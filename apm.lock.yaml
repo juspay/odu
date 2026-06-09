@@ -1,0 +1,55 @@
+lockfile_version: '1'
+generated_at: '2026-06-09T23:15:57.170651+00:00'
+apm_version: 0.19.0
+dependencies:
+- repo_url: srid/agency
+  host: github.com
+  resolved_commit: 6d53751b5fb42cc2c55b9072b314f3cdd0449ecb
+  resolved_ref: master
+  package_type: apm_package
+  deployed_files:
+  - .claude/agents/hickey.md
+  - .claude/agents/lowy.md
+  - .claude/hooks/agency/scripts/do-stop-guard.sh
+  - .claude/rules/apm-sources.md
+  - .claude/skills/code-police
+  - .claude/skills/code-police/SKILL.md
+  - .claude/skills/do
+  - .claude/skills/do/SKILL.md
+  - .claude/skills/do/scripts/do-results
+  - .claude/skills/do/scripts/steps/done
+  - .claude/skills/do/scripts/steps/sync
+  - .claude/skills/elegance
+  - .claude/skills/elegance/SKILL.md
+  - .claude/skills/fact-check
+  - .claude/skills/fact-check/SKILL.md
+  - .claude/skills/forge-pr
+  - .claude/skills/forge-pr/SKILL.md
+  - .claude/skills/hickey
+  - .claude/skills/hickey/SKILL.md
+  - .claude/skills/hickey/transcript.md
+  - .claude/skills/lowy
+  - .claude/skills/lowy/SKILL.md
+  - .claude/skills/ralph
+  - .claude/skills/ralph/SKILL.md
+  - .claude/skills/talk
+  - .claude/skills/talk/SKILL.md
+  deployed_file_hashes:
+    .claude/agents/hickey.md: sha256:10d9a4350a85752dc6658af8e0efb3d8be41803a2b6c73464e3d5b7a840435ad
+    .claude/agents/lowy.md: sha256:05aff7f6a91149a42c1fb9a3ca382a6f77bc39ac8a8d45436d443dd3349fb11e
+    .claude/hooks/agency/scripts/do-stop-guard.sh: sha256:cb033f86c15ffd3d09d8e4b74a61f55a70def4cc4131cc013b7368a2d23f3f33
+    .claude/rules/apm-sources.md: sha256:0d34f182279b93803855bd7f7b27a57e7cf3117ce4291d31a46294c629ee75d5
+    .claude/skills/code-police/SKILL.md: sha256:5a9f4ec8c2c2c44aaf7305561ee44884fbf551d45b27f94373eec49a18e5ad1f
+    .claude/skills/do/SKILL.md: sha256:24e77e783759e1f2d20c1600f2f9fc800d950efd19b9ea23f8e232d29d6ae84d
+    .claude/skills/do/scripts/do-results: sha256:2684dfce9cc7e4314d56c39edd5495628ac65d0631860e27e11f17fdcc0c7d49
+    .claude/skills/do/scripts/steps/done: sha256:03513d90bea1357eef3379c5b4fee5e46fe2d67b41fe8cf8b52d4beba4c73c72
+    .claude/skills/do/scripts/steps/sync: sha256:88fc95c548b183b766df02285038bf12d43fd06ae32b9a15f57dd741d9c83466
+    .claude/skills/elegance/SKILL.md: sha256:f330bf7e37034587f717e3a3d6453bd04ba80522fd9bdf8921a7140c7d5d3a3c
+    .claude/skills/fact-check/SKILL.md: sha256:6c4280ef618d27c278fc34365d336b1f889afb5b92f06ef6199fafe5a11304c0
+    .claude/skills/forge-pr/SKILL.md: sha256:78c66fbcb5146dbd83d856540eb810978fd9236e2d66cb4ebf14a2a012b9cda6
+    .claude/skills/hickey/SKILL.md: sha256:6eccc8ef4a2368c8ca898abde4b8a94451b844bb9cc082767a718fa2796c29ef
+    .claude/skills/hickey/transcript.md: sha256:c7da3fda455cc17adc5788984954baf95a354f2e83367bff0efd1b01f45a96a3
+    .claude/skills/lowy/SKILL.md: sha256:082aa643189b3b31fa90fb185a01239cfb5e437cdd7b1afb122de1e533ac48eb
+    .claude/skills/ralph/SKILL.md: sha256:1b2c547102584c87384b90b291536bedc0494dcb8382ac776bd0a3cec0fe1b4a
+    .claude/skills/talk/SKILL.md: sha256:ba059751cd4b3c1c52221554719bfe1fc5da56540694cb8e793ae0c19e210377
+  content_hash: sha256:703dc7eb1a510ab80f5daa4cd7d9997ed1c748cb0942ff3ced88ac7bd062944b
