@@ -2,3 +2,7 @@
 
 # APM dependencies
 apm_modules/
+node_modules/
+result
+result-*
+.ci/

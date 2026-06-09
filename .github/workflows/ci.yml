@@ -1,0 +1,45 @@
+# odu runs odu: each platform job executes this repo's own [metadata("ci")]
+# DAG with the odu built from the very commit under test — coordinator and
+# lane on the same runner (a localhost lane), strict mode, posting
+# ci::<recipe>@<platform> commit statuses next to the Actions checks.
+#
+# Fork PRs degrade gracefully: their read-only token can't post statuses,
+# and odu logs failed posts without failing the run.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  odu:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            system: x86_64-linux
+          - os: macos-latest
+            system: aarch64-darwin
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Check out the PR HEAD, not the synthetic merge ref: odu posts
+          # statuses to the sha it tests, and only head-sha statuses show
+          # on the PR.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: nixbuild/nix-quick-install-action@v31
+      - name: odu runs odu
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          nix run --accept-flake-config .#odu -- run \
+            --platform ${{ matrix.system }} \
+            --host ${{ matrix.system }}=localhost
