@@ -1,7 +1,7 @@
 /**
- * `odu monitor`'s non-interactive stream, exercised over a real unix socket
+ * `odu attach`'s non-interactive stream, exercised over a real unix socket
  * (the same harness the MCP face uses). The point of juspay/odu#4: a piped
- * `monitor` must emit the *same* json/plain contract as a piped `run`, not a
+ * `attach` must emit the *same* json/plain contract as a piped `run`, not a
  * drifted re-implementation. These dial a served surface, run the stream, and
  * assert the json carries `recipe`/`platform`/`log` and the plain lines use
  * `run`'s glyph + ProgressStatus wording.
@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { pendingNode, type PipelineState } from "../common/surface";
 import { dialSocket } from "../coordinator/socket";
 import { serveTestSurface, type TestSurface } from "../mcp/serveForTest";
-import { monitorStream, statusCommand } from "./introspect";
+import { attachStream, statusCommand } from "./introspect";
 
 type Row = [
   id: string,
@@ -19,7 +19,7 @@ type Row = [
   exitCode?: number,
 ];
 
-// A settled pipeline: monitorStream's first snapshot is already done, so it
+// A settled pipeline: attachStream's first snapshot is already done, so it
 // emits one transition per terminal node and returns.
 function doneState(rows: Row[]): PipelineState {
   const order = rows.map(([id]) => id);
@@ -74,12 +74,12 @@ async function streamOf(
   const surface = await served(state);
   const { client, close } = await dialSocket(surface.socketPath);
   const { out, result } = await capturingStdout(() =>
-    monitorStream(client, close, json),
+    attachStream(client, close, json),
   );
   return { out, code: result };
 }
 
-describe("monitorStream — json", () => {
+describe("attachStream — json", () => {
   it("emits the full ProgressEvent contract, not a node-status-only shape", async () => {
     const { out, code } = await streamOf(
       doneState([
@@ -114,7 +114,7 @@ describe("monitorStream — json", () => {
   });
 });
 
-describe("monitorStream — plain", () => {
+describe("attachStream — plain", () => {
   it("uses run's glyph + ProgressStatus wording and a log ref on failure", async () => {
     const { out } = await streamOf(
       doneState([["ci::e2e@x86_64-linux", "failed", 2]]),
@@ -129,7 +129,7 @@ describe("monitorStream — plain", () => {
     expect(out).toContain("→ .ci/3cbac86/x86_64-linux/ci::e2e.log");
   });
 
-  it("renders green nodes as success, the wording the old monitor got wrong", async () => {
+  it("renders green nodes as success, the wording the node-status-only stream got wrong", async () => {
     const { out } = await streamOf(
       doneState([["ci::install@x86_64-linux", "ok", 0]]),
       false,
@@ -139,10 +139,10 @@ describe("monitorStream — plain", () => {
 });
 
 // `odu status` is the third plain face onto the same fan-in state; it must use
-// the same ProgressStatus wording as run/monitor (lens hickey-2), not the raw
+// the same ProgressStatus wording as run/attach (lens hickey-2), not the raw
 // NodeStatus (`ok`).
 describe("statusCommand — plain", () => {
-  it("renders the snapshot with run/monitor's wording (success, not ok)", async () => {
+  it("renders the snapshot with run/attach's wording (success, not ok)", async () => {
     const surface = await served(
       doneState([
         ["ci::install@x86_64-linux", "ok", 0],

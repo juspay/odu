@@ -10,7 +10,7 @@
  *     coordinator sends the pipeline + workspace recipe over the surface.
  *
  *   - `oduSurface` — the fan-in the coordinator serves on `.ci/odu.sock` for
- *     `odu status` / `logs` / `monitor`. Same three primitives; node ids are
+ *     `odu status` / `logs` / `attach`. Same three primitives; node ids are
  *     `<namepath>@<platform>`.
  *
  * Call shapes (idiomatic):
@@ -111,12 +111,12 @@ export function pendingNode(seed: {
 export const PipelineStateSchema = z.object({
   name: z.string(),
   /** The run's commit, 7 hex chars — `odu run` stamps it from HEAD onto the
-   *  fan-in surface so `monitor` renders the durable log path (`.ci/<sha7>/…`)
+   *  fan-in surface so `attach` renders the durable log path (`.ci/<sha7>/…`)
    *  and the sha label from surface state: its banner (via `commitLabel`) and
    *  the per-transition `log` field (via `progressEvent`→`logPathFor`), instead
    *  of re-deriving the sha from git and drifting. The MCP `tail_log`
    *  durable-file fallback derives the sha from git HEAD instead — no live
-   *  socket exists in that branch — so this field is `monitor`'s, not the MCP
+   *  socket exists in that branch — so this field is `attach`'s, not the MCP
    *  tools'. Empty in the pre-run EMPTY_STATE. */
   sha7: z.string(),
   /** The run's working tree had uncommitted changes — the verdict is about
@@ -210,7 +210,7 @@ export const laneSurface = defineSurface({
 });
 
 /** Served by the coordinator on `.ci/odu.sock`; consumed by
- *  `odu status` / `logs` / `monitor`. */
+ *  `odu status` / `logs` / `attach`. */
 export const oduSurface = defineSurface({
   ...primitives,
   procedures: {

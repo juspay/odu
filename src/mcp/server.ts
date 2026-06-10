@@ -2,7 +2,7 @@
  * `odu mcp` — the agent face. An MCP stdio server that re-exposes the live
  * surface as agent tools + subscribable resources, so a coding agent (Claude
  * Code, Codex, opencode, Gemini CLI) drives CI with structured calls instead
- * of scraping terminal output. In-band, like `status` / `logs` / `monitor`:
+ * of scraping terminal output. In-band, like `status` / `logs` / `attach`:
  * it dials `.ci/odu.sock` in the cwd and predetermines no host — which boxes
  * run the lanes stays the coordinator's job (pool lease / hosts.json).
  *

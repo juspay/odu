@@ -1,5 +1,5 @@
 /**
- * Pure rendering + state-derivation helpers for `odu monitor` (and the unit
+ * Pure rendering + state-derivation helpers for `odu attach` (and the unit
  * tests). Everything is a pure function of surface state — no I/O, no
  * terminal control. Ported from the mini-ci example TUI, with the `errored`
  * status and CI-sized node ids.
@@ -14,7 +14,7 @@ import {
 } from "../common/surface";
 import { dim, green, magenta, red, yellow } from "./ansi";
 
-/** Per-status colour, shared by every face (monitor table, run matrix,
+/** Per-status colour, shared by every face (attach table, run matrix,
  *  verdict) — a no-op when stdout isn't a TTY, so pure-string tests and
  *  captured logs see the bare glyphs. */
 export const STATUS_COLOR: Record<NodeState["status"], (s: string) => string> =

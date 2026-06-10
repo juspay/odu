@@ -280,7 +280,7 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
     writeFileSync(file, text);
   };
 
-  // ── the fan-in surface (status/logs/monitor attach to this) ──
+  // ── the fan-in surface (status / logs / attach dial this) ──
   const lanes = new Map<string, Lane>();
   const fragment = implementSurface(oduSurface, {
     channel: inMemoryChannelByName(),

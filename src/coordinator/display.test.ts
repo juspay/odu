@@ -116,7 +116,7 @@ describe("renderRunFrame", () => {
   });
 });
 
-// The single projection `run` and `monitor` share so their json/plain faces
+// The single projection `run` and `attach` share so their json/plain faces
 // can't drift (juspay/odu#4). The fields a node-status-only emitter used to
 // drop — recipe, platform, log — are what these lock down.
 describe("progressEvent", () => {
@@ -138,7 +138,7 @@ describe("progressEvent", () => {
   it("maps NodeStatus to the external ProgressStatus wording", () => {
     const status = (s: NodeState["status"]): string | undefined =>
       progressEvent("3cbac86", `n@p`, node("n@p", s))?.status;
-    // `ok` surfaces as `success`, the wording a monitor that emitted the raw
+    // `ok` surfaces as `success`, the wording a face that emitted the raw
     // NodeStatus got wrong (issue #4, divergence #2/#3).
     expect(status("ok")).toBe("success");
     expect(status("failed")).toBe("failed");
