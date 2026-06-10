@@ -328,6 +328,26 @@ describe("clampLine", () => {
     // Width is measured on the visible glyphs only.
     expect(clamped.replace(/\x1b\[[0-9;]*m/g, "")).toBe("abcd");
   });
+
+  it("counts only visible glyphs, not a hyperlink's URL bytes", () => {
+    // A short visible label behind a long commit URL: the URL must not push the
+    // line over budget (stripAnsi leaves OSC bytes in, so this used to truncate
+    // a header that visibly fits).
+    const longUrl = `https://example.com/owner/repo/commit/${"a".repeat(60)}`;
+    const link = `\x1b]8;;${longUrl}\x1b\\abc\x1b]8;;\x1b\\`;
+    expect(clampLine(link, 10)).toBe(link);
+  });
+
+  it("closes an OSC 8 link when truncation lands mid-hyperlink", () => {
+    // Visible text "abcdefghij" wrapped in an OSC 8 link; clamp to 4 cuts inside
+    // the link, so the OSC 8 close must precede the SGR reset (a reset alone
+    // does NOT close a hyperlink — it would bleed onto the next row).
+    const link = "\x1b]8;;https://x/c\x1b\\abcdefghij\x1b]8;;\x1b\\";
+    const clamped = clampLine(link, 4);
+    expect(clamped).toBe("\x1b]8;;https://x/c\x1b\\abcd\x1b]8;;\x1b\\\x1b[0m");
+    // No dangling open link: the only OSC 8 left is the empty-URI close.
+    expect(clamped.endsWith("\x1b]8;;\x1b\\\x1b[0m")).toBe(true);
+  });
 });
 
 // The single projection `run` and `attach` share so their json/plain faces

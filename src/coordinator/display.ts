@@ -367,32 +367,71 @@ export function renderRunFrame(opts: {
 const KEY_HINT = "[digits] focus · [n/p] cycle · [r] rerun · [q] quit";
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: matching ANSI escapes is the point.
-const ANSI_TOKEN = /^\x1b(?:\[[0-9;]*[A-Za-z]|\][^\x07\x1b]*(?:\x07|\x1b\\))/;
+const CSI_TOKEN = /^\x1b\[[0-9;]*[A-Za-z]/;
+// An OSC token: `\x1b]…(ST|BEL)`. The OSC 8 hyperlink is `\x1b]8;;<uri>\x1b\\`
+// (or BEL-terminated); a `<uri>`-less one (`\x1b]8;;\x1b\\`) *closes* the link.
+// biome-ignore lint/suspicious/noControlCharactersInRegex: matching OSC escapes is the point.
+const OSC_TOKEN = /^\x1b\]([^\x07\x1b]*)(?:\x07|\x1b\\)/;
+const OSC8_CLOSE = "\x1b]8;;\x1b\\";
 
-/** Truncate a styled line to `width` *visible* columns, leaving ANSI/OSC
- *  escapes uncounted, so the embedded log pane's wide command/log lines can't
- *  wrap. A line already within budget passes through byte-for-byte (so the OSC 8
- *  commit link in the header survives intact); a truncated one gets a trailing
- *  reset so cut-off styling can't bleed into the next row. The repaint counts
- *  one terminal row per clamped line, which is exact once nothing wraps. */
+/** The *visible* width of a styled line: glyph columns only, with CSI and OSC
+ *  escapes (incl. an OSC 8 hyperlink's long URL) uncounted. `stripAnsi` only
+ *  drops CSI, so it would wrongly count a hyperlink's URL bytes against the
+ *  budget — a header whose visible text fits but whose commit URL is long would
+ *  read as over-budget and get truncated. */
+function visibleWidth(line: string): number {
+  let visible = 0;
+  let i = 0;
+  while (i < line.length) {
+    const rest = line.slice(i);
+    const esc = CSI_TOKEN.exec(rest) ?? OSC_TOKEN.exec(rest);
+    if (esc !== null) {
+      i += esc[0].length;
+      continue;
+    }
+    visible += 1;
+    i += 1;
+  }
+  return visible;
+}
+
+/** Truncate a styled line to `width` *visible* columns, leaving CSI/OSC escapes
+ *  uncounted, so the embedded log pane's wide command/log lines can't wrap. A
+ *  line already within budget passes through byte-for-byte (so the OSC 8 commit
+ *  link in the header survives intact); a truncated one gets a trailing reset so
+ *  cut-off styling can't bleed into the next row, and — since an SGR reset does
+ *  NOT close an OSC 8 hyperlink — an OSC 8 close first if truncation lands while
+ *  a link is still open, so the link can't stay active across following rows.
+ *  The repaint counts one terminal row per clamped line, exact once nothing
+ *  wraps. */
 export function clampLine(line: string, width: number): string {
-  if (width <= 0 || stripAnsi(line).length <= width) return line;
+  if (width <= 0 || visibleWidth(line) <= width) return line;
   let out = "";
   let visible = 0;
   let i = 0;
+  let linkOpen = false;
   while (i < line.length && visible < width) {
     const rest = line.slice(i);
-    const esc = ANSI_TOKEN.exec(rest);
-    if (esc !== null) {
-      out += esc[0];
-      i += esc[0].length;
+    const csi = CSI_TOKEN.exec(rest);
+    if (csi !== null) {
+      out += csi[0];
+      i += csi[0].length;
+      continue;
+    }
+    const osc = OSC_TOKEN.exec(rest);
+    if (osc !== null) {
+      out += osc[0];
+      i += osc[0].length;
+      // `]8;;<uri>` opens a hyperlink; the `<uri>`-less `]8;;` closes it.
+      const body = osc[1] ?? "";
+      if (body.startsWith("8;;")) linkOpen = body !== "8;;";
       continue;
     }
     out += line[i];
     visible += 1;
     i += 1;
   }
-  return `${out}\x1b[0m`;
+  return `${out}${linkOpen ? OSC8_CLOSE : ""}\x1b[0m`;
 }
 
 class LiveDisplay implements Display {
