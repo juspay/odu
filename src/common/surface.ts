@@ -248,6 +248,7 @@ export const laneSurface = defineSurface({
  *  lane→host map) the lane surface has no business knowing, so an attached
  *  face renders the same matrix `run` does. */
 export const oduSurface = defineSurface({
+	...primitives,
 	cells: {
 		...primitives.cells,
 		header: {
@@ -255,7 +256,6 @@ export const oduSurface = defineSurface({
 			default: EMPTY_HEADER,
 		},
 	},
-	streams: primitives.streams,
 	procedures: {
 		node: rerunProcedure,
 	},
