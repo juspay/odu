@@ -10,6 +10,7 @@ import { dialSocket, type OduClient } from "../coordinator/socket";
 import {
   applyLogFrame,
   defaultAttachId,
+  nodeRow,
   renderDashboard,
   statusGlyph,
   summarize,
@@ -45,13 +46,8 @@ export async function statusCommand(json: boolean): Promise<number> {
   if (json) {
     const rows = state.order
       .map((id) => state.nodes[id])
-      .filter((n) => n !== undefined)
-      .map((n) => ({
-        name: n.id,
-        status: n.status,
-        exit_code: n.exitCode,
-        duration_ms: n.durationMs,
-      }));
+      .filter((n): n is NonNullable<typeof n> => n !== undefined)
+      .map(nodeRow);
     process.stdout.write(`${JSON.stringify(rows, null, 2)}\n`);
   } else {
     for (const id of state.order) {

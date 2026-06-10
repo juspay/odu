@@ -45,6 +45,29 @@ export interface PipelineSummary {
   failedOverall: boolean;
 }
 
+/** The machine-readable snapshot of one node — the snake_cased projection
+ *  shared by `odu status -o json` and the MCP `get_nodes` tool, so the two
+ *  agent/tooling faces speak one vocabulary (both `id` and `name`) instead of
+ *  re-deriving it inline and drifting. `get_nodes` spreads this and adds the
+ *  `red` verdict bit on top. */
+export interface NodeRowJson {
+  id: string;
+  name: string;
+  status: NodeState["status"];
+  exit_code: number | null;
+  duration_ms: number | null;
+}
+
+export function nodeRow(node: NodeState): NodeRowJson {
+  return {
+    id: node.id,
+    name: node.name,
+    status: node.status,
+    exit_code: node.exitCode,
+    duration_ms: node.durationMs,
+  };
+}
+
 export function summarize(state: PipelineState): PipelineSummary {
   const counts = {
     running: 0,

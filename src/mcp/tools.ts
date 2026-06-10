@@ -20,6 +20,7 @@ import {
   firstSnapshot,
   resolveNodeId,
 } from "../cli/introspect";
+import { type NodeRowJson, nodeRow, summarize } from "../cli/render";
 import { splitFanId } from "../common/nodeId";
 import { logPathFor } from "../coordinator/statuses";
 import { SOCKET_PATH, tryDialSocket } from "../coordinator/socket";
@@ -34,12 +35,7 @@ import {
 /** One node, flattened for the agent (the verbose `needs`/`startedAt` stay
  *  out of the default projection — an agent triaging a failure wants
  *  id/status/exit/duration). */
-export interface NodeRow {
-  id: string;
-  name: string;
-  status: NodeState["status"];
-  exit_code: number | null;
-  duration_ms: number | null;
+export interface NodeRow extends NodeRowJson {
   red: boolean;
 }
 
@@ -50,14 +46,7 @@ export interface NodesResult {
 }
 
 function rowOf(node: NodeState): NodeRow {
-  return {
-    id: node.id,
-    name: node.name,
-    status: node.status,
-    exit_code: node.exitCode,
-    duration_ms: node.durationMs,
-    red: STATUS_META[node.status].isRed,
-  };
+  return { ...nodeRow(node), red: STATUS_META[node.status].isRed };
 }
 
 function rowsOf(state: PipelineState): NodeRow[] {
