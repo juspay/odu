@@ -7,26 +7,14 @@
 
 import {
   EMPTY_HEADER,
-  type NodeLogFrame,
   type NodeState,
   type PipelineState,
   type RunHeader,
   STATUS_META,
 } from "../common/surface";
-import {
-  createDisplay,
-  progressEvent,
-  renderRunFrame,
-} from "../coordinator/display";
+import { createDisplay, progressEvent } from "../coordinator/display";
 import { dialSocket, type OduClient } from "../coordinator/socket";
-import {
-  applyLogFrame,
-  defaultAttachId,
-  nodeRow,
-  renderLogPane,
-  statusGlyph,
-  summarize,
-} from "./render";
+import { exitCode, nodeRow, statusGlyph, summarize } from "./render";
 
 export async function firstSnapshot(client: OduClient): Promise<PipelineState> {
   for await (const state of await client.surface.nodes.get({})) {
@@ -158,123 +146,50 @@ export async function attachStream(
   }
   display.stop(last);
   close();
-  return last !== undefined && summarize(last).failedOverall ? 1 : 0;
+  return exitCode(last);
 }
 
-/** Interactive view — `run`'s recipe × platform matrix with the focused node's
- *  log pane below it. The header (lane→host map) comes off the surface, so this
- *  paints the *same* matrix `run` does, not a separate table. Keys: digits / n /
- *  p move focus, r rerun (the one mutation), q quit. */
+/** Interactive view — the ONE shared live view (`createDisplay("live", …)`),
+ *  the same `run` paints, fed from the surface instead of the in-process run:
+ *  state is push-fed from the `nodes` read-loop (`view.update`), the focused
+ *  node's log is pull-fed via the surface `nodeLog` stream (`openLog`), and `r`
+ *  routes to the surface `node.rerun`. The header (lane→host map) comes off the
+ *  surface, so this is the same matrix, not a separate table. */
 async function attachDashboard(
   client: OduClient,
   close: () => void,
 ): Promise<number> {
   const header = await firstHeader(client);
-  let state: PipelineState | undefined;
-  let attachedId: string | undefined;
-  let log = "";
-  let detachLog: (() => void) | undefined;
-  let tick = 0;
-
-  const repaint = (): void => {
-    if (state === undefined) return;
-    const frame = renderRunFrame({
-      state,
-      header,
-      tick,
-      startedAt: header.startedAt,
-      now: Date.now(),
-      columns: process.stdout.columns ?? 100,
-      focusedId: attachedId,
-    });
-    const node = attachedId !== undefined ? state.nodes[attachedId] : undefined;
-    process.stdout.write(
-      `\x1b[2J\x1b[H${frame}\n${renderLogPane(node, log)}\n` +
-        "\n[digits] focus · [n/p] cycle · [r] rerun · [q] quit\n",
-    );
-  };
-
-  const attachLog = (id: string): (() => void) => {
-    const controller = new AbortController();
-    void (async () => {
-      try {
-        for await (const frame of await client.surface.nodeLog.get(
-          { id },
-          { signal: controller.signal },
-        )) {
-          log = applyLogFrame(log, frame as NodeLogFrame);
-          repaint();
-        }
-      } catch (err) {
-        if (controller.signal.aborted) return;
-        log += `\n[odu] log stream error: ${(err as Error).message}\n`;
-        repaint();
-      }
-    })();
-    return () => controller.abort();
-  };
-
-  const attach = (id: string | undefined): void => {
-    if (id === undefined || id === attachedId) return;
-    attachedId = id;
-    log = "";
-    detachLog?.();
-    detachLog = attachLog(id);
-    repaint();
-  };
-
-  // Repaint on a timer too (not just on state deltas), so the matrix spinners
-  // animate and the elapsed clock ticks between transitions. unref'd + cleared
-  // on quit so it never holds the process open.
-  const ticker = setInterval(() => {
-    tick += 1;
-    repaint();
-  }, 250);
-  ticker.unref?.();
-
+  // The one binding for the latest state: both the completion path (`view.stop`,
+  // the returned verdict) and the quit path read it. `attach` owns its own
+  // exit-code policy (the view no longer carries it on `onQuit`): the current
+  // verdict via the shared `exitCode` projection.
+  let last: PipelineState | undefined;
   const quit = (code: number): void => {
-    clearInterval(ticker);
-    detachLog?.();
-    if (process.stdin.isTTY) process.stdin.setRawMode(false);
-    process.stdin.pause();
+    view.stop(last);
     close();
     process.exit(code);
   };
-
-  process.stdin.setRawMode(true);
-  process.stdin.resume();
-  process.stdin.setEncoding("utf-8");
-  process.stdin.on("data", (key: string) => {
-    if (key === "q" || key === "\x03" || key === "\x04") return quit(0);
-    if (key === "r" && attachedId !== undefined) {
-      void client.surface.node.rerun({ id: attachedId });
-      return;
-    }
-    if (state === undefined) return;
-    if (key === "n" || key === "p") {
-      const idx =
-        attachedId !== undefined ? state.order.indexOf(attachedId) : -1;
-      const delta = key === "n" ? 1 : -1;
-      attach(
-        state.order[(idx + delta + state.order.length) % state.order.length],
-      );
-      return;
-    }
-    if (key >= "1" && key <= "9") {
-      const next = state.order[Number(key) - 1];
-      if (next !== undefined) attach(next);
-    }
+  const view = createDisplay("live", {
+    interactive: true,
+    hookStderr: false,
+    openLog: (id, sig) => client.surface.nodeLog.get({ id }, { signal: sig }),
+    rerun: (id) => void client.surface.node.rerun({ id }),
+    onQuit: () => quit(exitCode(last)),
   });
 
   let first = true;
-  for await (const next of await client.surface.nodes.get({})) {
+  for await (const state of await client.surface.nodes.get({})) {
+    last = state;
     if (first) {
       first = false;
-      attach(defaultAttachId(next));
+      view.start(state, header);
+    } else {
+      view.update(state);
     }
-    state = next;
-    repaint();
+    if (summarize(state).done) break;
   }
-  quit(state !== undefined && summarize(state).failedOverall ? 1 : 0);
-  return 0;
+  view.stop(last);
+  close();
+  return exitCode(last);
 }
