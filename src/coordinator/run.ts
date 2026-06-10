@@ -284,7 +284,6 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
   const fileFor = (id: string): string => join(repoRoot, logPathFor(sha7, id));
   const appendLocal = (id: string, text: string): void => {
     tail.append(id, text);
-    display.logLine(id, text);
     const file = fileFor(id);
     mkdirSync(dirname(file), { recursive: true });
     appendFileSync(file, text);

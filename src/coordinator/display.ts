@@ -87,10 +87,6 @@ export interface Display {
   update(state: PipelineState): void;
   /** A node crossed a status boundary (the diff-driven event feed). */
   transition(event: ProgressEvent, node: NodeState): void;
-  /** A chunk of some node's log arrived. A no-op for the live face now that
-   *  its log pane is `openLog`-fed; kept on the interface for the json/plain
-   *  faces (which ignore it) and the coordinator's append-site call. */
-  logLine(id: string, text: string): void;
   /** Operator-facing message (post failures, signals, …). */
   info(msg: string): void;
   /** Stop timers, restore the terminal, paint the final frame. */
@@ -121,9 +117,10 @@ export interface LiveOpts {
   ) => AsyncIterable<NodeLogFrame> | Promise<AsyncIterable<NodeLogFrame>>;
   /** The one mutation `r` triggers — re-run the focused node. */
   rerun: (id: string) => void;
-  /** The interrupt path: `q`/Ctrl-C/Ctrl-D quit with the current verdict's
-   *  exit code. `run` routes this to its `shutdown`, `attach` to its `quit`. */
-  onQuit: (code: number) => void;
+  /** The interrupt path: `q`/Ctrl-C/Ctrl-D request a quit. The view doesn't
+   *  own verdict-on-quit policy — each consumer decides its own exit code (`run`
+   *  always 130 for an interrupt; `attach` the current verdict). */
+  onQuit: () => void;
 }
 
 export function createDisplay(mode: DisplayMode, live?: LiveOpts): Display {
@@ -181,7 +178,6 @@ class JsonDisplay implements Display {
   transition(event: ProgressEvent): void {
     process.stdout.write(`${JSON.stringify(event)}\n`);
   }
-  logLine(): void {}
   info(msg: string): void {
     process.stderr.write(`${msg}\n`);
   }
@@ -232,8 +228,6 @@ class PlainDisplay implements Display {
         : "";
     this.say(`${glyph} ${event.status.padEnd(7)} ${event.node}${dur}${logRef}`);
   }
-
-  logLine(): void {}
 
   info(msg: string): void {
     process.stderr.write(`${msg}\n`);
@@ -460,7 +454,7 @@ class LiveDisplay implements Display {
     this.header = header;
     process.stdout.write("\x1b[?25l");
     if (this.opts.hookStderr) this.hookStderr();
-    if (this.opts.interactive && process.stdin.isTTY) {
+    if (this.opts.interactive) {
       process.stdin.setRawMode(true);
       process.stdin.resume();
       process.stdin.setEncoding("utf-8");
@@ -472,7 +466,7 @@ class LiveDisplay implements Display {
     process.once("exit", () => {
       if (!this.stopped) {
         if (this.opts.hookStderr) process.stderr.write = this.stderrWrite;
-        if (this.opts.interactive && process.stdin.isTTY) {
+        if (this.opts.interactive) {
           process.stdin.setRawMode(false);
         }
         process.stdout.write("\x1b[?25h");
@@ -516,11 +510,6 @@ class LiveDisplay implements Display {
     );
   }
 
-  /** No-op: the focused log pane is `openLog`-fed (pull), not push-fed
-   *  per-chunk. Kept to satisfy `Display` (the coordinator's append site still
-   *  calls it). */
-  logLine(): void {}
-
   info(msg: string): void {
     this.printAbove(msg);
   }
@@ -533,7 +522,7 @@ class LiveDisplay implements Display {
     if (state !== undefined) this.state = state;
     this.paint();
     if (this.opts.hookStderr) process.stderr.write = this.stderrWrite;
-    if (this.opts.interactive && process.stdin.isTTY) {
+    if (this.opts.interactive) {
       process.stdin.off("data", this.keyHandler);
       process.stdin.setRawMode(false);
       process.stdin.pause();
@@ -581,17 +570,9 @@ class LiveDisplay implements Display {
     this.paint();
   }
 
-  /** The current verdict's exit code — 1 if the latest state has settled red,
-   *  else 0. The interrupt path (`q`/Ctrl-C/Ctrl-D) quits with this. */
-  private currentExitCode(): number {
-    return this.state !== undefined && summarize(this.state).failedOverall
-      ? 1
-      : 0;
-  }
-
   private onKey(key: string): void {
     if (key === "q" || key === "\x03" || key === "\x04") {
-      this.opts.onQuit(this.currentExitCode());
+      this.opts.onQuit();
       return;
     }
     if (key === "r" && this.focusedId !== undefined) {
