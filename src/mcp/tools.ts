@@ -419,13 +419,18 @@ async function defaultWaitForSocket(
   void exited.then(() => {
     done = true;
   });
+  // Probe the socket and release the probe connection at once — we only want
+  // to know it answers, not to hold it open.
+  const serving = async (): Promise<boolean> => {
+    const d = await tryDialSocket(socketPath);
+    d?.close();
+    return d !== null;
+  };
   for (let i = 0; i < 240; i += 1) {
-    if (await tryDialSocket(socketPath).then((d) => (d?.close(), d !== null))) {
-      return true;
-    }
+    if (await serving()) return true;
     if (done) {
       // Child has exited — one last dial, then give up rather than poll on.
-      return tryDialSocket(socketPath).then((d) => (d?.close(), d !== null));
+      return serving();
     }
     await new Promise((r) => setTimeout(r, 250));
   }
