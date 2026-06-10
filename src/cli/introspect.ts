@@ -10,12 +10,13 @@ import { dialSocket, type OduClient } from "../coordinator/socket";
 import {
   applyLogFrame,
   defaultAttachId,
+  nodeRow,
   renderDashboard,
   statusGlyph,
   summarize,
 } from "./render";
 
-async function firstSnapshot(client: OduClient): Promise<PipelineState> {
+export async function firstSnapshot(client: OduClient): Promise<PipelineState> {
   for await (const state of await client.surface.nodes.get({})) {
     return state;
   }
@@ -24,7 +25,7 @@ async function firstSnapshot(client: OduClient): Promise<PipelineState> {
 
 /** Resolve a node argument against the live state: exact id, or unique
  *  suffix-ish match (`e2e@x86_64-linux` ≡ `ci::e2e@x86_64-linux`). */
-function resolveNodeId(state: PipelineState, token: string): string {
+export function resolveNodeId(state: PipelineState, token: string): string {
   if (state.nodes[token] !== undefined) return token;
   const matches = state.order.filter(
     (id) =>
@@ -45,13 +46,8 @@ export async function statusCommand(json: boolean): Promise<number> {
   if (json) {
     const rows = state.order
       .map((id) => state.nodes[id])
-      .filter((n) => n !== undefined)
-      .map((n) => ({
-        name: n.id,
-        status: n.status,
-        exit_code: n.exitCode,
-        duration_ms: n.durationMs,
-      }));
+      .filter((n): n is NonNullable<typeof n> => n !== undefined)
+      .map(nodeRow);
     process.stdout.write(`${JSON.stringify(rows, null, 2)}\n`);
   } else {
     for (const id of state.order) {

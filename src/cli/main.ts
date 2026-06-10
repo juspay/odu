@@ -8,6 +8,7 @@
  *   odu dump                               resolved pipeline as JSON
  *   odu graph                              dependency graph (Mermaid)
  *   odu protect [--dry-run] [--branch B]   sync required status checks
+ *   odu mcp                                serve the agent face (MCP, stdio)
  *
  * Strict by default: refuses a dirty tree, pins HEAD via `git worktree`,
  * posts commit statuses under `<recipe>@<platform>` contexts, splits logs
@@ -20,9 +21,10 @@ import { parseArgs } from "node:util";
 import { runCommand } from "../coordinator/run";
 import { loadJustPipeline, mermaidGraph } from "../just/ingest";
 import { logsCommand, monitorCommand, statusCommand } from "./introspect";
+import { mcpCommand } from "./mcp";
 import { protectCommand } from "./protect";
 
-const USAGE = `usage: odu <run|status|logs|monitor|dump|graph|protect> [args]
+const USAGE = `usage: odu <run|status|logs|monitor|dump|graph|protect|mcp> [args]
 
 run [recipe[@platform]…] [--platform P]… [--host P=ADDR]… [--root NAMEPATH]
     [--no-deps] [--no-strict] [--no-snapshot] [--no-post] [--progress json]
@@ -32,6 +34,7 @@ monitor [-o json]
 dump [--root NAMEPATH]
 graph [--root NAMEPATH]
 protect [--dry-run] [--branch B] [--platform P]…
+mcp
 `;
 
 async function dispatch(argv: string[]): Promise<number> {
@@ -120,6 +123,8 @@ async function dispatch(argv: string[]): Promise<number> {
         platforms: values.platform ?? [],
       });
     }
+    case "mcp":
+      return mcpCommand();
     case undefined:
     case "help":
     case "--help":

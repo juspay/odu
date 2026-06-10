@@ -7,3 +7,11 @@ target: claude
 dependencies:
   apm:
     - srid/agency#master
+  # odu's agent face: consumers that depend on juspay/odu get the odu MCP
+  # server wired into their .mcp.json (Claude) / .codex / .opencode. The
+  # launcher resolves odu via Nix and serves `odu mcp` in the consumer's repo.
+  mcp:
+    - name: odu
+      registry: false
+      transport: stdio
+      command: .agents/skills/odu-mcp/bin/serve
