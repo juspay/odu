@@ -122,7 +122,8 @@ odu run [recipe[@platform]…]      run (selectors compose; bare names fan out
     --progress json               one NDJSON line per node transition
 odu status [-o json]              snapshot a live run
 odu logs [-f] <node>              replay (+ follow) one node's log
-odu monitor [-o json]             live dashboard (tty) / transition stream
+odu monitor [-o json]             live dashboard (tty); else the same
+                                  transition stream as run --progress json
 odu dump | graph                  resolved pipeline as JSON / Mermaid
 odu protect [--dry-run]           sync branch protection's required contexts
 odu mcp                           serve the agent face (MCP server, stdio)

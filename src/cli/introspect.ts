@@ -6,6 +6,11 @@
  */
 
 import type { NodeLogFrame, PipelineState } from "../common/surface";
+import {
+  createDisplay,
+  progressEvent,
+  type RunHeader,
+} from "../coordinator/display";
 import { dialSocket, type OduClient } from "../coordinator/socket";
 import {
   applyLogFrame,
@@ -77,6 +82,11 @@ export async function logsCommand(
 }
 
 export async function monitorCommand(json: boolean): Promise<number> {
+  // The dashboard reads keystrokes (attach / rerun / quit), so it needs a TTY
+  // *stdin* — the one deliberate threshold difference from `run`'s output-only
+  // live matrix, which keys off stdout alone. The non-interactive fallback is
+  // no longer a poor cousin: it shares `run`'s json/plain rendering
+  // (juspay/odu#4), so a piped `monitor` and a piped `run` emit one contract.
   const interactive =
     !json && process.stdin.isTTY === true && process.stdout.isTTY === true;
   const { client, close } = await dialSocket();
@@ -84,36 +94,53 @@ export async function monitorCommand(json: boolean): Promise<number> {
   return monitorDashboard(client, close);
 }
 
-/** Non-tty / `-o json`: one line per node transition, no polling — the
- *  monitor analogue of `--progress json`. */
-async function monitorStream(
+/** The run header `monitor` shows above the transition stream — `run`'s
+ *  banner minus the parts only the coordinator owns. An attached observer
+ *  knows the pipeline name + commit (from the surface) but not which hosts the
+ *  coordinator leased (lanes) nor the forge origin (commitUrl), so it leaves
+ *  those empty and the banner collapses to `odu · <pipeline> @ <sha>`. */
+function monitorHeader(state: PipelineState): RunHeader {
+  return {
+    pipeline: state.name,
+    sha7: state.sha7,
+    dirty: state.dirty,
+    commitUrl: null,
+    lanes: [],
+    hostsSource: null,
+  };
+}
+
+/** Non-tty / `-o json`: one line per node transition — the monitor analogue
+ *  of `--progress json`. Routes through `run`'s own `createDisplay`, building
+ *  each event with the shared `progressEvent`, so the json shape (with
+ *  `recipe`/`platform`/`log`), the plain line format, and the 60s heartbeat
+ *  are byte-identical to `run` rather than a drifted re-implementation. */
+export async function monitorStream(
   client: OduClient,
   close: () => void,
   json: boolean,
 ): Promise<number> {
+  const display = createDisplay(json ? "json" : "plain");
   const seen = new Map<string, string>();
   let last: PipelineState | undefined;
+  let started = false;
   for await (const state of await client.surface.nodes.get({})) {
     last = state;
+    if (!started) {
+      started = true;
+      display.start(monitorHeader(state));
+    }
+    display.update(state); // drives the plain heartbeat
     for (const id of state.order) {
       const node = state.nodes[id];
       if (node === undefined || seen.get(id) === node.status) continue;
       seen.set(id, node.status);
-      if (node.status === "pending") continue;
-      if (json) {
-        process.stdout.write(
-          `${JSON.stringify({
-            node: id,
-            status: node.status,
-            ...(node.exitCode !== null ? { exit_code: node.exitCode } : {}),
-          })}\n`,
-        );
-      } else {
-        process.stdout.write(`${node.status.padEnd(8)} ${id}\n`);
-      }
+      const event = progressEvent(state.sha7, id, node);
+      if (event !== null) display.transition(event, node);
     }
     if (summarize(state).done) break;
   }
+  display.stop(last);
   close();
   return last !== undefined && summarize(last).failedOverall ? 1 : 0;
 }

@@ -255,6 +255,8 @@ describe("odu lane runner over stdio (loopback)", () => {
 describe("render helpers", () => {
   const state: PipelineState = {
     name: "p",
+    sha7: "abc1234",
+    dirty: false,
     order: ["a", "b", "c"],
     nodes: {
       a: mkNode("a", "ok", 9_000),

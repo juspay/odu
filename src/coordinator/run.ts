@@ -42,7 +42,7 @@ import {
   type PipelineState,
   STATUS_META,
 } from "../common/surface";
-import { commitLabel, createDisplay, type ProgressEvent } from "./display";
+import { commitLabel, createDisplay, progressEvent } from "./display";
 import { laneTasks, loadJustPipeline, parseSelector } from "../just/ingest";
 import { loadHosts, resolveLanes } from "./hosts";
 import { type Lane, startLane } from "./lane";
@@ -254,6 +254,8 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
 
   const store = inMemoryStore<PipelineState>({
     name: spec.name,
+    sha7,
+    dirty: ctx.dirty,
     order,
     nodes,
   });
@@ -304,17 +306,8 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
 
   // ── observers: progress stream + commit statuses, diffed per transition ──
   const emitProgress = (id: string, node: NodeState): void => {
-    const status = STATUS_META[node.status].progress;
-    if (status === null) return;
-    const { namepath, platform } = splitFanId(id);
-    const event: ProgressEvent = {
-      node: id,
-      recipe: namepath,
-      platform,
-      status,
-      ...(node.exitCode !== null ? { exit_code: node.exitCode } : {}),
-      log: logPathFor(sha7, id),
-    };
+    const event = progressEvent(sha7, id, node);
+    if (event === null) return;
     display.transition(event, node);
   };
 

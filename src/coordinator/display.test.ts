@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { NodeState, PipelineState } from "../common/surface";
-import { renderRunFrame } from "./display";
+import { progressEvent, renderRunFrame } from "./display";
 
 function node(
   id: string,
@@ -22,6 +22,8 @@ function node(
 
 const state: PipelineState = {
   name: "ci::default",
+  sha7: "3cbac86",
+  dirty: false,
   order: [
     "_ci-setup@x86_64-linux",
     "ci::install@x86_64-linux",
@@ -111,5 +113,51 @@ describe("renderRunFrame", () => {
       columns: 100,
     });
     expect(dirtyFrame.split("\n")[0]).toContain("@ 3cbac86+dirty");
+  });
+});
+
+// The single projection `run` and `monitor` share so their json/plain faces
+// can't drift (juspay/odu#4). The fields a node-status-only emitter used to
+// drop — recipe, platform, log — are what these lock down.
+describe("progressEvent", () => {
+  it("carries recipe, platform, and the durable per-SHA log path", () => {
+    const event = progressEvent(
+      "3cbac86",
+      "ci::e2e@x86_64-linux",
+      node("ci::e2e@x86_64-linux", "running"),
+    );
+    expect(event).toEqual({
+      node: "ci::e2e@x86_64-linux",
+      recipe: "ci::e2e",
+      platform: "x86_64-linux",
+      status: "running",
+      log: ".ci/3cbac86/x86_64-linux/ci::e2e.log",
+    });
+  });
+
+  it("maps NodeStatus to the external ProgressStatus wording", () => {
+    const status = (s: NodeState["status"]): string | undefined =>
+      progressEvent("3cbac86", `n@p`, node("n@p", s))?.status;
+    // `ok` surfaces as `success`, the wording a monitor that emitted the raw
+    // NodeStatus got wrong (issue #4, divergence #2/#3).
+    expect(status("ok")).toBe("success");
+    expect(status("failed")).toBe("failed");
+    expect(status("errored")).toBe("errored");
+    expect(status("skipped")).toBe("skipped");
+    expect(status("running")).toBe("running");
+  });
+
+  it("emits exit_code only once a node carries one", () => {
+    const running = progressEvent("abc", "n@p", node("n@p", "running"));
+    expect(running && "exit_code" in running).toBe(false);
+    const failed = progressEvent("abc", "n@p", {
+      ...node("n@p", "failed", 1_000),
+      exitCode: 2,
+    });
+    expect(failed?.exit_code).toBe(2);
+  });
+
+  it("returns null for pending — nothing to emit", () => {
+    expect(progressEvent("abc", "n@p", node("n@p", "pending"))).toBeNull();
   });
 });
