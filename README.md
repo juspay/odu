@@ -162,14 +162,16 @@ The agent loop is `run` → `wait_for_settle` (fail-fast) → read the red node'
 { "mcpServers": { "odu": {
   "type": "stdio",
   "command": "nix",
-  "args": ["run", "github:juspay/odu", "--", "mcp"] } } }
+  "args": ["run", ".#odu", "--", "mcp"] } } }
 ```
 
-Repos that manage agent config with [APM](https://github.com/juspay/apm) get
-this wired automatically by depending on `juspay/odu`: odu's `apm.yml` declares
-the MCP server, deploying the `odu-mcp` launcher and the `.mcp.json` entry into
-the consumer's tree (set `ODU_FLAKE=.#odu` to use a repo's own pinned odu
-instead of `github:juspay/odu`).
+`.#odu` is the repo's own pinned odu (it pins odu via npins and re-exports it),
+so the agent face is the exact odu the repo's CI uses — never an unpinned
+`github:` fetch. Repos that manage agent config with
+[APM](https://github.com/juspay/apm) get this wired automatically by depending
+on `juspay/odu`: odu's `apm.yml` declares the MCP server, deploying the
+`odu-mcp` launcher and the `.mcp.json` entry into the consumer's tree (the
+launcher runs `.#odu`; override with `ODU_FLAKE`).
 
 ## Honest notes
 
