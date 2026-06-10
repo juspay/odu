@@ -67,6 +67,15 @@ export function nodeRow(node: NodeState): NodeRowJson {
   };
 }
 
+/** The verdict-on-state projection every consumer reuses: 1 if the latest
+ *  state has settled red (any failure or infrastructure error), else 0.
+ *  `undefined` (no state yet) is a clean 0. Folds the inline
+ *  `summarize(state).failedOverall ? 1 : 0` so the live view and the attach
+ *  faces compute the exit code one way. */
+export function exitCode(state: PipelineState | undefined): number {
+  return state !== undefined && summarize(state).failedOverall ? 1 : 0;
+}
+
 export function summarize(state: PipelineState): PipelineSummary {
   const counts = {
     running: 0,

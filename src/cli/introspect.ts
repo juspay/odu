@@ -14,7 +14,7 @@ import {
 } from "../common/surface";
 import { createDisplay, progressEvent } from "../coordinator/display";
 import { dialSocket, type OduClient } from "../coordinator/socket";
-import { nodeRow, statusGlyph, summarize } from "./render";
+import { exitCode, nodeRow, statusGlyph, summarize } from "./render";
 
 export async function firstSnapshot(client: OduClient): Promise<PipelineState> {
   for await (const state of await client.surface.nodes.get({})) {
@@ -146,7 +146,7 @@ export async function attachStream(
   }
   display.stop(last);
   close();
-  return last !== undefined && summarize(last).failedOverall ? 1 : 0;
+  return exitCode(last);
 }
 
 /** Interactive view — the ONE shared live view (`createDisplay("live", …)`),
@@ -160,9 +160,13 @@ async function attachDashboard(
   close: () => void,
 ): Promise<number> {
   const header = await firstHeader(client);
-  let currentState: PipelineState | undefined;
+  // The one binding for the latest state: both the completion path (`view.stop`,
+  // the returned verdict) and the quit path read it. `attach` owns its own
+  // exit-code policy (the view no longer carries it on `onQuit`): the current
+  // verdict via the shared `exitCode` projection.
+  let last: PipelineState | undefined;
   const quit = (code: number): void => {
-    view.stop(currentState);
+    view.stop(last);
     close();
     process.exit(code);
   };
@@ -171,14 +175,12 @@ async function attachDashboard(
     hookStderr: false,
     openLog: (id, sig) => client.surface.nodeLog.get({ id }, { signal: sig }),
     rerun: (id) => void client.surface.node.rerun({ id }),
-    onQuit: (code) => quit(code),
+    onQuit: () => quit(exitCode(last)),
   });
 
-  let last: PipelineState | undefined;
   let first = true;
   for await (const state of await client.surface.nodes.get({})) {
     last = state;
-    currentState = state;
     if (first) {
       first = false;
       view.start(state, header);
@@ -189,5 +191,5 @@ async function attachDashboard(
   }
   view.stop(last);
   close();
-  return last !== undefined && summarize(last).failedOverall ? 1 : 0;
+  return exitCode(last);
 }
