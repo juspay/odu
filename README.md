@@ -154,7 +154,7 @@ the agent.
 | `wait_for_settle` | Block until the run settles, or — fail-fast — the instant a node goes red. |
 
 The pipeline snapshot and per-node logs are **subscribable resources** rather
-than tools: `surface://cells/nodes` (the pipeline as `{ run, pipeline, nodes[] }`
+than tools: `surface://streams/nodes` (the pipeline as `{ run, pipeline, nodes[] }`
 — every node's status / exit / duration + the `red` verdict bit) and
 `surface://collections/logs/{id}` (one node's output — the live buffered
 snapshot while a run is up, else the durable per-SHA log). Both support

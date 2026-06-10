@@ -65,13 +65,14 @@ function isDone(snap: AgentNodes): boolean {
 }
 
 /** The structural shape `wait_for_settle` needs of the agent client — just the
- *  `nodes` cell read. Permissive (the concrete projected client assigns) so we
- *  don't re-materialize the precise client union here. */
+ *  `nodes` stream read (snapshot-then-deltas, void input). Permissive (the
+ *  concrete projected client assigns) so we don't re-materialize the precise
+ *  client union here. */
 export interface WaitClient {
   surface: {
     nodes: {
       get: (
-        input: Record<string, never>,
+        input: void,
         opts: { signal?: AbortSignal },
       ) => Promise<AsyncIterable<AgentNodes>>;
     };
@@ -131,10 +132,9 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
   };
 
   try {
-    for await (const snap of await opts.client.surface.nodes.get(
-      {},
-      { signal: controller.signal },
-    )) {
+    for await (const snap of await opts.client.surface.nodes.get(undefined, {
+      signal: controller.signal,
+    })) {
       last = snap;
       // The pre-run / no-run snapshot (`run: false`, empty rows) is not a
       // settled verdict — keep waiting for a real run's frames.

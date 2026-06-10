@@ -9,9 +9,11 @@
  * run actually wants, exposed through `@kolu/surface-mcp` as default-deny MCP
  * resources + tools. The mapping:
  *
- *   - cell `nodes` (PipelineState) → cell `nodes` ({ run, pipeline, nodes[] })
- *     via `deriveCell`: every A frame is flattened to agent rows (id/status/
- *     exit/duration + the `red` verdict bit).
+ *   - cell `nodes` (PipelineState) → stream `nodes` ({ run, pipeline, nodes[] })
+ *     via `deriveStream`: every A frame is flattened to agent rows (id/status/
+ *     exit/duration + the `red` verdict bit). A stream (not a cell) so a
+ *     one-shot `resources/read` awaits A's real first frame instead of seeing
+ *     the empty pre-snapshot default a derived cell starts at.
  *   - stream `nodeLog` ({ id }) → collection `logs` keyed by node id: one
  *     node's output as a `{ node, source, text }` record. The collection read
  *     pulls the live `nodeLog` first frame (the buffered snapshot), falling
@@ -22,16 +24,28 @@
  * `header` and `run.configure` are absent by construction: `header` isn't
  * mapped (it carries no agent value the `nodes` rows don't), and
  * `run.configure` lives on `laneSurface`, never on A — so neither can leak.
+ *
+ * Lifecycle: the projection is wired once over a *re-dialing* A-client
+ * (`redialingAClient`) that opens a fresh `.ci/odu.sock` for every upstream
+ * call. So the face tracks the coordinator across its whole lifetime — a run
+ * that starts, ends, or restarts on the same path after the server booted is
+ * observed by the next read/poll/subscribe, and a no-socket state reads as the
+ * `{ run: false }` / durable-file no-run value rather than stale data or an
+ * error. (The surface-mcp adapter memoizes one read/tool connection and only
+ * re-dials on a thrown call; the re-dialing client moves freshness a layer down
+ * so a silently-closed-and-rebound socket can't pin a previous run's snapshot.)
  */
 
 import { closeSync, openSync, readSync, statSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
-import { deriveCell, projectSurface } from "@kolu/surface/project";
+import { deriveStream, projectSurface } from "@kolu/surface/project";
 import { inMemoryChannelByName } from "@kolu/surface/server";
 import { z } from "zod";
 import { rowsOf } from "../cli/render";
 import { splitFanId } from "../common/nodeId";
 import {
+  clampLog,
+  EMPTY_STATE,
   MAX_LOG_CHARS,
   type oduSurface,
   type PipelineState,
@@ -72,9 +86,9 @@ interface OduSurfaceClient {
 
 // ── B's spec ──────────────────────────────────────────────────────────────
 
-/** The agent `nodes` cell: the pipeline flattened to rows the agent triages.
- *  `run: false` (with a null pipeline and no rows) is the pre-run / no-run
- *  value, mirroring the old `get_nodes` tool's `NodesResult`. */
+/** The agent `nodes` snapshot: the pipeline flattened to rows the agent
+ *  triages. `run: false` (with a null pipeline and no rows) is the pre-run /
+ *  no-run value, mirroring the old `get_nodes` tool's `NodesResult`. */
 const NodeRowSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -105,8 +119,21 @@ const LogEntrySchema = z.object({
 export type LogEntry = z.infer<typeof LogEntrySchema>;
 
 const agentSpec = {
-  cells: {
-    nodes: { schema: AgentNodesSchema, default: EMPTY_NODES },
+  streams: {
+    // `nodes` is a *stream*, not a cell. A derived cell fills its snapshot
+    // asynchronously (the upstream subscription lands a tick after connect),
+    // so a one-shot `resources/read` could return the empty pre-snapshot value
+    // even with a run live — the old `get_nodes` tool awaited A's first frame
+    // and never had that gap. A stream's snapshot read (`firstFrame` in
+    // surface-mcp) awaits the upstream's first mapped frame, so a single read
+    // after connect returns the live pipeline without polling, and each read
+    // re-subscribes upstream (no cell state cached across coordinator
+    // lifetimes). `inputSchema` accepts `undefined` so it exposes as the
+    // no-input static resource `surface://streams/nodes`.
+    nodes: {
+      inputSchema: z.void(),
+      outputSchema: AgentNodesSchema,
+    },
   },
   collections: {
     // A plain `z.string()` key, NOT `TaskIdSchema` (`z.string().min(1)`):
@@ -196,54 +223,76 @@ export function durableLog(token: string): LogEntry {
 
 // ── The logs collection's read store ────────────────────────────────────────
 
-/**
- * Back the `logs` collection's synchronous read with a live-then-file cache.
- *
- * `@kolu/surface`'s collection contract reads each item synchronously
- * (`collectionHandlers.get` yields `readOne(key)` as the snapshot's first
- * frame — it can't await). The live first frame of `a.surface.nodeLog.get`,
- * though, is genuinely async. So this store:
- *
- *   - serves `readOne(id)` from an in-memory cache, falling back to the
- *     durable-file read (with all guards) on a miss — so a read always
- *     returns a value;
- *   - on a miss, kicks off a one-shot live subscription that pulls the
- *     `nodeLog` buffered snapshot and writes it into the cache, so the *next*
- *     read of that id returns the live text. The MCP `logs/<id>` resource is
- *     subscribable: the surface-mcp pusher re-reads on every key-set delta,
- *     which upgrades the file/empty snapshot to the live value once it lands.
- *
- * This is the one place that bridges A's async log stream onto B's sync
- * collection read; the 64KB clamp rides the durable read, and the live frame
- * is already clamped by the coordinator's in-memory tail.
- */
-function makeLogsStore(client: OduSurfaceClient): {
+/** A logs store with a late-bound publish hook. `publish` is the framework's
+ *  *wrapped* collection upsert (`ctx.collections.logs.upsert`), which both
+ *  persists the value and broadcasts it on the collection's per-key + key-set
+ *  buses — the surface-mcp pusher turns that broadcast into a
+ *  `notifications/resources/updated`. It's settable because the wrapped upsert
+ *  only exists *after* `implementSurface` has wired this store, so the store is
+ *  built first and handed its publisher once `implement` returns. */
+export interface LogsStore {
   readAll: () => Map<string, LogEntry>;
   readOne: (id: string) => LogEntry | undefined;
   upsert: (id: string, value: LogEntry) => void;
   remove: (id: string) => void;
-} {
-  const cache = new Map<string, LogEntry>();
-  const priming = new Set<string>();
+  /** Wire the framework's broadcasting upsert (after `implement`). */
+  setPublish: (publish: (id: string, value: LogEntry) => void) => void;
+}
 
-  // Pull the live buffered snapshot for `id` and cache it. One-shot: the
-  // `nodeLog` stream's first frame is the whole current buffer. A failure
-  // (invalid id, no live run, link drop) leaves the cache as-is so the next
-  // read falls back to the durable file.
-  const primeLive = (id: string): void => {
-    if (priming.has(id)) return;
-    priming.add(id);
+/**
+ * Back the `logs` collection with a live-following cache.
+ *
+ * `@kolu/surface`'s collection contract reads each item synchronously
+ * (`collectionHandlers.get` yields `readOne(key)` as the snapshot's first
+ * frame — it can't await), but the live frames of `a.surface.nodeLog.get` are
+ * genuinely async. So this store:
+ *
+ *   - serves `readOne(id)` from an in-memory cache, falling back to the
+ *     durable-file read (with all guards) on a miss — so a read always returns
+ *     a value;
+ *   - on a miss, opens a *following* live subscription to `nodeLog` (snapshot,
+ *     then appends) and pushes every accumulated frame through the framework's
+ *     broadcasting `upsert` (the `publish` hook). That broadcast drives the
+ *     per-key bus a `resources/subscribe` on `surface://collections/logs/{id}`
+ *     watches, so a subscriber is notified for the live snapshot *and* for each
+ *     later append — not just on a key-set delta re-read.
+ *
+ * The clamp: the durable read clamps to 64KB; the live buffer is already
+ * clamped by the coordinator's in-memory tail, and `clampLog` re-clamps the
+ * accumulation so a long-lived follow can't grow the cached entry unbounded.
+ */
+function makeLogsStore(client: OduSurfaceClient): LogsStore {
+  const cache = new Map<string, LogEntry>();
+  const following = new Set<string>();
+  // Defaults to a bare cache write until `setPublish` wires the framework's
+  // broadcasting upsert; after that, every write also notifies subscribers.
+  let publish = (id: string, value: LogEntry): void => {
+    cache.set(id, value);
+  };
+
+  // Follow the live `nodeLog` stream for `id`: the first frame is the buffered
+  // snapshot, later frames are appends. Accumulate and publish each so a
+  // subscriber sees the snapshot and every append. Stays open until the stream
+  // ends (run done / link drop); a failure leaves the durable fallback in
+  // place. One follow per id (`following` guards re-entry).
+  const follow = (id: string): void => {
+    if (following.has(id)) return;
+    following.add(id);
     void (async () => {
       try {
         const stream = await client.surface.nodeLog.get({ id });
+        let text = "";
         for await (const frame of stream) {
-          cache.set(id, { node: id, source: "live", text: frame.text });
-          break; // buffered snapshot only — non-follow
+          text =
+            frame.kind === "append"
+              ? clampLog(text + frame.text)
+              : clampLog(frame.text);
+          publish(id, { node: id, source: "live", text });
         }
       } catch {
-        // No live frame — leave the durable fallback in place.
+        // No live frame / link drop — leave the durable fallback in place.
       } finally {
-        priming.delete(id);
+        following.delete(id);
       }
     })();
   };
@@ -251,10 +300,10 @@ function makeLogsStore(client: OduSurfaceClient): {
   const readOne = (id: string): LogEntry => {
     const live = cache.get(id);
     if (live !== undefined) return live;
-    // Cache miss: kick off the live pull for next time, return the durable
+    // Cache miss: start following so future frames notify, return the durable
     // fallback now so the read never blocks and never returns undefined (a
     // collection's `get` errors on an undefined first snapshot).
-    primeLive(id);
+    follow(id);
     return durableLog(id);
   };
 
@@ -267,30 +316,138 @@ function makeLogsStore(client: OduSurfaceClient): {
     remove: (id) => {
       cache.delete(id);
     },
+    setPublish: (p) => {
+      publish = p;
+    },
+  };
+}
+
+// ── The re-dialing A-client ──────────────────────────────────────────────────
+
+/** Dial the coordinator socket, or `null` when no run is live. Injectable so
+ *  the tests drive a controllable surface; defaults to the real unix-socket
+ *  dial in `mcp.ts`. */
+export type DialA = () => Promise<{
+  client: OduSurfaceClient;
+  close: () => void;
+} | null>;
+
+/**
+ * An A-client that dials a *fresh* coordinator socket for every streaming call
+ * and closes it when the consumer stops iterating.
+ *
+ * This is what makes the agent face track the coordinator's lifecycle. The
+ * surface-mcp adapter memoizes one read/tool connection for the whole server
+ * lifetime and only re-dials after a thrown call — but a coordinator socket
+ * that closed and was re-bound by the *next* run (same `.ci/odu.sock` path)
+ * doesn't make a pending read throw; the old projection would keep serving the
+ * previous run's snapshot. Re-dialing per call sidesteps that entirely: each
+ * `nodes` read / `wait_for_settle` poll / log follow opens the live socket
+ * afresh, so it sees the run that's live *now*, and falls back to the no-run
+ * value the instant there's no socket.
+ *
+ *   - `nodes.get`  — dial, stream A's `nodes` (snapshot-then-deltas) until the
+ *                    consumer aborts/returns or A closes; no socket → one
+ *                    `EMPTY_STATE`-shaped frame (mapped to `{ run: false }`).
+ *   - `nodeLog.get`— dial, stream A's `nodeLog`; no socket → end immediately so
+ *                    the logs store falls back to the durable file.
+ *   - `node.rerun` — dial, call, close; no socket → `{ ok: false }`.
+ */
+export function redialingAClient(dial: DialA): OduSurfaceClient {
+  // Dial fresh, stream the chosen upstream, and close the socket when iteration
+  // ends (consumer return/abort, or A closing the stream). `onNoRun` supplies
+  // the frames to yield when no coordinator is live.
+  async function* streamFresh<F>(
+    pick: (a: OduSurfaceClient) => Promise<AsyncIterable<F>>,
+    onNoRun: () => AsyncIterable<F>,
+  ): AsyncGenerator<F> {
+    const dialed = await dial();
+    if (dialed === null) {
+      yield* onNoRun();
+      return;
+    }
+    try {
+      yield* await pick(dialed.client);
+    } finally {
+      dialed.close();
+    }
+  }
+
+  async function* one<F>(value: F): AsyncIterable<F> {
+    yield value;
+  }
+  // biome-ignore lint/correctness/useYield: an empty stream — no frames.
+  async function* none<F>(): AsyncIterable<F> {
+    return;
+  }
+
+  return {
+    surface: {
+      nodes: {
+        get: (_input, opts) =>
+          Promise.resolve(
+            streamFresh<PipelineState>(
+              (a) => a.surface.nodes.get({}, opts),
+              () => one(EMPTY_STATE),
+            ),
+          ),
+      },
+      nodeLog: {
+        get: (input, opts) =>
+          Promise.resolve(
+            streamFresh<{ kind: string; text: string }>(
+              (a) => a.surface.nodeLog.get(input, opts),
+              () => none(),
+            ),
+          ),
+      },
+      node: {
+        rerun: async (input) => {
+          const dialed = await dial();
+          if (dialed === null) return { ok: false };
+          try {
+            return await dialed.client.surface.node.rerun(input);
+          } finally {
+            dialed.close();
+          }
+        },
+      },
+    },
   };
 }
 
 // ── The projection ──────────────────────────────────────────────────────────
 
-/** B's server impl deps, given a live A-client. Typed against the minimal
+/** B's server impl deps, given a live A-client. `onStore` receives the logs
+ *  store this call built so `implement`'s wrapper can wire its broadcasting
+ *  `publish` from the ctx the package returns. Typed against the minimal
  *  `OduSurfaceClient` (see its note) so the heavy per-spec client union is
  *  never materialized; cast onto the package's `deps` signature below. */
-function agentDeps(a: OduSurfaceClient) {
+function agentDeps(a: OduSurfaceClient, onStore: (store: LogsStore) => void) {
+  const logs = makeLogsStore(a);
+  onStore(logs);
   return {
     channel: inMemoryChannelByName(),
-    cells: {
-      nodes: deriveCell(
-        (opts) => a.surface.nodes.get({}, opts),
-        (state: PipelineState): AgentNodes => ({
-          run: true,
-          pipeline: state.name,
-          nodes: rowsOf(state),
-        }),
-        EMPTY_NODES,
+    streams: {
+      // Map A's `nodes` cell (snapshot-then-deltas) onto B's `nodes` stream.
+      // `deriveStream` preserves snapshot-then-deltas, so B's first frame is
+      // A's current snapshot mapped — a one-shot read awaits the real upstream
+      // value, and a subscriber gets deltas on every transition.
+      nodes: deriveStream(
+        (_input: void, opts: { signal?: AbortSignal }) =>
+          a.surface.nodes.get({}, opts),
+        (state: PipelineState): AgentNodes =>
+          // An empty pipeline (no nodes) is the no-run / pre-run value the
+          // re-dialing A-client yields when no coordinator is live (EMPTY_STATE)
+          // — map it to `{ run: false }`, mirroring the old `get_nodes`. A live
+          // run always has at least one node.
+          state.order.length === 0
+            ? EMPTY_NODES
+            : { run: true, pipeline: state.name, nodes: rowsOf(state) },
       ),
     },
     collections: {
-      logs: makeLogsStore(a),
+      logs,
     },
     procedures: {
       node: {
@@ -301,21 +458,57 @@ function agentDeps(a: OduSurfaceClient) {
   };
 }
 
+/** B's projected surface plus an `implement` that wires the logs store's
+ *  broadcasting publish from the implemented ctx. */
+export interface AgentProjection {
+  surface: ReturnType<typeof projectSurface>["surface"];
+  implement: (client: { surface: Record<string, unknown> }) => {
+    // biome-ignore lint/suspicious/noExplicitAny: implementSurface's router is opaque (its surface walk is dynamic).
+    router: any;
+  };
+}
+
 /** Build `oduAgentSurface` (B) as a projection of `oduSurface` (A). Pass the
  *  source surface so `projectSurface` pins A's spec.
+ *
+ *  `implement` wraps the package's: after wiring B's server it hands the logs
+ *  store the framework's *broadcasting* upsert (`ctx.collections.logs.upsert`)
+ *  via `setPublish`, so a live `nodeLog` frame published into the store reaches
+ *  the collection's per-key bus — which is what a `resources/subscribe` on a
+ *  log item watches. Without this the store would only ever write its private
+ *  cache and a subscriber would never be notified.
  *
  *  `agentDeps` is cast onto `projectSurface`'s `deps` parameter: its declared
  *  type wants `SurfaceClientOf<typeof oduSurface.spec>`, which overflows TS's
  *  union budget for this surface (TS2590). The runtime client only ever has
  *  `.surface.nodes/.nodeLog/.node` read, which `OduSurfaceClient` covers — the
  *  same union-budget dodge the package documents for its own `implement`. */
-export function buildAgentProjection(source: typeof oduSurface) {
-  return projectSurface(source, {
+export function buildAgentProjection(source: typeof oduSurface): AgentProjection {
+  let pendingStore: LogsStore | null = null;
+  const projection = projectSurface(source, {
     spec: agentSpec,
     // `deps` is cast (`as never`): its declared param is
     // `SurfaceClientOf<typeof oduSurface.spec>`, materializing which here
     // overflows TS's union budget (TS2590). `A` is still inferred from
     // `source` and `B` from `spec`, so the return type stays precise.
-    deps: agentDeps as never,
+    deps: ((client: OduSurfaceClient) =>
+      agentDeps(client, (store) => {
+        pendingStore = store;
+      })) as never,
   });
+  return {
+    surface: projection.surface,
+    implement: (client) => {
+      const implemented = projection.implement(client);
+      // The store `agentDeps` just built (captured during `implement`) gets the
+      // framework's wrapped upsert, which persists *and* broadcasts.
+      const store = pendingStore;
+      pendingStore = null;
+      const ctx = implemented.ctx as {
+        collections: { logs: { upsert: (k: string, v: LogEntry) => void } };
+      };
+      store?.setPublish((id, value) => ctx.collections.logs.upsert(id, value));
+      return { router: implemented.router };
+    },
+  };
 }

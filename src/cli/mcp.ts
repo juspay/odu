@@ -23,7 +23,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { directLink } from "@kolu/surface/links/direct";
 import { serveSurfaceAsMcp } from "@kolu/surface-mcp";
-import { buildAgentProjection } from "../mcp/agentSurface";
+import { buildAgentProjection, redialingAClient } from "../mcp/agentSurface";
 import { killRuns, runTool } from "../mcp/runTool";
 import { waitTool } from "../mcp/waitTool";
 import { oduSurface } from "../common/surface";
@@ -48,21 +48,26 @@ function version(): string {
 export async function mcpCommand(socketPath: string = SOCKET_PATH): Promise<number> {
   const projection = buildAgentProjection(oduSurface);
 
+  // One stable B-client over a *re-dialing* A-client: the projection is wired
+  // once, but every upstream call inside it dials a fresh `.ci/odu.sock`. So a
+  // run that starts (or restarts on the same path) after the server booted is
+  // observed by the next read/poll/subscribe — without relying on the adapter's
+  // memoized connection to re-dial. No socket → the A-client yields the no-run
+  // value, so `nodes`/`wait_for_settle` read `{ run: false }`, `logs` reads the
+  // durable file, and `run` (which ignores the client) spawns a coordinator.
+  const aClient = redialingAClient(async () => {
+    const dialed = await tryDialSocket(socketPath);
+    return dialed === null ? null : { client: dialed.client, close: dialed.close };
+  });
+  const { router } = projection.implement(aClient);
+  const bClient = directLink<typeof projection.surface.contract>(router);
+
   const { server, close } = await serveSurfaceAsMcp({
     surface: projection.surface,
-    // Live-client factory: dial the coordinator's socket and project it. The
-    // projected B router is consumed in-process via `directLink`. A dial
-    // failure (no run in progress) throws, which surfaces as a tool error
-    // rather than a silent empty read.
-    client: async () => {
-      const dialed = await tryDialSocket(socketPath);
-      if (dialed === null) throw new Error("odu: no run in progress");
-      const { router } = projection.implement(dialed.client);
-      return {
-        client: directLink<typeof projection.surface.contract>(router),
-        dispose: dialed.close,
-      };
-    },
+    // The adapter memoizes one connection for reads/tools; the freshness lives
+    // a layer down, in the re-dialing A-client, so this can be the bare,
+    // already-built B-client (nothing per-call to dispose here).
+    client: () => bClient,
     expose: {
       nodes: "resource",
       logs: "resource",
