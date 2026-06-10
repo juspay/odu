@@ -7,10 +7,10 @@ user-invocable: false
 # odu-mcp
 
 The agent face of [odu](https://github.com/juspay/odu) — an MCP stdio server
-that re-exposes a live CI run as agent tools (`run`, `get_nodes`, `tail_log`,
-`rerun_node`, `wait_for_settle`) and subscribable resources (`odu://nodes`,
-`odu://log/{node}`), so Claude Code / Codex / opencode / Gemini CLI drive CI
-with structured calls instead of scraping terminal output.
+that re-exposes a live CI run as agent tools (`run`, `node_rerun`,
+`wait_for_settle`) and subscribable resources (`surface://cells/nodes`,
+`surface://collections/logs/{id}`), so Claude Code / Codex / opencode / Gemini
+CLI drive CI with structured calls instead of scraping terminal output.
 
 `bin/serve` is self-contained — it resolves odu via `nix run` and serves over
 stdio in the consumer's repo (dialing `.ci/odu.sock`). Set `ODU_FLAKE` to
