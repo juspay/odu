@@ -53,11 +53,6 @@ export interface ProgressEvent {
 	log: string;
 }
 
-// `RunHeader` is defined on the surface (it now travels over it as the `header`
-// cell so `attach` can render the matrix), and re-exported here where the
-// renderer + displays consume it.
-export type { RunHeader } from "../common/surface";
-
 /** `3cbac86` for a clean run, `3cbac86+dirty` when the working tree has
  *  uncommitted changes — every face shows which code the verdict is about. */
 export function commitLabel(header: Pick<RunHeader, "sha7" | "dirty">): string {
