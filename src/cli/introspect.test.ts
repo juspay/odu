@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { pendingNode, type PipelineState } from "../common/surface";
 import { dialSocket } from "../coordinator/socket";
 import { serveTestSurface, type TestSurface } from "../mcp/serveForTest";
-import { monitorStream } from "./introspect";
+import { monitorStream, statusCommand } from "./introspect";
 
 type Row = [
   id: string,
@@ -40,26 +40,43 @@ afterEach(() => {
   for (const s of open.splice(0)) s.close();
 });
 
+/** Run `fn` with process.stdout captured; returns what it wrote + fn's result. */
+async function capturingStdout<T>(
+  fn: () => Promise<T>,
+): Promise<{ out: string; result: T }> {
+  const chunks: string[] = [];
+  const original = process.stdout.write.bind(process.stdout);
+  process.stdout.write = ((chunk: string | Uint8Array): boolean => {
+    chunks.push(
+      typeof chunk === "string" ? chunk : Buffer.from(chunk).toString(),
+    );
+    return true;
+  }) as typeof process.stdout.write;
+  try {
+    const result = await fn();
+    return { out: chunks.join(""), result };
+  } finally {
+    process.stdout.write = original;
+  }
+}
+
+async function served(state: PipelineState): Promise<TestSurface> {
+  const surface = await serveTestSurface(state);
+  open.push(surface);
+  return surface;
+}
+
 /** Serve `state`, run the stream against it, capture stdout. */
 async function streamOf(
   state: PipelineState,
   json: boolean,
 ): Promise<{ out: string; code: number }> {
-  const surface = await serveTestSurface(state);
-  open.push(surface);
+  const surface = await served(state);
   const { client, close } = await dialSocket(surface.socketPath);
-  const chunks: string[] = [];
-  const original = process.stdout.write.bind(process.stdout);
-  process.stdout.write = ((chunk: string | Uint8Array): boolean => {
-    chunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString());
-    return true;
-  }) as typeof process.stdout.write;
-  try {
-    const code = await monitorStream(client, close, json);
-    return { out: chunks.join(""), code };
-  } finally {
-    process.stdout.write = original;
-  }
+  const { out, result } = await capturingStdout(() =>
+    monitorStream(client, close, json),
+  );
+  return { out, code: result };
 }
 
 describe("monitorStream — json", () => {
@@ -118,5 +135,26 @@ describe("monitorStream — plain", () => {
       false,
     );
     expect(out).toMatch(/✔ success\s+ci::install@x86_64-linux/);
+  });
+});
+
+// `odu status` is the third plain face onto the same fan-in state; it must use
+// the same ProgressStatus wording as run/monitor (lens hickey-2), not the raw
+// NodeStatus (`ok`).
+describe("statusCommand — plain", () => {
+  it("renders the snapshot with run/monitor's wording (success, not ok)", async () => {
+    const surface = await served(
+      doneState([
+        ["ci::install@x86_64-linux", "ok", 0],
+        ["ci::e2e@x86_64-linux", "failed", 2],
+      ]),
+    );
+    const { out, result } = await capturingStdout(() =>
+      statusCommand(false, surface.socketPath),
+    );
+    expect(out).toMatch(/✔ success\s+ci::install@x86_64-linux/);
+    expect(out).toMatch(/✗ failed\s+ci::e2e@x86_64-linux/);
+    expect(out).not.toMatch(/\bok\b/); // the old NodeStatus wording is gone
+    expect(result).toBe(1);
   });
 });

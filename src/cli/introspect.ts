@@ -5,7 +5,12 @@
  * log stream with snapshot-then-append replay, the dashboard with `r`erun.
  */
 
-import type { NodeLogFrame, PipelineState } from "../common/surface";
+import {
+  type NodeLogFrame,
+  type NodeState,
+  type PipelineState,
+  STATUS_META,
+} from "../common/surface";
 import {
   createDisplay,
   progressEvent,
@@ -44,8 +49,11 @@ export function resolveNodeId(state: PipelineState, token: string): string {
   );
 }
 
-export async function statusCommand(json: boolean): Promise<number> {
-  const { client, close } = await dialSocket();
+export async function statusCommand(
+  json: boolean,
+  socketPath?: string,
+): Promise<number> {
+  const { client, close } = await dialSocket(socketPath);
   const state = await firstSnapshot(client);
   close();
   if (json) {
@@ -58,8 +66,13 @@ export async function statusCommand(json: boolean): Promise<number> {
     for (const id of state.order) {
       const node = state.nodes[id];
       if (node === undefined) continue;
+      // Same word source as run/monitor's plain face — STATUS_META's external
+      // wording (ok→success, …), padded to 7, so a green node reads `success`
+      // in every plain face. The `??` keeps the snapshot-only states whose
+      // progress mapping is null (pending) reading as their raw status.
+      const word = STATUS_META[node.status].progress ?? node.status;
       process.stdout.write(
-        `${statusGlyph(node.status)} ${node.status.padEnd(8)} ${id}\n`,
+        `${statusGlyph(node.status)} ${word.padEnd(7)} ${id}\n`,
       );
     }
   }
@@ -121,7 +134,7 @@ export async function monitorStream(
   json: boolean,
 ): Promise<number> {
   const display = createDisplay(json ? "json" : "plain");
-  const seen = new Map<string, string>();
+  const seen = new Map<string, NodeState["status"]>();
   let last: PipelineState | undefined;
   let started = false;
   for await (const state of await client.surface.nodes.get({})) {
