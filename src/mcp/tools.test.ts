@@ -24,7 +24,7 @@ function state(rows: Row[]): PipelineState {
       status,
     };
   }
-  return { name: "test", order, nodes };
+  return { name: "test", sha7: "abc1234", dirty: false, order, nodes };
 }
 
 const open: TestSurface[] = [];

@@ -110,6 +110,20 @@ export function pendingNode(seed: {
 
 export const PipelineStateSchema = z.object({
   name: z.string(),
+  /** The run's commit, 7 hex chars — `odu run` stamps it from HEAD onto the
+   *  fan-in surface so `monitor` renders the durable log path (`.ci/<sha7>/…`)
+   *  and the sha label from surface state: its banner (via `commitLabel`) and
+   *  the per-transition `log` field (via `progressEvent`→`logPathFor`), instead
+   *  of re-deriving the sha from git and drifting. The MCP `tail_log`
+   *  durable-file fallback derives the sha from git HEAD instead — no live
+   *  socket exists in that branch — so this field is `monitor`'s, not the MCP
+   *  tools'. Empty in the pre-run EMPTY_STATE. */
+  sha7: z.string(),
+  /** The run's working tree had uncommitted changes — the verdict is about
+   *  that tree, not the commit. Drives the `+dirty` sha label every face
+   *  shows. Authoritative only on the coordinator's fan-in (the lane copy is
+   *  advisory; see runner.ts). */
+  dirty: z.boolean(),
   /** Node ids in scheduling order — the row order dashboards paint. */
   order: z.array(TaskIdSchema),
   nodes: z.record(TaskIdSchema, NodeStateSchema),
@@ -118,6 +132,8 @@ export type PipelineState = z.infer<typeof PipelineStateSchema>;
 
 export const EMPTY_STATE: PipelineState = {
   name: "pipeline",
+  sha7: "",
+  dirty: false,
   order: [],
   nodes: {},
 };

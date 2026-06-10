@@ -39,6 +39,7 @@ import {
   yellow,
 } from "../cli/ansi";
 import { STATUS_COLOR, summarize } from "../cli/render";
+import { logPathFor } from "./statuses";
 
 export type DisplayMode = "json" | "plain" | "live";
 
@@ -62,7 +63,11 @@ export interface RunHeader {
    *  OSC 8 hyperlink on terminals that render them. Null elsewhere. */
   commitUrl: string | null;
   lanes: ReadonlyArray<{ platform: string; host: string }>;
-  hostsSource: string;
+  /** Where the lane→host map came from (`~/.config/odu/hosts.json`, a pool
+   *  lease, …). `null` for an observer that didn't own host selection —
+   *  `monitor` attaches to a run it didn't launch, so it leaves lanes empty
+   *  and the hosts clause off. */
+  hostsSource: string | null;
 }
 
 /** `3cbac86` for a clean run, `3cbac86+dirty` when the working tree has
@@ -89,6 +94,31 @@ export function createDisplay(mode: DisplayMode): Display {
   if (mode === "json") return new JsonDisplay();
   if (mode === "plain") return new PlainDisplay();
   return new LiveDisplay();
+}
+
+/** Project a node's state into the `ProgressEvent` the json/plain faces emit.
+ *  `run` (its own run `sha7`) and `monitor` (the surface's `sha7`) both build
+ *  events through this one function, so the two faces emit a single
+ *  byte-identical `--progress json` / plain contract instead of each
+ *  hand-rolling the projection and drifting (the bug in juspay/odu#4).
+ *  `null` for a status that emits nothing (`pending`, whose `progress` mapping
+ *  is `null`) — the caller skips it. */
+export function progressEvent(
+  sha7: string,
+  id: string,
+  node: NodeState,
+): ProgressEvent | null {
+  const status = STATUS_META[node.status].progress;
+  if (status === null) return null;
+  const { namepath, platform } = splitFanId(id);
+  return {
+    node: id,
+    recipe: namepath,
+    platform,
+    status,
+    ...(node.exitCode !== null ? { exit_code: node.exitCode } : {}),
+    log: logPathFor(sha7, id),
+  };
 }
 
 /** Short display name for a fan-in node id: `ci::e2e@x86_64-linux` → `e2e`
@@ -129,11 +159,18 @@ class PlainDisplay implements Display {
   private lastWrite = Date.now();
 
   start(header: RunHeader): void {
-    const lanes = header.lanes
-      .map((l) => `${l.platform}=${l.host}`)
-      .join(" · ");
+    // `run` carries lanes + a hosts source, so the banner shows both; an
+    // observer (`monitor`) has neither, so those clauses drop out and the
+    // banner is just `odu · <pipeline> @ <sha>`.
+    const parts = [`odu · ${header.pipeline} @ ${commitLabel(header)}`];
+    if (header.lanes.length > 0) {
+      parts.push(header.lanes.map((l) => `${l.platform}=${l.host}`).join(" · "));
+    }
+    const banner = parts.join(" · ");
     this.say(
-      `odu · ${header.pipeline} @ ${commitLabel(header)} · ${lanes} (hosts: ${header.hostsSource})`,
+      header.hostsSource !== null
+        ? `${banner} (hosts: ${header.hostsSource})`
+        : banner,
     );
     this.timer = setInterval(() => this.heartbeat(), HEARTBEAT_MS);
     this.timer.unref?.();

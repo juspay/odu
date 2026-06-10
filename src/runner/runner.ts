@@ -142,6 +142,12 @@ export function createLaneRunner(): LaneRunner {
     }
     ctx.cells.nodes.set({
       name: input.name,
+      // Commit identity is fan-in state: the coordinator stamps the
+      // authoritative sha7/dirty onto `.ci/odu.sock` (what monitor reads). A
+      // lane only echoes the sha it was handed (none in workspace mode) and
+      // never assesses tree dirtiness, so its copy is advisory.
+      sha7: input.sha?.slice(0, 7) ?? "",
+      dirty: false,
       order: [SETUP_NODE_ID, ...input.tasks.map((t) => t.id)],
       nodes,
     });
