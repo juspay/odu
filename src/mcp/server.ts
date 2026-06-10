@@ -51,6 +51,8 @@ function version(): string {
     ) as { version?: string };
     return pkg.version ?? "0.0.0";
   } catch {
+    // best-effort: the version is cosmetic in the MCP handshake, so a missing
+    // or unreadable package.json falls back rather than failing server startup.
     return "0.0.0";
   }
 }
