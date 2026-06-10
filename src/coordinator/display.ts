@@ -20,68 +20,68 @@
  */
 
 import {
-	bold,
-	dim,
-	green,
-	link,
-	magenta,
-	red,
-	spinnerAt,
-	stripAnsi,
-	yellow,
+  bold,
+  dim,
+  green,
+  link,
+  magenta,
+  red,
+  spinnerAt,
+  stripAnsi,
+  yellow,
 } from "../cli/ansi";
 import { STATUS_COLOR, summarize } from "../cli/render";
 import { formatGoDuration } from "../common/duration";
 import { splitFanId } from "../common/nodeId";
 import {
-	type NodeState,
-	type PipelineState,
-	type ProgressStatus,
-	type RunHeader,
-	STATUS_META,
+  type NodeState,
+  type PipelineState,
+  type ProgressStatus,
+  type RunHeader,
+  STATUS_META,
 } from "../common/surface";
 import { logPathFor } from "./statuses";
 
 export type DisplayMode = "json" | "plain" | "live";
 
 export interface ProgressEvent {
-	node: string;
-	recipe: string;
-	platform: string;
-	status: ProgressStatus;
-	exit_code?: number;
-	log: string;
+  node: string;
+  recipe: string;
+  platform: string;
+  status: ProgressStatus;
+  exit_code?: number;
+  log: string;
 }
 
 /** `3cbac86` for a clean run, `3cbac86+dirty` when the working tree has
  *  uncommitted changes — every face shows which code the verdict is about.
  *  Commit identity lives on `PipelineState`, so the label is fed from state. */
 export function commitLabel(
-	state: Pick<PipelineState, "sha7" | "dirty">,
+  state: Pick<PipelineState, "sha7" | "dirty">,
 ): string {
-	return state.dirty ? `${state.sha7}+dirty` : state.sha7;
+  return state.dirty ? `${state.sha7}+dirty` : state.sha7;
 }
 
 export interface Display {
-	/** Commit identity comes from `state`; the run-env (lanes, hosts source,
-	 *  commit link, start clock) from `header`. */
-	start(state: PipelineState, header: RunHeader): void;
-	/** Latest fan-in state — live repaints from it, plain heartbeats off it. */
-	update(state: PipelineState): void;
-	/** A node crossed a status boundary (the diff-driven event feed). */
-	transition(event: ProgressEvent, node: NodeState): void;
-	/** A chunk of some node's log arrived (live's footer feed). */
-	logLine(id: string, text: string): void;
-	/** Operator-facing message (post failures, signals, …). */
-	info(msg: string): void;
-	/** Stop timers, restore the terminal, paint the final frame. */
-	stop(state?: PipelineState): void;
+  /** Commit identity comes from `state`; the run-env (lanes, hosts source,
+   *  commit link, start clock) from `header`. */
+  start(state: PipelineState, header: RunHeader): void;
+  /** Latest fan-in state — live repaints from it, plain heartbeats off it. */
+  update(state: PipelineState): void;
+  /** A node crossed a status boundary (the diff-driven event feed). */
+  transition(event: ProgressEvent, node: NodeState): void;
+  /** A chunk of some node's log arrived (live's footer feed). */
+  logLine(id: string, text: string): void;
+  /** Operator-facing message (post failures, signals, …). */
+  info(msg: string): void;
+  /** Stop timers, restore the terminal, paint the final frame. */
+  stop(state?: PipelineState): void;
 }
 
 export function createDisplay(mode: DisplayMode): Display {
-	if (mode === "json") return new JsonDisplay();
-	if (mode === "plain") return new PlainDisplay();
-	return new LiveDisplay();
+  if (mode === "json") return new JsonDisplay();
+  if (mode === "plain") return new PlainDisplay();
+  return new LiveDisplay();
 }
 
 /** Project a node's state into the `ProgressEvent` the json/plain faces emit.
@@ -92,49 +92,49 @@ export function createDisplay(mode: DisplayMode): Display {
  *  `null` for a status that emits nothing (`pending`, whose `progress` mapping
  *  is `null`) — the caller skips it. */
 export function progressEvent(
-	sha7: string,
-	id: string,
-	node: NodeState,
+  sha7: string,
+  id: string,
+  node: NodeState,
 ): ProgressEvent | null {
-	const status = STATUS_META[node.status].progress;
-	if (status === null) return null;
-	const { namepath, platform } = splitFanId(id);
-	return {
-		node: id,
-		recipe: namepath,
-		platform,
-		status,
-		...(node.exitCode !== null ? { exit_code: node.exitCode } : {}),
-		log: logPathFor(sha7, id),
-	};
+  const status = STATUS_META[node.status].progress;
+  if (status === null) return null;
+  const { namepath, platform } = splitFanId(id);
+  return {
+    node: id,
+    recipe: namepath,
+    platform,
+    status,
+    ...(node.exitCode !== null ? { exit_code: node.exitCode } : {}),
+    log: logPathFor(sha7, id),
+  };
 }
 
 /** Short display name for a fan-in node id: `ci::e2e@x86_64-linux` → `e2e`
  *  (the matrix's columns carry the platform; `ci::` is the one module prefix
  *  every kolu pipeline shares, so it's noise in a narrow cell). */
 function recipeLabel(namepath: string): string {
-	return namepath.startsWith("ci::") ? namepath.slice(4) : namepath;
+  return namepath.startsWith("ci::") ? namepath.slice(4) : namepath;
 }
 
 function glyphFor(status: NodeState["status"], tick: number): string {
-	const raw =
-		status === "running" ? spinnerAt(tick) : STATUS_META[status].glyph;
-	return STATUS_COLOR[status](raw);
+  const raw =
+    status === "running" ? spinnerAt(tick) : STATUS_META[status].glyph;
+  return STATUS_COLOR[status](raw);
 }
 
 // ── json ────────────────────────────────────────────────────────────────────
 
 class JsonDisplay implements Display {
-	start(): void {}
-	update(): void {}
-	transition(event: ProgressEvent): void {
-		process.stdout.write(`${JSON.stringify(event)}\n`);
-	}
-	logLine(): void {}
-	info(msg: string): void {
-		process.stderr.write(`${msg}\n`);
-	}
-	stop(): void {}
+  start(): void {}
+  update(): void {}
+  transition(event: ProgressEvent): void {
+    process.stdout.write(`${JSON.stringify(event)}\n`);
+  }
+  logLine(): void {}
+  info(msg: string): void {
+    process.stderr.write(`${msg}\n`);
+  }
+  stop(): void {}
 }
 
 // ── plain ───────────────────────────────────────────────────────────────────
@@ -142,74 +142,74 @@ class JsonDisplay implements Display {
 const HEARTBEAT_MS = 60_000;
 
 class PlainDisplay implements Display {
-	private state: PipelineState | undefined;
-	private timer: NodeJS.Timeout | undefined;
-	private lastWrite = Date.now();
+  private state: PipelineState | undefined;
+  private timer: NodeJS.Timeout | undefined;
+  private lastWrite = Date.now();
 
-	start(state: PipelineState, header: RunHeader): void {
-		// Commit identity (pipeline name + sha) comes from state; `run` carries
-		// lanes + a hosts source on the header, so the banner shows both; an
-		// observer (`attach`) has neither, so those clauses drop out and the
-		// banner is just `odu · <pipeline> @ <sha>`.
-		const parts = [`odu · ${state.name} @ ${commitLabel(state)}`];
-		if (header.lanes.length > 0) {
-			parts.push(
-				header.lanes.map((l) => `${l.platform}=${l.host}`).join(" · "),
-			);
-		}
-		const banner = parts.join(" · ");
-		this.say(
-			header.hostsSource !== null
-				? `${banner} (hosts: ${header.hostsSource})`
-				: banner,
-		);
-		this.timer = setInterval(() => this.heartbeat(), HEARTBEAT_MS);
-		this.timer.unref?.();
-	}
+  start(state: PipelineState, header: RunHeader): void {
+    // Commit identity (pipeline name + sha) comes from state; `run` carries
+    // lanes + a hosts source on the header, so the banner shows both; an
+    // observer (`attach`) has neither, so those clauses drop out and the
+    // banner is just `odu · <pipeline> @ <sha>`.
+    const parts = [`odu · ${state.name} @ ${commitLabel(state)}`];
+    if (header.lanes.length > 0) {
+      parts.push(
+        header.lanes.map((l) => `${l.platform}=${l.host}`).join(" · "),
+      );
+    }
+    const banner = parts.join(" · ");
+    this.say(
+      header.hostsSource !== null
+        ? `${banner} (hosts: ${header.hostsSource})`
+        : banner,
+    );
+    this.timer = setInterval(() => this.heartbeat(), HEARTBEAT_MS);
+    this.timer.unref?.();
+  }
 
-	update(state: PipelineState): void {
-		this.state = state;
-	}
+  update(state: PipelineState): void {
+    this.state = state;
+  }
 
-	transition(event: ProgressEvent, node: NodeState): void {
-		const glyph = STATUS_META[node.status].glyph;
-		const dur =
-			node.durationMs !== null ? ` ${formatGoDuration(node.durationMs)}` : "";
-		const logRef =
-			node.status === "failed" || node.status === "errored"
-				? `  → ${event.log}`
-				: "";
-		this.say(`${glyph} ${event.status.padEnd(7)} ${event.node}${dur}${logRef}`);
-	}
+  transition(event: ProgressEvent, node: NodeState): void {
+    const glyph = STATUS_META[node.status].glyph;
+    const dur =
+      node.durationMs !== null ? ` ${formatGoDuration(node.durationMs)}` : "";
+    const logRef =
+      node.status === "failed" || node.status === "errored"
+        ? `  → ${event.log}`
+        : "";
+    this.say(`${glyph} ${event.status.padEnd(7)} ${event.node}${dur}${logRef}`);
+  }
 
-	logLine(): void {}
+  logLine(): void {}
 
-	info(msg: string): void {
-		process.stderr.write(`${msg}\n`);
-	}
+  info(msg: string): void {
+    process.stderr.write(`${msg}\n`);
+  }
 
-	stop(): void {
-		if (this.timer !== undefined) clearInterval(this.timer);
-	}
+  stop(): void {
+    if (this.timer !== undefined) clearInterval(this.timer);
+  }
 
-	/** Between transitions a captured log goes silent for however long the
-	 *  slowest node takes (darwin e2e: ~30 min) — name the laggards once a
-	 *  minute so the log reads as alive. */
-	private heartbeat(): void {
-		if (this.state === undefined) return;
-		if (Date.now() - this.lastWrite < HEARTBEAT_MS) return;
-		const now = Date.now();
-		const running = this.state.order
-			.map((id) => this.state?.nodes[id])
-			.filter((n): n is NodeState => n !== undefined && n.status === "running")
-			.map((n) => `${n.id} (${formatGoDuration(now - (n.startedAt ?? now))})`);
-		if (running.length > 0) this.say(`… still running: ${running.join(", ")}`);
-	}
+  /** Between transitions a captured log goes silent for however long the
+   *  slowest node takes (darwin e2e: ~30 min) — name the laggards once a
+   *  minute so the log reads as alive. */
+  private heartbeat(): void {
+    if (this.state === undefined) return;
+    if (Date.now() - this.lastWrite < HEARTBEAT_MS) return;
+    const now = Date.now();
+    const running = this.state.order
+      .map((id) => this.state?.nodes[id])
+      .filter((n): n is NodeState => n !== undefined && n.status === "running")
+      .map((n) => `${n.id} (${formatGoDuration(now - (n.startedAt ?? now))})`);
+    if (running.length > 0) this.say(`… still running: ${running.join(", ")}`);
+  }
 
-	private say(line: string): void {
-		this.lastWrite = Date.now();
-		process.stdout.write(`${line}\n`);
-	}
+  private say(line: string): void {
+    this.lastWrite = Date.now();
+    process.stdout.write(`${line}\n`);
+  }
 }
 
 // ── live ────────────────────────────────────────────────────────────────────
@@ -218,242 +218,242 @@ const TICK_MS = 120;
 
 /** Pure frame renderer — exported for tests (ANSI auto-disables off-TTY). */
 export function renderRunFrame(opts: {
-	state: PipelineState;
-	header: RunHeader;
-	tick: number;
-	startedAt: number;
-	now: number;
-	lastLog?: { id: string; text: string };
-	columns: number;
-	/** `attach`'s interactive focus — marks the specific matrix cell
-	 *  (recipe × platform) whose log the pane below is showing and which `r`
-	 *  reruns, so the same recipe on two platforms stays distinguishable. `run`
-	 *  passes none. */
-	focusedId?: string;
+  state: PipelineState;
+  header: RunHeader;
+  tick: number;
+  startedAt: number;
+  now: number;
+  lastLog?: { id: string; text: string };
+  columns: number;
+  /** `attach`'s interactive focus — marks the specific matrix cell
+   *  (recipe × platform) whose log the pane below is showing and which `r`
+   *  reruns, so the same recipe on two platforms stays distinguishable. `run`
+   *  passes none. */
+  focusedId?: string;
 }): string {
-	const { state, header, tick, now } = opts;
-	const focused =
-		opts.focusedId !== undefined ? splitFanId(opts.focusedId) : undefined;
-	const platforms = [
-		...new Set(state.order.map((id) => splitFanId(id).platform)),
-	];
-	const recipes: string[] = [];
-	for (const id of state.order) {
-		const { namepath } = splitFanId(id);
-		if (!recipes.includes(namepath)) recipes.push(namepath);
-	}
+  const { state, header, tick, now } = opts;
+  const focused =
+    opts.focusedId !== undefined ? splitFanId(opts.focusedId) : undefined;
+  const platforms = [
+    ...new Set(state.order.map((id) => splitFanId(id).platform)),
+  ];
+  const recipes: string[] = [];
+  for (const id of state.order) {
+    const { namepath } = splitFanId(id);
+    if (!recipes.includes(namepath)) recipes.push(namepath);
+  }
 
-	const summary = summarize(state);
-	const headGlyph = summary.done
-		? summary.failedOverall
-			? red("✗")
-			: green("✔")
-		: yellow(spinnerAt(tick));
-	const shaText =
-		header.commitUrl !== null
-			? link(commitLabel(state), header.commitUrl)
-			: commitLabel(state);
-	const sha = state.dirty ? yellow(`@ ${shaText}`) : dim(`@ ${shaText}`);
-	const lines: string[] = [
-		`${bold("odu")} ${headGlyph} ${state.name} ${sha} ${dim(
-			formatGoDuration(now - opts.startedAt),
-		)}`,
-		dim(
-			`  ${header.lanes.map((l) => `${l.platform} = ${l.host}`).join(" · ")}`,
-		),
-		"",
-	];
+  const summary = summarize(state);
+  const headGlyph = summary.done
+    ? summary.failedOverall
+      ? red("✗")
+      : green("✔")
+    : yellow(spinnerAt(tick));
+  const shaText =
+    header.commitUrl !== null
+      ? link(commitLabel(state), header.commitUrl)
+      : commitLabel(state);
+  const sha = state.dirty ? yellow(`@ ${shaText}`) : dim(`@ ${shaText}`);
+  const lines: string[] = [
+    `${bold("odu")} ${headGlyph} ${state.name} ${sha} ${dim(
+      formatGoDuration(now - opts.startedAt),
+    )}`,
+    dim(
+      `  ${header.lanes.map((l) => `${l.platform} = ${l.host}`).join(" · ")}`,
+    ),
+    "",
+  ];
 
-	const nameWidth = Math.max(9, ...recipes.map((r) => recipeLabel(r).length));
-	const cellWidth = Math.max(14, ...platforms.map((p) => p.length + 2));
-	lines.push(
-		dim(
-			`  ${"".padEnd(nameWidth)}  ${platforms
-				.map((p) => p.padEnd(cellWidth))
-				.join("")}`,
-		),
-	);
-	for (const recipe of recipes) {
-		const cells = platforms.map((platform) => {
-			const node = state.nodes[`${recipe}@${platform}`];
-			// `attach`'s focus lands on one specific cell (recipe × platform), not
-			// a whole row — a `›` on the cell so the same recipe on two platforms is
-			// distinguishable and `r`'s target is unambiguous. `run` passes none.
-			const cellMark =
-				focused?.namepath === recipe && focused?.platform === platform
-					? "›"
-					: " ";
-			if (node === undefined) return `${cellMark}${"".padEnd(cellWidth)}`;
-			const glyph = glyphFor(node.status, tick);
-			const time =
-				node.status === "running"
-					? formatGoDuration(now - (node.startedAt ?? now))
-					: node.durationMs !== null
-						? formatGoDuration(node.durationMs)
-						: "";
-			const plain = `${STATUS_META[node.status].glyph} ${time}`;
-			return `${cellMark}${glyph} ${dim(time)}${"".padEnd(Math.max(0, cellWidth - plain.length))}`;
-		});
-		const marker = focused?.namepath === recipe ? "›" : " ";
-		lines.push(
-			`${marker} ${recipeLabel(recipe).padEnd(nameWidth)} ${cells.join("")}`,
-		);
-	}
+  const nameWidth = Math.max(9, ...recipes.map((r) => recipeLabel(r).length));
+  const cellWidth = Math.max(14, ...platforms.map((p) => p.length + 2));
+  lines.push(
+    dim(
+      `  ${"".padEnd(nameWidth)}  ${platforms
+        .map((p) => p.padEnd(cellWidth))
+        .join("")}`,
+    ),
+  );
+  for (const recipe of recipes) {
+    const cells = platforms.map((platform) => {
+      const node = state.nodes[`${recipe}@${platform}`];
+      // `attach`'s focus lands on one specific cell (recipe × platform), not
+      // a whole row — a `›` on the cell so the same recipe on two platforms is
+      // distinguishable and `r`'s target is unambiguous. `run` passes none.
+      const cellMark =
+        focused?.namepath === recipe && focused?.platform === platform
+          ? "›"
+          : " ";
+      if (node === undefined) return `${cellMark}${"".padEnd(cellWidth)}`;
+      const glyph = glyphFor(node.status, tick);
+      const time =
+        node.status === "running"
+          ? formatGoDuration(now - (node.startedAt ?? now))
+          : node.durationMs !== null
+            ? formatGoDuration(node.durationMs)
+            : "";
+      const plain = `${STATUS_META[node.status].glyph} ${time}`;
+      return `${cellMark}${glyph} ${dim(time)}${"".padEnd(Math.max(0, cellWidth - plain.length))}`;
+    });
+    const marker = focused?.namepath === recipe ? "›" : " ";
+    lines.push(
+      `${marker} ${recipeLabel(recipe).padEnd(nameWidth)} ${cells.join("")}`,
+    );
+  }
 
-	lines.push("");
-	const counts = [
-		summary.ok > 0 ? green(`${summary.ok} ok`) : null,
-		summary.running > 0 ? yellow(`${summary.running} running`) : null,
-		summary.pending > 0 ? dim(`${summary.pending} pending`) : null,
-		summary.failed > 0 ? red(`${summary.failed} failed`) : null,
-		summary.errored > 0 ? magenta(`${summary.errored} errored`) : null,
-		summary.skipped > 0 ? dim(`${summary.skipped} skipped`) : null,
-	].filter((s): s is string => s !== null);
-	lines.push(`  ${counts.join(dim(" · "))}`);
+  lines.push("");
+  const counts = [
+    summary.ok > 0 ? green(`${summary.ok} ok`) : null,
+    summary.running > 0 ? yellow(`${summary.running} running`) : null,
+    summary.pending > 0 ? dim(`${summary.pending} pending`) : null,
+    summary.failed > 0 ? red(`${summary.failed} failed`) : null,
+    summary.errored > 0 ? magenta(`${summary.errored} errored`) : null,
+    summary.skipped > 0 ? dim(`${summary.skipped} skipped`) : null,
+  ].filter((s): s is string => s !== null);
+  lines.push(`  ${counts.join(dim(" · "))}`);
 
-	if (opts.lastLog !== undefined && !summary.done) {
-		const label = `› ${opts.lastLog.id}`;
-		const budget = Math.max(20, opts.columns - label.length - 5);
-		const text = opts.lastLog.text.slice(0, budget);
-		lines.push(dim(`  ${label}  ${text}`));
-	}
-	return lines.join("\n");
+  if (opts.lastLog !== undefined && !summary.done) {
+    const label = `› ${opts.lastLog.id}`;
+    const budget = Math.max(20, opts.columns - label.length - 5);
+    const text = opts.lastLog.text.slice(0, budget);
+    lines.push(dim(`  ${label}  ${text}`));
+  }
+  return lines.join("\n");
 }
 
 class LiveDisplay implements Display {
-	private header: RunHeader | undefined;
-	private state: PipelineState | undefined;
-	private lastLog: { id: string; text: string } | undefined;
-	private tick = 0;
-	private prevHeight = 0;
-	private timer: NodeJS.Timeout | undefined;
-	private readonly stderrWrite = process.stderr.write.bind(process.stderr);
-	private stopped = false;
+  private header: RunHeader | undefined;
+  private state: PipelineState | undefined;
+  private lastLog: { id: string; text: string } | undefined;
+  private tick = 0;
+  private prevHeight = 0;
+  private timer: NodeJS.Timeout | undefined;
+  private readonly stderrWrite = process.stderr.write.bind(process.stderr);
+  private stopped = false;
 
-	start(state: PipelineState, header: RunHeader): void {
-		this.state = state;
-		this.header = header;
-		process.stdout.write("\x1b[?25l");
-		this.hookStderr();
-		// Whatever path the process dies by (a throw past orchestrate, a missed
-		// stop()), the terminal must come back: cursor shown, stderr unhooked.
-		process.once("exit", () => {
-			if (!this.stopped) {
-				process.stderr.write = this.stderrWrite;
-				process.stdout.write("\x1b[?25h");
-			}
-		});
-		this.timer = setInterval(() => {
-			this.tick += 1;
-			this.paint();
-		}, TICK_MS);
-		this.timer.unref?.();
-	}
+  start(state: PipelineState, header: RunHeader): void {
+    this.state = state;
+    this.header = header;
+    process.stdout.write("\x1b[?25l");
+    this.hookStderr();
+    // Whatever path the process dies by (a throw past orchestrate, a missed
+    // stop()), the terminal must come back: cursor shown, stderr unhooked.
+    process.once("exit", () => {
+      if (!this.stopped) {
+        process.stderr.write = this.stderrWrite;
+        process.stdout.write("\x1b[?25h");
+      }
+    });
+    this.timer = setInterval(() => {
+      this.tick += 1;
+      this.paint();
+    }, TICK_MS);
+    this.timer.unref?.();
+  }
 
-	update(state: PipelineState): void {
-		this.state = state;
-		if (this.lastLog !== undefined) {
-			// Drop the footer once its node stops running — a stale tail line
-			// from a finished node reads as a hang, the exact feel this kills.
-			const node = state.nodes[this.lastLog.id];
-			if (node === undefined || node.status !== "running") {
-				this.lastLog = undefined;
-			}
-		}
-	}
+  update(state: PipelineState): void {
+    this.state = state;
+    if (this.lastLog !== undefined) {
+      // Drop the footer once its node stops running — a stale tail line
+      // from a finished node reads as a hang, the exact feel this kills.
+      const node = state.nodes[this.lastLog.id];
+      if (node === undefined || node.status !== "running") {
+        this.lastLog = undefined;
+      }
+    }
+  }
 
-	transition(event: ProgressEvent, node: NodeState): void {
-		// Reds persist in scrollback; greens live in the matrix.
-		if (node.status !== "failed" && node.status !== "errored") return;
-		const color = node.status === "failed" ? red : magenta;
-		const dur =
-			node.durationMs !== null ? ` (${formatGoDuration(node.durationMs)})` : "";
-		this.printAbove(
-			color(
-				`${STATUS_META[node.status].glyph} ${event.node} ${node.status}${dur}`,
-			) + dim(`  → ${event.log}`),
-		);
-	}
+  transition(event: ProgressEvent, node: NodeState): void {
+    // Reds persist in scrollback; greens live in the matrix.
+    if (node.status !== "failed" && node.status !== "errored") return;
+    const color = node.status === "failed" ? red : magenta;
+    const dur =
+      node.durationMs !== null ? ` (${formatGoDuration(node.durationMs)})` : "";
+    this.printAbove(
+      color(
+        `${STATUS_META[node.status].glyph} ${event.node} ${node.status}${dur}`,
+      ) + dim(`  → ${event.log}`),
+    );
+  }
 
-	logLine(id: string, text: string): void {
-		const node = this.state?.nodes[id];
-		if (node === undefined || node.status !== "running") return;
-		const line = stripAnsi(text)
-			.split("\n")
-			.map((l) => l.trim())
-			.filter((l) => l.length > 0)
-			.at(-1);
-		if (line !== undefined) this.lastLog = { id, text: line };
-	}
+  logLine(id: string, text: string): void {
+    const node = this.state?.nodes[id];
+    if (node === undefined || node.status !== "running") return;
+    const line = stripAnsi(text)
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0)
+      .at(-1);
+    if (line !== undefined) this.lastLog = { id, text: line };
+  }
 
-	info(msg: string): void {
-		this.printAbove(msg);
-	}
+  info(msg: string): void {
+    this.printAbove(msg);
+  }
 
-	stop(state?: PipelineState): void {
-		if (this.stopped) return;
-		this.stopped = true;
-		if (this.timer !== undefined) clearInterval(this.timer);
-		if (state !== undefined) this.state = state;
-		this.paint();
-		process.stderr.write = this.stderrWrite;
-		process.stdout.write("\x1b[?25h");
-		this.prevHeight = 0;
-	}
+  stop(state?: PipelineState): void {
+    if (this.stopped) return;
+    this.stopped = true;
+    if (this.timer !== undefined) clearInterval(this.timer);
+    if (state !== undefined) this.state = state;
+    this.paint();
+    process.stderr.write = this.stderrWrite;
+    process.stdout.write("\x1b[?25h");
+    this.prevHeight = 0;
+  }
 
-	/** Library chatter must not shred the repaint region: `[host:…]` lines
-	 *  (surface-nix-host provisioning — already mirrored into `_ci-setup`'s
-	 *  log file) are dropped; everything else re-prints above the matrix. */
-	private hookStderr(): void {
-		const handler: typeof process.stderr.write = (
-			chunk: Uint8Array | string,
-			encodingOrCb?: unknown,
-			maybeCb?: unknown,
-		): boolean => {
-			const text =
-				typeof chunk === "string"
-					? chunk
-					: Buffer.from(chunk).toString("utf-8");
-			for (const line of text.split("\n")) {
-				if (line.trim() === "") continue;
-				if (line.startsWith("[host:")) continue;
-				this.printAbove(dim(stripAnsi(line)));
-			}
-			const cb = [encodingOrCb, maybeCb].find(
-				(a): a is () => void => typeof a === "function",
-			);
-			cb?.();
-			return true;
-		};
-		process.stderr.write = handler;
-	}
+  /** Library chatter must not shred the repaint region: `[host:…]` lines
+   *  (surface-nix-host provisioning — already mirrored into `_ci-setup`'s
+   *  log file) are dropped; everything else re-prints above the matrix. */
+  private hookStderr(): void {
+    const handler: typeof process.stderr.write = (
+      chunk: Uint8Array | string,
+      encodingOrCb?: unknown,
+      maybeCb?: unknown,
+    ): boolean => {
+      const text =
+        typeof chunk === "string"
+          ? chunk
+          : Buffer.from(chunk).toString("utf-8");
+      for (const line of text.split("\n")) {
+        if (line.trim() === "") continue;
+        if (line.startsWith("[host:")) continue;
+        this.printAbove(dim(stripAnsi(line)));
+      }
+      const cb = [encodingOrCb, maybeCb].find(
+        (a): a is () => void => typeof a === "function",
+      );
+      cb?.();
+      return true;
+    };
+    process.stderr.write = handler;
+  }
 
-	/** Print a persistent line above the live region: erase the region, emit
-	 *  the line into normal scrollback, repaint below it. */
-	private printAbove(line: string): void {
-		let out = "";
-		if (this.prevHeight > 0) out += `\x1b[${this.prevHeight}F\x1b[0J`;
-		this.prevHeight = 0;
-		out += `${line}\n`;
-		process.stdout.write(out);
-		this.paint();
-	}
+  /** Print a persistent line above the live region: erase the region, emit
+   *  the line into normal scrollback, repaint below it. */
+  private printAbove(line: string): void {
+    let out = "";
+    if (this.prevHeight > 0) out += `\x1b[${this.prevHeight}F\x1b[0J`;
+    this.prevHeight = 0;
+    out += `${line}\n`;
+    process.stdout.write(out);
+    this.paint();
+  }
 
-	private paint(): void {
-		if (this.header === undefined || this.state === undefined) return;
-		const frame = renderRunFrame({
-			state: this.state,
-			header: this.header,
-			tick: this.tick,
-			startedAt: this.header.startedAt,
-			now: Date.now(),
-			lastLog: this.lastLog,
-			columns: process.stdout.columns ?? 100,
-		});
-		let out = "";
-		if (this.prevHeight > 0) out += `\x1b[${this.prevHeight}F\x1b[0J`;
-		out += `${frame}\n`;
-		process.stdout.write(out);
-		this.prevHeight = frame.split("\n").length;
-	}
+  private paint(): void {
+    if (this.header === undefined || this.state === undefined) return;
+    const frame = renderRunFrame({
+      state: this.state,
+      header: this.header,
+      tick: this.tick,
+      startedAt: this.header.startedAt,
+      now: Date.now(),
+      lastLog: this.lastLog,
+      columns: process.stdout.columns ?? 100,
+    });
+    let out = "";
+    if (this.prevHeight > 0) out += `\x1b[${this.prevHeight}F\x1b[0J`;
+    out += `${frame}\n`;
+    process.stdout.write(out);
+    this.prevHeight = frame.split("\n").length;
+  }
 }
