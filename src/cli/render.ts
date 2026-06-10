@@ -45,10 +45,10 @@ export interface PipelineSummary {
 }
 
 /** The machine-readable snapshot of one node — the snake_cased projection
- *  shared by `odu status -o json` and the MCP `get_nodes` tool, so the two
- *  agent/tooling faces speak one vocabulary (both `id` and `name`) instead of
- *  re-deriving it inline and drifting. `get_nodes` spreads this and adds the
- *  `red` verdict bit on top. */
+ *  shared by `odu status -o json` and the MCP agent `nodes` resource, so the
+ *  two agent/tooling faces speak one vocabulary (both `id` and `name`) instead
+ *  of re-deriving it inline and drifting. The agent rows (`rowsOf`) spread this
+ *  and add the `red` verdict bit on top. */
 export interface NodeRowJson {
   id: string;
   name: string;
@@ -65,6 +65,26 @@ export function nodeRow(node: NodeState): NodeRowJson {
     exit_code: node.exitCode,
     duration_ms: node.durationMs,
   };
+}
+
+/** One node, flattened for the agent face: the `nodeRow` projection plus the
+ *  `red` verdict bit (gated on `STATUS_META`, the single source of redness so
+ *  the agent verdict can't drift from the TUI/run verdict). The MCP `nodes`
+ *  resource exposes these rows. */
+export interface NodeRow extends NodeRowJson {
+  red: boolean;
+}
+
+export function nodeRowRed(node: NodeState): NodeRow {
+  return { ...nodeRow(node), red: STATUS_META[node.status].isRed };
+}
+
+/** Every node of a pipeline as agent rows, in scheduling order. */
+export function rowsOf(state: PipelineState): NodeRow[] {
+  return state.order
+    .map((id) => state.nodes[id])
+    .filter((n): n is NodeState => n !== undefined)
+    .map(nodeRowRed);
 }
 
 /** The verdict-on-state projection every consumer reuses: 1 if the latest

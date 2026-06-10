@@ -1,6 +1,6 @@
 /**
  * Minimal git probes for the MCP face's durable-log fallback: when no run is
- * live, `tail_log` reads `.ci/<sha7>/<platform>/<node>.log` directly, which
+ * live, a log read resolves `.ci/<sha7>/<platform>/<node>.log` directly, which
  * needs the repo root and the current short SHA. Best-effort — a non-git cwd
  * or a missing HEAD returns `null`, and the caller reports "missing".
  */
