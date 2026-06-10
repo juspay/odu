@@ -167,19 +167,16 @@ describe("firstHeader", () => {
     const surface = await serveTestSurface(
       doneState([["ci::e2e@x86_64-linux", "ok", 0]]),
       {
-        pipeline: "ci::default",
-        sha7: "3cbac86",
-        dirty: false,
         commitUrl: null,
         lanes: [{ platform: "x86_64-linux", host: "kolu-ci-1" }],
         hostsSource: "~/.config/odu/hosts.json",
+        startedAt: 0,
       },
     );
     open.push(surface);
     const { client, close } = await dialSocket(surface.socketPath);
     try {
       const header = await firstHeader(client);
-      expect(header.pipeline).toBe("ci::default");
       expect(header.lanes).toEqual([
         { platform: "x86_64-linux", host: "kolu-ci-1" },
       ]);

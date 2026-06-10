@@ -11,14 +11,15 @@
  *
  *   - `oduSurface` — the fan-in the coordinator serves on `.ci/odu.sock` for
  *     `odu status` / `logs` / `attach`. The lane's three primitives plus one
- *     fan-in-only cell, `header` (run identity + lane→host map), which `attach`
- *     reads to paint the same matrix `run` does; node ids are
+ *     fan-in-only cell, `header` (the run *environment*: lane→host map +
+ *     commit link + start clock; commit identity lives on the `nodes` state),
+ *     which `attach` reads to paint the same matrix `run` does; node ids are
  *     `<namepath>@<platform>`.
  *
  * Call shapes (idiomatic):
  *   surface.nodes.get({})          — snapshot of the whole pipeline, then deltas
  *   surface.nodeLog.get({ id })    — buffered snapshot frame, then appends
- *   surface.header.get({})         — run identity + lanes (oduSurface only; fan-in)
+ *   surface.header.get({})         — run env: lanes + commit link (oduSurface only; fan-in)
  *   surface.node.rerun({ id })     — the only mutation: reset id + dependents
  *   surface.run.configure({ … })   — lane only; idempotence: second call errors
  */
@@ -176,16 +177,13 @@ export const ConfigureOutputSchema = z.object({
 });
 export type ConfigureOutput = z.infer<typeof ConfigureOutputSchema>;
 
-/** The run's identity + environment — what `run` set up and every attached
- *  face paints in the matrix banner. `run` has it in-process; an `attach`-er
- *  reads it from the fan-in `header` cell so its matrix shows the real
- *  lane→host map and commit link, not an observer stub. Static for a run. */
+/** The run's *environment* — what `run` set up that the `nodes`/`header`
+ *  state can't already tell you: the lane→host map, where it came from, and
+ *  the forge commit link. Commit identity (pipeline name + sha7 + dirty) lives
+ *  on `PipelineState`, so it isn't duplicated here. `run` has this in-process;
+ *  an `attach`-er reads it from the fan-in `header` cell so its matrix shows the
+ *  real lane→host map and commit link, not an observer stub. Static for a run. */
 export const RunHeaderSchema = z.object({
-	pipeline: z.string(),
-	sha7: z.string(),
-	/** Working tree had uncommitted changes (live-tree mode only) — drives the
-	 *  `+dirty` sha label. */
-	dirty: z.boolean(),
 	/** Forge page for the commit (GitHub origins); the sha label becomes an
 	 *  OSC 8 hyperlink where supported. Null elsewhere. */
 	commitUrl: z.string().nullable(),
@@ -193,18 +191,21 @@ export const RunHeaderSchema = z.object({
 	/** Where the lane→host map came from (`hosts.json`, a pool lease, …);
 	 *  null before the run publishes its header. */
 	hostsSource: z.string().nullable(),
+	/** The run's start wall-clock (`Date.now()`), set once by `run` — the matrix
+	 *  elapsed timer counts from it. Every face reads one value rather than each
+	 *  deriving its own start, so a piped attach and the live matrix agree. `0`
+	 *  before the run publishes its header. */
+	startedAt: z.number(),
 });
 export type RunHeader = z.infer<typeof RunHeaderSchema>;
 
 /** The pre-run header — `attach` before the coordinator publishes, and the
  *  cell default. An empty `lanes` collapses the banner's host line. */
 export const EMPTY_HEADER: RunHeader = {
-	pipeline: "",
-	sha7: "",
-	dirty: false,
 	commitUrl: null,
 	lanes: [],
 	hostsSource: null,
+	startedAt: 0,
 };
 
 const primitives = {
@@ -244,9 +245,9 @@ export const laneSurface = defineSurface({
 });
 
 /** Served by the coordinator on `.ci/odu.sock`; consumed by
- *  `odu status` / `logs` / `attach`. Adds the `header` cell (run identity +
- *  lane→host map) the lane surface has no business knowing, so an attached
- *  face renders the same matrix `run` does. */
+ *  `odu status` / `logs` / `attach`. Adds the `header` cell (the run
+ *  environment: lane→host map + commit link) the lane surface has no business
+ *  knowing, so an attached face renders the same matrix `run` does. */
 export const oduSurface = defineSurface({
 	...primitives,
 	cells: {

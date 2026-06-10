@@ -261,9 +261,9 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
     order,
     nodes,
   });
-  // The run identity + lane→host map, published on the surface so an `attach`-er
-  // paints the same matrix `run` does. Filled in once the lanes resolve (below),
-  // before the socket starts serving.
+  // The run environment (lane→host map + commit link + start clock), published
+  // on the surface so an `attach`-er paints the same matrix `run` does. Filled
+  // in once the lanes resolve (below), before the socket starts serving.
   const headerStore = inMemoryStore<RunHeader>(EMPTY_HEADER);
 
   // ── per-node local logs: the in-memory tail (late socket subscribers) plus
@@ -387,23 +387,24 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
     github !== null
       ? `https://github.com/${github.owner}/${github.repo}/commit/${sha}`
       : null;
+  // One run-start wall-clock, captured here and carried on the header so every
+  // face (live matrix + attach) counts elapsed from the same instant. Commit
+  // identity (pipeline name + sha7 + dirty) is already on `store`'s state.
   const header: RunHeader = {
-    pipeline: spec.name,
-    sha7,
-    dirty: ctx.dirty,
     commitUrl,
     lanes: [...tasksByPlatform.keys()].sort().map((platform) => ({
       platform,
       host: lanesByPlatform[platform] as string,
     })),
     hostsSource: hostsConfig.source,
+    startedAt: Date.now(),
   };
   // Publish before serving so an `attach` connecting in the first instant reads
   // the real header, not the EMPTY_HEADER default.
   headerStore.set(header);
   const closeSocket = await serveSocket(router, join(repoRoot, SOCKET_PATH));
 
-  display.start(header);
+  display.start(store.get(), header);
   display.update(store.get());
 
   for (const platform of [...tasksByPlatform.keys()].sort()) {

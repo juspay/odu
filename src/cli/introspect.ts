@@ -6,6 +6,7 @@
  */
 
 import {
+	EMPTY_HEADER,
 	type NodeLogFrame,
 	type NodeState,
 	type PipelineState,
@@ -120,22 +121,6 @@ export async function attachCommand(json: boolean): Promise<number> {
 	return attachDashboard(client, close);
 }
 
-/** The run header `attach` shows above the transition stream — `run`'s
- *  banner minus the parts only the coordinator owns. An attached observer
- *  knows the pipeline name + commit (from the surface) but not which hosts the
- *  coordinator leased (lanes) nor the forge origin (commitUrl), so it leaves
- *  those empty and the banner collapses to `odu · <pipeline> @ <sha>`. */
-function attachHeader(state: PipelineState): RunHeader {
-	return {
-		pipeline: state.name,
-		sha7: state.sha7,
-		dirty: state.dirty,
-		commitUrl: null,
-		lanes: [],
-		hostsSource: null,
-	};
-}
-
 /** Non-tty / `-o json`: one line per node transition — the attach analogue
  *  of `--progress json`. Routes through `run`'s own `createDisplay`, building
  *  each event with the shared `progressEvent`, so the json shape (with
@@ -154,7 +139,12 @@ export async function attachStream(
 		last = state;
 		if (!started) {
 			started = true;
-			display.start(attachHeader(state));
+			// Commit identity (pipeline name + sha) comes from the snapshot's state;
+			// an observer has no run-env (no leased hosts, no forge origin, no own
+			// start clock), so it passes EMPTY_HEADER and the banner collapses to
+			// `odu · <pipeline> @ <sha>`. The matrix dashboard reads the real
+			// run-env off the surface `header` cell instead (`firstHeader`).
+			display.start(state, EMPTY_HEADER);
 		}
 		display.update(state); // drives the plain heartbeat
 		for (const id of state.order) {
@@ -192,7 +182,7 @@ async function attachDashboard(
 			state,
 			header,
 			tick,
-			startedAt: runStartedAt(state),
+			startedAt: header.startedAt,
 			now: Date.now(),
 			columns: process.stdout.columns ?? 100,
 			focusedId: attachedId,
@@ -287,18 +277,4 @@ async function attachDashboard(
 	}
 	quit(state !== undefined && summarize(state).failedOverall ? 1 : 0);
 	return 0;
-}
-
-/** The run's start wall-clock for the matrix's elapsed timer — the earliest
- *  node start the surface reports, else now (nothing has started yet). `run`
- *  knows this directly; an attached face derives it from the node states. */
-function runStartedAt(state: PipelineState): number {
-	let earliest = Number.POSITIVE_INFINITY;
-	for (const id of state.order) {
-		const startedAt = state.nodes[id]?.startedAt;
-		if (startedAt !== null && startedAt !== undefined && startedAt < earliest) {
-			earliest = startedAt;
-		}
-	}
-	return Number.isFinite(earliest) ? earliest : Date.now();
 }

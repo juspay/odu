@@ -54,13 +54,18 @@ export interface ProgressEvent {
 }
 
 /** `3cbac86` for a clean run, `3cbac86+dirty` when the working tree has
- *  uncommitted changes — every face shows which code the verdict is about. */
-export function commitLabel(header: Pick<RunHeader, "sha7" | "dirty">): string {
-	return header.dirty ? `${header.sha7}+dirty` : header.sha7;
+ *  uncommitted changes — every face shows which code the verdict is about.
+ *  Commit identity lives on `PipelineState`, so the label is fed from state. */
+export function commitLabel(
+	state: Pick<PipelineState, "sha7" | "dirty">,
+): string {
+	return state.dirty ? `${state.sha7}+dirty` : state.sha7;
 }
 
 export interface Display {
-	start(header: RunHeader): void;
+	/** Commit identity comes from `state`; the run-env (lanes, hosts source,
+	 *  commit link, start clock) from `header`. */
+	start(state: PipelineState, header: RunHeader): void;
 	/** Latest fan-in state — live repaints from it, plain heartbeats off it. */
 	update(state: PipelineState): void;
 	/** A node crossed a status boundary (the diff-driven event feed). */
@@ -141,11 +146,12 @@ class PlainDisplay implements Display {
 	private timer: NodeJS.Timeout | undefined;
 	private lastWrite = Date.now();
 
-	start(header: RunHeader): void {
-		// `run` carries lanes + a hosts source, so the banner shows both; an
+	start(state: PipelineState, header: RunHeader): void {
+		// Commit identity (pipeline name + sha) comes from state; `run` carries
+		// lanes + a hosts source on the header, so the banner shows both; an
 		// observer (`attach`) has neither, so those clauses drop out and the
 		// banner is just `odu · <pipeline> @ <sha>`.
-		const parts = [`odu · ${header.pipeline} @ ${commitLabel(header)}`];
+		const parts = [`odu · ${state.name} @ ${commitLabel(state)}`];
 		if (header.lanes.length > 0) {
 			parts.push(
 				header.lanes.map((l) => `${l.platform}=${l.host}`).join(" · "),
@@ -245,11 +251,11 @@ export function renderRunFrame(opts: {
 		: yellow(spinnerAt(tick));
 	const shaText =
 		header.commitUrl !== null
-			? link(commitLabel(header), header.commitUrl)
-			: commitLabel(header);
-	const sha = header.dirty ? yellow(`@ ${shaText}`) : dim(`@ ${shaText}`);
+			? link(commitLabel(state), header.commitUrl)
+			: commitLabel(state);
+	const sha = state.dirty ? yellow(`@ ${shaText}`) : dim(`@ ${shaText}`);
 	const lines: string[] = [
-		`${bold("odu")} ${headGlyph} ${header.pipeline} ${sha} ${dim(
+		`${bold("odu")} ${headGlyph} ${state.name} ${sha} ${dim(
 			formatGoDuration(now - opts.startedAt),
 		)}`,
 		dim(
@@ -321,11 +327,11 @@ class LiveDisplay implements Display {
 	private tick = 0;
 	private prevHeight = 0;
 	private timer: NodeJS.Timeout | undefined;
-	private readonly startedAt = Date.now();
 	private readonly stderrWrite = process.stderr.write.bind(process.stderr);
 	private stopped = false;
 
-	start(header: RunHeader): void {
+	start(state: PipelineState, header: RunHeader): void {
+		this.state = state;
 		this.header = header;
 		process.stdout.write("\x1b[?25l");
 		this.hookStderr();
@@ -439,7 +445,7 @@ class LiveDisplay implements Display {
 			state: this.state,
 			header: this.header,
 			tick: this.tick,
-			startedAt: this.startedAt,
+			startedAt: this.header.startedAt,
 			now: Date.now(),
 			lastLog: this.lastLog,
 			columns: process.stdout.columns ?? 100,

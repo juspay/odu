@@ -52,15 +52,13 @@ const state: PipelineState = {
 };
 
 const header = {
-	pipeline: "ci::default",
-	sha7: "3cbac86",
-	dirty: false,
 	commitUrl: "https://github.com/juspay/kolu/commit/3cbac86f",
 	lanes: [
 		{ platform: "x86_64-linux", host: "kolu-ci-5" },
 		{ platform: "aarch64-darwin", host: "rasam" },
 	],
 	hostsSource: "~/.config/odu/hosts.json",
+	startedAt: 940_000,
 };
 
 // ANSI is auto-disabled off-TTY (vitest), so frames are plain strings here.
@@ -151,8 +149,8 @@ describe("renderRunFrame", () => {
 	it("names the commit, marking a dirty live-tree run loudly", () => {
 		expect(frame.split("\n")[0]).toContain("@ 3cbac86");
 		const dirtyFrame = renderRunFrame({
-			state,
-			header: { ...header, dirty: true },
+			state: { ...state, dirty: true },
+			header,
 			tick: 0,
 			startedAt: 940_000,
 			now: 1_540_000,
