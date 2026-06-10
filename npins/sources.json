@@ -9,9 +9,9 @@
       },
       "branch": "surface-mcp",
       "submodules": false,
-      "revision": "5cf248d95451fa6a878cf5e300406ccde41501c8",
-      "url": "https://github.com/juspay/kolu/archive/5cf248d95451fa6a878cf5e300406ccde41501c8.tar.gz",
-      "hash": "sha256-u+D+buIUWUqqmP24niu3+wKxPn274jOjoX891I79mYw="
+      "revision": "8edc0aa66294337ec1c630c2a548fd93affd5590",
+      "url": "https://github.com/juspay/kolu/archive/8edc0aa66294337ec1c630c2a548fd93affd5590.tar.gz",
+      "hash": "sha256-ZpiZYwNCCQOlLXEhF7R3k6gJc32dG+M5qtPE/AzjqeA="
     },
     "nixpkgs": {
       "type": "Git",
