@@ -1,4 +1,5 @@
 /.do-results.json
+/.worktrees/
 
 # APM dependencies
 apm_modules/
