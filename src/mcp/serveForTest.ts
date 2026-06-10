@@ -18,11 +18,17 @@ import {
 import { implement } from "@orpc/server";
 import { createLogTail } from "../common/logTail";
 import { serveSocket } from "../coordinator/socket";
-import { oduSurface, type PipelineState } from "../common/surface";
+import {
+  EMPTY_HEADER,
+  oduSurface,
+  type PipelineState,
+  type RunHeader,
+} from "../common/surface";
 
 export interface TestSurface {
   socketPath: string;
   setState: (state: PipelineState) => void;
+  setHeader: (header: RunHeader) => void;
   appendLog: (id: string, text: string) => void;
   resetLog: (id: string, text: string) => void;
   reruns: string[];
@@ -31,14 +37,16 @@ export interface TestSurface {
 
 export async function serveTestSurface(
   initial: PipelineState,
+  initialHeader: RunHeader = EMPTY_HEADER,
 ): Promise<TestSurface> {
   const store = inMemoryStore<PipelineState>(initial);
+  const headerStore = inMemoryStore<RunHeader>(initialHeader);
   const tail = createLogTail();
   const reruns: string[] = [];
 
   const fragment = implementSurface(oduSurface, {
     channel: inMemoryChannelByName(),
-    cells: { nodes: { store } },
+    cells: { nodes: { store }, header: { store: headerStore } },
     streams: { nodeLog: { source: tail.streamSource } },
     procedures: {
       node: {
@@ -60,6 +68,7 @@ export async function serveTestSurface(
   return {
     socketPath,
     setState: (state) => fragment.ctx.cells.nodes.set(state),
+    setHeader: (header) => fragment.ctx.cells.header.set(header),
     appendLog: (id, text) => tail.append(id, text),
     resetLog: (id, text) => tail.reset(id, text),
     reruns,

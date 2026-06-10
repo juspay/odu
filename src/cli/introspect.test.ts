@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { pendingNode, type PipelineState } from "../common/surface";
 import { dialSocket } from "../coordinator/socket";
 import { serveTestSurface, type TestSurface } from "../mcp/serveForTest";
-import { attachStream, statusCommand } from "./introspect";
+import { attachStream, firstHeader, statusCommand } from "./introspect";
 
 type Row = [
   id: string,
@@ -156,5 +156,36 @@ describe("statusCommand — plain", () => {
     expect(out).toMatch(/✗ failed\s+ci::e2e@x86_64-linux/);
     expect(out).not.toMatch(/\bok\b/); // the old NodeStatus wording is gone
     expect(result).toBe(1);
+  });
+});
+
+// The data gap #6 closes: an attached face reads the run's lane→host map off the
+// surface `header` cell, so its matrix banner matches run's instead of an
+// observer stub.
+describe("firstHeader", () => {
+  it("reads the run header (lane→host map) off the surface", async () => {
+    const surface = await serveTestSurface(
+      doneState([["ci::e2e@x86_64-linux", "ok", 0]]),
+      {
+        pipeline: "ci::default",
+        sha7: "3cbac86",
+        dirty: false,
+        commitUrl: null,
+        lanes: [{ platform: "x86_64-linux", host: "kolu-ci-1" }],
+        hostsSource: "~/.config/odu/hosts.json",
+      },
+    );
+    open.push(surface);
+    const { client, close } = await dialSocket(surface.socketPath);
+    try {
+      const header = await firstHeader(client);
+      expect(header.pipeline).toBe("ci::default");
+      expect(header.lanes).toEqual([
+        { platform: "x86_64-linux", host: "kolu-ci-1" },
+      ]);
+      expect(header.hostsSource).toBe("~/.config/odu/hosts.json");
+    } finally {
+      close();
+    }
   });
 });

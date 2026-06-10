@@ -102,6 +102,22 @@ describe("renderRunFrame", () => {
     expect(frame.split("\n")[0]).toContain("10m0s");
   });
 
+  it("marks the focused node's recipe row for attach (run passes none)", () => {
+    const focused = renderRunFrame({
+      state,
+      header,
+      tick: 0,
+      startedAt: 940_000,
+      now: 1_540_000,
+      columns: 100,
+      focusedId: "ci::e2e@x86_64-linux",
+    });
+    expect(focused).toMatch(/^› e2e\s/m); // focused recipe row carries the marker
+    expect(focused).toMatch(/^ {2}install\s/m); // others keep the two-space indent
+    // No focusedId (run's path) → no marker, every row two-space indented.
+    expect(frame).toMatch(/^ {2}e2e\s/m);
+  });
+
   it("names the commit, marking a dirty live-tree run loudly", () => {
     expect(frame.split("\n")[0]).toContain("@ 3cbac86");
     const dirtyFrame = renderRunFrame({

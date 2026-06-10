@@ -173,6 +173,37 @@ export const ConfigureOutputSchema = z.object({
 });
 export type ConfigureOutput = z.infer<typeof ConfigureOutputSchema>;
 
+/** The run's identity + environment — what `run` set up and every attached
+ *  face paints in the matrix banner. `run` has it in-process; an `attach`-er
+ *  reads it from the fan-in `header` cell so its matrix shows the real
+ *  lane→host map and commit link, not an observer stub. Static for a run. */
+export const RunHeaderSchema = z.object({
+  pipeline: z.string(),
+  sha7: z.string(),
+  /** Working tree had uncommitted changes (live-tree mode only) — drives the
+   *  `+dirty` sha label. */
+  dirty: z.boolean(),
+  /** Forge page for the commit (GitHub origins); the sha label becomes an
+   *  OSC 8 hyperlink where supported. Null elsewhere. */
+  commitUrl: z.string().nullable(),
+  lanes: z.array(z.object({ platform: z.string(), host: z.string() })),
+  /** Where the lane→host map came from (`hosts.json`, a pool lease, …);
+   *  null before the run publishes its header. */
+  hostsSource: z.string().nullable(),
+});
+export type RunHeader = z.infer<typeof RunHeaderSchema>;
+
+/** The pre-run header — `attach` before the coordinator publishes, and the
+ *  cell default. An empty `lanes` collapses the banner's host line. */
+export const EMPTY_HEADER: RunHeader = {
+  pipeline: "",
+  sha7: "",
+  dirty: false,
+  commitUrl: null,
+  lanes: [],
+  hostsSource: null,
+};
+
 const primitives = {
   cells: {
     nodes: {
@@ -210,9 +241,18 @@ export const laneSurface = defineSurface({
 });
 
 /** Served by the coordinator on `.ci/odu.sock`; consumed by
- *  `odu status` / `logs` / `attach`. */
+ *  `odu status` / `logs` / `attach`. Adds the `header` cell (run identity +
+ *  lane→host map) the lane surface has no business knowing, so an attached
+ *  face renders the same matrix `run` does. */
 export const oduSurface = defineSurface({
-  ...primitives,
+  cells: {
+    ...primitives.cells,
+    header: {
+      schema: RunHeaderSchema,
+      default: EMPTY_HEADER,
+    },
+  },
+  streams: primitives.streams,
   procedures: {
     node: rerunProcedure,
   },

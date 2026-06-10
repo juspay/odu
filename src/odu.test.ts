@@ -10,7 +10,7 @@ import { stdioLink } from "@kolu/surface/links/stdio";
 import { createLoopbackPair } from "@kolu/surface/loopback";
 import { serveOverStdio } from "@kolu/surface/peer-server";
 import { afterEach, describe, expect, it } from "vitest";
-import { applyLogFrame, renderTable, summarize } from "./cli/render";
+import { applyLogFrame, renderLogPane, summarize } from "./cli/render";
 import type { TaskSpec } from "./common/spec";
 import type {
   laneSurface,
@@ -289,11 +289,12 @@ describe("render helpers", () => {
     expect(summary.failedOverall).toBe(true);
   });
 
-  it("renders Go durations and glyphs in the table", () => {
-    const table = renderTable(state, "b");
-    expect(table).toContain("✔ a");
-    expect(table).toContain("› ⚠ b");
-    expect(table).toContain("(1m1s)");
+  it("renderLogPane shows the focused node's command + log tail", () => {
+    const pane = renderLogPane(state.nodes.b, "line one\nline two");
+    expect(pane).toContain("$ echo b");
+    expect(pane).toContain("line two");
+    // No focus → just the rule (the matrix above carries the overview).
+    expect(renderLogPane(undefined, "")).toBe("─".repeat(60));
   });
 
   it("applyLogFrame resets on snapshot, appends on delta", () => {

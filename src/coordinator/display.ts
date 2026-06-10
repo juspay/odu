@@ -25,6 +25,7 @@ import {
   type NodeState,
   type PipelineState,
   type ProgressStatus,
+  type RunHeader,
   STATUS_META,
 } from "../common/surface";
 import {
@@ -52,23 +53,10 @@ export interface ProgressEvent {
   log: string;
 }
 
-export interface RunHeader {
-  pipeline: string;
-  sha7: string;
-  /** Uncommitted changes in the tree this run reads (live-tree mode only —
-   *  strict refuses a dirty tree). Shown loudly: a dirty run's verdict is
-   *  about your working tree, not the commit. */
-  dirty: boolean;
-  /** Forge page for the commit (GitHub origins) — the sha label becomes an
-   *  OSC 8 hyperlink on terminals that render them. Null elsewhere. */
-  commitUrl: string | null;
-  lanes: ReadonlyArray<{ platform: string; host: string }>;
-  /** Where the lane→host map came from (`~/.config/odu/hosts.json`, a pool
-   *  lease, …). `null` for an observer that didn't own host selection —
-   *  `attach` joins a run it didn't launch, so it leaves lanes empty
-   *  and the hosts clause off. */
-  hostsSource: string | null;
-}
+// `RunHeader` is defined on the surface (it now travels over it as the `header`
+// cell so `attach` can render the matrix), and re-exported here where the
+// renderer + displays consume it.
+export type { RunHeader } from "../common/surface";
 
 /** `3cbac86` for a clean run, `3cbac86+dirty` when the working tree has
  *  uncommitted changes — every face shows which code the verdict is about. */
@@ -234,8 +222,15 @@ export function renderRunFrame(opts: {
   now: number;
   lastLog?: { id: string; text: string };
   columns: number;
+  /** `attach`'s interactive focus — marks the row whose recipe owns this node
+   *  (the node whose log the pane below is showing). `run` passes none. */
+  focusedId?: string;
 }): string {
   const { state, header, tick, now } = opts;
+  const focusedRecipe =
+    opts.focusedId !== undefined
+      ? splitFanId(opts.focusedId).namepath
+      : undefined;
   const platforms = [
     ...new Set(state.order.map((id) => splitFanId(id).platform)),
   ];
@@ -289,7 +284,10 @@ export function renderRunFrame(opts: {
       const plain = `${STATUS_META[node.status].glyph} ${time}`;
       return `${glyph} ${dim(time)}${"".padEnd(Math.max(0, cellWidth - plain.length))}`;
     });
-    lines.push(`  ${recipeLabel(recipe).padEnd(nameWidth)}  ${cells.join("")}`);
+    const marker = recipe === focusedRecipe ? "›" : " ";
+    lines.push(
+      `${marker} ${recipeLabel(recipe).padEnd(nameWidth)}  ${cells.join("")}`,
+    );
   }
 
   lines.push("");

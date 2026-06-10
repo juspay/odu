@@ -36,10 +36,12 @@ import { createLogTail } from "../common/logTail";
 import { fanId, onPlatform, splitFanId } from "../common/nodeId";
 import type { TaskSpec } from "../common/spec";
 import {
+  EMPTY_HEADER,
   type NodeState,
   oduSurface,
   pendingNode,
   type PipelineState,
+  type RunHeader,
   STATUS_META,
 } from "../common/surface";
 import { commitLabel, createDisplay, progressEvent } from "./display";
@@ -259,6 +261,10 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
     order,
     nodes,
   });
+  // The run identity + lane→host map, published on the surface so an `attach`-er
+  // paints the same matrix `run` does. Filled in once the lanes resolve (below),
+  // before the socket starts serving.
+  const headerStore = inMemoryStore<RunHeader>(EMPTY_HEADER);
 
   // ── per-node local logs: the in-memory tail (late socket subscribers) plus
   //    the durable per-SHA file (.ci/<sha7>/<plat>/<node>.log, justci's layout).
@@ -284,7 +290,7 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
   const lanes = new Map<string, Lane>();
   const fragment = implementSurface(oduSurface, {
     channel: inMemoryChannelByName(),
-    cells: { nodes: { store } },
+    cells: { nodes: { store }, header: { store: headerStore } },
     streams: {
       nodeLog: { source: tail.streamSource },
     },
@@ -376,13 +382,12 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
 
   // ── socket + lanes ──
   mkdirSync(join(repoRoot, ".ci"), { recursive: true });
-  const closeSocket = await serveSocket(router, join(repoRoot, SOCKET_PATH));
 
   const commitUrl =
     github !== null
       ? `https://github.com/${github.owner}/${github.repo}/commit/${sha}`
       : null;
-  display.start({
+  const header: RunHeader = {
     pipeline: spec.name,
     sha7,
     dirty: ctx.dirty,
@@ -392,7 +397,13 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
       host: lanesByPlatform[platform] as string,
     })),
     hostsSource: hostsConfig.source,
-  });
+  };
+  // Publish before serving so an `attach` connecting in the first instant reads
+  // the real header, not the EMPTY_HEADER default.
+  headerStore.set(header);
+  const closeSocket = await serveSocket(router, join(repoRoot, SOCKET_PATH));
+
+  display.start(header);
   display.update(store.get());
 
   for (const platform of [...tasksByPlatform.keys()].sort()) {

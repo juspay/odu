@@ -5,7 +5,6 @@
  * status and CI-sized node ids.
  */
 
-import { formatGoDuration } from "../common/duration";
 import {
   clampLog,
   type NodeState,
@@ -104,22 +103,6 @@ export function defaultAttachId(state: PipelineState): string | undefined {
   return state.order.at(-1);
 }
 
-/** One status row per node — the top half of the dashboard. */
-export function renderTable(state: PipelineState, attachedId?: string): string {
-  const width = Math.max(12, ...state.order.map((id) => id.length));
-  const lines = [`pipeline: ${state.name}`];
-  for (const id of state.order) {
-    const node = state.nodes[id];
-    if (node === undefined) continue;
-    const marker = id === attachedId ? "›" : " ";
-    const glyph = statusGlyph(node.status);
-    const dur =
-      node.durationMs !== null ? ` (${formatGoDuration(node.durationMs)})` : "";
-    lines.push(`${marker} ${glyph} ${id.padEnd(width)} ${node.status}${dur}`);
-  }
-  return lines.join("\n");
-}
-
 /** Keep a log buffer in sync with a stream of `nodeLog` frames — reset on a
  *  `snapshot` frame, append on a delta. Returns the new buffer. */
 export function applyLogFrame(
@@ -129,34 +112,16 @@ export function applyLogFrame(
   return clampLog(frame.kind === "snapshot" ? frame.text : buffer + frame.text);
 }
 
-/** Status line — the bottom of the dashboard. */
-export function renderStatusLine(summary: PipelineSummary): string {
-  if (summary.done) {
-    return summary.failedOverall
-      ? `● done — ${summary.failed} failed, ${summary.errored} errored, ${summary.ok} ok, ${summary.skipped} skipped`
-      : `● done — ${summary.ok} ok`;
-  }
-  return `● ${summary.running} running · ${summary.ok} ok · ${summary.pending} pending`;
-}
-
-/** The whole dashboard: status table, the attached node's log tail, status
- *  line. `logRows` bounds how much of the (potentially long) log we paint. */
-export function renderDashboard(opts: {
-  state: PipelineState;
-  attachedId?: string;
-  log: string;
-  logRows?: number;
-}): string {
-  const { state, attachedId, log } = opts;
-  const logRows = opts.logRows ?? 12;
-  const summary = summarize(state);
-  const sections = [renderTable(state, attachedId), "─".repeat(60)];
-  if (attachedId !== undefined) {
-    const node = state.nodes[attachedId];
-    sections.push(`$ ${node?.command ?? attachedId}`);
-    const tail = log.split("\n").slice(-logRows).join("\n");
-    sections.push(tail);
-  }
-  sections.push("─".repeat(60), renderStatusLine(summary));
-  return sections.join("\n");
+/** The focused node's log pane — the bottom half of `attach`'s view, below the
+ *  matrix: a rule, the node's command, then the last `logRows` lines of its
+ *  captured output. `logRows` bounds how much of a long log we paint. */
+export function renderLogPane(
+  node: NodeState | undefined,
+  log: string,
+  logRows = 12,
+): string {
+  const rule = "─".repeat(60);
+  if (node === undefined) return rule;
+  const tail = log.split("\n").slice(-logRows).join("\n");
+  return `${rule}\n$ ${node.command}\n${tail}`;
 }

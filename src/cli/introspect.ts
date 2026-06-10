@@ -6,22 +6,24 @@
  */
 
 import {
+  EMPTY_HEADER,
   type NodeLogFrame,
   type NodeState,
   type PipelineState,
+  type RunHeader,
   STATUS_META,
 } from "../common/surface";
 import {
   createDisplay,
   progressEvent,
-  type RunHeader,
+  renderRunFrame,
 } from "../coordinator/display";
 import { dialSocket, type OduClient } from "../coordinator/socket";
 import {
   applyLogFrame,
   defaultAttachId,
   nodeRow,
-  renderDashboard,
+  renderLogPane,
   statusGlyph,
   summarize,
 } from "./render";
@@ -31,6 +33,16 @@ export async function firstSnapshot(client: OduClient): Promise<PipelineState> {
     return state;
   }
   throw new Error("odu: coordinator closed before sending state");
+}
+
+/** The run header off the surface — `run` publishes it before serving, so the
+ *  first value is the real lane→host map. Falls back to EMPTY_HEADER only if
+ *  the coordinator closes before sending (banner just collapses). */
+export async function firstHeader(client: OduClient): Promise<RunHeader> {
+  for await (const header of await client.surface.header.get({})) {
+    return header;
+  }
+  return EMPTY_HEADER;
 }
 
 /** Resolve a node argument against the live state: exact id, or unique
@@ -158,23 +170,36 @@ export async function attachStream(
   return last !== undefined && summarize(last).failedOverall ? 1 : 0;
 }
 
-/** Interactive dashboard — node table + attached log pane.
- *  Keys: digits attach, n/p cycle, r rerun (the one mutation), q quit. */
+/** Interactive view — `run`'s recipe × platform matrix with the focused node's
+ *  log pane below it. The header (lane→host map) comes off the surface, so this
+ *  paints the *same* matrix `run` does, not a separate table. Keys: digits / n /
+ *  p move focus, r rerun (the one mutation), q quit. */
 async function attachDashboard(
   client: OduClient,
   close: () => void,
 ): Promise<number> {
+  const header = await firstHeader(client);
   let state: PipelineState | undefined;
   let attachedId: string | undefined;
   let log = "";
   let detachLog: (() => void) | undefined;
+  let tick = 0;
 
   const repaint = (): void => {
     if (state === undefined) return;
-    process.stdout.write("\x1b[2J\x1b[H");
-    process.stdout.write(`${renderDashboard({ state, attachedId, log })}\n`);
+    const frame = renderRunFrame({
+      state,
+      header,
+      tick,
+      startedAt: runStartedAt(state),
+      now: Date.now(),
+      columns: process.stdout.columns ?? 100,
+      focusedId: attachedId,
+    });
+    const node = attachedId !== undefined ? state.nodes[attachedId] : undefined;
     process.stdout.write(
-      "\n[digits] attach · [n/p] cycle · [r] rerun · [q] quit\n",
+      `\x1b[2J\x1b[H${frame}\n${renderLogPane(node, log)}\n` +
+        "\n[digits] focus · [n/p] cycle · [r] rerun · [q] quit\n",
     );
   };
 
@@ -207,7 +232,17 @@ async function attachDashboard(
     repaint();
   };
 
+  // Repaint on a timer too (not just on state deltas), so the matrix spinners
+  // animate and the elapsed clock ticks between transitions. unref'd + cleared
+  // on quit so it never holds the process open.
+  const ticker = setInterval(() => {
+    tick += 1;
+    repaint();
+  }, 250);
+  ticker.unref?.();
+
   const quit = (code: number): void => {
+    clearInterval(ticker);
     detachLog?.();
     if (process.stdin.isTTY) process.stdin.setRawMode(false);
     process.stdin.pause();
@@ -251,4 +286,18 @@ async function attachDashboard(
   }
   quit(state !== undefined && summarize(state).failedOverall ? 1 : 0);
   return 0;
+}
+
+/** The run's start wall-clock for the matrix's elapsed timer — the earliest
+ *  node start the surface reports, else now (nothing has started yet). `run`
+ *  knows this directly; an attached face derives it from the node states. */
+function runStartedAt(state: PipelineState): number {
+  let earliest = Number.POSITIVE_INFINITY;
+  for (const id of state.order) {
+    const startedAt = state.nodes[id]?.startedAt;
+    if (startedAt !== null && startedAt !== undefined && startedAt < earliest) {
+      earliest = startedAt;
+    }
+  }
+  return Number.isFinite(earliest) ? earliest : Date.now();
 }
