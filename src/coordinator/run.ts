@@ -148,13 +148,23 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
   const { repoRoot, specSource, sha, sha7 } = ctx;
   // Where stdout points picks the face: NDJSON for the /do contract, an
   // in-place live matrix on a TTY, transition lines + heartbeats for a pipe.
-  const display = createDisplay(
-    args.progressJson
-      ? "json"
-      : process.stdout.isTTY === true
-        ? "live"
-        : "plain",
-  );
+  // The live face is the shared interactive view (same one `attach` paints):
+  // it pulls the focused node's log from this run's in-memory `tail`, and its
+  // keys drive `rerunNode` and `shutdown` — the source-agnostic seam. Keys are
+  // only live when stdin is a TTY (an output-only `run` keeps the matrix, no
+  // raw mode). `json`/`plain` ignore the live opts and keep the byte contract
+  // `/do` and kolu CI depend on — untouched.
+  const display = args.progressJson
+    ? createDisplay("json")
+    : process.stdout.isTTY === true
+      ? createDisplay("live", {
+          interactive: process.stdin.isTTY === true,
+          hookStderr: true,
+          openLog: (id, sig) => tail.streamSource({ id }, sig),
+          rerun: (id) => void rerunNode(id),
+          onQuit: () => shutdown(130),
+        })
+      : createDisplay("plain");
   const info = (msg: string): void => {
     display.info(msg);
   };
@@ -288,6 +298,16 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
 
   // ── the fan-in surface (status / logs / attach dial this) ──
   const lanes = new Map<string, Lane>();
+  // Route a rerun request to the owning lane. A bare lane-local id (no `@`)
+  // carries no platform: splitFanId reports it as the "unknown" sentinel, which
+  // has no lane, so the request is unroutable — `false`, same as a missing
+  // lane. The surface's `node.rerun` and the live view's `r` key both call this.
+  const rerunNode = async (id: string): Promise<boolean> => {
+    const { namepath, platform } = splitFanId(id);
+    const lane = platform === "unknown" ? undefined : lanes.get(platform);
+    if (lane === undefined) return false;
+    return lane.rerun(namepath);
+  };
   const fragment = implementSurface(oduSurface, {
     channel: inMemoryChannelByName(),
     cells: { nodes: { store }, header: { store: headerStore } },
@@ -296,15 +316,7 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
     },
     procedures: {
       node: {
-        rerun: async ({ input }) => {
-          // A bare lane-local id (no `@`) carries no platform to route to:
-          // splitFanId reports it as the "unknown" sentinel, which has no lane,
-          // so the request is unroutable — `ok: false`, same as a missing lane.
-          const { namepath, platform } = splitFanId(input.id);
-          const lane = platform === "unknown" ? undefined : lanes.get(platform);
-          if (lane === undefined) return { ok: false };
-          return { ok: await lane.rerun(namepath) };
-        },
+        rerun: async ({ input }) => ({ ok: await rerunNode(input.id) }),
       },
     },
   });
@@ -496,13 +508,18 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
     lanes.set(platform, lane);
   }
 
-  // ── finalizer: an interrupted coordinator must not strand `Running:`
-  //    contexts as eternally-pending checks ──
-  let interrupted = false;
-  const onSignal = (signal: NodeJS.Signals): void => {
-    if (interrupted) return;
-    interrupted = true;
-    info(`odu: ${signal} — finalizing posted statuses before exit`);
+  // ── the interrupt path: an interrupted coordinator must not strand
+  //    `Running:` contexts as eternally-pending checks, and must hand the
+  //    terminal back. The single shutdown the three interrupt sources share:
+  //    SIGTERM, and (in raw mode Ctrl-C is a keypress, not a SIGINT) the live
+  //    view's `q`/Ctrl-C/Ctrl-D via `onQuit`. SIGINT routes here too for the
+  //    non-interactive `run` (no raw mode → a real SIGINT). Natural completion
+  //    does NOT go through here — it falls through to the verdict below. ──
+  let shuttingDown = false;
+  const shutdown = (code: number): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    info("odu: interrupted — finalizing posted statuses before exit");
     for (const context of poster.pendingContexts()) {
       poster.post({
         state: "error",
@@ -514,11 +531,11 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
       for (const lane of lanes.values()) lane.close();
       closeSocket();
       display.stop(store.get());
-      process.exit(130);
+      process.exit(code);
     });
   };
-  process.once("SIGINT", () => onSignal("SIGINT"));
-  process.once("SIGTERM", () => onSignal("SIGTERM"));
+  process.once("SIGINT", () => shutdown(130));
+  process.once("SIGTERM", () => shutdown(130));
 
   await allSettled;
 

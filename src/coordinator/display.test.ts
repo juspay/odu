@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
-import type { NodeState, PipelineState } from "../common/surface";
-import { progressEvent, renderRunFrame } from "./display";
+import type {
+  NodeLogFrame,
+  NodeState,
+  PipelineState,
+} from "../common/surface";
+import { createDisplay, progressEvent, renderRunFrame } from "./display";
 
 function node(
   id: string,
@@ -69,7 +73,6 @@ describe("renderRunFrame", () => {
     tick: 4,
     startedAt: 940_000,
     now: 1_540_000,
-    lastLog: { id: "ci::e2e@x86_64-linux", text: "Scenario: canvas maximize" },
     columns: 100,
   });
 
@@ -88,12 +91,13 @@ describe("renderRunFrame", () => {
     expect(frame).toContain("9m0s"); // running e2e: now - startedAt
   });
 
-  it("summarizes counts and tails the busiest node's log", () => {
+  it("summarizes counts (the busiest-node footer is gone — the log pane replaces it)", () => {
     expect(frame).toContain("3 ok");
     expect(frame).toContain("1 running");
     expect(frame).toContain("1 failed");
-    expect(frame).toContain("› ci::e2e@x86_64-linux");
-    expect(frame).toContain("Scenario: canvas maximize");
+    // The matrix frame no longer carries a tail line; the focused log pane (a
+    // separate render, openLog-fed) is the live view's log surface now.
+    expect(frame).not.toContain("Scenario: canvas maximize");
   });
 
   it("ends the header with the run's elapsed wall clock", () => {
@@ -157,6 +161,55 @@ describe("renderRunFrame", () => {
       columns: 100,
     });
     expect(dirtyFrame.split("\n")[0]).toContain("@ 3cbac86+dirty");
+  });
+});
+
+// The shared interactive `live` view: state is push-fed (`update`), the focused
+// node's log is pull-fed via the injected `openLog`. Raw-mode key handling isn't
+// unit-tested (it needs a real TTY stdin); this locks down that the openLog
+// snapshot lands in the painted log pane below the matrix.
+describe("LiveDisplay — focused log pane", () => {
+  async function* snapshotOnly(text: string): AsyncGenerator<NodeLogFrame> {
+    yield { kind: "snapshot", text };
+  }
+
+  /** Capture process.stdout while `fn` runs. */
+  async function capturing(fn: () => Promise<void>): Promise<string> {
+    const chunks: string[] = [];
+    const original = process.stdout.write.bind(process.stdout);
+    process.stdout.write = ((chunk: string | Uint8Array): boolean => {
+      chunks.push(
+        typeof chunk === "string" ? chunk : Buffer.from(chunk).toString(),
+      );
+      return true;
+    }) as typeof process.stdout.write;
+    try {
+      await fn();
+    } finally {
+      process.stdout.write = original;
+    }
+    return chunks.join("");
+  }
+
+  it("paints the focused node's log pane (openLog snapshot) below the matrix", async () => {
+    const out = await capturing(async () => {
+      const view = createDisplay("live", {
+        interactive: false, // off-TTY unit env: no raw mode, no key wiring
+        hookStderr: false,
+        openLog: (id) =>
+          snapshotOnly(`log of ${id}\nScenario: canvas maximize`),
+        rerun: () => {},
+        onQuit: () => {},
+      });
+      view.start(state, header);
+      view.update(state); // seeds focus → opens the focused log
+      await new Promise((r) => setTimeout(r, 0)); // let openLog yield + repaint
+      view.stop(state);
+    });
+    // The first running node is the default focus (`ci::e2e@x86_64-linux`); its
+    // log pane (rule + command + the openLog snapshot) is in the painted frame.
+    expect(out).toContain("ci::e2e@x86_64-linux");
+    expect(out).toContain("Scenario: canvas maximize");
   });
 });
 

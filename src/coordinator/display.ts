@@ -8,15 +8,25 @@
  *     duration, plus a 60-second heartbeat naming the still-running nodes so
  *     a captured log never *looks* hung between transitions.
  *   - `live`  (stdout is a TTY): an in-place recipes × lanes matrix with
- *     spinners, ticking elapsed times, and a one-line tail of whatever the
- *     busiest node just printed. Terminal failures also print a persistent
- *     line above the matrix so they survive in scrollback.
+ *     spinners, ticking elapsed times, and the focused node's log pane below
+ *     it. Terminal failures also print a persistent line above the matrix so
+ *     they survive in scrollback.
+ *
+ * The `live` face is the ONE interactive view, shared by `odu run` and `odu
+ * attach` through a source-agnostic seam: state is push-fed (`update(state)`
+ * — `run`'s coordinator loop and `attach`'s read-loop both call it) and the
+ * focused-node log is pull-fed via an injected `openLog(id, signal)` (`run`
+ * passes its in-memory tail, `attach` passes the surface's `nodeLog` stream).
+ * Keys (digits / n / p / r / q) drive focus, rerun, and quit through injected
+ * callbacks. When non-interactive (a piped `attach`, or a `run` whose stdin
+ * isn't a TTY) the keys + raw mode are simply off.
  *
  * The live renderer owns the terminal: it hides the cursor, repaints a
- * bounded region, and interposes `process.stderr.write` so library chatter
- * (surface-nix-host's `[host:…]` provisioning lines — already duplicated
- * into `_ci-setup`'s log) can't shred the region; anything else written to
- * stderr is re-printed intact above the matrix.
+ * bounded region, and (when `hookStderr`, i.e. `run`) interposes
+ * `process.stderr.write` so library chatter (surface-nix-host's `[host:…]`
+ * provisioning lines — already duplicated into `_ci-setup`'s log) can't shred
+ * the region; anything else written to stderr is re-printed intact above the
+ * matrix.
  */
 
 import {
@@ -30,10 +40,17 @@ import {
   stripAnsi,
   yellow,
 } from "../cli/ansi";
-import { STATUS_COLOR, summarize } from "../cli/render";
+import {
+  applyLogFrame,
+  defaultAttachId,
+  renderLogPane,
+  STATUS_COLOR,
+  summarize,
+} from "../cli/render";
 import { formatGoDuration } from "../common/duration";
 import { splitFanId } from "../common/nodeId";
 import {
+  type NodeLogFrame,
   type NodeState,
   type PipelineState,
   type ProgressStatus,
@@ -70,7 +87,9 @@ export interface Display {
   update(state: PipelineState): void;
   /** A node crossed a status boundary (the diff-driven event feed). */
   transition(event: ProgressEvent, node: NodeState): void;
-  /** A chunk of some node's log arrived (live's footer feed). */
+  /** A chunk of some node's log arrived. A no-op for the live face now that
+   *  its log pane is `openLog`-fed; kept on the interface for the json/plain
+   *  faces (which ignore it) and the coordinator's append-site call. */
   logLine(id: string, text: string): void;
   /** Operator-facing message (post failures, signals, …). */
   info(msg: string): void;
@@ -78,10 +97,42 @@ export interface Display {
   stop(state?: PipelineState): void;
 }
 
-export function createDisplay(mode: DisplayMode): Display {
+/** The injected dependencies that make the `live` face the shared interactive
+ *  view — the source-agnostic seam between `run` (its in-memory tail, raw
+ *  stderr to hook, its own shutdown) and `attach` (the surface stream, no
+ *  stderr to hook). Push-fed for state (via `Display.update`), pull-fed for the
+ *  focused log (via `openLog`). */
+export interface LiveOpts {
+  /** Read keys + drive focus/rerun/quit; raw-mode the terminal. Off for a
+   *  `run` whose stdin isn't a TTY (output-only live matrix). */
+  interactive: boolean;
+  /** Interpose `process.stderr.write` (drop `[host:…]`, re-print the rest
+   *  above the matrix). `run`=true (library chatter shares its stderr);
+   *  `attach`=false (an observer has no such chatter to tame). */
+  hookStderr: boolean;
+  /** Pull the focused node's log: a `snapshot` frame then `append`s, so a
+   *  focus change backfills. `run` passes `tail.streamSource` (a synchronous
+   *  generator), `attach` passes `client.surface.nodeLog.get` (a promised
+   *  stream over the socket) — hence the `| Promise`, `await`ed at the call
+   *  site, which is a no-op for the generator. */
+  openLog: (
+    id: string,
+    signal: AbortSignal,
+  ) => AsyncIterable<NodeLogFrame> | Promise<AsyncIterable<NodeLogFrame>>;
+  /** The one mutation `r` triggers — re-run the focused node. */
+  rerun: (id: string) => void;
+  /** The interrupt path: `q`/Ctrl-C/Ctrl-D quit with the current verdict's
+   *  exit code. `run` routes this to its `shutdown`, `attach` to its `quit`. */
+  onQuit: (code: number) => void;
+}
+
+export function createDisplay(mode: DisplayMode, live?: LiveOpts): Display {
   if (mode === "json") return new JsonDisplay();
   if (mode === "plain") return new PlainDisplay();
-  return new LiveDisplay();
+  if (live === undefined) {
+    throw new Error("odu: createDisplay('live') requires LiveOpts");
+  }
+  return new LiveDisplay(live);
 }
 
 /** Project a node's state into the `ProgressEvent` the json/plain faces emit.
@@ -223,12 +274,11 @@ export function renderRunFrame(opts: {
   tick: number;
   startedAt: number;
   now: number;
-  lastLog?: { id: string; text: string };
   columns: number;
-  /** `attach`'s interactive focus — marks the specific matrix cell
-   *  (recipe × platform) whose log the pane below is showing and which `r`
-   *  reruns, so the same recipe on two platforms stays distinguishable. `run`
-   *  passes none. */
+  /** The interactive focus — marks the specific matrix cell (recipe ×
+   *  platform) whose log the pane below is showing and which `r` reruns, so the
+   *  same recipe on two platforms stays distinguishable. Undefined before the
+   *  first focus lands. */
   focusedId?: string;
 }): string {
   const { state, header, tick, now } = opts;
@@ -276,9 +326,9 @@ export function renderRunFrame(opts: {
   for (const recipe of recipes) {
     const cells = platforms.map((platform) => {
       const node = state.nodes[`${recipe}@${platform}`];
-      // `attach`'s focus lands on one specific cell (recipe × platform), not
-      // a whole row — a `›` on the cell so the same recipe on two platforms is
-      // distinguishable and `r`'s target is unambiguous. `run` passes none.
+      // Focus lands on one specific cell (recipe × platform), not a whole row —
+      // a `›` on the cell so the same recipe on two platforms is
+      // distinguishable and `r`'s target is unambiguous.
       const cellMark =
         focused?.namepath === recipe && focused?.platform === platform
           ? "›"
@@ -311,38 +361,50 @@ export function renderRunFrame(opts: {
   ].filter((s): s is string => s !== null);
   lines.push(`  ${counts.join(dim(" · "))}`);
 
-  if (opts.lastLog !== undefined && !summary.done) {
-    const label = `› ${opts.lastLog.id}`;
-    const budget = Math.max(20, opts.columns - label.length - 5);
-    const text = opts.lastLog.text.slice(0, budget);
-    lines.push(dim(`  ${label}  ${text}`));
-  }
   return lines.join("\n");
 }
+
+const KEY_HINT = "[digits] focus · [n/p] cycle · [r] rerun · [q] quit";
 
 class LiveDisplay implements Display {
   private header: RunHeader | undefined;
   private state: PipelineState | undefined;
-  private lastLog: { id: string; text: string } | undefined;
+  private focusedId: string | undefined;
+  private focusedLog = "";
+  private logSub: AbortController | undefined;
   private tick = 0;
   private prevHeight = 0;
   private timer: NodeJS.Timeout | undefined;
   private readonly stderrWrite = process.stderr.write.bind(process.stderr);
   private stopped = false;
+  private readonly keyHandler = (key: string): void => this.onKey(key);
+
+  constructor(private readonly opts: LiveOpts) {}
 
   start(state: PipelineState, header: RunHeader): void {
     this.state = state;
     this.header = header;
     process.stdout.write("\x1b[?25l");
-    this.hookStderr();
+    if (this.opts.hookStderr) this.hookStderr();
+    if (this.opts.interactive && process.stdin.isTTY) {
+      process.stdin.setRawMode(true);
+      process.stdin.resume();
+      process.stdin.setEncoding("utf-8");
+      process.stdin.on("data", this.keyHandler);
+    }
     // Whatever path the process dies by (a throw past orchestrate, a missed
-    // stop()), the terminal must come back: cursor shown, stderr unhooked.
+    // stop()), the terminal must come back: cursor shown, raw mode off, stderr
+    // unhooked.
     process.once("exit", () => {
       if (!this.stopped) {
-        process.stderr.write = this.stderrWrite;
+        if (this.opts.hookStderr) process.stderr.write = this.stderrWrite;
+        if (this.opts.interactive && process.stdin.isTTY) {
+          process.stdin.setRawMode(false);
+        }
         process.stdout.write("\x1b[?25h");
       }
     });
+    this.seedFocus(state);
     this.timer = setInterval(() => {
       this.tick += 1;
       this.paint();
@@ -352,14 +414,17 @@ class LiveDisplay implements Display {
 
   update(state: PipelineState): void {
     this.state = state;
-    if (this.lastLog !== undefined) {
-      // Drop the footer once its node stops running — a stale tail line
-      // from a finished node reads as a hang, the exact feel this kills.
-      const node = state.nodes[this.lastLog.id];
-      if (node === undefined || node.status !== "running") {
-        this.lastLog = undefined;
-      }
-    }
+    this.seedFocus(state);
+  }
+
+  /** The first state with nodes seeds the focus (the first running node, else
+   *  the first pending, else the last) — the pane's `r` target. Run feeds an
+   *  `update` right after `start`; attach may `start` on an already-settled
+   *  snapshot and never `update`, so both call this. */
+  private seedFocus(state: PipelineState): void {
+    if (this.focusedId !== undefined) return;
+    const id = defaultAttachId(state);
+    if (id !== undefined) this.focus(id);
   }
 
   transition(event: ProgressEvent, node: NodeState): void {
@@ -375,16 +440,10 @@ class LiveDisplay implements Display {
     );
   }
 
-  logLine(id: string, text: string): void {
-    const node = this.state?.nodes[id];
-    if (node === undefined || node.status !== "running") return;
-    const line = stripAnsi(text)
-      .split("\n")
-      .map((l) => l.trim())
-      .filter((l) => l.length > 0)
-      .at(-1);
-    if (line !== undefined) this.lastLog = { id, text: line };
-  }
+  /** No-op: the focused log pane is `openLog`-fed (pull), not push-fed
+   *  per-chunk. Kept to satisfy `Display` (the coordinator's append site still
+   *  calls it). */
+  logLine(): void {}
 
   info(msg: string): void {
     this.printAbove(msg);
@@ -394,11 +453,81 @@ class LiveDisplay implements Display {
     if (this.stopped) return;
     this.stopped = true;
     if (this.timer !== undefined) clearInterval(this.timer);
+    this.logSub?.abort();
     if (state !== undefined) this.state = state;
     this.paint();
-    process.stderr.write = this.stderrWrite;
+    if (this.opts.hookStderr) process.stderr.write = this.stderrWrite;
+    if (this.opts.interactive && process.stdin.isTTY) {
+      process.stdin.off("data", this.keyHandler);
+      process.stdin.setRawMode(false);
+      process.stdin.pause();
+    }
     process.stdout.write("\x1b[?25h");
     this.prevHeight = 0;
+  }
+
+  /** Move focus to `id`, abort the previous log subscription, and pull the new
+   *  node's log via the injected `openLog` (a `snapshot` frame then `append`s,
+   *  so a focus change backfills the buffer). */
+  private focus(id: string): void {
+    if (id === this.focusedId) return;
+    this.focusedId = id;
+    this.focusedLog = "";
+    this.logSub?.abort();
+    const controller = new AbortController();
+    this.logSub = controller;
+    void (async () => {
+      try {
+        for await (const frame of await this.opts.openLog(
+          id,
+          controller.signal,
+        )) {
+          this.focusedLog = applyLogFrame(this.focusedLog, frame);
+          this.paint();
+        }
+      } catch (err) {
+        if (controller.signal.aborted) return;
+        this.focusedLog += `\n[odu] log stream error: ${
+          (err as Error).message
+        }\n`;
+        this.paint();
+      }
+    })();
+    this.paint();
+  }
+
+  /** The current verdict's exit code — 1 if the latest state has settled red,
+   *  else 0. The interrupt path (`q`/Ctrl-C/Ctrl-D) quits with this. */
+  private currentExitCode(): number {
+    return this.state !== undefined && summarize(this.state).failedOverall
+      ? 1
+      : 0;
+  }
+
+  private onKey(key: string): void {
+    if (key === "q" || key === "\x03" || key === "\x04") {
+      this.opts.onQuit(this.currentExitCode());
+      return;
+    }
+    if (key === "r" && this.focusedId !== undefined) {
+      this.opts.rerun(this.focusedId);
+      return;
+    }
+    const state = this.state;
+    if (state === undefined) return;
+    if (key === "n" || key === "p") {
+      const idx =
+        this.focusedId !== undefined ? state.order.indexOf(this.focusedId) : -1;
+      const delta = key === "n" ? 1 : -1;
+      const next =
+        state.order[(idx + delta + state.order.length) % state.order.length];
+      if (next !== undefined) this.focus(next);
+      return;
+    }
+    if (key >= "1" && key <= "9") {
+      const next = state.order[Number(key) - 1];
+      if (next !== undefined) this.focus(next);
+    }
   }
 
   /** Library chatter must not shred the repaint region: `[host:…]` lines
@@ -447,13 +576,20 @@ class LiveDisplay implements Display {
       tick: this.tick,
       startedAt: this.header.startedAt,
       now: Date.now(),
-      lastLog: this.lastLog,
       columns: process.stdout.columns ?? 100,
+      focusedId: this.focusedId,
     });
+    const focusedNode =
+      this.focusedId !== undefined
+        ? this.state.nodes[this.focusedId]
+        : undefined;
+    const body =
+      `${frame}\n${renderLogPane(focusedNode, this.focusedLog)}` +
+      (this.opts.interactive ? `\n\n${dim(KEY_HINT)}` : "");
     let out = "";
     if (this.prevHeight > 0) out += `\x1b[${this.prevHeight}F\x1b[0J`;
-    out += `${frame}\n`;
+    out += `${body}\n`;
     process.stdout.write(out);
-    this.prevHeight = frame.split("\n").length;
+    this.prevHeight = body.split("\n").length;
   }
 }
