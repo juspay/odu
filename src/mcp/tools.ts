@@ -211,8 +211,14 @@ function redNodes(state: PipelineState): { failed: string[]; errored: string[] }
   const errored: string[] = [];
   for (const id of state.order) {
     const status = state.nodes[id]?.status;
-    if (status === "failed") failed.push(id);
-    else if (status === "errored") errored.push(id);
+    // Gate redness on the receptacle (STATUS_META), then bucket by concrete
+    // status — mirroring run.ts's verdict. Adding a red NodeStatus is one edit
+    // in surface.ts; without this gate the agent verdict would silently desync
+    // from the TUI/run verdict.
+    if (status && STATUS_META[status].isRed) {
+      if (status === "failed") failed.push(id);
+      else if (status === "errored") errored.push(id);
+    }
   }
   return { failed, errored };
 }
