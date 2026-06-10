@@ -36,6 +36,7 @@ let
       runHook preInstall
       sh scripts/hydrate-kolu-packages.sh \
         ${pkgs.kolu-surface} @kolu/surface \
+        ${pkgs.kolu-surface-mcp} @kolu/surface-mcp \
         ${pkgs.kolu-surface-nix-host} @kolu/surface-nix-host
       cp -r . $out
       runHook postInstall

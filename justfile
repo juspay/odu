@@ -13,6 +13,7 @@ install:
     {{ nix_shell }} pnpm install --frozen-lockfile
     {{ nix_shell }} sh -c 'sh scripts/hydrate-kolu-packages.sh \
       "$ODU_KOLU_SURFACE" @kolu/surface \
+      "$ODU_KOLU_SURFACE_MCP" @kolu/surface-mcp \
       "$ODU_KOLU_SURFACE_NIX_HOST" @kolu/surface-nix-host'
 
 # TypeScript type checking

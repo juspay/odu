@@ -4,5 +4,6 @@
 { pkgs }:
 {
   ODU_KOLU_SURFACE = pkgs.kolu-surface;
+  ODU_KOLU_SURFACE_MCP = pkgs.kolu-surface-mcp;
   ODU_KOLU_SURFACE_NIX_HOST = pkgs.kolu-surface-nix-host;
 }
