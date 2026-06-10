@@ -30,8 +30,8 @@ base64-framed over stdio — no daemons, no ports, no agents to install):
 | **Procedure** | `surface.node.rerun({ id })` | The *only* mutation: reset a node + its transitive dependents and reschedule. |
 
 Every face is a thin adapter over the same contract: the bundled terminal
-dashboard today; a web dashboard and an MCP server for coding agents are
-designed on the same surface (see the roadmap below).
+dashboard and an **MCP server for coding agents** (`odu mcp`) today; a web
+dashboard is designed on the same surface (see the roadmap below).
 
 ## How a run works
 
@@ -125,10 +125,51 @@ odu logs [-f] <node>              replay (+ follow) one node's log
 odu monitor [-o json]             live dashboard (tty) / transition stream
 odu dump | graph                  resolved pipeline as JSON / Mermaid
 odu protect [--dry-run]           sync branch protection's required contexts
+odu mcp                           serve the agent face (MCP server, stdio)
 ```
 
 **Strict by default**: a real CI run refuses a dirty tree, tests the pinned
 HEAD commit, posts statuses. The opt-outs exist for dev iteration, not CI.
+
+## Drive CI from an agent (MCP)
+
+`odu mcp` serves odu's surface as an [MCP](https://modelcontextprotocol.io)
+server over stdio, so a coding agent (Claude Code, Codex, opencode, Gemini CLI)
+drives CI with structured calls instead of scraping your terminal. It is
+*in-band*, like `status` / `logs` / `monitor`: it dials the `.ci/odu.sock` of a
+run in the current repo and predetermines no host — which boxes run the lanes
+stays the coordinator's job (pool lease / `hosts.json`).
+
+| Tool | What it does |
+| --- | --- |
+| `run` | Start a run (background coordinator) and return once it's live. |
+| `get_nodes` | Snapshot the pipeline — every node's status / exit / duration. |
+| `tail_log` | One node's output (live stream, or the durable per-SHA log). |
+| `rerun_node` | Reset a node + its dependents and reschedule (the only mutation). |
+| `wait_for_settle` | Block until the run settles, or — fail-fast — the instant a node goes red. |
+
+It also exposes the live state as **subscribable resources** for hosts that act
+on notifications: `odu://nodes` (the pipeline cell) and `odu://log/{node}` —
+`resources/subscribe` + `notifications/resources/updated` on every transition.
+`wait_for_settle` is the blocking-pull floor for hosts that don't wake the model
+on a notification; both ride the same live cell.
+
+The agent loop is `run` → `wait_for_settle` (fail-fast) → read the red node's
+`tail_log` → fix → `rerun_node`. Declare it over stdio:
+
+```jsonc
+// .mcp.json (Claude Code; Codex / opencode / Gemini CLI take the same shape)
+{ "mcpServers": { "odu": {
+  "type": "stdio",
+  "command": "nix",
+  "args": ["run", "github:juspay/odu", "--", "mcp"] } } }
+```
+
+Repos that manage agent config with [APM](https://github.com/juspay/apm) get
+this wired automatically by depending on `juspay/odu`: odu's `apm.yml` declares
+the MCP server, deploying the `odu-mcp` launcher and the `.mcp.json` entry into
+the consumer's tree (set `ODU_FLAKE=.#odu` to use a repo's own pinned odu
+instead of `github:juspay/odu`).
 
 ## Honest notes
 
@@ -158,7 +199,7 @@ contexts, same per-SHA log layout, same strict-mode flag table, so the
 migration was invisible to branch protection), and then graduated here, the
 way kolu's remote-process-monitor example became
 [drishti](https://github.com/srid/drishti). The design history, the justci
-comparison, and the phased roadmap (web + MCP faces) live in the kolu Atlas:
+comparison, and the phased roadmap (the web face) live in the kolu Atlas:
 [*A CI runner you attach to*](https://github.com/juspay/kolu/blob/master/docs/atlas/dist/mini-ci-vs-justci.html).
 
 License: AGPL-3.0-or-later.

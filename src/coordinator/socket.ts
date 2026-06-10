@@ -66,21 +66,32 @@ export async function serveSocket(
   }
 }
 
-/** Dial the socket of a live run. Exits with the justci-parity message when
- *  no run is in progress (a dead/absent server rejects with
- *  ECONNREFUSED/ENOENT). */
-export async function dialSocket(
+/** Dial the socket of a live run, or `null` when no run is in progress (a
+ *  dead/absent server rejects with ECONNREFUSED/ENOENT). The non-exiting
+ *  variant: the MCP face turns "no live run" into a structured tool result
+ *  rather than a process exit. */
+export async function tryDialSocket(
   path: string = SOCKET_PATH,
-): Promise<{ client: OduClient; close: () => void }> {
+): Promise<{ client: OduClient; close: () => void } | null> {
   try {
     const { client, dispose } = await unixSocketLink<
       typeof oduSurface.contract
     >({ socketPath: path });
     return { client, close: dispose };
   } catch {
-    process.stderr.write(
-      `odu: no run in progress in this checkout (no live socket at ${path})\n`,
-    );
-    process.exit(1);
+    return null;
   }
+}
+
+/** Dial the socket of a live run. Exits with the justci-parity message when
+ *  no run is in progress. */
+export async function dialSocket(
+  path: string = SOCKET_PATH,
+): Promise<{ client: OduClient; close: () => void }> {
+  const dialed = await tryDialSocket(path);
+  if (dialed !== null) return dialed;
+  process.stderr.write(
+    `odu: no run in progress in this checkout (no live socket at ${path})\n`,
+  );
+  process.exit(1);
 }

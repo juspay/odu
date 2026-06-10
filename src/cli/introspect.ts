@@ -15,7 +15,7 @@ import {
   summarize,
 } from "./render";
 
-async function firstSnapshot(client: OduClient): Promise<PipelineState> {
+export async function firstSnapshot(client: OduClient): Promise<PipelineState> {
   for await (const state of await client.surface.nodes.get({})) {
     return state;
   }
@@ -24,7 +24,7 @@ async function firstSnapshot(client: OduClient): Promise<PipelineState> {
 
 /** Resolve a node argument against the live state: exact id, or unique
  *  suffix-ish match (`e2e@x86_64-linux` ≡ `ci::e2e@x86_64-linux`). */
-function resolveNodeId(state: PipelineState, token: string): string {
+export function resolveNodeId(state: PipelineState, token: string): string {
   if (state.nodes[token] !== undefined) return token;
   const matches = state.order.filter(
     (id) =>

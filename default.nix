@@ -19,7 +19,7 @@ let
   pnpmDeps = pkgs.fetchPnpmDeps {
     pname = "odu";
     inherit version src;
-    hash = "sha256-eqGiC4XW8Ut69gAEIPawOijS5hNW1MshQmnw7K2zkYc=";
+    hash = "sha256-amkFs395vTG+HeB3t6eE7m6txaSXGrqaNi1l+C9EDdU=";
     fetcherVersion = 3;
   };
 
@@ -75,6 +75,7 @@ let
     makeWrapper ${pkgs.tsx}/bin/tsx $out/bin/odu \
       --add-flags "${base}/src/cli/main.ts" \
       --set ODU_GH_BIN "${pkgs.gh}/bin/gh" \
+      --set ODU_SELF "$out/bin/odu" \
       --prefix PATH : ${pkgs.lib.makeBinPath [
         pkgs.nodejs
         pkgs.git
