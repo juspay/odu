@@ -9,7 +9,7 @@ typed state you can attach to** from a terminal dashboard while it runs.
 
 ```
 $ odu run                      # the whole DAG, every configured platform
-$ odu monitor                  # attach a live dashboard to the run (other terminal)
+$ odu attach                   # attach a live dashboard to the run (other terminal)
 $ odu logs -f e2e@x86_64-linux # follow one node's output
 ```
 
@@ -45,7 +45,7 @@ odu run  (coordinator, your machine)
  │    the host fetches your pushed SHA into a writable per-SHA workspace
  │    and runs each node as `just --no-deps <recipe>`
  ├─ fan-in: lane states merge into one surface, served on .ci/odu.sock
- │    (odu status / logs / monitor attach to it, live)
+ │    (odu status / logs / attach dial it, live)
  ├─ logs: .ci/<sha>/<platform>/<recipe>.log — durable even if the runner dies
  └─ GitHub: commit status per <recipe>@<platform> context, posted on
     transitions read from the state cell (credentials never leave your machine)
@@ -122,7 +122,7 @@ odu run [recipe[@platform]…]      run (selectors compose; bare names fan out
     --progress json               one NDJSON line per node transition
 odu status [-o json]              snapshot a live run
 odu logs [-f] <node>              replay (+ follow) one node's log
-odu monitor [-o json]             live dashboard (tty); piped, -o json
+odu attach [-o json]              live dashboard (tty); piped, -o json
                                   matches run --progress json, else run's
                                   plain transition stream
 odu dump | graph                  resolved pipeline as JSON / Mermaid
@@ -138,7 +138,7 @@ HEAD commit, posts statuses. The opt-outs exist for dev iteration, not CI.
 `odu mcp` serves odu's surface as an [MCP](https://modelcontextprotocol.io)
 server over stdio, so a coding agent (Claude Code, Codex, opencode, Gemini CLI)
 drives CI with structured calls instead of scraping your terminal. It is
-*in-band*, like `status` / `logs` / `monitor`: it dials the `.ci/odu.sock` of a
+*in-band*, like `status` / `logs` / `attach`: it dials the `.ci/odu.sock` of a
 run in the current repo and predetermines no host — which boxes run the lanes
 stays the coordinator's job (pool lease / `hosts.json`).
 

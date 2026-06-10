@@ -1,7 +1,7 @@
 /**
  * The MCP tools — the agent face's request/response verbs. Each is stateless
  * and dials `.ci/odu.sock` per call, exactly like `odu status` / `logs` /
- * `monitor` (src/cli/introspect.ts): the runner owns the state, a tool is a
+ * `attach` (src/cli/introspect.ts): the runner owns the state, a tool is a
  * thin attach-read-detach. They return plain data; `server.ts` wraps it for
  * the wire and owns the MCP plumbing.
  *

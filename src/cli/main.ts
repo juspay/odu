@@ -4,7 +4,7 @@
  *   odu run [recipe[@platform]…] [flags]   run the [metadata("ci")] DAG
  *   odu status [-o json]                   snapshot a live run's nodes
  *   odu logs [-f] <node>                   one node's log (replay + follow)
- *   odu monitor [-o json]                  live dashboard / transition stream
+ *   odu attach [-o json]                   live dashboard / transition stream
  *   odu dump                               resolved pipeline as JSON
  *   odu graph                              dependency graph (Mermaid)
  *   odu protect [--dry-run] [--branch B]   sync required status checks
@@ -20,17 +20,17 @@
 import { parseArgs } from "node:util";
 import { runCommand } from "../coordinator/run";
 import { loadJustPipeline, mermaidGraph } from "../just/ingest";
-import { logsCommand, monitorCommand, statusCommand } from "./introspect";
+import { attachCommand, logsCommand, statusCommand } from "./introspect";
 import { mcpCommand } from "./mcp";
 import { protectCommand } from "./protect";
 
-const USAGE = `usage: odu <run|status|logs|monitor|dump|graph|protect|mcp> [args]
+const USAGE = `usage: odu <run|status|logs|attach|dump|graph|protect|mcp> [args]
 
 run [recipe[@platform]…] [--platform P]… [--host P=ADDR]… [--root NAMEPATH]
     [--no-deps] [--no-strict] [--no-snapshot] [--no-post] [--progress json]
 status [-o json]
 logs [-f] <node>
-monitor [-o json]
+attach [-o json]
 dump [--root NAMEPATH]
 graph [--root NAMEPATH]
 protect [--dry-run] [--branch B] [--platform P]…
@@ -87,12 +87,12 @@ async function dispatch(argv: string[]): Promise<number> {
       if (node === undefined) throw new Error("odu: logs needs a node id");
       return logsCommand(node, values.follow ?? false);
     }
-    case "monitor": {
+    case "attach": {
       const { values } = parseArgs({
         args: rest,
         options: { output: { type: "string", short: "o" } },
       });
-      return monitorCommand(values.output === "json");
+      return attachCommand(values.output === "json");
     }
     case "dump":
     case "graph": {

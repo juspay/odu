@@ -65,7 +65,7 @@ export interface RunHeader {
   lanes: ReadonlyArray<{ platform: string; host: string }>;
   /** Where the lane→host map came from (`~/.config/odu/hosts.json`, a pool
    *  lease, …). `null` for an observer that didn't own host selection —
-   *  `monitor` attaches to a run it didn't launch, so it leaves lanes empty
+   *  `attach` joins a run it didn't launch, so it leaves lanes empty
    *  and the hosts clause off. */
   hostsSource: string | null;
 }
@@ -97,7 +97,7 @@ export function createDisplay(mode: DisplayMode): Display {
 }
 
 /** Project a node's state into the `ProgressEvent` the json/plain faces emit.
- *  `run` (its own run `sha7`) and `monitor` (the surface's `sha7`) both build
+ *  `run` (its own run `sha7`) and `attach` (the surface's `sha7`) both build
  *  events through this one function, so the two faces emit a single
  *  byte-identical `--progress json` / plain contract instead of each
  *  hand-rolling the projection and drifting (the bug in juspay/odu#4).
@@ -160,7 +160,7 @@ class PlainDisplay implements Display {
 
   start(header: RunHeader): void {
     // `run` carries lanes + a hosts source, so the banner shows both; an
-    // observer (`monitor`) has neither, so those clauses drop out and the
+    // observer (`attach`) has neither, so those clauses drop out and the
     // banner is just `odu · <pipeline> @ <sha>`.
     const parts = [`odu · ${header.pipeline} @ ${commitLabel(header)}`];
     if (header.lanes.length > 0) {

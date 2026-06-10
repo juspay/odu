@@ -1,7 +1,7 @@
 /**
  * The in-band introspection rendezvous: while `odu run` is live, the
  * coordinator serves the fan-in surface on `.ci/odu.sock`, and
- * `odu status` / `logs` / `monitor` dial it.
+ * `odu status` / `logs` / `attach` dial it.
  *
  * Transport is `@kolu/surface`'s first-class unix-socket pair
  * (`serveOverUnixSocket` / `unixSocketLink`) — same base64-newline framing
