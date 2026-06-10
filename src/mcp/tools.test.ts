@@ -1,5 +1,9 @@
+import { rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, relative } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { pendingNode, type PipelineState } from "../common/surface";
+import { gitTopLevel, headSha7 } from "./git";
 import { serveTestSurface, type TestSurface } from "./serveForTest";
 import {
   getNodes,
@@ -85,6 +89,30 @@ describe("tail_log", () => {
     const result = await tailLog("ci::nope@aarch64-darwin", NO_SOCKET);
     expect(result.source).toBe("missing");
   });
+
+  it("refuses a node id that escapes the per-SHA log dir", async () => {
+    // A real .log file sits outside `.ci/<sha7>`; a `..`-laden node id whose
+    // logPathFor resolves to it must be rejected, not read.
+    const secret = join(tmpdir(), `odu-traversal-${process.pid}.log`);
+    writeFileSync(secret, "SECRET CONTENTS\n");
+    try {
+      const root = gitTopLevel();
+      const sha7 = headSha7(root);
+      expect(root).not.toBeNull();
+      expect(sha7).not.toBeNull();
+      // `.ci/<sha7>/<platform>/<namepath>.log` → climb out to the temp file.
+      const climb = relative(
+        join(root as string, ".ci", sha7 as string, "x86_64-linux"),
+        secret,
+      ).replace(/\.log$/, "");
+      const token = `${climb}@x86_64-linux`;
+      const result = await tailLog(token, NO_SOCKET);
+      expect(result.source).toBe("missing");
+      expect(result.text).toBe("");
+    } finally {
+      rmSync(secret, { force: true });
+    }
+  });
 });
 
 describe("wait_for_settle", () => {
@@ -139,6 +167,36 @@ describe("wait_for_settle", () => {
   it("returns no-run when nothing is live", async () => {
     const v = await waitForSettle({ socketPath: NO_SOCKET, timeoutMs: 50 });
     expect(v).toMatchObject({ settled: false, passed: false });
+  });
+
+  it("never reports passed when the run does not settle green", async () => {
+    // Coordinator vanishes (crash / socket close) while a node is still
+    // running and no node is red — must NOT be a false green, whether the
+    // client stream ends or the wait times out.
+    const s = await serve([["ci::nix@x86_64-linux", "running"]]);
+    setTimeout(() => s.close(), 30);
+    const v = await waitForSettle({
+      socketPath: s.socketPath,
+      failFast: false,
+      timeoutMs: 300,
+    });
+    expect(v.passed).toBe(false);
+    expect(v.settled).toBe(false);
+  });
+
+  it("returns cancelled when the caller aborts the wait", async () => {
+    const s = await serve([["ci::nix@x86_64-linux", "running"]]);
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 30);
+    const v = await waitForSettle({
+      socketPath: s.socketPath,
+      failFast: false,
+      timeoutMs: 2000,
+      signal: ac.signal,
+    });
+    expect(v.cancelled).toBe(true);
+    expect(v.timed_out).toBe(false);
+    expect(v.passed).toBe(false);
   });
 });
 

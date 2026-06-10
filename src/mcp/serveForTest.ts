@@ -7,7 +7,7 @@
  * as a suite — it's imported by tools.test.ts / resources.test.ts.
  */
 
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -55,7 +55,7 @@ export async function serveTestSurface(
   const socketPath = join(dir, "odu.sock");
   // Reuse the coordinator's serve (mkdir + 0700 chmod + outcome handling); it
   // types `router` as `any`, the same oRPC-spread workaround run.ts uses.
-  const close = await serveSocket(router, socketPath);
+  const closeListener = await serveSocket(router, socketPath);
 
   return {
     socketPath,
@@ -63,6 +63,11 @@ export async function serveTestSurface(
     appendLog: (id, text) => tail.append(id, text),
     resetLog: (id, text) => tail.reset(id, text),
     reruns,
-    close,
+    // Close the listener AND remove the temp dir/socket, so repeated runs don't
+    // leak `odu-mcp-test-*` directories under the system tmpdir.
+    close: () => {
+      closeListener();
+      rmSync(dir, { recursive: true, force: true });
+    },
   };
 }

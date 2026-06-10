@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { pendingNode, type PipelineState } from "../common/surface";
-import { logUri, NODES_URI, parseLogUri, ResourcePusher } from "./resources";
+import {
+  isValidLogUri,
+  logUri,
+  NODES_URI,
+  parseLogUri,
+  ResourcePusher,
+} from "./resources";
 import { serveTestSurface, type TestSurface } from "./serveForTest";
 
 function state(
@@ -42,6 +48,16 @@ describe("uri helpers", () => {
     );
     expect(parseLogUri(NODES_URI)).toBeNull();
     expect(parseLogUri("file:///etc/passwd")).toBeNull();
+  });
+
+  it("rejects an empty or malformed log uri", () => {
+    expect(parseLogUri("odu://log/")).toBeNull();
+    // Malformed percent-encoding must not throw — it's not a valid node uri.
+    expect(parseLogUri("odu://log/%")).toBeNull();
+    expect(isValidLogUri(logUri("ci::e2e@x86_64-linux"))).toBe(true);
+    expect(isValidLogUri(NODES_URI)).toBe(false);
+    expect(isValidLogUri("odu://log/")).toBe(false);
+    expect(isValidLogUri("file:///etc/passwd")).toBe(false);
   });
 });
 

@@ -28,7 +28,12 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { SOCKET_PATH } from "../coordinator/socket";
-import { NODES_URI, parseLogUri, ResourcePusher } from "./resources";
+import {
+  isValidLogUri,
+  NODES_URI,
+  parseLogUri,
+  ResourcePusher,
+} from "./resources";
 import {
   getNodes,
   killRuns,
@@ -193,7 +198,7 @@ export function buildServer(socketPath: string = SOCKET_PATH): {
     tools: TOOLS.map((t) => ({ ...t })),
   }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (req) => {
+  server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
     const { name, arguments: rawArgs } = req.params;
     const args = rawArgs ?? {};
     try {
@@ -213,6 +218,9 @@ export function buildServer(socketPath: string = SOCKET_PATH): {
               timeoutMs: a.timeout_ms,
               failFast: a.fail_fast,
               socketPath,
+              // Cancelling the MCP request closes the dialed socket promptly
+              // rather than holding it until settle or the 10-minute timeout.
+              signal: extra.signal,
             }),
           );
         }
@@ -275,7 +283,15 @@ export function buildServer(socketPath: string = SOCKET_PATH): {
   });
 
   server.setRequestHandler(SubscribeRequestSchema, async (req) => {
-    pusher.subscribe(req.params.uri);
+    const { uri } = req.params;
+    // Only the resources we actually serve: the nodes cell, or a well-formed
+    // `odu://log/<node>`. Storing an unknown uri would leave the pusher
+    // attached/retrying for a resource it can never push; a malformed log uri
+    // (bad percent-encoding) would throw downstream after being subscribed.
+    if (uri !== NODES_URI && !isValidLogUri(uri)) {
+      throw new Error(`odu mcp: cannot subscribe to unknown resource "${uri}"`);
+    }
+    pusher.subscribe(uri);
     return {};
   });
   server.setRequestHandler(UnsubscribeRequestSchema, async (req) => {

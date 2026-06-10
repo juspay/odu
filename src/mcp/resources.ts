@@ -24,10 +24,23 @@ export function logUri(node: string): string {
   return `${LOG_PREFIX}${encodeURIComponent(node)}`;
 }
 
-/** `odu://log/<node>` → `<node>`, or `null` for any other uri. */
+/** `odu://log/<node>` → `<node>`, or `null` for any other uri — including a
+ *  `odu://log/` with no node or with malformed percent-encoding (a bad
+ *  `decodeURIComponent` would otherwise throw downstream). */
 export function parseLogUri(uri: string): string | null {
   if (!uri.startsWith(LOG_PREFIX)) return null;
-  return decodeURIComponent(uri.slice(LOG_PREFIX.length));
+  const encoded = uri.slice(LOG_PREFIX.length);
+  if (encoded === "") return null;
+  try {
+    return decodeURIComponent(encoded);
+  } catch {
+    return null;
+  }
+}
+
+/** Whether `uri` is a well-formed `odu://log/<node>` we can subscribe to. */
+export function isValidLogUri(uri: string): boolean {
+  return parseLogUri(uri) !== null;
 }
 
 type Dialer = () => Promise<{ client: OduClient; close: () => void } | null>;
