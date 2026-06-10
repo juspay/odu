@@ -111,10 +111,13 @@ export function pendingNode(seed: {
 export const PipelineStateSchema = z.object({
   name: z.string(),
   /** The run's commit, 7 hex chars — `odu run` stamps it from HEAD onto the
-   *  fan-in surface so every attached face (`monitor`, the MCP tools) derives
-   *  the durable log path (`.ci/<sha7>/…`) and renders the same
-   *  `--progress json` contract from surface state, instead of re-deriving the
-   *  sha from git and drifting. Empty in the pre-run EMPTY_STATE. */
+   *  fan-in surface so `monitor` renders the durable log path (`.ci/<sha7>/…`)
+   *  and the sha label from surface state: its banner (via `commitLabel`) and
+   *  the per-transition `log` field (via `progressEvent`→`logPathFor`), instead
+   *  of re-deriving the sha from git and drifting. The MCP `tail_log`
+   *  durable-file fallback derives the sha from git HEAD instead — no live
+   *  socket exists in that branch — so this field is `monitor`'s, not the MCP
+   *  tools'. Empty in the pre-run EMPTY_STATE. */
   sha7: z.string(),
   /** The run's working tree had uncommitted changes — the verdict is about
    *  that tree, not the commit. Drives the `+dirty` sha label every face
