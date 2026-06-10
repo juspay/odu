@@ -223,13 +223,6 @@ function redNodes(state: PipelineState): { failed: string[]; errored: string[] }
   return { failed, errored };
 }
 
-function isDone(state: PipelineState): boolean {
-  return state.order.every((id) => {
-    const s = state.nodes[id]?.status;
-    return s !== "pending" && s !== "running";
-  });
-}
-
 export interface WaitOptions {
   timeoutMs?: number;
   /** Return the instant a node goes red, rather than waiting for the whole
@@ -288,18 +281,19 @@ export async function waitForSettle(
       last = state;
       const { failed, errored } = redNodes(state);
       if (failFast && failed.length + errored.length > 0) {
+        const done = summarize(state).done;
         return {
-          settled: isDone(state),
+          settled: done,
           passed: false,
           failed,
           errored,
-          fail_fast_tripped: !isDone(state),
+          fail_fast_tripped: !done,
           timed_out: false,
           cancelled: false,
           duration_ms: now() - started,
         };
       }
-      if (isDone(state)) {
+      if (summarize(state).done) {
         return {
           settled: true,
           passed: failed.length + errored.length === 0,
@@ -318,7 +312,7 @@ export async function waitForSettle(
     // snapshot we saw was already terminal; `passed` requires that — a green
     // verdict must never come from a half-observed run.
     const red = last !== undefined ? redNodes(last) : { failed: [], errored: [] };
-    const settled = last !== undefined && isDone(last);
+    const settled = last !== undefined && summarize(last).done;
     return {
       settled,
       passed: settled && red.failed.length + red.errored.length === 0,
