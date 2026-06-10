@@ -366,10 +366,45 @@ export function renderRunFrame(opts: {
 
 const KEY_HINT = "[digits] focus · [n/p] cycle · [r] rerun · [q] quit";
 
+// biome-ignore lint/suspicious/noControlCharactersInRegex: matching ANSI escapes is the point.
+const ANSI_TOKEN = /^\x1b(?:\[[0-9;]*[A-Za-z]|\][^\x07\x1b]*(?:\x07|\x1b\\))/;
+
+/** Truncate a styled line to `width` *visible* columns, leaving ANSI/OSC
+ *  escapes uncounted, so the embedded log pane's wide command/log lines can't
+ *  wrap. A line already within budget passes through byte-for-byte (so the OSC 8
+ *  commit link in the header survives intact); a truncated one gets a trailing
+ *  reset so cut-off styling can't bleed into the next row. The repaint counts
+ *  one terminal row per clamped line, which is exact once nothing wraps. */
+export function clampLine(line: string, width: number): string {
+  if (width <= 0 || stripAnsi(line).length <= width) return line;
+  let out = "";
+  let visible = 0;
+  let i = 0;
+  while (i < line.length && visible < width) {
+    const rest = line.slice(i);
+    const esc = ANSI_TOKEN.exec(rest);
+    if (esc !== null) {
+      out += esc[0];
+      i += esc[0].length;
+      continue;
+    }
+    out += line[i];
+    visible += 1;
+    i += 1;
+  }
+  return `${out}\x1b[0m`;
+}
+
 class LiveDisplay implements Display {
   private header: RunHeader | undefined;
   private state: PipelineState | undefined;
   private focusedId: string | undefined;
+  /** Until the operator picks a node by hand (n/p/digits), focus auto-follows
+   *  the run: it re-tracks the best default node (first running, else first
+   *  pending, else last) on every state update, so a `run` that `start`s with
+   *  everything pending advances off `_ci-setup` onto the active node instead of
+   *  staying pinned to the startup snapshot. A keypress locks it. */
+  private focusLocked = false;
   private focusedLog = "";
   private logSub: AbortController | undefined;
   private tick = 0;
@@ -417,12 +452,14 @@ class LiveDisplay implements Display {
     this.seedFocus(state);
   }
 
-  /** The first state with nodes seeds the focus (the first running node, else
-   *  the first pending, else the last) — the pane's `r` target. Run feeds an
-   *  `update` right after `start`; attach may `start` on an already-settled
-   *  snapshot and never `update`, so both call this. */
+  /** Auto-follow the best default node (first running, else first pending, else
+   *  last) until the operator pins focus with a key. `run` `start`s on an
+   *  all-pending snapshot then `update`s as lanes go live, so re-tracking here
+   *  walks focus off `_ci-setup` onto the running node; `attach` may `start` on
+   *  an already-settled snapshot and never `update`, so both call this. Once
+   *  `focusLocked`, the operator's choice stands. */
   private seedFocus(state: PipelineState): void {
-    if (this.focusedId !== undefined) return;
+    if (this.focusLocked) return;
     const id = defaultAttachId(state);
     if (id !== undefined) this.focus(id);
   }
@@ -476,17 +513,26 @@ class LiveDisplay implements Display {
     this.logSub?.abort();
     const controller = new AbortController();
     this.logSub = controller;
+    // A frame from this subscription is only the focused log's if this is still
+    // the live subscription: a fast focus switch (or `stop()`) can leave the
+    // previous `openLog` resolving or yielding a queued frame after focus has
+    // moved on (notably `attach`'s socket stream, which can lag the abort), and
+    // applying it would paint A's bytes under B's header. Drop anything from a
+    // superseded/stopped subscription before it touches `focusedLog` or paints.
+    const live = (): boolean =>
+      !controller.signal.aborted && this.logSub === controller && !this.stopped;
     void (async () => {
       try {
         for await (const frame of await this.opts.openLog(
           id,
           controller.signal,
         )) {
+          if (!live()) return;
           this.focusedLog = applyLogFrame(this.focusedLog, frame);
           this.paint();
         }
       } catch (err) {
-        if (controller.signal.aborted) return;
+        if (!live()) return;
         this.focusedLog += `\n[odu] log stream error: ${
           (err as Error).message
         }\n`;
@@ -521,12 +567,18 @@ class LiveDisplay implements Display {
       const delta = key === "n" ? 1 : -1;
       const next =
         state.order[(idx + delta + state.order.length) % state.order.length];
-      if (next !== undefined) this.focus(next);
+      if (next !== undefined) {
+        this.focusLocked = true; // a hand-picked node stops auto-follow
+        this.focus(next);
+      }
       return;
     }
     if (key >= "1" && key <= "9") {
       const next = state.order[Number(key) - 1];
-      if (next !== undefined) this.focus(next);
+      if (next !== undefined) {
+        this.focusLocked = true; // a hand-picked node stops auto-follow
+        this.focus(next);
+      }
     }
   }
 
@@ -583,13 +635,19 @@ class LiveDisplay implements Display {
       this.focusedId !== undefined
         ? this.state.nodes[this.focusedId]
         : undefined;
-    const body =
+    const raw =
       `${frame}\n${renderLogPane(focusedNode, this.focusedLog)}` +
       (this.opts.interactive ? `\n\n${dim(KEY_HINT)}` : "");
+    // The bounded repaint moves up exactly `prevHeight` rows, so every painted
+    // line must occupy exactly one terminal row: clamp each (the embedded log
+    // pane carries arbitrarily wide command/log lines that would otherwise wrap
+    // and leave the cursor-up undercounting, smearing stale output below).
+    const columns = process.stdout.columns ?? 100;
+    const lines = raw.split("\n").map((l) => clampLine(l, columns));
     let out = "";
     if (this.prevHeight > 0) out += `\x1b[${this.prevHeight}F\x1b[0J`;
-    out += `${body}\n`;
+    out += `${lines.join("\n")}\n`;
     process.stdout.write(out);
-    this.prevHeight = body.split("\n").length;
+    this.prevHeight = lines.length;
   }
 }

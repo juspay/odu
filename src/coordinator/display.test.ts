@@ -4,7 +4,12 @@ import type {
   NodeState,
   PipelineState,
 } from "../common/surface";
-import { createDisplay, progressEvent, renderRunFrame } from "./display";
+import {
+  clampLine,
+  createDisplay,
+  progressEvent,
+  renderRunFrame,
+} from "./display";
 
 function node(
   id: string,
@@ -210,6 +215,118 @@ describe("LiveDisplay — focused log pane", () => {
     // log pane (rule + command + the openLog snapshot) is in the painted frame.
     expect(out).toContain("ci::e2e@x86_64-linux");
     expect(out).toContain("Scenario: canvas maximize");
+  });
+
+  // F2: a `run` starts on an all-pending snapshot, so the default focus is the
+  // first pending node (`_ci-setup@…`). Focus must auto-follow the run onto the
+  // node that goes running, not stay pinned to setup forever.
+  it("auto-follows focus onto the running node as lanes go live", async () => {
+    const allPending: PipelineState = {
+      ...state,
+      nodes: Object.fromEntries(
+        state.order.map((id) => [id, node(id, "pending")]),
+      ),
+    };
+    const running: PipelineState = {
+      ...allPending,
+      nodes: {
+        ...allPending.nodes,
+        "_ci-setup@x86_64-linux": node("_ci-setup@x86_64-linux", "ok", 41_000),
+        "ci::install@x86_64-linux": node(
+          "ci::install@x86_64-linux",
+          "running",
+          null,
+          1_000_000,
+        ),
+      },
+    };
+    const out = await capturing(async () => {
+      const view = createDisplay("live", {
+        interactive: false,
+        hookStderr: false,
+        openLog: (id) => snapshotOnly(`LOGPANE for ${id}`),
+        rerun: () => {},
+        onQuit: () => {},
+      });
+      view.start(allPending, header); // seeds focus → _ci-setup@x86_64-linux
+      await new Promise((r) => setTimeout(r, 0));
+      view.update(running); // a node goes live → focus must follow
+      await new Promise((r) => setTimeout(r, 0));
+      view.stop(running);
+    });
+    // The final pane is the now-running node's, not the startup setup node's.
+    expect(out).toContain("LOGPANE for ci::install@x86_64-linux");
+  });
+
+  // F1: a superseded subscription that yields one more frame after focus has
+  // moved on (a lagging socket stream) must not write its bytes under the new
+  // focus's header. The first node's stream parks on the abort signal, then
+  // emits a late frame; it must be dropped, not applied.
+  it("drops late frames from a superseded log subscription", async () => {
+    async function* lateAfterAbort(
+      id: string,
+      signal: AbortSignal,
+    ): AsyncGenerator<NodeLogFrame> {
+      yield { kind: "snapshot", text: `INITIAL ${id}` };
+      // Park until this subscription is aborted (focus moved away), then leak
+      // one more frame the way a buffered socket stream would.
+      await new Promise<void>((resolve) => {
+        if (signal.aborted) resolve();
+        else signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+      yield { kind: "snapshot", text: `STALE ${id}` };
+    }
+    const out = await capturing(async () => {
+      const view = createDisplay("live", {
+        interactive: false,
+        hookStderr: false,
+        openLog: (id, sig) => lateAfterAbort(id, sig),
+        rerun: () => {},
+        onQuit: () => {},
+      });
+      view.start(state, header); // focus → ci::e2e@x86_64-linux
+      await new Promise((r) => setTimeout(r, 0));
+      // Re-focus by re-seeding onto a different default: a state whose only
+      // running node is install moves auto-follow there, aborting e2e's stream.
+      view.update({
+        ...state,
+        nodes: {
+          ...state.nodes,
+          "ci::e2e@x86_64-linux": node("ci::e2e@x86_64-linux", "ok", 5_000),
+          "ci::install@x86_64-linux": node(
+            "ci::install@x86_64-linux",
+            "running",
+            null,
+            1_000_000,
+          ),
+        },
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      view.stop();
+    });
+    // The new focus's snapshot is shown; the aborted e2e stream's late frame is
+    // not (no STALE bytes leak into install's pane).
+    expect(out).toContain("INITIAL ci::install@x86_64-linux");
+    expect(out).not.toContain("STALE ci::e2e@x86_64-linux");
+  });
+});
+
+describe("clampLine", () => {
+  it("passes a within-budget line through byte-for-byte (links survive)", () => {
+    const link = "\x1b]8;;https://x/commit/abc\x1b\\abc\x1b]8;;\x1b\\";
+    expect(clampLine(link, 80)).toBe(link);
+    expect(clampLine("short", 80)).toBe("short");
+  });
+
+  it("truncates to visible width and resets trailing style", () => {
+    expect(clampLine("abcdefghij", 4)).toBe("abcd\x1b[0m");
+    // ANSI styling doesn't count toward the width budget.
+    const styled = "\x1b[31mabcdefghij\x1b[39m";
+    const clamped = clampLine(styled, 4);
+    expect(clamped.startsWith("\x1b[31mabcd")).toBe(true);
+    expect(clamped.endsWith("\x1b[0m")).toBe(true);
+    // Width is measured on the visible glyphs only.
+    expect(clamped.replace(/\x1b\[[0-9;]*m/g, "")).toBe("abcd");
   });
 });
 
