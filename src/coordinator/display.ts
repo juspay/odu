@@ -19,14 +19,6 @@
  * stderr is re-printed intact above the matrix.
  */
 
-import { formatGoDuration } from "../common/duration";
-import { splitFanId } from "../common/nodeId";
-import {
-  type NodeState,
-  type PipelineState,
-  type ProgressStatus,
-  STATUS_META,
-} from "../common/surface";
 import {
   bold,
   dim,
@@ -39,6 +31,15 @@ import {
   yellow,
 } from "../cli/ansi";
 import { STATUS_COLOR, summarize } from "../cli/render";
+import { formatGoDuration } from "../common/duration";
+import { splitFanId } from "../common/nodeId";
+import {
+  type NodeState,
+  type PipelineState,
+  type ProgressStatus,
+  type RunHeader,
+  STATUS_META,
+} from "../common/surface";
 import { logPathFor } from "./statuses";
 
 export type DisplayMode = "json" | "plain" | "live";
@@ -52,32 +53,19 @@ export interface ProgressEvent {
   log: string;
 }
 
-export interface RunHeader {
-  pipeline: string;
-  sha7: string;
-  /** Uncommitted changes in the tree this run reads (live-tree mode only —
-   *  strict refuses a dirty tree). Shown loudly: a dirty run's verdict is
-   *  about your working tree, not the commit. */
-  dirty: boolean;
-  /** Forge page for the commit (GitHub origins) — the sha label becomes an
-   *  OSC 8 hyperlink on terminals that render them. Null elsewhere. */
-  commitUrl: string | null;
-  lanes: ReadonlyArray<{ platform: string; host: string }>;
-  /** Where the lane→host map came from (`~/.config/odu/hosts.json`, a pool
-   *  lease, …). `null` for an observer that didn't own host selection —
-   *  `attach` joins a run it didn't launch, so it leaves lanes empty
-   *  and the hosts clause off. */
-  hostsSource: string | null;
-}
-
 /** `3cbac86` for a clean run, `3cbac86+dirty` when the working tree has
- *  uncommitted changes — every face shows which code the verdict is about. */
-export function commitLabel(header: Pick<RunHeader, "sha7" | "dirty">): string {
-  return header.dirty ? `${header.sha7}+dirty` : header.sha7;
+ *  uncommitted changes — every face shows which code the verdict is about.
+ *  Commit identity lives on `PipelineState`, so the label is fed from state. */
+export function commitLabel(
+  state: Pick<PipelineState, "sha7" | "dirty">,
+): string {
+  return state.dirty ? `${state.sha7}+dirty` : state.sha7;
 }
 
 export interface Display {
-  start(header: RunHeader): void;
+  /** Commit identity comes from `state`; the run-env (lanes, hosts source,
+   *  commit link, start clock) from `header`. */
+  start(state: PipelineState, header: RunHeader): void;
   /** Latest fan-in state — live repaints from it, plain heartbeats off it. */
   update(state: PipelineState): void;
   /** A node crossed a status boundary (the diff-driven event feed). */
@@ -158,13 +146,16 @@ class PlainDisplay implements Display {
   private timer: NodeJS.Timeout | undefined;
   private lastWrite = Date.now();
 
-  start(header: RunHeader): void {
-    // `run` carries lanes + a hosts source, so the banner shows both; an
+  start(state: PipelineState, header: RunHeader): void {
+    // Commit identity (pipeline name + sha) comes from state; `run` carries
+    // lanes + a hosts source on the header, so the banner shows both; an
     // observer (`attach`) has neither, so those clauses drop out and the
     // banner is just `odu · <pipeline> @ <sha>`.
-    const parts = [`odu · ${header.pipeline} @ ${commitLabel(header)}`];
+    const parts = [`odu · ${state.name} @ ${commitLabel(state)}`];
     if (header.lanes.length > 0) {
-      parts.push(header.lanes.map((l) => `${l.platform}=${l.host}`).join(" · "));
+      parts.push(
+        header.lanes.map((l) => `${l.platform}=${l.host}`).join(" · "),
+      );
     }
     const banner = parts.join(" · ");
     this.say(
@@ -234,8 +225,15 @@ export function renderRunFrame(opts: {
   now: number;
   lastLog?: { id: string; text: string };
   columns: number;
+  /** `attach`'s interactive focus — marks the specific matrix cell
+   *  (recipe × platform) whose log the pane below is showing and which `r`
+   *  reruns, so the same recipe on two platforms stays distinguishable. `run`
+   *  passes none. */
+  focusedId?: string;
 }): string {
   const { state, header, tick, now } = opts;
+  const focused =
+    opts.focusedId !== undefined ? splitFanId(opts.focusedId) : undefined;
   const platforms = [
     ...new Set(state.order.map((id) => splitFanId(id).platform)),
   ];
@@ -253,11 +251,11 @@ export function renderRunFrame(opts: {
     : yellow(spinnerAt(tick));
   const shaText =
     header.commitUrl !== null
-      ? link(commitLabel(header), header.commitUrl)
-      : commitLabel(header);
-  const sha = header.dirty ? yellow(`@ ${shaText}`) : dim(`@ ${shaText}`);
+      ? link(commitLabel(state), header.commitUrl)
+      : commitLabel(state);
+  const sha = state.dirty ? yellow(`@ ${shaText}`) : dim(`@ ${shaText}`);
   const lines: string[] = [
-    `${bold("odu")} ${headGlyph} ${header.pipeline} ${sha} ${dim(
+    `${bold("odu")} ${headGlyph} ${state.name} ${sha} ${dim(
       formatGoDuration(now - opts.startedAt),
     )}`,
     dim(
@@ -278,7 +276,14 @@ export function renderRunFrame(opts: {
   for (const recipe of recipes) {
     const cells = platforms.map((platform) => {
       const node = state.nodes[`${recipe}@${platform}`];
-      if (node === undefined) return "".padEnd(cellWidth);
+      // `attach`'s focus lands on one specific cell (recipe × platform), not
+      // a whole row — a `›` on the cell so the same recipe on two platforms is
+      // distinguishable and `r`'s target is unambiguous. `run` passes none.
+      const cellMark =
+        focused?.namepath === recipe && focused?.platform === platform
+          ? "›"
+          : " ";
+      if (node === undefined) return `${cellMark}${"".padEnd(cellWidth)}`;
       const glyph = glyphFor(node.status, tick);
       const time =
         node.status === "running"
@@ -287,9 +292,12 @@ export function renderRunFrame(opts: {
             ? formatGoDuration(node.durationMs)
             : "";
       const plain = `${STATUS_META[node.status].glyph} ${time}`;
-      return `${glyph} ${dim(time)}${"".padEnd(Math.max(0, cellWidth - plain.length))}`;
+      return `${cellMark}${glyph} ${dim(time)}${"".padEnd(Math.max(0, cellWidth - plain.length))}`;
     });
-    lines.push(`  ${recipeLabel(recipe).padEnd(nameWidth)}  ${cells.join("")}`);
+    const marker = focused?.namepath === recipe ? "›" : " ";
+    lines.push(
+      `${marker} ${recipeLabel(recipe).padEnd(nameWidth)} ${cells.join("")}`,
+    );
   }
 
   lines.push("");
@@ -319,11 +327,11 @@ class LiveDisplay implements Display {
   private tick = 0;
   private prevHeight = 0;
   private timer: NodeJS.Timeout | undefined;
-  private readonly startedAt = Date.now();
   private readonly stderrWrite = process.stderr.write.bind(process.stderr);
   private stopped = false;
 
-  start(header: RunHeader): void {
+  start(state: PipelineState, header: RunHeader): void {
+    this.state = state;
     this.header = header;
     process.stdout.write("\x1b[?25l");
     this.hookStderr();
@@ -437,7 +445,7 @@ class LiveDisplay implements Display {
       state: this.state,
       header: this.header,
       tick: this.tick,
-      startedAt: this.startedAt,
+      startedAt: this.header.startedAt,
       now: Date.now(),
       lastLog: this.lastLog,
       columns: process.stdout.columns ?? 100,

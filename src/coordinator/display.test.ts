@@ -52,15 +52,13 @@ const state: PipelineState = {
 };
 
 const header = {
-  pipeline: "ci::default",
-  sha7: "3cbac86",
-  dirty: false,
   commitUrl: "https://github.com/juspay/kolu/commit/3cbac86f",
   lanes: [
     { platform: "x86_64-linux", host: "kolu-ci-5" },
     { platform: "aarch64-darwin", host: "rasam" },
   ],
   hostsSource: "~/.config/odu/hosts.json",
+  startedAt: 940_000,
 };
 
 // ANSI is auto-disabled off-TTY (vitest), so frames are plain strings here.
@@ -102,11 +100,57 @@ describe("renderRunFrame", () => {
     expect(frame.split("\n")[0]).toContain("10m0s");
   });
 
+  it("marks the focused node's recipe row for attach (run passes none)", () => {
+    const focused = renderRunFrame({
+      state,
+      header,
+      tick: 0,
+      startedAt: 940_000,
+      now: 1_540_000,
+      columns: 100,
+      focusedId: "ci::e2e@x86_64-linux",
+    });
+    expect(focused).toMatch(/^› e2e\s/m); // focused recipe row carries the marker
+    expect(focused).toMatch(/^ {2}install\s/m); // others keep the two-space indent
+    // No focusedId (run's path) → no marker, every row two-space indented.
+    expect(frame).toMatch(/^ {2}e2e\s/m);
+  });
+
+  it("marks the focused cell per platform, not the whole recipe row", () => {
+    // Same recipe, two platforms — the focus marker must land on the focused
+    // lane's cell only, so `r`'s target is unambiguous in a matrix run.
+    const linux = renderRunFrame({
+      state,
+      header,
+      tick: 0,
+      startedAt: 940_000,
+      now: 1_540_000,
+      columns: 100,
+      focusedId: "ci::e2e@x86_64-linux",
+    });
+    const darwin = renderRunFrame({
+      state,
+      header,
+      tick: 0,
+      startedAt: 940_000,
+      now: 1_540_000,
+      columns: 100,
+      focusedId: "ci::e2e@aarch64-darwin",
+    });
+    // The e2e row's two renderings differ — the cell marker moves with the
+    // focused platform, so they are not byte-identical (the old per-recipe bug).
+    const e2eRow = (f: string): string =>
+      f.split("\n").find((l) => /^› e2e\s/.test(l)) ?? "";
+    expect(e2eRow(linux)).not.toBe(e2eRow(darwin));
+    expect(e2eRow(linux)).not.toBe("");
+    expect(e2eRow(darwin)).not.toBe("");
+  });
+
   it("names the commit, marking a dirty live-tree run loudly", () => {
     expect(frame.split("\n")[0]).toContain("@ 3cbac86");
     const dirtyFrame = renderRunFrame({
-      state,
-      header: { ...header, dirty: true },
+      state: { ...state, dirty: true },
+      header,
       tick: 0,
       startedAt: 940_000,
       now: 1_540_000,

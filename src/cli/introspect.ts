@@ -6,22 +6,24 @@
  */
 
 import {
+  EMPTY_HEADER,
   type NodeLogFrame,
   type NodeState,
   type PipelineState,
+  type RunHeader,
   STATUS_META,
 } from "../common/surface";
 import {
   createDisplay,
   progressEvent,
-  type RunHeader,
+  renderRunFrame,
 } from "../coordinator/display";
 import { dialSocket, type OduClient } from "../coordinator/socket";
 import {
   applyLogFrame,
   defaultAttachId,
   nodeRow,
-  renderDashboard,
+  renderLogPane,
   statusGlyph,
   summarize,
 } from "./render";
@@ -31,6 +33,18 @@ export async function firstSnapshot(client: OduClient): Promise<PipelineState> {
     return state;
   }
   throw new Error("odu: coordinator closed before sending state");
+}
+
+/** The run header off the surface — `run` publishes it before serving, so the
+ *  first value is the real lane→host map. The `header` cell always yields its
+ *  current value (EMPTY_HEADER until `run` publishes), so an empty stream means
+ *  the coordinator closed before sending — a protocol failure we surface
+ *  rather than mask with a blank banner (mirrors `firstSnapshot`). */
+export async function firstHeader(client: OduClient): Promise<RunHeader> {
+  for await (const header of await client.surface.header.get({})) {
+    return header;
+  }
+  throw new Error("odu: coordinator closed before sending header");
 }
 
 /** Resolve a node argument against the live state: exact id, or unique
@@ -107,22 +121,6 @@ export async function attachCommand(json: boolean): Promise<number> {
   return attachDashboard(client, close);
 }
 
-/** The run header `attach` shows above the transition stream — `run`'s
- *  banner minus the parts only the coordinator owns. An attached observer
- *  knows the pipeline name + commit (from the surface) but not which hosts the
- *  coordinator leased (lanes) nor the forge origin (commitUrl), so it leaves
- *  those empty and the banner collapses to `odu · <pipeline> @ <sha>`. */
-function attachHeader(state: PipelineState): RunHeader {
-  return {
-    pipeline: state.name,
-    sha7: state.sha7,
-    dirty: state.dirty,
-    commitUrl: null,
-    lanes: [],
-    hostsSource: null,
-  };
-}
-
 /** Non-tty / `-o json`: one line per node transition — the attach analogue
  *  of `--progress json`. Routes through `run`'s own `createDisplay`, building
  *  each event with the shared `progressEvent`, so the json shape (with
@@ -141,7 +139,12 @@ export async function attachStream(
     last = state;
     if (!started) {
       started = true;
-      display.start(attachHeader(state));
+      // Commit identity (pipeline name + sha) comes from the snapshot's state;
+      // an observer has no run-env (no leased hosts, no forge origin, no own
+      // start clock), so it passes EMPTY_HEADER and the banner collapses to
+      // `odu · <pipeline> @ <sha>`. The matrix dashboard reads the real
+      // run-env off the surface `header` cell instead (`firstHeader`).
+      display.start(state, EMPTY_HEADER);
     }
     display.update(state); // drives the plain heartbeat
     for (const id of state.order) {
@@ -158,23 +161,36 @@ export async function attachStream(
   return last !== undefined && summarize(last).failedOverall ? 1 : 0;
 }
 
-/** Interactive dashboard — node table + attached log pane.
- *  Keys: digits attach, n/p cycle, r rerun (the one mutation), q quit. */
+/** Interactive view — `run`'s recipe × platform matrix with the focused node's
+ *  log pane below it. The header (lane→host map) comes off the surface, so this
+ *  paints the *same* matrix `run` does, not a separate table. Keys: digits / n /
+ *  p move focus, r rerun (the one mutation), q quit. */
 async function attachDashboard(
   client: OduClient,
   close: () => void,
 ): Promise<number> {
+  const header = await firstHeader(client);
   let state: PipelineState | undefined;
   let attachedId: string | undefined;
   let log = "";
   let detachLog: (() => void) | undefined;
+  let tick = 0;
 
   const repaint = (): void => {
     if (state === undefined) return;
-    process.stdout.write("\x1b[2J\x1b[H");
-    process.stdout.write(`${renderDashboard({ state, attachedId, log })}\n`);
+    const frame = renderRunFrame({
+      state,
+      header,
+      tick,
+      startedAt: header.startedAt,
+      now: Date.now(),
+      columns: process.stdout.columns ?? 100,
+      focusedId: attachedId,
+    });
+    const node = attachedId !== undefined ? state.nodes[attachedId] : undefined;
     process.stdout.write(
-      "\n[digits] attach · [n/p] cycle · [r] rerun · [q] quit\n",
+      `\x1b[2J\x1b[H${frame}\n${renderLogPane(node, log)}\n` +
+        "\n[digits] focus · [n/p] cycle · [r] rerun · [q] quit\n",
     );
   };
 
@@ -207,7 +223,17 @@ async function attachDashboard(
     repaint();
   };
 
+  // Repaint on a timer too (not just on state deltas), so the matrix spinners
+  // animate and the elapsed clock ticks between transitions. unref'd + cleared
+  // on quit so it never holds the process open.
+  const ticker = setInterval(() => {
+    tick += 1;
+    repaint();
+  }, 250);
+  ticker.unref?.();
+
   const quit = (code: number): void => {
+    clearInterval(ticker);
     detachLog?.();
     if (process.stdin.isTTY) process.stdin.setRawMode(false);
     process.stdin.pause();
