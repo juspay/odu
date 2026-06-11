@@ -176,21 +176,17 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
   // ── DAG + lanes ──
   const spec = loadJustPipeline(specSource, { root: args.root });
   const hostsConfig = loadHosts();
-  let lanesByPlatform = resolveLanes(
-    hostsConfig,
-    args.hostPins,
-    args.platforms,
-  );
-  // Zero lanes means a bare `odu run` with no hosts configured anywhere — the
+  // Zero configured lanes means a bare `odu run` with no hosts anywhere — the
   // newcomer path. Running on this machine is the overwhelmingly common intent,
   // so default to a localhost lane on the current system rather than erroring.
   // (A localhost lane dials no one; it's the zero-config default, not a baked-in
-  // remote host.) An explicit `--platform` with no host still errors in
-  // resolveLanes — that is the operator asking for a lane we can't build.
+  // remote host.) An explicit `--platform` with no host still errors earlier in
+  // resolveLanes — the operator asking for a lane we can't build.
+  let lanesByPlatform = resolveLanes(hostsConfig, args.hostPins, args.platforms);
   if (Object.keys(lanesByPlatform).length === 0) {
     const system = await resolveSystem("localhost");
+    info(localFallbackNote(system));
     lanesByPlatform = { [system]: "localhost" };
-    process.stderr.write(localFallbackNote(system));
   }
   const selectors = args.selectors.map(parseSelector);
   for (const selector of selectors) {

@@ -52,14 +52,17 @@ export function loadHosts(): HostsConfig {
   return { hosts: {}, source: "(no hosts file)" };
 }
 
-/** The note `odu run` prints when no hosts are configured and it falls back to
- *  a local lane on `system`. Tells the newcomer what just happened and how to
- *  graduate to a multi-machine fanout when they want one. */
+/** The note `odu run` shows when no hosts are configured and it falls back to a
+ *  local lane on `system`. Tells the newcomer what just happened and how to
+ *  graduate to a multi-machine fanout when they want one. The caller owns the
+ *  trailing newline (it rides `run`'s `info` seam, which terminates the line),
+ *  so the text every literal here describes — the config path, the `--host`
+ *  syntax — stays beside `loadHosts`/`resolveLanes`, the module that owns it. */
 export function localFallbackNote(system: string): string {
   return (
     `odu: no hosts configured — running locally on ${system}.\n` +
     `     To fan out across machines, write ~/.config/odu/hosts.json ` +
-    `(platform → host) or pass --host PLAT=ADDR.\n`
+    `(platform → host) or pass --host PLAT=ADDR.`
   );
 }
 
