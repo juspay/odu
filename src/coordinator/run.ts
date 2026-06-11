@@ -498,9 +498,17 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
   };
   // Supersede: cancel a run already live in this checkout (and confirm its
   // socket is gone) before we bind the lock, so "stop this, run the fixed
-  // commit" is one invocation. A no-op when nothing is live.
+  // commit" is one invocation. A no-op when nothing is live. Gate on the
+  // confirmation — same as the MCP path — so a stuck old run fails with a
+  // supersede-specific message rather than `serveSocket`'s opaque lock error.
   if (args.supersede) {
-    await cancelRun(join(repoRoot, SOCKET_PATH));
+    const { confirmed } = await cancelRun(join(repoRoot, SOCKET_PATH));
+    if (!confirmed) {
+      process.stderr.write(
+        "odu: supersede — the run already in progress here did not shut down in time.\n",
+      );
+      return 1;
+    }
   }
   // Publish before serving so an `attach` connecting in the first instant reads
   // the real header, not the EMPTY_HEADER default.
