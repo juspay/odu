@@ -16,21 +16,27 @@ import {
 const hasJust =
   spawnSync("just", ["--version"], { encoding: "utf-8" }).status === 0;
 
-/** A synthetic `just --dump --dump-format json` tree shaped like kolu's:
- *  an empty-bodied `[metadata("ci")]` root in module `ci`, an `install`
- *  funnel, and coordinator-side recipes that must never schedule. */
-function dump(): unknown {
-  const recipe = (
-    name: string,
-    deps: string[],
-    opts: { attributes?: unknown[]; body?: unknown[] } = {},
-  ): unknown => ({
+/** A `just --dump` recipe node in module `ci` (namepath `ci::<name>`), shaped
+ *  like real `just --dump --dump-format json` output. Shared by the synthetic
+ *  fixtures below. */
+function ciRecipe(
+  name: string,
+  deps: string[],
+  opts: { attributes?: unknown[]; body?: unknown[] } = {},
+): unknown {
+  return {
     name,
     namepath: `ci::${name}`,
     attributes: opts.attributes ?? [],
     body: opts.body ?? [["echo hi"]],
     dependencies: deps.map((d) => ({ arguments: [], recipe: d })),
-  });
+  };
+}
+
+/** A synthetic `just --dump --dump-format json` tree shaped like kolu's:
+ *  an empty-bodied `[metadata("ci")]` root in module `ci`, an `install`
+ *  funnel, and coordinator-side recipes that must never schedule. */
+function dump(): unknown {
   return {
     recipes: {
       fmt: {
@@ -44,16 +50,16 @@ function dump(): unknown {
     modules: {
       ci: {
         recipes: {
-          default: recipe("default", ["nix", "e2e", "unit", "smoke"], {
+          default: ciRecipe("default", ["nix", "e2e", "unit", "smoke"], {
             attributes: ["linux", "macos", { metadata: ["ci"] }, "parallel"],
             body: [],
           }),
-          install: recipe("install", []),
-          nix: recipe("nix", []),
-          smoke: recipe("smoke", []),
-          e2e: recipe("e2e", ["install"]),
-          unit: recipe("unit", ["install"]),
-          "pool-ensure": recipe("pool-ensure", []),
+          install: ciRecipe("install", []),
+          nix: ciRecipe("nix", []),
+          smoke: ciRecipe("smoke", []),
+          e2e: ciRecipe("e2e", ["install"]),
+          unit: ciRecipe("unit", ["install"]),
+          "pool-ensure": ciRecipe("pool-ensure", []),
         },
         modules: {},
       },
@@ -157,40 +163,23 @@ describe("selectors", () => {
  *  the cascade is observable; `everywhere` is `[parallel]` to prove a non-OS
  *  attribute imposes no platform restriction. */
 function osDump(): unknown {
-  const r = (
-    name: string,
-    deps: string[],
-    attributes: unknown[] = [],
-  ): unknown => ({
-    name,
-    namepath: `ci::${name}`,
-    attributes,
-    body: [["echo hi"]],
-    dependencies: deps.map((d) => ({ arguments: [], recipe: d })),
-  });
+  const tagged = (name: string, attr: string): unknown =>
+    ciRecipe(name, [], { attributes: [attr] });
   return {
     recipes: {},
     modules: {
       ci: {
         recipes: {
-          default: {
-            name: "default",
-            namepath: "ci::default",
-            attributes: [{ metadata: ["ci"] }],
-            body: [],
-            dependencies: [
-              "everywhere",
-              "linuxOnly",
-              "macOnly",
-              "unixOnly",
-              "deployer",
-            ].map((d) => ({ arguments: [], recipe: d })),
-          },
-          everywhere: r("everywhere", [], ["parallel"]),
-          linuxOnly: r("linuxOnly", [], ["linux"]),
-          macOnly: r("macOnly", [], ["macos"]),
-          unixOnly: r("unixOnly", [], ["unix"]),
-          deployer: r("deployer", ["linuxOnly"]),
+          default: ciRecipe(
+            "default",
+            ["everywhere", "linuxOnly", "macOnly", "unixOnly", "deployer"],
+            { attributes: [{ metadata: ["ci"] }], body: [] },
+          ),
+          everywhere: tagged("everywhere", "parallel"),
+          linuxOnly: tagged("linuxOnly", "linux"),
+          macOnly: tagged("macOnly", "macos"),
+          unixOnly: tagged("unixOnly", "unix"),
+          deployer: ciRecipe("deployer", ["linuxOnly"]),
         },
         modules: {},
       },

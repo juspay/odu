@@ -292,12 +292,12 @@ export function laneTasks(
   selectors: readonly Selector[],
   noDeps: boolean,
 ): TaskSpec[] {
-  const enabled = enabledOnPlatform(spec.tasks, platform);
-
   const relevant = selectors.filter(
     (s) => s.platform === undefined || s.platform === platform,
   );
   if (selectors.length > 0 && relevant.length === 0) return [];
+
+  const enabled = enabledOnPlatform(spec.tasks, platform);
 
   let wanted: Set<string>;
   if (relevant.length === 0) {
@@ -315,17 +315,12 @@ export function laneTasks(
       }
     }
   }
-  const kept = new Set(
-    spec.tasks
-      .filter((t) => wanted.has(t.id) && enabled.has(t.id))
-      .map((t) => t.id),
-  );
+  // A task (and each of its dependency edges) survives on this lane iff it was
+  // both asked for and OS-enabled here.
+  const keep = (id: string): boolean => wanted.has(id) && enabled.has(id);
   return spec.tasks
-    .filter((t) => kept.has(t.id))
-    .map((t) => ({
-      ...t,
-      needs: t.needs.filter((dep) => kept.has(dep)),
-    }));
+    .filter((t) => keep(t.id))
+    .map((t) => ({ ...t, needs: t.needs.filter((dep) => keep(dep)) }));
 }
 
 /** Mermaid flowchart of the pipeline DAG (justci's `graph` equivalent). */
