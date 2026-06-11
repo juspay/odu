@@ -38,3 +38,11 @@ fmt-check:
 # Update the kolu / nixpkgs pins
 update-pins:
     nix run nixpkgs#npins -- update
+
+# Regenerate the APM-managed agent config (.claude/, .mcp.json,
+# apm.lock.yaml) from apm.yml + .apm/ sources. odu is a hybrid APM package,
+# so this also self-deploys its own ci skill + odu MCP launcher (dogfooding,
+# the way a consumer like kolu gets them). Run apm via uvx — never the
+# system binary, which may be a stale version that mangles the lockfile.
+apm:
+    {{ nix_shell }} uvx --from apm-cli apm install

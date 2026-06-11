@@ -10,5 +10,6 @@ pkgs.mkShell ({
     pnpm
     tsx
     nixpkgs-fmt
+    uv # `just apm` runs apm via `uvx --from apm-cli`
   ];
 } // oduEnv)
