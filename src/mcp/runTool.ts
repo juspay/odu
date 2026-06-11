@@ -118,18 +118,18 @@ async function awaitStartup(
   socketPath: string,
   onExit: Promise<number>,
 ): Promise<{ up: true } | { up: false; code: number | null }> {
+  // `exitCode` is null until the child exits; non-null means "has exited with
+  // this code", so both the sentinel and the value live in one variable.
   let exitCode: number | null = null;
-  let exited = false;
   const exitGuard = onExit.then((code) => {
     exitCode = code;
-    exited = true;
   });
   const up = await waitForSocket(socketPath, exitGuard);
   if (up) return { up: true };
   // Not up. If the child has already exited (or is about to in this tick),
   // capture its code so we report it; never block on a still-alive child.
   await Promise.race([exitGuard, Promise.resolve()]);
-  return { up: false, code: exited ? exitCode : null };
+  return { up: false, code: exitCode };
 }
 
 /** `run` — start a pipeline the agent can then watch and drive. Spawns a
@@ -178,9 +178,11 @@ export async function startRun(
     env: process.env,
   });
   liveRuns.add(child);
+  // Cap stderr to 64KB so a verbose child process can't grow this unboundedly.
+  const MAX_STDERR = 64 * 1024;
   let stderr = "";
   child.stderr?.on("data", (c: Buffer) => {
-    stderr += c.toString("utf-8");
+    stderr = (stderr + c.toString("utf-8")).slice(-MAX_STDERR);
   });
   const onExit = new Promise<number>((resolve) => {
     child.on("exit", (code) => {
