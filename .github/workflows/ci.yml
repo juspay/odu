@@ -1,10 +1,12 @@
 # odu runs odu: each platform job executes this repo's own [metadata("ci")]
 # DAG with the odu built from the very commit under test — coordinator and
-# lane on the same runner (a localhost lane), strict mode, posting
-# ci::<recipe>@<platform> commit statuses next to the Actions checks.
+# lane on the same runner (a localhost lane), strict mode.
 #
-# Fork PRs degrade gracefully: their read-only token can't post statuses,
-# and odu logs failed posts without failing the run.
+# It runs with --no-post: this workflow is the green/red Actions check only.
+# Commit-status posting (the ci::<recipe>@<platform> contexts) is owned by the
+# local / MCP-driven run, which holds the durable per-SHA logs the statuses
+# point at — a status posted from here would reference logs on a runner that's
+# already gone. So this job needs no statuses:write and no token.
 name: ci
 
 on:
@@ -14,7 +16,6 @@ on:
 
 permissions:
   contents: read
-  statuses: write
 
 jobs:
   odu:
@@ -31,15 +32,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Check out the PR HEAD, not the synthetic merge ref: odu posts
-          # statuses to the sha it tests, and only head-sha statuses show
-          # on the PR.
+          # Check out the PR HEAD, not the synthetic merge ref, so the run
+          # tests the sha the PR is actually about.
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: nixbuild/nix-quick-install-action@v31
       - name: odu runs odu
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           nix run --accept-flake-config .#odu -- run \
+            --no-post \
             --platform ${{ matrix.system }} \
             --host ${{ matrix.system }}=localhost
