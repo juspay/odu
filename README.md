@@ -8,10 +8,13 @@ commit statuses, and — unlike every batch CI tool — holds the run as **live,
 typed state you can attach to** from a terminal dashboard while it runs.
 
 ```
-$ odu run                      # the whole DAG, every configured platform
+$ odu run                      # the whole DAG — local by default, or every configured platform
 $ odu attach                   # attach a live dashboard to the run (other terminal)
 $ odu logs -f e2e@x86_64-linux # follow one node's output
 ```
+
+> [!TIP]
+> New here? Read the announcement — [**Introducing odu**](https://kolu.dev/blog/odu/) — for the story behind it and **video demos** of a live run and the agent face.
 
 ## Why
 
@@ -57,33 +60,42 @@ shell, and the source arrives by `git fetch` of the pushed SHA.
 
 ## Install / run
 
-```sh
-nix run github:juspay/odu -- run --no-strict     # from anywhere
-nix run .#odu -- run                             # inside a consuming repo
-```
-
-## Developing
+Nothing to install — run odu straight from the flake against the current repo:
 
 ```sh
-just install     # pnpm install + hydrate @kolu/* from the npins kolu pin
-just typecheck
-just test        # the loopback falsifiability suite
-just run -- run --no-strict --platform x86_64-linux --host x86_64-linux=localhost fmt
+nix run github:juspay/odu -- run               # a strict CI run
+nix run github:juspay/odu -- run --no-strict   # dev iteration: dirty tree OK, no GitHub writes
 ```
 
-odu consumes the [`@kolu/surface`](https://github.com/juspay/kolu/tree/master/packages/surface)
-libraries **upstream, not vendored** — the
-[drishti](https://github.com/srid/drishti) pattern: `npins` pins
-`juspay/kolu`, `nix/overlay.nix` extracts each package as a store path, and
-`scripts/hydrate-kolu-packages.sh` copies the raw TypeScript into
-`node_modules/@kolu/` (`just update-pins` to advance the pin). The repo runs
-its own CI with itself: `nix run .#odu -- run` against the
-`[metadata("ci")]` DAG in `ci/mod.just`.
+## Configure your repo
 
-### Configure platforms
+### Tag the pipeline DAG
 
-`~/.config/odu/hosts.json` (or `$ODU_HOSTS`; falls back to justci's
-`~/.config/justci/hosts.json` so migrating needs zero config):
+Exactly one recipe carries `[metadata("ci")]`; its dependency closure *is* the
+pipeline odu runs:
+
+```just
+[metadata("ci")]
+default: build test lint
+```
+
+### Where the lanes run
+
+**Local (the default).** With no hosts configured, `odu run` runs the whole
+pipeline on *this* machine — it detects your Nix system and uses a `localhost`
+lane, which runs directly against your toolchain (skipping the Nix closure
+copy). Nothing to set up:
+
+```sh
+odu run            # → "no hosts configured — running locally on aarch64-darwin"
+```
+
+This single-machine case is what most users want, and most never need more.
+
+**Multi-platform (fan out across machines).** To run each platform's lane on a
+real builder for that platform, list them in `~/.config/odu/hosts.json` (or set
+`$ODU_HOSTS` to a hosts file elsewhere — its value is a filesystem path to a
+JSON file in this same format, taking precedence over the default location):
 
 ```json
 {
@@ -92,20 +104,14 @@ its own CI with itself: `nix run .#odu -- run` against the
 }
 ```
 
-Keys are Nix system tuples; values are anything ssh can dial, or
-`localhost` (runs directly, skipping the closure copy). Missing platforms
-drop from the fanout. `--host PLAT=ADDR` pins a platform for one run —
-that is how kolu's warm-pool lease (`ci/pu/run.sh`) injects a leased box.
-
-### Tag your DAG
-
-Exactly one recipe carries `[metadata("ci")]`; its dependency closure is the
-pipeline:
-
-```just
-[metadata("ci")]
-default: build test lint
-```
+Keys are Nix system tuples; values are anything ssh can dial, or `localhost`.
+A bare `odu run` then fans out to **every** configured platform at once;
+missing platforms simply drop from the fanout, and `--platform P` slices to a
+subset. The real-world example is **kolu**, which builds on both Linux and
+macOS: its CI keys an `x86_64-linux` and an `aarch64-darwin` lane, and its
+warm-pool lease (`ci/pu/run.sh`) injects the leased box per run with
+`--host PLAT=ADDR` (which pins or adds a platform for one run, on top of the
+file).
 
 ## CLI
 
@@ -197,6 +203,24 @@ instead of `github:juspay/odu`).
   in the same checkout refuses to start.
 - **Idle attach is not here yet.** `odu status` with no live run exits 1;
   a long-lived idle runner you can attach to is Phase-2 territory.
+
+## Developing
+
+```sh
+just install     # pnpm install + hydrate @kolu/* from the npins kolu pin
+just typecheck
+just test        # the loopback falsifiability suite
+just run -- run --no-strict fmt   # one recipe, locally, against the live tree
+```
+
+odu consumes the [`@kolu/surface`](https://github.com/juspay/kolu/tree/master/packages/surface)
+libraries **upstream, not vendored** — the
+[drishti](https://github.com/srid/drishti) pattern: `npins` pins
+`juspay/kolu`, `nix/overlay.nix` extracts each package as a store path, and
+`scripts/hydrate-kolu-packages.sh` copies the raw TypeScript into
+`node_modules/@kolu/` (`just update-pins` to advance the pin). The repo runs
+its own CI with itself: `nix run .#odu -- run` against the
+`[metadata("ci")]` DAG in `ci/mod.just`.
 
 ## Lineage and roadmap
 
