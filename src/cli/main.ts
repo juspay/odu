@@ -5,6 +5,7 @@
  *   odu status [-o json]                   snapshot a live run's nodes
  *   odu logs [-f] <node>                   one node's log (replay + follow)
  *   odu attach [-o json]                   live dashboard / transition stream
+ *   odu cancel                             stop the live run in this checkout
  *   odu dump                               resolved pipeline as JSON
  *   odu graph                              dependency graph (Mermaid)
  *   odu protect [--dry-run] [--branch B]   sync required status checks
@@ -20,17 +21,24 @@
 import { parseArgs } from "node:util";
 import { runCommand } from "../coordinator/run";
 import { loadJustPipeline, mermaidGraph } from "../just/ingest";
-import { attachCommand, logsCommand, statusCommand } from "./introspect";
+import {
+  attachCommand,
+  cancelCommand,
+  logsCommand,
+  statusCommand,
+} from "./introspect";
 import { mcpCommand } from "./mcp";
 import { protectCommand } from "./protect";
 
-const USAGE = `usage: odu <run|status|logs|attach|dump|graph|protect|mcp> [args]
+const USAGE = `usage: odu <run|status|logs|attach|cancel|dump|graph|protect|mcp> [args]
 
 run [recipe[@platform]…] [--platform P]… [--host P=ADDR]… [--root NAMEPATH]
     [--no-deps] [--no-strict] [--no-snapshot] [--no-post] [--progress json]
+    [--supersede] [--linger]
 status [-o json]
 logs [-f] <node>
 attach [-o json]
+cancel
 dump [--root NAMEPATH]
 graph [--root NAMEPATH]
 protect [--dry-run] [--branch B] [--platform P]…
@@ -53,6 +61,8 @@ async function dispatch(argv: string[]): Promise<number> {
           "no-snapshot": { type: "boolean" },
           "no-post": { type: "boolean" },
           progress: { type: "string" },
+          supersede: { type: "boolean" },
+          linger: { type: "boolean" },
         },
       });
       if (values.progress !== undefined && values.progress !== "json") {
@@ -68,6 +78,8 @@ async function dispatch(argv: string[]): Promise<number> {
         noSnapshot: values["no-snapshot"] ?? false,
         noPost: values["no-post"] ?? false,
         progressJson: values.progress === "json",
+        supersede: values.supersede ?? false,
+        linger: values.linger ?? false,
       });
     }
     case "status": {
@@ -94,6 +106,8 @@ async function dispatch(argv: string[]): Promise<number> {
       });
       return attachCommand(values.output === "json");
     }
+    case "cancel":
+      return cancelCommand();
     case "dump":
     case "graph": {
       const { values } = parseArgs({

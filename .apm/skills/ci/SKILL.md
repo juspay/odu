@@ -103,11 +103,20 @@ nix run github:juspay/odu -- attach          # live TUI dashboard on a tty
                                              #  r rerun · q quit); -o json
                                              # = transition stream
 nix run github:juspay/odu -- logs -f e2e@x86_64-linux
+nix run github:juspay/odu -- cancel          # stop the live run, cleanly
 ```
 
 No run in progress ⇒ exit non-zero with `no run in progress in this
 checkout (no live socket at .ci/odu.sock)`. One run per checkout — a
 second `odu run` refuses while the socket is live.
+
+**Cancel / supersede / linger.** `odu cancel` drives the live run's teardown
+from a second process (finalize posted statuses, close lanes, drop the socket)
+and waits until it's gone — no need to wait out a doomed run or `pkill` the
+coordinator. `odu run --supersede` cancels whatever's live here first, then
+starts ("stop this, run the fixed commit"). By default a run exits the instant
+it drains; `odu run --linger` keeps it serving past settle so a node can be
+rerun later (retry a flake), self-reaping after an idle period or on `cancel`.
 
 ## Hosts config
 

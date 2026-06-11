@@ -62,12 +62,14 @@ mcp_configs:
     registry: false
     command: .agents/skills/odu-mcp/bin/serve
 local_deployed_files:
+- .claude/rules/surface-docs-sync.md
 - .claude/skills/ci
 - .claude/skills/ci/SKILL.md
 - .claude/skills/odu-mcp
 - .claude/skills/odu-mcp/SKILL.md
 - .claude/skills/odu-mcp/bin/serve
 local_deployed_file_hashes:
-  .claude/skills/ci/SKILL.md: sha256:1d06eca01b5ac03c825a943e99ca45a567c8ea7dd420fb08660705112bb232fd
-  .claude/skills/odu-mcp/SKILL.md: sha256:d21d9900fe3144e2535f94d2291d1dba474c23daead0762629fddc35d3193e96
+  .claude/rules/surface-docs-sync.md: sha256:20bfe61dc593bc471625f068d2c9ee328f45e45c65fa32ec183303d60a282014
+  .claude/skills/ci/SKILL.md: sha256:eb8c18af59c2a4992198083668828254894d43ddc2b3bf1bf025192648a2dd38
+  .claude/skills/odu-mcp/SKILL.md: sha256:25cd14d47aa082fb4061e793d3b74095eeb6749672356eea6b9acde9f9de6863
   .claude/skills/odu-mcp/bin/serve: sha256:6152e8fc4d3478b70a5cd547c172be596787e600b5757233fb82b307186b9e26

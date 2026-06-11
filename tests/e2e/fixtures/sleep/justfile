@@ -1,0 +1,10 @@
+# A fixture whose ci DAG blocks on a long sleep, so the run stays live long
+# enough to be cancelled / superseded / observed. The sleep is far longer than
+# any test's patience, so a natural green finish never races the assertion —
+# the run is always still running when the test acts on it.
+
+[metadata("ci")]
+default: slow
+
+slow:
+    sleep 120

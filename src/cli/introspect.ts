@@ -1,8 +1,9 @@
 /**
- * In-band introspection of a live run — `odu status` / `logs` / `attach`
- * attach to the coordinator's fan-in surface on `.ci/odu.sock`. The same
- * three primitives every face speaks: one snapshot of the `nodes` cell, a
- * log stream with snapshot-then-append replay, the dashboard with `r`erun.
+ * In-band commands against a live run — `odu status` / `logs` / `attach`
+ * attach to the coordinator's fan-in surface on `.ci/odu.sock`; `odu cancel`
+ * drives its teardown. The same primitives every face speaks: one snapshot of
+ * the `nodes` cell, a log stream with snapshot-then-append replay, the
+ * dashboard with `r`erun, and the `run.cancel` lifecycle mutation.
  */
 
 import {
@@ -12,6 +13,7 @@ import {
   type RunHeader,
   STATUS_META,
 } from "../common/surface";
+import { cancelRun } from "../coordinator/cancel";
 import { createDisplay, progressEvent } from "../coordinator/display";
 import { dialSocket, type OduClient } from "../coordinator/socket";
 import { exitCode, nodeRow, statusGlyph, summarize } from "./render";
@@ -192,4 +194,23 @@ async function attachDashboard(
   view.stop(last);
   close();
   return exitCode(last);
+}
+
+/** `odu cancel` — tell the live run in this checkout to stop, and wait until
+ *  its coordinator is gone. No live run is a clean no-op (nothing to cancel),
+ *  not an error: cancelling something already finished is success. */
+export async function cancelCommand(socketPath?: string): Promise<number> {
+  const result = await cancelRun(socketPath);
+  if (!result.cancelled) {
+    process.stderr.write(
+      "odu: no run in progress in this checkout (nothing to cancel)\n",
+    );
+    return 0;
+  }
+  process.stdout.write(
+    result.confirmed
+      ? "odu: run cancelled\n"
+      : "odu: cancel requested — the coordinator is still shutting down\n",
+  );
+  return 0;
 }

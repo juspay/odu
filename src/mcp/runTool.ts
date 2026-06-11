@@ -15,6 +15,7 @@
 import { spawn } from "node:child_process";
 import { z } from "zod";
 import type { BespokeTool } from "@kolu/surface-mcp";
+import { type CancelResult, cancelRun } from "../coordinator/cancel";
 import { SOCKET_PATH, tryDialSocket } from "../coordinator/socket";
 
 export const runInput = z.object({
@@ -26,6 +27,12 @@ export const runInput = z.object({
   no_strict: z.boolean().optional(),
   no_snapshot: z.boolean().optional(),
   no_post: z.boolean().optional(),
+  /** Cancel a run already live in this checkout and start fresh, instead of
+   *  refusing — the "stop this, run the fixed commit" move after a fail-fast. */
+  supersede: z.boolean().optional(),
+  /** Keep the coordinator alive after the run drains so a node can be rerun
+   *  post-settle; call `cancel` (or `run` with supersede) when done. */
+  linger: z.boolean().optional(),
 });
 export type RunInput = z.infer<typeof runInput>;
 
@@ -54,6 +61,11 @@ function runArgsFrom(input: RunInput): string[] {
   if (input.no_strict) args.push("--no-strict");
   if (input.no_snapshot) args.push("--no-snapshot");
   if (input.no_post) args.push("--no-post");
+  if (input.linger) args.push("--linger");
+  // `supersede` is handled here in `startRun` (cancel the live run, confirm
+  // it's gone, then spawn), so the spawned coordinator binds a free lock and
+  // never needs the flag — and `awaitStartup` can't mistake the dying run's
+  // socket for the new one.
   return args;
 }
 
@@ -68,6 +80,9 @@ export function killRuns(): void {
 
 export interface SpawnDeps {
   socketPath?: string;
+  /** Injected for tests; defaults to `cancelRun`. Used to supersede a run
+   *  already live in this checkout (cancel it + confirm its socket is gone). */
+  cancelExisting?: (socketPath: string) => Promise<CancelResult>;
   /** Injected for tests; defaults to spawning the real odu CLI. */
   spawnRun?: (args: string[]) => { stderr: string; onExit: Promise<number> };
   /** Poll the socket until it answers (or `exited` resolves); injected for
@@ -146,11 +161,26 @@ export async function startRun(
   const existing = await tryDialSocket(socketPath);
   if (existing !== null) {
     existing.close();
-    return {
-      ok: false,
-      started: false,
-      error: "a run is already in progress in this checkout",
-    };
+    if (!input.supersede) {
+      return {
+        ok: false,
+        started: false,
+        error:
+          "a run is already in progress in this checkout " +
+          "(pass supersede to cancel it and start fresh)",
+      };
+    }
+    // Supersede: cancel the live run and wait until its socket is gone, so the
+    // spawn below binds a free lock rather than colliding on it.
+    const cancel = deps.cancelExisting ?? cancelRun;
+    const result = await cancel(socketPath);
+    if (!result.confirmed) {
+      return {
+        ok: false,
+        started: false,
+        error: "supersede: the existing run did not shut down in time",
+      };
+    }
   }
 
   const args = runArgsFrom(input);
