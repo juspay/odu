@@ -42,7 +42,7 @@
  * so a silently-closed-and-rebound socket can't pin a previous run's snapshot.)
  */
 
-import { closeSync, openSync, readSync, statSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 import { deriveStream, projectSurface } from "@kolu/surface/project";
 import { inMemoryChannelByName } from "@kolu/surface/server";
@@ -230,7 +230,7 @@ function durableLogPath(
 function tailFile(path: string, maxBytes: number): string {
   const fd = openSync(path, "r");
   try {
-    const size = statSync(path).size;
+    const size = fstatSync(fd).size;
     const start = size > maxBytes ? size - maxBytes : 0;
     const length = size - start;
     const buf = Buffer.allocUnsafe(length);
