@@ -67,10 +67,6 @@ nix run github:juspay/odu -- run               # a strict CI run
 nix run github:juspay/odu -- run --no-strict   # dev iteration: dirty tree OK, no GitHub writes
 ```
 
-If your repo pins odu in its own `flake.nix` (the `ODU_FLAKE=.#odu` wiring in
-the [MCP section](#drive-ci-from-an-agent-mcp)), the same command becomes
-`nix run .#odu -- run` — your pinned version, no network fetch.
-
 ## Configure your repo
 
 ### Tag the pipeline DAG
