@@ -15,7 +15,7 @@
  * resources) and `node.rerun` (as a tool) reach the host; the coordinator's
  * `header` cell and the lane-only `run.configure` are unreachable by
  * construction. Two bespoke tools — `run` (spawn-and-await) and
- * `wait_for_settle` (blocking poll) — ride alongside.
+ * `wait_for_settle` (single blocking subscription) — ride alongside.
  */
 
 import { readFileSync } from "node:fs";
@@ -51,10 +51,15 @@ export async function mcpCommand(socketPath: string = SOCKET_PATH): Promise<numb
   // One stable B-client over a *re-dialing* A-client: the projection is wired
   // once, but every upstream call inside it dials a fresh `.ci/odu.sock`. So a
   // run that starts (or restarts on the same path) after the server booted is
-  // observed by the next read/poll/subscribe — without relying on the adapter's
-  // memoized connection to re-dial. No socket → the A-client yields the no-run
-  // value, so `nodes`/`wait_for_settle` read `{ run: false }`, `logs` reads the
-  // durable file, and `run` (which ignores the client) spawns a coordinator.
+  // observed by the next read/subscribe — without relying on the adapter's
+  // memoized connection to re-dial. Each `nodes` read and log follow re-subscribe
+  // (re-dial) afresh; `wait_for_settle` holds ONE subscription dialed at call
+  // time, so it observes the coordinator live when it subscribes, not one that
+  // starts later — the run → wait_for_settle agent loop is safe because `run`
+  // blocks until the socket is live before returning. No socket → the A-client
+  // yields the no-run value, so `nodes`/`wait_for_settle` read `{ run: false }`,
+  // `logs` reads the durable file, and `run` (which ignores the client) spawns a
+  // coordinator.
   const aClient = redialingAClient(async () => {
     const dialed = await tryDialSocket(socketPath);
     return dialed === null ? null : { client: dialed.client, close: dialed.close };

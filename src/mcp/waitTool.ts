@@ -1,10 +1,10 @@
 /**
- * The `wait_for_settle` bespoke MCP tool — a fail-fast blocking poll over the
- * live `nodes` cell.
+ * The `wait_for_settle` bespoke MCP tool — a fail-fast single blocking
+ * subscription over the live `nodes` stream.
  *
  * This is the floor that works on every MCP host: the model is *inside* a tool
  * call when the answer lands, so it needs no resource-notification support. It
- * blocks on the agent surface's `nodes` cell (the projected `{ run, pipeline,
+ * blocks on the agent surface's `nodes` stream (the projected `{ run, pipeline,
  * nodes[] }` frames) and returns the verdict the instant a node goes red
  * (fail-fast) or the whole run settles.
  *
@@ -92,8 +92,9 @@ export interface WaitOptions {
   now?: () => number;
 }
 
-/** Block on the live `nodes` cell and return the verdict the instant a node
- *  goes red (fail-fast) or the whole run settles. */
+/** A fail-fast single blocking subscription over the live `nodes` stream:
+ *  block and return the verdict the instant a node goes red (fail-fast) or the
+ *  whole run settles. */
 export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
   const failFast = opts.failFast ?? true;
   const timeoutMs = opts.timeoutMs ?? 600_000;

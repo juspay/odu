@@ -348,9 +348,12 @@ export type DialA = () => Promise<{
  * that closed and was re-bound by the *next* run (same `.ci/odu.sock` path)
  * doesn't make a pending read throw; the old projection would keep serving the
  * previous run's snapshot. Re-dialing per call sidesteps that entirely: each
- * `nodes` read / `wait_for_settle` poll / log follow opens the live socket
- * afresh, so it sees the run that's live *now*, and falls back to the no-run
- * value the instant there's no socket.
+ * `nodes` read and log follow re-subscribe (re-dial) afresh, so they see the
+ * run that's live *now*, and fall back to the no-run value the instant there's
+ * no socket. `wait_for_settle` holds ONE subscription dialed at call time, so it
+ * observes the coordinator live when it subscribes, not one that starts later —
+ * the run → wait_for_settle agent loop is safe because `run` blocks until the
+ * socket is live before returning.
  *
  *   - `nodes.get`  — dial, stream A's `nodes` (snapshot-then-deltas) until the
  *                    consumer aborts/returns or A closes; no socket → one
