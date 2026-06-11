@@ -55,6 +55,17 @@ export function loadHosts(): HostsConfig {
   return { hosts: {}, source: "(no hosts file)" };
 }
 
+/** The note `odu run` prints when no hosts are configured and it falls back to
+ *  a local lane on `system`. Tells the newcomer what just happened and how to
+ *  graduate to a multi-machine fanout when they want one. */
+export function localFallbackNote(system: string): string {
+  return (
+    `odu: no hosts configured — running locally on ${system}.\n` +
+    `     To fan out across machines, write ~/.config/odu/hosts.json ` +
+    `(platform → host) or pass --host PLAT=ADDR.\n`
+  );
+}
+
 /** Apply `--host PLAT=ADDR` pins and `--platform` slices to the config. */
 export function resolveLanes(
   config: HostsConfig,

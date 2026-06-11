@@ -28,7 +28,11 @@ import {
   inMemoryChannelByName,
   inMemoryStore,
 } from "@kolu/surface/server";
-import { destroyAllSessions, isLocalHost } from "@kolu/surface-nix-host";
+import {
+  destroyAllSessions,
+  isLocalHost,
+  resolveSystem,
+} from "@kolu/surface-nix-host";
 import { implement } from "@orpc/server";
 import { bold, dim, green, link, magenta, red } from "../cli/ansi";
 import { formatGoDuration } from "../common/duration";
@@ -46,7 +50,7 @@ import {
 } from "../common/surface";
 import { commitLabel, createDisplay, progressEvent } from "./display";
 import { laneTasks, loadJustPipeline, parseSelector } from "../just/ingest";
-import { loadHosts, resolveLanes } from "./hosts";
+import { loadHosts, localFallbackNote, resolveLanes } from "./hosts";
 import { type Lane, startLane } from "./lane";
 import { SOCKET_PATH, serveSocket } from "./socket";
 import {
@@ -172,11 +176,22 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
   // ── DAG + lanes ──
   const spec = loadJustPipeline(specSource, { root: args.root });
   const hostsConfig = loadHosts();
-  const lanesByPlatform = resolveLanes(
+  let lanesByPlatform = resolveLanes(
     hostsConfig,
     args.hostPins,
     args.platforms,
   );
+  // Zero lanes means a bare `odu run` with no hosts configured anywhere — the
+  // newcomer path. Running on this machine is the overwhelmingly common intent,
+  // so default to a localhost lane on the current system rather than erroring.
+  // (A localhost lane dials no one; it's the zero-config default, not a baked-in
+  // remote host.) An explicit `--platform` with no host still errors in
+  // resolveLanes — that is the operator asking for a lane we can't build.
+  if (Object.keys(lanesByPlatform).length === 0) {
+    const system = await resolveSystem("localhost");
+    lanesByPlatform = { [system]: "localhost" };
+    process.stderr.write(localFallbackNote(system));
+  }
   const selectors = args.selectors.map(parseSelector);
   for (const selector of selectors) {
     if (
