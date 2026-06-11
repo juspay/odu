@@ -21,29 +21,19 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ResourceUpdatedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import { serveSurfaceAsMcp } from "@kolu/surface-mcp";
 import { afterEach, describe, expect, it } from "vitest";
-import { gitTopLevel, headSha7 } from "../common/git";
+import { gitRunContext } from "../common/git";
 import { tryDialSocket } from "../coordinator/socket";
 import { oduSurface, pendingNode, type PipelineState } from "../common/surface";
 import {
   type AgentNodesReader,
   buildAgentProjection,
+  type DialA,
   durableLog,
   redialingAClient,
 } from "./agentSurface";
 import { serveTestSurface, type TestSurface } from "./serveForTest";
 import { waitForSettle } from "./waitTool";
 
-/** The git-backed run-context resolver, mirroring `mcp.ts`'s default: the
- *  durable-log identity (repo root + SHA) the projection now takes through the
- *  injection seam. The MCP-wiring tests don't exercise the durable read, so any
- *  resolver works; this matches production so the durable-file tests below
- *  (which write real `.ci/<sha7>/…` files) resolve to the same paths. */
-function gitRunContext(): { repoRoot: string; sha7: string } | null {
-  const repoRoot = gitTopLevel();
-  const sha7 = headSha7(repoRoot);
-  if (repoRoot === null || sha7 === null) return null;
-  return { repoRoot, sha7 };
-}
 
 type Row = [id: string, status: PipelineState["nodes"][string]["status"]];
 
@@ -71,24 +61,35 @@ afterEach(async () => {
   for (const s of open.splice(0)) s.close();
 });
 
-/** Stand up the MCP server + a connected MCP client over an in-memory pair,
- *  wired exactly as `mcpCommand`: one stable B-client over a re-dialing
- *  A-client that dials `socketPath` fresh per call (so a coordinator restart at
- *  the same path is observed). `socketPath` defaults to the served surface's. */
-async function connect(s: TestSurface, socketPath: string = s.socketPath) {
-  const projection = buildAgentProjection(oduSurface, gitRunContext);
-  const [clientTransport, serverTransport] =
-    InMemoryTransport.createLinkedPair();
+/** Retry `fn` up to `maxAttempts` times at `delayMs` intervals until the
+ *  returned value satisfies `pred`. Returns the last value regardless. */
+async function pollUntil<T>(
+  fn: () => Promise<T>,
+  pred: (val: T) => boolean,
+  maxAttempts = 50,
+  delayMs = 20,
+): Promise<T> {
+  let val = await fn();
+  for (let i = 1; i < maxAttempts && !pred(val); i += 1) {
+    await new Promise((r) => setTimeout(r, delayMs));
+    val = await fn();
+  }
+  return val;
+}
 
-  const aClient = redialingAClient(async () => {
-    const dialed = await tryDialSocket(socketPath);
-    return dialed === null
-      ? null
-      : { client: dialed.client, close: dialed.close };
-  });
+/** Shared MCP-server wiring used by both `connect` and `connectNoRun`: build
+ *  the projection over a re-dialing A-client, wire the in-memory transport, and
+ *  register closers. `dial` controls whether a live coordinator is reachable;
+ *  `tools` is the bespoke-tool map passed to `serveSurfaceAsMcp`. */
+async function connectWith(
+  dial: DialA,
+  tools: Parameters<typeof serveSurfaceAsMcp>[0]["tools"],
+) {
+  const projection = buildAgentProjection(oduSurface, gitRunContext);
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const aClient = redialingAClient(dial);
   const { router } = projection.implement(aClient);
   const bClient = directLink<typeof projection.surface.contract>(router);
-
   const served = await serveSurfaceAsMcp({
     surface: projection.surface,
     client: () => bClient,
@@ -97,7 +98,27 @@ async function connect(s: TestSurface, socketPath: string = s.socketPath) {
       logs: "resource",
       "node.rerun": { tool: { mutates: true } },
     },
-    tools: {
+    tools,
+    serverInfo: { name: "odu", version: "0.0.0" },
+    transport: serverTransport,
+  });
+  const mcp = new Client({ name: "test-client", version: "0.0.0" });
+  await mcp.connect(clientTransport);
+  closers.push(() => mcp.close(), () => served.close());
+  return { mcp, served };
+}
+
+/** Stand up the MCP server + a connected MCP client over an in-memory pair,
+ *  wired exactly as `mcpCommand`: one stable B-client over a re-dialing
+ *  A-client that dials `socketPath` fresh per call (so a coordinator restart at
+ *  the same path is observed). `socketPath` defaults to the served surface's. */
+async function connect(s: TestSurface, socketPath: string = s.socketPath) {
+  return connectWith(
+    async () => {
+      const dialed = await tryDialSocket(socketPath);
+      return dialed === null ? null : { client: dialed.client, close: dialed.close };
+    },
+    {
       run: {
         description: "stub",
         // No real spawn in the smoke test — assert tools/list only.
@@ -109,17 +130,7 @@ async function connect(s: TestSurface, socketPath: string = s.socketPath) {
         handler: () => ({ settled: false }),
       },
     },
-    serverInfo: { name: "odu", version: "0.0.0" },
-    transport: serverTransport,
-  });
-
-  const mcp = new Client({ name: "test-client", version: "0.0.0" });
-  await mcp.connect(clientTransport);
-  closers.push(
-    () => mcp.close(),
-    () => served.close(),
   );
-  return { mcp, served };
 }
 
 describe("odu agent MCP — end to end over the in-memory transport", () => {
@@ -213,13 +224,11 @@ describe("odu agent MCP — end to end over the in-memory transport", () => {
         undefined,
         socketPath,
       );
-      let seen = "";
-      for (let i = 0; i < 50 && seen !== "run-B"; i += 1) {
-        read = await mcp.readResource({ uri: "surface://streams/nodes" });
-        seen = JSON.parse((read.contents[0] as { text: string }).text).pipeline;
-        if (seen !== "run-B") await new Promise((r) => setTimeout(r, 20));
-      }
-      expect(seen).toBe("run-B");
+      read = await pollUntil(
+        () => mcp.readResource({ uri: "surface://streams/nodes" }),
+        (r) => JSON.parse((r.contents[0] as { text: string }).text).pipeline === "run-B",
+      );
+      expect(JSON.parse((read.contents[0] as { text: string }).text).pipeline).toBe("run-B");
 
       // And after the second run ends, reads fall back to the no-run value.
       b.close();
@@ -258,12 +267,11 @@ describe("odu agent MCP — end to end over the in-memory transport", () => {
     // First read primes the live follow (returns the durable/empty fallback);
     // poll the item until the live frame lands.
     const uri = `surface://collections/logs/${encodeURIComponent("ci::e2e@x86_64-linux")}`;
-    let text = "";
-    for (let i = 0; i < 50 && !text.includes("cucumber"); i += 1) {
-      const read = await mcp.readResource({ uri });
-      text = JSON.parse((read.contents[0] as { text: string }).text).text;
-      if (!text.includes("cucumber")) await new Promise((r) => setTimeout(r, 20));
-    }
+    const read = await pollUntil(
+      () => mcp.readResource({ uri }),
+      (r) => JSON.parse((r.contents[0] as { text: string }).text).text.includes("cucumber"),
+    );
+    const text = JSON.parse((read.contents[0] as { text: string }).text).text;
     expect(text).toContain("cucumber: 14 scenarios");
   });
 
@@ -285,26 +293,21 @@ describe("odu agent MCP — end to end over the in-memory transport", () => {
     // The live follow publishes the buffered snapshot through the collection's
     // per-key bus → a `notifications/resources/updated`. A later append must
     // notify again (the follow stays open — not a one-shot snapshot).
-    for (let i = 0; i < 50 && updates.length < 1; i += 1) {
-      await new Promise((r) => setTimeout(r, 20));
-    }
+    await pollUntil(async () => updates.length, (n) => n >= 1);
     expect(updates.length).toBeGreaterThanOrEqual(1);
 
     const before = updates.length;
     s.appendLog("ci::e2e@x86_64-linux", "scenario 2\n");
-    for (let i = 0; i < 50 && updates.length <= before; i += 1) {
-      await new Promise((r) => setTimeout(r, 20));
-    }
+    await pollUntil(async () => updates.length, (n) => n > before);
     expect(updates.length).toBeGreaterThan(before);
 
     // And a read reflects the appended output (the read connection's own
     // follow accumulates the snapshot + appends; poll until it lands).
-    let text = "";
-    for (let i = 0; i < 50 && !text.includes("scenario 2"); i += 1) {
-      const read = await mcp.readResource({ uri });
-      text = JSON.parse((read.contents[0] as { text: string }).text).text;
-      if (!text.includes("scenario 2")) await new Promise((r) => setTimeout(r, 20));
-    }
+    const finalRead = await pollUntil(
+      () => mcp.readResource({ uri }),
+      (r) => JSON.parse((r.contents[0] as { text: string }).text).text.includes("scenario 2"),
+    );
+    const text = JSON.parse((finalRead.contents[0] as { text: string }).text).text;
     expect(text).toContain("scenario 2");
   });
 });
@@ -314,34 +317,11 @@ describe("no-run state — the face stays usable with no coordinator socket", ()
    *  the factory returns the no-run fallback client (no dial). This is the
    *  state an agent is in when it calls `run` to start a pipeline. */
   async function connectNoRun(runHandler: () => unknown) {
-    const projection = buildAgentProjection(oduSurface, gitRunContext);
     // A re-dialing A-client whose dial always fails (no coordinator socket) —
     // the exact wiring `mcpCommand` uses, minus a live socket.
-    const aClient = redialingAClient(async () => null);
-    const { router } = projection.implement(aClient);
-    const bClient = directLink<typeof projection.surface.contract>(router);
-    const [clientTransport, serverTransport] =
-      InMemoryTransport.createLinkedPair();
-    const served = await serveSurfaceAsMcp({
-      surface: projection.surface,
-      client: () => bClient,
-      expose: {
-        nodes: "resource",
-        logs: "resource",
-        "node.rerun": { tool: { mutates: true } },
-      },
-      tools: {
-        run: { description: "stub", handler: runHandler, mutates: true },
-      },
-      serverInfo: { name: "odu", version: "0.0.0" },
-      transport: serverTransport,
+    const { mcp } = await connectWith(async () => null, {
+      run: { description: "stub", handler: runHandler, mutates: true },
     });
-    const mcp = new Client({ name: "test-client", version: "0.0.0" });
-    await mcp.connect(clientTransport);
-    closers.push(
-      () => mcp.close(),
-      () => served.close(),
-    );
     return mcp;
   }
 
@@ -368,19 +348,18 @@ describe("durableLog — guards (ported)", () => {
   it("refuses a node id that escapes the per-SHA log dir", () => {
     // A real .log file sits outside `.ci/<sha7>`; a `..`-laden node id whose
     // logPathFor resolves to it must be rejected, not read.
+    const ctx = gitRunContext();
+    expect(ctx).not.toBeNull();
+    const { repoRoot, sha7 } = ctx as { repoRoot: string; sha7: string };
     const secret = join(tmpdir(), `odu-traversal-${process.pid}.log`);
     writeFileSync(secret, "SECRET CONTENTS\n");
     try {
-      const root = gitTopLevel();
-      const sha7 = headSha7(root);
-      expect(root).not.toBeNull();
-      expect(sha7).not.toBeNull();
       const climb = relative(
-        join(root as string, ".ci", sha7 as string, "x86_64-linux"),
+        join(repoRoot, ".ci", sha7, "x86_64-linux"),
         secret,
       ).replace(/\.log$/, "");
       const token = `${climb}@x86_64-linux`;
-      const result = durableLog(token, root as string, sha7 as string);
+      const result = durableLog(token, repoRoot, sha7);
       expect(result.source).toBe("missing");
       expect(result.text).toBe("");
     } finally {
@@ -389,18 +368,17 @@ describe("durableLog — guards (ported)", () => {
   });
 
   it("clamps a durable log to the 64KB cap", () => {
-    const root = gitTopLevel();
-    const sha7 = headSha7(root);
-    expect(root).not.toBeNull();
-    expect(sha7).not.toBeNull();
+    const ctx = gitRunContext();
+    expect(ctx).not.toBeNull();
+    const { repoRoot, sha7 } = ctx as { repoRoot: string; sha7: string };
     const token = `clamp-test-${process.pid}@x86_64-linux`;
-    const dir = join(root as string, ".ci", sha7 as string, "x86_64-linux");
+    const dir = join(repoRoot, ".ci", sha7, "x86_64-linux");
     const file = join(dir, `clamp-test-${process.pid}.log`);
     const big = "x".repeat(200 * 1024);
     try {
       mkdirSync(dir, { recursive: true });
       writeFileSync(file, big);
-      const result = durableLog(token, root as string, sha7 as string);
+      const result = durableLog(token, repoRoot, sha7);
       expect(result.source).toBe("file");
       expect(result.text.length).toBe(64 * 1024);
     } finally {

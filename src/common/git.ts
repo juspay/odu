@@ -24,3 +24,13 @@ export function headSha7(repoRoot: string | null): string | null {
   });
   return sha.status === 0 ? sha.stdout.trim().slice(0, 7) : null;
 }
+
+/** The durable-log identity from the process's real git: the repo root and the
+ *  current short SHA. Returns `null` outside a git checkout (→ "missing" for
+ *  any durable-log read). Used by both `mcpCommand` and the test harness. */
+export function gitRunContext(): { repoRoot: string; sha7: string } | null {
+  const repoRoot = gitTopLevel();
+  const sha7 = headSha7(repoRoot);
+  if (repoRoot === null || sha7 === null) return null;
+  return { repoRoot, sha7 };
+}

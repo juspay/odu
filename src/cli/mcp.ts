@@ -26,20 +26,10 @@ import { serveSurfaceAsMcp } from "@kolu/surface-mcp";
 import { buildAgentProjection, redialingAClient } from "../mcp/agentSurface";
 import { killRuns, runTool } from "../mcp/runTool";
 import { waitTool } from "../mcp/waitTool";
-import { gitTopLevel, headSha7 } from "../common/git";
+import { gitRunContext } from "../common/git";
 import { oduSurface } from "../common/surface";
 import { SOCKET_PATH, tryDialSocket } from "../coordinator/socket";
 
-/** The durable-log identity from the process's real git: where this `odu mcp`
- *  is checked out and at what SHA. Injected into the projection so the
- *  durable-log fallback takes repo root + SHA as arguments instead of probing
- *  git itself; returns `null` (→ "missing") outside a git checkout. */
-function gitRunContext(): { repoRoot: string; sha7: string } | null {
-  const repoRoot = gitTopLevel();
-  const sha7 = headSha7(repoRoot);
-  if (repoRoot === null || sha7 === null) return null;
-  return { repoRoot, sha7 };
-}
 
 function version(): string {
   try {
