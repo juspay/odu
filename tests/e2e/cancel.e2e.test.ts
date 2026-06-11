@@ -8,15 +8,25 @@
  */
 
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it, onTestFinished } from "vitest";
 import { buildOduBinary, cleanup, makeFixture } from "./harness";
 
 let oduBin: string;
+// Pin every spawned run to a localhost lane regardless of the runner's ambient
+// `~/.config/odu/hosts.json`: an empty hosts file makes `resolveLanes` find
+// nothing, so `odu run` falls back to a single localhost lane (the hermetic
+// shape this suite assumes — a configured remote lane would need an origin the
+// throwaway fixture has none of).
+let env: NodeJS.ProcessEnv;
 
 beforeAll(() => {
   oduBin = buildOduBinary();
+  const hostsFile = join(mkdtempSync(join(tmpdir(), "odu-e2e-hosts-")), "hosts.json");
+  writeFileSync(hostsFile, "{}");
+  env = { ...process.env, ODU_HOSTS: hostsFile };
 }, 600_000);
 
 const live: ChildProcess[] = [];
@@ -38,7 +48,7 @@ function spawnOdu(dir: string, args: string[]): {
   child: ChildProcess;
   exited: Promise<number>;
 } {
-  const child = spawn(oduBin, args, { cwd: dir, stdio: "ignore" });
+  const child = spawn(oduBin, args, { cwd: dir, stdio: "ignore", env });
   live.push(child);
   const exited = new Promise<number>((resolve) => {
     child.on("exit", (code) => resolve(code ?? -1));
@@ -64,7 +74,7 @@ async function waitUntil(
 
 function statusExit(dir: string): number {
   try {
-    execFileSync(oduBin, ["status"], { cwd: dir, stdio: "ignore" });
+    execFileSync(oduBin, ["status"], { cwd: dir, stdio: "ignore", env });
     return 0;
   } catch {
     return 1;
@@ -84,7 +94,7 @@ describe("odu cancel / supersede / linger (black-box)", () => {
     await waitUntil(() => runIsLive(dir), 120_000, "the run to come up");
 
     // The cancel is a different process dialing the live socket.
-    const out = execFileSync(oduBin, ["cancel"], { cwd: dir, encoding: "utf-8" });
+    const out = execFileSync(oduBin, ["cancel"], { cwd: dir, encoding: "utf-8", env });
     expect(out).toMatch(/run cancelled/);
 
     // The coordinator tore down: its process exits and the socket is gone, so a
@@ -105,7 +115,7 @@ describe("odu cancel / supersede / linger (black-box)", () => {
     // Without supersede, the one-run lock refuses the second start.
     let refusedStderr = "";
     try {
-      execFileSync(oduBin, ["run", "--no-strict"], { cwd: dir, encoding: "utf-8" });
+      execFileSync(oduBin, ["run", "--no-strict"], { cwd: dir, encoding: "utf-8", env });
       throw new Error("expected the second run to be refused");
     } catch (err) {
       refusedStderr = String((err as { stderr?: string }).stderr ?? err);
@@ -121,7 +131,7 @@ describe("odu cancel / supersede / linger (black-box)", () => {
     expect(firstCode).not.toBe("timeout"); // the superseded run exited
     await waitUntil(() => runIsLive(dir), 120_000, "the superseding run to serve");
 
-    execFileSync(oduBin, ["cancel"], { cwd: dir }); // clean up the live run
+    execFileSync(oduBin, ["cancel"], { cwd: dir, env }); // clean up the live run
   }, 240_000);
 
   it("--linger keeps the coordinator serving past settle", async () => {
@@ -136,6 +146,7 @@ describe("odu cancel / supersede / linger (black-box)", () => {
         const out = execFileSync(oduBin, ["status", "-o", "json"], {
           cwd: dir,
           encoding: "utf-8",
+          env,
         });
         const rows = JSON.parse(out) as Array<{ status: string }>;
         return rows.length > 0 && rows.every((r) => r.status === "ok");
@@ -148,7 +159,7 @@ describe("odu cancel / supersede / linger (black-box)", () => {
     await sleep(3_000);
     expect(statusExit(dir)).toBe(0);
 
-    execFileSync(oduBin, ["cancel"], { cwd: dir });
+    execFileSync(oduBin, ["cancel"], { cwd: dir, env });
     await waitUntil(() => statusExit(dir) !== 0, 15_000, "cancel to drop the socket");
   }, 180_000);
 });
