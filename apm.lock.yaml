@@ -1,5 +1,5 @@
 lockfile_version: '1'
-generated_at: '2026-06-09T23:15:57.170651+00:00'
+generated_at: '2026-06-11T13:40:17.545302+00:00'
 apm_version: 0.19.0
 dependencies:
 - repo_url: srid/agency
@@ -53,3 +53,21 @@ dependencies:
     .claude/skills/ralph/SKILL.md: sha256:1b2c547102584c87384b90b291536bedc0494dcb8382ac776bd0a3cec0fe1b4a
     .claude/skills/talk/SKILL.md: sha256:ba059751cd4b3c1c52221554719bfe1fc5da56540694cb8e793ae0c19e210377
   content_hash: sha256:703dc7eb1a510ab80f5daa4cd7d9997ed1c748cb0942ff3ced88ac7bd062944b
+mcp_servers:
+- odu
+mcp_configs:
+  odu:
+    name: odu
+    transport: stdio
+    registry: false
+    command: .agents/skills/odu-mcp/bin/serve
+local_deployed_files:
+- .claude/skills/ci
+- .claude/skills/ci/SKILL.md
+- .claude/skills/odu-mcp
+- .claude/skills/odu-mcp/SKILL.md
+- .claude/skills/odu-mcp/bin/serve
+local_deployed_file_hashes:
+  .claude/skills/ci/SKILL.md: sha256:1d06eca01b5ac03c825a943e99ca45a567c8ea7dd420fb08660705112bb232fd
+  .claude/skills/odu-mcp/SKILL.md: sha256:d21d9900fe3144e2535f94d2291d1dba474c23daead0762629fddc35d3193e96
+  .claude/skills/odu-mcp/bin/serve: sha256:6152e8fc4d3478b70a5cd547c172be596787e600b5757233fb82b307186b9e26
