@@ -230,6 +230,21 @@ const rerunProcedure = {
   },
 } as const;
 
+/** The fan-in-only run-lifecycle mutation: `run.cancel` tells the live
+ *  coordinator to stop — it routes the call into the same teardown path a
+ *  SIGINT takes (finalize posted statuses, close lanes, drop the socket,
+ *  exit), so a *second* process (`odu cancel`, the MCP `cancel` tool, or a
+ *  `--supersede` run) can call off a run it doesn't own without pkill-ing the
+ *  coordinator pid. Empty input/`ok` output: cancellation has no parameters,
+ *  and the caller confirms teardown by the socket going away, not by this
+ *  ack (the coordinator may exit before the reply flushes). */
+const cancelProcedure = {
+  cancel: {
+    input: z.object({}),
+    output: z.object({ ok: z.boolean() }),
+  },
+} as const;
+
 /** Served by `odu-runner --stdio` on each lane host. */
 export const laneSurface = defineSurface({
   ...primitives,
@@ -245,9 +260,12 @@ export const laneSurface = defineSurface({
 });
 
 /** Served by the coordinator on `.ci/odu.sock`; consumed by
- *  `odu status` / `logs` / `attach`. Adds the `header` cell (the run
+ *  `odu status` / `logs` / `attach` / `cancel`. Adds the `header` cell (the run
  *  environment: lane→host map + commit link) the lane surface has no business
- *  knowing, so an attached face renders the same matrix `run` does. */
+ *  knowing, so an attached face renders the same matrix `run` does, and the
+ *  `run.cancel` lifecycle mutation a second process drives teardown through.
+ *  (`run.cancel` is fan-in-only — a lane has no run to cancel; it's the
+ *  coordinator that owns the run and the lanes.) */
 export const oduSurface = defineSurface({
   ...primitives,
   cells: {
@@ -259,6 +277,7 @@ export const oduSurface = defineSurface({
   },
   procedures: {
     node: rerunProcedure,
+    run: cancelProcedure,
   },
 });
 

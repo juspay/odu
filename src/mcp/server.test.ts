@@ -31,6 +31,7 @@ import {
   durableLog,
   redialingAClient,
 } from "./agentSurface";
+import { cancelTool } from "./cancelTool";
 import { serveTestSurface, type TestSurface } from "./serveForTest";
 import { waitForSettle } from "./waitTool";
 
@@ -129,18 +130,19 @@ async function connect(s: TestSurface, socketPath: string = s.socketPath) {
         description: "stub",
         handler: () => ({ settled: false }),
       },
+      cancel: cancelTool,
     },
   );
 }
 
 describe("odu agent MCP — end to end over the in-memory transport", () => {
-  it("tools/list is exactly [node_rerun, run, wait_for_settle] (default-deny)", async () => {
+  it("tools/list is exactly [cancel, node_rerun, run, wait_for_settle] (default-deny)", async () => {
     const s = await serve([["ci::e2e@x86_64-linux", "running"]]);
     const { mcp } = await connect(s);
 
     const { tools } = await mcp.listTools();
     const names = tools.map((t) => t.name).sort();
-    expect(names).toEqual(["node_rerun", "run", "wait_for_settle"]);
+    expect(names).toEqual(["cancel", "node_rerun", "run", "wait_for_settle"]);
   });
 
   it("resources/list contains the nodes cell; templates contain the logs item", async () => {

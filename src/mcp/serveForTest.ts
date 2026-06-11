@@ -32,21 +32,40 @@ export interface TestSurface {
   appendLog: (id: string, text: string) => void;
   resetLog: (id: string, text: string) => void;
   reruns: string[];
+  /** How many times `run.cancel` was called over the socket. */
+  cancels: () => number;
   close: () => void;
+}
+
+export interface ServeTestOptions {
+  /** Pin the socket to a caller-owned path (the coordinator-restart regression
+   *  serves two surfaces at the same path in turn). Defaults to a fresh temp
+   *  socket the harness owns and removes on `close`. */
+  socketPath?: string;
+  /** Invoked on a `run.cancel` call. The real coordinator tears down and exits
+   *  in response, so a test exercising `cancelRun`'s wait-for-gone closes the
+   *  listener here (via the passed `close`) to make the socket disappear. */
+  onCancel?: (close: () => void) => void;
 }
 
 export async function serveTestSurface(
   initial: PipelineState,
   initialHeader: RunHeader = EMPTY_HEADER,
-  /** Pin the socket to a caller-owned path (the coordinator-restart regression
-   *  serves two surfaces at the same path in turn). Defaults to a fresh temp
-   *  socket the harness owns and removes on `close`. */
-  pinnedSocketPath?: string,
+  /** A bare string is the legacy pinned-socket-path arg; the object form adds
+   *  the `onCancel` teardown hook. */
+  opts: string | ServeTestOptions = {},
 ): Promise<TestSurface> {
+  const options: ServeTestOptions =
+    typeof opts === "string" ? { socketPath: opts } : opts;
+  const pinnedSocketPath = options.socketPath;
   const store = inMemoryStore<PipelineState>(initial);
   const headerStore = inMemoryStore<RunHeader>(initialHeader);
   const tail = createLogTail();
   const reruns: string[] = [];
+  let cancels = 0;
+  // Forward declaration: the cancel handler can close the listener via the
+  // caller's hook, but `closeListener` is only bound after `serveSocket`.
+  let closeListener: () => void = () => {};
 
   const fragment = implementSurface(oduSurface, {
     channel: inMemoryChannelByName(),
@@ -56,6 +75,13 @@ export async function serveTestSurface(
       node: {
         rerun: async ({ input }) => {
           reruns.push(input.id);
+          return { ok: true };
+        },
+      },
+      run: {
+        cancel: async () => {
+          cancels += 1;
+          options.onCancel?.(() => closeListener());
           return { ok: true };
         },
       },
@@ -69,7 +95,7 @@ export async function serveTestSurface(
   const socketPath = pinnedSocketPath ?? join(dir as string, "odu.sock");
   // Reuse the coordinator's serve (mkdir + 0700 chmod + outcome handling); it
   // types `router` as `any`, the same oRPC-spread workaround run.ts uses.
-  const closeListener = await serveSocket(router, socketPath);
+  closeListener = await serveSocket(router, socketPath);
 
   return {
     socketPath,
@@ -78,6 +104,7 @@ export async function serveTestSurface(
     appendLog: (id, text) => tail.append(id, text),
     resetLog: (id, text) => tail.reset(id, text),
     reruns,
+    cancels: () => cancels,
     // Close the listener AND, when the harness owns the dir, remove it so
     // repeated runs don't leak `odu-mcp-test-*` dirs under the system tmpdir.
     close: () => {

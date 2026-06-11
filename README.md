@@ -157,11 +157,14 @@ odu run [recipe[@platform]…]      run (selectors compose; bare names fan out
     --no-snapshot                 live tree, implies --no-post
     --no-strict                   ≡ --no-snapshot --no-post (dev iteration)
     --progress json               one NDJSON line per node transition
+    --supersede                   cancel a run already live here, then start
+    --linger                      keep serving after settle (rerun a node later)
 odu status [-o json]              snapshot a live run
 odu logs [-f] <node>              replay (+ follow) one node's log
 odu attach [-o json]              live dashboard (tty); piped, -o json
                                   matches run --progress json, else run's
                                   plain transition stream
+odu cancel                        stop the live run in this checkout, cleanly
 odu dump | graph                  resolved pipeline as JSON / Mermaid
 odu protect [--dry-run]           sync branch protection's required contexts
 odu mcp                           serve the agent face (MCP server, stdio)
@@ -169,6 +172,17 @@ odu mcp                           serve the agent face (MCP server, stdio)
 
 **Strict by default**: a real CI run refuses a dirty tree, tests the pinned
 HEAD commit, posts statuses. The opt-outs exist for dev iteration, not CI.
+
+**Cancelling a run.** A run is owned by its coordinator, but `.ci/odu.sock` lets
+a *second* process stop it: `odu cancel` dials the live run and drives the same
+teardown a Ctrl-C does — finalize the posted statuses (no eternally-pending
+checks), close the lanes, drop the socket — then waits until it's gone. So you
+needn't wait out a run you know is doomed, or `pkill` a coordinator pid by hand.
+`odu run --supersede` rolls cancel + start into one: it cancels whatever's live
+here before binding the lock, which is the "stop this, run the fixed commit"
+move after a fail-fast. By default a run exits the instant it drains; `--linger`
+keeps the coordinator serving past settle so you can rerun a node afterwards
+(e.g. retry a flake) — it self-reaps after an idle period, or on `cancel`.
 
 ## Drive CI from an agent (MCP)
 
@@ -186,9 +200,10 @@ the agent.
 
 | Tool | What it does |
 | --- | --- |
-| `run` | Start a run (background coordinator) and return once it's live. |
-| `node_rerun` | Reset a node + its dependents and reschedule (the only mutation). |
+| `run` | Start a run (background coordinator) and return once it's live. `supersede` cancels a run already live here first; `linger` keeps it serving past settle. |
+| `node_rerun` | Reset a node + its dependents and reschedule (the only *node* mutation). |
 | `wait_for_settle` | Block until the run settles, or — fail-fast — the instant a node goes red. |
+| `cancel` | Stop the live run and wait until it's torn down, so a following `run` can start. |
 
 The pipeline snapshot and per-node logs are **subscribable resources** rather
 than tools: `surface://streams/nodes` (the pipeline as `{ run, pipeline, nodes[] }`
@@ -200,7 +215,11 @@ snapshot while a run is up, else the durable per-SHA log). Both support
 on a notification.
 
 The agent loop is `run` → `wait_for_settle` (fail-fast) → read the red node's
-`surface://collections/logs/{id}` → fix → `node_rerun`. Declare it over stdio:
+`surface://collections/logs/{id}` → fix → `node_rerun`. When the right next move
+is a fresh run instead — wrong commit, or the fix is a new commit — `run` with
+`supersede` calls off the live run and starts over in one step; `cancel` calls
+off a run you no longer need at all (so the loop never strands a pipeline or
+hits "a run is already in progress"). Declare it over stdio:
 
 ```jsonc
 // .mcp.json (Claude Code; Codex / opencode / Gemini CLI take the same shape)
@@ -231,7 +250,8 @@ instead of `github:juspay/odu`).
   fails — live state does not survive a runner restart in Phase 1; the
   per-SHA log files do.
 - **One run per checkout.** `.ci/odu.sock` is the lock; a second `odu run`
-  in the same checkout refuses to start.
+  in the same checkout refuses to start — `odu cancel` (or `odu run
+  --supersede`) frees the lock first.
 - **Idle attach is not here yet.** `odu status` with no live run exits 1;
   a long-lived idle runner you can attach to is Phase-2 territory.
 

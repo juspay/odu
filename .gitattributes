@@ -1,0 +1,4 @@
+# `.claude/` is generated from `.apm/` sources by APM (`just apm`) — never edited
+# by hand. Mark it generated so GitHub collapses its diffs and excludes it from
+# language stats. Edit the `.apm/` sources instead.
+.claude/** linguist-generated=true

@@ -52,6 +52,7 @@ import { commitLabel, createDisplay, progressEvent } from "./display";
 import { laneTasks, loadJustPipeline, parseSelector } from "../just/ingest";
 import { loadHosts, localFallbackNote, resolveLanes } from "./hosts";
 import { type Lane, startLane } from "./lane";
+import { cancelRun } from "./cancel";
 import { SOCKET_PATH, serveSocket } from "./socket";
 import {
   fetchUrlFor,
@@ -73,6 +74,12 @@ export interface RunArgs {
   noSnapshot: boolean;
   noPost: boolean;
   progressJson: boolean;
+  /** Cancel a run already live in this checkout before starting, instead of
+   *  refusing on the one-run lock — "stop this, run the fixed commit". */
+  supersede: boolean;
+  /** Keep the coordinator serving after the run drains, so a node can be
+   *  rerun post-settle; exit only on cancel / signal / idle backstop. */
+  linger: boolean;
 }
 
 function git(repo: string, args: string[]): string {
@@ -120,6 +127,11 @@ export async function runCommand(args: RunArgs): Promise<number> {
     rmSync(snapshotDir, { recursive: true, force: true });
     snapshotDir = null;
   };
+  // The cancel / linger / signal teardown exits via `process.exit` (in
+  // `shutdown`), which bypasses the `finally` below — so also reclaim the HEAD
+  // snapshot on process exit. Idempotent (guards on `snapshotDir`) and sync, so
+  // it's safe both here and as an exit handler.
+  process.once("exit", cleanupSnapshot);
 
   try {
     return await orchestrate(args, {
@@ -318,6 +330,54 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
     if (lane === undefined) return false;
     return lane.rerun(namepath);
   };
+
+  // ── teardown: the single path every cancel-shaped interrupt shares ──
+  // Defined above the surface so the `run.cancel` mutation can drive the very
+  // same teardown a SIGINT does. `closeSocket` is hoisted (assigned once the
+  // socket serves, below) so this closure can reference it before it exists.
+  let closeSocket: () => void = () => {};
+  // Linger's idle backstop: a settled-but-lingering coordinator self-reaps
+  // after `idleMs` with no new work, so a forgotten `--linger` run can't hold
+  // the checkout lock forever. Cleared the instant a node (re)starts.
+  const idleMs = lingerIdleMs();
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  const clearIdle = (): void => {
+    if (idleTimer !== undefined) {
+      clearTimeout(idleTimer);
+      idleTimer = undefined;
+    }
+  };
+  // Linger hook: invoked on every settle (each drain, including post-rerun);
+  // null in the default mode where the run exits on its first settle.
+  let onSettledEach: (() => void) | null = null;
+
+  let shuttingDown = false;
+  // The single shutdown every interrupt source shares: SIGTERM/SIGINT, the live
+  // view's `q` (via `onQuit`), and the `run.cancel` surface mutation a second
+  // process drives (`odu cancel`, the MCP `cancel` tool, a `--supersede` start).
+  // An interrupted coordinator must not strand `Running:` contexts as eternally
+  // pending checks, and must hand the terminal back. Natural completion does NOT
+  // pass through here — it falls through to the verdict below.
+  const shutdown = (code: number, reason = "interrupted"): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    clearIdle();
+    info(`odu: ${reason} — finalizing posted statuses before exit`);
+    for (const context of poster.pendingContexts()) {
+      poster.post({
+        state: "error",
+        context,
+        description: `Errored (${reason}): ${logPathFor(sha7, context)}`,
+      });
+    }
+    void poster.settle().then(() => {
+      for (const lane of lanes.values()) lane.close();
+      closeSocket();
+      display.stop(store.get());
+      process.exit(code);
+    });
+  };
+
   const fragment = implementSurface(oduSurface, {
     channel: inMemoryChannelByName(),
     cells: { nodes: { store }, header: { store: headerStore } },
@@ -327,6 +387,15 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
     procedures: {
       node: {
         rerun: async ({ input }) => ({ ok: await rerunNode(input.id) }),
+      },
+      run: {
+        // A second process asked this run to stop. Drive the shared teardown
+        // and ack at once — the caller confirms the run is gone by the socket
+        // closing, not by this reply (the process exits as the queue drains).
+        cancel: async () => {
+          shutdown(130, "cancelled");
+          return { ok: true };
+        },
       },
     },
   });
@@ -349,7 +418,10 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
       const status = state.nodes[id]?.status;
       return status !== "pending" && status !== "running";
     });
-    if (done) settled();
+    if (done) {
+      settled();
+      onSettledEach?.();
+    }
   };
 
   const updateNode = (id: string, patch: Partial<NodeState>): void => {
@@ -370,6 +442,9 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
     });
     display.update(store.get());
     if (next.status !== prev.status) {
+      // A node (re)starting means work resumed — disarm linger's idle backstop
+      // so it can't reap a run that just got a rerun.
+      if (next.status === "running") clearIdle();
       emitProgress(id, next);
       const payload = statusFor(id, next.status, next.durationMs, sha7);
       if (payload !== null) poster.post(payload);
@@ -421,10 +496,24 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
     hostsSource: hostsConfig.source,
     startedAt: Date.now(),
   };
+  // Supersede: cancel a run already live in this checkout (and confirm its
+  // socket is gone) before we bind the lock, so "stop this, run the fixed
+  // commit" is one invocation. A no-op when nothing is live. Gate on the
+  // confirmation — same as the MCP path — so a stuck old run fails with a
+  // supersede-specific message rather than `serveSocket`'s opaque lock error.
+  if (args.supersede) {
+    const { confirmed } = await cancelRun(join(repoRoot, SOCKET_PATH));
+    if (!confirmed) {
+      process.stderr.write(
+        "odu: supersede — the run already in progress here did not shut down in time.\n",
+      );
+      return 1;
+    }
+  }
   // Publish before serving so an `attach` connecting in the first instant reads
   // the real header, not the EMPTY_HEADER default.
   headerStore.set(header);
-  const closeSocket = await serveSocket(router, join(repoRoot, SOCKET_PATH));
+  closeSocket = await serveSocket(router, join(repoRoot, SOCKET_PATH));
 
   display.start(store.get(), header);
   display.update(store.get());
@@ -518,34 +607,122 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
     lanes.set(platform, lane);
   }
 
-  // ── the interrupt path: an interrupted coordinator must not strand
-  //    `Running:` contexts as eternally-pending checks, and must hand the
-  //    terminal back. The single shutdown the three interrupt sources share:
-  //    SIGTERM, and (in raw mode Ctrl-C is a keypress, not a SIGINT) the live
-  //    view's `q`/Ctrl-C/Ctrl-D via `onQuit`. SIGINT routes here too for the
-  //    non-interactive `run` (no raw mode → a real SIGINT). Natural completion
-  //    does NOT go through here — it falls through to the verdict below. ──
-  let shuttingDown = false;
-  const shutdown = (code: number): void => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    info("odu: interrupted — finalizing posted statuses before exit");
-    for (const context of poster.pendingContexts()) {
-      poster.post({
-        state: "error",
-        context,
-        description: `Errored (interrupted): ${logPathFor(sha7, context)}`,
-      });
-    }
-    void poster.settle().then(() => {
-      for (const lane of lanes.values()) lane.close();
-      closeSocket();
-      display.stop(store.get());
-      process.exit(code);
-    });
-  };
+  // `shutdown` (the shared teardown) is defined above the surface so the
+  // `run.cancel` mutation can drive it; here we only attach the OS signals.
   process.once("SIGINT", () => shutdown(130));
   process.once("SIGTERM", () => shutdown(130));
+
+  // ── verdict artifacts ──
+  // The per-node timing sidecar report.sh scrapes — durations odu owns in its
+  // state cell, written directly rather than re-parsed from logs. Refreshed on
+  // every settle in linger mode (a post-rerun drain updates it); written once on
+  // a normal run's completion. Best-effort: a missing sidecar only degrades the
+  // metrics comment.
+  const writeTimingSidecar = (state: PipelineState): void => {
+    try {
+      const timingLines: string[] = [];
+      for (const id of state.order) {
+        const node = state.nodes[id];
+        if (node === undefined) continue;
+        const { namepath, platform } = splitFanId(id);
+        timingLines.push(
+          JSON.stringify({
+            node: id,
+            recipe: namepath,
+            platform,
+            status: node.status,
+            startedAt: node.startedAt,
+            durationMs: node.durationMs,
+            exitCode: node.exitCode,
+          }),
+        );
+      }
+      const timingsFile = join(repoRoot, ".ci", sha7, "timings.jsonl");
+      mkdirSync(dirname(timingsFile), { recursive: true });
+      writeFileSync(timingsFile, `${timingLines.join("\n")}\n`);
+    } catch {
+      // best-effort: a missing sidecar only degrades the metrics comment
+    }
+  };
+
+  // Any red node (failed/errored) → the process exit code.
+  const verdictCode = (state: PipelineState): number =>
+    state.order.some((id) => {
+      const node = state.nodes[id];
+      return node !== undefined && STATUS_META[node.status].isRed;
+    })
+      ? 1
+      : 0;
+
+  // The human verdict summary — foreground completion only, never mid-linger
+  // where the live display still owns the screen. Returns the exit code.
+  const printVerdict = (state: PipelineState): number => {
+    const counts = { ok: 0, failed: 0, errored: 0, skipped: 0 };
+    const shaLabel = commitLabel({ sha7, dirty: ctx.dirty });
+    const lines: string[] = [
+      dim(
+        `── ci run summary @ ${
+          commitUrl !== null ? link(shaLabel, commitUrl) : shaLabel
+        } ──`,
+      ),
+    ];
+    for (const id of state.order) {
+      const node = state.nodes[id];
+      if (node === undefined) continue;
+      if (node.status === "ok") counts.ok += 1;
+      else if (node.status === "failed") counts.failed += 1;
+      else if (node.status === "errored") counts.errored += 1;
+      else if (node.status === "skipped") counts.skipped += 1;
+      const color =
+        node.status === "ok"
+          ? green
+          : node.status === "errored"
+            ? magenta
+            : node.status === "failed"
+              ? red
+              : dim;
+      const glyph = color(STATUS_META[node.status].glyph);
+      const dur =
+        node.durationMs !== null
+          ? ` ${dim(formatGoDuration(node.durationMs))}`
+          : "";
+      const logRef =
+        node.status === "failed" || node.status === "errored"
+          ? dim(`  ${logPathFor(sha7, id)}`)
+          : "";
+      lines.push(`  ${glyph} ${id.padEnd(44)} ${node.status}${dur}${logRef}`);
+    }
+    const code = verdictCode(state);
+    lines.push(
+      `${counts.ok} ok · ${counts.failed} failed · ${counts.errored} errored · ${counts.skipped} skipped — ${
+        code > 0 ? bold(red("FAILED")) : bold(green("OK"))
+      }`,
+    );
+    process.stderr.write(`${lines.join("\n")}\n`);
+    return code;
+  };
+
+  if (args.linger) {
+    // Keep the coordinator serving past settle so a node can be rerun after the
+    // run drains (the flake-retry sub-case the agent loop wants). Refresh the
+    // sidecar on every drain and arm the idle backstop; exit only via cancel /
+    // signal / idle — all of which route through `shutdown`, which exits us.
+    onSettledEach = (): void => {
+      writeTimingSidecar(store.get());
+      if (idleMs > 0) {
+        clearIdle();
+        idleTimer = setTimeout(
+          () => shutdown(verdictCode(store.get()), "idle"),
+          idleMs,
+        );
+        idleTimer.unref?.();
+      }
+    };
+    // A run that already drained before we reached here fires the hook once.
+    checkSettled();
+    await new Promise<void>(() => {});
+    return 0; // unreachable: shutdown() exits the process
+  }
 
   await allSettled;
 
@@ -553,82 +730,20 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
   closeSocket();
   await poster.settle();
 
-  // ── verdict ──
   const finalState = store.get();
   display.stop(finalState);
-  const counts = { ok: 0, failed: 0, errored: 0, skipped: 0 };
-  let redCount = 0;
-  const shaLabel = commitLabel({ sha7, dirty: ctx.dirty });
-  const lines: string[] = [
-    dim(
-      `── ci run summary @ ${
-        commitUrl !== null ? link(shaLabel, commitUrl) : shaLabel
-      } ──`,
-    ),
-  ];
-  for (const id of finalState.order) {
-    const node = finalState.nodes[id];
-    if (node === undefined) continue;
-    if (node.status === "ok") counts.ok += 1;
-    else if (node.status === "failed") counts.failed += 1;
-    else if (node.status === "errored") counts.errored += 1;
-    else if (node.status === "skipped") counts.skipped += 1;
-    if (STATUS_META[node.status].isRed) redCount += 1;
-    const color =
-      node.status === "ok"
-        ? green
-        : node.status === "errored"
-          ? magenta
-          : node.status === "failed"
-            ? red
-            : dim;
-    const glyph = color(STATUS_META[node.status].glyph);
-    const dur =
-      node.durationMs !== null
-        ? ` ${dim(formatGoDuration(node.durationMs))}`
-        : "";
-    const logRef =
-      node.status === "failed" || node.status === "errored"
-        ? dim(`  ${logPathFor(sha7, id)}`)
-        : "";
-    lines.push(`  ${glyph} ${id.padEnd(44)} ${node.status}${dur}${logRef}`);
-  }
-  lines.push(
-    `${counts.ok} ok · ${counts.failed} failed · ${counts.errored} errored · ${counts.skipped} skipped — ${
-      redCount > 0 ? bold(red("FAILED")) : bold(green("OK"))
-    }`,
-  );
-  process.stderr.write(`${lines.join("\n")}\n`);
+  const code = printVerdict(finalState);
+  writeTimingSidecar(finalState);
+  return code;
+}
 
-  // ── timing sidecar: the per-node durations report.sh used to scrape out of
-  //    justci's process-compose log (.ci/pc.log). odu owns the durations in
-  //    its state cell, so it writes them directly rather than leaving anyone
-  //    to re-parse logs. JSON lines, one per node: {node, recipe, platform,
-  //    status, startedAt, durationMs, exitCode}. ──
-  try {
-    const timingLines: string[] = [];
-    for (const id of finalState.order) {
-      const node = finalState.nodes[id];
-      if (node === undefined) continue;
-      const { namepath, platform } = splitFanId(id);
-      timingLines.push(
-        JSON.stringify({
-          node: id,
-          recipe: namepath,
-          platform,
-          status: node.status,
-          startedAt: node.startedAt,
-          durationMs: node.durationMs,
-          exitCode: node.exitCode,
-        }),
-      );
-    }
-    const timingsFile = join(repoRoot, ".ci", sha7, "timings.jsonl");
-    mkdirSync(dirname(timingsFile), { recursive: true });
-    writeFileSync(timingsFile, `${timingLines.join("\n")}\n`);
-  } catch {
-    // best-effort: a missing sidecar only degrades the metrics comment
-  }
-
-  return redCount > 0 ? 1 : 0;
+/** Idle backstop for a `--linger` run: after the run drains, the coordinator
+ *  self-reaps after this long with no new work, so a forgotten lingering run
+ *  can't hold the checkout's one-run lock forever. `ODU_LINGER_IDLE_MS=0`
+ *  disables it (linger until cancel/signal only); default 30 minutes. */
+function lingerIdleMs(): number {
+  const raw = process.env.ODU_LINGER_IDLE_MS;
+  if (raw === undefined || raw === "") return 30 * 60 * 1000;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 30 * 60 * 1000;
 }
