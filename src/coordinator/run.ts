@@ -173,25 +173,29 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
     display.info(msg);
   };
 
-  // ── DAG + lanes ──
-  const spec = loadJustPipeline(specSource, { root: args.root });
-  const hostsConfig = loadHosts();
-  let lanesByPlatform = resolveLanes(
-    hostsConfig,
-    args.hostPins,
-    args.platforms,
-  );
-  // Zero lanes means a bare `odu run` with no hosts configured anywhere — the
+  // Zero configured lanes means a bare `odu run` with no hosts anywhere — the
   // newcomer path. Running on this machine is the overwhelmingly common intent,
   // so default to a localhost lane on the current system rather than erroring.
   // (A localhost lane dials no one; it's the zero-config default, not a baked-in
-  // remote host.) An explicit `--platform` with no host still errors in
-  // resolveLanes — that is the operator asking for a lane we can't build.
-  if (Object.keys(lanesByPlatform).length === 0) {
+  // remote host.) An explicit `--platform` with no host still errors earlier in
+  // resolveLanes — the operator asking for a lane we can't build. The whole
+  // policy lives here, in the orchestrator, so the resolver stays a pure
+  // transform and the note rides the same `info` seam as every other line.
+  const applyLocalhostFallback = async (
+    lanes: Record<string, string>,
+  ): Promise<Record<string, string>> => {
+    if (Object.keys(lanes).length > 0) return lanes;
     const system = await resolveSystem("localhost");
-    lanesByPlatform = { [system]: "localhost" };
-    process.stderr.write(localFallbackNote(system));
-  }
+    info(localFallbackNote(system));
+    return { [system]: "localhost" };
+  };
+
+  // ── DAG + lanes ──
+  const spec = loadJustPipeline(specSource, { root: args.root });
+  const hostsConfig = loadHosts();
+  const lanesByPlatform = await applyLocalhostFallback(
+    resolveLanes(hostsConfig, args.hostPins, args.platforms),
+  );
   const selectors = args.selectors.map(parseSelector);
   for (const selector of selectors) {
     if (
