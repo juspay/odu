@@ -17,9 +17,9 @@
  * — `run`'s coordinator loop and `attach`'s read-loop both call it) and the
  * focused-node log is pull-fed via an injected `openLog(id, signal)` (`run`
  * passes its in-memory tail, `attach` passes the surface's `nodeLog` stream).
- * Keys (digits / n / p / r / q) drive focus, rerun, and quit through injected
- * callbacks. When non-interactive (a piped `attach`, or a `run` whose stdin
- * isn't a TTY) the keys + raw mode are simply off.
+ * Keys (digits / h / j / k / l / r / q) drive focus, rerun, and quit through
+ * injected callbacks. When non-interactive (a piped `attach`, or a `run` whose
+ * stdin isn't a TTY) the keys + raw mode are simply off.
  *
  * The live renderer owns the terminal: it hides the cursor, repaints a
  * bounded region, and (when `hookStderr`, i.e. `run`) interposes
@@ -48,7 +48,7 @@ import {
   summarize,
 } from "../cli/render";
 import { formatGoDuration } from "../common/duration";
-import { splitFanId } from "../common/nodeId";
+import { fanId, splitFanId } from "../common/nodeId";
 import {
   type NodeLogFrame,
   type NodeState,
@@ -168,6 +168,46 @@ function glyphFor(status: NodeState["status"], tick: number): string {
   const raw =
     status === "running" ? spinnerAt(tick) : STATUS_META[status].glyph;
   return STATUS_COLOR[status](raw);
+}
+
+/** Move the interactive focus one cell across the recipe × platform matrix:
+ *  `h`/`l` step between platform columns on the current recipe row, `j`/`k`
+ *  between recipe rows in the current platform column. `order` is the live node
+ *  list, which doubles as the existence check — each axis wraps, and missing
+ *  cells (a recipe that doesn't run on a platform — the `°` gaps) are skipped,
+ *  so focus only ever lands on a real node. With no focus yet, lands on the
+ *  first node. Returns undefined when no other cell exists along that axis.
+ *
+ *  The matrix's rows/columns are derived from `order` exactly as the renderer
+ *  derives them, so a step tracks precisely what's on screen. */
+export function stepFocus(
+  order: readonly string[],
+  focusedId: string | undefined,
+  key: "h" | "j" | "k" | "l",
+): string | undefined {
+  if (focusedId === undefined) return order[0];
+  const present = new Set(order);
+  const platforms = [...new Set(order.map((id) => splitFanId(id).platform))];
+  const recipes: string[] = [];
+  for (const id of order) {
+    const { namepath } = splitFanId(id);
+    if (!recipes.includes(namepath)) recipes.push(namepath);
+  }
+  const { namepath, platform } = splitFanId(focusedId);
+  const horizontal = key === "h" || key === "l";
+  const axis = horizontal ? platforms : recipes;
+  const delta = key === "l" || key === "j" ? 1 : -1;
+  const start = axis.indexOf(horizontal ? platform : namepath);
+  if (start === -1) return undefined;
+  for (let stepCount = 1; stepCount < axis.length; stepCount++) {
+    const pos =
+      (((start + delta * stepCount) % axis.length) + axis.length) % axis.length;
+    const at = axis[pos];
+    if (at === undefined) continue;
+    const candidate = horizontal ? fanId(namepath, at) : fanId(at, platform);
+    if (present.has(candidate)) return candidate;
+  }
+  return undefined;
 }
 
 // ── json ────────────────────────────────────────────────────────────────────
@@ -358,7 +398,7 @@ export function renderRunFrame(opts: {
   return lines.join("\n");
 }
 
-const KEY_HINT = "[digits] focus · [n/p] cycle · [r] rerun · [q] quit";
+const KEY_HINT = "[digits] focus · [hjkl] move · [r] rerun · [q] quit";
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: matching ANSI escapes is the point.
 const CSI_TOKEN = /^\x1b\[[0-9;]*[A-Za-z]/;
@@ -432,7 +472,7 @@ class LiveDisplay implements Display {
   private header: RunHeader | undefined;
   private state: PipelineState | undefined;
   private focusedId: string | undefined;
-  /** Until the operator picks a node by hand (n/p/digits), focus auto-follows
+  /** Until the operator picks a node by hand (hjkl/digits), focus auto-follows
    *  the run: it re-tracks the best default node (first running, else first
    *  pending, else last) on every state update, so a `run` that `start`s with
    *  everything pending advances off `_ci-setup` onto the active node instead of
@@ -581,12 +621,8 @@ class LiveDisplay implements Display {
     }
     const state = this.state;
     if (state === undefined) return;
-    if (key === "n" || key === "p") {
-      const idx =
-        this.focusedId !== undefined ? state.order.indexOf(this.focusedId) : -1;
-      const delta = key === "n" ? 1 : -1;
-      const next =
-        state.order[(idx + delta + state.order.length) % state.order.length];
+    if (key === "h" || key === "j" || key === "k" || key === "l") {
+      const next = stepFocus(state.order, this.focusedId, key);
       if (next !== undefined) {
         this.focusLocked = true; // a hand-picked node stops auto-follow
         this.focus(next);
