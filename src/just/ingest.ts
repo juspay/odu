@@ -301,25 +301,30 @@ export function laneTasks(
 
   let wanted: Set<string>;
   if (relevant.length === 0) {
-    wanted = enabled;
+    wanted = new Set(spec.tasks.map((t) => t.id));
   } else {
     const byId = new Map(spec.tasks.map((t) => [t.id, t]));
     wanted = new Set<string>();
     const queue = relevant.map((s) => resolveRecipe(spec, s.recipe));
     while (queue.length > 0) {
       const id = queue.shift();
-      if (id === undefined || wanted.has(id) || !enabled.has(id)) continue;
+      if (id === undefined || wanted.has(id)) continue;
       wanted.add(id);
       if (!noDeps) {
         for (const dep of byId.get(id)?.needs ?? []) queue.push(dep);
       }
     }
   }
+  const kept = new Set(
+    spec.tasks
+      .filter((t) => wanted.has(t.id) && enabled.has(t.id))
+      .map((t) => t.id),
+  );
   return spec.tasks
-    .filter((t) => wanted.has(t.id))
+    .filter((t) => kept.has(t.id))
     .map((t) => ({
       ...t,
-      needs: t.needs.filter((dep) => wanted.has(dep)),
+      needs: t.needs.filter((dep) => kept.has(dep)),
     }));
 }
 
