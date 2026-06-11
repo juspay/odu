@@ -24,6 +24,11 @@ typecheck: install
 test: install
     {{ nix_shell }} pnpm test:unit
 
+# Black-box e2e: build the odu binary with nix and drive it against a
+# throwaway fixture repo on a localhost lane (tests/e2e/README.md).
+e2e: install
+    {{ nix_shell }} pnpm test:e2e
+
 # Run odu from source: `just run -- run --no-strict biome`
 run *args: install
     {{ nix_shell }} pnpm start {{ args }}

@@ -1,0 +1,14 @@
+# A passing fixture DAG. odu discovers the [metadata("ci")] recipe, expands
+# its reachable subgraph, and runs each reachable recipe as
+# `just --no-deps <name>`. Every leaf here is pure shell that exits 0, so the
+# whole run goes green and `odu run` exits 0.
+
+[parallel]
+[metadata("ci")]
+default: alpha beta
+
+alpha:
+    echo "alpha ran"
+
+beta: alpha
+    echo "beta ran"
