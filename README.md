@@ -208,6 +208,6 @@ migration was invisible to branch protection), and then graduated here, the
 way kolu's remote-process-monitor example became
 [drishti](https://github.com/srid/drishti). The design history, the justci
 comparison, and the phased roadmap (the web face) live in the kolu Atlas:
-[*A CI runner you attach to*](https://github.com/juspay/kolu/blob/master/docs/atlas/dist/mini-ci-vs-justci.html).
+[*A CI runner you attach to*](https://htmlpreview.github.io/?https://raw.githubusercontent.com/juspay/kolu/master/docs/atlas/dist/mini-ci-vs-justci.html).
 
 License: AGPL-3.0-or-later.
