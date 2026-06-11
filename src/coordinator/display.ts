@@ -170,44 +170,47 @@ function glyphFor(status: NodeState["status"], tick: number): string {
   return STATUS_COLOR[status](raw);
 }
 
-/** Project the flat node-id `order` into the matrix the live view draws: the
- *  recipe rows and platform columns (each in first-seen order) and a
- *  `fanId(recipe, platform)` → original-id lookup for the cells that exist. The
- *  one home for the "flat list → 2D shape" rule, so the renderer and the hjkl
- *  navigator can never drift on how rows/columns are derived. */
+/** Project the flat node-id `order` into the matrix axes the live view draws:
+ *  the recipe rows and platform columns, each in first-seen order. The one home
+ *  for the "flat list → 2D shape" rule, so the renderer and the hjkl navigator
+ *  can never drift on how rows and columns are derived. */
 function matrixShape(order: readonly string[]): {
   recipes: string[];
   platforms: string[];
-  cells: Map<string, string>;
 } {
   const recipes: string[] = [];
   const platforms: string[] = [];
-  const cells = new Map<string, string>();
   for (const id of order) {
     const { namepath, platform } = splitFanId(id);
-    cells.set(fanId(namepath, platform), id);
     if (!recipes.includes(namepath)) recipes.push(namepath);
     if (!platforms.includes(platform)) platforms.push(platform);
   }
-  return { recipes, platforms, cells };
+  return { recipes, platforms };
 }
 
 /** Move the interactive focus one cell across the recipe × platform matrix:
  *  `h`/`l` step between platform columns on the current recipe row, `j`/`k`
  *  between recipe rows in the current platform column. Each axis wraps, and
  *  missing cells (a recipe that doesn't run on a platform — the `°` gaps) are
- *  skipped, so focus only ever lands on a real node. The `cells` map returns the
- *  *original* id rather than a re-synthesized one (a lane-local id without `@`
- *  would rebuild into a different string and never match). With no focus yet,
- *  lands on the first node; returns undefined when no other cell exists along
- *  that axis. */
+ *  skipped, so focus only ever lands on a real node. With no focus yet, lands on
+ *  the first node; returns undefined when no other cell exists along that axis. */
 export function stepFocus(
   order: readonly string[],
   focusedId: string | undefined,
   key: "h" | "j" | "k" | "l",
 ): string | undefined {
   if (focusedId === undefined) return order[0];
-  const { recipes, platforms, cells } = matrixShape(order);
+  const { recipes, platforms } = matrixShape(order);
+  // Each existing cell keyed by `fanId(recipe, platform)` back to its original
+  // id, so a step returns the real id rather than a re-synthesized one — a
+  // lane-local id without `@` would otherwise rebuild into a different string
+  // and never match.
+  const cells = new Map(
+    order.map((id) => {
+      const { namepath, platform } = splitFanId(id);
+      return [fanId(namepath, platform), id] as const;
+    }),
+  );
   const { namepath, platform } = splitFanId(focusedId);
   const horizontal = key === "h" || key === "l";
   const axis = horizontal ? platforms : recipes;
@@ -217,6 +220,7 @@ export function stepFocus(
   for (let stepCount = 1; stepCount < axis.length; stepCount++) {
     const pos =
       (((start + delta * stepCount) % axis.length) + axis.length) % axis.length;
+    // `pos` is always in range; the guard only satisfies noUncheckedIndexedAccess.
     const at = axis[pos];
     if (at === undefined) continue;
     const candidate = horizontal
