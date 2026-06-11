@@ -60,10 +60,16 @@ shell, and the source arrives by `git fetch` of the pushed SHA.
 
 ## Install / run
 
+Nothing to install — run odu straight from the flake against the current repo:
+
 ```sh
-nix run github:juspay/odu -- run --no-strict     # from anywhere
-nix run .#odu -- run                             # inside a consuming repo
+nix run github:juspay/odu -- run               # a strict CI run
+nix run github:juspay/odu -- run --no-strict   # dev iteration: dirty tree OK, no GitHub writes
 ```
+
+If your repo pins odu in its own `flake.nix` (the `ODU_FLAKE=.#odu` wiring in
+the [MCP section](#drive-ci-from-an-agent-mcp)), the same command becomes
+`nix run .#odu -- run` — your pinned version, no network fetch.
 
 ## Configure your repo
 
