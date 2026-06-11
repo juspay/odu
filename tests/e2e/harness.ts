@@ -32,7 +32,13 @@ export const repoRoot = execFileSync(
 /** `path:` flake ref the fixture re-exports `odu-runner` from. */
 export const oduFlakeRef = `path:${repoRoot}`;
 
-/** One line of `odu run --progress json` output (src/coordinator/display.ts). */
+/**
+ * One line of `odu run --progress json` output. Deliberately mirrors — and is
+ * NOT imported from — `ProgressEvent` in src/coordinator/display.ts: this is
+ * the wire schema the test deserializes, so the assertions verify the binary's
+ * real output (black-box). Sharing the type would make the test white-box and
+ * hide exactly the wire-format regressions this suite exists to catch.
+ */
 export interface ProgressEvent {
   node: string; // fanId, e.g. "alpha@x86_64-linux"
   recipe: string; // just namepath, e.g. "alpha"
@@ -142,11 +148,12 @@ export function terminalStatuses(
   return last;
 }
 
-/** Best-effort temp-dir cleanup; never throws (a left-behind tmp is harmless). */
+/** Best-effort temp-dir cleanup; never throws, but a failure is logged so a
+ *  leaked fixture dir is visible in CI rather than silently accumulating. */
 export function cleanup(dir: string): void {
   try {
     rmSync(dir, { recursive: true, force: true });
-  } catch {
-    // ignore
+  } catch (err) {
+    process.stderr.write(`e2e: failed to remove fixture ${dir}: ${String(err)}\n`);
   }
 }
