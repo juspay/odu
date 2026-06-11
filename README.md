@@ -113,6 +113,27 @@ warm-pool lease (`ci/pu/run.sh`) injects the leased box per run with
 `--host PLAT=ADDR` (which pins or adds a platform for one run, on top of the
 file).
 
+**Scope a recipe to specific platforms.** By default every recipe runs on
+every configured platform. To restrict one to an OS family, tag it with
+`just`'s built-in [OS attributes](https://just.systems/man/en/attributes.html)
+— `[linux]`, `[macos]`, or `[unix]` (Linux + macOS):
+
+```just
+[macos]
+codesign:
+    ./sign.sh         # only ever scheduled on a *-darwin lane
+
+[linux]
+nix-bundle:
+    nix bundle .#app  # only ever scheduled on a *-linux lane
+```
+
+A tagged recipe is pruned from the lanes whose OS it doesn't name, and
+**so is anything that depends on it** — a step needing a `[linux]`-only recipe
+drops from the macOS lane too, so no lane is ever left a node whose dependency
+was pruned. Multiple OS attributes are OR-ed (`[linux]` + `[macos]` ⇒ both),
+and an untagged recipe still fans out everywhere.
+
 ## CLI
 
 ```

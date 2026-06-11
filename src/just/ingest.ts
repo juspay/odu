@@ -62,6 +62,66 @@ function hasCiMetadata(recipe: DumpRecipe): boolean {
   );
 }
 
+/**
+ * `just`'s OS-family enabling attributes — emitted as bare strings in the dump
+ * (`[linux]` → `"linux"`) — each a predicate over a Nix system tuple's OS
+ * segment (`x86_64-linux` → `"linux"`, `aarch64-darwin` → `"darwin"`). `unix`
+ * is every OS except Windows, matching `just`'s own semantics.
+ */
+const OS_ATTR_MATCHERS: Record<string, (osSegment: string) => boolean> = {
+  linux: (os) => os === "linux",
+  macos: (os) => os === "darwin",
+  windows: (os) => os === "windows" || os === "mingw32",
+  openbsd: (os) => os === "openbsd",
+  unix: (os) => os !== "windows" && os !== "mingw32",
+};
+
+/** The recipe's OS-family attributes (`[linux]` / `[macos]` / `[unix]` / …),
+ *  ignoring every non-OS attribute (`[parallel]`, `[group(…)]`, `[metadata]`). */
+function osAttributes(recipe: DumpRecipe): string[] {
+  return recipe.attributes.filter(
+    (attr): attr is string =>
+      typeof attr === "string" && attr in OS_ATTR_MATCHERS,
+  );
+}
+
+/** Does a recipe with these OS-family attributes run on `platform`? Empty ⇒
+ *  every platform; otherwise any one matching attribute enables it (`just`'s
+ *  OR over multiple OS attributes). */
+export function recipeRunsOn(os: readonly string[], platform: string): boolean {
+  if (os.length === 0) return true;
+  const osSegment = platform.slice(platform.lastIndexOf("-") + 1);
+  return os.some((attr) => OS_ATTR_MATCHERS[attr]?.(osSegment) ?? false);
+}
+
+/** The task ids that schedule on `platform`: each task whose own OS attributes
+ *  allow it *and* whose every dependency also schedules here — so a recipe
+ *  pinned to one OS takes its dependents off the other platforms with it,
+ *  never leaving a lane a node whose dependency was pruned (a cascade to a
+ *  fixpoint; pipelines are tiny). */
+function enabledOnPlatform(
+  tasks: readonly TaskSpec[],
+  platform: string,
+): Set<string> {
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  const enabled = new Set(tasks.map((t) => t.id));
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const task of tasks) {
+      if (!enabled.has(task.id)) continue;
+      const allowed =
+        recipeRunsOn(task.os ?? [], platform) &&
+        task.needs.every((dep) => !byId.has(dep) || enabled.has(dep));
+      if (!allowed) {
+        enabled.delete(task.id);
+        changed = true;
+      }
+    }
+  }
+  return enabled;
+}
+
 export interface IngestOptions {
   /** Override the DAG root by namepath (justci's `--root`). */
   root?: string;
@@ -133,6 +193,7 @@ export function pipelineFromDump(
       needs: recipe.dependencies
         .map((dep) => siblings[dep.recipe]?.namepath)
         .filter((np): np is string => np !== undefined && reachable.has(np)),
+      os: osAttributes(recipe),
     }),
   );
   // Deterministic order: dependencies first (stable topo by repeated passes),
@@ -216,30 +277,38 @@ function resolveRecipe(spec: PipelineSpec, recipe: string): string {
   throw new Error(`odu: selector "${recipe}" matches no pipeline recipe`);
 }
 
-/** Slice the pipeline for one platform's lane: selected recipes (plus their
- *  dependency closure unless `noDeps`), in pipeline order. No selectors ⇒ the
- *  whole pipeline. */
+/** Slice the pipeline for one platform's lane: the platform-enabled recipes
+ *  (those whose `[linux]`/`[macos]`/… attributes admit this platform, and
+ *  whose dependencies do too), narrowed to the selected recipes plus their
+ *  dependency closure unless `noDeps`, in pipeline order. No selectors ⇒ every
+ *  enabled recipe. */
 export function laneTasks(
   spec: PipelineSpec,
   platform: string,
   selectors: readonly Selector[],
   noDeps: boolean,
 ): TaskSpec[] {
+  const enabled = enabledOnPlatform(spec.tasks, platform);
+
   const relevant = selectors.filter(
     (s) => s.platform === undefined || s.platform === platform,
   );
   if (selectors.length > 0 && relevant.length === 0) return [];
-  if (relevant.length === 0) return spec.tasks;
 
-  const byId = new Map(spec.tasks.map((t) => [t.id, t]));
-  const wanted = new Set<string>();
-  const queue = relevant.map((s) => resolveRecipe(spec, s.recipe));
-  while (queue.length > 0) {
-    const id = queue.shift();
-    if (id === undefined || wanted.has(id)) continue;
-    wanted.add(id);
-    if (!noDeps) {
-      for (const dep of byId.get(id)?.needs ?? []) queue.push(dep);
+  let wanted: Set<string>;
+  if (relevant.length === 0) {
+    wanted = enabled;
+  } else {
+    const byId = new Map(spec.tasks.map((t) => [t.id, t]));
+    wanted = new Set<string>();
+    const queue = relevant.map((s) => resolveRecipe(spec, s.recipe));
+    while (queue.length > 0) {
+      const id = queue.shift();
+      if (id === undefined || wanted.has(id) || !enabled.has(id)) continue;
+      wanted.add(id);
+      if (!noDeps) {
+        for (const dep of byId.get(id)?.needs ?? []) queue.push(dep);
+      }
     }
   }
   return spec.tasks

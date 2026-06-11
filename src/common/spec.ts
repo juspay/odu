@@ -20,6 +20,12 @@ export const TaskSpecSchema = z.object({
   /** Shell command, run via `sh -c` from the workspace root. */
   command: z.string().min(1),
   needs: z.array(TaskIdSchema).default([]),
+  /** `just` OS-family attributes (`[linux]` / `[macos]` / `[unix]` / …) that
+   *  restrict which platforms schedule this recipe; absent / empty ⇒ every
+   *  platform. Consumed coordinator-side at fan-out (src/just/ingest.ts
+   *  `laneTasks`); the runner ignores it, since a task only ever reaches a lane
+   *  it's enabled on. */
+  os: z.array(z.string()).optional(),
 });
 export type TaskSpec = z.infer<typeof TaskSpecSchema>;
 
