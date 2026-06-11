@@ -6,5 +6,6 @@ let
 in
 {
   kolu-surface = mkKoluPackage "surface";
+  kolu-surface-mcp = mkKoluPackage "surface-mcp";
   kolu-surface-nix-host = mkKoluPackage "surface-nix-host";
 }

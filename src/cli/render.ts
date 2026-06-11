@@ -5,13 +5,22 @@
  * status and CI-sized node ids.
  */
 
+import type { AgentNodes } from "../mcp/agentSurface";
 import {
   clampLog,
   type NodeState,
+  type NodeStatus,
   type PipelineState,
   STATUS_META,
 } from "../common/surface";
 import { dim, green, magenta, red, yellow } from "./ansi";
+
+/** The non-terminal statuses: a node in one of these is still in flight, so the
+ *  pipeline hasn't settled. The single taxonomy `summarize` (PipelineState) and
+ *  `agentSummary` (AgentNodes) share for the "settled" concept, so the two faces
+ *  can't disagree on done-ness — and adding a `NodeStatus` forces a decision
+ *  here rather than silently defaulting to "terminal". */
+export const NON_TERMINAL_STATUSES = new Set<NodeStatus>(["pending", "running"]);
 
 /** Per-status colour, shared by every face (attach table, run matrix,
  *  verdict) — a no-op when stdout isn't a TTY, so pure-string tests and
@@ -45,10 +54,10 @@ export interface PipelineSummary {
 }
 
 /** The machine-readable snapshot of one node — the snake_cased projection
- *  shared by `odu status -o json` and the MCP `get_nodes` tool, so the two
- *  agent/tooling faces speak one vocabulary (both `id` and `name`) instead of
- *  re-deriving it inline and drifting. `get_nodes` spreads this and adds the
- *  `red` verdict bit on top. */
+ *  shared by `odu status -o json` and the MCP agent `nodes` resource, so the
+ *  two agent/tooling faces speak one vocabulary (both `id` and `name`) instead
+ *  of re-deriving it inline and drifting. The agent rows (`rowsOf`) spread this
+ *  and add the `red` verdict bit on top. */
 export interface NodeRowJson {
   id: string;
   name: string;
@@ -65,6 +74,26 @@ export function nodeRow(node: NodeState): NodeRowJson {
     exit_code: node.exitCode,
     duration_ms: node.durationMs,
   };
+}
+
+/** One node, flattened for the agent face: the `nodeRow` projection plus the
+ *  `red` verdict bit (gated on `STATUS_META`, the single source of redness so
+ *  the agent verdict can't drift from the TUI/run verdict). The MCP `nodes`
+ *  resource exposes these rows. */
+export interface NodeRow extends NodeRowJson {
+  red: boolean;
+}
+
+export function nodeRowRed(node: NodeState): NodeRow {
+  return { ...nodeRow(node), red: STATUS_META[node.status].isRed };
+}
+
+/** Every node of a pipeline as agent rows, in scheduling order. */
+export function rowsOf(state: PipelineState): NodeRow[] {
+  return state.order
+    .map((id) => state.nodes[id])
+    .filter((n): n is NodeState => n !== undefined)
+    .map(nodeRowRed);
 }
 
 /** The verdict-on-state projection every consumer reuses: 1 if the latest
@@ -90,12 +119,36 @@ export function summarize(state: PipelineState): PipelineSummary {
     if (node === undefined) continue;
     counts[node.status] += 1;
   }
-  const done = counts.pending === 0 && counts.running === 0;
+  const done = ![...NON_TERMINAL_STATUSES].some((s) => counts[s] > 0);
   return {
     ...counts,
     done,
     failedOverall: done && counts.failed + counts.errored > 0,
   };
+}
+
+/** The agent-face parallel of `summarize`, over the flattened `AgentNodes`
+ *  rows: `done` when no row holds a non-terminal status (the same
+ *  `NON_TERMINAL_STATUSES` taxonomy `summarize` uses, so the two faces can't
+ *  disagree on settled-ness), and the red rows bucketed by status using each
+ *  row's own `red` bit (the single source of redness, so the agent verdict
+ *  can't drift from the TUI/run verdict). `wait_for_settle` consumes this
+ *  instead of re-deriving done/red over the raw status strings. */
+export function agentSummary(snap: AgentNodes): {
+  done: boolean;
+  failed: string[];
+  errored: string[];
+} {
+  const failed: string[] = [];
+  const errored: string[] = [];
+  let done = true;
+  for (const node of snap.nodes) {
+    if (NON_TERMINAL_STATUSES.has(node.status as NodeStatus)) done = false;
+    if (!node.red) continue;
+    if (node.status === "failed") failed.push(node.id);
+    else if (node.status === "errored") errored.push(node.id);
+  }
+  return { done, failed, errored };
 }
 
 /** The default node to attach to: the first running node, else the first

@@ -142,22 +142,28 @@ drives CI with structured calls instead of scraping your terminal. It is
 run in the current repo and predetermines no host — which boxes run the lanes
 stays the coordinator's job (pool lease / `hosts.json`).
 
+The face is a projection of odu's own [`@kolu/surface`](https://github.com/juspay/kolu)
+through [`@kolu/surface-mcp`](https://github.com/juspay/kolu): the coordinator
+surface is re-exposed as a default-deny MCP face — only what's declared reaches
+the agent.
+
 | Tool | What it does |
 | --- | --- |
 | `run` | Start a run (background coordinator) and return once it's live. |
-| `get_nodes` | Snapshot the pipeline — every node's status / exit / duration. |
-| `tail_log` | One node's output (live stream, or the durable per-SHA log). |
-| `rerun_node` | Reset a node + its dependents and reschedule (the only mutation). |
+| `node_rerun` | Reset a node + its dependents and reschedule (the only mutation). |
 | `wait_for_settle` | Block until the run settles, or — fail-fast — the instant a node goes red. |
 
-It also exposes the live state as **subscribable resources** for hosts that act
-on notifications: `odu://nodes` (the pipeline cell) and `odu://log/{node}` —
+The pipeline snapshot and per-node logs are **subscribable resources** rather
+than tools: `surface://streams/nodes` (the pipeline as `{ run, pipeline, nodes[] }`
+— every node's status / exit / duration + the `red` verdict bit) and
+`surface://collections/logs/{id}` (one node's output — the live buffered
+snapshot while a run is up, else the durable per-SHA log). Both support
 `resources/subscribe` + `notifications/resources/updated` on every transition.
 `wait_for_settle` is the blocking-pull floor for hosts that don't wake the model
-on a notification; both ride the same live cell.
+on a notification.
 
 The agent loop is `run` → `wait_for_settle` (fail-fast) → read the red node's
-`tail_log` → fix → `rerun_node`. Declare it over stdio:
+`surface://collections/logs/{id}` → fix → `node_rerun`. Declare it over stdio:
 
 ```jsonc
 // .mcp.json (Claude Code; Codex / opencode / Gemini CLI take the same shape)
