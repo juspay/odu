@@ -9,6 +9,7 @@ import {
   createDisplay,
   progressEvent,
   renderRunFrame,
+  stepFocus,
 } from "./display";
 
 function node(
@@ -393,5 +394,87 @@ describe("progressEvent", () => {
 
   it("returns null for pending — nothing to emit", () => {
     expect(progressEvent("abc", "n@p", node("n@p", "pending"))).toBeNull();
+  });
+});
+
+// `stepFocus` is the matrix's hjkl navigation: `j`/`k` move down/up a platform
+// column (recipe rows), `h`/`l` left/right a recipe row (platform columns). It
+// reads only the node-id `order`, so it's exercised here without a live TTY.
+describe("stepFocus — hjkl matrix navigation", () => {
+  // The shared `state` fixture is a full 3×2 matrix: rows
+  // [_ci-setup, ci::install, ci::e2e] × columns [x86_64-linux, aarch64-darwin].
+  const full = state.order;
+
+  it("lands on the first node when nothing is focused yet", () => {
+    expect(stepFocus(full, undefined, "j")).toBe("_ci-setup@x86_64-linux");
+    expect(stepFocus(full, undefined, "l")).toBe("_ci-setup@x86_64-linux");
+  });
+
+  it("j/k walk recipe rows within the focused platform column", () => {
+    expect(stepFocus(full, "_ci-setup@x86_64-linux", "j")).toBe(
+      "ci::install@x86_64-linux",
+    );
+    expect(stepFocus(full, "ci::install@x86_64-linux", "k")).toBe(
+      "_ci-setup@x86_64-linux",
+    );
+  });
+
+  it("h/l walk platform columns within the focused recipe row", () => {
+    expect(stepFocus(full, "ci::install@x86_64-linux", "l")).toBe(
+      "ci::install@aarch64-darwin",
+    );
+    expect(stepFocus(full, "ci::install@aarch64-darwin", "h")).toBe(
+      "ci::install@x86_64-linux",
+    );
+  });
+
+  it("wraps around each axis", () => {
+    // k off the top recipe wraps to the bottom of the same column.
+    expect(stepFocus(full, "_ci-setup@x86_64-linux", "k")).toBe(
+      "ci::e2e@x86_64-linux",
+    );
+    // j off the bottom recipe wraps back to the top.
+    expect(stepFocus(full, "ci::e2e@x86_64-linux", "j")).toBe(
+      "_ci-setup@x86_64-linux",
+    );
+    // With two columns, h and l from a row both reach the other column.
+    expect(stepFocus(full, "_ci-setup@x86_64-linux", "h")).toBe(
+      "_ci-setup@aarch64-darwin",
+    );
+  });
+
+  // A recipe (`linux-only`) that runs on just one platform leaves a `°` gap in
+  // the darwin column — navigation must skip those holes, never focusing a cell
+  // with no node behind it.
+  const sparse = [
+    "a@x86_64-linux",
+    "linux-only@x86_64-linux",
+    "c@x86_64-linux",
+    "a@aarch64-darwin",
+    "c@aarch64-darwin",
+  ];
+
+  it("skips missing cells when stepping down a column", () => {
+    // j from a@darwin skips the absent linux-only@darwin to land on c@darwin.
+    expect(stepFocus(sparse, "a@aarch64-darwin", "j")).toBe("c@aarch64-darwin");
+  });
+
+  it("returns undefined when no other cell exists along the axis", () => {
+    // linux-only has no darwin cell, so l/h off it find nothing.
+    expect(stepFocus(sparse, "linux-only@x86_64-linux", "l")).toBeUndefined();
+    expect(stepFocus(sparse, "linux-only@x86_64-linux", "h")).toBeUndefined();
+  });
+
+  it("returns undefined for a single-cell matrix (no move possible)", () => {
+    expect(stepFocus(["solo@x86_64-linux"], "solo@x86_64-linux", "j")).toBe(
+      undefined,
+    );
+  });
+
+  it("returns the original id for lane-local ids without an `@`", () => {
+    // A bare id splits to the `unknown` platform sentinel; stepping must return
+    // the stored id verbatim, not a reconstructed `b@unknown`.
+    expect(stepFocus(["a", "b"], "a", "j")).toBe("b");
+    expect(stepFocus(["a", "b"], "b", "k")).toBe("a");
   });
 });

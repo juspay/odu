@@ -17,9 +17,9 @@
  * — `run`'s coordinator loop and `attach`'s read-loop both call it) and the
  * focused-node log is pull-fed via an injected `openLog(id, signal)` (`run`
  * passes its in-memory tail, `attach` passes the surface's `nodeLog` stream).
- * Keys (digits / n / p / r / q) drive focus, rerun, and quit through injected
- * callbacks. When non-interactive (a piped `attach`, or a `run` whose stdin
- * isn't a TTY) the keys + raw mode are simply off.
+ * Keys (digits / h / j / k / l / r / q) drive focus, rerun, and quit through
+ * injected callbacks. When non-interactive (a piped `attach`, or a `run` whose
+ * stdin isn't a TTY) the keys + raw mode are simply off.
  *
  * The live renderer owns the terminal: it hides the cursor, repaints a
  * bounded region, and (when `hookStderr`, i.e. `run`) interposes
@@ -48,7 +48,7 @@ import {
   summarize,
 } from "../cli/render";
 import { formatGoDuration } from "../common/duration";
-import { splitFanId } from "../common/nodeId";
+import { fanId, splitFanId } from "../common/nodeId";
 import {
   type NodeLogFrame,
   type NodeState,
@@ -170,6 +170,67 @@ function glyphFor(status: NodeState["status"], tick: number): string {
   return STATUS_COLOR[status](raw);
 }
 
+/** Project the flat node-id `order` into the matrix axes the live view draws:
+ *  the recipe rows and platform columns, each in first-seen order. The one home
+ *  for the "flat list → 2D shape" rule, so the renderer and the hjkl navigator
+ *  can never drift on how rows and columns are derived. */
+function matrixShape(order: readonly string[]): {
+  recipes: string[];
+  platforms: string[];
+} {
+  const recipes: string[] = [];
+  const platforms: string[] = [];
+  for (const id of order) {
+    const { namepath, platform } = splitFanId(id);
+    if (!recipes.includes(namepath)) recipes.push(namepath);
+    if (!platforms.includes(platform)) platforms.push(platform);
+  }
+  return { recipes, platforms };
+}
+
+/** Move the interactive focus one cell across the recipe × platform matrix:
+ *  `h`/`l` step between platform columns on the current recipe row, `j`/`k`
+ *  between recipe rows in the current platform column. Each axis wraps, and
+ *  missing cells (a recipe that doesn't run on a platform — the `°` gaps) are
+ *  skipped, so focus only ever lands on a real node. With no focus yet, lands on
+ *  the first node; returns undefined when no other cell exists along that axis. */
+export function stepFocus(
+  order: readonly string[],
+  focusedId: string | undefined,
+  key: "h" | "j" | "k" | "l",
+): string | undefined {
+  if (focusedId === undefined) return order[0];
+  const { recipes, platforms } = matrixShape(order);
+  // Each existing cell keyed by `fanId(recipe, platform)` back to its original
+  // id, so a step returns the real id rather than a re-synthesized one — a
+  // lane-local id without `@` would otherwise rebuild into a different string
+  // and never match.
+  const cells = new Map(
+    order.map((id) => {
+      const { namepath, platform } = splitFanId(id);
+      return [fanId(namepath, platform), id] as const;
+    }),
+  );
+  const { namepath, platform } = splitFanId(focusedId);
+  const horizontal = key === "h" || key === "l";
+  const axis = horizontal ? platforms : recipes;
+  const delta = key === "l" || key === "j" ? 1 : -1;
+  const start = axis.indexOf(horizontal ? platform : namepath);
+  if (start === -1) return undefined;
+  for (let stepCount = 1; stepCount < axis.length; stepCount++) {
+    const pos =
+      (((start + delta * stepCount) % axis.length) + axis.length) % axis.length;
+    // `pos` is always in range; the guard only satisfies noUncheckedIndexedAccess.
+    const at = axis[pos];
+    if (at === undefined) continue;
+    const candidate = horizontal
+      ? cells.get(fanId(namepath, at))
+      : cells.get(fanId(at, platform));
+    if (candidate !== undefined) return candidate;
+  }
+  return undefined;
+}
+
 // ── json ────────────────────────────────────────────────────────────────────
 
 class JsonDisplay implements Display {
@@ -278,14 +339,7 @@ export function renderRunFrame(opts: {
   const { state, header, tick, now } = opts;
   const focused =
     opts.focusedId !== undefined ? splitFanId(opts.focusedId) : undefined;
-  const platforms = [
-    ...new Set(state.order.map((id) => splitFanId(id).platform)),
-  ];
-  const recipes: string[] = [];
-  for (const id of state.order) {
-    const { namepath } = splitFanId(id);
-    if (!recipes.includes(namepath)) recipes.push(namepath);
-  }
+  const { recipes, platforms } = matrixShape(state.order);
 
   const summary = summarize(state);
   const headGlyph = summary.done
@@ -358,7 +412,7 @@ export function renderRunFrame(opts: {
   return lines.join("\n");
 }
 
-const KEY_HINT = "[digits] focus · [n/p] cycle · [r] rerun · [q] quit";
+const KEY_HINT = "[digits] focus · [hjkl] move · [r] rerun · [q] quit";
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: matching ANSI escapes is the point.
 const CSI_TOKEN = /^\x1b\[[0-9;]*[A-Za-z]/;
@@ -432,7 +486,7 @@ class LiveDisplay implements Display {
   private header: RunHeader | undefined;
   private state: PipelineState | undefined;
   private focusedId: string | undefined;
-  /** Until the operator picks a node by hand (n/p/digits), focus auto-follows
+  /** Until the operator picks a node by hand (hjkl/digits), focus auto-follows
    *  the run: it re-tracks the best default node (first running, else first
    *  pending, else last) on every state update, so a `run` that `start`s with
    *  everything pending advances off `_ci-setup` onto the active node instead of
@@ -581,12 +635,8 @@ class LiveDisplay implements Display {
     }
     const state = this.state;
     if (state === undefined) return;
-    if (key === "n" || key === "p") {
-      const idx =
-        this.focusedId !== undefined ? state.order.indexOf(this.focusedId) : -1;
-      const delta = key === "n" ? 1 : -1;
-      const next =
-        state.order[(idx + delta + state.order.length) % state.order.length];
+    if (key === "h" || key === "j" || key === "k" || key === "l") {
+      const next = stepFocus(state.order, this.focusedId, key);
       if (next !== undefined) {
         this.focusLocked = true; // a hand-picked node stops auto-follow
         this.focus(next);
