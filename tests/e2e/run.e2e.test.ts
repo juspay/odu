@@ -7,7 +7,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, onTestFinished } from "vitest";
 import {
   buildOduBinary,
   cleanup,
@@ -18,19 +18,16 @@ import {
 } from "./harness";
 
 let oduBin: string;
-const fixtures: string[] = [];
 
 beforeAll(() => {
   oduBin = buildOduBinary();
 }, 600_000); // nix build, cold cache
 
-afterAll(() => {
-  for (const dir of fixtures) cleanup(dir);
-});
-
+// Materialize a fixture and register its teardown with the running test, so
+// creation and cleanup are co-located (no module-level accumulator to sweep).
 function fixture(name: string): string {
   const dir = makeFixture(name);
-  fixtures.push(dir);
+  onTestFinished(() => cleanup(dir));
   return dir;
 }
 
