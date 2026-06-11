@@ -113,6 +113,28 @@ export type AgentNodes = z.infer<typeof AgentNodesSchema>;
 
 const EMPTY_NODES: AgentNodes = { run: false, pipeline: null, nodes: [] };
 
+/**
+ * The node-id identity axis as a *collection key*: `TaskIdSchema` minus the
+ * `.min(1)` the surface-mcp URI decoder's empty-string probe can't tolerate.
+ *
+ * The same "what is a valid node id" contract `TaskIdSchema` (`z.string()
+ * .min(1)`) spells everywhere else in the surface (node.rerun's input, A's
+ * primitives) is deliberately relaxed here for the `logs` collection key:
+ * `@kolu/surface-mcp`'s collection-item URI decoder classifies a key as
+ * "string-typed" via `keySchema.safeParse("").success`, which a `.min(1)`
+ * string rejects — it would then try `JSON.parse` on the id segment and fail to
+ * address any real node id. A node id is never empty in practice, so dropping
+ * just the lower bound is safe and makes `logs/{id}` addressable.
+ *
+ * This is the same base string type as `TaskIdSchema` with only the lower
+ * bound dropped — named here so the divergence between the two id contracts is
+ * a single, intentional, documented difference rather than two independent
+ * literals that could silently drift. Should the id ever grow a *format*
+ * constraint (a regex/brand beyond the min), tighten it on `TaskIdSchema` and
+ * mirror it here, keeping this the lone deliberate relaxation.
+ */
+const NodeIdKeySchema = z.string();
+
 /** One node's log, keyed by node id in the `logs` collection. `source` says
  *  where the text came from: "live" (the running coordinator's buffered
  *  snapshot), "file" (the durable per-SHA log after the run process exited),
@@ -142,13 +164,11 @@ const agentSpec = {
     },
   },
   collections: {
-    // A plain `z.string()` key, NOT `TaskIdSchema` (`z.string().min(1)`):
-    // `@kolu/surface-mcp`'s collection-item URI decoder classifies a key as
-    // "string-typed" via `keySchema.safeParse("").success`, which a `.min(1)`
-    // string rejects — it would then try `JSON.parse` on the id segment and
-    // fail to address any real node id. A node id is never empty in practice,
-    // so the looser key schema is safe and makes `logs/{id}` addressable.
-    logs: { keySchema: z.string(), schema: LogEntrySchema },
+    // `NodeIdKeySchema` is `TaskIdSchema` minus the `.min(1)` the surface-mcp
+    // URI decoder's empty-string probe can't tolerate (see its definition): the
+    // node-id contract is named once and the `.min(1)` divergence is the single
+    // intentional difference, not two hand-divergent literals.
+    logs: { keySchema: NodeIdKeySchema, schema: LogEntrySchema },
   },
   procedures: {
     node: {
