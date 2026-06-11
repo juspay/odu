@@ -13,6 +13,9 @@ $ odu attach                   # attach a live dashboard to the run (other termi
 $ odu logs -f e2e@x86_64-linux # follow one node's output
 ```
 
+> [!TIP]
+> New here? Read the announcement — [**Introducing odu**](https://kolu.dev/blog/odu/) — for the story behind it and **video demos** of a live run and the agent face.
+
 ## Why
 
 Local CI tools translate your task graph into a batch process, run it, and
