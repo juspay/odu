@@ -20,7 +20,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const BIG = 256 * 1024 * 1024; // nix output / NDJSON can be chunky
+/** Large maxBuffer for nix output / NDJSON streams (256 MiB). */
+export const BIG = 256 * 1024 * 1024;
 
 /** The odu checkout under test — the worktree this test file lives in. */
 export const repoRoot = execFileSync(
@@ -31,6 +32,12 @@ export const repoRoot = execFileSync(
 
 /** `path:` flake ref the fixture re-exports `odu-runner` from. */
 export const oduFlakeRef = `path:${repoRoot}`;
+
+/** Substituted `flake.nix` content, computed once and reused across fixtures. */
+const flakeNix: string = readFileSync(
+  join(here, "fixtures", "_flake.nix.in"),
+  "utf-8",
+).replaceAll("__ODU_FLAKE__", oduFlakeRef);
 
 /**
  * One line of `odu run --progress json` output. Deliberately mirrors — and is
@@ -88,14 +95,7 @@ export function makeFixture(name: string): string {
   const dir = mkdtempSync(join(tmpdir(), `odu-e2e-${name}-`));
   cpSync(join(here, "fixtures", name), dir, { recursive: true });
 
-  const template = readFileSync(
-    join(here, "fixtures", "_flake.nix.in"),
-    "utf-8",
-  );
-  writeFileSync(
-    join(dir, "flake.nix"),
-    template.replaceAll("__ODU_FLAKE__", oduFlakeRef),
-  );
+  writeFileSync(join(dir, "flake.nix"), flakeNix);
 
   const git = (...args: string[]): void => {
     execFileSync("git", args, { cwd: dir, encoding: "utf-8" });
@@ -131,9 +131,11 @@ export function oduRun(
     if (line.trim() === "") continue;
     try {
       events.push(JSON.parse(line) as ProgressEvent);
-    } catch {
-      // non-JSON noise on stdout would be a contract violation; the test
-      // asserts on `events`, so a stray line simply won't satisfy it.
+    } catch (err) {
+      // non-JSON noise on stdout is a contract violation — log it so
+      // regressions surface here rather than as a mysterious missing-event
+      // assertion failure downstream.
+      process.stderr.write(`e2e: unparseable NDJSON line: ${line}\n${String(err)}\n`);
     }
   }
   return { status: res.status, events, stdout: res.stdout, stderr: res.stderr };
@@ -143,9 +145,7 @@ export function oduRun(
 export function terminalStatuses(
   events: ProgressEvent[],
 ): Map<string, ProgressEvent> {
-  const last = new Map<string, ProgressEvent>();
-  for (const e of events) last.set(e.recipe, e);
-  return last;
+  return new Map(events.map((e) => [e.recipe, e]));
 }
 
 /** Best-effort temp-dir cleanup; never throws, but a failure is logged so a
