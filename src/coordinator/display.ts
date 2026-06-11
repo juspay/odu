@@ -48,7 +48,7 @@ import {
   summarize,
 } from "../cli/render";
 import { formatGoDuration } from "../common/duration";
-import { fanId, splitFanId } from "../common/nodeId";
+import { splitFanId } from "../common/nodeId";
 import {
   type NodeLogFrame,
   type NodeState,
@@ -186,11 +186,19 @@ export function stepFocus(
   key: "h" | "j" | "k" | "l",
 ): string | undefined {
   if (focusedId === undefined) return order[0];
-  const present = new Set(order);
-  const platforms = [...new Set(order.map((id) => splitFanId(id).platform))];
+  // Index every node by its (recipe, platform) cell — the same `recipe@platform`
+  // key the renderer uses — mapping back to the *original* id, so a step returns
+  // the real id rather than re-synthesizing one (a lane-local id without `@`
+  // would rebuild into a different string and never match). Rows and columns
+  // fall out of the same pass, in first-seen order, exactly as the renderer
+  // derives them.
+  const cells = new Map<string, string>();
+  const platforms: string[] = [];
   const recipes: string[] = [];
   for (const id of order) {
-    const { namepath } = splitFanId(id);
+    const { namepath, platform } = splitFanId(id);
+    cells.set(`${namepath}@${platform}`, id);
+    if (!platforms.includes(platform)) platforms.push(platform);
     if (!recipes.includes(namepath)) recipes.push(namepath);
   }
   const { namepath, platform } = splitFanId(focusedId);
@@ -204,8 +212,10 @@ export function stepFocus(
       (((start + delta * stepCount) % axis.length) + axis.length) % axis.length;
     const at = axis[pos];
     if (at === undefined) continue;
-    const candidate = horizontal ? fanId(namepath, at) : fanId(at, platform);
-    if (present.has(candidate)) return candidate;
+    const candidate = horizontal
+      ? cells.get(`${namepath}@${at}`)
+      : cells.get(`${at}@${platform}`);
+    if (candidate !== undefined) return candidate;
   }
   return undefined;
 }

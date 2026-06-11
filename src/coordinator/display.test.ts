@@ -470,4 +470,11 @@ describe("stepFocus — hjkl matrix navigation", () => {
       undefined,
     );
   });
+
+  it("returns the original id for lane-local ids without an `@`", () => {
+    // A bare id splits to the `unknown` platform sentinel; stepping must return
+    // the stored id verbatim, not a reconstructed `b@unknown`.
+    expect(stepFocus(["a", "b"], "a", "j")).toBe("b");
+    expect(stepFocus(["a", "b"], "b", "k")).toBe("a");
+  });
 });
