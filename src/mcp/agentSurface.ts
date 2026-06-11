@@ -21,6 +21,12 @@
  *     live — the 64KB clamp + the path-traversal guard live in this handler.
  *   - procedure `node.rerun` → `node.rerun` (pass-through to A).
  *
+ * `nodes` is live-only by design — unlike `logs`, no durable `PipelineState`
+ * manifest exists on disk, so when the coordinator socket is gone `nodes` reports
+ * `{ run: false }` rather than a finished run's verdict. An agent must read the
+ * verdict from `wait_for_settle`'s return value (captured while the socket was
+ * live), not from a post-coordinator `nodes` read.
+ *
  * `header` and `run.configure` are absent by construction: `header` isn't
  * mapped (it carries no agent value the `nodes` rows don't), and
  * `run.configure` lives on `laneSurface`, never on A — so neither can leak.
