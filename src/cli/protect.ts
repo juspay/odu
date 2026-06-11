@@ -10,7 +10,7 @@ import { spawnSync } from "node:child_process";
 import { fanId } from "../common/nodeId";
 import { loadHosts, resolveLanes } from "../coordinator/hosts";
 import { parseGithubRemote } from "../coordinator/statuses";
-import { loadJustPipeline } from "../just/ingest";
+import { laneTasks, loadJustPipeline } from "../just/ingest";
 
 export interface ProtectArgs {
   dryRun: boolean;
@@ -31,8 +31,11 @@ export async function protectCommand(args: ProtectArgs): Promise<number> {
     );
     return 1;
   }
+  // Require exactly the contexts `odu run` posts: each platform's lane after
+  // OS-attribute filtering (a [linux]-only recipe is never posted on a darwin
+  // lane, so it must not be required there or protection waits forever).
   const contexts = platforms.flatMap((platform) =>
-    spec.tasks.map((task) => fanId(task.id, platform)),
+    laneTasks(spec, platform, [], false).map((task) => fanId(task.id, platform)),
   );
 
   if (args.dryRun) {
