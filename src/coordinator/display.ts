@@ -48,7 +48,7 @@ import {
   summarize,
 } from "../cli/render";
 import { formatGoDuration } from "../common/duration";
-import { splitFanId } from "../common/nodeId";
+import { fanId, splitFanId } from "../common/nodeId";
 import {
   type NodeLogFrame,
   type NodeState,
@@ -170,37 +170,44 @@ function glyphFor(status: NodeState["status"], tick: number): string {
   return STATUS_COLOR[status](raw);
 }
 
+/** Project the flat node-id `order` into the matrix the live view draws: the
+ *  recipe rows and platform columns (each in first-seen order) and a
+ *  `fanId(recipe, platform)` → original-id lookup for the cells that exist. The
+ *  one home for the "flat list → 2D shape" rule, so the renderer and the hjkl
+ *  navigator can never drift on how rows/columns are derived. */
+function matrixShape(order: readonly string[]): {
+  recipes: string[];
+  platforms: string[];
+  cells: Map<string, string>;
+} {
+  const recipes: string[] = [];
+  const platforms: string[] = [];
+  const cells = new Map<string, string>();
+  for (const id of order) {
+    const { namepath, platform } = splitFanId(id);
+    cells.set(fanId(namepath, platform), id);
+    if (!recipes.includes(namepath)) recipes.push(namepath);
+    if (!platforms.includes(platform)) platforms.push(platform);
+  }
+  return { recipes, platforms, cells };
+}
+
 /** Move the interactive focus one cell across the recipe × platform matrix:
  *  `h`/`l` step between platform columns on the current recipe row, `j`/`k`
- *  between recipe rows in the current platform column. `order` is the live node
- *  list, which doubles as the existence check — each axis wraps, and missing
- *  cells (a recipe that doesn't run on a platform — the `°` gaps) are skipped,
- *  so focus only ever lands on a real node. With no focus yet, lands on the
- *  first node. Returns undefined when no other cell exists along that axis.
- *
- *  The matrix's rows/columns are derived from `order` exactly as the renderer
- *  derives them, so a step tracks precisely what's on screen. */
+ *  between recipe rows in the current platform column. Each axis wraps, and
+ *  missing cells (a recipe that doesn't run on a platform — the `°` gaps) are
+ *  skipped, so focus only ever lands on a real node. The `cells` map returns the
+ *  *original* id rather than a re-synthesized one (a lane-local id without `@`
+ *  would rebuild into a different string and never match). With no focus yet,
+ *  lands on the first node; returns undefined when no other cell exists along
+ *  that axis. */
 export function stepFocus(
   order: readonly string[],
   focusedId: string | undefined,
   key: "h" | "j" | "k" | "l",
 ): string | undefined {
   if (focusedId === undefined) return order[0];
-  // Index every node by its (recipe, platform) cell — the same `recipe@platform`
-  // key the renderer uses — mapping back to the *original* id, so a step returns
-  // the real id rather than re-synthesizing one (a lane-local id without `@`
-  // would rebuild into a different string and never match). Rows and columns
-  // fall out of the same pass, in first-seen order, exactly as the renderer
-  // derives them.
-  const cells = new Map<string, string>();
-  const platforms: string[] = [];
-  const recipes: string[] = [];
-  for (const id of order) {
-    const { namepath, platform } = splitFanId(id);
-    cells.set(`${namepath}@${platform}`, id);
-    if (!platforms.includes(platform)) platforms.push(platform);
-    if (!recipes.includes(namepath)) recipes.push(namepath);
-  }
+  const { recipes, platforms, cells } = matrixShape(order);
   const { namepath, platform } = splitFanId(focusedId);
   const horizontal = key === "h" || key === "l";
   const axis = horizontal ? platforms : recipes;
@@ -213,8 +220,8 @@ export function stepFocus(
     const at = axis[pos];
     if (at === undefined) continue;
     const candidate = horizontal
-      ? cells.get(`${namepath}@${at}`)
-      : cells.get(`${at}@${platform}`);
+      ? cells.get(fanId(namepath, at))
+      : cells.get(fanId(at, platform));
     if (candidate !== undefined) return candidate;
   }
   return undefined;
@@ -328,14 +335,7 @@ export function renderRunFrame(opts: {
   const { state, header, tick, now } = opts;
   const focused =
     opts.focusedId !== undefined ? splitFanId(opts.focusedId) : undefined;
-  const platforms = [
-    ...new Set(state.order.map((id) => splitFanId(id).platform)),
-  ];
-  const recipes: string[] = [];
-  for (const id of state.order) {
-    const { namepath } = splitFanId(id);
-    if (!recipes.includes(namepath)) recipes.push(namepath);
-  }
+  const { recipes, platforms } = matrixShape(state.order);
 
   const summary = summarize(state);
   const headGlyph = summary.done
