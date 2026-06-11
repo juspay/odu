@@ -18,7 +18,7 @@
 import { z } from "zod";
 import type { BespokeTool } from "@kolu/surface-mcp";
 import { agentSummary } from "../cli/render";
-import type { AgentNodes } from "./agentSurface";
+import type { AgentNodes, AgentNodesReader } from "./agentSurface";
 
 export const waitInput = z.object({
   timeout_ms: z.number().optional(),
@@ -44,23 +44,8 @@ export interface SettleVerdict {
   duration_ms: number;
 }
 
-/** The structural shape `wait_for_settle` needs of the agent client — just the
- *  `nodes` stream read (snapshot-then-deltas, void input). Permissive (the
- *  concrete projected client assigns) so we don't re-materialize the precise
- *  client union here. */
-export interface WaitClient {
-  surface: {
-    nodes: {
-      get: (
-        input: void,
-        opts: { signal?: AbortSignal },
-      ) => Promise<AsyncIterable<AgentNodes>>;
-    };
-  };
-}
-
 export interface WaitOptions {
-  client: WaitClient;
+  client: AgentNodesReader;
   timeoutMs?: number;
   /** Return the instant a node goes red, rather than waiting for the whole
    *  run to settle (default true — the "e2e failed, drill in now" loop). */
@@ -192,7 +177,7 @@ export const waitTool: BespokeTool = {
   handler: (args, client, signal) => {
     const a = args as WaitInput;
     return waitForSettle({
-      client: client as WaitClient,
+      client: client as AgentNodesReader,
       timeoutMs: a.timeout_ms,
       failFast: a.fail_fast,
       signal,

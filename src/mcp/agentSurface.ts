@@ -111,6 +111,26 @@ const AgentNodesSchema = z.object({
 });
 export type AgentNodes = z.infer<typeof AgentNodesSchema>;
 
+/**
+ * The B-side read slice: the projected agent client's `nodes` stream read
+ * (snapshot-then-deltas over `AgentNodes`), spelled once here so the two ends of
+ * the projection don't author divergent `{ surface: { nodes: { get } } }`
+ * shapes. The input is `void` to match `agentSpec.streams.nodes.inputSchema`
+ * (`z.void()`). Permissive (the concrete projected client assigns) so consumers
+ * needn't re-materialize the precise client union. Distinct from
+ * `OduSurfaceClient`, which is the A-side (`PipelineState`) slice — that
+ * projection boundary justifies two shapes, one per side. */
+export interface AgentNodesReader {
+  surface: {
+    nodes: {
+      get: (
+        input: void,
+        opts: { signal?: AbortSignal },
+      ) => Promise<AsyncIterable<AgentNodes>>;
+    };
+  };
+}
+
 const EMPTY_NODES: AgentNodes = { run: false, pipeline: null, nodes: [] };
 
 /**

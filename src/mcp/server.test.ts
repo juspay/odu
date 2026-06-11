@@ -25,12 +25,13 @@ import { gitTopLevel, headSha7 } from "../common/git";
 import { tryDialSocket } from "../coordinator/socket";
 import { oduSurface, pendingNode, type PipelineState } from "../common/surface";
 import {
+  type AgentNodesReader,
   buildAgentProjection,
   durableLog,
   redialingAClient,
 } from "./agentSurface";
 import { serveTestSurface, type TestSurface } from "./serveForTest";
-import { waitForSettle, type WaitClient } from "./waitTool";
+import { waitForSettle } from "./waitTool";
 
 type Row = [id: string, status: PipelineState["nodes"][string]["status"]];
 
@@ -403,7 +404,7 @@ describe("durableLog — guards (ported)", () => {
 
 describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", () => {
   /** A live B (agent) client over a test surface, for the verdict unit. */
-  async function agentWaitClient(s: TestSurface): Promise<WaitClient> {
+  async function agentWaitClient(s: TestSurface): Promise<AgentNodesReader> {
     const { unixSocketLink } = await import("@kolu/surface/links/unix-socket");
     const projection = buildAgentProjection(oduSurface);
     const dialed = await unixSocketLink<typeof oduSurface.contract>({
@@ -411,7 +412,9 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     });
     const { router } = projection.implement(dialed.client);
     closers.push(() => dialed.dispose());
-    return directLink<typeof projection.surface.contract>(router) as WaitClient;
+    return directLink<typeof projection.surface.contract>(
+      router,
+    ) as AgentNodesReader;
   }
 
   it("returns the verdict the instant a node goes red (fail-fast)", async () => {
