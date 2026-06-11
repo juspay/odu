@@ -9,6 +9,7 @@
 import { execFileSync } from "node:child_process";
 import { beforeAll, describe, expect, it, onTestFinished } from "vitest";
 import {
+  BIG,
   buildOduBinary,
   cleanup,
   makeFixture,
@@ -18,6 +19,10 @@ import {
 } from "./harness";
 
 let oduBin: string;
+
+// One full `odu run` per test, with the binary already built — generous to
+// absorb the localhost lane realise/spawn without flaking on a busy machine.
+const RUN_TIMEOUT = 300_000;
 
 beforeAll(() => {
   oduBin = buildOduBinary();
@@ -48,7 +53,7 @@ describe("odu run (local, black-box)", () => {
       expect(shape(last.get(recipe)).status).toBe("success");
     }
     expect(status).toBe(0);
-  }, 300_000);
+  }, RUN_TIMEOUT);
 
   it("propagates a node failure to a non-zero exit", () => {
     const { status, events } = oduRun(oduBin, fixture("fail"));
@@ -59,7 +64,7 @@ describe("odu run (local, black-box)", () => {
     expect(boom.status).toBe("failed");
     expect(boom.exit_code).toBe(1);
     expect(status).toBe(1);
-  }, 300_000);
+  }, RUN_TIMEOUT);
 
   it("emits well-formed progress events", () => {
     const { events } = oduRun(oduBin, fixture("pass"));
@@ -68,14 +73,14 @@ describe("odu run (local, black-box)", () => {
     expect(e.node).toContain("alpha@");
     expect(typeof e.platform).toBe("string");
     expect(typeof e.log).toBe("string");
-  }, 300_000);
+  }, RUN_TIMEOUT);
 
   it("dump emits the resolved pipeline without a live run", () => {
     const dir = fixture("pass");
     const out = execFileSync(oduBin, ["dump"], {
       cwd: dir,
       encoding: "utf-8",
-      maxBuffer: 64 * 1024 * 1024,
+      maxBuffer: BIG,
     });
     const spec = JSON.parse(out) as { name?: unknown };
     expect(typeof spec.name).toBe("string");
