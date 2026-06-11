@@ -71,13 +71,13 @@ function hasCiMetadata(recipe: DumpRecipe): boolean {
 const OS_ATTR_MATCHERS: Record<string, (osSegment: string) => boolean> = {
   linux: (os) => os === "linux",
   macos: (os) => os === "darwin",
-  windows: (os) => os === "windows" || os === "mingw32",
+  windows: (os) => os === "windows",
   openbsd: (os) => os === "openbsd",
   freebsd: (os) => os === "freebsd",
   netbsd: (os) => os === "netbsd",
   dragonfly: (os) => os === "dragonfly",
   android: (os) => os === "android",
-  unix: (os) => os !== "windows" && os !== "mingw32",
+  unix: (os) => os !== "windows",
 };
 
 /** The recipe's OS-family attributes (`[linux]` / `[macos]` / `[unix]` / …),
@@ -105,9 +105,9 @@ export function recipeRunsOn(os: readonly string[], platform: string): boolean {
  *  fixpoint; pipelines are tiny). */
 function enabledOnPlatform(
   tasks: readonly TaskSpec[],
+  byId: ReadonlyMap<string, TaskSpec>,
   platform: string,
 ): Set<string> {
-  const byId = new Map(tasks.map((t) => [t.id, t]));
   const enabled = new Set(tasks.map((t) => t.id));
   let changed = true;
   while (changed) {
@@ -297,13 +297,13 @@ export function laneTasks(
   );
   if (selectors.length > 0 && relevant.length === 0) return [];
 
-  const enabled = enabledOnPlatform(spec.tasks, platform);
+  const byId = new Map(spec.tasks.map((t) => [t.id, t]));
+  const enabled = enabledOnPlatform(spec.tasks, byId, platform);
 
-  let wanted: Set<string>;
-  if (relevant.length === 0) {
-    wanted = new Set(spec.tasks.map((t) => t.id));
-  } else {
-    const byId = new Map(spec.tasks.map((t) => [t.id, t]));
+  // When there are no selectors every enabled task is wanted; otherwise walk
+  // the dependency closure of the matching selectors.
+  let wanted: Set<string> | null = null;
+  if (relevant.length > 0) {
     wanted = new Set<string>();
     const queue = relevant.map((s) => resolveRecipe(spec, s.recipe));
     while (queue.length > 0) {
@@ -316,8 +316,9 @@ export function laneTasks(
     }
   }
   // A task (and each of its dependency edges) survives on this lane iff it was
-  // both asked for and OS-enabled here.
-  const keep = (id: string): boolean => wanted.has(id) && enabled.has(id);
+  // both asked for (or selectors were absent) and OS-enabled here.
+  const keep = (id: string): boolean =>
+    (wanted === null || wanted.has(id)) && enabled.has(id);
   return spec.tasks
     .filter((t) => keep(t.id))
     .map((t) => ({ ...t, needs: t.needs.filter((dep) => keep(dep)) }));
