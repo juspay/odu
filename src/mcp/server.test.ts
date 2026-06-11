@@ -33,6 +33,18 @@ import {
 import { serveTestSurface, type TestSurface } from "./serveForTest";
 import { waitForSettle } from "./waitTool";
 
+/** The git-backed run-context resolver, mirroring `mcp.ts`'s default: the
+ *  durable-log identity (repo root + SHA) the projection now takes through the
+ *  injection seam. The MCP-wiring tests don't exercise the durable read, so any
+ *  resolver works; this matches production so the durable-file tests below
+ *  (which write real `.ci/<sha7>/…` files) resolve to the same paths. */
+function gitRunContext(): { repoRoot: string; sha7: string } | null {
+  const repoRoot = gitTopLevel();
+  const sha7 = headSha7(repoRoot);
+  if (repoRoot === null || sha7 === null) return null;
+  return { repoRoot, sha7 };
+}
+
 type Row = [id: string, status: PipelineState["nodes"][string]["status"]];
 
 function state(rows: Row[]): PipelineState {
@@ -64,7 +76,7 @@ afterEach(async () => {
  *  A-client that dials `socketPath` fresh per call (so a coordinator restart at
  *  the same path is observed). `socketPath` defaults to the served surface's. */
 async function connect(s: TestSurface, socketPath: string = s.socketPath) {
-  const projection = buildAgentProjection(oduSurface);
+  const projection = buildAgentProjection(oduSurface, gitRunContext);
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
 
@@ -302,7 +314,7 @@ describe("no-run state — the face stays usable with no coordinator socket", ()
    *  the factory returns the no-run fallback client (no dial). This is the
    *  state an agent is in when it calls `run` to start a pipeline. */
   async function connectNoRun(runHandler: () => unknown) {
-    const projection = buildAgentProjection(oduSurface);
+    const projection = buildAgentProjection(oduSurface, gitRunContext);
     // A re-dialing A-client whose dial always fails (no coordinator socket) —
     // the exact wiring `mcpCommand` uses, minus a live socket.
     const aClient = redialingAClient(async () => null);
@@ -368,7 +380,7 @@ describe("durableLog — guards (ported)", () => {
         secret,
       ).replace(/\.log$/, "");
       const token = `${climb}@x86_64-linux`;
-      const result = durableLog(token);
+      const result = durableLog(token, root as string, sha7 as string);
       expect(result.source).toBe("missing");
       expect(result.text).toBe("");
     } finally {
@@ -388,7 +400,7 @@ describe("durableLog — guards (ported)", () => {
     try {
       mkdirSync(dir, { recursive: true });
       writeFileSync(file, big);
-      const result = durableLog(token);
+      const result = durableLog(token, root as string, sha7 as string);
       expect(result.source).toBe("file");
       expect(result.text.length).toBe(64 * 1024);
     } finally {
@@ -397,7 +409,13 @@ describe("durableLog — guards (ported)", () => {
   });
 
   it("reports missing when no durable file exists", () => {
-    const result = durableLog(`ci::nope-${process.pid}@aarch64-darwin`);
+    const ctx = gitRunContext();
+    expect(ctx).not.toBeNull();
+    const result = durableLog(
+      `ci::nope-${process.pid}@aarch64-darwin`,
+      (ctx as { repoRoot: string }).repoRoot,
+      (ctx as { sha7: string }).sha7,
+    );
     expect(result.source).toBe("missing");
   });
 });
@@ -406,7 +424,7 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
   /** A live B (agent) client over a test surface, for the verdict unit. */
   async function agentWaitClient(s: TestSurface): Promise<AgentNodesReader> {
     const { unixSocketLink } = await import("@kolu/surface/links/unix-socket");
-    const projection = buildAgentProjection(oduSurface);
+    const projection = buildAgentProjection(oduSurface, gitRunContext);
     const dialed = await unixSocketLink<typeof oduSurface.contract>({
       socketPath: s.socketPath,
     });

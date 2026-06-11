@@ -26,8 +26,20 @@ import { serveSurfaceAsMcp } from "@kolu/surface-mcp";
 import { buildAgentProjection, redialingAClient } from "../mcp/agentSurface";
 import { killRuns, runTool } from "../mcp/runTool";
 import { waitTool } from "../mcp/waitTool";
+import { gitTopLevel, headSha7 } from "../common/git";
 import { oduSurface } from "../common/surface";
 import { SOCKET_PATH, tryDialSocket } from "../coordinator/socket";
+
+/** The durable-log identity from the process's real git: where this `odu mcp`
+ *  is checked out and at what SHA. Injected into the projection so the
+ *  durable-log fallback takes repo root + SHA as arguments instead of probing
+ *  git itself; returns `null` (→ "missing") outside a git checkout. */
+function gitRunContext(): { repoRoot: string; sha7: string } | null {
+  const repoRoot = gitTopLevel();
+  const sha7 = headSha7(repoRoot);
+  if (repoRoot === null || sha7 === null) return null;
+  return { repoRoot, sha7 };
+}
 
 function version(): string {
   try {
@@ -46,7 +58,7 @@ function version(): string {
 /** Serve the agent MCP face over stdio until the client disconnects
  *  (stdin EOF / server close). */
 export async function mcpCommand(socketPath: string = SOCKET_PATH): Promise<number> {
-  const projection = buildAgentProjection(oduSurface);
+  const projection = buildAgentProjection(oduSurface, gitRunContext);
 
   // One stable B-client over a *re-dialing* A-client: the projection is wired
   // once, but every upstream call inside it dials a fresh `.ci/odu.sock`. So a

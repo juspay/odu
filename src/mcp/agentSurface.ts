@@ -56,7 +56,6 @@ import {
   type oduSurface,
   type PipelineState,
 } from "../common/surface";
-import { gitTopLevel, headSha7 } from "../common/git";
 import { logPathFor } from "../coordinator/statuses";
 import { TaskIdSchema } from "../common/spec";
 
@@ -248,16 +247,12 @@ function tailFile(path: string, maxBytes: number): string {
 }
 
 /** The durable-file fallback for a node id when no live frame is cached: read
- *  `.ci/<sha7>/<platform>/<node>.log` (sha from git HEAD — no live socket in
- *  this branch), bounded to `MAX_LOG_CHARS`, with the path-traversal guard.
- *  Best-effort: any failure (no git, no file, an escaping id) reads "missing".
- *  Exported for the guard tests (path-traversal + 64KB clamp). */
-export function durableLog(token: string): LogEntry {
-  const repoRoot = gitTopLevel();
-  const sha7 = headSha7(repoRoot);
-  if (repoRoot === null || sha7 === null) {
-    return { node: token, source: "missing", text: "" };
-  }
+ *  `.ci/<sha7>/<platform>/<node>.log`, bounded to `MAX_LOG_CHARS`, with the
+ *  path-traversal guard. The `repoRoot`/`sha7` identity arrives as arguments —
+ *  resolved through the same injection seam (`resolveRunContext`) as the socket
+ *  — so this stays a pure A→B mapping and doesn't probe the process's git.
+ *  Best-effort: any failure (no file, an escaping id) reads "missing". */
+export function durableLog(token: string, repoRoot: string, sha7: string): LogEntry {
   const file = durableLogPath(repoRoot, sha7, token);
   if (file === null) return { node: token, source: "missing", text: "" };
   try {
@@ -266,6 +261,14 @@ export function durableLog(token: string): LogEntry {
     return { node: token, source: "missing", text: "" };
   }
 }
+
+/** Where am I checked out and at what SHA — the durable-log identity, resolved
+ *  through the same injection boundary as the socket. Returns `null` when the
+ *  cwd isn't a git checkout (or HEAD is unreadable), in which case a no-live
+ *  log read reports "missing". Defaults to git (`gitTopLevel`/`headSha7`) in
+ *  `mcp.ts`; tests pass a stub so the projection stays a pure A→B mapping with
+ *  one injected view of the world. */
+export type ResolveRunContext = () => { repoRoot: string; sha7: string } | null;
 
 // ── The logs collection's read store ────────────────────────────────────────
 
@@ -307,7 +310,10 @@ export interface LogsStore {
  * clamped by the coordinator's in-memory tail, and `clampLog` re-clamps the
  * accumulation so a long-lived follow can't grow the cached entry unbounded.
  */
-function makeLogsStore(client: OduSurfaceClient): LogsStore {
+function makeLogsStore(
+  client: OduSurfaceClient,
+  resolveRunContext: ResolveRunContext,
+): LogsStore {
   const cache = new Map<string, LogEntry>();
   const following = new Set<string>();
   // Defaults to a bare cache write until `setPublish` wires the framework's
@@ -348,9 +354,12 @@ function makeLogsStore(client: OduSurfaceClient): LogsStore {
     if (live !== undefined) return live;
     // Cache miss: start following so future frames notify, return the durable
     // fallback now so the read never blocks and never returns undefined (a
-    // collection's `get` errors on an undefined first snapshot).
+    // collection's `get` errors on an undefined first snapshot). The git
+    // identity arrives through the injection seam, not a probe inside the read.
     follow(id);
-    return durableLog(id);
+    const ctx = resolveRunContext();
+    if (ctx === null) return { node: id, source: "missing", text: "" };
+    return durableLog(id, ctx.repoRoot, ctx.sha7);
   };
 
   return {
@@ -472,8 +481,12 @@ export function redialingAClient(dial: DialA): OduSurfaceClient {
  *  `publish` from the ctx the package returns. Typed against the minimal
  *  `OduSurfaceClient` (see its note) so the heavy per-spec client union is
  *  never materialized; cast onto the package's `deps` signature below. */
-function agentDeps(a: OduSurfaceClient, onStore: (store: LogsStore) => void) {
-  const logs = makeLogsStore(a);
+function agentDeps(
+  a: OduSurfaceClient,
+  resolveRunContext: ResolveRunContext,
+  onStore: (store: LogsStore) => void,
+) {
+  const logs = makeLogsStore(a, resolveRunContext);
   onStore(logs);
   return {
     channel: inMemoryChannelByName(),
@@ -518,7 +531,10 @@ export interface AgentProjection {
 }
 
 /** Build `oduAgentSurface` (B) as a projection of `oduSurface` (A). Pass the
- *  source surface so `projectSurface` pins A's spec.
+ *  source surface so `projectSurface` pins A's spec, and `resolveRunContext` —
+ *  the durable-log identity (repo root + SHA) — so that input arrives through
+ *  the same injection boundary as the socket rather than the projection probing
+ *  git itself. `mcp.ts` passes a git-backed resolver; tests pass a stub.
  *
  *  `implement` wraps the package's: after wiring B's server it hands the logs
  *  store the framework's *broadcasting* upsert (`ctx.collections.logs.upsert`)
@@ -532,7 +548,10 @@ export interface AgentProjection {
  *  union budget for this surface (TS2590). The runtime client only ever has
  *  `.surface.nodes/.nodeLog/.node` read, which `OduSurfaceClient` covers — the
  *  same union-budget dodge the package documents for its own `implement`. */
-export function buildAgentProjection(source: typeof oduSurface): AgentProjection {
+export function buildAgentProjection(
+  source: typeof oduSurface,
+  resolveRunContext: ResolveRunContext,
+): AgentProjection {
   let pendingStore: LogsStore | null = null;
   const projection = projectSurface(source, {
     spec: agentSpec,
@@ -541,7 +560,7 @@ export function buildAgentProjection(source: typeof oduSurface): AgentProjection
     // overflows TS's union budget (TS2590). `A` is still inferred from
     // `source` and `B` from `spec`, so the return type stays precise.
     deps: ((client: OduSurfaceClient) =>
-      agentDeps(client, (store) => {
+      agentDeps(client, resolveRunContext, (store) => {
         pendingStore = store;
       })) as never,
   });
