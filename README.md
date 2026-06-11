@@ -95,9 +95,10 @@ closure copy. This is the common single-machine case — most users never need
 more.
 
 **Multi-platform (fan out across machines).** To run each platform's lane on a
-real builder for that platform, list them in `~/.config/odu/hosts.json` (or
-`$ODU_HOSTS`; falls back to justci's `~/.config/justci/hosts.json` so migrating
-needs zero config):
+real builder for that platform, list them in `~/.config/odu/hosts.json` (or set
+`$ODU_HOSTS` to the path of a hosts file elsewhere — its value is a filesystem
+path to a JSON file in this same format, taking precedence over the default
+location):
 
 ```json
 {

@@ -6,9 +6,7 @@
  *
  * Lookup order:
  *   1. `$ODU_HOSTS` — explicit file path;
- *   2. `~/.config/odu/hosts.json`;
- *   3. `~/.config/justci/hosts.json` — migration fallback, so replacing
- *      justci needs zero config changes.
+ *   2. `~/.config/odu/hosts.json`.
  * `--host PLAT=ADDR` upserts on top (and adds the platform when absent —
  * that is how `ci/pu/run.sh` pins the leased pool box).
  */
@@ -29,7 +27,6 @@ export function loadHosts(): HostsConfig {
       ? [process.env.ODU_HOSTS]
       : []),
     join(homedir(), ".config", "odu", "hosts.json"),
-    join(homedir(), ".config", "justci", "hosts.json"),
   ];
   for (const path of candidates) {
     if (!existsSync(path)) continue;
