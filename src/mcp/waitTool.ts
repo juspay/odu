@@ -17,6 +17,7 @@
 
 import { z } from "zod";
 import type { BespokeTool } from "@kolu/surface-mcp";
+import { agentSummary } from "../cli/render";
 import type { AgentNodes } from "./agentSurface";
 
 export const waitInput = z.object({
@@ -41,27 +42,6 @@ export interface SettleVerdict {
    *  run settled or timed out. */
   cancelled: boolean;
   duration_ms: number;
-}
-
-/** The red nodes in an agent snapshot, bucketed by concrete status. Redness is
- *  the projected `red` bit (gated on `STATUS_META` upstream), so the agent
- *  verdict can't drift from the TUI/run verdict. */
-function redNodes(snap: AgentNodes): { failed: string[]; errored: string[] } {
-  const failed: string[] = [];
-  const errored: string[] = [];
-  for (const node of snap.nodes) {
-    if (!node.red) continue;
-    if (node.status === "failed") failed.push(node.id);
-    else if (node.status === "errored") errored.push(node.id);
-  }
-  return { failed, errored };
-}
-
-/** The run has settled when no node is pending or running. */
-function isDone(snap: AgentNodes): boolean {
-  return !snap.nodes.some(
-    (n) => n.status === "pending" || n.status === "running",
-  );
 }
 
 /** The structural shape `wait_for_settle` needs of the agent client — just the
@@ -119,7 +99,7 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
   const abortedVerdict = (): SettleVerdict => {
     const cancelled = opts.signal?.aborted === true;
     const red =
-      last !== undefined ? redNodes(last) : { failed: [], errored: [] };
+      last !== undefined ? agentSummary(last) : { failed: [], errored: [] };
     return {
       settled: false,
       passed: false,
@@ -140,9 +120,8 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
       // The pre-run / no-run snapshot (`run: false`, empty rows) is not a
       // settled verdict — keep waiting for a real run's frames.
       if (!snap.run) continue;
-      const { failed, errored } = redNodes(snap);
+      const { done, failed, errored } = agentSummary(snap);
       if (failFast && failed.length + errored.length > 0) {
-        const done = isDone(snap);
         return {
           settled: done,
           passed: false,
@@ -154,7 +133,7 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
           duration_ms: now() - started,
         };
       }
-      if (isDone(snap)) {
+      if (done) {
         return {
           settled: true,
           passed: failed.length + errored.length === 0,
@@ -176,8 +155,10 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
     // the last snapshot we saw was already terminal; `passed` requires that — a
     // green verdict must never come from a half-observed run.
     const red =
-      last !== undefined ? redNodes(last) : { failed: [], errored: [] };
-    const settled = last !== undefined && last.run && isDone(last);
+      last !== undefined
+        ? agentSummary(last)
+        : { done: false, failed: [], errored: [] };
+    const settled = last !== undefined && last.run && red.done;
     return {
       settled,
       passed: settled && red.failed.length + red.errored.length === 0,

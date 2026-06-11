@@ -5,13 +5,22 @@
  * status and CI-sized node ids.
  */
 
+import type { AgentNodes } from "../mcp/agentSurface";
 import {
   clampLog,
   type NodeState,
+  type NodeStatus,
   type PipelineState,
   STATUS_META,
 } from "../common/surface";
 import { dim, green, magenta, red, yellow } from "./ansi";
+
+/** The non-terminal statuses: a node in one of these is still in flight, so the
+ *  pipeline hasn't settled. The single taxonomy `summarize` (PipelineState) and
+ *  `agentSummary` (AgentNodes) share for the "settled" concept, so the two faces
+ *  can't disagree on done-ness — and adding a `NodeStatus` forces a decision
+ *  here rather than silently defaulting to "terminal". */
+export const NON_TERMINAL_STATUSES = new Set<NodeStatus>(["pending", "running"]);
 
 /** Per-status colour, shared by every face (attach table, run matrix,
  *  verdict) — a no-op when stdout isn't a TTY, so pure-string tests and
@@ -110,12 +119,36 @@ export function summarize(state: PipelineState): PipelineSummary {
     if (node === undefined) continue;
     counts[node.status] += 1;
   }
-  const done = counts.pending === 0 && counts.running === 0;
+  const done = ![...NON_TERMINAL_STATUSES].some((s) => counts[s] > 0);
   return {
     ...counts,
     done,
     failedOverall: done && counts.failed + counts.errored > 0,
   };
+}
+
+/** The agent-face parallel of `summarize`, over the flattened `AgentNodes`
+ *  rows: `done` when no row holds a non-terminal status (the same
+ *  `NON_TERMINAL_STATUSES` taxonomy `summarize` uses, so the two faces can't
+ *  disagree on settled-ness), and the red rows bucketed by status using each
+ *  row's own `red` bit (the single source of redness, so the agent verdict
+ *  can't drift from the TUI/run verdict). `wait_for_settle` consumes this
+ *  instead of re-deriving done/red over the raw status strings. */
+export function agentSummary(snap: AgentNodes): {
+  done: boolean;
+  failed: string[];
+  errored: string[];
+} {
+  const failed: string[] = [];
+  const errored: string[] = [];
+  let done = true;
+  for (const node of snap.nodes) {
+    if (NON_TERMINAL_STATUSES.has(node.status as NodeStatus)) done = false;
+    if (!node.red) continue;
+    if (node.status === "failed") failed.push(node.id);
+    else if (node.status === "errored") errored.push(node.id);
+  }
+  return { done, failed, errored };
 }
 
 /** The default node to attach to: the first running node, else the first
