@@ -1,0 +1,13 @@
+# A failing fixture DAG. `boom` exits non-zero, so its node goes red and
+# `odu run` exits 1 — the path that proves odu propagates a node failure all
+# the way out to the process exit code.
+
+[parallel]
+[metadata("ci")]
+default: ok boom
+
+ok:
+    echo "ok ran"
+
+boom: ok
+    exit 1

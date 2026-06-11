@@ -209,7 +209,8 @@ instead of `github:juspay/odu`).
 ```sh
 just install     # pnpm install + hydrate @kolu/* from the npins kolu pin
 just typecheck
-just test        # the loopback falsifiability suite
+just test        # unit tests — the loopback falsifiability suite
+just e2e         # black-box e2e — nix-build odu, drive it against a fixture repo
 just run -- run --no-strict fmt   # one recipe, locally, against the live tree
 ```
 

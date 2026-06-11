@@ -1,0 +1,13 @@
+{
+  # E2E fixture flake. A local `odu run` resolves the lane runner by
+  # evaluating `<repo>#packages.<system>.odu-runner.drvPath` (see
+  # src/coordinator/run.ts) — even for a localhost lane (the realise is a
+  # local no-op copy, but the drvPath lookup still happens). So any repo
+  # that runs odu locally must expose `odu-runner` in its flake.
+  #
+  # The harness rewrites the odu input url below to a `path:` input pointing at
+  # the odu checkout under test and we re-export its packages verbatim, so the
+  # fixture runs the exact `odu-runner` the harness already built (a cache hit).
+  inputs.odu.url = "__ODU_FLAKE__";
+  outputs = { odu, ... }: { packages = odu.packages; };
+}

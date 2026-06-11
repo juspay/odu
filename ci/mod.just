@@ -9,7 +9,7 @@ nix_shell := if env('IN_NIX_SHELL', '') != '' { '' } else { 'nix develop --accep
 
 [parallel]
 [metadata("ci")]
-default: typecheck unit fmt nix
+default: typecheck unit fmt nix e2e
 
 install:
     {{ nix_shell }} pnpm install --frozen-lockfile
@@ -23,6 +23,12 @@ typecheck: install
 
 unit: install
     {{ nix_shell }} pnpm test:unit
+
+# Black-box e2e: builds the odu binary with nix and drives it against a
+# throwaway fixture repo on a localhost lane (tests/e2e/README.md). Needs the
+# dev shell on PATH (nix, git, just) plus the vitest/tsx deps from `install`.
+e2e: install
+    {{ nix_shell }} pnpm test:e2e
 
 fmt:
     {{ nix_shell }} nixpkgs-fmt --check *.nix nix/*.nix nix/packages/*.nix

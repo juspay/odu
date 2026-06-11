@@ -18,5 +18,5 @@
     "jsx": "preserve",
     "lib": ["ES2022"]
   },
-  "include": ["src"]
+  "include": ["src", "tests"]
 }
