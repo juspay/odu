@@ -113,26 +113,36 @@ warm-pool lease (`ci/pu/run.sh`) injects the leased box per run with
 `--host PLAT=ADDR` (which pins or adds a platform for one run, on top of the
 file).
 
-**Scope a recipe to specific platforms.** By default every recipe runs on
-every configured platform. To restrict one to an OS family, tag it with
-`just`'s built-in [OS attributes](https://just.systems/man/en/attributes.html)
-— `[linux]`, `[macos]`, or `[unix]` (Linux + macOS):
+**Scope a recipe to the coordinator's own OS family.** By default every recipe
+fans out to every configured platform. Tagging a recipe with `just`'s built-in
+[OS attributes](https://just.systems/man/en/attributes.html) — `[linux]`,
+`[macos]`, `[unix]`, `[windows]`, … — keeps it off the lanes whose OS it
+doesn't name:
 
 ```just
-[macos]
-codesign:
-    ./sign.sh         # only ever scheduled on a *-darwin lane
-
 [linux]
 nix-bundle:
-    nix bundle .#app  # only ever scheduled on a *-linux lane
+    nix bundle .#app  # dropped from the macOS lane
 ```
 
-A tagged recipe is pruned from the lanes whose OS it doesn't name, and
-**so is anything that depends on it** — a step needing a `[linux]`-only recipe
-drops from the macOS lane too, so no lane is ever left a node whose dependency
-was pruned. Multiple OS attributes are OR-ed (`[linux]` + `[macos]` ⇒ both),
-and an untagged recipe still fans out everywhere.
+A tagged recipe is pruned from the lanes whose OS it doesn't name, and **so is
+anything that depends on it** — a step needing a `[linux]`-only recipe drops
+from the macOS lane too, so no lane is ever left a node whose dependency was
+pruned. Multiple OS attributes are OR-ed (`[linux]` + `[macos]` ⇒ both), and an
+untagged recipe still fans out everywhere. `odu protect` requires exactly the
+filtered contexts, so an OS-scoped recipe is never required on a lane that can't
+post it.
+
+> **Limitation — same-OS only.** odu reads the pipeline once on the coordinator
+> via `just --dump --dump-format json`, and `just` resolves OS attributes
+> *before* emitting that JSON: a recipe whose attribute doesn't match the
+> coordinator's OS is absent from the dump entirely (and a recipe that *depends*
+> on a cross-OS recipe makes `just --dump` fail). So OS attributes reliably
+> **prune** a recipe off non-matching lanes when odu runs on the OS the recipe
+> targets — e.g. a Linux coordinator dropping a `[linux]` recipe from the macOS
+> lane. They cannot **introduce** a recipe onto a foreign-OS lane: a `[macos]`
+> recipe is invisible to a Linux coordinator and so never schedules anywhere.
+> Run each OS family's exclusive recipes from a coordinator on that OS.
 
 ## CLI
 

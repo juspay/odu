@@ -73,6 +73,10 @@ const OS_ATTR_MATCHERS: Record<string, (osSegment: string) => boolean> = {
   macos: (os) => os === "darwin",
   windows: (os) => os === "windows" || os === "mingw32",
   openbsd: (os) => os === "openbsd",
+  freebsd: (os) => os === "freebsd",
+  netbsd: (os) => os === "netbsd",
+  dragonfly: (os) => os === "dragonfly",
+  android: (os) => os === "android",
   unix: (os) => os !== "windows" && os !== "mingw32",
 };
 

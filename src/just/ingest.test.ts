@@ -1,11 +1,20 @@
-import { describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { arch, platform as osPlatform } from "node:process";
+import { afterAll, describe, expect, it } from "vitest";
 import {
   laneTasks,
+  loadJustPipeline,
   mermaidGraph,
   parseSelector,
   pipelineFromDump,
   recipeRunsOn,
 } from "./ingest";
+
+const hasJust =
+  spawnSync("just", ["--version"], { encoding: "utf-8" }).status === 0;
 
 /** A synthetic `just --dump --dump-format json` tree shaped like kolu's:
  *  an empty-bodied `[metadata("ci")]` root in module `ci`, an `install`
@@ -141,9 +150,11 @@ describe("selectors", () => {
   });
 });
 
-/** A dump whose leaves carry OS-family attributes, plus `deployer` (no OS
- *  attribute of its own) depending on the linux-only recipe — so the cascade
- *  is observable. `everywhere` is tagged `[parallel]` to prove a non-OS
+/** A *synthetic* dump exercising the pure filtering logic — both a `[linux]`
+ *  and a `[macos]` recipe present at once, which real `just --dump` never emits
+ *  from a single coordinator (see the "real just --dump" suite for the actual
+ *  contract). `deployer` (no OS attribute) depends on the linux-only recipe so
+ *  the cascade is observable; `everywhere` is `[parallel]` to prove a non-OS
  *  attribute imposes no platform restriction. */
 function osDump(): unknown {
   const r = (
@@ -209,6 +220,22 @@ describe("recipeRunsOn", () => {
   it("multiple OS attributes are OR-ed", () => {
     expect(recipeRunsOn(["linux", "macos"], "aarch64-darwin")).toBe(true);
     expect(recipeRunsOn(["linux", "macos"], "x86_64-linux")).toBe(true);
+  });
+
+  it("covers just's other built-in OS attributes", () => {
+    // Every OS-enabling attribute just 1.50 accepts beyond linux/macos/unix.
+    expect(recipeRunsOn(["windows"], "x86_64-windows")).toBe(true);
+    expect(recipeRunsOn(["openbsd"], "x86_64-openbsd")).toBe(true);
+    expect(recipeRunsOn(["freebsd"], "x86_64-freebsd")).toBe(true);
+    expect(recipeRunsOn(["netbsd"], "x86_64-netbsd")).toBe(true);
+    expect(recipeRunsOn(["dragonfly"], "x86_64-dragonfly")).toBe(true);
+    expect(recipeRunsOn(["android"], "aarch64-android")).toBe(true);
+    // each restricts to its own OS, not "runs everywhere"
+    expect(recipeRunsOn(["freebsd"], "x86_64-linux")).toBe(false);
+    expect(recipeRunsOn(["android"], "aarch64-darwin")).toBe(false);
+    // [unix] excludes windows but includes the BSDs and android
+    expect(recipeRunsOn(["unix"], "x86_64-freebsd")).toBe(true);
+    expect(recipeRunsOn(["unix"], "x86_64-windows")).toBe(false);
   });
 });
 
@@ -277,5 +304,90 @@ describe("mermaidGraph", () => {
     expect(graph).toContain("flowchart TD");
     expect(graph).toContain('ci__e2e["ci::e2e"]');
     expect(graph).toContain("ci__install --> ci__e2e");
+  });
+});
+
+/**
+ * The real-`just` dump path. The synthetic `osDump()` above feeds both a
+ * `[linux]` and a `[macos]` recipe through `pipelineFromDump`, but a single
+ * coordinator's `just --dump --dump-format json` *never* yields that input:
+ * `just` resolves OS attributes before emitting JSON, so a recipe whose OS
+ * doesn't match the coordinator is absent from the dump entirely. These tests
+ * pin the resulting contract — OS attributes reliably *prune* same-OS recipes
+ * off foreign lanes, but cannot *introduce* a foreign-OS recipe — so a future
+ * change can't silently regress (or over-promise) it.
+ */
+describe.skipIf(!hasJust)("loadJustPipeline (real just --dump)", () => {
+  const coordinatorOs = osPlatform === "darwin" ? "macos" : "linux";
+  const sameOsPlatform =
+    osPlatform === "darwin" ? `${arch}-darwin` : `${arch}-linux`;
+  const foreignOsPlatform =
+    osPlatform === "darwin" ? `${arch}-linux` : `${arch}-darwin`;
+  const foreignOsAttr = osPlatform === "darwin" ? "linux" : "macos";
+
+  const dirs: string[] = [];
+  afterAll(() => {
+    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+  });
+  const justfileDir = (contents: string): string => {
+    const dir = mkdtempSync(join(tmpdir(), "odu-just-"));
+    dirs.push(dir);
+    writeFileSync(join(dir, "justfile"), contents);
+    return dir;
+  };
+
+  it("prunes a coordinator-OS recipe off the foreign lane (the working case)", () => {
+    const dir = justfileDir(
+      [
+        '[metadata("ci")]',
+        "default: same-os portable",
+        "",
+        `[${coordinatorOs}]`,
+        "same-os:",
+        "    echo same",
+        "",
+        "portable:",
+        "    echo portable",
+        "",
+      ].join("\n"),
+    );
+    const spec = loadJustPipeline(dir);
+    // The coordinator-OS recipe is in the dump, tagged with its OS.
+    expect(spec.tasks.find((t) => t.id === "same-os")?.os).toEqual([
+      coordinatorOs,
+    ]);
+    const same = laneTasks(spec, sameOsPlatform, [], false).map((t) => t.id);
+    const foreign = laneTasks(spec, foreignOsPlatform, [], false).map(
+      (t) => t.id,
+    );
+    expect(same).toContain("same-os");
+    expect(same).toContain("portable");
+    expect(foreign).not.toContain("same-os"); // pruned off the foreign lane
+    expect(foreign).toContain("portable"); // untagged still fans out
+  });
+
+  it("cannot see a foreign-OS recipe — just drops it from the JSON dump (the limitation)", () => {
+    const dir = justfileDir(
+      [
+        '[metadata("ci")]',
+        "default: portable",
+        "",
+        `[${foreignOsAttr}]`,
+        "foreign-os:",
+        "    echo foreign",
+        "",
+        "portable:",
+        "    echo portable",
+        "",
+      ].join("\n"),
+    );
+    const spec = loadJustPipeline(dir);
+    // The foreign-OS recipe is absent from the coordinator's dump entirely, so
+    // it never schedules on *any* lane, including its own target OS.
+    expect(spec.tasks.find((t) => t.id === "foreign-os")).toBeUndefined();
+    const foreign = laneTasks(spec, foreignOsPlatform, [], false).map(
+      (t) => t.id,
+    );
+    expect(foreign).not.toContain("foreign-os");
   });
 });
