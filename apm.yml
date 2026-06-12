@@ -4,6 +4,15 @@ type: hybrid
 
 target: claude
 
+# Gate exactly what odu publishes to consumers (e.g. kolu). `includes` is an
+# allow-list — only these paths ship. odu's agent face is its two skills; the
+# odu MCP server ships separately via `dependencies.mcp` below. Internal dev
+# guidance lives outside `.apm/` and is wired as a devDependency so consumers
+# never pull it.
+includes:
+  - .apm/skills/ci/
+  - .apm/skills/odu-mcp/
+
 dependencies:
   apm:
     - srid/agency#master
@@ -15,3 +24,9 @@ dependencies:
       registry: false
       transport: stdio
       command: .agents/skills/odu-mcp/bin/serve
+
+# Maintainer-only: deployed into odu's own .claude/ for odu developers, but
+# excluded from what consumers receive (and from `apm pack`).
+devDependencies:
+  apm:
+    - path: ./dev

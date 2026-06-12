@@ -1,0 +1,11 @@
+# Maintainer-only APM package: odu's internal dev guidance. Wired into the
+# root apm.yml as a local-path devDependency, so `apm install` deploys these
+# instructions into odu's own .claude/ for odu developers, while consumers of
+# juspay/odu (and `apm pack`) never receive them.
+name: odu-dev
+version: 1.0.0
+type: instructions
+
+target: claude
+
+includes: auto
