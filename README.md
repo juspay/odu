@@ -207,6 +207,7 @@ the agent.
 | `node_rerun` | Reset a node + its dependents and reschedule (the only *node* mutation). |
 | `wait_for_settle` | Block until the run settles, or — fail-fast — the instant a node goes red. |
 | `cancel` | Stop the live run and wait until it's torn down, so a following `run` can start. |
+| `runs` | The durable run history — each recorded run's `sha#seq`, outcome, timing, lanes, and per-node results, newest first. Reads the on-disk ledger, so it answers *after* the coordinator has exited (the agent-face analogue of `odu runs`). |
 
 The pipeline snapshot and per-node logs are **subscribable resources** rather
 than tools: `surface://streams/nodes` (the pipeline as `{ run, pipeline, nodes[] }`
