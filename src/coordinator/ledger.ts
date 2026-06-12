@@ -67,9 +67,15 @@ export function allocateSeq(repoRoot: string, sha7: string): number {
 
 /** Persist a run's record at `.ci/<sha7>/runs/<seq>.json`. Overwrites the same
  *  `(sha7, seq)` file — so a lingering run that re-finalizes on each drain
- *  refreshes its own record in place rather than accreting duplicates. */
-export function writeRunRecord(repoRoot: string, record: RunRecord): void {
-  const path = recordPath(repoRoot, record.sha7, record.seq);
+ *  refreshes its own record in place rather than accreting duplicates. `sha7`
+ *  is the directory key supplied by the coordinator (the record holds only the
+ *  full `sha`); the layout stays `.ci/<sha7>/`. */
+export function writeRunRecord(
+  repoRoot: string,
+  sha7: string,
+  record: RunRecord,
+): void {
+  const path = recordPath(repoRoot, sha7, record.seq);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `${JSON.stringify(record, null, 2)}\n`);
 }

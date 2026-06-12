@@ -12,6 +12,13 @@ function git(args: string[]): string | null {
   return result.status === 0 ? result.stdout.trim() : null;
 }
 
+/** The 7-char short form of a commit sha — the one place the prefix rule
+ *  lives, so every reader derives the short sha mechanically rather than
+ *  trusting a stored copy. */
+export function shortSha(sha: string): string {
+  return sha.slice(0, 7);
+}
+
 export function gitTopLevel(): string | null {
   return git(["rev-parse", "--show-toplevel"]);
 }
@@ -22,7 +29,7 @@ export function headSha7(repoRoot: string | null): string | null {
     cwd: repoRoot,
     encoding: "utf-8",
   });
-  return sha.status === 0 ? sha.stdout.trim().slice(0, 7) : null;
+  return sha.status === 0 ? shortSha(sha.stdout.trim()) : null;
 }
 
 /** The durable-log identity from the process's real git: the repo root and the

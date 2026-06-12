@@ -537,10 +537,10 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
     try {
       writeRunRecord(
         repoRoot,
+        sha7,
         buildRunRecord({
           repo,
           sha,
-          sha7,
           seq,
           dirty: ctx.dirty,
           startedAt: header.startedAt,

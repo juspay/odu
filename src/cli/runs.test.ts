@@ -8,7 +8,6 @@ function record(over: Partial<RunRecord> = {}): RunRecord {
     version: RUN_RECORD_VERSION,
     repo: "juspay/kolu",
     sha: "26d2c2dabc",
-    sha7: "26d2c2d",
     seq: 1,
     dirty: false,
     pipeline: "pipeline",
@@ -40,10 +39,10 @@ describe("renderRuns", () => {
   it("shows the ref, verdict, lane count and age, newest first as given", () => {
     const out = renderRuns(
       [
-        record({ seq: 2, sha7: "26d2c2d", outcome: "passed", finishedAt: now - 7_200_000 }),
+        record({ seq: 2, sha: "26d2c2dabc", outcome: "passed", finishedAt: now - 7_200_000 }),
         record({
           seq: 1,
-          sha7: "53c0889",
+          sha: "53c0889abc",
           outcome: "failed",
           finishedAt: now - 18_000_000,
           lanes: [

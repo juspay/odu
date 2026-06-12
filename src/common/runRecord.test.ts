@@ -27,7 +27,6 @@ function stateOf(
 const base = {
   repo: "juspay/kolu",
   sha: "26d2c2dabc",
-  sha7: "26d2c2d",
   seq: 1,
   dirty: false,
   startedAt: 1000,
@@ -96,7 +95,6 @@ describe("buildRunRecord", () => {
     expect(record).toMatchObject({
       repo: "juspay/kolu",
       sha: "26d2c2dabc",
-      sha7: "26d2c2d",
       seq: 3,
       dirty: true,
       startedAt: 1000,
@@ -107,7 +105,7 @@ describe("buildRunRecord", () => {
 });
 
 describe("formatRunRef", () => {
-  it("is the stable <sha7>#<seq> spelling", () => {
-    expect(formatRunRef({ sha7: "26d2c2d", seq: 2 })).toBe("26d2c2d#2");
+  it("is the stable <sha7>#<seq> spelling, derived from the full sha", () => {
+    expect(formatRunRef({ sha: "26d2c2dabc", seq: 2 })).toBe("26d2c2d#2");
   });
 });

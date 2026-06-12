@@ -25,7 +25,6 @@ function record(over: Partial<RunRecord> = {}): RunRecord {
     version: RUN_RECORD_VERSION,
     repo: "juspay/kolu",
     sha: "26d2c2dabc",
-    sha7: "26d2c2d",
     seq: 1,
     dirty: false,
     pipeline: "pipeline",
@@ -45,14 +44,14 @@ describe("allocateSeq", () => {
 
   it("returns one past the highest existing seq", () => {
     const repo = tmpRepo();
-    writeRunRecord(repo, record({ seq: 1 }));
-    writeRunRecord(repo, record({ seq: 2 }));
+    writeRunRecord(repo, "26d2c2d", record({ seq: 1 }));
+    writeRunRecord(repo, "26d2c2d", record({ seq: 2 }));
     expect(allocateSeq(repo, "26d2c2d")).toBe(3);
   });
 
   it("is per-commit — a different sha starts fresh at 1", () => {
     const repo = tmpRepo();
-    writeRunRecord(repo, record({ sha7: "aaaaaaa", seq: 5 }));
+    writeRunRecord(repo, "aaaaaaa", record({ seq: 5 }));
     expect(allocateSeq(repo, "bbbbbbb")).toBe(1);
   });
 
@@ -68,7 +67,7 @@ describe("writeRunRecord / readLedger round-trip", () => {
   it("writes to .ci/<sha7>/runs/<seq>.json and reads it back", () => {
     const repo = tmpRepo();
     const r = record({ seq: 2 });
-    writeRunRecord(repo, r);
+    writeRunRecord(repo, "26d2c2d", r);
     expect(recordPath(repo, "26d2c2d", 2)).toBe(
       join(repo, ".ci", "26d2c2d", "runs", "2.json"),
     );
@@ -77,20 +76,20 @@ describe("writeRunRecord / readLedger round-trip", () => {
 
   it("collects records across commits, newest (finishedAt) first", () => {
     const repo = tmpRepo();
-    writeRunRecord(repo, record({ sha7: "aaaaaaa", seq: 1, finishedAt: 100 }));
-    writeRunRecord(repo, record({ sha7: "bbbbbbb", seq: 1, finishedAt: 300 }));
-    writeRunRecord(repo, record({ sha7: "ccccccc", seq: 1, finishedAt: 200 }));
-    expect(readLedger(repo).map((r) => r.sha7)).toEqual([
-      "bbbbbbb",
-      "ccccccc",
-      "aaaaaaa",
+    writeRunRecord(repo, "aaaaaaa", record({ sha: "aaaaaaaXX", seq: 1, finishedAt: 100 }));
+    writeRunRecord(repo, "bbbbbbb", record({ sha: "bbbbbbbXX", seq: 1, finishedAt: 300 }));
+    writeRunRecord(repo, "ccccccc", record({ sha: "cccccccXX", seq: 1, finishedAt: 200 }));
+    expect(readLedger(repo).map((r) => r.sha)).toEqual([
+      "bbbbbbbXX",
+      "cccccccXX",
+      "aaaaaaaXX",
     ]);
   });
 
   it("breaks a finishedAt tie by seq, descending", () => {
     const repo = tmpRepo();
-    writeRunRecord(repo, record({ seq: 1, finishedAt: 500 }));
-    writeRunRecord(repo, record({ seq: 2, finishedAt: 500 }));
+    writeRunRecord(repo, "26d2c2d", record({ seq: 1, finishedAt: 500 }));
+    writeRunRecord(repo, "26d2c2d", record({ seq: 2, finishedAt: 500 }));
     expect(readLedger(repo).map((r) => r.seq)).toEqual([2, 1]);
   });
 
@@ -100,7 +99,7 @@ describe("writeRunRecord / readLedger round-trip", () => {
 
   it("skips an unparseable record rather than blinding the whole ledger", () => {
     const repo = tmpRepo();
-    writeRunRecord(repo, record({ seq: 1 }));
+    writeRunRecord(repo, "26d2c2d", record({ seq: 1 }));
     const runs = join(repo, ".ci", "26d2c2d", "runs");
     writeFileSync(join(runs, "2.json"), "{ not valid json");
     writeFileSync(join(runs, "3.json"), JSON.stringify({ version: 1 })); // missing fields

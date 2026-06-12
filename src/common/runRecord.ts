@@ -26,6 +26,7 @@
  */
 
 import { z } from "zod";
+import { shortSha } from "./git";
 import {
   type NodeStatus,
   NodeStatusSchema,
@@ -67,9 +68,10 @@ export const RunRecordSchema = z.object({
    *  no recognized remote (the zero-config newcomer run). The repo axis a
    *  multi-repo service face fans in on. */
   repo: z.string().nullable(),
-  /** The run's commit (full 40-hex) and its 7-char short form. */
+  /** The run's commit (full 40-hex). The short form is derived (`shortSha`) at
+   *  read sites rather than stored, so a record can't carry a sha7 that
+   *  disagrees with its sha. */
   sha: z.string(),
-  sha7: z.string(),
   /** This run's ordinal among runs of the same `sha` in this checkout, 1-based
    *  — a rerun of one commit gets `seq` 2, 3, … so its record never overwrites
    *  the prior run's. */
@@ -96,8 +98,8 @@ export type RunRecord = z.infer<typeof RunRecordSchema>;
  *  spelling for `odu runs`, a service face's run-page URL, and a future
  *  `target_url` — so the id a status links to and the id the ledger keys on
  *  are the same string, derived here rather than re-concatenated per consumer. */
-export function formatRunRef(record: Pick<RunRecord, "sha7" | "seq">): string {
-  return `${record.sha7}#${record.seq}`;
+export function formatRunRef(record: Pick<RunRecord, "sha" | "seq">): string {
+  return `${shortSha(record.sha)}#${record.seq}`;
 }
 
 function isTerminal(status: NodeStatus): boolean {
@@ -138,7 +140,6 @@ export function projectNodes(state: PipelineState): RunNode[] {
 export function buildRunRecord(input: {
   repo: string | null;
   sha: string;
-  sha7: string;
   seq: number;
   dirty: boolean;
   startedAt: number;
@@ -154,7 +155,6 @@ export function buildRunRecord(input: {
     version: RUN_RECORD_VERSION,
     repo: input.repo,
     sha: input.sha,
-    sha7: input.sha7,
     seq: input.seq,
     dirty: input.dirty,
     pipeline: state.name,

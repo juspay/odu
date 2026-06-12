@@ -9,7 +9,7 @@
  * the default is a compact table, newest first.
  */
 
-import { gitTopLevel } from "../common/git";
+import { gitTopLevel, shortSha } from "../common/git";
 import { formatRunRef, type RunRecord } from "../common/runRecord";
 import { readLedger } from "../coordinator/ledger";
 
@@ -34,7 +34,8 @@ export function renderRuns(records: readonly RunRecord[], now: number): string {
     return "no runs recorded in this checkout (.ci is empty)\n";
   }
   const rows = records.map((r) => {
-    const sha = r.dirty ? `${r.sha7}+dirty` : r.sha7;
+    const sha7 = shortSha(r.sha);
+    const sha = r.dirty ? `${sha7}+dirty` : sha7;
     const verdict =
       r.outcome === "passed"
         ? "✔ passed"
