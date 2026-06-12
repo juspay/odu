@@ -9,9 +9,9 @@
       },
       "branch": "fix/stdio-write-epipe-guard",
       "submodules": false,
-      "revision": "21ea1585930abfcf0069cd4aacfda4df66decda2",
-      "url": "https://github.com/juspay/kolu/archive/21ea1585930abfcf0069cd4aacfda4df66decda2.tar.gz",
-      "hash": "sha256-dElNgd79HfIFOcZ0uVBHUPHMw3BBSBb+vd7XyVhhTAs="
+      "revision": "7f86dbb13d51b47b3ceb97cdf233c133ba980152",
+      "url": "https://github.com/juspay/kolu/archive/7f86dbb13d51b47b3ceb97cdf233c133ba980152.tar.gz",
+      "hash": "sha256-D8a/VKlGe/+NxddvrPP9Pv/ffRngGNQkJCMNHEC2M0o="
     },
     "nixpkgs": {
       "type": "Git",
