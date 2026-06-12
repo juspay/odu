@@ -381,6 +381,14 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
     if (shuttingDown) return;
     shuttingDown = true;
     clearIdle();
+    // Snapshot the state at the instant the interrupt lands — *before* posting,
+    // settling, or letting the still-open lanes mutate it further. The record
+    // must describe the run as it was when cancelled: any node still
+    // pending/running here makes the outcome `incomplete`. If we instead read
+    // `store.get()` after `poster.settle()` (below), a lane that happens to
+    // finish naturally during that window would flip the record to passed/failed
+    // for a run the operator cancelled — contradicting the incomplete semantics.
+    const interruptedState = store.get();
     info(`odu: ${reason} — finalizing posted statuses before exit`);
     for (const context of poster.pendingContexts()) {
       poster.post({
@@ -393,13 +401,15 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
       for (const lane of lanes.values()) lane.close();
       // Record this run before the socket closes: a superseding run waits on
       // that close to confirm we're gone, so writing first guarantees our
-      // record is on disk before it allocates its own (next) seq. Refresh the
-      // timing sidecar alongside the run record so this terminal path leaves the
+      // record is on disk before it allocates its own (next) seq. Use the
+      // interrupt-time snapshot (not a fresh `store.get()`) so a lane that drained
+      // during the settle window can't rewrite a cancelled run's verdict. Refresh
+      // the timing sidecar from the same snapshot so this terminal path leaves the
       // same paired durable state every other terminal path writes.
-      writeTimingSidecar(store.get());
-      finalizeRunRecord(store.get());
+      writeTimingSidecar(interruptedState);
+      finalizeRunRecord(interruptedState);
       closeSocket();
-      display.stop(store.get());
+      display.stop(interruptedState);
       process.exit(code);
     });
   };
@@ -782,15 +792,20 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
   await allSettled;
 
   for (const lane of lanes.values()) lane.close();
+  // Record this run *before* releasing the socket lock — every node is already
+  // terminal (allSettled), so the state is final. A superseding/next run waits
+  // on the socket close to confirm we're gone and only then `allocateSeq()`s, so
+  // writing the record first guarantees our `<seq>.json` is on disk before
+  // anyone can allocate the next seq, and two runs can't collide on one file.
+  // Mirrors the shutdown path's lock-before-record-release ordering.
+  const finalState = store.get();
+  writeTimingSidecar(finalState);
+  finalizeRunRecord(finalState);
   closeSocket();
   await poster.settle();
 
-  const finalState = store.get();
   display.stop(finalState);
-  const code = printVerdict(finalState);
-  writeTimingSidecar(finalState);
-  finalizeRunRecord(finalState);
-  return code;
+  return printVerdict(finalState);
 }
 
 /** Idle backstop for a `--linger` run: after the run drains, the coordinator
