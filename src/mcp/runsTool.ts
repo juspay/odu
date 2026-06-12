@@ -17,7 +17,7 @@
 
 import type { BespokeTool } from "@kolu/surface-mcp";
 import { z } from "zod";
-import { gitRunContext } from "../common/git";
+import { gitTopLevel } from "../common/git";
 import type { RunRecord } from "../common/runRecord";
 import { readLedger } from "../coordinator/ledger";
 
@@ -42,8 +42,11 @@ export interface RunsOptions {
 }
 
 function defaultLoadLedger(): RunRecord[] {
-  const ctx = gitRunContext();
-  return ctx === null ? [] : readLedger(ctx.repoRoot);
+  // The ledger read needs only the checkout root — not a readable HEAD — so
+  // resolve via `gitTopLevel` (what `odu runs` uses), not `gitRunContext`
+  // (which also derives the current sha and would return null on an unborn HEAD).
+  const repoRoot = gitTopLevel();
+  return repoRoot === null ? [] : readLedger(repoRoot);
 }
 
 /** The newest `limit` run records (the ledger is already newest-first). Pure
