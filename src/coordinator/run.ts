@@ -382,7 +382,10 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
       for (const lane of lanes.values()) lane.close();
       // Record this run before the socket closes: a superseding run waits on
       // that close to confirm we're gone, so writing first guarantees our
-      // record is on disk before it allocates its own (next) seq.
+      // record is on disk before it allocates its own (next) seq. Refresh the
+      // timing sidecar alongside the run record so this terminal path leaves the
+      // same paired durable state every other terminal path writes.
+      writeTimingSidecar(store.get());
       finalizeRunRecord(store.get());
       closeSocket();
       display.stop(store.get());
