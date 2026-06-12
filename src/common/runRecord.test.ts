@@ -1,0 +1,111 @@
+import { describe, expect, it } from "vitest";
+import {
+  buildRunRecord,
+  formatRunRef,
+  RUN_RECORD_VERSION,
+  RunRecordSchema,
+} from "./runRecord";
+import { pendingNode, type PipelineState } from "./surface";
+
+/** A PipelineState with `order`-respecting nodes built from terse tuples. */
+function stateOf(
+  rows: Array<[id: string, status: PipelineState["nodes"][string]["status"], exit: number | null, dur: number | null]>,
+): PipelineState {
+  const order = rows.map(([id]) => id);
+  const nodes: PipelineState["nodes"] = {};
+  for (const [id, status, exitCode, durationMs] of rows) {
+    nodes[id] = {
+      ...pendingNode({ id, name: id, command: "x", needs: [] }),
+      status,
+      exitCode,
+      durationMs,
+    };
+  }
+  return { name: "pipeline", sha7: "26d2c2d", dirty: false, order, nodes };
+}
+
+const base = {
+  repo: "juspay/kolu",
+  sha: "26d2c2dabc",
+  seq: 1,
+  dirty: false,
+  startedAt: 1000,
+  finishedAt: 5000,
+  lanes: [{ platform: "x86_64-linux", host: "localhost" }],
+};
+
+describe("buildRunRecord", () => {
+  it("passes only when every node is terminal and none is red", () => {
+    const record = buildRunRecord({
+      ...base,
+      state: stateOf([
+        ["ci::nix@x86_64-linux", "ok", 0, 3000],
+        ["ci::e2e@x86_64-linux", "ok", 0, 1000],
+      ]),
+    });
+    expect(record.outcome).toBe("passed");
+    expect(record.version).toBe(RUN_RECORD_VERSION);
+    // The record validates against its own schema (the ledger reader's gate).
+    expect(RunRecordSchema.safeParse(record).success).toBe(true);
+  });
+
+  it("fails when a node is red, even though the run completed", () => {
+    const record = buildRunRecord({
+      ...base,
+      state: stateOf([
+        ["ci::nix@x86_64-linux", "ok", 0, 3000],
+        ["ci::e2e@x86_64-linux", "failed", 1, 1200],
+      ]),
+    });
+    expect(record.outcome).toBe("failed");
+  });
+
+  it("marks an interrupted run incomplete (a gate that didn't finish didn't pass)", () => {
+    const record = buildRunRecord({
+      ...base,
+      state: stateOf([
+        ["ci::nix@x86_64-linux", "ok", 0, 3000],
+        ["ci::e2e@x86_64-linux", "running", null, null],
+      ]),
+    });
+    expect(record.outcome).toBe("incomplete");
+  });
+
+  it("projects nodes to the matrix-cell fields, in order, dropping command/needs", () => {
+    const record = buildRunRecord({
+      ...base,
+      state: stateOf([
+        ["ci::nix@x86_64-linux", "ok", 0, 3000],
+        ["ci::e2e@x86_64-linux", "failed", 1, 1200],
+      ]),
+    });
+    expect(record.nodes).toEqual([
+      { id: "ci::nix@x86_64-linux", name: "ci::nix@x86_64-linux", status: "ok", exitCode: 0, durationMs: 3000 },
+      { id: "ci::e2e@x86_64-linux", name: "ci::e2e@x86_64-linux", status: "failed", exitCode: 1, durationMs: 1200 },
+    ]);
+  });
+
+  it("carries the identity + run env through unchanged", () => {
+    const record = buildRunRecord({
+      ...base,
+      seq: 3,
+      dirty: true,
+      state: stateOf([["ci::nix@x86_64-linux", "ok", 0, 10]]),
+    });
+    expect(record).toMatchObject({
+      repo: "juspay/kolu",
+      sha: "26d2c2dabc",
+      seq: 3,
+      dirty: true,
+      startedAt: 1000,
+      finishedAt: 5000,
+      lanes: [{ platform: "x86_64-linux", host: "localhost" }],
+    });
+  });
+});
+
+describe("formatRunRef", () => {
+  it("is the stable <sha7>#<seq> spelling, derived from the full sha", () => {
+    expect(formatRunRef({ sha: "26d2c2dabc", seq: 2 })).toBe("26d2c2d#2");
+  });
+});

@@ -50,6 +50,8 @@ odu run  (coordinator, your machine)
  ├─ fan-in: lane states merge into one surface, served on .ci/odu.sock
  │    (odu status / logs / attach dial it, live)
  ├─ logs: .ci/<sha>/<platform>/<recipe>.log — durable even if the runner dies
+ ├─ record: .ci/<sha>/runs/<seq>.json — the run's durable verdict + identity
+ │    (repo, sha, seq), listable with `odu runs` after the coordinator exits
  └─ GitHub: commit status per <recipe>@<platform> context, posted on
     transitions read from the state cell (credentials never leave your machine)
 ```
@@ -165,6 +167,7 @@ odu attach [-o json]              live dashboard (tty); piped, -o json
                                   matches run --progress json, else run's
                                   plain transition stream
 odu cancel                        stop the live run in this checkout, cleanly
+odu runs [-o json]                the durable run history (works with no live run)
 odu dump | graph                  resolved pipeline as JSON / Mermaid
 odu protect [--dry-run]           sync branch protection's required contexts
 odu mcp                           serve the agent face (MCP server, stdio)
@@ -204,6 +207,7 @@ the agent.
 | `node_rerun` | Reset a node + its dependents and reschedule (the only *node* mutation). |
 | `wait_for_settle` | Block until the run settles, or — fail-fast — the instant a node goes red. |
 | `cancel` | Stop the live run and wait until it's torn down, so a following `run` can start. |
+| `runs` | The durable run history — each recorded run's `sha#seq`, outcome, timing, lanes, and per-node results, newest first. Reads the on-disk ledger, so it answers *after* the coordinator has exited (the agent-face analogue of `odu runs`). |
 
 The pipeline snapshot and per-node logs are **subscribable resources** rather
 than tools: `surface://streams/nodes` (the pipeline as `{ run, pipeline, nodes[] }`
@@ -247,13 +251,22 @@ instead of `github:juspay/odu`).
   slice to local platforms with `--platform`, or commit+push for a remote run.
 - **One-shot lanes.** If the ssh link to a lane dies mid-run, that lane's
   unfinished nodes are marked `errored` (GitHub state `error`) and the run
-  fails — live state does not survive a runner restart in Phase 1; the
-  per-SHA log files do.
+  fails — live *node* state does not survive a runner restart in Phase 1; the
+  per-SHA log files and the run record (see below) do.
 - **One run per checkout.** `.ci/odu.sock` is the lock; a second `odu run`
   in the same checkout refuses to start — `odu cancel` (or `odu run
   --supersede`) frees the lock first.
-- **Idle attach is not here yet.** `odu status` with no live run exits 1;
-  a long-lived idle runner you can attach to is Phase-2 territory.
+- **Run history is durable; live attach to a finished run is not.** Every
+  terminal run writes a `(repo, sha, seq)` record to `.ci/<sha>/runs/<seq>.json`
+  — `odu runs` lists them with no coordinator live (an interrupted run records
+  too, marked incomplete). **`status` / `logs` / `attach` take no run selector**:
+  they dial `.ci/odu.sock` and only ever target the run *in progress* (with none
+  live, `odu status` exits 1) — there is no `odu status <sha#seq>` for an old
+  run. To inspect a finished run, read `odu runs -o json`, whose record carries
+  each node's status / exit / duration. What's *not* yet here is the live half:
+  re-attaching the `nodes` / `nodeLog` surface (or a `status`-style detail view)
+  to a run that already finished, and a long-lived idle runner you reach before a
+  run starts — both Phase-2 (`odu serve`) territory.
 
 ## Developing
 

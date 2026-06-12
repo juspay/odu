@@ -36,6 +36,7 @@ import {
 import { implement } from "@orpc/server";
 import { bold, dim, green, link, magenta, red } from "../cli/ansi";
 import { formatGoDuration } from "../common/duration";
+import { gitTopLevel } from "../common/git";
 import { createLogTail } from "../common/logTail";
 import { fanId, onPlatform, splitFanId } from "../common/nodeId";
 import type { TaskSpec } from "../common/spec";
@@ -53,11 +54,14 @@ import { laneTasks, loadJustPipeline, parseSelector } from "../just/ingest";
 import { loadHosts, localFallbackNote, resolveLanes } from "./hosts";
 import { type Lane, startLane } from "./lane";
 import { cancelRun } from "./cancel";
+import { allocateSeq, writeRunRecord } from "./ledger";
+import { buildRunRecord, projectNodes } from "../common/runRecord";
 import { SOCKET_PATH, serveSocket } from "./socket";
 import {
   fetchUrlFor,
   logPathFor,
   parseGithubRemote,
+  repoSlug,
   StatusPoster,
   statusFor,
 } from "./statuses";
@@ -96,7 +100,12 @@ function tryGit(repo: string, args: string[]): string | null {
 }
 
 export async function runCommand(args: RunArgs): Promise<number> {
-  const repoRoot = git(process.cwd(), ["rev-parse", "--show-toplevel"]);
+  const repoRoot = gitTopLevel();
+  if (repoRoot === null) {
+    throw new Error(
+      "odu: git rev-parse --show-toplevel failed: not a git checkout",
+    );
+  }
 
   // ── modes (the justci flag table: strict by default) ──
   const snapshotMode = !args.noStrict && !args.noSnapshot;
@@ -194,7 +203,11 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
   // (A localhost lane dials no one; it's the zero-config default, not a baked-in
   // remote host.) An explicit `--platform` with no host still errors earlier in
   // resolveLanes — the operator asking for a lane we can't build.
-  let lanesByPlatform = resolveLanes(hostsConfig, args.hostPins, args.platforms);
+  let lanesByPlatform = resolveLanes(
+    hostsConfig,
+    args.hostPins,
+    args.platforms,
+  );
   if (Object.keys(lanesByPlatform).length === 0) {
     const system = await resolveSystem("localhost");
     info(localFallbackNote(system));
@@ -336,6 +349,12 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
   // same teardown a SIGINT does. `closeSocket` is hoisted (assigned once the
   // socket serves, below) so this closure can reference it before it exists.
   let closeSocket: () => void = () => {};
+  // Writes this run's durable record to the ledger. Hoisted like `closeSocket`:
+  // a no-op until the run identity is allocated (after a possible --supersede,
+  // below), then driven by every terminal path — natural completion, each
+  // linger drain, and the shared `shutdown` teardown — so an interrupted or
+  // cancelled run still leaves a record (marked incomplete).
+  let finalizeRunRecord: (state: PipelineState) => void = () => {};
   // Linger's idle backstop: a settled-but-lingering coordinator self-reaps
   // after `idleMs` with no new work, so a forgotten `--linger` run can't hold
   // the checkout lock forever. Cleared the instant a node (re)starts.
@@ -362,6 +381,14 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
     if (shuttingDown) return;
     shuttingDown = true;
     clearIdle();
+    // Snapshot the state at the instant the interrupt lands — *before* posting,
+    // settling, or letting the still-open lanes mutate it further. The record
+    // must describe the run as it was when cancelled: any node still
+    // pending/running here makes the outcome `incomplete`. If we instead read
+    // `store.get()` after `poster.settle()` (below), a lane that happens to
+    // finish naturally during that window would flip the record to passed/failed
+    // for a run the operator cancelled — contradicting the incomplete semantics.
+    const interruptedState = store.get();
     info(`odu: ${reason} — finalizing posted statuses before exit`);
     for (const context of poster.pendingContexts()) {
       poster.post({
@@ -372,8 +399,17 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
     }
     void poster.settle().then(() => {
       for (const lane of lanes.values()) lane.close();
+      // Record this run before the socket closes: a superseding run waits on
+      // that close to confirm we're gone, so writing first guarantees our
+      // record is on disk before it allocates its own (next) seq. Use the
+      // interrupt-time snapshot (not a fresh `store.get()`) so a lane that drained
+      // during the settle window can't rewrite a cancelled run's verdict. Refresh
+      // the timing sidecar from the same snapshot so this terminal path leaves the
+      // same paired durable state every other terminal path writes.
+      writeTimingSidecar(interruptedState);
+      finalizeRunRecord(interruptedState);
       closeSocket();
-      display.stop(store.get());
+      display.stop(interruptedState);
       process.exit(code);
     });
   };
@@ -510,6 +546,36 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
       return 1;
     }
   }
+  // ── run identity — the durable record's (repo, sha, seq) ──
+  // Allocated *after* a possible --supersede cancel: a superseded run writes
+  // its own record before its socket closes (the teardown above), so by the
+  // time we get here that record is on disk and we take the next seq rather
+  // than colliding on it. `repo` is the GitHub owner/repo or null for a
+  // local-only checkout; `seq` distinguishes repeat runs of one commit.
+  const repo = github !== null ? repoSlug(github) : null;
+  const seq = allocateSeq(repoRoot, sha7);
+  finalizeRunRecord = (state: PipelineState): void => {
+    try {
+      writeRunRecord(
+        repoRoot,
+        sha7,
+        buildRunRecord({
+          repo,
+          sha,
+          seq,
+          dirty: ctx.dirty,
+          startedAt: header.startedAt,
+          finishedAt: Date.now(),
+          lanes: header.lanes,
+          state,
+        }),
+      );
+    } catch {
+      // best-effort: the run history is a convenience, never a gate — a failed
+      // record write must not fail the run or mask its verdict.
+    }
+  };
+
   // Publish before serving so an `attach` connecting in the first instant reads
   // the real header, not the EMPTY_HEADER default.
   headerStore.set(header);
@@ -620,23 +686,21 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
   // metrics comment.
   const writeTimingSidecar = (state: PipelineState): void => {
     try {
-      const timingLines: string[] = [];
-      for (const id of state.order) {
-        const node = state.nodes[id];
-        if (node === undefined) continue;
-        const { namepath, platform } = splitFanId(id);
-        timingLines.push(
-          JSON.stringify({
-            node: id,
-            recipe: namepath,
-            platform,
-            status: node.status,
-            startedAt: node.startedAt,
-            durationMs: node.durationMs,
-            exitCode: node.exitCode,
-          }),
-        );
-      }
+      // Derive the node field set from the one shared projection; the sidecar
+      // adds only its own axes — recipe/platform (splitFanId) and the node's
+      // `startedAt` (not on RunNode) — so a per-node field change lands once.
+      const timingLines = projectNodes(state).map((node) => {
+        const { namepath, platform } = splitFanId(node.id);
+        return JSON.stringify({
+          node: node.id,
+          recipe: namepath,
+          platform,
+          status: node.status,
+          startedAt: state.nodes[node.id]?.startedAt ?? null,
+          durationMs: node.durationMs,
+          exitCode: node.exitCode,
+        });
+      });
       const timingsFile = join(repoRoot, ".ci", sha7, "timings.jsonl");
       mkdirSync(dirname(timingsFile), { recursive: true });
       writeFileSync(timingsFile, `${timingLines.join("\n")}\n`);
@@ -709,6 +773,7 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
     // signal / idle — all of which route through `shutdown`, which exits us.
     onSettledEach = (): void => {
       writeTimingSidecar(store.get());
+      finalizeRunRecord(store.get());
       if (idleMs > 0) {
         clearIdle();
         idleTimer = setTimeout(
@@ -727,14 +792,20 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
   await allSettled;
 
   for (const lane of lanes.values()) lane.close();
+  // Record this run *before* releasing the socket lock — every node is already
+  // terminal (allSettled), so the state is final. A superseding/next run waits
+  // on the socket close to confirm we're gone and only then `allocateSeq()`s, so
+  // writing the record first guarantees our `<seq>.json` is on disk before
+  // anyone can allocate the next seq, and two runs can't collide on one file.
+  // Mirrors the shutdown path's lock-before-record-release ordering.
+  const finalState = store.get();
+  writeTimingSidecar(finalState);
+  finalizeRunRecord(finalState);
   closeSocket();
   await poster.settle();
 
-  const finalState = store.get();
   display.stop(finalState);
-  const code = printVerdict(finalState);
-  writeTimingSidecar(finalState);
-  return code;
+  return printVerdict(finalState);
 }
 
 /** Idle backstop for a `--linger` run: after the run drains, the coordinator

@@ -21,11 +21,14 @@
  *     live — the 64KB clamp + the path-traversal guard live in this handler.
  *   - procedure `node.rerun` → `node.rerun` (pass-through to A).
  *
- * `nodes` is live-only by design — unlike `logs`, no durable `PipelineState`
- * manifest exists on disk, so when the coordinator socket is gone `nodes` reports
- * `{ run: false }` rather than a finished run's verdict. An agent must read the
- * verdict from `wait_for_settle`'s return value (captured while the socket was
- * live), not from a post-coordinator `nodes` read.
+ * `nodes` is live-only by design — when the coordinator socket is gone `nodes`
+ * reports `{ run: false }` rather than a finished run's verdict, so within a run
+ * an agent reads the verdict from `wait_for_settle`'s return value (captured
+ * while the socket was live), not from a post-coordinator `nodes` read. The
+ * *durable* history of finished runs lives in the on-disk ledger and is reached
+ * through the `runs` bespoke tool (src/mcp/runsTool.ts), not this live
+ * projection — the same split the CLI draws between `attach`/`status` (live) and
+ * `runs` (durable).
  *
  * `header` and `run.configure` are absent by construction: `header` isn't
  * mapped (it carries no agent value the `nodes` rows don't), and

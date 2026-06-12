@@ -14,10 +14,12 @@
  * Default-deny `expose`: only the `nodes` cell + `logs` collection (as
  * resources) and `node.rerun` (as a tool) reach the host; the coordinator's
  * `header` cell and the lane-only `run.configure` are unreachable by
- * construction. Three bespoke tools — `run` (spawn-and-await),
- * `wait_for_settle` (single blocking subscription), and `cancel` (drive the
- * live run's teardown) — ride alongside. (`run.cancel` is the surface mutation
- * `cancel` drives; it's not exposed directly — the tool also confirms teardown.)
+ * construction. Four bespoke tools — `run` (spawn-and-await),
+ * `wait_for_settle` (single blocking subscription), `cancel` (drive the live
+ * run's teardown), and `runs` (the durable run history, read off the on-disk
+ * ledger so it answers after the coordinator exits) — ride alongside.
+ * (`run.cancel` is the surface mutation `cancel` drives; it's not exposed
+ * directly — the tool also confirms teardown.)
  */
 
 import { readFileSync } from "node:fs";
@@ -28,6 +30,7 @@ import { serveSurfaceAsMcp } from "@kolu/surface-mcp";
 import { buildAgentProjection, redialingAClient } from "../mcp/agentSurface";
 import { cancelTool } from "../mcp/cancelTool";
 import { killRuns, runTool } from "../mcp/runTool";
+import { runsTool } from "../mcp/runsTool";
 import { waitTool } from "../mcp/waitTool";
 import { gitRunContext } from "../common/git";
 import { oduSurface } from "../common/surface";
@@ -83,7 +86,12 @@ export async function mcpCommand(socketPath: string = SOCKET_PATH): Promise<numb
       logs: "resource",
       "node.rerun": { tool: { mutates: true } },
     },
-    tools: { run: runTool, wait_for_settle: waitTool, cancel: cancelTool },
+    tools: {
+      run: runTool,
+      wait_for_settle: waitTool,
+      cancel: cancelTool,
+      runs: runsTool,
+    },
     serverInfo: { name: "odu", version: version() },
   });
 
