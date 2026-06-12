@@ -259,10 +259,14 @@ instead of `github:juspay/odu`).
 - **Run history is durable; live attach to a finished run is not.** Every
   terminal run writes a `(repo, sha, seq)` record to `.ci/<sha>/runs/<seq>.json`
   — `odu runs` lists them with no coordinator live (an interrupted run records
-  too, marked incomplete). What's *not* yet here: attaching the live `nodes` /
-  `nodeLog` surface to a run that already finished, and a long-lived idle runner
-  you reach before a run starts — both Phase-2 territory. `odu status` with no
-  live run still exits 1; reach for `odu runs` to read what already happened.
+  too, marked incomplete). **`status` / `logs` / `attach` take no run selector**:
+  they dial `.ci/odu.sock` and only ever target the run *in progress* (with none
+  live, `odu status` exits 1) — there is no `odu status <sha#seq>` for an old
+  run. To inspect a finished run, read `odu runs -o json`, whose record carries
+  each node's status / exit / duration. What's *not* yet here is the live half:
+  re-attaching the `nodes` / `nodeLog` surface (or a `status`-style detail view)
+  to a run that already finished, and a long-lived idle runner you reach before a
+  run starts — both Phase-2 (`odu serve`) territory.
 
 ## Developing
 
