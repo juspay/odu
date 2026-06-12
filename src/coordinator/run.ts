@@ -60,6 +60,7 @@ import {
   fetchUrlFor,
   logPathFor,
   parseGithubRemote,
+  repoSlug,
   StatusPoster,
   statusFor,
 } from "./statuses";
@@ -531,7 +532,7 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
   // time we get here that record is on disk and we take the next seq rather
   // than colliding on it. `repo` is the GitHub owner/repo or null for a
   // local-only checkout; `seq` distinguishes repeat runs of one commit.
-  const repo = github !== null ? `${github.owner}/${github.repo}` : null;
+  const repo = github !== null ? repoSlug(github) : null;
   const seq = allocateSeq(repoRoot, sha7);
   finalizeRunRecord = (state: PipelineState): void => {
     try {

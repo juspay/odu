@@ -158,6 +158,12 @@ export function parseGithubRemote(
   return { owner, repo };
 }
 
+/** Format a parsed GitHub remote as its `owner/repo` slug — the durable run
+ *  record's repo identity. */
+export function repoSlug(gh: { owner: string; repo: string }): string {
+  return `${gh.owner}/${gh.repo}`;
+}
+
 /** Normalize a GitHub remote to the anonymous-https form lane hosts fetch
  *  from (they have no GitHub ssh identity — the repo being public is what
  *  makes remote lanes work). */
