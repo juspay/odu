@@ -161,7 +161,7 @@ export function buildRunRecord(input: {
     outcome: !complete ? "incomplete" : red ? "failed" : "passed",
     startedAt: input.startedAt,
     finishedAt: input.finishedAt,
-    lanes: input.lanes.map((l) => ({ platform: l.platform, host: l.host })),
+    lanes: [...input.lanes],
     nodes,
   };
 }
