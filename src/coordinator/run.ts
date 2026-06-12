@@ -53,6 +53,8 @@ import { laneTasks, loadJustPipeline, parseSelector } from "../just/ingest";
 import { loadHosts, localFallbackNote, resolveLanes } from "./hosts";
 import { type Lane, startLane } from "./lane";
 import { cancelRun } from "./cancel";
+import { allocateSeq, writeRunRecord } from "./ledger";
+import { buildRunRecord } from "../common/runRecord";
 import { SOCKET_PATH, serveSocket } from "./socket";
 import {
   fetchUrlFor,
@@ -336,6 +338,12 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
   // same teardown a SIGINT does. `closeSocket` is hoisted (assigned once the
   // socket serves, below) so this closure can reference it before it exists.
   let closeSocket: () => void = () => {};
+  // Writes this run's durable record to the ledger. Hoisted like `closeSocket`:
+  // a no-op until the run identity is allocated (after a possible --supersede,
+  // below), then driven by every terminal path — natural completion, each
+  // linger drain, and the shared `shutdown` teardown — so an interrupted or
+  // cancelled run still leaves a record (marked incomplete).
+  let finalizeRunRecord: (state: PipelineState) => void = () => {};
   // Linger's idle backstop: a settled-but-lingering coordinator self-reaps
   // after `idleMs` with no new work, so a forgotten `--linger` run can't hold
   // the checkout lock forever. Cleared the instant a node (re)starts.
@@ -372,6 +380,10 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
     }
     void poster.settle().then(() => {
       for (const lane of lanes.values()) lane.close();
+      // Record this run before the socket closes: a superseding run waits on
+      // that close to confirm we're gone, so writing first guarantees our
+      // record is on disk before it allocates its own (next) seq.
+      finalizeRunRecord(store.get());
       closeSocket();
       display.stop(store.get());
       process.exit(code);
@@ -510,6 +522,36 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
       return 1;
     }
   }
+  // ── run identity — the durable record's (repo, sha, seq) ──
+  // Allocated *after* a possible --supersede cancel: a superseded run writes
+  // its own record before its socket closes (the teardown above), so by the
+  // time we get here that record is on disk and we take the next seq rather
+  // than colliding on it. `repo` is the GitHub owner/repo or null for a
+  // local-only checkout; `seq` distinguishes repeat runs of one commit.
+  const repo = github !== null ? `${github.owner}/${github.repo}` : null;
+  const seq = allocateSeq(repoRoot, sha7);
+  finalizeRunRecord = (state: PipelineState): void => {
+    try {
+      writeRunRecord(
+        repoRoot,
+        buildRunRecord({
+          repo,
+          sha,
+          sha7,
+          seq,
+          dirty: ctx.dirty,
+          startedAt: header.startedAt,
+          finishedAt: Date.now(),
+          lanes: header.lanes,
+          state,
+        }),
+      );
+    } catch {
+      // best-effort: the run history is a convenience, never a gate — a failed
+      // record write must not fail the run or mask its verdict.
+    }
+  };
+
   // Publish before serving so an `attach` connecting in the first instant reads
   // the real header, not the EMPTY_HEADER default.
   headerStore.set(header);
@@ -709,6 +751,7 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
     // signal / idle — all of which route through `shutdown`, which exits us.
     onSettledEach = (): void => {
       writeTimingSidecar(store.get());
+      finalizeRunRecord(store.get());
       if (idleMs > 0) {
         clearIdle();
         idleTimer = setTimeout(
@@ -734,6 +777,7 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
   display.stop(finalState);
   const code = printVerdict(finalState);
   writeTimingSidecar(finalState);
+  finalizeRunRecord(finalState);
   return code;
 }
 
