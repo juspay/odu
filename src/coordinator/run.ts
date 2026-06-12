@@ -36,6 +36,7 @@ import {
 import { implement } from "@orpc/server";
 import { bold, dim, green, link, magenta, red } from "../cli/ansi";
 import { formatGoDuration } from "../common/duration";
+import { gitTopLevel } from "../common/git";
 import { createLogTail } from "../common/logTail";
 import { fanId, onPlatform, splitFanId } from "../common/nodeId";
 import type { TaskSpec } from "../common/spec";
@@ -99,7 +100,12 @@ function tryGit(repo: string, args: string[]): string | null {
 }
 
 export async function runCommand(args: RunArgs): Promise<number> {
-  const repoRoot = git(process.cwd(), ["rev-parse", "--show-toplevel"]);
+  const repoRoot = gitTopLevel();
+  if (repoRoot === null) {
+    throw new Error(
+      "odu: git rev-parse --show-toplevel failed: not a git checkout",
+    );
+  }
 
   // ── modes (the justci flag table: strict by default) ──
   const snapshotMode = !args.noStrict && !args.noSnapshot;
@@ -197,7 +203,11 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
   // (A localhost lane dials no one; it's the zero-config default, not a baked-in
   // remote host.) An explicit `--platform` with no host still errors earlier in
   // resolveLanes — the operator asking for a lane we can't build.
-  let lanesByPlatform = resolveLanes(hostsConfig, args.hostPins, args.platforms);
+  let lanesByPlatform = resolveLanes(
+    hostsConfig,
+    args.hostPins,
+    args.platforms,
+  );
   if (Object.keys(lanesByPlatform).length === 0) {
     const system = await resolveSystem("localhost");
     info(localFallbackNote(system));
