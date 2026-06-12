@@ -7,11 +7,11 @@
         "owner": "juspay",
         "repo": "kolu"
       },
-      "branch": "master",
+      "branch": "fix/stdio-write-epipe-guard",
       "submodules": false,
-      "revision": "00be1ec9c2949246c1e466fdcab2f6b4c252f8a5",
-      "url": "https://github.com/juspay/kolu/archive/00be1ec9c2949246c1e466fdcab2f6b4c252f8a5.tar.gz",
-      "hash": "sha256-ZpiZYwNCCQOlLXEhF7R3k6gJc32dG+M5qtPE/AzjqeA="
+      "revision": "21ea1585930abfcf0069cd4aacfda4df66decda2",
+      "url": "https://github.com/juspay/kolu/archive/21ea1585930abfcf0069cd4aacfda4df66decda2.tar.gz",
+      "hash": "sha256-dElNgd79HfIFOcZ0uVBHUPHMw3BBSBb+vd7XyVhhTAs="
     },
     "nixpkgs": {
       "type": "Git",
