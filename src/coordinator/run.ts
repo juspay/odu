@@ -54,7 +54,7 @@ import { loadHosts, localFallbackNote, resolveLanes } from "./hosts";
 import { type Lane, startLane } from "./lane";
 import { cancelRun } from "./cancel";
 import { allocateSeq, writeRunRecord } from "./ledger";
-import { buildRunRecord } from "../common/runRecord";
+import { buildRunRecord, projectNodes } from "../common/runRecord";
 import { SOCKET_PATH, serveSocket } from "./socket";
 import {
   fetchUrlFor,
@@ -662,23 +662,21 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
   // metrics comment.
   const writeTimingSidecar = (state: PipelineState): void => {
     try {
-      const timingLines: string[] = [];
-      for (const id of state.order) {
-        const node = state.nodes[id];
-        if (node === undefined) continue;
-        const { namepath, platform } = splitFanId(id);
-        timingLines.push(
-          JSON.stringify({
-            node: id,
-            recipe: namepath,
-            platform,
-            status: node.status,
-            startedAt: node.startedAt,
-            durationMs: node.durationMs,
-            exitCode: node.exitCode,
-          }),
-        );
-      }
+      // Derive the node field set from the one shared projection; the sidecar
+      // adds only its own axes — recipe/platform (splitFanId) and the node's
+      // `startedAt` (not on RunNode) — so a per-node field change lands once.
+      const timingLines = projectNodes(state).map((node) => {
+        const { namepath, platform } = splitFanId(node.id);
+        return JSON.stringify({
+          node: node.id,
+          recipe: namepath,
+          platform,
+          status: node.status,
+          startedAt: state.nodes[node.id]?.startedAt ?? null,
+          durationMs: node.durationMs,
+          exitCode: node.exitCode,
+        });
+      });
       const timingsFile = join(repoRoot, ".ci", sha7, "timings.jsonl");
       mkdirSync(dirname(timingsFile), { recursive: true });
       writeFileSync(timingsFile, `${timingLines.join("\n")}\n`);

@@ -99,6 +99,30 @@ function isTerminal(status: NodeStatus): boolean {
   return status !== "pending" && status !== "running";
 }
 
+/** The single per-node terminal projection of a finished run's `state.order` —
+ *  the one place the on-disk node field set (status, exitCode, durationMs, …)
+ *  is derived. Both durable consumers fan out from here: `buildRunRecord` uses
+ *  it verbatim for `record.nodes`, and the coordinator's timing sidecar maps
+ *  each `RunNode` (+ `splitFanId(id)` for recipe/platform + the node's
+ *  `startedAt`) into its jsonl shape — so the two formats can't silently
+ *  diverge on a node-level field. Skips ids with no live cell, exactly as the
+ *  matrix repaint does. */
+export function projectNodes(state: PipelineState): RunNode[] {
+  const nodes: RunNode[] = [];
+  for (const id of state.order) {
+    const node = state.nodes[id];
+    if (node === undefined) continue;
+    nodes.push({
+      id,
+      name: node.name,
+      status: node.status,
+      exitCode: node.exitCode,
+      durationMs: node.durationMs,
+    });
+  }
+  return nodes;
+}
+
 /** Build the durable record for a run from its final `PipelineState` plus the
  *  run environment the state cell doesn't carry (identity, lanes, timing).
  *
@@ -118,22 +142,9 @@ export function buildRunRecord(input: {
   state: PipelineState;
 }): RunRecord {
   const { state } = input;
-  const nodes: RunNode[] = [];
-  let complete = true;
-  let red = false;
-  for (const id of state.order) {
-    const node = state.nodes[id];
-    if (node === undefined) continue;
-    if (!isTerminal(node.status)) complete = false;
-    if (STATUS_META[node.status].isRed) red = true;
-    nodes.push({
-      id,
-      name: node.name,
-      status: node.status,
-      exitCode: node.exitCode,
-      durationMs: node.durationMs,
-    });
-  }
+  const nodes = projectNodes(state);
+  const complete = nodes.every((n) => isTerminal(n.status));
+  const red = nodes.some((n) => STATUS_META[n.status].isRed);
   return {
     version: RUN_RECORD_VERSION,
     repo: input.repo,
