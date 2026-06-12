@@ -28,7 +28,7 @@ export function formatAgo(deltaMs: number): string {
 
 /** Render the ledger as a fixed-column table, newest first. Pure over `now`
  *  (the caller passes `Date.now()`) so the relative ages are testable. The
- *  columns mirror the idle-attach sketch: ref · sha · verdict · lanes · age. */
+ *  columns mirror the idle-attach sketch: ref · sha · outcome · lanes · age. */
 export function renderRuns(records: readonly RunRecord[], now: number): string {
   if (records.length === 0) {
     return "no runs recorded in this checkout (.ci is empty)\n";
@@ -36,7 +36,11 @@ export function renderRuns(records: readonly RunRecord[], now: number): string {
   const rows = records.map((r) => {
     const sha = r.dirty ? `${r.sha7}+dirty` : r.sha7;
     const verdict =
-      r.verdict === "passed" ? "✔ passed" : r.complete ? "✗ failed" : "✗ incomplete";
+      r.outcome === "passed"
+        ? "✔ passed"
+        : r.outcome === "failed"
+          ? "✗ failed"
+          : "✗ incomplete";
     return {
       ref: formatRunRef(r),
       sha,

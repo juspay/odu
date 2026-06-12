@@ -52,11 +52,14 @@ export const RunNodeSchema = z.object({
 });
 export type RunNode = z.infer<typeof RunNodeSchema>;
 
-/** A run's verdict: `passed` only when the run *completed* with no red node.
- *  An interrupted/cancelled run (some node still pending/running when the
- *  record was finalized) is `failed` — a gate that didn't finish didn't pass. */
-export const RunVerdictSchema = z.enum(["passed", "failed"]);
-export type RunVerdict = z.infer<typeof RunVerdictSchema>;
+/** A run's outcome — one domain concept with exactly three reachable states:
+ *  `passed` only when the run *completed* with no red node; `failed` when it
+ *  completed with a red node; `incomplete` when some node was still
+ *  pending/running as the record was finalized (a gate that didn't finish
+ *  didn't pass). One field, so the illegal "passed but incomplete" combination
+ *  is unrepresentable. */
+export const RunOutcomeSchema = z.enum(["passed", "failed", "incomplete"]);
+export type RunOutcome = z.infer<typeof RunOutcomeSchema>;
 
 export const RunRecordSchema = z.object({
   version: z.literal(RUN_RECORD_VERSION),
@@ -75,10 +78,12 @@ export const RunRecordSchema = z.object({
    *  not the bare commit. */
   dirty: z.boolean(),
   pipeline: z.string(),
-  verdict: RunVerdictSchema,
-  /** Every node reached a terminal status before the record was written. False
-   *  for a record finalized by cancel/interrupt/idle teardown mid-run. */
-  complete: z.boolean(),
+  /** The run's tri-state outcome. `incomplete` covers a record finalized by
+   *  cancel/interrupt/idle teardown mid-run (a node still pending/running);
+   *  `failed` a completed run with a red node; `passed` a completed run with
+   *  none. A consumer that wants the coarse pass/fail bit reads
+   *  `outcome === "passed"`. */
+  outcome: RunOutcomeSchema,
   /** Wall-clock (`Date.now()`) bounds of the run. */
   startedAt: z.number(),
   finishedAt: z.number(),
@@ -127,9 +132,9 @@ export function projectNodes(state: PipelineState): RunNode[] {
  *  run environment the state cell doesn't carry (identity, lanes, timing).
  *
  *  Pure — the caller (the coordinator) supplies `finishedAt` and the allocated
- *  `seq`; verdict and `complete` are *derived* from the state so they can't
- *  drift from what the matrix showed: `complete` iff every node is terminal,
- *  `passed` iff complete with no red (failed/errored) node. */
+ *  `seq`; `outcome` is *derived* from the state so it can't drift from what the
+ *  matrix showed: `incomplete` unless every node is terminal, then `failed` if
+ *  any is red (failed/errored), else `passed`. */
 export function buildRunRecord(input: {
   repo: string | null;
   sha: string;
@@ -153,8 +158,7 @@ export function buildRunRecord(input: {
     seq: input.seq,
     dirty: input.dirty,
     pipeline: state.name,
-    verdict: complete && !red ? "passed" : "failed",
-    complete,
+    outcome: !complete ? "incomplete" : red ? "failed" : "passed",
     startedAt: input.startedAt,
     finishedAt: input.finishedAt,
     lanes: input.lanes.map((l) => ({ platform: l.platform, host: l.host })),

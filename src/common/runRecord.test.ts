@@ -44,8 +44,7 @@ describe("buildRunRecord", () => {
         ["ci::e2e@x86_64-linux", "ok", 0, 1000],
       ]),
     });
-    expect(record.verdict).toBe("passed");
-    expect(record.complete).toBe(true);
+    expect(record.outcome).toBe("passed");
     expect(record.version).toBe(RUN_RECORD_VERSION);
     // The record validates against its own schema (the ledger reader's gate).
     expect(RunRecordSchema.safeParse(record).success).toBe(true);
@@ -59,11 +58,10 @@ describe("buildRunRecord", () => {
         ["ci::e2e@x86_64-linux", "failed", 1, 1200],
       ]),
     });
-    expect(record.verdict).toBe("failed");
-    expect(record.complete).toBe(true);
+    expect(record.outcome).toBe("failed");
   });
 
-  it("marks an interrupted run incomplete and failed (a gate that didn't finish didn't pass)", () => {
+  it("marks an interrupted run incomplete (a gate that didn't finish didn't pass)", () => {
     const record = buildRunRecord({
       ...base,
       state: stateOf([
@@ -71,8 +69,7 @@ describe("buildRunRecord", () => {
         ["ci::e2e@x86_64-linux", "running", null, null],
       ]),
     });
-    expect(record.complete).toBe(false);
-    expect(record.verdict).toBe("failed");
+    expect(record.outcome).toBe("incomplete");
   });
 
   it("projects nodes to the matrix-cell fields, in order, dropping command/needs", () => {

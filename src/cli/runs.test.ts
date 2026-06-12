@@ -12,8 +12,7 @@ function record(over: Partial<RunRecord> = {}): RunRecord {
     seq: 1,
     dirty: false,
     pipeline: "pipeline",
-    verdict: "passed",
-    complete: true,
+    outcome: "passed",
     startedAt: 1000,
     finishedAt: 2000,
     lanes: [{ platform: "x86_64-linux", host: "localhost" }],
@@ -41,11 +40,11 @@ describe("renderRuns", () => {
   it("shows the ref, verdict, lane count and age, newest first as given", () => {
     const out = renderRuns(
       [
-        record({ seq: 2, sha7: "26d2c2d", verdict: "passed", finishedAt: now - 7_200_000 }),
+        record({ seq: 2, sha7: "26d2c2d", outcome: "passed", finishedAt: now - 7_200_000 }),
         record({
           seq: 1,
           sha7: "53c0889",
-          verdict: "failed",
+          outcome: "failed",
           finishedAt: now - 18_000_000,
           lanes: [
             { platform: "x86_64-linux", host: "localhost" },
@@ -67,7 +66,7 @@ describe("renderRuns", () => {
   });
 
   it("distinguishes an incomplete run from a completed failure", () => {
-    const out = renderRuns([record({ verdict: "failed", complete: false })], now);
+    const out = renderRuns([record({ outcome: "incomplete" })], now);
     expect(out).toContain("✗ incomplete");
   });
 
