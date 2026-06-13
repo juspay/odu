@@ -36,7 +36,7 @@ const USAGE = `usage: odu <run|status|logs|attach|cancel|runs|dump|graph|protect
 
 run [recipe[@platform]…] [--platform P]… [--host P=ADDR]… [--root NAMEPATH]
     [--no-deps] [--no-strict] [--no-snapshot] [--no-post] [--progress json]
-    [--supersede] [--linger] [--runner-flake REF]
+    [--supersede] [--linger]
 status [-o json]
 logs [-f] <node>
 attach [-o json]
@@ -66,7 +66,6 @@ async function dispatch(argv: string[]): Promise<number> {
           progress: { type: "string" },
           supersede: { type: "boolean" },
           linger: { type: "boolean" },
-          "runner-flake": { type: "string" },
         },
       });
       if (values.progress !== undefined && values.progress !== "json") {
@@ -84,7 +83,6 @@ async function dispatch(argv: string[]): Promise<number> {
         progressJson: values.progress === "json",
         supersede: values.supersede ?? false,
         linger: values.linger ?? false,
-        runnerFlake: values["runner-flake"],
       });
     }
     case "status": {

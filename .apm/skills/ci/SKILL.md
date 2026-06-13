@@ -170,9 +170,10 @@ host daemon corrupts CA-derivation handling).
   not the repo under test:
   `nix eval $ODU_RUNNER_FLAKE#packages.<platform>.odu-runner.drvPath`, where
   `ODU_RUNNER_FLAKE` is baked onto the `odu` wrapper from `self.outPath` at
-  build time. A consuming repo no longer re-exports `odu-runner`; pass
-  `--runner-flake REF` (or set `ODU_RUNNER_FLAKE`) to pin or fork the runner.
-  There is no fallback — a binary built without it refuses to run.
+  build time. A consuming repo no longer re-exports `odu-runner`. There is no
+  override or fallback — the runner is the exact build that shipped the
+  coordinator (they share an RPC contract); a binary built without the baked
+  flake refuses to run.
 
 ## When NOT to use this skill
 

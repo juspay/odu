@@ -85,11 +85,6 @@ export interface RunArgs {
   /** Keep the coordinator serving after the run drains, so a node can be
    *  rerun post-settle; exit only on cancel / signal / idle backstop. */
   linger: boolean;
-  /** Override where the GENERIC lane runner (`odu-runner`) is resolved from,
-   *  beating the wrapper-baked ODU_RUNNER_FLAKE. The pin / fork knob
-   *  (`--runner-flake github:juspay/odu`). undefined → ODU_RUNNER_FLAKE; with
-   *  neither, the coordinator refuses to run (there is no fallback). */
-  runnerFlake?: string;
 }
 
 function git(repo: string, args: string[]): string {
@@ -108,9 +103,9 @@ function tryGit(repo: string, args: string[]): string | null {
 export async function runCommand(args: RunArgs): Promise<number> {
   // Resolve where the generic lane runner comes from before any side effect
   // (worktree snapshot, socket) — a misbuilt binary with no runner flake should
-  // refuse instantly, not after pinning HEAD. Throws when neither --runner-flake
-  // nor ODU_RUNNER_FLAKE is set; there is no fallback to the repo under test.
-  const runnerFlake = resolveRunnerFlake(args.runnerFlake, process.env);
+  // refuse instantly, not after pinning HEAD. Throws when ODU_RUNNER_FLAKE is
+  // unset; there is no override or fallback to the repo under test.
+  const runnerFlake = resolveRunnerFlake(process.env);
 
   const repoRoot = gitTopLevel();
   if (repoRoot === null) {

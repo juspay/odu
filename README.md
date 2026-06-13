@@ -64,8 +64,9 @@ That runner derivation is **odu's own**, not your repo's: the generic
 `odu-runner` (odu's tsx wrapper + a fixed git/just/node toolchain) carries none
 of your code, so the coordinator resolves it from odu's flake — baked onto the
 `odu` binary as `ODU_RUNNER_FLAKE` (`self.outPath`) at build time — and your
-repo never re-exports it. `--runner-flake REF` (or `ODU_RUNNER_FLAKE`) pins or
-forks it; there is no fallback to the repo under test.
+repo never re-exports it. There is no override or fallback: the runner is always
+the exact build that shipped the coordinator (they share an RPC contract), so
+"use a different runner" just means "run a different odu".
 
 ## Install / run
 
@@ -168,8 +169,6 @@ odu run [recipe[@platform]…]      run (selectors compose; bare names fan out
     --progress json               one NDJSON line per node transition
     --supersede                   cancel a run already live here, then start
     --linger                      keep serving after settle (rerun a node later)
-    --runner-flake REF            pin/fork the lane runner (default: odu's own
-                                  flake, baked into the binary at build time)
 odu status [-o json]              snapshot a live run
 odu logs [-f] <node>              replay (+ follow) one node's log
 odu attach [-o json]              live dashboard (tty); piped, -o json

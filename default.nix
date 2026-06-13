@@ -5,8 +5,8 @@
 # flake.nix so the `odu` wrapper bakes it as ODU_RUNNER_FLAKE — the coordinator
 # resolves the GENERIC lane runner from odu's flake, never the consumer's. It is
 # null under plain `nix-build` / `shell.nix` (no `self`): the wrapper bakes
-# nothing, and such a binary refuses to run until given `--runner-flake` /
-# ODU_RUNNER_FLAKE (there is no fallback to the repo under test).
+# nothing, and such a binary refuses to run until given ODU_RUNNER_FLAKE (there
+# is no override or fallback to the repo under test).
 { pkgs ? import ./nix/nixpkgs.nix { }, selfFlake ? null }:
 let
   version = (pkgs.lib.importJSON ./package.json).version;

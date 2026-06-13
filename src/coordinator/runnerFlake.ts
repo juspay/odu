@@ -3,28 +3,27 @@
  *
  * The runner is odu's own tsx wrapper + a fixed toolchain — it carries none of
  * the repo-under-test's code — so it is resolved from odu's OWN flake, never
- * from the consumer's. The `odu` wrapper bakes `ODU_RUNNER_FLAKE` = odu's
- * `self.outPath` at build time (default.nix); `--runner-flake` overrides it to
- * pin or fork a runner.
+ * the consumer's. The `odu` wrapper bakes `ODU_RUNNER_FLAKE` = odu's
+ * `self.outPath` at build time (default.nix), and that is the SINGLE source: the
+ * coordinator and the runner share an RPC contract (`laneSurface`), so the
+ * runner must be the exact build that shipped the coordinator. There is no
+ * override — "use a different runner" means "run a different odu"; pointing one
+ * odu at another's runner is a version-skew footgun, not a feature.
  *
- * There is deliberately NO fallback to the repo under test: a coordinator that
- * carries neither knob is misbuilt (a raw `tsx src/cli/main.ts`, or a non-flake
- * `nix-build`), and resolving the runner from the consumer's flake is exactly
- * the silent failure this indirection exists to remove. So we refuse loudly.
+ * There is deliberately NO fallback either: a coordinator that carries no baked
+ * flake is misbuilt (a raw `tsx src/cli/main.ts`, or a non-flake `nix-build`),
+ * and resolving the runner from the consumer's flake is exactly the silent
+ * failure this indirection exists to remove. So we refuse loudly.
  */
-export function resolveRunnerFlake(
-  runnerFlake: string | undefined,
-  env: NodeJS.ProcessEnv,
-): string {
-  const flake = runnerFlake ?? env.ODU_RUNNER_FLAKE;
+export function resolveRunnerFlake(env: NodeJS.ProcessEnv): string {
+  const flake = env.ODU_RUNNER_FLAKE;
   if (flake === undefined || flake === "") {
     throw new Error(
-      "odu: no runner flake — the coordinator resolves the lane runner from " +
-        "odu's own flake, baked as ODU_RUNNER_FLAKE into the `odu` wrapper at " +
-        "build time. This binary carries none (a raw `tsx src/cli/main.ts`, or " +
-        "a non-flake `nix-build`). Pass `--runner-flake <ref>` or set " +
-        "ODU_RUNNER_FLAKE (e.g. `github:juspay/odu`, or `path:$PWD` in an odu " +
-        "checkout).",
+      "odu: ODU_RUNNER_FLAKE is unset — the coordinator resolves the lane " +
+        "runner from odu's own flake, baked onto the `odu` wrapper at build " +
+        "time. This binary carries none (a raw `tsx src/cli/main.ts`, or a " +
+        "non-flake `nix-build`). Set ODU_RUNNER_FLAKE to an odu flake " +
+        "(`github:juspay/odu`, or `git+file://$PWD` in an odu checkout).",
     );
   }
   return flake;
@@ -49,8 +48,7 @@ export function missingRunnerError(
   }
   return (
     `${runnerFlake} does not export packages.${platform}.odu-runner — ` +
-    `odu resolves the lane runner from this flake (--runner-flake / ` +
-    `ODU_RUNNER_FLAKE), not the repo under test. Point it at a flake that ` +
-    `exports odu-runner (e.g. github:juspay/odu).`
+    `ODU_RUNNER_FLAKE must point at an odu flake (it is baked onto the binary ` +
+    `from odu's own source; in a dev checkout, git+file://$PWD).`
   );
 }
