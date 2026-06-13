@@ -7,6 +7,8 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { beforeAll, describe, expect, it, onTestFinished } from "vitest";
 import {
   BIG,
@@ -52,6 +54,20 @@ describe("odu run (local, black-box)", () => {
     for (const recipe of ["_ci-setup", "alpha", "beta"]) {
       expect(shape(last.get(recipe)).status).toBe("success");
     }
+    expect(status).toBe(0);
+  }, RUN_TIMEOUT);
+
+  it("runs a consumer that exports no odu-runner — the runner is odu's own (#30)", () => {
+    const dir = fixture("pass");
+    // The fixture is a plain repo with no flake.nix: it re-exports nothing.
+    // Before #30's fix the coordinator evaluated `<consumer>#…odu-runner` and
+    // every lane died at _ci-setup; now the runner is resolved from the baked
+    // ODU_RUNNER_FLAKE (odu's own flake), so setup succeeds and the run is green.
+    expect(existsSync(join(dir, "flake.nix"))).toBe(false);
+    const { status, events } = oduRun(oduBin, dir);
+    expect(shape(terminalStatuses(events).get("_ci-setup")).status).toBe(
+      "success",
+    );
     expect(status).toBe(0);
   }, RUN_TIMEOUT);
 

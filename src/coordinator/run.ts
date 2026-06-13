@@ -53,6 +53,7 @@ import { commitLabel, createDisplay, progressEvent } from "./display";
 import { laneTasks, loadJustPipeline, parseSelector } from "../just/ingest";
 import { loadHosts, localFallbackNote, resolveLanes } from "./hosts";
 import { type Lane, startLane } from "./lane";
+import { resolveRunnerFlake } from "./runnerFlake";
 import { cancelRun } from "./cancel";
 import { allocateSeq, writeRunRecord } from "./ledger";
 import { buildRunRecord, projectNodes } from "../common/runRecord";
@@ -84,6 +85,11 @@ export interface RunArgs {
   /** Keep the coordinator serving after the run drains, so a node can be
    *  rerun post-settle; exit only on cancel / signal / idle backstop. */
   linger: boolean;
+  /** Override where the GENERIC lane runner (`odu-runner`) is resolved from,
+   *  beating the wrapper-baked ODU_RUNNER_FLAKE. The pin / fork knob
+   *  (`--runner-flake github:juspay/odu`). undefined → ODU_RUNNER_FLAKE; with
+   *  neither, the coordinator refuses to run (there is no fallback). */
+  runnerFlake?: string;
 }
 
 function git(repo: string, args: string[]): string {
@@ -100,6 +106,12 @@ function tryGit(repo: string, args: string[]): string | null {
 }
 
 export async function runCommand(args: RunArgs): Promise<number> {
+  // Resolve where the generic lane runner comes from before any side effect
+  // (worktree snapshot, socket) — a misbuilt binary with no runner flake should
+  // refuse instantly, not after pinning HEAD. Throws when neither --runner-flake
+  // nor ODU_RUNNER_FLAKE is set; there is no fallback to the repo under test.
+  const runnerFlake = resolveRunnerFlake(args.runnerFlake, process.env);
+
   const repoRoot = gitTopLevel();
   if (repoRoot === null) {
     throw new Error(
@@ -146,6 +158,7 @@ export async function runCommand(args: RunArgs): Promise<number> {
     return await orchestrate(args, {
       repoRoot,
       specSource,
+      runnerFlake,
       sha,
       sha7,
       posting,
@@ -161,6 +174,9 @@ export async function runCommand(args: RunArgs): Promise<number> {
 interface RunContext {
   repoRoot: string;
   specSource: string;
+  /** Flake-ref the generic lane runner (`odu-runner`) is resolved from — odu's
+   *  own flake, NOT specSource (the repo under test). See runnerFlake.ts. */
+  runnerFlake: string;
   sha: string;
   sha7: string;
   posting: boolean;
@@ -170,7 +186,7 @@ interface RunContext {
 }
 
 async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
-  const { repoRoot, specSource, sha, sha7 } = ctx;
+  const { repoRoot, specSource, runnerFlake, sha, sha7 } = ctx;
   // Where stdout points picks the face: NDJSON for the /do contract, an
   // in-place live matrix on a TTY, transition lines + heartbeats for a pipe.
   // The live face is the shared interactive view (same one `attach` paints):
@@ -601,17 +617,30 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
       sha: local ? null : sha,
       workspace: local ? specSource : null,
       resolveDrvPath: async () => {
+        const attr = `${runnerFlake}#packages.${platform}.odu-runner.drvPath`;
         const result = spawnSync(
           "nix",
-          [
-            "eval",
-            "--raw",
-            "--accept-flake-config",
-            `${specSource}#packages.${platform}.odu-runner.drvPath`,
-          ],
+          ["eval", "--raw", "--accept-flake-config", attr],
           { encoding: "utf-8", maxBuffer: 16 * 1024 * 1024 },
         );
         if (result.status !== 0) {
+          // The runner flake resolved but doesn't export odu-runner for this
+          // platform. Name the flake and the split (it's `--runner-flake` /
+          // ODU_RUNNER_FLAKE, not the repo under test); any other eval failure
+          // keeps the raw stderr so unrelated breakage isn't masked.
+          if (
+            /does not provide attribute|attribute .* missing/i.test(
+              result.stderr,
+            ) &&
+            result.stderr.includes("odu-runner")
+          ) {
+            throw new Error(
+              `${runnerFlake} does not export packages.${platform}.odu-runner — ` +
+                `odu resolves the lane runner from this flake (--runner-flake / ` +
+                `ODU_RUNNER_FLAKE), not the repo under test. Point it at a flake ` +
+                `that exports odu-runner (e.g. github:juspay/odu).`,
+            );
+          }
           throw new Error(`nix eval odu-runner drv failed:\n${result.stderr}`);
         }
         return result.stdout.trim();

@@ -166,10 +166,13 @@ host daemon corrupts CA-derivation handling).
   state does not survive a runner restart — the per-SHA log files do.
 - **Skipped nodes post no status**: an absent required context is what
   blocks the merge.
-- The coordinator resolves the lane runner via
-  `nix eval <snapshot>#packages.<platform>.odu-runner.drvPath` — the
-  consuming repo's flake must expose `odu-runner` (re-export odu's, as
-  kolu does) until odu threads its own runner derivation.
+- The coordinator resolves the **generic lane runner from odu's own flake**,
+  not the repo under test:
+  `nix eval $ODU_RUNNER_FLAKE#packages.<platform>.odu-runner.drvPath`, where
+  `ODU_RUNNER_FLAKE` is baked onto the `odu` wrapper from `self.outPath` at
+  build time. A consuming repo no longer re-exports `odu-runner`; pass
+  `--runner-flake REF` (or set `ODU_RUNNER_FLAKE`) to pin or fork the runner.
+  There is no fallback — a binary built without it refuses to run.
 
 ## When NOT to use this skill
 

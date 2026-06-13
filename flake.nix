@@ -19,7 +19,7 @@
     in
     {
       packages = eachSystem (pkgs:
-        let odu = import ./default.nix { inherit pkgs; };
+        let odu = import ./default.nix { inherit pkgs; selfFlake = self.outPath; };
         in {
           inherit (odu) odu odu-runner pnpmDeps;
           default = odu.odu;
