@@ -29,3 +29,28 @@ export function resolveRunnerFlake(
   }
   return flake;
 }
+
+/**
+ * A directed message for the common `resolveDrvPath` miss: the runner flake
+ * resolved, but doesn't export `odu-runner` (for this platform). Returns null
+ * for any other nix failure (network, a broken/absent flake) so the caller
+ * surfaces the raw stderr and never masks unrelated breakage. Keyed off nix's
+ * missing-attribute wording — the only attribute we ever evaluate against the
+ * runner flake is `odu-runner`, so a missing-attribute error is necessarily
+ * about it.
+ */
+export function missingRunnerError(
+  runnerFlake: string,
+  platform: string,
+  stderr: string,
+): string | null {
+  if (!/does not provide attribute|attribute .* missing/i.test(stderr)) {
+    return null;
+  }
+  return (
+    `${runnerFlake} does not export packages.${platform}.odu-runner — ` +
+    `odu resolves the lane runner from this flake (--runner-flake / ` +
+    `ODU_RUNNER_FLAKE), not the repo under test. Point it at a flake that ` +
+    `exports odu-runner (e.g. github:juspay/odu).`
+  );
+}

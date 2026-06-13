@@ -10,14 +10,15 @@
 #     -c "bash tests/evidence/runs-demo.sh $odu $PWD" /tmp/runs.cast
 #   agg --speed 1.3 --theme asciinema --font-size 22 /tmp/runs.cast runs.gif
 set -u
-ODU="$1"   # path to the odu binary
-WT="$2"    # the odu checkout (for the fixture's flake ref)
+ODU="$1"   # path to the odu binary (carries ODU_RUNNER_FLAKE baked in)
+WT="$2"    # the odu checkout (source of the fixture justfile)
 
 export ODU_HOSTS="$(mktemp -d)/hosts.json"; echo '{}' > "$ODU_HOSTS"  # localhost lane
 D=$(mktemp -d /tmp/odu-runs-demo-XXXX)
+# A plain consumer: just a justfile, no flake — the runner comes from the odu
+# binary's baked ODU_RUNNER_FLAKE, not this repo (see issue #30).
 cp "$WT/tests/e2e/fixtures/pass/justfile" "$D/"
 printf '.ci/\n' > "$D/.gitignore"   # so odu's own run output never reads as a dirty tree
-sed "s|__ODU_FLAKE__|path:$WT|" "$WT/tests/e2e/fixtures/_flake.nix.in" > "$D/flake.nix"
 ( cd "$D" && git init -q && git add -A &&
   git -c user.email=a@b.c -c user.name=x commit -qm pass ) >/dev/null 2>&1
 cd "$D"

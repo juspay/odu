@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveRunnerFlake } from "./runnerFlake";
+import { missingRunnerError, resolveRunnerFlake } from "./runnerFlake";
 
 describe("resolveRunnerFlake", () => {
   it("prefers an explicit --runner-flake over the baked env", () => {
@@ -38,5 +38,34 @@ describe("resolveRunnerFlake", () => {
     }
     expect(message).toMatch(/--runner-flake/);
     expect(message).toMatch(/ODU_RUNNER_FLAKE/);
+  });
+});
+
+describe("missingRunnerError", () => {
+  const flake = "github:juspay/odu";
+  const plat = "x86_64-linux";
+
+  it("returns a directed message when nix can't find the odu-runner attribute", () => {
+    const stderr =
+      "error: flake 'github:juspay/odu' does not provide attribute " +
+      "'packages.x86_64-linux.odu-runner.drvPath'";
+    const msg = missingRunnerError(flake, plat, stderr);
+    expect(msg).not.toBeNull();
+    expect(msg).toContain(flake);
+    expect(msg).toContain("packages.x86_64-linux.odu-runner");
+    expect(msg).toMatch(/--runner-flake/);
+  });
+
+  it("also fires on the alternate 'attribute … missing' wording", () => {
+    expect(
+      missingRunnerError(flake, plat, "error: attribute 'odu-runner' missing"),
+    ).not.toBeNull();
+  });
+
+  it("returns null for an unrelated failure — the raw stderr must survive", () => {
+    expect(
+      missingRunnerError(flake, plat, "error: unable to download: Couldn't resolve host"),
+    ).toBeNull();
+    expect(missingRunnerError(flake, plat, "error: path does not exist")).toBeNull();
   });
 });

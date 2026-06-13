@@ -53,7 +53,7 @@ import { commitLabel, createDisplay, progressEvent } from "./display";
 import { laneTasks, loadJustPipeline, parseSelector } from "../just/ingest";
 import { loadHosts, localFallbackNote, resolveLanes } from "./hosts";
 import { type Lane, startLane } from "./lane";
-import { resolveRunnerFlake } from "./runnerFlake";
+import { missingRunnerError, resolveRunnerFlake } from "./runnerFlake";
 import { cancelRun } from "./cancel";
 import { allocateSeq, writeRunRecord } from "./ledger";
 import { buildRunRecord, projectNodes } from "../common/runRecord";
@@ -624,23 +624,15 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
           { encoding: "utf-8", maxBuffer: 16 * 1024 * 1024 },
         );
         if (result.status !== 0) {
-          // The runner flake resolved but doesn't export odu-runner for this
-          // platform. Name the flake and the split (it's `--runner-flake` /
-          // ODU_RUNNER_FLAKE, not the repo under test); any other eval failure
-          // keeps the raw stderr so unrelated breakage isn't masked.
-          if (
-            /does not provide attribute|attribute .* missing/i.test(
-              result.stderr,
-            ) &&
-            result.stderr.includes("odu-runner")
-          ) {
-            throw new Error(
-              `${runnerFlake} does not export packages.${platform}.odu-runner — ` +
-                `odu resolves the lane runner from this flake (--runner-flake / ` +
-                `ODU_RUNNER_FLAKE), not the repo under test. Point it at a flake ` +
-                `that exports odu-runner (e.g. github:juspay/odu).`,
-            );
-          }
+          // A flake that doesn't export odu-runner gets a directed message
+          // (name the flake + the split); any other eval failure keeps the raw
+          // stderr so unrelated breakage isn't masked.
+          const directed = missingRunnerError(
+            runnerFlake,
+            platform,
+            result.stderr,
+          );
+          if (directed !== null) throw new Error(directed);
           throw new Error(`nix eval odu-runner drv failed:\n${result.stderr}`);
         }
         return result.stdout.trim();

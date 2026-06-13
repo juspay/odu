@@ -8,25 +8,18 @@
  */
 
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it, onTestFinished } from "vitest";
-import { buildOduBinary, cleanup, makeFixture } from "./harness";
+import { buildOduBinary, cleanup, hermeticEnv, makeFixture } from "./harness";
 
 let oduBin: string;
-// Pin every spawned run to a localhost lane regardless of the runner's ambient
-// `~/.config/odu/hosts.json`: an empty hosts file makes `resolveLanes` find
-// nothing, so `odu run` falls back to a single localhost lane (the hermetic
-// shape this suite assumes — a configured remote lane would need an origin the
-// throwaway fixture has none of).
-let env: NodeJS.ProcessEnv;
+// Pin every spawned run to a localhost lane regardless of the machine's ambient
+// `~/.config/odu/hosts.json` — the shared empty-`ODU_HOSTS` env (see harness).
+const env = hermeticEnv;
 
 beforeAll(() => {
   oduBin = buildOduBinary();
-  const hostsFile = join(mkdtempSync(join(tmpdir(), "odu-e2e-hosts-")), "hosts.json");
-  writeFileSync(hostsFile, "{}");
-  env = { ...process.env, ODU_HOSTS: hostsFile };
 }, 600_000);
 
 const live: ChildProcess[] = [];

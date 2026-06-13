@@ -8,13 +8,14 @@
 #     -c "bash tests/evidence/cancel-demo.sh $odu $PWD" /tmp/cancel.cast
 #   agg --speed 1.3 --theme asciinema --font-size 22 /tmp/cancel.cast cancel.gif
 set -u
-ODU="$1"   # path to the odu binary
-WT="$2"    # the odu checkout (for the fixture's flake ref)
+ODU="$1"   # path to the odu binary (carries ODU_RUNNER_FLAKE baked in)
+WT="$2"    # the odu checkout (source of the fixture justfile)
 
 export ODU_HOSTS="$(mktemp -d)/hosts.json"; echo '{}' > "$ODU_HOSTS"
 D=$(mktemp -d /tmp/odu-demo-XXXX)
+# A plain consumer: just a justfile, no flake. The runner comes from the odu
+# binary's baked ODU_RUNNER_FLAKE, not this repo (see issue #30).
 cp "$WT/tests/e2e/fixtures/sleep/justfile" "$D/"
-sed "s|__ODU_FLAKE__|path:$WT|" "$WT/tests/e2e/fixtures/_flake.nix.in" > "$D/flake.nix"
 ( cd "$D" && git init -q && git add -A &&
   git -c user.email=a@b.c -c user.name=x commit -qm fix ) >/dev/null 2>&1
 cd "$D"
