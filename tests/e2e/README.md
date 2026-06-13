@@ -15,7 +15,6 @@ tests/e2e/
 ├── harness.ts            # nix build, fixture materialization, run + parse
 ├── run.e2e.test.ts       # the assertions (Vitest)
 ├── fixtures/
-│   ├── _flake.nix.in     # shared flake template (re-exports odu-runner)
 │   ├── pass/justfile     # a DAG that goes green
 │   └── fail/justfile     # a DAG whose node fails (exit 1)
 └── README.md
@@ -31,14 +30,15 @@ In CI it's the `e2e` step in `ci/mod.just`.
 
 ## How a fixture works
 
-A local `odu run` resolves its lane runner by evaluating
-`<repo>#packages.<system>.odu-runner.drvPath` (`src/coordinator/run.ts`) — this
-happens even for a localhost lane (the realise is a local no-op copy, but the
-drvPath lookup still runs). So **any repo that runs odu locally must expose
-`odu-runner` in its flake.** Each fixture is therefore a flake: the harness
-rewrites `__ODU_FLAKE__` in `_flake.nix.in` to a `path:` input pointing at the
-checkout under test and re-exports its packages, so the fixture runs the exact
-`odu-runner` the harness just built (a Nix cache hit).
+A fixture is just a throwaway git repo with a `justfile` — **no flake**. The
+coordinator resolves its lane runner from the `ODU_RUNNER_FLAKE` baked into the
+`.#odu` binary under test (odu's own flake — `src/coordinator/runnerFlake.ts`),
+*not* from the repo under test. So a fixture re-exports nothing: it stands in
+for a real consumer that runs odu without exporting `odu-runner` — exactly the
+cross-repo path [#30](https://github.com/juspay/odu/issues/30) fixed. (Even for
+a localhost lane the realise is a local no-op copy, but the `drvPath` lookup
+still runs — now against odu's flake, a Nix cache hit since the harness builds
+`.#odu-runner` first.)
 
 The leaf recipes are pure shell — the fixture's own "CI" is trivial on purpose,
 so the test exercises *odu's* machinery, not a real toolchain.

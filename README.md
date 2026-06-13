@@ -60,6 +60,14 @@ A lane host needs **ssh + Nix + outbound https**. Nothing else: the runner
 binary travels as a Nix closure, the toolchain comes from your repo's dev
 shell, and the source arrives by `git fetch` of the pushed SHA.
 
+That runner derivation is **odu's own**, not your repo's: the generic
+`odu-runner` (odu's tsx wrapper + a fixed git/just/node toolchain) carries none
+of your code, so the coordinator resolves it from odu's flake — baked onto the
+`odu` binary as `ODU_RUNNER_FLAKE` (`self.outPath`) at build time — and your
+repo never re-exports it. There is no override or fallback: the runner is always
+the exact build that shipped the coordinator (they share an RPC contract), so
+"use a different runner" just means "run a different odu".
+
 ## Install / run
 
 Nothing to install — run odu straight from the flake against the current repo:

@@ -53,6 +53,7 @@ import { commitLabel, createDisplay, progressEvent } from "./display";
 import { laneTasks, loadJustPipeline, parseSelector } from "../just/ingest";
 import { loadHosts, localFallbackNote, resolveLanes } from "./hosts";
 import { type Lane, startLane } from "./lane";
+import { missingRunnerError, resolveRunnerFlake } from "./runnerFlake";
 import { cancelRun } from "./cancel";
 import { allocateSeq, writeRunRecord } from "./ledger";
 import { buildRunRecord, projectNodes } from "../common/runRecord";
@@ -100,6 +101,12 @@ function tryGit(repo: string, args: string[]): string | null {
 }
 
 export async function runCommand(args: RunArgs): Promise<number> {
+  // Resolve where the generic lane runner comes from before any side effect
+  // (worktree snapshot, socket) — a misbuilt binary with no runner flake should
+  // refuse instantly, not after pinning HEAD. Throws when ODU_RUNNER_FLAKE is
+  // unset; there is no override or fallback to the repo under test.
+  const runnerFlake = resolveRunnerFlake(process.env);
+
   const repoRoot = gitTopLevel();
   if (repoRoot === null) {
     throw new Error(
@@ -146,6 +153,7 @@ export async function runCommand(args: RunArgs): Promise<number> {
     return await orchestrate(args, {
       repoRoot,
       specSource,
+      runnerFlake,
       sha,
       sha7,
       posting,
@@ -161,6 +169,9 @@ export async function runCommand(args: RunArgs): Promise<number> {
 interface RunContext {
   repoRoot: string;
   specSource: string;
+  /** Flake-ref the generic lane runner (`odu-runner`) is resolved from — odu's
+   *  own flake, NOT specSource (the repo under test). See runnerFlake.ts. */
+  runnerFlake: string;
   sha: string;
   sha7: string;
   posting: boolean;
@@ -170,7 +181,7 @@ interface RunContext {
 }
 
 async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
-  const { repoRoot, specSource, sha, sha7 } = ctx;
+  const { repoRoot, specSource, runnerFlake, sha, sha7 } = ctx;
   // Where stdout points picks the face: NDJSON for the /do contract, an
   // in-place live matrix on a TTY, transition lines + heartbeats for a pipe.
   // The live face is the shared interactive view (same one `attach` paints):
@@ -601,17 +612,22 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
       sha: local ? null : sha,
       workspace: local ? specSource : null,
       resolveDrvPath: async () => {
+        const attr = `${runnerFlake}#packages.${platform}.odu-runner.drvPath`;
         const result = spawnSync(
           "nix",
-          [
-            "eval",
-            "--raw",
-            "--accept-flake-config",
-            `${specSource}#packages.${platform}.odu-runner.drvPath`,
-          ],
+          ["eval", "--raw", "--accept-flake-config", attr],
           { encoding: "utf-8", maxBuffer: 16 * 1024 * 1024 },
         );
         if (result.status !== 0) {
+          // A flake that doesn't export odu-runner gets a directed message
+          // (name the flake + the split); any other eval failure keeps the raw
+          // stderr so unrelated breakage isn't masked.
+          const directed = missingRunnerError(
+            runnerFlake,
+            platform,
+            result.stderr,
+          );
+          if (directed !== null) throw new Error(directed);
           throw new Error(`nix eval odu-runner drv failed:\n${result.stderr}`);
         }
         return result.stdout.trim();

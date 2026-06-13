@@ -1,6 +1,13 @@
 # Root composer for odu's Nix packages. Used by flake.nix (thin wrapper),
 # shell.nix, and nix-build directly.
-{ pkgs ? import ./nix/nixpkgs.nix { } }:
+#
+# `selfFlake` is odu's OWN flake source (`self.outPath`), threaded in by
+# flake.nix so the `odu` wrapper bakes it as ODU_RUNNER_FLAKE — the coordinator
+# resolves the GENERIC lane runner from odu's flake, never the consumer's. It is
+# null under plain `nix-build` / `shell.nix` (no `self`): the wrapper bakes
+# nothing, and such a binary refuses to run until given ODU_RUNNER_FLAKE (there
+# is no override or fallback to the repo under test).
+{ pkgs ? import ./nix/nixpkgs.nix { }, selfFlake ? null }:
 let
   version = (pkgs.lib.importJSON ./package.json).version;
 
@@ -77,6 +84,7 @@ let
       --add-flags "${base}/src/cli/main.ts" \
       --set ODU_GH_BIN "${pkgs.gh}/bin/gh" \
       --set ODU_SELF "$out/bin/odu" \
+      ${pkgs.lib.optionalString (selfFlake != null) ''--set ODU_RUNNER_FLAKE "${selfFlake}"''} \
       --prefix PATH : ${pkgs.lib.makeBinPath [
         pkgs.nodejs
         pkgs.git

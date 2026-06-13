@@ -29,9 +29,13 @@ test: install
 e2e: install
     {{ nix_shell }} pnpm test:e2e
 
-# Run odu from source: `just run -- run --no-strict biome`
+# Run odu from source: `just run -- run --no-strict biome`. The nix build bakes
+# ODU_RUNNER_FLAKE onto the `odu` wrapper, but `pnpm start` is a raw tsx entry
+# with no wrapper — and there is no fallback — so point the runner at this
+# checkout (odu's own flake exports odu-runner; git+file sees live tracked edits
+# and skips node_modules).
 run *args: install
-    {{ nix_shell }} pnpm start {{ args }}
+    {{ nix_shell }} env ODU_RUNNER_FLAKE="git+file://{{ justfile_directory() }}" pnpm start {{ args }}
 
 # Format nix files
 fmt:

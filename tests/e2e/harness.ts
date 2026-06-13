@@ -8,13 +8,7 @@
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
-import {
-  cpSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { cpSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,21 +17,32 @@ const here = dirname(fileURLToPath(import.meta.url));
 /** Large maxBuffer for nix output / NDJSON streams (256 MiB). */
 export const BIG = 256 * 1024 * 1024;
 
+/**
+ * An empty hosts file, pointed at via `ODU_HOSTS`, so a fixture run finds no
+ * configured lanes and falls back to a single localhost lane — regardless of
+ * the dev machine's ambient `~/.config/odu/hosts.json` (a configured remote
+ * lane would need an origin the throwaway fixture has none of). Without this
+ * the suite is green only on a host with no hosts file (e.g. CI).
+ */
+const emptyHostsFile = join(
+  mkdtempSync(join(tmpdir(), "odu-e2e-hosts-")),
+  "hosts.json",
+);
+writeFileSync(emptyHostsFile, "{}");
+
+/** A fixture run's env: the ambient env plus an empty `ODU_HOSTS` so lane
+ *  resolution is hermetic (localhost-only) on any machine. */
+export const hermeticEnv: NodeJS.ProcessEnv = {
+  ...process.env,
+  ODU_HOSTS: emptyHostsFile,
+};
+
 /** The odu checkout under test — the worktree this test file lives in. */
 export const repoRoot = execFileSync(
   "git",
   ["rev-parse", "--show-toplevel"],
   { cwd: here, encoding: "utf-8" },
 ).trim();
-
-/** `path:` flake ref the fixture re-exports `odu-runner` from. */
-export const oduFlakeRef = `path:${repoRoot}`;
-
-/** Substituted `flake.nix` content, computed once and reused across fixtures. */
-const flakeNix: string = readFileSync(
-  join(here, "fixtures", "_flake.nix.in"),
-  "utf-8",
-).replaceAll("__ODU_FLAKE__", oduFlakeRef);
 
 /**
  * One line of `odu run --progress json` output. Deliberately mirrors — and is
@@ -87,15 +92,16 @@ export function buildOduBinary(): string {
 }
 
 /**
- * Materialize a fixture into a fresh temp git repo: the named fixture's
- * `justfile` plus a `flake.nix` re-exporting `odu-runner` from the checkout
- * under test. Flakes only see git-tracked files, so we commit before returning.
+ * Materialize a fixture into a fresh temp git repo: just the named fixture's
+ * `justfile`, with NO flake. The fixture is a plain consumer that never
+ * re-exports `odu-runner` — the runner comes from the baked ODU_RUNNER_FLAKE on
+ * the `.#odu` binary under test, so this exercises exactly the cross-repo path
+ * (coordinator ships its own runner, consumer exports nothing) that issue #30
+ * was about. The coordinator reads HEAD, so we commit before returning.
  */
 export function makeFixture(name: string): string {
   const dir = mkdtempSync(join(tmpdir(), `odu-e2e-${name}-`));
   cpSync(join(here, "fixtures", name), dir, { recursive: true });
-
-  writeFileSync(join(dir, "flake.nix"), flakeNix);
 
   const git = (...args: string[]): void => {
     execFileSync("git", args, { cwd: dir, encoding: "utf-8" });
@@ -124,7 +130,7 @@ export function oduRun(
   const res = spawnSync(
     oduBin,
     ["run", "--no-strict", "--progress", "json", ...selectors],
-    { cwd: dir, encoding: "utf-8", maxBuffer: BIG },
+    { cwd: dir, encoding: "utf-8", maxBuffer: BIG, env: hermeticEnv },
   );
   const events: ProgressEvent[] = [];
   for (const line of res.stdout.split("\n")) {
