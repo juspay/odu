@@ -410,9 +410,14 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     });
     const { router } = projection.implement(dialed.client);
     closers.push(() => dialed.dispose());
+    // `as unknown as`: every surface contract now intersects the framework-reserved
+    // `system.live` proc (kolu#1568), so the inferred client type surfaces
+    // `surface.system.live` and no longer structurally overlaps the narrower
+    // `AgentNodesReader` for a direct cast. The runtime router DOES serve
+    // `surface.nodes` (the agent projection), so the narrowing is sound.
     return directLink<typeof projection.surface.contract>(
       router,
-    ) as AgentNodesReader;
+    ) as unknown as AgentNodesReader;
   }
 
   it("returns the verdict the instant a node goes red (fail-fast)", async () => {

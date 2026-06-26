@@ -14,7 +14,8 @@ install:
     {{ nix_shell }} sh -c 'sh scripts/hydrate-kolu-packages.sh \
       "$ODU_KOLU_SURFACE" @kolu/surface \
       "$ODU_KOLU_SURFACE_MCP" @kolu/surface-mcp \
-      "$ODU_KOLU_SURFACE_NIX_HOST" @kolu/surface-nix-host'
+      "$ODU_KOLU_SURFACE_NIX_HOST" @kolu/surface-nix-host \
+      "$ODU_KOLU_SHELL_QUOTE" @kolu/shell-quote'
 
 # TypeScript type checking
 typecheck: install
