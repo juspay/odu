@@ -166,15 +166,19 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
 	}
 }
 
-/** The `wait_for_settle` bespoke tool. Read-only: it observes the run, it
- *  doesn't change it. Typed as the loose `BespokeTool` (the package's `tools`
- *  slot is invariant in the input type); `input` validates, handler narrows. */
+/** The `wait_for_settle` bespoke tool. Read-only (`mutates: false`): it observes the
+ *  run, it doesn't change it. The explicit `mutates: false` opts into `readOnlyHint:
+ *  true` under `@kolu/surface-mcp`'s conservative default (an unannotated tool is now
+ *  treated as MUTATING so a host can't auto-run it unconfirmed). Typed as the loose
+ *  `BespokeTool` (the package's `tools` slot is invariant in the input type); `input`
+ *  validates, handler narrows. */
 export const waitTool: BespokeTool = {
 	description:
 		"Block until the run settles, or — fail-fast (default) — the instant a " +
 		"node goes red, so you can drill into a failure without waiting for the " +
 		"slow lanes. Returns the verdict {settled, passed, failed[], errored[]}.",
 	input: waitInput,
+	mutates: false,
 	handler: (args, client, signal) => {
 		const a = args as WaitInput;
 		return waitForSettle({
