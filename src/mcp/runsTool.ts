@@ -58,8 +58,12 @@ export function listRuns(opts: RunsOptions = {}): RunsResult {
   return { runs: load().slice(0, limit) };
 }
 
-/** The `runs` bespoke tool. Read-only (no `mutates`): it reads the durable
- *  ledger off disk and ignores the live client the adapter hands it. */
+/** The `runs` bespoke tool. Read-only (`mutates: false`): it reads the durable
+ *  ledger off disk and ignores the live client the adapter hands it. The explicit
+ *  `mutates: false` is now load-bearing — `@kolu/surface-mcp` defaults an unannotated
+ *  tool to MUTATING (a host can auto-run a `readOnlyHint: true` tool unconfirmed, so
+ *  an absent flag must fail SAFE), so a genuinely read-only tool has to say so to keep
+ *  its `readOnlyHint: true`. */
 export const runsTool: BespokeTool = {
   description:
     "List this checkout's durable run history — each recorded run's identity " +
@@ -68,5 +72,6 @@ export const runsTool: BespokeTool = {
     "on-disk ledger, so it answers 'what happened on the last run?' after the " +
     "coordinator has exited. Optional `limit` (default 20).",
   input: runsInput,
+  mutates: false,
   handler: (args) => listRuns({ limit: (args as RunsInput).limit }),
 };
