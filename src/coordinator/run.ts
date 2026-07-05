@@ -4,7 +4,7 @@
  * parents exactly one coordinator):
  *
  *   strict gate → HEAD snapshot → `just` DAG ingest → fan lanes out per
- *   platform (HostSession each) → merge lane state into one fan-in surface
+ *   platform (an ssh session each) → merge lane state into one fan-in surface
  *   served on `.ci/odu.sock` → write per-SHA logs + post commit statuses on
  *   transitions → verdict.
  *
@@ -28,11 +28,7 @@ import {
   inMemoryChannelByName,
   inMemoryStore,
 } from "@kolu/surface/server";
-import {
-  destroyAllSessions,
-  isLocalHost,
-  resolveSystem,
-} from "@kolu/surface-nix-host";
+import { isLocalHost, resolveSystem } from "@kolu/surface-nix-host";
 import { implement } from "@orpc/server";
 import { bold, dim, green, link, magenta, red } from "../cli/ansi";
 import { formatGoDuration } from "../common/duration";
@@ -149,20 +145,36 @@ export async function runCommand(args: RunArgs): Promise<number> {
   // it's safe both here and as an exit handler.
   process.once("exit", cleanupSnapshot);
 
+  // Every lane orchestrate builds, registered the instant it's constructed so
+  // this `finally` can tear down a lane's session that its own `lane.close()`
+  // never reached — an EARLY-THROW out of orchestrate (e.g. one lane built, a
+  // later lane's setup throws) that skips the normal per-lane teardown. The
+  // natural-completion path (`for … lane.close()` after `allSettled`) and the
+  // cancel/signal `shutdown()` path already close every lane; `shutdown()` exits
+  // via `process.exit`, which BYPASSES this `finally`, so those two paths stand
+  // on their own and this sweep only covers the throw-before-close gap the old
+  // module-global `destroyAllSessions()` used to. `lane.close()` is a guarded
+  // no-op once a lane is closed/dead (its `session.destroy()` is idempotent), so
+  // re-sweeping an already-closed lane here is harmless.
+  const createdLanes = new Set<Lane>();
   try {
-    return await orchestrate(args, {
-      repoRoot,
-      specSource,
-      runnerFlake,
-      sha,
-      sha7,
-      posting,
-      snapshotMode,
-      dirty,
-    });
+    return await orchestrate(
+      args,
+      {
+        repoRoot,
+        specSource,
+        runnerFlake,
+        sha,
+        sha7,
+        posting,
+        snapshotMode,
+        dirty,
+      },
+      createdLanes,
+    );
   } finally {
     cleanupSnapshot();
-    destroyAllSessions();
+    for (const lane of createdLanes) lane.close();
   }
 }
 
@@ -180,7 +192,15 @@ interface RunContext {
   dirty: boolean;
 }
 
-async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
+async function orchestrate(
+  args: RunArgs,
+  ctx: RunContext,
+  /** runCommand-owned registry of every lane this call builds, so its `finally`
+   *  can sweep sessions on an early-throw path (see the call site). Populated
+   *  here at construction; the natural + shutdown paths still close each lane
+   *  themselves. */
+  createdLanes: Set<Lane>,
+): Promise<number> {
   const { repoRoot, specSource, runnerFlake, sha, sha7 } = ctx;
   // Where stdout points picks the face: NDJSON for the /do contract, an
   // in-place live matrix on a TTY, transition lines + heartbeats for a pipe.
@@ -686,6 +706,10 @@ async function orchestrate(args: RunArgs, ctx: RunContext): Promise<number> {
         }
       },
     });
+    // Register the session for the runCommand `finally` sweep the instant it
+    // exists — before `lanes.set` — so a throw later in this loop still leaves
+    // every already-built lane reachable for teardown.
+    createdLanes.add(lane);
     lanes.set(platform, lane);
   }
 
