@@ -1,19 +1,24 @@
 /**
  * One platform's lane, coordinator side: provision the runner closure on the
- * host (HostSession: `nix copy --derivation` → remote realise → spawn over
+ * host (the ssh session: `nix copy --derivation` → remote realise → spawn over
  * ssh), configure the run over the surface, and pump node state + logs back.
  *
  * Lanes are **one-shot** (design review): the first link death after attach
  * is terminal — the runner process died with the pipe, taking live state
  * with it, and Phase 1 explicitly defers runner-restart survival. The lane
  * reports `onDead` and the coordinator marks unfinished nodes `errored`
- * rather than letting HostSession's reconnect loop respawn a fresh idle
+ * rather than letting the session's reconnect loop respawn a fresh idle
  * runner that would silently re-run completed work. Pre-attach, a bounded
  * number of connect attempts (a down host fails fast instead of retrying
  * forever on ssh's exit 255).
  */
 
-import { getHostSession, type HostSessionState } from "@kolu/surface-nix-host";
+import {
+  type AgentClient,
+  makeSession,
+  type SessionState,
+  sshConnector,
+} from "@kolu/surface-nix-host";
 import type { TaskSpec } from "../common/spec";
 import type {
   laneSurface,
@@ -61,10 +66,13 @@ export function startLane(opts: LaneOptions): Lane {
   let disconnects = 0;
   const aborts: AbortController[] = [];
 
-  const session = getHostSession<typeof laneSurface.contract>({
-    host: opts.host,
-    resolveDrvPath: opts.resolveDrvPath,
-    binary: "odu-runner",
+  const session = makeSession<AgentClient<typeof laneSurface.contract>>({
+    connectOnce: sshConnector<typeof laneSurface.contract>({
+      host: opts.host,
+      binary: "odu-runner",
+      resolveDrvPath: opts.resolveDrvPath,
+    }),
+    label: `host:${opts.host}`,
   });
 
   const die = (error: string): void => {
@@ -88,7 +96,7 @@ export function startLane(opts: LaneOptions): Lane {
   deadline.unref?.();
 
   let seenProgress = 0;
-  session.onState((state: HostSessionState) => {
+  session.onState((state: SessionState) => {
     for (const line of state.progressLines.slice(seenProgress)) {
       opts.onSetupLine(line);
     }

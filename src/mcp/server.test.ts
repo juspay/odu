@@ -70,12 +70,27 @@ async function pollUntil<T>(
   maxAttempts = 50,
   delayMs = 20,
 ): Promise<T> {
-  let val = await fn();
-  for (let i = 1; i < maxAttempts && !pred(val); i += 1) {
-    await new Promise((r) => setTimeout(r, delayMs));
-    val = await fn();
+  // Tolerate a TRANSIENT throw from `fn` (e.g. reading a collection item whose key
+  // is not registered YET — surface-mcp throws "collection key is not present" until
+  // the run's snapshot lands) by treating it as an unsatisfied poll and retrying.
+  // Only surface the last error if we exhaust attempts having NEVER succeeded — a
+  // persistently-broken read still fails loudly, but a startup race no longer does.
+  let val: T | undefined;
+  let lastErr: unknown;
+  let succeeded = false;
+  for (let i = 0; i < maxAttempts; i += 1) {
+    if (i > 0) await new Promise((r) => setTimeout(r, delayMs));
+    try {
+      val = await fn();
+      succeeded = true;
+      lastErr = undefined;
+      if (pred(val)) return val;
+    } catch (err) {
+      lastErr = err;
+    }
   }
-  return val;
+  if (!succeeded) throw lastErr;
+  return val as T;
 }
 
 /** Shared MCP-server wiring used by both `connect` and `connectNoRun`: build
