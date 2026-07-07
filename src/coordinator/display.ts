@@ -23,7 +23,7 @@
  *
  * The live renderer owns the terminal: it hides the cursor, repaints a
  * bounded region, and (when `hookStderr`, i.e. `run`) interposes
- * `process.stderr.write` so library chatter (surface-nix-host's `[host:…]`
+ * `process.stderr.write` so library chatter (surface-remote's `[host:…]`
  * provisioning lines — already duplicated into `_ci-setup`'s log) can't shred
  * the region; anything else written to stderr is re-printed intact above the
  * matrix.
@@ -653,7 +653,7 @@ class LiveDisplay implements Display {
   }
 
   /** Library chatter must not shred the repaint region: `[host:…]` lines
-   *  (surface-nix-host provisioning — already mirrored into `_ci-setup`'s
+   *  (surface-remote provisioning — already mirrored into `_ci-setup`'s
    *  log file) are dropped; everything else re-prints above the matrix. */
   private hookStderr(): void {
     const handler: typeof process.stderr.write = (

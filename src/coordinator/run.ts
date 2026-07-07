@@ -28,7 +28,7 @@ import {
   inMemoryChannelByName,
   inMemoryStore,
 } from "@kolu/surface/server";
-import { isLocalHost, resolveSystem } from "@kolu/surface-nix-host";
+import { isLocalHost, resolveSystem } from "@kolu/surface-remote";
 import { implement } from "@orpc/server";
 import { bold, dim, green, link, magenta, red } from "../cli/ansi";
 import { formatGoDuration } from "../common/duration";

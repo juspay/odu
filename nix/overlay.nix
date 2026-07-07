@@ -7,9 +7,11 @@ in
 {
   kolu-surface = mkKoluPackage "surface";
   kolu-surface-mcp = mkKoluPackage "surface-mcp";
-  kolu-surface-nix-host = mkKoluPackage "surface-nix-host";
-  # `surface-nix-host` imports `@kolu/shell-quote` (its ssh-command construction),
-  # so the consumer must hydrate that transitive source too — TypeScript resolves
+  kolu-surface-remote = mkKoluPackage "surface-remote";
+  # `surface-remote` imports `@kolu/shell-quote` (its ssh-command construction)
+  # and `@kolu/surface-map` (`serveHostMap`'s host-topology surface), so the
+  # consumer must hydrate those transitive sources too — TypeScript resolves
   # the import from the hydrated package's real location.
   kolu-shell-quote = mkKoluPackage "shell-quote";
+  kolu-surface-map = mkKoluPackage "surface-map";
 }
