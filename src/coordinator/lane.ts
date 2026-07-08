@@ -18,7 +18,7 @@ import {
   makeSession,
   type SessionState,
   sshConnector,
-} from "@kolu/surface-nix-host";
+} from "@kolu/surface-remote";
 import type { TaskSpec } from "../common/spec";
 import type {
   laneSurface,
@@ -67,6 +67,7 @@ export function startLane(opts: LaneOptions): Lane {
   const aborts: AbortController[] = [];
 
   const session = makeSession<AgentClient<typeof laneSurface.contract>>({
+    initialConnection: "copying",
     connectOnce: sshConnector<typeof laneSurface.contract>({
       host: opts.host,
       binary: "odu-runner",

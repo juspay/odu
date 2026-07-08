@@ -44,8 +44,9 @@ let
       sh scripts/hydrate-kolu-packages.sh \
         ${pkgs.kolu-surface} @kolu/surface \
         ${pkgs.kolu-surface-mcp} @kolu/surface-mcp \
-        ${pkgs.kolu-surface-nix-host} @kolu/surface-nix-host \
-        ${pkgs.kolu-shell-quote} @kolu/shell-quote
+        ${pkgs.kolu-surface-remote} @kolu/surface-remote \
+        ${pkgs.kolu-shell-quote} @kolu/shell-quote \
+        ${pkgs.kolu-surface-map} @kolu/surface-map
       cp -r . $out
       runHook postInstall
     '';
