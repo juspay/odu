@@ -29,6 +29,23 @@ process-compose, no separately-versioned socket client.
 > scraping terminal output. The `nix run … -- run` CLI below is the reference and
 > the fallback when no MCP server is wired.
 >
+> **Don't block on the full run — fail-fast is the point.** `wait_for_settle`
+> defaults to `fail_fast: true`: it returns the **instant the first node goes
+> red**, while the slow lanes (e2e, build) keep running. That early return *is*
+> your unblock signal — drill into the red node's log and start fixing at once;
+> never sit through the remaining lanes to "see the full status". The verdict is
+> explicitly partial when it trips: `fail_fast_tripped: true` with
+> `settled: false`, and `failed[]`/`errored[]` list only what's red **so far** —
+> a floor, not the final tally, so more lanes may still fail. Conversely
+> `passed: true` is the *only* trustworthy green — it comes solely from a fully
+> settled run with zero red; never infer success from a fail-fast return. The
+> coordinator does **not** stop when the tool returns: only your call did, so you
+> can `node_rerun` the fixed node against the still-live run (the pending slow
+> lanes keep it alive; `linger` covers the case where it already settled) and
+> `wait_for_settle` again to catch any reds that surfaced meanwhile — or
+> `run({supersede})` when the fix is a new commit. Don't pad `timeout_ms` and
+> wait: the loop is fail-fast → fix → re-wait, not one long block.
+>
 > **Logs are a resource, not a tool.** Don't look for a log-tail tool — there
 > isn't one. A node's output is the MCP **resource** `surface://collections/logs/{id}`
 > (`{id}` is the node, e.g. `ci::unit@aarch64-darwin`), read with
