@@ -227,7 +227,15 @@ snapshot while a run is up, else the durable per-SHA log). Both support
 on a notification.
 
 The agent loop is `run` → `wait_for_settle` (fail-fast) → read the red node's
-`surface://collections/logs/{id}` → fix → `node_rerun`. When the right next move
+`surface://collections/logs/{id}` → fix → `node_rerun`. Fail-fast is the point:
+`wait_for_settle` returns the *instant* the first node goes red — that early
+return (`fail_fast_tripped: true`, `settled: false`) is the unblock signal, so
+the agent never waits out the slow lanes just to "see full status". Its
+`failed[]`/`errored[]` are only what's red *so far* — a floor, not the tally;
+`passed: true` (a fully settled run, zero red) is the only trustworthy green.
+The coordinator keeps running after the tool returns, so `node_rerun` retries a
+fixed node against the still-live run and `wait_for_settle` again catches any
+later reds. When the right next move
 is a fresh run instead — wrong commit, or the fix is a new commit — `run` with
 `supersede` calls off the live run and starts over in one step; `cancel` calls
 off a run you no longer need at all (so the loop never strands a pipeline or
