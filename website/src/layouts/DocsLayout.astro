@@ -1,0 +1,56 @@
+---
+import "../styles/global.css";
+import "../styles/docs.css";
+
+const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+const github = "https://github.com/juspay/odu";
+const { frontmatter } = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="description" content={frontmatter.description} />
+    <meta name="theme-color" content="#090d0c" />
+    <link rel="icon" type="image/svg+xml" href={`${base}/logo.svg`} />
+    <link rel="canonical" href="https://juspay.github.io/odu/docs/" />
+    <title>{frontmatter.title} · odu</title>
+  </head>
+  <body>
+    <header class="shell site-nav">
+      <a class="brand" href={`${base}/`} aria-label="odu home">
+        <img class="brand-logo" src={`${base}/logo.svg`} width="34" height="34" alt="" />
+        <span>odu</span>
+      </a>
+      <nav class="nav-links" aria-label="Primary navigation">
+        <a href={`${base}/`}>Home</a>
+        <a href="https://just.systems" target="_blank" rel="noreferrer">just ↗</a>
+        <a class="nav-github" href={github} target="_blank" rel="noreferrer">GitHub ↗</a>
+      </nav>
+    </header>
+
+    <div class="shell docs-layout">
+      <aside class="docs-nav" aria-label="Documentation sections">
+        <span class="docs-nav-label">Documentation</span>
+        <a href="#quick-start">Quick start</a>
+        <a href="#why-odu">Why odu</a>
+        <a href="#how-a-run-works">How a run works</a>
+        <a href="#configure-your-repo">Configure</a>
+        <a href="#cli-reference">CLI reference</a>
+        <a href="#coding-agents-mcp">Coding agents</a>
+        <a href="#operational-notes">Operational notes</a>
+        <a href="#development">Development</a>
+      </aside>
+      <main class="docs-content">
+        <slot />
+      </main>
+    </div>
+
+    <footer class="shell docs-footer">
+      <span>odu · ஓடு · run</span>
+      <span>AGPL-3.0-or-later</span>
+    </footer>
+  </body>
+</html>

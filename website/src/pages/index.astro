@@ -3,7 +3,7 @@ import "../styles/global.css";
 
 const base = import.meta.env.BASE_URL.replace(/\/$/, "");
 const github = "https://github.com/juspay/odu";
-const docs = `${github}#configure-your-repo`;
+const docs = `${base}/docs/`;
 ---
 
 <!doctype html>
@@ -29,6 +29,7 @@ const docs = `${github}#configure-your-repo`;
       </a>
       <nav class="nav-links" aria-label="Primary navigation">
         <a href="#how-it-works">How it works</a>
+        <a href={docs}>Docs</a>
         <a href="#quickstart">Quickstart</a>
         <a class="nav-github" href={github} target="_blank" rel="noreferrer">
           GitHub
@@ -43,7 +44,7 @@ const docs = `${github}#configure-your-repo`;
           <p class="eyebrow">Live CI for just</p>
           <h1>CI you can <span>attach to.</span></h1>
           <p class="hero-copy">
-            Run your <code>just</code> DAG across machines. Watch state, stream logs,
+            Run your <a class="inline-link" href="https://just.systems" target="_blank" rel="noreferrer"><code>just</code></a> DAG across machines. Watch state, stream logs,
             and rerun a node while the pipeline is still alive.
           </p>
           <div class="actions">
@@ -125,6 +126,34 @@ const docs = `${github}#configure-your-repo`;
         </div>
       </section>
 
+      <section class="demo-section">
+        <div class="shell">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Actual runs</p>
+              <h2 class="section-title">See one state<br />from both sides.</h2>
+            </div>
+            <p class="section-copy">Recorded from odu itself. No staged dashboard, no reconstructed events.</p>
+          </div>
+          <div class="demo-grid">
+            <figure class="demo-card demo-card-wide">
+              <video autoplay muted loop playsinline controls preload="metadata" poster="https://kolu.dev/blog/odu-attach.webp">
+                <source src="https://kolu.dev/blog/odu-attach.webm" type="video/webm" />
+                <source src="https://kolu.dev/blog/odu-attach.mp4" type="video/mp4" />
+              </video>
+              <figcaption><strong>Human face</strong><span><code>odu run</code> and <code>odu attach</code> reading one live pipeline.</span></figcaption>
+            </figure>
+            <figure class="demo-card">
+              <video controls muted loop playsinline preload="metadata" poster="https://kolu.dev/blog/odu-mcp.webp">
+                <source src="https://kolu.dev/blog/odu-mcp.webm" type="video/webm" />
+                <source src="https://kolu.dev/blog/odu-mcp.mp4" type="video/mp4" />
+              </video>
+              <figcaption><strong>Agent face</strong><span>An agent drives MCP while the terminal watches the same state.</span></figcaption>
+            </figure>
+          </div>
+        </div>
+      </section>
+
       <section>
         <div class="shell">
           <div class="section-heading">
@@ -153,6 +182,18 @@ const docs = `${github}#configure-your-repo`;
               <div class="arch-card"><span class="arch-kicker">Durable</span><span class="arch-name">logs + run ledger</span></div>
             </div>
           </div>
+
+          <a class="surface-promo" href="https://kolu.dev/surface/" target="_blank" rel="noreferrer">
+            <span class="surface-copy">
+              <span class="surface-label">The framework underneath</span>
+              <strong>@kolu/surface</strong>
+              <span>Define typed reactive state once. Serve it locally, over ssh, to a terminal, or through MCP.</span>
+            </span>
+            <span class="surface-primitives" aria-hidden="true">
+              <i>Cell</i><i>Stream</i><i>Procedure</i><b>→</b><i>any frontend</i>
+            </span>
+            <span class="surface-arrow" aria-hidden="true">↗</span>
+          </a>
         </div>
       </section>
 
@@ -170,24 +211,29 @@ const docs = `${github}#configure-your-repo`;
             <div class="step">
               <span class="step-number">01</span>
               <h3>Tag the root</h3>
-              <div class="code-block"><span class="accent">[metadata("ci")]</span>
-default: build test lint</div>
+              <div class="code-block">
+                <span class="code-line"><span class="accent">[metadata("ci")]</span></span>
+                <span class="code-line">default: build test lint</span>
+              </div>
             </div>
             <div class="step">
               <span class="step-number">02</span>
               <h3>Run the DAG</h3>
-              <div class="code-block"><button class="copy-button" data-copy="nix run github:juspay/odu -- run">copy</button><span class="log-dim">$</span> nix run github:juspay/odu -- run
-
-<span class="log-green">✓</span> build  <span class="log-green">✓</span> lint  <span class="log-amber">⠹</span> test</div>
+              <div class="code-block">
+                <button class="copy-button" data-copy="nix run github:juspay/odu -- run">copy</button>
+                <span class="code-line code-command"><span class="log-dim">$</span> nix run github:juspay/odu -- run</span>
+                <span class="code-line"><span class="log-green">✓</span> build&nbsp;&nbsp;<span class="log-green">✓</span> lint&nbsp;&nbsp;<span class="log-amber">⠹</span> test</span>
+              </div>
             </div>
             <div class="step">
               <span class="step-number">03</span>
               <h3>Attach anywhere</h3>
-              <div class="code-block"><span class="log-dim"># another terminal</span>
-<span class="log-dim">$</span> odu attach
-
-<span class="log-dim"># or let an agent drive it</span>
-<span class="log-dim">$</span> odu mcp</div>
+              <div class="code-block">
+                <span class="code-line log-dim"># another terminal</span>
+                <span class="code-line"><span class="log-dim">$</span> odu attach</span>
+                <span class="code-line code-gap log-dim"># or let an agent drive it</span>
+                <span class="code-line"><span class="log-dim">$</span> odu mcp</span>
+              </div>
             </div>
           </div>
         </div>
@@ -221,6 +267,7 @@ default: build test lint</div>
       <span>odu · ஓடு · run<br />AGPL-3.0-or-later</span>
       <span class="footer-links">
         <a href={github}>GitHub</a>
+        <a href="https://just.systems">just</a>
         <a href="https://kolu.dev/blog/odu/">Announcement</a>
         <a href={`${github}/issues`}>Issues</a>
       </span>
