@@ -4,7 +4,7 @@
 
 **Live, attachable CI for [`just`](https://just.systems) recipe DAGs.**
 
-[Website](https://juspay.github.io/odu/) · [Documentation](https://juspay.github.io/odu/docs/) · [Announcement](https://kolu.dev/blog/odu/)
+[Website & documentation](https://juspay.github.io/odu/#docs) · [Announcement](https://kolu.dev/blog/odu/)
 
 ```sh
 nix run github:juspay/odu -- run

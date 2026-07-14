@@ -1,10 +1,11 @@
+.docs-section { padding-bottom: 40px; border-top: 1px solid var(--line); }
 .docs-layout {
   display: grid;
   grid-template-columns: 190px minmax(0, 790px);
   gap: clamp(3rem, 8vw, 8rem);
   align-items: start;
-  padding-top: 70px;
-  padding-bottom: 120px;
+  padding-top: 0;
+  padding-bottom: 40px;
 }
 
 .docs-nav {

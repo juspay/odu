@@ -1,9 +1,11 @@
 ---
 import "../styles/global.css";
+import "../styles/docs.css";
+import { Content as DocsContent } from "../content/docs.md";
 
 const base = import.meta.env.BASE_URL.replace(/\/$/, "");
 const github = "https://github.com/juspay/odu";
-const docs = `${base}/docs/`;
+const docs = "#docs";
 ---
 
 <!doctype html>
@@ -253,11 +255,30 @@ const docs = `${base}/docs/`;
         </div>
       </section>
 
+      <section id="docs" class="docs-section">
+        <div class="shell docs-layout">
+          <aside class="docs-nav" aria-label="Documentation sections">
+            <span class="docs-nav-label">Documentation</span>
+            <a href="#quick-start">Quick start</a>
+            <a href="#why-odu">Why odu</a>
+            <a href="#how-a-run-works">How a run works</a>
+            <a href="#configure-your-repo">Configure</a>
+            <a href="#cli-reference">CLI reference</a>
+            <a href="#coding-agents-mcp">Coding agents</a>
+            <a href="#operational-notes">Operational notes</a>
+            <a href="#development">Development</a>
+          </aside>
+          <div class="docs-content">
+            <DocsContent />
+          </div>
+        </div>
+      </section>
+
       <section class="final-cta">
         <div class="shell cta-box">
           <h2>Already speak <span>just?</span><br />Start running live.</h2>
           <div class="actions">
-            <a class="button button-primary" href={docs} target="_blank" rel="noreferrer">Read the docs <span aria-hidden="true">↗</span></a>
+            <a class="button button-primary" href={github} target="_blank" rel="noreferrer">View on GitHub <span aria-hidden="true">↗</span></a>
           </div>
         </div>
       </section>
