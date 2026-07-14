@@ -63,7 +63,7 @@ button, input { font: inherit; }
   height: 86px;
 }
 .brand { display: inline-flex; align-items: center; gap: .72rem; text-decoration: none; font: 700 1rem/1 var(--mono); }
-.brand-mark { display: grid; width: 30px; height: 30px; place-items: center; border: 1px solid var(--line); border-radius: 8px; color: var(--green); background: #0c1210; }
+.brand-logo { display: block; width: 34px; height: 34px; border-radius: 8px; }
 .nav-links { display: flex; align-items: center; gap: 1.45rem; color: var(--muted); font-size: .86rem; }
 .nav-links a { text-decoration: none; transition: color .18s ease; }
 .nav-links a:hover { color: var(--ink); }
