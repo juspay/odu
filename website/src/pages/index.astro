@@ -1,0 +1,286 @@
+---
+import "../styles/global.css";
+
+const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+const github = "https://github.com/juspay/odu";
+const docs = `${github}#configure-your-repo`;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="description" content="odu is live, attachable CI for just recipe DAGs." />
+    <meta name="theme-color" content="#090d0c" />
+    <link rel="icon" type="image/svg+xml" href={`${base}/favicon.svg`} />
+    <link rel="canonical" href="https://juspay.github.io/odu/" />
+    <meta property="og:title" content="odu — CI you can attach to" />
+    <meta property="og:description" content="Run your just DAG across machines. Attach while it is live." />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://juspay.github.io/odu/" />
+    <title>odu — CI you can attach to</title>
+  </head>
+  <body>
+    <header class="shell site-nav">
+      <a class="brand" href={`${base}/`} aria-label="odu home">
+        <span class="brand-mark">$</span>
+        <span>odu</span>
+      </a>
+      <nav class="nav-links" aria-label="Primary navigation">
+        <a href="#how-it-works">How it works</a>
+        <a href="#quickstart">Quickstart</a>
+        <a class="nav-github" href={github} target="_blank" rel="noreferrer">
+          GitHub
+          <span aria-hidden="true">↗</span>
+        </a>
+      </nav>
+    </header>
+
+    <main>
+      <div class="shell hero">
+        <div>
+          <p class="eyebrow">Live CI for just</p>
+          <h1>CI you can <span>attach to.</span></h1>
+          <p class="hero-copy">
+            Run your <code>just</code> DAG across machines. Watch state, stream logs,
+            and rerun a node while the pipeline is still alive.
+          </p>
+          <div class="actions">
+            <a class="button button-primary" href="#quickstart">Run odu <span aria-hidden="true">↓</span></a>
+            <a class="button" href={github} target="_blank" rel="noreferrer">View source <span aria-hidden="true">↗</span></a>
+          </div>
+        </div>
+
+        <div class="pipeline-stage" role="img" aria-label="An animated recipe pipeline fanning out to Linux and macOS">
+          <div class="stage-grid" aria-hidden="true"></div>
+          <div class="pipeline-card">
+            <div class="window-bar">
+              <span></span><span></span><span></span>
+              <span class="window-title">pipeline · 3cbac86</span>
+            </div>
+            <div class="dag">
+              <div class="dag-line line-1"></div>
+              <div class="dag-line line-2"></div>
+              <div class="dag-line line-3"></div>
+              <div class="dag-line line-4"></div>
+              <div class="node node-root">default</div>
+              <div class="node node-build">build ✓</div>
+              <div class="node node-lint">lint ✓</div>
+              <div class="node node-linux">test@linux ✓</div>
+              <div class="node node-macos node-running">test@macos</div>
+            </div>
+          </div>
+          <div class="stage-note"><strong>Attached from another terminal</strong>$ odu attach</div>
+        </div>
+      </div>
+
+      <div class="shell signal-strip" aria-label="Key features">
+        <div class="signal"><strong>Local first</strong><span>Zero config on one machine</span></div>
+        <div class="signal"><strong>Multi-platform</strong><span>Linux + macOS, one live surface</span></div>
+        <div class="signal"><strong>Agent native</strong><span>Typed state and logs over MCP</span></div>
+      </div>
+
+      <section id="how-it-works">
+        <div class="shell">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">The live face</p>
+              <h2 class="section-title">Your pipeline is<br />not a log file.</h2>
+            </div>
+            <p class="section-copy">Attach late and replay from the top. Move across lanes. Focus a node. Rerun it with its dependents.</p>
+          </div>
+
+          <div class="terminal" data-terminal>
+            <div class="window-bar">
+              <span></span><span></span><span></span>
+              <span class="window-title">odu attach · kolu · 3cbac86</span>
+            </div>
+            <div class="terminal-body">
+              <div class="matrix">
+                <div class="term-label">pipeline / 8 nodes / live</div>
+                <div class="matrix-head"><span>recipe</span><span>x86_64-linux</span><span>aarch64-darwin</span></div>
+                <div class="matrix-row"><span>format</span><span class="check">✓ 1.4s</span><span class="check">✓ 1.7s</span></div>
+                <div class="matrix-row"><span>typecheck</span><span class="check">✓ 8.2s</span><span class="check">✓ 9.1s</span></div>
+                <div class="matrix-row"><span>unit</span><span class="check">✓ 12s</span><span class="check">✓ 14s</span></div>
+                <div class="matrix-row active" data-node="e2e@x86_64-linux" role="button" tabindex="0"><span>e2e</span><span class="run"><i class="spinner"></i> 24s</span><span class="pending">·</span></div>
+                <div class="matrix-row" data-node="e2e@aarch64-darwin" role="button" tabindex="0"><span>e2e</span><span class="run"><i class="spinner"></i> 24s</span><span class="run"><i class="spinner"></i> 19s</span></div>
+              </div>
+              <div class="log-pane" aria-live="polite">
+                <div class="log-rule" data-log-title>e2e@x86_64-linux</div>
+                <div data-log-content>
+                  <span class="log-line log-dim">$ just --no-deps ci::e2e</span>
+                  <span class="log-line">building odu runner closure…</span>
+                  <span class="log-line">copying 17 paths to localhost</span>
+                  <span class="log-line log-green">✓ pass fixture settles cleanly</span>
+                  <span class="log-line log-green">✓ fail fixture reports exit 7</span>
+                  <span class="log-line log-green">✓ late attach replays buffered output</span>
+                  <span class="log-spacer"></span>
+                  <span class="log-line log-amber">⠹ cancel fixture</span>
+                </div>
+                <div class="terminal-help"><span><i class="key">hjkl</i> focus</span><span><i class="key">r</i> rerun</span><span><i class="key">q</i> detach</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="shell">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Under the terminal</p>
+              <h2 class="section-title">One state.<br />Every face.</h2>
+            </div>
+            <p class="section-copy">The coordinator owns the run. Terminal and agent interfaces are thin adapters over the same typed contract.</p>
+          </div>
+
+          <div class="architecture" role="img" aria-label="odu architecture diagram">
+            <div class="arch-stack">
+              <div class="arch-card"><span class="arch-kicker">Input</span><span class="arch-name">just recipe DAG</span></div>
+              <div class="arch-card"><span class="arch-kicker">Lane</span><span class="arch-name">x86_64-linux</span></div>
+              <div class="arch-card"><span class="arch-kicker">Lane</span><span class="arch-name">aarch64-darwin</span></div>
+            </div>
+            <div class="coordinator">
+              <div class="coord-head"><span>odu coordinator</span><span>● live</span></div>
+              <div class="primitive"><span class="primitive-icon">C</span><span><strong>Cell</strong><small>pipeline snapshot → deltas</small></span></div>
+              <div class="primitive"><span class="primitive-icon">S</span><span><strong>Stream</strong><small>buffered node output → appends</small></span></div>
+              <div class="primitive"><span class="primitive-icon">P</span><span><strong>Procedure</strong><small>rerun node + dependents</small></span></div>
+            </div>
+            <div class="arch-stack">
+              <div class="arch-card"><span class="arch-kicker">Human face</span><span class="arch-name">odu attach</span></div>
+              <div class="arch-card"><span class="arch-kicker">Agent face</span><span class="arch-name">odu mcp</span></div>
+              <div class="arch-card"><span class="arch-kicker">Durable</span><span class="arch-name">logs + run ledger</span></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="quickstart">
+        <div class="shell">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Three commands away</p>
+              <h2 class="section-title">Keep your justfile.</h2>
+            </div>
+            <p class="section-copy">No CI-flavored YAML. Your tagged dependency closure is the pipeline.</p>
+          </div>
+
+          <div class="steps">
+            <div class="step">
+              <span class="step-number">01</span>
+              <h3>Tag the root</h3>
+              <div class="code-block"><span class="accent">[metadata("ci")]</span>
+default: build test lint</div>
+            </div>
+            <div class="step">
+              <span class="step-number">02</span>
+              <h3>Run the DAG</h3>
+              <div class="code-block"><button class="copy-button" data-copy="nix run github:juspay/odu -- run">copy</button><span class="log-dim">$</span> nix run github:juspay/odu -- run
+
+<span class="log-green">✓</span> build  <span class="log-green">✓</span> lint  <span class="log-amber">⠹</span> test</div>
+            </div>
+            <div class="step">
+              <span class="step-number">03</span>
+              <h3>Attach anywhere</h3>
+              <div class="code-block"><span class="log-dim"># another terminal</span>
+<span class="log-dim">$</span> odu attach
+
+<span class="log-dim"># or let an agent drive it</span>
+<span class="log-dim">$</span> odu mcp</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="agent-section">
+        <div class="shell">
+          <p class="eyebrow">Made for coding agents</p>
+          <h2 class="section-title">Structured state in.<br />Targeted fixes out.</h2>
+          <div class="agent-loop" aria-label="Agent CI loop">
+            <div class="loop-node"><span class="loop-index">01</span><strong>run</strong><small>start the coordinator</small></div>
+            <div class="loop-node"><span class="loop-index">02</span><strong>wait</strong><small>return on first red</small></div>
+            <div class="loop-node highlight"><span class="loop-index">03</span><strong>inspect</strong><small>read that node's log</small></div>
+            <div class="loop-node"><span class="loop-index">04</span><strong>fix</strong><small>change the source</small></div>
+            <div class="loop-node"><span class="loop-index">05 ↻</span><strong>rerun</strong><small>node + dependents only</small></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="final-cta">
+        <div class="shell cta-box">
+          <h2>Already speak <span>just?</span><br />Start running live.</h2>
+          <div class="actions">
+            <a class="button button-primary" href={docs} target="_blank" rel="noreferrer">Read the docs <span aria-hidden="true">↗</span></a>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="shell">
+      <span>odu · ஓடு · run<br />AGPL-3.0-or-later</span>
+      <span class="footer-links">
+        <a href={github}>GitHub</a>
+        <a href="https://kolu.dev/blog/odu/">Announcement</a>
+        <a href={`${github}/issues`}>Issues</a>
+      </span>
+    </footer>
+
+    <script>
+      const logs: Record<string, Array<[string, string]>> = {
+        "e2e@x86_64-linux": [
+          ["$ just --no-deps ci::e2e", "log-dim"],
+          ["building odu runner closure…", ""],
+          ["copying 17 paths to localhost", ""],
+          ["✓ pass fixture settles cleanly", "log-green"],
+          ["✓ fail fixture reports exit 7", "log-green"],
+          ["✓ late attach replays buffered output", "log-green"],
+          ["⠹ cancel fixture", "log-amber"],
+        ],
+        "e2e@aarch64-darwin": [
+          ["$ just --no-deps ci::e2e", "log-dim"],
+          ["realising runner on macos lane…", ""],
+          ["copying 14 paths to localhost", ""],
+          ["✓ pass fixture settles cleanly", "log-green"],
+          ["✓ runner workspace is writable", "log-green"],
+          ["⠹ late attach replay", "log-amber"],
+        ],
+      };
+
+      const title = document.querySelector("[data-log-title]");
+      const content = document.querySelector("[data-log-content]");
+      document.querySelectorAll<HTMLElement>("[data-node]").forEach((row) => {
+        const selectRow = () => {
+          const id = row.getAttribute("data-node");
+          if (!id || !title || !content || !(id in logs)) return;
+          document.querySelectorAll("[data-node]").forEach((node) => node.classList.remove("active"));
+          row.classList.add("active");
+          title.textContent = id;
+          content.replaceChildren(...logs[id].map(([line, cls]) => {
+            const element = document.createElement("span");
+            element.className = `log-line ${cls}`;
+            element.textContent = line;
+            return element;
+          }));
+        };
+        row.addEventListener("click", selectRow);
+        row.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            selectRow();
+          }
+        });
+      });
+
+      document.querySelectorAll("[data-copy]").forEach((button) => {
+        button.addEventListener("click", async () => {
+          const value = button.getAttribute("data-copy");
+          if (!value) return;
+          await navigator.clipboard.writeText(value);
+          button.textContent = "copied";
+          setTimeout(() => { button.textContent = "copy"; }, 1400);
+        });
+      });
+    </script>
+  </body>
+</html>
