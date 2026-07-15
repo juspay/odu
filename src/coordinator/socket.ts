@@ -30,7 +30,7 @@ export type OduClient = ContractRouterClient<typeof oduSurface.contract>;
  *  and refuses to serve from a world-readable directory, so `.ci` is
  *  tightened to owner-only first (it holds nothing but this run's logs). */
 export async function serveSocket(
-  // biome-ignore lint/suspicious/noExplicitAny: same router-shape constraint as serveOverUnixSocket's own options (the implementSurface spread defeats oRPC's Router type).
+  // biome-ignore lint/suspicious/noExplicitAny: same router-shape constraint as serveOverUnixSocket's own options (implementSurface types its returned router as `any` — its spec walk is dynamic).
   router: any,
   path: string = SOCKET_PATH,
 ): Promise<() => void> {

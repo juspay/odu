@@ -10,12 +10,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  implementSurface,
-  inMemoryChannelByName,
-  inMemoryStore,
-} from "@kolu/surface/server";
-import { implement } from "@orpc/server";
+import { implementSurface, inMemoryStore } from "@kolu/surface/server";
 import { createLogTail } from "../common/logTail";
 import { serveSocket } from "../coordinator/socket";
 import {
@@ -67,8 +62,7 @@ export async function serveTestSurface(
   // caller's hook, but `closeListener` is only bound after `serveSocket`.
   let closeListener: () => void = () => {};
 
-  const fragment = implementSurface(oduSurface, {
-    channel: inMemoryChannelByName(),
+  const runtime = implementSurface(oduSurface, {
     cells: { nodes: { store }, header: { store: headerStore } },
     streams: { nodeLog: { source: tail.streamSource } },
     procedures: {
@@ -87,20 +81,22 @@ export async function serveTestSurface(
       },
     },
   });
-  const router = implement(oduSurface.contract).router({ ...fragment.router });
+  // `implementSurface` returns the FINAL top-level router — serve it directly.
+  const router = runtime.router;
 
   // A pinned path is caller-owned (the caller removes it); otherwise the harness
   // owns a fresh temp dir + socket and removes them on `close`.
   const dir = pinnedSocketPath ? null : mkdtempSync(join(tmpdir(), "odu-mcp-test-"));
   const socketPath = pinnedSocketPath ?? join(dir as string, "odu.sock");
   // Reuse the coordinator's serve (mkdir + 0700 chmod + outcome handling); it
-  // types `router` as `any`, the same oRPC-spread workaround run.ts uses.
+  // types `router` as `any` — implementSurface's returned router is `any`, same
+  // as run.ts serves.
   closeListener = await serveSocket(router, socketPath);
 
   return {
     socketPath,
-    setState: (state) => fragment.ctx.cells.nodes.set(state),
-    setHeader: (header) => fragment.ctx.cells.header.set(header),
+    setState: (state) => runtime.ctx.cells.nodes.set(state),
+    setHeader: (header) => runtime.ctx.cells.header.set(header),
     appendLog: (id, text) => tail.append(id, text),
     resetLog: (id, text) => tail.reset(id, text),
     reruns,
