@@ -23,13 +23,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import {
-  implementSurface,
-  inMemoryChannelByName,
-  inMemoryStore,
-} from "@kolu/surface/server";
+import { implementSurface, inMemoryStore } from "@kolu/surface/server";
 import { isLocalHost, resolveSystem } from "@kolu/surface-remote";
-import { implement } from "@orpc/server";
 import { bold, dim, green, link, magenta, red } from "../cli/ansi";
 import { formatGoDuration } from "../common/duration";
 import { gitTopLevel } from "../common/git";
@@ -445,8 +440,7 @@ async function orchestrate(
     });
   };
 
-  const fragment = implementSurface(oduSurface, {
-    channel: inMemoryChannelByName(),
+  const runtime = implementSurface(oduSurface, {
     cells: { nodes: { store }, header: { store: headerStore } },
     streams: {
       nodeLog: { source: tail.streamSource },
@@ -466,7 +460,9 @@ async function orchestrate(
       },
     },
   });
-  const router = implement(oduSurface.contract).router({ ...fragment.router });
+  // `implementSurface` now returns the FINAL top-level router (the framework
+  // owns its own in-memory channel and the oRPC finalize) — serve it directly.
+  const router = runtime.router;
 
   // ── observers: progress stream + commit statuses, diffed per transition ──
   const emitProgress = (id: string, node: NodeState): void => {
@@ -503,7 +499,7 @@ async function orchestrate(
     ) {
       return;
     }
-    fragment.ctx.cells.nodes.set({
+    runtime.ctx.cells.nodes.set({
       ...cur,
       nodes: { ...cur.nodes, [id]: next },
     });

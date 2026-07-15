@@ -48,7 +48,6 @@
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 import { deriveStream, projectSurface } from "@kolu/surface/project";
-import { inMemoryChannelByName } from "@kolu/surface/server";
 import { z } from "zod";
 import { rowsOf } from "../cli/render";
 import { splitFanId } from "../common/nodeId";
@@ -492,7 +491,6 @@ function agentDeps(
   const logs = makeLogsStore(a, resolveRunContext);
   onStore(logs);
   return {
-    channel: inMemoryChannelByName(),
     streams: {
       // Map A's `nodes` cell (snapshot-then-deltas) onto B's `nodes` stream.
       // `deriveStream` preserves snapshot-then-deltas, so B's first frame is

@@ -26,6 +26,9 @@ importers:
       '@orpc/standard-server-peer':
         specifier: ^1.13.13
         version: 1.14.5
+      '@preact/signals-core':
+        specifier: ^1.8.0
+        version: 1.14.4
       '@solid-primitives/scheduled':
         specifier: ^1.5.3
         version: 1.5.3(solid-js@1.9.13)
@@ -294,6 +297,9 @@ packages:
 
   '@oxc-project/types@0.133.0':
     resolution: {integrity: sha512-KzkdCd6Uxqnf6l3HOw1xfatAlUURA0g14cvBYFyJ5SaNOQbOUvBr9PKArcPcrNIeRsBdgcUzOGrhKveVpvOIGA==}
+
+  '@preact/signals-core@1.14.4':
+    resolution: {integrity: sha512-HNB6HYeYKhQbJ1aKl+YRjrS4+QWHLKX6qKoUsfS/m0vqzsVaEBiZiaKbG/e+NKk2ch5ALQr/ihWaMHxiCuuWHA==}
 
   '@rolldown/binding-android-arm64@1.0.3':
     resolution: {integrity: sha512-454rs7jHngixp/NMxd5srYD57OnzSlZ/eFTETjORQHLwJG1lRtmNOJcBerZlfu4GjKqeq8aCCIQrMdHyhI51Hw==}
@@ -1335,6 +1341,8 @@ snapshots:
       - '@opentelemetry/api'
 
   '@oxc-project/types@0.133.0': {}
+
+  '@preact/signals-core@1.14.4': {}
 
   '@rolldown/binding-android-arm64@1.0.3':
     optional: true
