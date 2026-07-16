@@ -36,6 +36,12 @@ async function main(): Promise<void> {
     onFirstRequest: () =>
       log("odu-runner: first RPC received — coordinator attached"),
   });
+  // Synchronous post-settle cleanup — the supported window before the
+  // FRAMEWORK-OWNED exit: since kolu#1858, `serveOverStdio` on the default
+  // transport exits this process itself once the serve promise settles
+  // (0 on a clean end, 1 on a transport error), so a live handle can no
+  // longer leave an orphaned lane agent on a CI box (the T/odu/kolu/*
+  // leaves). These synchronous lines run before that exit.
   runner.dispose();
   log(`odu-runner: stdin closed (${end.reason}) — exiting`);
 }
