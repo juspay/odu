@@ -15,7 +15,7 @@ a code change forgets them. When you add or change any of:
 update **all three** in the *same* change:
 
 1. **`README.md`** — the `## CLI` block, the MCP `| Tool |` table, and the agent-loop prose.
-2. **`.apm/skills/ci/SKILL.md`** — the runner reference (modes, invocations, live commands).
+2. **`.apm/skills/odu/SKILL.md`** — the runner reference (modes, invocations, live commands).
 3. **`.apm/skills/odu-mcp/SKILL.md`** — the agent-face tool list.
 
 The skills are APM sources: edit them here, then `just apm` regenerates the

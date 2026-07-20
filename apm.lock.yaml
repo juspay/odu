@@ -1,5 +1,5 @@
 lockfile_version: '1'
-generated_at: '2026-07-20T20:48:59.583449+00:00'
+generated_at: '2026-07-20T21:22:59.810818+00:00'
 apm_version: 0.26.0
 dependencies:
 - repo_url: _local/dev
@@ -9,7 +9,7 @@ dependencies:
   deployed_files:
   - .claude/rules/surface-docs-sync.md
   deployed_file_hashes:
-    .claude/rules/surface-docs-sync.md: sha256:20bfe61dc593bc471625f068d2c9ee328f45e45c65fa32ec183303d60a282014
+    .claude/rules/surface-docs-sync.md: sha256:be464c63e9007b32768796bf67d42047d0148bfb3fa22a26d93c89914bef5d09
   source: local
   local_path: ./dev
   is_dev: true
@@ -117,6 +117,7 @@ dependencies:
     .claude/skills/ralph/SKILL.md: sha256:1b2c547102584c87384b90b291536bedc0494dcb8382ac776bd0a3cec0fe1b4a
     .claude/skills/talk/SKILL.md: sha256:ba059751cd4b3c1c52221554719bfe1fc5da56540694cb8e793ae0c19e210377
   content_hash: sha256:703dc7eb1a510ab80f5daa4cd7d9997ed1c748cb0942ff3ced88ac7bd062944b
+  is_dev: true
   declared_license: MIT
 - repo_url: juspay/odu
   name: odu
@@ -199,7 +200,7 @@ deployments:
   owners:
   - ./dev
   active_owner: ./dev
-  content_hash: sha256:20bfe61dc593bc471625f068d2c9ee328f45e45c65fa32ec183303d60a282014
+  content_hash: sha256:be464c63e9007b32768796bf67d42047d0148bfb3fa22a26d93c89914bef5d09
 - kind: project-relative
   target: claude
   value: .claude/skills/architecture-first-principles
@@ -261,7 +262,6 @@ deployments:
   scope: project
   owners:
   - juspay/odu
-  - .
   active_owner: juspay/odu
   content_hash: null
 - kind: project-relative
@@ -271,7 +271,6 @@ deployments:
   scope: project
   owners:
   - juspay/odu
-  - .
   active_owner: juspay/odu
   content_hash: sha256:3bd16fea5db2b1bcb26d07a263e88e5194f8fabe6d9bb92b48445fa41e3320d2
 - kind: project-relative
@@ -528,6 +527,15 @@ deployments:
   content_hash: sha256:082aa643189b3b31fa90fb185a01239cfb5e437cdd7b1afb122de1e533ac48eb
 - kind: project-relative
   target: claude
+  value: .claude/skills/odu
+  runtime: null
+  scope: project
+  owners:
+  - .
+  active_owner: .
+  content_hash: null
+- kind: project-relative
+  target: claude
   value: .claude/skills/odu-mcp
   runtime: null
   scope: project
@@ -556,6 +564,15 @@ deployments:
   - .
   active_owner: juspay/odu
   content_hash: sha256:6152e8fc4d3478b70a5cd547c172be596787e600b5757233fb82b307186b9e26
+- kind: project-relative
+  target: claude
+  value: .claude/skills/odu/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - .
+  active_owner: .
+  content_hash: sha256:d1d557bca31737771cbba1f05f6be6e6e949737558f81277336e2f5471de985f
 - kind: project-relative
   target: claude
   value: .claude/skills/orchestrator
@@ -691,12 +708,12 @@ mcp_configs:
     registry: false
     command: .agents/skills/odu-mcp/bin/serve
 local_deployed_files:
-- .claude/skills/ci
-- .claude/skills/ci/SKILL.md
+- .claude/skills/odu
 - .claude/skills/odu-mcp
 - .claude/skills/odu-mcp/SKILL.md
 - .claude/skills/odu-mcp/bin/serve
+- .claude/skills/odu/SKILL.md
 local_deployed_file_hashes:
-  .claude/skills/ci/SKILL.md: sha256:3bd16fea5db2b1bcb26d07a263e88e5194f8fabe6d9bb92b48445fa41e3320d2
   .claude/skills/odu-mcp/SKILL.md: sha256:91b2b059b629b1f7193ce96ef575b3d24c480229a265e4b72121efd05512b651
   .claude/skills/odu-mcp/bin/serve: sha256:6152e8fc4d3478b70a5cd547c172be596787e600b5757233fb82b307186b9e26
+  .claude/skills/odu/SKILL.md: sha256:d1d557bca31737771cbba1f05f6be6e6e949737558f81277336e2f5471de985f
