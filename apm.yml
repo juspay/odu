@@ -30,3 +30,6 @@ dependencies:
 devDependencies:
   apm:
     - path: ./dev
+    # kolu's authoring workflow (/be and its review lenses), deployed into odu's
+    # own .claude/ for maintainers only — excluded from what consumers receive.
+    - juspay/kolu/agents#master
