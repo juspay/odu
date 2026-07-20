@@ -35,7 +35,10 @@ describe("fanoutLanes — the no-config fail-fast (juspay/odu#46)", () => {
       thrown = e as Error;
     }
     expect(thrown).toBeDefined();
-    expect(thrown?.message).not.toContain("localhost lane");
+    // The throw itself is the guarantee (no localhost lane is ever returned);
+    // the message must read as a refusal, not the removed "running locally on
+    // <system>" graceful-degradation note.
+    expect(thrown?.message).not.toMatch(/running locally on/i);
     expect(thrown?.message).toMatch(/refus/i);
   });
 

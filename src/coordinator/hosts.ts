@@ -111,8 +111,10 @@ function noHostsConfiguredError(config: HostsConfig): Error {
       `     ${why}\n` +
       "     Configure at least one platform (a JSON object of Nix-system -> host,\n" +
       "     where a host is an ssh target or \"localhost\" to run here on purpose),\n" +
-      "     or pass --host PLATFORM=ADDR for this run. To run locally on this\n" +
-      "     machine, opt in explicitly, e.g. --host x86_64-linux=localhost.",
+      "     or pass --host PLATFORM=ADDR for this run. To run locally, name YOUR\n" +
+      "     platform's lane localhost — e.g. --host aarch64-darwin=localhost on a\n" +
+      "     Mac, --host x86_64-linux=localhost on Linux (a localhost lane runs the\n" +
+      "     matching-platform runner, so the tuple must be this machine's).",
   );
 }
 
