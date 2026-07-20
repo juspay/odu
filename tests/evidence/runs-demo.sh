@@ -13,7 +13,10 @@ set -u
 ODU="$1"   # path to the odu binary (carries ODU_RUNNER_FLAKE baked in)
 WT="$2"    # the odu checkout (source of the fixture justfile)
 
-export ODU_HOSTS="$(mktemp -d)/hosts.json"; echo '{}' > "$ODU_HOSTS"  # localhost lane
+# Pin this machine's platform to an explicit localhost lane. A bare/empty hosts
+# config is refused (juspay/odu#46), so name the lane for the current system.
+export ODU_HOSTS="$(mktemp -d)/hosts.json"
+printf '{"%s":"localhost"}' "$(nix eval --impure --raw --expr builtins.currentSystem)" > "$ODU_HOSTS"
 D=$(mktemp -d /tmp/odu-runs-demo-XXXX)
 # A plain consumer: just a justfile, no flake — the runner comes from the odu
 # binary's baked ODU_RUNNER_FLAKE, not this repo (see issue #30).

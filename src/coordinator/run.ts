@@ -24,7 +24,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { implementSurface, inMemoryStore } from "@kolu/surface/server";
-import { isLocalHost, resolveSystem } from "@kolu/surface-remote";
+import { isLocalHost } from "@kolu/surface-remote";
 import { bold, dim, green, link, magenta, red } from "../cli/ansi";
 import { formatGoDuration } from "../common/duration";
 import { gitTopLevel } from "../common/git";
@@ -42,7 +42,7 @@ import {
 } from "../common/surface";
 import { commitLabel, createDisplay, progressEvent } from "./display";
 import { laneTasks, loadJustPipeline, parseSelector } from "../just/ingest";
-import { loadHosts, localFallbackNote, resolveLanes } from "./hosts";
+import { fanoutLanes, loadHosts } from "./hosts";
 import { type Lane, startLane } from "./lane";
 import { missingRunnerError, resolveRunnerFlake } from "./runnerFlake";
 import { cancelRun } from "./cancel";
@@ -223,22 +223,18 @@ async function orchestrate(
   // ── DAG + lanes ──
   const spec = loadJustPipeline(specSource, { root: args.root });
   const hostsConfig = loadHosts();
-  // Zero configured lanes means a bare `odu run` with no hosts anywhere — the
-  // newcomer path. Running on this machine is the overwhelmingly common intent,
-  // so default to a localhost lane on the current system rather than erroring.
-  // (A localhost lane dials no one; it's the zero-config default, not a baked-in
-  // remote host.) An explicit `--platform` with no host still errors earlier in
-  // resolveLanes — the operator asking for a lane we can't build.
-  let lanesByPlatform = resolveLanes(
+  // Zero resolved lanes means a bare `odu run` with no hosts anywhere — no
+  // config file, no `--host` pin, no `--platform` slice. Defaulting that to a
+  // localhost lane silently turned a fanout into a local fork-bomb on a
+  // production workstation (juspay/odu#46), so `fanoutLanes` refuses it loudly
+  // instead — running locally stays available only as an explicit decision
+  // (a `"…": "localhost"` entry or `--host PLAT=localhost`). An explicit
+  // `--platform` with no host still errors earlier in resolveLanes.
+  const lanesByPlatform = fanoutLanes(
     hostsConfig,
     args.hostPins,
     args.platforms,
   );
-  if (Object.keys(lanesByPlatform).length === 0) {
-    const system = await resolveSystem("localhost");
-    info(localFallbackNote(system));
-    lanesByPlatform = { [system]: "localhost" };
-  }
   const selectors = args.selectors.map(parseSelector);
   for (const selector of selectors) {
     if (
