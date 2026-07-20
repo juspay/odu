@@ -52,6 +52,16 @@ describe("fanoutLanes — the no-config fail-fast (juspay/odu#46)", () => {
     expect(msg).toContain("localhost");
   });
 
+  it("names the winning-but-empty file when a hosts file exists yet configures nothing", () => {
+    // A `{}` file that won resolution still resolves zero lanes → refuse. The
+    // diagnosis must name that file, not claim nothing existed.
+    const emptyFile = { hosts: {}, source: "/home/me/.config/odu/hosts.json" };
+    const msg = messageOf(() => fanoutLanes(emptyFile, [], []));
+    expect(msg).toMatch(/refus/i);
+    expect(msg).toContain("/home/me/.config/odu/hosts.json");
+    expect(msg).toContain("configured no platform");
+  });
+
   it("keeps an explicit --host PLAT=localhost override working (localhost as a decision)", () => {
     expect(fanoutLanes(empty, ["x86_64-linux=localhost"], [])).toEqual({
       "x86_64-linux": "localhost",
