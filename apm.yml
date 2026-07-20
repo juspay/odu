@@ -10,12 +10,10 @@ target: claude
 # guidance lives outside `.apm/` and is wired as a devDependency so consumers
 # never pull it.
 includes:
-  - .apm/skills/ci/
+  - .apm/skills/odu/
   - .apm/skills/odu-mcp/
 
 dependencies:
-  apm:
-    - srid/agency#master
   # odu's agent face: consumers that depend on juspay/odu get the odu MCP
   # server wired into their .mcp.json (Claude) / .codex / .opencode. The
   # launcher resolves odu via Nix and serves `odu mcp` in the consumer's repo.
@@ -30,6 +28,9 @@ dependencies:
 devDependencies:
   apm:
     - path: ./dev
+    # srid/agency's review lenses (hickey/lowy/code-police, …): maintainer
+    # tooling, never shipped to consumers.
+    - srid/agency#master
     # kolu's authoring workflow (/be and its review lenses), deployed into odu's
     # own .claude/ for maintainers only — excluded from what consumers receive.
     - juspay/kolu/agents#master
