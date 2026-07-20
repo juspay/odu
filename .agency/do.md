@@ -22,8 +22,10 @@ internal refactors with no externally visible effect.
 
 **Make it reproducible.** Drive the real, nix-built binary from a small script
 committed under `tests/evidence/` (e.g. `tests/evidence/cancel-demo.sh`), against
-a throwaway fixture pinned to a localhost lane (`ODU_HOSTS` → an empty hosts
-file), with `say`/`cmd` helpers narrating each step. The script *is* the recipe —
+a throwaway fixture pinned to a localhost lane (`ODU_HOSTS` → a hosts file
+naming this machine's platform `localhost`; an empty `{}` is refused — see
+juspay/odu#46), with `say`/`cmd` helpers narrating each step. The script *is*
+the recipe —
 re-run it to regenerate the gif when behavior changes.
 
 ```sh

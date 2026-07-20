@@ -91,21 +91,38 @@ default: build test lint
 
 ### Where the lanes run
 
-**Local (the default).** With no hosts configured, `odu run` runs the whole
-pipeline on *this* machine — it detects your Nix system and uses a `localhost`
-lane, which runs directly against your toolchain (skipping the Nix closure
-copy). Nothing to set up:
+**A host is a decision — `odu run` never guesses one.** odu resolves hosts from
+the first of these that exists — `$ODU_HOSTS` (a filesystem path to a hosts
+file, taking precedence) → `~/.config/odu/hosts.json` → `~/.config/justci/hosts.json`
+— and if none configures a platform, a bare `odu run` **refuses** rather than
+quietly running the whole pipeline on your own machine. (A missing config once
+resolved silently to a `localhost` lane and fork-bombed a production
+workstation — [#46](https://github.com/juspay/odu/issues/46). Running locally is
+a fine choice; making it *by default, silently* is not.) The refusal names the
+chain it checked and how to opt in.
 
 ```sh
-odu run            # → "no hosts configured — running locally on aarch64-darwin"
+odu run            # no hosts configured → refuses, names the resolution chain
 ```
 
-This single-machine case is what most users want, and most never need more.
+**Run on this machine, on purpose.** Name your platform's lane `localhost`,
+either for one run or in a hosts file:
+
+```sh
+odu run --host x86_64-linux=localhost      # this run only
+```
+
+```json
+{ "x86_64-linux": "localhost" }
+```
+
+A `localhost` lane runs directly against your toolchain (skipping the Nix
+closure copy). This single-machine case is what most users want — it just has to
+be asked for.
 
 **Multi-platform (fan out across machines).** To run each platform's lane on a
 real builder for that platform, list them in `~/.config/odu/hosts.json` (or set
-`$ODU_HOSTS` to a hosts file elsewhere — its value is a filesystem path to a
-JSON file in this same format, taking precedence over the default location):
+`$ODU_HOSTS` to a hosts file elsewhere):
 
 ```json
 {
@@ -116,8 +133,8 @@ JSON file in this same format, taking precedence over the default location):
 
 Keys are Nix system tuples; values are anything ssh can dial, or `localhost`.
 A bare `odu run` then fans out to **every** configured platform at once;
-missing platforms simply drop from the fanout, and `--platform P` slices to a
-subset. The real-world example is **kolu**, which builds on both Linux and
+platforms absent from an *existing* config simply drop from the fanout (a
+partial config is a decision), and `--platform P` slices to a subset. The real-world example is **kolu**, which builds on both Linux and
 macOS: its CI keys an `x86_64-linux` and an `aarch64-darwin` lane, and its
 warm-pool lease (`ci/pu/run.sh`) injects the leased box per run with
 `--host PLAT=ADDR` (which pins or adds a platform for one run, on top of the

@@ -17,24 +17,42 @@ const here = dirname(fileURLToPath(import.meta.url));
 /** Large maxBuffer for nix output / NDJSON streams (256 MiB). */
 export const BIG = 256 * 1024 * 1024;
 
+/** This machine's Nix system tuple, from the running node's arch/os — the two
+ *  values the e2e lanes ever run on (`x86_64-linux`, `aarch64-darwin`). No
+ *  subprocess, no import from `src/`; a fail-fast throw on anything else. */
+function currentNixSystem(): string {
+  const arches: Record<string, string> = { x64: "x86_64", arm64: "aarch64" };
+  const oses: Record<string, string> = { linux: "linux", darwin: "darwin" };
+  const arch = arches[process.arch];
+  const os = oses[process.platform];
+  if (arch === undefined || os === undefined) {
+    throw new Error(
+      `e2e harness: unsupported host ${process.arch}-${process.platform}`,
+    );
+  }
+  return `${arch}-${os}`;
+}
+
 /**
- * An empty hosts file, pointed at via `ODU_HOSTS`, so a fixture run finds no
- * configured lanes and falls back to a single localhost lane — regardless of
- * the dev machine's ambient `~/.config/odu/hosts.json` (a configured remote
- * lane would need an origin the throwaway fixture has none of). Without this
- * the suite is green only on a host with no hosts file (e.g. CI).
+ * A hosts file, pointed at via `ODU_HOSTS`, that pins THIS machine's platform
+ * to an explicit `localhost` lane — regardless of the dev machine's ambient
+ * `~/.config/odu/hosts.json` (a configured remote lane would need an origin
+ * the throwaway fixture has none of). The localhost lane is a named decision,
+ * not the no-config fork-bomb odu now refuses (juspay/odu#46): an empty `{}`
+ * file would resolve zero lanes and be rejected, so the harness names the lane.
  */
-const emptyHostsFile = join(
+const hostsFile = join(
   mkdtempSync(join(tmpdir(), "odu-e2e-hosts-")),
   "hosts.json",
 );
-writeFileSync(emptyHostsFile, "{}");
+writeFileSync(hostsFile, JSON.stringify({ [currentNixSystem()]: "localhost" }));
 
-/** A fixture run's env: the ambient env plus an empty `ODU_HOSTS` so lane
- *  resolution is hermetic (localhost-only) on any machine. */
+/** A fixture run's env: the ambient env plus an `ODU_HOSTS` pinning this
+ *  machine's platform to localhost, so lane resolution is hermetic
+ *  (localhost-only) on any machine. */
 export const hermeticEnv: NodeJS.ProcessEnv = {
   ...process.env,
-  ODU_HOSTS: emptyHostsFile,
+  ODU_HOSTS: hostsFile,
 };
 
 /** The odu checkout under test — the worktree this test file lives in. */

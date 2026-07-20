@@ -175,8 +175,12 @@ rerun later (retry a flake), self-reaping after an idle period or on `cancel`.
 ```
 
 Keys are Nix system tuples; values are anything ssh dials, or `localhost`
-(runs directly against the snapshot, no closure copy). Missing platforms
-silently drop from the fanout. `--host PLAT=ADDR` overrides per run.
+(runs directly against the snapshot, no closure copy). Platforms absent from
+an *existing* config silently drop from the fanout, but a run that resolves
+**zero** lanes — no file anywhere, no `--host`, no `--platform` — is
+**refused**, not defaulted to `localhost` (juspay/odu#46). `--host PLAT=ADDR`
+overrides per run; run on this machine on purpose with `--host PLAT=localhost`
+or a `"PLAT": "localhost"` entry.
 
 A lane host needs only **ssh + Nix + outbound https**: the runner ships as
 a Nix closure (`nix copy` → realise on the host), and the source arrives by
