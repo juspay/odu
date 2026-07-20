@@ -17,20 +17,18 @@ const here = dirname(fileURLToPath(import.meta.url));
 /** Large maxBuffer for nix output / NDJSON streams (256 MiB). */
 export const BIG = 256 * 1024 * 1024;
 
-/** This machine's Nix system tuple, from the running node's arch/os — the two
- *  values the e2e lanes ever run on (`x86_64-linux`, `aarch64-darwin`). No
- *  subprocess, no import from `src/`; a fail-fast throw on anything else. */
+/** This machine's Nix system tuple, asked of Nix itself — the same authority
+ *  `resolveSystem` and the `tests/evidence/*.sh` scripts use. A hand-rolled
+ *  arch/os table would drift as platforms are added and disagree with Nix
+ *  under emulation / cross setups; `builtins.currentSystem` is what odu will
+ *  actually build `odu-runner` against, so it is the tuple the lane must name.
+ *  Synchronous, like this file's other `nix`/`git` calls; no import from `src/`. */
 function currentNixSystem(): string {
-  const arches: Record<string, string> = { x64: "x86_64", arm64: "aarch64" };
-  const oses: Record<string, string> = { linux: "linux", darwin: "darwin" };
-  const arch = arches[process.arch];
-  const os = oses[process.platform];
-  if (arch === undefined || os === undefined) {
-    throw new Error(
-      `e2e harness: unsupported host ${process.arch}-${process.platform}`,
-    );
-  }
-  return `${arch}-${os}`;
+  return execFileSync(
+    "nix",
+    ["eval", "--impure", "--raw", "--expr", "builtins.currentSystem"],
+    { encoding: "utf-8" },
+  ).trim();
 }
 
 /**

@@ -90,8 +90,9 @@ export function loadHosts(): HostsConfig {
  *  lives beside `loadHosts`, the module that owns the chain. Takes the loaded
  *  `config` (not a fresh filesystem probe) so the diagnosis matches what
  *  resolution actually did — e.g. names the file that won but configured
- *  nothing, rather than mislabeling a shadowed lower-precedence file. */
-export function noHostsConfiguredError(config: HostsConfig): Error {
+ *  nothing, rather than mislabeling a shadowed lower-precedence file.
+ *  Module-private: `fanoutLanes` is the seam callers reach it through. */
+function noHostsConfiguredError(config: HostsConfig): Error {
   const chain = hostsCandidates()
     .map((c) => `       ${c.label}`)
     .join("\n");
