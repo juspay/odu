@@ -67,8 +67,9 @@ export interface SettleVerdict {
 	/** The run this verdict describes: `sha7` its 7-char commit, `seq` its
 	 *  ordinal among runs of that commit (`<sha7>#<seq>`), so a caller can match
 	 *  the verdict to the run it dispatched rather than a previously-settled one
-	 *  (juspay/odu#49 ask 2). `seq` is null on the coordinator-close path when the
-	 *  observed run never carried one. */
+	 *  (juspay/odu#49 ask 2). `seq` is null when no ordinal was reserved — a wait
+	 *  that observed no run frame, or the rare case the coordinator couldn't
+	 *  reserve one (the verdict then carries `sha7` but no unique `<sha7>#<seq>`). */
 	sha7: string;
 	seq: number | null;
 }

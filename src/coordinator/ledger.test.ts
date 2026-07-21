@@ -112,6 +112,17 @@ describe("reserveNextSeq — atomic select-and-reserve", () => {
     writeRunRecord(repo, "26d2c2d", finished);
     expect(readLedger(repo)).toEqual([finished]);
   });
+
+  it("returns null on a write failure rather than throwing (never gates the run)", () => {
+    // A genuine write failure: the `runs` path already exists as a FILE, so the
+    // reservation can't create its dir/sentinel. reserveNextSeq must return null
+    // (best-effort) so the coordinator proceeds with no seq — not throw and abort
+    // the run (juspay/odu#49 F4).
+    const repo = tmpRepo();
+    mkdirSync(join(repo, ".ci", "26d2c2d"), { recursive: true });
+    writeFileSync(join(repo, ".ci", "26d2c2d", "runs"), "not a dir");
+    expect(reserveNextSeq(repo, "26d2c2d")).toBeNull();
+  });
 });
 
 describe("writeRunRecord / readLedger round-trip", () => {

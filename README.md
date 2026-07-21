@@ -251,11 +251,13 @@ return (`fail_fast_tripped: true`, `settled: false`) is the unblock signal, so
 the agent never waits out the slow lanes just to "see full status". Its
 `failed[]`/`errored[]` are only what's red *so far* — a floor, not the tally;
 `passed: true` (a fully settled run, zero red) is the only trustworthy green.
-A verdict about an observed run carries that run's identity (`sha7`, `seq`, i.e.
-`sha7#seq`), so you match it to the run you dispatched rather than a
-previously-settled one; pass `expected_sha` (a full sha or a `sha7` prefix) to
-make that a hard check. *(Only a wait that times out or is cancelled before the
-run produces any frame has nothing to name — its `seq` is `null`.)* And
+A verdict about an observed run carries that run's identity — `sha7` always, and
+`seq` (the reserved ordinal, i.e. `sha7#seq`) whenever the coordinator reserved
+one — so you match it to the run you dispatched rather than a previously-settled
+one; pass `expected_sha` (a full sha or a `sha7` prefix) to make that a hard
+check. *(`seq` is `null` only when no ordinal was reserved: a wait that saw no
+frame at all, or the rare case where the coordinator couldn't durably reserve a
+seq — then the run claims `sha7` but no unique `sha7#seq`.)* And
 `wait_for_settle` never returns an empty nothing-verdict: called with **no run
 live** in the checkout it fails loud with the same "no run in progress" message
 as `odu status`, so a stale/no-run call is unmistakable rather than an instant

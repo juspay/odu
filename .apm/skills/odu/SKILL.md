@@ -47,11 +47,13 @@ process-compose, no separately-versioned socket client.
 > wait: the loop is fail-fast → fix → re-wait, not one long block.
 >
 > **A verdict names its run; no run fails loud.** A verdict about an observed
-> run carries that run's identity — `sha7` and `seq` (`sha7#seq`) — so you match
-> it to the run you dispatched, not a previously-settled one; pass `expected_sha`
-> (a full sha or a `sha7` prefix) to make that a hard, loud check. *(Only a wait
-> that times out or is cancelled before the run produces any frame has no run to
-> name — `seq` is then `null`.)* And `wait_for_settle` **never** returns an empty
+> run carries that run's identity — `sha7` always, and `seq` (`sha7#seq`)
+> whenever the coordinator reserved an ordinal — so you match it to the run you
+> dispatched, not a previously-settled one; pass `expected_sha` (a full sha or a
+> `sha7` prefix) to make that a hard, loud check. *(`seq` is `null` only when
+> none was reserved — a wait that saw no frame, or the rare case the coordinator
+> couldn't reserve one; the run then claims `sha7` but no unique `sha7#seq`.)*
+> And `wait_for_settle` **never** returns an empty
 > nothing-verdict: called with no live run in the checkout it fails loud (an
 > error mirroring `odu status`'s "no run in progress"), not an instant
 > `settled: false`. So a loud error means *start or find a run* (or read history

@@ -543,6 +543,20 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     expect(v).toMatchObject({ settled: true, passed: true, sha7: "abc1234", seq: 3 });
   });
 
+  it("ask 2: a run frame with no reserved seq yields sha7 but seq null", async () => {
+    // The coordinator couldn't reserve a seq (a rare reservation-write failure),
+    // so it publishes state with `seq` absent. An observed run's verdict then
+    // carries `sha7` but `seq: null` — no unique `sha7#seq` is claimed
+    // (juspay/odu#49 F5); the identity is honestly partial, never fabricated.
+    const noSeq = { ...state([["ci::unit@x86_64-linux", "ok"]]), seq: undefined };
+    const s = await serveTestSurface(noSeq);
+    open.push(s);
+    const client = await agentWaitClient(s);
+    const v = await waitForSettle({ client, failFast: false, timeoutMs: 2000 });
+    expect(v).toMatchObject({ settled: true, passed: true, sha7: "abc1234" });
+    expect(v.seq).toBeNull();
+  });
+
   it("ask 2: stamps run identity onto a fail-fast verdict too", async () => {
     const s = await serve([
       ["ci::nix@x86_64-linux", "running"],
