@@ -230,7 +230,7 @@ the agent.
 | --- | --- |
 | `run` | Start a run (background coordinator) and return once it's live. `supersede` cancels a run already live here first; `linger` keeps it serving past settle. |
 | `node_rerun` | Reset a node + its dependents and reschedule (the only *node* mutation). |
-| `wait_for_settle` | Block until the run settles, or — fail-fast — the instant a node goes red. The verdict is stamped with the run's `sha7`/`seq` so you know *which* run it describes. Fails **loud** (an error, not an empty verdict) when no run is live here, or — with `expected_sha` — when the live run's commit doesn't match. |
+| `wait_for_settle` | Block until the run settles, or — fail-fast — the instant a node goes red. The verdict carries the run's identity — `sha7` always, and a non-null `seq` completing the unique `sha7#seq` (null only when no ordinal was reserved) — so you know *which* run it describes. Fails **loud** (an error, not an empty verdict) when no run is live here, or — with `expected_sha` — when the live run's commit doesn't match. |
 | `cancel` | Stop the live run and wait until it's torn down, so a following `run` can start. |
 | `runs` | The durable run history — each recorded run's `sha#seq`, outcome, timing, lanes, and per-node results, newest first. Reads the on-disk ledger, so it answers *after* the coordinator has exited (the agent-face analogue of `odu runs`). |
 

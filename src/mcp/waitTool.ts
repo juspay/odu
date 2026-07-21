@@ -250,9 +250,10 @@ export const waitTool: BespokeTool = {
 		"Block until the run settles, or — fail-fast (default) — the instant a " +
 		"node goes red, so you can drill into a failure without waiting for the " +
 		"slow lanes. Returns the verdict {settled, passed, failed[], errored[], " +
-		"sha7, seq} — sha7#seq identifies WHICH run it describes. Fails LOUD (an " +
-		"error, not an empty verdict) when no run is live in this checkout, or " +
-		"when the live run's commit doesn't prefix-match `expected_sha`.",
+		"sha7, seq}: sha7 names the commit, and a non-null seq completes the " +
+		"unique run ref sha7#seq (seq is null only when no ordinal was reserved). " +
+		"Fails LOUD (an error, not an empty verdict) when no run is live in this " +
+		"checkout, or when the live run's commit doesn't prefix-match `expected_sha`.",
 	input: waitInput,
 	mutates: false,
 	handler: (args, client, signal) => {
