@@ -21,8 +21,10 @@ import { join } from "node:path";
 
 export interface HostsConfig {
   hosts: Record<string, string>;
-  /** Which file won — named in run output so the operator can tell. */
-  source: string;
+  /** Which file won — named in run output so the operator can tell; `null`
+   *  when no candidate file existed (typed absence, not a sentinel string, so
+   *  consumers branch on it instead of matching display text). */
+  source: string | null;
 }
 
 /** A resolution-chain slot: the label the operator sees and the path we probe
@@ -77,7 +79,7 @@ export function loadHosts(): HostsConfig {
     }
     return { hosts, source: path };
   }
-  return { hosts: {}, source: "(no hosts file)" };
+  return { hosts: {}, source: null };
 }
 
 /** The loud refusal `fanoutLanes` raises when a run resolves to *zero* lanes —
@@ -96,10 +98,10 @@ function noHostsConfiguredError(config: HostsConfig): Error {
   const chain = hostsCandidates()
     .map((c) => `       ${c.label}`)
     .join("\n");
-  // `loadHosts` sets `source` to the file it read, or "(no hosts file)" when
-  // none existed — so we can say precisely why the fanout came up empty.
+  // `loadHosts` sets `source` to the file it read, or null when none existed —
+  // so we can say precisely why the fanout came up empty.
   const why =
-    config.source === "(no hosts file)"
+    config.source === null
       ? "None of these exist."
       : `The file that won (${config.source}) configured no platform.`;
   return new Error(
