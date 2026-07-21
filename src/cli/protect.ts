@@ -18,13 +18,14 @@ export interface ProtectArgs {
   platforms: string[];
 }
 
-/** The platform set protection covers, as pure data — the decision (what set,
- *  from where) stays free of I/O so it is unit-testable, and protectCommand
- *  owns the stderr/exit at its boundary (mirrors hosts.ts's pure-refusal
- *  factory). `explicit` names came straight from `--platform`; `derived` came
- *  from the hosts config and carries its `source` so the caller can warn that
- *  the set is machine-local, not a repo fact; `none` means neither produced a
- *  platform, with `source` so the refusal can name an empty-but-present file. */
+/** The platform set protection covers, as pure data — the decision writes no
+ *  output (its one effect is the hosts-config read on the unsliced path), and
+ *  protectCommand owns the stderr/exit at its boundary (mirrors hosts.ts's
+ *  pure-refusal factory). `explicit` names came straight from `--platform`;
+ *  `derived` came from the hosts config and carries its `source` so the caller
+ *  can warn that the set is machine-local, not a repo fact; `none` means
+ *  neither produced a platform, with `source` so the refusal can name an
+ *  empty-but-present file. */
 type PlatformSet =
   | { kind: "explicit"; platforms: string[] }
   | { kind: "derived"; platforms: string[]; source: string }
@@ -39,6 +40,16 @@ type PlatformSet =
  *  names its source. */
 function protectPlatforms(explicit: readonly string[]): PlatformSet {
   if (explicit.length > 0) {
+    // A blank value (`--platform=`) would fan out contexts like `alpha@` and,
+    // un-dry-run, PATCH them into protection — the host lookup that used to
+    // reject it incidentally is gone, so refuse it on purpose.
+    for (const platform of explicit) {
+      if (platform.trim() === "") {
+        throw new Error(
+          "odu: --platform expects a Nix system tuple (e.g. x86_64-linux), got an empty value",
+        );
+      }
+    }
     return { kind: "explicit", platforms: [...new Set(explicit)].sort() };
   }
   const config = loadHosts();
