@@ -30,9 +30,17 @@ function protectPlatforms(explicit: readonly string[]): string[] | null {
   const config = loadHosts();
   const platforms = Object.keys(config.hosts).sort();
   if (platforms.length === 0) {
+    // Mirror noHostsConfiguredError's why-branch: `config.source` names the
+    // file that won or "(no hosts file)" when none existed, so an empty-but-
+    // present hosts file is diagnosed as such rather than told to "configure"
+    // one it already has.
+    const why =
+      config.source === "(no hosts file)"
+        ? "     to name the repo's CI platforms, or configure a hosts file\n"
+        : `     to name the repo's CI platforms — ${config.source} configured no platform\n`;
     process.stderr.write(
       "odu: protect found no platforms — pass --platform PLAT (repeatable)\n" +
-        "     to name the repo's CI platforms, or configure a hosts file\n",
+        why,
     );
     return null;
   }
