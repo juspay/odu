@@ -42,7 +42,12 @@ function protectPlatforms(explicit: readonly string[]): PlatformSet {
   if (explicit.length > 0) {
     // A blank value (`--platform=`) would fan out contexts like `alpha@` and,
     // un-dry-run, PATCH them into protection — the host lookup that used to
-    // reject it incidentally is gone, so refuse it on purpose.
+    // reject it incidentally is gone, so refuse it on purpose. Beyond
+    // blankness the tuple is operator-trusted, the same trust hosts.json keys
+    // and `--host` pins get: odu owns no vocabulary of valid Nix systems (Nix
+    // does), so a local shape check would be a drifting partial guess — e.g.
+    // it could never catch an arch typo. `--dry-run` is the preview for
+    // catching a typo before it reaches protection.
     if (explicit.some((platform) => platform.trim() === "")) {
       throw new Error(
         "odu: --platform expects a Nix system tuple (e.g. x86_64-linux), got an empty value",
