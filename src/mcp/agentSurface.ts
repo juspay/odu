@@ -138,7 +138,11 @@ export interface AgentNodesReader {
   };
 }
 
-const EMPTY_NODES: AgentNodes = {
+/** The no-run frame: `run: false`, no pipeline, and the no-run identity
+ *  (`sha7: ""`, `seq: null`). Exported so a consumer reading a run's identity
+ *  from a missing/absent frame spells the no-run value once, here, rather than
+ *  re-authoring the sentinel. */
+export const EMPTY_NODES: AgentNodes = {
   run: false,
   pipeline: null,
   sha7: "",

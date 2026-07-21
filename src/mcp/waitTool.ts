@@ -20,7 +20,7 @@ import { z } from "zod";
 import { agentSummary } from "../cli/render";
 import { formatRef } from "../common/runRecord";
 import { SOCKET_PATH } from "../coordinator/socket";
-import type { AgentNodes, AgentNodesReader } from "./agentSurface";
+import { type AgentNodes, type AgentNodesReader, EMPTY_NODES } from "./agentSurface";
 
 export const waitInput = z.object({
 	timeout_ms: z.number().optional(),
@@ -90,9 +90,11 @@ export interface WaitOptions {
 }
 
 /** The run-identity fields stamped into every verdict, from the frame it
- *  describes. No frame (a run that never appeared) reads the no-run value. */
+ *  describes. No frame (a run that never appeared) reads the no-run identity
+ *  from `EMPTY_NODES`, the one place the no-run sentinel is spelled. */
 function identityOf(snap: AgentNodes | undefined): Pick<SettleVerdict, "sha7" | "seq"> {
-	return snap === undefined ? { sha7: "", seq: null } : { sha7: snap.sha7, seq: snap.seq };
+	const frame = snap ?? EMPTY_NODES;
+	return { sha7: frame.sha7, seq: frame.seq };
 }
 
 /** Does the live run's `observed` sha7 satisfy the caller's `expected` sha? A
