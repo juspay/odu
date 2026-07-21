@@ -604,6 +604,15 @@ async function orchestrate(
       // record write must not fail the run or mask its verdict.
     }
   };
+  // Reserve the seq durably BEFORE the socket serves (below): write the initial
+  // (incomplete) record now, so the allocated seq is on disk the instant it
+  // becomes observable via the surface. `allocateSeq` is `max(seqs)+1`, so even
+  // if this coordinator is SIGKILLed after serving the stamped state but before
+  // `finalizeRunRecord` overwrites the record, the next run of this commit
+  // advances PAST the reserved seq rather than reusing it — a published
+  // `<sha7>#<seq>` identity can never name two distinct runs (juspay/odu#49).
+  // Every later finalize (drain / settle / teardown) overwrites this same file.
+  finalizeRunRecord(store.get());
 
   // Publish before serving so an `attach` connecting in the first instant reads
   // the real header, not the EMPTY_HEADER default.

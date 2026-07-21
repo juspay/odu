@@ -12,7 +12,7 @@
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { buildOduBinary, cleanup, hermeticEnv, makeFixture } from "./harness";
 
 let oduBin: string;

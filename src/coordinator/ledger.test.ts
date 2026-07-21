@@ -55,6 +55,17 @@ describe("allocateSeq", () => {
     expect(allocateSeq(repo, "bbbbbbb")).toBe(1);
   });
 
+  it("advances past a reserved (incomplete) record — a crashed run's seq is never reused", () => {
+    // The coordinator reserves its seq by writing an `incomplete` record BEFORE
+    // the socket serves (src/coordinator/run.ts), then a SIGKILL leaves that
+    // record un-overwritten. Allocation keys on the filename, not the outcome,
+    // so the next run of this commit must advance rather than reuse the seq a
+    // `wait_for_settle` verdict already advertised (juspay/odu#49).
+    const repo = tmpRepo();
+    writeRunRecord(repo, "26d2c2d", record({ seq: 1, outcome: "incomplete" }));
+    expect(allocateSeq(repo, "26d2c2d")).toBe(2);
+  });
+
   it("ignores non-seq files in the runs dir", () => {
     const repo = tmpRepo();
     mkdirSync(join(repo, ".ci", "26d2c2d", "runs"), { recursive: true });
