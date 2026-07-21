@@ -16,6 +16,10 @@ CLI drive CI with structured calls instead of scraping terminal output.
 goes red (`fail_fast_tripped: true`, `settled: false`), so the agent drills into
 the failure without blocking on the slow lanes — its `failed[]` is only what's
 red so far, and only `passed: true` (a fully settled run) is a trustworthy green.
+Every verdict is stamped with the run's identity (`sha7`, `seq`) so it's clear
+*which* run it describes; called with **no run live** it fails loud (an error
+mirroring `odu status`, not an empty `settled: false`), and an optional
+`expected_sha` refuses loud when the live run's commit doesn't match.
 
 `cancel` stops the live run and waits until it's torn down; `run`'s `supersede`
 cancels a run already live here before starting (the "stop this, run the fixed

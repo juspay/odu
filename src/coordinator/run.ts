@@ -577,6 +577,12 @@ async function orchestrate(
   // local-only checkout; `seq` distinguishes repeat runs of one commit.
   const repo = github !== null ? repoSlug(github) : null;
   const seq = allocateSeq(repoRoot, sha7);
+  // Stamp the allocated seq onto the fan-in state so every face — the agent
+  // `wait_for_settle` verdict especially (juspay/odu#49) — can read the run's
+  // full identity `<sha7>#<seq>`. Set once here, before the socket serves
+  // (below), so the first snapshot a subscriber reads already carries it;
+  // `updateNode` spreads the whole state, so it survives every node update.
+  runtime.ctx.cells.nodes.set({ ...store.get(), seq });
   finalizeRunRecord = (state: PipelineState): void => {
     try {
       writeRunRecord(
