@@ -5,8 +5,8 @@
  * This is the floor that works on every MCP host: the model is *inside* a tool
  * call when the answer lands, so it needs no resource-notification support. It
  * blocks on the agent surface's `nodes` stream (the projected `{ run, pipeline,
- * nodes[] }` frames) and returns the verdict the instant a node goes red
- * (fail-fast) or the whole run settles.
+ * sha7, seq, nodes[] }` frames) and returns the verdict the instant a node goes
+ * red (fail-fast) or the whole run settles.
  *
  * It rides the bespoke-tool slot rather than an exposed procedure because it's
  * a *blocking read loop* with cancellation, fail-fast, and timeout policy —
@@ -27,7 +27,14 @@ export const waitInput = z.object({
 	/** Refuse loudly unless the live run's commit matches this sha (a prefix
 	 *  either way, so a 7- or 40-char sha both work) — the "wait for the run I
 	 *  just dispatched, not a stale one" guard (juspay/odu#49 ask 3). */
-	expected_sha: z.string().optional(),
+	expected_sha: z
+		.string()
+		.describe(
+			"Refuse loudly unless the live run's commit matches this. Prefix-matched " +
+				"against the run's sha7 either way, so a full 40-char sha or the 7-char " +
+				"sha7 from a prior verdict both work.",
+		)
+		.optional(),
 });
 export type WaitInput = z.infer<typeof waitInput>;
 
@@ -247,7 +254,7 @@ export const waitTool: BespokeTool = {
 		"slow lanes. Returns the verdict {settled, passed, failed[], errored[], " +
 		"sha7, seq} — sha7#seq identifies WHICH run it describes. Fails LOUD (an " +
 		"error, not an empty verdict) when no run is live in this checkout, or " +
-		"when the live run's commit doesn't match `expected_sha`.",
+		"when the live run's commit doesn't prefix-match `expected_sha`.",
 	input: waitInput,
 	mutates: false,
 	handler: (args, client, signal) => {

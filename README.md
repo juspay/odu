@@ -235,8 +235,9 @@ the agent.
 | `runs` | The durable run history — each recorded run's `sha#seq`, outcome, timing, lanes, and per-node results, newest first. Reads the on-disk ledger, so it answers *after* the coordinator has exited (the agent-face analogue of `odu runs`). |
 
 The pipeline snapshot and per-node logs are **subscribable resources** rather
-than tools: `surface://streams/nodes` (the pipeline as `{ run, pipeline, nodes[] }`
-— every node's status / exit / duration + the `red` verdict bit) and
+than tools: `surface://streams/nodes` (the pipeline as
+`{ run, pipeline, sha7, seq, nodes[] }` — the run's identity plus every node's
+status / exit / duration + the `red` verdict bit) and
 `surface://collections/logs/{id}` (one node's output — the live buffered
 snapshot while a run is up, else the durable per-SHA log). Both support
 `resources/subscribe` + `notifications/resources/updated` on every transition.
@@ -250,12 +251,15 @@ return (`fail_fast_tripped: true`, `settled: false`) is the unblock signal, so
 the agent never waits out the slow lanes just to "see full status". Its
 `failed[]`/`errored[]` are only what's red *so far* — a floor, not the tally;
 `passed: true` (a fully settled run, zero red) is the only trustworthy green.
-Every verdict carries the run's identity (`sha7`, `seq`, i.e. `sha7#seq`), so a
-verdict is matched to the run you dispatched rather than a previously-settled
-one; pass `expected_sha` to make that a hard check. And `wait_for_settle` never
-returns an empty nothing-verdict: called with **no run live** in the checkout it
-fails loud with the same "no run in progress" message as `odu status`, so a
-stale/no-run call is unmistakable rather than an instant `settled: false`.
+A verdict about an observed run carries that run's identity (`sha7`, `seq`, i.e.
+`sha7#seq`), so you match it to the run you dispatched rather than a
+previously-settled one; pass `expected_sha` (a full sha or a `sha7` prefix) to
+make that a hard check. *(Only a wait that times out or is cancelled before the
+run produces any frame has nothing to name — its `seq` is `null`.)* And
+`wait_for_settle` never returns an empty nothing-verdict: called with **no run
+live** in the checkout it fails loud with the same "no run in progress" message
+as `odu status`, so a stale/no-run call is unmistakable rather than an instant
+`settled: false`.
 The coordinator keeps running after the tool returns, so `node_rerun` retries a
 fixed node against the still-live run and `wait_for_settle` again catches any
 later reds. When the right next move
