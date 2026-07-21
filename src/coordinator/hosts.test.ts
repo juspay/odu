@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { fanoutLanes, resolveLanes } from "./hosts";
 
 describe("resolveLanes", () => {
-  const empty = { hosts: {}, source: "(no hosts file)" };
+  const empty = { hosts: {}, source: null };
 
   it("returns nothing for a bare run with no config — the fail-fast trigger", () => {
     expect(resolveLanes(empty, [], [])).toEqual({});
@@ -22,7 +22,7 @@ describe("resolveLanes", () => {
 });
 
 describe("fanoutLanes — the no-config fail-fast (juspay/odu#46)", () => {
-  const empty = { hosts: {}, source: "(no hosts file)" };
+  const empty = { hosts: {}, source: null };
 
   it("REFUSES a bare run with no hosts config — never a silent localhost lane", () => {
     // The incident: a bare `odu run` with no config anywhere silently resolved
