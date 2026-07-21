@@ -46,7 +46,7 @@ import { fanoutLanes, loadHosts } from "./hosts";
 import { type Lane, startLane } from "./lane";
 import { missingRunnerError, resolveRunnerFlake } from "./runnerFlake";
 import { cancelRun } from "./cancel";
-import { allocateSeq, writeRunRecord } from "./ledger";
+import { allocateSeq, reserveSeq, writeRunRecord } from "./ledger";
 import { buildRunRecord, projectNodes } from "../common/runRecord";
 import { SOCKET_PATH, serveSocket } from "./socket";
 import {
@@ -604,15 +604,20 @@ async function orchestrate(
       // record write must not fail the run or mask its verdict.
     }
   };
-  // Reserve the seq durably BEFORE the socket serves (below): write the initial
-  // (incomplete) record now, so the allocated seq is on disk the instant it
-  // becomes observable via the surface. `allocateSeq` is `max(seqs)+1`, so even
-  // if this coordinator is SIGKILLed after serving the stamped state but before
-  // `finalizeRunRecord` overwrites the record, the next run of this commit
-  // advances PAST the reserved seq rather than reusing it — a published
-  // `<sha7>#<seq>` identity can never name two distinct runs (juspay/odu#49).
-  // Every later finalize (drain / settle / teardown) overwrites this same file.
-  finalizeRunRecord(store.get());
+  // Reserve the seq durably BEFORE the socket serves (below), so the allocated
+  // seq is on disk the instant it can become observable via the surface. The
+  // reservation is a sentinel `<seq>.json` that `allocateSeq` (which keys on the
+  // filename) counts but `readLedger` skips (it fails the record schema), so it
+  // claims the seq WITHOUT appearing in `odu runs` as a finished run. `allocateSeq`
+  // is `max(seqs)+1`, so even if this coordinator is SIGKILLed after publishing
+  // the seq but before `finalizeRunRecord` writes the real record, the next run
+  // of this commit advances PAST the reserved seq rather than reusing it — a
+  // *published* `<sha7>#<seq>` can never name two distinct runs (juspay/odu#49;
+  // a seq is only published after `serveSocket`, and that lock fails fast, so the
+  // one run that wins the lock is the only one that ever publishes this seq).
+  // Best-effort like the finalizer: a failed reservation degrades to the prior
+  // behaviour (a crash *could* reuse the seq), never gates the run.
+  reserveSeq(repoRoot, sha7, seq);
 
   // Publish before serving so an `attach` connecting in the first instant reads
   // the real header, not the EMPTY_HEADER default.

@@ -80,6 +80,22 @@ export function writeRunRecord(
   writeFileSync(path, `${JSON.stringify(record, null, 2)}\n`);
 }
 
+/** Reserve a seq by claiming its `<seq>.json` file with a sentinel that
+ *  `allocateSeq` counts (it keys on the filename) but `readLedger` skips (the
+ *  sentinel fails `RunRecordSchema`, so it never appears in `odu runs` as a
+ *  finished run). Written before the coordinator serves its socket — so once a
+ *  seq is observable via the surface it is already durably on disk, and a run
+ *  SIGKILLed before `writeRunRecord` still forces the next run of this commit to
+ *  advance past the reserved seq rather than reuse a published `<sha7>#<seq>`
+ *  (juspay/odu#49). `writeRunRecord` overwrites the same file with the real
+ *  record on the first finalize, so a completed run leaves history, not a
+ *  sentinel. Idempotent: re-reserving the same seq just rewrites the sentinel. */
+export function reserveSeq(repoRoot: string, sha7: string, seq: number): void {
+  const path = recordPath(repoRoot, sha7, seq);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${JSON.stringify({ reserved: true, seq }, null, 2)}\n`);
+}
+
 /** Child directory names under `dir`, or `[]` if it doesn't exist. */
 function childDirs(dir: string): string[] {
   try {

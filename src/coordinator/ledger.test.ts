@@ -4,7 +4,13 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { RunRecord } from "../common/runRecord";
 import { RUN_RECORD_VERSION } from "../common/runRecord";
-import { allocateSeq, readLedger, recordPath, writeRunRecord } from "./ledger";
+import {
+  allocateSeq,
+  readLedger,
+  recordPath,
+  reserveSeq,
+  writeRunRecord,
+} from "./ledger";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -55,14 +61,14 @@ describe("allocateSeq", () => {
     expect(allocateSeq(repo, "bbbbbbb")).toBe(1);
   });
 
-  it("advances past a reserved (incomplete) record — a crashed run's seq is never reused", () => {
-    // The coordinator reserves its seq by writing an `incomplete` record BEFORE
-    // the socket serves (src/coordinator/run.ts), then a SIGKILL leaves that
-    // record un-overwritten. Allocation keys on the filename, not the outcome,
-    // so the next run of this commit must advance rather than reuse the seq a
-    // `wait_for_settle` verdict already advertised (juspay/odu#49).
+  it("advances past a reserved seq — a crashed run's published seq is never reused", () => {
+    // The coordinator reserves its seq BEFORE the socket serves
+    // (src/coordinator/run.ts); a SIGKILL leaves that reservation un-finalized.
+    // Allocation keys on the filename, so the next run of this commit must
+    // advance rather than reuse the seq a `wait_for_settle` verdict already
+    // advertised (juspay/odu#49).
     const repo = tmpRepo();
-    writeRunRecord(repo, "26d2c2d", record({ seq: 1, outcome: "incomplete" }));
+    reserveSeq(repo, "26d2c2d", 1);
     expect(allocateSeq(repo, "26d2c2d")).toBe(2);
   });
 
@@ -117,6 +123,18 @@ describe("writeRunRecord / readLedger round-trip", () => {
     const ledger = readLedger(repo);
     expect(ledger).toHaveLength(1);
     expect(ledger[0]?.seq).toBe(1);
+  });
+
+  it("a reservation sentinel is skipped by readLedger — a live run is not phantom history", () => {
+    // reserveSeq claims the seq before the run serves; it must NOT surface in
+    // `odu runs` as a finished run (the sentinel fails RunRecordSchema). A real
+    // finalize later overwrites the same file with a genuine record.
+    const repo = tmpRepo();
+    reserveSeq(repo, "26d2c2d", 1);
+    expect(readLedger(repo)).toEqual([]);
+    const finished = record({ seq: 1 });
+    writeRunRecord(repo, "26d2c2d", finished);
+    expect(readLedger(repo)).toEqual([finished]);
   });
 
   it("ignores a commit dir that has logs but no runs subdir", () => {
