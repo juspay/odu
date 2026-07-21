@@ -195,6 +195,10 @@ odu cancel                        stop the live run in this checkout, cleanly
 odu runs [-o json]                the durable run history (works with no live run)
 odu dump | graph                  resolved pipeline as JSON / Mermaid
 odu protect [--dry-run]           sync branch protection's required contexts
+    --platform P (repeatable)     the repo's platform set — needs no hosts
+                                  config; default derives from the machine's
+                                  hosts file (and says so on stderr)
+    --branch B                    branch to protect (default: repo default)
 odu mcp                           serve the agent face (MCP server, stdio)
 ```
 

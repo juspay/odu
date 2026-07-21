@@ -572,7 +572,7 @@ deployments:
   owners:
   - .
   active_owner: .
-  content_hash: sha256:5b9e068002a0144e92c0ff1a60b5a0a6482d6f5b15a895903dcc5757ac5218d6
+  content_hash: sha256:9e387042f15013cc8b2cae1854d56e53bc2db3fed817addedd794e9c55cc8306
 - kind: project-relative
   target: claude
   value: .claude/skills/orchestrator
@@ -716,4 +716,4 @@ local_deployed_files:
 local_deployed_file_hashes:
   .claude/skills/odu-mcp/SKILL.md: sha256:d704536fdd36cfd1298ffc1d0276734bbc177ea22c3c5f0bade95cc1abf54af2
   .claude/skills/odu-mcp/bin/serve: sha256:6152e8fc4d3478b70a5cd547c172be596787e600b5757233fb82b307186b9e26
-  .claude/skills/odu/SKILL.md: sha256:5b9e068002a0144e92c0ff1a60b5a0a6482d6f5b15a895903dcc5757ac5218d6
+  .claude/skills/odu/SKILL.md: sha256:9e387042f15013cc8b2cae1854d56e53bc2db3fed817addedd794e9c55cc8306

@@ -8,7 +8,7 @@
 
 import { spawnSync } from "node:child_process";
 import { fanId } from "../common/nodeId";
-import { loadHosts, resolveLanes } from "../coordinator/hosts";
+import { loadHosts } from "../coordinator/hosts";
 import { parseGithubRemote } from "../coordinator/statuses";
 import { laneTasks, loadJustPipeline } from "../just/ingest";
 
@@ -18,19 +18,39 @@ export interface ProtectArgs {
   platforms: string[];
 }
 
+/** The platform set protection covers. Unlike `run`, protect never dials a
+ *  host — it only needs platform KEYS to fan out contexts — so explicit
+ *  `--platform` flags stand on their own with no hosts config at all
+ *  (juspay/odu#52; routing them through `run`'s lane resolver demanded a host
+ *  per platform). With no flags the set derives from the hosts config, which
+ *  is machine-local while protection is repo-global — that once silently
+ *  halved a repo's required contexts, so the derivation names its source. */
+function protectPlatforms(explicit: readonly string[]): string[] | null {
+  if (explicit.length > 0) return [...new Set(explicit)].sort();
+  const config = loadHosts();
+  const platforms = Object.keys(config.hosts).sort();
+  if (platforms.length === 0) {
+    process.stderr.write(
+      "odu: protect found no platforms — pass --platform PLAT (repeatable)\n" +
+        "     to name the repo's CI platforms, or configure a hosts file\n",
+    );
+    return null;
+  }
+  process.stderr.write(
+    `odu: protect: platform set (${platforms.join(", ")}) derives from\n` +
+      `     ${config.source} — a machine-local hosts config, not a repo\n` +
+      "     fact; pass --platform to pin the repo's platform set explicitly\n",
+  );
+  return platforms;
+}
+
 export async function protectCommand(args: ProtectArgs): Promise<number> {
   const repoRoot = spawnSync("git", ["rev-parse", "--show-toplevel"], {
     encoding: "utf-8",
   }).stdout.trim();
   const spec = loadJustPipeline(repoRoot);
-  const lanes = resolveLanes(loadHosts(), [], args.platforms);
-  const platforms = Object.keys(lanes).sort();
-  if (platforms.length === 0) {
-    process.stderr.write(
-      "odu: no platforms configured (hosts file is empty)\n",
-    );
-    return 1;
-  }
+  const platforms = protectPlatforms(args.platforms);
+  if (platforms === null) return 1;
   // Require exactly the contexts `odu run` posts: each platform's lane after
   // OS-attribute filtering (a [linux]-only recipe is never posted on a darwin
   // lane, so it must not be required there or protection waits forever).
