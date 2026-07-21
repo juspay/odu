@@ -46,6 +46,15 @@ process-compose, no separately-versioned socket client.
 > `run({supersede})` when the fix is a new commit. Don't pad `timeout_ms` and
 > wait: the loop is fail-fast → fix → re-wait, not one long block.
 >
+> **Every verdict names its run; no run fails loud.** The verdict carries the
+> run's identity — `sha7` and `seq` (`sha7#seq`) — so you match it to the run
+> you dispatched, not a previously-settled one; pass `expected_sha` to make that
+> a hard, loud check. And `wait_for_settle` **never** returns an empty
+> nothing-verdict: called with no live run in the checkout it fails loud (an
+> error mirroring `odu status`'s "no run in progress"), not an instant
+> `settled: false`. So a loud error means *start or find a run* (or read history
+> with `runs`) — never hand-roll a process-liveness poll as a workaround.
+>
 > **Logs are a resource, not a tool.** Don't look for a log-tail tool — there
 > isn't one. A node's output is the MCP **resource** `surface://collections/logs/{id}`
 > (`{id}` is the node, e.g. `ci::unit@aarch64-darwin`), read with

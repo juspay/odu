@@ -47,7 +47,7 @@ function state(rows: Row[]): PipelineState {
       status,
     };
   }
-  return { name: "test", sha7: "abc1234", dirty: false, order, nodes };
+  return { name: "test", sha7: "abc1234", dirty: false, seq: 3, order, nodes };
 }
 
 const open: TestSurface[] = [];
@@ -253,6 +253,8 @@ describe("odu agent MCP — end to end over the in-memory transport", () => {
       expect(JSON.parse((read.contents[0] as { text: string }).text)).toEqual({
         run: false,
         pipeline: null,
+        sha7: "",
+        seq: null,
         nodes: [],
       });
     } finally {
@@ -357,7 +359,13 @@ describe("no-run state — the face stays usable with no coordinator socket", ()
     const mcp = await connectNoRun(() => ({ ok: true, started: true }));
     const read = await mcp.readResource({ uri: "surface://streams/nodes" });
     const body = JSON.parse((read.contents[0] as { text: string }).text);
-    expect(body).toEqual({ run: false, pipeline: null, nodes: [] });
+    expect(body).toEqual({
+      run: false,
+      pipeline: null,
+      sha7: "",
+      seq: null,
+      nodes: [],
+    });
   });
 });
 
@@ -499,5 +507,87 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     expect(v.cancelled).toBe(true);
     expect(v.timed_out).toBe(false);
     expect(v.passed).toBe(false);
+  });
+
+  // ── issue #49 ─────────────────────────────────────────────────────────────
+
+  /** A live B (agent) client wired exactly as `mcpCommand`'s no-run case: the
+   *  A-client's dial always fails, so `nodes` yields the `{run:false}` no-run
+   *  frame — the state an agent is in when its checkout has no live socket. */
+  function agentNoRunClient(): AgentNodesReader {
+    const projection = buildAgentProjection(oduSurface, gitRunContext);
+    const aClient = redialingAClient(async () => null);
+    const { router } = projection.implement(aClient);
+    return directLink<typeof projection.surface.contract>(
+      router,
+    ) as unknown as AgentNodesReader;
+  }
+
+  it("ask 1: no live run refuses LOUD (throws) instead of an instant empty verdict", async () => {
+    const client = agentNoRunClient();
+    // Today's bug: this resolves `{settled:false, …, timed_out:false}` in ~2ms,
+    // ignoring the timeout and indistinguishable from a real verdict. It must
+    // instead throw the CLI-parity refusal.
+    await expect(
+      waitForSettle({ client, failFast: false, timeoutMs: 5000 }),
+    ).rejects.toThrow(/no run in progress in this checkout/);
+  });
+
+  it("ask 2: stamps the settled verdict with run identity (sha7, seq)", async () => {
+    const s = await serve([
+      ["ci::unit@x86_64-linux", "ok"],
+      ["ci::nix@x86_64-linux", "ok"],
+    ]);
+    const client = await agentWaitClient(s);
+    const v = await waitForSettle({ client, failFast: false, timeoutMs: 2000 });
+    expect(v).toMatchObject({ settled: true, passed: true, sha7: "abc1234", seq: 3 });
+  });
+
+  it("ask 2: stamps run identity onto a fail-fast verdict too", async () => {
+    const s = await serve([
+      ["ci::nix@x86_64-linux", "running"],
+      ["ci::e2e@x86_64-linux", "running"],
+    ]);
+    const client = await agentWaitClient(s);
+    setTimeout(() => {
+      s.setState(
+        state([
+          ["ci::nix@x86_64-linux", "running"],
+          ["ci::e2e@x86_64-linux", "failed"],
+        ]),
+      );
+    }, 30);
+    const v = await waitForSettle({ client, failFast: true, timeoutMs: 2000 });
+    expect(v.fail_fast_tripped).toBe(true);
+    expect(v).toMatchObject({ sha7: "abc1234", seq: 3 });
+  });
+
+  it("ask 3: refuses LOUD when the live run's sha does not match expected_sha", async () => {
+    const s = await serve([["ci::nix@x86_64-linux", "running"]]);
+    const client = await agentWaitClient(s);
+    await expect(
+      waitForSettle({
+        client,
+        expectedSha: "deadbeef",
+        failFast: false,
+        timeoutMs: 500,
+      }),
+    ).rejects.toThrow(/no live run matching deadbeef/);
+  });
+
+  it("ask 3: proceeds when expected_sha prefix-matches the live run", async () => {
+    const s = await serve([
+      ["ci::unit@x86_64-linux", "ok"],
+      ["ci::nix@x86_64-linux", "ok"],
+    ]);
+    const client = await agentWaitClient(s);
+    // "abc1234" is the served run's sha7; a prefix of it matches.
+    const v = await waitForSettle({
+      client,
+      expectedSha: "abc12",
+      failFast: false,
+      timeoutMs: 2000,
+    });
+    expect(v).toMatchObject({ settled: true, passed: true, sha7: "abc1234" });
   });
 });

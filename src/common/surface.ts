@@ -128,6 +128,14 @@ export const PipelineStateSchema = z.object({
    *  shows. Authoritative only on the coordinator's fan-in (the lane copy is
    *  advisory; see runner.ts). */
   dirty: z.boolean(),
+  /** This run's ordinal among runs of the same `sha7` in this checkout (1-based
+   *  — the ledger's `seq`, `<sha7>#<seq>` = `formatRunRef`). Completes the run's
+   *  identity on the surface so a verdict says WHICH run it describes, not just
+   *  which commit — the fix for the agent face's stale/no-run ambiguity
+   *  (juspay/odu#49). Absent (not a fake `0`) when there is no run identity: the
+   *  pre-run EMPTY_STATE and the advisory lane copy, which never allocate a seq.
+   *  Authoritative only on the coordinator's fan-in, like `dirty`. */
+  seq: z.number().int().positive().optional(),
   /** Node ids in scheduling order — the row order dashboards paint. */
   order: z.array(TaskIdSchema),
   nodes: z.record(TaskIdSchema, NodeStateSchema),

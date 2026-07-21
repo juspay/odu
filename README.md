@@ -230,7 +230,7 @@ the agent.
 | --- | --- |
 | `run` | Start a run (background coordinator) and return once it's live. `supersede` cancels a run already live here first; `linger` keeps it serving past settle. |
 | `node_rerun` | Reset a node + its dependents and reschedule (the only *node* mutation). |
-| `wait_for_settle` | Block until the run settles, or — fail-fast — the instant a node goes red. |
+| `wait_for_settle` | Block until the run settles, or — fail-fast — the instant a node goes red. The verdict is stamped with the run's `sha7`/`seq` so you know *which* run it describes. Fails **loud** (an error, not an empty verdict) when no run is live here, or — with `expected_sha` — when the live run's commit doesn't match. |
 | `cancel` | Stop the live run and wait until it's torn down, so a following `run` can start. |
 | `runs` | The durable run history — each recorded run's `sha#seq`, outcome, timing, lanes, and per-node results, newest first. Reads the on-disk ledger, so it answers *after* the coordinator has exited (the agent-face analogue of `odu runs`). |
 
@@ -250,6 +250,12 @@ return (`fail_fast_tripped: true`, `settled: false`) is the unblock signal, so
 the agent never waits out the slow lanes just to "see full status". Its
 `failed[]`/`errored[]` are only what's red *so far* — a floor, not the tally;
 `passed: true` (a fully settled run, zero red) is the only trustworthy green.
+Every verdict carries the run's identity (`sha7`, `seq`, i.e. `sha7#seq`), so a
+verdict is matched to the run you dispatched rather than a previously-settled
+one; pass `expected_sha` to make that a hard check. And `wait_for_settle` never
+returns an empty nothing-verdict: called with **no run live** in the checkout it
+fails loud with the same "no run in progress" message as `odu status`, so a
+stale/no-run call is unmistakable rather than an instant `settled: false`.
 The coordinator keeps running after the tool returns, so `node_rerun` retries a
 fixed node against the still-live run and `wait_for_settle` again catches any
 later reds. When the right next move

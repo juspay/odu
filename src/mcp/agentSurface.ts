@@ -108,6 +108,12 @@ const NodeRowSchema = z.object({
 const AgentNodesSchema = z.object({
   run: z.boolean(),
   pipeline: z.string().nullable(),
+  /** The live run's identity, projected from `PipelineState` so an agent
+   *  verdict says WHICH run it describes (juspay/odu#49): `sha7` the 7-char
+   *  commit, `seq` its ordinal among runs of that commit (`<sha7>#<seq>`).
+   *  Both are the no-run value (`""` / `null`) when `run` is false. */
+  sha7: z.string(),
+  seq: z.number().nullable(),
   nodes: z.array(NodeRowSchema),
 });
 export type AgentNodes = z.infer<typeof AgentNodesSchema>;
@@ -132,7 +138,13 @@ export interface AgentNodesReader {
   };
 }
 
-const EMPTY_NODES: AgentNodes = { run: false, pipeline: null, nodes: [] };
+const EMPTY_NODES: AgentNodes = {
+  run: false,
+  pipeline: null,
+  sha7: "",
+  seq: null,
+  nodes: [],
+};
 
 /**
  * The node-id identity axis as a *collection key*: `TaskIdSchema` minus the
@@ -506,7 +518,13 @@ function agentDeps(
           // run always has at least one node.
           state.order.length === 0
             ? EMPTY_NODES
-            : { run: true, pipeline: state.name, nodes: rowsOf(state) },
+            : {
+                run: true,
+                pipeline: state.name,
+                sha7: state.sha7,
+                seq: state.seq ?? null,
+                nodes: rowsOf(state),
+              },
       ),
     },
     collections: {
