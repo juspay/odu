@@ -230,13 +230,14 @@ the agent.
 | --- | --- |
 | `run` | Start a run (background coordinator) and return once it's live. `supersede` cancels a run already live here first; `linger` keeps it serving past settle. |
 | `node_rerun` | Reset a node + its dependents and reschedule (the only *node* mutation). |
-| `wait_for_settle` | Block until the run settles, or — fail-fast — the instant a node goes red. The verdict is stamped with the run's `sha7`/`seq` so you know *which* run it describes. Fails **loud** (an error, not an empty verdict) when no run is live here, or — with `expected_sha` — when the live run's commit doesn't match. |
+| `wait_for_settle` | Block until the run settles, or — fail-fast — the instant a node goes red. The verdict carries the run's identity — `sha7` always, and a non-null `seq` completing the unique `sha7#seq` (null only when no ordinal was reserved) — so you know *which* run it describes. Fails **loud** (an error, not an empty verdict) when no run is live here, or — with `expected_sha` — when the live run's commit doesn't match. |
 | `cancel` | Stop the live run and wait until it's torn down, so a following `run` can start. |
 | `runs` | The durable run history — each recorded run's `sha#seq`, outcome, timing, lanes, and per-node results, newest first. Reads the on-disk ledger, so it answers *after* the coordinator has exited (the agent-face analogue of `odu runs`). |
 
 The pipeline snapshot and per-node logs are **subscribable resources** rather
-than tools: `surface://streams/nodes` (the pipeline as `{ run, pipeline, nodes[] }`
-— every node's status / exit / duration + the `red` verdict bit) and
+than tools: `surface://streams/nodes` (the pipeline as
+`{ run, pipeline, sha7, seq, nodes[] }` — the run's identity plus every node's
+status / exit / duration + the `red` verdict bit) and
 `surface://collections/logs/{id}` (one node's output — the live buffered
 snapshot while a run is up, else the durable per-SHA log). Both support
 `resources/subscribe` + `notifications/resources/updated` on every transition.
@@ -250,12 +251,17 @@ return (`fail_fast_tripped: true`, `settled: false`) is the unblock signal, so
 the agent never waits out the slow lanes just to "see full status". Its
 `failed[]`/`errored[]` are only what's red *so far* — a floor, not the tally;
 `passed: true` (a fully settled run, zero red) is the only trustworthy green.
-Every verdict carries the run's identity (`sha7`, `seq`, i.e. `sha7#seq`), so a
-verdict is matched to the run you dispatched rather than a previously-settled
-one; pass `expected_sha` to make that a hard check. And `wait_for_settle` never
-returns an empty nothing-verdict: called with **no run live** in the checkout it
-fails loud with the same "no run in progress" message as `odu status`, so a
-stale/no-run call is unmistakable rather than an instant `settled: false`.
+A verdict about an observed run carries that run's identity — `sha7` always, and
+`seq` (the reserved ordinal, i.e. `sha7#seq`) whenever the coordinator reserved
+one — so you match it to the run you dispatched rather than a previously-settled
+one; pass `expected_sha` (a full sha or a `sha7` prefix) to make that a hard
+check. *(`seq` is `null` only when no ordinal was reserved: a wait that saw no
+frame at all, or the rare case where the coordinator couldn't durably reserve a
+seq — then the run claims `sha7` but no unique `sha7#seq`.)* And
+`wait_for_settle` never returns an empty nothing-verdict: called with **no run
+live** in the checkout it fails loud with the same "no run in progress" message
+as `odu status`, so a stale/no-run call is unmistakable rather than an instant
+`settled: false`.
 The coordinator keeps running after the tool returns, so `node_rerun` retries a
 fixed node against the still-live run and `wait_for_settle` again catches any
 later reds. When the right next move

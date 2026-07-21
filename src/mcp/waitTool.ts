@@ -5,8 +5,8 @@
  * This is the floor that works on every MCP host: the model is *inside* a tool
  * call when the answer lands, so it needs no resource-notification support. It
  * blocks on the agent surface's `nodes` stream (the projected `{ run, pipeline,
- * nodes[] }` frames) and returns the verdict the instant a node goes red
- * (fail-fast) or the whole run settles.
+ * sha7, seq, nodes[] }` frames) and returns the verdict the instant a node goes
+ * red (fail-fast) or the whole run settles.
  *
  * It rides the bespoke-tool slot rather than an exposed procedure because it's
  * a *blocking read loop* with cancellation, fail-fast, and timeout policy —
@@ -18,8 +18,9 @@
 import type { BespokeTool } from "@kolu/surface-mcp";
 import { z } from "zod";
 import { agentSummary } from "../cli/render";
+import { formatRef } from "../common/runRecord";
 import { SOCKET_PATH } from "../coordinator/socket";
-import type { AgentNodes, AgentNodesReader } from "./agentSurface";
+import { type AgentNodes, type AgentNodesReader, EMPTY_NODES } from "./agentSurface";
 
 export const waitInput = z.object({
 	timeout_ms: z.number().optional(),
@@ -27,7 +28,14 @@ export const waitInput = z.object({
 	/** Refuse loudly unless the live run's commit matches this sha (a prefix
 	 *  either way, so a 7- or 40-char sha both work) — the "wait for the run I
 	 *  just dispatched, not a stale one" guard (juspay/odu#49 ask 3). */
-	expected_sha: z.string().optional(),
+	expected_sha: z
+		.string()
+		.describe(
+			"Refuse loudly unless the live run's commit matches this. Prefix-matched " +
+				"against the run's sha7 either way, so a full 40-char sha or the 7-char " +
+				"sha7 from a prior verdict both work.",
+		)
+		.optional(),
 });
 export type WaitInput = z.infer<typeof waitInput>;
 
@@ -59,8 +67,9 @@ export interface SettleVerdict {
 	/** The run this verdict describes: `sha7` its 7-char commit, `seq` its
 	 *  ordinal among runs of that commit (`<sha7>#<seq>`), so a caller can match
 	 *  the verdict to the run it dispatched rather than a previously-settled one
-	 *  (juspay/odu#49 ask 2). `seq` is null on the coordinator-close path when the
-	 *  observed run never carried one. */
+	 *  (juspay/odu#49 ask 2). `seq` is null when no ordinal was reserved — a wait
+	 *  that observed no run frame, or the rare case the coordinator couldn't
+	 *  reserve one (the verdict then carries `sha7` but no unique `<sha7>#<seq>`). */
 	sha7: string;
 	seq: number | null;
 }
@@ -81,16 +90,12 @@ export interface WaitOptions {
 	now?: () => number;
 }
 
-/** The run ref `<sha7>#<seq>` (`formatRunRef`'s shape) from an observed frame,
- *  for the loud refusal messages. `seq` unknown reads `?`. */
-function runRef(snap: AgentNodes): string {
-	return `${snap.sha7}#${snap.seq ?? "?"}`;
-}
-
 /** The run-identity fields stamped into every verdict, from the frame it
- *  describes. No frame (a run that never appeared) reads the no-run value. */
+ *  describes. No frame (a run that never appeared) reads the no-run identity
+ *  from `EMPTY_NODES`, the one place the no-run sentinel is spelled. */
 function identityOf(snap: AgentNodes | undefined): Pick<SettleVerdict, "sha7" | "seq"> {
-	return snap === undefined ? { sha7: "", seq: null } : { sha7: snap.sha7, seq: snap.seq };
+	const frame = snap ?? EMPTY_NODES;
+	return { sha7: frame.sha7, seq: frame.seq };
 }
 
 /** Does the live run's `observed` sha7 satisfy the caller's `expected` sha? A
@@ -161,7 +166,7 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
 				!shaMatches(snap.sha7, opts.expectedSha)
 			) {
 				throw new NoLiveRunError(
-					`no live run matching ${opts.expectedSha} (this checkout is running ${runRef(snap)})`,
+					`no live run matching ${opts.expectedSha} (this checkout is running ${formatRef(snap.sha7, snap.seq)})`,
 				);
 			}
 			const { done, failed, errored } = agentSummary(snap);
@@ -224,6 +229,14 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
 			...identityOf(last),
 		};
 	} catch (err) {
+		// A deliberate loud refusal ALWAYS propagates — never downgrade it to an
+		// abort verdict. The `expected_sha`-mismatch throw happens inside the read
+		// loop, whose unwinding awaits the async iterator's cleanup; if the timeout
+		// fires in that window `controller.signal.aborted` is already true, and
+		// without this guard the refusal would be swallowed into a generic
+		// `timed_out` verdict — reintroducing the nothing-verdict juspay/odu#49
+		// exists to kill.
+		if (err instanceof NoLiveRunError) throw err;
 		// An abort that surfaces as a rejection (rather than a clean end) is the
 		// same timeout/cancel verdict.
 		if (controller.signal.aborted) return abortedVerdict();
@@ -245,9 +258,10 @@ export const waitTool: BespokeTool = {
 		"Block until the run settles, or — fail-fast (default) — the instant a " +
 		"node goes red, so you can drill into a failure without waiting for the " +
 		"slow lanes. Returns the verdict {settled, passed, failed[], errored[], " +
-		"sha7, seq} — sha7#seq identifies WHICH run it describes. Fails LOUD (an " +
-		"error, not an empty verdict) when no run is live in this checkout, or " +
-		"when the live run's commit doesn't match `expected_sha`.",
+		"sha7, seq}: sha7 names the commit, and a non-null seq completes the " +
+		"unique run ref sha7#seq (seq is null only when no ordinal was reserved). " +
+		"Fails LOUD (an error, not an empty verdict) when no run is live in this " +
+		"checkout, or when the live run's commit doesn't prefix-match `expected_sha`.",
 	input: waitInput,
 	mutates: false,
 	handler: (args, client, signal) => {

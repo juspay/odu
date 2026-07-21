@@ -19,11 +19,32 @@
  * `seq` allocation never races (the socket lock already serializes runs here).
  */
 
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { type RunRecord, RunRecordSchema } from "../common/runRecord";
 
 const RUNS_SUBDIR = "runs";
+
+/** The marker key a reservation sentinel carries (`reserveNextSeq`). `readRecord`
+ *  skips a file with it set EXPLICITLY, so keeping a reserved (not-yet-finalized)
+ *  run out of `odu runs` is a named contract between the writer and the reader —
+ *  not a side effect of the sentinel happening to fail `RunRecordSchema` (which a
+ *  stricter future reader might stop silently skipping). */
+const RESERVED_MARKER = "reserved";
+
+function isReservationSentinel(parsed: unknown): boolean {
+  return (
+    typeof parsed === "object" &&
+    parsed !== null &&
+    (parsed as Record<string, unknown>)[RESERVED_MARKER] === true
+  );
+}
 
 function runsDir(repoRoot: string, sha7: string): string {
   return join(repoRoot, ".ci", sha7, RUNS_SUBDIR);
@@ -80,6 +101,84 @@ export function writeRunRecord(
   writeFileSync(path, `${JSON.stringify(record, null, 2)}\n`);
 }
 
+/**
+ * Atomically select AND reserve the next seq for a commit, returning the
+ * reserved seq — or `null` if it couldn't be claimed (a write failure).
+ *
+ * Combining selection and reservation is what makes a published `<sha7>#<seq>`
+ * globally unique (juspay/odu#49). `allocateSeq` alone is a read (a directory
+ * scan): two same-checkout starters can both pick the same number before either
+ * writes, and the fail-fast socket lock (serveSocket) is acquired *later*, so it
+ * doesn't serialize the pick. Here each candidate is claimed with an EXCLUSIVE
+ * create (`flag: "wx"` → `O_CREAT|O_EXCL`): if the file already exists (a
+ * finalized record OR another run's reservation) the create fails `EEXIST` and
+ * we advance to the next candidate. So no two runs can hold the same slot, and
+ * the exclusive create never truncates an existing record.
+ *
+ * The reservation is a sentinel that `readLedger` skips (by its `reserved`
+ * marker) — so a live/reserved run never appears in `odu runs` as finished
+ * history; the first `writeRunRecord` overwrites the sentinel with the real
+ * record. Best-effort by design: a genuine write failure returns `null`
+ * rather than throwing, so the caller proceeds WITHOUT a seq (publishing no
+ * identity claim) rather than gating the run — the repo's "run history is a
+ * convenience, never a gate" rule.
+ */
+export function reserveNextSeq(repoRoot: string, sha7: string): number | null {
+  try {
+    mkdirSync(runsDir(repoRoot, sha7), { recursive: true });
+  } catch {
+    return null;
+  }
+  // Start from the scan's best guess, then let the exclusive create arbitrate
+  // races by advancing on EEXIST. Bounded so a pathological directory can't spin
+  // forever.
+  let candidate = allocateSeq(repoRoot, sha7);
+  for (let attempt = 0; attempt < 1024; attempt += 1, candidate += 1) {
+    try {
+      writeFileSync(
+        recordPath(repoRoot, sha7, candidate),
+        `${JSON.stringify({ [RESERVED_MARKER]: true, seq: candidate }, null, 2)}\n`,
+        { flag: "wx" },
+      );
+      return candidate;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EEXIST") continue;
+      return null;
+    }
+  }
+  return null;
+}
+
+/** Release a reservation for `seq` — but ONLY if it's still an unfinalized
+ *  sentinel. The runCommand early-throw cleanup: a run that reserved a seq and
+ *  then threw before serving/finalizing (a bad config, a lost `serveSocket` lock
+ *  race) would otherwise leave the sentinel on disk forever — burning the ordinal
+ *  and accumulating dead files across retries of the same commit. The
+ *  `isReservationSentinel` guard makes it safe: a seq that was published then
+ *  finalized is a real `RunRecord` (not a sentinel), so this leaves it untouched
+ *  — it never races a genuine record or the durable reservation a real SIGKILL
+ *  intentionally leaves behind. Best-effort and idempotent (missing/finalized →
+ *  no-op). */
+export function releaseReservation(
+  repoRoot: string,
+  sha7: string,
+  seq: number,
+): void {
+  const path = recordPath(repoRoot, sha7, seq);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf-8"));
+  } catch {
+    return; // missing / unreadable — nothing to release
+  }
+  if (!isReservationSentinel(parsed)) return; // a real record — leave it
+  try {
+    rmSync(path, { force: true });
+  } catch {
+    // best-effort: failing to reclaim a stub file never fails the run
+  }
+}
+
 /** Child directory names under `dir`, or `[]` if it doesn't exist. */
 function childDirs(dir: string): string[] {
   try {
@@ -106,6 +205,10 @@ function readRecord(path: string): RunRecord | null {
   } catch {
     return null;
   }
+  // A reservation sentinel is not a finished run — skip it by its marker, so a
+  // reserved-but-unfinalized run stays out of `odu runs` explicitly (see
+  // RESERVED_MARKER), independent of whether it would also fail the schema.
+  if (isReservationSentinel(parsed)) return null;
   const result = RunRecordSchema.safeParse(parsed);
   return result.success ? result.data : null;
 }
