@@ -18,6 +18,7 @@
 import type { BespokeTool } from "@kolu/surface-mcp";
 import { z } from "zod";
 import { agentSummary } from "../cli/render";
+import { formatRef } from "../common/runRecord";
 import { SOCKET_PATH } from "../coordinator/socket";
 import type { AgentNodes, AgentNodesReader } from "./agentSurface";
 
@@ -86,12 +87,6 @@ export interface WaitOptions {
 	signal?: AbortSignal;
 	/** Injected clock for tests; defaults to `Date.now`. */
 	now?: () => number;
-}
-
-/** The run ref `<sha7>#<seq>` (`formatRunRef`'s shape) from an observed frame,
- *  for the loud refusal messages. `seq` unknown reads `?`. */
-function runRef(snap: AgentNodes): string {
-	return `${snap.sha7}#${snap.seq ?? "?"}`;
 }
 
 /** The run-identity fields stamped into every verdict, from the frame it
@@ -168,7 +163,7 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
 				!shaMatches(snap.sha7, opts.expectedSha)
 			) {
 				throw new NoLiveRunError(
-					`no live run matching ${opts.expectedSha} (this checkout is running ${runRef(snap)})`,
+					`no live run matching ${opts.expectedSha} (this checkout is running ${formatRef(snap.sha7, snap.seq)})`,
 				);
 			}
 			const { done, failed, errored } = agentSummary(snap);
