@@ -46,7 +46,7 @@ import { fanoutLanes, loadHosts } from "./hosts";
 import { type Lane, startLane } from "./lane";
 import { missingRunnerError, resolveRunnerFlake } from "./runnerFlake";
 import { cancelRun } from "./cancel";
-import { reserveNextSeq, writeRunRecord } from "./ledger";
+import { releaseReservation, reserveNextSeq, writeRunRecord } from "./ledger";
 import { buildRunRecord, projectNodes } from "../common/runRecord";
 import { SOCKET_PATH, serveSocket } from "./socket";
 import {
@@ -152,6 +152,11 @@ export async function runCommand(args: RunArgs): Promise<number> {
   // no-op once a lane is closed/dead (its `session.destroy()` is idempotent), so
   // re-sweeping an already-closed lane here is harmless.
   const createdLanes = new Set<Lane>();
+  // runCommand-owned holder for the seq this run reserved, so the `finally` can
+  // reclaim an orphaned reservation sentinel on an early-throw — the same
+  // early-throw-cleanup convention as `createdLanes` / `cleanupSnapshot`
+  // (releaseReservation is a guarded no-op once the seq was finalized).
+  const reservation: { seq: number | null } = { seq: null };
   try {
     return await orchestrate(
       args,
@@ -166,10 +171,14 @@ export async function runCommand(args: RunArgs): Promise<number> {
         dirty,
       },
       createdLanes,
+      reservation,
     );
   } finally {
     cleanupSnapshot();
     for (const lane of createdLanes) lane.close();
+    if (reservation.seq !== null) {
+      releaseReservation(repoRoot, sha7, reservation.seq);
+    }
   }
 }
 
@@ -195,6 +204,9 @@ async function orchestrate(
    *  here at construction; the natural + shutdown paths still close each lane
    *  themselves. */
   createdLanes: Set<Lane>,
+  /** runCommand-owned holder for the reserved seq, so its `finally` can reclaim
+   *  an orphaned reservation sentinel on an early-throw. Set once reserved. */
+  reservation: { seq: number | null },
 ): Promise<number> {
   const { repoRoot, specSource, runnerFlake, sha, sha7 } = ctx;
   // Where stdout points picks the face: NDJSON for the /do contract, an
@@ -585,6 +597,10 @@ async function orchestrate(
   // failed — the run proceeds WITHOUT a seq (no identity claim, no record)
   // rather than gating on a history write, so `seq` stays absent on the surface.
   const seq = reserveNextSeq(repoRoot, sha7);
+  // Hand the reserved seq to runCommand's early-throw cleanup: if this run
+  // throws before serving/finalizing, its `finally` reclaims the orphaned
+  // sentinel (releaseReservation leaves a finalized record untouched).
+  reservation.seq = seq;
   // Stamp the reserved seq onto the fan-in state so every face — the agent
   // `wait_for_settle` verdict especially — reads the run's full identity
   // `<sha7>#<seq>`. Set once here, before the socket serves; `updateNode` spreads

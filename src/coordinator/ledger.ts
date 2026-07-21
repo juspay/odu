@@ -19,7 +19,13 @@
  * `seq` allocation never races (the socket lock already serializes runs here).
  */
 
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { type RunRecord, RunRecordSchema } from "../common/runRecord";
 
@@ -141,6 +147,36 @@ export function reserveNextSeq(repoRoot: string, sha7: string): number | null {
     }
   }
   return null;
+}
+
+/** Release a reservation for `seq` — but ONLY if it's still an unfinalized
+ *  sentinel. The runCommand early-throw cleanup: a run that reserved a seq and
+ *  then threw before serving/finalizing (a bad config, a lost `serveSocket` lock
+ *  race) would otherwise leave the sentinel on disk forever — burning the ordinal
+ *  and accumulating dead files across retries of the same commit. The
+ *  `isReservationSentinel` guard makes it safe: a seq that was published then
+ *  finalized is a real `RunRecord` (not a sentinel), so this leaves it untouched
+ *  — it never races a genuine record or the durable reservation a real SIGKILL
+ *  intentionally leaves behind. Best-effort and idempotent (missing/finalized →
+ *  no-op). */
+export function releaseReservation(
+  repoRoot: string,
+  sha7: string,
+  seq: number,
+): void {
+  const path = recordPath(repoRoot, sha7, seq);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf-8"));
+  } catch {
+    return; // missing / unreadable — nothing to release
+  }
+  if (!isReservationSentinel(parsed)) return; // a real record — leave it
+  try {
+    rmSync(path, { force: true });
+  } catch {
+    // best-effort: failing to reclaim a stub file never fails the run
+  }
 }
 
 /** Child directory names under `dir`, or `[]` if it doesn't exist. */

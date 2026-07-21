@@ -229,6 +229,14 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
 			...identityOf(last),
 		};
 	} catch (err) {
+		// A deliberate loud refusal ALWAYS propagates — never downgrade it to an
+		// abort verdict. The `expected_sha`-mismatch throw happens inside the read
+		// loop, whose unwinding awaits the async iterator's cleanup; if the timeout
+		// fires in that window `controller.signal.aborted` is already true, and
+		// without this guard the refusal would be swallowed into a generic
+		// `timed_out` verdict — reintroducing the nothing-verdict juspay/odu#49
+		// exists to kill.
+		if (err instanceof NoLiveRunError) throw err;
 		// An abort that surfaces as a rejection (rather than a clean end) is the
 		// same timeout/cancel verdict.
 		if (controller.signal.aborted) return abortedVerdict();

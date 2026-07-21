@@ -8,6 +8,7 @@ import {
   allocateSeq,
   readLedger,
   recordPath,
+  releaseReservation,
   reserveNextSeq,
   writeRunRecord,
 } from "./ledger";
@@ -111,6 +112,28 @@ describe("reserveNextSeq — atomic select-and-reserve", () => {
     const finished = record({ seq: 1 });
     writeRunRecord(repo, "26d2c2d", finished);
     expect(readLedger(repo)).toEqual([finished]);
+  });
+
+  it("releaseReservation reclaims an orphaned sentinel and frees the ordinal", () => {
+    // A run reserved a seq then threw before serving (early-throw). runCommand's
+    // finally releases the orphan so it doesn't accumulate or burn the ordinal.
+    const repo = tmpRepo();
+    expect(reserveNextSeq(repo, "26d2c2d")).toBe(1);
+    releaseReservation(repo, "26d2c2d", 1);
+    // Gone from disk, and the ordinal is free again (an unpublished seq is safe
+    // to reuse — nothing ever observed it).
+    expect(reserveNextSeq(repo, "26d2c2d")).toBe(1);
+  });
+
+  it("releaseReservation NEVER removes a finalized record", () => {
+    // A published+finalized seq is a real record, not a sentinel — release must
+    // leave it untouched (it never races a genuine record or a SIGKILL reservation).
+    const repo = tmpRepo();
+    reserveNextSeq(repo, "26d2c2d");
+    const finished = record({ seq: 1 });
+    writeRunRecord(repo, "26d2c2d", finished); // overwrites the sentinel
+    releaseReservation(repo, "26d2c2d", 1);
+    expect(readLedger(repo)).toEqual([finished]); // still there
   });
 
   it("returns null on a write failure rather than throwing (never gates the run)", () => {

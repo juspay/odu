@@ -604,4 +604,50 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     });
     expect(v).toMatchObject({ settled: true, passed: true, sha7: "abc1234" });
   });
+
+  it("ask 3: a mismatch refusal is NOT downgraded to timed_out when the abort races it", async () => {
+    // The expected_sha throw fires inside the read loop; its unwinding awaits the
+    // iterator cleanup, and the timeout can fire in that window so the controller
+    // is aborted by the time the catch runs. The loud refusal must still throw,
+    // never be swallowed into a timed_out verdict (the nothing-verdict #49 kills).
+    // Reproduced deterministically: the stream aborts (via the caller signal, the
+    // same controller the timeout uses) BEFORE yielding the mismatched frame.
+    const ac = new AbortController();
+    const client: AgentNodesReader = {
+      surface: {
+        nodes: {
+          get: async () => ({
+            async *[Symbol.asyncIterator]() {
+              ac.abort(); // controller aborted before the throw propagates
+              yield {
+                run: true,
+                pipeline: "p",
+                sha7: "beef123",
+                seq: 1,
+                nodes: [
+                  {
+                    id: "n",
+                    name: "n",
+                    status: "running",
+                    exit_code: null,
+                    duration_ms: null,
+                    red: false,
+                  },
+                ],
+              };
+            },
+          }),
+        },
+      },
+    };
+    await expect(
+      waitForSettle({
+        client,
+        expectedSha: "deadbeef",
+        failFast: false,
+        timeoutMs: 5000,
+        signal: ac.signal,
+      }),
+    ).rejects.toThrow(/no live run matching deadbeef/);
+  });
 });
