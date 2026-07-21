@@ -8,7 +8,7 @@ import {
   allocateSeq,
   readLedger,
   recordPath,
-  reserveSeq,
+  reserveNextSeq,
   writeRunRecord,
 } from "./ledger";
 
@@ -61,22 +61,56 @@ describe("allocateSeq", () => {
     expect(allocateSeq(repo, "bbbbbbb")).toBe(1);
   });
 
-  it("advances past a reserved seq — a crashed run's published seq is never reused", () => {
-    // The coordinator reserves its seq BEFORE the socket serves
-    // (src/coordinator/run.ts); a SIGKILL leaves that reservation un-finalized.
-    // Allocation keys on the filename, so the next run of this commit must
-    // advance rather than reuse the seq a `wait_for_settle` verdict already
-    // advertised (juspay/odu#49).
-    const repo = tmpRepo();
-    reserveSeq(repo, "26d2c2d", 1);
-    expect(allocateSeq(repo, "26d2c2d")).toBe(2);
-  });
-
   it("ignores non-seq files in the runs dir", () => {
     const repo = tmpRepo();
     mkdirSync(join(repo, ".ci", "26d2c2d", "runs"), { recursive: true });
     writeFileSync(join(repo, ".ci", "26d2c2d", "runs", "notes.txt"), "x");
     expect(allocateSeq(repo, "26d2c2d")).toBe(1);
+  });
+});
+
+describe("reserveNextSeq — atomic select-and-reserve", () => {
+  it("reserves the next seq and returns it", () => {
+    const repo = tmpRepo();
+    expect(reserveNextSeq(repo, "26d2c2d")).toBe(1);
+  });
+
+  it("two reservations without a finalize between them get DISTINCT seqs", () => {
+    // The whole point of atomic reserve-not-just-scan (juspay/odu#49 F1): a
+    // plain `allocateSeq` scan would hand both the same number, letting two runs
+    // publish the same `<sha7>#<seq>`. The exclusive create makes the second
+    // advance.
+    const repo = tmpRepo();
+    expect(reserveNextSeq(repo, "26d2c2d")).toBe(1);
+    expect(reserveNextSeq(repo, "26d2c2d")).toBe(2);
+  });
+
+  it("a reserved seq is never reused after a crash (SIGKILL before finalize)", () => {
+    const repo = tmpRepo();
+    reserveNextSeq(repo, "26d2c2d"); // reserved 1, then the coordinator dies
+    expect(reserveNextSeq(repo, "26d2c2d")).toBe(2);
+  });
+
+  it("never truncates an existing finalized record — a stale contender advances", () => {
+    // A finalized record must not be overwritten by a later reservation of the
+    // same number: the exclusive create sees the file and advances instead.
+    const repo = tmpRepo();
+    const finished = record({ seq: 1 });
+    writeRunRecord(repo, "26d2c2d", finished);
+    expect(reserveNextSeq(repo, "26d2c2d")).toBe(2);
+    expect(readLedger(repo)).toEqual([finished]); // untouched
+  });
+
+  it("a reservation sentinel is skipped by readLedger — a live run is not phantom history", () => {
+    // reserveNextSeq claims the seq before the run serves; it must NOT surface in
+    // `odu runs` as a finished run (the sentinel fails RunRecordSchema). A real
+    // finalize later overwrites the same file with a genuine record.
+    const repo = tmpRepo();
+    reserveNextSeq(repo, "26d2c2d");
+    expect(readLedger(repo)).toEqual([]);
+    const finished = record({ seq: 1 });
+    writeRunRecord(repo, "26d2c2d", finished);
+    expect(readLedger(repo)).toEqual([finished]);
   });
 });
 
@@ -123,18 +157,6 @@ describe("writeRunRecord / readLedger round-trip", () => {
     const ledger = readLedger(repo);
     expect(ledger).toHaveLength(1);
     expect(ledger[0]?.seq).toBe(1);
-  });
-
-  it("a reservation sentinel is skipped by readLedger — a live run is not phantom history", () => {
-    // reserveSeq claims the seq before the run serves; it must NOT surface in
-    // `odu runs` as a finished run (the sentinel fails RunRecordSchema). A real
-    // finalize later overwrites the same file with a genuine record.
-    const repo = tmpRepo();
-    reserveSeq(repo, "26d2c2d", 1);
-    expect(readLedger(repo)).toEqual([]);
-    const finished = record({ seq: 1 });
-    writeRunRecord(repo, "26d2c2d", finished);
-    expect(readLedger(repo)).toEqual([finished]);
   });
 
   it("ignores a commit dir that has logs but no runs subdir", () => {

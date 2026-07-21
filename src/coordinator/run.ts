@@ -46,7 +46,7 @@ import { fanoutLanes, loadHosts } from "./hosts";
 import { type Lane, startLane } from "./lane";
 import { missingRunnerError, resolveRunnerFlake } from "./runnerFlake";
 import { cancelRun } from "./cancel";
-import { allocateSeq, reserveSeq, writeRunRecord } from "./ledger";
+import { reserveNextSeq, writeRunRecord } from "./ledger";
 import { buildRunRecord, projectNodes } from "../common/runRecord";
 import { SOCKET_PATH, serveSocket } from "./socket";
 import {
@@ -570,54 +570,52 @@ async function orchestrate(
     }
   }
   // ── run identity — the durable record's (repo, sha, seq) ──
-  // Allocated *after* a possible --supersede cancel: a superseded run writes
-  // its own record before its socket closes (the teardown above), so by the
-  // time we get here that record is on disk and we take the next seq rather
-  // than colliding on it. `repo` is the GitHub owner/repo or null for a
-  // local-only checkout; `seq` distinguishes repeat runs of one commit.
+  // Reserved *after* a possible --supersede cancel: a superseded run writes its
+  // own record before its socket closes (the teardown above), so by the time we
+  // get here that record is on disk and the exclusive reservation advances past
+  // it. `repo` is the GitHub owner/repo or null for a local-only checkout.
   const repo = github !== null ? repoSlug(github) : null;
-  const seq = allocateSeq(repoRoot, sha7);
-  // Stamp the allocated seq onto the fan-in state so every face — the agent
-  // `wait_for_settle` verdict especially (juspay/odu#49) — can read the run's
-  // full identity `<sha7>#<seq>`. Set once here, before the socket serves
-  // (below), so the first snapshot a subscriber reads already carries it;
-  // `updateNode` spreads the whole state, so it survives every node update.
-  runtime.ctx.cells.nodes.set({ ...store.get(), seq });
-  finalizeRunRecord = (state: PipelineState): void => {
-    try {
-      writeRunRecord(
-        repoRoot,
-        sha7,
-        buildRunRecord({
-          repo,
-          sha,
-          seq,
-          dirty: ctx.dirty,
-          startedAt: header.startedAt,
-          finishedAt: Date.now(),
-          lanes: header.lanes,
-          state,
-        }),
-      );
-    } catch {
-      // best-effort: the run history is a convenience, never a gate — a failed
-      // record write must not fail the run or mask its verdict.
-    }
-  };
-  // Reserve the seq durably BEFORE the socket serves (below), so the allocated
-  // seq is on disk the instant it can become observable via the surface. The
-  // reservation is a sentinel `<seq>.json` that `allocateSeq` (which keys on the
-  // filename) counts but `readLedger` skips (it fails the record schema), so it
-  // claims the seq WITHOUT appearing in `odu runs` as a finished run. `allocateSeq`
-  // is `max(seqs)+1`, so even if this coordinator is SIGKILLed after publishing
-  // the seq but before `finalizeRunRecord` writes the real record, the next run
-  // of this commit advances PAST the reserved seq rather than reusing it — a
-  // *published* `<sha7>#<seq>` can never name two distinct runs (juspay/odu#49;
-  // a seq is only published after `serveSocket`, and that lock fails fast, so the
-  // one run that wins the lock is the only one that ever publishes this seq).
-  // Best-effort like the finalizer: a failed reservation degrades to the prior
-  // behaviour (a crash *could* reuse the seq), never gates the run.
-  reserveSeq(repoRoot, sha7, seq);
+  // Atomically SELECT-and-RESERVE the seq durably BEFORE the socket serves, so
+  // the seq is on disk the instant it can become observable via the surface, and
+  // is claimed with an exclusive create so no two runs ever hold the same slot
+  // (see `reserveNextSeq`). A published `<sha7>#<seq>` is therefore globally
+  // unique: even a coordinator SIGKILLed after publishing but before
+  // `finalizeRunRecord` leaves its reservation on disk, so the next run of this
+  // commit advances past it (juspay/odu#49). `null` means the reservation write
+  // failed — the run proceeds WITHOUT a seq (no identity claim, no record)
+  // rather than gating on a history write, so `seq` stays absent on the surface.
+  const seq = reserveNextSeq(repoRoot, sha7);
+  // Stamp the reserved seq onto the fan-in state so every face — the agent
+  // `wait_for_settle` verdict especially — reads the run's full identity
+  // `<sha7>#<seq>`. Set once here, before the socket serves; `updateNode` spreads
+  // the whole state, so it survives every node update. `undefined` (no reserved
+  // seq) leaves the field absent, mapped to `null` on the agent surface.
+  runtime.ctx.cells.nodes.set({ ...store.get(), seq: seq ?? undefined });
+  if (seq !== null) {
+    finalizeRunRecord = (state: PipelineState): void => {
+      try {
+        writeRunRecord(
+          repoRoot,
+          sha7,
+          buildRunRecord({
+            repo,
+            sha,
+            seq,
+            dirty: ctx.dirty,
+            startedAt: header.startedAt,
+            finishedAt: Date.now(),
+            lanes: header.lanes,
+            state,
+          }),
+        );
+      } catch {
+        // best-effort: the run history is a convenience, never a gate — a failed
+        // record write must not fail the run or mask its verdict.
+      }
+    };
+  }
+  // No reserved seq → `finalizeRunRecord` stays the default no-op: a run that
+  // couldn't reserve an identity writes no record and claims no `<sha7>#<seq>`.
 
   // Publish before serving so an `attach` connecting in the first instant reads
   // the real header, not the EMPTY_HEADER default.
@@ -846,10 +844,11 @@ async function orchestrate(
   for (const lane of lanes.values()) lane.close();
   // Record this run *before* releasing the socket lock — every node is already
   // terminal (allSettled), so the state is final. A superseding/next run waits
-  // on the socket close to confirm we're gone and only then `allocateSeq()`s, so
+  // on the socket close to confirm we're gone and only then reserves its seq, so
   // writing the record first guarantees our `<seq>.json` is on disk before
-  // anyone can allocate the next seq, and two runs can't collide on one file.
-  // Mirrors the shutdown path's lock-before-record-release ordering.
+  // anyone reserves the next seq (and the exclusive reservation would skip our
+  // slot regardless). Mirrors the shutdown path's lock-before-record-release
+  // ordering.
   const finalState = store.get();
   writeTimingSidecar(finalState);
   finalizeRunRecord(finalState);
