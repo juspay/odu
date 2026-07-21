@@ -25,6 +25,21 @@ import { type RunRecord, RunRecordSchema } from "../common/runRecord";
 
 const RUNS_SUBDIR = "runs";
 
+/** The marker key a reservation sentinel carries (`reserveNextSeq`). `readRecord`
+ *  skips a file with it set EXPLICITLY, so keeping a reserved (not-yet-finalized)
+ *  run out of `odu runs` is a named contract between the writer and the reader —
+ *  not a side effect of the sentinel happening to fail `RunRecordSchema` (which a
+ *  stricter future reader might stop silently skipping). */
+const RESERVED_MARKER = "reserved";
+
+function isReservationSentinel(parsed: unknown): boolean {
+  return (
+    typeof parsed === "object" &&
+    parsed !== null &&
+    (parsed as Record<string, unknown>)[RESERVED_MARKER] === true
+  );
+}
+
 function runsDir(repoRoot: string, sha7: string): string {
   return join(repoRoot, ".ci", sha7, RUNS_SUBDIR);
 }
@@ -94,10 +109,10 @@ export function writeRunRecord(
  * we advance to the next candidate. So no two runs can hold the same slot, and
  * the exclusive create never truncates an existing record.
  *
- * The reservation is a sentinel that `readLedger` skips (it fails
- * `RunRecordSchema`) — so a live/reserved run never appears in `odu runs` as
- * finished history; the first `writeRunRecord` overwrites the sentinel with the
- * real record. Best-effort by design: a genuine write failure returns `null`
+ * The reservation is a sentinel that `readLedger` skips (by its `reserved`
+ * marker) — so a live/reserved run never appears in `odu runs` as finished
+ * history; the first `writeRunRecord` overwrites the sentinel with the real
+ * record. Best-effort by design: a genuine write failure returns `null`
  * rather than throwing, so the caller proceeds WITHOUT a seq (publishing no
  * identity claim) rather than gating the run — the repo's "run history is a
  * convenience, never a gate" rule.
@@ -116,7 +131,7 @@ export function reserveNextSeq(repoRoot: string, sha7: string): number | null {
     try {
       writeFileSync(
         recordPath(repoRoot, sha7, candidate),
-        `${JSON.stringify({ reserved: true, seq: candidate }, null, 2)}\n`,
+        `${JSON.stringify({ [RESERVED_MARKER]: true, seq: candidate }, null, 2)}\n`,
         { flag: "wx" },
       );
       return candidate;
@@ -154,6 +169,10 @@ function readRecord(path: string): RunRecord | null {
   } catch {
     return null;
   }
+  // A reservation sentinel is not a finished run — skip it by its marker, so a
+  // reserved-but-unfinalized run stays out of `odu runs` explicitly (see
+  // RESERVED_MARKER), independent of whether it would also fail the schema.
+  if (isReservationSentinel(parsed)) return null;
   const result = RunRecordSchema.safeParse(parsed);
   return result.success ? result.data : null;
 }
