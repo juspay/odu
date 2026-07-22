@@ -40,6 +40,7 @@ function readLockPid(lockPath: string): number | null {
     const pid = Number.parseInt(readFileSync(lockPath, "utf8").trim(), 10);
     return Number.isFinite(pid) && pid > 0 ? pid : null;
   } catch {
+    // Missing / unreadable lock file → free.
     return null;
   }
 }
@@ -52,6 +53,8 @@ export function liveRunLockPid(lockPath: string): number | null {
     process.kill(pid, 0);
     return pid;
   } catch {
+    // ESRCH (dead) or EPERM — treat as free/stale so a dead holder's file
+    // cannot block the checkout forever.
     return null;
   }
 }
@@ -88,15 +91,17 @@ export function tryAcquireRunLock(lockPath: string): RunLockHandle | null {
   try {
     writeSync(fd, `${process.pid}\n`);
   } catch {
+    // Write failed after exclusive create — drop the empty file so we do not
+    // leave a zero-length lock that looks held. Cleanup errors are best-effort.
     try {
       closeSync(fd);
     } catch {
-      /* ignore */
+      /* fd already closed */
     }
     try {
       unlinkSync(lockPath);
     } catch {
-      /* ignore */
+      /* already unlinked or raced */
     }
     return null;
   }
@@ -108,7 +113,7 @@ export function tryAcquireRunLock(lockPath: string): RunLockHandle | null {
     try {
       closeSync(fd);
     } catch {
-      /* ignore */
+      /* already closed */
     }
     // Only unlink if we still own the file (pid matches). A superseder may
     // have already replaced it after killing us.
@@ -116,7 +121,7 @@ export function tryAcquireRunLock(lockPath: string): RunLockHandle | null {
       try {
         unlinkSync(lockPath);
       } catch {
-        /* ignore */
+        /* raced with supersede replace / already gone */
       }
     }
   };
@@ -139,6 +144,7 @@ export function signalRunLockHolder(
     process.kill(pid, signal);
     return pid;
   } catch {
+    // Process exited between liveness probe and signal — already free.
     return null;
   }
 }
