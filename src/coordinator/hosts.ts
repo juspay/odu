@@ -5,7 +5,7 @@
  * back-compatible. Missing platforms silently drop from the fanout — the
  * operator opts in per platform, exactly the justci hosts.json semantics. But
  * a config that names *no* platform at all is not "run everything here": that
- * is the juspay/odu#46 fork-bomb, so `fanoutLanes` refuses it loudly rather
+ * is the juspay/odu#46 fork-bomb, so `fanoutPools` refuses it loudly rather
  * than synthesizing a localhost lane (running locally stays available only as
  * an explicit `--host PLAT=localhost` or `"PLAT": "localhost"` decision).
  *
@@ -153,7 +153,7 @@ export function loadHosts(): HostsConfig {
   return { hosts: {}, source: null };
 }
 
-/** The loud refusal `fanoutLanes` raises when a run resolves to *zero* lanes —
+/** The loud refusal `fanoutPools` raises when a run resolves to *zero* pools —
  *  no hosts file anywhere, no `--host` pin, no `--platform` slice. A missing
  *  config is indistinguishable in outcome from an explicit `"…": "localhost"`,
  *  but only one is a decision someone made (juspay/odu#46): defaulting the
@@ -164,7 +164,7 @@ export function loadHosts(): HostsConfig {
  *  `config` (not a fresh filesystem probe) so the diagnosis matches what
  *  resolution actually did — e.g. names the file that won but configured
  *  nothing, rather than mislabeling a shadowed lower-precedence file.
- *  Module-private: `fanoutLanes` is the seam callers reach it through. */
+ *  Module-private: `fanoutPools` is the seam callers reach it through. */
 function noHostsConfiguredError(config: HostsConfig): Error {
   const chain = hostsCandidates()
     .map((c) => `       ${c.label}`)
@@ -193,8 +193,9 @@ function noHostsConfiguredError(config: HostsConfig): Error {
 }
 
 /** Apply `--host PLAT=ADDR` pins and `--platform` slices to the config.
- *  Pins replace the pool with a single-host pool (the pin is a forced pick). */
-export function resolveLanes(
+ *  Pins replace the pool with a single-host pool (the pin is a forced pick).
+ *  Returns inventory pools — not post-lease lanes (`leaseLanes` picks hosts). */
+export function resolvePools(
   config: HostsConfig,
   hostPins: readonly string[],
   platforms: readonly string[],
@@ -226,21 +227,22 @@ export function resolveLanes(
   return sliced;
 }
 
-/** The fanout pools for a run: `resolveLanes` plus the no-config fail-fast.
- *  Zero resolved lanes means the run named no host anywhere — the juspay/odu#46
+/** The fanout pools for a run: `resolvePools` plus the no-config fail-fast.
+ *  Zero resolved pools means the run named no host anywhere — the juspay/odu#46
  *  case — so we refuse loudly instead of defaulting to a localhost lane. This
- *  is the single seam `run` decides the fanout through; keeping the refusal
- *  here (not inline in `run`) keeps the decision pure and testable. */
-export function fanoutLanes(
+ *  is the single seam `run` decides the inventory through; keeping the refusal
+ *  here (not inline in `run`) keeps the decision pure and testable. Post-lease
+ *  platform→host maps stay named `lanes` (`leaseLanes`). */
+export function fanoutPools(
   config: HostsConfig,
   hostPins: readonly string[],
   platforms: readonly string[],
 ): Record<string, HostPool> {
-  const lanes = resolveLanes(config, hostPins, platforms);
-  if (Object.keys(lanes).length === 0) {
+  const pools = resolvePools(config, hostPins, platforms);
+  if (Object.keys(pools).length === 0) {
     throw noHostsConfiguredError(config);
   }
-  return lanes;
+  return pools;
 }
 
 /** Short label for a dial target: strip `user@` and any domain suffix so the

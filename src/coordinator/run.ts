@@ -44,7 +44,7 @@ import {
 } from "../common/surface";
 import { commitLabel, createDisplay, progressEvent } from "./display";
 import { laneTasks, loadJustPipeline, parseSelector } from "../just/ingest";
-import { fanoutLanes, loadHosts } from "./hosts";
+import { fanoutPools, loadHosts } from "./hosts";
 import { type Lane, startLane } from "./lane";
 import {
   type LeaseHandle,
@@ -303,16 +303,16 @@ async function orchestrate(
   // ── DAG + lanes ──
   const spec = loadJustPipeline(specSource, { root: args.root });
   const hostsConfig = loadHosts();
-  // Zero resolved lanes means a bare `odu run` with no hosts anywhere — no
+  // Zero resolved pools means a bare `odu run` with no hosts anywhere — no
   // config file, no `--host` pin, no `--platform` slice. Defaulting that to a
   // localhost lane silently turned a fanout into a local fork-bomb on a
-  // production workstation (juspay/odu#46), so `fanoutLanes` refuses it loudly
+  // production workstation (juspay/odu#46), so `fanoutPools` refuses it loudly
   // instead — running locally stays available only as an explicit decision
   // (a `"…": "localhost"` entry or `--host PLAT=localhost`). An explicit
-  // `--platform` with no host still errors earlier in resolveLanes.
+  // `--platform` with no host still errors earlier in resolvePools.
   // Values are *pools* (one or more hosts per platform); `leaseLanes` below
   // picks a free machine and holds the venue lock for the run (juspay/odu#54).
-  const poolsByPlatform = fanoutLanes(
+  const poolsByPlatform = fanoutPools(
     hostsConfig,
     args.hostPins,
     args.platforms,

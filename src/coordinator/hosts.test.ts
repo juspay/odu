@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { fanoutLanes, loadHosts, resolveLanes, shortHost } from "./hosts";
+import { fanoutPools, loadHosts, resolvePools, shortHost } from "./hosts";
 
 const prevOduHosts = process.env.ODU_HOSTS;
 afterEach(() => {
@@ -10,21 +10,21 @@ afterEach(() => {
   else process.env.ODU_HOSTS = prevOduHosts;
 });
 
-describe("resolveLanes", () => {
+describe("resolvePools", () => {
   const empty = { hosts: {}, source: null };
 
   it("returns nothing for a bare run with no config — the fail-fast trigger", () => {
-    expect(resolveLanes(empty, [], [])).toEqual({});
+    expect(resolvePools(empty, [], [])).toEqual({});
   });
 
   it("synthesizes a one-host pool from a --host pin even with no config file", () => {
-    expect(resolveLanes(empty, ["aarch64-darwin=localhost"], [])).toEqual({
+    expect(resolvePools(empty, ["aarch64-darwin=localhost"], [])).toEqual({
       "aarch64-darwin": ["localhost"],
     });
   });
 
-  it("errors on --platform with no host — operator asked for a lane we can't build", () => {
-    expect(() => resolveLanes(empty, [], ["x86_64-linux"])).toThrow(
+  it("errors on --platform with no host — operator asked for a pool we can't build", () => {
+    expect(() => resolvePools(empty, [], ["x86_64-linux"])).toThrow(
       /no host/,
     );
   });
@@ -35,12 +35,12 @@ describe("resolveLanes", () => {
       source: "/some/hosts.json",
     };
     expect(
-      resolveLanes(config, ["x86_64-linux=ci-2"], []),
+      resolvePools(config, ["x86_64-linux=ci-2"], []),
     ).toEqual({ "x86_64-linux": ["ci-2"] });
   });
 });
 
-describe("fanoutLanes — the no-config fail-fast (juspay/odu#46)", () => {
+describe("fanoutPools — the no-config fail-fast (juspay/odu#46)", () => {
   const empty = { hosts: {}, source: null };
 
   it("REFUSES a bare run with no hosts config — never a silent localhost lane", () => {
@@ -49,7 +49,7 @@ describe("fanoutLanes — the no-config fail-fast (juspay/odu#46)", () => {
     // The correct behavior is a loud refusal, NOT any localhost lane.
     let thrown: Error | undefined;
     try {
-      fanoutLanes(empty, [], []);
+      fanoutPools(empty, [], []);
     } catch (e) {
       thrown = e as Error;
     }
@@ -62,30 +62,30 @@ describe("fanoutLanes — the no-config fail-fast (juspay/odu#46)", () => {
   });
 
   it("names the full resolution chain in the refusal so the operator knows what was checked", () => {
-    const msg = messageOf(() => fanoutLanes(empty, [], []));
+    const msg = messageOf(() => fanoutPools(empty, [], []));
     expect(msg).toContain("$ODU_HOSTS");
     expect(msg).toContain("~/.config/odu/hosts.json");
     expect(msg).toContain("~/.config/justci/hosts.json");
   });
 
   it("tells the operator how to opt into localhost on purpose", () => {
-    const msg = messageOf(() => fanoutLanes(empty, [], []));
+    const msg = messageOf(() => fanoutPools(empty, [], []));
     expect(msg).toContain("--host");
     expect(msg).toContain("localhost");
   });
 
   it("names the winning-but-empty file when a hosts file exists yet configures nothing", () => {
-    // A `{}` file that won resolution still resolves zero lanes → refuse. The
+    // A `{}` file that won resolution still resolves zero pools → refuse. The
     // diagnosis must name that file, not claim nothing existed.
     const emptyFile = { hosts: {}, source: "/home/me/.config/odu/hosts.json" };
-    const msg = messageOf(() => fanoutLanes(emptyFile, [], []));
+    const msg = messageOf(() => fanoutPools(emptyFile, [], []));
     expect(msg).toMatch(/refus/i);
     expect(msg).toContain("/home/me/.config/odu/hosts.json");
     expect(msg).toContain("configured no platform");
   });
 
   it("keeps an explicit --host PLAT=localhost override working (localhost as a decision)", () => {
-    expect(fanoutLanes(empty, ["x86_64-linux=localhost"], [])).toEqual({
+    expect(fanoutPools(empty, ["x86_64-linux=localhost"], [])).toEqual({
       "x86_64-linux": ["localhost"],
     });
   });
@@ -95,7 +95,7 @@ describe("fanoutLanes — the no-config fail-fast (juspay/odu#46)", () => {
       hosts: { "x86_64-linux": ["localhost"] },
       source: "/some/hosts.json",
     };
-    expect(fanoutLanes(config, [], [])).toEqual({
+    expect(fanoutPools(config, [], [])).toEqual({
       "x86_64-linux": ["localhost"],
     });
   });
@@ -107,7 +107,7 @@ describe("fanoutLanes — the no-config fail-fast (juspay/odu#46)", () => {
     };
     // aarch64-darwin absent from the config simply doesn't join the fanout —
     // a partial config someone wrote, distinct from the no-config refusal above.
-    expect(fanoutLanes(config, [], [])).toEqual({
+    expect(fanoutPools(config, [], [])).toEqual({
       "x86_64-linux": ["builder.example"],
     });
   });
@@ -120,7 +120,7 @@ describe("fanoutLanes — the no-config fail-fast (juspay/odu#46)", () => {
       },
       source: "/some/hosts.json",
     };
-    expect(fanoutLanes(config, [], [])).toEqual({
+    expect(fanoutPools(config, [], [])).toEqual({
       "x86_64-linux": ["ci-1", "ci-2", "ci-3"],
       "aarch64-darwin": ["rasam", "sincereintent"],
     });
