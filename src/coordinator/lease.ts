@@ -22,6 +22,7 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { hostname, userInfo } from "node:os";
+import { shellQuoteArg } from "@kolu/shell-quote";
 import { isLocalHost } from "@kolu/surface-remote";
 import { shortHost, type HostPool } from "./hosts";
 
@@ -117,12 +118,9 @@ export function parseHolderBody(body: string): HolderInfo | null {
   return { holder: line, run: null, sinceMs: Date.now() };
 }
 
-function shellQuote(s: string): string {
-  return `'${s.replace(/'/g, `'\\''`)}'`;
-}
-
 /** Remote claim command (single ssh argv): non-blocking flock, write holder,
- *  wait on heartbeats from stdin. Quoting is shell-safe for `ssh host <cmd>`. */
+ *  wait on heartbeats from stdin. Quoting via `@kolu/shell-quote` (same leaf
+ *  surface-remote uses for ssh remote argv). */
 function claimRemoteScript(
   lock: string,
   identity: LeaseIdentity,
@@ -135,9 +133,9 @@ function claimRemoteScript(
   // On hold: write holder, print HELD, then read heartbeats until EOF/TTL/MAX.
   // stdin is ONLY the heartbeat channel (script is an ssh argv, not bash -s).
   return [
-    `LOCK=${shellQuote(lock)}`,
-    `HOLDER=${shellQuote(holderFile)}`,
-    `BODY=${shellQuote(body)}`,
+    `LOCK=${shellQuoteArg(lock)}`,
+    `HOLDER=${shellQuoteArg(holderFile)}`,
+    `BODY=${shellQuoteArg(body)}`,
     `TTL=${TTL_S}`,
     `MAX=${MAX_HOLD_S}`,
     `command -v flock >/dev/null 2>&1 || { echo 'NOFLOCK flock(1) missing on host'; exit 9; }`,
@@ -163,8 +161,8 @@ function claimRemoteScript(
 function probeRemoteScript(lock: string): string {
   const holderFile = `${lock}.holder`;
   return [
-    `LOCK=${shellQuote(lock)}`,
-    `HOLDER=${shellQuote(holderFile)}`,
+    `LOCK=${shellQuoteArg(lock)}`,
+    `HOLDER=${shellQuoteArg(holderFile)}`,
     `command -v flock >/dev/null 2>&1 || { echo 'NOFLOCK'; exit 9; }`,
     `if flock -n "$LOCK" -c true 2>/dev/null; then echo FREE`,
     `else echo BUSY; if [ -f "$HOLDER" ]; then cat "$HOLDER"; fi; fi`,
