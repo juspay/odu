@@ -22,6 +22,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { isLocalHost } from "@kolu/surface-remote";
 
 /** One platform's declared inventory — always a list (a bare string in the
  *  file normalizes to a one-element pool). Never empty after `loadHosts`: an
@@ -63,6 +64,32 @@ function hostsCandidates(): HostsCandidate[] {
   ];
 }
 
+/**
+ * Refuse pools that mix localhost with remotes. Localhost is lease-exempt
+ * (checkout socket serializes local runs); in a multi-host scan that made it
+ * an always-free overflow — busy remotes were skipped the moment a local
+ * entry appeared. Pure-local (typically a sole `"localhost"`) and pure-remote
+ * pools are both fine; mixing is illegal at load time.
+ */
+function assertPoolLocality(
+  path: string,
+  platform: string,
+  pool: readonly string[],
+): void {
+  let anyLocal = false;
+  let anyRemote = false;
+  for (const host of pool) {
+    if (isLocalHost(host)) anyLocal = true;
+    else anyRemote = true;
+  }
+  if (anyLocal && anyRemote) {
+    throw new Error(
+      `odu: ${path}: host pool for "${platform}" must not mix localhost with remote hosts` +
+        ` (got ${JSON.stringify(pool)}; use a pure-local or pure-remote pool)`,
+    );
+  }
+}
+
 /** Parse one platform's value: a string, or a non-empty array of strings. */
 function parsePool(
   path: string,
@@ -75,6 +102,9 @@ function parsePool(
         `odu: ${path}: host for "${platform}" must be a non-empty string`,
       );
     }
+    // Single host — pure by construction; still assert for symmetry if someone
+    // later folds pins through the same gate.
+    assertPoolLocality(path, platform, [value]);
     return [value];
   }
   if (Array.isArray(value)) {
@@ -92,6 +122,7 @@ function parsePool(
       }
       pool.push(entry);
     }
+    assertPoolLocality(path, platform, pool);
     return pool;
   }
   throw new Error(

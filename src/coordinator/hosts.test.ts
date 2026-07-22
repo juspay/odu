@@ -164,6 +164,16 @@ describe("loadHosts — string | list values", () => {
     writeHosts({ "x86_64-linux": [1, 2] });
     expect(() => loadHosts()).toThrow(/array of non-empty strings/);
   });
+
+  it("refuses a pool that mixes localhost with remotes", () => {
+    writeHosts({ "x86_64-linux": ["ci-1", "localhost", "ci-2"] });
+    expect(() => loadHosts()).toThrow(/must not mix localhost with remote/);
+  });
+
+  it("keeps a pure-local sole-localhost pool", () => {
+    writeHosts({ "x86_64-linux": ["localhost"] });
+    expect(loadHosts().hosts).toEqual({ "x86_64-linux": ["localhost"] });
+  });
 });
 
 function messageOf(fn: () => unknown): string {
