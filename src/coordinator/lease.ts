@@ -41,13 +41,25 @@ export function leaseLockPath(): string {
     : "/tmp/odu.lease";
 }
 
-const HEARTBEAT_S = Number(process.env.ODU_LEASE_HEARTBEAT ?? 10);
-const TTL_S = Number(process.env.ODU_LEASE_TTL ?? 40);
+/**
+ * Parse a non-negative env override. Empty / non-finite / below `min` fall back
+ * — `Number("")` is 0 and would busy-loop `setInterval` or break remote
+ * `read -t` if taken as a real value (same pattern as `lingerIdleMs`).
+ */
+function envNumber(name: string, fallback: number, min: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= min ? n : fallback;
+}
+
+const HEARTBEAT_S = envNumber("ODU_LEASE_HEARTBEAT", 10, 1);
+const TTL_S = envNumber("ODU_LEASE_TTL", 40, 1);
 /** Absolute remote hold ceiling in seconds. `0` (default) = unlimited while
  *  heartbeats arrive — only idle TTL / EOF end the hold. */
-const MAX_HOLD_S = Number(process.env.ODU_LEASE_MAX_HOLD ?? 0);
-const WAIT_POLL_MS = Number(process.env.ODU_LEASE_WAIT_POLL_MS ?? 5_000);
-const CLAIM_TIMEOUT_MS = Number(process.env.ODU_LEASE_CLAIM_TIMEOUT_MS ?? 30_000);
+const MAX_HOLD_S = envNumber("ODU_LEASE_MAX_HOLD", 0, 0);
+const WAIT_POLL_MS = envNumber("ODU_LEASE_WAIT_POLL_MS", 5_000, 1);
+const CLAIM_TIMEOUT_MS = envNumber("ODU_LEASE_CLAIM_TIMEOUT_MS", 30_000, 1);
 
 export interface HolderInfo {
   /** Local identity of the process holding the lock (`user@hostname`). */
@@ -238,6 +250,10 @@ function spawnSsh(host: string, script: string): ChildProcess {
   });
 }
 
+/** Cap dial collectors — claim holds last for the whole run; an ssh that
+ *  chatters on stderr must not grow these for hours (MCP spawn caps the same). */
+const DIAL_COLLECT_MAX = 64 * 1024;
+
 function attachCollectors(child: ChildProcess): {
   getStdout: () => string;
   getCombined: () => string;
@@ -247,10 +263,10 @@ function attachCollectors(child: ChildProcess): {
   child.stdout?.setEncoding("utf-8");
   child.stderr?.setEncoding("utf-8");
   child.stdout?.on("data", (chunk: string) => {
-    stdout += chunk;
+    stdout = (stdout + chunk).slice(-DIAL_COLLECT_MAX);
   });
   child.stderr?.on("data", (chunk: string) => {
-    stderr += chunk;
+    stderr = (stderr + chunk).slice(-DIAL_COLLECT_MAX);
   });
   return {
     getStdout: () => stdout,
@@ -265,13 +281,21 @@ function dialProbe(host: string, script: string): Promise<DialResult> {
     const child = spawnSsh(host, script);
     const { getCombined } = attachCollectors(child);
     child.stdin?.end();
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-    }, CLAIM_TIMEOUT_MS);
-    child.on("close", (code) => {
+    let settled = false;
+    const finish = (code: number | null): void => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       resolve({ stdout: getCombined(), code });
-    });
+    };
+    // Timeout must resolve (not only kill): Node docs say spawn `error` may
+    // omit `close`, which would hang probe forever if we only waited on close.
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish(null);
+    }, CLAIM_TIMEOUT_MS);
+    child.on("error", () => finish(null));
+    child.on("close", (code) => finish(code));
   });
 }
 
@@ -286,14 +310,18 @@ function dialClaim(host: string, script: string): Promise<DialResult> {
     const { getStdout, getCombined } = attachCollectors(child);
 
     let settled = false;
-    const timer = setTimeout(() => {
+    const settleFail = (code: number | null): void => {
       if (settled) return;
       settled = true;
-      child.kill("SIGKILL");
+      clearTimeout(timer);
       resolve({
-        stdout: getStdout(),
-        code: null,
+        stdout: getCombined(),
+        code,
       });
+    };
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      settleFail(null);
     }, CLAIM_TIMEOUT_MS);
 
     const trySettle = (): void => {
@@ -337,7 +365,7 @@ function dialClaim(host: string, script: string): Promise<DialResult> {
                 try {
                   child.stdin?.end();
                 } catch {
-                  /* ignore */
+                  /* ignore — stdin already closed / child already dead */
                 }
                 // Give the remote a moment to see EOF; then ensure death.
                 setTimeout(() => {
@@ -355,15 +383,10 @@ function dialClaim(host: string, script: string): Promise<DialResult> {
     };
 
     child.stdout?.on("data", () => trySettle());
-    child.on("close", (code) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve({
-        stdout: getCombined(),
-        code,
-      });
-    });
+    // Spawn failure (missing ssh, etc.) may not emit `close` — fail closed now
+    // rather than waiting the full claim timeout with an unhandled `error`.
+    child.on("error", () => settleFail(null));
+    child.on("close", (code) => settleFail(code));
   });
 }
 
