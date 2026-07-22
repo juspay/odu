@@ -76,8 +76,8 @@
   padding: .12rem .28rem;
   border: 1px solid var(--line);
   border-radius: 3px;
-  color: #c8d4ce;
-  background: var(--panel);
+  color: var(--ink);
+  background: var(--panel-2);
   font: .84em var(--mono);
 }
 .docs-content pre {
@@ -121,7 +121,7 @@
 }
 .docs-content blockquote p {
   margin: .4rem 0;
-  color: #b8b19d;
+  color: var(--muted);
 }
 
 @media (max-width: 800px) {

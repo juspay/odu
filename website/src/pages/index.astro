@@ -23,7 +23,19 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
       name="description"
       content="odu is live, attachable CI for just recipe DAGs — one state for humans and coding agents."
     />
-    <meta name="theme-color" content="#0a0c0b" />
+    <meta name="theme-color" content="#080b0a" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#f4f7f5" media="(prefers-color-scheme: light)" />
+    <script is:inline>
+      (function () {
+        try {
+          var s = localStorage.getItem("odu-theme");
+          document.documentElement.dataset.theme =
+            s || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+        } catch (e) {
+          document.documentElement.dataset.theme = "dark";
+        }
+      })();
+    </script>
     <link rel="icon" type="image/svg+xml" href={`${base}/logo.svg`} />
     <link rel="canonical" href="https://juspay.github.io/odu/" />
     <meta property="og:title" content="odu — CI you can attach to" />
@@ -43,10 +55,10 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
           <div class="hero-grid">
             <div>
               <p class="eyebrow">Live CI for just · humans + agents</p>
-              <h1>CI you can <em>attach to.</em></h1>
+              <h1>CI you can <em>attach to.</em><span class="cursor" aria-hidden="true">▌</span></h1>
               <p class="hero-copy">
-                Batch CI turns your task graph into a process and leaves log files.
-                <strong>odu keeps the pipeline alive as typed state</strong> —
+                Batch CI turns your task graph into a process and leaves log
+                files. <strong>odu keeps the pipeline alive as typed state</strong> —
                 attach from another terminal, or let a coding agent drive the same
                 run over MCP. Your <a href="https://just.systems"><code>just</code></a> file
                 is still the pipeline.
@@ -56,9 +68,29 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
                 <a class="button" href="#proof">Watch demos</a>
                 <a class="button button-ghost" href={`${base}/docs/`}>Docs</a>
               </div>
-              <div class="hero-cmd">
-                <code><span class="prompt">$</span> {runCmd}</code>
-                <button class="copy-btn" type="button" data-copy={runCmd}>copy</button>
+              <div class="hero-term" aria-label="A live odu pipeline settling in real time">
+                <div class="term-bar">
+                  <span class="term-dot r"></span>
+                  <span class="term-dot y"></span>
+                  <span class="term-dot g"></span>
+                  <span class="term-title">odu — live run</span>
+                  <button class="copy-btn" type="button" data-copy={runCmd} style="margin-left:auto">copy</button>
+                </div>
+                <div class="term-body">
+                  <div class="cmd"><span class="prompt">$</span> nix run github:juspay/odu -- run <span class="flag">--host x86_64-linux=localhost</span></div>
+                  <div class="pipeline" aria-hidden="true">
+                    <span class="pnode"><span class="pdot" style="--d:0s"><span class="pcheck">✓</span></span>typecheck</span>
+                    <span class="parrow">→</span>
+                    <span class="pnode"><span class="pdot" style="--d:.8s"><span class="pcheck">✓</span></span>unit</span>
+                    <span class="parrow">→</span>
+                    <span class="pnode"><span class="pdot" style="--d:1.4s"><span class="pcheck">✓</span></span>fmt</span>
+                    <span class="parrow">→</span>
+                    <span class="pnode"><span class="pdot" style="--d:1.4s"><span class="pcheck">✓</span></span>nix</span>
+                    <span class="parrow">→</span>
+                    <span class="pnode"><span class="pdot" style="--d:2.4s"><span class="pcheck">✓</span></span>e2e</span>
+                  </div>
+                  <div class="term-status"><span class="live" aria-hidden="true"></span> attach · mcp · rerun — same live state<span class="caret" aria-hidden="true"></span></div>
+                </div>
               </div>
             </div>
 
@@ -141,7 +173,7 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
               </p>
             </div>
             <div class="outcomes">
-              <article class="outcome">
+              <article class="outcome who-human">
                 <span class="who">Human</span>
                 <h3>Attach while e2e is still running</h3>
                 <p>
@@ -150,7 +182,7 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
                   everything that ran before you connected.
                 </p>
               </article>
-              <article class="outcome">
+              <article class="outcome who-agent">
                 <span class="who">Agent</span>
                 <h3>Stop on first red, not after 20 minutes</h3>
                 <p>
@@ -159,7 +191,7 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
                   failed node and its dependents.
                 </p>
               </article>
-              <article class="outcome">
+              <article class="outcome who-human">
                 <span class="who">Human</span>
                 <h3>Retry a flake without restarting CI</h3>
                 <p>
@@ -167,15 +199,87 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
                   flaky node. No full pipeline restart for one bad leaf.
                 </p>
               </article>
-              <article class="outcome">
+              <article class="outcome who-team">
                 <span class="who">Team</span>
-                <h3>Linux + macOS, nothing preinstalled</h3>
+                <h3>Linux + macOS in one command</h3>
                 <p>
-                  Explicit ssh lanes. Hosts need ssh, Nix, and outbound HTTPS —
-                  the runner arrives as a Nix closure. GitHub statuses post from
-                  your machine.
+                  A bare <code>odu run</code> covers every configured platform and
+                  posts a GitHub commit status per <code>recipe@platform</code> — a
+                  green matrix on your own machines, no hosted runner rented.
                 </p>
               </article>
+            </div>
+          </div>
+        </section>
+
+        <!-- 3b. Execution model: local coordinator, remote hosts, pools -->
+        <section id="hosts" class="section">
+          <div class="shell">
+            <div class="section-head">
+              <p class="eyebrow">Local coordinator · remote lanes</p>
+              <h2 class="section-title">Runs from your machine. Executes anywhere.</h2>
+              <p class="section-lead">
+                No CI service, no server-side YAML. The coordinator lives
+                on <strong>your machine</strong> — a bare <code>odu run</code> fans out
+                across every configured platform at once, delegating each lane to a
+                host over plain ssh. The runner travels as a Nix closure, so hosts
+                need only ssh, Nix, and outbound HTTPS. Nothing preinstalled.
+              </p>
+            </div>
+
+            <div class="topo" aria-label="odu execution topology">
+              <div class="topo-node topo-coord">
+                <span class="topo-tag">your machine</span>
+                <strong>odu run</strong>
+                <span class="topo-sub">coordinator · holds live state · posts GitHub statuses</span>
+              </div>
+              <div class="topo-arrow" aria-hidden="true">
+                <span class="glyph">→</span>
+                <span class="lbl">ssh · Nix closure</span>
+              </div>
+              <div class="topo-lanes">
+                <div class="topo-lane">
+                  <span class="topo-plat">x86_64-linux</span>
+                  <div class="topo-pool">
+                    <span class="host held">ci-1 <i>leased</i></span>
+                    <span class="host">ci-2</span>
+                    <span class="host">localhost</span>
+                  </div>
+                </div>
+                <div class="topo-lane">
+                  <span class="topo-plat">aarch64-darwin</span>
+                  <div class="topo-pool">
+                    <span class="host held">mac-mini <i>leased</i></span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="host-facts">
+              <div class="host-fact">
+                <h3>Point a platform at a pool</h3>
+                <p>
+                  List several machines for a platform. odu <strong>leases a free
+                  one</strong>, locks it for the run, and releases when it settles —
+                  or when the holder dies.
+                </p>
+              </div>
+              <div class="host-fact">
+                <h3>One run per machine</h3>
+                <p>
+                  The lock is an <code>flock</code> on the builder. Whole pool
+                  busy? <strong>Wait in line</strong> — it names who you're behind —
+                  or <code>--no-wait</code> to fail fast.
+                </p>
+              </div>
+              <div class="host-fact">
+                <h3>localhost is opt-in</h3>
+                <p>
+                  Never a silent fallback. This machine runs only when you
+                  name it: <code>--host P=localhost</code>, the sole lane, or an
+                  explicit pool member.
+                </p>
+              </div>
             </div>
           </div>
         </section>
@@ -224,8 +328,7 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
               </div>
               <div>
                 <p class="section-lead" style="margin-top:0">
-                  Tools: <code>run</code>, <code>wait_for_settle</code>,
-                  <code>node_rerun</code>, <code>cancel</code>, <code>runs</code>.
+                  Tools: <code>run</code>, <code>wait_for_settle</code>, <code>node_rerun</code>, <code>cancel</code>, <code>runs</code>.
                   Pipeline state and logs are subscribable resources, not scraped text.
                 </p>
                 <p class="section-lead">
@@ -271,8 +374,7 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
               </div>
               <figcaption>
                 Exactly one recipe carries <code>[metadata("ci")]</code>. Everything
-                reachable from it is the pipeline — here <code>typecheck</code>,
-                <code>unit</code>, <code>fmt</code>, <code>nix</code>, and <code>e2e</code>.
+                reachable from it is the pipeline — here <code>typecheck</code>, <code>unit</code>, <code>fmt</code>, <code>nix</code>, and <code>e2e</code>.
               </figcaption>
             </figure>
 
