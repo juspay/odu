@@ -377,6 +377,60 @@ button { font: inherit; }
   color: var(--ink);
 }
 
+/* —— Justfile example —— */
+.justfile-example {
+  margin: 0 0 1.5rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  overflow: hidden;
+}
+.justfile-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .65rem 1rem;
+  padding: .7rem 1rem;
+  border-bottom: 1px solid var(--line);
+  font: .72rem/1 var(--mono);
+}
+.justfile-path {
+  color: var(--ink);
+  font-weight: 600;
+}
+.justfile-note {
+  color: var(--quiet);
+  flex: 1;
+}
+.justfile-source {
+  color: var(--muted);
+  text-decoration: none;
+}
+.justfile-source:hover { color: var(--green); }
+.justfile-code {
+  overflow-x: auto;
+  background: #0c0f0e;
+}
+.justfile-code pre,
+.justfile-code .astro-code {
+  margin: 0 !important;
+  padding: 1.1rem 1.15rem !important;
+  background: #0c0f0e !important;
+  font: .78rem/1.65 var(--mono) !important;
+  border-radius: 0 !important;
+}
+.justfile-example figcaption {
+  padding: .85rem 1rem;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: .88rem;
+  line-height: 1.5;
+}
+.justfile-example figcaption code {
+  font: .88em var(--mono);
+  color: var(--ink);
+}
+
 /* —— Quickstart —— */
 .steps {
   display: grid;
@@ -402,6 +456,16 @@ button { font: inherit; }
   margin: 0 0 .75rem;
   font-size: .95rem;
   font-weight: 600;
+}
+.step-copy {
+  margin: 0;
+  color: var(--muted);
+  font-size: .88rem;
+  line-height: 1.55;
+}
+.step-copy code {
+  font: .88em var(--mono);
+  color: var(--ink);
 }
 .code-block {
   position: relative;

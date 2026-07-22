@@ -1,10 +1,17 @@
 ---
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { Code } from "astro:components";
 import "../styles/global.css";
 import SiteChrome from "../components/SiteChrome.astro";
 
 const base = import.meta.env.BASE_URL.replace(/\/$/, "");
 const github = "https://github.com/juspay/odu";
 const runCmd = "nix run github:juspay/odu -- run --host x86_64-linux=localhost";
+
+// Dogfood: show odu's real CI justfile. Astro's cwd is website/, so ../ci is the repo.
+const justfileSource = readFileSync(resolve(process.cwd(), "../ci/mod.just"), "utf-8");
+const justfileHref = `${github}/blob/master/ci/mod.just`;
 ---
 
 <!doctype html>
@@ -245,11 +252,38 @@ const runCmd = "nix run github:juspay/odu -- run --host x86_64-linux=localhost";
                 Hosts are always explicit — never a silent localhost surprise.
               </p>
             </div>
+
+            <figure class="justfile-example">
+              <div class="justfile-bar">
+                <span class="justfile-path">ci/mod.just</span>
+                <span class="justfile-note">odu’s own CI — this repo</span>
+                <a class="justfile-source" href={justfileHref} target="_blank" rel="noreferrer">
+                  source ↗
+                </a>
+              </div>
+              <div class="justfile-code">
+                <Code
+                  code={justfileSource}
+                  lang="just"
+                  theme="github-dark"
+                  class="justfile-shiki"
+                />
+              </div>
+              <figcaption>
+                Exactly one recipe carries <code>[metadata("ci")]</code>. Everything
+                reachable from it is the pipeline — here <code>typecheck</code>,
+                <code>unit</code>, <code>fmt</code>, <code>nix</code>, and <code>e2e</code>.
+              </figcaption>
+            </figure>
+
             <div class="steps">
               <div class="step">
                 <span class="step-n">01</span>
                 <h3>Tag the root</h3>
-                <pre class="code-block"><span class="line"><span class="accent">[metadata("ci")]</span></span><span class="line">default: build test lint</span></pre>
+                <p class="step-copy">
+                  Add <code>[metadata("ci")]</code> to one recipe. That dependency
+                  closure is what odu runs.
+                </p>
               </div>
               <div class="step">
                 <span class="step-n">02</span>
@@ -258,7 +292,7 @@ const runCmd = "nix run github:juspay/odu -- run --host x86_64-linux=localhost";
                   <button class="copy-btn" type="button" data-copy={runCmd}>copy</button>
                   <span class="line"><span class="dim">$</span> nix run github:juspay/odu -- run \</span>
                   <span class="line">    --host x86_64-linux=localhost</span>
-                  <span class="line"><span class="accent">✓</span> build  <span class="accent">✓</span> lint  <span class="dim">⠹</span> test</span>
+                  <span class="line"><span class="accent">✓</span> typecheck  <span class="accent">✓</span> unit  <span class="dim">⠹</span> e2e</span>
                 </pre>
               </div>
               <div class="step">
