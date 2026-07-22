@@ -5,8 +5,9 @@
  *
  * Stdout is the protocol channel: all diagnostics go to fd 2 (and
  * `serveOverStdio` defensively redirects `console.log` there). The runner
- * spawns idle and waits for `run.configure` over the surface; it exits when
- * the coordinator closes the pipe — one run per lane process.
+ * spawns idle and serves `laneSurface`: venue `lease.*` (pool claim/probe)
+ * and `run.configure` (CI). It exits when the coordinator closes the pipe —
+ * one agent process per dial (lease hold and/or lane).
  */
 
 import { parseArgs } from "node:util";

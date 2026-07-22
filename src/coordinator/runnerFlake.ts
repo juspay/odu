@@ -10,11 +10,17 @@
  * override — "use a different runner" means "run a different odu"; pointing one
  * odu at another's runner is a version-skew footgun, not a feature.
  *
+ * Venue lease dials the same agent (surface-remote + `lease.*` procedures);
+ * pool claim/probe and lane CI share this resolution path.
+ *
  * There is deliberately NO fallback either: a coordinator that carries no baked
  * flake is misbuilt (a raw `tsx src/cli/main.ts`, or a non-flake `nix-build`),
  * and resolving the runner from the consumer's flake is exactly the silent
  * failure this indirection exists to remove. So we refuse loudly.
  */
+
+import { spawnSync } from "node:child_process";
+
 export function resolveRunnerFlake(env: NodeJS.ProcessEnv): string {
   const flake = env.ODU_RUNNER_FLAKE;
   if (flake === undefined || flake === "") {
@@ -51,4 +57,30 @@ export function missingRunnerError(
     `ODU_RUNNER_FLAKE must point at an odu flake (it is baked onto the binary ` +
     `from odu's own source; in a dev checkout, git+file://$PWD).`
   );
+}
+
+/**
+ * Evaluate `packages.<platform>.odu-runner.drvPath` from the runner flake.
+ * Shared by venue lease (claim/probe) and lane start — one agent, one drv.
+ */
+export function evalOduRunnerDrv(
+  runnerFlake: string,
+  platform: string,
+): string {
+  const attr = `${runnerFlake}#packages.${platform}.odu-runner.drvPath`;
+  const result = spawnSync(
+    "nix",
+    ["eval", "--raw", "--accept-flake-config", attr],
+    { encoding: "utf-8", maxBuffer: 16 * 1024 * 1024 },
+  );
+  if (result.status !== 0) {
+    const directed = missingRunnerError(
+      runnerFlake,
+      platform,
+      result.stderr,
+    );
+    if (directed !== null) throw new Error(directed);
+    throw new Error(`nix eval odu-runner drv failed:\n${result.stderr}`);
+  }
+  return result.stdout.trim();
 }

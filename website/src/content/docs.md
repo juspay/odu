@@ -43,9 +43,10 @@ This is built with [**@kolu/surface**](https://kolu.dev/surface/), a framework f
 odu run  (coordinator, your machine)
  ├─ strict gate: refuse a dirty tree, pin HEAD via git worktree
  ├─ ingest: just --dump → [metadata("ci")] dependency DAG
+ ├─ venue lease: pick a free host per platform (pool) and hold it
+ │    (or reuse an agent-held lease from `odu lease` / MCP lease)
  ├─ per-platform lane:
- │    copy the runner closure → realise on the host →
- │    ssh host odu-runner --stdio → configure over the surface →
+ │    dial odu-runner over surface-remote → configure over the surface →
  │    fetch the pushed SHA → run each node with just --no-deps
  ├─ fan-in: merge lane state and serve it on .ci/odu.sock
  ├─ logs: .ci/<sha>/<platform>/<recipe>.log
@@ -55,7 +56,7 @@ odu run  (coordinator, your machine)
 
 A remote lane needs **ssh, Nix, and outbound HTTPS**. The runner travels as a Nix closure, the toolchain comes from the repository's dev shell, and the source arrives by `git fetch` of the pushed SHA.
 
-The runner derivation belongs to odu, not the target repository. `ODU_RUNNER_FLAKE` is baked into the `odu` binary at build time, so coordinator and runner always ship together and share the exact RPC contract.
+The runner derivation belongs to odu, not the target repository. `ODU_RUNNER_FLAKE` is baked into the `odu` binary at build time, so coordinator and runner always ship together and share the exact RPC contract. Venue locking uses the **same odu-runner agent** (`lease.claim` / `lease.probe` / `lease.release` on the lane surface)—not a separate bash-over-ssh protocol.
 
 ## Configure your repo
 
@@ -103,6 +104,42 @@ Define platform lanes in `~/.config/odu/hosts.json`, or point `$ODU_HOSTS` at an
 
 Keys are Nix system tuples. Values are anything ssh can dial, or `localhost`. A bare `odu run` fans out to every configured platform. Platforms absent from an existing hosts file are intentionally omitted: a partial configuration is still a decision. Use `--platform P` to select a subset or `--host P=ADDR` to pin or add a lane for one run.
 
+### Venue pools (one free machine per platform)
+
+A platform can list several hosts. odu picks a free machine, locks it for the run, and releases when the run ends (or the holder dies):
+
+```json
+{
+  "x86_64-linux": ["nix@ci-1", "nix@ci-2", "nix@ci-3"],
+  "aarch64-darwin": ["nix-infra@rasam.example.ts.net", "srid@sincereintent"]
+}
+```
+
+Rules:
+
+- **One run per machine.** The lock is an `flock` **on the builder**, held by the **odu-runner agent** the coordinator dials over surface-remote (`lease.claim`). `flock` comes from odu-runner's Nix closure (util-linux on its PATH)—builders need ssh + Nix, not a system-installed flock.
+- **Busy pool → wait in line** (and say who you're waiting for). `--no-wait` fails immediately instead.
+- **`--host P=ADDR`** pins a specific machine for that run (waits if busy).
+- **`localhost` is never an implicit fallback** (see [juspay/odu#46](https://github.com/juspay/odu/issues/46)). It participates only when you name it—for one run with `--host`, as the only entry, or as an **explicit** member of a mixed pool (e.g. `["ci-1", "localhost"]`) so it can be picked when remotes are busy.
+- Multi-platform claim is **all-or-nothing**: partial holds are released while waiting for the full set.
+
+`odu hosts` probes free / busy / held-by without acquiring (same agent, `lease.probe`). Lock file default: `/tmp/odu.lease` (`ODU_LEASE_LOCK` to override).
+
+On the agent, half-open links self-release after ~45s without inbound activity including framework `system.live` probes (`ODU_LEASE_DEAD_MAN_MS`). Forgotten holds self-release after 1h (`ODU_LEASE_MAX_HOLD_MS`; `0` = unlimited).
+
+### Agent-held leases (cross-run)
+
+A coding agent without a long-lived orchestrator can hold a venue across discrete tool calls:
+
+```sh
+odu lease                     # all platforms; prints wait/held lines
+odu lease x86_64-linux --no-wait
+odu run                       # reuses held hosts — no re-queue; lock untouched on exit
+odu release                   # drop agent-held lease(s)
+```
+
+`odu lease` spawns a detached holder (`odu lease-hold`) that dials odu-runner and records state in `.ci/odu-lease.json` (`held` / `waiting`, host, holder pid). MCP tools `lease` / `release` match: `lease` returns **immediately** with `held {host}` or `waiting {behind…}`; re-call `lease` or inventory to observe the queue. `odu run` consumes agent-held hosts and skips its own claim/release for those platforms. `--host` still overrides.
+
 ### Scope recipes by OS
 
 odu respects `just`'s built-in [OS attributes](https://just.systems/man/en/attributes.html). A tagged recipe—and anything that depends on it—is pruned from lanes that do not match:
@@ -131,12 +168,16 @@ odu run [recipe[@platform]…]      run selectors; bare recipes fan out
     --progress json               emit NDJSON node transitions
     --supersede                   cancel the current run, then start
     --linger                      keep serving after settlement
+    --no-wait                     fail if every host in a pool is busy
 
 odu status [-o json]              snapshot the live run
 odu logs [-f] <node>              replay and optionally follow a node log
 odu attach [-o json]              attach the live dashboard or event stream
 odu cancel                        cleanly stop the live run
 odu runs [-o json]                read durable run history
+odu hosts                         venue inventory (free / busy / held by)
+odu lease [PLAT…] [--no-wait]     agent-held venue across runs
+odu release [PLAT…]               drop agent-held lease(s)
 odu dump | graph                  emit the resolved DAG as JSON or Mermaid
 odu protect [--dry-run]           sync required GitHub status contexts
     --platform P (repeatable)     explicit repo platform set; no hosts needed
@@ -158,11 +199,13 @@ The interface projects odu's [@kolu/surface](https://kolu.dev/surface/) through 
 
 | Tool | Purpose |
 | --- | --- |
-| `run` | Start a background coordinator. Supports `supersede` and `linger`. |
+| `run` | Start a background coordinator. Supports `supersede`, `linger`, and `no_wait`. Reuses agent-held venues without re-claiming. |
 | `node_rerun` | Reset one node and its transitive dependents. |
 | `wait_for_settle` | Return on settlement or immediately when a node goes red. Carries `sha7` and the reserved `seq`, and fails loud with no live run or an `expected_sha` mismatch. |
 | `cancel` | Stop and fully tear down the live run. |
 | `runs` | Read durable run history after the coordinator exits. |
+| `lease` | Agent-held venue: spawn a detached holder and return immediately with `held {host}` or `waiting {behind…}`. Re-call to observe the queue. |
+| `release` | Drop agent-held venue lease(s). |
 
 Pipeline state and logs are subscribable resources rather than tools:
 
@@ -171,9 +214,13 @@ Pipeline state and logs are subscribable resources rather than tools:
 
 Both support `resources/subscribe` and `notifications/resources/updated`. `wait_for_settle` is the blocking fallback for hosts that do not wake a model on notifications.
 
-The fail-fast loop is:
+Typical agent loops:
 
 ```text
+# Cross-run venue (no re-queue between iterations)
+lease → run → wait_for_settle → fix → run → … → release
+
+# Fail-fast on a live run
 run → wait_for_settle → read red node log → fix → node_rerun
 ```
 

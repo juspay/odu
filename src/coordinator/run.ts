@@ -1,12 +1,14 @@
 /**
- * `odu run` — the coordinator. One process owns the whole run, mirroring the
- * lease wrapper's constraint (the flock lives in `ci/pu/run.sh`, which
- * parents exactly one coordinator):
+ * `odu run` — the coordinator. One process owns the whole run, including the
+ * venue lease (ssh-held flock per remote host — juspay/odu#54): lock lifetime
+ * equals run lifetime, so crash / SIGKILL free the box when the connection
+ * drops.
  *
- *   strict gate → HEAD snapshot → `just` DAG ingest → fan lanes out per
- *   platform (an ssh session each) → merge lane state into one fan-in surface
+ *   strict gate → HEAD snapshot → `just` DAG ingest → free checkout
+ *   (supersede/refuse) → reserve seq → lease one free host per platform → fan
+ *   lanes out (an ssh session each) → merge lane state into one fan-in surface
  *   served on `.ci/odu.sock` → write per-SHA logs + post commit statuses on
- *   transitions → verdict.
+ *   transitions → verdict → release leases.
  *
  * Status posting and `--progress json` are both *diff-driven off the fan-in
  * state*, so every observer derives from the same source of truth the
@@ -42,13 +44,31 @@ import {
 } from "../common/surface";
 import { commitLabel, createDisplay, progressEvent } from "./display";
 import { laneTasks, loadJustPipeline, parseSelector } from "../just/ingest";
-import { fanoutLanes, loadHosts } from "./hosts";
+import { fanoutPools, loadHosts, shortHost } from "./hosts";
 import { type Lane, startLane } from "./lane";
-import { missingRunnerError, resolveRunnerFlake } from "./runnerFlake";
+import {
+  type LeaseHandle,
+  leaseLanes,
+  localHolderId,
+} from "./lease";
+import {
+  liveHeldPlatforms,
+  upsertPlatformLease,
+  removePlatformLease,
+} from "./leaseRecord";
+import { evalOduRunnerDrv, resolveRunnerFlake } from "./runnerFlake";
 import { cancelRun } from "./cancel";
+import {
+  liveRunLockPid,
+  RUN_LOCK_PATH,
+  signalRunLockHolder,
+  tryAcquireRunLock,
+  waitForRunLockFree,
+  type RunLockHandle,
+} from "./checkoutLock";
 import { releaseReservation, reserveNextSeq, writeRunRecord } from "./ledger";
 import { buildRunRecord, projectNodes } from "../common/runRecord";
-import { SOCKET_PATH, serveSocket } from "./socket";
+import { SOCKET_PATH, serveSocket, tryDialSocket } from "./socket";
 import {
   fetchUrlFor,
   logPathFor,
@@ -76,6 +96,104 @@ export interface RunArgs {
   /** Keep the coordinator serving after the run drains, so a node can be
    *  rerun post-settle; exit only on cancel / signal / idle backstop. */
   linger: boolean;
+  /** When every host in a platform's pool is busy, fail immediately instead
+   *  of waiting in line for a free machine (juspay/odu#54). */
+  noWait: boolean;
+}
+
+/**
+ * One-run-per-checkout prelude — runs *before* any venue lease claim so a
+ * single-host pool can't deadlock: the live run holds the only remote flock,
+ * and a waiter that claimed first would block forever and never reach cancel.
+ *
+ * Checks both the attach socket *and* the PID run-lock: lease wait happens
+ * before `serveSocket`, so a live socket alone misses concurrent starters
+ * that are still queued on the venue pool.
+ *
+ * Mirrors MCP `startRun`: supersede cancels-then-confirms (socket when up,
+ * SIGTERM on the run-lock holder when only the lease wait is live); without
+ * supersede a live socket/lock is an immediate refuse.
+ * Exported for unit tests that assert cancel-before-claim ordering.
+ */
+export async function ensureCheckoutFree(
+  socketPath: string,
+  supersede: boolean,
+  deps: {
+    cancel?: typeof cancelRun;
+    dial?: typeof tryDialSocket;
+    /** Absolute path to `.ci/odu.run.lock`; derived from socketPath when omitted. */
+    lockPath?: string;
+    signalLock?: typeof signalRunLockHolder;
+    waitLockFree?: typeof waitForRunLockFree;
+    liveLockPid?: typeof liveRunLockPid;
+  } = {},
+): Promise<
+  | { ok: true }
+  | { ok: false; reason: "live" | "supersede-timeout"; message: string }
+> {
+  const dial = deps.dial ?? tryDialSocket;
+  const cancel = deps.cancel ?? cancelRun;
+  const lockPath = deps.lockPath ?? join(dirname(socketPath), "odu.run.lock");
+  const signalLock = deps.signalLock ?? signalRunLockHolder;
+  const waitLockFree = deps.waitLockFree ?? waitForRunLockFree;
+  const liveLockPid = deps.liveLockPid ?? liveRunLockPid;
+
+  const refuseLive = {
+    ok: false as const,
+    reason: "live" as const,
+    message:
+      "odu: a run is already in progress in this checkout\n" +
+      "(pass --supersede to cancel it and start fresh)",
+  };
+
+  if (supersede) {
+    // Prefer graceful surface cancel when the socket is up; always clear a
+    // lease-waiting holder that never reached serveSocket.
+    const supersedeTimeout = {
+      ok: false as const,
+      reason: "supersede-timeout" as const,
+      message:
+        "odu: supersede — the run already in progress here did not shut down in time.",
+    };
+    const { confirmed } = await cancel(socketPath);
+    if (!confirmed) return supersedeTimeout;
+    if (liveLockPid(lockPath) !== null) {
+      signalLock(lockPath, "SIGTERM");
+      if (!(await waitLockFree(lockPath))) return supersedeTimeout;
+    }
+    return { ok: true };
+  }
+
+  const existing = await dial(socketPath);
+  if (existing !== null) {
+    existing.close();
+    return refuseLive;
+  }
+  if (liveLockPid(lockPath) !== null) return refuseLive;
+  return { ok: true };
+}
+
+/**
+ * Interrupt stop-work seam for cancel vs venue-lease-loss.
+ *
+ * - `before-settle` + `exclusivityLost`: stop lanes/holds *now* — the remote
+ *   flock is already free (`lease.lost`); another coordinator can claim while
+ *   we still have ssh build sessions open if we wait on status settle.
+ * - `after-settle`: always stop (idempotent). For cancel/SIGINT the hold is
+ *   still ours during settle, so exclusivity covers GH status finalization;
+ *   for lease-loss this is a no-op second pass after the early stop.
+ *
+ * Exported so unit tests can assert the lease-lost path invokes stop before
+ * settle completes (not only that `lease.lost` resolves).
+ */
+export function applyInterruptStopWork(
+  phase: "before-settle" | "after-settle",
+  exclusivityLost: boolean,
+  stop: () => void,
+): void {
+  // before-settle: only on exclusivity loss (flock already free).
+  // after-settle: always (idempotent second pass after lease-loss early stop).
+  if (phase === "after-settle" || exclusivityLost) stop();
 }
 
 function git(repo: string, args: string[]): string {
@@ -152,6 +270,15 @@ export async function runCommand(args: RunArgs): Promise<number> {
   // no-op once a lane is closed/dead (its `session.destroy()` is idempotent), so
   // re-sweeping an already-closed lane here is harmless.
   const createdLanes = new Set<Lane>();
+  // Venue leases (ssh-held flock per remote host). Owned here so the `finally`
+  // and the process-exit path both free them — crash/SIGKILL still frees via
+  // the OS closing the ssh channel (the remote read hits EOF).
+  const acquiredLeases: LeaseHandle[] = [];
+  // Checkout run-lock (PID file under `.ci/`). Claimed inside orchestrate
+  // immediately after ensureCheckoutFree and held for the whole run — including
+  // the unbounded venue-lease wait before serveSocket. `finally` + process-exit
+  // both release so a second starter never co-queues during lease wait.
+  const runLock: { handle: RunLockHandle | null } = { handle: null };
   // runCommand-owned holder for the seq this run reserved, so the `finally` can
   // reclaim an orphaned reservation sentinel on an early-throw — the same
   // early-throw-cleanup convention as `createdLanes` / `cleanupSnapshot`
@@ -171,11 +298,17 @@ export async function runCommand(args: RunArgs): Promise<number> {
         dirty,
       },
       createdLanes,
+      acquiredLeases,
       reservation,
+      runLock,
     );
   } finally {
     cleanupSnapshot();
     for (const lane of createdLanes) lane.close();
+    for (const lease of acquiredLeases) lease.release();
+    acquiredLeases.length = 0;
+    runLock.handle?.release();
+    runLock.handle = null;
     if (reservation.seq !== null) {
       releaseReservation(repoRoot, sha7, reservation.seq);
     }
@@ -204,9 +337,15 @@ async function orchestrate(
    *  here at construction; the natural + shutdown paths still close each lane
    *  themselves. */
   createdLanes: Set<Lane>,
+  /** runCommand-owned venue leases; populated once pools are claimed, released
+   *  on every terminal path (finally + shutdown). */
+  acquiredLeases: LeaseHandle[],
   /** runCommand-owned holder for the reserved seq, so its `finally` can reclaim
    *  an orphaned reservation sentinel on an early-throw. Set once reserved. */
   reservation: { seq: number | null },
+  /** runCommand-owned checkout run-lock; claimed right after ensureCheckoutFree
+   *  and released in runCommand's finally / process exit. */
+  runLock: { handle: RunLockHandle | null },
 ): Promise<number> {
   const { repoRoot, specSource, runnerFlake, sha, sha7 } = ctx;
   // Where stdout points picks the face: NDJSON for the /do contract, an
@@ -235,14 +374,16 @@ async function orchestrate(
   // ── DAG + lanes ──
   const spec = loadJustPipeline(specSource, { root: args.root });
   const hostsConfig = loadHosts();
-  // Zero resolved lanes means a bare `odu run` with no hosts anywhere — no
+  // Zero resolved pools means a bare `odu run` with no hosts anywhere — no
   // config file, no `--host` pin, no `--platform` slice. Defaulting that to a
   // localhost lane silently turned a fanout into a local fork-bomb on a
-  // production workstation (juspay/odu#46), so `fanoutLanes` refuses it loudly
+  // production workstation (juspay/odu#46), so `fanoutPools` refuses it loudly
   // instead — running locally stays available only as an explicit decision
   // (a `"…": "localhost"` entry or `--host PLAT=localhost`). An explicit
-  // `--platform` with no host still errors earlier in resolveLanes.
-  const lanesByPlatform = fanoutLanes(
+  // `--platform` with no host still errors earlier in resolvePools.
+  // Values are *pools* (one or more hosts per platform); `leaseLanes` below
+  // picks a free machine and holds the venue lock for the run (juspay/odu#54).
+  const poolsByPlatform = fanoutPools(
     hostsConfig,
     args.hostPins,
     args.platforms,
@@ -251,16 +392,16 @@ async function orchestrate(
   for (const selector of selectors) {
     if (
       selector.platform !== undefined &&
-      lanesByPlatform[selector.platform] === undefined
+      poolsByPlatform[selector.platform] === undefined
     ) {
       throw new Error(
         `odu: selector platform "${selector.platform}" is not in the fanout ` +
-          `(${Object.keys(lanesByPlatform).join(", ") || "no lanes"})`,
+          `(${Object.keys(poolsByPlatform).join(", ") || "no lanes"})`,
       );
     }
   }
 
-  const platforms = Object.keys(lanesByPlatform).sort();
+  const platforms = Object.keys(poolsByPlatform).sort();
   const tasksByPlatform = new Map<string, TaskSpec[]>();
   for (const platform of platforms) {
     const tasks = laneTasks(spec, platform, selectors, args.noDeps);
@@ -279,24 +420,146 @@ async function orchestrate(
         "(pass --no-post for non-GitHub strict runs)",
     );
   }
-  for (const [platform, host] of Object.entries(lanesByPlatform)) {
-    if (!tasksByPlatform.has(platform)) continue;
-    if (!isLocalHost(host) && originUrl === null) {
+  // Pool-level prechecks (before lease): a pool that can only land on a remote
+  // needs an origin; a dirty live-tree run refuses any pool that still has a
+  // remote candidate (it might lease that box and silently test committed HEAD).
+  for (const platform of tasksByPlatform.keys()) {
+    const pool = poolsByPlatform[platform] ?? [];
+    const remotes = pool.filter((h) => !isLocalHost(h));
+    if (remotes.length === pool.length && originUrl === null) {
       throw new Error(
-        `odu: remote lane ${platform}=${host} needs an origin remote to fetch from`,
+        `odu: remote lane ${platform}=[${remotes.join(", ")}] needs an origin remote to fetch from`,
       );
     }
-    // Live-tree mode (no snapshot) only honors a dirty tree on localhost: a
-    // remote lane fetches the committed HEAD, so on a dirty tree it would
-    // silently test stale code while local lanes test your edits. Refuse it
-    // rather than hand back a misleading verdict.
-    if (!ctx.snapshotMode && ctx.dirty && !isLocalHost(host)) {
+    if (!ctx.snapshotMode && ctx.dirty && remotes.length > 0) {
       throw new Error(
         `odu: live-tree mode (--no-snapshot/--no-strict) on a dirty tree only ` +
-          `applies to localhost lanes — remote lane ${platform}=${host} would ` +
-          `fetch the committed HEAD (${ctx.sha7}), not your uncommitted changes. ` +
-          `Commit and push first, or slice to local platforms with --platform.`,
+          `applies to localhost lanes — remote host(s) in ${platform} pool ` +
+          `(${remotes.join(", ")}) would fetch the committed HEAD (${ctx.sha7}), ` +
+          `not your uncommitted changes. Commit and push first, pin localhost ` +
+          `with --host ${platform}=localhost, or slice to local platforms.`,
       );
+    }
+  }
+
+  // ── one-run-per-checkout BEFORE any venue lease ──
+  // Cancel/refuse first so a single-host pool cannot deadlock: the live run
+  // holds the only remote flock, and a waiter that claimed first would block
+  // forever without ever reaching supersede cancel (or fail later at
+  // serveSocket after waiting the whole prior run). Same order as MCP startRun.
+  // The PID run-lock (claimed immediately below) covers the whole lease-wait
+  // window; serveSocket remains the attach surface, not the sole exclusivity
+  // gate.
+  const socketPath = join(repoRoot, SOCKET_PATH);
+  const lockPath = join(repoRoot, RUN_LOCK_PATH);
+  const checkout = await ensureCheckoutFree(socketPath, args.supersede, {
+    lockPath,
+  });
+  if (!checkout.ok) {
+    process.stderr.write(`${checkout.message}\n`);
+    return 1;
+  }
+
+  // Exclusive claim for this process — closes the TOCTOU between the free
+  // check and serveSocket (which can be minutes of venue wait). A second
+  // starter that lost the race refuses here rather than co-queuing.
+  const claimed = tryAcquireRunLock(lockPath);
+  if (claimed === null) {
+    process.stderr.write(
+      "odu: a run is already in progress in this checkout\n" +
+        "(pass --supersede to cancel it and start fresh)\n",
+    );
+    return 1;
+  }
+  runLock.handle = claimed;
+
+  // ── run identity — the durable record's (repo, sha, seq) ──
+  // Reserved *after* a possible --supersede cancel (above): a superseded run
+  // writes its own record before its socket closes, so by the time we get here
+  // that record is on disk and the exclusive reservation advances past it.
+  // Also *before* the venue lease so the holder label can carry `sha7#seq`
+  // (and so a setup failure after claim still leaves a claimed seq to reclaim).
+  // `repo` is the GitHub owner/repo or null for a local-only checkout.
+  const repo = github !== null ? repoSlug(github) : null;
+  // Atomically SELECT-and-RESERVE the seq durably BEFORE the socket serves, so
+  // the seq is on disk the instant it can become observable via the surface, and
+  // is claimed with an exclusive create so no two runs ever hold the same slot
+  // (see `reserveNextSeq`). A published `<sha7>#<seq>` is therefore globally
+  // unique: even a coordinator SIGKILLed after publishing but before
+  // `finalizeRunRecord` leaves its reservation on disk, so the next run of this
+  // commit advances past it (juspay/odu#49). `null` means the reservation write
+  // failed — the run proceeds WITHOUT a seq (no identity claim, no record)
+  // rather than gating on a history write, so `seq` stays absent on the surface.
+  const seq = reserveNextSeq(repoRoot, sha7);
+  // Hand the reserved seq to runCommand's early-throw cleanup: if this run
+  // throws before serving/finalizing, its `finally` reclaims the orphaned
+  // sentinel (releaseReservation leaves a finalized record untouched).
+  reservation.seq = seq;
+
+  // ── venue lease: one free machine per platform, lock held for the run ──
+  // Two layers (juspay/odu#54 CR1):
+  //   1) Agent-held: `odu lease` / MCP lease left a live holder in
+  //      `.ci/odu-lease.json` → use that host, skip claim/release entirely
+  //      (iterate fix→run without re-queue).
+  //   2) Run auto-lease: claim for the rest, release on run exit.
+  // `--host` pins still force a claim path (override agent hold).
+  // After checkout free + run-lock + seq reserve so supersede can't deadlock.
+  const activePlatforms = [...tasksByPlatform.keys()].sort();
+  const runLabel = seq !== null ? `${sha7}#${seq}` : sha7;
+  const pinPlatforms = new Set(
+    args.hostPins.map((p) => p.split("=")[0]).filter((x): x is string => !!x),
+  );
+  const agentHeld = liveHeldPlatforms(repoRoot);
+  const lanesByPlatform: Record<string, string> = {};
+  const platformsToClaim: string[] = [];
+  for (const platform of activePlatforms) {
+    if (pinPlatforms.has(platform)) {
+      platformsToClaim.push(platform);
+      continue;
+    }
+    const held = agentHeld[platform];
+    if (held !== undefined) {
+      lanesByPlatform[platform] = held;
+      info(
+        `${platform}: using agent-held ${held} (odu lease — lock untouched on run exit)`,
+      );
+      continue;
+    }
+    platformsToClaim.push(platform);
+  }
+  if (platformsToClaim.length > 0) {
+    // Observable wait: record waiting state for platforms we're about to claim
+    // so `odu hosts` / re-reads of the lease file see the line (CR2).
+    for (const platform of platformsToClaim) {
+      upsertPlatformLease(repoRoot, platform, {
+        host: null,
+        holderPid: process.pid,
+        since: Date.now(),
+        state: "waiting",
+        waitingBehind: null,
+        run: runLabel,
+      });
+    }
+    try {
+      const claimed = await leaseLanes({
+        pools: poolsByPlatform,
+        platforms: platformsToClaim,
+        identity: { holder: localHolderId(), run: runLabel },
+        noWait: args.noWait,
+        onLine: info,
+        resolveDrvPath: (platform) => () =>
+          Promise.resolve(evalOduRunnerDrv(runnerFlake, platform)),
+      });
+      for (const [p, h] of Object.entries(claimed.lanes)) {
+        lanesByPlatform[p] = h;
+      }
+      acquiredLeases.push(...claimed.leases);
+    } finally {
+      // Drop run-owned waiting records (this pid). Agent-held platforms were
+      // never in platformsToClaim, so their records stay.
+      for (const platform of platformsToClaim) {
+        removePlatformLease(repoRoot, platform);
+      }
     }
   }
 
@@ -384,10 +647,10 @@ async function orchestrate(
   // socket serves, below) so this closure can reference it before it exists.
   let closeSocket: () => void = () => {};
   // Writes this run's durable record to the ledger. Hoisted like `closeSocket`:
-  // a no-op until the run identity is allocated (after a possible --supersede,
-  // below), then driven by every terminal path — natural completion, each
-  // linger drain, and the shared `shutdown` teardown — so an interrupted or
-  // cancelled run still leaves a record (marked incomplete).
+  // a no-op until `finalizeRunRecord` is wired after the surface exists (seq is
+  // already reserved above), then driven by every terminal path — natural
+  // completion, each linger drain, and the shared `shutdown` teardown — so an
+  // interrupted or cancelled run still leaves a record (marked incomplete).
   let finalizeRunRecord: (state: PipelineState) => void = () => {};
   // Linger's idle backstop: a settled-but-lingering coordinator self-reaps
   // after `idleMs` with no new work, so a forgotten `--linger` run can't hold
@@ -406,15 +669,38 @@ async function orchestrate(
 
   let shuttingDown = false;
   // The single shutdown every interrupt source shares: SIGTERM/SIGINT, the live
-  // view's `q` (via `onQuit`), and the `run.cancel` surface mutation a second
-  // process drives (`odu cancel`, the MCP `cancel` tool, a `--supersede` start).
-  // An interrupted coordinator must not strand `Running:` contexts as eternally
-  // pending checks, and must hand the terminal back. Natural completion does NOT
-  // pass through here — it falls through to the verdict below.
-  const shutdown = (code: number, reason = "interrupted"): void => {
+  // view's `q` (via `onQuit`), the `run.cancel` surface mutation a second
+  // process drives (`odu cancel`, the MCP `cancel` tool, a `--supersede` start),
+  // and venue `lease.lost` (remote hold died — flock already free). An interrupted
+  // coordinator must not strand `Running:` contexts as eternally pending checks,
+  // and must hand the terminal back. Natural completion does NOT pass through
+  // here — it falls through to the verdict below.
+  //
+  // `exclusivityLost`: when true (lease.lost only), stop lanes and drop local
+  // hold handles *before* awaiting poster.settle — the flock is already free so
+  // another coordinator can claim immediately. Cancel/SIGINT leave exclusivity
+  // intact until after settle (still holding the remote flock), then release.
+  const shutdown = (
+    code: number,
+    reason = "interrupted",
+    opts: { exclusivityLost?: boolean } = {},
+  ): void => {
     if (shuttingDown) return;
     shuttingDown = true;
     clearIdle();
+    const exclusivityLost = opts.exclusivityLost === true;
+    const stopWork = (): void => {
+      for (const lane of lanes.values()) lane.close();
+      // Free venue leases so the remote flock drops immediately rather than
+      // waiting for the OS to reap our ssh children on process death (crash
+      // paths still free via connection close — this is the clean path). On
+      // lease.lost the flock is already free; release still reaps local hold
+      // children so we do not leave heartbeats running.
+      for (const lease of acquiredLeases) lease.release();
+      acquiredLeases.length = 0;
+    };
+    // Fail-closed on exclusivity loss: stop fanout work before any settle wait.
+    applyInterruptStopWork("before-settle", exclusivityLost, stopWork);
     // Snapshot the state at the instant the interrupt lands — *before* posting,
     // settling, or letting the still-open lanes mutate it further. The record
     // must describe the run as it was when cancelled: any node still
@@ -422,6 +708,8 @@ async function orchestrate(
     // `store.get()` after `poster.settle()` (below), a lane that happens to
     // finish naturally during that window would flip the record to passed/failed
     // for a run the operator cancelled — contradicting the incomplete semantics.
+    // On lease.lost, lanes are already closed above so the snapshot cannot race
+    // with further fanout progress either.
     const interruptedState = store.get();
     info(`odu: ${reason} — finalizing posted statuses before exit`);
     for (const context of poster.pendingContexts()) {
@@ -432,7 +720,7 @@ async function orchestrate(
       });
     }
     void poster.settle().then(() => {
-      for (const lane of lanes.values()) lane.close();
+      applyInterruptStopWork("after-settle", exclusivityLost, stopWork);
       // Record this run before the socket closes: a superseding run waits on
       // that close to confirm we're gone, so writing first guarantees our
       // record is on disk before it allocates its own (next) seq. Use the
@@ -447,6 +735,17 @@ async function orchestrate(
       process.exit(code);
     });
   };
+
+  // Fail closed if a remote hold dies mid-run (ssh drop, optional MAX_HOLD,
+  // remote kill): exclusivity is gone and another laptop can claim the same
+  // flock. Intentional `release()` does not fire `lost`.
+  for (const lease of acquiredLeases) {
+    void lease.lost?.then(() => {
+      shutdown(1, `venue lease lost on ${shortHost(lease.host)}`, {
+        exclusivityLost: true,
+      });
+    });
+  }
 
   const runtime = implementSurface(oduSurface, {
     cells: { nodes: { store }, header: { store: headerStore } },
@@ -567,45 +866,12 @@ async function orchestrate(
     hostsSource: hostsConfig.source,
     startedAt: Date.now(),
   };
-  // Supersede: cancel a run already live in this checkout (and confirm its
-  // socket is gone) before we bind the lock, so "stop this, run the fixed
-  // commit" is one invocation. A no-op when nothing is live. Gate on the
-  // confirmation — same as the MCP path — so a stuck old run fails with a
-  // supersede-specific message rather than `serveSocket`'s opaque lock error.
-  if (args.supersede) {
-    const { confirmed } = await cancelRun(join(repoRoot, SOCKET_PATH));
-    if (!confirmed) {
-      process.stderr.write(
-        "odu: supersede — the run already in progress here did not shut down in time.\n",
-      );
-      return 1;
-    }
-  }
-  // ── run identity — the durable record's (repo, sha, seq) ──
-  // Reserved *after* a possible --supersede cancel: a superseded run writes its
-  // own record before its socket closes (the teardown above), so by the time we
-  // get here that record is on disk and the exclusive reservation advances past
-  // it. `repo` is the GitHub owner/repo or null for a local-only checkout.
-  const repo = github !== null ? repoSlug(github) : null;
-  // Atomically SELECT-and-RESERVE the seq durably BEFORE the socket serves, so
-  // the seq is on disk the instant it can become observable via the surface, and
-  // is claimed with an exclusive create so no two runs ever hold the same slot
-  // (see `reserveNextSeq`). A published `<sha7>#<seq>` is therefore globally
-  // unique: even a coordinator SIGKILLed after publishing but before
-  // `finalizeRunRecord` leaves its reservation on disk, so the next run of this
-  // commit advances past it (juspay/odu#49). `null` means the reservation write
-  // failed — the run proceeds WITHOUT a seq (no identity claim, no record)
-  // rather than gating on a history write, so `seq` stays absent on the surface.
-  const seq = reserveNextSeq(repoRoot, sha7);
-  // Hand the reserved seq to runCommand's early-throw cleanup: if this run
-  // throws before serving/finalizing, its `finally` reclaims the orphaned
-  // sentinel (releaseReservation leaves a finalized record untouched).
-  reservation.seq = seq;
   // Stamp the reserved seq onto the fan-in state so every face — the agent
   // `wait_for_settle` verdict especially — reads the run's full identity
   // `<sha7>#<seq>`. Set once here, before the socket serves; `updateNode` spreads
   // the whole state, so it survives every node update. `undefined` (no reserved
   // seq) leaves the field absent, mapped to `null` on the agent surface.
+  // (seq itself was reserved before the venue lease — see above.)
   runtime.ctx.cells.nodes.set({ ...store.get(), seq: seq ?? undefined });
   if (seq !== null) {
     finalizeRunRecord = (state: PipelineState): void => {
@@ -636,7 +902,9 @@ async function orchestrate(
   // Publish before serving so an `attach` connecting in the first instant reads
   // the real header, not the EMPTY_HEADER default.
   headerStore.set(header);
-  closeSocket = await serveSocket(router, join(repoRoot, SOCKET_PATH));
+  // Checkout run-lock is already held (covers lease wait); serveSocket is the
+  // attach surface and a second exclusivity gate for the post-lease window.
+  closeSocket = await serveSocket(router, socketPath);
 
   display.start(store.get(), header);
   display.update(store.get());
@@ -657,27 +925,7 @@ async function orchestrate(
       origin: local || originUrl === null ? null : fetchUrlFor(originUrl),
       sha: local ? null : sha,
       workspace: local ? specSource : null,
-      resolveDrvPath: async () => {
-        const attr = `${runnerFlake}#packages.${platform}.odu-runner.drvPath`;
-        const result = spawnSync(
-          "nix",
-          ["eval", "--raw", "--accept-flake-config", attr],
-          { encoding: "utf-8", maxBuffer: 16 * 1024 * 1024 },
-        );
-        if (result.status !== 0) {
-          // A flake that doesn't export odu-runner gets a directed message
-          // (name the flake + the split); any other eval failure keeps the raw
-          // stderr so unrelated breakage isn't masked.
-          const directed = missingRunnerError(
-            runnerFlake,
-            platform,
-            result.stderr,
-          );
-          if (directed !== null) throw new Error(directed);
-          throw new Error(`nix eval odu-runner drv failed:\n${result.stderr}`);
-        }
-        return result.stdout.trim();
-      },
+      resolveDrvPath: async () => evalOduRunnerDrv(runnerFlake, platform),
       onSetupLine: (line) => appendLocal(setupId, `${line}\n`),
       onNodes: (laneState) => {
         for (const laneId of laneState.order) {
@@ -858,6 +1106,10 @@ async function orchestrate(
   await allSettled;
 
   for (const lane of lanes.values()) lane.close();
+  // Venue locks drop with the run — free them as soon as lanes are done so the
+  // next waiter can claim the box while we still finalize statuses/records.
+  for (const lease of acquiredLeases) lease.release();
+  acquiredLeases.length = 0;
   // Record this run *before* releasing the socket lock — every node is already
   // terminal (allSettled), so the state is final. A superseding/next run waits
   // on the socket close to confirm we're gone and only then reserves its seq, so

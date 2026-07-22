@@ -5,11 +5,15 @@
  * dial, so it's served via `serveTestSurface`.
  */
 
-import { afterEach, describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CancelResult } from "../coordinator/cancel";
+import { tryAcquireRunLock } from "../coordinator/checkoutLock";
 import { pendingNode, type PipelineState } from "../common/surface";
 import { serveTestSurface, type TestSurface } from "./serveForTest";
-import { startRun } from "./runTool";
+import { pollUntilSocketOrExit, startRun } from "./runTool";
 
 function liveState(): PipelineState {
   return {
@@ -99,9 +103,32 @@ describe("startRun — lock + supersede", () => {
     expect(r.error).toMatch(/did not shut down/);
     expect(calls).toHaveLength(0);
   });
+
+  it("refuses when the run-lock is held with no socket (lease-wait window)", async () => {
+    // Concurrent starter during venue lease wait: no .ci/odu.sock yet, but
+    // the PID run-lock is held — must not spawn a second coordinator.
+    const dir = mkdtempSync(join(tmpdir(), "odu-mcp-lock-"));
+    const socketPath = join(dir, "odu.sock");
+    const lockPath = join(dir, "odu.run.lock");
+    const held = tryAcquireRunLock(lockPath);
+    expect(held).not.toBeNull();
+    try {
+      const { calls, spawnRun } = captureSpawn();
+      const r = await startRun(
+        {},
+        { socketPath, spawnRun, waitForSocket: socketUp },
+      );
+      expect(r.ok).toBe(false);
+      expect(r.error).toMatch(/already in progress/);
+      expect(calls).toHaveLength(0);
+    } finally {
+      held!.release();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
-describe("startRun — linger flag plumbing", () => {
+describe("startRun — linger / no_wait flag plumbing", () => {
   it("passes --linger through to the spawned run", async () => {
     const { calls, spawnRun } = captureSpawn();
     const r = await startRun(
@@ -119,5 +146,67 @@ describe("startRun — linger flag plumbing", () => {
       { socketPath: "/no/such/odu.sock", spawnRun, waitForSocket: socketUp },
     );
     expect(calls[0]).not.toContain("--linger");
+  });
+
+  it("passes --no-wait through to the spawned run", async () => {
+    const { calls, spawnRun } = captureSpawn();
+    const r = await startRun(
+      { no_wait: true },
+      { socketPath: "/no/such/odu.sock", spawnRun, waitForSocket: socketUp },
+    );
+    expect(r).toMatchObject({ ok: true, started: true });
+    expect(calls[0]).toContain("--no-wait");
+  });
+});
+
+describe("pollUntilSocketOrExit — exit-bounded wait (no fixed startup window)", () => {
+  it("keeps polling past the former ~60s window while the child lives", async () => {
+    // 240 × 250ms was the old hard cap. Simulate a busy-pool queue longer than
+    // that many polls; the waiter must not give up while the child is alive.
+    const OLD_MAX_POLLS = 240;
+    let polls = 0;
+    const ready = vi.fn(async () => {
+      polls += 1;
+      return polls > OLD_MAX_POLLS + 10;
+    });
+    const exited = new Promise<number>(() => {
+      /* child still running — lease queue */
+    });
+    const up = await pollUntilSocketOrExit(ready, exited, 0);
+    expect(up).toBe(true);
+    expect(polls).toBeGreaterThan(OLD_MAX_POLLS);
+  });
+
+  it("stops when the child exits without a socket", async () => {
+    let resolveExit!: () => void;
+    const exited = new Promise<void>((r) => {
+      resolveExit = r;
+    });
+    let polls = 0;
+    const ready = vi.fn(async () => {
+      polls += 1;
+      if (polls === 3) resolveExit();
+      return false;
+    });
+    const up = await pollUntilSocketOrExit(ready, exited, 0);
+    expect(up).toBe(false);
+    expect(polls).toBeGreaterThanOrEqual(3);
+  });
+
+  it("startRun reports failure without requiring the child to have exited", async () => {
+    // Custom wait aborts while onExit never settles (stand-in for a still-alive
+    // lease waiter under a non-default wait). Must fail closed, not hang.
+    const neverExit = new Promise<number>(() => {});
+    const r = await startRun(
+      {},
+      {
+        socketPath: "/no/such/odu.sock",
+        spawnRun: () => ({ stderr: "", onExit: neverExit }),
+        waitForSocket: async () => false,
+      },
+    );
+    expect(r.ok).toBe(false);
+    expect(r.started).toBe(false);
+    expect(r.error).toMatch(/did not serve a socket|still running/);
   });
 });
