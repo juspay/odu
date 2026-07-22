@@ -57,8 +57,8 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
               <p class="eyebrow">Live CI for just · humans + agents</p>
               <h1>CI you can <em>attach to.</em><span class="cursor" aria-hidden="true">▌</span></h1>
               <p class="hero-copy">
-                Batch CI turns your task graph into a process and leaves log files.
-                <strong>odu keeps the pipeline alive as typed state</strong> —
+                Batch CI turns your task graph into a process and leaves log
+                files. <strong>odu keeps the pipeline alive as typed state</strong> —
                 attach from another terminal, or let a coding agent drive the same
                 run over MCP. Your <a href="https://just.systems"><code>just</code></a> file
                 is still the pipeline.
@@ -201,13 +201,85 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
               </article>
               <article class="outcome who-team">
                 <span class="who">Team</span>
-                <h3>Linux + macOS, nothing preinstalled</h3>
+                <h3>Linux + macOS in one command</h3>
                 <p>
-                  Explicit ssh lanes. Hosts need ssh, Nix, and outbound HTTPS —
-                  the runner arrives as a Nix closure. GitHub statuses post from
-                  your machine.
+                  A bare <code>odu run</code> covers every configured platform and
+                  posts a GitHub commit status per <code>recipe@platform</code> — a
+                  green matrix on your own machines, no hosted runner rented.
                 </p>
               </article>
+            </div>
+          </div>
+        </section>
+
+        <!-- 3b. Execution model: local coordinator, remote hosts, pools -->
+        <section id="hosts" class="section">
+          <div class="shell">
+            <div class="section-head">
+              <p class="eyebrow">Local coordinator · remote lanes</p>
+              <h2 class="section-title">Runs from your machine. Executes anywhere.</h2>
+              <p class="section-lead">
+                No CI service, no server-side YAML. The coordinator lives
+                on <strong>your machine</strong> — a bare <code>odu run</code> fans out
+                across every configured platform at once, delegating each lane to a
+                host over plain ssh. The runner travels as a Nix closure, so hosts
+                need only ssh, Nix, and outbound HTTPS. Nothing preinstalled.
+              </p>
+            </div>
+
+            <div class="topo" aria-label="odu execution topology">
+              <div class="topo-node topo-coord">
+                <span class="topo-tag">your machine</span>
+                <strong>odu run</strong>
+                <span class="topo-sub">coordinator · holds live state · posts GitHub statuses</span>
+              </div>
+              <div class="topo-arrow" aria-hidden="true">
+                <span class="glyph">→</span>
+                <span class="lbl">ssh · Nix closure</span>
+              </div>
+              <div class="topo-lanes">
+                <div class="topo-lane">
+                  <span class="topo-plat">x86_64-linux</span>
+                  <div class="topo-pool">
+                    <span class="host held">ci-1 <i>leased</i></span>
+                    <span class="host">ci-2</span>
+                    <span class="host">localhost</span>
+                  </div>
+                </div>
+                <div class="topo-lane">
+                  <span class="topo-plat">aarch64-darwin</span>
+                  <div class="topo-pool">
+                    <span class="host held">mac-mini <i>leased</i></span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="host-facts">
+              <div class="host-fact">
+                <h3>Point a platform at a pool</h3>
+                <p>
+                  List several machines for a platform. odu <strong>leases a free
+                  one</strong>, locks it for the run, and releases when it settles —
+                  or when the holder dies.
+                </p>
+              </div>
+              <div class="host-fact">
+                <h3>One run per machine</h3>
+                <p>
+                  The lock is an <code>flock</code> on the builder. Whole pool
+                  busy? <strong>Wait in line</strong> — it names who you're behind —
+                  or <code>--no-wait</code> to fail fast.
+                </p>
+              </div>
+              <div class="host-fact">
+                <h3>localhost is opt-in</h3>
+                <p>
+                  Never a silent fallback. This machine runs only when you
+                  name it: <code>--host P=localhost</code>, the sole lane, or an
+                  explicit pool member.
+                </p>
+              </div>
             </div>
           </div>
         </section>
@@ -256,8 +328,7 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
               </div>
               <div>
                 <p class="section-lead" style="margin-top:0">
-                  Tools: <code>run</code>, <code>wait_for_settle</code>,
-                  <code>node_rerun</code>, <code>cancel</code>, <code>runs</code>.
+                  Tools: <code>run</code>, <code>wait_for_settle</code>, <code>node_rerun</code>, <code>cancel</code>, <code>runs</code>.
                   Pipeline state and logs are subscribable resources, not scraped text.
                 </p>
                 <p class="section-lead">
@@ -303,8 +374,7 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
               </div>
               <figcaption>
                 Exactly one recipe carries <code>[metadata("ci")]</code>. Everything
-                reachable from it is the pipeline — here <code>typecheck</code>,
-                <code>unit</code>, <code>fmt</code>, <code>nix</code>, and <code>e2e</code>.
+                reachable from it is the pipeline — here <code>typecheck</code>, <code>unit</code>, <code>fmt</code>, <code>nix</code>, and <code>e2e</code>.
               </figcaption>
             </figure>
 
