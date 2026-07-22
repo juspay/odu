@@ -72,7 +72,6 @@
 * { box-sizing: border-box; }
 html { scroll-behavior: smooth; background: var(--canvas); }
 body {
-  position: relative;
   margin: 0;
   color: var(--ink);
   background: var(--canvas);
@@ -80,48 +79,26 @@ body {
   -webkit-font-smoothing: antialiased;
   line-height: 1.5;
 }
-/* Soft static wash behind the page — no animation. Animated full-viewport
-   layers (aurora) re-composite on every hover repaint and read as shimmer
-   on buttons *and* plain links. */
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  z-index: -1;
-  pointer-events: none;
-  background:
-    radial-gradient(38vmax 38vmax at 12% -6%, rgba(69, 227, 154, 0.18), transparent 60%),
-    radial-gradient(32vmax 32vmax at 92% 4%, rgba(70, 214, 224, 0.16), transparent 60%),
-    radial-gradient(34vmax 34vmax at 78% 88%, rgba(179, 153, 255, 0.14), transparent 62%);
-}
-:root[data-theme="light"] body::before {
-  background:
-    radial-gradient(38vmax 38vmax at 12% -6%, rgba(12, 166, 120, .13), transparent 60%),
-    radial-gradient(32vmax 32vmax at 92% 4%, rgba(14, 154, 176, .12), transparent 60%),
-    radial-gradient(34vmax 34vmax at 78% 88%, rgba(124, 92, 255, .10), transparent 62%);
-}
 a { color: inherit; }
 button { font: inherit; }
 ::selection { color: #06100c; background: var(--green); }
 :focus-visible { outline: 2px solid var(--cyan); outline-offset: 3px; }
 
-/* —— Keyframes —— */
+/* —— Keyframes ——
+   Only compositor-cheap properties (opacity / transform / solid colors).
+   Never animate box-shadow or filter — Safari re-rasterizes large areas on
+   every frame and any hover elsewhere on the page reads as "shimmer". */
 @keyframes blink { 0%, 55% { opacity: 1; } 56%, 100% { opacity: 0; } }
-@keyframes pop {
-  0% { transform: scale(0); opacity: 0; }
-  70% { transform: scale(1.25); }
-  100% { transform: scale(1); opacity: 1; }
-}
 @keyframes ring-pulse {
   0% { transform: scale(.6); opacity: .8; }
   100% { transform: scale(1.9); opacity: 0; }
 }
 /* One node's life: pending → running (amber) → settled (green) → hold → reset */
 @keyframes node-settle {
-  0%, 6%    { background: var(--quiet); box-shadow: none; }
-  10%, 26%  { background: var(--amber); box-shadow: 0 0 0 4px rgba(245,196,81,.22), 0 0 14px rgba(245,196,81,.5); }
-  32%, 88%  { background: var(--green); box-shadow: 0 0 0 3px rgba(69,227,154,.18), 0 0 12px rgba(69,227,154,.45); }
-  96%, 100% { background: var(--quiet); box-shadow: none; }
+  0%, 6%    { background: var(--quiet); }
+  10%, 26%  { background: var(--amber); }
+  32%, 88%  { background: var(--green); }
+  96%, 100% { background: var(--quiet); }
 }
 @keyframes check-in {
   0%, 26%   { opacity: 0; transform: scale(0); }
@@ -213,7 +190,6 @@ button { font: inherit; }
   height: 7px;
   border-radius: 50%;
   background: var(--green);
-  box-shadow: 0 0 8px var(--green);
   animation: node-settle 3.2s ease-in-out infinite;
 }
 .section-title {
@@ -239,8 +215,8 @@ button { font: inherit; }
 }
 
 /* —— Buttons ——
-   Hover is color/border only. No filter, no ::after sweep, no transform —
-   those restart or re-composite on edge re-entry and look like flicker. */
+   Instant, paint-only hover. No transitions, no box-shadow, no filter,
+   no ::after — all of those have caused hover flicker on Safari. */
 .actions { display: flex; flex-wrap: wrap; gap: .65rem; }
 .button {
   display: inline-flex;
@@ -255,23 +231,19 @@ button { font: inherit; }
   background: var(--panel);
   font: 500 .82rem/1 var(--mono);
   text-decoration: none;
-  transition: border-color .15s ease, background .15s ease, box-shadow .15s ease;
 }
-.button:hover {
-  border-color: #4a5c55;
+.button:not(.button-primary):hover {
+  border-color: var(--line-strong);
   background: var(--panel-2);
 }
 .button-primary {
   border: 0;
   color: #04140c;
   background: var(--accent-grad);
-  box-shadow: 0 6px 22px -8px rgba(69, 227, 154, .7);
 }
 .button-primary:hover {
-  /* reassert the gradient — .button:hover's background would otherwise win
-     on specificity and drop the button to the dark panel colour */
-  background: var(--accent-grad);
-  box-shadow: 0 10px 28px -8px rgba(70, 214, 224, .8);
+  /* solid-ish darkening without filter/box-shadow (both flicker on Safari) */
+  background: linear-gradient(105deg, var(--cyan), var(--violet));
 }
 .button-ghost {
   background: transparent;
@@ -309,7 +281,6 @@ button { font: inherit; }
   background: var(--cyan);
   color: transparent;
   border-radius: 2px;
-  box-shadow: 0 0 12px var(--cyan);
   animation: blink 1.1s steps(1) infinite;
 }
 .hero-copy {
@@ -337,15 +308,18 @@ button { font: inherit; }
 }
 .copy-btn:hover { color: var(--ink); background: var(--panel-2); }
 
-/* —— Live pipeline terminal (hero) —— */
+/* —— Live pipeline terminal (hero) ——
+   Isolate paints so the DAG loop can't re-composite the rest of the page
+   (that full-page re-raster is what made plain link hovers shimmer). */
 .hero-term {
   margin-top: 1.5rem;
   max-width: 34rem;
   border: 1px solid var(--line-strong);
   border-radius: 10px;
-  background: linear-gradient(180deg, #0c110f, #0a0e0d);
-  box-shadow: 0 24px 60px -30px rgba(0, 0, 0, .9), 0 0 0 1px rgba(70, 214, 224, .05);
+  background: #0c110f;
   overflow: hidden;
+  contain: paint;
+  isolation: isolate;
 }
 .term-bar {
   display: flex;
@@ -422,7 +396,6 @@ button { font: inherit; }
   height: 8px;
   border-radius: 50%;
   background: var(--green);
-  box-shadow: 0 0 0 0 rgba(69, 227, 154, .6);
   animation: ring-pulse 1.6s ease-out infinite;
 }
 .term-status .caret {
@@ -478,11 +451,9 @@ button { font: inherit; }
   border-radius: 8px;
   background: var(--panel);
   overflow: hidden;
-  transition: transform .2s ease, border-color .2s ease, box-shadow .2s ease;
 }
 .proof-card:hover {
   border-color: var(--line-strong);
-  box-shadow: 0 22px 44px -28px rgba(70, 214, 224, .6);
 }
 .proof-card video {
   display: block;
@@ -527,7 +498,6 @@ button { font: inherit; }
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel);
-  transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease;
 }
 /* colourful top edge, tinted per persona */
 .outcome::before {
@@ -541,7 +511,6 @@ button { font: inherit; }
 }
 .outcome:hover {
   border-color: var(--line-strong);
-  box-shadow: 0 18px 40px -24px color-mix(in srgb, var(--accent, var(--green)) 70%, black);
 }
 .outcome h3 {
   margin: 0 0 .55rem;
@@ -979,7 +948,7 @@ button { font: inherit; }
     transition-duration: .001ms !important;
   }
   /* leave the pipeline resting in its settled (green) state */
-  .pdot { background: var(--green) !important; box-shadow: 0 0 10px rgba(69,227,154,.4) !important; }
+  .pdot { background: var(--green) !important; }
   .pcheck { opacity: 1 !important; }
-  .eyebrow::before { background: var(--green) !important; box-shadow: 0 0 8px var(--green) !important; }
+  .eyebrow::before { background: var(--green) !important; }
 }
