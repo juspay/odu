@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import { ensureCheckoutFree } from "./run";
+import { applyInterruptStopWork, ensureCheckoutFree } from "./run";
 import { acquireFromPool, type ClaimResult, type LeaseIdentity } from "./lease";
 
 const identity: LeaseIdentity = { holder: "me@desk", run: "abc1234" };
@@ -141,5 +141,63 @@ describe("cancel-before-claim — single-host pool supersede (ordering)", () => 
         claim,
       }),
     ).rejects.toThrow(/every host.*busy/);
+  });
+});
+
+describe("lease-lost interrupt stop-work ordering", () => {
+  /**
+   * Models `shutdown(..., { exclusivityLost: true })`: the remote flock is
+   * already free, so lanes/holds must stop before status settle drains. The
+   * cancel path keeps exclusivity during settle and only stops after.
+   */
+  it("closes lanes before settle completes when exclusivity is already gone", async () => {
+    const events: string[] = [];
+    let settleResolve!: () => void;
+    const settle = new Promise<void>((r) => {
+      settleResolve = r;
+    });
+    const stop = (): void => {
+      events.push("stop-work");
+    };
+
+    const exclusivityLost = true;
+    applyInterruptStopWork("before-settle", exclusivityLost, stop);
+    void settle.then(() => {
+      applyInterruptStopWork("after-settle", exclusivityLost, stop);
+      events.push("after-settle");
+    });
+
+    // settle still pending — stop-work must already have run (fail-closed).
+    expect(events).toEqual(["stop-work"]);
+    settleResolve();
+    await settle;
+    // microtask for the .then chain
+    await Promise.resolve();
+    // second stop is idempotent-intent; after-settle always invokes stop
+    expect(events).toEqual(["stop-work", "stop-work", "after-settle"]);
+  });
+
+  it("defers stop-work until after settle when exclusivity is still held (cancel)", async () => {
+    const events: string[] = [];
+    let settleResolve!: () => void;
+    const settle = new Promise<void>((r) => {
+      settleResolve = r;
+    });
+    const stop = (): void => {
+      events.push("stop-work");
+    };
+
+    const exclusivityLost = false;
+    applyInterruptStopWork("before-settle", exclusivityLost, stop);
+    void settle.then(() => {
+      applyInterruptStopWork("after-settle", exclusivityLost, stop);
+      events.push("after-settle");
+    });
+
+    expect(events).toEqual([]);
+    settleResolve();
+    await settle;
+    await Promise.resolve();
+    expect(events).toEqual(["stop-work", "after-settle"]);
   });
 });

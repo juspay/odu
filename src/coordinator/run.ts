@@ -136,6 +136,31 @@ export async function ensureCheckoutFree(
   };
 }
 
+/**
+ * Interrupt stop-work seam for cancel vs venue-lease-loss.
+ *
+ * - `before-settle` + `exclusivityLost`: stop lanes/holds *now* — the remote
+ *   flock is already free (`lease.lost`); another coordinator can claim while
+ *   we still have ssh build sessions open if we wait on status settle.
+ * - `after-settle`: always stop (idempotent). For cancel/SIGINT the hold is
+ *   still ours during settle, so exclusivity covers GH status finalization;
+ *   for lease-loss this is a no-op second pass after the early stop.
+ *
+ * Exported so unit tests can assert the lease-lost path invokes stop before
+ * settle completes (not only that `lease.lost` resolves).
+ */
+export function applyInterruptStopWork(
+  phase: "before-settle" | "after-settle",
+  exclusivityLost: boolean,
+  stop: () => void,
+): void {
+  if (phase === "before-settle") {
+    if (exclusivityLost) stop();
+    return;
+  }
+  stop();
+}
+
 function git(repo: string, args: string[]): string {
   const result = spawnSync("git", args, { cwd: repo, encoding: "utf-8" });
   if (result.status !== 0) {
@@ -529,15 +554,38 @@ async function orchestrate(
 
   let shuttingDown = false;
   // The single shutdown every interrupt source shares: SIGTERM/SIGINT, the live
-  // view's `q` (via `onQuit`), and the `run.cancel` surface mutation a second
-  // process drives (`odu cancel`, the MCP `cancel` tool, a `--supersede` start).
-  // An interrupted coordinator must not strand `Running:` contexts as eternally
-  // pending checks, and must hand the terminal back. Natural completion does NOT
-  // pass through here — it falls through to the verdict below.
-  const shutdown = (code: number, reason = "interrupted"): void => {
+  // view's `q` (via `onQuit`), the `run.cancel` surface mutation a second
+  // process drives (`odu cancel`, the MCP `cancel` tool, a `--supersede` start),
+  // and venue `lease.lost` (remote hold died — flock already free). An interrupted
+  // coordinator must not strand `Running:` contexts as eternally pending checks,
+  // and must hand the terminal back. Natural completion does NOT pass through
+  // here — it falls through to the verdict below.
+  //
+  // `exclusivityLost`: when true (lease.lost only), stop lanes and drop local
+  // hold handles *before* awaiting poster.settle — the flock is already free so
+  // another coordinator can claim immediately. Cancel/SIGINT leave exclusivity
+  // intact until after settle (still holding the remote flock), then release.
+  const shutdown = (
+    code: number,
+    reason = "interrupted",
+    opts: { exclusivityLost?: boolean } = {},
+  ): void => {
     if (shuttingDown) return;
     shuttingDown = true;
     clearIdle();
+    const exclusivityLost = opts.exclusivityLost === true;
+    const stopWork = (): void => {
+      for (const lane of lanes.values()) lane.close();
+      // Free venue leases so the remote flock drops immediately rather than
+      // waiting for the OS to reap our ssh children on process death (crash
+      // paths still free via connection close — this is the clean path). On
+      // lease.lost the flock is already free; release still reaps local hold
+      // children so we do not leave heartbeats running.
+      for (const lease of acquiredLeases) lease.release();
+      acquiredLeases.length = 0;
+    };
+    // Fail-closed on exclusivity loss: stop fanout work before any settle wait.
+    applyInterruptStopWork("before-settle", exclusivityLost, stopWork);
     // Snapshot the state at the instant the interrupt lands — *before* posting,
     // settling, or letting the still-open lanes mutate it further. The record
     // must describe the run as it was when cancelled: any node still
@@ -545,6 +593,8 @@ async function orchestrate(
     // `store.get()` after `poster.settle()` (below), a lane that happens to
     // finish naturally during that window would flip the record to passed/failed
     // for a run the operator cancelled — contradicting the incomplete semantics.
+    // On lease.lost, lanes are already closed above so the snapshot cannot race
+    // with further fanout progress either.
     const interruptedState = store.get();
     info(`odu: ${reason} — finalizing posted statuses before exit`);
     for (const context of poster.pendingContexts()) {
@@ -555,12 +605,7 @@ async function orchestrate(
       });
     }
     void poster.settle().then(() => {
-      for (const lane of lanes.values()) lane.close();
-      // Free venue leases before exit so the remote flock drops immediately
-      // rather than waiting for the OS to reap our ssh children on process death
-      // (crash paths still free via connection close — this is the clean path).
-      for (const lease of acquiredLeases) lease.release();
-      acquiredLeases.length = 0;
+      applyInterruptStopWork("after-settle", exclusivityLost, stopWork);
       // Record this run before the socket closes: a superseding run waits on
       // that close to confirm we're gone, so writing first guarantees our
       // record is on disk before it allocates its own (next) seq. Use the
@@ -581,10 +626,9 @@ async function orchestrate(
   // flock. Intentional `release()` does not fire `lost`.
   for (const lease of acquiredLeases) {
     void lease.lost?.then(() => {
-      shutdown(
-        1,
-        `venue lease lost on ${shortHost(lease.host)}`,
-      );
+      shutdown(1, `venue lease lost on ${shortHost(lease.host)}`, {
+        exclusivityLost: true,
+      });
     });
   }
 
