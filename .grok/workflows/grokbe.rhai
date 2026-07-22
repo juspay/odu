@@ -160,6 +160,9 @@ let stage_schema = #{
 };
 
 // codex-debate track (real /codex-debate via Kolu — not a Grok-critic substitute)
+// Success contract for status=consensus: rounds>=1, effort=xhigh, non-empty artifacts.
+// Non-consensus statuses may still use empty comment_body; Rhai enforces the
+// success invariants below (schema alone cannot express ok-dependent rules).
 let codex_schema = #{
     "type": "object",
     "required": ["ok", "status", "summary", "rounds", "effort", "comment_body", "codex_start", "head_sha"],
@@ -167,8 +170,8 @@ let codex_schema = #{
         "ok": #{ "type": "boolean" },
         "status": #{ "type": "string", "enum": ["consensus", "reviewer-error", "merge-base-error"] },
         "rounds": #{ "type": "integer", "minimum": 0 },
-        "effort": #{ "type": "string", "enum": ["low", "medium", "high", "xhigh"] },
-        "summary": #{ "type": "string" },
+        "effort": #{ "type": "string", "enum": ["xhigh"] },
+        "summary": #{ "type": "string", "minLength": 1 },
         "comment_body": #{ "type": "string" },
         "codex_start": #{ "type": "string" },
         "head_sha": #{ "type": "string" },
@@ -272,10 +275,14 @@ fn normalize_tracks(csv) {
     let out = "";
     let known = ",arch,lens,adversarial,simplify,police,";
     let saw_any = false;
-    // Cap iterations to avoid infinite loop on malformed input.
+    // At most five known tracks (+ a few empties/aliases). Fail closed if input
+    // is absurdly long rather than silently truncating a tail token.
     let guard = 0;
-    while remaining != "" && guard < 32 {
+    while remaining != "" {
         guard += 1;
+        if guard > 16 {
+            return (); // too many pieces — refuse rather than drop a tail
+        }
         let comma = remaining.index_of(",");
         let piece = remaining;
         if comma >= 0 {
@@ -289,6 +296,8 @@ fn normalize_tracks(csv) {
             // skip empty (e.g. trailing comma)
         } else if !(known.contains("," + tok + ",")) {
             return (); // unknown token
+        } else if ("," + out + ",").contains("," + tok + ",") {
+            return (); // duplicate track
         } else {
             if saw_any {
                 out += ",";
@@ -956,14 +965,24 @@ if do_adversarial {
             csum = "";
         }
         gauntlet_notes.push("codex-debate: " + cstatus + " — " + csum);
-        if codex_r.output.comment_body != () && codex_r.output.comment_body != "" {
-            adversarial_comment = codex_r.output.comment_body;
-        }
-        // Proof gate: consensus requires ok=true AND status=consensus.
-        let consensus = codex_r.output.ok == true && cstatus == "consensus";
-        if !consensus {
+        // Proof gate: consensus requires ok + status + success artifacts
+        // (rounds>=1, effort=xhigh, non-empty comment_body / SHAs).
+        let crounds = if codex_r.output.rounds != () { codex_r.output.rounds } else { 0 };
+        let ceffort = if codex_r.output.effort != () { codex_r.output.effort } else { "" };
+        let cbody = if codex_r.output.comment_body != () { codex_r.output.comment_body } else { "" };
+        let cstart = if codex_r.output.codex_start != () { codex_r.output.codex_start } else { "" };
+        let chead = if codex_r.output.head_sha != () { codex_r.output.head_sha } else { "" };
+        let artifacts_ok = crounds >= 1 && ceffort == "xhigh" && cbody != "" && cstart != "" && chead != "";
+        let consensus = codex_r.output.ok == true && cstatus == "consensus" && artifacts_ok;
+        if consensus {
+            adversarial_comment = cbody;
+        } else {
             gauntlet_ok = false;
-            gauntlet_notes.push("codex-debate: PROOF GATE FAIL — no consensus (gauntlet_ok=false)");
+            if codex_r.output.ok == true && cstatus == "consensus" && !artifacts_ok {
+                gauntlet_notes.push("codex-debate: PROOF GATE FAIL — claimed consensus but missing artifacts (rounds/effort/comment/SHAs)");
+            } else {
+                gauntlet_notes.push("codex-debate: PROOF GATE FAIL — no consensus (gauntlet_ok=false)");
+            }
         }
     } else {
         gauntlet_ok = false;
