@@ -1,7 +1,7 @@
 /**
  * `odu hosts` — inventory snapshot: every configured machine and whether its
- * venue lock is free or held (and by whom). Probes each host with a non-blocking
- * flock over ssh; does not acquire.
+ * venue lock is free or held (and by whom). Dials odu-runner on each host
+ * (surface-remote) and calls `lease.probe`; does not acquire.
  */
 
 import { loadHosts, shortHost } from "../coordinator/hosts";
@@ -10,6 +10,10 @@ import {
   probeAllHosts,
   type ProbeResult,
 } from "../coordinator/lease";
+import {
+  evalOduRunnerDrv,
+  resolveRunnerFlake,
+} from "../coordinator/runnerFlake";
 
 function stateLabel(probe: ProbeResult): string {
   return probe.state === "unreachable" ? "down" : probe.state;
@@ -35,7 +39,11 @@ export async function hostsCommand(): Promise<number> {
     return 1;
   }
 
-  const rows = await probeAllHosts(config.hosts);
+  const runnerFlake = resolveRunnerFlake(process.env);
+  const rows = await probeAllHosts(config.hosts, {
+    resolveDrvPath: (platform) => () =>
+      Promise.resolve(evalOduRunnerDrv(runnerFlake, platform)),
+  });
   const nowMs = Date.now();
 
   // Column widths from content.

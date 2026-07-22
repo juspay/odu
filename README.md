@@ -151,16 +151,22 @@ a pool of one:
 Rules (juspay/odu#54):
 
 - One run per machine at a time. The lock is an `flock` **on the target
-  machine**, held over a long-lived ssh connection with heartbeats — so
-  laptops/agents contend correctly with no lock server. Crash / SIGKILL /
-  half-open network all free the lock when heartbeats stop.
+  machine**, held by the **odu-runner agent** (same binary/surface the lane
+  uses). The coordinator dials it over `@kolu/surface-remote` and calls
+  `lease.claim` / `lease.probe` / `lease.release` — never a bash claim script
+  over raw ssh. Crash / SIGKILL / session death free the lock when the agent
+  process dies.
+- `flock` is a **Nix runtime dependency of odu-runner** (util-linux on its
+  PATH), not a host-installed tool. Builders need ssh + Nix; they do not need
+  system flock.
 - Every machine busy → wait in line (and say who you're waiting for).
   `--no-wait` fails immediately instead.
 - `--host x86_64-linux=ci-2` still pins a specific machine (waits if busy).
 - `localhost` is never leased (the checkout socket already serializes local runs).
 - Empty pool / no reachable host → loud error. Never localhost by accident.
 
-`odu hosts` probes the inventory without acquiring:
+`odu hosts` probes the inventory without acquiring (dials the agent, calls
+`lease.probe`):
 
 ```
 HOST            PLATFORM        STATE   HELD BY
@@ -169,8 +175,7 @@ ci-3            x86_64-linux    free
 rasam           aarch64-darwin  busy    srid@laptop · a1b2c3d#4 · 6m
 ```
 
-Builders need `flock(1)` (util-linux) on PATH. The lock file defaults to
-`/tmp/odu.lease` (`ODU_LEASE_LOCK` to override).
+The lock file defaults to `/tmp/odu.lease` (`ODU_LEASE_LOCK` to override).
 
 **Scope a recipe to the coordinator's own OS family.** By default every recipe
 fans out to every configured platform. Tagging a recipe with `just`'s built-in

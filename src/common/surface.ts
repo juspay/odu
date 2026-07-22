@@ -5,9 +5,10 @@
  *
  *   - `laneSurface` — served by `odu-runner --stdio` on each platform's host.
  *     mini-ci's three primitives (`nodes` cell, `nodeLog` stream,
- *     `node.rerun`) plus `run.configure`, the one lane-only procedure: the
- *     runner spawns idle (HostSession argv is fixed to `--stdio`), and the
- *     coordinator sends the pipeline + workspace recipe over the surface.
+ *     `node.rerun`) plus `run.configure` (pipeline recipe) and `lease.*`
+ *     (venue flock on the agent — claim/probe/release). The runner spawns
+ *     idle (HostSession argv is fixed to `--stdio`); the coordinator dials
+ *     it over surface-remote for both pool lease and the CI lane.
  *
  *   - `oduSurface` — the fan-in the coordinator serves on `.ci/odu.sock` for
  *     `odu status` / `logs` / `attach`. The lane's three primitives plus one
@@ -255,6 +256,69 @@ const cancelProcedure = {
   },
 } as const;
 
+/** Who holds a venue lock (`holder|run|sinceMs` on the agent). Shared by the
+ *  lane's `lease.*` procedures and the coordinator's `odu hosts` rendering. */
+export const LeaseHolderSchema = z.object({
+  holder: z.string(),
+  run: z.string().nullable(),
+  sinceMs: z.number(),
+});
+export type LeaseHolder = z.infer<typeof LeaseHolderSchema>;
+
+/** Default remote venue lock path; override via claim/probe input or
+ *  `ODU_LEASE_LOCK` on the agent. */
+export const DEFAULT_LEASE_LOCK = "/tmp/odu.lease";
+
+const LeaseClaimInputSchema = z.object({
+  holder: z.string().min(1),
+  run: z.string().nullable(),
+  /** Absolute path on the agent host. Omit → agent default (`ODU_LEASE_LOCK`
+   *  or {@link DEFAULT_LEASE_LOCK}). */
+  lockPath: z.string().optional(),
+});
+
+const LeaseClaimOutputSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("held") }),
+  z.object({
+    status: z.literal("busy"),
+    heldBy: LeaseHolderSchema.nullable(),
+  }),
+  z.object({ status: z.literal("error"), error: z.string() }),
+]);
+
+const LeaseProbeInputSchema = z.object({
+  lockPath: z.string().optional(),
+});
+
+const LeaseProbeOutputSchema = z.discriminatedUnion("state", [
+  z.object({ state: z.literal("free"), heldBy: z.null() }),
+  z.object({
+    state: z.literal("busy"),
+    heldBy: LeaseHolderSchema.nullable(),
+  }),
+  z.object({ state: z.literal("error"), error: z.string() }),
+]);
+
+/** Venue lock on the lane agent — non-blocking claim/probe/release.
+ *  Flock is local to the agent process (util-linux on odu-runner's Nix PATH);
+ *  the coordinator dials this surface over surface-remote, never a bash
+ *  claim script. Hold lifetime = agent session: release RPC or process death
+ *  frees the lock. */
+const leaseProcedures = {
+  claim: {
+    input: LeaseClaimInputSchema,
+    output: LeaseClaimOutputSchema,
+  },
+  probe: {
+    input: LeaseProbeInputSchema,
+    output: LeaseProbeOutputSchema,
+  },
+  release: {
+    input: z.object({}),
+    output: z.object({ ok: z.boolean() }),
+  },
+} as const;
+
 /** Served by `odu-runner --stdio` on each lane host. */
 export const laneSurface = defineSurface({
   ...primitives,
@@ -266,6 +330,7 @@ export const laneSurface = defineSurface({
         output: ConfigureOutputSchema,
       },
     },
+    lease: leaseProcedures,
   },
 });
 

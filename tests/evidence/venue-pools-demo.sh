@@ -5,8 +5,10 @@
 # fixture; the "venue" is this machine reached over ssh (not the localhost
 # short-circuit) so flock-over-ssh lease, `odu hosts`, and `--no-wait` are real.
 #
-# Requires: passwordless `ssh $USER@$(hostname -s)` (or bare hostname) with
-# flock(1) on PATH — true of a typical nix/dev box that already dials itself.
+# Requires: passwordless `ssh $USER@$(hostname -s)` (or bare hostname) and
+# odu's Nix-built odu-runner (lease is an agent surface RPC; flock ships on
+# the runner PATH). The synthetic "other agent holds the lock" uses host
+# flock only to occupy the lock file for the demo.
 #
 #   odu=$(nix build .#odu --no-link --print-out-paths)/bin/odu
 #   asciinema rec --headless --window-size 92x22 -i 2 --overwrite \

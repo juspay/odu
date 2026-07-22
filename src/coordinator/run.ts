@@ -51,7 +51,7 @@ import {
   leaseLanes,
   localHolderId,
 } from "./lease";
-import { missingRunnerError, resolveRunnerFlake } from "./runnerFlake";
+import { evalOduRunnerDrv, resolveRunnerFlake } from "./runnerFlake";
 import { cancelRun } from "./cancel";
 import {
   liveRunLockPid,
@@ -506,6 +506,10 @@ async function orchestrate(
     identity: { holder: localHolderId(), run: runLabel },
     noWait: args.noWait,
     onLine: info,
+    // Same odu-runner agent the lane will use — lease is a surface RPC on
+    // that agent (not bash-over-ssh). Drv is per platform tuple in hosts.json.
+    resolveDrvPath: (platform) => () =>
+      Promise.resolve(evalOduRunnerDrv(runnerFlake, platform)),
   });
   acquiredLeases.push(...leases);
 
@@ -871,27 +875,7 @@ async function orchestrate(
       origin: local || originUrl === null ? null : fetchUrlFor(originUrl),
       sha: local ? null : sha,
       workspace: local ? specSource : null,
-      resolveDrvPath: async () => {
-        const attr = `${runnerFlake}#packages.${platform}.odu-runner.drvPath`;
-        const result = spawnSync(
-          "nix",
-          ["eval", "--raw", "--accept-flake-config", attr],
-          { encoding: "utf-8", maxBuffer: 16 * 1024 * 1024 },
-        );
-        if (result.status !== 0) {
-          // A flake that doesn't export odu-runner gets a directed message
-          // (name the flake + the split); any other eval failure keeps the raw
-          // stderr so unrelated breakage isn't masked.
-          const directed = missingRunnerError(
-            runnerFlake,
-            platform,
-            result.stderr,
-          );
-          if (directed !== null) throw new Error(directed);
-          throw new Error(`nix eval odu-runner drv failed:\n${result.stderr}`);
-        }
-        return result.stdout.trim();
-      },
+      resolveDrvPath: async () => evalOduRunnerDrv(runnerFlake, platform),
       onSetupLine: (line) => appendLocal(setupId, `${line}\n`),
       onNodes: (laneState) => {
         for (const laneId of laneState.order) {

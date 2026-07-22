@@ -1,50 +1,49 @@
 /**
- * Venue lease — one run per machine, lock held by the run process.
+ * Venue lease — one run per machine, lock held for the run lifetime.
  *
- * The lock lives ON THE TARGET MACHINE (`flock` on a file there), held over one
- * long-lived ssh connection: the remote side grabs the lock and sits reading
- * heartbeat bytes; the holder ticks one byte every ~10s. Every way of letting
- * go looks the same to the machine — the heartbeats stop:
+ * The lock lives ON THE TARGET MACHINE (`flock` on a file there), but the
+ * coordinator never runs flock over raw ssh. It dials **odu-runner** via
+ * `@kolu/surface-remote` (`makeSession` + `sshConnector`) and calls the
+ * lane surface's `lease.claim` / `lease.probe` / `lease.release` procedures.
+ * Flock is a Nix runtime dep of odu-runner (util-linux on PATH); the agent
+ * process holds the lock; agent death frees it.
  *
- *   - normal finish → connection closes → lock frees instantly;
- *   - crash / SIGKILL → the OS closes the connection → lock frees in seconds;
- *   - half-open network → the remote read times out (~40s) → lock frees.
- *
- * There is no absolute wall-clock max while heartbeats keep arriving: a healthy
- * multi-hour CI run must keep exclusivity. `ODU_LEASE_MAX_HOLD` (default 0 =
- * unlimited) is an optional operator override for environments that want a
- * hard ceiling; when it fires (or the ssh child dies for any reason) the local
- * `LeaseHandle.lost` promise resolves so the coordinator fails closed rather
- * than continuing as if it still held the flock.
- *
- * Because the lock is on the machine, runs from different laptops/agents contend
- * correctly with no lock server, database, or daemon anywhere. Proven in kolu's
- * production pool sidecar (`.apm/skills/ci/pu/lease.sh`); moved into the run
- * process so the lease lifetime = run lifetime (juspay/odu#54).
+ *   - normal finish → lease.release + session.destroy → flock frees;
+ *   - crash / SIGKILL → ssh drops → agent dies → flock frees;
+ *   - half-open network → session liveness fails → lost fires → shutdown.
  *
  * `localhost` is never leased — the checkout socket already serializes local
- * runs, and flock-over-ssh has nothing to dial.
+ * runs, and there is no remote agent to dial for the lock.
  */
 
-import { type ChildProcess, spawn } from "node:child_process";
 import { hostname, userInfo } from "node:os";
-import { shellQuoteArg } from "@kolu/shell-quote";
-import { isLocalHost, SSH_COMMON_OPTS } from "@kolu/surface-remote";
+import {
+  type AgentClient,
+  isLocalHost,
+  makeSession,
+  type SessionState,
+  sshConnector,
+  type SshProv,
+} from "@kolu/surface-remote";
+import {
+  DEFAULT_LEASE_LOCK,
+  laneSurface,
+  type LeaseHolder,
+} from "../common/surface";
 import { shortHost, type HostPool } from "./hosts";
 
-/** Remote lock file (and adjacent `.holder` identity file). Override via
- *  `ODU_LEASE_LOCK` for tests / multi-tenant boxes that share a namespace. */
+export type HolderInfo = LeaseHolder;
+
 export function leaseLockPath(): string {
   const fromEnv = process.env.ODU_LEASE_LOCK;
   return fromEnv !== undefined && fromEnv !== ""
     ? fromEnv
-    : "/tmp/odu.lease";
+    : DEFAULT_LEASE_LOCK;
 }
 
 /**
  * Parse a non-negative env override. Empty / non-finite / below `min` fall back
- * — `Number("")` is 0 and would busy-loop `setInterval` or break remote
- * `read -t` if taken as a real value (same pattern as `lingerIdleMs`).
+ * — `Number("")` is 0 and would busy-loop `setInterval` if taken as a real value.
  */
 function envNumber(name: string, fallback: number, min: number): number {
   const raw = process.env[name];
@@ -53,22 +52,9 @@ function envNumber(name: string, fallback: number, min: number): number {
   return Number.isFinite(n) && n >= min ? n : fallback;
 }
 
-const HEARTBEAT_S = envNumber("ODU_LEASE_HEARTBEAT", 10, 1);
-const TTL_S = envNumber("ODU_LEASE_TTL", 40, 1);
-/** Absolute remote hold ceiling in seconds. `0` (default) = unlimited while
- *  heartbeats arrive — only idle TTL / EOF end the hold. */
-const MAX_HOLD_S = envNumber("ODU_LEASE_MAX_HOLD", 0, 0);
 const WAIT_POLL_MS = envNumber("ODU_LEASE_WAIT_POLL_MS", 5_000, 1);
-const CLAIM_TIMEOUT_MS = envNumber("ODU_LEASE_CLAIM_TIMEOUT_MS", 30_000, 1);
-
-export interface HolderInfo {
-  /** Local identity of the process holding the lock (`user@hostname`). */
-  holder: string;
-  /** Run label when known (`sha7` or `sha7#seq`); null if not recorded. */
-  run: string | null;
-  /** Epoch ms when the holder acquired (for "held for 6m" rendering). */
-  sinceMs: number;
-}
+/** Bound for pin + claim RPC (includes cold nix copy of odu-runner). */
+const CLAIM_TIMEOUT_MS = envNumber("ODU_LEASE_CLAIM_TIMEOUT_MS", 180_000, 1);
 
 export interface LeaseIdentity {
   holder: string;
@@ -77,27 +63,22 @@ export interface LeaseIdentity {
 
 export interface LeaseHandle {
   readonly host: string;
-  /** Drop the hold — closes the ssh data channel so the remote flock frees. */
+  /** Drop the hold — release RPC + destroy the agent session. */
   release(): void;
   /**
-   * Resolves when the remote hold ends *without* an intentional `release()`
-   * (ssh child exit, TTL, optional MAX_HOLD, remote kill). Callers must treat
-   * this as loss of exclusivity — do not keep fanning work to the host.
-   * Optional so test fakes can omit it; production claims always set it.
+   * Resolves when the agent session ends *without* an intentional `release()`
+   * (ssh drop, agent crash, remote kill). Callers must treat this as loss of
+   * exclusivity. Optional so test fakes can omit it.
    */
   readonly lost?: Promise<void>;
 }
 
-/** Outcome of one non-blocking claim attempt against a *remote* host.
- *  Localhost is not a claim outcome — pure-local pools short-circuit in
- *  `acquireFromPool` / `probeHost` before any claim protocol runs. */
+/** Outcome of one non-blocking claim attempt against a *remote* host. */
 export type ClaimResult =
   | { kind: "held"; lease: LeaseHandle }
   | { kind: "busy"; heldBy: HolderInfo | null }
   | { kind: "unreachable"; error: string };
 
-/** Probe snapshot aligned with claim outcomes; `local` is host topology
- *  (lease-exempt), not a claim result. Unreachable always carries an error. */
 export type ProbeResult =
   | { host: string; state: "free"; heldBy: null }
   | { host: string; state: "busy"; heldBy: HolderInfo | null }
@@ -111,7 +92,6 @@ export function localHolderId(): string {
   return `${user}@${host}`;
 }
 
-/** Compact duration for status lines (`45s`, `6m`, `2h`). */
 export function formatHeldFor(sinceMs: number, nowMs = Date.now()): string {
   const sec = Math.max(0, Math.floor((nowMs - sinceMs) / 1000));
   if (sec < 60) return `${sec}s`;
@@ -127,7 +107,7 @@ export function formatHolder(info: HolderInfo, nowMs = Date.now()): string {
   return `${info.holder} · ${held}`;
 }
 
-/** Parse the remote holder file body (`holder|run|sinceMs` or legacy free text). */
+/** Parse holder file body (shared with agent; kept for tests / formatting). */
 export function parseHolderBody(body: string): HolderInfo | null {
   const line = body.trim().split("\n")[0]?.trim() ?? "";
   if (line === "") return null;
@@ -143,276 +123,50 @@ export function parseHolderBody(body: string): HolderInfo | null {
       sinceMs: since,
     };
   }
-  // Free-text fallback (older holders / manual files).
   return { holder: line, run: null, sinceMs: Date.now() };
 }
 
-/** Remote claim command (single ssh argv): non-blocking flock, write holder,
- *  wait on heartbeats from stdin. Quoting via `@kolu/shell-quote` (same leaf
- *  surface-remote uses for ssh remote argv). */
-function claimRemoteScript(
-  lock: string,
-  identity: LeaseIdentity,
-  nowMs: number,
-): string {
-  const holderFile = `${lock}.holder`;
-  const run = identity.run ?? "-";
-  const body = `${identity.holder}|${run}|${nowMs}`;
-  // flock -n: busy → print BUSY + holder (if any) and exit 7.
-  // On hold: write holder, print HELD, then read heartbeats until EOF/TTL, or
-  // until absolute MAX when MAX>0 (default MAX=0 = unlimited while beating).
-  // stdin is ONLY the heartbeat channel (script is an ssh argv, not bash -s).
-  return [
-    `LOCK=${shellQuoteArg(lock)}`,
-    `HOLDER=${shellQuoteArg(holderFile)}`,
-    `BODY=${shellQuoteArg(body)}`,
-    `TTL=${TTL_S}`,
-    `MAX=${MAX_HOLD_S}`,
-    `command -v flock >/dev/null 2>&1 || { echo 'NOFLOCK flock(1) missing on host'; exit 9; }`,
-    `exec 9>"$LOCK" || { echo 'ERR cannot open lock'; exit 8; }`,
-    `if ! flock -n 9; then`,
-    `  echo BUSY`,
-    `  if [ -f "$HOLDER" ]; then cat "$HOLDER"; fi`,
-    `  exit 7`,
-    `fi`,
-    `printf '%s\\n' "$BODY" >"$HOLDER"`,
-    `echo HELD`,
-    `start=$(date +%s)`,
-    `while true; do`,
-    `  if ! read -t "$TTL" -r _; then break; fi`,
-    `  now=$(date +%s)`,
-    `  if [ "$MAX" -gt 0 ] && [ $((now - start)) -ge "$MAX" ]; then break; fi`,
-    `done`,
-    `rm -f "$HOLDER"`,
-  ].join("; ");
+export type LaneAgentClient = AgentClient<typeof laneSurface.contract>;
+
+/** How the coordinator resolves odu-runner for a host (nix eval + platform). */
+export type ResolveRunnerDrv = () => Promise<string>;
+
+export interface AgentDialOpts {
+  resolveDrvPath: ResolveRunnerDrv;
+  onLog?: (line: string) => void;
+  /** Bound for session pin + claim/probe RPC (default CLAIM_TIMEOUT_MS). */
+  timeoutMs?: number;
+  /** Optional lock path override (tests / multi-tenant). */
+  lockPath?: string;
 }
 
-/** Remote probe command: non-blocking flock test + holder dump. */
-function probeRemoteScript(lock: string): string {
-  const holderFile = `${lock}.holder`;
-  return [
-    `LOCK=${shellQuoteArg(lock)}`,
-    `HOLDER=${shellQuoteArg(holderFile)}`,
-    `command -v flock >/dev/null 2>&1 || { echo 'NOFLOCK'; exit 9; }`,
-    `if flock -n "$LOCK" -c true 2>/dev/null; then echo FREE`,
-    `else echo BUSY; if [ -f "$HOLDER" ]; then cat "$HOLDER"; fi; fi`,
-  ].join("; ");
-}
-
-export interface DialResult {
-  /** Combined stdout (and useful stderr lines if the remote printed there). */
-  stdout: string;
-  /** Process exit code, or null if killed/timeout without a code. */
-  code: number | null;
-  /** Claim hold session: release drops the flock; lost fires on unexpected end. */
-  hold?: {
-    release: () => void;
-    /** Resolves on unexpected hold-child death (not after intentional release). */
-    lost: Promise<void>;
-  };
-}
-
-/**
- * Low-level ssh dial. `mode: "claim"` keeps the connection open for the hold
- * (stdin is the heartbeat channel); `mode: "probe"` runs to completion.
- * Injected in unit tests so we never hit a real network. Production default
- * splits transport spawn from claim-protocol settle / hold lifecycle.
- */
-export type DialFn = (
-  host: string,
-  script: string,
-  mode: "claim" | "probe",
-) => Promise<DialResult>;
-
-/**
- * ssh argv for a lease dial. Exported so unit tests can assert the
- * option-terminator footgun guard without spawning a real ssh.
- *
- * `--` ends ssh option parsing so `host` is always a destination. Without it a
- * host like `-oProxyCommand=<cmd>` is parsed as an option and runs `<cmd>` via
- * /bin/sh — the same RCE surface `buildAgentCommand` / `buildSshProbeCommand`
- * already close in `@kolu/surface-remote`. Lease hosts come from hosts.json,
- * `--host` pins, and MCP `run.hosts` — same trust boundary.
- */
-export function buildLeaseSshArgs(host: string, script: string): string[] {
-  return [...SSH_COMMON_OPTS, "--", host, script];
-}
-
-/** Transport only: spawn ssh with the shared dead-peer policy. */
-function spawnSsh(host: string, script: string): ChildProcess {
-  // Remote command is an ssh argv (not bash -s): stdin stays free for
-  // claim-mode heartbeats, matching kolu's lease.sh data-channel pattern.
-  // Dead-peer / BatchMode policy is the shared surface-remote receptacle —
-  // not hand-rolled here (and not tied to ODU_LEASE_HEARTBEAT: that tick is
-  // only for flock stdin + remote TTL, not ssh ServerAlive).
-  return spawn("ssh", buildLeaseSshArgs(host, script), {
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-}
-
-/** Cap dial collectors — claim holds last for the whole run; an ssh that
- *  chatters on stderr must not grow these for hours (MCP spawn caps the same). */
-const DIAL_COLLECT_MAX = 64 * 1024;
-
-function attachCollectors(child: ChildProcess): {
-  getStdout: () => string;
-  getCombined: () => string;
-} {
-  let stdout = "";
-  let stderr = "";
-  child.stdout?.setEncoding("utf-8");
-  child.stderr?.setEncoding("utf-8");
-  child.stdout?.on("data", (chunk: string) => {
-    stdout = (stdout + chunk).slice(-DIAL_COLLECT_MAX);
-  });
-  child.stderr?.on("data", (chunk: string) => {
-    stderr = (stderr + chunk).slice(-DIAL_COLLECT_MAX);
-  });
-  return {
-    getStdout: () => stdout,
-    getCombined: () =>
-      stdout + (stderr.trim() !== "" ? `\n${stderr}` : ""),
-  };
-}
-
-/** Probe path: run remote script to completion (stdin closed). */
-function dialProbe(host: string, script: string): Promise<DialResult> {
-  return new Promise((resolve) => {
-    const child = spawnSsh(host, script);
-    const { getCombined } = attachCollectors(child);
-    child.stdin?.end();
-    let settled = false;
-    const finish = (code: number | null): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve({ stdout: getCombined(), code });
-    };
-    // Timeout must resolve (not only kill): Node docs say spawn `error` may
-    // omit `close`, which would hang probe forever if we only waited on close.
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      finish(null);
-    }, CLAIM_TIMEOUT_MS);
-    child.on("error", () => finish(null));
-    child.on("close", (code) => finish(code));
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => {
+      reject(new Error(`odu: ${label} timed out after ${ms}ms`));
+    }, ms);
+    t.unref?.();
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e: unknown) => {
+        clearTimeout(t);
+        reject(e);
+      },
+    );
   });
 }
 
 /**
- * Claim path: settle once HELD/BUSY/error appears; on HELD keep the child
- * as a hold session (stdin heartbeats + release). Protocol settle and hold
- * lifecycle live here — not in the transport spawn.
+ * Dial odu-runner on `host` via surface-remote, claim the venue lock, keep
+ * the agent session for the hold lifetime.
  */
-function dialClaim(host: string, script: string): Promise<DialResult> {
-  return new Promise((resolve) => {
-    const child = spawnSsh(host, script);
-    const { getStdout, getCombined } = attachCollectors(child);
-
-    let settled = false;
-    const settleFail = (code: number | null): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve({
-        stdout: getCombined(),
-        code,
-      });
-    };
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      settleFail(null);
-    }, CLAIM_TIMEOUT_MS);
-
-    const trySettle = (): void => {
-      if (settled) return;
-      const stdout = getStdout();
-      if (
-        /\bHELD\b/.test(stdout) ||
-        /\bBUSY\b/.test(stdout) ||
-        /\bNOFLOCK\b/.test(stdout) ||
-        /\bERR\b/.test(stdout)
-      ) {
-        settled = true;
-        clearTimeout(timer);
-        if (/\bHELD\b/.test(stdout)) {
-          let intentionalRelease = false;
-          const writeHb = (): void => {
-            try {
-              child.stdin?.write("\n");
-            } catch {
-              /* ignore — release/close ends the interval */
-            }
-          };
-          const hb = setInterval(writeHb, HEARTBEAT_S * 1000);
-          hb.unref?.();
-          // Surface unexpected hold end (MAX_HOLD, TTL, remote kill, ssh drop)
-          // so the claim layer does not keep treating the host as exclusively
-          // ours after the flock is gone.
-          const lost = new Promise<void>((resolveLost) => {
-            child.on("close", () => {
-              clearInterval(hb);
-              if (!intentionalRelease) resolveLost();
-            });
-          });
-          resolve({
-            stdout,
-            code: 0,
-            hold: {
-              release: () => {
-                intentionalRelease = true;
-                clearInterval(hb);
-                try {
-                  child.stdin?.end();
-                } catch {
-                  /* ignore — stdin already closed / child already dead */
-                }
-                // Give the remote a moment to see EOF; then ensure death.
-                setTimeout(() => {
-                  if (!child.killed) child.kill("SIGTERM");
-                }, 500).unref?.();
-              },
-              lost,
-            },
-          });
-        } else {
-          child.kill("SIGTERM");
-          resolve({ stdout, code: 7 });
-        }
-      }
-    };
-
-    child.stdout?.on("data", () => trySettle());
-    // Spawn failure (missing ssh, etc.) may not emit `close` — fail closed now
-    // rather than waiting the full claim timeout with an unhandled `error`.
-    child.on("error", () => settleFail(null));
-    child.on("close", (code) => settleFail(code));
-  });
-}
-
-const defaultDial: DialFn = (host, script, mode) =>
-  mode === "probe" ? dialProbe(host, script) : dialClaim(host, script);
-
-function parseBusyHolder(stdout: string): HolderInfo | null {
-  // After the BUSY line, the holder body (if any).
-  const lines = stdout.split(/\r?\n/);
-  const busyIdx = lines.findIndex((l) => l.trim() === "BUSY");
-  if (busyIdx < 0) return null;
-  const rest = lines
-    .slice(busyIdx + 1)
-    .map((l) => l.trim())
-    .filter((l) => l !== "" && l !== "BUSY" && l !== "HELD")
-    .join("\n");
-  return parseHolderBody(rest);
-}
-
-/** Try to claim one remote host. Callers must not pass localhost — pure-local
- *  pools are gated in `acquireFromPool` before claim. */
 export async function tryClaim(
   host: string,
   identity: LeaseIdentity,
-  dial: DialFn = defaultDial,
-  nowMs: number = Date.now(),
+  opts: AgentDialOpts,
 ): Promise<ClaimResult> {
   if (isLocalHost(host)) {
     throw new Error(
@@ -420,56 +174,130 @@ export async function tryClaim(
     );
   }
 
-  const script = claimRemoteScript(leaseLockPath(), identity, nowMs);
-  let result: DialResult;
-  try {
-    result = await dial(host, script, "claim");
-  } catch (e) {
-    return {
-      kind: "unreachable",
-      error: e instanceof Error ? e.message : String(e),
-    };
-  }
+  const timeoutMs = opts.timeoutMs ?? CLAIM_TIMEOUT_MS;
+  const session = makeSession<LaneAgentClient, SshProv>({
+    connectOnce: sshConnector<typeof laneSurface.contract>({
+      host,
+      binary: "odu-runner",
+      resolveDrvPath: opts.resolveDrvPath,
+    }),
+    initialConnection: "probing",
+    label: `lease:${shortHost(host)}`,
+    onLog: opts.onLog,
+  });
 
-  if (/\bHELD\b/.test(result.stdout) && result.hold !== undefined) {
+  let intentionalRelease = false;
+
+  try {
+    const client = await withTimeout(
+      session.pin(),
+      timeoutMs,
+      `lease pin ${shortHost(host)}`,
+    );
+
+    const result = await withTimeout(
+      client.surface.lease.claim({
+        holder: identity.holder,
+        run: identity.run,
+        lockPath: opts.lockPath,
+      }),
+      timeoutMs,
+      `lease claim ${shortHost(host)}`,
+    );
+
+    if (result.status === "busy") {
+      session.destroy();
+      return { kind: "busy", heldBy: result.heldBy };
+    }
+    if (result.status === "error") {
+      session.destroy();
+      return { kind: "unreachable", error: result.error };
+    }
+
+    // Held — keep session; mark connected so the connect watchdog stands down.
+    session.markConnected();
+
+    const lost = new Promise<void>((resolveLost) => {
+      session.onState((state: SessionState<SshProv>) => {
+        if (intentionalRelease) return;
+        if (state.phase === "disconnected" || state.phase === "failed") {
+          resolveLost();
+        }
+      });
+    });
+
     return {
       kind: "held",
       lease: {
         host,
-        release: result.hold.release,
-        lost: result.hold.lost,
+        release: () => {
+          intentionalRelease = true;
+          void client.surface.lease.release({}).catch(() => {
+            /* session may already be dead */
+          });
+          session.destroy();
+        },
+        lost,
       },
     };
-  }
-  if (/\bBUSY\b/.test(result.stdout)) {
-    return { kind: "busy", heldBy: parseBusyHolder(result.stdout) };
-  }
-  if (/\bNOFLOCK\b/.test(result.stdout)) {
+  } catch (e) {
+    intentionalRelease = true;
+    session.destroy();
     return {
       kind: "unreachable",
-      error: `flock(1) missing on ${host} — install util-linux flock on the builder`,
+      error: e instanceof Error ? e.message : String(e),
     };
   }
-  const detail = result.stdout.trim() || `exit ${result.code ?? "?"}`;
-  return {
-    kind: "unreachable",
-    error: `could not lease ${host}: ${detail}`,
-  };
 }
 
-/** Probe one host without holding. */
+/** Probe one host without holding — short-lived agent session. */
 export async function probeHost(
   host: string,
-  dial: DialFn = defaultDial,
+  opts: AgentDialOpts,
 ): Promise<ProbeResult> {
   if (isLocalHost(host)) {
     return { host, state: "local", heldBy: null };
   }
-  const script = probeRemoteScript(leaseLockPath());
-  let result: DialResult;
+
+  const timeoutMs = opts.timeoutMs ?? CLAIM_TIMEOUT_MS;
+  const session = makeSession<LaneAgentClient, SshProv>({
+    connectOnce: sshConnector<typeof laneSurface.contract>({
+      host,
+      binary: "odu-runner",
+      resolveDrvPath: opts.resolveDrvPath,
+    }),
+    initialConnection: "probing",
+    label: `lease-probe:${shortHost(host)}`,
+    onLog: opts.onLog,
+  });
+
   try {
-    result = await dial(host, script, "probe");
+    const client = await withTimeout(
+      session.pin(),
+      timeoutMs,
+      `lease probe pin ${shortHost(host)}`,
+    );
+    session.markConnected();
+    const result = await withTimeout(
+      client.surface.lease.probe({ lockPath: opts.lockPath }),
+      timeoutMs,
+      `lease probe ${shortHost(host)}`,
+    );
+    session.destroy();
+    if (result.state === "free") {
+      return { host, state: "free", heldBy: null };
+    }
+    if (result.state === "busy") {
+      return { host, state: "busy", heldBy: result.heldBy };
+    }
+    return {
+      host,
+      state: "unreachable",
+      heldBy: null,
+      error: result.error,
+    };
   } catch (e) {
+    session.destroy();
     return {
       host,
       state: "unreachable",
@@ -477,37 +305,12 @@ export async function probeHost(
       error: e instanceof Error ? e.message : String(e),
     };
   }
-  if (/\bFREE\b/.test(result.stdout)) {
-    return { host, state: "free", heldBy: null };
-  }
-  if (/\bBUSY\b/.test(result.stdout)) {
-    return {
-      host,
-      state: "busy",
-      heldBy: parseBusyHolder(result.stdout),
-    };
-  }
-  if (/\bNOFLOCK\b/.test(result.stdout)) {
-    return {
-      host,
-      state: "unreachable",
-      heldBy: null,
-      error: `flock(1) missing on ${host}`,
-    };
-  }
-  return {
-    host,
-    state: "unreachable",
-    heldBy: null,
-    error: result.stdout.trim() || `exit ${result.code ?? "?"}`,
-  };
 }
 
 export interface AcquireFromPoolOpts {
   platform: string;
   pool: HostPool;
   identity: LeaseIdentity;
-  /** Fail immediately when every candidate is busy (default: wait in line). */
   noWait: boolean;
   onLine?: (msg: string) => void;
   /** Injected claim — tests supply a fake; production uses `tryClaim`. */
@@ -515,15 +318,15 @@ export interface AcquireFromPoolOpts {
     host: string,
     identity: LeaseIdentity,
   ) => Promise<ClaimResult>;
+  /** Production: resolve odu-runner drv for this platform (passed to tryClaim). */
+  resolveDrvPath?: ResolveRunnerDrv;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
-  /** Rotate the scan start to reduce stampede on slot 0. */
   rotateBy?: number;
 }
 
 export interface AcquiredLane {
   host: string;
-  /** Null for localhost (no remote lock). */
   lease: LeaseHandle | null;
 }
 
@@ -540,7 +343,6 @@ function defaultSleep(ms: number): Promise<void> {
   });
 }
 
-/** One non-waiting scan of a platform pool (claim each candidate at most once). */
 type ScanOnce =
   | { status: "ok"; host: string; lease: LeaseHandle | null }
   | {
@@ -610,10 +412,6 @@ function releaseAll(leases: readonly LeaseHandle[]): void {
   for (const lease of leases) lease.release();
 }
 
-/**
- * Single non-waiting pass over a platform pool. Pure-local → ok without claim.
- * Used by `acquireFromPool` (wait loop) and `leaseLanes` (all-or-nothing multi).
- */
 async function scanPoolOnce(opts: {
   platform: string;
   pool: HostPool;
@@ -633,8 +431,6 @@ async function scanPoolOnce(opts: {
     );
   }
 
-  // Pure-local pool (after hosts.parsePool: never mixed with remotes): no
-  // remote lock, no claim protocol. Sole localhost is the common case.
   if (pool.every((h) => isLocalHost(h))) {
     const host = pool[0]!;
     onLine?.(`${platform}: picked ${shortHost(host)} (localhost)`);
@@ -672,13 +468,6 @@ async function scanPoolOnce(opts: {
 
 /**
  * Pick a free machine from the platform's pool, lock it, and return the hold.
- * Scans the pool (rotated) until one claim succeeds; when every reachable host
- * is busy, waits and retries — unless `noWait`, which fails immediately.
- * Unreachable hosts are skipped (reported) but never block the wait forever if
- * at least one host was merely busy; if *every* host is unreachable, fail loud.
- *
- * For multi-platform runs prefer `leaseLanes`, which never holds one platform
- * while waiting on another.
  */
 export async function acquireFromPool(
   opts: AcquireFromPoolOpts,
@@ -689,11 +478,26 @@ export async function acquireFromPool(
     identity,
     noWait,
     onLine,
-    claim = (h, id) => tryClaim(h, id),
     sleep = defaultSleep,
     now = Date.now,
     rotateBy = now(),
   } = opts;
+
+  const claim =
+    opts.claim ??
+    ((h, id) => {
+      if (opts.resolveDrvPath === undefined) {
+        return Promise.reject(
+          new Error(
+            "odu: acquireFromPool needs resolveDrvPath or an injected claim",
+          ),
+        );
+      }
+      return tryClaim(h, id, {
+        resolveDrvPath: opts.resolveDrvPath,
+        onLog: onLine,
+      });
+    });
 
   let waited = false;
   for (;;) {
@@ -726,34 +530,25 @@ export async function acquireFromPool(
 
 export interface LeaseLanesOpts {
   pools: Record<string, HostPool>;
-  /** Platforms that actually have tasks this run (others are not leased). */
   platforms: readonly string[];
   identity: LeaseIdentity;
   noWait: boolean;
   onLine?: (msg: string) => void;
   claim?: AcquireFromPoolOpts["claim"];
+  /**
+   * Resolve odu-runner drv for a platform (used when `claim` is not
+   * injected). Required for production multi-platform lease.
+   */
+  resolveDrvPath?: (platform: string) => ResolveRunnerDrv;
   sleep?: AcquireFromPoolOpts["sleep"];
   now?: AcquireFromPoolOpts["now"];
 }
 
 export interface LeasedLanes {
-  /** Final platform → single host map for the run. */
   lanes: Record<string, string>;
   leases: LeaseHandle[];
 }
 
-/**
- * Venue lock is one file per machine (`/tmp/odu.lease`), not per platform.
- * If two platforms in the same run list the same remote host, all-or-nothing
- * acquire holds it for platform A then sees it busy for B (self), releases,
- * and retries forever. Fail loud at lease time instead.
- *
- * Comparison keys match `shortHost` (strip `user@` + trailing DNS labels for
- * non-IP hosts; leave IPv4/IPv6 intact) then case-fold — so hosts.json shapes
- * like `nix@ci-1` vs `ci-1`, `ci-1` vs `ci-1.lab.example.com`, or mixed case
- * still collide. Dial-string identity alone misses those aliases and livelocks
- * under wait-in-line. README pool examples already mix short names and FQDNs.
- */
 function venueHostKey(host: string): string {
   return shortHost(host.trim()).toLowerCase();
 }
@@ -783,21 +578,34 @@ function assertNoSharedRemoteHosts(
 
 /**
  * Lease one host per platform that participates in the run.
- *
- * Multi-platform is all-or-nothing: one pass claims every platform without
- * waiting; if any platform is busy, holds already taken are released, then
- * the whole set sleeps and retries (or fails under `noWait`). Sorted platform
- * order is only for deterministic scan within a pass — never hold platform A
- * while blocked on B.
+ * Multi-platform is all-or-nothing (release partial holds while waiting).
  */
 export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
   const platforms = [...opts.platforms].sort();
   assertNoSharedRemoteHosts(opts.pools, platforms);
-  const claim = opts.claim ?? ((h, id) => tryClaim(h, id));
   const sleep = opts.sleep ?? defaultSleep;
   const now = opts.now ?? Date.now;
   const rotateBy = now();
   let waited = false;
+
+  const claimFor = (
+    platform: string,
+  ): ((host: string, identity: LeaseIdentity) => Promise<ClaimResult>) => {
+    if (opts.claim !== undefined) return opts.claim;
+    const resolve = opts.resolveDrvPath?.(platform);
+    if (resolve === undefined) {
+      return async () => ({
+        kind: "unreachable",
+        error:
+          "odu: leaseLanes needs resolveDrvPath(platform) or an injected claim",
+      });
+    }
+    return (h, id) =>
+      tryClaim(h, id, {
+        resolveDrvPath: resolve,
+        onLog: opts.onLine,
+      });
+  };
 
   for (;;) {
     const lanes: Record<string, string> = {};
@@ -822,7 +630,7 @@ export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
           pool,
           identity: opts.identity,
           onLine: opts.onLine,
-          claim,
+          claim: claimFor(platform),
           rotateBy,
         });
         if (scan.status === "ok") {
@@ -855,7 +663,6 @@ export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
       return { lanes, leases };
     }
 
-    // Partial hold while another platform is busy — drop everything, wait.
     releaseAll(leases);
 
     if (opts.noWait) {
@@ -881,19 +688,24 @@ export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
 /** Probe every host in the config for `odu hosts`. */
 export async function probeAllHosts(
   pools: Record<string, HostPool>,
-  dial: DialFn = defaultDial,
+  opts: {
+    resolveDrvPath: (platform: string) => ResolveRunnerDrv;
+    onLog?: (line: string) => void;
+  },
 ): Promise<{ platform: string; probe: ProbeResult }[]> {
   const out: { platform: string; probe: ProbeResult }[] = [];
   const platforms = Object.keys(pools).sort();
   await Promise.all(
     platforms.flatMap((platform) =>
       (pools[platform] ?? []).map(async (host) => {
-        const probe = await probeHost(host, dial);
+        const probe = await probeHost(host, {
+          resolveDrvPath: opts.resolveDrvPath(platform),
+          onLog: opts.onLog,
+        });
         out.push({ platform, probe });
       }),
     ),
   );
-  // Stable order: platform, then host as declared.
   out.sort((a, b) => {
     if (a.platform !== b.platform) return a.platform.localeCompare(b.platform);
     return a.probe.host.localeCompare(b.probe.host);

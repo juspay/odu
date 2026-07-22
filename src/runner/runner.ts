@@ -32,6 +32,12 @@ import {
   pendingNode,
   type PipelineState,
 } from "../common/surface";
+import {
+  agentLeaseLockPath,
+  claimLocal,
+  type LocalHold,
+  probeLocal,
+} from "./leaseHold";
 import { prepareWorkspace } from "./workspace";
 
 export const SETUP_NODE_ID = "_ci-setup";
@@ -50,6 +56,9 @@ export function createLaneRunner(): LaneRunner {
   const stateStore = inMemoryStore<PipelineState>(EMPTY_STATE);
   const tail = createLogTail();
 
+  /** Venue hold for this agent process — at most one; release on dispose. */
+  let venueHold: LocalHold | null = null;
+
   const runtime = implementSurface(laneSurface, {
     cells: {
       nodes: { store: stateStore },
@@ -63,6 +72,46 @@ export function createLaneRunner(): LaneRunner {
       },
       run: {
         configure: async ({ input }) => configure(input),
+      },
+      lease: {
+        claim: async ({ input }) => {
+          if (disposed) {
+            return { status: "error" as const, error: "runner is disposed" };
+          }
+          if (venueHold !== null) {
+            return {
+              status: "error" as const,
+              error: "agent already holds a venue lease",
+            };
+          }
+          const lockPath = agentLeaseLockPath(input.lockPath);
+          const result = await claimLocal(lockPath, {
+            holder: input.holder,
+            run: input.run,
+          });
+          if (result.status === "held") {
+            venueHold = result.hold;
+            return { status: "held" as const };
+          }
+          if (result.status === "busy") {
+            return {
+              status: "busy" as const,
+              heldBy: result.heldBy,
+            };
+          }
+          return { status: "error" as const, error: result.error };
+        },
+        probe: async ({ input }) => {
+          const lockPath = agentLeaseLockPath(input.lockPath);
+          return probeLocal(lockPath);
+        },
+        release: async () => {
+          if (venueHold !== null) {
+            venueHold.release();
+            venueHold = null;
+          }
+          return { ok: true };
+        },
       },
     },
   });
@@ -337,6 +386,10 @@ export function createLaneRunner(): LaneRunner {
     router,
     dispose: () => {
       disposed = true;
+      if (venueHold !== null) {
+        venueHold.release();
+        venueHold = null;
+      }
       for (const child of children.values()) killGroup(child, "SIGKILL");
       children.clear();
       // Keep the worktree when anything failed — it is the debugging trail;

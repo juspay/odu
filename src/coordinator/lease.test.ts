@@ -1,18 +1,13 @@
-import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
 import {
   acquireFromPool,
-  buildLeaseSshArgs,
   formatHeldFor,
   formatHolder,
   leaseLanes,
   parseHolderBody,
-  tryClaim,
   type ClaimResult,
-  type DialFn,
   type LeaseIdentity,
 } from "./lease";
-import { SSH_COMMON_OPTS } from "@kolu/surface-remote";
 
 const id: LeaseIdentity = { holder: "me@desk", run: "abc1234#1" };
 
@@ -99,14 +94,12 @@ describe("acquireFromPool", () => {
     await expect(
       acquireFromPool({
         platform: "aarch64-darwin",
-        pool: ["rasam", "sincereintent"],
+        pool: ["mac-1"],
         identity: id,
         noWait: true,
         claim,
-        rotateBy: 0,
       }),
     ).rejects.toThrow(/every host for aarch64-darwin is busy/);
-    expect(claim).toHaveBeenCalledTimes(2);
   });
 
   it("waits and retries when a host frees (no --no-wait)", async () => {
@@ -156,12 +149,14 @@ describe("acquireFromPool", () => {
         pool: [],
         identity: id,
         noWait: true,
+        claim: vi.fn(),
       }),
     ).rejects.toThrow(/empty host pool/);
   });
+});
 
+describe("leaseLanes", () => {
   it("releases already-held leases if a later platform fails", async () => {
-    // leaseLanes sorts platforms alphabetically — aarch64-darwin first.
     const releaseDarwin = vi.fn();
     const claim = vi.fn(async (host: string): Promise<ClaimResult> => {
       if (host === "mac-1") {
@@ -185,8 +180,6 @@ describe("acquireFromPool", () => {
   });
 
   it("multi-platform: does not hold early platforms while waiting on a busy later one", async () => {
-    // aarch64-darwin sorts first and can claim; x86_64-linux is busy once then free.
-    // All-or-nothing: release mac while waiting so mac is not idled across the poll.
     const releaseDarwin = vi.fn();
     let pass = 0;
     const claim = vi.fn(async (host: string): Promise<ClaimResult> => {
@@ -196,7 +189,6 @@ describe("acquireFromPool", () => {
           lease: { host, release: releaseDarwin },
         };
       }
-      // linux-1: busy on first whole-set pass, free after sleep+retry
       if (pass === 0) return { kind: "busy", heldBy: null };
       return held(host);
     });
@@ -218,10 +210,8 @@ describe("acquireFromPool", () => {
       "aarch64-darwin": "mac-1",
       "x86_64-linux": "linux-1",
     });
-    // First-pass mac hold was released when linux was busy.
     expect(releaseDarwin).toHaveBeenCalled();
     expect(sleep).toHaveBeenCalled();
-    // Final returned set still holds a live lease for mac (re-claimed on retry).
     expect(r.leases.length).toBe(2);
   });
 
@@ -238,8 +228,9 @@ describe("acquireFromPool", () => {
         noWait: false,
         claim,
       }),
-    ).rejects.toThrow(/shared-builder.*both.*x86_64-linux.*aarch64-linux|both.*aarch64-linux.*x86_64-linux/);
-    // Must fail before any claim attempt — never enter the wait loop.
+    ).rejects.toThrow(
+      /shared-builder.*both.*x86_64-linux.*aarch64-linux|both.*aarch64-linux.*x86_64-linux/,
+    );
     expect(claim).not.toHaveBeenCalled();
   });
 
@@ -333,7 +324,6 @@ describe("acquireFromPool", () => {
 
   it("does not collapse distinct IPv4 targets via first-dot split", async () => {
     const claim = vi.fn(async (host: string): Promise<ClaimResult> => held(host));
-    // Distinct boxes — must not throw the shared-host guard.
     const r = await leaseLanes({
       pools: {
         "x86_64-linux": ["10.0.0.1"],
@@ -348,112 +338,5 @@ describe("acquireFromPool", () => {
       "aarch64-linux": "10.0.0.2",
       "x86_64-linux": "10.0.0.1",
     });
-  });
-});
-
-describe("buildLeaseSshArgs — option terminator", () => {
-  it("ends option parsing with `--` before host (ProxyCommand RCE guard)", () => {
-    const evil = "-oProxyCommand=touch /tmp/pwned";
-    const args = buildLeaseSshArgs(evil, "echo held");
-    expect(args.slice(0, SSH_COMMON_OPTS.length)).toEqual([...SSH_COMMON_OPTS]);
-    const sep = args.indexOf("--");
-    expect(sep).toBe(SSH_COMMON_OPTS.length);
-    expect(args[sep + 1]).toBe(evil);
-    expect(args[sep + 2]).toBe("echo held");
-  });
-
-  it("places a normal host after `--`", () => {
-    const args = buildLeaseSshArgs("nix@ci-1", "true");
-    expect(args).toEqual([...SSH_COMMON_OPTS, "--", "nix@ci-1", "true"]);
-  });
-});
-
-describe("tryClaim — hold loss surfaces locally", () => {
-  it("resolves lease.lost when the hold child closes without release", async () => {
-    const child = new EventEmitter() as EventEmitter & {
-      killed: boolean;
-      kill: ReturnType<typeof vi.fn>;
-      stdin: { write: ReturnType<typeof vi.fn>; end: ReturnType<typeof vi.fn> };
-    };
-    child.killed = false;
-    child.kill = vi.fn();
-    child.stdin = { write: vi.fn(), end: vi.fn() };
-
-    let intentional = false;
-    const lost = new Promise<void>((resolve) => {
-      child.on("close", () => {
-        if (!intentional) resolve();
-      });
-    });
-    const dial: DialFn = async () => ({
-      stdout: "HELD\n",
-      code: 0,
-      hold: {
-        release: () => {
-          intentional = true;
-        },
-        lost,
-      },
-    });
-
-    const r = await tryClaim("ci-1", id, dial);
-    expect(r.kind).toBe("held");
-    if (r.kind !== "held") return;
-
-    const lostSpy = vi.fn();
-    void r.lease.lost?.then(lostSpy);
-    child.emit("close", 0);
-    await vi.waitFor(() => expect(lostSpy).toHaveBeenCalled());
-  });
-
-  it("does not resolve lease.lost after intentional release", async () => {
-    const child = new EventEmitter() as EventEmitter & {
-      killed: boolean;
-      kill: ReturnType<typeof vi.fn>;
-      stdin: { write: ReturnType<typeof vi.fn>; end: ReturnType<typeof vi.fn> };
-    };
-    child.killed = false;
-    child.kill = vi.fn();
-    child.stdin = { write: vi.fn(), end: vi.fn() };
-
-    let intentional = false;
-    const lost = new Promise<void>((resolve) => {
-      child.on("close", () => {
-        if (!intentional) resolve();
-      });
-    });
-    const dial: DialFn = async () => ({
-      stdout: "HELD\n",
-      code: 0,
-      hold: {
-        release: () => {
-          intentional = true;
-        },
-        lost,
-      },
-    });
-
-    const r = await tryClaim("ci-1", id, dial);
-    expect(r.kind).toBe("held");
-    if (r.kind !== "held") return;
-
-    const lostSpy = vi.fn();
-    void r.lease.lost?.then(lostSpy);
-    r.lease.release();
-    child.emit("close", 0);
-    // Give microtasks a turn — lost must stay pending.
-    await new Promise((r) => setTimeout(r, 20));
-    expect(lostSpy).not.toHaveBeenCalled();
-  });
-
-  it("default claim script uses unlimited MAX (idle/TTL only)", async () => {
-    let script = "";
-    const dial: DialFn = async (_host, s) => {
-      script = s;
-      return { stdout: "BUSY\n", code: 7 };
-    };
-    await tryClaim("ci-1", id, dial);
-    expect(script).toMatch(/MAX=0/);
-    expect(script).toMatch(/MAX" -gt 0/);
   });
 });
