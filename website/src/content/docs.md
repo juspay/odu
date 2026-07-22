@@ -73,7 +73,7 @@ default: build test lint
 **A host is a decision.** odu resolves hosts from the first source that exists:
 
 ```text
-$ODU_HOSTS → ~/.config/odu/hosts.json → ~/.config/justci/hosts.json
+$ODU_HOSTS → ~/.config/odu/hosts.json
 ```
 
 If none configures a platform, `odu run` refuses and prints both the resolution chain and the ways to opt in. It never silently runs the pipeline on your workstation.
@@ -223,6 +223,6 @@ The repository runs its own CI with itself: `nix run .#odu -- run` executes the 
 
 ## Lineage and roadmap
 
-odu grew from kolu's `mini-ci` example and replaced [justci](https://github.com/juspay/justci) as Kolu's CI without changing its branch-protection status contexts or log layout.
+odu grew from kolu's `mini-ci` example and graduated into its own repository. It runs Kolu's CI today — Linux and macOS, terminal attach and agent MCP — on the same `@kolu/surface` stack as the rest of the family.
 
-Read [Introducing odu](https://kolu.dev/blog/odu/) for the design story and live demos, explore the framework at [kolu.dev/surface](https://kolu.dev/surface/), or see the original Atlas comparison: [A CI runner you attach to](https://htmlpreview.github.io/?https://raw.githubusercontent.com/juspay/kolu/master/docs/atlas/dist/mini-ci-vs-justci.html).
+Read [Introducing odu](https://kolu.dev/blog/odu/) for the design story and live demos, or explore the framework at [kolu.dev/surface](https://kolu.dev/surface/).
