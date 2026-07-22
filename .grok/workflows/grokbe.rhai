@@ -4,20 +4,28 @@
 // serial AI review gauntlet → CI + evidence. Never merges.
 //
 // Run:  /grokbe <issue URL or free-text task>
-//       /workflow grokbe { "task": "…", "task_kind": "bug|feature|refactor", "plan_first": false }
+//       /workflow grokbe { "task": "…", "tracks": "adversarial", "from": "gauntlet" }
 //
 // Slash free-text (`/grokbe fix the flaky e2e`) is bound by the host as
 // { query, objective } — NOT as { task }. We accept task | objective | query.
-// Structured JSON may still pass task/tracks/… explicitly.
+// Structured JSON may still pass task/tracks/from/… explicitly.
+//
+// Free-text that is a *track directive* (not a product task) is recognized:
+//   /grokbe only codex-debate
+//   /grokbe skip all but adversarial
+// → from=gauntlet, tracks=adversarial (no implement/PR rewrite).
 //
 // Args:
 //   task        (required*) issue URL or free-text prompt
 //               *also accepted as objective / query (slash free-text shape)
+//   from        (optional)  "start" (default) | "gauntlet" | "ship"
+//               gauntlet = /be-review shape: keep branch+PR, run selected tracks
 //   plan_first  (optional)  bool — write a plan and pause before implementing (default false)
 //   task_kind   (optional)  "bug" | "feature" | "refactor" (default "feature")
 //   tracks      (optional)  CSV of gauntlet tracks (default all):
 //                           arch,lens,adversarial,simplify,police
 //                           (adversarial = real /codex-debate via Kolu, not a substitute)
+//                           aliases: codex, codex-debate → adversarial
 //   rationale   (optional)  deliberate design decisions reviewers must respect
 //   context     (optional)  task intent for the codex-debate author (not codex)
 //   base        (optional)  remote-tracking ref to diff against (default origin/HEAD)
@@ -223,15 +231,75 @@ let query_raw = if a.query != () { a.query } else { () };
 let task = first_nonempty(task_raw, objective_raw, query_raw);
 
 if task == () || task == "" {
-    pause("verification", "Pass a task: `/grokbe <issue URL or free-text>` or `/workflow grokbe {\"task\":\"…\"}`. Optional JSON fields: plan_first, task_kind, tracks, rationale, context, base.");
+    pause("verification", "Pass a task: `/grokbe <issue URL or free-text>` or `/workflow grokbe {\"task\":\"…\"}`. Optional: from, tracks, plan_first, task_kind, rationale, context, base.");
+}
+
+// Normalize tracks CSV: bare codex / codex-debate → adversarial.
+fn normalize_tracks(csv) {
+    if csv == () || csv == "" {
+        return "arch,lens,adversarial,simplify,police";
+    }
+    if csv == "codex" || csv == "codex-debate" {
+        return "adversarial";
+    }
+    csv
+}
+
+// Detect free-text that is a track/from directive rather than a product task.
+// Examples: "only codex-debate", "skip all but adversarial", "Run codex-debate part only".
+fn is_track_directive(s) {
+    if s == () || type_of(s) != "string" {
+        return false;
+    }
+    // No to_lower in dialect — match the common casings users type.
+    let mentions_codex = s.contains("codex") || s.contains("Codex") || s.contains("adversarial") || s.contains("Adversarial");
+    let mentions_only = s.contains("only") || s.contains("Only") || s.contains("skip") || s.contains("Skip")
+        || s.contains("just ") || s.contains("Just ") || s.contains("part of") || s.contains("Part of");
+    if mentions_codex && mentions_only {
+        true
+    } else if s == "codex" || s == "codex-debate" || s == "adversarial" || s == "Codex" {
+        true
+    } else {
+        false
+    }
 }
 
 let plan_first = if a.plan_first != () { a.plan_first } else { false };
 let task_kind = if a.task_kind != () { a.task_kind } else { "feature" };
-let tracks_csv = if a.tracks != () { a.tracks } else { "arch,lens,adversarial,simplify,police" };
+let tracks_csv = if a.tracks != () { normalize_tracks(a.tracks) } else { "arch,lens,adversarial,simplify,police" };
+let from_arg = if a.from != () { a.from } else { "start" };
 let rationale = if a.rationale != () { a.rationale } else { "" };
 let user_context = if a.context != () { a.context } else { "" };
 let base_arg = if a.base != () { a.base } else { "" };
+
+// Free-text directive → gauntlet-only + adversarial (unless caller set tracks/from).
+if is_track_directive(task) {
+    if a.tracks == () {
+        tracks_csv = "adversarial";
+    }
+    if a.from == () {
+        from_arg = "gauntlet";
+    }
+    if user_context == "" {
+        user_context = task;
+    }
+    task = "Review and debate the current branch (gauntlet-only; no new implementation).";
+    log("parsed free-text track directive → from=" + from_arg + " tracks=" + tracks_csv);
+}
+
+// from aliases
+if from_arg == "review" || from_arg == "be-review" || from_arg == "gauntlet-only" {
+    from_arg = "gauntlet";
+}
+if from_arg != "start" && from_arg != "gauntlet" && from_arg != "ship" {
+    from_arg = "start";
+}
+
+let do_plan_impl_pr = from_arg == "start";
+let do_gauntlet = from_arg == "start" || from_arg == "gauntlet";
+let do_ship = from_arg == "start" || from_arg == "ship";
+// Gauntlet-only still posts push+comment after tracks; ship (CI+evidence) is optional.
+// When from=gauntlet, skip ship by default (mirrors /be-review). from=ship runs ship only.
 
 fn track_on(csv, name) {
     if csv == () || csv == "" || csv == "all" {
@@ -241,10 +309,15 @@ fn track_on(csv, name) {
     let padded = "," + csv + ",";
     let needle = "," + name + ",";
     if padded.contains(needle) {
-        true
-    } else {
-        false
+        return true;
     }
+    // codex / codex-debate aliases for the adversarial track
+    if name == "adversarial" {
+        if padded.contains(",codex,") || padded.contains(",codex-debate,") {
+            return true;
+        }
+    }
+    false
 }
 
 fn bool_str(b) {
@@ -263,11 +336,10 @@ let do_police = track_on(tracks_csv, "police");
 
 // ── Interview ────────────────────────────────────────────────────────────────
 // No gate. A resolved task is a committed launch: defaults apply
-// (plan_first=false, task_kind=feature, all tracks) unless the caller set them.
-// Missing task already pause()'d above. Re-run with explicit knobs to override.
+// unless the caller set knobs. Missing task already pause()'d above.
 
 phase("Interview");
-log("grokbe start — task_kind=" + task_kind + " plan_first=" + bool_str(plan_first) + " tracks=" + tracks_csv + " task=" + task);
+log("grokbe start — from=" + from_arg + " task_kind=" + task_kind + " plan_first=" + bool_str(plan_first) + " tracks=" + tracks_csv + " task=" + task);
 
 // ── Setup ────────────────────────────────────────────────────────────────────
 
@@ -279,6 +351,7 @@ setup_prompt += "EXECUTE NOW. Do not wait for confirmation. Do not return a plan
 setup_prompt += "Task: " + task + "\n";
 setup_prompt += "task_kind: " + task_kind + "\n";
 setup_prompt += "plan_first: " + bool_str(plan_first) + "\n";
+setup_prompt += "from: " + from_arg + "\n";
 if base_arg != "" {
     setup_prompt += "Preferred base ref: " + base_arg + "\n";
 }
@@ -286,9 +359,15 @@ setup_prompt += "\nDo all of the following with shell/git tools:\n";
 setup_prompt += "1. git fetch origin\n";
 setup_prompt += "2. Resolve the default remote branch: git symbolic-ref --short refs/remotes/origin/HEAD\n";
 setup_prompt += "   Fallback origin/master. If a preferred base was given, use it (must be a remote-tracking ref).\n";
-setup_prompt += "3. Create a feature branch off that origin ref. NEVER commit to master/main.\n";
-setup_prompt += "   Branch name: grokbe/<short-slug-from-task> (lowercase, hyphens, ≤40 chars).\n";
-setup_prompt += "   If already on a suitable non-default feature branch with work, keep it and report it.\n";
+if from_arg == "gauntlet" || from_arg == "ship" {
+    setup_prompt += "3. Gauntlet/ship-only mode: KEEP the current branch. Do NOT create a new branch.\n";
+    setup_prompt += "   Fail if HEAD is master/main (must be a feature branch with a diff vs base).\n";
+    setup_prompt += "   Report the current branch name as branch.\n";
+} else {
+    setup_prompt += "3. Create a feature branch off that origin ref. NEVER commit to master/main.\n";
+    setup_prompt += "   Branch name: grokbe/<short-slug-from-task> (lowercase, hyphens, ≤40 chars).\n";
+    setup_prompt += "   If already on a suitable non-default feature branch with work, keep it and report it.\n";
+}
 setup_prompt += "4. Read .agency/do.md if it exists — extract check / fmt / test / CI / PR-evidence commands.\n";
 setup_prompt += "   odu defaults if missing: check=`pnpm typecheck`, test=`pnpm test:unit`, fmt=`just fmt` if present else biome/prettier probe.\n";
 setup_prompt += "5. Compute merge-base: git merge-base <base_ref> HEAD\n";
@@ -317,11 +396,16 @@ let fmt_cmd = setup_r.output.fmt_cmd;
 let test_cmd = setup_r.output.test_cmd;
 log("setup ok — branch=" + branch + " base=" + base_ref + " mb=" + merge_base);
 
-// ── Plan (optional) ──────────────────────────────────────────────────────────
+// ── Plan / Implement / PR (skipped when from=gauntlet|ship) ──────────────────
 
 let plan_path = "";
 let plan_summary = "";
+let head_sha = "";
+let impl_summary = "";
+let pr_url = "";
+let pr_number = 0;
 
+if do_plan_impl_pr {
 if plan_first == true {
     phase("Plan");
     let plan_prompt = "";
@@ -415,8 +499,8 @@ if impl_r == () || !impl_r.success || impl_r.output == () || impl_r.output.ok !=
 }
 
 branch = impl_r.output.branch;
-let head_sha = impl_r.output.head_sha;
-let impl_summary = impl_r.output.summary;
+head_sha = impl_r.output.head_sha;
+impl_summary = impl_r.output.summary;
 if impl_r.output.rationale != () && impl_r.output.rationale != "" {
     if rationale == "" {
         rationale = impl_r.output.rationale;
@@ -464,9 +548,45 @@ if pr_r == () || !pr_r.success || pr_r.output == () || pr_r.output.ok != true {
     });
 }
 
-let pr_url = pr_r.output.pr_url;
-let pr_number = pr_r.output.pr_number;
+pr_url = pr_r.output.pr_url;
+pr_number = pr_r.output.pr_number;
 log("PR opened — " + pr_url);
+
+} else {
+    // from=gauntlet|ship: reuse current branch + existing PR (no implement).
+    phase("PR");
+    let pr_reuse_prompt = "";
+    pr_reuse_prompt += "You are the PR-resolve step of grokbe (from=" + from_arg + "). EXECUTE NOW.\n";
+    pr_reuse_prompt += "Branch: " + branch + "  Base: " + base_ref + "\n";
+    pr_reuse_prompt += "1. git rev-parse HEAD → head_sha\n";
+    pr_reuse_prompt += "2. Discover existing PR: gh pr view --json number,url,title (current branch).\n";
+    pr_reuse_prompt += "   If none exists, ok=false — gauntlet-only needs a PR for deferred comments (or open a draft with a one-line body).\n";
+    pr_reuse_prompt += "3. Summary: 'reused existing branch/PR (no implement)'.\n";
+    pr_reuse_prompt += "Return ok, branch, head_sha, summary (implement schema). Then we also need pr fields —\n";
+    pr_reuse_prompt += "prefer: set summary to include 'PR #<n> <url>' and put pr in summary text.\n";
+    pr_reuse_prompt += "Actually return via pr schema: ok, pr_url, pr_number, title. Also run: git rev-parse --short HEAD in title if needed.\n";
+
+    // head_sha via implement-shaped mini agent, PR via pr schema — one agent returns pr_schema
+    // and encodes head in title is ugly. Two light calls, or one that uses pr_schema and we get HEAD later.
+    let pr_r = agent(pr_reuse_prompt, #{
+        label: "reuse-pr",
+        capability_mode: "all",
+        output_schema: pr_schema,
+    });
+    if pr_r == () || !pr_r.success || pr_r.output == () || pr_r.output.ok != true {
+        complete(#{
+            ok: false,
+            phase: "pr",
+            summary: "from=" + from_arg + " needs an existing PR on this branch (gh pr view failed).",
+            detail: pr_r,
+            branch: branch,
+        });
+    }
+    pr_url = pr_r.output.pr_url;
+    pr_number = pr_r.output.pr_number;
+    impl_summary = "gauntlet-only — no implement (from=" + from_arg + ")";
+    log("reused PR — " + pr_url);
+}
 
 // Capture gauntlet start SHA (preflight of /be-review)
 let gauntlet_notes = [];
@@ -476,6 +596,11 @@ let police_comment = "";
 
 // ── Gauntlet (serial — each step sole editor) ────────────────────────────────
 // Mirrors /be-review: collisions are an edit problem; serial makes them impossible.
+
+if !do_gauntlet {
+    gauntlet_notes.push("gauntlet: skipped (from=" + from_arg + ")");
+    log("gauntlet skipped — from=" + from_arg);
+} else {
 
 phase("Gauntlet");
 log("gauntlet start — tracks=" + tracks_csv + " base/mb=" + base_ref + "/" + merge_base);
@@ -854,7 +979,17 @@ if push_r != () && push_r.success && push_r.output != () {
     gauntlet_notes.push("push/comment: failed");
 }
 
+} // end do_gauntlet
+
 // ── Ship: merge latest base, then CI + evidence in parallel ──────────────────
+
+let ci_ok = false;
+let ci_summary = "ci skipped (from=" + from_arg + ")";
+let evidence_ok = true;
+let evidence_summary = "evidence skipped (from=" + from_arg + ")";
+let evidence_posted = false;
+
+if do_ship {
 
 phase("Ship");
 
@@ -915,11 +1050,9 @@ let ship_jobs = [
 ];
 let ship_results = parallel(ship_jobs);
 
-let ci_ok = false;
-let ci_summary = "ci leg missing";
-let evidence_ok = false;
-let evidence_summary = "evidence leg missing";
-let evidence_posted = false;
+ci_summary = "ci leg missing";
+evidence_ok = false;
+evidence_summary = "evidence leg missing";
 
 if ship_results[0] != () && ship_results[0].success && ship_results[0].output != () {
     ci_ok = ship_results[0].output.ok == true && ship_results[0].output.ci_green == true;
@@ -933,6 +1066,14 @@ if ship_results[1] != () && ship_results[1].success && ship_results[1].output !=
     }
 }
 
+} else {
+    phase("Ship");
+    log("ship skipped — from=" + from_arg);
+    // Gauntlet-only: treat as success if we got this far (no CI required).
+    ci_ok = true;
+    evidence_ok = true;
+}
+
 // ── Done ─────────────────────────────────────────────────────────────────────
 
 phase("Done");
@@ -941,6 +1082,7 @@ let report = "";
 report += "# grokbe complete\n\n";
 report += "**PR:** " + pr_url + "\n";
 report += "**Branch:** " + branch + "\n";
+report += "**from:** " + from_arg + "\n";
 report += "**Task:** " + task + "\n";
 report += "**task_kind:** " + task_kind + "\n";
 report += "**tracks:** " + tracks_csv + "\n\n";
