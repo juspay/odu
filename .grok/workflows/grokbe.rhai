@@ -162,16 +162,28 @@ let stage_schema = #{
 // codex-debate track (real /codex-debate via Kolu — not a Grok-critic substitute)
 let codex_schema = #{
     "type": "object",
-    "required": ["ok", "status", "summary"],
+    "required": ["ok", "status", "summary", "rounds", "effort", "comment_body", "codex_start", "head_sha"],
     "properties": #{
         "ok": #{ "type": "boolean" },
-        "status": #{ "type": "string" },
-        "rounds": #{ "type": "integer" },
-        "effort": #{ "type": "string" },
+        "status": #{ "type": "string", "enum": ["consensus", "reviewer-error", "merge-base-error"] },
+        "rounds": #{ "type": "integer", "minimum": 0 },
+        "effort": #{ "type": "string", "enum": ["low", "medium", "high", "xhigh"] },
         "summary": #{ "type": "string" },
         "comment_body": #{ "type": "string" },
         "codex_start": #{ "type": "string" },
         "head_sha": #{ "type": "string" },
+    },
+};
+
+// Gauntlet preflight returns a refreshed merge-base (not free-text-only).
+let preflight_schema = #{
+    "type": "object",
+    "required": ["ok", "merge_base", "summary"],
+    "properties": #{
+        "ok": #{ "type": "boolean" },
+        "merge_base": #{ "type": "string" },
+        "summary": #{ "type": "string" },
+        "changed": #{ "type": "boolean" },
     },
 };
 
@@ -234,30 +246,83 @@ if task == () || task == "" {
     pause("verification", "Pass a task: `/grokbe <issue URL or free-text>` or `/workflow grokbe {\"task\":\"…\"}`. Optional: from, tracks, plan_first, task_kind, rationale, context, base.");
 }
 
-// Normalize tracks CSV: bare codex / codex-debate → adversarial.
-fn normalize_tracks(csv) {
-    if csv == () || csv == "" {
-        return "arch,lens,adversarial,simplify,police";
+// Normalize a single track token (trim + aliases). Returns "" if empty after trim.
+fn normalize_track_token(tok) {
+    if tok == () || type_of(tok) != "string" {
+        return "";
     }
-    if csv == "codex" || csv == "codex-debate" {
+    let t = tok;
+    t.trim();
+    if t == "" {
+        return "";
+    }
+    if t == "codex" || t == "codex-debate" || t == "Codex" || t == "Codex-debate" {
         return "adversarial";
     }
-    csv
+    t
 }
 
-// Detect free-text that is a track/from directive rather than a product task.
-// Examples: "only codex-debate", "skip all but adversarial", "Run codex-debate part only".
+// Normalize tracks CSV: trim tokens, map aliases, reject unknowns (returns () on bad input).
+fn normalize_tracks(csv) {
+    if csv == () || csv == "" || csv == "all" {
+        return "arch,lens,adversarial,simplify,police";
+    }
+    // Split on commas without regex: walk by finding commas.
+    let remaining = csv;
+    let out = "";
+    let known = ",arch,lens,adversarial,simplify,police,";
+    let saw_any = false;
+    // Cap iterations to avoid infinite loop on malformed input.
+    let guard = 0;
+    while remaining != "" && guard < 32 {
+        guard += 1;
+        let comma = remaining.index_of(",");
+        let piece = remaining;
+        if comma >= 0 {
+            piece = remaining.sub_string(0, comma);
+            remaining = remaining.sub_string(comma + 1, remaining.len() - (comma + 1));
+        } else {
+            remaining = "";
+        }
+        let tok = normalize_track_token(piece);
+        if tok == "" {
+            // skip empty (e.g. trailing comma)
+        } else if !(known.contains("," + tok + ",")) {
+            return (); // unknown token
+        } else {
+            if saw_any {
+                out += ",";
+            }
+            out += tok;
+            saw_any = true;
+        }
+    }
+    if !saw_any {
+        return ();
+    }
+    out
+}
+
+// Strict whole-input directive grammar (not a substring search).
+// Accepts only enumerated shapes after trim.
 fn is_track_directive(s) {
     if s == () || type_of(s) != "string" {
         return false;
     }
-    // No to_lower in dialect — match the common casings users type.
-    let mentions_codex = s.contains("codex") || s.contains("Codex") || s.contains("adversarial") || s.contains("Adversarial");
-    let mentions_only = s.contains("only") || s.contains("Only") || s.contains("skip") || s.contains("Skip")
-        || s.contains("just ") || s.contains("Just ") || s.contains("part of") || s.contains("Part of");
-    if mentions_codex && mentions_only {
-        true
-    } else if s == "codex" || s == "codex-debate" || s == "adversarial" || s == "Codex" {
+    let t = s;
+    t.trim();
+    // Exact short tokens
+    if t == "codex" || t == "codex-debate" || t == "adversarial" || t == "Codex" {
+        return true;
+    }
+    // Enumerated phrases (common casings users type)
+    if t == "only codex-debate" || t == "only codex" || t == "only adversarial"
+        || t == "skip all but codex-debate" || t == "skip all but codex" || t == "skip all but adversarial"
+        || t == "Skip all but codex-debate" || t == "Skip all but codex" || t == "Skip all but adversarial"
+        || t == "just codex-debate" || t == "just codex" || t == "just adversarial"
+        || t == "Run codex-debate part of the grokbe workflow only"
+        || t == "run codex-debate part of the grokbe workflow only"
+        || t == "codex-debate only" || t == "codex only" || t == "adversarial only" {
         true
     } else {
         false
@@ -266,20 +331,30 @@ fn is_track_directive(s) {
 
 let plan_first = if a.plan_first != () { a.plan_first } else { false };
 let task_kind = if a.task_kind != () { a.task_kind } else { "feature" };
-let tracks_csv = if a.tracks != () { normalize_tracks(a.tracks) } else { "arch,lens,adversarial,simplify,police" };
+let tracks_csv = "arch,lens,adversarial,simplify,police";
+if a.tracks != () {
+    let nt = normalize_tracks(a.tracks);
+    if nt == () {
+        pause("verification", "Invalid tracks CSV: " + a.tracks + " — use arch,lens,adversarial|codex|codex-debate,simplify,police (comma-separated).");
+    }
+    tracks_csv = nt;
+}
 let from_arg = if a.from != () { a.from } else { "start" };
+if type_of(from_arg) == "string" {
+    from_arg.trim();
+}
 let rationale = if a.rationale != () { a.rationale } else { "" };
 let user_context = if a.context != () { a.context } else { "" };
 let base_arg = if a.base != () { a.base } else { "" };
 
-// Free-text directive → gauntlet-only + adversarial (unless caller set tracks/from).
-if is_track_directive(task) {
-    if a.tracks == () {
-        tracks_csv = "adversarial";
-    }
-    if a.from == () {
-        from_arg = "gauntlet";
-    }
+// Free-text directive → gauntlet-only + adversarial.
+// ONLY when the resolved task came from slash query/objective (no explicit task)
+// AND caller did not set tracks/from. Never rewrite an explicit product task.
+let from_slash_only = (task_raw == () || task_raw == "")
+    && (objective_raw != () || query_raw != ());
+if from_slash_only && a.tracks == () && a.from == () && is_track_directive(task) {
+    tracks_csv = "adversarial";
+    from_arg = "gauntlet";
     if user_context == "" {
         user_context = task;
     }
@@ -287,12 +362,13 @@ if is_track_directive(task) {
     log("parsed free-text track directive → from=" + from_arg + " tracks=" + tracks_csv);
 }
 
-// from aliases
+// from aliases (only documented ones)
 if from_arg == "review" || from_arg == "be-review" || from_arg == "gauntlet-only" {
     from_arg = "gauntlet";
 }
+// Fail closed on unknown from — never silently escalate to mutating start.
 if from_arg != "start" && from_arg != "gauntlet" && from_arg != "ship" {
-    from_arg = "start";
+    pause("verification", "Invalid from=" + from_arg + " — use start | gauntlet | ship (aliases: review, be-review, gauntlet-only).");
 }
 
 let do_plan_impl_pr = from_arg == "start";
@@ -558,16 +634,11 @@ log("PR opened — " + pr_url);
     let pr_reuse_prompt = "";
     pr_reuse_prompt += "You are the PR-resolve step of grokbe (from=" + from_arg + "). EXECUTE NOW.\n";
     pr_reuse_prompt += "Branch: " + branch + "  Base: " + base_ref + "\n";
-    pr_reuse_prompt += "1. git rev-parse HEAD → head_sha\n";
-    pr_reuse_prompt += "2. Discover existing PR: gh pr view --json number,url,title (current branch).\n";
-    pr_reuse_prompt += "   If none exists, ok=false — gauntlet-only needs a PR for deferred comments (or open a draft with a one-line body).\n";
-    pr_reuse_prompt += "3. Summary: 'reused existing branch/PR (no implement)'.\n";
-    pr_reuse_prompt += "Return ok, branch, head_sha, summary (implement schema). Then we also need pr fields —\n";
-    pr_reuse_prompt += "prefer: set summary to include 'PR #<n> <url>' and put pr in summary text.\n";
-    pr_reuse_prompt += "Actually return via pr schema: ok, pr_url, pr_number, title. Also run: git rev-parse --short HEAD in title if needed.\n";
+    pr_reuse_prompt += "1. Discover existing PR: gh pr view --json number,url,title (current branch).\n";
+    pr_reuse_prompt += "2. If NONE exists: set ok=false — do NOT open a draft. Caller must create a PR first.\n";
+    pr_reuse_prompt += "3. If found: return ok=true, pr_url, pr_number, title.\n";
+    pr_reuse_prompt += "Fail closed. No side effects other than reading gh.\n";
 
-    // head_sha via implement-shaped mini agent, PR via pr schema — one agent returns pr_schema
-    // and encodes head in title is ugly. Two light calls, or one that uses pr_schema and we get HEAD later.
     let pr_r = agent(pr_reuse_prompt, #{
         label: "reuse-pr",
         capability_mode: "all",
@@ -577,14 +648,18 @@ log("PR opened — " + pr_url);
         complete(#{
             ok: false,
             phase: "pr",
-            summary: "from=" + from_arg + " needs an existing PR on this branch (gh pr view failed).",
+            summary: "from=" + from_arg + " needs an existing PR on this branch (gh pr view found none — create one, then re-run).",
             detail: pr_r,
             branch: branch,
         });
     }
     pr_url = pr_r.output.pr_url;
     pr_number = pr_r.output.pr_number;
-    impl_summary = "gauntlet-only — no implement (from=" + from_arg + ")";
+    if from_arg == "ship" {
+        impl_summary = "ship-only — no implement (from=ship)";
+    } else {
+        impl_summary = "gauntlet-only — no implement (from=gauntlet)";
+    }
     log("reused PR — " + pr_url);
 }
 
@@ -593,6 +668,10 @@ let gauntlet_notes = [];
 let lens_comment = "";
 let adversarial_comment = "";
 let police_comment = "";
+// Proof-gate invariants: selected adversarial track must reach consensus;
+// deferred push/comment must succeed when the gauntlet ran.
+let gauntlet_ok = true;
+let push_ok = true;
 
 // ── Gauntlet (serial — each step sole editor) ────────────────────────────────
 // Mirrors /be-review: collisions are an edit problem; serial makes them impossible.
@@ -609,16 +688,19 @@ log("gauntlet start — tracks=" + tracks_csv + " base/mb=" + base_ref + "/" + m
 let preflight_prompt = "";
 preflight_prompt += "Gauntlet preflight for grokbe. EXECUTE NOW.\n";
 preflight_prompt += "Repo is the cwd worktree. Branch: " + branch + "\n";
+preflight_prompt += "Base ref: " + base_ref + "\n";
 preflight_prompt += "1. git fetch origin\n";
-preflight_prompt += "2. Confirm non-empty diff vs " + base_ref + " (or merge-base). If empty, report ok=false summary='empty diff'.\n";
-preflight_prompt += "3. Ensure working tree clean (commit or stash nothing unexpected — if dirty from prior step, commit only if it's intentional leftover; prefer fail).\n";
-preflight_prompt += "4. Recompute merge-base of " + base_ref + " and HEAD; return it as merge_base in summary text if changed.\n";
-preflight_prompt += "5. Return structured: ok, changed=false, summary with merge_base SHA, commit=''.\n";
+preflight_prompt += "2. Confirm non-empty diff vs " + base_ref + " (or merge-base). If empty, ok=false summary='empty diff'.\n";
+preflight_prompt += "3. Ensure working tree clean — if dirty, ok=false (do not auto-commit leftovers).\n";
+preflight_prompt += "4. Recompute merge-base: git merge-base " + base_ref + " HEAD → return as merge_base (required SHA field).\n";
+preflight_prompt += "5. Trusted-diff note (codex --yolo): this gauntlet assumes a TRUSTED local branch (your own work).\n";
+preflight_prompt += "   Do not review untrusted third-party PRs with YOLO. Surface that in summary if the PR author is not the current gh user.\n";
+preflight_prompt += "Return: ok, merge_base (40-char or short SHA), summary.\n";
 
 let pref_r = agent(preflight_prompt, #{
     label: "gauntlet-preflight",
     capability_mode: "all",
-    output_schema: stage_schema,
+    output_schema: preflight_schema,
 });
 
 if pref_r == () || !pref_r.success || pref_r.output == () || pref_r.output.ok != true {
@@ -629,6 +711,10 @@ if pref_r == () || !pref_r.success || pref_r.output == () || pref_r.output.ok !=
         pr_url: pr_url,
         detail: pref_r,
     });
+}
+if pref_r.output.merge_base != () && pref_r.output.merge_base != "" {
+    merge_base = pref_r.output.merge_base;
+    log("gauntlet preflight refreshed merge_base=" + merge_base);
 }
 
 // ── Track: arch (architecture-first-principles) ──────────────────────────────
@@ -873,11 +959,15 @@ if do_adversarial {
         if codex_r.output.comment_body != () && codex_r.output.comment_body != "" {
             adversarial_comment = codex_r.output.comment_body;
         }
-        if codex_r.output.ok != true {
-            gauntlet_notes.push("codex-debate: did not reach consensus (continuing gauntlet)");
+        // Proof gate: consensus requires ok=true AND status=consensus.
+        let consensus = codex_r.output.ok == true && cstatus == "consensus";
+        if !consensus {
+            gauntlet_ok = false;
+            gauntlet_notes.push("codex-debate: PROOF GATE FAIL — no consensus (gauntlet_ok=false)");
         }
     } else {
-        gauntlet_notes.push("codex-debate: agent failed — continuing gauntlet");
+        gauntlet_ok = false;
+        gauntlet_notes.push("codex-debate: agent failed — PROOF GATE FAIL (gauntlet_ok=false)");
     }
 } else {
     gauntlet_notes.push("adversarial/codex-debate: skipped via tracks");
@@ -973,10 +1063,11 @@ let push_r = agent(push_prompt, #{
     capability_mode: "all",
     output_schema: stage_schema,
 });
-if push_r != () && push_r.success && push_r.output != () {
+if push_r != () && push_r.success && push_r.output != () && push_r.output.ok == true {
     gauntlet_notes.push("push/comment: " + push_r.output.summary);
 } else {
-    gauntlet_notes.push("push/comment: failed");
+    push_ok = false;
+    gauntlet_notes.push("push/comment: FAILED (push_ok=false)");
 }
 
 } // end do_gauntlet
@@ -996,11 +1087,13 @@ phase("Ship");
 let sync_prompt = "";
 sync_prompt += "Ship pre-sync for grokbe (Claude /be §5). EXECUTE NOW.\n";
 sync_prompt += "Branch: " + branch + "\n";
+sync_prompt += "Base ref to merge (NOT necessarily origin/master): " + base_ref + "\n";
 sync_prompt += "1. git fetch origin\n";
-sync_prompt += "2. If origin default is NOT already an ancestor of HEAD, merge origin's default branch into HEAD.\n";
+sync_prompt += "2. If " + base_ref + " is NOT already an ancestor of HEAD, merge " + base_ref + " into HEAD.\n";
+sync_prompt += "   Use the resolved remote-tracking base_ref exactly — do not substitute origin/master/main unless base_ref is that.\n";
 sync_prompt += "   Resolve real conflicts properly — never paper over.\n";
 sync_prompt += "3. Push the branch.\n";
-sync_prompt += "4. Return ok, changed, summary.\n";
+sync_prompt += "4. Return ok=true only if merge (if needed) and push succeeded. ok=false on conflict/push failure.\n";
 sync_prompt += "NEVER merge the PR to the default branch.\n";
 
 let sync_r = agent(sync_prompt, #{
@@ -1008,9 +1101,17 @@ let sync_r = agent(sync_prompt, #{
     capability_mode: "all",
     output_schema: stage_schema,
 });
-if sync_r != () && sync_r.success && sync_r.output != () {
-    log("ship-sync: " + sync_r.output.summary);
+if sync_r == () || !sync_r.success || sync_r.output == () || sync_r.output.ok != true {
+    complete(#{
+        ok: false,
+        phase: "ship-sync",
+        summary: "Ship sync failed — could not merge base_ref=" + base_ref + " or push.",
+        pr_url: pr_url,
+        branch: branch,
+        detail: sync_r,
+    });
 }
+log("ship-sync: " + sync_r.output.summary);
 
 // CI and evidence are independent — fan out (Claude /be §5).
 let ci_prompt = "";
@@ -1069,10 +1170,13 @@ if ship_results[1] != () && ship_results[1].success && ship_results[1].output !=
 } else {
     phase("Ship");
     log("ship skipped — from=" + from_arg);
-    // Gauntlet-only: treat as success if we got this far (no CI required).
+    // Gauntlet-only: CI/evidence not required; proof gates still apply below.
     ci_ok = true;
     evidence_ok = true;
 }
+
+// Final outcome: ship legs AND proof gates (codex consensus when selected, push when gauntlet ran).
+let final_ok = ci_ok && evidence_ok && gauntlet_ok && push_ok;
 
 // ── Done ─────────────────────────────────────────────────────────────────────
 
@@ -1085,7 +1189,8 @@ report += "**Branch:** " + branch + "\n";
 report += "**from:** " + from_arg + "\n";
 report += "**Task:** " + task + "\n";
 report += "**task_kind:** " + task_kind + "\n";
-report += "**tracks:** " + tracks_csv + "\n\n";
+report += "**tracks:** " + tracks_csv + "\n";
+report += "**ok:** " + bool_str(final_ok) + " (ci=" + bool_str(ci_ok) + " evidence=" + bool_str(evidence_ok) + " gauntlet=" + bool_str(gauntlet_ok) + " push=" + bool_str(push_ok) + ")\n\n";
 report += "## Implementation\n" + impl_summary + "\n\n";
 if plan_path != "" {
     report += "## Plan\n" + plan_path + " — " + plan_summary + "\n\n";
@@ -1095,24 +1200,36 @@ for note in gauntlet_notes {
     report += "- " + note + "\n";
 }
 report += "\n## Ship\n";
-report += "- CI: " + ci_summary + " (green=" + bool_str(ci_ok) + ")\n";
-report += "- Evidence: " + evidence_summary + " (posted=" + bool_str(evidence_posted) + ")\n\n";
+if do_ship {
+    report += "- CI: " + ci_summary + " (green=" + bool_str(ci_ok) + ")\n";
+    report += "- Evidence: " + evidence_summary + " (posted=" + bool_str(evidence_posted) + ")\n\n";
+} else {
+    report += "- skipped (from=" + from_arg + ")\n\n";
+}
 report += "## Notes\n";
 report += "- Never merged — human reviews commits and merges when satisfied.\n";
-report += "- Adversarial track runs real /codex-debate via Kolu (live codex --yolo, effort xhigh) — no substitute critic.\n";
-report += "- Lens track runs lowy ∥ hickey independently, then one reconcile+apply editor.\n";
+if do_adversarial {
+    report += "- Adversarial track runs real /codex-debate via Kolu (live codex --yolo, effort xhigh) — no substitute critic. Proof gate: consensus required when selected.\n";
+}
+if do_lens {
+    report += "- Lens track runs lowy ∥ hickey independently, then one reconcile+apply editor.\n";
+}
+report += "- YOLO reviewer assumes a TRUSTED local branch (codex-debate skill honest limit) — not for untrusted third-party PRs.\n";
 
 let report_path = write_scratch_file("grokbe-report.md", report);
 log(report);
 
 complete(#{
-    ok: ci_ok && evidence_ok,
+    ok: final_ok,
     pr_url: pr_url,
     pr_number: pr_number,
     branch: branch,
     task_kind: task_kind,
     tracks: tracks_csv,
+    from: from_arg,
     gauntlet: gauntlet_notes,
+    gauntlet_ok: gauntlet_ok,
+    push_ok: push_ok,
     ci_green: ci_ok,
     evidence_posted: evidence_posted,
     report_path: report_path,
