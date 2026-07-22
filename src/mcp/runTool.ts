@@ -33,6 +33,9 @@ export const runInput = z.object({
   /** Keep the coordinator alive after the run drains so a node can be rerun
    *  post-settle; call `cancel` (or `run` with supersede) when done. */
   linger: z.boolean().optional(),
+  /** Fail immediately when every host in a platform's pool is busy, instead of
+   *  waiting in line (mirrors `odu run --no-wait`). */
+  no_wait: z.boolean().optional(),
 });
 export type RunInput = z.infer<typeof runInput>;
 
@@ -62,6 +65,7 @@ function runArgsFrom(input: RunInput): string[] {
   if (input.no_snapshot) args.push("--no-snapshot");
   if (input.no_post) args.push("--no-post");
   if (input.linger) args.push("--linger");
+  if (input.no_wait) args.push("--no-wait");
   // `supersede` is handled here in `startRun` (cancel the live run, confirm
   // it's gone, then spawn), so the spawned coordinator binds a free lock and
   // never needs the flag — and `awaitStartup` can't mistake the dying run's

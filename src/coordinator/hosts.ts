@@ -1,26 +1,35 @@
 /**
- * Platform → host resolution. Keys are Nix system tuples; values are
- * anything ssh can dial (or `localhost`, which short-circuits the nix-copy
- * transport). Missing platforms silently drop from the fanout — the operator
- * opts in per platform, exactly the justci hosts.json semantics. But a config
- * that names *no* platform at all is not "run everything here": that is the
- * juspay/odu#46 fork-bomb, so `fanoutLanes` refuses it loudly rather than
- * synthesizing a localhost lane (running locally stays available only as an
- * explicit `--host PLAT=localhost` or `"PLAT": "localhost"` decision).
+ * Platform → host-pool resolution. Keys are Nix system tuples; values are
+ * pools of anything ssh can dial (or `localhost`, which short-circuits the
+ * nix-copy transport). A plain string in hosts.json is a pool of one — fully
+ * back-compatible. Missing platforms silently drop from the fanout — the
+ * operator opts in per platform, exactly the justci hosts.json semantics. But
+ * a config that names *no* platform at all is not "run everything here": that
+ * is the juspay/odu#46 fork-bomb, so `fanoutLanes` refuses it loudly rather
+ * than synthesizing a localhost lane (running locally stays available only as
+ * an explicit `--host PLAT=localhost` or `"PLAT": "localhost"` decision).
  *
  * Lookup order (`$ODU_HOSTS → ~/.config/odu/hosts.json →
  * ~/.config/justci/hosts.json`): the first file that exists wins. The justci
  * path is the compat fallback for machines still carrying a justci hosts file.
- * `--host PLAT=ADDR` upserts on top (and adds the platform when absent — that
- * is how `ci/pu/run.sh` pins the leased pool box).
+ * `--host PLAT=ADDR` upserts a single-host pool on top (and adds the platform
+ * when absent — that is how a one-shot pin forces a specific box).
+ *
+ * Picking *which* free machine from a multi-host pool is the lease layer's job
+ * (`lease.ts`); this module only resolves the declared inventory per platform.
  */
 
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+/** One platform's declared inventory — always a list (a bare string in the
+ *  file normalizes to a one-element pool). Never empty after `loadHosts`: an
+ *  empty array in the file is refused at parse time. */
+export type HostPool = readonly string[];
+
 export interface HostsConfig {
-  hosts: Record<string, string>;
+  hosts: Record<string, HostPool>;
   /** Which file won — named in run output so the operator can tell; `null`
    *  when no candidate file existed (typed absence, not a sentinel string, so
    *  consumers branch on it instead of matching display text). */
@@ -54,6 +63,42 @@ function hostsCandidates(): HostsCandidate[] {
   ];
 }
 
+/** Parse one platform's value: a string, or a non-empty array of strings. */
+function parsePool(
+  path: string,
+  platform: string,
+  value: unknown,
+): string[] {
+  if (typeof value === "string") {
+    if (value === "") {
+      throw new Error(
+        `odu: ${path}: host for "${platform}" must be a non-empty string`,
+      );
+    }
+    return [value];
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      throw new Error(
+        `odu: ${path}: host pool for "${platform}" must not be empty`,
+      );
+    }
+    const pool: string[] = [];
+    for (const entry of value) {
+      if (typeof entry !== "string" || entry === "") {
+        throw new Error(
+          `odu: ${path}: host pool for "${platform}" must be an array of non-empty strings`,
+        );
+      }
+      pool.push(entry);
+    }
+    return pool;
+  }
+  throw new Error(
+    `odu: ${path}: host for "${platform}" must be a string or an array of strings`,
+  );
+}
+
 export function loadHosts(): HostsConfig {
   const candidates = hostsCandidates()
     .map((c) => c.path)
@@ -68,14 +113,9 @@ export function loadHosts(): HostsConfig {
     ) {
       throw new Error(`odu: ${path} must be a JSON object of platform → host`);
     }
-    const hosts: Record<string, string> = {};
-    for (const [platform, host] of Object.entries(parsed)) {
-      if (typeof host !== "string") {
-        throw new Error(
-          `odu: ${path}: host for "${platform}" must be a string`,
-        );
-      }
-      hosts[platform] = host;
+    const hosts: Record<string, HostPool> = {};
+    for (const [platform, value] of Object.entries(parsed)) {
+      hosts[platform] = parsePool(path, platform, value);
     }
     return { hosts, source: path };
   }
@@ -112,7 +152,8 @@ function noHostsConfiguredError(config: HostsConfig): Error {
       `${chain}\n` +
       `     ${why}\n` +
       "     Configure at least one platform (a JSON object of Nix-system -> host,\n" +
-      "     where a host is an ssh target or \"localhost\" to run here on purpose),\n" +
+      "     where a host is an ssh target, a list of them (a pool), or \"localhost\"\n" +
+      "     to run here on purpose),\n" +
       "     or pass --host PLATFORM=ADDR for this run. To run locally, name YOUR\n" +
       "     platform's lane localhost — e.g. --host aarch64-darwin=localhost on a\n" +
       "     Mac, --host x86_64-linux=localhost on Linux (a localhost lane runs the\n" +
@@ -120,35 +161,41 @@ function noHostsConfiguredError(config: HostsConfig): Error {
   );
 }
 
-/** Apply `--host PLAT=ADDR` pins and `--platform` slices to the config. */
+/** Apply `--host PLAT=ADDR` pins and `--platform` slices to the config.
+ *  Pins replace the pool with a single-host pool (the pin is a forced pick). */
 export function resolveLanes(
   config: HostsConfig,
   hostPins: readonly string[],
   platforms: readonly string[],
-): Record<string, string> {
-  const hosts = { ...config.hosts };
+): Record<string, HostPool> {
+  const hosts: Record<string, HostPool> = { ...config.hosts };
   for (const pin of hostPins) {
     const eq = pin.indexOf("=");
     if (eq <= 0) {
       throw new Error(`odu: --host expects PLATFORM=ADDR, got "${pin}"`);
     }
-    hosts[pin.slice(0, eq)] = pin.slice(eq + 1);
+    const platform = pin.slice(0, eq);
+    const addr = pin.slice(eq + 1);
+    if (addr === "") {
+      throw new Error(`odu: --host expects PLATFORM=ADDR, got "${pin}"`);
+    }
+    hosts[platform] = [addr];
   }
   if (platforms.length === 0) return hosts;
-  const sliced: Record<string, string> = {};
+  const sliced: Record<string, HostPool> = {};
   for (const platform of platforms) {
-    const host = hosts[platform];
-    if (host === undefined) {
+    const pool = hosts[platform];
+    if (pool === undefined) {
       throw new Error(
         `odu: --platform ${platform} has no host (configure it or pass --host ${platform}=ADDR)`,
       );
     }
-    sliced[platform] = host;
+    sliced[platform] = pool;
   }
   return sliced;
 }
 
-/** The fanout lanes for a run: `resolveLanes` plus the no-config fail-fast.
+/** The fanout pools for a run: `resolveLanes` plus the no-config fail-fast.
  *  Zero resolved lanes means the run named no host anywhere — the juspay/odu#46
  *  case — so we refuse loudly instead of defaulting to a localhost lane. This
  *  is the single seam `run` decides the fanout through; keeping the refusal
@@ -157,10 +204,20 @@ export function fanoutLanes(
   config: HostsConfig,
   hostPins: readonly string[],
   platforms: readonly string[],
-): Record<string, string> {
+): Record<string, HostPool> {
   const lanes = resolveLanes(config, hostPins, platforms);
   if (Object.keys(lanes).length === 0) {
     throw noHostsConfiguredError(config);
   }
   return lanes;
+}
+
+/** Short label for a dial target: strip `user@` and any domain suffix so the
+ *  operator-facing pick/status lines stay compact (`nix@ci-3.foo` → `ci-3`). */
+export function shortHost(addr: string): string {
+  const afterAt = addr.includes("@")
+    ? addr.slice(addr.indexOf("@") + 1)
+    : addr;
+  const dot = afterAt.indexOf(".");
+  return dot > 0 ? afterAt.slice(0, dot) : afterAt;
 }

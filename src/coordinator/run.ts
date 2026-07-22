@@ -1,12 +1,13 @@
 /**
- * `odu run` — the coordinator. One process owns the whole run, mirroring the
- * lease wrapper's constraint (the flock lives in `ci/pu/run.sh`, which
- * parents exactly one coordinator):
+ * `odu run` — the coordinator. One process owns the whole run, including the
+ * venue lease (ssh-held flock per remote host — juspay/odu#54): lock lifetime
+ * equals run lifetime, so crash / SIGKILL free the box when the connection
+ * drops.
  *
- *   strict gate → HEAD snapshot → `just` DAG ingest → fan lanes out per
- *   platform (an ssh session each) → merge lane state into one fan-in surface
- *   served on `.ci/odu.sock` → write per-SHA logs + post commit statuses on
- *   transitions → verdict.
+ *   strict gate → HEAD snapshot → `just` DAG ingest → lease one free host per
+ *   platform → fan lanes out (an ssh session each) → merge lane state into one
+ *   fan-in surface served on `.ci/odu.sock` → write per-SHA logs + post commit
+ *   statuses on transitions → verdict → release leases.
  *
  * Status posting and `--progress json` are both *diff-driven off the fan-in
  * state*, so every observer derives from the same source of truth the
@@ -44,6 +45,11 @@ import { commitLabel, createDisplay, progressEvent } from "./display";
 import { laneTasks, loadJustPipeline, parseSelector } from "../just/ingest";
 import { fanoutLanes, loadHosts } from "./hosts";
 import { type Lane, startLane } from "./lane";
+import {
+  type LeaseHandle,
+  leaseLanes,
+  localHolderId,
+} from "./lease";
 import { missingRunnerError, resolveRunnerFlake } from "./runnerFlake";
 import { cancelRun } from "./cancel";
 import { releaseReservation, reserveNextSeq, writeRunRecord } from "./ledger";
@@ -76,6 +82,9 @@ export interface RunArgs {
   /** Keep the coordinator serving after the run drains, so a node can be
    *  rerun post-settle; exit only on cancel / signal / idle backstop. */
   linger: boolean;
+  /** When every host in a platform's pool is busy, fail immediately instead
+   *  of waiting in line for a free machine (juspay/odu#54). */
+  noWait: boolean;
 }
 
 function git(repo: string, args: string[]): string {
@@ -152,6 +161,10 @@ export async function runCommand(args: RunArgs): Promise<number> {
   // no-op once a lane is closed/dead (its `session.destroy()` is idempotent), so
   // re-sweeping an already-closed lane here is harmless.
   const createdLanes = new Set<Lane>();
+  // Venue leases (ssh-held flock per remote host). Owned here so the `finally`
+  // and the process-exit path both free them — crash/SIGKILL still frees via
+  // the OS closing the ssh channel (the remote read hits EOF).
+  const acquiredLeases: LeaseHandle[] = [];
   // runCommand-owned holder for the seq this run reserved, so the `finally` can
   // reclaim an orphaned reservation sentinel on an early-throw — the same
   // early-throw-cleanup convention as `createdLanes` / `cleanupSnapshot`
@@ -171,11 +184,14 @@ export async function runCommand(args: RunArgs): Promise<number> {
         dirty,
       },
       createdLanes,
+      acquiredLeases,
       reservation,
     );
   } finally {
     cleanupSnapshot();
     for (const lane of createdLanes) lane.close();
+    for (const lease of acquiredLeases) lease.release();
+    acquiredLeases.length = 0;
     if (reservation.seq !== null) {
       releaseReservation(repoRoot, sha7, reservation.seq);
     }
@@ -204,6 +220,9 @@ async function orchestrate(
    *  here at construction; the natural + shutdown paths still close each lane
    *  themselves. */
   createdLanes: Set<Lane>,
+  /** runCommand-owned venue leases; populated once pools are claimed, released
+   *  on every terminal path (finally + shutdown). */
+  acquiredLeases: LeaseHandle[],
   /** runCommand-owned holder for the reserved seq, so its `finally` can reclaim
    *  an orphaned reservation sentinel on an early-throw. Set once reserved. */
   reservation: { seq: number | null },
@@ -242,7 +261,9 @@ async function orchestrate(
   // instead — running locally stays available only as an explicit decision
   // (a `"…": "localhost"` entry or `--host PLAT=localhost`). An explicit
   // `--platform` with no host still errors earlier in resolveLanes.
-  const lanesByPlatform = fanoutLanes(
+  // Values are *pools* (one or more hosts per platform); `leaseLanes` below
+  // picks a free machine and holds the venue lock for the run (juspay/odu#54).
+  const poolsByPlatform = fanoutLanes(
     hostsConfig,
     args.hostPins,
     args.platforms,
@@ -251,16 +272,16 @@ async function orchestrate(
   for (const selector of selectors) {
     if (
       selector.platform !== undefined &&
-      lanesByPlatform[selector.platform] === undefined
+      poolsByPlatform[selector.platform] === undefined
     ) {
       throw new Error(
         `odu: selector platform "${selector.platform}" is not in the fanout ` +
-          `(${Object.keys(lanesByPlatform).join(", ") || "no lanes"})`,
+          `(${Object.keys(poolsByPlatform).join(", ") || "no lanes"})`,
       );
     }
   }
 
-  const platforms = Object.keys(lanesByPlatform).sort();
+  const platforms = Object.keys(poolsByPlatform).sort();
   const tasksByPlatform = new Map<string, TaskSpec[]>();
   for (const platform of platforms) {
     const tasks = laneTasks(spec, platform, selectors, args.noDeps);
@@ -279,26 +300,40 @@ async function orchestrate(
         "(pass --no-post for non-GitHub strict runs)",
     );
   }
-  for (const [platform, host] of Object.entries(lanesByPlatform)) {
-    if (!tasksByPlatform.has(platform)) continue;
-    if (!isLocalHost(host) && originUrl === null) {
+  // Pool-level prechecks (before lease): a pool that can only land on a remote
+  // needs an origin; a dirty live-tree run refuses any pool that still has a
+  // remote candidate (it might lease that box and silently test committed HEAD).
+  for (const platform of tasksByPlatform.keys()) {
+    const pool = poolsByPlatform[platform] ?? [];
+    const remotes = pool.filter((h) => !isLocalHost(h));
+    if (remotes.length === pool.length && originUrl === null) {
       throw new Error(
-        `odu: remote lane ${platform}=${host} needs an origin remote to fetch from`,
+        `odu: remote lane ${platform}=[${remotes.join(", ")}] needs an origin remote to fetch from`,
       );
     }
-    // Live-tree mode (no snapshot) only honors a dirty tree on localhost: a
-    // remote lane fetches the committed HEAD, so on a dirty tree it would
-    // silently test stale code while local lanes test your edits. Refuse it
-    // rather than hand back a misleading verdict.
-    if (!ctx.snapshotMode && ctx.dirty && !isLocalHost(host)) {
+    if (!ctx.snapshotMode && ctx.dirty && remotes.length > 0) {
       throw new Error(
         `odu: live-tree mode (--no-snapshot/--no-strict) on a dirty tree only ` +
-          `applies to localhost lanes — remote lane ${platform}=${host} would ` +
-          `fetch the committed HEAD (${ctx.sha7}), not your uncommitted changes. ` +
-          `Commit and push first, or slice to local platforms with --platform.`,
+          `applies to localhost lanes — remote host(s) in ${platform} pool ` +
+          `(${remotes.join(", ")}) would fetch the committed HEAD (${ctx.sha7}), ` +
+          `not your uncommitted changes. Commit and push first, pin localhost ` +
+          `with --host ${platform}=localhost, or slice to local platforms.`,
       );
     }
   }
+
+  // ── venue lease: one free machine per platform, lock held for the run ──
+  // Held by this coordinator process (and by the MCP-spawned coordinator the
+  // same way — never the MCP server itself). localhost short-circuits.
+  const activePlatforms = [...tasksByPlatform.keys()].sort();
+  const { lanes: lanesByPlatform, leases } = await leaseLanes({
+    pools: poolsByPlatform,
+    platforms: activePlatforms,
+    identity: { holder: localHolderId(), run: sha7 },
+    noWait: args.noWait,
+    onLine: info,
+  });
+  acquiredLeases.push(...leases);
 
   const poster = new StatusPoster({
     owner: github?.owner ?? "",
@@ -433,6 +468,11 @@ async function orchestrate(
     }
     void poster.settle().then(() => {
       for (const lane of lanes.values()) lane.close();
+      // Free venue leases before exit so the remote flock drops immediately
+      // rather than waiting for the OS to reap our ssh children on process death
+      // (crash paths still free via connection close — this is the clean path).
+      for (const lease of acquiredLeases) lease.release();
+      acquiredLeases.length = 0;
       // Record this run before the socket closes: a superseding run waits on
       // that close to confirm we're gone, so writing first guarantees our
       // record is on disk before it allocates its own (next) seq. Use the
@@ -858,6 +898,10 @@ async function orchestrate(
   await allSettled;
 
   for (const lane of lanes.values()) lane.close();
+  // Venue locks drop with the run — free them as soon as lanes are done so the
+  // next waiter can claim the box while we still finalize statuses/records.
+  for (const lease of acquiredLeases) lease.release();
+  acquiredLeases.length = 0;
   // Record this run *before* releasing the socket lock — every node is already
   // terminal (allSettled), so the state is final. A superseding/next run waits
   // on the socket close to confirm we're gone and only then reserves its seq, so

@@ -7,6 +7,7 @@
  *   odu attach [-o json]                   live dashboard / transition stream
  *   odu cancel                             stop the live run in this checkout
  *   odu runs [-o json]                     the durable run history (no live run)
+ *   odu hosts                              venue inventory (free / busy / held by)
  *   odu dump                               resolved pipeline as JSON
  *   odu graph                              dependency graph (Mermaid)
  *   odu protect [--dry-run] [--branch B]   sync required status checks
@@ -28,20 +29,22 @@ import {
   logsCommand,
   statusCommand,
 } from "./introspect";
+import { hostsCommand } from "./hosts";
 import { mcpCommand } from "./mcp";
 import { protectCommand } from "./protect";
 import { runsCommand } from "./runs";
 
-const USAGE = `usage: odu <run|status|logs|attach|cancel|runs|dump|graph|protect|mcp> [args]
+const USAGE = `usage: odu <run|status|logs|attach|cancel|runs|hosts|dump|graph|protect|mcp> [args]
 
 run [recipe[@platform]…] [--platform P]… [--host P=ADDR]… [--root NAMEPATH]
     [--no-deps] [--no-strict] [--no-snapshot] [--no-post] [--progress json]
-    [--supersede] [--linger]
+    [--supersede] [--linger] [--no-wait]
 status [-o json]
 logs [-f] <node>
 attach [-o json]
 cancel
 runs [-o json]
+hosts
 dump [--root NAMEPATH]
 graph [--root NAMEPATH]
 protect [--dry-run] [--branch B] [--platform P]…
@@ -66,6 +69,7 @@ async function dispatch(argv: string[]): Promise<number> {
           progress: { type: "string" },
           supersede: { type: "boolean" },
           linger: { type: "boolean" },
+          "no-wait": { type: "boolean" },
         },
       });
       if (values.progress !== undefined && values.progress !== "json") {
@@ -83,6 +87,7 @@ async function dispatch(argv: string[]): Promise<number> {
         progressJson: values.progress === "json",
         supersede: values.supersede ?? false,
         linger: values.linger ?? false,
+        noWait: values["no-wait"] ?? false,
       });
     }
     case "status": {
@@ -118,6 +123,8 @@ async function dispatch(argv: string[]): Promise<number> {
       });
       return runsCommand(values.output === "json");
     }
+    case "hosts":
+      return hostsCommand();
     case "dump":
     case "graph": {
       const { values } = parseArgs({

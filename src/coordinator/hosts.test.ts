@@ -1,5 +1,14 @@
-import { describe, expect, it } from "vitest";
-import { fanoutLanes, resolveLanes } from "./hosts";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { fanoutLanes, loadHosts, resolveLanes, shortHost } from "./hosts";
+
+const prevOduHosts = process.env.ODU_HOSTS;
+afterEach(() => {
+  if (prevOduHosts === undefined) delete process.env.ODU_HOSTS;
+  else process.env.ODU_HOSTS = prevOduHosts;
+});
 
 describe("resolveLanes", () => {
   const empty = { hosts: {}, source: null };
@@ -8,9 +17,9 @@ describe("resolveLanes", () => {
     expect(resolveLanes(empty, [], [])).toEqual({});
   });
 
-  it("synthesizes a lane from a --host pin even with no config file", () => {
+  it("synthesizes a one-host pool from a --host pin even with no config file", () => {
     expect(resolveLanes(empty, ["aarch64-darwin=localhost"], [])).toEqual({
-      "aarch64-darwin": "localhost",
+      "aarch64-darwin": ["localhost"],
     });
   });
 
@@ -18,6 +27,16 @@ describe("resolveLanes", () => {
     expect(() => resolveLanes(empty, [], ["x86_64-linux"])).toThrow(
       /no host/,
     );
+  });
+
+  it("replaces a multi-host pool with a --host pin (forced pick)", () => {
+    const config = {
+      hosts: { "x86_64-linux": ["ci-1", "ci-2", "ci-3"] },
+      source: "/some/hosts.json",
+    };
+    expect(
+      resolveLanes(config, ["x86_64-linux=ci-2"], []),
+    ).toEqual({ "x86_64-linux": ["ci-2"] });
   });
 });
 
@@ -67,28 +86,83 @@ describe("fanoutLanes — the no-config fail-fast (juspay/odu#46)", () => {
 
   it("keeps an explicit --host PLAT=localhost override working (localhost as a decision)", () => {
     expect(fanoutLanes(empty, ["x86_64-linux=localhost"], [])).toEqual({
-      "x86_64-linux": "localhost",
+      "x86_64-linux": ["localhost"],
     });
   });
 
   it("keeps an explicit \"PLAT\": \"localhost\" hosts-file entry working", () => {
     const config = {
-      hosts: { "x86_64-linux": "localhost" },
+      hosts: { "x86_64-linux": ["localhost"] },
       source: "/some/hosts.json",
     };
-    expect(fanoutLanes(config, [], [])).toEqual({ "x86_64-linux": "localhost" });
+    expect(fanoutLanes(config, [], [])).toEqual({
+      "x86_64-linux": ["localhost"],
+    });
   });
 
-  it("still fans out to a configured remote lane, and missing platforms stay dropped (partial config is a decision)", () => {
+  it("still fans out to a configured remote pool, and missing platforms stay dropped (partial config is a decision)", () => {
     const config = {
-      hosts: { "x86_64-linux": "builder.example" },
+      hosts: { "x86_64-linux": ["builder.example"] },
       source: "/some/hosts.json",
     };
     // aarch64-darwin absent from the config simply doesn't join the fanout —
     // a partial config someone wrote, distinct from the no-config refusal above.
     expect(fanoutLanes(config, [], [])).toEqual({
-      "x86_64-linux": "builder.example",
+      "x86_64-linux": ["builder.example"],
     });
+  });
+
+  it("preserves a multi-host pool from the config (juspay/odu#54)", () => {
+    const config = {
+      hosts: {
+        "x86_64-linux": ["ci-1", "ci-2", "ci-3"],
+        "aarch64-darwin": ["rasam", "sincereintent"],
+      },
+      source: "/some/hosts.json",
+    };
+    expect(fanoutLanes(config, [], [])).toEqual({
+      "x86_64-linux": ["ci-1", "ci-2", "ci-3"],
+      "aarch64-darwin": ["rasam", "sincereintent"],
+    });
+  });
+});
+
+describe("shortHost", () => {
+  it("strips user@ and domain for compact pick/status lines", () => {
+    expect(shortHost("nix@ci-3")).toBe("ci-3");
+    expect(shortHost("nix-infra@rasam.example.ts.net")).toBe("rasam");
+    expect(shortHost("srid@sincereintent")).toBe("sincereintent");
+    expect(shortHost("localhost")).toBe("localhost");
+  });
+});
+
+describe("loadHosts — string | list values", () => {
+  function writeHosts(body: unknown): string {
+    const dir = mkdtempSync(join(tmpdir(), "odu-hosts-"));
+    const path = join(dir, "hosts.json");
+    writeFileSync(path, JSON.stringify(body));
+    process.env.ODU_HOSTS = path;
+    return path;
+  }
+
+  it("normalizes a plain string to a one-host pool", () => {
+    writeHosts({ "x86_64-linux": "builder" });
+    expect(loadHosts().hosts).toEqual({ "x86_64-linux": ["builder"] });
+  });
+
+  it("keeps a multi-host pool", () => {
+    writeHosts({ "x86_64-linux": ["ci-1", "ci-2"] });
+    expect(loadHosts().hosts).toEqual({ "x86_64-linux": ["ci-1", "ci-2"] });
+  });
+
+  it("refuses an empty pool array", () => {
+    writeHosts({ "x86_64-linux": [] });
+    expect(() => loadHosts()).toThrow(/must not be empty/);
+  });
+
+  it("refuses a non-string pool entry", () => {
+    writeHosts({ "x86_64-linux": [1, 2] });
+    expect(() => loadHosts()).toThrow(/array of non-empty strings/);
   });
 });
 

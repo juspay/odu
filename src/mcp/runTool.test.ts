@@ -101,7 +101,7 @@ describe("startRun — lock + supersede", () => {
   });
 });
 
-describe("startRun — linger flag plumbing", () => {
+describe("startRun — linger / no_wait flag plumbing", () => {
   it("passes --linger through to the spawned run", async () => {
     const { calls, spawnRun } = captureSpawn();
     const r = await startRun(
@@ -119,5 +119,15 @@ describe("startRun — linger flag plumbing", () => {
       { socketPath: "/no/such/odu.sock", spawnRun, waitForSocket: socketUp },
     );
     expect(calls[0]).not.toContain("--linger");
+  });
+
+  it("passes --no-wait through to the spawned run", async () => {
+    const { calls, spawnRun } = captureSpawn();
+    const r = await startRun(
+      { no_wait: true },
+      { socketPath: "/no/such/odu.sock", spawnRun, waitForSocket: socketUp },
+    );
+    expect(r).toMatchObject({ ok: true, started: true });
+    expect(calls[0]).toContain("--no-wait");
   });
 });

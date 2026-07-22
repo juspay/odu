@@ -42,7 +42,7 @@ dashboard is designed on the same surface (see the roadmap below).
 odu run  (coordinator, your machine)
  ├─ strict gate: refuse a dirty tree, pin HEAD via `git worktree`
  ├─ ingest: `just --dump` → the [metadata("ci")] recipe's dependency DAG
- ├─ per platform lane (hosts.json):
+ ├─ per platform lane (hosts.json pool → lease a free host):
  │    nix copy the runner derivation → realise on the host →
  │    ssh host odu-runner --stdio → configure over the surface →
  │    the host fetches your pushed SHA into a writable per-SHA workspace
@@ -134,11 +134,43 @@ real builder for that platform, list them in `~/.config/odu/hosts.json` (or set
 Keys are Nix system tuples; values are anything ssh can dial, or `localhost`.
 A bare `odu run` then fans out to **every** configured platform at once;
 platforms absent from an *existing* config simply drop from the fanout (a
-partial config is a decision), and `--platform P` slices to a subset. The real-world example is **kolu**, which builds on both Linux and
-macOS: its CI keys an `x86_64-linux` and an `aarch64-darwin` lane, and its
-warm-pool lease (`ci/pu/run.sh`) injects the leased box per run with
-`--host PLAT=ADDR` (which pins or adds a platform for one run, on top of the
-file).
+partial config is a decision), and `--platform P` slices to a subset.
+
+**Venue pools (one free machine per platform).** A platform can name a **list**
+of hosts instead of one — odu picks a free machine, locks it for the run, and
+releases it when the run ends (or the process dies). A plain string still means
+a pool of one:
+
+```json
+{
+  "x86_64-linux": ["nix@ci-1", "nix@ci-2", "nix@ci-3", "nix@ci-4"],
+  "aarch64-darwin": ["nix-infra@rasam.example.ts.net", "srid@sincereintent"]
+}
+```
+
+Rules (juspay/odu#54):
+
+- One run per machine at a time. The lock is an `flock` **on the target
+  machine**, held over a long-lived ssh connection with heartbeats — so
+  laptops/agents contend correctly with no lock server. Crash / SIGKILL /
+  half-open network all free the lock when heartbeats stop.
+- Every machine busy → wait in line (and say who you're waiting for).
+  `--no-wait` fails immediately instead.
+- `--host x86_64-linux=ci-2` still pins a specific machine (waits if busy).
+- `localhost` is never leased (the checkout socket already serializes local runs).
+- Empty pool / no reachable host → loud error. Never localhost by accident.
+
+`odu hosts` probes the inventory without acquiring:
+
+```
+HOST            PLATFORM        STATE   HELD BY
+ci-1            x86_64-linux    busy    grok@desk · e9f0a1b#1 · 2m
+ci-3            x86_64-linux    free
+rasam           aarch64-darwin  busy    srid@laptop · a1b2c3d#4 · 6m
+```
+
+Builders need `flock(1)` (util-linux) on PATH. The lock file defaults to
+`/tmp/odu.lease` (`ODU_LEASE_LOCK` to override).
 
 **Scope a recipe to the coordinator's own OS family.** By default every recipe
 fans out to every configured platform. Tagging a recipe with `just`'s built-in
@@ -186,6 +218,8 @@ odu run [recipe[@platform]…]      run (selectors compose; bare names fan out
     --progress json               one NDJSON line per node transition
     --supersede                   cancel a run already live here, then start
     --linger                      keep serving after settle (rerun a node later)
+    --no-wait                     fail if every host in a pool is busy
+                                  (default: wait in line)
 odu status [-o json]              snapshot a live run
 odu logs [-f] <node>              replay (+ follow) one node's log
 odu attach [-o json]              live dashboard (tty); piped, -o json
@@ -193,6 +227,7 @@ odu attach [-o json]              live dashboard (tty); piped, -o json
                                   plain transition stream
 odu cancel                        stop the live run in this checkout, cleanly
 odu runs [-o json]                the durable run history (works with no live run)
+odu hosts                         venue inventory (free / busy / held by)
 odu dump | graph                  resolved pipeline as JSON / Mermaid
 odu protect [--dry-run]           sync branch protection's required contexts
     --platform P (repeatable)     the repo's platform set — needs no hosts
@@ -232,7 +267,7 @@ the agent.
 
 | Tool | What it does |
 | --- | --- |
-| `run` | Start a run (background coordinator) and return once it's live. `supersede` cancels a run already live here first; `linger` keeps it serving past settle. |
+| `run` | Start a run (background coordinator) and return once it's live. `supersede` cancels a run already live here first; `linger` keeps it serving past settle; `no_wait` fails if every host in a pool is busy. |
 | `node_rerun` | Reset a node + its dependents and reschedule (the only *node* mutation). |
 | `wait_for_settle` | Block until the run settles, or — fail-fast — the instant a node goes red. The verdict carries the run's identity — `sha7` always, and a non-null `seq` completing the unique `sha7#seq` (null only when no ordinal was reserved) — so you know *which* run it describes. Fails **loud** (an error, not an empty verdict) when no run is live here, or — with `expected_sha` — when the live run's commit doesn't match. |
 | `cancel` | Stop the live run and wait until it's torn down, so a following `run` can start. |
