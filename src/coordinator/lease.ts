@@ -61,12 +61,13 @@ export interface LeaseHandle {
   release(): void;
 }
 
-/** Outcome of one non-blocking claim attempt against a single host. */
+/** Outcome of one non-blocking claim attempt against a *remote* host.
+ *  Localhost is not a claim outcome — pure-local pools short-circuit in
+ *  `acquireFromPool` / `probeHost` before any claim protocol runs. */
 export type ClaimResult =
   | { kind: "held"; lease: LeaseHandle }
   | { kind: "busy"; heldBy: HolderInfo | null }
-  | { kind: "unreachable"; error: string }
-  | { kind: "local" };
+  | { kind: "unreachable"; error: string };
 
 export interface ProbeResult {
   host: string;
@@ -346,14 +347,19 @@ function parseBusyHolder(stdout: string): HolderInfo | null {
   return parseHolderBody(rest);
 }
 
-/** Try to claim one host. Localhost short-circuits to `{ kind: "local" }`. */
+/** Try to claim one remote host. Callers must not pass localhost — pure-local
+ *  pools are gated in `acquireFromPool` before claim. */
 export async function tryClaim(
   host: string,
   identity: LeaseIdentity,
   dial: DialFn = defaultDial,
   nowMs: number = Date.now(),
 ): Promise<ClaimResult> {
-  if (isLocalHost(host)) return { kind: "local" };
+  if (isLocalHost(host)) {
+    throw new Error(
+      `odu: tryClaim called on localhost (${host}) — pure-local pools short-circuit in acquireFromPool`,
+    );
+  }
 
   const script = claimRemoteScript(leaseLockPath(), identity, nowMs);
   let result: DialResult;
@@ -503,10 +509,12 @@ export async function acquireFromPool(
     );
   }
 
-  // Single localhost pool: no remote lock, no scan.
-  if (pool.length === 1 && isLocalHost(pool[0]!)) {
-    onLine?.(`${platform}: picked ${shortHost(pool[0]!)} (localhost)`);
-    return { host: pool[0]!, lease: null };
+  // Pure-local pool (after hosts.parsePool: never mixed with remotes): no
+  // remote lock, no claim protocol. Sole localhost is the common case.
+  if (pool.every((h) => isLocalHost(h))) {
+    const host = pool[0]!;
+    onLine?.(`${platform}: picked ${shortHost(host)} (localhost)`);
+    return { host, lease: null };
   }
 
   let waited = false;
@@ -516,15 +524,6 @@ export async function acquireFromPool(
     const unreachable: { host: string; error: string }[] = [];
 
     for (const host of order) {
-      if (isLocalHost(host)) {
-        onLine?.(
-          `${platform}: picked ${shortHost(host)}` +
-            (busy.length > 0
-              ? `   (${busy.map((b) => shortHost(b.host)).join(", ")} busy)`
-              : ""),
-        );
-        return { host, lease: null };
-      }
       const result = await claim(host, identity);
       if (result.kind === "held") {
         const busyNote =
@@ -535,10 +534,6 @@ export async function acquireFromPool(
           `${platform}: picked ${shortHost(host)}${busyNote}`,
         );
         return { host, lease: result.lease };
-      }
-      if (result.kind === "local") {
-        onLine?.(`${platform}: picked ${shortHost(host)} (localhost)`);
-        return { host, lease: null };
       }
       if (result.kind === "busy") {
         busy.push({ host, heldBy: result.heldBy });
