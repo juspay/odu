@@ -4,10 +4,11 @@
  * equals run lifetime, so crash / SIGKILL free the box when the connection
  * drops.
  *
- *   strict gate → HEAD snapshot → `just` DAG ingest → lease one free host per
- *   platform → fan lanes out (an ssh session each) → merge lane state into one
- *   fan-in surface served on `.ci/odu.sock` → write per-SHA logs + post commit
- *   statuses on transitions → verdict → release leases.
+ *   strict gate → HEAD snapshot → `just` DAG ingest → free checkout
+ *   (supersede/refuse) → reserve seq → lease one free host per platform → fan
+ *   lanes out (an ssh session each) → merge lane state into one fan-in surface
+ *   served on `.ci/odu.sock` → write per-SHA logs + post commit statuses on
+ *   transitions → verdict → release leases.
  *
  * Status posting and `--progress json` are both *diff-driven off the fan-in
  * state*, so every observer derives from the same source of truth the
@@ -54,7 +55,7 @@ import { missingRunnerError, resolveRunnerFlake } from "./runnerFlake";
 import { cancelRun } from "./cancel";
 import { releaseReservation, reserveNextSeq, writeRunRecord } from "./ledger";
 import { buildRunRecord, projectNodes } from "../common/runRecord";
-import { SOCKET_PATH, serveSocket } from "./socket";
+import { SOCKET_PATH, serveSocket, tryDialSocket } from "./socket";
 import {
   fetchUrlFor,
   logPathFor,
@@ -85,6 +86,54 @@ export interface RunArgs {
   /** When every host in a platform's pool is busy, fail immediately instead
    *  of waiting in line for a free machine (juspay/odu#54). */
   noWait: boolean;
+}
+
+/**
+ * One-run-per-checkout prelude — runs *before* any venue lease claim so a
+ * single-host pool can't deadlock: the live run holds the only remote flock,
+ * and a waiter that claimed first would block forever and never reach cancel.
+ *
+ * Mirrors MCP `startRun`: supersede cancels-then-confirms; without supersede
+ * a live socket is an immediate refuse (not a wait-then-fail at serveSocket).
+ * Exported for unit tests that assert cancel-before-claim ordering.
+ */
+export async function ensureCheckoutFree(
+  socketPath: string,
+  supersede: boolean,
+  deps: {
+    cancel?: typeof cancelRun;
+    dial?: typeof tryDialSocket;
+  } = {},
+): Promise<
+  | { ok: true }
+  | { ok: false; reason: "live" | "supersede-timeout"; message: string }
+> {
+  const dial = deps.dial ?? tryDialSocket;
+  const cancel = deps.cancel ?? cancelRun;
+
+  if (supersede) {
+    const { confirmed } = await cancel(socketPath);
+    if (!confirmed) {
+      return {
+        ok: false,
+        reason: "supersede-timeout",
+        message:
+          "odu: supersede — the run already in progress here did not shut down in time.",
+      };
+    }
+    return { ok: true };
+  }
+
+  const existing = await dial(socketPath);
+  if (existing === null) return { ok: true };
+  existing.close();
+  return {
+    ok: false,
+    reason: "live",
+    message:
+      "odu: a run is already in progress in this checkout\n" +
+      "(pass --supersede to cancel it and start fresh)",
+  };
 }
 
 function git(repo: string, args: string[]): string {
@@ -322,9 +371,46 @@ async function orchestrate(
     }
   }
 
+  // ── one-run-per-checkout BEFORE any venue lease ──
+  // Cancel/refuse first so a single-host pool cannot deadlock: the live run
+  // holds the only remote flock, and a waiter that claimed first would block
+  // forever without ever reaching supersede cancel (or fail later at
+  // serveSocket after waiting the whole prior run). Same order as MCP startRun.
+  const socketPath = join(repoRoot, SOCKET_PATH);
+  const checkout = await ensureCheckoutFree(socketPath, args.supersede);
+  if (!checkout.ok) {
+    process.stderr.write(`${checkout.message}\n`);
+    return 1;
+  }
+
+  // ── run identity — the durable record's (repo, sha, seq) ──
+  // Reserved *after* a possible --supersede cancel (above): a superseded run
+  // writes its own record before its socket closes, so by the time we get here
+  // that record is on disk and the exclusive reservation advances past it.
+  // Also *before* the venue lease so the holder label can carry `sha7#seq`
+  // (and so a setup failure after claim still leaves a claimed seq to reclaim).
+  // `repo` is the GitHub owner/repo or null for a local-only checkout.
+  const repo = github !== null ? repoSlug(github) : null;
+  // Atomically SELECT-and-RESERVE the seq durably BEFORE the socket serves, so
+  // the seq is on disk the instant it can become observable via the surface, and
+  // is claimed with an exclusive create so no two runs ever hold the same slot
+  // (see `reserveNextSeq`). A published `<sha7>#<seq>` is therefore globally
+  // unique: even a coordinator SIGKILLed after publishing but before
+  // `finalizeRunRecord` leaves its reservation on disk, so the next run of this
+  // commit advances past it (juspay/odu#49). `null` means the reservation write
+  // failed — the run proceeds WITHOUT a seq (no identity claim, no record)
+  // rather than gating on a history write, so `seq` stays absent on the surface.
+  const seq = reserveNextSeq(repoRoot, sha7);
+  // Hand the reserved seq to runCommand's early-throw cleanup: if this run
+  // throws before serving/finalizing, its `finally` reclaims the orphaned
+  // sentinel (releaseReservation leaves a finalized record untouched).
+  reservation.seq = seq;
+
   // ── venue lease: one free machine per platform, lock held for the run ──
   // Held by this coordinator process (and by the MCP-spawned coordinator the
   // same way — never the MCP server itself). localhost short-circuits.
+  // After checkout free + seq reserve so supersede can't deadlock on a busy
+  // single-host pool and the holder file can name `sha7#seq`.
   const activePlatforms = [...tasksByPlatform.keys()].sort();
   const { lanes: lanesByPlatform, leases } = await leaseLanes({
     pools: poolsByPlatform,
@@ -419,10 +505,10 @@ async function orchestrate(
   // socket serves, below) so this closure can reference it before it exists.
   let closeSocket: () => void = () => {};
   // Writes this run's durable record to the ledger. Hoisted like `closeSocket`:
-  // a no-op until the run identity is allocated (after a possible --supersede,
-  // below), then driven by every terminal path — natural completion, each
-  // linger drain, and the shared `shutdown` teardown — so an interrupted or
-  // cancelled run still leaves a record (marked incomplete).
+  // a no-op until `finalizeRunRecord` is wired after the surface exists (seq is
+  // already reserved above), then driven by every terminal path — natural
+  // completion, each linger drain, and the shared `shutdown` teardown — so an
+  // interrupted or cancelled run still leaves a record (marked incomplete).
   let finalizeRunRecord: (state: PipelineState) => void = () => {};
   // Linger's idle backstop: a settled-but-lingering coordinator self-reaps
   // after `idleMs` with no new work, so a forgotten `--linger` run can't hold
@@ -607,45 +693,12 @@ async function orchestrate(
     hostsSource: hostsConfig.source,
     startedAt: Date.now(),
   };
-  // Supersede: cancel a run already live in this checkout (and confirm its
-  // socket is gone) before we bind the lock, so "stop this, run the fixed
-  // commit" is one invocation. A no-op when nothing is live. Gate on the
-  // confirmation — same as the MCP path — so a stuck old run fails with a
-  // supersede-specific message rather than `serveSocket`'s opaque lock error.
-  if (args.supersede) {
-    const { confirmed } = await cancelRun(join(repoRoot, SOCKET_PATH));
-    if (!confirmed) {
-      process.stderr.write(
-        "odu: supersede — the run already in progress here did not shut down in time.\n",
-      );
-      return 1;
-    }
-  }
-  // ── run identity — the durable record's (repo, sha, seq) ──
-  // Reserved *after* a possible --supersede cancel: a superseded run writes its
-  // own record before its socket closes (the teardown above), so by the time we
-  // get here that record is on disk and the exclusive reservation advances past
-  // it. `repo` is the GitHub owner/repo or null for a local-only checkout.
-  const repo = github !== null ? repoSlug(github) : null;
-  // Atomically SELECT-and-RESERVE the seq durably BEFORE the socket serves, so
-  // the seq is on disk the instant it can become observable via the surface, and
-  // is claimed with an exclusive create so no two runs ever hold the same slot
-  // (see `reserveNextSeq`). A published `<sha7>#<seq>` is therefore globally
-  // unique: even a coordinator SIGKILLed after publishing but before
-  // `finalizeRunRecord` leaves its reservation on disk, so the next run of this
-  // commit advances past it (juspay/odu#49). `null` means the reservation write
-  // failed — the run proceeds WITHOUT a seq (no identity claim, no record)
-  // rather than gating on a history write, so `seq` stays absent on the surface.
-  const seq = reserveNextSeq(repoRoot, sha7);
-  // Hand the reserved seq to runCommand's early-throw cleanup: if this run
-  // throws before serving/finalizing, its `finally` reclaims the orphaned
-  // sentinel (releaseReservation leaves a finalized record untouched).
-  reservation.seq = seq;
   // Stamp the reserved seq onto the fan-in state so every face — the agent
   // `wait_for_settle` verdict especially — reads the run's full identity
   // `<sha7>#<seq>`. Set once here, before the socket serves; `updateNode` spreads
   // the whole state, so it survives every node update. `undefined` (no reserved
   // seq) leaves the field absent, mapped to `null` on the agent surface.
+  // (seq itself was reserved before the venue lease — see above.)
   runtime.ctx.cells.nodes.set({ ...store.get(), seq: seq ?? undefined });
   if (seq !== null) {
     finalizeRunRecord = (state: PipelineState): void => {
@@ -676,7 +729,9 @@ async function orchestrate(
   // Publish before serving so an `attach` connecting in the first instant reads
   // the real header, not the EMPTY_HEADER default.
   headerStore.set(header);
-  closeSocket = await serveSocket(router, join(repoRoot, SOCKET_PATH));
+  // Checkout was already confirmed free (ensureCheckoutFree); serveSocket is
+  // the hard one-run lock for races after that check.
+  closeSocket = await serveSocket(router, socketPath);
 
   display.start(store.get(), header);
   display.update(store.get());
