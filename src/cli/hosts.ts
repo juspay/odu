@@ -28,7 +28,7 @@ function heldByColumn(probe: ProbeResult, nowMs: number): string {
   if (probe.state === "busy" && probe.heldBy !== null) {
     return formatHolder(probe.heldBy, nowMs);
   }
-  if (probe.state === "unreachable" && probe.error !== undefined) {
+  if (probe.state === "unreachable") {
     return probe.error;
   }
   return "";

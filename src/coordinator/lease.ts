@@ -69,12 +69,13 @@ export type ClaimResult =
   | { kind: "busy"; heldBy: HolderInfo | null }
   | { kind: "unreachable"; error: string };
 
-export interface ProbeResult {
-  host: string;
-  state: "free" | "busy" | "unreachable" | "local";
-  heldBy: HolderInfo | null;
-  error?: string;
-}
+/** Probe snapshot aligned with claim outcomes; `local` is host topology
+ *  (lease-exempt), not a claim result. Unreachable always carries an error. */
+export type ProbeResult =
+  | { host: string; state: "free"; heldBy: null }
+  | { host: string; state: "busy"; heldBy: HolderInfo | null }
+  | { host: string; state: "local"; heldBy: null }
+  | { host: string; state: "unreachable"; heldBy: null; error: string };
 
 /** Who *this* process is for holder identity — `user@short-hostname`. */
 export function localHolderId(): string {
