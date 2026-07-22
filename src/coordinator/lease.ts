@@ -8,8 +8,14 @@
  *
  *   - normal finish → connection closes → lock frees instantly;
  *   - crash / SIGKILL → the OS closes the connection → lock frees in seconds;
- *   - half-open network → the remote read times out (~40s) → lock frees;
- *   - a live-but-forgotten holder → self-release backstop (~1h).
+ *   - half-open network → the remote read times out (~40s) → lock frees.
+ *
+ * There is no absolute wall-clock max while heartbeats keep arriving: a healthy
+ * multi-hour CI run must keep exclusivity. `ODU_LEASE_MAX_HOLD` (default 0 =
+ * unlimited) is an optional operator override for environments that want a
+ * hard ceiling; when it fires (or the ssh child dies for any reason) the local
+ * `LeaseHandle.lost` promise resolves so the coordinator fails closed rather
+ * than continuing as if it still held the flock.
  *
  * Because the lock is on the machine, runs from different laptops/agents contend
  * correctly with no lock server, database, or daemon anywhere. Proven in kolu's
@@ -37,7 +43,9 @@ export function leaseLockPath(): string {
 
 const HEARTBEAT_S = Number(process.env.ODU_LEASE_HEARTBEAT ?? 10);
 const TTL_S = Number(process.env.ODU_LEASE_TTL ?? 40);
-const MAX_HOLD_S = Number(process.env.ODU_LEASE_MAX_HOLD ?? 3600);
+/** Absolute remote hold ceiling in seconds. `0` (default) = unlimited while
+ *  heartbeats arrive — only idle TTL / EOF end the hold. */
+const MAX_HOLD_S = Number(process.env.ODU_LEASE_MAX_HOLD ?? 0);
 const WAIT_POLL_MS = Number(process.env.ODU_LEASE_WAIT_POLL_MS ?? 5_000);
 const CLAIM_TIMEOUT_MS = Number(process.env.ODU_LEASE_CLAIM_TIMEOUT_MS ?? 30_000);
 
@@ -59,6 +67,13 @@ export interface LeaseHandle {
   readonly host: string;
   /** Drop the hold — closes the ssh data channel so the remote flock frees. */
   release(): void;
+  /**
+   * Resolves when the remote hold ends *without* an intentional `release()`
+   * (ssh child exit, TTL, optional MAX_HOLD, remote kill). Callers must treat
+   * this as loss of exclusivity — do not keep fanning work to the host.
+   * Optional so test fakes can omit it; production claims always set it.
+   */
+  readonly lost?: Promise<void>;
 }
 
 /** Outcome of one non-blocking claim attempt against a *remote* host.
@@ -132,7 +147,8 @@ function claimRemoteScript(
   const run = identity.run ?? "-";
   const body = `${identity.holder}|${run}|${nowMs}`;
   // flock -n: busy → print BUSY + holder (if any) and exit 7.
-  // On hold: write holder, print HELD, then read heartbeats until EOF/TTL/MAX.
+  // On hold: write holder, print HELD, then read heartbeats until EOF/TTL, or
+  // until absolute MAX when MAX>0 (default MAX=0 = unlimited while beating).
   // stdin is ONLY the heartbeat channel (script is an ssh argv, not bash -s).
   return [
     `LOCK=${shellQuoteArg(lock)}`,
@@ -153,7 +169,7 @@ function claimRemoteScript(
     `while true; do`,
     `  if ! read -t "$TTL" -r _; then break; fi`,
     `  now=$(date +%s)`,
-    `  if [ $((now - start)) -ge "$MAX" ]; then break; fi`,
+    `  if [ "$MAX" -gt 0 ] && [ $((now - start)) -ge "$MAX" ]; then break; fi`,
     `done`,
     `rm -f "$HOLDER"`,
   ].join("; ");
@@ -181,6 +197,8 @@ export interface DialResult {
     child: ChildProcess;
     writeHeartbeat: () => void;
     release: () => void;
+    /** Resolves on unexpected hold-child death (not after intentional release). */
+    lost: Promise<void>;
   };
 }
 
@@ -278,6 +296,7 @@ function dialClaim(host: string, script: string): Promise<DialResult> {
         settled = true;
         clearTimeout(timer);
         if (/\bHELD\b/.test(stdout)) {
+          let intentionalRelease = false;
           const hb = setInterval(() => {
             try {
               child.stdin?.write("\n");
@@ -286,6 +305,15 @@ function dialClaim(host: string, script: string): Promise<DialResult> {
             }
           }, HEARTBEAT_S * 1000);
           hb.unref?.();
+          // Surface unexpected hold end (MAX_HOLD, TTL, remote kill, ssh drop)
+          // so the claim layer does not keep treating the host as exclusively
+          // ours after the flock is gone.
+          const lost = new Promise<void>((resolveLost) => {
+            child.on("close", () => {
+              clearInterval(hb);
+              if (!intentionalRelease) resolveLost();
+            });
+          });
           resolve({
             stdout,
             code: 0,
@@ -299,6 +327,7 @@ function dialClaim(host: string, script: string): Promise<DialResult> {
                 }
               },
               release: () => {
+                intentionalRelease = true;
                 clearInterval(hb);
                 try {
                   child.stdin?.end();
@@ -310,6 +339,7 @@ function dialClaim(host: string, script: string): Promise<DialResult> {
                   if (!child.killed) child.kill("SIGTERM");
                 }, 500).unref?.();
               },
+              lost,
             },
           });
         } else {
@@ -380,6 +410,7 @@ export async function tryClaim(
       lease: {
         host,
         release: () => hold.release(),
+        lost: hold.lost,
       },
     };
   }

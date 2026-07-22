@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
 import {
   acquireFromPool,
@@ -5,7 +6,9 @@ import {
   formatHolder,
   leaseLanes,
   parseHolderBody,
+  tryClaim,
   type ClaimResult,
+  type DialFn,
   type LeaseIdentity,
 } from "./lease";
 
@@ -218,5 +221,99 @@ describe("acquireFromPool", () => {
     expect(sleep).toHaveBeenCalled();
     // Final returned set still holds a live lease for mac (re-claimed on retry).
     expect(r.leases.length).toBe(2);
+  });
+});
+
+describe("tryClaim — hold loss surfaces locally", () => {
+  it("resolves lease.lost when the hold child closes without release", async () => {
+    const child = new EventEmitter() as EventEmitter & {
+      killed: boolean;
+      kill: ReturnType<typeof vi.fn>;
+      stdin: { write: ReturnType<typeof vi.fn>; end: ReturnType<typeof vi.fn> };
+    };
+    child.killed = false;
+    child.kill = vi.fn();
+    child.stdin = { write: vi.fn(), end: vi.fn() };
+
+    let intentional = false;
+    const lost = new Promise<void>((resolve) => {
+      child.on("close", () => {
+        if (!intentional) resolve();
+      });
+    });
+    const dial: DialFn = async () => ({
+      stdout: "HELD\n",
+      code: 0,
+      hold: {
+        child: child as never,
+        writeHeartbeat: () => {},
+        release: () => {
+          intentional = true;
+        },
+        lost,
+      },
+    });
+
+    const r = await tryClaim("ci-1", id, dial);
+    expect(r.kind).toBe("held");
+    if (r.kind !== "held") return;
+
+    const lostSpy = vi.fn();
+    void r.lease.lost?.then(lostSpy);
+    child.emit("close", 0);
+    await vi.waitFor(() => expect(lostSpy).toHaveBeenCalled());
+  });
+
+  it("does not resolve lease.lost after intentional release", async () => {
+    const child = new EventEmitter() as EventEmitter & {
+      killed: boolean;
+      kill: ReturnType<typeof vi.fn>;
+      stdin: { write: ReturnType<typeof vi.fn>; end: ReturnType<typeof vi.fn> };
+    };
+    child.killed = false;
+    child.kill = vi.fn();
+    child.stdin = { write: vi.fn(), end: vi.fn() };
+
+    let intentional = false;
+    const lost = new Promise<void>((resolve) => {
+      child.on("close", () => {
+        if (!intentional) resolve();
+      });
+    });
+    const dial: DialFn = async () => ({
+      stdout: "HELD\n",
+      code: 0,
+      hold: {
+        child: child as never,
+        writeHeartbeat: () => {},
+        release: () => {
+          intentional = true;
+        },
+        lost,
+      },
+    });
+
+    const r = await tryClaim("ci-1", id, dial);
+    expect(r.kind).toBe("held");
+    if (r.kind !== "held") return;
+
+    const lostSpy = vi.fn();
+    void r.lease.lost?.then(lostSpy);
+    r.lease.release();
+    child.emit("close", 0);
+    // Give microtasks a turn — lost must stay pending.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(lostSpy).not.toHaveBeenCalled();
+  });
+
+  it("default claim script uses unlimited MAX (idle/TTL only)", async () => {
+    let script = "";
+    const dial: DialFn = async (_host, s) => {
+      script = s;
+      return { stdout: "BUSY\n", code: 7 };
+    };
+    await tryClaim("ci-1", id, dial);
+    expect(script).toMatch(/MAX=0/);
+    expect(script).toMatch(/MAX" -gt 0/);
   });
 });

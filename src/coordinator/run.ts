@@ -44,7 +44,7 @@ import {
 } from "../common/surface";
 import { commitLabel, createDisplay, progressEvent } from "./display";
 import { laneTasks, loadJustPipeline, parseSelector } from "../just/ingest";
-import { fanoutPools, loadHosts } from "./hosts";
+import { fanoutPools, loadHosts, shortHost } from "./hosts";
 import { type Lane, startLane } from "./lane";
 import {
   type LeaseHandle,
@@ -575,6 +575,18 @@ async function orchestrate(
       process.exit(code);
     });
   };
+
+  // Fail closed if a remote hold dies mid-run (ssh drop, optional MAX_HOLD,
+  // remote kill): exclusivity is gone and another laptop can claim the same
+  // flock. Intentional `release()` does not fire `lost`.
+  for (const lease of acquiredLeases) {
+    void lease.lost?.then(() => {
+      shutdown(
+        1,
+        `venue lease lost on ${shortHost(lease.host)}`,
+      );
+    });
+  }
 
   const runtime = implementSurface(oduSurface, {
     cells: { nodes: { store }, header: { store: headerStore } },
