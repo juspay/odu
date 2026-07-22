@@ -98,16 +98,42 @@ export interface SpawnDeps {
   ) => Promise<boolean>;
 }
 
-async function defaultWaitForSocket(
-  socketPath: string,
+/**
+ * Poll until the coordinator socket answers or the child exits.
+ *
+ * No fixed startup window: venue-lease wait-in-line (juspay/odu#54) can exceed
+ * minutes while the child is healthy and has not yet served `.ci/odu.sock`
+ * (`leaseLanes` runs before `serveSocket`). Bounding the poll and SIGTERM-ing
+ * a still-alive waiter was a regression vs pre-lease spawn. Child exit is the
+ * only failure bound — a dirty-tree refusal / bad justfile dies immediately.
+ *
+ * Exported for unit tests of the exit-bounded policy.
+ */
+export async function pollUntilSocketOrExit(
+  ready: () => Promise<boolean>,
   exited: Promise<unknown>,
+  intervalMs = 250,
 ): Promise<boolean> {
-  // A flag the exit promise flips; the loop does one final dial after it so a
+  // A flag the exit promise flips; the loop does one final probe after it so a
   // detached coordinator that came up as the launcher exited still counts.
   let done = false;
   void exited.then(() => {
     done = true;
   });
+  for (;;) {
+    if (await ready()) return true;
+    if (done) {
+      // Child has exited — one last probe, then give up rather than poll on.
+      return ready();
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
+
+async function defaultWaitForSocket(
+  socketPath: string,
+  exited: Promise<unknown>,
+): Promise<boolean> {
   // Probe the socket and release the probe connection at once — we only want
   // to know it answers, not to hold it open.
   const serving = async (): Promise<boolean> => {
@@ -115,23 +141,14 @@ async function defaultWaitForSocket(
     d?.close();
     return d !== null;
   };
-  for (let i = 0; i < 240; i += 1) {
-    if (await serving()) return true;
-    if (done) {
-      // Child has exited — one last dial, then give up rather than poll on.
-      return serving();
-    }
-    await new Promise((r) => setTimeout(r, 250));
-  }
-  return false;
+  return pollUntilSocketOrExit(serving, exited);
 }
 
 /** Bring the run up. The wait stops the instant the child dies (a dirty-tree
  *  refusal, a missing `tsx`, or a bad justfile kills it early), so a failed
- *  run is reported at once; if the child stays alive but never serves, the
- *  poll window still bounds the wait so we never block forever. The socket
- *  coming up always wins — a clean run can fork a detached coordinator and let
- *  the launcher exit. */
+ *  run is reported at once. While the child lives we keep polling — lease
+ *  queue time is unbounded. The socket coming up always wins — a clean run can
+ *  fork a detached coordinator and let the launcher exit. */
 async function awaitStartup(
   waitForSocket: (s: string, exited: Promise<unknown>) => Promise<boolean>,
   socketPath: string,
@@ -231,19 +248,20 @@ export async function startRun(
 
   const r = await awaitStartup(waitForSocket, socketPath, onExit);
   if (r.up) return { ok: true, started: true, pid: child.pid };
-  // Timed out with the child still alive (it never served a socket): kill it
-  // rather than leak a process and then block forever awaiting its exit.
-  if (r.code === null) child.kill("SIGTERM");
+  // Wait is exit-bounded under `defaultWaitForSocket`. If a custom wait gives
+  // up while the child still lives (or exit races), do NOT SIGTERM — a healthy
+  // lease waiter (juspay/odu#54) must keep its place in line; killing it was
+  // the prior ~60s startup-window regression.
   return { ok: false, started: false, error: startupError(stderr, r.code) };
 }
 
 /** The failure message when a run never serves a socket — the run's own
- *  stderr when it died, else a code- or timeout-flavored explanation. */
+ *  stderr when it died, else a code- or wait-flavored explanation. */
 function startupError(stderr: string, code: number | null): string {
   const trimmed = stderr.trim();
   if (trimmed !== "") return trimmed;
   return code === null
-    ? "odu run did not serve a socket within the startup window"
+    ? "odu run did not serve a socket before the wait ended (child still running)"
     : `odu run exited ${code} before serving a socket`;
 }
 

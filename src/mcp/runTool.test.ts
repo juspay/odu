@@ -5,11 +5,11 @@
  * dial, so it's served via `serveTestSurface`.
  */
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CancelResult } from "../coordinator/cancel";
 import { pendingNode, type PipelineState } from "../common/surface";
 import { serveTestSurface, type TestSurface } from "./serveForTest";
-import { startRun } from "./runTool";
+import { pollUntilSocketOrExit, startRun } from "./runTool";
 
 function liveState(): PipelineState {
   return {
@@ -129,5 +129,57 @@ describe("startRun — linger / no_wait flag plumbing", () => {
     );
     expect(r).toMatchObject({ ok: true, started: true });
     expect(calls[0]).toContain("--no-wait");
+  });
+});
+
+describe("pollUntilSocketOrExit — exit-bounded wait (no fixed startup window)", () => {
+  it("keeps polling past the former ~60s window while the child lives", async () => {
+    // 240 × 250ms was the old hard cap. Simulate a busy-pool queue longer than
+    // that many polls; the waiter must not give up while the child is alive.
+    const OLD_MAX_POLLS = 240;
+    let polls = 0;
+    const ready = vi.fn(async () => {
+      polls += 1;
+      return polls > OLD_MAX_POLLS + 10;
+    });
+    const exited = new Promise<number>(() => {
+      /* child still running — lease queue */
+    });
+    const up = await pollUntilSocketOrExit(ready, exited, 0);
+    expect(up).toBe(true);
+    expect(polls).toBeGreaterThan(OLD_MAX_POLLS);
+  });
+
+  it("stops when the child exits without a socket", async () => {
+    let resolveExit!: () => void;
+    const exited = new Promise<void>((r) => {
+      resolveExit = r;
+    });
+    let polls = 0;
+    const ready = vi.fn(async () => {
+      polls += 1;
+      if (polls === 3) resolveExit();
+      return false;
+    });
+    const up = await pollUntilSocketOrExit(ready, exited, 0);
+    expect(up).toBe(false);
+    expect(polls).toBeGreaterThanOrEqual(3);
+  });
+
+  it("startRun reports failure without requiring the child to have exited", async () => {
+    // Custom wait aborts while onExit never settles (stand-in for a still-alive
+    // lease waiter under a non-default wait). Must fail closed, not hang.
+    const neverExit = new Promise<number>(() => {});
+    const r = await startRun(
+      {},
+      {
+        socketPath: "/no/such/odu.sock",
+        spawnRun: () => ({ stderr: "", onExit: neverExit }),
+        waitForSocket: async () => false,
+      },
+    );
+    expect(r.ok).toBe(false);
+    expect(r.started).toBe(false);
+    expect(r.error).toMatch(/did not serve a socket|still running/);
   });
 });
