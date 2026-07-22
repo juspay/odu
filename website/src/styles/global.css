@@ -242,11 +242,15 @@ button { font: inherit; }
 /* —— Proof videos —— */
 .proof-grid {
   display: grid;
-  grid-template-columns: 1.35fr 1fr;
+  grid-template-columns: 1fr 1fr;
   gap: 1rem;
+  align-items: stretch;
 }
 .proof-card {
   margin: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel);
@@ -255,13 +259,18 @@ button { font: inherit; }
 .proof-card video {
   display: block;
   width: 100%;
+  flex: none;
   aspect-ratio: 16 / 10;
   object-fit: cover;
+  object-position: center top;
   background: #050706;
 }
 .proof-card figcaption {
   display: grid;
-  gap: .3rem;
+  gap: .35rem;
+  flex: 1;
+  align-content: start;
+  min-height: 5.25rem;
   padding: .9rem 1rem;
   border-top: 1px solid var(--line);
 }
