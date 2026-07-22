@@ -32,6 +32,12 @@ import {
   pendingNode,
   type PipelineState,
 } from "../common/surface";
+import {
+  agentLeaseLockPath,
+  claimLocal,
+  type LocalHold,
+  probeLocal,
+} from "./leaseHold";
 import { prepareWorkspace } from "./workspace";
 
 export const SETUP_NODE_ID = "_ci-setup";
@@ -50,6 +56,14 @@ export function createLaneRunner(): LaneRunner {
   const stateStore = inMemoryStore<PipelineState>(EMPTY_STATE);
   const tail = createLogTail();
 
+  /** Venue hold for this agent process — at most one; release on dispose. */
+  let venueHold: LocalHold | null = null;
+  /** Inbound stdio (incl. system.live) counts as a dead-man pulse. */
+  const onStdinPulse = (): void => {
+    venueHold?.noteActivity();
+  };
+  process.stdin.on("data", onStdinPulse);
+
   const runtime = implementSurface(laneSurface, {
     cells: {
       nodes: { store: stateStore },
@@ -59,10 +73,68 @@ export function createLaneRunner(): LaneRunner {
     },
     procedures: {
       node: {
-        rerun: async ({ input }) => ({ ok: rerun(input.id) }),
+        rerun: async ({ input }) => {
+          venueHold?.noteActivity();
+          return { ok: rerun(input.id) };
+        },
       },
       run: {
-        configure: async ({ input }) => configure(input),
+        configure: async ({ input }) => {
+          venueHold?.noteActivity();
+          return configure(input);
+        },
+      },
+      lease: {
+        claim: async ({ input }) => {
+          if (disposed) {
+            return { status: "error" as const, error: "runner is disposed" };
+          }
+          if (venueHold !== null) {
+            return {
+              status: "error" as const,
+              error: "agent already holds a venue lease",
+            };
+          }
+          const lockPath = agentLeaseLockPath(input.lockPath);
+          const result = await claimLocal(
+            lockPath,
+            { holder: input.holder, run: input.run },
+            {
+              onSelfRelease: (reason) => {
+                venueHold = null;
+                process.stderr.write(
+                  `odu-runner: venue lease self-released (${reason})\n`,
+                );
+                // Exit so the coordinator session sees link death and
+                // `lease.lost` fires — flock is already free.
+                process.exit(0);
+              },
+            },
+          );
+          if (result.status === "held") {
+            venueHold = result.hold;
+            return { status: "held" as const };
+          }
+          if (result.status === "busy") {
+            return {
+              status: "busy" as const,
+              heldBy: result.heldBy,
+            };
+          }
+          return { status: "error" as const, error: result.error };
+        },
+        probe: async ({ input }) => {
+          venueHold?.noteActivity();
+          const lockPath = agentLeaseLockPath(input.lockPath);
+          return probeLocal(lockPath);
+        },
+        release: async () => {
+          if (venueHold !== null) {
+            venueHold.release();
+            venueHold = null;
+          }
+          return { ok: true };
+        },
       },
     },
   });
@@ -337,6 +409,11 @@ export function createLaneRunner(): LaneRunner {
     router,
     dispose: () => {
       disposed = true;
+      process.stdin.off("data", onStdinPulse);
+      if (venueHold !== null) {
+        venueHold.release();
+        venueHold = null;
+      }
       for (const child of children.values()) killGroup(child, "SIGKILL");
       children.clear();
       // Keep the worktree when anything failed — it is the debugging trail;
