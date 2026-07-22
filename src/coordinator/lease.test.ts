@@ -178,4 +178,45 @@ describe("acquireFromPool", () => {
     ).rejects.toThrow(/no reachable host/);
     expect(releaseDarwin).toHaveBeenCalled();
   });
+
+  it("multi-platform: does not hold early platforms while waiting on a busy later one", async () => {
+    // aarch64-darwin sorts first and can claim; x86_64-linux is busy once then free.
+    // All-or-nothing: release mac while waiting so mac is not idled across the poll.
+    const releaseDarwin = vi.fn();
+    let pass = 0;
+    const claim = vi.fn(async (host: string): Promise<ClaimResult> => {
+      if (host === "mac-1") {
+        return {
+          kind: "held",
+          lease: { host, release: releaseDarwin },
+        };
+      }
+      // linux-1: busy on first whole-set pass, free after sleep+retry
+      if (pass === 0) return { kind: "busy", heldBy: null };
+      return held(host);
+    });
+    const sleep = vi.fn(async () => {
+      pass += 1;
+    });
+    const r = await leaseLanes({
+      pools: {
+        "x86_64-linux": ["linux-1"],
+        "aarch64-darwin": ["mac-1"],
+      },
+      platforms: ["x86_64-linux", "aarch64-darwin"],
+      identity: id,
+      noWait: false,
+      claim,
+      sleep,
+    });
+    expect(r.lanes).toEqual({
+      "aarch64-darwin": "mac-1",
+      "x86_64-linux": "linux-1",
+    });
+    // First-pass mac hold was released when linux was busy.
+    expect(releaseDarwin).toHaveBeenCalled();
+    expect(sleep).toHaveBeenCalled();
+    // Final returned set still holds a live lease for mac (re-claimed on retry).
+    expect(r.leases.length).toBe(2);
+  });
 });

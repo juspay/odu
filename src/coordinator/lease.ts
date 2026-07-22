@@ -481,12 +481,125 @@ function defaultSleep(ms: number): Promise<void> {
   });
 }
 
+/** One non-waiting scan of a platform pool (claim each candidate at most once). */
+type ScanOnce =
+  | { status: "ok"; host: string; lease: LeaseHandle | null }
+  | {
+      status: "busy";
+      busy: { host: string; heldBy: HolderInfo | null }[];
+      unreachable: { host: string; error: string }[];
+    }
+  | {
+      status: "unreachable";
+      unreachable: { host: string; error: string }[];
+    };
+
+function formatBusyDesc(
+  busy: { host: string; heldBy: HolderInfo | null }[],
+  nowMs: number,
+): string {
+  return busy
+    .map((b) => {
+      const who =
+        b.heldBy !== null ? formatHolder(b.heldBy, nowMs) : "busy";
+      return `${shortHost(b.host)} (${who})`;
+    })
+    .join(", ");
+}
+
+function unreachableError(
+  platform: string,
+  unreachable: { host: string; error: string }[],
+): Error {
+  const detail = unreachable
+    .map((u) => `${shortHost(u.host)}: ${u.error}`)
+    .join("; ");
+  return new Error(
+    `odu: no reachable host in ${platform} pool` +
+      (detail !== "" ? ` (${detail})` : ""),
+  );
+}
+
+function busyError(
+  platform: string,
+  busy: { host: string; heldBy: HolderInfo | null }[],
+  nowMs: number,
+): Error {
+  return new Error(
+    `odu: every host for ${platform} is busy — ${formatBusyDesc(busy, nowMs)}` +
+      " (pass without --no-wait to wait in line)",
+  );
+}
+
+/**
+ * Single non-waiting pass over a platform pool. Pure-local → ok without claim.
+ * Used by `acquireFromPool` (wait loop) and `leaseLanes` (all-or-nothing multi).
+ */
+async function scanPoolOnce(opts: {
+  platform: string;
+  pool: HostPool;
+  identity: LeaseIdentity;
+  onLine?: (msg: string) => void;
+  claim: (
+    host: string,
+    identity: LeaseIdentity,
+  ) => Promise<ClaimResult>;
+  rotateBy: number;
+}): Promise<ScanOnce> {
+  const { platform, pool, identity, onLine, claim, rotateBy } = opts;
+
+  if (pool.length === 0) {
+    throw new Error(
+      `odu: empty host pool for ${platform} — configure at least one host`,
+    );
+  }
+
+  // Pure-local pool (after hosts.parsePool: never mixed with remotes): no
+  // remote lock, no claim protocol. Sole localhost is the common case.
+  if (pool.every((h) => isLocalHost(h))) {
+    const host = pool[0]!;
+    onLine?.(`${platform}: picked ${shortHost(host)} (localhost)`);
+    return { status: "ok", host, lease: null };
+  }
+
+  const order = rotatePool(pool, rotateBy);
+  const busy: { host: string; heldBy: HolderInfo | null }[] = [];
+  const unreachable: { host: string; error: string }[] = [];
+
+  for (const host of order) {
+    const result = await claim(host, identity);
+    if (result.kind === "held") {
+      const busyNote =
+        busy.length > 0
+          ? `   (${busy.map((b) => shortHost(b.host)).join(", ")} busy)`
+          : "";
+      onLine?.(
+        `${platform}: picked ${shortHost(host)}${busyNote}`,
+      );
+      return { status: "ok", host, lease: result.lease };
+    }
+    if (result.kind === "busy") {
+      busy.push({ host, heldBy: result.heldBy });
+      continue;
+    }
+    unreachable.push({ host, error: result.error });
+  }
+
+  if (busy.length === 0) {
+    return { status: "unreachable", unreachable };
+  }
+  return { status: "busy", busy, unreachable };
+}
+
 /**
  * Pick a free machine from the platform's pool, lock it, and return the hold.
  * Scans the pool (rotated) until one claim succeeds; when every reachable host
  * is busy, waits and retries — unless `noWait`, which fails immediately.
  * Unreachable hosts are skipped (reported) but never block the wait forever if
  * at least one host was merely busy; if *every* host is unreachable, fail loud.
+ *
+ * For multi-platform runs prefer `leaseLanes`, which never holds one platform
+ * while waiting on another.
  */
 export async function acquireFromPool(
   opts: AcquireFromPoolOpts,
@@ -503,77 +616,33 @@ export async function acquireFromPool(
     rotateBy = now(),
   } = opts;
 
-  if (pool.length === 0) {
-    throw new Error(
-      `odu: empty host pool for ${platform} — configure at least one host`,
-    );
-  }
-
-  // Pure-local pool (after hosts.parsePool: never mixed with remotes): no
-  // remote lock, no claim protocol. Sole localhost is the common case.
-  if (pool.every((h) => isLocalHost(h))) {
-    const host = pool[0]!;
-    onLine?.(`${platform}: picked ${shortHost(host)} (localhost)`);
-    return { host, lease: null };
-  }
-
   let waited = false;
   for (;;) {
-    const order = rotatePool(pool, rotateBy);
-    const busy: { host: string; heldBy: HolderInfo | null }[] = [];
-    const unreachable: { host: string; error: string }[] = [];
-
-    for (const host of order) {
-      const result = await claim(host, identity);
-      if (result.kind === "held") {
-        const busyNote =
-          busy.length > 0
-            ? `   (${busy.map((b) => shortHost(b.host)).join(", ")} busy)`
-            : "";
-        onLine?.(
-          `${platform}: picked ${shortHost(host)}${busyNote}`,
-        );
-        return { host, lease: result.lease };
-      }
-      if (result.kind === "busy") {
-        busy.push({ host, heldBy: result.heldBy });
-        continue;
-      }
-      unreachable.push({ host, error: result.error });
+    const scan = await scanPoolOnce({
+      platform,
+      pool,
+      identity,
+      onLine,
+      claim,
+      rotateBy,
+    });
+    if (scan.status === "ok") {
+      return { host: scan.host, lease: scan.lease };
+    }
+    if (scan.status === "unreachable") {
+      throw unreachableError(platform, scan.unreachable);
     }
 
-    // Full scan done with no claim.
-    if (busy.length === 0) {
-      // Nothing was merely busy — every candidate failed hard.
-      const detail = unreachable
-        .map((u) => `${shortHost(u.host)}: ${u.error}`)
-        .join("; ");
-      throw new Error(
-        `odu: no reachable host in ${platform} pool` +
-          (detail !== "" ? ` (${detail})` : ""),
-      );
-    }
-
-    const busyDesc = busy
-      .map((b) => {
-        const who =
-          b.heldBy !== null ? formatHolder(b.heldBy, now()) : "busy";
-        return `${shortHost(b.host)} (${who})`;
-      })
-      .join(", ");
-
+    const busyDesc = formatBusyDesc(scan.busy, now());
     if (noWait) {
-      throw new Error(
-        `odu: every host for ${platform} is busy — ${busyDesc}` +
-          " (pass without --no-wait to wait in line)",
-      );
+      throw busyError(platform, scan.busy, now());
     }
 
     if (!waited) {
       onLine?.(
         `${platform}: waiting — ${busyDesc}` +
-          (unreachable.length > 0
-            ? `; ${unreachable.map((u) => shortHost(u.host)).join(", ")} unreachable`
+          (scan.unreachable.length > 0
+            ? `; ${scan.unreachable.map((u) => shortHost(u.host)).join(", ")} unreachable`
             : ""),
       );
       waited = true;
@@ -602,34 +671,106 @@ export interface LeasedLanes {
   leases: LeaseHandle[];
 }
 
-/** Lease one host per platform that participates in the run. */
+/**
+ * Lease one host per platform that participates in the run.
+ *
+ * Multi-platform is all-or-nothing: one pass claims every platform without
+ * waiting; if any platform is busy, holds already taken are released, then
+ * the whole set sleeps and retries (or fails under `noWait`). Sorted platform
+ * order is only for deterministic scan within a pass — never hold platform A
+ * while blocked on B.
+ */
 export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
-  const lanes: Record<string, string> = {};
-  const leases: LeaseHandle[] = [];
-  try {
-    for (const platform of [...opts.platforms].sort()) {
-      const pool = opts.pools[platform];
-      if (pool === undefined) {
-        throw new Error(`odu: internal: no pool for platform ${platform}`);
+  const platforms = [...opts.platforms].sort();
+  const claim = opts.claim ?? ((h, id) => tryClaim(h, id));
+  const sleep = opts.sleep ?? defaultSleep;
+  const now = opts.now ?? Date.now;
+  const rotateBy = now();
+  let waited = false;
+
+  for (;;) {
+    const lanes: Record<string, string> = {};
+    const leases: LeaseHandle[] = [];
+    let blocked:
+      | {
+          platform: string;
+          busy: { host: string; heldBy: HolderInfo | null }[];
+          unreachable: { host: string; error: string }[];
+        }
+      | null = null;
+    let hardFail: Error | null = null;
+
+    try {
+      for (const platform of platforms) {
+        const pool = opts.pools[platform];
+        if (pool === undefined) {
+          throw new Error(`odu: internal: no pool for platform ${platform}`);
+        }
+        const scan = await scanPoolOnce({
+          platform,
+          pool,
+          identity: opts.identity,
+          onLine: opts.onLine,
+          claim,
+          rotateBy,
+        });
+        if (scan.status === "ok") {
+          lanes[platform] = scan.host;
+          if (scan.lease !== null) leases.push(scan.lease);
+          continue;
+        }
+        if (scan.status === "unreachable") {
+          hardFail = unreachableError(platform, scan.unreachable);
+          break;
+        }
+        blocked = {
+          platform,
+          busy: scan.busy,
+          unreachable: scan.unreachable,
+        };
+        break;
       }
-      const acquired = await acquireFromPool({
-        platform,
-        pool,
-        identity: opts.identity,
-        noWait: opts.noWait,
-        onLine: opts.onLine,
-        claim: opts.claim,
-        sleep: opts.sleep,
-        now: opts.now,
-      });
-      lanes[platform] = acquired.host;
-      if (acquired.lease !== null) leases.push(acquired.lease);
+    } catch (e) {
+      for (const lease of leases) lease.release();
+      throw e;
     }
-  } catch (e) {
+
+    if (hardFail !== null) {
+      for (const lease of leases) lease.release();
+      throw hardFail;
+    }
+
+    if (blocked === null) {
+      return { lanes, leases };
+    }
+
+    // Partial hold while another platform is busy — drop everything, wait.
     for (const lease of leases) lease.release();
-    throw e;
+
+    if (opts.noWait) {
+      throw busyError(blocked.platform, blocked.busy, now());
+    }
+
+    const busyDesc = formatBusyDesc(blocked.busy, now());
+    const unreachNote =
+      blocked.unreachable.length > 0
+        ? `; ${blocked.unreachable.map((u) => shortHost(u.host)).join(", ")} unreachable`
+        : "";
+    if (!waited) {
+      opts.onLine?.(
+        `${blocked.platform}: waiting — ${busyDesc}${unreachNote}` +
+          (platforms.length > 1
+            ? " (releasing other platforms until the full set is free)"
+            : ""),
+      );
+      waited = true;
+    } else {
+      opts.onLine?.(
+        `${blocked.platform}: still waiting — ${busyDesc}`,
+      );
+    }
+    await sleep(WAIT_POLL_MS);
   }
-  return { lanes, leases };
 }
 
 /** Probe every host in the config for `odu hosts`. */
