@@ -14,10 +14,8 @@
  * Default-deny `expose`: only the `nodes` cell + `logs` collection (as
  * resources) and `node.rerun` (as a tool) reach the host; the coordinator's
  * `header` cell and the lane-only `run.configure` are unreachable by
- * construction. Four bespoke tools — `run` (spawn-and-await),
- * `wait_for_settle` (single blocking subscription), `cancel` (drive the live
- * run's teardown), and `runs` (the durable run history, read off the on-disk
- * ledger so it answers after the coordinator exits) — ride alongside.
+ * construction. Bespoke tools: `run`, `wait_for_settle`, `cancel`, `runs`,
+ * plus agent-held venue `lease` / `release` (cross-run hold).
  * (`run.cancel` is the surface mutation `cancel` drives; it's not exposed
  * directly — the tool also confirms teardown.)
  */
@@ -29,6 +27,7 @@ import { directLink } from "@kolu/surface/links/direct";
 import { serveSurfaceAsMcp } from "@kolu/surface-mcp";
 import { buildAgentProjection, redialingAClient } from "../mcp/agentSurface";
 import { cancelTool } from "../mcp/cancelTool";
+import { leaseTool, releaseTool } from "../mcp/leaseTool";
 import { killRuns, runTool } from "../mcp/runTool";
 import { runsTool } from "../mcp/runsTool";
 import { waitTool } from "../mcp/waitTool";
@@ -91,6 +90,8 @@ export async function mcpCommand(socketPath: string = SOCKET_PATH): Promise<numb
       wait_for_settle: waitTool,
       cancel: cancelTool,
       runs: runsTool,
+      lease: leaseTool,
+      release: releaseTool,
     },
     serverInfo: { name: "odu", version: version() },
   });

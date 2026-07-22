@@ -8,6 +8,8 @@
  *   odu cancel                             stop the live run in this checkout
  *   odu runs [-o json]                     the durable run history (no live run)
  *   odu hosts                              venue inventory (free / busy / held by)
+ *   odu lease [PLAT…] [--no-wait]          agent-held venue lease (cross-run)
+ *   odu release [PLAT…]                    drop agent-held lease(s)
  *   odu dump                               resolved pipeline as JSON
  *   odu graph                              dependency graph (Mermaid)
  *   odu protect [--dry-run] [--branch B]   sync required status checks
@@ -30,11 +32,16 @@ import {
   statusCommand,
 } from "./introspect";
 import { hostsCommand } from "./hosts";
+import {
+  leaseCommand,
+  leaseHoldCommand,
+  releaseCommand,
+} from "./leaseCmd";
 import { mcpCommand } from "./mcp";
 import { protectCommand } from "./protect";
 import { runsCommand } from "./runs";
 
-const USAGE = `usage: odu <run|status|logs|attach|cancel|runs|hosts|dump|graph|protect|mcp> [args]
+const USAGE = `usage: odu <run|status|logs|attach|cancel|runs|hosts|lease|release|dump|graph|protect|mcp> [args]
 
 run [recipe[@platform]…] [--platform P]… [--host P=ADDR]… [--root NAMEPATH]
     [--no-deps] [--no-strict] [--no-snapshot] [--no-post] [--progress json]
@@ -45,6 +52,8 @@ attach [-o json]
 cancel
 runs [-o json]
 hosts
+lease [PLAT…] [--no-wait]     hold a free venue across runs (agent layer)
+release [PLAT…]               drop agent-held lease(s)
 dump [--root NAMEPATH]
 graph [--root NAMEPATH]
 protect [--dry-run] [--branch B] [--platform P]…
@@ -125,6 +134,46 @@ async function dispatch(argv: string[]): Promise<number> {
     }
     case "hosts":
       return hostsCommand();
+    case "lease": {
+      const { values, positionals } = parseArgs({
+        args: rest,
+        allowPositionals: true,
+        options: { "no-wait": { type: "boolean" } },
+      });
+      const r = await leaseCommand({
+        platforms: positionals,
+        noWait: values["no-wait"] ?? false,
+        nonBlocking: false,
+      });
+      return r.code;
+    }
+    case "release": {
+      const { positionals } = parseArgs({
+        args: rest,
+        allowPositionals: true,
+        options: {},
+      });
+      return releaseCommand({ platforms: positionals });
+    }
+    case "lease-hold": {
+      // Hidden: detached holder process. Not listed in usage.
+      const { values } = parseArgs({
+        args: rest,
+        options: {
+          platform: { type: "string" },
+          repo: { type: "string" },
+          "no-wait": { type: "boolean" },
+        },
+      });
+      if (values.platform === undefined || values.platform === "") {
+        throw new Error("odu lease-hold: --platform is required");
+      }
+      return leaseHoldCommand({
+        platform: values.platform,
+        noWait: values["no-wait"] ?? false,
+        repoRoot: values.repo ?? process.cwd(),
+      });
+    }
     case "dump":
     case "graph": {
       const { values } = parseArgs({

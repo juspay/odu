@@ -58,6 +58,22 @@ describe("acquireFromPool", () => {
     expect(claim).not.toHaveBeenCalled();
   });
 
+  it("picks explicit localhost when remotes are busy (mixed pool)", async () => {
+    const claim = vi.fn(
+      async (): Promise<ClaimResult> => ({ kind: "busy", heldBy: null }),
+    );
+    const r = await acquireFromPool({
+      platform: "x86_64-linux",
+      pool: ["ci-1", "localhost"],
+      identity: id,
+      noWait: true,
+      claim,
+      rotateBy: 0,
+    });
+    expect(r).toEqual({ host: "localhost", lease: null });
+    expect(claim).toHaveBeenCalledWith("ci-1", id);
+  });
+
   it("picks the first free host and reports busy siblings", async () => {
     const lines: string[] = [];
     const claim = vi.fn(async (host: string): Promise<ClaimResult> => {

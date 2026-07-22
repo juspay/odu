@@ -8,9 +8,14 @@
  *
  * Hold model: a child `flock -n -x <lock> -c '…; cat'` keeps the exclusive
  * lock while its stdin stays open. Release closes stdin (and kills the child);
- * agent process death drops the ssh pipe → child dies → flock frees. Same
- * crash/half-open semantics as the old bash-over-ssh design, without a
- * hand-rolled remote shell protocol.
+ * agent process death drops the ssh pipe → child dies → flock frees.
+ *
+ * Box-side dead-man (juspay/odu#54): half-open TCP never EOFs the agent, so
+ * the flock would stick until remote sshd times out (~2h). While holding we
+ * treat any inbound stdio activity (including framework `system.live` probes
+ * every ~15s) as a pulse; ~45s without a pulse releases the flock and exits.
+ * Max-hold (default 1h, `ODU_LEASE_MAX_HOLD_MS`) self-releases forgotten holds.
+ * No `lease.beat` — `system.live` is the pulse.
  */
 
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
@@ -20,6 +25,23 @@ import {
   DEFAULT_LEASE_LOCK,
   type LeaseHolder,
 } from "../common/surface";
+
+/** Idle without inbound activity before the hold self-releases (ms). */
+export function deadManMs(): number {
+  return envNumber("ODU_LEASE_DEAD_MAN_MS", 45_000, 1_000);
+}
+
+/** Absolute hold ceiling (ms). Default 1h; `0` = unlimited. */
+export function maxHoldMs(): number {
+  return envNumber("ODU_LEASE_MAX_HOLD_MS", 3_600_000, 0);
+}
+
+function envNumber(name: string, fallback: number, min: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= min ? n : fallback;
+}
 
 export function agentLeaseLockPath(override?: string): string {
   if (override !== undefined && override !== "") return override;
@@ -86,28 +108,48 @@ export function probeLocal(
 
 export interface LocalHold {
   release: () => void;
+  /** Mark inbound activity (RPC / stdio pulse) for the dead-man timer. */
+  noteActivity: () => void;
+}
+
+export interface ClaimLocalOpts {
+  nowMs?: number;
+  settleTimeoutMs?: number;
+  /** Injected clock for tests. */
+  now?: () => number;
+  /** Injected timers for tests. */
+  setIntervalFn?: typeof setInterval;
+  clearIntervalFn?: typeof clearInterval;
+  deadManMs?: number;
+  maxHoldMs?: number;
+  /** Called when dead-man or max-hold fires (after release). */
+  onSelfRelease?: (reason: "dead-man" | "max-hold") => void;
 }
 
 /**
  * Non-blocking claim. On success, keeps a child flock session until
- * `release()`. Concurrent second claim on this agent process is rejected by
- * the runner — one venue hold per runner process.
+ * `release()` or dead-man / max-hold self-release.
  */
 export async function claimLocal(
   lockPath: string,
   identity: { holder: string; run: string | null },
-  nowMs: number = Date.now(),
-  settleTimeoutMs: number = 5_000,
+  opts: ClaimLocalOpts = {},
 ): Promise<
   | { status: "held"; hold: LocalHold }
   | { status: "busy"; heldBy: LeaseHolder | null }
   | { status: "error"; error: string }
 > {
+  const nowMs = opts.nowMs ?? (opts.now?.() ?? Date.now());
+  const settleTimeoutMs = opts.settleTimeoutMs ?? 5_000;
+  const now = opts.now ?? Date.now;
+  const setInt = opts.setIntervalFn ?? setInterval;
+  const clearInt = opts.clearIntervalFn ?? clearInterval;
+  const deadMs = opts.deadManMs ?? deadManMs();
+  const maxMs = opts.maxHoldMs ?? maxHoldMs();
+
   const holderFile = `${lockPath}.holder`;
   const run = identity.run ?? "-";
   const body = `${identity.holder}|${run}|${nowMs}`;
-  // flock -c runs via the shell. Linear pipeline only (no if/then/do) —
-  // write holder, announce READY, hold with cat, remove holder on exit.
   const cmd = [
     `printf '%s\\n' ${shellQuoteArg(body)} > ${shellQuoteArg(holderFile)}`,
     `printf 'READY\\n'`,
@@ -131,25 +173,49 @@ export async function claimLocal(
   const settle = await settleClaimChild(child, settleTimeoutMs);
   if (settle.kind === "ready") {
     let released = false;
+    let lastActivity = now();
+    const heldSince = now();
+
+    const doRelease = (): void => {
+      if (released) return;
+      released = true;
+      clearInt(watch);
+      try {
+        child.stdin?.end();
+      } catch {
+        /* already closed */
+      }
+      setTimeout(() => {
+        if (!child.killed) child.kill("SIGTERM");
+      }, 500).unref?.();
+      try {
+        unlinkSync(holderFile);
+      } catch {
+        /* child may have removed it */
+      }
+    };
+
+    const watch = setInt(() => {
+      if (released) return;
+      const t = now();
+      if (maxMs > 0 && t - heldSince >= maxMs) {
+        doRelease();
+        opts.onSelfRelease?.("max-hold");
+        return;
+      }
+      if (t - lastActivity >= deadMs) {
+        doRelease();
+        opts.onSelfRelease?.("dead-man");
+      }
+    }, Math.min(5_000, deadMs, maxMs > 0 ? maxMs : deadMs));
+    watch.unref?.();
+
     return {
       status: "held",
       hold: {
-        release: () => {
-          if (released) return;
-          released = true;
-          try {
-            child.stdin?.end();
-          } catch {
-            /* already closed */
-          }
-          setTimeout(() => {
-            if (!child.killed) child.kill("SIGTERM");
-          }, 500).unref?.();
-          try {
-            unlinkSync(holderFile);
-          } catch {
-            /* child may have removed it */
-          }
+        release: doRelease,
+        noteActivity: () => {
+          lastActivity = now();
         },
       },
     };
@@ -211,9 +277,7 @@ function settleClaimChild(
     });
 
     child.on("close", (code) => {
-      // flock -n failure exits non-zero without running -c (no READY).
       if (code === 0) {
-        // Command finished without READY — treat as error.
         finish({
           kind: "error",
           message: "flock hold exited before READY",

@@ -134,6 +134,11 @@ nix run github:juspay/odu -- run --no-wait
 # Venue inventory — free / busy / held-by for every configured host.
 nix run github:juspay/odu -- hosts
 
+# Agent-held lease across runs (no re-queue between odu run iterations).
+nix run github:juspay/odu -- lease
+nix run github:juspay/odu -- lease x86_64-linux --no-wait
+nix run github:juspay/odu -- release
+
 # One NDJSON line per node transition, for agents/tools driving CI:
 # {"node":"ci::e2e@x86_64-linux","recipe":"ci::e2e","platform":"x86_64-linux",
 #  "status":"running|success|failed|skipped|errored","exit_code":1,
@@ -201,13 +206,16 @@ copy). A plain string is a pool of one. For each platform, `odu run` picks a
 free machine and leases it for the run: the coordinator dials **odu-runner**
 (same agent as the lane) over surface-remote and calls `lease.claim` — flock
 is a Nix dep of odu-runner, held by the agent process. Releases on finish /
-agent death. Busy pool → wait in line (or `--no-wait` fails). `odu hosts`
-probes via `lease.probe`. Platforms absent from an *existing* config silently
-drop from the fanout, but a run that resolves **zero** lanes — no file
-anywhere, no `--host`, no `--platform` — is **refused**, not defaulted to
-`localhost` (juspay/odu#46). `--host PLAT=ADDR` pins one box for the run; run
-on this machine on purpose with `--host PLAT=localhost` or a
-`"PLAT": "localhost"` entry.
+agent death unless an **agent-held** lease (`odu lease` / MCP `lease`) already
+covers the platform — then run reuses that host and leaves the lock alone.
+Busy pool → wait in line (or `--no-wait` fails). `odu hosts` probes via
+`lease.probe`. Platforms absent from an *existing* config silently drop from
+the fanout, but a run that resolves **zero** lanes — no file anywhere, no
+`--host`, no `--platform` — is **refused**, not defaulted to `localhost`
+(juspay/odu#46). `--host PLAT=ADDR` pins one box for the run; run on this
+machine on purpose with `--host PLAT=localhost` or a `"PLAT": "localhost"`
+entry. A mixed pool may list localhost explicitly as a real candidate when
+remotes are busy — still never an implicit fallback.
 
 A lane host needs only **ssh + Nix + outbound https**: the runner ships as
 a Nix closure (`nix copy` → realise on the host), and the source arrives by

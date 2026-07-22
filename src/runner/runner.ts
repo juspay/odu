@@ -58,6 +58,11 @@ export function createLaneRunner(): LaneRunner {
 
   /** Venue hold for this agent process — at most one; release on dispose. */
   let venueHold: LocalHold | null = null;
+  /** Inbound stdio (incl. system.live) counts as a dead-man pulse. */
+  const onStdinPulse = (): void => {
+    venueHold?.noteActivity();
+  };
+  process.stdin.on("data", onStdinPulse);
 
   const runtime = implementSurface(laneSurface, {
     cells: {
@@ -68,10 +73,16 @@ export function createLaneRunner(): LaneRunner {
     },
     procedures: {
       node: {
-        rerun: async ({ input }) => ({ ok: rerun(input.id) }),
+        rerun: async ({ input }) => {
+          venueHold?.noteActivity();
+          return { ok: rerun(input.id) };
+        },
       },
       run: {
-        configure: async ({ input }) => configure(input),
+        configure: async ({ input }) => {
+          venueHold?.noteActivity();
+          return configure(input);
+        },
       },
       lease: {
         claim: async ({ input }) => {
@@ -85,10 +96,21 @@ export function createLaneRunner(): LaneRunner {
             };
           }
           const lockPath = agentLeaseLockPath(input.lockPath);
-          const result = await claimLocal(lockPath, {
-            holder: input.holder,
-            run: input.run,
-          });
+          const result = await claimLocal(
+            lockPath,
+            { holder: input.holder, run: input.run },
+            {
+              onSelfRelease: (reason) => {
+                venueHold = null;
+                process.stderr.write(
+                  `odu-runner: venue lease self-released (${reason})\n`,
+                );
+                // Exit so the coordinator session sees link death and
+                // `lease.lost` fires — flock is already free.
+                process.exit(0);
+              },
+            },
+          );
           if (result.status === "held") {
             venueHold = result.hold;
             return { status: "held" as const };
@@ -102,6 +124,7 @@ export function createLaneRunner(): LaneRunner {
           return { status: "error" as const, error: result.error };
         },
         probe: async ({ input }) => {
+          venueHold?.noteActivity();
           const lockPath = agentLeaseLockPath(input.lockPath);
           return probeLocal(lockPath);
         },
@@ -386,6 +409,7 @@ export function createLaneRunner(): LaneRunner {
     router,
     dispose: () => {
       disposed = true;
+      process.stdin.off("data", onStdinPulse);
       if (venueHold !== null) {
         venueHold.release();
         venueHold = null;

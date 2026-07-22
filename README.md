@@ -176,6 +176,25 @@ rasam           aarch64-darwin  busy    srid@laptop · a1b2c3d#4 · 6m
 ```
 
 The lock file defaults to `/tmp/odu.lease` (`ODU_LEASE_LOCK` to override).
+On the agent, half-open links self-release after ~45s without `system.live`
+pulses (`ODU_LEASE_DEAD_MAN_MS`); forgotten holds self-release after 1h
+(`ODU_LEASE_MAX_HOLD_MS`, `0` = unlimited).
+
+**Agent-held leases (cross-run).** A terminal agent without an orchestrator can
+hold a venue across discrete tool calls:
+
+```sh
+odu lease                     # all platforms; waits in the foreground
+odu lease x86_64-linux --no-wait
+odu run                       # reuses held hosts — no re-queue, lock untouched
+odu release                   # drop agent-held lease(s)
+```
+
+`odu lease` spawns a detached holder (`odu lease-hold`) that dials odu-runner
+and records state in `.ci/odu-lease.json` (`held` / `waiting` + holder pid).
+MCP tools `lease` / `release` match: `lease` returns immediately with
+`held {host}` or `waiting {behind…}`; re-call or `hosts` to observe the line.
+`--host` still overrides an agent hold for that platform.
 
 **Scope a recipe to the coordinator's own OS family.** By default every recipe
 fans out to every configured platform. Tagging a recipe with `just`'s built-in
@@ -233,6 +252,8 @@ odu attach [-o json]              live dashboard (tty); piped, -o json
 odu cancel                        stop the live run in this checkout, cleanly
 odu runs [-o json]                the durable run history (works with no live run)
 odu hosts                         venue inventory (free / busy / held by)
+odu lease [PLAT…] [--no-wait]     agent-held venue (cross-run; detached holder)
+odu release [PLAT…]               drop agent-held lease(s)
 odu dump | graph                  resolved pipeline as JSON / Mermaid
 odu protect [--dry-run]           sync branch protection's required contexts
     --platform P (repeatable)     the repo's platform set — needs no hosts
@@ -277,6 +298,8 @@ the agent.
 | `wait_for_settle` | Block until the run settles, or — fail-fast — the instant a node goes red. The verdict carries the run's identity — `sha7` always, and a non-null `seq` completing the unique `sha7#seq` (null only when no ordinal was reserved) — so you know *which* run it describes. Fails **loud** (an error, not an empty verdict) when no run is live here, or — with `expected_sha` — when the live run's commit doesn't match. |
 | `cancel` | Stop the live run and wait until it's torn down, so a following `run` can start. |
 | `runs` | The durable run history — each recorded run's `sha#seq`, outcome, timing, lanes, and per-node results, newest first. Reads the on-disk ledger, so it answers *after* the coordinator has exited (the agent-face analogue of `odu runs`). |
+| `lease` | Agent-held venue: spawn a detached holder and return immediately with `held {host}` or `waiting {behind…}`. Re-call to observe the queue; `run` reuses held hosts without re-claiming. |
+| `release` | Drop agent-held venue lease(s) (SIGTERM holder). |
 
 The pipeline snapshot and per-node logs are **subscribable resources** rather
 than tools: `surface://streams/nodes` (the pipeline as

@@ -51,6 +51,11 @@ import {
   leaseLanes,
   localHolderId,
 } from "./lease";
+import {
+  liveHeldPlatforms,
+  upsertPlatformLease,
+  removePlatformLease,
+} from "./leaseRecord";
 import { evalOduRunnerDrv, resolveRunnerFlake } from "./runnerFlake";
 import { cancelRun } from "./cancel";
 import {
@@ -492,26 +497,71 @@ async function orchestrate(
   reservation.seq = seq;
 
   // ── venue lease: one free machine per platform, lock held for the run ──
-  // Held by this coordinator process (and by the MCP-spawned coordinator the
-  // same way — never the MCP server itself). localhost short-circuits.
-  // After checkout free + run-lock + seq reserve so supersede can't deadlock
-  // on a busy single-host pool, concurrent starters cannot co-queue during
-  // wait, and the holder file names the full run id (`sha7#seq` when reserved,
-  // else sha7) — matches `odu hosts` held-by lines.
+  // Two layers (juspay/odu#54 CR1):
+  //   1) Agent-held: `odu lease` / MCP lease left a live holder in
+  //      `.ci/odu-lease.json` → use that host, skip claim/release entirely
+  //      (iterate fix→run without re-queue).
+  //   2) Run auto-lease: claim for the rest, release on run exit.
+  // `--host` pins still force a claim path (override agent hold).
+  // After checkout free + run-lock + seq reserve so supersede can't deadlock.
   const activePlatforms = [...tasksByPlatform.keys()].sort();
   const runLabel = seq !== null ? `${sha7}#${seq}` : sha7;
-  const { lanes: lanesByPlatform, leases } = await leaseLanes({
-    pools: poolsByPlatform,
-    platforms: activePlatforms,
-    identity: { holder: localHolderId(), run: runLabel },
-    noWait: args.noWait,
-    onLine: info,
-    // Same odu-runner agent the lane will use — lease is a surface RPC on
-    // that agent (not bash-over-ssh). Drv is per platform tuple in hosts.json.
-    resolveDrvPath: (platform) => () =>
-      Promise.resolve(evalOduRunnerDrv(runnerFlake, platform)),
-  });
-  acquiredLeases.push(...leases);
+  const pinPlatforms = new Set(
+    args.hostPins.map((p) => p.split("=")[0]).filter((x): x is string => !!x),
+  );
+  const agentHeld = liveHeldPlatforms(repoRoot);
+  const lanesByPlatform: Record<string, string> = {};
+  const platformsToClaim: string[] = [];
+  for (const platform of activePlatforms) {
+    if (pinPlatforms.has(platform)) {
+      platformsToClaim.push(platform);
+      continue;
+    }
+    const held = agentHeld[platform];
+    if (held !== undefined) {
+      lanesByPlatform[platform] = held;
+      info(
+        `${platform}: using agent-held ${held} (odu lease — lock untouched on run exit)`,
+      );
+      continue;
+    }
+    platformsToClaim.push(platform);
+  }
+  if (platformsToClaim.length > 0) {
+    // Observable wait: record waiting state for platforms we're about to claim
+    // so `odu hosts` / re-reads of the lease file see the line (CR2).
+    for (const platform of platformsToClaim) {
+      upsertPlatformLease(repoRoot, platform, {
+        host: null,
+        holderPid: process.pid,
+        since: Date.now(),
+        state: "waiting",
+        waitingBehind: null,
+        run: runLabel,
+      });
+    }
+    try {
+      const claimed = await leaseLanes({
+        pools: poolsByPlatform,
+        platforms: platformsToClaim,
+        identity: { holder: localHolderId(), run: runLabel },
+        noWait: args.noWait,
+        onLine: info,
+        resolveDrvPath: (platform) => () =>
+          Promise.resolve(evalOduRunnerDrv(runnerFlake, platform)),
+      });
+      for (const [p, h] of Object.entries(claimed.lanes)) {
+        lanesByPlatform[p] = h;
+      }
+      acquiredLeases.push(...claimed.leases);
+    } finally {
+      // Drop run-owned waiting records (this pid). Agent-held platforms were
+      // never in platformsToClaim, so their records stay.
+      for (const platform of platformsToClaim) {
+        removePlatformLease(repoRoot, platform);
+      }
+    }
+  }
 
   const poster = new StatusPoster({
     owner: github?.owner ?? "",

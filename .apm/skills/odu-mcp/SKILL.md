@@ -8,9 +8,15 @@ user-invocable: false
 
 The agent face of [odu](https://github.com/juspay/odu) — an MCP stdio server
 that re-exposes a live CI run as agent tools (`run`, `node_rerun`,
-`wait_for_settle`, `cancel`) and subscribable resources (`surface://streams/nodes`,
-`surface://collections/logs/{id}`), so Claude Code / Codex / opencode / Gemini
-CLI drive CI with structured calls instead of scraping terminal output.
+`wait_for_settle`, `cancel`, `lease`, `release`) and subscribable resources
+(`surface://streams/nodes`, `surface://collections/logs/{id}`), so Claude Code /
+Codex / opencode / Gemini CLI drive CI with structured calls instead of
+scraping terminal output.
+
+`lease` / `release` are the agent-held venue layer: hold a free box across
+discrete tool calls without re-queuing between `run`s. `lease` returns
+immediately (`held` or `waiting`); re-call or inventory to observe the line.
+`run` reuses held hosts and does not release them on exit.
 
 `wait_for_settle` defaults to fail-fast: it returns the instant the first node
 goes red (`fail_fast_tripped: true`, `settled: false`), so the agent drills into

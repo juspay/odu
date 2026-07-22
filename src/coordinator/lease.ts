@@ -431,6 +431,10 @@ async function scanPoolOnce(opts: {
     );
   }
 
+  // Pure-local pool (every member is localhost): no remote claim. Mixed
+  // pools may also name localhost explicitly — that entry is a real
+  // candidate (pick without claim when reached in scan order), never an
+  // implicit fallback when the config omitted it (juspay/odu#46).
   if (pool.every((h) => isLocalHost(h))) {
     const host = pool[0]!;
     onLine?.(`${platform}: picked ${shortHost(host)} (localhost)`);
@@ -442,6 +446,17 @@ async function scanPoolOnce(opts: {
   const unreachable: { host: string; error: string }[] = [];
 
   for (const host of order) {
+    // Explicit localhost pool member: free without remote claim (no flock).
+    if (isLocalHost(host)) {
+      const busyNote =
+        busy.length > 0
+          ? `   (${busy.map((b) => shortHost(b.host)).join(", ")} busy)`
+          : "";
+      onLine?.(
+        `${platform}: picked ${shortHost(host)} (localhost)${busyNote}`,
+      );
+      return { status: "ok", host, lease: null };
+    }
     const result = await claim(host, identity);
     if (result.kind === "held") {
       const busyNote =
