@@ -39,6 +39,13 @@ e2e: install
 run *args: install
     {{ nix_shell }} env ODU_RUNNER_FLAKE="git+file://{{ justfile_directory() }}" pnpm start {{ args }}
 
+# The site lives in website/ as a standalone npm project (its own
+# package-lock.json, not the root pnpm), so this shells in and uses npm. Pass
+# Astro flags through, e.g. `just website --port 3000 --open`.
+# Preview the marketing website locally (Astro dev server, hot reload).
+website *args:
+    {{ nix_shell }} sh -c 'cd website && npm install && npm run dev -- {{ args }}'
+
 # Format nix files
 fmt:
     {{ nix_shell }} nixpkgs-fmt *.nix nix/*.nix nix/packages/*.nix

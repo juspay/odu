@@ -43,7 +43,7 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
           <div class="hero-grid">
             <div>
               <p class="eyebrow">Live CI for just · humans + agents</p>
-              <h1>CI you can <em>attach to.</em></h1>
+              <h1>CI you can <em>attach to.</em><span class="cursor" aria-hidden="true">▌</span></h1>
               <p class="hero-copy">
                 Batch CI turns your task graph into a process and leaves log files.
                 <strong>odu keeps the pipeline alive as typed state</strong> —
@@ -56,9 +56,29 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
                 <a class="button" href="#proof">Watch demos</a>
                 <a class="button button-ghost" href={`${base}/docs/`}>Docs</a>
               </div>
-              <div class="hero-cmd">
-                <code><span class="prompt">$</span> {runCmd}</code>
-                <button class="copy-btn" type="button" data-copy={runCmd}>copy</button>
+              <div class="hero-term" aria-label="A live odu pipeline settling in real time">
+                <div class="term-bar">
+                  <span class="term-dot r"></span>
+                  <span class="term-dot y"></span>
+                  <span class="term-dot g"></span>
+                  <span class="term-title">odu — live run</span>
+                  <button class="copy-btn" type="button" data-copy={runCmd} style="margin-left:auto">copy</button>
+                </div>
+                <div class="term-body">
+                  <div class="cmd"><span class="prompt">$</span> nix run github:juspay/odu -- run <span class="flag">--host x86_64-linux=localhost</span></div>
+                  <div class="pipeline" aria-hidden="true">
+                    <span class="pnode"><span class="pdot" style="--d:0s"><span class="pcheck">✓</span></span>typecheck</span>
+                    <span class="parrow">→</span>
+                    <span class="pnode"><span class="pdot" style="--d:.8s"><span class="pcheck">✓</span></span>unit</span>
+                    <span class="parrow">→</span>
+                    <span class="pnode"><span class="pdot" style="--d:1.4s"><span class="pcheck">✓</span></span>fmt</span>
+                    <span class="parrow">→</span>
+                    <span class="pnode"><span class="pdot" style="--d:1.4s"><span class="pcheck">✓</span></span>nix</span>
+                    <span class="parrow">→</span>
+                    <span class="pnode"><span class="pdot" style="--d:2.4s"><span class="pcheck">✓</span></span>e2e</span>
+                  </div>
+                  <div class="term-status"><span class="live" aria-hidden="true"></span> attach · mcp · rerun — same live state<span class="caret" aria-hidden="true"></span></div>
+                </div>
               </div>
             </div>
 
@@ -141,7 +161,7 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
               </p>
             </div>
             <div class="outcomes">
-              <article class="outcome">
+              <article class="outcome who-human">
                 <span class="who">Human</span>
                 <h3>Attach while e2e is still running</h3>
                 <p>
@@ -150,7 +170,7 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
                   everything that ran before you connected.
                 </p>
               </article>
-              <article class="outcome">
+              <article class="outcome who-agent">
                 <span class="who">Agent</span>
                 <h3>Stop on first red, not after 20 minutes</h3>
                 <p>
@@ -159,7 +179,7 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
                   failed node and its dependents.
                 </p>
               </article>
-              <article class="outcome">
+              <article class="outcome who-human">
                 <span class="who">Human</span>
                 <h3>Retry a flake without restarting CI</h3>
                 <p>
@@ -167,7 +187,7 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
                   flaky node. No full pipeline restart for one bad leaf.
                 </p>
               </article>
-              <article class="outcome">
+              <article class="outcome who-team">
                 <span class="who">Team</span>
                 <h3>Linux + macOS, nothing preinstalled</h3>
                 <p>
