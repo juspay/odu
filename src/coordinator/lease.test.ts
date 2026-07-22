@@ -241,6 +241,40 @@ describe("acquireFromPool", () => {
     expect(claim).not.toHaveBeenCalled();
   });
 
+  it("rejects user@host vs bare host across platforms (same machine lock)", async () => {
+    const claim = vi.fn(async (host: string): Promise<ClaimResult> => held(host));
+    await expect(
+      leaseLanes({
+        pools: {
+          "x86_64-linux": ["nix@ci-1"],
+          "aarch64-linux": ["ci-1"],
+        },
+        platforms: ["x86_64-linux", "aarch64-linux"],
+        identity: id,
+        noWait: false,
+        claim,
+      }),
+    ).rejects.toThrow(/ci-1.*both/);
+    expect(claim).not.toHaveBeenCalled();
+  });
+
+  it("rejects different users on the same host across platforms", async () => {
+    const claim = vi.fn(async (host: string): Promise<ClaimResult> => held(host));
+    await expect(
+      leaseLanes({
+        pools: {
+          "x86_64-linux": ["nix@ci-1"],
+          "aarch64-linux": ["root@ci-1"],
+        },
+        platforms: ["x86_64-linux", "aarch64-linux"],
+        identity: id,
+        noWait: false,
+        claim,
+      }),
+    ).rejects.toThrow(/ci-1.*both/);
+    expect(claim).not.toHaveBeenCalled();
+  });
+
   it("allows the same localhost string across platforms (lease-exempt)", async () => {
     const claim = vi.fn();
     const r = await leaseLanes({

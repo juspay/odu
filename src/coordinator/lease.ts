@@ -717,7 +717,17 @@ export interface LeasedLanes {
  * If two platforms in the same run list the same remote host, all-or-nothing
  * acquire holds it for platform A then sees it busy for B (self), releases,
  * and retries forever. Fail loud at lease time instead.
+ *
+ * Comparison keys strip a single `user@` prefix and case-fold so hosts.json
+ * shapes like `nix@ci-1` vs bare `ci-1` (or `root@ci-1`) still collide —
+ * dial-string identity alone misses those aliases and livelocks.
  */
+function venueHostKey(host: string): string {
+  const trimmed = host.trim().toLowerCase();
+  const at = trimmed.indexOf("@");
+  return at >= 0 ? trimmed.slice(at + 1) : trimmed;
+}
+
 function assertNoSharedRemoteHosts(
   pools: Record<string, HostPool>,
   platforms: readonly string[],
@@ -726,7 +736,8 @@ function assertNoSharedRemoteHosts(
   for (const platform of platforms) {
     for (const host of pools[platform] ?? []) {
       if (isLocalHost(host)) continue;
-      const key = host.trim().toLowerCase();
+      const key = venueHostKey(host);
+      if (key === "") continue;
       const prev = owner.get(key);
       if (prev !== undefined && prev !== platform) {
         throw new Error(
