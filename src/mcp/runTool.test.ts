@@ -5,8 +5,12 @@
  * dial, so it's served via `serveTestSurface`.
  */
 
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CancelResult } from "../coordinator/cancel";
+import { tryAcquireRunLock } from "../coordinator/checkoutLock";
 import { pendingNode, type PipelineState } from "../common/surface";
 import { serveTestSurface, type TestSurface } from "./serveForTest";
 import { pollUntilSocketOrExit, startRun } from "./runTool";
@@ -98,6 +102,29 @@ describe("startRun — lock + supersede", () => {
     expect(r.ok).toBe(false);
     expect(r.error).toMatch(/did not shut down/);
     expect(calls).toHaveLength(0);
+  });
+
+  it("refuses when the run-lock is held with no socket (lease-wait window)", async () => {
+    // Concurrent starter during venue lease wait: no .ci/odu.sock yet, but
+    // the PID run-lock is held — must not spawn a second coordinator.
+    const dir = mkdtempSync(join(tmpdir(), "odu-mcp-lock-"));
+    const socketPath = join(dir, "odu.sock");
+    const lockPath = join(dir, "odu.run.lock");
+    const held = tryAcquireRunLock(lockPath);
+    expect(held).not.toBeNull();
+    try {
+      const { calls, spawnRun } = captureSpawn();
+      const r = await startRun(
+        {},
+        { socketPath, spawnRun, waitForSocket: socketUp },
+      );
+      expect(r.ok).toBe(false);
+      expect(r.error).toMatch(/already in progress/);
+      expect(calls).toHaveLength(0);
+    } finally {
+      held!.release();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

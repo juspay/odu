@@ -13,9 +13,16 @@
  */
 
 import { spawn } from "node:child_process";
+import { dirname, join } from "node:path";
 import { z } from "zod";
 import type { BespokeTool } from "@kolu/surface-mcp";
 import { type CancelResult, cancelRun } from "../coordinator/cancel";
+import {
+  liveRunLockPid,
+  RUN_LOCK_PATH,
+  signalRunLockHolder,
+  waitForRunLockFree,
+} from "../coordinator/checkoutLock";
 import { SOCKET_PATH, tryDialSocket } from "../coordinator/socket";
 
 export const runInput = z.object({
@@ -171,17 +178,26 @@ async function awaitStartup(
 /** `run` — start a pipeline the agent can then watch and drive. Spawns a
  *  background `odu run` (its own coordinator owning `.ci/odu.sock`) and returns
  *  once the socket is live, so a following `wait_for_settle` / `nodes` read /
- *  resource subscribe attaches to it. One run per checkout: a live socket means
- *  a run is already in progress, so we refuse rather than collide on the lock. */
+ *  resource subscribe attaches to it. One run per checkout: a live socket *or*
+ *  a held run-lock (lease wait before the socket serves) means a run is already
+ *  in progress, so we refuse rather than co-queue on the venue pool. */
 export async function startRun(
   input: RunInput,
   deps: SpawnDeps = {},
 ): Promise<RunResult> {
   const socketPath = deps.socketPath ?? SOCKET_PATH;
+  // Sibling of the socket (`.ci/odu.run.lock`); absolute when socketPath is.
+  const lockPath =
+    socketPath === SOCKET_PATH
+      ? RUN_LOCK_PATH
+      : join(dirname(socketPath), "odu.run.lock");
 
   const existing = await tryDialSocket(socketPath);
-  if (existing !== null) {
-    existing.close();
+  const lockPid = liveRunLockPid(lockPath);
+  const busy = existing !== null || lockPid !== null;
+
+  if (busy) {
+    if (existing !== null) existing.close();
     if (!input.supersede) {
       return {
         ok: false,
@@ -191,16 +207,29 @@ export async function startRun(
           "(pass supersede to cancel it and start fresh)",
       };
     }
-    // Supersede: cancel the live run and wait until its socket is gone, so the
-    // spawn below binds a free lock rather than colliding on it.
-    const cancel = deps.cancelExisting ?? cancelRun;
-    const result = await cancel(socketPath);
-    if (!result.confirmed) {
-      return {
-        ok: false,
-        started: false,
-        error: "supersede: the existing run did not shut down in time",
-      };
+    // Supersede: cancel via socket when up; always clear a lease-waiting
+    // holder that never reached serveSocket (SIGTERM on the run-lock PID).
+    if (existing !== null) {
+      const cancel = deps.cancelExisting ?? cancelRun;
+      const result = await cancel(socketPath);
+      if (!result.confirmed) {
+        return {
+          ok: false,
+          started: false,
+          error: "supersede: the existing run did not shut down in time",
+        };
+      }
+    }
+    if (liveRunLockPid(lockPath) !== null) {
+      signalRunLockHolder(lockPath, "SIGTERM");
+      const free = await waitForRunLockFree(lockPath);
+      if (!free) {
+        return {
+          ok: false,
+          started: false,
+          error: "supersede: the existing run did not shut down in time",
+        };
+      }
     }
   }
 

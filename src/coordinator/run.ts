@@ -53,6 +53,14 @@ import {
 } from "./lease";
 import { missingRunnerError, resolveRunnerFlake } from "./runnerFlake";
 import { cancelRun } from "./cancel";
+import {
+  liveRunLockPid,
+  RUN_LOCK_PATH,
+  signalRunLockHolder,
+  tryAcquireRunLock,
+  waitForRunLockFree,
+  type RunLockHandle,
+} from "./checkoutLock";
 import { releaseReservation, reserveNextSeq, writeRunRecord } from "./ledger";
 import { buildRunRecord, projectNodes } from "../common/runRecord";
 import { SOCKET_PATH, serveSocket, tryDialSocket } from "./socket";
@@ -93,8 +101,13 @@ export interface RunArgs {
  * single-host pool can't deadlock: the live run holds the only remote flock,
  * and a waiter that claimed first would block forever and never reach cancel.
  *
- * Mirrors MCP `startRun`: supersede cancels-then-confirms; without supersede
- * a live socket is an immediate refuse (not a wait-then-fail at serveSocket).
+ * Checks both the attach socket *and* the PID run-lock: lease wait happens
+ * before `serveSocket`, so a live socket alone misses concurrent starters
+ * that are still queued on the venue pool.
+ *
+ * Mirrors MCP `startRun`: supersede cancels-then-confirms (socket when up,
+ * SIGTERM on the run-lock holder when only the lease wait is live); without
+ * supersede a live socket/lock is an immediate refuse.
  * Exported for unit tests that assert cancel-before-claim ordering.
  */
 export async function ensureCheckoutFree(
@@ -103,6 +116,11 @@ export async function ensureCheckoutFree(
   deps: {
     cancel?: typeof cancelRun;
     dial?: typeof tryDialSocket;
+    /** Absolute path to `.ci/odu.run.lock`; derived from socketPath when omitted. */
+    lockPath?: string;
+    signalLock?: typeof signalRunLockHolder;
+    waitLockFree?: typeof waitForRunLockFree;
+    liveLockPid?: typeof liveRunLockPid;
   } = {},
 ): Promise<
   | { ok: true }
@@ -110,8 +128,22 @@ export async function ensureCheckoutFree(
 > {
   const dial = deps.dial ?? tryDialSocket;
   const cancel = deps.cancel ?? cancelRun;
+  const lockPath = deps.lockPath ?? join(dirname(socketPath), "odu.run.lock");
+  const signalLock = deps.signalLock ?? signalRunLockHolder;
+  const waitLockFree = deps.waitLockFree ?? waitForRunLockFree;
+  const liveLockPid = deps.liveLockPid ?? liveRunLockPid;
+
+  const refuseLive = {
+    ok: false as const,
+    reason: "live" as const,
+    message:
+      "odu: a run is already in progress in this checkout\n" +
+      "(pass --supersede to cancel it and start fresh)",
+  };
 
   if (supersede) {
+    // Prefer graceful surface cancel when the socket is up; always clear a
+    // lease-waiting holder that never reached serveSocket.
     const { confirmed } = await cancel(socketPath);
     if (!confirmed) {
       return {
@@ -121,19 +153,28 @@ export async function ensureCheckoutFree(
           "odu: supersede — the run already in progress here did not shut down in time.",
       };
     }
+    if (liveLockPid(lockPath) !== null) {
+      signalLock(lockPath, "SIGTERM");
+      const free = await waitLockFree(lockPath);
+      if (!free) {
+        return {
+          ok: false,
+          reason: "supersede-timeout",
+          message:
+            "odu: supersede — the run already in progress here did not shut down in time.",
+        };
+      }
+    }
     return { ok: true };
   }
 
   const existing = await dial(socketPath);
-  if (existing === null) return { ok: true };
-  existing.close();
-  return {
-    ok: false,
-    reason: "live",
-    message:
-      "odu: a run is already in progress in this checkout\n" +
-      "(pass --supersede to cancel it and start fresh)",
-  };
+  if (existing !== null) {
+    existing.close();
+    return refuseLive;
+  }
+  if (liveLockPid(lockPath) !== null) return refuseLive;
+  return { ok: true };
 }
 
 /**
@@ -239,6 +280,11 @@ export async function runCommand(args: RunArgs): Promise<number> {
   // and the process-exit path both free them — crash/SIGKILL still frees via
   // the OS closing the ssh channel (the remote read hits EOF).
   const acquiredLeases: LeaseHandle[] = [];
+  // Checkout run-lock (PID file under `.ci/`). Claimed inside orchestrate
+  // immediately after ensureCheckoutFree and held for the whole run — including
+  // the unbounded venue-lease wait before serveSocket. `finally` + process-exit
+  // both release so a second starter never co-queues during lease wait.
+  const runLock: { handle: RunLockHandle | null } = { handle: null };
   // runCommand-owned holder for the seq this run reserved, so the `finally` can
   // reclaim an orphaned reservation sentinel on an early-throw — the same
   // early-throw-cleanup convention as `createdLanes` / `cleanupSnapshot`
@@ -260,12 +306,15 @@ export async function runCommand(args: RunArgs): Promise<number> {
       createdLanes,
       acquiredLeases,
       reservation,
+      runLock,
     );
   } finally {
     cleanupSnapshot();
     for (const lane of createdLanes) lane.close();
     for (const lease of acquiredLeases) lease.release();
     acquiredLeases.length = 0;
+    runLock.handle?.release();
+    runLock.handle = null;
     if (reservation.seq !== null) {
       releaseReservation(repoRoot, sha7, reservation.seq);
     }
@@ -300,6 +349,9 @@ async function orchestrate(
   /** runCommand-owned holder for the reserved seq, so its `finally` can reclaim
    *  an orphaned reservation sentinel on an early-throw. Set once reserved. */
   reservation: { seq: number | null },
+  /** runCommand-owned checkout run-lock; claimed right after ensureCheckoutFree
+   *  and released in runCommand's finally / process exit. */
+  runLock: { handle: RunLockHandle | null },
 ): Promise<number> {
   const { repoRoot, specSource, runnerFlake, sha, sha7 } = ctx;
   // Where stdout points picks the face: NDJSON for the /do contract, an
@@ -401,12 +453,31 @@ async function orchestrate(
   // holds the only remote flock, and a waiter that claimed first would block
   // forever without ever reaching supersede cancel (or fail later at
   // serveSocket after waiting the whole prior run). Same order as MCP startRun.
+  // The PID run-lock (claimed immediately below) covers the whole lease-wait
+  // window; serveSocket remains the attach surface, not the sole exclusivity
+  // gate.
   const socketPath = join(repoRoot, SOCKET_PATH);
-  const checkout = await ensureCheckoutFree(socketPath, args.supersede);
+  const lockPath = join(repoRoot, RUN_LOCK_PATH);
+  const checkout = await ensureCheckoutFree(socketPath, args.supersede, {
+    lockPath,
+  });
   if (!checkout.ok) {
     process.stderr.write(`${checkout.message}\n`);
     return 1;
   }
+
+  // Exclusive claim for this process — closes the TOCTOU between the free
+  // check and serveSocket (which can be minutes of venue wait). A second
+  // starter that lost the race refuses here rather than co-queuing.
+  const claimed = tryAcquireRunLock(lockPath);
+  if (claimed === null) {
+    process.stderr.write(
+      "odu: a run is already in progress in this checkout\n" +
+        "(pass --supersede to cancel it and start fresh)\n",
+    );
+    return 1;
+  }
+  runLock.handle = claimed;
 
   // ── run identity — the durable record's (repo, sha, seq) ──
   // Reserved *after* a possible --supersede cancel (above): a superseded run
@@ -434,9 +505,10 @@ async function orchestrate(
   // ── venue lease: one free machine per platform, lock held for the run ──
   // Held by this coordinator process (and by the MCP-spawned coordinator the
   // same way — never the MCP server itself). localhost short-circuits.
-  // After checkout free + seq reserve so supersede can't deadlock on a busy
-  // single-host pool and the holder file names the full run id (`sha7#seq`
-  // when reserved, else sha7) — matches `odu hosts` held-by lines.
+  // After checkout free + run-lock + seq reserve so supersede can't deadlock
+  // on a busy single-host pool, concurrent starters cannot co-queue during
+  // wait, and the holder file names the full run id (`sha7#seq` when reserved,
+  // else sha7) — matches `odu hosts` held-by lines.
   const activePlatforms = [...tasksByPlatform.keys()].sort();
   const runLabel = seq !== null ? `${sha7}#${seq}` : sha7;
   const { lanes: lanesByPlatform, leases } = await leaseLanes({
@@ -787,8 +859,8 @@ async function orchestrate(
   // Publish before serving so an `attach` connecting in the first instant reads
   // the real header, not the EMPTY_HEADER default.
   headerStore.set(header);
-  // Checkout was already confirmed free (ensureCheckoutFree); serveSocket is
-  // the hard one-run lock for races after that check.
+  // Checkout run-lock is already held (covers lease wait); serveSocket is the
+  // attach surface and a second exclusivity gate for the post-lease window.
   closeSocket = await serveSocket(router, socketPath);
 
   display.start(store.get(), header);
