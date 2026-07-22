@@ -23,7 +23,19 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
       name="description"
       content="odu is live, attachable CI for just recipe DAGs — one state for humans and coding agents."
     />
-    <meta name="theme-color" content="#0a0c0b" />
+    <meta name="theme-color" content="#080b0a" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#f4f7f5" media="(prefers-color-scheme: light)" />
+    <script is:inline>
+      (function () {
+        try {
+          var s = localStorage.getItem("odu-theme");
+          document.documentElement.dataset.theme =
+            s || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+        } catch (e) {
+          document.documentElement.dataset.theme = "dark";
+        }
+      })();
+    </script>
     <link rel="icon" type="image/svg+xml" href={`${base}/logo.svg`} />
     <link rel="canonical" href="https://juspay.github.io/odu/" />
     <meta property="og:title" content="odu — CI you can attach to" />

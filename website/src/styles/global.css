@@ -27,6 +27,48 @@
   color-scheme: dark;
 }
 
+/* Light theme — activated when data-theme="light" is set on <html>
+   (the inline head script resolves this from localStorage / OS preference). */
+:root[data-theme="light"] {
+  --ink: #10201a;
+  --muted: #48584f;
+  --quiet: #6a7a72;
+  --canvas: #f4f7f5;
+  --panel: #ffffff;
+  --panel-2: #eef2f0;
+  --line: #dde5e0;
+  --line-strong: #c3d0c9;
+  --green: #0ca678;
+  --green-soft: rgba(12, 166, 120, 0.13);
+  --cyan: #0e9ab0;
+  --violet: #7c5cff;
+  --pink: #dd4f95;
+  --amber: #b47500;
+  --red: #e5484d;
+  --accent-grad: linear-gradient(105deg, #0ca678, #0e9ab0 55%, #7c5cff);
+  color-scheme: light;
+}
+
+/* Terminal / code surfaces read as a dark console in BOTH themes, so they
+   pin the dark palette locally — their descendants resolve against it
+   regardless of the page theme. */
+.hero-term,
+.code-block,
+.justfile-code {
+  --ink: #eef3f0;
+  --muted: #9db0a8;
+  --quiet: #6c7c76;
+  --panel: #101513;
+  --panel-2: #161d1a;
+  --line: #26302c;
+  --line-strong: #37453f;
+  --green: #45e39a;
+  --green-soft: rgba(69, 227, 154, 0.14);
+  --cyan: #46d6e0;
+  --amber: #f5c451;
+  --red: #ff7d74;
+}
+
 * { box-sizing: border-box; }
 html { scroll-behavior: smooth; background: var(--canvas); }
 body {
@@ -51,6 +93,12 @@ body::before {
     radial-gradient(34vmax 34vmax at 78% 88%, rgba(179, 153, 255, 0.14), transparent 62%);
   filter: blur(6px);
   animation: aurora 22s ease-in-out infinite alternate;
+}
+:root[data-theme="light"] body::before {
+  background:
+    radial-gradient(38vmax 38vmax at 12% -6%, rgba(12, 166, 120, .13), transparent 60%),
+    radial-gradient(32vmax 32vmax at 92% 4%, rgba(14, 154, 176, .12), transparent 60%),
+    radial-gradient(34vmax 34vmax at 78% 88%, rgba(124, 92, 255, .10), transparent 62%);
 }
 a { color: inherit; }
 button { font: inherit; }
@@ -127,6 +175,28 @@ button { font: inherit; }
   font-family: var(--mono);
   font-size: .8rem;
 }
+.theme-toggle {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--ink);
+  cursor: pointer;
+  transition: border-color .15s ease, background .15s ease, transform .15s ease;
+}
+.theme-toggle:hover {
+  border-color: var(--green);
+  background: var(--panel-2);
+  transform: translateY(-1px);
+}
+.theme-toggle svg { display: block; width: 16px; height: 16px; }
+/* Show the icon for the theme you'd switch TO: sun in dark, moon in light. */
+:root[data-theme="dark"] .theme-toggle .i-moon,
+:root[data-theme="light"] .theme-toggle .i-sun { display: none; }
 
 /* —— Shared type —— */
 .eyebrow {
@@ -208,6 +278,9 @@ button { font: inherit; }
   box-shadow: 0 6px 22px -8px rgba(69, 227, 154, .7);
 }
 .button-primary:hover {
+  /* reassert the gradient — .button:hover's background would otherwise win
+     on specificity and drop the button to the dark panel colour */
+  background: var(--accent-grad);
   filter: brightness(1.08);
   box-shadow: 0 10px 28px -8px rgba(70, 214, 224, .8);
 }
