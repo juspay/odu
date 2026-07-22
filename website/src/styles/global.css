@@ -469,26 +469,44 @@ button { font: inherit; }
 }
 .code-block {
   position: relative;
+  display: grid;
+  gap: .2rem;
   margin: 0;
   padding: .85rem .9rem;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: #0c0f0e;
   color: #b8c4be;
-  font: .72rem/1.7 var(--mono);
-  overflow-x: auto;
+  font: .72rem/1.45 var(--mono);
+  overflow-wrap: anywhere;
+}
+.code-block:has(.copy-btn) {
+  padding-right: 3.6rem;
 }
 .code-block .accent { color: var(--green); }
-.code-block .dim { color: var(--quiet); }
-.code-block .line { display: block; white-space: pre; }
+.code-block .dim,
+.code-block .line.dim { color: var(--quiet); }
+.code-block .line {
+  display: block;
+  min-width: 0;
+}
+.code-block .line.indent { padding-left: 1.1rem; color: var(--muted); }
+.code-block .line.gap { margin-top: .55rem; }
 .code-block .copy-btn {
   position: absolute;
-  top: .4rem;
-  right: .4rem;
+  top: .55rem;
+  right: .55rem;
   border: 1px solid var(--line);
   border-radius: 4px;
   background: var(--panel);
+  color: var(--quiet);
   padding: .3rem .45rem;
+  cursor: pointer;
+  font: .58rem var(--mono);
+}
+.code-block .copy-btn:hover {
+  color: var(--ink);
+  background: var(--panel-2);
 }
 
 /* —— Compare —— */

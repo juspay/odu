@@ -288,17 +288,22 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
               <div class="step">
                 <span class="step-n">02</span>
                 <h3>Run a lane</h3>
-                <pre class="code-block">
+                <div class="code-block">
                   <button class="copy-btn" type="button" data-copy={runCmd}>copy</button>
-                  <span class="line"><span class="dim">$</span> nix run github:juspay/odu -- run \</span>
-                  <span class="line">    --host x86_64-linux=localhost</span>
-                  <span class="line"><span class="accent">✓</span> typecheck  <span class="accent">✓</span> unit  <span class="dim">⠹</span> e2e</span>
-                </pre>
+                  <span class="line"><span class="dim">$</span> nix run github:juspay/odu -- run</span>
+                  <span class="line indent">--host x86_64-linux=localhost</span>
+                  <span class="line gap"><span class="accent">✓</span> typecheck  <span class="accent">✓</span> unit  <span class="dim">⠹</span> e2e</span>
+                </div>
               </div>
               <div class="step">
                 <span class="step-n">03</span>
                 <h3>Attach or agent</h3>
-                <pre class="code-block"><span class="line"><span class="dim"># another terminal</span></span><span class="line"><span class="dim">$</span> odu attach</span><span class="line"> </span><span class="line"><span class="dim"># or let an agent drive</span></span><span class="line"><span class="dim">$</span> odu mcp</span></pre>
+                <div class="code-block">
+                  <span class="line dim"># another terminal</span>
+                  <span class="line"><span class="dim">$</span> odu attach</span>
+                  <span class="line gap dim"># or let an agent drive</span>
+                  <span class="line"><span class="dim">$</span> odu mcp</span>
+                </div>
               </div>
             </div>
             <div class="actions" style="margin-top:1.5rem">
