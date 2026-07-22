@@ -12,13 +12,14 @@
 //   task_kind   (optional)  "bug" | "feature" | "refactor" (default "feature")
 //   tracks      (optional)  CSV of gauntlet tracks (default all):
 //                           arch,lens,adversarial,simplify,police
+//                           (adversarial = real /codex-debate via Kolu, not a substitute)
 //   rationale   (optional)  deliberate design decisions reviewers must respect
-//   context     (optional)  task intent / key decisions for the adversarial author pass
+//   context     (optional)  task intent for the codex-debate author (not codex)
 //   base        (optional)  remote-tracking ref to diff against (default origin/HEAD)
 
 let meta = #{
     name: "grokbe",
-    description: "End-to-end /be-style delivery: interview → implement → draft PR → serial review gauntlet (arch → lowy⇄hickey → adversarial → simplify → code-police) → CI + evidence. Never merges.",
+    description: "End-to-end /be-style delivery: interview → implement → draft PR → serial review gauntlet (arch → lowy⇄hickey → codex-debate via Kolu → simplify → code-police) → CI + evidence. Never merges.",
     when_to_use: "When the user wants the Claude /be workflow under Grok: clarify once, then autonomously ship a reviewed PR.",
     phases: [
         #{ title: "Interview", detail: "confirm plan-first + task kind (or accept args defaults)" },
@@ -26,7 +27,7 @@ let meta = #{
         #{ title: "Plan", detail: "optional plan-first pause" },
         #{ title: "Implement", detail: "code + tests + docs; check/fmt; commit; push" },
         #{ title: "PR", detail: "open draft PR via forge-pr guidance" },
-        #{ title: "Gauntlet", detail: "serial: arch → lens debate → adversarial → simplify → police" },
+        #{ title: "Gauntlet", detail: "serial: arch → lens debate → codex-debate (Kolu) → simplify → police" },
         #{ title: "Ship", detail: "merge latest base; CI + evidence in parallel" },
         #{ title: "Done", detail: "report PR URL + gauntlet + CI; never merge" },
     ],
@@ -142,6 +143,22 @@ let stage_schema = #{
         "summary": #{ "type": "string" },
         "commit": #{ "type": "string" },
         "comment_body": #{ "type": "string" },
+    },
+};
+
+// codex-debate track (real /codex-debate via Kolu — not a Grok-critic substitute)
+let codex_schema = #{
+    "type": "object",
+    "required": ["ok", "status", "summary"],
+    "properties": #{
+        "ok": #{ "type": "boolean" },
+        "status": #{ "type": "string" },
+        "rounds": #{ "type": "integer" },
+        "effort": #{ "type": "string" },
+        "summary": #{ "type": "string" },
+        "comment_body": #{ "type": "string" },
+        "codex_start": #{ "type": "string" },
+        "head_sha": #{ "type": "string" },
     },
 };
 
@@ -629,105 +646,92 @@ if do_lens {
     gauntlet_notes.push("lens: skipped via tracks");
 }
 
-// ── Track: adversarial (codex-debate substitute) ─────────────────────────────
-// Claude /be uses codex ⇄ author. Grok has no codex session; run a deep
-// independent critic then an author-apply loop to consensus (max 3 rounds).
+// ── Track: adversarial = real /codex-debate via Kolu ─────────────────────────
+// Claude /be-review §codex: live codex split ⇄ author, to consensus, no cap.
+// Grok is the author; Codex is the independent reviewer. NOT a same-model
+// critic substitute. Engine = /codex-debate skill + /kolu drive protocol.
 
 if do_adversarial {
-    log("track: adversarial (codex substitute)");
-    let round = 1;
-    let max_adv_rounds = 3;
-    let adv_done = false;
-    let adv_start_note = "adversarial start";
+    log("track: adversarial (codex-debate via Kolu)");
 
-    while round <= max_adv_rounds && adv_done == false {
-        log("adversarial round " + round.to_string());
-
-        let critic_prompt = "";
-        critic_prompt += "You are the deep adversarial critic (grokbe substitute for /codex-debate reviewer, effort xhigh).\n";
-        critic_prompt += "Round " + round.to_string() + " of " + max_adv_rounds.to_string() + ".\n";
-        critic_prompt += "Scope: git diff " + merge_base + "...HEAD. Read the actual code — do not answer from memory.\n";
-        critic_prompt += "Task/context (inherit what the implementer knew): " + task + "\n";
-        critic_prompt += "Context: " + user_context + "\n";
-        critic_prompt += "Rationale (do not flag these deliberate decisions): " + rationale + "\n";
-        critic_prompt += "If the diff touches shared surface APIs, note companion-repo ship gates as deferred (not blocking code findings).\n\n";
-        critic_prompt += "Hunt for: correctness bugs, race/ordering lies, silent error swallowing, unjustified fallbacks,\n";
-        critic_prompt += "API breaks, test gaps for the claimed behavior, security footguns, resource leaks.\n";
-        critic_prompt += "Precision over coverage — better 3 real issues than 20 maybes.\n";
-        critic_prompt += "Disposition fix or drop only. Prefix ids with C" + round.to_string() + "- (e.g. C1-1).\n";
-        critic_prompt += "If the tree is clean, return findings=[] and summary explaining what you checked.\n";
-        critic_prompt += "Do NOT edit.\n";
-
-        let critic_r = agent(critic_prompt, #{
-            label: "adv:critic-r" + round.to_string(),
-            capability_mode: "read-only",
-            agent_type: "explore",
-            output_schema: findings_schema,
-        });
-
-        let critic_json = "{\"findings\":[],\"summary\":\"critic failed\"}";
-        let n_findings = 0;
-        if critic_r != () && critic_r.success && critic_r.output != () {
-            critic_json = json_encode(critic_r.output);
-            if critic_r.output.findings != () {
-                n_findings = critic_r.output.findings.len();
-            }
-            gauntlet_notes.push("adv r" + round.to_string() + " critic: " + critic_r.output.summary);
-        } else {
-            gauntlet_notes.push("adv r" + round.to_string() + " critic failed — stopping adversarial");
-            adv_done = true;
-        }
-
-        if adv_done == false {
-            if n_findings == 0 {
-                adv_done = true;
-                adversarial_comment = "## Adversarial review (grokbe)\n\n✅ Clean after " + round.to_string() + " round(s). " + adv_start_note;
-            } else {
-                let author_prompt = "";
-                author_prompt += "You are the author in grokbe's adversarial debate (codex-debate author role).\n";
-                author_prompt += "EXECUTE NOW. Round " + round.to_string() + ".\n";
-                author_prompt += "Merge-base: " + merge_base + "  Branch: " + branch + "\n";
-                author_prompt += "You wrote (or own) this change. Critic findings JSON:\n" + critic_json + "\n\n";
-                author_prompt += "For each finding:\n";
-                author_prompt += "• If valid: fix it, commit fix(adv-r" + round.to_string() + "): <title> staging only its files.\n";
-                author_prompt += "• If invalid: dispute with concrete code evidence in the summary — do NOT apply a bad fix.\n";
-                author_prompt += "Never push. Never merge.\n";
-                author_prompt += "Return ok, status (fixed|disputed|mixed), applied commits, summary listing per-finding disposition,\n";
-                author_prompt += "comment_body as a compact round table for the PR (Round | Commit | Description).\n";
-
-                let author_r = agent(author_prompt, #{
-                    label: "adv:author-r" + round.to_string(),
-                    capability_mode: "all",
-                    output_schema: apply_schema,
-                });
-
-                if author_r != () && author_r.success && author_r.output != () {
-                    gauntlet_notes.push("adv r" + round.to_string() + " author: " + author_r.output.summary);
-                    if author_r.output.comment_body != () && author_r.output.comment_body != "" {
-                        if adversarial_comment == "" {
-                            adversarial_comment = "## Adversarial review (grokbe)\n\n" + author_r.output.comment_body;
-                        } else {
-                            adversarial_comment = adversarial_comment + "\n\n" + author_r.output.comment_body;
-                        }
-                    }
-                    // Continue to next round so critic re-reads the fixed tree.
-                    if author_r.output.applied != () && author_r.output.applied.len() == 0 {
-                        // No fixes applied (all disputed) — stop rather than loop forever.
-                        adv_done = true;
-                    }
-                } else {
-                    gauntlet_notes.push("adv r" + round.to_string() + " author failed");
-                    adv_done = true;
-                }
-            }
-        }
-        round += 1;
+    let codex_prompt = "";
+    codex_prompt += "You are the codex-debate track of grokbe's gauntlet (Claude /be-review step 2).\n";
+    codex_prompt += "EXECUTE NOW. Run the REAL `/codex-debate` review protocol — not a Grok-critic substitute.\n\n";
+    codex_prompt += "Branch: " + branch + "\n";
+    codex_prompt += "Merge-base (base for the debate): " + merge_base + "\n";
+    codex_prompt += "PR: #" + pr_number.to_string() + " (" + pr_url + ")\n";
+    codex_prompt += "Task/context (author-only, for YOUR fix/dispute reasoning): " + task + "\n";
+    if user_context != "" {
+        codex_prompt += "Extra context (author-only): " + user_context + "\n";
     }
-    if adv_done == false {
-        gauntlet_notes.push("adversarial: hit max rounds without clean critic pass");
+    if rationale != "" {
+        codex_prompt += "Rationale (thread into codex round-1 + your own reasoning — do not 'fix' deliberate decisions): " + rationale + "\n";
+    }
+    codex_prompt += "\n## Required reading (do this first)\n";
+    codex_prompt += "1. Read `.claude/skills/codex-debate/SKILL.md` end-to-end — that is the contract.\n";
+    codex_prompt += "2. Read `.claude/skills/kolu/SKILL.md` (and TUI.md if MCP is unavailable) — terminal drive protocol.\n";
+    codex_prompt += "3. You are the AUTHOR. Codex is the independent REVIEWER. Independence is the point.\n\n";
+    codex_prompt += "## Hard constraints (acceptance for this track)\n";
+    codex_prompt += "- Spawn a **live `codex` session via Kolu** as a **split terminal parented to your own terminal**\n";
+    codex_prompt += "  (MCP `lifecycle_create` with `parentId`, or `padi-tui create --parent` fallback).\n";
+    codex_prompt += "  Launch: `codex --yolo` at effort **xhigh**, cwd = this repo. Confirm footer shows YOLO before dispatch.\n";
+    codex_prompt += "- **FORBIDDEN:** Grok explore/critic subagents, same-model adversarial loops, artificial round caps,\n";
+    codex_prompt += "  deadlock exits, or any substitute for a live Codex reviewer.\n";
+    codex_prompt += "- Loop matches `/codex-debate` **review** mode:\n";
+    codex_prompt += "  • verdict files under `$REPO/.codex-debate/verdict-NNN.json` (schema in the skill)\n";
+    codex_prompt += "  • consensus only when `approved: true` (every finding resolved, every severity)\n";
+    codex_prompt += "  • **no round cap, no deadlock exit** (resolved-and-deferred gates only for genuine ship-phase items)\n";
+    codex_prompt += "  • per-round commits of agreed fixes (path-only staging; never `git add -A`)\n";
+    codex_prompt += "  • talk via files + short pointer (multi-line paste rule); re-ask on missing/malformed verdict — never guess\n";
+    codex_prompt += "  • record BOTH sides' terminal id **and title** (kaval re-key safety)\n";
+    codex_prompt += "- Run with the equivalent of:\n";
+    codex_prompt += "  `review --base " + merge_base + " --effort xhigh --no-comment`\n";
+    codex_prompt += "  (`--no-comment`: gauntlet posts the compact PR comment AFTER the final push, not now)\n";
+    codex_prompt += "- Never push. Never merge. Tear down **only** the codex split you spawned (by id/title, never pattern-kill).\n\n";
+    codex_prompt += "## Steps (mirror /be-review codex step)\n";
+    codex_prompt += "1. Preflight: `codex login status` (if not logged in → status=reviewer-error, ok=false, stop).\n";
+    codex_prompt += "   Clean tree for commit mode; prepare gitignored `.codex-debate/` (wipe prior verdict-*/section-*/ask-*).\n";
+    codex_prompt += "2. Capture `CODEX_START=$(git rev-parse HEAD)` before the debate.\n";
+    codex_prompt += "3. Spawn + drive the debate to consensus per the skill (you fix/dispute; codex reviews).\n";
+    codex_prompt += "4. On **consensus**, assemble the **compact** PR comment body (do NOT post it yet):\n";
+    codex_prompt += "   - Header: `## Codex ⇄ Grok debate` then\n";
+    codex_prompt += "     `✅ Consensus in N rounds · reviewer effort: xhigh · base: " + merge_base + "`\n";
+    codex_prompt += "   - Table of debate commits only (`git log --reverse --oneline $CODEX_START..HEAD`):\n";
+    codex_prompt += "     `| Round | Commit | Description |` with **bare** short SHAs (no backticks — GitHub autolink)\n";
+    codex_prompt += "   - **Legend** — one line per finding id from verdict files (skill's jq recipe)\n";
+    codex_prompt += "   Put that markdown in `comment_body`.\n";
+    codex_prompt += "5. On **reviewer-error** / merge-base failure: no false-consensus comment; ok=false; empty comment_body.\n";
+    codex_prompt += "6. Return structured output.\n\n";
+    codex_prompt += "Return: ok (true only on consensus), status (consensus|reviewer-error|merge-base-error),\n";
+    codex_prompt += "rounds (integer), effort=xhigh, summary, comment_body, codex_start, head_sha.\n";
+
+    let codex_r = agent(codex_prompt, #{
+        label: "adv:codex-debate",
+        capability_mode: "all",
+        output_schema: codex_schema,
+    });
+
+    if codex_r != () && codex_r.success && codex_r.output != () {
+        let cstatus = codex_r.output.status;
+        if cstatus == () {
+            cstatus = "unknown";
+        }
+        let csum = codex_r.output.summary;
+        if csum == () {
+            csum = "";
+        }
+        gauntlet_notes.push("codex-debate: " + cstatus + " — " + csum);
+        if codex_r.output.comment_body != () && codex_r.output.comment_body != "" {
+            adversarial_comment = codex_r.output.comment_body;
+        }
+        if codex_r.output.ok != true {
+            gauntlet_notes.push("codex-debate: did not reach consensus (continuing gauntlet)");
+        }
+    } else {
+        gauntlet_notes.push("codex-debate: agent failed — continuing gauntlet");
     }
 } else {
-    gauntlet_notes.push("adversarial: skipped via tracks");
+    gauntlet_notes.push("adversarial/codex-debate: skipped via tracks");
 }
 
 // ── Track: simplify ──────────────────────────────────────────────────────────
@@ -809,7 +813,7 @@ push_prompt += "   Only after a successful push (or if nothing to push and PR ex
 push_prompt += "3. Post PR comments with gh pr comment " + pr_number.to_string() + " -F <file> for each non-empty body below.\n";
 push_prompt += "   Write each body to a temp file first. Skip empty bodies.\n\n";
 push_prompt += "--- LENS COMMENT ---\n" + lens_comment + "\n--- END LENS ---\n\n";
-push_prompt += "--- ADVERSARIAL COMMENT ---\n" + adversarial_comment + "\n--- END ADVERSARIAL ---\n\n";
+push_prompt += "--- CODEX-DEBATE COMMENT ---\n" + adversarial_comment + "\n--- END CODEX-DEBATE ---\n\n";
 push_prompt += "--- POLICE COMMENT ---\n" + police_comment + "\n--- END POLICE ---\n\n";
 push_prompt += "If a required push fails, do NOT post comments (SHAs would be local-only). Report failure.\n";
 push_prompt += "NEVER merge the PR.\n";
@@ -929,7 +933,7 @@ report += "- CI: " + ci_summary + " (green=" + bool_str(ci_ok) + ")\n";
 report += "- Evidence: " + evidence_summary + " (posted=" + bool_str(evidence_posted) + ")\n\n";
 report += "## Notes\n";
 report += "- Never merged — human reviews commits and merges when satisfied.\n";
-report += "- Adversarial track substitutes for Claude's codex⇄author debate (no codex session in Grok).\n";
+report += "- Adversarial track runs real /codex-debate via Kolu (live codex --yolo, effort xhigh) — no substitute critic.\n";
 report += "- Lens track runs lowy ∥ hickey independently, then one reconcile+apply editor.\n";
 
 let report_path = write_scratch_file("grokbe-report.md", report);
