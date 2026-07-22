@@ -712,8 +712,37 @@ export interface LeasedLanes {
  * order is only for deterministic scan within a pass — never hold platform A
  * while blocked on B.
  */
+/**
+ * Venue lock is one file per machine (`/tmp/odu.lease`), not per platform.
+ * If two platforms in the same run list the same remote host, all-or-nothing
+ * acquire holds it for platform A then sees it busy for B (self), releases,
+ * and retries forever. Fail loud at lease time instead.
+ */
+function assertNoSharedRemoteHosts(
+  pools: Record<string, HostPool>,
+  platforms: readonly string[],
+): void {
+  const owner = new Map<string, string>();
+  for (const platform of platforms) {
+    for (const host of pools[platform] ?? []) {
+      if (isLocalHost(host)) continue;
+      const key = host.trim().toLowerCase();
+      const prev = owner.get(key);
+      if (prev !== undefined && prev !== platform) {
+        throw new Error(
+          `odu: host ${shortHost(host)} is listed for both ${prev} and ${platform} — ` +
+            "venue lock is per-machine, so a multi-platform run cannot claim " +
+            "the same builder twice (split the pools or run one platform at a time)",
+        );
+      }
+      owner.set(key, platform);
+    }
+  }
+}
+
 export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
   const platforms = [...opts.platforms].sort();
+  assertNoSharedRemoteHosts(opts.pools, platforms);
   const claim = opts.claim ?? ((h, id) => tryClaim(h, id));
   const sleep = opts.sleep ?? defaultSleep;
   const now = opts.now ?? Date.now;

@@ -222,6 +222,44 @@ describe("acquireFromPool", () => {
     // Final returned set still holds a live lease for mac (re-claimed on retry).
     expect(r.leases.length).toBe(2);
   });
+
+  it("rejects when two platforms list the same remote host (self-livelock)", async () => {
+    const claim = vi.fn(async (host: string): Promise<ClaimResult> => held(host));
+    await expect(
+      leaseLanes({
+        pools: {
+          "x86_64-linux": ["shared-builder"],
+          "aarch64-linux": ["shared-builder"],
+        },
+        platforms: ["x86_64-linux", "aarch64-linux"],
+        identity: id,
+        noWait: false,
+        claim,
+      }),
+    ).rejects.toThrow(/shared-builder.*both.*x86_64-linux.*aarch64-linux|both.*aarch64-linux.*x86_64-linux/);
+    // Must fail before any claim attempt — never enter the wait loop.
+    expect(claim).not.toHaveBeenCalled();
+  });
+
+  it("allows the same localhost string across platforms (lease-exempt)", async () => {
+    const claim = vi.fn();
+    const r = await leaseLanes({
+      pools: {
+        "x86_64-linux": ["localhost"],
+        "aarch64-darwin": ["localhost"],
+      },
+      platforms: ["x86_64-linux", "aarch64-darwin"],
+      identity: id,
+      noWait: true,
+      claim,
+    });
+    expect(r.lanes).toEqual({
+      "aarch64-darwin": "localhost",
+      "x86_64-linux": "localhost",
+    });
+    expect(r.leases).toEqual([]);
+    expect(claim).not.toHaveBeenCalled();
+  });
 });
 
 describe("tryClaim — hold loss surfaces locally", () => {
