@@ -79,7 +79,7 @@ const docs = "#docs";
       </div>
 
       <div class="shell signal-strip" aria-label="Key features">
-        <div class="signal"><strong>Local first</strong><span>Zero config on one machine</span></div>
+        <div class="signal"><strong>Explicit hosts</strong><span>Localhost or ssh, never guessed</span></div>
         <div class="signal"><strong>Multi-platform</strong><span>Linux + macOS, one live surface</span></div>
         <div class="signal"><strong>Agent native</strong><span>Typed state and logs over MCP</span></div>
       </div>
@@ -220,10 +220,11 @@ const docs = "#docs";
             </div>
             <div class="step">
               <span class="step-number">02</span>
-              <h3>Run the DAG</h3>
+              <h3>Choose a lane</h3>
               <div class="code-block">
-                <button class="copy-button" data-copy="nix run github:juspay/odu -- run">copy</button>
+                <button class="copy-button" data-copy="nix run github:juspay/odu -- run --host x86_64-linux=localhost">copy</button>
                 <span class="code-line code-command"><span class="log-dim">$</span> nix run github:juspay/odu -- run</span>
+                <span class="code-line">&nbsp;&nbsp;--host x86_64-linux=localhost</span>
                 <span class="code-line"><span class="log-green">✓</span> build&nbsp;&nbsp;<span class="log-green">✓</span> lint&nbsp;&nbsp;<span class="log-amber">⠹</span> test</span>
               </div>
             </div>

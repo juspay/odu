@@ -23,13 +23,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import {
-  implementSurface,
-  inMemoryChannelByName,
-  inMemoryStore,
-} from "@kolu/surface/server";
-import { isLocalHost, resolveSystem } from "@kolu/surface-remote";
-import { implement } from "@orpc/server";
+import { implementSurface, inMemoryStore } from "@kolu/surface/server";
+import { isLocalHost } from "@kolu/surface-remote";
 import { bold, dim, green, link, magenta, red } from "../cli/ansi";
 import { formatGoDuration } from "../common/duration";
 import { gitTopLevel } from "../common/git";
@@ -47,11 +42,11 @@ import {
 } from "../common/surface";
 import { commitLabel, createDisplay, progressEvent } from "./display";
 import { laneTasks, loadJustPipeline, parseSelector } from "../just/ingest";
-import { loadHosts, localFallbackNote, resolveLanes } from "./hosts";
+import { fanoutLanes, loadHosts } from "./hosts";
 import { type Lane, startLane } from "./lane";
 import { missingRunnerError, resolveRunnerFlake } from "./runnerFlake";
 import { cancelRun } from "./cancel";
-import { allocateSeq, writeRunRecord } from "./ledger";
+import { releaseReservation, reserveNextSeq, writeRunRecord } from "./ledger";
 import { buildRunRecord, projectNodes } from "../common/runRecord";
 import { SOCKET_PATH, serveSocket } from "./socket";
 import {
@@ -157,6 +152,11 @@ export async function runCommand(args: RunArgs): Promise<number> {
   // no-op once a lane is closed/dead (its `session.destroy()` is idempotent), so
   // re-sweeping an already-closed lane here is harmless.
   const createdLanes = new Set<Lane>();
+  // runCommand-owned holder for the seq this run reserved, so the `finally` can
+  // reclaim an orphaned reservation sentinel on an early-throw — the same
+  // early-throw-cleanup convention as `createdLanes` / `cleanupSnapshot`
+  // (releaseReservation is a guarded no-op once the seq was finalized).
+  const reservation: { seq: number | null } = { seq: null };
   try {
     return await orchestrate(
       args,
@@ -171,10 +171,14 @@ export async function runCommand(args: RunArgs): Promise<number> {
         dirty,
       },
       createdLanes,
+      reservation,
     );
   } finally {
     cleanupSnapshot();
     for (const lane of createdLanes) lane.close();
+    if (reservation.seq !== null) {
+      releaseReservation(repoRoot, sha7, reservation.seq);
+    }
   }
 }
 
@@ -200,6 +204,9 @@ async function orchestrate(
    *  here at construction; the natural + shutdown paths still close each lane
    *  themselves. */
   createdLanes: Set<Lane>,
+  /** runCommand-owned holder for the reserved seq, so its `finally` can reclaim
+   *  an orphaned reservation sentinel on an early-throw. Set once reserved. */
+  reservation: { seq: number | null },
 ): Promise<number> {
   const { repoRoot, specSource, runnerFlake, sha, sha7 } = ctx;
   // Where stdout points picks the face: NDJSON for the /do contract, an
@@ -228,22 +235,18 @@ async function orchestrate(
   // ── DAG + lanes ──
   const spec = loadJustPipeline(specSource, { root: args.root });
   const hostsConfig = loadHosts();
-  // Zero configured lanes means a bare `odu run` with no hosts anywhere — the
-  // newcomer path. Running on this machine is the overwhelmingly common intent,
-  // so default to a localhost lane on the current system rather than erroring.
-  // (A localhost lane dials no one; it's the zero-config default, not a baked-in
-  // remote host.) An explicit `--platform` with no host still errors earlier in
-  // resolveLanes — the operator asking for a lane we can't build.
-  let lanesByPlatform = resolveLanes(
+  // Zero resolved lanes means a bare `odu run` with no hosts anywhere — no
+  // config file, no `--host` pin, no `--platform` slice. Defaulting that to a
+  // localhost lane silently turned a fanout into a local fork-bomb on a
+  // production workstation (juspay/odu#46), so `fanoutLanes` refuses it loudly
+  // instead — running locally stays available only as an explicit decision
+  // (a `"…": "localhost"` entry or `--host PLAT=localhost`). An explicit
+  // `--platform` with no host still errors earlier in resolveLanes.
+  const lanesByPlatform = fanoutLanes(
     hostsConfig,
     args.hostPins,
     args.platforms,
   );
-  if (Object.keys(lanesByPlatform).length === 0) {
-    const system = await resolveSystem("localhost");
-    info(localFallbackNote(system));
-    lanesByPlatform = { [system]: "localhost" };
-  }
   const selectors = args.selectors.map(parseSelector);
   for (const selector of selectors) {
     if (
@@ -445,8 +448,7 @@ async function orchestrate(
     });
   };
 
-  const fragment = implementSurface(oduSurface, {
-    channel: inMemoryChannelByName(),
+  const runtime = implementSurface(oduSurface, {
     cells: { nodes: { store }, header: { store: headerStore } },
     streams: {
       nodeLog: { source: tail.streamSource },
@@ -466,7 +468,9 @@ async function orchestrate(
       },
     },
   });
-  const router = implement(oduSurface.contract).router({ ...fragment.router });
+  // `implementSurface` now returns the FINAL top-level router (the framework
+  // owns its own in-memory channel and the oRPC finalize) — serve it directly.
+  const router = runtime.router;
 
   // ── observers: progress stream + commit statuses, diffed per transition ──
   const emitProgress = (id: string, node: NodeState): void => {
@@ -503,7 +507,7 @@ async function orchestrate(
     ) {
       return;
     }
-    fragment.ctx.cells.nodes.set({
+    runtime.ctx.cells.nodes.set({
       ...cur,
       nodes: { ...cur.nodes, [id]: next },
     });
@@ -578,34 +582,56 @@ async function orchestrate(
     }
   }
   // ── run identity — the durable record's (repo, sha, seq) ──
-  // Allocated *after* a possible --supersede cancel: a superseded run writes
-  // its own record before its socket closes (the teardown above), so by the
-  // time we get here that record is on disk and we take the next seq rather
-  // than colliding on it. `repo` is the GitHub owner/repo or null for a
-  // local-only checkout; `seq` distinguishes repeat runs of one commit.
+  // Reserved *after* a possible --supersede cancel: a superseded run writes its
+  // own record before its socket closes (the teardown above), so by the time we
+  // get here that record is on disk and the exclusive reservation advances past
+  // it. `repo` is the GitHub owner/repo or null for a local-only checkout.
   const repo = github !== null ? repoSlug(github) : null;
-  const seq = allocateSeq(repoRoot, sha7);
-  finalizeRunRecord = (state: PipelineState): void => {
-    try {
-      writeRunRecord(
-        repoRoot,
-        sha7,
-        buildRunRecord({
-          repo,
-          sha,
-          seq,
-          dirty: ctx.dirty,
-          startedAt: header.startedAt,
-          finishedAt: Date.now(),
-          lanes: header.lanes,
-          state,
-        }),
-      );
-    } catch {
-      // best-effort: the run history is a convenience, never a gate — a failed
-      // record write must not fail the run or mask its verdict.
-    }
-  };
+  // Atomically SELECT-and-RESERVE the seq durably BEFORE the socket serves, so
+  // the seq is on disk the instant it can become observable via the surface, and
+  // is claimed with an exclusive create so no two runs ever hold the same slot
+  // (see `reserveNextSeq`). A published `<sha7>#<seq>` is therefore globally
+  // unique: even a coordinator SIGKILLed after publishing but before
+  // `finalizeRunRecord` leaves its reservation on disk, so the next run of this
+  // commit advances past it (juspay/odu#49). `null` means the reservation write
+  // failed — the run proceeds WITHOUT a seq (no identity claim, no record)
+  // rather than gating on a history write, so `seq` stays absent on the surface.
+  const seq = reserveNextSeq(repoRoot, sha7);
+  // Hand the reserved seq to runCommand's early-throw cleanup: if this run
+  // throws before serving/finalizing, its `finally` reclaims the orphaned
+  // sentinel (releaseReservation leaves a finalized record untouched).
+  reservation.seq = seq;
+  // Stamp the reserved seq onto the fan-in state so every face — the agent
+  // `wait_for_settle` verdict especially — reads the run's full identity
+  // `<sha7>#<seq>`. Set once here, before the socket serves; `updateNode` spreads
+  // the whole state, so it survives every node update. `undefined` (no reserved
+  // seq) leaves the field absent, mapped to `null` on the agent surface.
+  runtime.ctx.cells.nodes.set({ ...store.get(), seq: seq ?? undefined });
+  if (seq !== null) {
+    finalizeRunRecord = (state: PipelineState): void => {
+      try {
+        writeRunRecord(
+          repoRoot,
+          sha7,
+          buildRunRecord({
+            repo,
+            sha,
+            seq,
+            dirty: ctx.dirty,
+            startedAt: header.startedAt,
+            finishedAt: Date.now(),
+            lanes: header.lanes,
+            state,
+          }),
+        );
+      } catch {
+        // best-effort: the run history is a convenience, never a gate — a failed
+        // record write must not fail the run or mask its verdict.
+      }
+    };
+  }
+  // No reserved seq → `finalizeRunRecord` stays the default no-op: a run that
+  // couldn't reserve an identity writes no record and claims no `<sha7>#<seq>`.
 
   // Publish before serving so an `attach` connecting in the first instant reads
   // the real header, not the EMPTY_HEADER default.
@@ -834,10 +860,11 @@ async function orchestrate(
   for (const lane of lanes.values()) lane.close();
   // Record this run *before* releasing the socket lock — every node is already
   // terminal (allSettled), so the state is final. A superseding/next run waits
-  // on the socket close to confirm we're gone and only then `allocateSeq()`s, so
+  // on the socket close to confirm we're gone and only then reserves its seq, so
   // writing the record first guarantees our `<seq>.json` is on disk before
-  // anyone can allocate the next seq, and two runs can't collide on one file.
-  // Mirrors the shutdown path's lock-before-record-release ordering.
+  // anyone reserves the next seq (and the exclusive reservation would skip our
+  // slot regardless). Mirrors the shutdown path's lock-before-record-release
+  // ordering.
   const finalState = store.get();
   writeTimingSidecar(finalState);
   finalizeRunRecord(finalState);

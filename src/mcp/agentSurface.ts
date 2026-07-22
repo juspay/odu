@@ -48,7 +48,6 @@
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 import { deriveStream, projectSurface } from "@kolu/surface/project";
-import { inMemoryChannelByName } from "@kolu/surface/server";
 import { z } from "zod";
 import { rowsOf } from "../cli/render";
 import { splitFanId } from "../common/nodeId";
@@ -109,6 +108,12 @@ const NodeRowSchema = z.object({
 const AgentNodesSchema = z.object({
   run: z.boolean(),
   pipeline: z.string().nullable(),
+  /** The live run's identity, projected from `PipelineState` so an agent
+   *  verdict says WHICH run it describes (juspay/odu#49): `sha7` the 7-char
+   *  commit, `seq` its ordinal among runs of that commit (`<sha7>#<seq>`).
+   *  Both are the no-run value (`""` / `null`) when `run` is false. */
+  sha7: z.string(),
+  seq: z.number().nullable(),
   nodes: z.array(NodeRowSchema),
 });
 export type AgentNodes = z.infer<typeof AgentNodesSchema>;
@@ -133,7 +138,17 @@ export interface AgentNodesReader {
   };
 }
 
-const EMPTY_NODES: AgentNodes = { run: false, pipeline: null, nodes: [] };
+/** The no-run frame: `run: false`, no pipeline, and the no-run identity
+ *  (`sha7: ""`, `seq: null`). Exported so a consumer reading a run's identity
+ *  from a missing/absent frame spells the no-run value once, here, rather than
+ *  re-authoring the sentinel. */
+export const EMPTY_NODES: AgentNodes = {
+  run: false,
+  pipeline: null,
+  sha7: "",
+  seq: null,
+  nodes: [],
+};
 
 /**
  * The node-id identity axis as a *collection key*: `TaskIdSchema` minus the
@@ -492,7 +507,6 @@ function agentDeps(
   const logs = makeLogsStore(a, resolveRunContext);
   onStore(logs);
   return {
-    channel: inMemoryChannelByName(),
     streams: {
       // Map A's `nodes` cell (snapshot-then-deltas) onto B's `nodes` stream.
       // `deriveStream` preserves snapshot-then-deltas, so B's first frame is
@@ -508,7 +522,13 @@ function agentDeps(
           // run always has at least one node.
           state.order.length === 0
             ? EMPTY_NODES
-            : { run: true, pipeline: state.name, nodes: rowsOf(state) },
+            : {
+                run: true,
+                pipeline: state.name,
+                sha7: state.sha7,
+                seq: state.seq ?? null,
+                nodes: rowsOf(state),
+              },
       ),
     },
     collections: {

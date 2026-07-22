@@ -2,13 +2,17 @@
  * Platform → host resolution. Keys are Nix system tuples; values are
  * anything ssh can dial (or `localhost`, which short-circuits the nix-copy
  * transport). Missing platforms silently drop from the fanout — the operator
- * opts in per platform, exactly the justci hosts.json semantics.
+ * opts in per platform, exactly the justci hosts.json semantics. But a config
+ * that names *no* platform at all is not "run everything here": that is the
+ * juspay/odu#46 fork-bomb, so `fanoutLanes` refuses it loudly rather than
+ * synthesizing a localhost lane (running locally stays available only as an
+ * explicit `--host PLAT=localhost` or `"PLAT": "localhost"` decision).
  *
- * Lookup order:
- *   1. `$ODU_HOSTS` — explicit file path;
- *   2. `~/.config/odu/hosts.json`.
- * `--host PLAT=ADDR` upserts on top (and adds the platform when absent —
- * that is how `ci/pu/run.sh` pins the leased pool box).
+ * Lookup order (`$ODU_HOSTS → ~/.config/odu/hosts.json →
+ * ~/.config/justci/hosts.json`): the first file that exists wins. The justci
+ * path is the compat fallback for machines still carrying a justci hosts file.
+ * `--host PLAT=ADDR` upserts on top (and adds the platform when absent — that
+ * is how `ci/pu/run.sh` pins the leased pool box).
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -17,17 +21,43 @@ import { join } from "node:path";
 
 export interface HostsConfig {
   hosts: Record<string, string>;
-  /** Which file won — named in run output so the operator can tell. */
-  source: string;
+  /** Which file won — named in run output so the operator can tell; `null`
+   *  when no candidate file existed (typed absence, not a sentinel string, so
+   *  consumers branch on it instead of matching display text). */
+  source: string | null;
+}
+
+/** A resolution-chain slot: the label the operator sees and the path we probe
+ *  (null for `$ODU_HOSTS` when it is unset — the slot still shows in the
+ *  refusal so the chain reads in full). One source of truth for both the
+ *  lookup in `loadHosts` and the named chain in the no-config refusal. */
+interface HostsCandidate {
+  label: string;
+  path: string | null;
+}
+
+function hostsCandidates(): HostsCandidate[] {
+  const oduHosts = process.env.ODU_HOSTS;
+  return [
+    {
+      label: "$ODU_HOSTS",
+      path: oduHosts !== undefined && oduHosts !== "" ? oduHosts : null,
+    },
+    {
+      label: "~/.config/odu/hosts.json",
+      path: join(homedir(), ".config", "odu", "hosts.json"),
+    },
+    {
+      label: "~/.config/justci/hosts.json",
+      path: join(homedir(), ".config", "justci", "hosts.json"),
+    },
+  ];
 }
 
 export function loadHosts(): HostsConfig {
-  const candidates = [
-    ...(process.env.ODU_HOSTS !== undefined && process.env.ODU_HOSTS !== ""
-      ? [process.env.ODU_HOSTS]
-      : []),
-    join(homedir(), ".config", "odu", "hosts.json"),
-  ];
+  const candidates = hostsCandidates()
+    .map((c) => c.path)
+    .filter((p): p is string => p !== null);
   for (const path of candidates) {
     if (!existsSync(path)) continue;
     const parsed: unknown = JSON.parse(readFileSync(path, "utf-8"));
@@ -49,20 +79,44 @@ export function loadHosts(): HostsConfig {
     }
     return { hosts, source: path };
   }
-  return { hosts: {}, source: "(no hosts file)" };
+  return { hosts: {}, source: null };
 }
 
-/** The note `odu run` shows when no hosts are configured and it falls back to a
- *  local lane on `system`. Tells the newcomer what just happened and how to
- *  graduate to a multi-machine fanout when they want one. The caller owns the
- *  trailing newline (it rides `run`'s `info` seam, which terminates the line),
- *  so the text every literal here describes — the config path, the `--host`
- *  syntax — stays beside `loadHosts`/`resolveLanes`, the module that owns it. */
-export function localFallbackNote(system: string): string {
-  return (
-    `odu: no hosts configured — running locally on ${system}.\n` +
-    `     To fan out across machines, write ~/.config/odu/hosts.json ` +
-    `(platform → host) or pass --host PLAT=ADDR.`
+/** The loud refusal `fanoutLanes` raises when a run resolves to *zero* lanes —
+ *  no hosts file anywhere, no `--host` pin, no `--platform` slice. A missing
+ *  config is indistinguishable in outcome from an explicit `"…": "localhost"`,
+ *  but only one is a decision someone made (juspay/odu#46): defaulting the
+ *  no-config case to a localhost lane fork-bombed a production workstation, so
+ *  we name the full resolution chain we checked and how to opt into localhost
+ *  on purpose, and refuse. The message text — the chain, the `--host` syntax —
+ *  lives beside `loadHosts`, the module that owns the chain. Takes the loaded
+ *  `config` (not a fresh filesystem probe) so the diagnosis matches what
+ *  resolution actually did — e.g. names the file that won but configured
+ *  nothing, rather than mislabeling a shadowed lower-precedence file.
+ *  Module-private: `fanoutLanes` is the seam callers reach it through. */
+function noHostsConfiguredError(config: HostsConfig): Error {
+  const chain = hostsCandidates()
+    .map((c) => `       ${c.label}`)
+    .join("\n");
+  // `loadHosts` sets `source` to the file it read, or null when none existed —
+  // so we can say precisely why the fanout came up empty.
+  const why =
+    config.source === null
+      ? "None of these exist."
+      : `The file that won (${config.source}) configured no platform.`;
+  return new Error(
+    "odu: no hosts configured for any platform — refusing to run.\n" +
+      "     A missing hosts config is not \"run everything here\": that silently\n" +
+      "     turns a fanout into a local fork-bomb (juspay/odu#46). odu resolves\n" +
+      "     hosts from the first of these that exists, in order:\n" +
+      `${chain}\n` +
+      `     ${why}\n` +
+      "     Configure at least one platform (a JSON object of Nix-system -> host,\n" +
+      "     where a host is an ssh target or \"localhost\" to run here on purpose),\n" +
+      "     or pass --host PLATFORM=ADDR for this run. To run locally, name YOUR\n" +
+      "     platform's lane localhost — e.g. --host aarch64-darwin=localhost on a\n" +
+      "     Mac, --host x86_64-linux=localhost on Linux (a localhost lane runs the\n" +
+      "     matching-platform runner, so the tuple must be this machine's).",
   );
 }
 
@@ -92,4 +146,21 @@ export function resolveLanes(
     sliced[platform] = host;
   }
   return sliced;
+}
+
+/** The fanout lanes for a run: `resolveLanes` plus the no-config fail-fast.
+ *  Zero resolved lanes means the run named no host anywhere — the juspay/odu#46
+ *  case — so we refuse loudly instead of defaulting to a localhost lane. This
+ *  is the single seam `run` decides the fanout through; keeping the refusal
+ *  here (not inline in `run`) keeps the decision pure and testable. */
+export function fanoutLanes(
+  config: HostsConfig,
+  hostPins: readonly string[],
+  platforms: readonly string[],
+): Record<string, string> {
+  const lanes = resolveLanes(config, hostPins, platforms);
+  if (Object.keys(lanes).length === 0) {
+    throw noHostsConfiguredError(config);
+  }
+  return lanes;
 }

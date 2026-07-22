@@ -17,6 +17,7 @@ import {
   type AgentClient,
   makeSession,
   type SessionState,
+  type SshProv,
   sshConnector,
 } from "@kolu/surface-remote";
 import type { TaskSpec } from "../common/spec";
@@ -66,8 +67,11 @@ export function startLane(opts: LaneOptions): Lane {
   let disconnects = 0;
   const aborts: AbortController[] = [];
 
-  const session = makeSession<AgentClient<typeof laneSurface.contract>>({
-    initialConnection: "copying",
+  const session = makeSession<AgentClient<typeof laneSurface.contract>, SshProv>({
+    // The ssh connector opens at its first provisioning phase: the arch/warm
+    // realise probe (`probing`), advancing to `copying`/`building` itself only
+    // on a cold host.
+    initialConnection: "probing",
     connectOnce: sshConnector<typeof laneSurface.contract>({
       host: opts.host,
       binary: "odu-runner",
@@ -97,26 +101,30 @@ export function startLane(opts: LaneOptions): Lane {
   deadline.unref?.();
 
   let seenProgress = 0;
-  session.onState((state: SessionState) => {
-    for (const line of state.progressLines.slice(seenProgress)) {
-      opts.onSetupLine(line);
+  session.onState((state: SessionState<SshProv>) => {
+    // The session's `log` is CURRENT-episode-scoped (reset on each down→up
+    // reconnect), so a shrink means a fresh episode began — rewind the cursor
+    // before slicing so a reconnect's early lines aren't skipped.
+    if (state.log.length < seenProgress) seenProgress = 0;
+    for (const entry of state.log.slice(seenProgress)) {
+      opts.onSetupLine(entry.line);
     }
-    seenProgress = state.progressLines.length;
+    seenProgress = state.log.length;
     if (closed || dead) return;
-    if (state.connection === "failed") {
-      die(state.lastError ?? "host session failed");
+    if (state.phase === "failed") {
+      die(state.error);
       return;
     }
-    if (state.connection === "disconnected") {
+    if (state.phase === "disconnected") {
       if (attached) {
         // One-shot: the runner died with the pipe; its state is gone.
-        die(state.lastError ?? "lane link dropped");
+        die(state.error);
         return;
       }
       disconnects += 1;
       if (disconnects >= MAX_CONNECT_ATTEMPTS) {
         die(
-          `could not reach ${opts.host} (${disconnects} attempts): ${state.lastError ?? "unknown"}`,
+          `could not reach ${opts.host} (${disconnects} attempts): ${state.error}`,
         );
       }
     }

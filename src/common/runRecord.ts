@@ -94,12 +94,20 @@ export const RunRecordSchema = z.object({
 });
 export type RunRecord = z.infer<typeof RunRecordSchema>;
 
+/** The atomic run-ref spelling over the identity pair both consumers hold: a
+ *  short sha and a seq (`null` when the run carried none, rendered `?`). The one
+ *  place `<sha7>#<seq>` is concatenated — `formatRunRef` and the wait-tool's
+ *  refusal messages route through it so the spelling can't fork per consumer. */
+export function formatRef(sha7: string, seq: number | null): string {
+  return `${sha7}#${seq ?? "?"}`;
+}
+
 /** The stable display ref for a run: `<sha7>#<seq>` (e.g. `26d2c2d#2`). One
  *  spelling for `odu runs`, a service face's run-page URL, and a future
  *  `target_url` — so the id a status links to and the id the ledger keys on
  *  are the same string, derived here rather than re-concatenated per consumer. */
 export function formatRunRef(record: Pick<RunRecord, "sha" | "seq">): string {
-  return `${shortSha(record.sha)}#${record.seq}`;
+  return formatRef(shortSha(record.sha), record.seq);
 }
 
 function isTerminal(status: NodeStatus): boolean {

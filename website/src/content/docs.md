@@ -7,9 +7,10 @@ odu runs a [`just`](https://just.systems) recipe DAG locally or across machines,
 Nothing to install. Run odu straight from its flake against the current repository:
 
 ```sh
-nix run github:juspay/odu -- run               # strict CI
-nix run github:juspay/odu -- run --no-strict   # dirty-tree development
+nix run github:juspay/odu -- run --host x86_64-linux=localhost
 ```
+
+odu never guesses where to run. Use `--host SYSTEM=localhost` to opt into this machine, or configure ssh lanes in a hosts file. Add `--no-strict` for dirty-tree development with GitHub writes disabled.
 
 Attach from another terminal while the run is live:
 
@@ -67,14 +68,27 @@ Exactly one [`just`](https://just.systems) recipe carries `[metadata("ci")]`. It
 default: build test lint
 ```
 
-### Run locally
+### Choose hosts explicitly
 
-With no hosts configured, odu detects the current Nix system and runs the whole pipeline on a local lane. This is the default and requires no setup:
+**A host is a decision.** odu resolves hosts from the first source that exists:
+
+```text
+$ODU_HOSTS → ~/.config/odu/hosts.json → ~/.config/justci/hosts.json
+```
+
+If none configures a platform, `odu run` refuses and prints both the resolution chain and the ways to opt in. It never silently runs the pipeline on your workstation.
+
+Run locally on purpose by naming the platform's lane `localhost` for one run or in a hosts file:
 
 ```sh
-odu run
-# no hosts configured — running locally on aarch64-darwin
+odu run --host x86_64-linux=localhost
 ```
+
+```json
+{ "x86_64-linux": "localhost" }
+```
+
+A localhost lane runs directly against your toolchain and skips the Nix closure copy.
 
 ### Fan out across machines
 
@@ -87,7 +101,7 @@ Define platform lanes in `~/.config/odu/hosts.json`, or point `$ODU_HOSTS` at an
 }
 ```
 
-Keys are Nix system tuples. Values are anything ssh can dial, or `localhost`. A bare `odu run` fans out to every configured platform. Use `--platform P` to select a subset or `--host P=ADDR` to pin or add a lane for one run.
+Keys are Nix system tuples. Values are anything ssh can dial, or `localhost`. A bare `odu run` fans out to every configured platform. Platforms absent from an existing hosts file are intentionally omitted: a partial configuration is still a decision. Use `--platform P` to select a subset or `--host P=ADDR` to pin or add a lane for one run.
 
 ### Scope recipes by OS
 
@@ -125,6 +139,8 @@ odu cancel                        cleanly stop the live run
 odu runs [-o json]                read durable run history
 odu dump | graph                  emit the resolved DAG as JSON or Mermaid
 odu protect [--dry-run]           sync required GitHub status contexts
+    --platform P (repeatable)     explicit repo platform set; no hosts needed
+    --branch B                    branch to protect (default: repo default)
 odu mcp                           serve the agent interface over stdio
 ```
 
@@ -144,13 +160,13 @@ The interface projects odu's [@kolu/surface](https://kolu.dev/surface/) through 
 | --- | --- |
 | `run` | Start a background coordinator. Supports `supersede` and `linger`. |
 | `node_rerun` | Reset one node and its transitive dependents. |
-| `wait_for_settle` | Return on settlement or immediately when a node goes red. |
+| `wait_for_settle` | Return on settlement or immediately when a node goes red. Carries `sha7` and the reserved `seq`, and fails loud with no live run or an `expected_sha` mismatch. |
 | `cancel` | Stop and fully tear down the live run. |
 | `runs` | Read durable run history after the coordinator exits. |
 
 Pipeline state and logs are subscribable resources rather than tools:
 
-- `surface://streams/nodes` — pipeline identity and every node's status, exit, duration, and red verdict.
+- `surface://streams/nodes` — `{ run, pipeline, sha7, seq, nodes[] }`: run identity and every node's status, exit, duration, and red verdict.
 - `surface://collections/logs/{id}` — buffered live output, or the durable log after exit.
 
 Both support `resources/subscribe` and `notifications/resources/updated`. `wait_for_settle` is the blocking fallback for hosts that do not wake a model on notifications.
@@ -162,6 +178,8 @@ run → wait_for_settle → read red node log → fix → node_rerun
 ```
 
 An early `wait_for_settle` response with `fail_fast_tripped: true` is not a final tally. Only `passed: true` on a fully settled run proves green.
+
+Every observed verdict identifies its run with `sha7` and, when the coordinator reserved one, `seq`—the durable `sha7#seq` identity. Pass `expected_sha` as a full SHA or `sha7` prefix to make identity a hard check. `seq` is null only when no ordinal could be reserved. With no live run, `wait_for_settle` raises the same “no run in progress” error as `odu status`; it never returns an ambiguous empty verdict.
 
 Configure the stdio server directly:
 

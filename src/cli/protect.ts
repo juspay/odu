@@ -8,7 +8,7 @@
 
 import { spawnSync } from "node:child_process";
 import { fanId } from "../common/nodeId";
-import { loadHosts, resolveLanes } from "../coordinator/hosts";
+import { loadHosts } from "../coordinator/hosts";
 import { parseGithubRemote } from "../coordinator/statuses";
 import { laneTasks, loadJustPipeline } from "../just/ingest";
 
@@ -18,23 +18,84 @@ export interface ProtectArgs {
   platforms: string[];
 }
 
+/** The platform set protection covers, as pure data — the decision writes no
+ *  output (its one effect is the hosts-config read on the unsliced path), and
+ *  protectCommand owns the stderr/exit at its boundary (mirrors hosts.ts's
+ *  pure-refusal factory). `explicit` names came straight from `--platform`;
+ *  `derived` came from the hosts config and carries its `source` so the caller
+ *  can warn that the set is machine-local, not a repo fact; `none` means
+ *  neither produced a platform, with `source` so the refusal can name an
+ *  empty-but-present file. */
+type PlatformSet =
+  | { kind: "explicit"; platforms: string[] }
+  | { kind: "derived"; platforms: string[]; source: string }
+  | { kind: "none"; source: string | null };
+
+/** Unlike `run`, protect never dials a host — it only needs platform KEYS to
+ *  fan out contexts — so explicit `--platform` flags stand on their own with no
+ *  hosts config at all (juspay/odu#52; routing them through `run`'s lane
+ *  resolver demanded a host per platform). With no flags the set derives from
+ *  the hosts config, which is machine-local while protection is repo-global —
+ *  that once silently halved a repo's required contexts, so the derivation
+ *  names its source. */
+function protectPlatforms(explicit: readonly string[]): PlatformSet {
+  if (explicit.length > 0) {
+    // A blank value (`--platform=`) would fan out contexts like `alpha@` and,
+    // un-dry-run, PATCH them into protection — the host lookup that used to
+    // reject it incidentally is gone, so refuse it on purpose. Beyond
+    // blankness the tuple is operator-trusted, the same trust hosts.json keys
+    // and `--host` pins get: odu owns no vocabulary of valid Nix systems (Nix
+    // does), so a local shape check would be a drifting partial guess — e.g.
+    // it could never catch an arch typo. `--dry-run` is the preview for
+    // catching a typo before it reaches protection.
+    if (explicit.some((platform) => platform.trim() === "")) {
+      throw new Error(
+        "odu: --platform expects a Nix system tuple (e.g. x86_64-linux), got an empty value",
+      );
+    }
+    return { kind: "explicit", platforms: [...new Set(explicit)].sort() };
+  }
+  const config = loadHosts();
+  const platforms = Object.keys(config.hosts).sort();
+  // A null source implies zero platforms, so `derived` always carries the real
+  // file that won.
+  if (config.source === null || platforms.length === 0) {
+    return { kind: "none", source: config.source };
+  }
+  return { kind: "derived", platforms, source: config.source };
+}
+
 export async function protectCommand(args: ProtectArgs): Promise<number> {
   const repoRoot = spawnSync("git", ["rev-parse", "--show-toplevel"], {
     encoding: "utf-8",
   }).stdout.trim();
   const spec = loadJustPipeline(repoRoot);
-  const lanes = resolveLanes(loadHosts(), [], args.platforms);
-  const platforms = Object.keys(lanes).sort();
-  if (platforms.length === 0) {
+  const set = protectPlatforms(args.platforms);
+  if (set.kind === "none") {
+    // Mirror noHostsConfiguredError's why-branch: `source` names the file that
+    // won, or is null when none existed, so an empty-but-present hosts file is
+    // diagnosed as such rather than told to "configure" one it already has.
+    const why =
+      set.source === null
+        ? "     to name the repo's CI platforms, or configure a hosts file\n"
+        : `     to name the repo's CI platforms — ${set.source} configured no platform\n`;
     process.stderr.write(
-      "odu: no platforms configured (hosts file is empty)\n",
+      "odu: protect found no platforms — pass --platform PLAT (repeatable)\n" +
+        why,
     );
     return 1;
+  }
+  if (set.kind === "derived") {
+    process.stderr.write(
+      `odu: protect: platform set (${set.platforms.join(", ")}) derives from\n` +
+        `     ${set.source} — a machine-local hosts config, not a repo\n` +
+        "     fact; pass --platform to pin the repo's platform set explicitly\n",
+    );
   }
   // Require exactly the contexts `odu run` posts: each platform's lane after
   // OS-attribute filtering (a [linux]-only recipe is never posted on a darwin
   // lane, so it must not be required there or protection waits forever).
-  const contexts = platforms.flatMap((platform) =>
+  const contexts = set.platforms.flatMap((platform) =>
     laneTasks(spec, platform, [], false).map((task) => fanId(task.id, platform)),
   );
 

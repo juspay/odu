@@ -1,5 +1,5 @@
 ---
-name: ci
+name: odu
 description: Reference for the `odu` runner — how to invoke a full pipeline, a single recipe, or a platform-pinned node, and how to attach to a live run, from a project whose CI odu runs. Trigger when the user asks to "run CI", "run the pipeline", "re-run a check", to run named lanes or recipes (e.g. "run fmt and nix", "just the e2e lane", bare selectors like `fmt`/`nix`/`e2e`), or names a recipe by `<recipe>@<platform>`. This skill — not a repo's local `just ci` / `just <recipe>` — is how an odu-run request is served.
 ---
 
@@ -45,6 +45,19 @@ process-compose, no separately-versioned socket client.
 > `wait_for_settle` again to catch any reds that surfaced meanwhile — or
 > `run({supersede})` when the fix is a new commit. Don't pad `timeout_ms` and
 > wait: the loop is fail-fast → fix → re-wait, not one long block.
+>
+> **A verdict names its run; no run fails loud.** A verdict about an observed
+> run carries that run's identity — `sha7` always, and `seq` (`sha7#seq`)
+> whenever the coordinator reserved an ordinal — so you match it to the run you
+> dispatched, not a previously-settled one; pass `expected_sha` (a full sha or a
+> `sha7` prefix) to make that a hard, loud check. *(`seq` is `null` only when
+> none was reserved — a wait that saw no frame, or the rare case the coordinator
+> couldn't reserve one; the run then claims `sha7` but no unique `sha7#seq`.)*
+> And `wait_for_settle` **never** returns an empty
+> nothing-verdict: called with no live run in the checkout it fails loud (an
+> error mirroring `odu status`'s "no run in progress"), not an instant
+> `settled: false`. So a loud error means *start or find a run* (or read history
+> with `runs`) — never hand-roll a process-liveness poll as a workaround.
 >
 > **Logs are a resource, not a tool.** Don't look for a log-tail tool — there
 > isn't one. A node's output is the MCP **resource** `surface://collections/logs/{id}`
@@ -133,6 +146,8 @@ nix run github:juspay/odu -- dump            # resolved pipeline as JSON
 nix run github:juspay/odu -- graph           # dependency graph (Mermaid)
 nix run github:juspay/odu -- protect --dry-run   # the (recipe × platform) contexts
 nix run github:juspay/odu -- protect             # PATCH branch protection to them
+# --platform P (repeatable) pins the repo's platform set with no hosts config;
+# omitted, the set derives from the machine's hosts file (warned on stderr).
 ```
 
 ## Live introspection (attach to a run in progress)
@@ -175,8 +190,12 @@ rerun later (retry a flake), self-reaping after an idle period or on `cancel`.
 ```
 
 Keys are Nix system tuples; values are anything ssh dials, or `localhost`
-(runs directly against the snapshot, no closure copy). Missing platforms
-silently drop from the fanout. `--host PLAT=ADDR` overrides per run.
+(runs directly against the snapshot, no closure copy). Platforms absent from
+an *existing* config silently drop from the fanout, but a run that resolves
+**zero** lanes — no file anywhere, no `--host`, no `--platform` — is
+**refused**, not defaulted to `localhost` (juspay/odu#46). `--host PLAT=ADDR`
+overrides per run; run on this machine on purpose with `--host PLAT=localhost`
+or a `"PLAT": "localhost"` entry.
 
 A lane host needs only **ssh + Nix + outbound https**: the runner ships as
 a Nix closure (`nix copy` → realise on the host), and the source arrives by

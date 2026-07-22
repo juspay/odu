@@ -19,12 +19,7 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import {
-  implementSurface,
-  inMemoryChannelByName,
-  inMemoryStore,
-} from "@kolu/surface/server";
-import { implement } from "@orpc/server";
+import { implementSurface, inMemoryStore } from "@kolu/surface/server";
 import { createLogTail } from "../common/logTail";
 import { validatePipeline } from "../common/spec";
 import {
@@ -42,9 +37,9 @@ import { prepareWorkspace } from "./workspace";
 export const SETUP_NODE_ID = "_ci-setup";
 
 export interface LaneRunner {
-  /** Top-level router, already wrapped via `implement(contract).router(...)`
-   *  — ready for `serveOverStdio({ router })`. */
-  // biome-ignore lint/suspicious/noExplicitAny: implementSurface's Lazy<Router> spread isn't accepted by oRPC's Router<any, T> input type; the runtime shape is valid (same as the mini-ci example runner).
+  /** Top-level router from `implementSurface` — the FINAL oRPC router (the
+   *  framework owns its channel + finalize), ready for `serveOverStdio({ router })`. */
+  // biome-ignore lint/suspicious/noExplicitAny: implementSurface types its router as `any` (its spec walk is dynamic); the runtime shape is a valid oRPC router.
   router: any;
   /** Kill running process groups and stop scheduling; cleans up this run's
    *  worktree when the pipeline settled green. */
@@ -55,8 +50,7 @@ export function createLaneRunner(): LaneRunner {
   const stateStore = inMemoryStore<PipelineState>(EMPTY_STATE);
   const tail = createLogTail();
 
-  const fragment = implementSurface(laneSurface, {
-    channel: inMemoryChannelByName(),
+  const runtime = implementSurface(laneSurface, {
     cells: {
       nodes: { store: stateStore },
     },
@@ -73,7 +67,7 @@ export function createLaneRunner(): LaneRunner {
     },
   });
 
-  const ctx = fragment.ctx;
+  const ctx = runtime.ctx;
   const children = new Map<string, ChildProcess>();
   /** Monotonic token per builtin-setup invocation — the async prep analogue
    *  of the child-identity guard on process nodes. */
@@ -336,7 +330,8 @@ export function createLaneRunner(): LaneRunner {
     return true;
   };
 
-  const router = implement(laneSurface.contract).router({ ...fragment.router });
+  // `implementSurface` returns the FINAL top-level router — serve it directly.
+  const router = runtime.router;
 
   return {
     router,

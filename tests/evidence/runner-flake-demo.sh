@@ -12,7 +12,10 @@ set -u
 ODU="$1"   # path to the odu binary (carries ODU_RUNNER_FLAKE baked in)
 WT="$2"    # the odu checkout (source of the fixture justfile)
 
-export ODU_HOSTS="$(mktemp -d)/hosts.json"; echo '{}' > "$ODU_HOSTS"  # localhost lane
+# Pin this machine's platform to an explicit localhost lane. A bare/empty hosts
+# config is refused (juspay/odu#46), so name the lane for the current system.
+export ODU_HOSTS="$(mktemp -d)/hosts.json"
+printf '{"%s":"localhost"}' "$(nix eval --impure --raw --expr builtins.currentSystem)" > "$ODU_HOSTS"
 D=$(mktemp -d /tmp/odu-rf-demo-XXXX)
 cp "$WT/tests/e2e/fixtures/pass/justfile" "$D/"
 printf '.ci/\n' > "$D/.gitignore"   # so odu's own run output never reads as dirty
