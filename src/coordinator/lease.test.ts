@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
 import {
   acquireFromPool,
+  buildLeaseSshArgs,
   formatHeldFor,
   formatHolder,
   leaseLanes,
@@ -11,6 +12,7 @@ import {
   type DialFn,
   type LeaseIdentity,
 } from "./lease";
+import { SSH_COMMON_OPTS } from "@kolu/surface-remote";
 
 const id: LeaseIdentity = { holder: "me@desk", run: "abc1234#1" };
 
@@ -293,6 +295,23 @@ describe("acquireFromPool", () => {
     });
     expect(r.leases).toEqual([]);
     expect(claim).not.toHaveBeenCalled();
+  });
+
+
+describe("buildLeaseSshArgs — option terminator", () => {
+  it("ends option parsing with `--` before host (ProxyCommand RCE guard)", () => {
+    const evil = "-oProxyCommand=touch /tmp/pwned";
+    const args = buildLeaseSshArgs(evil, "echo held");
+    expect(args.slice(0, SSH_COMMON_OPTS.length)).toEqual([...SSH_COMMON_OPTS]);
+    const sep = args.indexOf("--");
+    expect(sep).toBe(SSH_COMMON_OPTS.length);
+    expect(args[sep + 1]).toBe(evil);
+    expect(args[sep + 2]).toBe("echo held");
+  });
+
+  it("places a normal host after `--`", () => {
+    const args = buildLeaseSshArgs("nix@ci-1", "true");
+    expect(args).toEqual([...SSH_COMMON_OPTS, "--", "nix@ci-1", "true"]);
   });
 });
 

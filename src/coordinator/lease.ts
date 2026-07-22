@@ -214,6 +214,20 @@ export type DialFn = (
   mode: "claim" | "probe",
 ) => Promise<DialResult>;
 
+/**
+ * ssh argv for a lease dial. Exported so unit tests can assert the
+ * option-terminator footgun guard without spawning a real ssh.
+ *
+ * `--` ends ssh option parsing so `host` is always a destination. Without it a
+ * host like `-oProxyCommand=<cmd>` is parsed as an option and runs `<cmd>` via
+ * /bin/sh — the same RCE surface `buildAgentCommand` / `buildSshProbeCommand`
+ * already close in `@kolu/surface-remote`. Lease hosts come from hosts.json,
+ * `--host` pins, and MCP `run.hosts` — same trust boundary.
+ */
+export function buildLeaseSshArgs(host: string, script: string): string[] {
+  return [...SSH_COMMON_OPTS, "--", host, script];
+}
+
 /** Transport only: spawn ssh with the shared dead-peer policy. */
 function spawnSsh(host: string, script: string): ChildProcess {
   // Remote command is an ssh argv (not bash -s): stdin stays free for
@@ -221,7 +235,7 @@ function spawnSsh(host: string, script: string): ChildProcess {
   // Dead-peer / BatchMode policy is the shared surface-remote receptacle —
   // not hand-rolled here (and not tied to ODU_LEASE_HEARTBEAT: that tick is
   // only for flock stdin + remote TTL, not ssh ServerAlive).
-  return spawn("ssh", [...SSH_COMMON_OPTS, host, script], {
+  return spawn("ssh", buildLeaseSshArgs(host, script), {
     stdio: ["pipe", "pipe", "pipe"],
   });
 }
