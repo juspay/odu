@@ -3,11 +3,16 @@
 // Take a task to a shipped, reviewed PR: short interview → implement → draft PR →
 // serial AI review gauntlet → CI + evidence. Never merges.
 //
-// Run:  /grokbe
+// Run:  /grokbe <issue URL or free-text task>
 //       /workflow grokbe { "task": "…", "task_kind": "bug|feature|refactor", "plan_first": false }
 //
+// Slash free-text (`/grokbe fix the flaky e2e`) is bound by the host as
+// { query, objective } — NOT as { task }. We accept task | objective | query.
+// Structured JSON may still pass task/tracks/… explicitly.
+//
 // Args:
-//   task        (required)  issue URL or free-text prompt
+//   task        (required*) issue URL or free-text prompt
+//               *also accepted as objective / query (slash free-text shape)
 //   plan_first  (optional)  bool — write a plan and pause before implementing (default false)
 //   task_kind   (optional)  "bug" | "feature" | "refactor" (default "feature")
 //   tracks      (optional)  CSV of gauntlet tracks (default all):
@@ -179,16 +184,46 @@ let ship_schema = #{
 let a = if args == () {
     #{}
 } else if type_of(args) == "string" {
-    // Some hosts JSON-encode args before the script sees them.
-    // parse is not available for arbitrary JSON in Rhai host; treat bare string as task.
+    // Bare string (or JSON-encoded string some hosts pass) is the task itself.
     #{ task: args }
 } else {
     args
 };
 
-let task = if a.task != () { a.task } else { () };
+// Task resolution — three shapes the host actually sends:
+//   1. { "task": "…" }                     explicit / tool /workflow JSON
+//   2. { "query": "…", "objective": "…" }  slash free-text: /grokbe <words>
+//   3. "…"                                 bare string
+// Prefer task, then objective, then query. Empty string is missing.
+fn first_nonempty(x, y, z) {
+    if x != () && type_of(x) == "string" {
+        x.trim();
+        if x != "" {
+            return x;
+        }
+    }
+    if y != () && type_of(y) == "string" {
+        y.trim();
+        if y != "" {
+            return y;
+        }
+    }
+    if z != () && type_of(z) == "string" {
+        z.trim();
+        if z != "" {
+            return z;
+        }
+    }
+    ()
+}
+
+let task_raw = if a.task != () { a.task } else { () };
+let objective_raw = if a.objective != () { a.objective } else { () };
+let query_raw = if a.query != () { a.query } else { () };
+let task = first_nonempty(task_raw, objective_raw, query_raw);
+
 if task == () || task == "" {
-    pause("verification", "Pass args.task — an issue URL or free-text prompt describing the work. Optional: plan_first (bool), task_kind (bug|feature|refactor), tracks (CSV), rationale, context, base.");
+    pause("verification", "Pass a task: `/grokbe <issue URL or free-text>` or `/workflow grokbe {\"task\":\"…\"}`. Optional JSON fields: plan_first, task_kind, tracks, rationale, context, base.");
 }
 
 let plan_first = if a.plan_first != () { a.plan_first } else { false };
@@ -227,23 +262,12 @@ let do_simplify = track_on(tracks_csv, "simplify");
 let do_police = track_on(tracks_csv, "police");
 
 // ── Interview ────────────────────────────────────────────────────────────────
+// No gate. A resolved task is a committed launch: defaults apply
+// (plan_first=false, task_kind=feature, all tracks) unless the caller set them.
+// Missing task already pause()'d above. Re-run with explicit knobs to override.
 
 phase("Interview");
-log("grokbe interview — task_kind=" + task_kind + " plan_first=" + bool_str(plan_first) + " tracks=" + tracks_csv);
-
-// Only pause when the caller left both interview knobs unset *and* did not
-// pass an explicit skip. Re-invoke with plan_first/task_kind to skip this gate.
-let needs_interview = a.plan_first == () && a.task_kind == ();
-if needs_interview {
-    let interview_msg = "";
-    interview_msg += "Interview (resume to proceed with defaults below, or cancel and re-run with explicit args):\n";
-    interview_msg += "  • plan_first = false  (implement straight; set true to write a plan and pause)\n";
-    interview_msg += "  • task_kind  = feature  (bug | feature | refactor)\n";
-    interview_msg += "  • tracks     = " + tracks_csv + "\n";
-    interview_msg += "Task: " + task + "\n";
-    interview_msg += "After this gate the run is fully autonomous — no further confirmation.";
-    await_user("user", interview_msg);
-}
+log("grokbe start — task_kind=" + task_kind + " plan_first=" + bool_str(plan_first) + " tracks=" + tracks_csv + " task=" + task);
 
 // ── Setup ────────────────────────────────────────────────────────────────────
 
