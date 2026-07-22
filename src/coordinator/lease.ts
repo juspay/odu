@@ -185,7 +185,8 @@ export interface DialResult {
 /**
  * Low-level ssh dial. `mode: "claim"` keeps the connection open for the hold
  * (stdin is the heartbeat channel); `mode: "probe"` runs to completion.
- * Injected in unit tests so we never hit a real network.
+ * Injected in unit tests so we never hit a real network. Production default
+ * splits transport spawn from claim-protocol settle / hold lifecycle.
  */
 export type DialFn = (
   host: string,
@@ -193,57 +194,79 @@ export type DialFn = (
   mode: "claim" | "probe",
 ) => Promise<DialResult>;
 
-const defaultDial: DialFn = (host, script, mode) =>
-  new Promise((resolve) => {
-    // Remote command is an ssh argv (not bash -s): stdin is free for heartbeats
-    // in claim mode, matching kolu's lease.sh data-channel pattern.
-    // Dead-peer / BatchMode policy is the shared surface-remote receptacle —
-    // not hand-rolled here (and not tied to ODU_LEASE_HEARTBEAT: that tick is
-    // only for flock stdin + remote TTL, not ssh ServerAlive).
-    const child = spawn("ssh", [...SSH_COMMON_OPTS, host, script], {
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout?.setEncoding("utf-8");
-    child.stderr?.setEncoding("utf-8");
-    child.stdout?.on("data", (chunk: string) => {
-      stdout += chunk;
-    });
-    child.stderr?.on("data", (chunk: string) => {
-      stderr += chunk;
-    });
+/** Transport only: spawn ssh with the shared dead-peer policy. */
+function spawnSsh(host: string, script: string): ChildProcess {
+  // Remote command is an ssh argv (not bash -s): stdin stays free for
+  // claim-mode heartbeats, matching kolu's lease.sh data-channel pattern.
+  // Dead-peer / BatchMode policy is the shared surface-remote receptacle —
+  // not hand-rolled here (and not tied to ODU_LEASE_HEARTBEAT: that tick is
+  // only for flock stdin + remote TTL, not ssh ServerAlive).
+  return spawn("ssh", [...SSH_COMMON_OPTS, host, script], {
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+}
 
-    if (mode === "probe") {
-      child.stdin?.end();
-      const timer = setTimeout(() => {
-        child.kill("SIGKILL");
-      }, CLAIM_TIMEOUT_MS);
-      child.on("close", (code) => {
-        clearTimeout(timer);
-        resolve({
-          stdout: stdout + (stderr.trim() !== "" ? `\n${stderr}` : ""),
-          code,
-        });
-      });
-      return;
-    }
+function attachCollectors(child: ChildProcess): {
+  getStdout: () => string;
+  getCombined: () => string;
+} {
+  let stdout = "";
+  let stderr = "";
+  child.stdout?.setEncoding("utf-8");
+  child.stderr?.setEncoding("utf-8");
+  child.stdout?.on("data", (chunk: string) => {
+    stdout += chunk;
+  });
+  child.stderr?.on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+  return {
+    getStdout: () => stdout,
+    getCombined: () =>
+      stdout + (stderr.trim() !== "" ? `\n${stderr}` : ""),
+  };
+}
 
-    // Claim: resolve once we see HELD/BUSY/error, leaving the child running
-    // with stdin open as the heartbeat channel.
+/** Probe path: run remote script to completion (stdin closed). */
+function dialProbe(host: string, script: string): Promise<DialResult> {
+  return new Promise((resolve) => {
+    const child = spawnSsh(host, script);
+    const { getCombined } = attachCollectors(child);
+    child.stdin?.end();
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+    }, CLAIM_TIMEOUT_MS);
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ stdout: getCombined(), code });
+    });
+  });
+}
+
+/**
+ * Claim path: settle once HELD/BUSY/error appears; on HELD keep the child
+ * as a hold session (stdin heartbeats + release). Protocol settle and hold
+ * lifecycle live here — not in the transport spawn.
+ */
+function dialClaim(host: string, script: string): Promise<DialResult> {
+  return new Promise((resolve) => {
+    const child = spawnSsh(host, script);
+    const { getStdout, getCombined } = attachCollectors(child);
+
     let settled = false;
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
       child.kill("SIGKILL");
       resolve({
-        stdout,
+        stdout: getStdout(),
         code: null,
       });
     }, CLAIM_TIMEOUT_MS);
 
     const trySettle = (): void => {
       if (settled) return;
+      const stdout = getStdout();
       if (
         /\bHELD\b/.test(stdout) ||
         /\bBUSY\b/.test(stdout) ||
@@ -300,11 +323,15 @@ const defaultDial: DialFn = (host, script, mode) =>
       settled = true;
       clearTimeout(timer);
       resolve({
-        stdout: stdout + (stderr.trim() !== "" ? `\n${stderr}` : ""),
+        stdout: getCombined(),
         code,
       });
     });
   });
+}
+
+const defaultDial: DialFn = (host, script, mode) =>
+  mode === "probe" ? dialProbe(host, script) : dialClaim(host, script);
 
 function parseBusyHolder(stdout: string): HolderInfo | null {
   // After the BUSY line, the holder body (if any).
