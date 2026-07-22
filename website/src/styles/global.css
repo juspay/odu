@@ -80,19 +80,19 @@ body {
   -webkit-font-smoothing: antialiased;
   line-height: 1.5;
 }
-/* Ambient aurora — soft, slow-drifting colour blobs behind everything */
+/* Soft static wash behind the page — no animation. Animated full-viewport
+   layers (aurora) re-composite on every hover repaint and read as shimmer
+   on buttons *and* plain links. */
 body::before {
   content: "";
   position: fixed;
-  inset: -20vmax;
+  inset: 0;
   z-index: -1;
   pointer-events: none;
   background:
     radial-gradient(38vmax 38vmax at 12% -6%, rgba(69, 227, 154, 0.18), transparent 60%),
     radial-gradient(32vmax 32vmax at 92% 4%, rgba(70, 214, 224, 0.16), transparent 60%),
     radial-gradient(34vmax 34vmax at 78% 88%, rgba(179, 153, 255, 0.14), transparent 62%);
-  will-change: transform;
-  animation: aurora 22s ease-in-out infinite alternate;
 }
 :root[data-theme="light"] body::before {
   background:
@@ -106,11 +106,6 @@ button { font: inherit; }
 :focus-visible { outline: 2px solid var(--cyan); outline-offset: 3px; }
 
 /* —— Keyframes —— */
-@keyframes aurora {
-  0%   { transform: translate3d(0, 0, 0) scale(1); }
-  50%  { transform: translate3d(2.5%, 1.5%, 0) scale(1.06); }
-  100% { transform: translate3d(-2%, -2%, 0) scale(1.03); }
-}
 @keyframes blink { 0%, 55% { opacity: 1; } 56%, 100% { opacity: 0; } }
 @keyframes pop {
   0% { transform: scale(0); opacity: 0; }
@@ -243,7 +238,9 @@ button { font: inherit; }
   margin-bottom: 1.75rem;
 }
 
-/* —— Buttons —— */
+/* —— Buttons ——
+   Hover is color/border only. No filter, no ::after sweep, no transform —
+   those restart or re-composite on edge re-entry and look like flicker. */
 .actions { display: flex; flex-wrap: wrap; gap: .65rem; }
 .button {
   display: inline-flex;
@@ -258,7 +255,7 @@ button { font: inherit; }
   background: var(--panel);
   font: 500 .82rem/1 var(--mono);
   text-decoration: none;
-  transition: border-color .18s ease, background .18s ease, box-shadow .18s ease, filter .18s ease;
+  transition: border-color .15s ease, background .15s ease, box-shadow .15s ease;
 }
 .button:hover {
   border-color: #4a5c55;
@@ -274,7 +271,6 @@ button { font: inherit; }
   /* reassert the gradient — .button:hover's background would otherwise win
      on specificity and drop the button to the dark panel colour */
   background: var(--accent-grad);
-  filter: brightness(1.08);
   box-shadow: 0 10px 28px -8px rgba(70, 214, 224, .8);
 }
 .button-ghost {
