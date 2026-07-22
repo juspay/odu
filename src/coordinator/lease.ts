@@ -732,14 +732,14 @@ export interface LeasedLanes {
  * acquire holds it for platform A then sees it busy for B (self), releases,
  * and retries forever. Fail loud at lease time instead.
  *
- * Comparison keys strip a single `user@` prefix and case-fold so hosts.json
- * shapes like `nix@ci-1` vs bare `ci-1` (or `root@ci-1`) still collide —
- * dial-string identity alone misses those aliases and livelocks.
+ * Comparison keys match `shortHost` (strip `user@` + trailing DNS labels for
+ * non-IP hosts; leave IPv4/IPv6 intact) then case-fold — so hosts.json shapes
+ * like `nix@ci-1` vs `ci-1`, `ci-1` vs `ci-1.lab.example.com`, or mixed case
+ * still collide. Dial-string identity alone misses those aliases and livelocks
+ * under wait-in-line. README pool examples already mix short names and FQDNs.
  */
 function venueHostKey(host: string): string {
-  const trimmed = host.trim().toLowerCase();
-  const at = trimmed.indexOf("@");
-  return at >= 0 ? trimmed.slice(at + 1) : trimmed;
+  return shortHost(host.trim()).toLowerCase();
 }
 
 function assertNoSharedRemoteHosts(

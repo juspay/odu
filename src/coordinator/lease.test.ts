@@ -297,6 +297,59 @@ describe("acquireFromPool", () => {
     expect(claim).not.toHaveBeenCalled();
   });
 
+  it("rejects short name vs FQDN for the same machine across platforms", async () => {
+    const claim = vi.fn(async (host: string): Promise<ClaimResult> => held(host));
+    await expect(
+      leaseLanes({
+        pools: {
+          "x86_64-linux": ["ci-1"],
+          "aarch64-linux": ["ci-1.example.com"],
+        },
+        platforms: ["x86_64-linux", "aarch64-linux"],
+        identity: id,
+        noWait: false,
+        claim,
+      }),
+    ).rejects.toThrow(/ci-1.*both/);
+    expect(claim).not.toHaveBeenCalled();
+  });
+
+  it("rejects user@short vs bare FQDN aliases", async () => {
+    const claim = vi.fn(async (host: string): Promise<ClaimResult> => held(host));
+    await expect(
+      leaseLanes({
+        pools: {
+          "x86_64-linux": ["nix@ci-1.lab.example.com"],
+          "aarch64-linux": ["ci-1"],
+        },
+        platforms: ["x86_64-linux", "aarch64-linux"],
+        identity: id,
+        noWait: false,
+        claim,
+      }),
+    ).rejects.toThrow(/ci-1.*both/);
+    expect(claim).not.toHaveBeenCalled();
+  });
+
+  it("does not collapse distinct IPv4 targets via first-dot split", async () => {
+    const claim = vi.fn(async (host: string): Promise<ClaimResult> => held(host));
+    // Distinct boxes — must not throw the shared-host guard.
+    const r = await leaseLanes({
+      pools: {
+        "x86_64-linux": ["10.0.0.1"],
+        "aarch64-linux": ["10.0.0.2"],
+      },
+      platforms: ["x86_64-linux", "aarch64-linux"],
+      identity: id,
+      noWait: true,
+      claim,
+    });
+    expect(r.lanes).toEqual({
+      "aarch64-linux": "10.0.0.2",
+      "x86_64-linux": "10.0.0.1",
+    });
+  });
+});
 
 describe("buildLeaseSshArgs — option terminator", () => {
   it("ends option parsing with `--` before host (ProxyCommand RCE guard)", () => {
