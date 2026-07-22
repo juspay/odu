@@ -23,7 +23,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { hostname, userInfo } from "node:os";
 import { shellQuoteArg } from "@kolu/shell-quote";
-import { isLocalHost } from "@kolu/surface-remote";
+import { isLocalHost, SSH_COMMON_OPTS } from "@kolu/surface-remote";
 import { shortHost, type HostPool } from "./hosts";
 
 /** Remote lock file (and adjacent `.holder` identity file). Override via
@@ -197,19 +197,10 @@ const defaultDial: DialFn = (host, script, mode) =>
   new Promise((resolve) => {
     // Remote command is an ssh argv (not bash -s): stdin is free for heartbeats
     // in claim mode, matching kolu's lease.sh data-channel pattern.
-    const args = [
-      "-o",
-      "BatchMode=yes",
-      "-o",
-      "ConnectTimeout=20",
-      "-o",
-      `ServerAliveInterval=${HEARTBEAT_S}`,
-      "-o",
-      "ServerAliveCountMax=2",
-      host,
-      script,
-    ];
-    const child = spawn("ssh", args, {
+    // Dead-peer / BatchMode policy is the shared surface-remote receptacle —
+    // not hand-rolled here (and not tied to ODU_LEASE_HEARTBEAT: that tick is
+    // only for flock stdin + remote TTL, not ssh ServerAlive).
+    const child = spawn("ssh", [...SSH_COMMON_OPTS, host, script], {
       stdio: ["pipe", "pipe", "pipe"],
     });
     let stdout = "";
