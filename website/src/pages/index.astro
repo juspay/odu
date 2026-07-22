@@ -1,11 +1,10 @@
 ---
 import "../styles/global.css";
-import "../styles/docs.css";
-import { Content as DocsContent } from "../content/docs.md";
+import SiteChrome from "../components/SiteChrome.astro";
 
 const base = import.meta.env.BASE_URL.replace(/\/$/, "");
 const github = "https://github.com/juspay/odu";
-const docs = "#docs";
+const runCmd = "nix run github:juspay/odu -- run --host x86_64-linux=localhost";
 ---
 
 <!doctype html>
@@ -13,341 +12,345 @@ const docs = "#docs";
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width" />
-    <meta name="description" content="odu is live, attachable CI for just recipe DAGs." />
-    <meta name="theme-color" content="#090d0c" />
+    <meta
+      name="description"
+      content="odu is live, attachable CI for just recipe DAGs — one state for humans and coding agents."
+    />
+    <meta name="theme-color" content="#0a0c0b" />
     <link rel="icon" type="image/svg+xml" href={`${base}/logo.svg`} />
     <link rel="canonical" href="https://juspay.github.io/odu/" />
     <meta property="og:title" content="odu — CI you can attach to" />
-    <meta property="og:description" content="Run your just DAG across machines. Attach while it is live." />
+    <meta
+      property="og:description"
+      content="Batch CI leaves logs. odu keeps the pipeline alive as typed state — attach from a terminal or drive it over MCP."
+    />
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://juspay.github.io/odu/" />
     <title>odu — CI you can attach to</title>
   </head>
   <body>
-    <header class="shell site-nav">
-      <a class="brand" href={`${base}/`} aria-label="odu home">
-        <img class="brand-logo" src={`${base}/logo.svg`} width="34" height="34" alt="" />
-        <span>odu</span>
-      </a>
-      <nav class="nav-links" aria-label="Primary navigation">
-        <a href="#how-it-works">How it works</a>
-        <a href={docs}>Docs</a>
-        <a href="#quickstart">Quickstart</a>
-        <a class="nav-github" href={github} target="_blank" rel="noreferrer">
-          GitHub
-          <span aria-hidden="true">↗</span>
-        </a>
-      </nav>
-    </header>
-
-    <main>
-      <div class="shell hero">
-        <div>
-          <p class="eyebrow">Live CI for just</p>
-          <h1>CI you can <span>attach to.</span></h1>
-          <p class="hero-copy">
-            Run your <a class="inline-link" href="https://just.systems" target="_blank" rel="noreferrer"><code>just</code></a> DAG across machines. Watch state, stream logs,
-            and rerun a node while the pipeline is still alive.
-          </p>
-          <div class="actions">
-            <a class="button button-primary" href="#quickstart">Run odu <span aria-hidden="true">↓</span></a>
-            <a class="button" href={github} target="_blank" rel="noreferrer">View source <span aria-hidden="true">↗</span></a>
-          </div>
-        </div>
-
-        <div class="pipeline-stage" role="img" aria-label="An animated recipe pipeline fanning out to Linux and macOS">
-          <div class="stage-grid" aria-hidden="true"></div>
-          <div class="pipeline-card">
-            <div class="window-bar">
-              <span></span><span></span><span></span>
-              <span class="window-title">pipeline · 3cbac86</span>
-            </div>
-            <div class="dag">
-              <div class="dag-line line-1"></div>
-              <div class="dag-line line-2"></div>
-              <div class="dag-line line-3"></div>
-              <div class="dag-line line-4"></div>
-              <div class="node node-root">default</div>
-              <div class="node node-build">build ✓</div>
-              <div class="node node-lint">lint ✓</div>
-              <div class="node node-linux">test@linux ✓</div>
-              <div class="node node-macos node-running">test@macos</div>
-            </div>
-          </div>
-          <div class="stage-note"><strong>Attached from another terminal</strong>$ odu attach</div>
-        </div>
-      </div>
-
-      <div class="shell signal-strip" aria-label="Key features">
-        <div class="signal"><strong>Explicit hosts</strong><span>Localhost or ssh, never guessed</span></div>
-        <div class="signal"><strong>Multi-platform</strong><span>Linux + macOS, one live surface</span></div>
-        <div class="signal"><strong>Agent native</strong><span>Typed state and logs over MCP</span></div>
-      </div>
-
-      <section id="how-it-works">
-        <div class="shell">
-          <div class="section-heading">
+    <SiteChrome active="home">
+      <main>
+        <!-- 1. Hero: problem → inversion → command -->
+        <section class="shell hero">
+          <div class="hero-grid">
             <div>
-              <p class="eyebrow">The live face</p>
-              <h2 class="section-title">Your pipeline is<br />not a log file.</h2>
-            </div>
-            <p class="section-copy">Attach late and replay from the top. Move across lanes. Focus a node. Rerun it with its dependents.</p>
-          </div>
-
-          <div class="terminal" data-terminal>
-            <div class="window-bar">
-              <span></span><span></span><span></span>
-              <span class="window-title">odu attach · kolu · 3cbac86</span>
-            </div>
-            <div class="terminal-body">
-              <div class="matrix">
-                <div class="term-label">pipeline / 8 nodes / live</div>
-                <div class="matrix-head"><span>recipe</span><span>x86_64-linux</span><span>aarch64-darwin</span></div>
-                <div class="matrix-row"><span>format</span><span class="check">✓ 1.4s</span><span class="check">✓ 1.7s</span></div>
-                <div class="matrix-row"><span>typecheck</span><span class="check">✓ 8.2s</span><span class="check">✓ 9.1s</span></div>
-                <div class="matrix-row"><span>unit</span><span class="check">✓ 12s</span><span class="check">✓ 14s</span></div>
-                <div class="matrix-row active" data-node="e2e@x86_64-linux" role="button" tabindex="0"><span>e2e</span><span class="run"><i class="spinner"></i> 24s</span><span class="pending">·</span></div>
-                <div class="matrix-row" data-node="e2e@aarch64-darwin" role="button" tabindex="0"><span>e2e</span><span class="run"><i class="spinner"></i> 24s</span><span class="run"><i class="spinner"></i> 19s</span></div>
+              <p class="eyebrow">Live CI for just · humans + agents</p>
+              <h1>CI you can <em>attach to.</em></h1>
+              <p class="hero-copy">
+                Batch CI turns your task graph into a process and leaves log files.
+                <strong>odu keeps the pipeline alive as typed state</strong> —
+                attach from another terminal, or let a coding agent drive the same
+                run over MCP. Your <a href="https://just.systems"><code>just</code></a> file
+                is still the pipeline.
+              </p>
+              <div class="actions">
+                <a class="button button-primary" href="#quickstart">Get started</a>
+                <a class="button" href="#proof">Watch demos</a>
+                <a class="button button-ghost" href={`${base}/docs/`}>Docs</a>
               </div>
-              <div class="log-pane" aria-live="polite">
-                <div class="log-rule" data-log-title>e2e@x86_64-linux</div>
-                <div data-log-content>
-                  <span class="log-line log-dim">$ just --no-deps ci::e2e</span>
-                  <span class="log-line">building odu runner closure…</span>
-                  <span class="log-line">copying 17 paths to localhost</span>
-                  <span class="log-line log-green">✓ pass fixture settles cleanly</span>
-                  <span class="log-line log-green">✓ fail fixture reports exit 7</span>
-                  <span class="log-line log-green">✓ late attach replays buffered output</span>
-                  <span class="log-spacer"></span>
-                  <span class="log-line log-amber">⠹ cancel fixture</span>
+              <div class="hero-cmd">
+                <code><span class="prompt">$</span> {runCmd}</code>
+                <button class="copy-btn" type="button" data-copy={runCmd}>copy</button>
+              </div>
+            </div>
+
+            <div class="contrast" aria-label="Batch CI versus odu">
+              <div class="contrast-row before">
+                <span class="contrast-label">Batch</span>
+                <p>Compile the graph, run once, scrape logs. Mid-run you poll a process; agents get a wall of text.</p>
+              </div>
+              <div class="contrast-row after">
+                <span class="contrast-label">odu</span>
+                <p>The runner owns live state. <code>attach</code> for humans, <code>mcp</code> for agents — same run, fail-fast and rerun only what broke.</p>
+              </div>
+              <div class="contrast-row after">
+                <span class="contrast-label">Justfile</span>
+                <p>One <code>[metadata("ci")]</code> tag. No second YAML describing the graph you already wrote.</p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 2. Proof: real videos first -->
+        <section id="proof" class="section">
+          <div class="shell">
+            <div class="section-head">
+              <p class="eyebrow">Recorded from real runs</p>
+              <h2 class="section-title">One state. Two readers.</h2>
+              <p class="section-lead">
+                Not a staged dashboard. The terminal and the agent are thin adapters
+                over the same live pipeline.
+              </p>
+            </div>
+            <div class="proof-grid">
+              <figure class="proof-card">
+                <video
+                  autoplay
+                  muted
+                  loop
+                  playsinline
+                  controls
+                  preload="metadata"
+                  poster="https://kolu.dev/blog/odu-attach.webp"
+                >
+                  <source src="https://kolu.dev/blog/odu-attach.webm" type="video/webm" />
+                  <source src="https://kolu.dev/blog/odu-attach.mp4" type="video/mp4" />
+                </video>
+                <figcaption>
+                  <strong>Human face</strong>
+                  <span><code>odu run</code> and <code>odu attach</code> on one live pipeline — attach late, full buffer replay.</span>
+                </figcaption>
+              </figure>
+              <figure class="proof-card">
+                <video
+                  controls
+                  muted
+                  loop
+                  playsinline
+                  preload="metadata"
+                  poster="https://kolu.dev/blog/odu-mcp.webp"
+                >
+                  <source src="https://kolu.dev/blog/odu-mcp.webm" type="video/webm" />
+                  <source src="https://kolu.dev/blog/odu-mcp.mp4" type="video/mp4" />
+                </video>
+                <figcaption>
+                  <strong>Agent face</strong>
+                  <span>An agent drives MCP while the terminal watches the same state go green.</span>
+                </figcaption>
+              </figure>
+            </div>
+          </div>
+        </section>
+
+        <!-- 3. Concrete outcomes -->
+        <section class="section">
+          <div class="shell">
+            <div class="section-head">
+              <p class="eyebrow">What you actually get</p>
+              <h2 class="section-title">Usefulness, not feature chips.</h2>
+              <p class="section-lead">
+                Moments that batch CI makes painful — and what odu does instead.
+              </p>
+            </div>
+            <div class="outcomes">
+              <article class="outcome">
+                <span class="who">Human</span>
+                <h3>Attach while e2e is still running</h3>
+                <p>
+                  Lint already green, e2e still going. <code>odu attach</code> from
+                  another terminal: full matrix, focus a node, stream its log — including
+                  everything that ran before you connected.
+                </p>
+              </article>
+              <article class="outcome">
+                <span class="who">Agent</span>
+                <h3>Stop on first red, not after 20 minutes</h3>
+                <p>
+                  <code>wait_for_settle</code> returns the instant a node fails.
+                  Read that log, fix the source, <code>node_rerun</code> only the
+                  failed node and its dependents.
+                </p>
+              </article>
+              <article class="outcome">
+                <span class="who">Human</span>
+                <h3>Retry a flake without restarting CI</h3>
+                <p>
+                  Keep the coordinator with <code>--linger</code>, hit rerun on the
+                  flaky node. No full pipeline restart for one bad leaf.
+                </p>
+              </article>
+              <article class="outcome">
+                <span class="who">Team</span>
+                <h3>Linux + macOS, nothing preinstalled</h3>
+                <p>
+                  Explicit ssh lanes. Hosts need ssh, Nix, and outbound HTTPS —
+                  the runner arrives as a Nix closure. GitHub statuses post from
+                  your machine.
+                </p>
+              </article>
+            </div>
+          </div>
+        </section>
+
+        <!-- 4. Agent loop -->
+        <section id="agents" class="section">
+          <div class="shell">
+            <div class="section-head">
+              <p class="eyebrow">Coding agents</p>
+              <h2 class="section-title">The fail-fast loop.</h2>
+              <p class="section-lead">
+                <code>odu mcp</code> exposes the live run over MCP. Structured
+                state in, targeted fixes out — no scraping a terminal.
+              </p>
+            </div>
+            <div class="agent-layout">
+              <div class="loop" aria-label="Agent CI loop">
+                <div class="loop-step">
+                  <span class="loop-n">01</span>
+                  <div>
+                    <strong>run</strong>
+                    <span>Start the coordinator in the background.</span>
+                  </div>
                 </div>
-                <div class="terminal-help"><span><i class="key">hjkl</i> focus</span><span><i class="key">r</i> rerun</span><span><i class="key">q</i> detach</span></div>
+                <div class="loop-step critical">
+                  <span class="loop-n">02</span>
+                  <div>
+                    <strong>wait_for_settle</strong>
+                    <span>Return on settlement <em>or</em> the first red node — don’t wait out a doomed build.</span>
+                  </div>
+                </div>
+                <div class="loop-step">
+                  <span class="loop-n">03</span>
+                  <div>
+                    <strong>inspect</strong>
+                    <span>Subscribe to that node’s log resource and read the failure.</span>
+                  </div>
+                </div>
+                <div class="loop-step">
+                  <span class="loop-n">04</span>
+                  <div>
+                    <strong>fix → node_rerun</strong>
+                    <span>Patch source, then reset only the failed node and its dependents.</span>
+                  </div>
+                </div>
+              </div>
+              <div>
+                <p class="section-lead" style="margin-top:0">
+                  Tools: <code>run</code>, <code>wait_for_settle</code>,
+                  <code>node_rerun</code>, <code>cancel</code>, <code>runs</code>.
+                  Pipeline state and logs are subscribable resources, not scraped text.
+                </p>
+                <p class="section-lead">
+                  Wire it with one stdio entry:
+                </p>
+                <pre class="code-block" style="margin-top:1rem"><span class="line">nix run github:juspay/odu -- mcp</span></pre>
+                <div class="actions" style="margin-top:1.25rem">
+                  <a class="button" href={`${base}/docs/#coding-agents-mcp`}>MCP reference →</a>
+                  <a class="button button-ghost" href="https://kolu.dev/blog/odu/" target="_blank" rel="noreferrer">Design story ↗</a>
+                </div>
               </div>
             </div>
           </div>
-        </div>
-      </section>
+        </section>
 
-      <section class="demo-section">
-        <div class="shell">
-          <div class="section-heading">
-            <div>
-              <p class="eyebrow">Actual runs</p>
-              <h2 class="section-title">See one state<br />from both sides.</h2>
-            </div>
-            <p class="section-copy">Recorded from odu itself. No staged dashboard, no reconstructed events.</p>
-          </div>
-          <div class="demo-grid">
-            <figure class="demo-card demo-card-wide">
-              <video autoplay muted loop playsinline controls preload="metadata" poster="https://kolu.dev/blog/odu-attach.webp">
-                <source src="https://kolu.dev/blog/odu-attach.webm" type="video/webm" />
-                <source src="https://kolu.dev/blog/odu-attach.mp4" type="video/mp4" />
-              </video>
-              <figcaption><strong>Human face</strong><span><code>odu run</code> and <code>odu attach</code> reading one live pipeline.</span></figcaption>
-            </figure>
-            <figure class="demo-card">
-              <video controls muted loop playsinline preload="metadata" poster="https://kolu.dev/blog/odu-mcp.webp">
-                <source src="https://kolu.dev/blog/odu-mcp.webm" type="video/webm" />
-                <source src="https://kolu.dev/blog/odu-mcp.mp4" type="video/mp4" />
-              </video>
-              <figcaption><strong>Agent face</strong><span>An agent drives MCP while the terminal watches the same state.</span></figcaption>
-            </figure>
-          </div>
-        </div>
-      </section>
-
-      <section>
-        <div class="shell">
-          <div class="section-heading">
-            <div>
-              <p class="eyebrow">Under the terminal</p>
-              <h2 class="section-title">One state.<br />Every face.</h2>
-            </div>
-            <p class="section-copy">The coordinator owns the run. Terminal and agent interfaces are thin adapters over the same typed contract.</p>
-          </div>
-
-          <div class="architecture" role="img" aria-label="odu architecture diagram">
-            <div class="arch-stack">
-              <div class="arch-card"><span class="arch-kicker">Input</span><span class="arch-name">just recipe DAG</span></div>
-              <div class="arch-card"><span class="arch-kicker">Lane</span><span class="arch-name">x86_64-linux</span></div>
-              <div class="arch-card"><span class="arch-kicker">Lane</span><span class="arch-name">aarch64-darwin</span></div>
-            </div>
-            <div class="coordinator">
-              <div class="coord-head"><span>odu coordinator</span><span>● live</span></div>
-              <div class="primitive"><span class="primitive-icon">C</span><span><strong>Cell</strong><small>pipeline snapshot → deltas</small></span></div>
-              <div class="primitive"><span class="primitive-icon">S</span><span><strong>Stream</strong><small>buffered node output → appends</small></span></div>
-              <div class="primitive"><span class="primitive-icon">P</span><span><strong>Procedure</strong><small>rerun node + dependents</small></span></div>
-            </div>
-            <div class="arch-stack">
-              <div class="arch-card"><span class="arch-kicker">Human face</span><span class="arch-name">odu attach</span></div>
-              <div class="arch-card"><span class="arch-kicker">Agent face</span><span class="arch-name">odu mcp</span></div>
-              <div class="arch-card"><span class="arch-kicker">Durable</span><span class="arch-name">logs + run ledger</span></div>
-            </div>
-          </div>
-
-          <a class="surface-promo" href="https://kolu.dev/surface/" target="_blank" rel="noreferrer">
-            <span class="surface-copy">
-              <span class="surface-label">The framework underneath</span>
-              <strong>@kolu/surface</strong>
-              <span>Define typed reactive state once. Serve it locally, over ssh, to a terminal, or through MCP.</span>
-            </span>
-            <span class="surface-primitives" aria-hidden="true">
-              <i>Cell</i><i>Stream</i><i>Procedure</i><b>→</b><i>any frontend</i>
-            </span>
-            <span class="surface-arrow" aria-hidden="true">↗</span>
-          </a>
-        </div>
-      </section>
-
-      <section id="quickstart">
-        <div class="shell">
-          <div class="section-heading">
-            <div>
-              <p class="eyebrow">Three commands away</p>
+        <!-- 5. Quickstart -->
+        <section id="quickstart" class="section">
+          <div class="shell">
+            <div class="section-head">
+              <p class="eyebrow">Three steps</p>
               <h2 class="section-title">Keep your justfile.</h2>
+              <p class="section-lead">
+                No CI-flavored YAML. Tag one recipe; its dependency closure is the pipeline.
+                Hosts are always explicit — never a silent localhost surprise.
+              </p>
             </div>
-            <p class="section-copy">No CI-flavored YAML. Your tagged dependency closure is the pipeline.</p>
-          </div>
-
-          <div class="steps">
-            <div class="step">
-              <span class="step-number">01</span>
-              <h3>Tag the root</h3>
-              <div class="code-block">
-                <span class="code-line"><span class="accent">[metadata("ci")]</span></span>
-                <span class="code-line">default: build test lint</span>
+            <div class="steps">
+              <div class="step">
+                <span class="step-n">01</span>
+                <h3>Tag the root</h3>
+                <pre class="code-block"><span class="line"><span class="accent">[metadata("ci")]</span></span><span class="line">default: build test lint</span></pre>
+              </div>
+              <div class="step">
+                <span class="step-n">02</span>
+                <h3>Run a lane</h3>
+                <pre class="code-block">
+                  <button class="copy-btn" type="button" data-copy={runCmd}>copy</button>
+                  <span class="line"><span class="dim">$</span> nix run github:juspay/odu -- run \</span>
+                  <span class="line">    --host x86_64-linux=localhost</span>
+                  <span class="line"><span class="accent">✓</span> build  <span class="accent">✓</span> lint  <span class="dim">⠹</span> test</span>
+                </pre>
+              </div>
+              <div class="step">
+                <span class="step-n">03</span>
+                <h3>Attach or agent</h3>
+                <pre class="code-block"><span class="line"><span class="dim"># another terminal</span></span><span class="line"><span class="dim">$</span> odu attach</span><span class="line"> </span><span class="line"><span class="dim"># or let an agent drive</span></span><span class="line"><span class="dim">$</span> odu mcp</span></pre>
               </div>
             </div>
-            <div class="step">
-              <span class="step-number">02</span>
-              <h3>Choose a lane</h3>
-              <div class="code-block">
-                <button class="copy-button" data-copy="nix run github:juspay/odu -- run --host x86_64-linux=localhost">copy</button>
-                <span class="code-line code-command"><span class="log-dim">$</span> nix run github:juspay/odu -- run</span>
-                <span class="code-line">&nbsp;&nbsp;--host x86_64-linux=localhost</span>
-                <span class="code-line"><span class="log-green">✓</span> build&nbsp;&nbsp;<span class="log-green">✓</span> lint&nbsp;&nbsp;<span class="log-amber">⠹</span> test</span>
-              </div>
-            </div>
-            <div class="step">
-              <span class="step-number">03</span>
-              <h3>Attach anywhere</h3>
-              <div class="code-block">
-                <span class="code-line log-dim"># another terminal</span>
-                <span class="code-line"><span class="log-dim">$</span> odu attach</span>
-                <span class="code-line code-gap log-dim"># or let an agent drive it</span>
-                <span class="code-line"><span class="log-dim">$</span> odu mcp</span>
-              </div>
+            <div class="actions" style="margin-top:1.5rem">
+              <a class="button" href={`${base}/docs/`}>Full documentation →</a>
+              <a class="button button-ghost" href={`${base}/docs/#configure-your-repo`}>Hosts & platforms →</a>
             </div>
           </div>
-        </div>
-      </section>
+        </section>
 
-      <section class="agent-section">
-        <div class="shell">
-          <p class="eyebrow">Made for coding agents</p>
-          <h2 class="section-title">Structured state in.<br />Targeted fixes out.</h2>
-          <div class="agent-loop" aria-label="Agent CI loop">
-            <div class="loop-node"><span class="loop-index">01</span><strong>run</strong><small>start the coordinator</small></div>
-            <div class="loop-node"><span class="loop-index">02</span><strong>wait</strong><small>return on first red</small></div>
-            <div class="loop-node highlight"><span class="loop-index">03</span><strong>inspect</strong><small>read that node's log</small></div>
-            <div class="loop-node"><span class="loop-index">04</span><strong>fix</strong><small>change the source</small></div>
-            <div class="loop-node"><span class="loop-index">05 ↻</span><strong>rerun</strong><small>node + dependents only</small></div>
+        <!-- 6. Contrast table -->
+        <section class="section">
+          <div class="shell">
+            <div class="section-head">
+              <p class="eyebrow">Shape</p>
+              <h2 class="section-title">Batch job vs live service.</h2>
+            </div>
+            <div style="overflow-x:auto">
+              <table class="compare">
+                <thead>
+                  <tr>
+                    <th></th>
+                    <th>Typical local CI</th>
+                    <th>odu</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>Mid-run</td>
+                    <td class="lose">Logs / process poll</td>
+                    <td class="win">Live attach + typed snapshot</td>
+                  </tr>
+                  <tr>
+                    <td>Agent face</td>
+                    <td class="lose">Scraped terminal / ad-hoc scripts</td>
+                    <td class="win">MCP tools + resources, fail-fast wait</td>
+                  </tr>
+                  <tr>
+                    <td>Retry</td>
+                    <td class="lose">Restart the whole graph</td>
+                    <td class="win">Rerun node + dependents only</td>
+                  </tr>
+                  <tr>
+                    <td>Pipeline config</td>
+                    <td class="lose">Often a second graph format</td>
+                    <td class="win">Your just DAG is the pipeline</td>
+                  </tr>
+                  <tr>
+                    <td>Remote hosts</td>
+                    <td class="lose">Agents / daemons / ports</td>
+                    <td class="win">ssh + Nix closure, no preinstall</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
 
-      <section id="docs" class="docs-section">
-        <div class="shell docs-layout">
-          <aside class="docs-nav" aria-label="Documentation sections">
-            <span class="docs-nav-label">Documentation</span>
-            <a href="#quick-start">Quick start</a>
-            <a href="#why-odu">Why odu</a>
-            <a href="#how-a-run-works">How a run works</a>
-            <a href="#configure-your-repo">Configure</a>
-            <a href="#cli-reference">CLI reference</a>
-            <a href="#coding-agents-mcp">Coding agents</a>
-            <a href="#operational-notes">Operational notes</a>
-            <a href="#development">Development</a>
-          </aside>
-          <div class="docs-content">
-            <DocsContent />
+        <!-- 7. CTA -->
+        <section class="final">
+          <div class="shell">
+            <div class="final-inner">
+              <div>
+                <h2>Already have a justfile?</h2>
+                <p>Tag one recipe, pick a host, attach. Full reference lives in the docs.</p>
+              </div>
+              <div class="actions">
+                <a class="button button-primary" href="#quickstart">Quickstart</a>
+                <a class="button" href={github} target="_blank" rel="noreferrer">GitHub ↗</a>
+              </div>
+            </div>
           </div>
-        </div>
-      </section>
-
-      <section class="final-cta">
-        <div class="shell cta-box">
-          <h2>Already speak <span>just?</span><br />Start running live.</h2>
-          <div class="actions">
-            <a class="button button-primary" href={github} target="_blank" rel="noreferrer">View on GitHub <span aria-hidden="true">↗</span></a>
-          </div>
-        </div>
-      </section>
-    </main>
-
-    <footer class="shell">
-      <span>odu · ஓடு · run<br />AGPL-3.0-or-later</span>
-      <span class="footer-links">
-        <a href={github}>GitHub</a>
-        <a href="https://just.systems">just</a>
-        <a href="https://kolu.dev/blog/odu/">Announcement</a>
-        <a href={`${github}/issues`}>Issues</a>
-      </span>
-    </footer>
+        </section>
+      </main>
+    </SiteChrome>
 
     <script>
-      const logs: Record<string, Array<[string, string]>> = {
-        "e2e@x86_64-linux": [
-          ["$ just --no-deps ci::e2e", "log-dim"],
-          ["building odu runner closure…", ""],
-          ["copying 17 paths to localhost", ""],
-          ["✓ pass fixture settles cleanly", "log-green"],
-          ["✓ fail fixture reports exit 7", "log-green"],
-          ["✓ late attach replays buffered output", "log-green"],
-          ["⠹ cancel fixture", "log-amber"],
-        ],
-        "e2e@aarch64-darwin": [
-          ["$ just --no-deps ci::e2e", "log-dim"],
-          ["realising runner on macos lane…", ""],
-          ["copying 14 paths to localhost", ""],
-          ["✓ pass fixture settles cleanly", "log-green"],
-          ["✓ runner workspace is writable", "log-green"],
-          ["⠹ late attach replay", "log-amber"],
-        ],
-      };
-
-      const title = document.querySelector("[data-log-title]");
-      const content = document.querySelector("[data-log-content]");
-      document.querySelectorAll<HTMLElement>("[data-node]").forEach((row) => {
-        const selectRow = () => {
-          const id = row.getAttribute("data-node");
-          if (!id || !title || !content || !(id in logs)) return;
-          document.querySelectorAll("[data-node]").forEach((node) => node.classList.remove("active"));
-          row.classList.add("active");
-          title.textContent = id;
-          content.replaceChildren(...logs[id].map(([line, cls]) => {
-            const element = document.createElement("span");
-            element.className = `log-line ${cls}`;
-            element.textContent = line;
-            return element;
-          }));
-        };
-        row.addEventListener("click", selectRow);
-        row.addEventListener("keydown", (event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            selectRow();
-          }
-        });
-      });
-
       document.querySelectorAll("[data-copy]").forEach((button) => {
         button.addEventListener("click", async () => {
           const value = button.getAttribute("data-copy");
           if (!value) return;
           await navigator.clipboard.writeText(value);
+          const label = button.textContent;
           button.textContent = "copied";
-          setTimeout(() => { button.textContent = "copy"; }, 1400);
+          setTimeout(() => {
+            button.textContent = label;
+          }, 1400);
         });
       });
     </script>

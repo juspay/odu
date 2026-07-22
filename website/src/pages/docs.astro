@@ -1,0 +1,53 @@
+---
+import "../styles/global.css";
+import "../styles/docs.css";
+import SiteChrome from "../components/SiteChrome.astro";
+import { Content as DocsContent } from "../content/docs.md";
+
+const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta
+      name="description"
+      content="odu documentation — quick start, configuration, CLI, and MCP for coding agents."
+    />
+    <meta name="theme-color" content="#0a0c0b" />
+    <link rel="icon" type="image/svg+xml" href={`${base}/logo.svg`} />
+    <link rel="canonical" href="https://juspay.github.io/odu/docs/" />
+    <meta property="og:title" content="odu docs" />
+    <meta
+      property="og:description"
+      content="Quick start, hosts, CLI reference, and the agent MCP surface."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://juspay.github.io/odu/docs/" />
+    <title>Docs · odu</title>
+  </head>
+  <body>
+    <SiteChrome active="docs">
+      <main class="shell docs-page">
+        <div class="docs-layout">
+          <aside class="docs-nav" aria-label="Documentation sections">
+            <span class="docs-nav-label">On this page</span>
+            <a href="#quick-start">Quick start</a>
+            <a href="#why-odu">Why odu</a>
+            <a href="#how-a-run-works">How a run works</a>
+            <a href="#configure-your-repo">Configure</a>
+            <a href="#cli-reference">CLI reference</a>
+            <a href="#coding-agents-mcp">Coding agents</a>
+            <a href="#operational-notes">Operational notes</a>
+            <a href="#development">Development</a>
+          </aside>
+          <div class="docs-content">
+            <DocsContent />
+          </div>
+        </div>
+      </main>
+    </SiteChrome>
+  </body>
+</html>

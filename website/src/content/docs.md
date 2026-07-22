@@ -1,4 +1,4 @@
-# Documentation
+# Docs
 
 odu runs a [`just`](https://just.systems) recipe DAG locally or across machines, holds the run as live typed state, and exposes that state to humans and coding agents.
 

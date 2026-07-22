@@ -1,0 +1,37 @@
+---
+interface Props {
+  active?: "home" | "docs";
+}
+
+const { active = "home" } = Astro.props;
+const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+const github = "https://github.com/juspay/odu";
+---
+
+<header class="shell site-nav">
+  <a class="brand" href={`${base}/`} aria-label="odu home">
+    <img class="brand-logo" src={`${base}/logo.svg`} width="28" height="28" alt="" />
+    <span>odu</span>
+  </a>
+  <nav class="nav-links" aria-label="Primary">
+    <a href={`${base}/#proof`}>Demos</a>
+    <a href={`${base}/#quickstart`}>Quickstart</a>
+    <a href={`${base}/docs/`} aria-current={active === "docs" ? "page" : undefined}>Docs</a>
+    <a class="nav-github" href={github} target="_blank" rel="noreferrer">
+      GitHub <span aria-hidden="true">↗</span>
+    </a>
+  </nav>
+</header>
+
+<slot />
+
+<footer class="shell site-footer">
+  <span>odu · ஓடு · run<br />AGPL-3.0-or-later</span>
+  <span class="footer-links">
+    <a href={github}>GitHub</a>
+    <a href={`${base}/docs/`}>Docs</a>
+    <a href="https://just.systems">just</a>
+    <a href="https://kolu.dev/blog/odu/">Announcement</a>
+    <a href={`${github}/issues`}>Issues</a>
+  </span>
+</footer>
