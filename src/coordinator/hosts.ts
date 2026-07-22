@@ -20,6 +20,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
+import { isIP } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { isLocalHost } from "@kolu/surface-remote";
@@ -245,12 +246,17 @@ export function fanoutPools(
   return pools;
 }
 
-/** Short label for a dial target: strip `user@` and any domain suffix so the
- *  operator-facing pick/status lines stay compact (`nix@ci-3.foo` → `ci-3`). */
+/** Short label for a dial target: strip `user@` and any DNS domain suffix so
+ *  the operator-facing pick/status lines stay compact (`nix@ci-3.foo` → `ci-3`).
+ *  IPv4/IPv6 literals are left intact — first-dot splitting would collapse
+ *  distinct pool targets (`10.0.0.1` and `10.0.0.2` both → `10`). */
 export function shortHost(addr: string): string {
   const afterAt = addr.includes("@")
     ? addr.slice(addr.indexOf("@") + 1)
     : addr;
+  // Bracketed IPv6 (ssh style): keep the full host part.
+  if (afterAt.startsWith("[")) return afterAt;
+  if (isIP(afterAt) !== 0) return afterAt;
   const dot = afterAt.indexOf(".");
   return dot > 0 ? afterAt.slice(0, dot) : afterAt;
 }

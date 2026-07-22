@@ -134,6 +134,23 @@ describe("shortHost", () => {
     expect(shortHost("srid@sincereintent")).toBe("sincereintent");
     expect(shortHost("localhost")).toBe("localhost");
   });
+
+  it("keeps IPv4 literals intact (no first-dot collapse)", () => {
+    expect(shortHost("10.0.0.1")).toBe("10.0.0.1");
+    expect(shortHost("10.0.0.2")).toBe("10.0.0.2");
+    expect(shortHost("nix@192.168.1.10")).toBe("192.168.1.10");
+  });
+
+  it("keeps IPv6 literals intact", () => {
+    expect(shortHost("::1")).toBe("::1");
+    expect(shortHost("2001:db8::1")).toBe("2001:db8::1");
+    expect(shortHost("[2001:db8::1]")).toBe("[2001:db8::1]");
+  });
+
+  it("still shortens multi-label DNS names", () => {
+    expect(shortHost("builder.lab.example.com")).toBe("builder");
+    expect(shortHost("user@ci-3.internal.corp")).toBe("ci-3");
+  });
 });
 
 describe("loadHosts — string | list values", () => {
