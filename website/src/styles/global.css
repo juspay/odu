@@ -193,8 +193,8 @@ button { font: inherit; }
   padding: .85rem 1rem;
   font: .78rem/1.5 var(--mono);
   color: #c5d0cb;
-  overflow-x: auto;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 .hero-cmd code .prompt { color: var(--quiet); }
 .hero-cmd code .ok { color: var(--green); }
