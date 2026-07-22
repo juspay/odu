@@ -27,9 +27,11 @@ loud when the live run's commit doesn't match.
 
 `cancel` stops the live run and waits until it's torn down; `run`'s `supersede`
 cancels a run already live here before starting (the "stop this, run the fixed
-commit" move), and `linger` keeps the coordinator serving past settle so a node
-can be rerun afterwards. Together they let the agent loop call off or replace a
-run instead of stranding it or hitting "a run is already in progress".
+commit" move), `linger` keeps the coordinator serving past settle so a node can
+be rerun afterwards, and `no_wait` fails immediately when every host in a venue
+pool is busy (default: wait in line). Together they let the agent loop call off
+or replace a run instead of stranding it or hitting "a run is already in
+progress".
 
 `bin/serve` is self-contained — it resolves odu via `nix run` and serves over
 stdio in the consumer's repo (dialing `.ci/odu.sock`). Set `ODU_FLAKE` to
