@@ -410,12 +410,14 @@ async function orchestrate(
   // Held by this coordinator process (and by the MCP-spawned coordinator the
   // same way — never the MCP server itself). localhost short-circuits.
   // After checkout free + seq reserve so supersede can't deadlock on a busy
-  // single-host pool and the holder file can name `sha7#seq`.
+  // single-host pool and the holder file names the full run id (`sha7#seq`
+  // when reserved, else sha7) — matches `odu hosts` held-by lines.
   const activePlatforms = [...tasksByPlatform.keys()].sort();
+  const runLabel = seq !== null ? `${sha7}#${seq}` : sha7;
   const { lanes: lanesByPlatform, leases } = await leaseLanes({
     pools: poolsByPlatform,
     platforms: activePlatforms,
-    identity: { holder: localHolderId(), run: sha7 },
+    identity: { holder: localHolderId(), run: runLabel },
     noWait: args.noWait,
     onLine: info,
   });
