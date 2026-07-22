@@ -3,22 +3,36 @@
 // Take a task to a shipped, reviewed PR: short interview → implement → draft PR →
 // serial AI review gauntlet → CI + evidence. Never merges.
 //
-// Run:  /grokbe
-//       /workflow grokbe { "task": "…", "task_kind": "bug|feature|refactor", "plan_first": false }
+// Run:  /grokbe <issue URL or free-text task>
+//       /workflow grokbe { "task": "…", "tracks": "adversarial", "from": "gauntlet" }
+//
+// Slash free-text (`/grokbe fix the flaky e2e`) is bound by the host as
+// { query, objective } — NOT as { task }. We accept task | objective | query.
+// Structured JSON may still pass task/tracks/from/… explicitly.
+//
+// Free-text that is a *track directive* (not a product task) is recognized:
+//   /grokbe only codex-debate
+//   /grokbe skip all but adversarial
+// → from=gauntlet, tracks=adversarial (no implement/PR rewrite).
 //
 // Args:
-//   task        (required)  issue URL or free-text prompt
+//   task        (required*) issue URL or free-text prompt
+//               *also accepted as objective / query (slash free-text shape)
+//   from        (optional)  "start" (default) | "gauntlet" | "ship"
+//               gauntlet = /be-review shape: keep branch+PR, run selected tracks
 //   plan_first  (optional)  bool — write a plan and pause before implementing (default false)
 //   task_kind   (optional)  "bug" | "feature" | "refactor" (default "feature")
 //   tracks      (optional)  CSV of gauntlet tracks (default all):
 //                           arch,lens,adversarial,simplify,police
+//                           (adversarial = real /codex-debate via Kolu, not a substitute)
+//                           aliases: codex, codex-debate → adversarial
 //   rationale   (optional)  deliberate design decisions reviewers must respect
-//   context     (optional)  task intent / key decisions for the adversarial author pass
+//   context     (optional)  task intent for the codex-debate author (not codex)
 //   base        (optional)  remote-tracking ref to diff against (default origin/HEAD)
 
 let meta = #{
     name: "grokbe",
-    description: "End-to-end /be-style delivery: interview → implement → draft PR → serial review gauntlet (arch → lowy⇄hickey → adversarial → simplify → code-police) → CI + evidence. Never merges.",
+    description: "End-to-end /be-style delivery: interview → implement → draft PR → serial review gauntlet (arch → lowy⇄hickey → codex-debate via Kolu → simplify → code-police) → CI + evidence. Never merges.",
     when_to_use: "When the user wants the Claude /be workflow under Grok: clarify once, then autonomously ship a reviewed PR.",
     phases: [
         #{ title: "Interview", detail: "confirm plan-first + task kind (or accept args defaults)" },
@@ -26,7 +40,7 @@ let meta = #{
         #{ title: "Plan", detail: "optional plan-first pause" },
         #{ title: "Implement", detail: "code + tests + docs; check/fmt; commit; push" },
         #{ title: "PR", detail: "open draft PR via forge-pr guidance" },
-        #{ title: "Gauntlet", detail: "serial: arch → lens debate → adversarial → simplify → police" },
+        #{ title: "Gauntlet", detail: "serial: arch → lens debate → codex-debate (Kolu) → simplify → police" },
         #{ title: "Ship", detail: "merge latest base; CI + evidence in parallel" },
         #{ title: "Done", detail: "report PR URL + gauntlet + CI; never merge" },
     ],
@@ -145,6 +159,37 @@ let stage_schema = #{
     },
 };
 
+// codex-debate track (real /codex-debate via Kolu — not a Grok-critic substitute)
+// Success contract for status=consensus: rounds>=1, effort=xhigh, non-empty artifacts.
+// Non-consensus statuses may still use empty comment_body; Rhai enforces the
+// success invariants below (schema alone cannot express ok-dependent rules).
+let codex_schema = #{
+    "type": "object",
+    "required": ["ok", "status", "summary", "rounds", "effort", "comment_body", "codex_start", "head_sha"],
+    "properties": #{
+        "ok": #{ "type": "boolean" },
+        "status": #{ "type": "string", "enum": ["consensus", "reviewer-error", "merge-base-error"] },
+        "rounds": #{ "type": "integer", "minimum": 0 },
+        "effort": #{ "type": "string", "enum": ["xhigh"] },
+        "summary": #{ "type": "string", "minLength": 1 },
+        "comment_body": #{ "type": "string" },
+        "codex_start": #{ "type": "string" },
+        "head_sha": #{ "type": "string" },
+    },
+};
+
+// Gauntlet preflight returns a refreshed merge-base (not free-text-only).
+let preflight_schema = #{
+    "type": "object",
+    "required": ["ok", "merge_base", "summary"],
+    "properties": #{
+        "ok": #{ "type": "boolean" },
+        "merge_base": #{ "type": "string" },
+        "summary": #{ "type": "string" },
+        "changed": #{ "type": "boolean" },
+    },
+};
+
 let ship_schema = #{
     "type": "object",
     "required": ["ok", "summary"],
@@ -162,24 +207,184 @@ let ship_schema = #{
 let a = if args == () {
     #{}
 } else if type_of(args) == "string" {
-    // Some hosts JSON-encode args before the script sees them.
-    // parse is not available for arbitrary JSON in Rhai host; treat bare string as task.
+    // Bare string (or JSON-encoded string some hosts pass) is the task itself.
     #{ task: args }
 } else {
     args
 };
 
-let task = if a.task != () { a.task } else { () };
+// Task resolution — three shapes the host actually sends:
+//   1. { "task": "…" }                     explicit / tool /workflow JSON
+//   2. { "query": "…", "objective": "…" }  slash free-text: /grokbe <words>
+//   3. "…"                                 bare string
+// Prefer task, then objective, then query. Empty string is missing.
+fn first_nonempty(x, y, z) {
+    if x != () && type_of(x) == "string" {
+        x.trim();
+        if x != "" {
+            return x;
+        }
+    }
+    if y != () && type_of(y) == "string" {
+        y.trim();
+        if y != "" {
+            return y;
+        }
+    }
+    if z != () && type_of(z) == "string" {
+        z.trim();
+        if z != "" {
+            return z;
+        }
+    }
+    ()
+}
+
+let task_raw = if a.task != () { a.task } else { () };
+let objective_raw = if a.objective != () { a.objective } else { () };
+let query_raw = if a.query != () { a.query } else { () };
+let task = first_nonempty(task_raw, objective_raw, query_raw);
+
 if task == () || task == "" {
-    pause("verification", "Pass args.task — an issue URL or free-text prompt describing the work. Optional: plan_first (bool), task_kind (bug|feature|refactor), tracks (CSV), rationale, context, base.");
+    pause("verification", "Pass a task: `/grokbe <issue URL or free-text>` or `/workflow grokbe {\"task\":\"…\"}`. Optional: from, tracks, plan_first, task_kind, rationale, context, base.");
+}
+
+// Normalize a single track token (trim + aliases). Returns "" if empty after trim.
+fn normalize_track_token(tok) {
+    if tok == () || type_of(tok) != "string" {
+        return "";
+    }
+    let t = tok;
+    t.trim();
+    if t == "" {
+        return "";
+    }
+    if t == "codex" || t == "codex-debate" || t == "Codex" || t == "Codex-debate" {
+        return "adversarial";
+    }
+    t
+}
+
+// Normalize tracks CSV: trim tokens, map aliases, reject unknowns (returns () on bad input).
+fn normalize_tracks(csv) {
+    if csv == () || csv == "" || csv == "all" {
+        return "arch,lens,adversarial,simplify,police";
+    }
+    // Split on commas without regex: walk by finding commas.
+    let remaining = csv;
+    let out = "";
+    let known = ",arch,lens,adversarial,simplify,police,";
+    let saw_any = false;
+    // At most five known tracks (+ a few empties/aliases). Fail closed if input
+    // is absurdly long rather than silently truncating a tail token.
+    let guard = 0;
+    while remaining != "" {
+        guard += 1;
+        if guard > 16 {
+            return (); // too many pieces — refuse rather than drop a tail
+        }
+        let comma = remaining.index_of(",");
+        let piece = remaining;
+        if comma >= 0 {
+            piece = remaining.sub_string(0, comma);
+            remaining = remaining.sub_string(comma + 1, remaining.len() - (comma + 1));
+        } else {
+            remaining = "";
+        }
+        let tok = normalize_track_token(piece);
+        if tok == "" {
+            // skip empty (e.g. trailing comma)
+        } else if !(known.contains("," + tok + ",")) {
+            return (); // unknown token
+        } else if ("," + out + ",").contains("," + tok + ",") {
+            return (); // duplicate track
+        } else {
+            if saw_any {
+                out += ",";
+            }
+            out += tok;
+            saw_any = true;
+        }
+    }
+    if !saw_any {
+        return ();
+    }
+    out
+}
+
+// Strict whole-input directive grammar (not a substring search).
+// Accepts only enumerated shapes after trim.
+fn is_track_directive(s) {
+    if s == () || type_of(s) != "string" {
+        return false;
+    }
+    let t = s;
+    t.trim();
+    // Exact short tokens
+    if t == "codex" || t == "codex-debate" || t == "adversarial" || t == "Codex" {
+        return true;
+    }
+    // Enumerated phrases (common casings users type)
+    if t == "only codex-debate" || t == "only codex" || t == "only adversarial"
+        || t == "skip all but codex-debate" || t == "skip all but codex" || t == "skip all but adversarial"
+        || t == "Skip all but codex-debate" || t == "Skip all but codex" || t == "Skip all but adversarial"
+        || t == "just codex-debate" || t == "just codex" || t == "just adversarial"
+        || t == "Run codex-debate part of the grokbe workflow only"
+        || t == "run codex-debate part of the grokbe workflow only"
+        || t == "codex-debate only" || t == "codex only" || t == "adversarial only" {
+        true
+    } else {
+        false
+    }
 }
 
 let plan_first = if a.plan_first != () { a.plan_first } else { false };
 let task_kind = if a.task_kind != () { a.task_kind } else { "feature" };
-let tracks_csv = if a.tracks != () { a.tracks } else { "arch,lens,adversarial,simplify,police" };
+let tracks_csv = "arch,lens,adversarial,simplify,police";
+if a.tracks != () {
+    let nt = normalize_tracks(a.tracks);
+    if nt == () {
+        pause("verification", "Invalid tracks CSV: " + a.tracks + " — use arch,lens,adversarial|codex|codex-debate,simplify,police (comma-separated).");
+    }
+    tracks_csv = nt;
+}
+let from_arg = if a.from != () { a.from } else { "start" };
+if type_of(from_arg) == "string" {
+    from_arg.trim();
+}
 let rationale = if a.rationale != () { a.rationale } else { "" };
 let user_context = if a.context != () { a.context } else { "" };
 let base_arg = if a.base != () { a.base } else { "" };
+
+// Free-text directive → gauntlet-only + adversarial.
+// ONLY when the resolved task came from slash query/objective (no explicit task)
+// AND caller did not set tracks/from. Never rewrite an explicit product task.
+let from_slash_only = (task_raw == () || task_raw == "")
+    && (objective_raw != () || query_raw != ());
+if from_slash_only && a.tracks == () && a.from == () && is_track_directive(task) {
+    tracks_csv = "adversarial";
+    from_arg = "gauntlet";
+    if user_context == "" {
+        user_context = task;
+    }
+    task = "Review and debate the current branch (gauntlet-only; no new implementation).";
+    log("parsed free-text track directive → from=" + from_arg + " tracks=" + tracks_csv);
+}
+
+// from aliases (only documented ones)
+if from_arg == "review" || from_arg == "be-review" || from_arg == "gauntlet-only" {
+    from_arg = "gauntlet";
+}
+// Fail closed on unknown from — never silently escalate to mutating start.
+if from_arg != "start" && from_arg != "gauntlet" && from_arg != "ship" {
+    pause("verification", "Invalid from=" + from_arg + " — use start | gauntlet | ship (aliases: review, be-review, gauntlet-only).");
+}
+
+let do_plan_impl_pr = from_arg == "start";
+let do_gauntlet = from_arg == "start" || from_arg == "gauntlet";
+let do_ship = from_arg == "start" || from_arg == "ship";
+// Gauntlet-only still posts push+comment after tracks; ship (CI+evidence) is optional.
+// When from=gauntlet, skip ship by default (mirrors /be-review). from=ship runs ship only.
 
 fn track_on(csv, name) {
     if csv == () || csv == "" || csv == "all" {
@@ -189,10 +394,15 @@ fn track_on(csv, name) {
     let padded = "," + csv + ",";
     let needle = "," + name + ",";
     if padded.contains(needle) {
-        true
-    } else {
-        false
+        return true;
     }
+    // codex / codex-debate aliases for the adversarial track
+    if name == "adversarial" {
+        if padded.contains(",codex,") || padded.contains(",codex-debate,") {
+            return true;
+        }
+    }
+    false
 }
 
 fn bool_str(b) {
@@ -210,23 +420,11 @@ let do_simplify = track_on(tracks_csv, "simplify");
 let do_police = track_on(tracks_csv, "police");
 
 // ── Interview ────────────────────────────────────────────────────────────────
+// No gate. A resolved task is a committed launch: defaults apply
+// unless the caller set knobs. Missing task already pause()'d above.
 
 phase("Interview");
-log("grokbe interview — task_kind=" + task_kind + " plan_first=" + bool_str(plan_first) + " tracks=" + tracks_csv);
-
-// Only pause when the caller left both interview knobs unset *and* did not
-// pass an explicit skip. Re-invoke with plan_first/task_kind to skip this gate.
-let needs_interview = a.plan_first == () && a.task_kind == ();
-if needs_interview {
-    let interview_msg = "";
-    interview_msg += "Interview (resume to proceed with defaults below, or cancel and re-run with explicit args):\n";
-    interview_msg += "  • plan_first = false  (implement straight; set true to write a plan and pause)\n";
-    interview_msg += "  • task_kind  = feature  (bug | feature | refactor)\n";
-    interview_msg += "  • tracks     = " + tracks_csv + "\n";
-    interview_msg += "Task: " + task + "\n";
-    interview_msg += "After this gate the run is fully autonomous — no further confirmation.";
-    await_user("user", interview_msg);
-}
+log("grokbe start — from=" + from_arg + " task_kind=" + task_kind + " plan_first=" + bool_str(plan_first) + " tracks=" + tracks_csv + " task=" + task);
 
 // ── Setup ────────────────────────────────────────────────────────────────────
 
@@ -238,6 +436,7 @@ setup_prompt += "EXECUTE NOW. Do not wait for confirmation. Do not return a plan
 setup_prompt += "Task: " + task + "\n";
 setup_prompt += "task_kind: " + task_kind + "\n";
 setup_prompt += "plan_first: " + bool_str(plan_first) + "\n";
+setup_prompt += "from: " + from_arg + "\n";
 if base_arg != "" {
     setup_prompt += "Preferred base ref: " + base_arg + "\n";
 }
@@ -245,9 +444,15 @@ setup_prompt += "\nDo all of the following with shell/git tools:\n";
 setup_prompt += "1. git fetch origin\n";
 setup_prompt += "2. Resolve the default remote branch: git symbolic-ref --short refs/remotes/origin/HEAD\n";
 setup_prompt += "   Fallback origin/master. If a preferred base was given, use it (must be a remote-tracking ref).\n";
-setup_prompt += "3. Create a feature branch off that origin ref. NEVER commit to master/main.\n";
-setup_prompt += "   Branch name: grokbe/<short-slug-from-task> (lowercase, hyphens, ≤40 chars).\n";
-setup_prompt += "   If already on a suitable non-default feature branch with work, keep it and report it.\n";
+if from_arg == "gauntlet" || from_arg == "ship" {
+    setup_prompt += "3. Gauntlet/ship-only mode: KEEP the current branch. Do NOT create a new branch.\n";
+    setup_prompt += "   Fail if HEAD is master/main (must be a feature branch with a diff vs base).\n";
+    setup_prompt += "   Report the current branch name as branch.\n";
+} else {
+    setup_prompt += "3. Create a feature branch off that origin ref. NEVER commit to master/main.\n";
+    setup_prompt += "   Branch name: grokbe/<short-slug-from-task> (lowercase, hyphens, ≤40 chars).\n";
+    setup_prompt += "   If already on a suitable non-default feature branch with work, keep it and report it.\n";
+}
 setup_prompt += "4. Read .agency/do.md if it exists — extract check / fmt / test / CI / PR-evidence commands.\n";
 setup_prompt += "   odu defaults if missing: check=`pnpm typecheck`, test=`pnpm test:unit`, fmt=`just fmt` if present else biome/prettier probe.\n";
 setup_prompt += "5. Compute merge-base: git merge-base <base_ref> HEAD\n";
@@ -276,11 +481,16 @@ let fmt_cmd = setup_r.output.fmt_cmd;
 let test_cmd = setup_r.output.test_cmd;
 log("setup ok — branch=" + branch + " base=" + base_ref + " mb=" + merge_base);
 
-// ── Plan (optional) ──────────────────────────────────────────────────────────
+// ── Plan / Implement / PR (skipped when from=gauntlet|ship) ──────────────────
 
 let plan_path = "";
 let plan_summary = "";
+let head_sha = "";
+let impl_summary = "";
+let pr_url = "";
+let pr_number = 0;
 
+if do_plan_impl_pr {
 if plan_first == true {
     phase("Plan");
     let plan_prompt = "";
@@ -374,8 +584,8 @@ if impl_r == () || !impl_r.success || impl_r.output == () || impl_r.output.ok !=
 }
 
 branch = impl_r.output.branch;
-let head_sha = impl_r.output.head_sha;
-let impl_summary = impl_r.output.summary;
+head_sha = impl_r.output.head_sha;
+impl_summary = impl_r.output.summary;
 if impl_r.output.rationale != () && impl_r.output.rationale != "" {
     if rationale == "" {
         rationale = impl_r.output.rationale;
@@ -423,18 +633,62 @@ if pr_r == () || !pr_r.success || pr_r.output == () || pr_r.output.ok != true {
     });
 }
 
-let pr_url = pr_r.output.pr_url;
-let pr_number = pr_r.output.pr_number;
+pr_url = pr_r.output.pr_url;
+pr_number = pr_r.output.pr_number;
 log("PR opened — " + pr_url);
+
+} else {
+    // from=gauntlet|ship: reuse current branch + existing PR (no implement).
+    phase("PR");
+    let pr_reuse_prompt = "";
+    pr_reuse_prompt += "You are the PR-resolve step of grokbe (from=" + from_arg + "). EXECUTE NOW.\n";
+    pr_reuse_prompt += "Branch: " + branch + "  Base: " + base_ref + "\n";
+    pr_reuse_prompt += "1. Discover existing PR: gh pr view --json number,url,title (current branch).\n";
+    pr_reuse_prompt += "2. If NONE exists: set ok=false — do NOT open a draft. Caller must create a PR first.\n";
+    pr_reuse_prompt += "3. If found: return ok=true, pr_url, pr_number, title.\n";
+    pr_reuse_prompt += "Fail closed. No side effects other than reading gh.\n";
+
+    let pr_r = agent(pr_reuse_prompt, #{
+        label: "reuse-pr",
+        capability_mode: "all",
+        output_schema: pr_schema,
+    });
+    if pr_r == () || !pr_r.success || pr_r.output == () || pr_r.output.ok != true {
+        complete(#{
+            ok: false,
+            phase: "pr",
+            summary: "from=" + from_arg + " needs an existing PR on this branch (gh pr view found none — create one, then re-run).",
+            detail: pr_r,
+            branch: branch,
+        });
+    }
+    pr_url = pr_r.output.pr_url;
+    pr_number = pr_r.output.pr_number;
+    if from_arg == "ship" {
+        impl_summary = "ship-only — no implement (from=ship)";
+    } else {
+        impl_summary = "gauntlet-only — no implement (from=gauntlet)";
+    }
+    log("reused PR — " + pr_url);
+}
 
 // Capture gauntlet start SHA (preflight of /be-review)
 let gauntlet_notes = [];
 let lens_comment = "";
 let adversarial_comment = "";
 let police_comment = "";
+// Proof-gate invariants: selected adversarial track must reach consensus;
+// deferred push/comment must succeed when the gauntlet ran.
+let gauntlet_ok = true;
+let push_ok = true;
 
 // ── Gauntlet (serial — each step sole editor) ────────────────────────────────
 // Mirrors /be-review: collisions are an edit problem; serial makes them impossible.
+
+if !do_gauntlet {
+    gauntlet_notes.push("gauntlet: skipped (from=" + from_arg + ")");
+    log("gauntlet skipped — from=" + from_arg);
+} else {
 
 phase("Gauntlet");
 log("gauntlet start — tracks=" + tracks_csv + " base/mb=" + base_ref + "/" + merge_base);
@@ -443,16 +697,19 @@ log("gauntlet start — tracks=" + tracks_csv + " base/mb=" + base_ref + "/" + m
 let preflight_prompt = "";
 preflight_prompt += "Gauntlet preflight for grokbe. EXECUTE NOW.\n";
 preflight_prompt += "Repo is the cwd worktree. Branch: " + branch + "\n";
+preflight_prompt += "Base ref: " + base_ref + "\n";
 preflight_prompt += "1. git fetch origin\n";
-preflight_prompt += "2. Confirm non-empty diff vs " + base_ref + " (or merge-base). If empty, report ok=false summary='empty diff'.\n";
-preflight_prompt += "3. Ensure working tree clean (commit or stash nothing unexpected — if dirty from prior step, commit only if it's intentional leftover; prefer fail).\n";
-preflight_prompt += "4. Recompute merge-base of " + base_ref + " and HEAD; return it as merge_base in summary text if changed.\n";
-preflight_prompt += "5. Return structured: ok, changed=false, summary with merge_base SHA, commit=''.\n";
+preflight_prompt += "2. Confirm non-empty diff vs " + base_ref + " (or merge-base). If empty, ok=false summary='empty diff'.\n";
+preflight_prompt += "3. Ensure working tree clean — if dirty, ok=false (do not auto-commit leftovers).\n";
+preflight_prompt += "4. Recompute merge-base: git merge-base " + base_ref + " HEAD → return as merge_base (required SHA field).\n";
+preflight_prompt += "5. Trusted-diff note (codex --yolo): this gauntlet assumes a TRUSTED local branch (your own work).\n";
+preflight_prompt += "   Do not review untrusted third-party PRs with YOLO. Surface that in summary if the PR author is not the current gh user.\n";
+preflight_prompt += "Return: ok, merge_base (40-char or short SHA), summary.\n";
 
 let pref_r = agent(preflight_prompt, #{
     label: "gauntlet-preflight",
     capability_mode: "all",
-    output_schema: stage_schema,
+    output_schema: preflight_schema,
 });
 
 if pref_r == () || !pref_r.success || pref_r.output == () || pref_r.output.ok != true {
@@ -463,6 +720,10 @@ if pref_r == () || !pref_r.success || pref_r.output == () || pref_r.output.ok !=
         pr_url: pr_url,
         detail: pref_r,
     });
+}
+if pref_r.output.merge_base != () && pref_r.output.merge_base != "" {
+    merge_base = pref_r.output.merge_base;
+    log("gauntlet preflight refreshed merge_base=" + merge_base);
 }
 
 // ── Track: arch (architecture-first-principles) ──────────────────────────────
@@ -629,105 +890,106 @@ if do_lens {
     gauntlet_notes.push("lens: skipped via tracks");
 }
 
-// ── Track: adversarial (codex-debate substitute) ─────────────────────────────
-// Claude /be uses codex ⇄ author. Grok has no codex session; run a deep
-// independent critic then an author-apply loop to consensus (max 3 rounds).
+// ── Track: adversarial = real /codex-debate via Kolu ─────────────────────────
+// Claude /be-review §codex: live codex split ⇄ author, to consensus, no cap.
+// Grok is the author; Codex is the independent reviewer. NOT a same-model
+// critic substitute. Engine = /codex-debate skill + /kolu drive protocol.
 
 if do_adversarial {
-    log("track: adversarial (codex substitute)");
-    let round = 1;
-    let max_adv_rounds = 3;
-    let adv_done = false;
-    let adv_start_note = "adversarial start";
+    log("track: adversarial (codex-debate via Kolu)");
 
-    while round <= max_adv_rounds && adv_done == false {
-        log("adversarial round " + round.to_string());
-
-        let critic_prompt = "";
-        critic_prompt += "You are the deep adversarial critic (grokbe substitute for /codex-debate reviewer, effort xhigh).\n";
-        critic_prompt += "Round " + round.to_string() + " of " + max_adv_rounds.to_string() + ".\n";
-        critic_prompt += "Scope: git diff " + merge_base + "...HEAD. Read the actual code — do not answer from memory.\n";
-        critic_prompt += "Task/context (inherit what the implementer knew): " + task + "\n";
-        critic_prompt += "Context: " + user_context + "\n";
-        critic_prompt += "Rationale (do not flag these deliberate decisions): " + rationale + "\n";
-        critic_prompt += "If the diff touches shared surface APIs, note companion-repo ship gates as deferred (not blocking code findings).\n\n";
-        critic_prompt += "Hunt for: correctness bugs, race/ordering lies, silent error swallowing, unjustified fallbacks,\n";
-        critic_prompt += "API breaks, test gaps for the claimed behavior, security footguns, resource leaks.\n";
-        critic_prompt += "Precision over coverage — better 3 real issues than 20 maybes.\n";
-        critic_prompt += "Disposition fix or drop only. Prefix ids with C" + round.to_string() + "- (e.g. C1-1).\n";
-        critic_prompt += "If the tree is clean, return findings=[] and summary explaining what you checked.\n";
-        critic_prompt += "Do NOT edit.\n";
-
-        let critic_r = agent(critic_prompt, #{
-            label: "adv:critic-r" + round.to_string(),
-            capability_mode: "read-only",
-            agent_type: "explore",
-            output_schema: findings_schema,
-        });
-
-        let critic_json = "{\"findings\":[],\"summary\":\"critic failed\"}";
-        let n_findings = 0;
-        if critic_r != () && critic_r.success && critic_r.output != () {
-            critic_json = json_encode(critic_r.output);
-            if critic_r.output.findings != () {
-                n_findings = critic_r.output.findings.len();
-            }
-            gauntlet_notes.push("adv r" + round.to_string() + " critic: " + critic_r.output.summary);
-        } else {
-            gauntlet_notes.push("adv r" + round.to_string() + " critic failed — stopping adversarial");
-            adv_done = true;
-        }
-
-        if adv_done == false {
-            if n_findings == 0 {
-                adv_done = true;
-                adversarial_comment = "## Adversarial review (grokbe)\n\n✅ Clean after " + round.to_string() + " round(s). " + adv_start_note;
-            } else {
-                let author_prompt = "";
-                author_prompt += "You are the author in grokbe's adversarial debate (codex-debate author role).\n";
-                author_prompt += "EXECUTE NOW. Round " + round.to_string() + ".\n";
-                author_prompt += "Merge-base: " + merge_base + "  Branch: " + branch + "\n";
-                author_prompt += "You wrote (or own) this change. Critic findings JSON:\n" + critic_json + "\n\n";
-                author_prompt += "For each finding:\n";
-                author_prompt += "• If valid: fix it, commit fix(adv-r" + round.to_string() + "): <title> staging only its files.\n";
-                author_prompt += "• If invalid: dispute with concrete code evidence in the summary — do NOT apply a bad fix.\n";
-                author_prompt += "Never push. Never merge.\n";
-                author_prompt += "Return ok, status (fixed|disputed|mixed), applied commits, summary listing per-finding disposition,\n";
-                author_prompt += "comment_body as a compact round table for the PR (Round | Commit | Description).\n";
-
-                let author_r = agent(author_prompt, #{
-                    label: "adv:author-r" + round.to_string(),
-                    capability_mode: "all",
-                    output_schema: apply_schema,
-                });
-
-                if author_r != () && author_r.success && author_r.output != () {
-                    gauntlet_notes.push("adv r" + round.to_string() + " author: " + author_r.output.summary);
-                    if author_r.output.comment_body != () && author_r.output.comment_body != "" {
-                        if adversarial_comment == "" {
-                            adversarial_comment = "## Adversarial review (grokbe)\n\n" + author_r.output.comment_body;
-                        } else {
-                            adversarial_comment = adversarial_comment + "\n\n" + author_r.output.comment_body;
-                        }
-                    }
-                    // Continue to next round so critic re-reads the fixed tree.
-                    if author_r.output.applied != () && author_r.output.applied.len() == 0 {
-                        // No fixes applied (all disputed) — stop rather than loop forever.
-                        adv_done = true;
-                    }
-                } else {
-                    gauntlet_notes.push("adv r" + round.to_string() + " author failed");
-                    adv_done = true;
-                }
-            }
-        }
-        round += 1;
+    let codex_prompt = "";
+    codex_prompt += "You are the codex-debate track of grokbe's gauntlet (Claude /be-review step 2).\n";
+    codex_prompt += "EXECUTE NOW. Run the REAL `/codex-debate` review protocol — not a Grok-critic substitute.\n\n";
+    codex_prompt += "Branch: " + branch + "\n";
+    codex_prompt += "Merge-base (base for the debate): " + merge_base + "\n";
+    codex_prompt += "PR: #" + pr_number.to_string() + " (" + pr_url + ")\n";
+    codex_prompt += "Task/context (author-only, for YOUR fix/dispute reasoning): " + task + "\n";
+    if user_context != "" {
+        codex_prompt += "Extra context (author-only): " + user_context + "\n";
     }
-    if adv_done == false {
-        gauntlet_notes.push("adversarial: hit max rounds without clean critic pass");
+    if rationale != "" {
+        codex_prompt += "Rationale (thread into codex round-1 + your own reasoning — do not 'fix' deliberate decisions): " + rationale + "\n";
+    }
+    codex_prompt += "\n## Required reading (do this first)\n";
+    codex_prompt += "1. Read `.claude/skills/codex-debate/SKILL.md` end-to-end — that is the contract.\n";
+    codex_prompt += "2. Read `.claude/skills/kolu/SKILL.md` (and TUI.md if MCP is unavailable) — terminal drive protocol.\n";
+    codex_prompt += "3. You are the AUTHOR. Codex is the independent REVIEWER. Independence is the point.\n\n";
+    codex_prompt += "## Hard constraints (acceptance for this track)\n";
+    codex_prompt += "- Spawn a **live `codex` session via Kolu** as a **split terminal parented to your own terminal**\n";
+    codex_prompt += "  (MCP `lifecycle_create` with `parentId`, or `padi-tui create --parent` fallback).\n";
+    codex_prompt += "  Launch: `codex --yolo` at effort **xhigh**, cwd = this repo. Confirm footer shows YOLO before dispatch.\n";
+    codex_prompt += "- **FORBIDDEN:** Grok explore/critic subagents, same-model adversarial loops, artificial round caps,\n";
+    codex_prompt += "  deadlock exits, or any substitute for a live Codex reviewer.\n";
+    codex_prompt += "- Loop matches `/codex-debate` **review** mode:\n";
+    codex_prompt += "  • verdict files under `$REPO/.codex-debate/verdict-NNN.json` (schema in the skill)\n";
+    codex_prompt += "  • consensus only when `approved: true` (every finding resolved, every severity)\n";
+    codex_prompt += "  • **no round cap, no deadlock exit** (resolved-and-deferred gates only for genuine ship-phase items)\n";
+    codex_prompt += "  • per-round commits of agreed fixes (path-only staging; never `git add -A`)\n";
+    codex_prompt += "  • talk via files + short pointer (multi-line paste rule); re-ask on missing/malformed verdict — never guess\n";
+    codex_prompt += "  • record BOTH sides' terminal id **and title** (kaval re-key safety)\n";
+    codex_prompt += "- Run with the equivalent of:\n";
+    codex_prompt += "  `review --base " + merge_base + " --effort xhigh --no-comment`\n";
+    codex_prompt += "  (`--no-comment`: gauntlet posts the compact PR comment AFTER the final push, not now)\n";
+    codex_prompt += "- Never push. Never merge. Tear down **only** the codex split you spawned (by id/title, never pattern-kill).\n\n";
+    codex_prompt += "## Steps (mirror /be-review codex step)\n";
+    codex_prompt += "1. Preflight: `codex login status` (if not logged in → status=reviewer-error, ok=false, stop).\n";
+    codex_prompt += "   Clean tree for commit mode; prepare gitignored `.codex-debate/` (wipe prior verdict-*/section-*/ask-*).\n";
+    codex_prompt += "2. Capture `CODEX_START=$(git rev-parse HEAD)` before the debate.\n";
+    codex_prompt += "3. Spawn + drive the debate to consensus per the skill (you fix/dispute; codex reviews).\n";
+    codex_prompt += "4. On **consensus**, assemble the **compact** PR comment body (do NOT post it yet):\n";
+    codex_prompt += "   - Header: `## Codex ⇄ Grok debate` then\n";
+    codex_prompt += "     `✅ Consensus in N rounds · reviewer effort: xhigh · base: " + merge_base + "`\n";
+    codex_prompt += "   - Table of debate commits only (`git log --reverse --oneline $CODEX_START..HEAD`):\n";
+    codex_prompt += "     `| Round | Commit | Description |` with **bare** short SHAs (no backticks — GitHub autolink)\n";
+    codex_prompt += "   - **Legend** — one line per finding id from verdict files (skill's jq recipe)\n";
+    codex_prompt += "   Put that markdown in `comment_body`.\n";
+    codex_prompt += "5. On **reviewer-error** / merge-base failure: no false-consensus comment; ok=false; empty comment_body.\n";
+    codex_prompt += "6. Return structured output.\n\n";
+    codex_prompt += "Return: ok (true only on consensus), status (consensus|reviewer-error|merge-base-error),\n";
+    codex_prompt += "rounds (integer), effort=xhigh, summary, comment_body, codex_start, head_sha.\n";
+
+    let codex_r = agent(codex_prompt, #{
+        label: "adv:codex-debate",
+        capability_mode: "all",
+        output_schema: codex_schema,
+    });
+
+    if codex_r != () && codex_r.success && codex_r.output != () {
+        let cstatus = codex_r.output.status;
+        if cstatus == () {
+            cstatus = "unknown";
+        }
+        let csum = codex_r.output.summary;
+        if csum == () {
+            csum = "";
+        }
+        gauntlet_notes.push("codex-debate: " + cstatus + " — " + csum);
+        // Proof gate: consensus requires ok + status + success artifacts
+        // (rounds>=1, effort=xhigh, non-empty comment_body / SHAs).
+        let crounds = if codex_r.output.rounds != () { codex_r.output.rounds } else { 0 };
+        let ceffort = if codex_r.output.effort != () { codex_r.output.effort } else { "" };
+        let cbody = if codex_r.output.comment_body != () { codex_r.output.comment_body } else { "" };
+        let cstart = if codex_r.output.codex_start != () { codex_r.output.codex_start } else { "" };
+        let chead = if codex_r.output.head_sha != () { codex_r.output.head_sha } else { "" };
+        let artifacts_ok = crounds >= 1 && ceffort == "xhigh" && cbody != "" && cstart != "" && chead != "";
+        let consensus = codex_r.output.ok == true && cstatus == "consensus" && artifacts_ok;
+        if consensus {
+            adversarial_comment = cbody;
+        } else {
+            gauntlet_ok = false;
+            if codex_r.output.ok == true && cstatus == "consensus" && !artifacts_ok {
+                gauntlet_notes.push("codex-debate: PROOF GATE FAIL — claimed consensus but missing artifacts (rounds/effort/comment/SHAs)");
+            } else {
+                gauntlet_notes.push("codex-debate: PROOF GATE FAIL — no consensus (gauntlet_ok=false)");
+            }
+        }
+    } else {
+        gauntlet_ok = false;
+        gauntlet_notes.push("codex-debate: agent failed — PROOF GATE FAIL (gauntlet_ok=false)");
     }
 } else {
-    gauntlet_notes.push("adversarial: skipped via tracks");
+    gauntlet_notes.push("adversarial/codex-debate: skipped via tracks");
 }
 
 // ── Track: simplify ──────────────────────────────────────────────────────────
@@ -809,7 +1071,7 @@ push_prompt += "   Only after a successful push (or if nothing to push and PR ex
 push_prompt += "3. Post PR comments with gh pr comment " + pr_number.to_string() + " -F <file> for each non-empty body below.\n";
 push_prompt += "   Write each body to a temp file first. Skip empty bodies.\n\n";
 push_prompt += "--- LENS COMMENT ---\n" + lens_comment + "\n--- END LENS ---\n\n";
-push_prompt += "--- ADVERSARIAL COMMENT ---\n" + adversarial_comment + "\n--- END ADVERSARIAL ---\n\n";
+push_prompt += "--- CODEX-DEBATE COMMENT ---\n" + adversarial_comment + "\n--- END CODEX-DEBATE ---\n\n";
 push_prompt += "--- POLICE COMMENT ---\n" + police_comment + "\n--- END POLICE ---\n\n";
 push_prompt += "If a required push fails, do NOT post comments (SHAs would be local-only). Report failure.\n";
 push_prompt += "NEVER merge the PR.\n";
@@ -820,24 +1082,37 @@ let push_r = agent(push_prompt, #{
     capability_mode: "all",
     output_schema: stage_schema,
 });
-if push_r != () && push_r.success && push_r.output != () {
+if push_r != () && push_r.success && push_r.output != () && push_r.output.ok == true {
     gauntlet_notes.push("push/comment: " + push_r.output.summary);
 } else {
-    gauntlet_notes.push("push/comment: failed");
+    push_ok = false;
+    gauntlet_notes.push("push/comment: FAILED (push_ok=false)");
 }
 
+} // end do_gauntlet
+
 // ── Ship: merge latest base, then CI + evidence in parallel ──────────────────
+
+let ci_ok = false;
+let ci_summary = "ci skipped (from=" + from_arg + ")";
+let evidence_ok = true;
+let evidence_summary = "evidence skipped (from=" + from_arg + ")";
+let evidence_posted = false;
+
+if do_ship {
 
 phase("Ship");
 
 let sync_prompt = "";
 sync_prompt += "Ship pre-sync for grokbe (Claude /be §5). EXECUTE NOW.\n";
 sync_prompt += "Branch: " + branch + "\n";
+sync_prompt += "Base ref to merge (NOT necessarily origin/master): " + base_ref + "\n";
 sync_prompt += "1. git fetch origin\n";
-sync_prompt += "2. If origin default is NOT already an ancestor of HEAD, merge origin's default branch into HEAD.\n";
+sync_prompt += "2. If " + base_ref + " is NOT already an ancestor of HEAD, merge " + base_ref + " into HEAD.\n";
+sync_prompt += "   Use the resolved remote-tracking base_ref exactly — do not substitute origin/master/main unless base_ref is that.\n";
 sync_prompt += "   Resolve real conflicts properly — never paper over.\n";
 sync_prompt += "3. Push the branch.\n";
-sync_prompt += "4. Return ok, changed, summary.\n";
+sync_prompt += "4. Return ok=true only if merge (if needed) and push succeeded. ok=false on conflict/push failure.\n";
 sync_prompt += "NEVER merge the PR to the default branch.\n";
 
 let sync_r = agent(sync_prompt, #{
@@ -845,9 +1120,17 @@ let sync_r = agent(sync_prompt, #{
     capability_mode: "all",
     output_schema: stage_schema,
 });
-if sync_r != () && sync_r.success && sync_r.output != () {
-    log("ship-sync: " + sync_r.output.summary);
+if sync_r == () || !sync_r.success || sync_r.output == () || sync_r.output.ok != true {
+    complete(#{
+        ok: false,
+        phase: "ship-sync",
+        summary: "Ship sync failed — could not merge base_ref=" + base_ref + " or push.",
+        pr_url: pr_url,
+        branch: branch,
+        detail: sync_r,
+    });
 }
+log("ship-sync: " + sync_r.output.summary);
 
 // CI and evidence are independent — fan out (Claude /be §5).
 let ci_prompt = "";
@@ -887,11 +1170,9 @@ let ship_jobs = [
 ];
 let ship_results = parallel(ship_jobs);
 
-let ci_ok = false;
-let ci_summary = "ci leg missing";
-let evidence_ok = false;
-let evidence_summary = "evidence leg missing";
-let evidence_posted = false;
+ci_summary = "ci leg missing";
+evidence_ok = false;
+evidence_summary = "evidence leg missing";
 
 if ship_results[0] != () && ship_results[0].success && ship_results[0].output != () {
     ci_ok = ship_results[0].output.ok == true && ship_results[0].output.ci_green == true;
@@ -905,6 +1186,17 @@ if ship_results[1] != () && ship_results[1].success && ship_results[1].output !=
     }
 }
 
+} else {
+    phase("Ship");
+    log("ship skipped — from=" + from_arg);
+    // Gauntlet-only: CI/evidence not required; proof gates still apply below.
+    ci_ok = true;
+    evidence_ok = true;
+}
+
+// Final outcome: ship legs AND proof gates (codex consensus when selected, push when gauntlet ran).
+let final_ok = ci_ok && evidence_ok && gauntlet_ok && push_ok;
+
 // ── Done ─────────────────────────────────────────────────────────────────────
 
 phase("Done");
@@ -913,9 +1205,11 @@ let report = "";
 report += "# grokbe complete\n\n";
 report += "**PR:** " + pr_url + "\n";
 report += "**Branch:** " + branch + "\n";
+report += "**from:** " + from_arg + "\n";
 report += "**Task:** " + task + "\n";
 report += "**task_kind:** " + task_kind + "\n";
-report += "**tracks:** " + tracks_csv + "\n\n";
+report += "**tracks:** " + tracks_csv + "\n";
+report += "**ok:** " + bool_str(final_ok) + " (ci=" + bool_str(ci_ok) + " evidence=" + bool_str(evidence_ok) + " gauntlet=" + bool_str(gauntlet_ok) + " push=" + bool_str(push_ok) + ")\n\n";
 report += "## Implementation\n" + impl_summary + "\n\n";
 if plan_path != "" {
     report += "## Plan\n" + plan_path + " — " + plan_summary + "\n\n";
@@ -925,24 +1219,36 @@ for note in gauntlet_notes {
     report += "- " + note + "\n";
 }
 report += "\n## Ship\n";
-report += "- CI: " + ci_summary + " (green=" + bool_str(ci_ok) + ")\n";
-report += "- Evidence: " + evidence_summary + " (posted=" + bool_str(evidence_posted) + ")\n\n";
+if do_ship {
+    report += "- CI: " + ci_summary + " (green=" + bool_str(ci_ok) + ")\n";
+    report += "- Evidence: " + evidence_summary + " (posted=" + bool_str(evidence_posted) + ")\n\n";
+} else {
+    report += "- skipped (from=" + from_arg + ")\n\n";
+}
 report += "## Notes\n";
 report += "- Never merged — human reviews commits and merges when satisfied.\n";
-report += "- Adversarial track substitutes for Claude's codex⇄author debate (no codex session in Grok).\n";
-report += "- Lens track runs lowy ∥ hickey independently, then one reconcile+apply editor.\n";
+if do_adversarial {
+    report += "- Adversarial track runs real /codex-debate via Kolu (live codex --yolo, effort xhigh) — no substitute critic. Proof gate: consensus required when selected.\n";
+}
+if do_lens {
+    report += "- Lens track runs lowy ∥ hickey independently, then one reconcile+apply editor.\n";
+}
+report += "- YOLO reviewer assumes a TRUSTED local branch (codex-debate skill honest limit) — not for untrusted third-party PRs.\n";
 
 let report_path = write_scratch_file("grokbe-report.md", report);
 log(report);
 
 complete(#{
-    ok: ci_ok && evidence_ok,
+    ok: final_ok,
     pr_url: pr_url,
     pr_number: pr_number,
     branch: branch,
     task_kind: task_kind,
     tracks: tracks_csv,
+    from: from_arg,
     gauntlet: gauntlet_notes,
+    gauntlet_ok: gauntlet_ok,
+    push_ok: push_ok,
     ci_green: ci_ok,
     evidence_posted: evidence_posted,
     report_path: report_path,
