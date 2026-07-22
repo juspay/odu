@@ -389,8 +389,6 @@ describe("tryClaim — hold loss surfaces locally", () => {
       stdout: "HELD\n",
       code: 0,
       hold: {
-        child: child as never,
-        writeHeartbeat: () => {},
         release: () => {
           intentional = true;
         },
@@ -428,8 +426,6 @@ describe("tryClaim — hold loss surfaces locally", () => {
       stdout: "HELD\n",
       code: 0,
       hold: {
-        child: child as never,
-        writeHeartbeat: () => {},
         release: () => {
           intentional = true;
         },

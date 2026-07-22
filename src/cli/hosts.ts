@@ -12,26 +12,14 @@ import {
 } from "../coordinator/lease";
 
 function stateLabel(probe: ProbeResult): string {
-  switch (probe.state) {
-    case "free":
-      return "free";
-    case "busy":
-      return "busy";
-    case "local":
-      return "local";
-    case "unreachable":
-      return "down";
-  }
+  return probe.state === "unreachable" ? "down" : probe.state;
 }
 
 function heldByColumn(probe: ProbeResult, nowMs: number): string {
   if (probe.state === "busy" && probe.heldBy !== null) {
     return formatHolder(probe.heldBy, nowMs);
   }
-  if (probe.state === "unreachable") {
-    return probe.error;
-  }
-  return "";
+  return probe.state === "unreachable" ? probe.error : "";
 }
 
 export async function hostsCommand(): Promise<number> {

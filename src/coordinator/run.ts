@@ -144,26 +144,17 @@ export async function ensureCheckoutFree(
   if (supersede) {
     // Prefer graceful surface cancel when the socket is up; always clear a
     // lease-waiting holder that never reached serveSocket.
+    const supersedeTimeout = {
+      ok: false as const,
+      reason: "supersede-timeout" as const,
+      message:
+        "odu: supersede — the run already in progress here did not shut down in time.",
+    };
     const { confirmed } = await cancel(socketPath);
-    if (!confirmed) {
-      return {
-        ok: false,
-        reason: "supersede-timeout",
-        message:
-          "odu: supersede — the run already in progress here did not shut down in time.",
-      };
-    }
+    if (!confirmed) return supersedeTimeout;
     if (liveLockPid(lockPath) !== null) {
       signalLock(lockPath, "SIGTERM");
-      const free = await waitLockFree(lockPath);
-      if (!free) {
-        return {
-          ok: false,
-          reason: "supersede-timeout",
-          message:
-            "odu: supersede — the run already in progress here did not shut down in time.",
-        };
-      }
+      if (!(await waitLockFree(lockPath))) return supersedeTimeout;
     }
     return { ok: true };
   }
@@ -195,11 +186,9 @@ export function applyInterruptStopWork(
   exclusivityLost: boolean,
   stop: () => void,
 ): void {
-  if (phase === "before-settle") {
-    if (exclusivityLost) stop();
-    return;
-  }
-  stop();
+  // before-settle: only on exclusivity loss (flock already free).
+  // after-settle: always (idempotent second pass after lease-loss early stop).
+  if (phase === "after-settle" || exclusivityLost) stop();
 }
 
 function git(repo: string, args: string[]): string {

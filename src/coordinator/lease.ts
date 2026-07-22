@@ -192,10 +192,8 @@ export interface DialResult {
   stdout: string;
   /** Process exit code, or null if killed/timeout without a code. */
   code: number | null;
-  /** For claim holds: the live child + a way to feed heartbeats / release. */
+  /** Claim hold session: release drops the flock; lost fires on unexpected end. */
   hold?: {
-    child: ChildProcess;
-    writeHeartbeat: () => void;
     release: () => void;
     /** Resolves on unexpected hold-child death (not after intentional release). */
     lost: Promise<void>;
@@ -311,13 +309,14 @@ function dialClaim(host: string, script: string): Promise<DialResult> {
         clearTimeout(timer);
         if (/\bHELD\b/.test(stdout)) {
           let intentionalRelease = false;
-          const hb = setInterval(() => {
+          const writeHb = (): void => {
             try {
               child.stdin?.write("\n");
             } catch {
-              // ignore — release/close will end the interval
+              /* ignore — release/close ends the interval */
             }
-          }, HEARTBEAT_S * 1000);
+          };
+          const hb = setInterval(writeHb, HEARTBEAT_S * 1000);
           hb.unref?.();
           // Surface unexpected hold end (MAX_HOLD, TTL, remote kill, ssh drop)
           // so the claim layer does not keep treating the host as exclusively
@@ -332,14 +331,6 @@ function dialClaim(host: string, script: string): Promise<DialResult> {
             stdout,
             code: 0,
             hold: {
-              child,
-              writeHeartbeat: () => {
-                try {
-                  child.stdin?.write("\n");
-                } catch {
-                  /* ignore */
-                }
-              },
               release: () => {
                 intentionalRelease = true;
                 clearInterval(hb);
@@ -418,13 +409,12 @@ export async function tryClaim(
   }
 
   if (/\bHELD\b/.test(result.stdout) && result.hold !== undefined) {
-    const hold = result.hold;
     return {
       kind: "held",
       lease: {
         host,
-        release: () => hold.release(),
-        lost: hold.lost,
+        release: result.hold.release,
+        lost: result.hold.lost,
       },
     };
   }
@@ -577,6 +567,26 @@ function busyError(
   );
 }
 
+function waitLineNote(
+  busy: { host: string; heldBy: HolderInfo | null }[],
+  unreachable: { host: string; error: string }[],
+  nowMs: number,
+  still: boolean,
+): string {
+  const busyDesc = formatBusyDesc(busy, nowMs);
+  const unreach =
+    unreachable.length > 0
+      ? `; ${unreachable.map((u) => shortHost(u.host)).join(", ")} unreachable`
+      : "";
+  return still
+    ? `still waiting — ${busyDesc}`
+    : `waiting — ${busyDesc}${unreach}`;
+}
+
+function releaseAll(leases: readonly LeaseHandle[]): void {
+  for (const lease of leases) lease.release();
+}
+
 /**
  * Single non-waiting pass over a platform pool. Pure-local → ok without claim.
  * Used by `acquireFromPool` (wait loop) and `leaseLanes` (all-or-nothing multi).
@@ -679,22 +689,14 @@ export async function acquireFromPool(
       throw unreachableError(platform, scan.unreachable);
     }
 
-    const busyDesc = formatBusyDesc(scan.busy, now());
     if (noWait) {
       throw busyError(platform, scan.busy, now());
     }
 
-    if (!waited) {
-      onLine?.(
-        `${platform}: waiting — ${busyDesc}` +
-          (scan.unreachable.length > 0
-            ? `; ${scan.unreachable.map((u) => shortHost(u.host)).join(", ")} unreachable`
-            : ""),
-      );
-      waited = true;
-    } else {
-      onLine?.(`${platform}: still waiting — ${busyDesc}`);
-    }
+    onLine?.(
+      `${platform}: ${waitLineNote(scan.busy, scan.unreachable, now(), waited)}`,
+    );
+    waited = true;
     await sleep(WAIT_POLL_MS);
   }
 }
@@ -717,15 +719,6 @@ export interface LeasedLanes {
   leases: LeaseHandle[];
 }
 
-/**
- * Lease one host per platform that participates in the run.
- *
- * Multi-platform is all-or-nothing: one pass claims every platform without
- * waiting; if any platform is busy, holds already taken are released, then
- * the whole set sleeps and retries (or fails under `noWait`). Sorted platform
- * order is only for deterministic scan within a pass — never hold platform A
- * while blocked on B.
- */
 /**
  * Venue lock is one file per machine (`/tmp/odu.lease`), not per platform.
  * If two platforms in the same run list the same remote host, all-or-nothing
@@ -765,6 +758,15 @@ function assertNoSharedRemoteHosts(
   }
 }
 
+/**
+ * Lease one host per platform that participates in the run.
+ *
+ * Multi-platform is all-or-nothing: one pass claims every platform without
+ * waiting; if any platform is busy, holds already taken are released, then
+ * the whole set sleeps and retries (or fails under `noWait`). Sorted platform
+ * order is only for deterministic scan within a pass — never hold platform A
+ * while blocked on B.
+ */
 export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
   const platforms = [...opts.platforms].sort();
   assertNoSharedRemoteHosts(opts.pools, platforms);
@@ -817,12 +819,12 @@ export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
         break;
       }
     } catch (e) {
-      for (const lease of leases) lease.release();
+      releaseAll(leases);
       throw e;
     }
 
     if (hardFail !== null) {
-      for (const lease of leases) lease.release();
+      releaseAll(leases);
       throw hardFail;
     }
 
@@ -831,30 +833,24 @@ export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
     }
 
     // Partial hold while another platform is busy — drop everything, wait.
-    for (const lease of leases) lease.release();
+    releaseAll(leases);
 
     if (opts.noWait) {
       throw busyError(blocked.platform, blocked.busy, now());
     }
 
-    const busyDesc = formatBusyDesc(blocked.busy, now());
-    const unreachNote =
-      blocked.unreachable.length > 0
-        ? `; ${blocked.unreachable.map((u) => shortHost(u.host)).join(", ")} unreachable`
+    const note = waitLineNote(
+      blocked.busy,
+      blocked.unreachable,
+      now(),
+      waited,
+    );
+    const multi =
+      !waited && platforms.length > 1
+        ? " (releasing other platforms until the full set is free)"
         : "";
-    if (!waited) {
-      opts.onLine?.(
-        `${blocked.platform}: waiting — ${busyDesc}${unreachNote}` +
-          (platforms.length > 1
-            ? " (releasing other platforms until the full set is free)"
-            : ""),
-      );
-      waited = true;
-    } else {
-      opts.onLine?.(
-        `${blocked.platform}: still waiting — ${busyDesc}`,
-      );
-    }
+    opts.onLine?.(`${blocked.platform}: ${note}${multi}`);
+    waited = true;
     await sleep(WAIT_POLL_MS);
   }
 }

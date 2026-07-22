@@ -19,7 +19,6 @@ import type { BespokeTool } from "@kolu/surface-mcp";
 import { type CancelResult, cancelRun } from "../coordinator/cancel";
 import {
   liveRunLockPid,
-  RUN_LOCK_PATH,
   signalRunLockHolder,
   waitForRunLockFree,
 } from "../coordinator/checkoutLock";
@@ -187,14 +186,10 @@ export async function startRun(
 ): Promise<RunResult> {
   const socketPath = deps.socketPath ?? SOCKET_PATH;
   // Sibling of the socket (`.ci/odu.run.lock`); absolute when socketPath is.
-  const lockPath =
-    socketPath === SOCKET_PATH
-      ? RUN_LOCK_PATH
-      : join(dirname(socketPath), "odu.run.lock");
+  const lockPath = join(dirname(socketPath), "odu.run.lock");
 
   const existing = await tryDialSocket(socketPath);
-  const lockPid = liveRunLockPid(lockPath);
-  const busy = existing !== null || lockPid !== null;
+  const busy = existing !== null || liveRunLockPid(lockPath) !== null;
 
   if (busy) {
     if (existing !== null) existing.close();
@@ -209,27 +204,19 @@ export async function startRun(
     }
     // Supersede: cancel via socket when up; always clear a lease-waiting
     // holder that never reached serveSocket (SIGTERM on the run-lock PID).
+    const supersedeTimeout = {
+      ok: false as const,
+      started: false as const,
+      error: "supersede: the existing run did not shut down in time",
+    };
     if (existing !== null) {
       const cancel = deps.cancelExisting ?? cancelRun;
       const result = await cancel(socketPath);
-      if (!result.confirmed) {
-        return {
-          ok: false,
-          started: false,
-          error: "supersede: the existing run did not shut down in time",
-        };
-      }
+      if (!result.confirmed) return supersedeTimeout;
     }
     if (liveRunLockPid(lockPath) !== null) {
       signalRunLockHolder(lockPath, "SIGTERM");
-      const free = await waitForRunLockFree(lockPath);
-      if (!free) {
-        return {
-          ok: false,
-          started: false,
-          error: "supersede: the existing run did not shut down in time",
-        };
-      }
+      if (!(await waitForRunLockFree(lockPath))) return supersedeTimeout;
     }
   }
 

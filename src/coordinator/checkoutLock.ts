@@ -35,16 +35,19 @@ export interface RunLockHandle {
   release(): void;
 }
 
-/** PID of a live process holding `lockPath`, or `null` if free / stale. */
-export function liveRunLockPid(lockPath: string): number | null {
-  let raw: string;
+function readLockPid(lockPath: string): number | null {
   try {
-    raw = readFileSync(lockPath, "utf8").trim();
+    const pid = Number.parseInt(readFileSync(lockPath, "utf8").trim(), 10);
+    return Number.isFinite(pid) && pid > 0 ? pid : null;
   } catch {
     return null;
   }
-  const pid = Number.parseInt(raw, 10);
-  if (!Number.isFinite(pid) || pid <= 0) return null;
+}
+
+/** PID of a live process holding `lockPath`, or `null` if free / stale. */
+export function liveRunLockPid(lockPath: string): number | null {
+  const pid = readLockPid(lockPath);
+  if (pid === null) return null;
   try {
     process.kill(pid, 0);
     return pid;
@@ -120,15 +123,6 @@ export function tryAcquireRunLock(lockPath: string): RunLockHandle | null {
 
   process.once("exit", release);
   return { path: lockPath, pid: process.pid, release };
-}
-
-function readLockPid(lockPath: string): number | null {
-  try {
-    const pid = Number.parseInt(readFileSync(lockPath, "utf8").trim(), 10);
-    return Number.isFinite(pid) && pid > 0 ? pid : null;
-  } catch {
-    return null;
-  }
 }
 
 /**

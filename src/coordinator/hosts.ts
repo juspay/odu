@@ -77,12 +77,8 @@ function assertPoolLocality(
   platform: string,
   pool: readonly string[],
 ): void {
-  let anyLocal = false;
-  let anyRemote = false;
-  for (const host of pool) {
-    if (isLocalHost(host)) anyLocal = true;
-    else anyRemote = true;
-  }
+  const anyLocal = pool.some((h) => isLocalHost(h));
+  const anyRemote = pool.some((h) => !isLocalHost(h));
   if (anyLocal && anyRemote) {
     throw new Error(
       `odu: ${path}: host pool for "${platform}" must not mix localhost with remote hosts` +
@@ -103,9 +99,7 @@ function parsePool(
         `odu: ${path}: host for "${platform}" must be a non-empty string`,
       );
     }
-    // Single host — pure by construction; still assert for symmetry if someone
-    // later folds pins through the same gate.
-    assertPoolLocality(path, platform, [value]);
+    // Single host — pure by construction (no mix possible).
     return [value];
   }
   if (Array.isArray(value)) {
