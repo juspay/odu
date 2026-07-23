@@ -203,6 +203,16 @@ export class StatusPoster {
     post.attempts = 0;
   }
 
+  /** Desired payload still needing a confirmed send, or `undefined` if settled. */
+  private owedDesired(post: ContextPost): StatusPayload | undefined {
+    const d = post.desired;
+    if (d === undefined) return undefined;
+    if (post.confirmed !== undefined && payloadEqual(post.confirmed, d)) {
+      return undefined;
+    }
+    return d;
+  }
+
   /** Drop a post entry when it holds nothing useful. */
   private prune(context: string, post: ContextPost): void {
     if (
@@ -217,16 +227,33 @@ export class StatusPoster {
     }
   }
 
+  /** Clear desired + debt after a confirmed match; emit health. */
+  private settleDesired(context: string, post: ContextPost): void {
+    post.desired = undefined;
+    this.clearDebt(post);
+    this.clearWake(post);
+    this.prune(context, post);
+    this.emitHealth();
+  }
+
+  /**
+   * Schedule a follow-up send when desired moved mid-flight and no wake is armed.
+   * Debounce while open; immediate enqueue while finalizing.
+   */
+  private ensureWake(context: string, post: ContextPost): void {
+    if (post.wake !== undefined) return;
+    const phase = this.currentPhase();
+    if (phase === "closed") return;
+    if (phase === "finalizing") this.enqueue(context);
+    else this.scheduleDebounce(context);
+  }
+
   /** Current posting health for the live surface. */
   health(): PostingHealth {
     if (!this.opts.enabled) return EMPTY_POSTING;
     const owed: OwedStatus[] = [];
     for (const [context, post] of this.posts) {
-      const d = post.desired;
-      if (d === undefined) continue;
-      if (post.confirmed !== undefined && payloadEqual(post.confirmed, d)) {
-        continue;
-      }
+      if (this.owedDesired(post) === undefined) continue;
       owed.push({
         context,
         lastError: post.lastError ?? null,
@@ -295,18 +322,11 @@ export class StatusPoster {
       post.confirmed !== undefined &&
       payloadEqual(post.confirmed, payload)
     ) {
-      // Incoming matches confirmed — only clear debt when desired is absent or
-      // the *same* payload. A newer different desired must not be discarded
-      // (e.g. seed success, then failure still in debounce, then success re-post).
-      const existing = post.desired;
-      if (existing === undefined || payloadEqual(existing, payload)) {
-        if (existing !== undefined) {
-          post.desired = undefined;
-          this.clearDebt(post);
-          this.clearWake(post);
-          this.prune(payload.context, post);
-          this.emitHealth();
-        }
+      // Incoming matches confirmed — clear debt only when desired is the *same*
+      // payload. A newer different desired must not be discarded (e.g. seed
+      // success, failure still in debounce, then success re-post).
+      if (post.desired !== undefined && payloadEqual(post.desired, payload)) {
+        this.settleDesired(payload.context, post);
       }
       return;
     }
@@ -364,11 +384,8 @@ export class StatusPoster {
     const attempted = new Set<string>();
     for (;;) {
       for (const [context, post] of this.posts) {
-        const d = post.desired;
+        const d = this.owedDesired(post);
         if (d === undefined) continue;
-        if (post.confirmed !== undefined && payloadEqual(post.confirmed, d)) {
-          continue;
-        }
         const mark = attemptMark(d);
         if (attempted.has(mark)) continue;
         attempted.add(mark);
@@ -379,12 +396,8 @@ export class StatusPoster {
       if (this.queue !== q) continue;
       let more = false;
       for (const [, post] of this.posts) {
-        const d = post.desired;
-        if (d === undefined) continue;
-        if (post.confirmed !== undefined && payloadEqual(post.confirmed, d)) {
-          continue;
-        }
-        if (!attempted.has(attemptMark(d))) {
+        const d = this.owedDesired(post);
+        if (d !== undefined && !attempted.has(attemptMark(d))) {
           more = true;
           break;
         }
@@ -428,13 +441,10 @@ export class StatusPoster {
     if (this.currentPhase() === "closed") return;
     const post = this.posts.get(context);
     if (post === undefined) return;
-    const payload = post.desired;
-    if (payload === undefined) return;
-    if (post.confirmed !== undefined && payloadEqual(post.confirmed, payload)) {
-      post.desired = undefined;
-      this.clearDebt(post);
-      this.prune(context, post);
-      this.emitHealth();
+    const payload = this.owedDesired(post);
+    if (payload === undefined) {
+      // Desired matches confirmed (or is absent) — drop any stale desired.
+      if (post.desired !== undefined) this.settleDesired(context, post);
       return;
     }
 
@@ -451,32 +461,18 @@ export class StatusPoster {
       // so the next comparison is against what GitHub actually has.
       post.confirmed = payload;
       if (!desiredMoved) {
-        post.desired = undefined;
-        this.clearDebt(post);
-        this.prune(context, post);
-        this.emitHealth();
+        this.settleDesired(context, post);
         return;
       }
-      // Keep the newer desired; ensure a follow-up send is scheduled if post()
-      // did not already leave a wake (e.g. coalesced during the same tick).
+      // Keep the newer desired; arm a follow-up if post() did not already.
       this.emitHealth();
-      if (post.wake === undefined && this.currentPhase() !== "closed") {
-        if (this.currentPhase() === "finalizing") this.enqueue(context);
-        else this.scheduleDebounce(context);
-      }
+      this.ensureWake(context, post);
       return;
     }
 
     if (desiredMoved) {
       // Failure was about the old payload; leave debt/attempts for the new desired.
-      if (post.wake === undefined && this.currentPhase() === "open") {
-        this.scheduleDebounce(context);
-      } else if (
-        post.wake === undefined &&
-        this.currentPhase() === "finalizing"
-      ) {
-        this.enqueue(context);
-      }
+      this.ensureWake(context, post);
       return;
     }
 
@@ -713,9 +709,7 @@ export function unpostedNote(n: number): string {
 export function postingWarning(health: PostingHealth): string | null {
   if (health.owed.length === 0) return null;
   const n = health.owed.length;
-  const last =
-    health.owed.map((o) => o.lastError).find((e) => e !== null && e !== "") ??
-    null;
+  const last = health.owed.find((o) => o.lastError)?.lastError ?? null;
   const noun = n === 1 ? "status" : "statuses";
   const err = last !== null ? `, last error: ${last}` : "";
   // "sending" before the first attempt (debounce window); "retrying" after.
