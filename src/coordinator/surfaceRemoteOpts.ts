@@ -9,13 +9,31 @@
 
 import type { Logger } from "@kolu/log";
 
-/** Clean HOME/PATH for a localhost odu-runner spawn — never ambient
- *  `process.env`. Mirrors drishti's inline composition (odu has no kolu-pty). */
+/** Non-secret runtime state a localhost runner needs from its host session.
+ *
+ * In particular, nix-quick-install-action configures macOS through the three
+ * NIX_* variables below. Dropping NIX_SSL_CERT_FILE lets the already-realised
+ * runner start, but makes recipe-level `nix develop` fail on its first fetch.
+ */
+const LOCALHOST_ENV_ALLOWLIST = [
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "PATH",
+  "SHELL",
+  "TMPDIR",
+  "NIX_PROFILES",
+  "NIX_USER_PROFILE_DIR",
+  "NIX_SSL_CERT_FILE",
+] as const;
+
+/** Clean environment for a localhost odu-runner spawn — never ambient
+ *  `process.env`. */
 export function localhostSpawnEnv(
   env: NodeJS.ProcessEnv = process.env,
 ): Record<string, string> {
   return Object.fromEntries(
-    (["HOME", "PATH"] as const)
+    LOCALHOST_ENV_ALLOWLIST
       .map((k): [string, string | undefined] => [k, env[k]])
       .filter((e): e is [string, string] => e[1] !== undefined),
   );
