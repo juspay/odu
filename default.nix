@@ -46,7 +46,8 @@ let
         ${pkgs.kolu-surface-mcp} @kolu/surface-mcp \
         ${pkgs.kolu-surface-remote} @kolu/surface-remote \
         ${pkgs.kolu-shell-quote} @kolu/shell-quote \
-        ${pkgs.kolu-surface-map} @kolu/surface-map
+        ${pkgs.kolu-surface-map} @kolu/surface-map \
+        ${pkgs.kolu-log} @kolu/log
       cp -r . $out
       runHook postInstall
     '';

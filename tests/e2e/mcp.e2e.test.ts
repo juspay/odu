@@ -58,14 +58,15 @@ describe("odu mcp — wait_for_settle (black-box, juspay/odu#49)", () => {
     try {
       // The issue's exact reproduction: wait_for_settle in a checkout with no
       // live run. Pre-fix this returned {settled:false, …} in ~2ms; now the tool
-      // call fails LOUD with the CLI's `odu status` message (surface-mcp surfaces
-      // a handler throw as a failed tools/call, so the client rejects).
-      await expect(
-        client.callTool({
-          name: "wait_for_settle",
-          arguments: { timeout_ms: 5000 },
-        }),
-      ).rejects.toThrow(/no run in progress in this checkout/);
+      // fails LOUD with the CLI's `odu status` message. surface-mcp surfaces a
+      // handler throw as a tools/call result with isError:true (not a JSON-RPC
+      // reject) — the loud text is the contract, not the transport shape.
+      const res = await client.callTool({
+        name: "wait_for_settle",
+        arguments: { timeout_ms: 5000 },
+      });
+      expect(res.isError).toBe(true);
+      expect(resultText(res)).toMatch(/no run in progress in this checkout/);
     } finally {
       await close();
       cleanup(dir);
@@ -120,16 +121,16 @@ describe("odu mcp — wait_for_settle (black-box, juspay/odu#49)", () => {
       });
       expect(runStarted(run)).toBe(true);
 
-      await expect(
-        client.callTool({
-          name: "wait_for_settle",
-          arguments: {
-            timeout_ms: 10_000,
-            fail_fast: false,
-            expected_sha: "0000000",
-          },
-        }),
-      ).rejects.toThrow(/no live run matching 0000000/);
+      const res = await client.callTool({
+        name: "wait_for_settle",
+        arguments: {
+          timeout_ms: 10_000,
+          fail_fast: false,
+          expected_sha: "0000000",
+        },
+      });
+      expect(res.isError).toBe(true);
+      expect(resultText(res)).toMatch(/no live run matching 0000000/);
 
       // Clean up the lingering coordinator so the fixture teardown is quiet.
       await client.callTool({ name: "cancel", arguments: {} });

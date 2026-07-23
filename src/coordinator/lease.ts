@@ -31,6 +31,7 @@ import {
   type LeaseHolder,
 } from "../common/surface";
 import { shortHost, type HostPool } from "./hosts";
+import { lineLogger, localhostSpawnEnv } from "./surfaceRemoteOpts";
 
 export type HolderInfo = LeaseHolder;
 
@@ -180,10 +181,12 @@ export async function tryClaim(
       host,
       binary: "odu-runner",
       resolveDrvPath: opts.resolveDrvPath,
+      localEnv: localhostSpawnEnv(),
     }),
     initialConnection: "probing",
     label: `lease:${shortHost(host)}`,
-    onLog: opts.onLog,
+    // makeSession takes a structured Logger (kolu#1876+); adapt the line sink.
+    ...(opts.onLog !== undefined ? { log: lineLogger(opts.onLog) } : {}),
   });
 
   let intentionalRelease = false;
@@ -265,10 +268,11 @@ export async function probeHost(
       host,
       binary: "odu-runner",
       resolveDrvPath: opts.resolveDrvPath,
+      localEnv: localhostSpawnEnv(),
     }),
     initialConnection: "probing",
     label: `lease-probe:${shortHost(host)}`,
-    onLog: opts.onLog,
+    ...(opts.onLog !== undefined ? { log: lineLogger(opts.onLog) } : {}),
   });
 
   try {

@@ -18,7 +18,8 @@ install:
       "$ODU_KOLU_SURFACE_MCP" @kolu/surface-mcp \
       "$ODU_KOLU_SURFACE_REMOTE" @kolu/surface-remote \
       "$ODU_KOLU_SHELL_QUOTE" @kolu/shell-quote \
-      "$ODU_KOLU_SURFACE_MAP" @kolu/surface-map'
+      "$ODU_KOLU_SURFACE_MAP" @kolu/surface-map \
+      "$ODU_KOLU_LOG" @kolu/log'
 
 typecheck: install
     {{ nix_shell }} pnpm typecheck

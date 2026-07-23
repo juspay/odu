@@ -15,6 +15,7 @@
  * agent client `@kolu/surface-mcp` hands the handler.
  */
 
+import { isDeadTransportError } from "@kolu/surface/client";
 import type { BespokeTool } from "@kolu/surface-mcp";
 import { z } from "zod";
 import { agentSummary } from "../cli/render";
@@ -160,6 +161,44 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
 		};
 	};
 
+	/** End-of-stream verdict (clean close OR a dead-transport rejection): a live
+	 *  run that was observed, then the coordinator socket closed. Shared by the
+	 *  for-await clean exit and the transport-death catch so both paths refuse a
+	 *  false green the same way. */
+	const streamEndedVerdict = (): SettleVerdict => {
+		// Loop ended. If our controller is aborted, the stream ended *because* of
+		// the timeout/cancel (the projected `nodes` stream swallows abort) — that's
+		// an abort verdict, never a settled one.
+		if (controller.signal.aborted) return abortedVerdict();
+		// The stream ended with no settle and no abort. If we never observed a
+		// LIVE run, there is none in this checkout — refuse LOUD, mirroring the
+		// CLI (`odu status`), rather than an instant empty verdict a caller can't
+		// tell apart from a real one (juspay/odu#49 ask 1).
+		if (last === undefined || !last.run) {
+			throw new NoLiveRunError(
+				`no run in progress in this checkout (no live socket at ${SOCKET_PATH})`,
+			);
+		}
+		// A live run WAS observed, but the coordinator then closed the socket
+		// (crash, interrupt, or a close race) with nodes still pending/running.
+		// `settled` is true only if the last snapshot was already terminal;
+		// `passed` requires that — a green verdict must never come from a
+		// half-observed run.
+		const red = agentSummary(last);
+		const settled = red.done;
+		return {
+			settled,
+			passed: settled && red.failed.length + red.errored.length === 0,
+			failed: red.failed,
+			errored: red.errored,
+			fail_fast_tripped: false,
+			timed_out: false,
+			cancelled: false,
+			duration_ms: now() - started,
+			...identityOf(last),
+		};
+	};
+
 	try {
 		for await (const snap of await opts.client.surface.nodes.get(undefined, {
 			signal: controller.signal,
@@ -206,37 +245,7 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
 				};
 			}
 		}
-		// Loop ended. If our controller is aborted, the stream ended *because* of
-		// the timeout/cancel (the projected `nodes` stream swallows abort) — that's
-		// an abort verdict, never a settled one.
-		if (controller.signal.aborted) return abortedVerdict();
-		// The stream ended with no settle and no abort. If we never observed a
-		// LIVE run, there is none in this checkout — refuse LOUD, mirroring the
-		// CLI (`odu status`), rather than an instant empty verdict a caller can't
-		// tell apart from a real one (juspay/odu#49 ask 1).
-		if (last === undefined || !last.run) {
-			throw new NoLiveRunError(
-				`no run in progress in this checkout (no live socket at ${SOCKET_PATH})`,
-			);
-		}
-		// A live run WAS observed, but the coordinator then closed the socket
-		// (crash, interrupt, or a close race) with nodes still pending/running.
-		// `settled` is true only if the last snapshot was already terminal;
-		// `passed` requires that — a green verdict must never come from a
-		// half-observed run.
-		const red = agentSummary(last);
-		const settled = red.done;
-		return {
-			settled,
-			passed: settled && red.failed.length + red.errored.length === 0,
-			failed: red.failed,
-			errored: red.errored,
-			fail_fast_tripped: false,
-			timed_out: false,
-			cancelled: false,
-			duration_ms: now() - started,
-			...identityOf(last),
-		};
+		return streamEndedVerdict();
 	} catch (err) {
 		// A deliberate loud refusal ALWAYS propagates — never downgrade it to an
 		// abort verdict. The `expected_sha`-mismatch throw happens inside the read
@@ -249,6 +258,10 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
 		// An abort that surfaces as a rejection (rather than a clean end) is the
 		// same timeout/cancel verdict.
 		if (controller.signal.aborted) return abortedVerdict();
+		// Peer process/socket death used to end the async iterator cleanly; newer
+		// @kolu/surface rejects with SURFACE_STDIO_TRANSPORT_CLOSED. Treat that as
+		// the same end-of-stream verdict (never a false green, never an uncaught).
+		if (isDeadTransportError(err)) return streamEndedVerdict();
 		throw err;
 	} finally {
 		clearTimeout(timer);
