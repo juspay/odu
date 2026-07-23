@@ -13,6 +13,11 @@
  */
 
 import { spawn } from "node:child_process";
+import {
+  createWriteStream,
+  mkdirSync,
+  type WriteStream,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 import type { BespokeTool } from "@kolu/surface-mcp";
@@ -239,36 +244,122 @@ export async function startRun(
   if (cmd === undefined) {
     return { ok: false, started: false, error: "cannot locate the odu binary" };
   }
+  // Tee stdout+stderr to the durable run log once the coordinator publishes
+  // sha7/seq (juspay/odu#61); keep an in-memory tail for startup-error reporting.
   const child = spawn(cmd, [...prefix, ...args], {
     cwd: process.cwd(),
-    stdio: ["ignore", "ignore", "pipe"],
+    stdio: ["ignore", "pipe", "pipe"],
     env: process.env,
   });
   liveRuns.add(child);
-  // Cap stderr to 64KB so a verbose child process can't grow this unboundedly.
+  // Cap the in-memory startup tail and the pre-open tee buffer so a verbose
+  // child (or a failed openRunLog) can't grow this unboundedly.
   const MAX_STDERR = 64 * 1024;
+  const MAX_PREOPEN = 64 * 1024;
   let stderr = "";
-  child.stderr?.on("data", (c: Buffer) => {
+  const preOpen: Buffer[] = [];
+  let preOpenBytes = 0;
+  /** Once true, stop buffering into preOpen (stream open failed or cap hit). */
+  let stopPreOpen = false;
+  let logStream: WriteStream | null = null;
+  const onChunk = (c: Buffer): void => {
     stderr = (stderr + c.toString("utf-8")).slice(-MAX_STDERR);
-  });
+    if (logStream !== null) {
+      logStream.write(c);
+      return;
+    }
+    if (stopPreOpen) return;
+    preOpenBytes = appendPreOpen(preOpen, c, MAX_PREOPEN, preOpenBytes);
+    if (preOpenBytes >= MAX_PREOPEN) stopPreOpen = true;
+  };
+  child.stdout?.on("data", onChunk);
+  child.stderr?.on("data", onChunk);
   const onExit = new Promise<number>((resolve) => {
     child.on("exit", (code) => {
       liveRuns.delete(child);
+      logStream?.end();
       resolve(code ?? -1);
     });
     child.on("error", () => {
       liveRuns.delete(child);
+      logStream?.end();
       resolve(-1);
     });
   });
 
   const r = await awaitStartup(waitForSocket, socketPath, onExit);
-  if (r.up) return { ok: true, started: true, pid: child.pid };
+  if (r.up) {
+    // Open `.ci/<sha7>/runs/<seq>.log` from the live surface identity and flush
+    // the buffered startup output into it; further chunks stream in live.
+    void openRunLog(socketPath).then((stream) => {
+      if (stream === null) {
+        // Durable log unavailable — drop the buffer; keep the 64KB startup tail.
+        preOpen.length = 0;
+        preOpenBytes = 0;
+        stopPreOpen = true;
+        return;
+      }
+      for (const chunk of preOpen) stream.write(chunk);
+      preOpen.length = 0;
+      preOpenBytes = 0;
+      logStream = stream;
+    });
+    return { ok: true, started: true, pid: child.pid };
+  }
   // Wait is exit-bounded under `defaultWaitForSocket`. If a custom wait gives
   // up while the child still lives (or exit races), do NOT SIGTERM — a healthy
   // lease waiter (juspay/odu#54) must keep its place in line; killing it was
   // the prior ~60s startup-window regression.
   return { ok: false, started: false, error: startupError(stderr, r.code) };
+}
+
+/**
+ * Append `chunk` to a pre-open buffer capped at `maxBytes`. Returns the new
+ * total byte count (never above maxBytes). Exported for unit tests.
+ */
+export function appendPreOpen(
+  chunks: Buffer[],
+  chunk: Buffer,
+  maxBytes: number,
+  currentBytes: number,
+): number {
+  if (currentBytes >= maxBytes) return currentBytes;
+  const room = maxBytes - currentBytes;
+  if (chunk.length <= room) {
+    chunks.push(chunk);
+    return currentBytes + chunk.length;
+  }
+  chunks.push(chunk.subarray(0, room));
+  return maxBytes;
+}
+
+/** Dial the live coordinator for sha7/seq and open the durable run log path.
+ *  Best-effort: null when identity is missing or dial fails. */
+export async function openRunLog(
+  socketPath: string,
+): Promise<WriteStream | null> {
+  const dialed = await tryDialSocket(socketPath);
+  if (dialed === null) return null;
+  try {
+    let sha7 = "";
+    let seq: number | undefined;
+    for await (const state of await dialed.client.surface.nodes.get({})) {
+      sha7 = state.sha7;
+      seq = state.seq;
+      break;
+    }
+    if (sha7 === "" || seq === undefined) return null;
+    const dir = join(dirname(socketPath), sha7, "runs");
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, `${seq}.log`);
+    return createWriteStream(path, { flags: "a" });
+  } catch {
+    // Best-effort durable log only: dial/identity/fs failures must not fail the
+    // run tool — the agent still gets live surface frames without a disk tee.
+    return null;
+  } finally {
+    dialed.close();
+  }
 }
 
 /** The failure message when a run never serves a socket — the run's own

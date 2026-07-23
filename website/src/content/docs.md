@@ -170,7 +170,7 @@ odu run [recipe[@platform]…]      run selectors; bare recipes fan out
     --linger                      keep serving after settlement
     --no-wait                     fail if every host in a pool is busy
 
-odu status [-o json]              snapshot the live run
+odu status [-o json]              snapshot the live run (json: {nodes, posting})
 odu logs [-f] <node>              replay and optionally follow a node log
 odu attach [-o json]              attach the live dashboard or event stream
 odu cancel                        cleanly stop the live run
@@ -201,7 +201,7 @@ The interface projects odu's [@kolu/surface](https://kolu.dev/surface/) through 
 | --- | --- |
 | `run` | Start a background coordinator. Supports `supersede`, `linger`, and `no_wait`. Reuses agent-held venues without re-claiming. |
 | `node_rerun` | Reset one node and its transitive dependents. |
-| `wait_for_settle` | Return on settlement or immediately when a node goes red. Carries `sha7` and the reserved `seq`, and fails loud with no live run or an `expected_sha` mismatch. |
+| `wait_for_settle` | Return on settlement or immediately when a node goes red. Carries `sha7`, the reserved `seq`, and `unposted[]` full owed rows (`{context, lastError, attempts}` — reporting debt does not block settle). Fails loud with no live run or an `expected_sha` mismatch. |
 | `cancel` | Stop and fully tear down the live run. |
 | `runs` | Read durable run history after the coordinator exits. |
 | `lease` | Agent-held venue: spawn a detached holder and return immediately with `held {host}` or `waiting {behind…}`. Re-call to observe the queue. |
@@ -209,7 +209,7 @@ The interface projects odu's [@kolu/surface](https://kolu.dev/surface/) through 
 
 Pipeline state and logs are subscribable resources rather than tools:
 
-- `surface://streams/nodes` — `{ run, pipeline, sha7, seq, nodes[] }`: run identity and every node's status, exit, duration, and red verdict.
+- `surface://streams/nodes` — `{ run, pipeline, sha7, seq, nodes[], unposted[] }`: run identity, every node's status/exit/duration/red verdict, and full owed GitHub status rows not yet confirmed.
 - `surface://collections/logs/{id}` — buffered live output, or the durable log after exit.
 
 Both support `resources/subscribe` and `notifications/resources/updated`. `wait_for_settle` is the blocking fallback for hosts that do not wake a model on notifications.
@@ -252,7 +252,7 @@ Repositories using [APM](https://github.com/juspay/apm) can depend on `juspay/od
 - **One run per checkout.** `.ci/odu.sock` is the lock. Use `cancel` or `--supersede` before starting another run.
 - **History is durable; live attachment is not.** `odu runs` reads completed records, but `status`, `logs`, and `attach` always target the currently live run and take no historical selector.
 
-Each terminal run writes a `(repo, sha, seq)` record to `.ci/<sha>/runs/<seq>.json`, including interrupted runs. Use `odu runs -o json` to inspect old outcomes and per-node results.
+Each terminal run writes a `(repo, sha, seq)` record to `.ci/<sha>/runs/<seq>.json`, including interrupted runs. A run that ends still owing GitHub status posts records them as `unposted` (visible in `odu runs` as e.g. `passed, 1 status never reached GitHub`). MCP-spawned coordinators also tee stdout/stderr to `.ci/<sha>/runs/<seq>.log`. Use `odu runs -o json` to inspect old outcomes and per-node results.
 
 ## Development
 

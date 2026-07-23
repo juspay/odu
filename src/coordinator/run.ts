@@ -35,11 +35,13 @@ import { fanId, onPlatform, splitFanId } from "../common/nodeId";
 import type { TaskSpec } from "../common/spec";
 import {
   EMPTY_HEADER,
+  EMPTY_POSTING,
   type NodeState,
   oduSurface,
   pendingNode,
   type PipelineState,
   type RunHeader,
+  type UnpostedEntry,
   STATUS_META,
 } from "../common/surface";
 import { commitLabel, createDisplay, progressEvent } from "./display";
@@ -71,11 +73,14 @@ import { buildRunRecord, projectNodes } from "../common/runRecord";
 import { SOCKET_PATH, serveSocket, tryDialSocket } from "./socket";
 import {
   fetchUrlFor,
+  interruptStatus,
   logPathFor,
   parseGithubRemote,
   repoSlug,
+  postingEqual,
   StatusPoster,
   statusFor,
+  unpostedNote,
 } from "./statuses";
 
 const SETUP = "_ci-setup";
@@ -563,15 +568,9 @@ async function orchestrate(
     }
   }
 
-  const poster = new StatusPoster({
-    owner: github?.owner ?? "",
-    repo: github?.repo ?? "",
-    sha,
-    enabled: ctx.posting,
-    onLine: info,
-  });
-
   // ── fan-in state: one PipelineState keyed `<node>@<platform>` ──
+  // Poster is bound after `implementSurface` so `onHealth` publishes onto the
+  // cell from construction (no deferred rebinding).
   const order: string[] = [];
   const nodes: Record<string, NodeState> = {};
   const laneStart = new Map<string, number>();
@@ -603,6 +602,7 @@ async function orchestrate(
     dirty: ctx.dirty,
     order,
     nodes,
+    posting: EMPTY_POSTING,
   });
   // The run environment (lane→host map + commit link + start clock), published
   // on the surface so an `attach`-er paints the same matrix `run` does. Filled
@@ -651,7 +651,12 @@ async function orchestrate(
   // already reserved above), then driven by every terminal path — natural
   // completion, each linger drain, and the shared `shutdown` teardown — so an
   // interrupted or cancelled run still leaves a record (marked incomplete).
-  let finalizeRunRecord: (state: PipelineState) => void = () => {};
+  // `unposted` is the GitHub reporting debt still owed after finalize (or the
+  // live debt on a mid-linger refresh).
+  let finalizeRunRecord: (
+    state: PipelineState,
+    unposted?: ReadonlyArray<UnpostedEntry>,
+  ) => void = () => {};
   // Linger's idle backstop: a settled-but-lingering coordinator self-reaps
   // after `idleMs` with no new work, so a forgotten `--linger` run can't hold
   // the checkout lock forever. Cleared the instant a node (re)starts.
@@ -668,73 +673,13 @@ async function orchestrate(
   let onSettledEach: (() => void) | null = null;
 
   let shuttingDown = false;
-  // The single shutdown every interrupt source shares: SIGTERM/SIGINT, the live
-  // view's `q` (via `onQuit`), the `run.cancel` surface mutation a second
-  // process drives (`odu cancel`, the MCP `cancel` tool, a `--supersede` start),
-  // and venue `lease.lost` (remote hold died — flock already free). An interrupted
-  // coordinator must not strand `Running:` contexts as eternally pending checks,
-  // and must hand the terminal back. Natural completion does NOT pass through
-  // here — it falls through to the verdict below.
-  //
-  // `exclusivityLost`: when true (lease.lost only), stop lanes and drop local
-  // hold handles *before* awaiting poster.settle — the flock is already free so
-  // another coordinator can claim immediately. Cancel/SIGINT leave exclusivity
-  // intact until after settle (still holding the remote flock), then release.
-  const shutdown = (
+  // Hoisted: cancel procedure + lease.lost wire before the real body is assigned
+  // (poster is constructed after implementSurface so onHealth is live).
+  let shutdown: (
     code: number,
-    reason = "interrupted",
-    opts: { exclusivityLost?: boolean } = {},
-  ): void => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    clearIdle();
-    const exclusivityLost = opts.exclusivityLost === true;
-    const stopWork = (): void => {
-      for (const lane of lanes.values()) lane.close();
-      // Free venue leases so the remote flock drops immediately rather than
-      // waiting for the OS to reap our ssh children on process death (crash
-      // paths still free via connection close — this is the clean path). On
-      // lease.lost the flock is already free; release still reaps local hold
-      // children so we do not leave heartbeats running.
-      for (const lease of acquiredLeases) lease.release();
-      acquiredLeases.length = 0;
-    };
-    // Fail-closed on exclusivity loss: stop fanout work before any settle wait.
-    applyInterruptStopWork("before-settle", exclusivityLost, stopWork);
-    // Snapshot the state at the instant the interrupt lands — *before* posting,
-    // settling, or letting the still-open lanes mutate it further. The record
-    // must describe the run as it was when cancelled: any node still
-    // pending/running here makes the outcome `incomplete`. If we instead read
-    // `store.get()` after `poster.settle()` (below), a lane that happens to
-    // finish naturally during that window would flip the record to passed/failed
-    // for a run the operator cancelled — contradicting the incomplete semantics.
-    // On lease.lost, lanes are already closed above so the snapshot cannot race
-    // with further fanout progress either.
-    const interruptedState = store.get();
-    info(`odu: ${reason} — finalizing posted statuses before exit`);
-    for (const context of poster.pendingContexts()) {
-      poster.post({
-        state: "error",
-        context,
-        description: `Errored (${reason}): ${logPathFor(sha7, context)}`,
-      });
-    }
-    void poster.settle().then(() => {
-      applyInterruptStopWork("after-settle", exclusivityLost, stopWork);
-      // Record this run before the socket closes: a superseding run waits on
-      // that close to confirm we're gone, so writing first guarantees our
-      // record is on disk before it allocates its own (next) seq. Use the
-      // interrupt-time snapshot (not a fresh `store.get()`) so a lane that drained
-      // during the settle window can't rewrite a cancelled run's verdict. Refresh
-      // the timing sidecar from the same snapshot so this terminal path leaves the
-      // same paired durable state every other terminal path writes.
-      writeTimingSidecar(interruptedState);
-      finalizeRunRecord(interruptedState);
-      closeSocket();
-      display.stop(interruptedState);
-      process.exit(code);
-    });
-  };
+    reason?: string,
+    opts?: { exclusivityLost?: boolean },
+  ) => void = () => {};
 
   // Fail closed if a remote hold dies mid-run (ssh drop, optional MAX_HOLD,
   // remote kill): exclusivity is gone and another laptop can claim the same
@@ -770,6 +715,91 @@ async function orchestrate(
   // `implementSurface` now returns the FINAL top-level router (the framework
   // owns its own in-memory channel and the oRPC finalize) — serve it directly.
   const router = runtime.router;
+
+  // Poster after fan-in cell exists: onHealth is real from construction.
+  const poster = new StatusPoster({
+    owner: github?.owner ?? "",
+    repo: github?.repo ?? "",
+    sha,
+    enabled: ctx.posting,
+    onLine: info,
+    onHealth: (health) => {
+      const cur = store.get();
+      if (postingEqual(cur.posting, health)) return;
+      runtime.ctx.cells.nodes.set({ ...cur, posting: health });
+      // Surface cell alone does not repaint the live TUI warning strip.
+      display.update(store.get());
+    },
+  });
+  // Read-before-write: contexts GitHub already shows in the desired state
+  // become no-ops (eliminates the restart "pending wave").
+  if (ctx.posting && github !== null) {
+    await poster.seed();
+  }
+
+  // The single shutdown every interrupt source shares: SIGTERM/SIGINT, the live
+  // view's `q` (via `onQuit`), the `run.cancel` surface mutation a second
+  // process drives (`odu cancel`, the MCP `cancel` tool, a `--supersede` start),
+  // and venue `lease.lost` (remote hold died — flock already free). An interrupted
+  // coordinator must not strand `Running:` contexts as eternally pending checks,
+  // and must hand the terminal back. Natural completion does NOT pass through
+  // here — it falls through to the verdict below.
+  //
+  // `exclusivityLost`: when true (lease.lost only), stop lanes and drop local
+  // hold handles *before* awaiting poster.settle — the flock is already free so
+  // another coordinator can claim immediately. Cancel/SIGINT leave exclusivity
+  // intact until after settle (still holding the remote flock), then release.
+  shutdown = (
+    code: number,
+    reason = "interrupted",
+    opts: { exclusivityLost?: boolean } = {},
+  ): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    clearIdle();
+    const exclusivityLost = opts.exclusivityLost === true;
+    const stopWork = (): void => {
+      for (const lane of lanes.values()) lane.close();
+      // Free venue leases so the remote flock drops immediately rather than
+      // waiting for the OS to reap our ssh children on process death (crash
+      // paths still free via connection close — this is the clean path). On
+      // lease.lost the flock is already free; release still reaps local hold
+      // children so we do not leave heartbeats running.
+      for (const lease of acquiredLeases) lease.release();
+      acquiredLeases.length = 0;
+    };
+    // Fail-closed on exclusivity loss: stop fanout work before any settle wait.
+    applyInterruptStopWork("before-settle", exclusivityLost, stopWork);
+    // Snapshot the state at the instant the interrupt lands — *before* posting,
+    // settling, or letting the still-open lanes mutate it further. The record
+    // must describe the run as it was when cancelled: any node still
+    // pending/running here makes the outcome `incomplete`. If we instead read
+    // `store.get()` after `poster.settle()` (below), a lane that happens to
+    // finish naturally during that window would flip the record to passed/failed
+    // for a run the operator cancelled — contradicting the incomplete semantics.
+    // On lease.lost, lanes are already closed above so the snapshot cannot race
+    // with further fanout progress either.
+    const interruptedState = store.get();
+    info(`odu: ${reason} — finalizing posted statuses before exit`);
+    for (const context of poster.pendingContexts()) {
+      poster.post(interruptStatus(context, reason, sha7));
+    }
+    void poster.finalize().then((unposted) => {
+      applyInterruptStopWork("after-settle", exclusivityLost, stopWork);
+      // Record this run before the socket closes: a superseding run waits on
+      // that close to confirm we're gone, so writing first guarantees our
+      // record is on disk before it allocates its own (next) seq. Use the
+      // interrupt-time snapshot (not a fresh `store.get()`) so a lane that drained
+      // during the settle window can't rewrite a cancelled run's verdict. Refresh
+      // the timing sidecar from the same snapshot so this terminal path leaves the
+      // same paired durable state every other terminal path writes.
+      writeTimingSidecar(interruptedState);
+      finalizeRunRecord(interruptedState, unposted);
+      closeSocket();
+      display.stop(interruptedState);
+      process.exit(code);
+    });
+  };
 
   // ── observers: progress stream + commit statuses, diffed per transition ──
   const emitProgress = (id: string, node: NodeState): void => {
@@ -874,7 +904,7 @@ async function orchestrate(
   // (seq itself was reserved before the venue lease — see above.)
   runtime.ctx.cells.nodes.set({ ...store.get(), seq: seq ?? undefined });
   if (seq !== null) {
-    finalizeRunRecord = (state: PipelineState): void => {
+    finalizeRunRecord = (state, unposted): void => {
       try {
         writeRunRecord(
           repoRoot,
@@ -888,6 +918,7 @@ async function orchestrate(
             finishedAt: Date.now(),
             lanes: header.lanes,
             state,
+            unposted: unposted ?? poster.unposted(),
           }),
         );
       } catch {
@@ -1034,7 +1065,10 @@ async function orchestrate(
 
   // The human verdict summary — foreground completion only, never mid-linger
   // where the live display still owns the screen. Returns the exit code.
-  const printVerdict = (state: PipelineState): number => {
+  const printVerdict = (
+    state: PipelineState,
+    unposted: ReadonlyArray<UnpostedEntry> = [],
+  ): number => {
     const counts = { ok: 0, failed: 0, errored: 0, skipped: 0 };
     const shaLabel = commitLabel({ sha7, dirty: ctx.dirty });
     const lines: string[] = [
@@ -1071,10 +1105,11 @@ async function orchestrate(
       lines.push(`  ${glyph} ${id.padEnd(44)} ${node.status}${dur}${logRef}`);
     }
     const code = verdictCode(state);
+    const debt = unpostedNote(unposted.length);
     lines.push(
       `${counts.ok} ok · ${counts.failed} failed · ${counts.errored} errored · ${counts.skipped} skipped — ${
         code > 0 ? bold(red("FAILED")) : bold(green("OK"))
-      }`,
+      }${debt !== "" ? dim(debt) : ""}`,
     );
     process.stderr.write(`${lines.join("\n")}\n`);
     return code;
@@ -1087,7 +1122,8 @@ async function orchestrate(
     // signal / idle — all of which route through `shutdown`, which exits us.
     onSettledEach = (): void => {
       writeTimingSidecar(store.get());
-      finalizeRunRecord(store.get());
+      // Live debt only — poster keeps retrying until shutdown finalizes.
+      finalizeRunRecord(store.get(), poster.unposted());
       if (idleMs > 0) {
         clearIdle();
         idleTimer = setTimeout(
@@ -1110,21 +1146,17 @@ async function orchestrate(
   // next waiter can claim the box while we still finalize statuses/records.
   for (const lease of acquiredLeases) lease.release();
   acquiredLeases.length = 0;
-  // Record this run *before* releasing the socket lock — every node is already
-  // terminal (allSettled), so the state is final. A superseding/next run waits
-  // on the socket close to confirm we're gone and only then reserves its seq, so
-  // writing the record first guarantees our `<seq>.json` is on disk before
-  // anyone reserves the next seq (and the exclusive reservation would skip our
-  // slot regardless). Mirrors the shutdown path's lock-before-record-release
-  // ordering.
+  // Final status reconciliation *before* the record write and socket release —
+  // one last attempt at anything still owed, then stamp what failed into the
+  // durable record so the divergence stays visible after exit (juspay/odu#61).
   const finalState = store.get();
   writeTimingSidecar(finalState);
-  finalizeRunRecord(finalState);
+  const unposted = await poster.finalize();
+  finalizeRunRecord(finalState, unposted);
   closeSocket();
-  await poster.settle();
 
   display.stop(finalState);
-  return printVerdict(finalState);
+  return printVerdict(finalState, unposted);
 }
 
 /** Idle backstop for a `--linger` run: after the run drains, the coordinator

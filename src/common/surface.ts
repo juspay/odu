@@ -94,6 +94,43 @@ export const NodeStateSchema = z.object({
 });
 export type NodeState = z.infer<typeof NodeStateSchema>;
 
+/** One GitHub context still owed a confirmed post (live surface + agent face).
+ *  Degraded posting is derived from `owed.length > 0` — no separate state flag. */
+export const OwedStatusSchema = z.object({
+  context: z.string(),
+  lastError: z.string().nullable(),
+  attempts: z.number().int().nonnegative(),
+});
+export type OwedStatus = z.infer<typeof OwedStatusSchema>;
+
+/** Final unconfirmed debt stamped into the durable run record. Projects from
+ *  live {@link OwedStatus} without attempts; `lastError` is required at write. */
+export const UnpostedEntrySchema = z.object({
+  context: z.string(),
+  lastError: z.string(),
+});
+export type UnpostedEntry = z.infer<typeof UnpostedEntrySchema>;
+
+/** Project live owed rows into durable unposted entries (juspay/odu#61). */
+export function projectUnposted(
+  owed: readonly OwedStatus[],
+): UnpostedEntry[] {
+  return owed.map((o) => ({
+    context: o.context,
+    lastError: o.lastError ?? "not posted",
+  }));
+}
+
+/** GitHub status-posting health for a live run. Empty `owed` when every post
+ *  is confirmed (or posting disabled). Surfaces (`status` / `attach` / MCP)
+ *  read this so a reporting divergence is never silent (juspay/odu#61). */
+export const PostingHealthSchema = z.object({
+  owed: z.array(OwedStatusSchema),
+});
+export type PostingHealth = z.infer<typeof PostingHealthSchema>;
+
+export const EMPTY_POSTING: PostingHealth = { owed: [] };
+
 /** A fresh node: the caller supplies identity + dependencies; the four
  *  terminal/timing fields start at their `pending` defaults. One place owns
  *  what an unstarted node looks like, so adding a `NodeState` field can't drift
@@ -142,8 +179,16 @@ export const PipelineStateSchema = z.object({
   /** Node ids in scheduling order — the row order dashboards paint. */
   order: z.array(TaskIdSchema),
   nodes: z.record(TaskIdSchema, NodeStateSchema),
+  /** GitHub commit-status posting health (juspay/odu#61). Fan-in only; absent
+   *  or empty `owed` means nothing owed. Lane copies omit it. */
+  posting: PostingHealthSchema.optional(),
 });
 export type PipelineState = z.infer<typeof PipelineStateSchema>;
+
+/** Posting health on a state, defaulting to healthy when absent. */
+export function postingOf(state: Pick<PipelineState, "posting">): PostingHealth {
+  return state.posting ?? EMPTY_POSTING;
+}
 
 export const EMPTY_STATE: PipelineState = {
   name: "pipeline",
@@ -151,6 +196,7 @@ export const EMPTY_STATE: PipelineState = {
   dirty: false,
   order: [],
   nodes: {},
+  posting: EMPTY_POSTING,
 };
 
 export const NodeLogMessageSchema = z.discriminatedUnion("kind", [

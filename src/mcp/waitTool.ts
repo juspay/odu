@@ -19,6 +19,7 @@ import type { BespokeTool } from "@kolu/surface-mcp";
 import { z } from "zod";
 import { agentSummary } from "../cli/render";
 import { formatRef } from "../common/runRecord";
+import type { OwedStatus } from "../common/surface";
 import { SOCKET_PATH } from "../coordinator/socket";
 import { type AgentNodes, type AgentNodesReader, EMPTY_NODES } from "./agentSurface";
 
@@ -72,6 +73,9 @@ export interface SettleVerdict {
 	 *  reserve one (the verdict then carries `sha7` but no unique `<sha7>#<seq>`). */
 	sha7: string;
 	seq: number | null;
+	/** Full owed GitHub status rows not yet confirmed (juspay/odu#61).
+	 *  Reporting debt does not block settle — the test verdict stays the truth. */
+	unposted: OwedStatus[];
 }
 
 export interface WaitOptions {
@@ -90,12 +94,17 @@ export interface WaitOptions {
 	now?: () => number;
 }
 
-/** The run-identity fields stamped into every verdict, from the frame it
- *  describes. No frame (a run that never appeared) reads the no-run identity
- *  from `EMPTY_NODES`, the one place the no-run sentinel is spelled. */
-function identityOf(snap: AgentNodes | undefined): Pick<SettleVerdict, "sha7" | "seq"> {
+/** The run-identity + posting-debt fields stamped into every verdict, from the
+ *  frame it describes. No frame reads the no-run sentinel from `EMPTY_NODES`. */
+function identityOf(
+	snap: AgentNodes | undefined,
+): Pick<SettleVerdict, "sha7" | "seq" | "unposted"> {
 	const frame = snap ?? EMPTY_NODES;
-	return { sha7: frame.sha7, seq: frame.seq };
+	return {
+		sha7: frame.sha7,
+		seq: frame.seq,
+		unposted: frame.unposted ?? [],
+	};
 }
 
 /** Does the live run's `observed` sha7 satisfy the caller's `expected` sha? A
@@ -258,10 +267,13 @@ export const waitTool: BespokeTool = {
 		"Block until the run settles, or — fail-fast (default) — the instant a " +
 		"node goes red, so you can drill into a failure without waiting for the " +
 		"slow lanes. Returns the verdict {settled, passed, failed[], errored[], " +
-		"sha7, seq}: sha7 names the commit, and a non-null seq completes the " +
-		"unique run ref sha7#seq (seq is null only when no ordinal was reserved). " +
-		"Fails LOUD (an error, not an empty verdict) when no run is live in this " +
-		"checkout, or when the live run's commit doesn't prefix-match `expected_sha`.",
+		"sha7, seq, unposted[]}: sha7 names the commit, a non-null seq " +
+		"completes the unique run ref sha7#seq (seq is null only when no ordinal " +
+		"was reserved), and unposted is full owed rows " +
+		"({context, lastError, attempts}) not yet confirmed (reporting debt does " +
+		"not block settle). Fails LOUD (an error, not an empty verdict) when no " +
+		"run is live in this checkout, or when the live run's commit doesn't " +
+		"prefix-match `expected_sha`.",
 	input: waitInput,
 	mutates: false,
 	handler: (args, client, signal) => {
