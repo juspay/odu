@@ -121,16 +121,16 @@ describe("odu mcp — wait_for_settle (black-box, juspay/odu#49)", () => {
       });
       expect(runStarted(run)).toBe(true);
 
-      await expect(
-        client.callTool({
-          name: "wait_for_settle",
-          arguments: {
-            timeout_ms: 10_000,
-            fail_fast: false,
-            expected_sha: "0000000",
-          },
-        }),
-      ).rejects.toThrow(/no live run matching 0000000/);
+      const res = await client.callTool({
+        name: "wait_for_settle",
+        arguments: {
+          timeout_ms: 10_000,
+          fail_fast: false,
+          expected_sha: "0000000",
+        },
+      });
+      expect(res.isError).toBe(true);
+      expect(resultText(res)).toMatch(/no live run matching 0000000/);
 
       // Clean up the lingering coordinator so the fixture teardown is quiet.
       await client.callTool({ name: "cancel", arguments: {} });
