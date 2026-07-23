@@ -12,6 +12,7 @@
 import { gitTopLevel, shortSha } from "../common/git";
 import { formatRunRef, type RunRecord } from "../common/runRecord";
 import { readLedger } from "../coordinator/ledger";
+import { unpostedNote } from "../coordinator/statuses";
 
 /** A coarse "2h ago" / "3d ago" stamp — the ledger is browsed at human
  *  resolution, so seconds/minutes/hours/days is enough, and a future-dated
@@ -42,11 +43,9 @@ export function renderRuns(records: readonly RunRecord[], now: number): string {
         : r.outcome === "failed"
           ? "✗ failed"
           : "✗ incomplete";
-    const nUnposted = r.unposted?.length ?? 0;
-    const verdict =
-      nUnposted > 0
-        ? `${base}, ${nUnposted} status${nUnposted === 1 ? "" : "es"} never reached GitHub`
-        : base;
+    const debt = unpostedNote(r.unposted?.length ?? 0);
+    // unpostedNote prefixes with ", " for the run-summary join; strip for table.
+    const verdict = debt !== "" ? `${base}${debt}` : base;
     return {
       ref: formatRunRef(r),
       sha,

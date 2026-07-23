@@ -201,7 +201,7 @@ The interface projects odu's [@kolu/surface](https://kolu.dev/surface/) through 
 | --- | --- |
 | `run` | Start a background coordinator. Supports `supersede`, `linger`, and `no_wait`. Reuses agent-held venues without re-claiming. |
 | `node_rerun` | Reset one node and its transitive dependents. |
-| `wait_for_settle` | Return on settlement or immediately when a node goes red. Carries `sha7`, the reserved `seq`, and `unpostedContexts` (GitHub statuses not yet confirmed — reporting debt does not block settle). Fails loud with no live run or an `expected_sha` mismatch. |
+| `wait_for_settle` | Return on settlement or immediately when a node goes red. Carries `sha7`, the reserved `seq`, and `unposted[]` full owed rows (`{context, lastError, attempts}` — reporting debt does not block settle). Fails loud with no live run or an `expected_sha` mismatch. |
 | `cancel` | Stop and fully tear down the live run. |
 | `runs` | Read durable run history after the coordinator exits. |
 | `lease` | Agent-held venue: spawn a detached holder and return immediately with `held {host}` or `waiting {behind…}`. Re-call to observe the queue. |
@@ -209,7 +209,7 @@ The interface projects odu's [@kolu/surface](https://kolu.dev/surface/) through 
 
 Pipeline state and logs are subscribable resources rather than tools:
 
-- `surface://streams/nodes` — `{ run, pipeline, sha7, seq, nodes[], unpostedContexts[] }`: run identity, every node's status/exit/duration/red verdict, and GitHub statuses not yet confirmed.
+- `surface://streams/nodes` — `{ run, pipeline, sha7, seq, nodes[], unposted[] }`: run identity, every node's status/exit/duration/red verdict, and full owed GitHub status rows not yet confirmed.
 - `surface://collections/logs/{id}` — buffered live output, or the durable log after exit.
 
 Both support `resources/subscribe` and `notifications/resources/updated`. `wait_for_settle` is the blocking fallback for hosts that do not wake a model on notifications.

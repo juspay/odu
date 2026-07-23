@@ -1,13 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   fetchUrlFor,
+  interruptStatus,
   logPathFor,
-  parseGhPaginatedStdout,
   parseGithubRemote,
   postingEqual,
   postingWarning,
   StatusPoster,
   statusFor,
+  unpostedNote,
   type GhSendResult,
   type StatusPayload,
 } from "./statuses";
@@ -67,6 +68,19 @@ describe("statusFor", () => {
   });
 });
 
+describe("interruptStatus", () => {
+  it("routes interrupt wording through the statuses projector", () => {
+    expect(
+      interruptStatus("ci::unit@x86_64-linux", "cancelled", "abc1234"),
+    ).toEqual({
+      state: "error",
+      context: "ci::unit@x86_64-linux",
+      description:
+        "Errored (cancelled): .ci/abc1234/x86_64-linux/ci::unit.log",
+    });
+  });
+});
+
 describe("github remote parsing", () => {
   it("understands https and ssh forms", () => {
     expect(parseGithubRemote("https://github.com/juspay/kolu.git")).toEqual({
@@ -98,14 +112,12 @@ describe("postingWarning", () => {
   it("says sending before any attempt, retrying after", () => {
     expect(
       postingWarning({
-        state: "degraded",
         owed: [
           { context: "ci::unit@x86_64-linux", lastError: null, attempts: 0 },
         ],
       }),
     ).toMatch(/unconfirmed \(sending\)/);
     const w = postingWarning({
-      state: "degraded",
       owed: [
         {
           context: "ci::unit@x86_64-linux",
@@ -120,29 +132,17 @@ describe("postingWarning", () => {
   });
 });
 
-describe("parseGhPaginatedStdout", () => {
-  it("parses a single JSON array page", () => {
-    const items = parseGhPaginatedStdout(
-      `[{"context":"a","state":"success","description":"ok"}]`,
-    );
-    expect(items).toHaveLength(1);
-  });
-
-  it("flattens concatenated multi-page arrays", () => {
-    const page1 = `[{"context":"a","state":"success","description":"ok"}]`;
-    const page2 = `[{"context":"b","state":"pending","description":"run"}]`;
-    const items = parseGhPaginatedStdout(page1 + page2);
-    expect(items).toEqual([
-      { context: "a", state: "success", description: "ok" },
-      { context: "b", state: "pending", description: "run" },
-    ]);
+describe("unpostedNote", () => {
+  it("is empty for zero and pluralizes", () => {
+    expect(unpostedNote(0)).toBe("");
+    expect(unpostedNote(1)).toBe(", 1 status never reached GitHub");
+    expect(unpostedNote(3)).toBe(", 3 statuses never reached GitHub");
   });
 });
 
 describe("postingEqual", () => {
-  it("compares state and owed entries structurally", () => {
+  it("compares owed entries structurally", () => {
     const h = {
-      state: "degraded" as const,
       owed: [{ context: "x", lastError: "e", attempts: 1 }],
     };
     expect(postingEqual(h, { ...h, owed: [...h.owed] })).toBe(true);
@@ -168,21 +168,21 @@ describe("StatusPoster — honest dedup + retry", () => {
     vi.useRealTimers();
   });
 
-  it("records lastPosted only after a successful send (fails N times then succeeds)", async () => {
+  it("records confirmed only after a successful send (fails N times then succeeds)", async () => {
     let calls = 0;
     const sendGh = vi.fn(async (): Promise<GhSendResult> => {
       calls += 1;
       if (calls < 3) return { ok: false, error: "403 rate limited" };
       return { ok: true };
     });
-    const healthSnaps: string[] = [];
+    const healthSnaps: number[] = [];
     const poster = new StatusPoster({
       owner: "o",
       repo: "r",
       sha: "abc",
       enabled: true,
       onLine: () => {},
-      onHealth: (h) => healthSnaps.push(h.state),
+      onHealth: (h) => healthSnaps.push(h.owed.length),
       sendGh,
       debounceMs: 0,
       backoffBaseMs: 1,
@@ -191,7 +191,7 @@ describe("StatusPoster — honest dedup + retry", () => {
     const p = payload({ context: "ci::unit@x86_64-linux" });
     poster.post(p);
     // Drain: initial + retries until success.
-    for (let i = 0; i < 10 && poster.health().state === "degraded"; i++) {
+    for (let i = 0; i < 10 && poster.health().owed.length > 0; i++) {
       await poster.settle();
       await new Promise((r) => setTimeout(r, 5));
     }
@@ -204,8 +204,8 @@ describe("StatusPoster — honest dedup + retry", () => {
     poster.post(p);
     await poster.settle();
     expect(sendGh.mock.calls.length).toBe(before);
-    expect(healthSnaps).toContain("degraded");
-    expect(healthSnaps[healthSnaps.length - 1]).toBe("ok");
+    expect(healthSnaps.some((n) => n > 0)).toBe(true);
+    expect(healthSnaps[healthSnaps.length - 1]).toBe(0);
   });
 
   it("leaves owed contexts unconfirmed when send never succeeds", async () => {
@@ -226,7 +226,7 @@ describe("StatusPoster — honest dedup + retry", () => {
     });
     poster.post(payload({ context: "ci::unit@x86_64-linux" }));
     await poster.settle();
-    expect(poster.health().state).toBe("degraded");
+    expect(poster.health().owed.length).toBe(1);
     expect(poster.health().owed[0]?.context).toBe("ci::unit@x86_64-linux");
     expect(poster.health().owed[0]?.lastError).toMatch(/API down/);
     expect(poster.pendingContexts()).toEqual([]); // desired is success, not pending
@@ -399,7 +399,7 @@ describe("StatusPoster — honest dedup + retry", () => {
     await vi.advanceTimersByTimeAsync(25);
     await poster.settle();
     expect(sent).toEqual(["failure"]);
-    expect(poster.health().state).toBe("ok");
+    expect(poster.health().owed).toEqual([]);
   });
 
   it("finalize flushes a pending debounce and attempts the payload", async () => {

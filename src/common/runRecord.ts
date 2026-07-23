@@ -32,7 +32,11 @@ import {
   NodeStatusSchema,
   type PipelineState,
   STATUS_META,
+  UnpostedEntrySchema,
+  type UnpostedEntry,
 } from "./surface";
+
+export type { UnpostedEntry };
 
 /** The current record format. Bumped only when a field changes shape; the
  *  ledger reader tolerates records it can't parse (skips them) so a newer
@@ -93,14 +97,7 @@ export const RunRecordSchema = z.object({
   nodes: z.array(RunNodeSchema),
   /** Commit statuses that never reached GitHub by finalize time (juspay/odu#61).
    *  Absent / empty when every post confirmed — older records omit the field. */
-  unposted: z
-    .array(
-      z.object({
-        context: z.string(),
-        lastError: z.string(),
-      }),
-    )
-    .optional(),
+  unposted: z.array(UnpostedEntrySchema).optional(),
 });
 export type RunRecord = z.infer<typeof RunRecordSchema>;
 
@@ -165,7 +162,7 @@ export function buildRunRecord(input: {
   lanes: ReadonlyArray<{ platform: string; host: string }>;
   state: PipelineState;
   /** Statuses still unconfirmed when the record is finalized (juspay/odu#61). */
-  unposted?: ReadonlyArray<{ context: string; lastError: string }>;
+  unposted?: ReadonlyArray<UnpostedEntry>;
 }): RunRecord {
   const { state } = input;
   const nodes = projectNodes(state);

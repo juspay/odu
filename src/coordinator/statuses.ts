@@ -18,7 +18,7 @@
  * gap, the next snapshot re-derives exactly the transitions that were
  * missed.
  *
- * Dedup is confirm-then-record: `lastPosted` updates only after a successful
+ * Dedup is confirm-then-record: `confirmed` updates only after a successful
  * `gh api`, so a failed send is re-derived and retried. Transient failures
  * retry with exponential backoff for the life of the run; the `gh` child is
  * killed after a timeout so one hung TCP can't wedge the post queue.
@@ -30,13 +30,16 @@ import { splitFanId } from "../common/nodeId";
 import {
   type GithubState,
   type NodeStatus,
+  type OwedStatus,
   type PostingHealth,
+  type UnpostedEntry,
   EMPTY_POSTING,
+  projectUnposted,
   STATUS_META,
 } from "../common/surface";
 
-export type { GithubState, PostingHealth };
-export { EMPTY_POSTING };
+export type { GithubState, OwedStatus, PostingHealth, UnpostedEntry };
+export { EMPTY_POSTING, projectUnposted };
 
 /** Default debounce: rapid pending→failed→pending flips collapse to latest. */
 export const DEFAULT_DEBOUNCE_MS = 1_500;
@@ -56,6 +59,15 @@ export interface StatusPayload {
   state: GithubState;
   context: string;
   description: string;
+}
+
+/** Pure structural equality for status payloads. */
+export function payloadEqual(a: StatusPayload, b: StatusPayload): boolean {
+  return (
+    a.state === b.state &&
+    a.context === b.context &&
+    a.description === b.description
+  );
 }
 
 /** The status to post for a node transition; `null` = nothing to post
@@ -84,14 +96,20 @@ export function statusFor(
   return { state, context: nodeId, description };
 }
 
-function payloadKey(payload: StatusPayload): string {
-  return `${payload.state}\0${payload.description}`;
-}
-
-/** One context that still needs a confirmed post (durable run-record field). */
-export interface UnpostedEntry {
-  context: string;
-  lastError: string;
+/**
+ * Interrupt/error status wording — the one projector for cancel/SIGINT/idle
+ * `error` posts so descriptions never bypass the statuses surface (Lowy #11).
+ */
+export function interruptStatus(
+  context: string,
+  reason: string,
+  sha7: string,
+): StatusPayload {
+  return {
+    state: "error",
+    context,
+    description: `Errored (${reason}): ${logPathFor(sha7, context)}`,
+  };
 }
 
 /** Result of one `gh api` attempt. */
@@ -99,7 +117,7 @@ export type GhSendResult =
   | { ok: true }
   | { ok: false; error: string };
 
-/** One remote status as returned by GET …/statuses/{sha}. */
+/** One remote status as returned by GET …/commits/{sha}/status. */
 export interface RemoteStatus {
   context: string;
   state: string;
@@ -116,7 +134,7 @@ export interface StatusPosterOptions {
   onHealth?: (health: PostingHealth) => void;
   /** Injected for tests; defaults to spawning `gh api` with a timeout. */
   sendGh?: (payload: StatusPayload) => Promise<GhSendResult>;
-  /** Injected for tests; defaults to paginated GET of commit statuses. */
+  /** Injected for tests; defaults to combined commit-status GET. */
   listStatuses?: () => Promise<RemoteStatus[]>;
   debounceMs?: number;
   timeoutMs?: number;
@@ -124,59 +142,92 @@ export interface StatusPosterOptions {
   backoffCapMs?: number;
 }
 
+/** Per-context posting state — one map entry owns desired/confirmed/debt/wake. */
+interface ContextPost {
+  desired?: StatusPayload;
+  confirmed?: StatusPayload;
+  lastError?: string;
+  attempts: number;
+  /** Single wake timer: debounce before first send, or backoff after failure. */
+  wake?: ReturnType<typeof setTimeout>;
+}
+
+type PosterPhase = "open" | "finalizing" | "closed";
+
 export class StatusPoster {
-  /** Confirmed posts only — written on successful send, never at enqueue. */
-  private readonly lastPosted = new Map<string, string>();
-  private readonly lastError = new Map<string, string>();
-  private readonly attempts = new Map<string, number>();
-  /** Latest desired payload per context (coalesces rapid flips). */
-  private readonly desired = new Map<string, StatusPayload>();
-  private readonly debounceTimers = new Map<
-    string,
-    ReturnType<typeof setTimeout>
-  >();
-  private readonly backoffTimers = new Map<
-    string,
-    ReturnType<typeof setTimeout>
-  >();
+  private readonly posts = new Map<string, ContextPost>();
   private queue: Promise<void> = Promise.resolve();
-  /** After finalize completes: reject new posts; no more sends. */
-  private closed = false;
-  /** During finalize: accept posts but enqueue immediately (no debounce/backoff). */
-  private finalizing = false;
+  private phase: PosterPhase = "open";
 
   constructor(private readonly opts: StatusPosterOptions) {}
+
+  private currentPhase(): PosterPhase {
+    return this.phase;
+  }
+
+  private entry(context: string): ContextPost {
+    let post = this.posts.get(context);
+    if (post === undefined) {
+      post = { attempts: 0 };
+      this.posts.set(context, post);
+    }
+    return post;
+  }
+
+  private clearWake(post: ContextPost): void {
+    if (post.wake !== undefined) {
+      clearTimeout(post.wake);
+      post.wake = undefined;
+    }
+  }
+
+  private clearDebt(post: ContextPost): void {
+    post.lastError = undefined;
+    post.attempts = 0;
+  }
+
+  /** Drop a post entry when it holds nothing useful. */
+  private prune(context: string, post: ContextPost): void {
+    if (
+      post.desired === undefined &&
+      post.confirmed === undefined &&
+      post.wake === undefined &&
+      post.attempts === 0 &&
+      post.lastError === undefined
+    ) {
+      this.posts.delete(context);
+    }
+  }
 
   /** Current posting health for the live surface. */
   health(): PostingHealth {
     if (!this.opts.enabled) return EMPTY_POSTING;
-    const owed: PostingHealth["owed"] = [];
-    for (const [context, payload] of this.desired) {
-      if (this.lastPosted.get(context) === payloadKey(payload)) continue;
+    const owed: OwedStatus[] = [];
+    for (const [context, post] of this.posts) {
+      const d = post.desired;
+      if (d === undefined) continue;
+      if (post.confirmed !== undefined && payloadEqual(post.confirmed, d)) {
+        continue;
+      }
       owed.push({
         context,
-        lastError: this.lastError.get(context) ?? null,
-        attempts: this.attempts.get(context) ?? 0,
+        lastError: post.lastError ?? null,
+        attempts: post.attempts,
       });
     }
-    return {
-      owed,
-      state: owed.length === 0 ? "ok" : "degraded",
-    };
+    return { owed };
   }
 
   /** Durable form of still-unconfirmed contexts (empty when healthy). */
   unposted(): UnpostedEntry[] {
-    return this.health().owed.map((o) => ({
-      context: o.context,
-      lastError: o.lastError ?? "not posted",
-    }));
+    return projectUnposted(this.health().owed);
   }
 
   /**
-   * Seed `lastPosted` from GitHub's current statuses for this SHA so a restart
-   * does not re-post contexts already showing the desired state (eliminates the
-   * "pending wave" of ~N writes on coordinator start).
+   * Seed `confirmed` from GitHub's combined commit status for this SHA so a
+   * restart does not re-post contexts already showing the desired state
+   * (eliminates the "pending wave" of ~N writes on coordinator start).
+   * Soft-fails to an empty seed on any list error.
    */
   async seed(): Promise<void> {
     if (!this.opts.enabled) return;
@@ -191,10 +242,12 @@ export class StatusPoster {
         if (seen.has(s.context)) continue;
         seen.add(s.context);
         if (s.state === "" || s.context === "") continue;
-        this.lastPosted.set(
-          s.context,
-          `${s.state}\0${s.description ?? ""}`,
-        );
+        const post = this.entry(s.context);
+        post.confirmed = {
+          state: s.state as StatusPayload["state"],
+          context: s.context,
+          description: s.description ?? "",
+        };
       }
       this.opts.onLine(
         `[odu] seeded ${seen.size} commit status(es) from GitHub`,
@@ -210,28 +263,32 @@ export class StatusPoster {
    *  actual send is debounced so rapid re-run flips collapse to the latest.
    *  During {@link finalize}, posts enqueue immediately (no debounce). */
   post(payload: StatusPayload): void {
-    if (!this.opts.enabled || this.closed) return;
-    const key = payloadKey(payload);
-    if (this.lastPosted.get(payload.context) === key) {
+    if (!this.opts.enabled || this.phase === "closed") return;
+    const post = this.entry(payload.context);
+    if (
+      post.confirmed !== undefined &&
+      payloadEqual(post.confirmed, payload)
+    ) {
       // Incoming matches confirmed — only clear debt when desired is absent or
-      // the *same* key. A newer different desired must not be discarded
+      // the *same* payload. A newer different desired must not be discarded
       // (e.g. seed success, then failure still in debounce, then success re-post).
-      const existing = this.desired.get(payload.context);
-      if (existing === undefined || payloadKey(existing) === key) {
+      const existing = post.desired;
+      if (existing === undefined || payloadEqual(existing, payload)) {
         if (existing !== undefined) {
-          this.desired.delete(payload.context);
-          this.clearDebt(payload.context);
-          this.cancelTimers(payload.context);
+          post.desired = undefined;
+          this.clearDebt(post);
+          this.clearWake(post);
+          this.prune(payload.context, post);
           this.emitHealth();
         }
       }
       return;
     }
-    this.desired.set(payload.context, payload);
+    post.desired = payload;
     this.emitHealth();
-    if (this.finalizing) {
+    if (this.phase === "finalizing") {
       // Final drain: skip debounce so interrupt transitions still get an attempt.
-      this.cancelTimers(payload.context);
+      this.clearWake(post);
       this.enqueue(payload.context);
       return;
     }
@@ -247,12 +304,10 @@ export class StatusPoster {
   pendingContexts(): string[] {
     if (!this.opts.enabled) return [];
     const out = new Set<string>();
-    for (const [context, payload] of this.desired) {
-      if (payload.state === "pending") out.add(context);
-    }
-    for (const [context, key] of this.lastPosted) {
-      if (!key.startsWith("pending\0")) continue;
-      const d = this.desired.get(context);
+    for (const [context, post] of this.posts) {
+      if (post.desired?.state === "pending") out.add(context);
+      if (post.confirmed?.state !== "pending") continue;
+      const d = post.desired;
       // Confirmed pending with no newer desired terminal, or desired still pending.
       if (d === undefined || d.state === "pending") out.add(context);
     }
@@ -266,40 +321,49 @@ export class StatusPoster {
    */
   async finalize(): Promise<UnpostedEntry[]> {
     if (!this.opts.enabled) return [];
-    this.finalizing = true;
+    this.phase = "finalizing";
     // Cancel pending backoffs/debounces — enqueue immediate final attempts.
-    for (const t of this.backoffTimers.values()) clearTimeout(t);
-    this.backoffTimers.clear();
-    for (const [context, t] of this.debounceTimers) {
-      clearTimeout(t);
-      this.debounceTimers.delete(context);
-      this.enqueue(context);
+    for (const [context, post] of this.posts) {
+      if (post.wake !== undefined) {
+        this.clearWake(post);
+        this.enqueue(context);
+      }
     }
-    // Drain loop: posts that arrive mid-drain (finalizing mode) chain onto
-    // `this.queue`; re-await until a pass adds no new work. Each (context,key)
-    // gets one final attempt — failures are not re-queued here.
+    // Drain until the queue is stable and every current unconfirmed desired
+    // has been attempted once. No fixed pass cap — bound by unique
+    // (context, payload) pairs that appear as desired during the drain.
     const attempted = new Set<string>();
-    for (let pass = 0; pass < 32; pass++) {
-      for (const context of this.desired.keys()) {
-        const d = this.desired.get(context);
+    for (;;) {
+      for (const [context, post] of this.posts) {
+        const d = post.desired;
         if (d === undefined) continue;
-        const key = payloadKey(d);
-        if (this.lastPosted.get(context) === key) continue;
-        const mark = `${context}\0${key}`;
+        if (post.confirmed !== undefined && payloadEqual(post.confirmed, d)) {
+          continue;
+        }
+        const mark = attemptMark(d);
         if (attempted.has(mark)) continue;
         attempted.add(mark);
         this.enqueue(context);
       }
       const q = this.queue;
       await q;
-      if (this.queue === q) break;
+      if (this.queue !== q) continue;
+      let more = false;
+      for (const [, post] of this.posts) {
+        const d = post.desired;
+        if (d === undefined) continue;
+        if (post.confirmed !== undefined && payloadEqual(post.confirmed, d)) {
+          continue;
+        }
+        if (!attempted.has(attemptMark(d))) {
+          more = true;
+          break;
+        }
+      }
+      if (!more) break;
     }
-    this.closed = true;
-    this.finalizing = false;
-    for (const t of this.backoffTimers.values()) clearTimeout(t);
-    this.backoffTimers.clear();
-    for (const t of this.debounceTimers.values()) clearTimeout(t);
-    this.debounceTimers.clear();
+    this.phase = "closed";
+    for (const post of this.posts.values()) this.clearWake(post);
     return this.unposted();
   }
 
@@ -309,32 +373,20 @@ export class StatusPoster {
     return this.queue;
   }
 
-  private cancelTimers(context: string): void {
-    const d = this.debounceTimers.get(context);
-    if (d !== undefined) {
-      clearTimeout(d);
-      this.debounceTimers.delete(context);
-    }
-    const b = this.backoffTimers.get(context);
-    if (b !== undefined) {
-      clearTimeout(b);
-      this.backoffTimers.delete(context);
-    }
-  }
-
   private scheduleDebounce(context: string): void {
-    this.cancelTimers(context);
+    const post = this.entry(context);
+    this.clearWake(post);
     const ms = this.opts.debounceMs ?? DEFAULT_DEBOUNCE_MS;
     if (ms <= 0) {
       this.enqueue(context);
       return;
     }
     const t = setTimeout(() => {
-      this.debounceTimers.delete(context);
-      if (!this.closed) this.enqueue(context);
+      post.wake = undefined;
+      if (this.phase === "open") this.enqueue(context);
     }, ms);
     t.unref?.();
-    this.debounceTimers.set(context, t);
+    post.wake = t;
   }
 
   private enqueue(context: string): void {
@@ -342,94 +394,160 @@ export class StatusPoster {
   }
 
   private async sendLatest(context: string): Promise<void> {
-    if (this.closed) return;
-    const payload = this.desired.get(context);
+    // Read via getter so control-flow narrowing does not stick across `await`
+    // (phase can advance to closed while a send is in flight).
+    if (this.currentPhase() === "closed") return;
+    const post = this.posts.get(context);
+    if (post === undefined) return;
+    const payload = post.desired;
     if (payload === undefined) return;
-    const key = payloadKey(payload);
-    if (this.lastPosted.get(context) === key) {
-      this.desired.delete(context);
-      this.clearDebt(context);
+    if (post.confirmed !== undefined && payloadEqual(post.confirmed, payload)) {
+      post.desired = undefined;
+      this.clearDebt(post);
+      this.prune(context, post);
       this.emitHealth();
       return;
     }
 
-    const result = await this.sendWithTimeout(payload);
-    if (this.closed) return;
+    const result = await this.send(payload);
+    if (this.currentPhase() === "closed") return;
 
     // Desired may have changed while the request was in flight.
-    const still = this.desired.get(context);
-    if (still !== undefined && payloadKey(still) !== key) {
+    const still = post.desired;
+    if (still !== undefined && !payloadEqual(still, payload)) {
       return;
     }
 
     if (result.ok) {
-      this.lastPosted.set(context, key);
-      this.desired.delete(context);
-      this.clearDebt(context);
+      post.confirmed = payload;
+      post.desired = undefined;
+      this.clearDebt(post);
+      this.prune(context, post);
       this.emitHealth();
       return;
     }
 
-    const n = (this.attempts.get(context) ?? 0) + 1;
-    this.attempts.set(context, n);
-    this.lastError.set(context, result.error);
+    post.attempts += 1;
+    post.lastError = result.error;
     this.opts.onLine(
-      `[odu] status post failed for ${context} (attempt ${n}): ${result.error.trim()}`,
+      `[odu] status post failed for ${context} (attempt ${post.attempts}): ${result.error.trim()}`,
     );
     this.emitHealth();
 
     // No infinite retry during finalize — one final attempt, then record debt.
-    if (this.closed || this.finalizing) return;
+    if (this.currentPhase() !== "open") return;
 
     const base = this.opts.backoffBaseMs ?? DEFAULT_BACKOFF_BASE_MS;
     const cap = this.opts.backoffCapMs ?? DEFAULT_BACKOFF_CAP_MS;
-    const delay = Math.min(base * 2 ** (n - 1), cap);
+    const delay = Math.min(base * 2 ** (post.attempts - 1), cap);
+    this.clearWake(post);
     const t = setTimeout(() => {
-      this.backoffTimers.delete(context);
-      if (!this.closed && !this.finalizing) this.enqueue(context);
+      post.wake = undefined;
+      if (this.phase === "open") this.enqueue(context);
     }, delay);
     t.unref?.();
-    this.backoffTimers.set(context, t);
-  }
-
-  private clearDebt(context: string): void {
-    this.lastError.delete(context);
-    this.attempts.delete(context);
+    post.wake = t;
   }
 
   private emitHealth(): void {
     this.opts.onHealth?.(this.health());
   }
 
-  /** Run one send under the hang-timeout so a stuck `gh` can't wedge the queue. */
-  private sendWithTimeout(payload: StatusPayload): Promise<GhSendResult> {
+  /**
+   * One send. Default `gh` path kills the child on timeout; injected `sendGh`
+   * still gets a hang-timeout so a stuck fake can't wedge the queue.
+   */
+  private send(payload: StatusPayload): Promise<GhSendResult> {
     const timeoutMs = this.opts.timeoutMs ?? DEFAULT_GH_TIMEOUT_MS;
-    const attempt =
-      this.opts.sendGh !== undefined
-        ? this.opts.sendGh(payload)
-        : defaultSendGh(this.opts, payload);
-    return new Promise((resolve) => {
-      let settled = false;
-      const done = (r: GhSendResult): void => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        resolve(r);
-      };
-      const timer = setTimeout(() => {
-        done({ ok: false, error: `gh timed out after ${timeoutMs}ms` });
-      }, timeoutMs);
-      timer.unref?.();
-      void attempt.then(
-        (r) => done(r),
-        (err: unknown) =>
-          done({
-            ok: false,
-            error: err instanceof Error ? err.message : String(err),
-          }),
+    if (this.opts.sendGh !== undefined) {
+      return withTimeout(
+        this.opts.sendGh(payload),
+        timeoutMs,
+        `gh timed out after ${timeoutMs}ms`,
       );
-    });
+    }
+    return defaultSendGh(this.opts, payload);
   }
+}
+
+function attemptMark(payload: StatusPayload): string {
+  return `${payload.context}\0${payload.state}\0${payload.description}`;
+}
+
+/** Race a promise against a timeout; does not cancel the underlying work. */
+function withTimeout<T extends GhSendResult>(
+  attempt: Promise<T>,
+  timeoutMs: number,
+  error: string,
+): Promise<GhSendResult> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (r: GhSendResult): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(r);
+    };
+    const timer = setTimeout(() => {
+      done({ ok: false, error });
+    }, timeoutMs);
+    timer.unref?.();
+    void attempt.then(
+      (r) => done(r),
+      (err: unknown) =>
+        done({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+    );
+  });
+}
+
+type GhRunResult =
+  | { ok: true; stdout: string; stderr: string }
+  | { ok: false; error: string };
+
+/**
+ * Spawn `gh` with kill-on-timeout. Shared by POST (status) and GET (seed).
+ */
+function runGh(
+  args: string[],
+  timeoutMs: number,
+  opts: { captureStdout: boolean },
+): Promise<GhRunResult> {
+  const gh = process.env.ODU_GH_BIN ?? "gh";
+  return new Promise((resolve) => {
+    const child = spawn(gh, args, {
+      stdio: ["ignore", opts.captureStdout ? "pipe" : "ignore", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    if (opts.captureStdout) {
+      child.stdout?.on("data", (c: Buffer) => {
+        stdout += c.toString("utf-8");
+      });
+    }
+    child.stderr?.on("data", (c: Buffer) => {
+      stderr += c.toString("utf-8");
+    });
+    let settled = false;
+    const done = (result: GhRunResult): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      done({ ok: false, error: `gh timed out after ${timeoutMs}ms` });
+    }, timeoutMs);
+    timer.unref?.();
+    child.on("error", (err) => done({ ok: false, error: err.message }));
+    child.on("close", (code) => {
+      if (code === 0) done({ ok: true, stdout, stderr });
+      else done({ ok: false, error: stderr.trim() || `gh exited ${code}` });
+    });
+  });
 }
 
 /** Spawn `gh api` POST for one status; kill after timeout. */
@@ -438,120 +556,34 @@ function defaultSendGh(
   payload: StatusPayload,
 ): Promise<GhSendResult> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_GH_TIMEOUT_MS;
-  return new Promise((resolve) => {
-    const gh = process.env.ODU_GH_BIN ?? "gh";
-    const child = spawn(
-      gh,
-      [
-        "api",
-        `repos/${opts.owner}/${opts.repo}/statuses/${opts.sha}`,
-        "-f",
-        `state=${payload.state}`,
-        "-f",
-        `context=${payload.context}`,
-        "-f",
-        `description=${payload.description}`,
-      ],
-      { stdio: ["ignore", "ignore", "pipe"] },
-    );
-    let stderr = "";
-    child.stderr?.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf-8");
-    });
-    let settled = false;
-    const done = (result: GhSendResult): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(result);
-    };
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      done({ ok: false, error: `gh timed out after ${timeoutMs}ms` });
-    }, timeoutMs);
-    timer.unref?.();
-    child.on("error", (err) => done({ ok: false, error: err.message }));
-    child.on("close", (code) => {
-      if (code === 0) done({ ok: true });
-      else done({ ok: false, error: stderr.trim() || `gh exited ${code}` });
-    });
-  });
+  return runGh(
+    [
+      "api",
+      `repos/${opts.owner}/${opts.repo}/statuses/${opts.sha}`,
+      "-f",
+      `state=${payload.state}`,
+      "-f",
+      `context=${payload.context}`,
+      "-f",
+      `description=${payload.description}`,
+    ],
+    timeoutMs,
+    { captureStdout: false },
+  ).then((r) => (r.ok ? { ok: true } : { ok: false, error: r.error }));
 }
 
-/**
- * Parse `gh api --paginate` stdout. Multi-page responses concatenate JSON
- * values (`[{…}][{…}]`); a single page is one JSON value. Exported for tests.
- */
-export function parseGhPaginatedStdout(text: string): unknown[] {
-  const trimmed = text.trim();
-  if (trimmed === "") return [];
-  // Fast path: one JSON value (array or object).
-  try {
-    const once: unknown = JSON.parse(trimmed);
-    return Array.isArray(once) ? once : [once];
-  } catch {
-    // Multi-page: split concatenated top-level JSON values.
-  }
-  const items: unknown[] = [];
-  let i = 0;
-  const s = trimmed;
-  while (i < s.length) {
-    while (i < s.length && /\s/.test(s[i] ?? "")) i += 1;
-    if (i >= s.length) break;
-    const start = i;
-    const open = s[i];
-    if (open !== "[" && open !== "{") {
-      throw new Error(
-        `unexpected gh paginate token at ${i}: ${s.slice(i, i + 20)}`,
-      );
-    }
-    const close = open === "[" ? "]" : "}";
-    let depth = 0;
-    let inString = false;
-    let escape = false;
-    for (; i < s.length; i++) {
-      const ch = s[i];
-      if (inString) {
-        if (escape) escape = false;
-        else if (ch === "\\") escape = true;
-        else if (ch === '"') inString = false;
-        continue;
-      }
-      if (ch === '"') {
-        inString = true;
-        continue;
-      }
-      if (ch === open) depth += 1;
-      else if (ch === close) {
-        depth -= 1;
-        if (depth === 0) {
-          i += 1;
-          break;
-        }
-      }
-    }
-    const chunk = s.slice(start, i);
-    const parsed: unknown = JSON.parse(chunk);
-    if (Array.isArray(parsed)) items.push(...parsed);
-    else items.push(parsed);
-  }
-  return items;
-}
-
-function remoteStatusesFromItems(items: unknown[]): RemoteStatus[] {
+function remoteStatusesFromCombined(parsed: unknown): RemoteStatus[] {
+  if (typeof parsed !== "object" || parsed === null) return [];
+  const rec = parsed as Record<string, unknown>;
+  const items = Array.isArray(rec.statuses) ? rec.statuses : [parsed];
   const out: RemoteStatus[] = [];
   for (const item of items) {
     if (typeof item !== "object" || item === null) continue;
-    const rec = item as Record<string, unknown>;
-    // Combined status endpoint wraps latest-per-context in `.statuses`.
-    if (Array.isArray(rec.statuses)) {
-      out.push(...remoteStatusesFromItems(rec.statuses));
-      continue;
-    }
-    const context = typeof rec.context === "string" ? rec.context : "";
-    const state = typeof rec.state === "string" ? rec.state : "";
+    const row = item as Record<string, unknown>;
+    const context = typeof row.context === "string" ? row.context : "";
+    const state = typeof row.state === "string" ? row.state : "";
     const description =
-      typeof rec.description === "string" ? rec.description : "";
+      typeof row.description === "string" ? row.description : "";
     if (context !== "") out.push({ context, state, description });
   }
   return out;
@@ -559,70 +591,21 @@ function remoteStatusesFromItems(items: unknown[]): RemoteStatus[] {
 
 /**
  * Seed source: combined commit status (latest per context in one response).
- * Falls back to paginated `…/statuses/{sha}` if the combined endpoint fails.
- * Both paths hang-timeout like POST.
+ * Soft-fail empty seed on non-zero / parse error is handled by {@link StatusPoster.seed}.
  */
 async function defaultListStatuses(
   opts: StatusPosterOptions,
 ): Promise<RemoteStatus[]> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_GH_TIMEOUT_MS;
-  const combined = await ghApiGet(
-    `repos/${opts.owner}/${opts.repo}/commits/${opts.sha}/status`,
+  const result = await runGh(
+    ["api", `repos/${opts.owner}/${opts.repo}/commits/${opts.sha}/status`],
     timeoutMs,
+    { captureStdout: true },
   );
-  if (combined.ok) {
-    return remoteStatusesFromItems(parseGhPaginatedStdout(combined.stdout));
-  }
-  // Fallback: full status history (newest-first); first sighting per context wins.
-  const listed = await ghApiGet(
-    `repos/${opts.owner}/${opts.repo}/statuses/${opts.sha}?per_page=100`,
-    timeoutMs,
-    { paginate: true },
-  );
-  if (!listed.ok) {
-    throw new Error(listed.error);
-  }
-  return remoteStatusesFromItems(parseGhPaginatedStdout(listed.stdout));
-}
-
-/** Spawn `gh api` GET; kill after timeout. */
-function ghApiGet(
-  path: string,
-  timeoutMs: number,
-  opts: { paginate?: boolean } = {},
-): Promise<{ ok: true; stdout: string } | { ok: false; error: string }> {
-  const gh = process.env.ODU_GH_BIN ?? "gh";
-  const args = opts.paginate ? ["api", "--paginate", path] : ["api", path];
-  return new Promise((resolve) => {
-    const child = spawn(gh, args, { stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    child.stdout?.on("data", (c: Buffer) => {
-      stdout += c.toString("utf-8");
-    });
-    child.stderr?.on("data", (c: Buffer) => {
-      stderr += c.toString("utf-8");
-    });
-    let settled = false;
-    const done = (
-      result: { ok: true; stdout: string } | { ok: false; error: string },
-    ): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(result);
-    };
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      done({ ok: false, error: `gh timed out after ${timeoutMs}ms` });
-    }, timeoutMs);
-    timer.unref?.();
-    child.on("error", (err) => done({ ok: false, error: err.message }));
-    child.on("close", (code) => {
-      if (code === 0) done({ ok: true, stdout });
-      else done({ ok: false, error: stderr.trim() || `gh exited ${code}` });
-    });
-  });
+  if (!result.ok) throw new Error(result.error);
+  const trimmed = result.stdout.trim();
+  if (trimmed === "") return [];
+  return remoteStatusesFromCombined(JSON.parse(trimmed) as unknown);
 }
 
 /** Parse `git remote get-url origin` output into {owner, repo} for the
@@ -653,9 +636,15 @@ export function fetchUrlFor(url: string): string {
   return `https://github.com/${gh.owner}/${gh.repo}`;
 }
 
+/** Shared "N statuses never reached GitHub" note for verdict lines. */
+export function unpostedNote(n: number): string {
+  if (n <= 0) return "";
+  return `, ${n} status${n === 1 ? "" : "es"} never reached GitHub`;
+}
+
 /** Human warning strip for attach/status while posts are owed. */
 export function postingWarning(health: PostingHealth): string | null {
-  if (health.state === "ok" || health.owed.length === 0) return null;
+  if (health.owed.length === 0) return null;
   const n = health.owed.length;
   const last =
     health.owed.map((o) => o.lastError).find((e) => e !== null && e !== "") ??
@@ -673,7 +662,7 @@ export function postingEqual(
   b: PostingHealth,
 ): boolean {
   const left = a ?? EMPTY_POSTING;
-  if (left.state !== b.state || left.owed.length !== b.owed.length) return false;
+  if (left.owed.length !== b.owed.length) return false;
   for (let i = 0; i < left.owed.length; i++) {
     const x = left.owed[i];
     const y = b.owed[i];

@@ -116,9 +116,15 @@ const AgentNodesSchema = z.object({
   sha7: z.string(),
   seq: z.number().nullable(),
   nodes: z.array(NodeRowSchema),
-  /** Contexts whose GitHub status post has not confirmed yet (juspay/odu#61).
+  /** Full owed GitHub status rows not yet confirmed (juspay/odu#61).
    *  Empty when posting is healthy or disabled; test verdict stays the truth. */
-  unpostedContexts: z.array(z.string()),
+  unposted: z.array(
+    z.object({
+      context: z.string(),
+      lastError: z.string().nullable(),
+      attempts: z.number().int().nonnegative(),
+    }),
+  ),
 });
 export type AgentNodes = z.infer<typeof AgentNodesSchema>;
 
@@ -152,7 +158,7 @@ export const EMPTY_NODES: AgentNodes = {
   sha7: "",
   seq: null,
   nodes: [],
-  unpostedContexts: [],
+  unposted: [],
 };
 
 /**
@@ -533,7 +539,11 @@ function agentDeps(
                 sha7: state.sha7,
                 seq: state.seq ?? null,
                 nodes: rowsOf(state),
-                unpostedContexts: postingOf(state).owed.map((o) => o.context),
+                unposted: postingOf(state).owed.map((o) => ({
+                  context: o.context,
+                  lastError: o.lastError,
+                  attempts: o.attempts,
+                })),
               },
       ),
     },
