@@ -354,6 +354,8 @@ export async function openRunLog(
     const path = join(dir, `${seq}.log`);
     return createWriteStream(path, { flags: "a" });
   } catch {
+    // Best-effort durable log only: dial/identity/fs failures must not fail the
+    // run tool — the agent still gets live surface frames without a disk tee.
     return null;
   } finally {
     dialed.close();

@@ -19,6 +19,7 @@ import type { BespokeTool } from "@kolu/surface-mcp";
 import { z } from "zod";
 import { agentSummary } from "../cli/render";
 import { formatRef } from "../common/runRecord";
+import type { OwedStatus } from "../common/surface";
 import { SOCKET_PATH } from "../coordinator/socket";
 import { type AgentNodes, type AgentNodesReader, EMPTY_NODES } from "./agentSurface";
 
@@ -74,11 +75,7 @@ export interface SettleVerdict {
 	seq: number | null;
 	/** Full owed GitHub status rows not yet confirmed (juspay/odu#61).
 	 *  Reporting debt does not block settle — the test verdict stays the truth. */
-	unposted: Array<{
-		context: string;
-		lastError: string | null;
-		attempts: number;
-	}>;
+	unposted: OwedStatus[];
 }
 
 export interface WaitOptions {

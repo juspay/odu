@@ -268,6 +268,117 @@ describe("StatusPoster — honest dedup + retry", () => {
     expect(poster.pendingContexts()).not.toContain("ci::unit@x86_64-linux");
   });
 
+  it("pendingContexts ignores seeded foreign pending contexts", async () => {
+    const sendGh = vi.fn(async (): Promise<GhSendResult> => ({ ok: true }));
+    const poster = new StatusPoster({
+      owner: "o",
+      repo: "r",
+      sha: "abc",
+      enabled: true,
+      onLine: () => {},
+      sendGh,
+      debounceMs: 0,
+      listStatuses: async () => [
+        {
+          context: "github-actions/ci",
+          state: "pending",
+          description: "Waiting for a runner",
+        },
+        {
+          context: "ci::unit@x86_64-linux",
+          state: "pending",
+          description: "Running: x",
+        },
+      ],
+    });
+    await poster.seed();
+    // Seed alone must not put third-party or prior-run contexts on the interrupt list.
+    expect(poster.pendingContexts()).toEqual([]);
+    // Once this run posts, only that context is interruptible.
+    poster.post(
+      payload({
+        context: "ci::unit@x86_64-linux",
+        state: "pending",
+        description: "Running: x",
+      }),
+    );
+    await poster.settle();
+    expect(poster.pendingContexts()).toEqual(["ci::unit@x86_64-linux"]);
+    expect(poster.pendingContexts()).not.toContain("github-actions/ci");
+  });
+
+  it("seed skips remote states that are not valid GitHub states", async () => {
+    const sendGh = vi.fn(async (): Promise<GhSendResult> => ({ ok: true }));
+    const poster = new StatusPoster({
+      owner: "o",
+      repo: "r",
+      sha: "abc",
+      enabled: true,
+      onLine: () => {},
+      sendGh,
+      debounceMs: 0,
+      listStatuses: async () => [
+        {
+          context: "ci::unit@x86_64-linux",
+          state: "unexpected",
+          description: "bogus",
+        },
+      ],
+    });
+    await poster.seed();
+    // Invalid seed must not act as confirmed — a real post still sends.
+    poster.post(
+      payload({
+        context: "ci::unit@x86_64-linux",
+        description: "Succeeded (1s): .ci/x/y.log",
+      }),
+    );
+    await poster.settle();
+    expect(sendGh).toHaveBeenCalledOnce();
+  });
+
+  it("records confirmed even when desired moves mid-flight", async () => {
+    vi.useFakeTimers();
+    let release: ((r: GhSendResult) => void) | undefined;
+    const sent: string[] = [];
+    const poster = new StatusPoster({
+      owner: "o",
+      repo: "r",
+      sha: "abc",
+      enabled: true,
+      onLine: () => {},
+      debounceMs: 0,
+      sendGh: (p) => {
+        sent.push(p.state);
+        if (p.state === "pending") {
+          return new Promise((resolve) => {
+            release = resolve;
+          });
+        }
+        return Promise.resolve({ ok: true });
+      },
+    });
+    const ctx = "ci::unit@x86_64-linux";
+    poster.post(
+      payload({ context: ctx, state: "pending", description: "Running: a" }),
+    );
+    // Wait until the pending send is in flight.
+    await Promise.resolve();
+    await Promise.resolve();
+    // Desired moves to success while pending is still on the wire.
+    poster.post(
+      payload({ context: ctx, state: "success", description: "Succeeded: a" }),
+    );
+    release?.({ ok: true });
+    await poster.settle();
+    await vi.advanceTimersByTimeAsync(0);
+    await poster.settle();
+    // Pending success was recorded; success must still be sent (not discarded).
+    expect(sent).toContain("pending");
+    expect(sent).toContain("success");
+    expect(poster.health().owed).toEqual([]);
+  });
+
   it("times out a hung send and does not block later posts", async () => {
     vi.useFakeTimers();
     const order: string[] = [];

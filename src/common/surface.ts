@@ -190,11 +190,6 @@ export function postingOf(state: Pick<PipelineState, "posting">): PostingHealth 
   return state.posting ?? EMPTY_POSTING;
 }
 
-/** True while one or more GitHub status posts are still unconfirmed. */
-export function postingDegraded(health: PostingHealth): boolean {
-  return health.owed.length > 0;
-}
-
 export const EMPTY_STATE: PipelineState = {
   name: "pipeline",
   sha7: "",

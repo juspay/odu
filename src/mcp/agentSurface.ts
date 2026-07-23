@@ -56,6 +56,7 @@ import {
   EMPTY_STATE,
   MAX_LOG_CHARS,
   type oduSurface,
+  OwedStatusSchema,
   type PipelineState,
   postingOf,
 } from "../common/surface";
@@ -118,13 +119,7 @@ const AgentNodesSchema = z.object({
   nodes: z.array(NodeRowSchema),
   /** Full owed GitHub status rows not yet confirmed (juspay/odu#61).
    *  Empty when posting is healthy or disabled; test verdict stays the truth. */
-  unposted: z.array(
-    z.object({
-      context: z.string(),
-      lastError: z.string().nullable(),
-      attempts: z.number().int().nonnegative(),
-    }),
-  ),
+  unposted: z.array(OwedStatusSchema),
 });
 export type AgentNodes = z.infer<typeof AgentNodesSchema>;
 
@@ -539,11 +534,7 @@ function agentDeps(
                 sha7: state.sha7,
                 seq: state.seq ?? null,
                 nodes: rowsOf(state),
-                unposted: postingOf(state).owed.map((o) => ({
-                  context: o.context,
-                  lastError: o.lastError,
-                  attempts: o.attempts,
-                })),
+                unposted: [...postingOf(state).owed],
               },
       ),
     },

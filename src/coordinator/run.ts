@@ -727,6 +727,8 @@ async function orchestrate(
       const cur = store.get();
       if (postingEqual(cur.posting, health)) return;
       runtime.ctx.cells.nodes.set({ ...cur, posting: health });
+      // Surface cell alone does not repaint the live TUI warning strip.
+      display.update(store.get());
     },
   });
   // Read-before-write: contexts GitHub already shows in the desired state

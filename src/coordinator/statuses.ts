@@ -39,7 +39,18 @@ import {
 } from "../common/surface";
 
 export type { GithubState, OwedStatus, PostingHealth, UnpostedEntry };
-export { EMPTY_POSTING, projectUnposted };
+
+/** GitHub commit-status `state` values the statuses API accepts. */
+const GITHUB_STATES = new Set<string>([
+  "pending",
+  "success",
+  "failure",
+  "error",
+]);
+
+function isGithubState(state: string): state is GithubState {
+  return GITHUB_STATES.has(state);
+}
 
 /** Default debounce: rapid pending→failed→pending flips collapse to latest. */
 export const DEFAULT_DEBOUNCE_MS = 1_500;
@@ -134,7 +145,7 @@ export interface StatusPosterOptions {
   onHealth?: (health: PostingHealth) => void;
   /** Injected for tests; defaults to spawning `gh api` with a timeout. */
   sendGh?: (payload: StatusPayload) => Promise<GhSendResult>;
-  /** Injected for tests; defaults to combined commit-status GET. */
+  /** Injected for tests; defaults to paginated GET …/statuses/{sha}. */
   listStatuses?: () => Promise<RemoteStatus[]>;
   debounceMs?: number;
   timeoutMs?: number;
@@ -150,6 +161,12 @@ interface ContextPost {
   attempts: number;
   /** Single wake timer: debounce before first send, or backoff after failure. */
   wake?: ReturnType<typeof setTimeout>;
+  /**
+   * True once this run has called {@link StatusPoster.post} for the context.
+   * Seed alone does not set it — foreign GitHub contexts (Actions, other bots)
+   * stay in `confirmed` for dedup but must not enter the interrupt worklist.
+   */
+  owned: boolean;
 }
 
 type PosterPhase = "open" | "finalizing" | "closed";
@@ -168,7 +185,7 @@ export class StatusPoster {
   private entry(context: string): ContextPost {
     let post = this.posts.get(context);
     if (post === undefined) {
-      post = { attempts: 0 };
+      post = { attempts: 0, owned: false };
       this.posts.set(context, post);
     }
     return post;
@@ -193,7 +210,8 @@ export class StatusPoster {
       post.confirmed === undefined &&
       post.wake === undefined &&
       post.attempts === 0 &&
-      post.lastError === undefined
+      post.lastError === undefined &&
+      !post.owned
     ) {
       this.posts.delete(context);
     }
@@ -224,10 +242,15 @@ export class StatusPoster {
   }
 
   /**
-   * Seed `confirmed` from GitHub's combined commit status for this SHA so a
-   * restart does not re-post contexts already showing the desired state
-   * (eliminates the "pending wave" of ~N writes on coordinator start).
-   * Soft-fails to an empty seed on any list error.
+   * Seed `confirmed` from GitHub's statuses for this SHA so a restart does not
+   * re-post contexts already showing the desired state (eliminates the
+   * "pending wave" of ~N writes on coordinator start). Soft-fails to an empty
+   * seed on any list error.
+   *
+   * Only real GitHub states (`pending|success|failure|error`) are accepted —
+   * unknown/empty remote `state` values are skipped rather than cast into
+   * {@link StatusPayload}. Seed never marks a context `owned`: foreign pending
+   * checks stay for dedup only and are excluded from interrupt error posts.
    */
   async seed(): Promise<void> {
     if (!this.opts.enabled) return;
@@ -238,19 +261,21 @@ export class StatusPoster {
           : await defaultListStatuses(this.opts);
       // GitHub returns newest-first; keep the first sighting per context.
       const seen = new Set<string>();
+      let seeded = 0;
       for (const s of list) {
-        if (seen.has(s.context)) continue;
+        if (s.context === "" || seen.has(s.context)) continue;
         seen.add(s.context);
-        if (s.state === "" || s.context === "") continue;
+        if (!isGithubState(s.state)) continue;
         const post = this.entry(s.context);
         post.confirmed = {
-          state: s.state as StatusPayload["state"],
+          state: s.state,
           context: s.context,
           description: s.description ?? "",
         };
+        seeded += 1;
       }
       this.opts.onLine(
-        `[odu] seeded ${seen.size} commit status(es) from GitHub`,
+        `[odu] seeded ${seeded} commit status(es) from GitHub`,
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -265,6 +290,7 @@ export class StatusPoster {
   post(payload: StatusPayload): void {
     if (!this.opts.enabled || this.phase === "closed") return;
     const post = this.entry(payload.context);
+    post.owned = true;
     if (
       post.confirmed !== undefined &&
       payloadEqual(post.confirmed, payload)
@@ -296,15 +322,18 @@ export class StatusPoster {
   }
 
   /**
-   * Contexts whose confirmed post is still `pending` (or desired is still
-   * pending) — the interrupt finalizer's worklist for posting `error`.
-   * Extended from "last post was pending" to "confirmed ≠ terminal desired":
-   * a context that never confirmed, or only confirmed running, is owed.
+   * Contexts this run owns that are still `pending` (desired and/or confirmed)
+   * — the interrupt finalizer's worklist for posting `error`.
+   *
+   * Only {@link ContextPost.owned} contexts (this run called {@link post}) are
+   * included. Seeded foreign/third-party pending checks (CI Actions, other bots)
+   * must never receive an interrupt `error` POST.
    */
   pendingContexts(): string[] {
     if (!this.opts.enabled) return [];
     const out = new Set<string>();
     for (const [context, post] of this.posts) {
+      if (!post.owned) continue;
       if (post.desired?.state === "pending") out.add(context);
       if (post.confirmed?.state !== "pending") continue;
       const d = post.desired;
@@ -412,18 +441,42 @@ export class StatusPoster {
     const result = await this.send(payload);
     if (this.currentPhase() === "closed") return;
 
-    // Desired may have changed while the request was in flight.
+    // Desired may have moved while the request was in flight.
     const still = post.desired;
-    if (still !== undefined && !payloadEqual(still, payload)) {
+    const desiredMoved =
+      still !== undefined && !payloadEqual(still, payload);
+
+    if (result.ok) {
+      // Always record a successful send — even when desired moved mid-flight —
+      // so the next comparison is against what GitHub actually has.
+      post.confirmed = payload;
+      if (!desiredMoved) {
+        post.desired = undefined;
+        this.clearDebt(post);
+        this.prune(context, post);
+        this.emitHealth();
+        return;
+      }
+      // Keep the newer desired; ensure a follow-up send is scheduled if post()
+      // did not already leave a wake (e.g. coalesced during the same tick).
+      this.emitHealth();
+      if (post.wake === undefined && this.currentPhase() !== "closed") {
+        if (this.currentPhase() === "finalizing") this.enqueue(context);
+        else this.scheduleDebounce(context);
+      }
       return;
     }
 
-    if (result.ok) {
-      post.confirmed = payload;
-      post.desired = undefined;
-      this.clearDebt(post);
-      this.prune(context, post);
-      this.emitHealth();
+    if (desiredMoved) {
+      // Failure was about the old payload; leave debt/attempts for the new desired.
+      if (post.wake === undefined && this.currentPhase() === "open") {
+        this.scheduleDebounce(context);
+      } else if (
+        post.wake === undefined &&
+        this.currentPhase() === "finalizing"
+      ) {
+        this.enqueue(context);
+      }
       return;
     }
 
@@ -572,40 +625,54 @@ function defaultSendGh(
   ).then((r) => (r.ok ? { ok: true } : { ok: false, error: r.error }));
 }
 
-function remoteStatusesFromCombined(parsed: unknown): RemoteStatus[] {
-  if (typeof parsed !== "object" || parsed === null) return [];
-  const rec = parsed as Record<string, unknown>;
-  const items = Array.isArray(rec.statuses) ? rec.statuses : [parsed];
-  const out: RemoteStatus[] = [];
-  for (const item of items) {
-    if (typeof item !== "object" || item === null) continue;
-    const row = item as Record<string, unknown>;
-    const context = typeof row.context === "string" ? row.context : "";
-    const state = typeof row.state === "string" ? row.state : "";
-    const description =
-      typeof row.description === "string" ? row.description : "";
-    if (context !== "") out.push({ context, state, description });
-  }
-  return out;
+function remoteStatusFromItem(item: unknown): RemoteStatus | null {
+  if (typeof item !== "object" || item === null) return null;
+  const row = item as Record<string, unknown>;
+  const context = typeof row.context === "string" ? row.context : "";
+  const state = typeof row.state === "string" ? row.state : "";
+  const description =
+    typeof row.description === "string" ? row.description : "";
+  if (context === "") return null;
+  return { context, state, description };
 }
 
 /**
- * Seed source: combined commit status (latest per context in one response).
- * Soft-fail empty seed on non-zero / parse error is handled by {@link StatusPoster.seed}.
+ * Seed source: paginated GET `/repos/{owner}/{repo}/statuses/{sha}` (100/page).
+ * Newest-first; first sighting per context is the latest. Separate page
+ * requests (no multi-page concat parser). Soft-fail empty seed on non-zero /
+ * parse error is handled by {@link StatusPoster.seed}.
  */
 async function defaultListStatuses(
   opts: StatusPosterOptions,
 ): Promise<RemoteStatus[]> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_GH_TIMEOUT_MS;
-  const result = await runGh(
-    ["api", `repos/${opts.owner}/${opts.repo}/commits/${opts.sha}/status`],
-    timeoutMs,
-    { captureStdout: true },
-  );
-  if (!result.ok) throw new Error(result.error);
-  const trimmed = result.stdout.trim();
-  if (trimmed === "") return [];
-  return remoteStatusesFromCombined(JSON.parse(trimmed) as unknown);
+  const out: RemoteStatus[] = [];
+  const seen = new Set<string>();
+  // Bound pages so a pathological history cannot hang seed forever.
+  const maxPages = 50;
+  for (let page = 1; page <= maxPages; page++) {
+    const result = await runGh(
+      [
+        "api",
+        `repos/${opts.owner}/${opts.repo}/statuses/${opts.sha}?per_page=100&page=${page}`,
+      ],
+      timeoutMs,
+      { captureStdout: true },
+    );
+    if (!result.ok) throw new Error(result.error);
+    const trimmed = result.stdout.trim();
+    if (trimmed === "") break;
+    const parsed: unknown = JSON.parse(trimmed);
+    if (!Array.isArray(parsed) || parsed.length === 0) break;
+    for (const item of parsed) {
+      const row = remoteStatusFromItem(item);
+      if (row === null || seen.has(row.context)) continue;
+      seen.add(row.context);
+      out.push(row);
+    }
+    if (parsed.length < 100) break;
+  }
+  return out;
 }
 
 /** Parse `git remote get-url origin` output into {owner, repo} for the
