@@ -102,6 +102,30 @@ describe("buildRunRecord", () => {
       lanes: [{ platform: "x86_64-linux", host: "localhost" }],
     });
   });
+
+  it("records unposted GitHub statuses when finalize still owes posts", () => {
+    const record = buildRunRecord({
+      ...base,
+      state: stateOf([["ci::unit@x86_64-linux", "ok", 0, 1000]]),
+      unposted: [
+        { context: "ci::unit@x86_64-linux", lastError: "403 rate limited" },
+      ],
+    });
+    expect(record.outcome).toBe("passed");
+    expect(record.unposted).toEqual([
+      { context: "ci::unit@x86_64-linux", lastError: "403 rate limited" },
+    ]);
+    expect(RunRecordSchema.safeParse(record).success).toBe(true);
+  });
+
+  it("omits unposted when the list is empty", () => {
+    const record = buildRunRecord({
+      ...base,
+      state: stateOf([["ci::unit@x86_64-linux", "ok", 0, 10]]),
+      unposted: [],
+    });
+    expect(record.unposted).toBeUndefined();
+  });
 });
 
 describe("formatRunRef", () => {

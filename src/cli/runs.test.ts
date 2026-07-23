@@ -73,4 +73,18 @@ describe("renderRuns", () => {
     const out = renderRuns([record({ dirty: true })], now);
     expect(out).toContain("26d2c2d+dirty");
   });
+
+  it("surfaces unposted GitHub statuses on the verdict line", () => {
+    const out = renderRuns(
+      [
+        record({
+          unposted: [
+            { context: "ci::unit@x86_64-linux", lastError: "403" },
+          ],
+        }),
+      ],
+      now,
+    );
+    expect(out).toContain("✔ passed, 1 status never reached GitHub");
+  });
 });

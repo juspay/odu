@@ -94,6 +94,24 @@ export const NodeStateSchema = z.object({
 });
 export type NodeState = z.infer<typeof NodeStateSchema>;
 
+/** GitHub status-posting health for a live run — empty/`ok` when every owed
+ *  context is confirmed, `degraded` while one or more posts have not landed
+ *  (retrying). Surfaces (`status` / `attach` / MCP verdicts) read this so a
+ *  reporting divergence is never silent (juspay/odu#61). */
+export const PostingHealthSchema = z.object({
+  owed: z.array(
+    z.object({
+      context: z.string(),
+      lastError: z.string().nullable(),
+      attempts: z.number().int().nonnegative(),
+    }),
+  ),
+  state: z.enum(["ok", "degraded"]),
+});
+export type PostingHealth = z.infer<typeof PostingHealthSchema>;
+
+export const EMPTY_POSTING: PostingHealth = { owed: [], state: "ok" };
+
 /** A fresh node: the caller supplies identity + dependencies; the four
  *  terminal/timing fields start at their `pending` defaults. One place owns
  *  what an unstarted node looks like, so adding a `NodeState` field can't drift
@@ -142,8 +160,16 @@ export const PipelineStateSchema = z.object({
   /** Node ids in scheduling order — the row order dashboards paint. */
   order: z.array(TaskIdSchema),
   nodes: z.record(TaskIdSchema, NodeStateSchema),
+  /** GitHub commit-status posting health (juspay/odu#61). Fan-in only; absent
+   *  or empty/`ok` means nothing owed. Lane copies omit it. */
+  posting: PostingHealthSchema.optional(),
 });
 export type PipelineState = z.infer<typeof PipelineStateSchema>;
+
+/** Posting health on a state, defaulting to healthy when absent. */
+export function postingOf(state: Pick<PipelineState, "posting">): PostingHealth {
+  return state.posting ?? EMPTY_POSTING;
+}
 
 export const EMPTY_STATE: PipelineState = {
   name: "pipeline",
@@ -151,6 +177,7 @@ export const EMPTY_STATE: PipelineState = {
   dirty: false,
   order: [],
   nodes: {},
+  posting: EMPTY_POSTING,
 };
 
 export const NodeLogMessageSchema = z.discriminatedUnion("kind", [

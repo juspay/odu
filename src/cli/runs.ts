@@ -36,12 +36,17 @@ export function renderRuns(records: readonly RunRecord[], now: number): string {
   const rows = records.map((r) => {
     const sha7 = shortSha(r.sha);
     const sha = r.dirty ? `${sha7}+dirty` : sha7;
-    const verdict =
+    const base =
       r.outcome === "passed"
         ? "✔ passed"
         : r.outcome === "failed"
           ? "✗ failed"
           : "✗ incomplete";
+    const nUnposted = r.unposted?.length ?? 0;
+    const verdict =
+      nUnposted > 0
+        ? `${base}, ${nUnposted} status${nUnposted === 1 ? "" : "es"} never reached GitHub`
+        : base;
     return {
       ref: formatRunRef(r),
       sha,

@@ -4,19 +4,25 @@
  * drives its teardown. The same primitives every face speaks: one snapshot of
  * the `nodes` cell, a log stream with snapshot-then-append replay, the
  * dashboard with `r`erun, and the `run.cancel` lifecycle mutation.
+ *
+ * `status -o json` emits `{ nodes, posting }` (not a bare array) so GitHub
+ * reporting health is machine-readable (juspay/odu#61).
  */
 
 import {
   EMPTY_HEADER,
   type NodeState,
   type PipelineState,
+  postingOf,
   type RunHeader,
   STATUS_META,
 } from "../common/surface";
 import { cancelRun } from "../coordinator/cancel";
 import { createDisplay, progressEvent } from "../coordinator/display";
 import { dialSocket, type OduClient } from "../coordinator/socket";
+import { postingWarning } from "../coordinator/statuses";
 import { exitCode, nodeRow, statusGlyph, summarize } from "./render";
+import { yellow } from "./ansi";
 
 export async function firstSnapshot(client: OduClient): Promise<PipelineState> {
   for await (const state of await client.surface.nodes.get({})) {
@@ -60,13 +66,20 @@ export async function statusCommand(
   const { client, close } = await dialSocket(socketPath);
   const state = await firstSnapshot(client);
   close();
+  const posting = postingOf(state);
   if (json) {
     const rows = state.order
       .map((id) => state.nodes[id])
       .filter((n): n is NonNullable<typeof n> => n !== undefined)
       .map(nodeRow);
-    process.stdout.write(`${JSON.stringify(rows, null, 2)}\n`);
+    // Object form carries posting health verbatim (juspay/odu#61); older
+    // clients that expected a bare array should read `.nodes`.
+    process.stdout.write(
+      `${JSON.stringify({ nodes: rows, posting }, null, 2)}\n`,
+    );
   } else {
+    const warn = postingWarning(posting);
+    if (warn !== null) process.stderr.write(`${yellow(warn)}\n`);
     for (const id of state.order) {
       const node = state.nodes[id];
       if (node === undefined) continue;
@@ -75,8 +88,10 @@ export async function statusCommand(
       // in every plain face. The `??` keeps the snapshot-only states whose
       // progress mapping is null (pending) reading as their raw status.
       const word = STATUS_META[node.status].progress ?? node.status;
+      const owedMark =
+        posting.owed.some((o) => o.context === id) ? yellow(" ⇐ github?") : "";
       process.stdout.write(
-        `${statusGlyph(node.status)} ${word.padEnd(7)} ${id}\n`,
+        `${statusGlyph(node.status)} ${word.padEnd(7)} ${id}${owedMark}\n`,
       );
     }
   }

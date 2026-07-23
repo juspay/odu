@@ -53,11 +53,12 @@ import {
   type NodeLogFrame,
   type NodeState,
   type PipelineState,
+  postingOf,
   type ProgressStatus,
   type RunHeader,
   STATUS_META,
 } from "../common/surface";
-import { logPathFor } from "./statuses";
+import { logPathFor, postingWarning } from "./statuses";
 
 export type DisplayMode = "json" | "plain" | "live";
 
@@ -359,8 +360,11 @@ export function renderRunFrame(opts: {
     dim(
       `  ${header.lanes.map((l) => `${l.platform} = ${l.host}`).join(" · ")}`,
     ),
-    "",
   ];
+  // GitHub posting debt strip (juspay/odu#61) — gone when the debt clears.
+  const warn = postingWarning(postingOf(state));
+  if (warn !== null) lines.push(yellow(warn));
+  lines.push("");
 
   const nameWidth = Math.max(9, ...recipes.map((r) => recipeLabel(r).length));
   const cellWidth = Math.max(14, ...platforms.map((p) => p.length + 2));

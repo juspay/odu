@@ -2,7 +2,7 @@
  * odu — a CI runner you attach to. ஓடு: run.
  *
  *   odu run [recipe[@platform]…] [flags]   run the [metadata("ci")] DAG
- *   odu status [-o json]                   snapshot a live run's nodes
+ *   odu status [-o json]                   snapshot a live run ({nodes, posting})
  *   odu logs [-f] <node>                   one node's log (replay + follow)
  *   odu attach [-o json]                   live dashboard / transition stream
  *   odu cancel                             stop the live run in this checkout
@@ -46,7 +46,7 @@ const USAGE = `usage: odu <run|status|logs|attach|cancel|runs|hosts|lease|releas
 run [recipe[@platform]…] [--platform P]… [--host P=ADDR]… [--root NAMEPATH]
     [--no-deps] [--no-strict] [--no-snapshot] [--no-post] [--progress json]
     [--supersede] [--linger] [--no-wait]
-status [-o json]
+status [-o json]              # json shape: { nodes, posting }
 logs [-f] <node>
 attach [-o json]
 cancel

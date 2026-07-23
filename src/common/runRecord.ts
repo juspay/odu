@@ -91,6 +91,16 @@ export const RunRecordSchema = z.object({
   finishedAt: z.number(),
   lanes: z.array(z.object({ platform: z.string(), host: z.string() })),
   nodes: z.array(RunNodeSchema),
+  /** Commit statuses that never reached GitHub by finalize time (juspay/odu#61).
+   *  Absent / empty when every post confirmed — older records omit the field. */
+  unposted: z
+    .array(
+      z.object({
+        context: z.string(),
+        lastError: z.string(),
+      }),
+    )
+    .optional(),
 });
 export type RunRecord = z.infer<typeof RunRecordSchema>;
 
@@ -154,11 +164,17 @@ export function buildRunRecord(input: {
   finishedAt: number;
   lanes: ReadonlyArray<{ platform: string; host: string }>;
   state: PipelineState;
+  /** Statuses still unconfirmed when the record is finalized (juspay/odu#61). */
+  unposted?: ReadonlyArray<{ context: string; lastError: string }>;
 }): RunRecord {
   const { state } = input;
   const nodes = projectNodes(state);
   const complete = nodes.every((n) => isTerminal(n.status));
   const red = nodes.some((n) => STATUS_META[n.status].isRed);
+  const unposted =
+    input.unposted !== undefined && input.unposted.length > 0
+      ? [...input.unposted]
+      : undefined;
   return {
     version: RUN_RECORD_VERSION,
     repo: input.repo,
@@ -171,5 +187,6 @@ export function buildRunRecord(input: {
     finishedAt: input.finishedAt,
     lanes: [...input.lanes],
     nodes,
+    ...(unposted !== undefined ? { unposted } : {}),
   };
 }

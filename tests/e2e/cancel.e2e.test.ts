@@ -141,7 +141,10 @@ describe("odu cancel / supersede / linger (black-box)", () => {
           encoding: "utf-8",
           env,
         });
-        const rows = JSON.parse(out) as Array<{ status: string }>;
+        const parsed = JSON.parse(out) as
+          | { nodes: Array<{ status: string }> }
+          | Array<{ status: string }>;
+        const rows = Array.isArray(parsed) ? parsed : parsed.nodes;
         return rows.length > 0 && rows.every((r) => r.status === "ok");
       } catch {
         return false;

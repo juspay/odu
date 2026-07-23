@@ -39,6 +39,7 @@ import {
   oduSurface,
   pendingNode,
   type PipelineState,
+  type PostingHealth,
   type RunHeader,
   STATUS_META,
 } from "../common/surface";
@@ -74,6 +75,7 @@ import {
   logPathFor,
   parseGithubRemote,
   repoSlug,
+  postingEqual,
   StatusPoster,
   statusFor,
 } from "./statuses";
@@ -563,13 +565,21 @@ async function orchestrate(
     }
   }
 
+  // Bound after `implementSurface` so onHealth can publish onto the cell.
+  let publishPosting: (health: PostingHealth) => void = () => {};
   const poster = new StatusPoster({
     owner: github?.owner ?? "",
     repo: github?.repo ?? "",
     sha,
     enabled: ctx.posting,
     onLine: info,
+    onHealth: (health) => publishPosting(health),
   });
+  // Read-before-write: contexts GitHub already shows in the desired state
+  // become no-ops (eliminates the restart "pending wave").
+  if (ctx.posting && github !== null) {
+    await poster.seed();
+  }
 
   // ── fan-in state: one PipelineState keyed `<node>@<platform>` ──
   const order: string[] = [];
@@ -603,6 +613,7 @@ async function orchestrate(
     dirty: ctx.dirty,
     order,
     nodes,
+    posting: poster.health(),
   });
   // The run environment (lane→host map + commit link + start clock), published
   // on the surface so an `attach`-er paints the same matrix `run` does. Filled
@@ -651,7 +662,12 @@ async function orchestrate(
   // already reserved above), then driven by every terminal path — natural
   // completion, each linger drain, and the shared `shutdown` teardown — so an
   // interrupted or cancelled run still leaves a record (marked incomplete).
-  let finalizeRunRecord: (state: PipelineState) => void = () => {};
+  // `unposted` is the GitHub reporting debt still owed after finalize (or the
+  // live debt on a mid-linger refresh).
+  let finalizeRunRecord: (
+    state: PipelineState,
+    unposted?: ReadonlyArray<{ context: string; lastError: string }>,
+  ) => void = () => {};
   // Linger's idle backstop: a settled-but-lingering coordinator self-reaps
   // after `idleMs` with no new work, so a forgotten `--linger` run can't hold
   // the checkout lock forever. Cleared the instant a node (re)starts.
@@ -719,7 +735,7 @@ async function orchestrate(
         description: `Errored (${reason}): ${logPathFor(sha7, context)}`,
       });
     }
-    void poster.settle().then(() => {
+    void poster.finalize().then((unposted) => {
       applyInterruptStopWork("after-settle", exclusivityLost, stopWork);
       // Record this run before the socket closes: a superseding run waits on
       // that close to confirm we're gone, so writing first guarantees our
@@ -729,7 +745,7 @@ async function orchestrate(
       // the timing sidecar from the same snapshot so this terminal path leaves the
       // same paired durable state every other terminal path writes.
       writeTimingSidecar(interruptedState);
-      finalizeRunRecord(interruptedState);
+      finalizeRunRecord(interruptedState, unposted);
       closeSocket();
       display.stop(interruptedState);
       process.exit(code);
@@ -770,6 +786,11 @@ async function orchestrate(
   // `implementSurface` now returns the FINAL top-level router (the framework
   // owns its own in-memory channel and the oRPC finalize) — serve it directly.
   const router = runtime.router;
+  publishPosting = (health) => {
+    const cur = store.get();
+    if (postingEqual(cur.posting, health)) return;
+    runtime.ctx.cells.nodes.set({ ...cur, posting: health });
+  };
 
   // ── observers: progress stream + commit statuses, diffed per transition ──
   const emitProgress = (id: string, node: NodeState): void => {
@@ -874,7 +895,7 @@ async function orchestrate(
   // (seq itself was reserved before the venue lease — see above.)
   runtime.ctx.cells.nodes.set({ ...store.get(), seq: seq ?? undefined });
   if (seq !== null) {
-    finalizeRunRecord = (state: PipelineState): void => {
+    finalizeRunRecord = (state, unposted): void => {
       try {
         writeRunRecord(
           repoRoot,
@@ -888,6 +909,7 @@ async function orchestrate(
             finishedAt: Date.now(),
             lanes: header.lanes,
             state,
+            unposted: unposted ?? poster.unposted(),
           }),
         );
       } catch {
@@ -1034,7 +1056,10 @@ async function orchestrate(
 
   // The human verdict summary — foreground completion only, never mid-linger
   // where the live display still owns the screen. Returns the exit code.
-  const printVerdict = (state: PipelineState): number => {
+  const printVerdict = (
+    state: PipelineState,
+    unposted: ReadonlyArray<{ context: string; lastError: string }> = [],
+  ): number => {
     const counts = { ok: 0, failed: 0, errored: 0, skipped: 0 };
     const shaLabel = commitLabel({ sha7, dirty: ctx.dirty });
     const lines: string[] = [
@@ -1071,10 +1096,14 @@ async function orchestrate(
       lines.push(`  ${glyph} ${id.padEnd(44)} ${node.status}${dur}${logRef}`);
     }
     const code = verdictCode(state);
+    const unpostedNote =
+      unposted.length > 0
+        ? `, ${unposted.length} status${unposted.length === 1 ? "" : "es"} never reached GitHub`
+        : "";
     lines.push(
       `${counts.ok} ok · ${counts.failed} failed · ${counts.errored} errored · ${counts.skipped} skipped — ${
         code > 0 ? bold(red("FAILED")) : bold(green("OK"))
-      }`,
+      }${unpostedNote !== "" ? dim(unpostedNote) : ""}`,
     );
     process.stderr.write(`${lines.join("\n")}\n`);
     return code;
@@ -1087,7 +1116,8 @@ async function orchestrate(
     // signal / idle — all of which route through `shutdown`, which exits us.
     onSettledEach = (): void => {
       writeTimingSidecar(store.get());
-      finalizeRunRecord(store.get());
+      // Live debt only — poster keeps retrying until shutdown finalizes.
+      finalizeRunRecord(store.get(), poster.unposted());
       if (idleMs > 0) {
         clearIdle();
         idleTimer = setTimeout(
@@ -1110,21 +1140,17 @@ async function orchestrate(
   // next waiter can claim the box while we still finalize statuses/records.
   for (const lease of acquiredLeases) lease.release();
   acquiredLeases.length = 0;
-  // Record this run *before* releasing the socket lock — every node is already
-  // terminal (allSettled), so the state is final. A superseding/next run waits
-  // on the socket close to confirm we're gone and only then reserves its seq, so
-  // writing the record first guarantees our `<seq>.json` is on disk before
-  // anyone reserves the next seq (and the exclusive reservation would skip our
-  // slot regardless). Mirrors the shutdown path's lock-before-record-release
-  // ordering.
+  // Final status reconciliation *before* the record write and socket release —
+  // one last attempt at anything still owed, then stamp what failed into the
+  // durable record so the divergence stays visible after exit (juspay/odu#61).
   const finalState = store.get();
   writeTimingSidecar(finalState);
-  finalizeRunRecord(finalState);
+  const unposted = await poster.finalize();
+  finalizeRunRecord(finalState, unposted);
   closeSocket();
-  await poster.settle();
 
   display.stop(finalState);
-  return printVerdict(finalState);
+  return printVerdict(finalState, unposted);
 }
 
 /** Idle backstop for a `--linger` run: after the run drains, the coordinator

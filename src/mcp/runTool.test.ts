@@ -13,7 +13,13 @@ import type { CancelResult } from "../coordinator/cancel";
 import { tryAcquireRunLock } from "../coordinator/checkoutLock";
 import { pendingNode, type PipelineState } from "../common/surface";
 import { serveTestSurface, type TestSurface } from "./serveForTest";
-import { pollUntilSocketOrExit, startRun } from "./runTool";
+import {
+  appendPreOpen,
+  openRunLog,
+  pollUntilSocketOrExit,
+  startRun,
+} from "./runTool";
+import { existsSync, readFileSync } from "node:fs";
 
 function liveState(): PipelineState {
   return {
@@ -208,5 +214,50 @@ describe("pollUntilSocketOrExit — exit-bounded wait (no fixed startup window)"
     expect(r.ok).toBe(false);
     expect(r.started).toBe(false);
     expect(r.error).toMatch(/did not serve a socket|still running/);
+  });
+});
+
+describe("appendPreOpen — pre-open tee cap (juspay/odu#61)", () => {
+  it("caps total buffered bytes and truncates the overflow chunk", () => {
+    const chunks: Buffer[] = [];
+    let n = appendPreOpen(chunks, Buffer.from("hello "), 10, 0);
+    expect(n).toBe(6);
+    n = appendPreOpen(chunks, Buffer.from("world!!!"), 10, n);
+    expect(n).toBe(10);
+    expect(Buffer.concat(chunks).toString()).toBe("hello worl");
+    // Further appends are no-ops once at the cap.
+    expect(appendPreOpen(chunks, Buffer.from("more"), 10, n)).toBe(10);
+  });
+});
+
+describe("openRunLog — durable coordinator log path", () => {
+  it("writes under .ci/<sha7>/runs/<seq>.log when the surface has identity", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "odu-runlog-"));
+    const socketPath = join(dir, "odu.sock");
+    // Serve a surface with sha7+seq so openRunLog can place the file.
+    const state = liveState();
+    state.sha7 = "abc1234";
+    state.seq = 7;
+    const s = await serveTestSurface(state, undefined, { socketPath });
+    open.push(s);
+    try {
+      const stream = await openRunLog(socketPath);
+      expect(stream).not.toBeNull();
+      stream!.write("coordinator boot\n");
+      await new Promise<void>((resolve, reject) => {
+        stream!.end((err: Error | null | undefined) =>
+          err ? reject(err) : resolve(),
+        );
+      });
+      const logPath = join(dir, "abc1234", "runs", "7.log");
+      expect(existsSync(logPath)).toBe(true);
+      expect(readFileSync(logPath, "utf-8")).toContain("coordinator boot");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null when the socket cannot be dialed", async () => {
+    expect(await openRunLog("/no/such/odu.sock")).toBeNull();
   });
 });
