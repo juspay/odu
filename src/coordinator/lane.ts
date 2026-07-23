@@ -26,6 +26,7 @@ import type {
   NodeLogFrame,
   PipelineState,
 } from "../common/surface";
+import { localhostSpawnEnv } from "./surfaceRemoteOpts";
 
 const MAX_CONNECT_ATTEMPTS = 3;
 const CONNECT_DEADLINE_MS = Number(
@@ -76,6 +77,9 @@ export function startLane(opts: LaneOptions): Lane {
       host: opts.host,
       binary: "odu-runner",
       resolveDrvPath: opts.resolveDrvPath,
+      // Required (kolu#1884 / #1872): localhost arm refuses ambient inherit.
+      // Unused on a real ssh host. See surfaceRemoteOpts.localhostSpawnEnv.
+      localEnv: localhostSpawnEnv(),
     }),
     label: `host:${opts.host}`,
   });
