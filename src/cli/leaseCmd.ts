@@ -27,8 +27,8 @@ import {
   upsertPlatformLease,
 } from "../coordinator/leaseRecord";
 import {
-  evalOduRunnerDrv,
   resolveRunnerFlake,
+  runnerDrvResolver,
 } from "../coordinator/runnerFlake";
 import { oduSelfArgv } from "../mcp/runTool";
 
@@ -385,8 +385,7 @@ export async function leaseHoldCommand(opts: {
         run: `lease-hold:${pid}`,
       },
       noWait,
-      resolveDrvPath: () =>
-        Promise.resolve(evalOduRunnerDrv(runnerFlake, platform)),
+      resolveDrvPath: runnerDrvResolver(runnerFlake, platform),
       onLine: (msg) => {
         log(msg);
         // Keep waiting state visible while queueing.

@@ -1,6 +1,6 @@
 /**
  * One platform's lane, coordinator side: provision the runner closure on the
- * host (the ssh session: `nix copy --derivation` → remote realise → spawn over
+ * host (the ssh session: warm probe → remote-store provisioning → spawn over
  * ssh), configure the run over the surface, and pump node state + logs back.
  *
  * Lanes are **one-shot** (design review): the first link death after attach
@@ -26,6 +26,7 @@ import type {
   NodeLogFrame,
   PipelineState,
 } from "../common/surface";
+import type { ResolveRunnerDrv } from "./runnerFlake";
 import { localhostSpawnEnv } from "./surfaceRemoteOpts";
 
 const MAX_CONNECT_ATTEMPTS = 3;
@@ -45,7 +46,7 @@ export interface LaneOptions {
   /** Pre-existing checkout (the coordinator's HEAD snapshot) for localhost
    *  lanes; null for remote lanes. */
   workspace: string | null;
-  resolveDrvPath: () => Promise<string>;
+  resolveDrvPath: ResolveRunnerDrv;
   /** Provision / lifecycle lines — land in `_ci-setup@<platform>`'s log. */
   onSetupLine: (line: string) => void;
   onNodes: (state: PipelineState) => void;
@@ -70,8 +71,8 @@ export function startLane(opts: LaneOptions): Lane {
 
   const session = makeSession<AgentClient<typeof laneSurface.contract>, SshProv>({
     // The ssh connector opens at its first provisioning phase: the arch/warm
-    // realise probe (`probing`), advancing to `copying`/`building` itself only
-    // on a cold host.
+    // realise probe (`probing`), advancing to `provisioning` itself only on a
+    // cold host.
     initialConnection: "probing",
     connectOnce: sshConnector<typeof laneSurface.contract>({
       host: opts.host,
