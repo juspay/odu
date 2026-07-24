@@ -26,7 +26,7 @@ let
   pnpmDeps = pkgs.fetchPnpmDeps {
     pname = "odu";
     inherit version src;
-    hash = "sha256-YiGcJsu23WUSbr0jQdn8OOF/903xGvMeEwiob7QdJ+g=";
+    hash = "sha256-Xo+EwCd3zxJut0naFEzuxznddo4LmZkhx4x+T2pI3N0=";
     fetcherVersion = 3;
   };
 

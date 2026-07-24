@@ -11,8 +11,8 @@ import {
   type ProbeResult,
 } from "../coordinator/lease";
 import {
-  evalOduRunnerDrv,
   resolveRunnerFlake,
+  runnerDrvResolver,
 } from "../coordinator/runnerFlake";
 
 function stateLabel(probe: ProbeResult): string {
@@ -41,8 +41,8 @@ export async function hostsCommand(): Promise<number> {
 
   const runnerFlake = resolveRunnerFlake(process.env);
   const rows = await probeAllHosts(config.hosts, {
-    resolveDrvPath: (platform) => () =>
-      Promise.resolve(evalOduRunnerDrv(runnerFlake, platform)),
+    resolveDrvPath: (platform) =>
+      runnerDrvResolver(runnerFlake, platform),
   });
   const nowMs = Date.now();
 

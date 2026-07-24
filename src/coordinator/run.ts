@@ -58,7 +58,7 @@ import {
   upsertPlatformLease,
   removePlatformLease,
 } from "./leaseRecord";
-import { evalOduRunnerDrv, resolveRunnerFlake } from "./runnerFlake";
+import { resolveRunnerFlake, runnerDrvResolver } from "./runnerFlake";
 import { cancelRun } from "./cancel";
 import {
   liveRunLockPid,
@@ -552,8 +552,8 @@ async function orchestrate(
         identity: { holder: localHolderId(), run: runLabel },
         noWait: args.noWait,
         onLine: info,
-        resolveDrvPath: (platform) => () =>
-          Promise.resolve(evalOduRunnerDrv(runnerFlake, platform)),
+        resolveDrvPath: (platform) =>
+          runnerDrvResolver(runnerFlake, platform),
       });
       for (const [p, h] of Object.entries(claimed.lanes)) {
         lanesByPlatform[p] = h;
@@ -956,7 +956,7 @@ async function orchestrate(
       origin: local || originUrl === null ? null : fetchUrlFor(originUrl),
       sha: local ? null : sha,
       workspace: local ? specSource : null,
-      resolveDrvPath: async () => evalOduRunnerDrv(runnerFlake, platform),
+      resolveDrvPath: runnerDrvResolver(runnerFlake, platform),
       onSetupLine: (line) => appendLocal(setupId, `${line}\n`),
       onNodes: (laneState) => {
         for (const laneId of laneState.order) {

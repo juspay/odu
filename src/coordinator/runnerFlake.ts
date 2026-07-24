@@ -20,6 +20,13 @@
  */
 
 import { spawnSync } from "node:child_process";
+import {
+  type AgentDerivation,
+  directAgentDerivation,
+  type SshConnectorOptions,
+} from "@kolu/surface-remote";
+
+export type ResolveRunnerDrv = SshConnectorOptions["resolveDrvPath"];
 
 export function resolveRunnerFlake(env: NodeJS.ProcessEnv): string {
   const flake = env.ODU_RUNNER_FLAKE;
@@ -66,7 +73,7 @@ export function missingRunnerError(
 export function evalOduRunnerDrv(
   runnerFlake: string,
   platform: string,
-): string {
+): AgentDerivation {
   const attr = `${runnerFlake}#packages.${platform}.odu-runner.drvPath`;
   const result = spawnSync(
     "nix",
@@ -82,5 +89,13 @@ export function evalOduRunnerDrv(
     if (directed !== null) throw new Error(directed);
     throw new Error(`nix eval odu-runner drv failed:\n${result.stderr}`);
   }
-  return result.stdout.trim();
+  return directAgentDerivation(result.stdout.trim());
+}
+
+/** Bind one platform's runner evaluation to surface-remote's dial contract. */
+export function runnerDrvResolver(
+  runnerFlake: string,
+  platform: string,
+): ResolveRunnerDrv {
+  return async () => evalOduRunnerDrv(runnerFlake, platform);
 }

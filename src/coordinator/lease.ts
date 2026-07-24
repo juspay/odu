@@ -31,6 +31,7 @@ import {
   type LeaseHolder,
 } from "../common/surface";
 import { shortHost, type HostPool } from "./hosts";
+import type { ResolveRunnerDrv } from "./runnerFlake";
 import { lineLogger, localhostSpawnEnv } from "./surfaceRemoteOpts";
 
 export type HolderInfo = LeaseHolder;
@@ -54,7 +55,7 @@ function envNumber(name: string, fallback: number, min: number): number {
 }
 
 const WAIT_POLL_MS = envNumber("ODU_LEASE_WAIT_POLL_MS", 5_000, 1);
-/** Bound for pin + claim RPC (includes cold nix copy of odu-runner). */
+/** Bound for pin + claim RPC (includes cold provisioning of odu-runner). */
 const CLAIM_TIMEOUT_MS = envNumber("ODU_LEASE_CLAIM_TIMEOUT_MS", 180_000, 1);
 
 export interface LeaseIdentity {
@@ -128,9 +129,6 @@ export function parseHolderBody(body: string): HolderInfo | null {
 }
 
 export type LaneAgentClient = AgentClient<typeof laneSurface.contract>;
-
-/** How the coordinator resolves odu-runner for a host (nix eval + platform). */
-export type ResolveRunnerDrv = () => Promise<string>;
 
 export interface AgentDialOpts {
   resolveDrvPath: ResolveRunnerDrv;
