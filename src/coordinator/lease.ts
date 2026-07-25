@@ -30,7 +30,7 @@ import {
   laneSurface,
   type LeaseHolder,
 } from "../common/surface";
-import { assertPoolLocality, shortHost, type HostPool } from "./hosts";
+import { shortHost, type HostPool } from "./hosts";
 import type { ResolveRunnerDrv } from "./runnerFlake";
 import { lineLogger, localhostSpawnEnv } from "./surfaceRemoteOpts";
 
@@ -592,6 +592,38 @@ function assertNoSharedRemoteHosts(
       owner.set(key, platform);
     }
   }
+}
+
+/**
+ * Refuse a pool that mixes localhost with remotes. Localhost is lease-exempt
+ * (checkout socket serializes local runs); in a multi-host scan that made it
+ * an always-free overflow — busy remotes were skipped the moment a local
+ * entry appeared. Pure-local (typically a sole `"localhost"`) and pure-remote
+ * pools are both fine; mixing is illegal in any pool a run leases.
+ *
+ * Enforced at the lease seam (`leaseLanes` / `acquireFromPool` entry, via
+ * `assertPoolsScannable`), over exactly the platforms a run claims — never at
+ * parse time and never over the whole resolved map, both of which refuse runs
+ * that never touch the offending pool (juspay/odu#66): a resolved map still
+ * carries platforms a selector (`odu run fmt@aarch64-darwin`) or an
+ * OS-disabled recipe drops before any lease.
+ */
+function assertPoolLocality(
+  source: string | null,
+  platform: string,
+  pool: readonly string[],
+): void {
+  const anyLocal = pool.some((h) => isLocalHost(h));
+  const anyRemote = pool.some((h) => !isLocalHost(h));
+  if (!anyLocal || !anyRemote) return;
+  // A `--host` pin is a pool of one — pure by construction — so a mixed pool
+  // always came from the hosts file, and `source` names it. The fallback only
+  // covers a config assembled in code rather than read from disk.
+  const where = source === null ? "hosts config" : source;
+  throw new Error(
+    `odu: ${where}: host pool for "${platform}" must not mix localhost with remote hosts` +
+      ` (got ${JSON.stringify(pool)}; use a pure-local or pure-remote pool)`,
+  );
 }
 
 /**
