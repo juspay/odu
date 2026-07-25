@@ -237,17 +237,24 @@ describe("reservation reclaim — only before the identity is observable", () =>
    * still holding. Reclaim is therefore for pre-publication orphans only.
    */
   it("reclaims an orphan that never served (early throw)", () => {
-    expect(shouldReclaimReservation({ seq: 1, published: false })).toBe(true);
+    expect(
+      shouldReclaimReservation({ status: "reserved", seq: 1, published: false }),
+    ).toBe(true);
   });
 
   it("KEEPS the sentinel once the identity was served, even if finalize failed", () => {
     // finalizeRunRecord swallows write failures, so a published run can exit
     // leaving its sentinel behind. Burning the ordinal is the cheap failure;
     // reusing it is the corrupt one.
-    expect(shouldReclaimReservation({ seq: 1, published: true })).toBe(false);
+    expect(
+      shouldReclaimReservation({ status: "reserved", seq: 1, published: true }),
+    ).toBe(false);
   });
 
   it("has nothing to reclaim when no seq was ever reserved", () => {
-    expect(shouldReclaimReservation({ seq: null, published: false })).toBe(false);
+    // `{ status: "unreserved" }` carries no `seq`/`published` at all — the
+    // once-possible `{ seq: null, published: true }` is now a compile error,
+    // not just a runtime case this returns false for.
+    expect(shouldReclaimReservation({ status: "unreserved" })).toBe(false);
   });
 });

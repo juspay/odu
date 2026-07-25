@@ -182,6 +182,21 @@ export async function ensureCheckoutFree(
 }
 
 /**
+ * The reservation sentinel's lifecycle: no ordinal was ever claimed
+ * (`reserveNextSeq` returned `null`), or one was and `published` tracks
+ * whether it has since been served on the socket. The discriminant makes
+ * `{ seq: null, published: true }` unrepresentable — `published` can only
+ * exist once `seq` does, so a run that never got an ordinal can no longer be
+ * marked published (see the `serveSocket` call site in `orchestrate`, which
+ * used to set `published = true` unconditionally even when `seq` stayed
+ * `null`, a state `shouldReclaimReservation` happened to treat as harmless
+ * only because it also checks `seq !== null`).
+ */
+export type ReservationState =
+  | { status: "unreserved" }
+  | { status: "reserved"; seq: number; published: boolean };
+
+/**
  * Reclaim an orphaned reservation sentinel only while the identity was never
  * served. Once `sha7#seq` has been published on the socket a reader may key a
  * verdict on it (`wait_for_settle` reads the record BY that address), so
@@ -190,11 +205,10 @@ export async function ensureCheckoutFree(
  * the same slot and answer for a different run. A stale sentinel only burns an
  * ordinal; a reused one corrupts an identity (juspay/odu#49).
  */
-export function shouldReclaimReservation(reservation: {
-  seq: number | null;
-  published: boolean;
-}): boolean {
-  return reservation.seq !== null && !reservation.published;
+export function shouldReclaimReservation(
+  reservation: ReservationState,
+): reservation is { status: "reserved"; seq: number; published: false } {
+  return reservation.status === "reserved" && !reservation.published;
 }
 
 /**
@@ -312,9 +326,11 @@ export async function runCommand(args: RunArgs): Promise<number> {
   // on it. Reclaiming the sentinel then would let a later run of this commit
   // reserve the SAME ordinal — the exact reuse the reservation exists to
   // prevent (juspay/odu#49), and a stale sentinel is the cheaper failure.
-  const reservation: { seq: number | null; published: boolean } = {
-    seq: null,
-    published: false,
+  // Boxed (`{ current }`) rather than a bare `ReservationState` so `orchestrate`
+  // can hand back a new state by reassigning the field — a discriminated union
+  // is replaced wholesale, not mutated field-by-field.
+  const reservation: { current: ReservationState } = {
+    current: { status: "unreserved" },
   };
   try {
     return await orchestrate(
@@ -341,8 +357,8 @@ export async function runCommand(args: RunArgs): Promise<number> {
     acquiredLeases.length = 0;
     runLock.handle?.release();
     runLock.handle = null;
-    if (shouldReclaimReservation(reservation)) {
-      releaseReservation(repoRoot, sha7, reservation.seq as number);
+    if (shouldReclaimReservation(reservation.current)) {
+      releaseReservation(repoRoot, sha7, reservation.current.seq);
     }
   }
 }
@@ -374,7 +390,7 @@ async function orchestrate(
   acquiredLeases: LeaseHandle[],
   /** runCommand-owned holder for the reserved seq, so its `finally` can reclaim
    *  an orphaned reservation sentinel on an early-throw. Set once reserved. */
-  reservation: { seq: number | null; published: boolean },
+  reservation: { current: ReservationState },
   /** runCommand-owned checkout run-lock; claimed right after ensureCheckoutFree
    *  and released in runCommand's finally / process exit. */
   runLock: { handle: RunLockHandle | null },
@@ -525,8 +541,12 @@ async function orchestrate(
   const seq = reserveNextSeq(repoRoot, sha7);
   // Hand the reserved seq to runCommand's early-throw cleanup: if this run
   // throws before serving/finalizing, its `finally` reclaims the orphaned
-  // sentinel (releaseReservation leaves a finalized record untouched).
-  reservation.seq = seq;
+  // sentinel (releaseReservation leaves a finalized record untouched). `seq
+  // === null` (the reservation write failed) leaves `reservation.current`
+  // "unreserved" — there is no ordinal to reclaim or to later mark published.
+  if (seq !== null) {
+    reservation.current = { status: "reserved", seq, published: false };
+  }
 
   // ── venue lease: one free machine per platform, lock held for the run ──
   // Two layers (juspay/odu#54 CR1):
@@ -989,8 +1009,11 @@ async function orchestrate(
   closeSocket = await serveSocket(router, socketPath);
   // The identity is now observable: a reader can see `sha7#seq` and key a
   // verdict on it, so the ordinal must never be handed to another run even if
-  // finalizing this one's record fails.
-  reservation.published = true;
+  // finalizing this one's record fails. A no-op when no seq was ever reserved
+  // — "published" cannot apply to an ordinal that doesn't exist.
+  if (reservation.current.status === "reserved") {
+    reservation.current = { ...reservation.current, published: true };
+  }
 
   display.start(store.get(), header);
   display.update(store.get());
