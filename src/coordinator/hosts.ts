@@ -23,7 +23,6 @@ import { existsSync, readFileSync } from "node:fs";
 import { isIP } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { isLocalHost } from "@kolu/surface-remote";
 
 /** One platform's declared inventory — always a list (a bare string in the
  *  file normalizes to a one-element pool). Never empty after `loadHosts`: an
