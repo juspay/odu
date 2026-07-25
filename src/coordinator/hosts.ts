@@ -166,7 +166,8 @@ function noHostsConfiguredError(config: HostsConfig): Error {
 /** Apply `--host PLAT=ADDR` pins and `--platform` slices to the config.
  *  Pins replace the pool with a single-host pool (the pin is a forced pick).
  *  Returns declared inventory — unjudged, and not post-lease lanes: locality
- *  is `acquireFromPool`'s to enforce over the pools it actually scans. */
+ *  is the lease seam's to enforce (`leaseLanes` / `acquireFromPool` entry),
+ *  over exactly the pools a run claims. */
 export function resolvePools(
   config: HostsConfig,
   hostPins: readonly string[],

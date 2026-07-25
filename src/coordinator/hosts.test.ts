@@ -184,9 +184,9 @@ describe("loadHosts — string | list values", () => {
 
   it("parses a mixed pool — locality is judged per run, not per file (juspay/odu#66)", () => {
     // This test used to assert the throw right here. That contract failed a
-    // run over a platform it never touched, so the refusal moved to
-    // `resolvePools` — see the locality describe below for where it now fires
-    // (and that it still fires with the same words).
+    // run over a platform it never touched, so the refusal moved to the lease
+    // seam — see lease.test.ts ("REFUSES a mixed pool at the lease entry") for
+    // where it now fires and that it still names the hosts file.
     writeHosts({ "x86_64-linux": ["ci-1", "localhost", "ci-2"] });
     expect(loadHosts().hosts).toEqual({
       "x86_64-linux": ["ci-1", "localhost", "ci-2"],
@@ -223,12 +223,13 @@ describe("pool locality is judged over what a run resolves (juspay/odu#66)", () 
     ).toEqual({ "aarch64-darwin": ["sincereintent"] });
   });
 
-  it("resolves a mixed pool without judging it — the scan owns that rule", () => {
-    // Resolution reports declared inventory; `scanPoolOnce` refuses a mixed
-    // pool when a run actually claims from it (see lease.test.ts). Judging
-    // here would refuse runs that never lease this platform — a `--platform`
-    // slice, a `--host` pin, OR a selector like `odu run fmt@aarch64-darwin`,
-    // which resolution cannot see at all (juspay/odu#66).
+  it("resolves a mixed pool without judging it — the lease seam owns that rule", () => {
+    // Resolution reports declared inventory; `leaseLanes`/`acquireFromPool`
+    // refuse a mixed pool the run actually claims from (see lease.test.ts).
+    // Judging here would refuse runs that never lease this platform — a
+    // `--platform` slice, a `--host` pin, OR a selector like
+    // `odu run fmt@aarch64-darwin`, which resolution cannot see at all
+    // (juspay/odu#66).
     writeHosts({ "x86_64-linux": ["ci-1", "localhost", "ci-2"] });
     const config = loadHosts();
     expect(fanoutPools(config, [], [])).toEqual({
