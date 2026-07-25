@@ -19,8 +19,10 @@ import { isDeadTransportError } from "@kolu/surface/client";
 import type { BespokeTool } from "@kolu/surface-mcp";
 import { z } from "zod";
 import { agentSummary } from "../cli/render";
-import { formatRef } from "../common/runRecord";
+import { gitTopLevel, shortSha } from "../common/git";
+import { formatRef, type RunRecord } from "../common/runRecord";
 import type { OwedStatus } from "../common/surface";
+import { readLedger } from "../coordinator/ledger";
 import { SOCKET_PATH } from "../coordinator/socket";
 import { type AgentNodes, type AgentNodesReader, EMPTY_NODES } from "./agentSurface";
 
@@ -93,6 +95,40 @@ export interface WaitOptions {
 	signal?: AbortSignal;
 	/** Injected clock for tests; defaults to `Date.now`. */
 	now?: () => number;
+	/** The durable record for a run identity, or null when none is on disk.
+	 *  Injected for tests; defaults to the checkout's ledger. Consulted only
+	 *  when the stream ends without a settle frame — see `recordVerdict`. */
+	readRecord?: (sha7: string, seq: number | null) => RunRecord | null;
+}
+
+/** The finalized record for `sha7#seq`, read from the checkout's ledger. The
+ *  coordinator writes it as it exits, so it is the authority on a run whose
+ *  socket is already gone. */
+function ledgerRecord(sha7: string, seq: number | null): RunRecord | null {
+	if (seq === null) return null;
+	const root = gitTopLevel();
+	if (root === null) return null;
+	return (
+		readLedger(root).find(
+			(r) => shortSha(r.sha) === sha7 && r.seq === seq,
+		) ?? null
+	);
+}
+
+/** The verdict a finalized record dictates, or null when the record can't
+ *  settle the question (absent, or `incomplete` — a run torn down mid-flight,
+ *  which is exactly the half-observed case the caller must not read as green). */
+function recordVerdict(rec: RunRecord | null): {
+	settled: boolean;
+	failed: string[];
+	errored: string[];
+} | null {
+	if (rec === null || rec.outcome === "incomplete") return null;
+	const failed = rec.nodes.filter((n) => n.status === "failed").map((n) => n.id);
+	const errored = rec.nodes
+		.filter((n) => n.status === "errored")
+		.map((n) => n.id);
+	return { settled: true, failed, errored };
 }
 
 /** The run-identity + posting-debt fields stamped into every verdict, from the
@@ -181,11 +217,19 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
 		}
 		// A live run WAS observed, but the coordinator then closed the socket
 		// (crash, interrupt, or a close race) with nodes still pending/running.
-		// `settled` is true only if the last snapshot was already terminal;
-		// `passed` requires that — a green verdict must never come from a
-		// half-observed run.
-		const red = agentSummary(last);
-		const settled = red.done;
+		// A settled run normally publishes its terminal frame first; when the
+		// close wins that race, the *record* the coordinator finalized on the
+		// way out already holds the answer, so read it rather than report a
+		// passing run as unsettled. Only `passed`/`failed` records answer —
+		// `incomplete` means the run really was torn down mid-flight.
+		const fromRecord = recordVerdict(
+			(opts.readRecord ?? ledgerRecord)(last.sha7, last.seq),
+		);
+		// Falling back to the last snapshot keeps the fail-closed rule: `settled`
+		// only if it was already terminal, and `passed` requires that — a green
+		// verdict never comes from a half-observed run.
+		const red = fromRecord ?? agentSummary(last);
+		const settled = fromRecord !== null ? true : agentSummary(last).done;
 		return {
 			settled,
 			passed: settled && red.failed.length + red.errored.length === 0,

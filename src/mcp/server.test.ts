@@ -22,6 +22,7 @@ import { ResourceUpdatedNotificationSchema } from "@modelcontextprotocol/sdk/typ
 import { serveSurfaceAsMcp } from "@kolu/surface-mcp";
 import { afterEach, describe, expect, it } from "vitest";
 import { gitRunContext } from "../common/git";
+import type { RunOutcome, RunRecord } from "../common/runRecord";
 import { tryDialSocket } from "../coordinator/socket";
 import { oduSurface, pendingNode, type PipelineState } from "../common/surface";
 import {
@@ -486,11 +487,91 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
 
   it("never reports passed when the run does not settle green", async () => {
     // Coordinator vanishes (crash / socket close) while a node is still
-    // running and no node is red — must NOT be a false green.
+    // running and no node is red — must NOT be a false green. `readRecord`
+    // injected (no record on disk) so the verdict rests on the stream alone,
+    // and the test never reads this checkout's real ledger.
     const s = await serve([["ci::nix@x86_64-linux", "running"]]);
     const client = await agentWaitClient(s);
     setTimeout(() => s.close(), 30);
-    const v = await waitForSettle({ client, failFast: false, timeoutMs: 300 });
+    const v = await waitForSettle({
+      client,
+      failFast: false,
+      timeoutMs: 300,
+      readRecord: () => null,
+    });
+    expect(v.passed).toBe(false);
+    expect(v.settled).toBe(false);
+  });
+
+  /** The record the coordinator finalizes on its way out, for the identity the
+   *  test surface publishes (`abc1234#3`). */
+  function record(outcome: RunOutcome, nodes: PipelineState["nodes"] = {}): RunRecord {
+    return {
+      version: 1,
+      repo: null,
+      sha: "abc1234000000000000000000000000000000000",
+      seq: 3,
+      dirty: false,
+      pipeline: "ci::default",
+      outcome,
+      startedAt: 0,
+      finishedAt: 1,
+      lanes: [],
+      nodes: Object.values(nodes).map((n) => ({
+        id: n.id,
+        name: n.name,
+        status: n.status,
+        exitCode: null,
+        durationMs: null,
+      })),
+    };
+  }
+
+  it("settles green from the finalized record when the socket closes first", async () => {
+    // The close beat the terminal frame: the last snapshot still says running,
+    // but the run finished and wrote `passed`. Reporting that as unsettled made
+    // a green run unreadable to an agent — the record is the authority once the
+    // socket is gone.
+    const s = await serve([["ci::nix@x86_64-linux", "running"]]);
+    const client = await agentWaitClient(s);
+    setTimeout(() => s.close(), 30);
+    const v = await waitForSettle({
+      client,
+      failFast: false,
+      timeoutMs: 300,
+      readRecord: () => record("passed"),
+    });
+    expect(v).toMatchObject({ settled: true, passed: true, timed_out: false });
+  });
+
+  it("settles red from the finalized record, naming the failed node", async () => {
+    const s = await serve([["ci::e2e@x86_64-linux", "running"]]);
+    const client = await agentWaitClient(s);
+    setTimeout(() => s.close(), 30);
+    const failedNodes = state([["ci::e2e@x86_64-linux", "failed"]]).nodes;
+    const v = await waitForSettle({
+      client,
+      failFast: false,
+      timeoutMs: 300,
+      readRecord: () => record("failed", failedNodes),
+    });
+    expect(v.settled).toBe(true);
+    expect(v.passed).toBe(false);
+    expect(v.failed).toContain("ci::e2e@x86_64-linux");
+  });
+
+  it("stays fail-closed on an incomplete record (torn down mid-run)", async () => {
+    // `incomplete` is exactly the half-observed case: a node was still pending
+    // or running when the coordinator finalized. Never green.
+    const s = await serve([["ci::nix@x86_64-linux", "running"]]);
+    const client = await agentWaitClient(s);
+    setTimeout(() => s.close(), 30);
+    const v = await waitForSettle({
+      client,
+      failFast: false,
+      timeoutMs: 300,
+      readRecord: () => record("incomplete"),
+    });
     expect(v.passed).toBe(false);
     expect(v.settled).toBe(false);
   });
