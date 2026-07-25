@@ -549,6 +549,7 @@ async function orchestrate(
       const claimed = await leaseLanes({
         pools: poolsByPlatform,
         platforms: platformsToClaim,
+        source: hostsConfig.source,
         identity: { holder: localHolderId(), run: runLabel },
         noWait: args.noWait,
         onLine: info,

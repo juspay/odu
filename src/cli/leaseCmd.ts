@@ -380,6 +380,7 @@ export async function leaseHoldCommand(opts: {
     const acquired = await acquireFromPool({
       platform,
       pool,
+      source: hostsConfig.source,
       identity: {
         holder: localHolderId(),
         run: `lease-hold:${pid}`,

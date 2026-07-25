@@ -89,7 +89,7 @@ odu run --host x86_64-linux=localhost
 { "x86_64-linux": "localhost" }
 ```
 
-A localhost lane runs directly against your toolchain and skips the Nix closure copy.
+A localhost lane runs directly against your toolchain and skips the Nix closure copy. A pool must be pure-local or pure-remote — a localhost entry beside remote hosts is refused when a run leases that platform, since localhost needs no venue lock and would starve the busy remotes beside it.
 
 ### Fan out across machines
 
@@ -242,7 +242,7 @@ Configure the stdio server directly:
 }
 ```
 
-Repositories using [APM](https://github.com/juspay/apm) can depend on `juspay/odu`; its package deploys the launcher and MCP entry automatically. Set `ODU_FLAKE=.#odu` to use a repository's pinned build instead of `github:juspay/odu`.
+Repositories using [APM](https://github.com/juspay/apm) can depend on `juspay/odu`; its package deploys the launcher and MCP entry automatically. The deployed entry sets `ODU_FLAKE=.#odu`, so the server is built from the repo it was installed into; `github:juspay/odu` is the fallback when that variable is unset.
 
 ## Operational notes
 

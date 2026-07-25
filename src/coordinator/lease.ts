@@ -30,7 +30,7 @@ import {
   laneSurface,
   type LeaseHolder,
 } from "../common/surface";
-import { shortHost, type HostPool } from "./hosts";
+import { assertPoolLocality, shortHost, type HostPool } from "./hosts";
 import type { ResolveRunnerDrv } from "./runnerFlake";
 import { lineLogger, localhostSpawnEnv } from "./surfaceRemoteOpts";
 
@@ -314,6 +314,9 @@ export interface AcquireFromPoolOpts {
   pool: HostPool;
   identity: LeaseIdentity;
   noWait: boolean;
+  /** The hosts file this pool was declared in, named in the locality refusal
+   *  below; null for a config assembled in code. */
+  source?: string | null;
   onLine?: (msg: string) => void;
   /** Injected claim — tests supply a fake; production uses `tryClaim`. */
   claim?: (
@@ -418,6 +421,8 @@ async function scanPoolOnce(opts: {
   platform: string;
   pool: HostPool;
   identity: LeaseIdentity;
+  /** Hosts file the pool came from, for the locality refusal below. */
+  source?: string | null;
   onLine?: (msg: string) => void;
   claim: (
     host: string,
@@ -427,16 +432,26 @@ async function scanPoolOnce(opts: {
 }): Promise<ScanOnce> {
   const { platform, pool, identity, onLine, claim, rotateBy } = opts;
 
+  // Pool invariants are judged HERE — the one scan both `acquireFromPool` and
+  // `leaseLanes` run through, and the only endpoint that knows a run reaches
+  // this platform at all. Judged any earlier (at parse time, or over the whole
+  // resolved map) the locality rule refuses runs that never touch the
+  // offending pool: juspay/odu#66 in its `--platform`/`--host` form, and
+  // equally in its selector-scoped form (`odu run fmt@aarch64-darwin` leases
+  // no linux lane, so a mixed linux pool is none of its business).
+  assertPoolLocality(opts.source ?? null, platform, pool);
+
   if (pool.length === 0) {
     throw new Error(
       `odu: empty host pool for ${platform} — configure at least one host`,
     );
   }
 
-  // Pure-local pool (every member is localhost): no remote claim. Mixed
-  // pools may also name localhost explicitly — that entry is a real
-  // candidate (pick without claim when reached in scan order), never an
-  // implicit fallback when the config omitted it (juspay/odu#46).
+  // Pure-local pool (every member is localhost): no remote claim, no flock —
+  // the checkout socket already serializes local runs. A pool that MIXES
+  // localhost with remotes never reaches here (the locality assert above), so
+  // this is the only shape in which localhost is ever picked: an explicit
+  // whole-pool decision, never an implicit fallback (juspay/odu#46, #54).
   if (pool.every((h) => isLocalHost(h))) {
     const host = pool[0]!;
     onLine?.(`${platform}: picked ${shortHost(host)} (localhost)`);
@@ -448,17 +463,10 @@ async function scanPoolOnce(opts: {
   const unreachable: { host: string; error: string }[] = [];
 
   for (const host of order) {
-    // Explicit localhost pool member: free without remote claim (no flock).
-    if (isLocalHost(host)) {
-      const busyNote =
-        busy.length > 0
-          ? `   (${busy.map((b) => shortHost(b.host)).join(", ")} busy)`
-          : "";
-      onLine?.(
-        `${platform}: picked ${shortHost(host)} (localhost)${busyNote}`,
-      );
-      return { status: "ok", host, lease: null };
-    }
+    // Every member here is remote: a mixed pool was refused above, and a
+    // pure-local one returned above. Localhost as a lease-exempt entry beside
+    // busy remotes was the always-free overflow of juspay/odu#54 — it is now
+    // unrepresentable at this point rather than special-cased.
     const result = await claim(host, identity);
     if (result.kind === "held") {
       const busyNote =
@@ -522,6 +530,7 @@ export async function acquireFromPool(
       platform,
       pool,
       identity,
+      source: opts.source,
       onLine,
       claim,
       rotateBy,
@@ -550,6 +559,8 @@ export interface LeaseLanesOpts {
   platforms: readonly string[];
   identity: LeaseIdentity;
   noWait: boolean;
+  /** Hosts file the pools came from, named in the locality refusal. */
+  source?: string | null;
   onLine?: (msg: string) => void;
   claim?: AcquireFromPoolOpts["claim"];
   /**
@@ -646,6 +657,7 @@ export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
           platform,
           pool,
           identity: opts.identity,
+          source: opts.source,
           onLine: opts.onLine,
           claim: claimFor(platform),
           rotateBy,

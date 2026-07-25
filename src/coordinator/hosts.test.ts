@@ -223,29 +223,17 @@ describe("pool locality is judged over what a run resolves (juspay/odu#66)", () 
     ).toEqual({ "aarch64-darwin": ["sincereintent"] });
   });
 
-  it("STILL refuses a mixed pool the run does resolve, in the same words", () => {
-    // The rule narrowed to what a run touches; it did not go away. A bare run
-    // fans out to every configured platform, so the illegal linux pool is
-    // squarely in scope (juspay/odu#54).
+  it("resolves a mixed pool without judging it — the scan owns that rule", () => {
+    // Resolution reports declared inventory; `scanPoolOnce` refuses a mixed
+    // pool when a run actually claims from it (see lease.test.ts). Judging
+    // here would refuse runs that never lease this platform — a `--platform`
+    // slice, a `--host` pin, OR a selector like `odu run fmt@aarch64-darwin`,
+    // which resolution cannot see at all (juspay/odu#66).
     writeHosts({ "x86_64-linux": ["ci-1", "localhost", "ci-2"] });
     const config = loadHosts();
-    expect(() => fanoutPools(config, [], [])).toThrow(
-      /must not mix localhost with remote/,
-    );
-  });
-
-  it("refuses a mixed pool named by --platform, naming the file it came from", () => {
-    const path = writeHosts({
+    expect(fanoutPools(config, [], [])).toEqual({
       "x86_64-linux": ["ci-1", "localhost", "ci-2"],
-      "aarch64-darwin": ["rasam"],
     });
-    const config = loadHosts();
-    const msg = messageOf(() =>
-      fanoutPools(config, [], ["x86_64-linux"]),
-    );
-    expect(msg).toContain(path);
-    expect(msg).toContain("must not mix localhost with remote hosts");
-    expect(msg).toContain('["ci-1","localhost","ci-2"]');
   });
 
   it("lets a pin stand alone — it replaces the file's mixed pool, so nothing mixed resolves", () => {

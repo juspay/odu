@@ -116,19 +116,49 @@ function ledgerRecord(sha7: string, seq: number | null): RunRecord | null {
 }
 
 /** The verdict a finalized record dictates, or null when the record can't
- *  settle the question (absent, or `incomplete` — a run torn down mid-flight,
- *  which is exactly the half-observed case the caller must not read as green). */
-function recordVerdict(rec: RunRecord | null): {
-	settled: boolean;
+ *  settle the question. Three ways it can't:
+ *
+ *  - `incomplete` — a run torn down mid-flight, exactly the half-observed case
+ *    the caller must not read as green;
+ *  - it predates the last frame we saw. `--linger` REWRITES the record on every
+ *    drain (run.ts finalizes each settle so a lingering run still leaves a
+ *    record), so a rerun in flight sits beside an on-disk `passed` from the
+ *    previous drain. Without this guard a crash mid-rerun reads that stale
+ *    green as this run's verdict. Both stamps come from the same machine's
+ *    clock (the coordinator writes `finishedAt`, we read `now()`), so the
+ *    comparison is sound;
+ *  - it is missing (the close beat the write, or no ordinal was reserved).
+ *
+ *  `outcome` is the authority for pass/fail — the node lists are for reporting
+ *  only, so a record can never say `passed` while this reads a red node. */
+function recordVerdict(
+	rec: RunRecord | null,
+	lastSeenAt: number,
+): {
+	passed: boolean;
 	failed: string[];
 	errored: string[];
+	unposted: OwedStatus[];
 } | null {
-	if (rec === null || rec.outcome === "incomplete") return null;
+	if (rec === null) return null;
+	if (rec.outcome !== "passed" && rec.outcome !== "failed") return null;
+	if (rec.finishedAt < lastSeenAt) return null;
 	const failed = rec.nodes.filter((n) => n.status === "failed").map((n) => n.id);
 	const errored = rec.nodes
 		.filter((n) => n.status === "errored")
 		.map((n) => n.id);
-	return { settled: true, failed, errored };
+	// `projectUnposted` drops `attempts` on the way to disk, so a record-sourced
+	// row reports 0 — the context and its last error are what a caller acts on.
+	return {
+		passed: rec.outcome === "passed",
+		failed,
+		errored,
+		unposted: (rec.unposted ?? []).map((u) => ({
+			context: u.context,
+			lastError: u.lastError,
+			attempts: 0,
+		})),
+	};
 }
 
 /** The run-identity + posting-debt fields stamped into every verdict, from the
@@ -175,6 +205,9 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
 	}
 
 	let last: AgentNodes | undefined;
+	// When we last saw a live frame, on OUR clock — `recordVerdict` refuses a
+	// record finalized before it (a `--linger` drain from a previous settle).
+	let lastSeenAt = 0;
 	// The abort verdict (timeout vs caller-cancel), reused whether the read loop
 	// throws on abort or ends cleanly — B's projected `nodes` stream (over A's
 	// `nodes` cell) swallows the abort and ends the iterable rather than
@@ -220,19 +253,35 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
 		// A settled run normally publishes its terminal frame first; when the
 		// close wins that race, the *record* the coordinator finalized on the
 		// way out already holds the answer, so read it rather than report a
-		// passing run as unsettled. Only `passed`/`failed` records answer —
-		// `incomplete` means the run really was torn down mid-flight.
+		// passing run as unsettled. `recordVerdict` decides whether the record
+		// may answer at all (terminal outcome, and fresher than our last frame).
 		const fromRecord = recordVerdict(
 			(opts.readRecord ?? ledgerRecord)(last.sha7, last.seq),
+			lastSeenAt,
 		);
-		// Falling back to the last snapshot keeps the fail-closed rule: `settled`
+		if (fromRecord !== null) {
+			// One authority supplies every field it knows — pass/fail, the red
+			// node lists, and the posting debt it stamped at finalize.
+			return {
+				settled: true,
+				passed: fromRecord.passed,
+				failed: fromRecord.failed,
+				errored: fromRecord.errored,
+				fail_fast_tripped: false,
+				timed_out: false,
+				cancelled: false,
+				duration_ms: now() - started,
+				...identityOf(last),
+				unposted: fromRecord.unposted,
+			};
+		}
+		// No usable record: fall back to the last snapshot, fail-closed. `settled`
 		// only if it was already terminal, and `passed` requires that — a green
 		// verdict never comes from a half-observed run.
-		const red = fromRecord ?? agentSummary(last);
-		const settled = fromRecord !== null ? true : agentSummary(last).done;
+		const red = agentSummary(last);
 		return {
-			settled,
-			passed: settled && red.failed.length + red.errored.length === 0,
+			settled: red.done,
+			passed: red.done && red.failed.length + red.errored.length === 0,
 			failed: red.failed,
 			errored: red.errored,
 			fail_fast_tripped: false,
@@ -248,6 +297,7 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
 			signal: controller.signal,
 		})) {
 			last = snap;
+			lastSeenAt = now();
 			// The pre-run / no-run snapshot (`run: false`, empty rows) is not a
 			// settled verdict — keep waiting for a real run's frames.
 			if (!snap.run) continue;

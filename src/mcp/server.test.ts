@@ -505,7 +505,17 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
 
   /** The record the coordinator finalizes on its way out, for the identity the
    *  test surface publishes (`abc1234#3`). */
-  function record(outcome: RunOutcome, nodes: PipelineState["nodes"] = {}): RunRecord {
+  /** A frozen clock for the wait, so the record-freshness comparison below is
+   *  deterministic: the wait stamps every observation NOW, and a record counts
+   *  only when it was finalized at or after the last frame we saw. */
+  const NOW = 1_000;
+  const frozen = () => NOW;
+
+  function record(
+    outcome: RunOutcome,
+    nodes: PipelineState["nodes"] = {},
+    finishedAt = NOW,
+  ): RunRecord {
     return {
       version: 1,
       repo: null,
@@ -515,7 +525,7 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
       pipeline: "ci::default",
       outcome,
       startedAt: 0,
-      finishedAt: 1,
+      finishedAt,
       lanes: [],
       nodes: Object.values(nodes).map((n) => ({
         id: n.id,
@@ -538,6 +548,7 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     const v = await waitForSettle({
       client,
       failFast: false,
+      now: frozen,
       timeoutMs: 300,
       readRecord: () => record("passed"),
     });
@@ -552,6 +563,7 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     const v = await waitForSettle({
       client,
       failFast: false,
+      now: frozen,
       timeoutMs: 300,
       readRecord: () => record("failed", failedNodes),
     });
@@ -569,11 +581,54 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     const v = await waitForSettle({
       client,
       failFast: false,
+      now: frozen,
       timeoutMs: 300,
       readRecord: () => record("incomplete"),
     });
     expect(v.passed).toBe(false);
     expect(v.settled).toBe(false);
+  });
+
+  it("refuses a record finalized BEFORE the last frame it saw (stale --linger drain)", async () => {
+    // `--linger` finalizes on every drain, so a lingering run that passed, then
+    // took a node_rerun, has an on-disk `passed` record older than the live
+    // `running` frame. Trusting `outcome` alone would report that stale green
+    // as this run's verdict if the coordinator then died mid-rerun.
+    const s = await serve([["ci::nix@x86_64-linux", "running"]]);
+    const client = await agentWaitClient(s);
+    setTimeout(() => s.close(), 30);
+    const v = await waitForSettle({
+      client,
+      failFast: false,
+      now: frozen,
+      timeoutMs: 300,
+      readRecord: () => record("passed", {}, NOW - 1),
+    });
+    expect(v.passed).toBe(false);
+    expect(v.settled).toBe(false);
+  });
+
+  it("takes posting debt from the record it settled from, not the stale frame", async () => {
+    // One authority per verdict: if the record answers pass/fail, it also
+    // answers what statuses it still owed at finalize (juspay/odu#61).
+    const s = await serve([["ci::nix@x86_64-linux", "running"]]);
+    const client = await agentWaitClient(s);
+    setTimeout(() => s.close(), 30);
+    const owed = {
+      ...record("passed"),
+      unposted: [{ context: "odu / unit", lastError: "gh: 502" }],
+    };
+    const v = await waitForSettle({
+      client,
+      failFast: false,
+      now: frozen,
+      timeoutMs: 300,
+      readRecord: () => owed,
+    });
+    expect(v.passed).toBe(true);
+    expect(v.unposted).toEqual([
+      { context: "odu / unit", lastError: "gh: 502", attempts: 0 },
+    ]);
   });
 
   it("returns cancelled when the caller aborts the wait", async () => {

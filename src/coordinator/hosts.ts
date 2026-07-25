@@ -66,18 +66,20 @@ function hostsCandidates(): HostsCandidate[] {
 }
 
 /**
- * Refuse pools that mix localhost with remotes. Localhost is lease-exempt
+ * Refuse a pool that mixes localhost with remotes. Localhost is lease-exempt
  * (checkout socket serializes local runs); in a multi-host scan that made it
  * an always-free overflow — busy remotes were skipped the moment a local
  * entry appeared. Pure-local (typically a sole `"localhost"`) and pure-remote
- * pools are both fine; mixing is illegal in any pool a run resolves.
+ * pools are both fine; mixing is illegal in any pool that reaches the scan.
  *
- * Judged in `resolvePools`, not at parse time: the rule protects the lease
- * scan, so it applies to the pools a run actually leases — after `--host`
- * pins and the `--platform` slice. A pool the run never touches is the
- * operator's problem with a platform they didn't ask for (juspay/odu#66).
+ * Called from `acquireFromPool` — the scan itself, and the only endpoint that
+ * knows *which* pools a run leases (juspay/odu#66). Judging earlier
+ * over-reaches: a resolved map still
+ * carries platforms a selector (`odu run fmt@aarch64-darwin`) or an
+ * OS-disabled recipe drops before any lease, and refusing over one of those
+ * is the same defect #66 fixed for `--host`/`--platform`.
  */
-function assertPoolLocality(
+export function assertPoolLocality(
   source: string | null,
   platform: string,
   pool: readonly string[],
@@ -195,10 +197,8 @@ function noHostsConfiguredError(config: HostsConfig): Error {
 
 /** Apply `--host PLAT=ADDR` pins and `--platform` slices to the config.
  *  Pins replace the pool with a single-host pool (the pin is a forced pick).
- *  The locality rule is judged here, on the resolved map: a run answers only
- *  for the pools it resolves, and a pin (a pool of one) answers for nothing in
- *  the file it replaced. Returns inventory pools — not post-lease lanes
- *  (`leaseLanes` picks hosts). */
+ *  Returns declared inventory — unjudged, and not post-lease lanes: locality
+ *  is `acquireFromPool`'s to enforce over the pools it actually scans. */
 export function resolvePools(
   config: HostsConfig,
   hostPins: readonly string[],
@@ -231,11 +231,9 @@ export function resolvePools(
       resolved[platform] = pool;
     }
   }
-  for (const [platform, pool] of Object.entries(resolved)) {
-    assertPoolLocality(config.source, platform, pool);
-  }
   return resolved;
 }
+
 
 /** The fanout pools for a run: `resolvePools` plus the no-config fail-fast.
  *  Zero resolved pools means the run named no host anywhere — the juspay/odu#46

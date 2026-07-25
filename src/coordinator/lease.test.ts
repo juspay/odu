@@ -58,20 +58,49 @@ describe("acquireFromPool", () => {
     expect(claim).not.toHaveBeenCalled();
   });
 
-  it("picks explicit localhost when remotes are busy (mixed pool)", async () => {
+  it("REFUSES a mixed pool at the scan, naming the hosts file (juspay/odu#54, #66)", async () => {
+    // This test used to assert the opposite — that the scan picked localhost
+    // once the remotes came back busy. That IS the #54 defect: localhost is
+    // lease-exempt, so it read as always-free and starved every busy remote.
+    // The scan is where the rule belongs (the only place that knows a run
+    // leases this platform at all), so a mixed pool is refused here and the
+    // localhost-beside-remotes branch is gone rather than special-cased.
     const claim = vi.fn(
       async (): Promise<ClaimResult> => ({ kind: "busy", heldBy: null }),
     );
+    await expect(
+      acquireFromPool({
+        platform: "x86_64-linux",
+        pool: ["ci-1", "localhost"],
+        identity: id,
+        noWait: true,
+        source: "/home/me/.config/odu/hosts.json",
+        claim,
+        rotateBy: 0,
+      }),
+    ).rejects.toThrow(
+      /\/home\/me\/\.config\/odu\/hosts\.json: host pool for "x86_64-linux" must not mix localhost with remote hosts/,
+    );
+    // Refused before any claim: no remote is dialed to learn the pool is illegal.
+    expect(claim).not.toHaveBeenCalled();
+  });
+
+  it("never judges a platform this run does not lease (juspay/odu#66)", async () => {
+    // The regression the whole issue is about, at the seam that now owns the
+    // rule: an illegal x86_64-linux pool sits in the same (machine-global)
+    // hosts file, but this scan is for aarch64-darwin. `scanPoolOnce` only
+    // ever sees the pool it is claiming from, so the linux pool cannot
+    // possibly refuse this run — by construction, not by convention.
     const r = await acquireFromPool({
-      platform: "x86_64-linux",
-      pool: ["ci-1", "localhost"],
+      platform: "aarch64-darwin",
+      pool: ["rasam"],
       identity: id,
       noWait: true,
-      claim,
+      source: "/home/me/.config/odu/hosts.json",
+      claim: async (host) => held(host),
       rotateBy: 0,
     });
-    expect(r).toEqual({ host: "localhost", lease: null });
-    expect(claim).toHaveBeenCalledWith("ci-1", id);
+    expect(r.host).toBe("rasam");
   });
 
   it("picks the first free host and reports busy siblings", async () => {

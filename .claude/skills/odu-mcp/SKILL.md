@@ -45,9 +45,11 @@ or replace a run instead of stranding it or hitting "a run is already in
 progress".
 
 `bin/serve` is self-contained — it resolves odu via `nix run` and serves over
-stdio in the consumer's repo (dialing `.ci/odu.sock`). Set `ODU_FLAKE` to
-override the odu flake-ref (default `github:juspay/odu`); a repo that
-re-exports odu can point it at its own pinned output with `ODU_FLAKE=.#odu`.
+stdio in the consumer's repo (dialing `.ci/odu.sock`). The APM-deployed MCP entry sets
+`ODU_FLAKE=.#odu`, so the server is built from the repo it was installed into;
+`github:juspay/odu` is the bare launcher's fallback when the variable is unset.
+A consumer whose flake exports no `odu` output overrides it back to a ref that
+resolves (kolu pins `./ci#odu`).
 
 Full docs in the [repo README](https://github.com/juspay/odu/blob/master/README.md).
 
