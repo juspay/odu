@@ -153,14 +153,17 @@ describe("shortHost", () => {
   });
 });
 
+/** Write a hosts file to a throwaway dir and point $ODU_HOSTS at it, so
+ *  `loadHosts` reads it through the same resolution chain production uses. */
+function writeHosts(body: unknown): string {
+  const dir = mkdtempSync(join(tmpdir(), "odu-hosts-"));
+  const path = join(dir, "hosts.json");
+  writeFileSync(path, JSON.stringify(body));
+  process.env.ODU_HOSTS = path;
+  return path;
+}
+
 describe("loadHosts — string | list values", () => {
-  function writeHosts(body: unknown): string {
-    const dir = mkdtempSync(join(tmpdir(), "odu-hosts-"));
-    const path = join(dir, "hosts.json");
-    writeFileSync(path, JSON.stringify(body));
-    process.env.ODU_HOSTS = path;
-    return path;
-  }
 
   it("normalizes a plain string to a one-host pool", () => {
     writeHosts({ "x86_64-linux": "builder" });
@@ -200,13 +203,6 @@ describe("loadHosts — string | list values", () => {
 });
 
 describe("pool locality is judged over what a run resolves (juspay/odu#66)", () => {
-  function writeHosts(body: unknown): string {
-    const dir = mkdtempSync(join(tmpdir(), "odu-hosts-"));
-    const path = join(dir, "hosts.json");
-    writeFileSync(path, JSON.stringify(body));
-    process.env.ODU_HOSTS = path;
-    return path;
-  }
 
   it("lets a darwin-only pinned run through past a mixed linux pool it never touches", () => {
     // The operator's linux pool is illegal, but this run names only darwin and

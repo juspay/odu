@@ -611,14 +611,22 @@ function assertNoSharedRemoteHosts(
  * carries platforms a selector (`odu run fmt@aarch64-darwin`) or an
  * OS-disabled recipe drops before any lease.
  */
+/** Does this pool mix localhost with remotes — the shape the lease seam
+ *  refuses? Exported so a read-only face can SURFACE an illegal pool without
+ *  refusing over it: `odu hosts` never leases, so refusing there would be
+ *  juspay/odu#66 wearing an inventory hat. But the operator should learn it
+ *  from the command whose whole job is showing the inventory, rather than from
+ *  the first run that tries to claim that platform. */
+export function isMixedPool(pool: readonly string[]): boolean {
+  return pool.some((h) => isLocalHost(h)) && pool.some((h) => !isLocalHost(h));
+}
+
 function assertPoolLocality(
   source: string | null,
   platform: string,
   pool: readonly string[],
 ): void {
-  const anyLocal = pool.some((h) => isLocalHost(h));
-  const anyRemote = pool.some((h) => !isLocalHost(h));
-  if (!anyLocal || !anyRemote) return;
+  if (!isMixedPool(pool)) return;
   // A `--host` pin is a pool of one — pure by construction — so a mixed pool
   // always came from the hosts file, and `source` names it. The fallback only
   // covers a config assembled in code rather than read from disk.

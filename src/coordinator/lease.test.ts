@@ -3,6 +3,7 @@ import {
   acquireFromPool,
   formatHeldFor,
   formatHolder,
+  isMixedPool,
   leaseLanes,
   parseHolderBody,
   type ClaimResult,
@@ -471,5 +472,20 @@ describe("leaseLanes", () => {
       "aarch64-linux": "10.0.0.2",
       "x86_64-linux": "10.0.0.1",
     });
+  });
+});
+
+describe("isMixedPool — the shape the lease seam refuses", () => {
+  // Exported so `odu hosts` can WARN about an illegal pool without refusing
+  // over it: the inventory view never leases, and refusing there would be
+  // juspay/odu#66 again — a run stopped over a platform it never touches.
+  it("is true only when localhost sits beside a remote", () => {
+    expect(isMixedPool(["ci-1", "localhost"])).toBe(true);
+    expect(isMixedPool(["localhost", "nix@ci-2.example"])).toBe(true);
+  });
+
+  it("is false for the two legal shapes", () => {
+    expect(isMixedPool(["localhost"])).toBe(false);
+    expect(isMixedPool(["ci-1", "ci-2", "ci-3"])).toBe(false);
   });
 });
