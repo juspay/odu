@@ -1,4 +1,7 @@
-# `.claude/` is generated from `.apm/` sources by APM (`just apm`) — never edited
-# by hand. Mark it generated so GitHub collapses its diffs and excludes it from
-# language stats. Edit the `.apm/` sources instead.
+# Everything APM writes on `just apm` — never edited by hand. Marked generated
+# so GitHub collapses their diffs and excludes them from language stats. Edit
+# the sources instead: `.apm/` for the deployed skills, `apm.yml` for the MCP
+# servers and the dependency set.
 .claude/** linguist-generated=true
+.mcp.json linguist-generated=true
+apm.lock.yaml linguist-generated=true
