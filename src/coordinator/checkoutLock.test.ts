@@ -64,10 +64,11 @@ describe("ensureCheckoutFree — run-lock during lease wait", () => {
     expect(held).not.toBeNull();
 
     const dial = async () => null;
-    const r = await ensureCheckoutFree("/no/such/odu.sock", false, {
-      dial,
-      lockPath,
-    });
+    const r = await ensureCheckoutFree(
+      { socketPath: "/no/such/odu.sock", lockPath },
+      false,
+      { dial },
+    );
     expect(r.ok).toBe(false);
     if (r.ok) throw new Error("expected refuse");
     expect(r.reason).toBe("live");
@@ -89,10 +90,11 @@ describe("ensureCheckoutFree — run-lock during lease wait", () => {
     const second = tryAcquireRunLock(lockPath);
     expect(second).toBeNull();
 
-    const refuse = await ensureCheckoutFree("/no/such.sock", false, {
-      dial: async () => null,
-      lockPath,
-    });
+    const refuse = await ensureCheckoutFree(
+      { socketPath: "/no/such.sock", lockPath },
+      false,
+      { dial: async () => null },
+    );
     expect(refuse.ok).toBe(false);
 
     first!.release();

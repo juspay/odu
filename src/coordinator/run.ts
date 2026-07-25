@@ -62,7 +62,6 @@ import { resolveRunnerFlake, runnerDrvResolver } from "./runnerFlake";
 import { cancelRun } from "./cancel";
 import {
   liveRunLockPid,
-  RUN_LOCK_PATH,
   signalRunLockHolder,
   tryAcquireRunLock,
   waitForRunLockFree,
@@ -70,7 +69,7 @@ import {
 } from "./checkoutLock";
 import { releaseReservation, reserveNextSeq, writeRunRecord } from "./ledger";
 import { buildRunRecord, projectNodes } from "../common/runRecord";
-import { SOCKET_PATH, serveSocket, tryDialSocket } from "./socket";
+import { checkoutPaths, serveSocket, tryDialSocket } from "./socket";
 import {
   fetchUrlFor,
   interruptStatus,
@@ -119,15 +118,18 @@ export interface RunArgs {
  * SIGTERM on the run-lock holder when only the lease wait is live); without
  * supersede a live socket/lock is an immediate refuse.
  * Exported for unit tests that assert cancel-before-claim ordering.
+ *
+ * Takes BOTH checkout paths (`checkoutPaths(repoRoot)`) rather than deriving
+ * the lock from the socket: the supersede path SIGTERMs the lock holder, and a
+ * lock inferred from a relative socket path aims that signal at whatever
+ * checkout the process is cwd'd into.
  */
 export async function ensureCheckoutFree(
-  socketPath: string,
+  paths: { socketPath: string; lockPath: string },
   supersede: boolean,
   deps: {
     cancel?: typeof cancelRun;
     dial?: typeof tryDialSocket;
-    /** Absolute path to `.ci/odu.run.lock`; derived from socketPath when omitted. */
-    lockPath?: string;
     signalLock?: typeof signalRunLockHolder;
     waitLockFree?: typeof waitForRunLockFree;
     liveLockPid?: typeof liveRunLockPid;
@@ -136,9 +138,9 @@ export async function ensureCheckoutFree(
   | { ok: true }
   | { ok: false; reason: "live" | "supersede-timeout"; message: string }
 > {
+  const { socketPath, lockPath } = paths;
   const dial = deps.dial ?? tryDialSocket;
   const cancel = deps.cancel ?? cancelRun;
-  const lockPath = deps.lockPath ?? join(dirname(socketPath), "odu.run.lock");
   const signalLock = deps.signalLock ?? signalRunLockHolder;
   const waitLockFree = deps.waitLockFree ?? waitForRunLockFree;
   const liveLockPid = deps.liveLockPid ?? liveRunLockPid;
@@ -455,11 +457,11 @@ async function orchestrate(
   // The PID run-lock (claimed immediately below) covers the whole lease-wait
   // window; serveSocket remains the attach surface, not the sole exclusivity
   // gate.
-  const socketPath = join(repoRoot, SOCKET_PATH);
-  const lockPath = join(repoRoot, RUN_LOCK_PATH);
-  const checkout = await ensureCheckoutFree(socketPath, args.supersede, {
-    lockPath,
-  });
+  const { socketPath, lockPath } = checkoutPaths(repoRoot);
+  const checkout = await ensureCheckoutFree(
+    { socketPath, lockPath },
+    args.supersede,
+  );
   if (!checkout.ok) {
     process.stderr.write(`${checkout.message}\n`);
     return 1;
