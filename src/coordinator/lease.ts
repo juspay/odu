@@ -597,6 +597,16 @@ function assertNoSharedRemoteHosts(
   }
 }
 
+/** Does this pool mix localhost with remotes — the shape the lease seam
+ *  refuses? Exported so a read-only face can SURFACE an illegal pool without
+ *  refusing over it: `odu hosts` never leases, so refusing there would be
+ *  juspay/odu#66 wearing an inventory hat. But the operator should learn it
+ *  from the command whose whole job is showing the inventory, rather than from
+ *  the first run that tries to claim that platform. */
+export function isMixedPool(pool: readonly string[]): boolean {
+  return pool.some((h) => isLocalHost(h)) && pool.some((h) => !isLocalHost(h));
+}
+
 /**
  * Refuse a pool that mixes localhost with remotes. Localhost is lease-exempt
  * (checkout socket serializes local runs); in a multi-host scan that made it
@@ -611,16 +621,6 @@ function assertNoSharedRemoteHosts(
  * carries platforms a selector (`odu run fmt@aarch64-darwin`) or an
  * OS-disabled recipe drops before any lease.
  */
-/** Does this pool mix localhost with remotes — the shape the lease seam
- *  refuses? Exported so a read-only face can SURFACE an illegal pool without
- *  refusing over it: `odu hosts` never leases, so refusing there would be
- *  juspay/odu#66 wearing an inventory hat. But the operator should learn it
- *  from the command whose whole job is showing the inventory, rather than from
- *  the first run that tries to claim that platform. */
-export function isMixedPool(pool: readonly string[]): boolean {
-  return pool.some((h) => isLocalHost(h)) && pool.some((h) => !isLocalHost(h));
-}
-
 function assertPoolLocality(
   source: string | null,
   platform: string,
