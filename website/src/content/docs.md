@@ -242,7 +242,7 @@ Configure the stdio server directly:
 }
 ```
 
-Repositories using [APM](https://github.com/juspay/apm) can depend on `juspay/odu`; its package deploys the launcher and MCP entry automatically. The deployed entry sets `ODU_FLAKE=.#odu`, so the server is built from the repo it was installed into; `github:juspay/odu` is the fallback when that variable is unset.
+Repositories using [APM](https://github.com/juspay/apm) can depend on `juspay/odu`; its package deploys the launcher and MCP entry automatically. Set `ODU_FLAKE=.#odu` to use a repository's pinned build instead of `github:juspay/odu`.
 
 ## Operational notes
 

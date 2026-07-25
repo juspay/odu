@@ -6,8 +6,7 @@
 # required. Requires flakes (`experimental-features = nix-command flakes`).
 #
 # Override knobs (env vars):
-#   ODU_FLAKE   — flake-ref for odu (default: github:juspay/odu; the APM-deployed
-#                 MCP entry sets .#odu, i.e. the repo it was installed into). A consuming
+#   ODU_FLAKE   — flake-ref for odu (default: github:juspay/odu). A consuming
 #                 repo that re-exports odu can point this at its pinned output,
 #                 e.g. ODU_FLAKE=.#odu
 set -euo pipefail
