@@ -28,6 +28,7 @@ import { dirname, join } from "node:path";
 import { implementSurface, inMemoryStore } from "@kolu/surface/server";
 import { isLocalHost } from "@kolu/surface-remote";
 import { bold, dim, green, link, magenta, red } from "../cli/ansi";
+import { NON_TERMINAL_STATUSES } from "../cli/render";
 import { formatGoDuration } from "../common/duration";
 import { gitTopLevel } from "../common/git";
 import { createLogTail } from "../common/logTail";
@@ -181,6 +182,22 @@ export async function ensureCheckoutFree(
 }
 
 /**
+ * Reclaim an orphaned reservation sentinel only while the identity was never
+ * served. Once `sha7#seq` has been published on the socket a reader may key a
+ * verdict on it (`wait_for_settle` reads the record BY that address), so
+ * handing the ordinal back — after, say, a swallowed `finalizeRunRecord` write
+ * left the sentinel in place — would let the next run of this commit reserve
+ * the same slot and answer for a different run. A stale sentinel only burns an
+ * ordinal; a reused one corrupts an identity (juspay/odu#49).
+ */
+export function shouldReclaimReservation(reservation: {
+  seq: number | null;
+  published: boolean;
+}): boolean {
+  return reservation.seq !== null && !reservation.published;
+}
+
+/**
  * Interrupt stop-work seam for cancel vs venue-lease-loss.
  *
  * - `before-settle` + `exclusivityLost`: stop lanes/holds *now* — the remote
@@ -290,7 +307,15 @@ export async function runCommand(args: RunArgs): Promise<number> {
   // reclaim an orphaned reservation sentinel on an early-throw — the same
   // early-throw-cleanup convention as `createdLanes` / `cleanupSnapshot`
   // (releaseReservation is a guarded no-op once the seq was finalized).
-  const reservation: { seq: number | null } = { seq: null };
+  // `published` gates the reclaim below: once `sha7#seq` has been served on the
+  // socket it is observable, and a reader (`wait_for_settle`) may key a verdict
+  // on it. Reclaiming the sentinel then would let a later run of this commit
+  // reserve the SAME ordinal — the exact reuse the reservation exists to
+  // prevent (juspay/odu#49), and a stale sentinel is the cheaper failure.
+  const reservation: { seq: number | null; published: boolean } = {
+    seq: null,
+    published: false,
+  };
   try {
     return await orchestrate(
       args,
@@ -316,8 +341,8 @@ export async function runCommand(args: RunArgs): Promise<number> {
     acquiredLeases.length = 0;
     runLock.handle?.release();
     runLock.handle = null;
-    if (reservation.seq !== null) {
-      releaseReservation(repoRoot, sha7, reservation.seq);
+    if (shouldReclaimReservation(reservation)) {
+      releaseReservation(repoRoot, sha7, reservation.seq as number);
     }
   }
 }
@@ -349,7 +374,7 @@ async function orchestrate(
   acquiredLeases: LeaseHandle[],
   /** runCommand-owned holder for the reserved seq, so its `finally` can reclaim
    *  an orphaned reservation sentinel on an early-throw. Set once reserved. */
-  reservation: { seq: number | null },
+  reservation: { seq: number | null; published: boolean },
   /** runCommand-owned checkout run-lock; claimed right after ensureCheckoutFree
    *  and released in runCommand's finally / process exit. */
   runLock: { handle: RunLockHandle | null },
@@ -858,9 +883,17 @@ async function orchestrate(
       // derives `incomplete` from the live state, so re-finalizing here means
       // the ledger never carries a green verdict for a run in flight — and no
       // reader has to compare its own clock against `finishedAt` to notice.
-      if (next.status === "running") {
-        clearIdle();
-        if (recordWritten) finalizeRunRecord(store.get(), poster.unposted());
+      if (next.status === "running") clearIdle();
+      // Any terminal→non-terminal transition means work resumed — and the
+      // runner publishes `pending` before `running`, so keying this on
+      // `running` alone left a window where a socket loss after a rerun was
+      // accepted still let a reader consume the previous `passed` record.
+      if (
+        recordWritten &&
+        !NON_TERMINAL_STATUSES.has(prev.status) &&
+        NON_TERMINAL_STATUSES.has(next.status)
+      ) {
+        finalizeRunRecord(store.get(), poster.unposted());
       }
       emitProgress(id, next);
       const payload = statusFor(id, next.status, next.durationMs, sha7);
@@ -954,6 +987,10 @@ async function orchestrate(
   // Checkout run-lock is already held (covers lease wait); serveSocket is the
   // attach surface and a second exclusivity gate for the post-lease window.
   closeSocket = await serveSocket(router, socketPath);
+  // The identity is now observable: a reader can see `sha7#seq` and key a
+  // verdict on it, so the ordinal must never be handed to another run even if
+  // finalizing this one's record fails.
+  reservation.published = true;
 
   display.start(store.get(), header);
   display.update(store.get());

@@ -11,7 +11,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { applyInterruptStopWork, ensureCheckoutFree } from "./run";
+import {
+  applyInterruptStopWork,
+  ensureCheckoutFree,
+  shouldReclaimReservation,
+} from "./run";
 import { acquireFromPool, type ClaimResult, type LeaseIdentity } from "./lease";
 import { checkoutPaths } from "./socket";
 
@@ -222,5 +226,28 @@ describe("lease-lost interrupt stop-work ordering", () => {
     await settle;
     await Promise.resolve();
     expect(events).toEqual(["stop-work", "after-settle"]);
+  });
+});
+
+describe("reservation reclaim — only before the identity is observable", () => {
+  /**
+   * `wait_for_settle` reads the durable record BY ADDRESS (`sha7#seq`), so an
+   * ordinal that was ever served must never be handed to another run: the next
+   * run of the same commit would answer for an identity an earlier reader is
+   * still holding. Reclaim is therefore for pre-publication orphans only.
+   */
+  it("reclaims an orphan that never served (early throw)", () => {
+    expect(shouldReclaimReservation({ seq: 1, published: false })).toBe(true);
+  });
+
+  it("KEEPS the sentinel once the identity was served, even if finalize failed", () => {
+    // finalizeRunRecord swallows write failures, so a published run can exit
+    // leaving its sentinel behind. Burning the ordinal is the cheap failure;
+    // reusing it is the corrupt one.
+    expect(shouldReclaimReservation({ seq: 1, published: true })).toBe(false);
+  });
+
+  it("has nothing to reclaim when no seq was ever reserved", () => {
+    expect(shouldReclaimReservation({ seq: null, published: false })).toBe(false);
   });
 });

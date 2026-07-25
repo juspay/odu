@@ -640,6 +640,47 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     expect(v.settled).toBe(false);
   });
 
+  it.each([
+    ["pending", "a node never started"],
+    ["running", "a node still in flight"],
+  ] as const)(
+    "refuses a `passed` record carrying a %s node (%s)",
+    async (status, _why) => {
+      // The half-observed run this path exists to NOT call green. `passed`
+      // beside a non-terminal node is the same class of contradiction as
+      // `passed` beside a red one — the schema admits both, so the reader
+      // re-derives the whole invariant instead of half of it.
+      const s = await serve([["ci::e2e@x86_64-linux", "running"]]);
+      const client = await agentWaitClient(s);
+      setTimeout(() => s.close(), 30);
+      const openNodes = state([["ci::e2e@x86_64-linux", status]]).nodes;
+      const v = await waitForSettle({
+        client,
+        failFast: false,
+        timeoutMs: 300,
+        resolveRunContext: ledgerWith(record("passed", openNodes)),
+      });
+      expect(v.passed).toBe(false);
+      expect(v.settled).toBe(false);
+    },
+  );
+
+  it("refuses a `failed` record with no red node", async () => {
+    // The mirror of the passed+red case: an outcome its own node list cannot
+    // justify. Reporting it would name no failing node for a red verdict.
+    const s = await serve([["ci::nix@x86_64-linux", "running"]]);
+    const client = await agentWaitClient(s);
+    setTimeout(() => s.close(), 30);
+    const greenNodes = state([["ci::nix@x86_64-linux", "ok"]]).nodes;
+    const v = await waitForSettle({
+      client,
+      failFast: false,
+      timeoutMs: 300,
+      resolveRunContext: ledgerWith(record("failed", greenNodes)),
+    });
+    expect(v.settled).toBe(false);
+  });
+
   it("takes posting debt from the record it settled from, not the stale frame", async () => {
     // One authority per verdict: if the record answers pass/fail, it also
     // answers what statuses it still owed at finalize (juspay/odu#61).

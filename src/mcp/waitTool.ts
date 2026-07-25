@@ -18,7 +18,7 @@
 import { isDeadTransportError } from "@kolu/surface/client";
 import type { BespokeTool } from "@kolu/surface-mcp";
 import { z } from "zod";
-import { agentSummary } from "../cli/render";
+import { agentSummary, NON_TERMINAL_STATUSES } from "../cli/render";
 import { gitRunContext } from "../common/git";
 import { formatRef, type RunRecord } from "../common/runRecord";
 import { liftUnposted, type OwedStatus } from "../common/surface";
@@ -151,11 +151,17 @@ function recordVerdict(rec: RunRecord | null): {
 	const errored = rec.nodes
 		.filter((n) => n.status === "errored")
 		.map((n) => n.id);
-	// A record that says `passed` while carrying a red node contradicts itself
-	// — fall back to the stream rather than publish a contradiction as a verdict.
-	if (rec.outcome === "passed" && failed.length + errored.length > 0) {
-		return null;
-	}
+	// `buildRunRecord` derives `outcome` from the nodes, but `RunRecordSchema`
+	// cannot express that — it admits any (outcome, statuses) pair, including a
+	// torn or hand-written file. So re-derive the whole invariant here and fall
+	// back to the stream on ANY contradiction, rather than publishing one as a
+	// verdict: every node terminal (a `passed` beside a still-`running` node is
+	// exactly the half-observed run this path must never call green), `passed`
+	// with no red node, and `failed` with at least one.
+	if (rec.nodes.some((n) => NON_TERMINAL_STATUSES.has(n.status))) return null;
+	const red = failed.length + errored.length;
+	if (rec.outcome === "passed" && red > 0) return null;
+	if (rec.outcome === "failed" && red === 0) return null;
 	return {
 		passed: rec.outcome === "passed",
 		failed,
