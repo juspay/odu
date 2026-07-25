@@ -161,17 +161,23 @@ function recordVerdict(rec: RunRecord | null): {
 	};
 }
 
-/** The run-identity + posting-debt fields stamped into every verdict, from the
- *  frame it describes. No frame reads the no-run sentinel from `EMPTY_NODES`. */
+/** The run this verdict describes — identity ONLY, always from the frame. No
+ *  frame reads the no-run sentinel from `EMPTY_NODES`. Kept apart from the
+ *  posting debt below because the two answer to different authorities: identity
+ *  is always the frame's, debt belongs to whoever answered pass/fail. Spreading
+ *  both and overwriting one made the verdict's source depend on object-literal
+ *  key order — invisible at the call site, and reverted by any tidy-up. */
 function identityOf(
 	snap: AgentNodes | undefined,
-): Pick<SettleVerdict, "sha7" | "seq" | "unposted"> {
+): Pick<SettleVerdict, "sha7" | "seq"> {
 	const frame = snap ?? EMPTY_NODES;
-	return {
-		sha7: frame.sha7,
-		seq: frame.seq,
-		unposted: frame.unposted ?? [],
-	};
+	return { sha7: frame.sha7, seq: frame.seq };
+}
+
+/** The posting debt a FRAME reports. A record-sourced verdict uses the
+ *  record's instead — see `recordVerdict`. */
+function debtOf(snap: AgentNodes | undefined): OwedStatus[] {
+	return (snap ?? EMPTY_NODES).unposted ?? [];
 }
 
 /** Does the live run's `observed` sha7 satisfy the caller's `expected` sha? A
@@ -224,6 +230,7 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
 			cancelled,
 			duration_ms: now() - started,
 			...identityOf(last),
+			unposted: debtOf(last),
 		};
 	};
 
@@ -285,6 +292,7 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
 			cancelled: false,
 			duration_ms: now() - started,
 			...identityOf(last),
+			unposted: debtOf(last),
 		};
 	};
 
@@ -318,6 +326,7 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
 					cancelled: false,
 					duration_ms: now() - started,
 					...identityOf(snap),
+					unposted: debtOf(snap),
 				};
 			}
 			if (done) {
@@ -331,6 +340,7 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
 					cancelled: false,
 					duration_ms: now() - started,
 					...identityOf(snap),
+					unposted: debtOf(snap),
 				};
 			}
 		}
