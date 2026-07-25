@@ -504,17 +504,14 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
   });
 
   /** The record the coordinator finalizes on its way out, for the identity the
-   *  test surface publishes (`abc1234#3`). */
-  /** A frozen clock for the wait, so the record-freshness comparison below is
-   *  deterministic: the wait stamps every observation NOW, and a record counts
-   *  only when it was finalized at or after the last frame we saw. */
-  const NOW = 1_000;
-  const frozen = () => NOW;
-
+   *  test surface publishes (`abc1234#3`). No clock is threaded through these
+   *  tests: `outcome` is the whole rule the reader applies, because the
+   *  coordinator re-finalizes a resumed run's record as `incomplete` rather
+   *  than leaving the reader to date-check it (run.ts `updateNode`). */
   function record(
     outcome: RunOutcome,
     nodes: PipelineState["nodes"] = {},
-    finishedAt = NOW,
+    finishedAt = 1_000,
   ): RunRecord {
     return {
       version: 1,
@@ -548,7 +545,6 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     const v = await waitForSettle({
       client,
       failFast: false,
-      now: frozen,
       timeoutMs: 300,
       readRecord: () => record("passed"),
     });
@@ -563,7 +559,6 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     const v = await waitForSettle({
       client,
       failFast: false,
-      now: frozen,
       timeoutMs: 300,
       readRecord: () => record("failed", failedNodes),
     });
@@ -572,37 +567,24 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     expect(v.failed).toContain("ci::e2e@x86_64-linux");
   });
 
-  it("stays fail-closed on an incomplete record (torn down mid-run)", async () => {
+  it("stays fail-closed on an incomplete record (torn down mid-run, or a --linger rerun in flight)", async () => {
     // `incomplete` is exactly the half-observed case: a node was still pending
     // or running when the coordinator finalized. Never green.
+    //
+    // It is also the stale `--linger` drain: a lingering run that passed and
+    // then took a `node_rerun` used to leave an on-disk `passed` describing a
+    // run that was running again, and the reader dated the record against its
+    // own clock to spot it. The coordinator now re-finalizes the moment a node
+    // resumes (run.ts `updateNode`), so such a record says `incomplete` itself
+    // — the reader needs one rule, not two.
     const s = await serve([["ci::nix@x86_64-linux", "running"]]);
     const client = await agentWaitClient(s);
     setTimeout(() => s.close(), 30);
     const v = await waitForSettle({
       client,
       failFast: false,
-      now: frozen,
       timeoutMs: 300,
       readRecord: () => record("incomplete"),
-    });
-    expect(v.passed).toBe(false);
-    expect(v.settled).toBe(false);
-  });
-
-  it("refuses a record finalized BEFORE the last frame it saw (stale --linger drain)", async () => {
-    // `--linger` finalizes on every drain, so a lingering run that passed, then
-    // took a node_rerun, has an on-disk `passed` record older than the live
-    // `running` frame. Trusting `outcome` alone would report that stale green
-    // as this run's verdict if the coordinator then died mid-rerun.
-    const s = await serve([["ci::nix@x86_64-linux", "running"]]);
-    const client = await agentWaitClient(s);
-    setTimeout(() => s.close(), 30);
-    const v = await waitForSettle({
-      client,
-      failFast: false,
-      now: frozen,
-      timeoutMs: 300,
-      readRecord: () => record("passed", {}, NOW - 1),
     });
     expect(v.passed).toBe(false);
     expect(v.settled).toBe(false);
@@ -621,7 +603,6 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     const v = await waitForSettle({
       client,
       failFast: false,
-      now: frozen,
       timeoutMs: 300,
       readRecord: () => owed,
     });

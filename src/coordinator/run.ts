@@ -659,6 +659,11 @@ async function orchestrate(
     state: PipelineState,
     unposted?: ReadonlyArray<UnpostedEntry>,
   ) => void = () => {};
+  // Has a record for this run already been written? Only then can a resumed
+  // node leave a stale verdict on disk, so `updateNode` re-finalizes only in
+  // that case — a run that has never drained has nothing on disk to correct,
+  // and writing one early would list a live run in `odu runs`.
+  let recordWritten = false;
   // Linger's idle backstop: a settled-but-lingering coordinator self-reaps
   // after `idleMs` with no new work, so a forgotten `--linger` run can't hold
   // the checkout lock forever. Cleared the instant a node (re)starts.
@@ -845,8 +850,18 @@ async function orchestrate(
     display.update(store.get());
     if (next.status !== prev.status) {
       // A node (re)starting means work resumed — disarm linger's idle backstop
-      // so it can't reap a run that just got a rerun.
-      if (next.status === "running") clearIdle();
+      // so it can't reap a run that just got a rerun, and REFRESH the durable
+      // record if one already describes this run. `--linger` keeps one
+      // `(sha7, seq)` file and rewrites it on every drain, so a lingering run
+      // that passed and then took a `node_rerun` would otherwise leave an
+      // on-disk `passed` for a run that is running again. `buildRunRecord`
+      // derives `incomplete` from the live state, so re-finalizing here means
+      // the ledger never carries a green verdict for a run in flight — and no
+      // reader has to compare its own clock against `finishedAt` to notice.
+      if (next.status === "running") {
+        clearIdle();
+        if (recordWritten) finalizeRunRecord(store.get(), poster.unposted());
+      }
       emitProgress(id, next);
       const payload = statusFor(id, next.status, next.durationMs, sha7);
       if (payload !== null) poster.post(payload);
@@ -923,6 +938,7 @@ async function orchestrate(
             unposted: unposted ?? poster.unposted(),
           }),
         );
+        recordWritten = true;
       } catch {
         // best-effort: the run history is a convenience, never a gate — a failed
         // record write must not fail the run or mask its verdict.
