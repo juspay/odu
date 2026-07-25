@@ -621,6 +621,25 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     expect(v.settled).toBe(false);
   });
 
+  it("refuses a record whose outcome contradicts its own nodes", async () => {
+    // `buildRunRecord` can't produce this, but `RunRecordSchema` doesn't forbid
+    // it and the ledger reader is deliberately forgiving of odd files. A
+    // self-contradicting record is not an authority, so it settles nothing —
+    // the reader states that rather than trusting a promise from another module.
+    const s = await serve([["ci::e2e@x86_64-linux", "running"]]);
+    const client = await agentWaitClient(s);
+    setTimeout(() => s.close(), 30);
+    const redNodes = state([["ci::e2e@x86_64-linux", "failed"]]).nodes;
+    const v = await waitForSettle({
+      client,
+      failFast: false,
+      timeoutMs: 300,
+      resolveRunContext: ledgerWith(record("passed", redNodes)),
+    });
+    expect(v.passed).toBe(false);
+    expect(v.settled).toBe(false);
+  });
+
   it("takes posting debt from the record it settled from, not the stale frame", async () => {
     // One authority per verdict: if the record answers pass/fail, it also
     // answers what statuses it still owed at finalize (juspay/odu#61).

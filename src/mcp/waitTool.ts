@@ -133,8 +133,12 @@ function ledgerRecord(
  *    comparison is needed to detect it;
  *  - it is missing (the close beat the write, or no ordinal was reserved).
  *
- *  `outcome` is the authority for pass/fail — the node lists are for reporting
- *  only. */
+ *  `outcome` is the authority for pass/fail and the node lists are for
+ *  reporting only — but a record whose lists contradict its own outcome is no
+ *  authority at all, so it settles nothing either (third way, below). That is
+ *  `buildRunRecord`'s invariant; `RunRecordSchema` does not enforce it and the
+ *  ledger reader is deliberately forgiving of odd files, so this reader states
+ *  it rather than trusting a promise made in another module. */
 function recordVerdict(rec: RunRecord | null): {
 	passed: boolean;
 	failed: string[];
@@ -147,6 +151,11 @@ function recordVerdict(rec: RunRecord | null): {
 	const errored = rec.nodes
 		.filter((n) => n.status === "errored")
 		.map((n) => n.id);
+	// A record that says `passed` while carrying a red node contradicts itself
+	// — fall back to the stream rather than publish a contradiction as a verdict.
+	if (rec.outcome === "passed" && failed.length + errored.length > 0) {
+		return null;
+	}
 	return {
 		passed: rec.outcome === "passed",
 		failed,
