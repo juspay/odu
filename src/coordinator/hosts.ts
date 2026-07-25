@@ -186,23 +186,19 @@ export function resolvePools(
     }
     hosts[platform] = [addr];
   }
-  const resolved: Record<string, HostPool> = {};
-  if (platforms.length === 0) {
-    Object.assign(resolved, hosts);
-  } else {
-    for (const platform of platforms) {
-      const pool = hosts[platform];
-      if (pool === undefined) {
-        throw new Error(
-          `odu: --platform ${platform} has no host (configure it or pass --host ${platform}=ADDR)`,
-        );
-      }
-      resolved[platform] = pool;
+  if (platforms.length === 0) return hosts;
+  const sliced: Record<string, HostPool> = {};
+  for (const platform of platforms) {
+    const pool = hosts[platform];
+    if (pool === undefined) {
+      throw new Error(
+        `odu: --platform ${platform} has no host (configure it or pass --host ${platform}=ADDR)`,
+      );
     }
+    sliced[platform] = pool;
   }
-  return resolved;
+  return sliced;
 }
-
 
 /** The fanout pools for a run: `resolvePools` plus the no-config fail-fast.
  *  Zero resolved pools means the run named no host anywhere — the juspay/odu#46
