@@ -7,6 +7,16 @@
       "env": {
         "ODU_FLAKE": ".#odu"
       }
+    },
+    "kolu": {
+      "type": "stdio",
+      "command": "kolu",
+      "args": [
+        "mcp"
+      ],
+      "env_vars": [
+        "PADI_SOCKET"
+      ]
     }
   }
 }
