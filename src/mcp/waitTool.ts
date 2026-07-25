@@ -397,7 +397,9 @@ export function makeWaitTool(
 			"({context, lastError, attempts}) not yet confirmed (reporting debt does " +
 			"not block settle). Fails LOUD (an error, not an empty verdict) when no " +
 			"run is live in this checkout, or when the live run's commit doesn't " +
-			"prefix-match `expected_sha`.",
+			"prefix-match `expected_sha`. If the coordinator's socket closes before " +
+			"it publishes a terminal frame, the verdict comes from the run's " +
+			"finalized record on disk (never green for a run torn down mid-flight).",
 		input: waitInput,
 		mutates: false,
 		handler: (args, client, signal) => {
