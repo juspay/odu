@@ -19,12 +19,17 @@ import { isDeadTransportError } from "@kolu/surface/client";
 import type { BespokeTool } from "@kolu/surface-mcp";
 import { z } from "zod";
 import { agentSummary } from "../cli/render";
-import { gitTopLevel, shortSha } from "../common/git";
+import { gitRunContext } from "../common/git";
 import { formatRef, type RunRecord } from "../common/runRecord";
 import type { OwedStatus } from "../common/surface";
-import { readLedger } from "../coordinator/ledger";
+import { readRunRecord } from "../coordinator/ledger";
 import { SOCKET_PATH } from "../coordinator/socket";
-import { type AgentNodes, type AgentNodesReader, EMPTY_NODES } from "./agentSurface";
+import {
+	type AgentNodes,
+	type AgentNodesReader,
+	EMPTY_NODES,
+	type ResolveRunContext,
+} from "./agentSurface";
 
 export const waitInput = z.object({
 	timeout_ms: z.number().optional(),
@@ -95,24 +100,26 @@ export interface WaitOptions {
 	signal?: AbortSignal;
 	/** Injected clock for tests; defaults to `Date.now`. */
 	now?: () => number;
-	/** The durable record for a run identity, or null when none is on disk.
-	 *  Injected for tests; defaults to the checkout's ledger. Consulted only
-	 *  when the stream ends without a settle frame — see `recordVerdict`. */
-	readRecord?: (sha7: string, seq: number | null) => RunRecord | null;
+	/** Where am I checked out — the SAME injection seam the projection's durable
+	 *  log reads its identity through (`agentSurface.ResolveRunContext`), so the
+	 *  tool doesn't probe the process's git itself and tests drive the shipping
+	 *  code path rather than a second, differently-shaped stub. Defaults to
+	 *  `gitRunContext`, exactly as `mcp.ts` already does for the projection. */
+	resolveRunContext?: ResolveRunContext;
 }
 
-/** The finalized record for `sha7#seq`, read from the checkout's ledger. The
+/** The finalized record for `sha7#seq`, read from this checkout's ledger — one
+ *  addressed file read, not a scan of every run of every commit. The
  *  coordinator writes it as it exits, so it is the authority on a run whose
  *  socket is already gone. */
-function ledgerRecord(sha7: string, seq: number | null): RunRecord | null {
+function ledgerRecord(
+	resolve: ResolveRunContext,
+	sha7: string,
+	seq: number | null,
+): RunRecord | null {
 	if (seq === null) return null;
-	const root = gitTopLevel();
-	if (root === null) return null;
-	return (
-		readLedger(root).find(
-			(r) => shortSha(r.sha) === sha7 && r.seq === seq,
-		) ?? null
-	);
+	const ctx = resolve();
+	return ctx === null ? null : readRunRecord(ctx.repoRoot, sha7, seq);
 }
 
 /** The verdict a finalized record dictates, or null when the record can't
@@ -246,7 +253,7 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
 		// passing run as unsettled. `recordVerdict` decides whether the record
 		// may answer at all (a terminal outcome — nothing else).
 		const fromRecord = recordVerdict(
-			(opts.readRecord ?? ledgerRecord)(last.sha7, last.seq),
+			ledgerRecord(opts.resolveRunContext ?? gitRunContext, last.sha7, last.seq),
 		);
 		if (fromRecord !== null) {
 			// One authority supplies every field it knows — pass/fail, the red
@@ -351,34 +358,45 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
 	}
 }
 
-/** The `wait_for_settle` bespoke tool. Read-only (`mutates: false`): it observes the
- *  run, it doesn't change it. The explicit `mutates: false` opts into `readOnlyHint:
- *  true` under `@kolu/surface-mcp`'s conservative default (an unannotated tool is now
- *  treated as MUTATING so a host can't auto-run it unconfirmed). Typed as the loose
- *  `BespokeTool` (the package's `tools` slot is invariant in the input type); `input`
- *  validates, handler narrows. */
-export const waitTool: BespokeTool = {
-	description:
-		"Block until the run settles, or — fail-fast (default) — the instant a " +
-		"node goes red, so you can drill into a failure without waiting for the " +
-		"slow lanes. Returns the verdict {settled, passed, failed[], errored[], " +
-		"sha7, seq, unposted[]}: sha7 names the commit, a non-null seq " +
-		"completes the unique run ref sha7#seq (seq is null only when no ordinal " +
-		"was reserved), and unposted is full owed rows " +
-		"({context, lastError, attempts}) not yet confirmed (reporting debt does " +
-		"not block settle). Fails LOUD (an error, not an empty verdict) when no " +
-		"run is live in this checkout, or when the live run's commit doesn't " +
-		"prefix-match `expected_sha`.",
-	input: waitInput,
-	mutates: false,
-	handler: (args, client, signal) => {
-		const a = args as WaitInput;
-		return waitForSettle({
-			client: client as AgentNodesReader,
-			timeoutMs: a.timeout_ms,
-			failFast: a.fail_fast,
-			expectedSha: a.expected_sha,
-			signal,
-		});
-	},
-};
+/** The `wait_for_settle` bespoke tool, over one injected view of the world.
+ *  Read-only (`mutates: false`): it observes the run, it doesn't change it. The
+ *  explicit `mutates: false` opts into `readOnlyHint: true` under
+ *  `@kolu/surface-mcp`'s conservative default (an unannotated tool is now
+ *  treated as MUTATING so a host can't auto-run it unconfirmed). Typed as the
+ *  loose `BespokeTool` (the package's `tools` slot is invariant in the input
+ *  type); `input` validates, handler narrows.
+ *
+ *  A factory rather than a const so `resolveRunContext` reaches the handler:
+ *  `mcp.ts` hands it the same resolver the projection's durable-log fallback
+ *  gets, and a test hands it a stub — so the shipping handler is the one under
+ *  test, not a parallel path reachable only through an injected option. */
+export function makeWaitTool(
+	resolveRunContext: ResolveRunContext = gitRunContext,
+): BespokeTool {
+	return {
+		description:
+			"Block until the run settles, or — fail-fast (default) — the instant a " +
+			"node goes red, so you can drill into a failure without waiting for the " +
+			"slow lanes. Returns the verdict {settled, passed, failed[], errored[], " +
+			"sha7, seq, unposted[]}: sha7 names the commit, a non-null seq " +
+			"completes the unique run ref sha7#seq (seq is null only when no ordinal " +
+			"was reserved), and unposted is full owed rows " +
+			"({context, lastError, attempts}) not yet confirmed (reporting debt does " +
+			"not block settle). Fails LOUD (an error, not an empty verdict) when no " +
+			"run is live in this checkout, or when the live run's commit doesn't " +
+			"prefix-match `expected_sha`.",
+		input: waitInput,
+		mutates: false,
+		handler: (args, client, signal) => {
+			const a = args as WaitInput;
+			return waitForSettle({
+				client: client as AgentNodesReader,
+				timeoutMs: a.timeout_ms,
+				failFast: a.fail_fast,
+				expectedSha: a.expected_sha,
+				signal,
+				resolveRunContext,
+			});
+		},
+	};
+}

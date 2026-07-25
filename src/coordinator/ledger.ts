@@ -213,6 +213,19 @@ function readRecord(path: string): RunRecord | null {
   return result.success ? result.data : null;
 }
 
+/** The finalized record for ONE run identity, or `null` when it is missing,
+ *  still a reservation sentinel, or unparseable. The addressed counterpart to
+ *  `readLedger`'s whole-checkout listing: a verdict reader wants exactly one
+ *  run, not the history, and the identity→file mapping stays here with the
+ *  layout that defines it rather than being re-derived at each consumer. */
+export function readRunRecord(
+  repoRoot: string,
+  sha7: string,
+  seq: number,
+): RunRecord | null {
+  return readRecord(recordPath(repoRoot, sha7, seq));
+}
+
 /** Every run record in this checkout's `.ci`, newest first (by `finishedAt`,
  *  then `seq` as a stable tiebreak). The history `odu runs` prints and a
  *  service face reads; unparseable files are skipped, not surfaced. */

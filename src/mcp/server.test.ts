@@ -23,18 +23,20 @@ import { serveSurfaceAsMcp } from "@kolu/surface-mcp";
 import { afterEach, describe, expect, it } from "vitest";
 import { gitRunContext } from "../common/git";
 import type { RunOutcome, RunRecord } from "../common/runRecord";
+import { writeRunRecord } from "../coordinator/ledger";
 import { tryDialSocket } from "../coordinator/socket";
 import { oduSurface, pendingNode, type PipelineState } from "../common/surface";
 import {
   type AgentNodesReader,
   buildAgentProjection,
   type DialA,
+  type ResolveRunContext,
   durableLog,
   redialingAClient,
 } from "./agentSurface";
 import { cancelTool } from "./cancelTool";
 import { serveTestSurface, type TestSurface } from "./serveForTest";
-import { waitForSettle } from "./waitTool";
+import { makeWaitTool, type SettleVerdict, waitForSettle } from "./waitTool";
 
 
 type Row = [id: string, status: PipelineState["nodes"][string]["status"]];
@@ -487,9 +489,9 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
 
   it("never reports passed when the run does not settle green", async () => {
     // Coordinator vanishes (crash / socket close) while a node is still
-    // running and no node is red — must NOT be a false green. `readRecord`
-    // injected (no record on disk) so the verdict rests on the stream alone,
-    // and the test never reads this checkout's real ledger.
+    // running and no node is red — must NOT be a false green. The run context
+    // points at an EMPTY throwaway checkout, so the verdict rests on the
+    // stream alone and the test never reads this checkout's real ledger.
     const s = await serve([["ci::nix@x86_64-linux", "running"]]);
     const client = await agentWaitClient(s);
     setTimeout(() => s.close(), 30);
@@ -497,7 +499,7 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
       client,
       failFast: false,
       timeoutMs: 300,
-      readRecord: () => null,
+      resolveRunContext: ledgerWith(null),
     });
     expect(v.passed).toBe(false);
     expect(v.settled).toBe(false);
@@ -508,6 +510,18 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
    *  tests: `outcome` is the whole rule the reader applies, because the
    *  coordinator re-finalizes a resumed run's record as `incomplete` rather
    *  than leaving the reader to date-check it (run.ts `updateNode`). */
+  /** A throwaway checkout whose ledger holds `rec` for the identity the test
+   *  surface publishes (`abc1234#3`), plus the resolver the tool reads it
+   *  through. Deliberately a REAL `.ci` + the real addressed read rather than a
+   *  stubbed lookup: the record path production takes is then the one under
+   *  test. `null` gives an empty checkout (no record on disk). */
+  function ledgerWith(rec: RunRecord | null): ResolveRunContext {
+    const dir = mkdtempSync(join(tmpdir(), "odu-ledger-"));
+    closers.push(() => rmSync(dir, { recursive: true, force: true }));
+    if (rec !== null) writeRunRecord(dir, "abc1234", rec);
+    return () => ({ repoRoot: dir, sha7: "abc1234" });
+  }
+
   function record(
     outcome: RunOutcome,
     nodes: PipelineState["nodes"] = {},
@@ -546,9 +560,26 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
       client,
       failFast: false,
       timeoutMs: 300,
-      readRecord: () => record("passed"),
+      resolveRunContext: ledgerWith(record("passed")),
     });
     expect(v).toMatchObject({ settled: true, passed: true, timed_out: false });
+  });
+
+  it("the SHIPPING tool handler settles from the ledger", async () => {
+    // The handler used to pass no record reader at all, so the lookup that
+    // ships was reachable by no test — every case above exercised an injected
+    // one. This drives the tool `mcp.ts` builds, through its own handler, so
+    // production and the tests traverse the same path.
+    const s = await serve([["ci::nix@x86_64-linux", "running"]]);
+    const client = await agentWaitClient(s);
+    setTimeout(() => s.close(), 30);
+    const tool = makeWaitTool(ledgerWith(record("passed")));
+    const v = (await tool.handler(
+      { fail_fast: false, timeout_ms: 300 },
+      client as never,
+      undefined,
+    )) as SettleVerdict;
+    expect(v).toMatchObject({ settled: true, passed: true });
   });
 
   it("settles red from the finalized record, naming the failed node", async () => {
@@ -560,7 +591,7 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
       client,
       failFast: false,
       timeoutMs: 300,
-      readRecord: () => record("failed", failedNodes),
+      resolveRunContext: ledgerWith(record("failed", failedNodes)),
     });
     expect(v.settled).toBe(true);
     expect(v.passed).toBe(false);
@@ -584,7 +615,7 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
       client,
       failFast: false,
       timeoutMs: 300,
-      readRecord: () => record("incomplete"),
+      resolveRunContext: ledgerWith(record("incomplete")),
     });
     expect(v.passed).toBe(false);
     expect(v.settled).toBe(false);
@@ -604,7 +635,7 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
       client,
       failFast: false,
       timeoutMs: 300,
-      readRecord: () => owed,
+      resolveRunContext: ledgerWith(owed),
     });
     expect(v.passed).toBe(true);
     expect(v.unposted).toEqual([
