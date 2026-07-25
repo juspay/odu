@@ -21,7 +21,7 @@ import { z } from "zod";
 import { agentSummary } from "../cli/render";
 import { gitRunContext } from "../common/git";
 import { formatRef, type RunRecord } from "../common/runRecord";
-import type { OwedStatus } from "../common/surface";
+import { liftUnposted, type OwedStatus } from "../common/surface";
 import { readRunRecord } from "../coordinator/ledger";
 import { SOCKET_PATH } from "../coordinator/socket";
 import {
@@ -147,17 +147,11 @@ function recordVerdict(rec: RunRecord | null): {
 	const errored = rec.nodes
 		.filter((n) => n.status === "errored")
 		.map((n) => n.id);
-	// `projectUnposted` drops `attempts` on the way to disk, so a record-sourced
-	// row reports 0 — the context and its last error are what a caller acts on.
 	return {
 		passed: rec.outcome === "passed",
 		failed,
 		errored,
-		unposted: (rec.unposted ?? []).map((u) => ({
-			context: u.context,
-			lastError: u.lastError,
-			attempts: 0,
-		})),
+		unposted: liftUnposted(rec.unposted ?? []),
 	};
 }
 
