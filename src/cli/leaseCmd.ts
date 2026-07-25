@@ -102,7 +102,7 @@ function resolvePlatforms(requested: string[]): string[] {
     [],
     requested.length > 0 ? requested : [],
   );
-  const all = Object.keys(pools).sort();
+  const all = Object.keys(pools.hosts).sort();
   if (requested.length === 0) {
     if (all.length === 0) {
       throw new Error("odu: no platforms to lease (configure hosts.json)");
@@ -110,7 +110,7 @@ function resolvePlatforms(requested: string[]): string[] {
     return all;
   }
   for (const p of requested) {
-    if (pools[p] === undefined) {
+    if (pools.hosts[p] === undefined) {
       throw new Error(
         `odu: platform "${p}" is not in hosts config ` +
           `(have: ${all.join(", ") || "none"})`,
@@ -357,7 +357,7 @@ export async function leaseHoldCommand(opts: {
   const { platform, noWait, repoRoot } = opts;
   const hostsConfig = loadHosts();
   const pools = fanoutPools(hostsConfig, [], [platform]);
-  const pool = pools[platform];
+  const pool = pools.hosts[platform];
   if (pool === undefined || pool.length === 0) {
     log(`odu lease-hold: no pool for ${platform}`);
     removePlatformLease(repoRoot, platform);
@@ -380,7 +380,7 @@ export async function leaseHoldCommand(opts: {
     const acquired = await acquireFromPool({
       platform,
       pool,
-      source: hostsConfig.source,
+      source: pools.source,
       identity: {
         holder: localHolderId(),
         run: `lease-hold:${pid}`,

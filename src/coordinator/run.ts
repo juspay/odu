@@ -388,11 +388,11 @@ async function orchestrate(
   // `--platform` with no host still errors earlier in resolvePools.
   // Values are *pools* (one or more hosts per platform); `leaseLanes` below
   // picks a free machine and holds the venue lock for the run (juspay/odu#54).
-  const poolsByPlatform = fanoutPools(
-    hostsConfig,
-    args.hostPins,
-    args.platforms,
-  );
+  // Pools AND the file they were declared in, as one value: `leaseLanes` names
+  // that file in its refusals, so provenance travels with the pools rather than
+  // being re-attached by hand at the lease call.
+  const resolvedPools = fanoutPools(hostsConfig, args.hostPins, args.platforms);
+  const poolsByPlatform = resolvedPools.hosts;
   const selectors = args.selectors.map(parseSelector);
   for (const selector of selectors) {
     if (
@@ -547,9 +547,8 @@ async function orchestrate(
     }
     try {
       const claimed = await leaseLanes({
-        pools: poolsByPlatform,
+        pools: resolvedPools,
         platforms: platformsToClaim,
-        source: hostsConfig.source,
         identity: { holder: localHolderId(), run: runLabel },
         noWait: args.noWait,
         onLine: info,

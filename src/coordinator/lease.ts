@@ -30,7 +30,7 @@ import {
   laneSurface,
   type LeaseHolder,
 } from "../common/surface";
-import { shortHost, type HostPool } from "./hosts";
+import { type HostPool, type ResolvedPools, shortHost } from "./hosts";
 import type { ResolveRunnerDrv } from "./runnerFlake";
 import { lineLogger, localhostSpawnEnv } from "./surfaceRemoteOpts";
 
@@ -314,9 +314,11 @@ export interface AcquireFromPoolOpts {
   pool: HostPool;
   identity: LeaseIdentity;
   noWait: boolean;
-  /** The hosts file this pool was declared in, named in the locality refusal
-   *  below; null for a config assembled in code. */
-  source?: string | null;
+  /** The hosts file this pool was declared in, named in the locality refusal;
+   *  `null` for a config assembled in code. Required (not optional) so the
+   *  `"hosts config"` fallback is a caller's stated choice, never a forgotten
+   *  field — a pool and its provenance travel together (`ResolvedPools`). */
+  source: string | null;
   onLine?: (msg: string) => void;
   /** Injected claim — tests supply a fake; production uses `tryClaim`. */
   claim?: (
@@ -513,7 +515,7 @@ export async function acquireFromPool(
     });
 
   // Legality first, once, over the one pool this call leases — never per poll.
-  assertPoolsScannable({ [platform]: pool }, [platform], opts.source ?? null);
+  assertPoolsScannable({ [platform]: pool }, [platform], opts.source);
 
   let waited = false;
   for (;;) {
@@ -545,12 +547,13 @@ export async function acquireFromPool(
 }
 
 export interface LeaseLanesOpts {
-  pools: Record<string, HostPool>;
+  /** The declared pools AND the file they came from, as one value — the
+   *  refusals name that file, and a separately-threaded `source` is one a
+   *  caller can forget. */
+  pools: ResolvedPools;
   platforms: readonly string[];
   identity: LeaseIdentity;
   noWait: boolean;
-  /** Hosts file the pools came from, named in the locality refusal. */
-  source?: string | null;
   onLine?: (msg: string) => void;
   claim?: AcquireFromPoolOpts["claim"];
   /**
@@ -666,8 +669,8 @@ function assertPoolsScannable(
  */
 export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
   const platforms = [...opts.platforms].sort();
-  assertNoSharedRemoteHosts(opts.pools, platforms);
-  assertPoolsScannable(opts.pools, platforms, opts.source ?? null);
+  assertNoSharedRemoteHosts(opts.pools.hosts, platforms);
+  assertPoolsScannable(opts.pools.hosts, platforms, opts.pools.source);
   const sleep = opts.sleep ?? defaultSleep;
   const now = opts.now ?? Date.now;
   const rotateBy = now();
@@ -706,7 +709,7 @@ export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
 
     try {
       for (const platform of platforms) {
-        const pool = opts.pools[platform];
+        const pool = opts.pools.hosts[platform];
         if (pool === undefined) {
           throw new Error(`odu: internal: no pool for platform ${platform}`);
         }

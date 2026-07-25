@@ -128,6 +128,7 @@ describe("cancel-before-claim — single-host pool supersede (ordering)", () => 
       pool: ["ci-1"],
       identity,
       noWait: true,
+      source: null,
       claim,
     });
 
@@ -159,6 +160,7 @@ describe("cancel-before-claim — single-host pool supersede (ordering)", () => 
         pool: ["ci-1"],
         identity,
         noWait: true,
+        source: null,
         claim,
       }),
     ).rejects.toThrow(/every host.*busy/);

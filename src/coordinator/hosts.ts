@@ -200,6 +200,15 @@ export function resolvePools(
   return sliced;
 }
 
+/** The pools a run fans out over, WITH the file they were declared in — one
+ *  value, so provenance can't be dropped on the way to the lease layer (the
+ *  lease refusals name the hosts file, and a `source` re-attached by hand at
+ *  each consumer is a `source` some future consumer forgets). */
+export interface ResolvedPools {
+  hosts: Record<string, HostPool>;
+  source: string | null;
+}
+
 /** The fanout pools for a run: `resolvePools` plus the no-config fail-fast.
  *  Zero resolved pools means the run named no host anywhere — the juspay/odu#46
  *  case — so we refuse loudly instead of defaulting to a localhost lane. This
@@ -210,12 +219,12 @@ export function fanoutPools(
   config: HostsConfig,
   hostPins: readonly string[],
   platforms: readonly string[],
-): Record<string, HostPool> {
-  const pools = resolvePools(config, hostPins, platforms);
-  if (Object.keys(pools).length === 0) {
+): ResolvedPools {
+  const hosts = resolvePools(config, hostPins, platforms);
+  if (Object.keys(hosts).length === 0) {
     throw noHostsConfiguredError(config);
   }
-  return pools;
+  return { hosts, source: config.source };
 }
 
 /** Short label for a dial target: strip `user@` and any DNS domain suffix so

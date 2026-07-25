@@ -52,6 +52,7 @@ describe("acquireFromPool", () => {
       pool: ["localhost"],
       identity: id,
       noWait: true,
+      source: null,
       claim,
     });
     expect(r).toEqual({ host: "localhost", lease: null });
@@ -115,6 +116,7 @@ describe("acquireFromPool", () => {
       pool: ["ci-1", "ci-2", "ci-3"],
       identity: id,
       noWait: true,
+      source: null,
       claim,
       onLine: (m) => lines.push(m),
       rotateBy: 0,
@@ -142,6 +144,7 @@ describe("acquireFromPool", () => {
         pool: ["mac-1"],
         identity: id,
         noWait: true,
+        source: null,
         claim,
       }),
     ).rejects.toThrow(/every host for aarch64-darwin is busy/);
@@ -160,6 +163,7 @@ describe("acquireFromPool", () => {
       pool: ["ci-1"],
       identity: id,
       noWait: false,
+      source: null,
       claim,
       sleep,
       rotateBy: 0,
@@ -181,6 +185,7 @@ describe("acquireFromPool", () => {
         pool: ["ci-1", "ci-2"],
         identity: id,
         noWait: false,
+        source: null,
         claim,
         rotateBy: 0,
       }),
@@ -194,6 +199,7 @@ describe("acquireFromPool", () => {
         pool: [],
         identity: id,
         noWait: true,
+        source: null,
         claim: vi.fn(),
       }),
     ).rejects.toThrow(/empty host pool/);
@@ -216,13 +222,15 @@ describe("leaseLanes", () => {
     await expect(
       leaseLanes({
         pools: {
-          "aarch64-darwin": ["mac-1"],
-          "x86_64-linux": ["ci-1", "localhost"],
+          hosts: {
+            "aarch64-darwin": ["mac-1"],
+            "x86_64-linux": ["ci-1", "localhost"],
+          },
+          source: "/home/me/.config/odu/hosts.json",
         },
         platforms: ["aarch64-darwin", "x86_64-linux"],
         identity: id,
         noWait: false,
-        source: "/home/me/.config/odu/hosts.json",
         claim,
         sleep,
       }),
@@ -240,13 +248,15 @@ describe("leaseLanes", () => {
     const claim = vi.fn(async (host: string): Promise<ClaimResult> => held(host));
     const r = await leaseLanes({
       pools: {
-        "aarch64-darwin": ["mac-1"],
-        "x86_64-linux": ["ci-1", "localhost"],
+        hosts: {
+          "aarch64-darwin": ["mac-1"],
+          "x86_64-linux": ["ci-1", "localhost"],
+        },
+        source: "/home/me/.config/odu/hosts.json",
       },
       platforms: ["aarch64-darwin"],
       identity: id,
       noWait: true,
-      source: "/home/me/.config/odu/hosts.json",
       claim,
     });
     expect(r.lanes).toEqual({ "aarch64-darwin": "mac-1" });
@@ -263,8 +273,11 @@ describe("leaseLanes", () => {
     await expect(
       leaseLanes({
         pools: {
-          "x86_64-linux": ["linux-1"],
-          "aarch64-darwin": ["mac-1"],
+          hosts: {
+            "x86_64-linux": ["linux-1"],
+            "aarch64-darwin": ["mac-1"],
+          },
+          source: null,
         },
         platforms: ["x86_64-linux", "aarch64-darwin"],
         identity: id,
@@ -293,8 +306,11 @@ describe("leaseLanes", () => {
     });
     const r = await leaseLanes({
       pools: {
-        "x86_64-linux": ["linux-1"],
-        "aarch64-darwin": ["mac-1"],
+        hosts: {
+          "x86_64-linux": ["linux-1"],
+          "aarch64-darwin": ["mac-1"],
+        },
+        source: null,
       },
       platforms: ["x86_64-linux", "aarch64-darwin"],
       identity: id,
@@ -316,8 +332,11 @@ describe("leaseLanes", () => {
     await expect(
       leaseLanes({
         pools: {
-          "x86_64-linux": ["shared-builder"],
-          "aarch64-linux": ["shared-builder"],
+          hosts: {
+            "x86_64-linux": ["shared-builder"],
+            "aarch64-linux": ["shared-builder"],
+          },
+          source: null,
         },
         platforms: ["x86_64-linux", "aarch64-linux"],
         identity: id,
@@ -335,8 +354,11 @@ describe("leaseLanes", () => {
     await expect(
       leaseLanes({
         pools: {
-          "x86_64-linux": ["nix@ci-1"],
-          "aarch64-linux": ["ci-1"],
+          hosts: {
+            "x86_64-linux": ["nix@ci-1"],
+            "aarch64-linux": ["ci-1"],
+          },
+          source: null,
         },
         platforms: ["x86_64-linux", "aarch64-linux"],
         identity: id,
@@ -352,8 +374,11 @@ describe("leaseLanes", () => {
     await expect(
       leaseLanes({
         pools: {
-          "x86_64-linux": ["nix@ci-1"],
-          "aarch64-linux": ["root@ci-1"],
+          hosts: {
+            "x86_64-linux": ["nix@ci-1"],
+            "aarch64-linux": ["root@ci-1"],
+          },
+          source: null,
         },
         platforms: ["x86_64-linux", "aarch64-linux"],
         identity: id,
@@ -368,8 +393,11 @@ describe("leaseLanes", () => {
     const claim = vi.fn();
     const r = await leaseLanes({
       pools: {
-        "x86_64-linux": ["localhost"],
-        "aarch64-darwin": ["localhost"],
+        hosts: {
+          "x86_64-linux": ["localhost"],
+          "aarch64-darwin": ["localhost"],
+        },
+        source: null,
       },
       platforms: ["x86_64-linux", "aarch64-darwin"],
       identity: id,
@@ -389,8 +417,11 @@ describe("leaseLanes", () => {
     await expect(
       leaseLanes({
         pools: {
-          "x86_64-linux": ["ci-1"],
-          "aarch64-linux": ["ci-1.example.com"],
+          hosts: {
+            "x86_64-linux": ["ci-1"],
+            "aarch64-linux": ["ci-1.example.com"],
+          },
+          source: null,
         },
         platforms: ["x86_64-linux", "aarch64-linux"],
         identity: id,
@@ -406,8 +437,11 @@ describe("leaseLanes", () => {
     await expect(
       leaseLanes({
         pools: {
-          "x86_64-linux": ["nix@ci-1.lab.example.com"],
-          "aarch64-linux": ["ci-1"],
+          hosts: {
+            "x86_64-linux": ["nix@ci-1.lab.example.com"],
+            "aarch64-linux": ["ci-1"],
+          },
+          source: null,
         },
         platforms: ["x86_64-linux", "aarch64-linux"],
         identity: id,
@@ -422,8 +456,11 @@ describe("leaseLanes", () => {
     const claim = vi.fn(async (host: string): Promise<ClaimResult> => held(host));
     const r = await leaseLanes({
       pools: {
-        "x86_64-linux": ["10.0.0.1"],
-        "aarch64-linux": ["10.0.0.2"],
+        hosts: {
+          "x86_64-linux": ["10.0.0.1"],
+          "aarch64-linux": ["10.0.0.2"],
+        },
+        source: null,
       },
       platforms: ["x86_64-linux", "aarch64-linux"],
       identity: id,

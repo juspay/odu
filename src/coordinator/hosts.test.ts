@@ -85,7 +85,7 @@ describe("fanoutPools — the no-config fail-fast (juspay/odu#46)", () => {
   });
 
   it("keeps an explicit --host PLAT=localhost override working (localhost as a decision)", () => {
-    expect(fanoutPools(empty, ["x86_64-linux=localhost"], [])).toEqual({
+    expect(fanoutPools(empty, ["x86_64-linux=localhost"], []).hosts).toEqual({
       "x86_64-linux": ["localhost"],
     });
   });
@@ -95,7 +95,7 @@ describe("fanoutPools — the no-config fail-fast (juspay/odu#46)", () => {
       hosts: { "x86_64-linux": ["localhost"] },
       source: "/some/hosts.json",
     };
-    expect(fanoutPools(config, [], [])).toEqual({
+    expect(fanoutPools(config, [], []).hosts).toEqual({
       "x86_64-linux": ["localhost"],
     });
   });
@@ -107,7 +107,7 @@ describe("fanoutPools — the no-config fail-fast (juspay/odu#46)", () => {
     };
     // aarch64-darwin absent from the config simply doesn't join the fanout —
     // a partial config someone wrote, distinct from the no-config refusal above.
-    expect(fanoutPools(config, [], [])).toEqual({
+    expect(fanoutPools(config, [], []).hosts).toEqual({
       "x86_64-linux": ["builder.example"],
     });
   });
@@ -120,7 +120,7 @@ describe("fanoutPools — the no-config fail-fast (juspay/odu#46)", () => {
       },
       source: "/some/hosts.json",
     };
-    expect(fanoutPools(config, [], [])).toEqual({
+    expect(fanoutPools(config, [], []).hosts).toEqual({
       "x86_64-linux": ["ci-1", "ci-2", "ci-3"],
       "aarch64-darwin": ["rasam", "sincereintent"],
     });
@@ -217,9 +217,8 @@ describe("pool locality is judged over what a run resolves (juspay/odu#66)", () 
     });
     const config = loadHosts();
     expect(
-      fanoutPools(config, ["aarch64-darwin=sincereintent"], [
-        "aarch64-darwin",
-      ]),
+      fanoutPools(config, ["aarch64-darwin=sincereintent"], ["aarch64-darwin"])
+        .hosts,
     ).toEqual({ "aarch64-darwin": ["sincereintent"] });
   });
 
@@ -232,7 +231,7 @@ describe("pool locality is judged over what a run resolves (juspay/odu#66)", () 
     // (juspay/odu#66).
     writeHosts({ "x86_64-linux": ["ci-1", "localhost", "ci-2"] });
     const config = loadHosts();
-    expect(fanoutPools(config, [], [])).toEqual({
+    expect(fanoutPools(config, [], []).hosts).toEqual({
       "x86_64-linux": ["ci-1", "localhost", "ci-2"],
     });
   });
@@ -242,7 +241,7 @@ describe("pool locality is judged over what a run resolves (juspay/odu#66)", () 
     // construction, so the file's entry for a pinned platform is never judged.
     writeHosts({ "x86_64-linux": ["ci-1", "localhost", "ci-2"] });
     const config = loadHosts();
-    expect(fanoutPools(config, ["x86_64-linux=ci-9"], [])).toEqual({
+    expect(fanoutPools(config, ["x86_64-linux=ci-9"], []).hosts).toEqual({
       "x86_64-linux": ["ci-9"],
     });
   });
