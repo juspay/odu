@@ -7,17 +7,37 @@
  * before any `leaseLanes` / `acquireFromPool` claim.
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { applyInterruptStopWork, ensureCheckoutFree } from "./run";
 import { acquireFromPool, type ClaimResult, type LeaseIdentity } from "./lease";
 
 const identity: LeaseIdentity = { holder: "me@desk", run: "abc1234" };
 
+const dirs: string[] = [];
+afterEach(() => {
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
+/** A socket path *outside* the checkout. `ensureCheckoutFree` derives the run
+ *  lock from the socket's dirname, so a relative `.ci/odu.sock` here would
+ *  resolve to this repo's real `.ci/odu.run.lock` — and the supersede path
+ *  SIGTERMs whatever holds it. odu runs its own suite on a localhost lane, so
+ *  that holder is the very run executing this test: it killed itself mid-run.
+ *  Mocking `cancel` is not enough; the lock signal is a separate step. */
+function sockPath(): string {
+  const dir = mkdtempSync(join(tmpdir(), "odu-checkout-"));
+  dirs.push(dir);
+  return join(dir, "odu.sock");
+}
+
 describe("ensureCheckoutFree — cancel/refuse before venue claim", () => {
   it("is a no-op when no socket is live and supersede is off", async () => {
     const dial = vi.fn(async () => null);
     const cancel = vi.fn();
-    const r = await ensureCheckoutFree(".ci/odu.sock", false, { dial, cancel });
+    const r = await ensureCheckoutFree(sockPath(), false, { dial, cancel });
     expect(r).toEqual({ ok: true });
     expect(dial).toHaveBeenCalledOnce();
     expect(cancel).not.toHaveBeenCalled();
@@ -29,7 +49,7 @@ describe("ensureCheckoutFree — cancel/refuse before venue claim", () => {
       close: vi.fn(),
     }));
     const cancel = vi.fn();
-    const r = await ensureCheckoutFree(".ci/odu.sock", false, { dial, cancel });
+    const r = await ensureCheckoutFree(sockPath(), false, { dial, cancel });
     expect(r.ok).toBe(false);
     if (r.ok) throw new Error("expected refuse");
     expect(r.reason).toBe("live");
@@ -41,16 +61,17 @@ describe("ensureCheckoutFree — cancel/refuse before venue claim", () => {
   it("supersede cancels the live run and returns ready when confirmed", async () => {
     const cancel = vi.fn(async () => ({ cancelled: true, confirmed: true }));
     const dial = vi.fn();
-    const r = await ensureCheckoutFree(".ci/odu.sock", true, { dial, cancel });
+    const sock = sockPath();
+    const r = await ensureCheckoutFree(sock, true, { dial, cancel });
     expect(r).toEqual({ ok: true });
-    expect(cancel).toHaveBeenCalledWith(".ci/odu.sock");
+    expect(cancel).toHaveBeenCalledWith(sock);
     // Supersede path does not need a separate dial — cancel owns the probe.
     expect(dial).not.toHaveBeenCalled();
   });
 
   it("supersede fails when the holder does not shut down in time", async () => {
     const cancel = vi.fn(async () => ({ cancelled: true, confirmed: false }));
-    const r = await ensureCheckoutFree(".ci/odu.sock", true, { cancel });
+    const r = await ensureCheckoutFree(sockPath(), true, { cancel });
     expect(r.ok).toBe(false);
     if (r.ok) throw new Error("expected supersede-timeout");
     expect(r.reason).toBe("supersede-timeout");
@@ -99,7 +120,7 @@ describe("cancel-before-claim — single-host pool supersede (ordering)", () => 
     );
 
     // Prelude first (as orchestrate does), then venue claim.
-    const checkout = await ensureCheckoutFree(".ci/odu.sock", true, { cancel });
+    const checkout = await ensureCheckoutFree(sockPath(), true, { cancel });
     expect(checkout.ok).toBe(true);
 
     const acquired = await acquireFromPool({
