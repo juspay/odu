@@ -70,21 +70,29 @@ function hostsCandidates(): HostsCandidate[] {
  * (checkout socket serializes local runs); in a multi-host scan that made it
  * an always-free overflow — busy remotes were skipped the moment a local
  * entry appeared. Pure-local (typically a sole `"localhost"`) and pure-remote
- * pools are both fine; mixing is illegal at load time.
+ * pools are both fine; mixing is illegal in any pool a run resolves.
+ *
+ * Judged in `resolvePools`, not at parse time: the rule protects the lease
+ * scan, so it applies to the pools a run actually leases — after `--host`
+ * pins and the `--platform` slice. A pool the run never touches is the
+ * operator's problem with a platform they didn't ask for (juspay/odu#66).
  */
 function assertPoolLocality(
-  path: string,
+  source: string | null,
   platform: string,
   pool: readonly string[],
 ): void {
   const anyLocal = pool.some((h) => isLocalHost(h));
   const anyRemote = pool.some((h) => !isLocalHost(h));
-  if (anyLocal && anyRemote) {
-    throw new Error(
-      `odu: ${path}: host pool for "${platform}" must not mix localhost with remote hosts` +
-        ` (got ${JSON.stringify(pool)}; use a pure-local or pure-remote pool)`,
-    );
-  }
+  if (!anyLocal || !anyRemote) return;
+  // A `--host` pin is a pool of one — pure by construction — so a mixed pool
+  // always came from the hosts file, and `source` names it. The fallback only
+  // covers a config assembled in code rather than read from disk.
+  const where = source === null ? "hosts config" : source;
+  throw new Error(
+    `odu: ${where}: host pool for "${platform}" must not mix localhost with remote hosts` +
+      ` (got ${JSON.stringify(pool)}; use a pure-local or pure-remote pool)`,
+  );
 }
 
 /** Parse one platform's value: a string, or a non-empty array of strings. */
@@ -99,7 +107,6 @@ function parsePool(
         `odu: ${path}: host for "${platform}" must be a non-empty string`,
       );
     }
-    // Single host — pure by construction (no mix possible).
     return [value];
   }
   if (Array.isArray(value)) {
@@ -117,7 +124,6 @@ function parsePool(
       }
       pool.push(entry);
     }
-    assertPoolLocality(path, platform, pool);
     return pool;
   }
   throw new Error(
@@ -189,7 +195,10 @@ function noHostsConfiguredError(config: HostsConfig): Error {
 
 /** Apply `--host PLAT=ADDR` pins and `--platform` slices to the config.
  *  Pins replace the pool with a single-host pool (the pin is a forced pick).
- *  Returns inventory pools — not post-lease lanes (`leaseLanes` picks hosts). */
+ *  The locality rule is judged here, on the resolved map: a run answers only
+ *  for the pools it resolves, and a pin (a pool of one) answers for nothing in
+ *  the file it replaced. Returns inventory pools — not post-lease lanes
+ *  (`leaseLanes` picks hosts). */
 export function resolvePools(
   config: HostsConfig,
   hostPins: readonly string[],
@@ -208,18 +217,24 @@ export function resolvePools(
     }
     hosts[platform] = [addr];
   }
-  if (platforms.length === 0) return hosts;
-  const sliced: Record<string, HostPool> = {};
-  for (const platform of platforms) {
-    const pool = hosts[platform];
-    if (pool === undefined) {
-      throw new Error(
-        `odu: --platform ${platform} has no host (configure it or pass --host ${platform}=ADDR)`,
-      );
+  const resolved: Record<string, HostPool> = {};
+  if (platforms.length === 0) {
+    Object.assign(resolved, hosts);
+  } else {
+    for (const platform of platforms) {
+      const pool = hosts[platform];
+      if (pool === undefined) {
+        throw new Error(
+          `odu: --platform ${platform} has no host (configure it or pass --host ${platform}=ADDR)`,
+        );
+      }
+      resolved[platform] = pool;
     }
-    sliced[platform] = pool;
   }
-  return sliced;
+  for (const [platform, pool] of Object.entries(resolved)) {
+    assertPoolLocality(config.source, platform, pool);
+  }
+  return resolved;
 }
 
 /** The fanout pools for a run: `resolvePools` plus the no-config fail-fast.
