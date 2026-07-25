@@ -22,6 +22,14 @@ dependencies:
       registry: false
       transport: stdio
       command: .agents/skills/odu-mcp/bin/serve
+      # Serve odu from the repo it is installed into, not the published flake
+      # the launcher otherwise defaults to (github:juspay/odu). In odu's own
+      # checkout that is the dogfooding loop closing: the MCP face an agent
+      # drives is built from the working branch, so a CI fix is testable
+      # through the same tools it changes. Consumers re-export odu and this
+      # resolves to their pinned output — kolu's is `./ci#odu`.
+      env:
+        ODU_FLAKE: .#odu
 
 # Maintainer-only: deployed into odu's own .claude/ for odu developers, but
 # excluded from what consumers receive (and from `apm pack`).

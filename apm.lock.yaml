@@ -1,5 +1,5 @@
 lockfile_version: '1'
-generated_at: '2026-07-23T16:28:41.014583+00:00'
+generated_at: '2026-07-25T19:14:15.789570+00:00'
 apm_version: 0.26.0
 dependencies:
 - repo_url: _local/dev
@@ -694,14 +694,28 @@ deployments:
   - srid/agency
   active_owner: srid/agency
   content_hash: sha256:ba059751cd4b3c1c52221554719bfe1fc5da56540694cb8e793ae0c19e210377
+- kind: uri
+  target: mcp
+  value: odu
+  runtime: claude
+  scope: project
+  owners:
+  - .
+  active_owner: .
+  content_hash: null
 mcp_servers:
 - odu
 mcp_configs:
   odu:
     name: odu
     transport: stdio
+    env:
+      ODU_FLAKE: .#odu
     registry: false
     command: .agents/skills/odu-mcp/bin/serve
+mcp_target_servers:
+  claude:
+  - odu
 local_deployed_files:
 - .claude/skills/odu
 - .claude/skills/odu-mcp
