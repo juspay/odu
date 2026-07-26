@@ -53,6 +53,9 @@ export interface PipelineSummary {
   done: boolean;
   /** Settled with at least one failure or infrastructure error. */
   failedOverall: boolean;
+  /** Settled with no red and no operator-cancelled nodes — a clean pass.
+   *  Cancel is not red but is also not a clean pass (juspay/odu#68). */
+  clean: boolean;
 }
 
 /** The machine-readable snapshot of one node — the snake_cased projection
@@ -99,12 +102,13 @@ export function rowsOf(state: PipelineState): NodeRow[] {
 }
 
 /** The verdict-on-state projection every consumer reuses: 1 if the latest
- *  state has settled red (any failure or infrastructure error), else 0.
- *  `undefined` (no state yet) is a clean 0. Folds the inline
- *  `summarize(state).failedOverall ? 1 : 0` so the live view and the attach
- *  faces compute the exit code one way. */
+ *  state has settled and is not a clean pass (red *or* cancelled), else 0.
+ *  `undefined` (no state yet) is a clean 0. Folds the inline check so the live
+ *  view and the attach faces compute the exit code one way (juspay/odu#68). */
 export function exitCode(state: PipelineState | undefined): number {
-  return state !== undefined && summarize(state).failedOverall ? 1 : 0;
+  if (state === undefined) return 0;
+  const s = summarize(state);
+  return s.done && !s.clean ? 1 : 0;
 }
 
 export function summarize(state: PipelineState): PipelineSummary {
@@ -123,10 +127,12 @@ export function summarize(state: PipelineState): PipelineSummary {
     counts[node.status] += 1;
   }
   const done = ![...NON_TERMINAL_STATUSES].some((s) => counts[s] > 0);
+  const red = counts.failed + counts.errored > 0;
   return {
     ...counts,
     done,
-    failedOverall: done && counts.failed + counts.errored > 0,
+    failedOverall: done && red,
+    clean: done && !red && counts.cancelled === 0,
   };
 }
 

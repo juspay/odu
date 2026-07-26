@@ -10,7 +10,12 @@ import { stdioLink } from "@kolu/surface/links/stdio";
 import { createLoopbackPair } from "@kolu/surface/loopback";
 import { serveOverStdio } from "@kolu/surface/peer-server";
 import { afterEach, describe, expect, it } from "vitest";
-import { applyLogFrame, renderLogPane, summarize } from "./cli/render";
+import {
+  applyLogFrame,
+  exitCode,
+  renderLogPane,
+  summarize,
+} from "./cli/render";
 import type { TaskSpec } from "./common/spec";
 import type {
   laneSurface,
@@ -264,6 +269,8 @@ describe("odu lane runner over stdio (loopback)", () => {
     expect(last(h).nodes.slow?.status).toBe("cancelled");
     expect(last(h).nodes.after?.status).toBe("skipped");
     expect(summarize(last(h)).failedOverall).toBe(false);
+    expect(summarize(last(h)).clean).toBe(false);
+    expect(exitCode(last(h))).toBe(1);
   });
 
   it("rejects cancel of an unknown or already-terminal node", async () => {

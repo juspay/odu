@@ -27,8 +27,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { implementSurface, inMemoryStore } from "@kolu/surface/server";
 import { isLocalHost } from "@kolu/surface-remote";
-import { bold, dim, green, link, red } from "../cli/ansi";
+import { bold, dim, green, link, red, yellow } from "../cli/ansi";
 import {
+  exitCode,
   NON_TERMINAL_STATUSES,
   statusGlyph,
   summarize,
@@ -1223,19 +1224,8 @@ async function orchestrate(
     }
   };
 
-  // Any red node (failed/errored) OR any operator-cancelled node → non-zero.
-  // Cancel is not red, but a partially-cancelled run is not a clean pass
-  // (juspay/odu#68; ledger outcome `incomplete`).
-  const verdictCode = (state: PipelineState): number => {
-    for (const id of state.order) {
-      const node = state.nodes[id];
-      if (node === undefined) continue;
-      if (STATUS_META[node.status].isRed || node.status === "cancelled") {
-        return 1;
-      }
-    }
-    return 0;
-  };
+  // One rule with attach/status: settled and not clean → non-zero (juspay/odu#68).
+  const verdictCode = (state: PipelineState): number => exitCode(state);
 
   // The human verdict summary — foreground completion only, never mid-linger
   // where the live display still owns the screen. Returns the exit code.
@@ -1271,7 +1261,7 @@ async function orchestrate(
     const label =
       code > 0
         ? counts.cancelled > 0 && counts.failed + counts.errored === 0
-          ? bold(red("INCOMPLETE"))
+          ? bold(yellow("INCOMPLETE"))
           : bold(red("FAILED"))
         : bold(green("OK"));
     lines.push(

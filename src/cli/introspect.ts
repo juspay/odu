@@ -22,6 +22,7 @@ import { createDisplay, progressEvent } from "../coordinator/display";
 import { dialSocket, type OduClient } from "../coordinator/socket";
 import { postingWarning } from "../coordinator/statuses";
 import { exitCode, nodeRow, statusGlyph, summarize } from "./render";
+// exitCode is the single pass/fail projection (includes cancelled → non-zero).
 import { yellow } from "./ansi";
 
 export async function firstSnapshot(client: OduClient): Promise<PipelineState> {
@@ -95,7 +96,7 @@ export async function statusCommand(
       );
     }
   }
-  return summarize(state).failedOverall ? 1 : 0;
+  return exitCode(state);
 }
 
 export async function logsCommand(
