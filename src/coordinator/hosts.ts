@@ -23,7 +23,6 @@ import { existsSync, readFileSync } from "node:fs";
 import { isIP } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { isLocalHost } from "@kolu/surface-remote";
 
 /** One platform's declared inventory — always a list (a bare string in the
  *  file normalizes to a one-element pool). Never empty after `loadHosts`: an
@@ -65,28 +64,6 @@ function hostsCandidates(): HostsCandidate[] {
   ];
 }
 
-/**
- * Refuse pools that mix localhost with remotes. Localhost is lease-exempt
- * (checkout socket serializes local runs); in a multi-host scan that made it
- * an always-free overflow — busy remotes were skipped the moment a local
- * entry appeared. Pure-local (typically a sole `"localhost"`) and pure-remote
- * pools are both fine; mixing is illegal at load time.
- */
-function assertPoolLocality(
-  path: string,
-  platform: string,
-  pool: readonly string[],
-): void {
-  const anyLocal = pool.some((h) => isLocalHost(h));
-  const anyRemote = pool.some((h) => !isLocalHost(h));
-  if (anyLocal && anyRemote) {
-    throw new Error(
-      `odu: ${path}: host pool for "${platform}" must not mix localhost with remote hosts` +
-        ` (got ${JSON.stringify(pool)}; use a pure-local or pure-remote pool)`,
-    );
-  }
-}
-
 /** Parse one platform's value: a string, or a non-empty array of strings. */
 function parsePool(
   path: string,
@@ -99,7 +76,6 @@ function parsePool(
         `odu: ${path}: host for "${platform}" must be a non-empty string`,
       );
     }
-    // Single host — pure by construction (no mix possible).
     return [value];
   }
   if (Array.isArray(value)) {
@@ -117,7 +93,6 @@ function parsePool(
       }
       pool.push(entry);
     }
-    assertPoolLocality(path, platform, pool);
     return pool;
   }
   throw new Error(
@@ -189,7 +164,9 @@ function noHostsConfiguredError(config: HostsConfig): Error {
 
 /** Apply `--host PLAT=ADDR` pins and `--platform` slices to the config.
  *  Pins replace the pool with a single-host pool (the pin is a forced pick).
- *  Returns inventory pools — not post-lease lanes (`leaseLanes` picks hosts). */
+ *  Returns declared inventory — unjudged, and not post-lease lanes: locality
+ *  is the lease seam's to enforce (`leaseLanes` / `acquireFromPool` entry),
+ *  over exactly the pools a run claims. */
 export function resolvePools(
   config: HostsConfig,
   hostPins: readonly string[],
@@ -222,6 +199,15 @@ export function resolvePools(
   return sliced;
 }
 
+/** The pools a run fans out over, WITH the file they were declared in — one
+ *  value, so provenance can't be dropped on the way to the lease layer (the
+ *  lease refusals name the hosts file, and a `source` re-attached by hand at
+ *  each consumer is a `source` some future consumer forgets). */
+export interface ResolvedPools {
+  hosts: Record<string, HostPool>;
+  source: string | null;
+}
+
 /** The fanout pools for a run: `resolvePools` plus the no-config fail-fast.
  *  Zero resolved pools means the run named no host anywhere — the juspay/odu#46
  *  case — so we refuse loudly instead of defaulting to a localhost lane. This
@@ -232,12 +218,12 @@ export function fanoutPools(
   config: HostsConfig,
   hostPins: readonly string[],
   platforms: readonly string[],
-): Record<string, HostPool> {
-  const pools = resolvePools(config, hostPins, platforms);
-  if (Object.keys(pools).length === 0) {
+): ResolvedPools {
+  const hosts = resolvePools(config, hostPins, platforms);
+  if (Object.keys(hosts).length === 0) {
     throw noHostsConfiguredError(config);
   }
-  return pools;
+  return { hosts, source: config.source };
 }
 
 /** Short label for a dial target: strip `user@` and any DNS domain suffix so

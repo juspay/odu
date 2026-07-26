@@ -14,13 +14,30 @@
  */
 
 import { chmodSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { unixSocketLink } from "@kolu/surface/links/unix-socket";
 import { serveOverUnixSocket } from "@kolu/surface/unix-socket";
 import type { ContractRouterClient } from "@orpc/contract";
 import type { oduSurface } from "../common/surface";
+import { RUN_LOCK_PATH } from "./checkoutLock";
 
 export const SOCKET_PATH = ".ci/odu.sock";
+
+/** The two per-checkout coordinator paths, derived TOGETHER from the checkout
+ *  root — never one from the other. `ensureCheckoutFree` SIGTERMs whoever holds
+ *  the run lock, so a lock path inferred from a relative socket path is a kill
+ *  aimed at whatever checkout the process happens to be cwd'd into (that is how
+ *  odu's own suite once killed the run executing it). Taking a root makes the
+ *  pair unambiguous at every call site. */
+export function checkoutPaths(repoRoot: string): {
+  socketPath: string;
+  lockPath: string;
+} {
+  return {
+    socketPath: join(repoRoot, SOCKET_PATH),
+    lockPath: join(repoRoot, RUN_LOCK_PATH),
+  };
+}
 
 export type OduClient = ContractRouterClient<typeof oduSurface.contract>;
 

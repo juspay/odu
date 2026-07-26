@@ -1,5 +1,15 @@
 {
   "mcpServers": {
+    "kolu": {
+      "type": "stdio",
+      "command": "kolu",
+      "args": [
+        "mcp"
+      ],
+      "env_vars": [
+        "PADI_SOCKET"
+      ]
+    },
     "odu": {
       "type": "stdio",
       "command": ".claude/skills/odu-mcp/bin/serve",

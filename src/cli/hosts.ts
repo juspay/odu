@@ -7,6 +7,7 @@
 import { loadHosts, shortHost } from "../coordinator/hosts";
 import {
   formatHolder,
+  isMixedPool,
   probeAllHosts,
   type ProbeResult,
 } from "../coordinator/lease";
@@ -37,6 +38,22 @@ export async function hostsCommand(): Promise<number> {
           : " (no hosts file found)\n"),
     );
     return 1;
+  }
+
+  // A mixed pool is illegal at the lease seam, but refusing HERE would be the
+  // juspay/odu#66 defect again: `odu hosts` never leases, so an illegal pool
+  // for a platform you are not running is none of this command's business to
+  // refuse. It IS this command's business to report — the inventory view is
+  // where an operator diagnoses their hosts file, and before this warning the
+  // rule's only messenger was a run that refused later.
+  for (const platform of platforms) {
+    const pool = config.hosts[platform] ?? [];
+    if (!isMixedPool(pool)) continue;
+    process.stderr.write(
+      `odu: warning: ${config.source ?? "hosts config"}: host pool for "${platform}"` +
+        " mixes localhost with remote hosts — any run that leases" +
+        ` ${platform} will refuse it (use a pure-local or pure-remote pool)\n`,
+    );
   }
 
   const runnerFlake = resolveRunnerFlake(process.env);

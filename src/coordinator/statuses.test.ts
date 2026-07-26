@@ -231,8 +231,10 @@ describe("StatusPoster — honest dedup + retry", () => {
     expect(poster.health().owed[0]?.lastError).toMatch(/API down/);
     expect(poster.pendingContexts()).toEqual([]); // desired is success, not pending
     const unposted = await poster.finalize();
+    // `attempts` is persisted now (it used to be dropped and fabricated as 0 by
+    // whichever reader needed it), so the durable row carries the real count.
     expect(unposted).toEqual([
-      { context: "ci::unit@x86_64-linux", lastError: "API down" },
+      { context: "ci::unit@x86_64-linux", lastError: "API down", attempts: 3 },
     ]);
     // Closed — further posts are ignored.
     const callsBefore = sendGh.mock.calls.length;

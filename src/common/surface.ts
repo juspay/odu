@@ -103,21 +103,42 @@ export const OwedStatusSchema = z.object({
 });
 export type OwedStatus = z.infer<typeof OwedStatusSchema>;
 
-/** Final unconfirmed debt stamped into the durable run record. Projects from
- *  live {@link OwedStatus} without attempts; `lastError` is required at write. */
+/** Final unconfirmed debt stamped into the durable run record: a live
+ *  {@link OwedStatus} with `lastError` required at write. `attempts` is
+ *  optional ONLY so records written before it existed still parse — a reader
+ *  that finds it absent knows the count wasn't recorded, rather than being
+ *  handed a fabricated `0` it can't tell apart from "no retries yet". */
 export const UnpostedEntrySchema = z.object({
   context: z.string(),
   lastError: z.string(),
+  attempts: z.number().int().nonnegative().optional(),
 });
 export type UnpostedEntry = z.infer<typeof UnpostedEntrySchema>;
 
-/** Project live owed rows into durable unposted entries (juspay/odu#61). */
+/** Project live owed rows into durable unposted entries (juspay/odu#61). The
+ *  only narrowing left is `lastError`: a row that never reported one is written
+ *  as "not posted" so the durable shape can require it. */
 export function projectUnposted(
   owed: readonly OwedStatus[],
 ): UnpostedEntry[] {
   return owed.map((o) => ({
     context: o.context,
     lastError: o.lastError ?? "not posted",
+    attempts: o.attempts,
+  }));
+}
+
+/** Lift durable unposted entries back to live owed rows — the inverse of
+ *  {@link projectUnposted}, and its neighbour so a field added to either type
+ *  updates one place instead of whichever consumer needed the reverse first.
+ *  A record written before `attempts` was persisted reports 0. */
+export function liftUnposted(
+  entries: readonly UnpostedEntry[],
+): OwedStatus[] {
+  return entries.map((e) => ({
+    context: e.context,
+    lastError: e.lastError,
+    attempts: e.attempts ?? 0,
   }));
 }
 

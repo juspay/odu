@@ -7,17 +7,41 @@
  * before any `leaseLanes` / `acquireFromPool` claim.
  */
 
-import { describe, expect, it, vi } from "vitest";
-import { applyInterruptStopWork, ensureCheckoutFree } from "./run";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  applyInterruptStopWork,
+  ensureCheckoutFree,
+  shouldReclaimReservation,
+} from "./run";
 import { acquireFromPool, type ClaimResult, type LeaseIdentity } from "./lease";
+import { checkoutPaths } from "./socket";
 
 const identity: LeaseIdentity = { holder: "me@desk", run: "abc1234" };
+
+const dirs: string[] = [];
+afterEach(() => {
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
+/** Both coordinator paths for a throwaway checkout root. `ensureCheckoutFree`
+ *  takes the pair, so a test can no longer name a socket and silently inherit
+ *  THIS checkout's run lock — the supersede path SIGTERMs whoever holds it,
+ *  and odu runs its own suite on a localhost lane, so that holder used to be
+ *  the very run executing the test. */
+function checkout(): { socketPath: string; lockPath: string } {
+  const dir = mkdtempSync(join(tmpdir(), "odu-checkout-"));
+  dirs.push(dir);
+  return checkoutPaths(dir);
+}
 
 describe("ensureCheckoutFree — cancel/refuse before venue claim", () => {
   it("is a no-op when no socket is live and supersede is off", async () => {
     const dial = vi.fn(async () => null);
     const cancel = vi.fn();
-    const r = await ensureCheckoutFree(".ci/odu.sock", false, { dial, cancel });
+    const r = await ensureCheckoutFree(checkout(), false, { dial, cancel });
     expect(r).toEqual({ ok: true });
     expect(dial).toHaveBeenCalledOnce();
     expect(cancel).not.toHaveBeenCalled();
@@ -29,7 +53,7 @@ describe("ensureCheckoutFree — cancel/refuse before venue claim", () => {
       close: vi.fn(),
     }));
     const cancel = vi.fn();
-    const r = await ensureCheckoutFree(".ci/odu.sock", false, { dial, cancel });
+    const r = await ensureCheckoutFree(checkout(), false, { dial, cancel });
     expect(r.ok).toBe(false);
     if (r.ok) throw new Error("expected refuse");
     expect(r.reason).toBe("live");
@@ -41,16 +65,17 @@ describe("ensureCheckoutFree — cancel/refuse before venue claim", () => {
   it("supersede cancels the live run and returns ready when confirmed", async () => {
     const cancel = vi.fn(async () => ({ cancelled: true, confirmed: true }));
     const dial = vi.fn();
-    const r = await ensureCheckoutFree(".ci/odu.sock", true, { dial, cancel });
+    const paths = checkout();
+    const r = await ensureCheckoutFree(paths, true, { dial, cancel });
     expect(r).toEqual({ ok: true });
-    expect(cancel).toHaveBeenCalledWith(".ci/odu.sock");
+    expect(cancel).toHaveBeenCalledWith(paths.socketPath);
     // Supersede path does not need a separate dial — cancel owns the probe.
     expect(dial).not.toHaveBeenCalled();
   });
 
   it("supersede fails when the holder does not shut down in time", async () => {
     const cancel = vi.fn(async () => ({ cancelled: true, confirmed: false }));
-    const r = await ensureCheckoutFree(".ci/odu.sock", true, { cancel });
+    const r = await ensureCheckoutFree(checkout(), true, { cancel });
     expect(r.ok).toBe(false);
     if (r.ok) throw new Error("expected supersede-timeout");
     expect(r.reason).toBe("supersede-timeout");
@@ -99,14 +124,15 @@ describe("cancel-before-claim — single-host pool supersede (ordering)", () => 
     );
 
     // Prelude first (as orchestrate does), then venue claim.
-    const checkout = await ensureCheckoutFree(".ci/odu.sock", true, { cancel });
-    expect(checkout.ok).toBe(true);
+    const free = await ensureCheckoutFree(checkout(), true, { cancel });
+    expect(free.ok).toBe(true);
 
     const acquired = await acquireFromPool({
       platform: "x86_64-linux",
       pool: ["ci-1"],
       identity,
       noWait: true,
+      source: null,
       claim,
     });
 
@@ -138,6 +164,7 @@ describe("cancel-before-claim — single-host pool supersede (ordering)", () => 
         pool: ["ci-1"],
         identity,
         noWait: true,
+        source: null,
         claim,
       }),
     ).rejects.toThrow(/every host.*busy/);
@@ -199,5 +226,35 @@ describe("lease-lost interrupt stop-work ordering", () => {
     await settle;
     await Promise.resolve();
     expect(events).toEqual(["stop-work", "after-settle"]);
+  });
+});
+
+describe("reservation reclaim — only before the identity is observable", () => {
+  /**
+   * `wait_for_settle` reads the durable record BY ADDRESS (`sha7#seq`), so an
+   * ordinal that was ever served must never be handed to another run: the next
+   * run of the same commit would answer for an identity an earlier reader is
+   * still holding. Reclaim is therefore for pre-publication orphans only.
+   */
+  it("reclaims an orphan that never served (early throw)", () => {
+    expect(
+      shouldReclaimReservation({ status: "reserved", seq: 1, published: false }),
+    ).toBe(true);
+  });
+
+  it("KEEPS the sentinel once the identity was served, even if finalize failed", () => {
+    // finalizeRunRecord swallows write failures, so a published run can exit
+    // leaving its sentinel behind. Burning the ordinal is the cheap failure;
+    // reusing it is the corrupt one.
+    expect(
+      shouldReclaimReservation({ status: "reserved", seq: 1, published: true }),
+    ).toBe(false);
+  });
+
+  it("has nothing to reclaim when no seq was ever reserved", () => {
+    // `{ status: "unreserved" }` carries no `seq`/`published` at all — the
+    // once-possible `{ seq: null, published: true }` is now a compile error,
+    // not just a runtime case this returns false for.
+    expect(shouldReclaimReservation({ status: "unreserved" })).toBe(false);
   });
 });

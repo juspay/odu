@@ -28,6 +28,7 @@ import { dirname, join } from "node:path";
 import { implementSurface, inMemoryStore } from "@kolu/surface/server";
 import { isLocalHost } from "@kolu/surface-remote";
 import { bold, dim, green, link, magenta, red } from "../cli/ansi";
+import { NON_TERMINAL_STATUSES } from "../cli/render";
 import { formatGoDuration } from "../common/duration";
 import { gitTopLevel } from "../common/git";
 import { createLogTail } from "../common/logTail";
@@ -62,7 +63,6 @@ import { resolveRunnerFlake, runnerDrvResolver } from "./runnerFlake";
 import { cancelRun } from "./cancel";
 import {
   liveRunLockPid,
-  RUN_LOCK_PATH,
   signalRunLockHolder,
   tryAcquireRunLock,
   waitForRunLockFree,
@@ -70,7 +70,7 @@ import {
 } from "./checkoutLock";
 import { releaseReservation, reserveNextSeq, writeRunRecord } from "./ledger";
 import { buildRunRecord, projectNodes } from "../common/runRecord";
-import { SOCKET_PATH, serveSocket, tryDialSocket } from "./socket";
+import { checkoutPaths, serveSocket, tryDialSocket } from "./socket";
 import {
   fetchUrlFor,
   interruptStatus,
@@ -119,15 +119,18 @@ export interface RunArgs {
  * SIGTERM on the run-lock holder when only the lease wait is live); without
  * supersede a live socket/lock is an immediate refuse.
  * Exported for unit tests that assert cancel-before-claim ordering.
+ *
+ * Takes BOTH checkout paths (`checkoutPaths(repoRoot)`) rather than deriving
+ * the lock from the socket: the supersede path SIGTERMs the lock holder, and a
+ * lock inferred from a relative socket path aims that signal at whatever
+ * checkout the process is cwd'd into.
  */
 export async function ensureCheckoutFree(
-  socketPath: string,
+  paths: { socketPath: string; lockPath: string },
   supersede: boolean,
   deps: {
     cancel?: typeof cancelRun;
     dial?: typeof tryDialSocket;
-    /** Absolute path to `.ci/odu.run.lock`; derived from socketPath when omitted. */
-    lockPath?: string;
     signalLock?: typeof signalRunLockHolder;
     waitLockFree?: typeof waitForRunLockFree;
     liveLockPid?: typeof liveRunLockPid;
@@ -136,9 +139,9 @@ export async function ensureCheckoutFree(
   | { ok: true }
   | { ok: false; reason: "live" | "supersede-timeout"; message: string }
 > {
+  const { socketPath, lockPath } = paths;
   const dial = deps.dial ?? tryDialSocket;
   const cancel = deps.cancel ?? cancelRun;
-  const lockPath = deps.lockPath ?? join(dirname(socketPath), "odu.run.lock");
   const signalLock = deps.signalLock ?? signalRunLockHolder;
   const waitLockFree = deps.waitLockFree ?? waitForRunLockFree;
   const liveLockPid = deps.liveLockPid ?? liveRunLockPid;
@@ -176,6 +179,36 @@ export async function ensureCheckoutFree(
   }
   if (liveLockPid(lockPath) !== null) return refuseLive;
   return { ok: true };
+}
+
+/**
+ * The reservation sentinel's lifecycle: no ordinal was ever claimed
+ * (`reserveNextSeq` returned `null`), or one was and `published` tracks
+ * whether it has since been served on the socket. The discriminant makes
+ * `{ seq: null, published: true }` unrepresentable — `published` can only
+ * exist once `seq` does, so a run that never got an ordinal can no longer be
+ * marked published (see the `serveSocket` call site in `orchestrate`, which
+ * used to set `published = true` unconditionally even when `seq` stayed
+ * `null`, a state `shouldReclaimReservation` happened to treat as harmless
+ * only because it also checks `seq !== null`).
+ */
+export type ReservationState =
+  | { status: "unreserved" }
+  | { status: "reserved"; seq: number; published: boolean };
+
+/**
+ * Reclaim an orphaned reservation sentinel only while the identity was never
+ * served. Once `sha7#seq` has been published on the socket a reader may key a
+ * verdict on it (`wait_for_settle` reads the record BY that address), so
+ * handing the ordinal back — after, say, a swallowed `finalizeRunRecord` write
+ * left the sentinel in place — would let the next run of this commit reserve
+ * the same slot and answer for a different run. A stale sentinel only burns an
+ * ordinal; a reused one corrupts an identity (juspay/odu#49).
+ */
+export function shouldReclaimReservation(
+  reservation: ReservationState,
+): reservation is { status: "reserved"; seq: number; published: false } {
+  return reservation.status === "reserved" && !reservation.published;
 }
 
 /**
@@ -288,7 +321,17 @@ export async function runCommand(args: RunArgs): Promise<number> {
   // reclaim an orphaned reservation sentinel on an early-throw — the same
   // early-throw-cleanup convention as `createdLanes` / `cleanupSnapshot`
   // (releaseReservation is a guarded no-op once the seq was finalized).
-  const reservation: { seq: number | null } = { seq: null };
+  // `published` gates the reclaim below: once `sha7#seq` has been served on the
+  // socket it is observable, and a reader (`wait_for_settle`) may key a verdict
+  // on it. Reclaiming the sentinel then would let a later run of this commit
+  // reserve the SAME ordinal — the exact reuse the reservation exists to
+  // prevent (juspay/odu#49), and a stale sentinel is the cheaper failure.
+  // Boxed (`{ current }`) rather than a bare `ReservationState` so `orchestrate`
+  // can hand back a new state by reassigning the field — a discriminated union
+  // is replaced wholesale, not mutated field-by-field.
+  const reservation: { current: ReservationState } = {
+    current: { status: "unreserved" },
+  };
   try {
     return await orchestrate(
       args,
@@ -314,8 +357,8 @@ export async function runCommand(args: RunArgs): Promise<number> {
     acquiredLeases.length = 0;
     runLock.handle?.release();
     runLock.handle = null;
-    if (reservation.seq !== null) {
-      releaseReservation(repoRoot, sha7, reservation.seq);
+    if (shouldReclaimReservation(reservation.current)) {
+      releaseReservation(repoRoot, sha7, reservation.current.seq);
     }
   }
 }
@@ -347,7 +390,7 @@ async function orchestrate(
   acquiredLeases: LeaseHandle[],
   /** runCommand-owned holder for the reserved seq, so its `finally` can reclaim
    *  an orphaned reservation sentinel on an early-throw. Set once reserved. */
-  reservation: { seq: number | null },
+  reservation: { current: ReservationState },
   /** runCommand-owned checkout run-lock; claimed right after ensureCheckoutFree
    *  and released in runCommand's finally / process exit. */
   runLock: { handle: RunLockHandle | null },
@@ -388,11 +431,11 @@ async function orchestrate(
   // `--platform` with no host still errors earlier in resolvePools.
   // Values are *pools* (one or more hosts per platform); `leaseLanes` below
   // picks a free machine and holds the venue lock for the run (juspay/odu#54).
-  const poolsByPlatform = fanoutPools(
-    hostsConfig,
-    args.hostPins,
-    args.platforms,
-  );
+  // Pools AND the file they were declared in, as one value: `leaseLanes` names
+  // that file in its refusals, so provenance travels with the pools rather than
+  // being re-attached by hand at the lease call.
+  const resolvedPools = fanoutPools(hostsConfig, args.hostPins, args.platforms);
+  const poolsByPlatform = resolvedPools.hosts;
   const selectors = args.selectors.map(parseSelector);
   for (const selector of selectors) {
     if (
@@ -455,11 +498,11 @@ async function orchestrate(
   // The PID run-lock (claimed immediately below) covers the whole lease-wait
   // window; serveSocket remains the attach surface, not the sole exclusivity
   // gate.
-  const socketPath = join(repoRoot, SOCKET_PATH);
-  const lockPath = join(repoRoot, RUN_LOCK_PATH);
-  const checkout = await ensureCheckoutFree(socketPath, args.supersede, {
-    lockPath,
-  });
+  const { socketPath, lockPath } = checkoutPaths(repoRoot);
+  const checkout = await ensureCheckoutFree(
+    { socketPath, lockPath },
+    args.supersede,
+  );
   if (!checkout.ok) {
     process.stderr.write(`${checkout.message}\n`);
     return 1;
@@ -498,8 +541,12 @@ async function orchestrate(
   const seq = reserveNextSeq(repoRoot, sha7);
   // Hand the reserved seq to runCommand's early-throw cleanup: if this run
   // throws before serving/finalizing, its `finally` reclaims the orphaned
-  // sentinel (releaseReservation leaves a finalized record untouched).
-  reservation.seq = seq;
+  // sentinel (releaseReservation leaves a finalized record untouched). `seq
+  // === null` (the reservation write failed) leaves `reservation.current`
+  // "unreserved" — there is no ordinal to reclaim or to later mark published.
+  if (seq !== null) {
+    reservation.current = { status: "reserved", seq, published: false };
+  }
 
   // ── venue lease: one free machine per platform, lock held for the run ──
   // Two layers (juspay/odu#54 CR1):
@@ -547,7 +594,7 @@ async function orchestrate(
     }
     try {
       const claimed = await leaseLanes({
-        pools: poolsByPlatform,
+        pools: resolvedPools,
         platforms: platformsToClaim,
         identity: { holder: localHolderId(), run: runLabel },
         noWait: args.noWait,
@@ -657,6 +704,11 @@ async function orchestrate(
     state: PipelineState,
     unposted?: ReadonlyArray<UnpostedEntry>,
   ) => void = () => {};
+  // Has a record for this run already been written? Only then can a resumed
+  // node leave a stale verdict on disk, so `updateNode` re-finalizes only in
+  // that case — a run that has never drained has nothing on disk to correct,
+  // and writing one early would list a live run in `odu runs`.
+  let recordWritten = false;
   // Linger's idle backstop: a settled-but-lingering coordinator self-reaps
   // after `idleMs` with no new work, so a forgotten `--linger` run can't hold
   // the checkout lock forever. Cleared the instant a node (re)starts.
@@ -843,8 +895,26 @@ async function orchestrate(
     display.update(store.get());
     if (next.status !== prev.status) {
       // A node (re)starting means work resumed — disarm linger's idle backstop
-      // so it can't reap a run that just got a rerun.
+      // so it can't reap a run that just got a rerun, and REFRESH the durable
+      // record if one already describes this run. `--linger` keeps one
+      // `(sha7, seq)` file and rewrites it on every drain, so a lingering run
+      // that passed and then took a `node_rerun` would otherwise leave an
+      // on-disk `passed` for a run that is running again. `buildRunRecord`
+      // derives `incomplete` from the live state, so re-finalizing here means
+      // the ledger never carries a green verdict for a run in flight — and no
+      // reader has to compare its own clock against `finishedAt` to notice.
       if (next.status === "running") clearIdle();
+      // Any terminal→non-terminal transition means work resumed — and the
+      // runner publishes `pending` before `running`, so keying this on
+      // `running` alone left a window where a socket loss after a rerun was
+      // accepted still let a reader consume the previous `passed` record.
+      if (
+        recordWritten &&
+        !NON_TERMINAL_STATUSES.has(prev.status) &&
+        NON_TERMINAL_STATUSES.has(next.status)
+      ) {
+        finalizeRunRecord(store.get(), poster.unposted());
+      }
       emitProgress(id, next);
       const payload = statusFor(id, next.status, next.durationMs, sha7);
       if (payload !== null) poster.post(payload);
@@ -921,6 +991,7 @@ async function orchestrate(
             unposted: unposted ?? poster.unposted(),
           }),
         );
+        recordWritten = true;
       } catch {
         // best-effort: the run history is a convenience, never a gate — a failed
         // record write must not fail the run or mask its verdict.
@@ -936,6 +1007,13 @@ async function orchestrate(
   // Checkout run-lock is already held (covers lease wait); serveSocket is the
   // attach surface and a second exclusivity gate for the post-lease window.
   closeSocket = await serveSocket(router, socketPath);
+  // The identity is now observable: a reader can see `sha7#seq` and key a
+  // verdict on it, so the ordinal must never be handed to another run even if
+  // finalizing this one's record fails. A no-op when no seq was ever reserved
+  // — "published" cannot apply to an ordinal that doesn't exist.
+  if (reservation.current.status === "reserved") {
+    reservation.current = { ...reservation.current, published: true };
+  }
 
   display.start(store.get(), header);
   display.update(store.get());

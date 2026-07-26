@@ -30,7 +30,7 @@ import {
   laneSurface,
   type LeaseHolder,
 } from "../common/surface";
-import { shortHost, type HostPool } from "./hosts";
+import { type HostPool, type ResolvedPools, shortHost } from "./hosts";
 import type { ResolveRunnerDrv } from "./runnerFlake";
 import { lineLogger, localhostSpawnEnv } from "./surfaceRemoteOpts";
 
@@ -314,6 +314,11 @@ export interface AcquireFromPoolOpts {
   pool: HostPool;
   identity: LeaseIdentity;
   noWait: boolean;
+  /** The hosts file this pool was declared in, named in the locality refusal;
+   *  `null` for a config assembled in code. Required (not optional) so the
+   *  `"hosts config"` fallback is a caller's stated choice, never a forgotten
+   *  field — a pool and its provenance travel together (`ResolvedPools`). */
+  source: string | null;
   onLine?: (msg: string) => void;
   /** Injected claim — tests supply a fake; production uses `tryClaim`. */
   claim?: (
@@ -414,6 +419,10 @@ function releaseAll(leases: readonly LeaseHandle[]): void {
   for (const lease of leases) lease.release();
 }
 
+/** One poll of a pool's *availability*: is a host in it free right now. Pool
+ *  legality (non-empty, no localhost-beside-remotes) is a property of the
+ *  declared value, not of the world, and is judged once per run at the lease
+ *  entry points — see `assertPoolsScannable`. This function may assume both. */
 async function scanPoolOnce(opts: {
   platform: string;
   pool: HostPool;
@@ -427,16 +436,12 @@ async function scanPoolOnce(opts: {
 }): Promise<ScanOnce> {
   const { platform, pool, identity, onLine, claim, rotateBy } = opts;
 
-  if (pool.length === 0) {
-    throw new Error(
-      `odu: empty host pool for ${platform} — configure at least one host`,
-    );
-  }
-
-  // Pure-local pool (every member is localhost): no remote claim. Mixed
-  // pools may also name localhost explicitly — that entry is a real
-  // candidate (pick without claim when reached in scan order), never an
-  // implicit fallback when the config omitted it (juspay/odu#46).
+  // Pure-local pool (every member is localhost): no remote claim, no flock —
+  // the checkout socket already serializes local runs. A pool that MIXES
+  // localhost with remotes never reaches here (`assertPoolsScannable` refused
+  // it at the lease entry), so this is the only shape in which localhost is
+  // ever picked: an explicit whole-pool decision, never an implicit fallback
+  // (juspay/odu#46, #54).
   if (pool.every((h) => isLocalHost(h))) {
     const host = pool[0]!;
     onLine?.(`${platform}: picked ${shortHost(host)} (localhost)`);
@@ -448,17 +453,10 @@ async function scanPoolOnce(opts: {
   const unreachable: { host: string; error: string }[] = [];
 
   for (const host of order) {
-    // Explicit localhost pool member: free without remote claim (no flock).
-    if (isLocalHost(host)) {
-      const busyNote =
-        busy.length > 0
-          ? `   (${busy.map((b) => shortHost(b.host)).join(", ")} busy)`
-          : "";
-      onLine?.(
-        `${platform}: picked ${shortHost(host)} (localhost)${busyNote}`,
-      );
-      return { status: "ok", host, lease: null };
-    }
+    // Every member here is remote: a mixed pool was refused above, and a
+    // pure-local one returned above. Localhost as a lease-exempt entry beside
+    // busy remotes was the always-free overflow of juspay/odu#54 — it is now
+    // unrepresentable at this point rather than special-cased.
     const result = await claim(host, identity);
     if (result.kind === "held") {
       const busyNote =
@@ -516,6 +514,9 @@ export async function acquireFromPool(
       });
     });
 
+  // Legality first, once, over the one pool this call leases — never per poll.
+  assertPoolsScannable({ [platform]: pool }, [platform], opts.source);
+
   let waited = false;
   for (;;) {
     const scan = await scanPoolOnce({
@@ -546,7 +547,10 @@ export async function acquireFromPool(
 }
 
 export interface LeaseLanesOpts {
-  pools: Record<string, HostPool>;
+  /** The declared pools AND the file they came from, as one value — the
+   *  refusals name that file, and a separately-threaded `source` is one a
+   *  caller can forget. */
+  pools: ResolvedPools;
   platforms: readonly string[];
   identity: LeaseIdentity;
   noWait: boolean;
@@ -593,13 +597,88 @@ function assertNoSharedRemoteHosts(
   }
 }
 
+/** Does this pool mix localhost with remotes — the shape the lease seam
+ *  refuses? Exported so a read-only face can SURFACE an illegal pool without
+ *  refusing over it: `odu hosts` never leases, so refusing there would be
+ *  juspay/odu#66 wearing an inventory hat. But the operator should learn it
+ *  from the command whose whole job is showing the inventory, rather than from
+ *  the first run that tries to claim that platform. */
+export function isMixedPool(pool: readonly string[]): boolean {
+  return pool.some((h) => isLocalHost(h)) && pool.some((h) => !isLocalHost(h));
+}
+
+/**
+ * Refuse a pool that mixes localhost with remotes. Localhost is lease-exempt
+ * (checkout socket serializes local runs); in a multi-host scan that made it
+ * an always-free overflow — busy remotes were skipped the moment a local
+ * entry appeared. Pure-local (typically a sole `"localhost"`) and pure-remote
+ * pools are both fine; mixing is illegal in any pool a run leases.
+ *
+ * Enforced at the lease seam (`leaseLanes` / `acquireFromPool` entry, via
+ * `assertPoolsScannable`), over exactly the platforms a run claims — never at
+ * parse time and never over the whole resolved map, both of which refuse runs
+ * that never touch the offending pool (juspay/odu#66): a resolved map still
+ * carries platforms a selector (`odu run fmt@aarch64-darwin`) or an
+ * OS-disabled recipe drops before any lease.
+ */
+function assertPoolLocality(
+  source: string | null,
+  platform: string,
+  pool: readonly string[],
+): void {
+  if (!isMixedPool(pool)) return;
+  // A `--host` pin is a pool of one — pure by construction — so a mixed pool
+  // always came from the hosts file, and `source` names it. The fallback only
+  // covers a config assembled in code rather than read from disk.
+  const where = source === null ? "hosts config" : source;
+  throw new Error(
+    `odu: ${where}: host pool for "${platform}" must not mix localhost with remote hosts` +
+      ` (got ${JSON.stringify(pool)}; use a pure-local or pure-remote pool)`,
+  );
+}
+
+/**
+ * Every static rule a pool must satisfy before this run may claim from it:
+ * non-empty, and never localhost mixed with remotes. Judged ONCE per run at
+ * each lease entry point, beside `assertNoSharedRemoteHosts` — these are
+ * properties of declared inventory, not of who happens to be busy, so they do
+ * not belong in `scanPoolOnce`'s poll loop. In the loop the refusal was
+ * conditional on the weather: `leaseLanes` breaks on the first blocked
+ * platform of an alphabetically sorted list, so a mixed pool on a LATER
+ * platform was never reached while an earlier box stayed busy — with the
+ * default `noWait: false` the operator got a silent indefinite wait instead of
+ * a refusal, decided by alphabetical order and unrelated load.
+ *
+ * Scope is exactly the pools the run leases (juspay/odu#66): `platforms` here
+ * is `leaseLanes`' `platformsToClaim`, and `acquireFromPool` passes its one
+ * pool. Judging any wider — at parse time, or over the whole resolved map —
+ * refuses runs that never touch the offending pool, which is the defect #66
+ * fixed.
+ */
+function assertPoolsScannable(
+  pools: Record<string, HostPool>,
+  platforms: readonly string[],
+  source: string | null,
+): void {
+  for (const platform of platforms) {
+    const pool = pools[platform];
+    if (pool === undefined || pool.length === 0) {
+      throw new Error(
+        `odu: empty host pool for ${platform} — configure at least one host`,
+      );
+    }
+    assertPoolLocality(source, platform, pool);
+  }
+}
+
 /**
  * Lease one host per platform that participates in the run.
  * Multi-platform is all-or-nothing (release partial holds while waiting).
  */
 export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
   const platforms = [...opts.platforms].sort();
-  assertNoSharedRemoteHosts(opts.pools, platforms);
+  assertNoSharedRemoteHosts(opts.pools.hosts, platforms);
+  assertPoolsScannable(opts.pools.hosts, platforms, opts.pools.source);
   const sleep = opts.sleep ?? defaultSleep;
   const now = opts.now ?? Date.now;
   const rotateBy = now();
@@ -638,7 +717,7 @@ export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
 
     try {
       for (const platform of platforms) {
-        const pool = opts.pools[platform];
+        const pool = opts.pools.hosts[platform];
         if (pool === undefined) {
           throw new Error(`odu: internal: no pool for platform ${platform}`);
         }

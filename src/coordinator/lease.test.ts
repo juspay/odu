@@ -3,6 +3,7 @@ import {
   acquireFromPool,
   formatHeldFor,
   formatHolder,
+  isMixedPool,
   leaseLanes,
   parseHolderBody,
   type ClaimResult,
@@ -52,26 +53,56 @@ describe("acquireFromPool", () => {
       pool: ["localhost"],
       identity: id,
       noWait: true,
+      source: null,
       claim,
     });
     expect(r).toEqual({ host: "localhost", lease: null });
     expect(claim).not.toHaveBeenCalled();
   });
 
-  it("picks explicit localhost when remotes are busy (mixed pool)", async () => {
+  it("REFUSES a mixed pool at the lease entry, naming the hosts file (juspay/odu#54, #66)", async () => {
+    // This test used to assert the opposite — that the scan picked localhost
+    // once the remotes came back busy. That IS the #54 defect: localhost is
+    // lease-exempt, so it read as always-free and starved every busy remote.
+    // The rule is judged once at this entry, over the one pool this call
+    // leases, and the localhost-beside-remotes branch is gone from the scan
+    // rather than special-cased.
     const claim = vi.fn(
       async (): Promise<ClaimResult> => ({ kind: "busy", heldBy: null }),
     );
+    await expect(
+      acquireFromPool({
+        platform: "x86_64-linux",
+        pool: ["ci-1", "localhost"],
+        identity: id,
+        noWait: true,
+        source: "/home/me/.config/odu/hosts.json",
+        claim,
+        rotateBy: 0,
+      }),
+    ).rejects.toThrow(
+      /\/home\/me\/\.config\/odu\/hosts\.json: host pool for "x86_64-linux" must not mix localhost with remote hosts/,
+    );
+    // Refused before any claim: no remote is dialed to learn the pool is illegal.
+    expect(claim).not.toHaveBeenCalled();
+  });
+
+  it("never judges a platform this run does not lease (juspay/odu#66)", async () => {
+    // The regression the whole issue is about, at the seam that now owns the
+    // rule: an illegal x86_64-linux pool sits in the same (machine-global)
+    // hosts file, but this call leases aarch64-darwin. `acquireFromPool` is
+    // handed exactly one pool, so the linux pool cannot possibly refuse this
+    // run — by construction, not by convention.
     const r = await acquireFromPool({
-      platform: "x86_64-linux",
-      pool: ["ci-1", "localhost"],
+      platform: "aarch64-darwin",
+      pool: ["rasam"],
       identity: id,
       noWait: true,
-      claim,
+      source: "/home/me/.config/odu/hosts.json",
+      claim: async (host) => held(host),
       rotateBy: 0,
     });
-    expect(r).toEqual({ host: "localhost", lease: null });
-    expect(claim).toHaveBeenCalledWith("ci-1", id);
+    expect(r.host).toBe("rasam");
   });
 
   it("picks the first free host and reports busy siblings", async () => {
@@ -86,6 +117,7 @@ describe("acquireFromPool", () => {
       pool: ["ci-1", "ci-2", "ci-3"],
       identity: id,
       noWait: true,
+      source: null,
       claim,
       onLine: (m) => lines.push(m),
       rotateBy: 0,
@@ -113,6 +145,7 @@ describe("acquireFromPool", () => {
         pool: ["mac-1"],
         identity: id,
         noWait: true,
+        source: null,
         claim,
       }),
     ).rejects.toThrow(/every host for aarch64-darwin is busy/);
@@ -131,6 +164,7 @@ describe("acquireFromPool", () => {
       pool: ["ci-1"],
       identity: id,
       noWait: false,
+      source: null,
       claim,
       sleep,
       rotateBy: 0,
@@ -152,6 +186,7 @@ describe("acquireFromPool", () => {
         pool: ["ci-1", "ci-2"],
         identity: id,
         noWait: false,
+        source: null,
         claim,
         rotateBy: 0,
       }),
@@ -165,6 +200,7 @@ describe("acquireFromPool", () => {
         pool: [],
         identity: id,
         noWait: true,
+        source: null,
         claim: vi.fn(),
       }),
     ).rejects.toThrow(/empty host pool/);
@@ -172,6 +208,61 @@ describe("acquireFromPool", () => {
 });
 
 describe("leaseLanes", () => {
+  it("REFUSES a mixed pool on a LATER platform even while an earlier one is busy", async () => {
+    // The reason legality is judged at the entry rather than in the poll loop.
+    // `platforms` is sorted alphabetically and the loop breaks on the first
+    // blocked platform, so a per-scan assert for `x86_64-linux` was never
+    // reached while `aarch64-darwin` stayed busy: with the default
+    // `noWait: false` the operator waited forever instead of being told the
+    // config is illegal. Judged at the entry the refusal is deterministic —
+    // it does not depend on alphabetical order or on who happens to be busy.
+    const claim = vi.fn(
+      async (): Promise<ClaimResult> => ({ kind: "busy", heldBy: null }),
+    );
+    const sleep = vi.fn(async () => {});
+    await expect(
+      leaseLanes({
+        pools: {
+          hosts: {
+            "aarch64-darwin": ["mac-1"],
+            "x86_64-linux": ["ci-1", "localhost"],
+          },
+          source: "/home/me/.config/odu/hosts.json",
+        },
+        platforms: ["aarch64-darwin", "x86_64-linux"],
+        identity: id,
+        noWait: false,
+        claim,
+        sleep,
+      }),
+    ).rejects.toThrow(
+      /\/home\/me\/\.config\/odu\/hosts\.json: host pool for "x86_64-linux" must not mix localhost with remote hosts/,
+    );
+    expect(claim).not.toHaveBeenCalled();
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("never judges a platform this run does not lease (juspay/odu#66)", async () => {
+    // The mixed x86_64-linux pool is in the same machine-global hosts file,
+    // but this run claims only darwin — `platforms` IS the run's lease set, so
+    // the illegal pool is none of its business and must not refuse it.
+    const claim = vi.fn(async (host: string): Promise<ClaimResult> => held(host));
+    const r = await leaseLanes({
+      pools: {
+        hosts: {
+          "aarch64-darwin": ["mac-1"],
+          "x86_64-linux": ["ci-1", "localhost"],
+        },
+        source: "/home/me/.config/odu/hosts.json",
+      },
+      platforms: ["aarch64-darwin"],
+      identity: id,
+      noWait: true,
+      claim,
+    });
+    expect(r.lanes).toEqual({ "aarch64-darwin": "mac-1" });
+  });
+
   it("releases already-held leases if a later platform fails", async () => {
     const releaseDarwin = vi.fn();
     const claim = vi.fn(async (host: string): Promise<ClaimResult> => {
@@ -183,8 +274,11 @@ describe("leaseLanes", () => {
     await expect(
       leaseLanes({
         pools: {
-          "x86_64-linux": ["linux-1"],
-          "aarch64-darwin": ["mac-1"],
+          hosts: {
+            "x86_64-linux": ["linux-1"],
+            "aarch64-darwin": ["mac-1"],
+          },
+          source: null,
         },
         platforms: ["x86_64-linux", "aarch64-darwin"],
         identity: id,
@@ -213,8 +307,11 @@ describe("leaseLanes", () => {
     });
     const r = await leaseLanes({
       pools: {
-        "x86_64-linux": ["linux-1"],
-        "aarch64-darwin": ["mac-1"],
+        hosts: {
+          "x86_64-linux": ["linux-1"],
+          "aarch64-darwin": ["mac-1"],
+        },
+        source: null,
       },
       platforms: ["x86_64-linux", "aarch64-darwin"],
       identity: id,
@@ -236,8 +333,11 @@ describe("leaseLanes", () => {
     await expect(
       leaseLanes({
         pools: {
-          "x86_64-linux": ["shared-builder"],
-          "aarch64-linux": ["shared-builder"],
+          hosts: {
+            "x86_64-linux": ["shared-builder"],
+            "aarch64-linux": ["shared-builder"],
+          },
+          source: null,
         },
         platforms: ["x86_64-linux", "aarch64-linux"],
         identity: id,
@@ -255,8 +355,11 @@ describe("leaseLanes", () => {
     await expect(
       leaseLanes({
         pools: {
-          "x86_64-linux": ["nix@ci-1"],
-          "aarch64-linux": ["ci-1"],
+          hosts: {
+            "x86_64-linux": ["nix@ci-1"],
+            "aarch64-linux": ["ci-1"],
+          },
+          source: null,
         },
         platforms: ["x86_64-linux", "aarch64-linux"],
         identity: id,
@@ -272,8 +375,11 @@ describe("leaseLanes", () => {
     await expect(
       leaseLanes({
         pools: {
-          "x86_64-linux": ["nix@ci-1"],
-          "aarch64-linux": ["root@ci-1"],
+          hosts: {
+            "x86_64-linux": ["nix@ci-1"],
+            "aarch64-linux": ["root@ci-1"],
+          },
+          source: null,
         },
         platforms: ["x86_64-linux", "aarch64-linux"],
         identity: id,
@@ -288,8 +394,11 @@ describe("leaseLanes", () => {
     const claim = vi.fn();
     const r = await leaseLanes({
       pools: {
-        "x86_64-linux": ["localhost"],
-        "aarch64-darwin": ["localhost"],
+        hosts: {
+          "x86_64-linux": ["localhost"],
+          "aarch64-darwin": ["localhost"],
+        },
+        source: null,
       },
       platforms: ["x86_64-linux", "aarch64-darwin"],
       identity: id,
@@ -309,8 +418,11 @@ describe("leaseLanes", () => {
     await expect(
       leaseLanes({
         pools: {
-          "x86_64-linux": ["ci-1"],
-          "aarch64-linux": ["ci-1.example.com"],
+          hosts: {
+            "x86_64-linux": ["ci-1"],
+            "aarch64-linux": ["ci-1.example.com"],
+          },
+          source: null,
         },
         platforms: ["x86_64-linux", "aarch64-linux"],
         identity: id,
@@ -326,8 +438,11 @@ describe("leaseLanes", () => {
     await expect(
       leaseLanes({
         pools: {
-          "x86_64-linux": ["nix@ci-1.lab.example.com"],
-          "aarch64-linux": ["ci-1"],
+          hosts: {
+            "x86_64-linux": ["nix@ci-1.lab.example.com"],
+            "aarch64-linux": ["ci-1"],
+          },
+          source: null,
         },
         platforms: ["x86_64-linux", "aarch64-linux"],
         identity: id,
@@ -342,8 +457,11 @@ describe("leaseLanes", () => {
     const claim = vi.fn(async (host: string): Promise<ClaimResult> => held(host));
     const r = await leaseLanes({
       pools: {
-        "x86_64-linux": ["10.0.0.1"],
-        "aarch64-linux": ["10.0.0.2"],
+        hosts: {
+          "x86_64-linux": ["10.0.0.1"],
+          "aarch64-linux": ["10.0.0.2"],
+        },
+        source: null,
       },
       platforms: ["x86_64-linux", "aarch64-linux"],
       identity: id,
@@ -354,5 +472,20 @@ describe("leaseLanes", () => {
       "aarch64-linux": "10.0.0.2",
       "x86_64-linux": "10.0.0.1",
     });
+  });
+});
+
+describe("isMixedPool — the shape the lease seam refuses", () => {
+  // Exported so `odu hosts` can WARN about an illegal pool without refusing
+  // over it: the inventory view never leases, and refusing there would be
+  // juspay/odu#66 again — a run stopped over a platform it never touches.
+  it("is true only when localhost sits beside a remote", () => {
+    expect(isMixedPool(["ci-1", "localhost"])).toBe(true);
+    expect(isMixedPool(["localhost", "nix@ci-2.example"])).toBe(true);
+  });
+
+  it("is false for the two legal shapes", () => {
+    expect(isMixedPool(["localhost"])).toBe(false);
+    expect(isMixedPool(["ci-1", "ci-2", "ci-3"])).toBe(false);
   });
 });

@@ -18,11 +18,18 @@
 import { isDeadTransportError } from "@kolu/surface/client";
 import type { BespokeTool } from "@kolu/surface-mcp";
 import { z } from "zod";
-import { agentSummary } from "../cli/render";
-import { formatRef } from "../common/runRecord";
-import type { OwedStatus } from "../common/surface";
+import { agentSummary, NON_TERMINAL_STATUSES } from "../cli/render";
+import { gitRunContext } from "../common/git";
+import { formatRef, type RunRecord } from "../common/runRecord";
+import { liftUnposted, type OwedStatus } from "../common/surface";
+import { readRunRecord } from "../coordinator/ledger";
 import { SOCKET_PATH } from "../coordinator/socket";
-import { type AgentNodes, type AgentNodesReader, EMPTY_NODES } from "./agentSurface";
+import {
+	type AgentNodes,
+	type AgentNodesReader,
+	EMPTY_NODES,
+	type ResolveRunContext,
+} from "./agentSurface";
 
 export const waitInput = z.object({
 	timeout_ms: z.number().optional(),
@@ -93,19 +100,93 @@ export interface WaitOptions {
 	signal?: AbortSignal;
 	/** Injected clock for tests; defaults to `Date.now`. */
 	now?: () => number;
+	/** Where am I checked out — the SAME injection seam the projection's durable
+	 *  log reads its identity through (`agentSurface.ResolveRunContext`), so the
+	 *  tool doesn't probe the process's git itself and tests drive the shipping
+	 *  code path rather than a second, differently-shaped stub. Defaults to
+	 *  `gitRunContext`, exactly as `mcp.ts` already does for the projection. */
+	resolveRunContext?: ResolveRunContext;
 }
 
-/** The run-identity + posting-debt fields stamped into every verdict, from the
- *  frame it describes. No frame reads the no-run sentinel from `EMPTY_NODES`. */
+/** The finalized record for `sha7#seq`, read from this checkout's ledger — one
+ *  addressed file read, not a scan of every run of every commit. The
+ *  coordinator writes it as it exits, so it is the authority on a run whose
+ *  socket is already gone. */
+function ledgerRecord(
+	resolve: ResolveRunContext,
+	sha7: string,
+	seq: number | null,
+): RunRecord | null {
+	if (seq === null) return null;
+	const ctx = resolve();
+	return ctx === null ? null : readRunRecord(ctx.repoRoot, sha7, seq);
+}
+
+/** The verdict a finalized record dictates, or null when the record can't
+ *  settle the question. Two ways it can't:
+ *
+ *  - it is not terminal (`incomplete`) — a run torn down mid-flight, exactly
+ *    the half-observed case the caller must not read as green. This also
+ *    covers the stale `--linger` drain: the coordinator re-finalizes the
+ *    moment a node resumes (run.ts `updateNode`), so a record that describes
+ *    a run now back in flight says `incomplete` itself and no clock
+ *    comparison is needed to detect it;
+ *  - it is missing (the close beat the write, or no ordinal was reserved).
+ *
+ *  `outcome` is the authority for pass/fail and the node lists are for
+ *  reporting only — but a record whose lists contradict its own outcome is no
+ *  authority at all, so it settles nothing either (third way, below). That is
+ *  `buildRunRecord`'s invariant; `RunRecordSchema` does not enforce it and the
+ *  ledger reader is deliberately forgiving of odd files, so this reader states
+ *  it rather than trusting a promise made in another module. */
+function recordVerdict(rec: RunRecord | null): {
+	passed: boolean;
+	failed: string[];
+	errored: string[];
+	unposted: OwedStatus[];
+} | null {
+	if (rec === null) return null;
+	if (rec.outcome !== "passed" && rec.outcome !== "failed") return null;
+	const failed = rec.nodes.filter((n) => n.status === "failed").map((n) => n.id);
+	const errored = rec.nodes
+		.filter((n) => n.status === "errored")
+		.map((n) => n.id);
+	// `buildRunRecord` derives `outcome` from the nodes, but `RunRecordSchema`
+	// cannot express that — it admits any (outcome, statuses) pair, including a
+	// torn or hand-written file. So re-derive the whole invariant here and fall
+	// back to the stream on ANY contradiction, rather than publishing one as a
+	// verdict: every node terminal (a `passed` beside a still-`running` node is
+	// exactly the half-observed run this path must never call green), `passed`
+	// with no red node, and `failed` with at least one.
+	if (rec.nodes.some((n) => NON_TERMINAL_STATUSES.has(n.status))) return null;
+	const red = failed.length + errored.length;
+	if (rec.outcome === "passed" && red > 0) return null;
+	if (rec.outcome === "failed" && red === 0) return null;
+	return {
+		passed: rec.outcome === "passed",
+		failed,
+		errored,
+		unposted: liftUnposted(rec.unposted ?? []),
+	};
+}
+
+/** The run this verdict describes — identity ONLY, always from the frame. No
+ *  frame reads the no-run sentinel from `EMPTY_NODES`. Kept apart from the
+ *  posting debt below because the two answer to different authorities: identity
+ *  is always the frame's, debt belongs to whoever answered pass/fail. Spreading
+ *  both and overwriting one made the verdict's source depend on object-literal
+ *  key order — invisible at the call site, and reverted by any tidy-up. */
 function identityOf(
 	snap: AgentNodes | undefined,
-): Pick<SettleVerdict, "sha7" | "seq" | "unposted"> {
+): Pick<SettleVerdict, "sha7" | "seq"> {
 	const frame = snap ?? EMPTY_NODES;
-	return {
-		sha7: frame.sha7,
-		seq: frame.seq,
-		unposted: frame.unposted ?? [],
-	};
+	return { sha7: frame.sha7, seq: frame.seq };
+}
+
+/** The posting debt a FRAME reports. A record-sourced verdict uses the
+ *  record's instead — see `recordVerdict`. */
+function debtOf(snap: AgentNodes | undefined): OwedStatus[] {
+	return (snap ?? EMPTY_NODES).unposted ?? [];
 }
 
 /** Does the live run's `observed` sha7 satisfy the caller's `expected` sha? A
@@ -158,6 +239,7 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
 			cancelled,
 			duration_ms: now() - started,
 			...identityOf(last),
+			unposted: debtOf(last),
 		};
 	};
 
@@ -181,14 +263,37 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
 		}
 		// A live run WAS observed, but the coordinator then closed the socket
 		// (crash, interrupt, or a close race) with nodes still pending/running.
-		// `settled` is true only if the last snapshot was already terminal;
-		// `passed` requires that — a green verdict must never come from a
-		// half-observed run.
+		// A settled run normally publishes its terminal frame first; when the
+		// close wins that race, the *record* the coordinator finalized on the
+		// way out already holds the answer, so read it rather than report a
+		// passing run as unsettled. `recordVerdict` decides whether the record
+		// may answer at all (a terminal outcome — nothing else).
+		const fromRecord = recordVerdict(
+			ledgerRecord(opts.resolveRunContext ?? gitRunContext, last.sha7, last.seq),
+		);
+		if (fromRecord !== null) {
+			// One authority supplies every field it knows — pass/fail, the red
+			// node lists, and the posting debt it stamped at finalize.
+			return {
+				settled: true,
+				passed: fromRecord.passed,
+				failed: fromRecord.failed,
+				errored: fromRecord.errored,
+				fail_fast_tripped: false,
+				timed_out: false,
+				cancelled: false,
+				duration_ms: now() - started,
+				...identityOf(last),
+				unposted: fromRecord.unposted,
+			};
+		}
+		// No usable record: fall back to the last snapshot, fail-closed. `settled`
+		// only if it was already terminal, and `passed` requires that — a green
+		// verdict never comes from a half-observed run.
 		const red = agentSummary(last);
-		const settled = red.done;
 		return {
-			settled,
-			passed: settled && red.failed.length + red.errored.length === 0,
+			settled: red.done,
+			passed: red.done && red.failed.length + red.errored.length === 0,
 			failed: red.failed,
 			errored: red.errored,
 			fail_fast_tripped: false,
@@ -196,6 +301,7 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
 			cancelled: false,
 			duration_ms: now() - started,
 			...identityOf(last),
+			unposted: debtOf(last),
 		};
 	};
 
@@ -229,6 +335,7 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
 					cancelled: false,
 					duration_ms: now() - started,
 					...identityOf(snap),
+					unposted: debtOf(snap),
 				};
 			}
 			if (done) {
@@ -242,6 +349,7 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
 					cancelled: false,
 					duration_ms: now() - started,
 					...identityOf(snap),
+					unposted: debtOf(snap),
 				};
 			}
 		}
@@ -269,34 +377,47 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
 	}
 }
 
-/** The `wait_for_settle` bespoke tool. Read-only (`mutates: false`): it observes the
- *  run, it doesn't change it. The explicit `mutates: false` opts into `readOnlyHint:
- *  true` under `@kolu/surface-mcp`'s conservative default (an unannotated tool is now
- *  treated as MUTATING so a host can't auto-run it unconfirmed). Typed as the loose
- *  `BespokeTool` (the package's `tools` slot is invariant in the input type); `input`
- *  validates, handler narrows. */
-export const waitTool: BespokeTool = {
-	description:
-		"Block until the run settles, or — fail-fast (default) — the instant a " +
-		"node goes red, so you can drill into a failure without waiting for the " +
-		"slow lanes. Returns the verdict {settled, passed, failed[], errored[], " +
-		"sha7, seq, unposted[]}: sha7 names the commit, a non-null seq " +
-		"completes the unique run ref sha7#seq (seq is null only when no ordinal " +
-		"was reserved), and unposted is full owed rows " +
-		"({context, lastError, attempts}) not yet confirmed (reporting debt does " +
-		"not block settle). Fails LOUD (an error, not an empty verdict) when no " +
-		"run is live in this checkout, or when the live run's commit doesn't " +
-		"prefix-match `expected_sha`.",
-	input: waitInput,
-	mutates: false,
-	handler: (args, client, signal) => {
-		const a = args as WaitInput;
-		return waitForSettle({
-			client: client as AgentNodesReader,
-			timeoutMs: a.timeout_ms,
-			failFast: a.fail_fast,
-			expectedSha: a.expected_sha,
-			signal,
-		});
-	},
-};
+/** The `wait_for_settle` bespoke tool, over one injected view of the world.
+ *  Read-only (`mutates: false`): it observes the run, it doesn't change it. The
+ *  explicit `mutates: false` opts into `readOnlyHint: true` under
+ *  `@kolu/surface-mcp`'s conservative default (an unannotated tool is now
+ *  treated as MUTATING so a host can't auto-run it unconfirmed). Typed as the
+ *  loose `BespokeTool` (the package's `tools` slot is invariant in the input
+ *  type); `input` validates, handler narrows.
+ *
+ *  A factory rather than a const so `resolveRunContext` reaches the handler:
+ *  `mcp.ts` hands it the same resolver the projection's durable-log fallback
+ *  gets, and a test hands it a stub — so the shipping handler is the one under
+ *  test, not a parallel path reachable only through an injected option. */
+export function makeWaitTool(
+	resolveRunContext: ResolveRunContext = gitRunContext,
+): BespokeTool {
+	return {
+		description:
+			"Block until the run settles, or — fail-fast (default) — the instant a " +
+			"node goes red, so you can drill into a failure without waiting for the " +
+			"slow lanes. Returns the verdict {settled, passed, failed[], errored[], " +
+			"sha7, seq, unposted[]}: sha7 names the commit, a non-null seq " +
+			"completes the unique run ref sha7#seq (seq is null only when no ordinal " +
+			"was reserved), and unposted is full owed rows " +
+			"({context, lastError, attempts}) not yet confirmed (reporting debt does " +
+			"not block settle). Fails LOUD (an error, not an empty verdict) when no " +
+			"run is live in this checkout, or when the live run's commit doesn't " +
+			"prefix-match `expected_sha`. If the coordinator's socket closes before " +
+			"it publishes a terminal frame, the verdict comes from the run's " +
+			"finalized record on disk (never green for a run torn down mid-flight).",
+		input: waitInput,
+		mutates: false,
+		handler: (args, client, signal) => {
+			const a = args as WaitInput;
+			return waitForSettle({
+				client: client as AgentNodesReader,
+				timeoutMs: a.timeout_ms,
+				failFast: a.fail_fast,
+				expectedSha: a.expected_sha,
+				signal,
+				resolveRunContext,
+			});
+		},
+	};
+}

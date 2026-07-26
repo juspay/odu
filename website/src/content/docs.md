@@ -89,7 +89,7 @@ odu run --host x86_64-linux=localhost
 { "x86_64-linux": "localhost" }
 ```
 
-A localhost lane runs directly against your toolchain and skips the Nix closure copy.
+A localhost lane runs directly against your toolchain and skips the Nix closure copy. A pool must be pure-local or pure-remote — a localhost entry beside remote hosts is refused when a run leases that platform, since localhost needs no venue lock and would starve the busy remotes beside it.
 
 ### Fan out across machines
 
@@ -201,7 +201,7 @@ The interface projects odu's [@kolu/surface](https://kolu.dev/surface/) through 
 | --- | --- |
 | `run` | Start a background coordinator. Supports `supersede`, `linger`, and `no_wait`. Reuses agent-held venues without re-claiming. |
 | `node_rerun` | Reset one node and its transitive dependents. |
-| `wait_for_settle` | Return on settlement or immediately when a node goes red. Carries `sha7`, the reserved `seq`, and `unposted[]` full owed rows (`{context, lastError, attempts}` — reporting debt does not block settle). Fails loud with no live run or an `expected_sha` mismatch. |
+| `wait_for_settle` | Return on settlement or immediately when a node goes red. Carries `sha7`, the reserved `seq`, and `unposted[]` full owed rows (`{context, lastError, attempts}` — reporting debt does not block settle). If the coordinator's socket closes before the terminal frame, the verdict comes from the run's finalized record on disk. Fails loud with no live run or an `expected_sha` mismatch. |
 | `cancel` | Stop and fully tear down the live run. |
 | `runs` | Read durable run history after the coordinator exits. |
 | `lease` | Agent-held venue: spawn a detached holder and return immediately with `held {host}` or `waiting {behind…}`. Re-call to observe the queue. |
@@ -226,7 +226,7 @@ run → wait_for_settle → read red node log → fix → node_rerun
 
 An early `wait_for_settle` response with `fail_fast_tripped: true` is not a final tally. Only `passed: true` on a fully settled run proves green.
 
-Every observed verdict identifies its run with `sha7` and, when the coordinator reserved one, `seq`—the durable `sha7#seq` identity. Pass `expected_sha` as a full SHA or `sha7` prefix to make identity a hard check. `seq` is null only when no ordinal could be reserved. With no live run, `wait_for_settle` raises the same “no run in progress” error as `odu status`; it never returns an ambiguous empty verdict.
+Every observed verdict identifies its run with `sha7` and, when the coordinator reserved one, `seq`—the durable `sha7#seq` identity. Pass `expected_sha` as a full SHA or `sha7` prefix to make identity a hard check. `seq` is null only when no ordinal could be reserved. With no live run, `wait_for_settle` raises the same “no run in progress” error as `odu status`; it never returns an ambiguous empty verdict. When a run *was* observed and the coordinator's socket then closed before the terminal frame, the verdict is read from that run's finalized record — never green for a run torn down mid-flight.
 
 Configure the stdio server directly:
 

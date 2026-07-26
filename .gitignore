@@ -9,4 +9,5 @@ result-*
 .ci/
 .be-review/
 .codex-debate/
+.agent-debate/
 .lens-debate/

@@ -30,7 +30,7 @@ import { cancelTool } from "../mcp/cancelTool";
 import { leaseTool, releaseTool } from "../mcp/leaseTool";
 import { killRuns, runTool } from "../mcp/runTool";
 import { runsTool } from "../mcp/runsTool";
-import { waitTool } from "../mcp/waitTool";
+import { makeWaitTool } from "../mcp/waitTool";
 import { gitRunContext } from "../common/git";
 import { oduSurface } from "../common/surface";
 import { SOCKET_PATH, tryDialSocket } from "../coordinator/socket";
@@ -87,7 +87,7 @@ export async function mcpCommand(socketPath: string = SOCKET_PATH): Promise<numb
     },
     tools: {
       run: runTool,
-      wait_for_settle: waitTool,
+      wait_for_settle: makeWaitTool(gitRunContext),
       cancel: cancelTool,
       runs: runsTool,
       lease: leaseTool,
