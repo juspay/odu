@@ -12,12 +12,13 @@
  * coordinator's job (pool lease / hosts.json).
  *
  * Default-deny `expose`: only the `nodes` cell + `logs` collection (as
- * resources) and `node.rerun` (as a tool) reach the host; the coordinator's
- * `header` cell and the lane-only `run.configure` are unreachable by
- * construction. Bespoke tools: `run`, `wait_for_settle`, `cancel`, `runs`,
+ * resources) and `node.rerun` / `node.cancel` (as tools) reach the host; the
+ * coordinator's `header` cell and the lane-only `run.configure` are unreachable
+ * by construction. Bespoke tools: `run`, `wait_for_settle`, `cancel`, `runs`,
  * plus agent-held venue `lease` / `release` (cross-run hold).
- * (`run.cancel` is the surface mutation `cancel` drives; it's not exposed
- * directly — the tool also confirms teardown.)
+ * (`run.cancel` is the surface mutation full-run `cancel` drives; it's not
+ * exposed directly — the tool also confirms teardown. Per-node/per-lane cancel
+ * is `node_cancel` → `node.cancel`.)
  */
 
 import { readFileSync } from "node:fs";
@@ -84,6 +85,7 @@ export async function mcpCommand(socketPath: string = SOCKET_PATH): Promise<numb
       nodes: "resource",
       logs: "resource",
       "node.rerun": { tool: { mutates: true } },
+      "node.cancel": { tool: { mutates: true } },
     },
     tools: {
       run: runTool,

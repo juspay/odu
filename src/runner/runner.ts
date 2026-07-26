@@ -77,6 +77,10 @@ export function createLaneRunner(): LaneRunner {
           venueHold?.noteActivity();
           return { ok: rerun(input.id) };
         },
+        cancel: async ({ input }) => {
+          venueHold?.noteActivity();
+          return { ok: cancel(input.id) };
+        },
       },
       run: {
         configure: async ({ input }) => {
@@ -231,8 +235,14 @@ export function createLaneRunner(): LaneRunner {
       const s = statusOf(dep);
       // 'errored' is coordinator-only (surface.ts) and unreachable in lane
       // state; kept so blocked() reads as the full failed-set and survives any
-      // future in-lane errored.
-      return s === "failed" || s === "skipped" || s === "errored";
+      // future in-lane errored. 'cancelled' is deliberate operator cancel —
+      // dependents skip the same way as failed (juspay/odu#68).
+      return (
+        s === "failed" ||
+        s === "skipped" ||
+        s === "errored" ||
+        s === "cancelled"
+      );
     });
 
   const tick = (): void => {
@@ -398,6 +408,31 @@ export function createLaneRunner(): LaneRunner {
         durationMs: null,
       });
     }
+    tick();
+    return true;
+  };
+
+  // ── cancel: stop one pending/running node; dependents skip via tick ──
+  const cancel = (id: string): boolean => {
+    const initial = getState();
+    const node = initial.nodes[id];
+    if (disposed || node === undefined) return false;
+    if (node.status !== "pending" && node.status !== "running") return false;
+    const child = children.get(id);
+    if (child !== undefined) {
+      children.delete(id);
+      killGroup(child, "SIGTERM");
+    }
+    if (id === SETUP_NODE_ID) setupGeneration += 1;
+    const startedAt = node.startedAt;
+    const durationMs =
+      startedAt !== null ? Date.now() - startedAt : null;
+    tail.append(id, "\n[odu] cancelled by operator\n");
+    setNode(id, {
+      status: "cancelled",
+      exitCode: null,
+      durationMs,
+    });
     tick();
     return true;
   };

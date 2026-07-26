@@ -17,7 +17,7 @@ import {
   type RunHeader,
   STATUS_META,
 } from "../common/surface";
-import { cancelRun } from "../coordinator/cancel";
+import { cancelNodeOrPlatform, cancelRun } from "../coordinator/cancel";
 import { createDisplay, progressEvent } from "../coordinator/display";
 import { dialSocket, type OduClient } from "../coordinator/socket";
 import { postingWarning } from "../coordinator/statuses";
@@ -213,8 +213,32 @@ async function attachDashboard(
 
 /** `odu cancel` — tell the live run in this checkout to stop, and wait until
  *  its coordinator is gone. No live run is a clean no-op (nothing to cancel),
- *  not an error: cancelling something already finished is success. */
-export async function cancelCommand(socketPath?: string): Promise<number> {
+ *  not an error: cancelling something already finished is success.
+ *
+ *  With a target (`ci::fmt@plat` or `@plat`), cancel only that node or
+ *  platform lane and leave the rest of the run to settle (juspay/odu#68). */
+export async function cancelCommand(
+  target?: string,
+  socketPath?: string,
+): Promise<number> {
+  if (target !== undefined && target !== "") {
+    const result = await cancelNodeOrPlatform(target, socketPath);
+    if (!result.delivered) {
+      process.stderr.write(
+        "odu: no run in progress in this checkout (nothing to cancel)\n",
+      );
+      return 0;
+    }
+    if (!result.ok) {
+      process.stderr.write(
+        `odu: could not cancel ${target} (unknown node/platform, or already terminal)\n`,
+      );
+      return 1;
+    }
+    process.stdout.write(`odu: cancelled ${target}\n`);
+    return 0;
+  }
+
   const result = await cancelRun(socketPath);
   if (!result.cancelled) {
     process.stderr.write(

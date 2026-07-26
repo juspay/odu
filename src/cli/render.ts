@@ -33,6 +33,7 @@ export const STATUS_COLOR: Record<NodeState["status"], (s: string) => string> =
     failed: red,
     skipped: dim,
     errored: magenta,
+    cancelled: dim,
   };
 
 /** The status glyph, coloured for terminals. */
@@ -47,6 +48,7 @@ export interface PipelineSummary {
   skipped: number;
   errored: number;
   pending: number;
+  cancelled: number;
   /** No node is pending or running — the pipeline has settled. */
   done: boolean;
   /** Settled with at least one failure or infrastructure error. */
@@ -113,6 +115,7 @@ export function summarize(state: PipelineState): PipelineSummary {
     skipped: 0,
     errored: 0,
     pending: 0,
+    cancelled: 0,
   };
   for (const id of state.order) {
     const node = state.nodes[id];

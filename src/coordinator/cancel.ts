@@ -1,14 +1,18 @@
 /**
- * Cancel a live run from a *second* process — the shared core behind the
- * `odu cancel` CLI, the MCP `cancel` tool, and a `--supersede` run.
+ * Cancel a live run (or a node/lane of it) from a *second* process — the
+ * shared core behind the `odu cancel` CLI, the MCP `cancel` / `node_cancel`
+ * tools, and a `--supersede` run.
  *
- * The coordinator owns the run; everyone else only holds a socket to it. So
+ * The coordinator owns the run; everyone else only holds a socket to it. Full
  * cancellation is "dial the coordinator, call `run.cancel`, then wait until its
  * socket is gone." The ack is best-effort: `run.cancel` routes into the
  * coordinator's teardown, which exits the process — the reply can be cut off by
  * the socket closing, so we never depend on it. The *proof* a run is cancelled
  * is the socket no longer answering, which is exactly the precondition a
  * following `run` needs before it can re-bind the checkout's one-run lock.
+ *
+ * Per-node / per-lane cancel (juspay/odu#68) is `node.cancel` over the same
+ * socket and leaves the coordinator up so the rest of the run can settle.
  */
 
 import { SOCKET_PATH, tryDialSocket } from "./socket";
@@ -69,4 +73,32 @@ export async function cancelRun(
     await sleep(pollMs);
   }
   return { cancelled: true, confirmed: false };
+}
+
+export interface NodeCancelResult {
+  /** A live run was found and `node.cancel` was delivered. */
+  delivered: boolean;
+  /** The coordinator accepted the cancel (`ok: true`). */
+  ok: boolean;
+}
+
+/** Cancel one node (`ci::fmt@plat`) or a whole platform lane (`@plat`) on the
+ *  live run. No live run → `{ delivered: false, ok: false }`. The coordinator
+ *  stays up; only the targeted work stops (juspay/odu#68). */
+export async function cancelNodeOrPlatform(
+  target: string,
+  socketPath: string = SOCKET_PATH,
+  deps: Pick<CancelDeps, "dial"> = {},
+): Promise<NodeCancelResult> {
+  const dial = deps.dial ?? tryDialSocket;
+  const dialed = await dial(socketPath);
+  if (dialed === null) return { delivered: false, ok: false };
+  try {
+    const result = await dialed.client.surface.node.cancel({ id: target });
+    return { delivered: true, ok: result.ok };
+  } catch {
+    return { delivered: true, ok: false };
+  } finally {
+    dialed.close();
+  }
 }

@@ -103,7 +103,9 @@ export function statusFor(
         ? `Succeeded (${dur}): ${log}`
         : status === "failed"
           ? `Failed (${dur}): ${log}`
-          : `Errored (${dur}): ${log}`;
+          : status === "cancelled"
+            ? `Cancelled (${dur}): ${log}`
+            : `Errored (${dur}): ${log}`;
   return { state, context: nodeId, description };
 }
 

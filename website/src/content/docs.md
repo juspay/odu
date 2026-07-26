@@ -173,7 +173,7 @@ odu run [recipe[@platform]…]      run selectors; bare recipes fan out
 odu status [-o json]              snapshot the live run (json: {nodes, posting})
 odu logs [-f] <node>              replay and optionally follow a node log
 odu attach [-o json]              attach the live dashboard or event stream
-odu cancel                        cleanly stop the live run
+odu cancel [node|@platform]       stop the live run, or one node / lane
 odu runs [-o json]                read durable run history
 odu hosts                         venue inventory (free / busy / held by)
 odu lease [PLAT…] [--no-wait]     agent-held venue across runs
@@ -187,9 +187,11 @@ odu mcp                           serve the agent interface over stdio
 
 ### Cancel, supersede, and linger
 
-`.ci/odu.sock` identifies the live run in a checkout. `odu cancel` asks the coordinator to finalize statuses, close lanes, remove the socket, and then waits for teardown.
+`.ci/odu.sock` identifies the live run in a checkout. Bare `odu cancel` asks the coordinator to finalize statuses, close lanes, remove the socket, and then waits for teardown.
 
-`odu run --supersede` combines cancel and start for the common “stop this run and test the fix” move. Runs normally exit as soon as they settle; `--linger` keeps the coordinator available so a node can be retried later, then reaps it after an idle period or explicit cancellation.
+`odu cancel <node>` (e.g. `ci::fmt@aarch64-darwin`) or `odu cancel @<platform>` cancels only that node or whole platform lane — running work is stopped and marked `cancelled` (not `errored`/`failed`), pending work on the lane is cancelled, and a run-owned venue lease for that platform is released. The rest of the run settles normally. MCP twin: `node_cancel`.
+
+`odu run --supersede` combines full-run cancel and start for the common “stop this run and test the fix” move. Runs normally exit as soon as they settle; `--linger` keeps the coordinator available so a node can be retried later, then reaps it after an idle period or explicit cancellation.
 
 ## Coding agents (MCP)
 
@@ -201,6 +203,7 @@ The interface projects odu's [@kolu/surface](https://kolu.dev/surface/) through 
 | --- | --- |
 | `run` | Start a background coordinator. Supports `supersede`, `linger`, and `no_wait`. Reuses agent-held venues without re-claiming. |
 | `node_rerun` | Reset one node and its transitive dependents. |
+| `node_cancel` | Cancel one node (`ci::fmt@plat`) or a whole platform lane (`@plat`); leaves the rest of the run settling. Marks targets `cancelled` (not red). |
 | `wait_for_settle` | Return on settlement or immediately when a node goes red. Carries `sha7`, the reserved `seq`, and `unposted[]` full owed rows (`{context, lastError, attempts}` — reporting debt does not block settle). If the coordinator's socket closes before the terminal frame, the verdict comes from the run's finalized record on disk. Fails loud with no live run or an `expected_sha` mismatch. |
 | `cancel` | Stop and fully tear down the live run. |
 | `runs` | Read durable run history after the coordinator exits. |

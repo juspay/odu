@@ -8,7 +8,7 @@ user-invocable: false
 
 The agent face of [odu](https://github.com/juspay/odu) — an MCP stdio server
 that re-exposes a live CI run as agent tools (`run`, `node_rerun`,
-`wait_for_settle`, `cancel`, `lease`, `release`) and subscribable resources
+`node_cancel`, `wait_for_settle`, `cancel`, `lease`, `release`) and subscribable resources
 (`surface://streams/nodes`, `surface://collections/logs/{id}`), so Claude Code /
 Codex / opencode / Gemini CLI drive CI with structured calls instead of
 scraping terminal output.
@@ -38,7 +38,9 @@ finalized record on disk — never green for a run torn down mid-flight. The
 `nodes` resource carries the same `unposted`. MCP `run` tees coordinator
 stdout/stderr to `.ci/<sha7>/runs/<seq>.log`.
 
-`cancel` stops the live run and waits until it's torn down; `run`'s `supersede`
+`cancel` stops the live run and waits until it's torn down; `node_cancel` drops
+one node (`ci::fmt@plat`) or a whole platform lane (`@plat`) while the rest of
+the run settles (status `cancelled`, not `errored`/`failed`). `run`'s `supersede`
 cancels a run already live here before starting (the "stop this, run the fixed
 commit" move), `linger` keeps the coordinator serving past settle so a node can
 be rerun afterwards, and `no_wait` fails immediately when every host in a venue

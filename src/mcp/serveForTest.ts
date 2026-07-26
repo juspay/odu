@@ -27,6 +27,8 @@ export interface TestSurface {
   appendLog: (id: string, text: string) => void;
   resetLog: (id: string, text: string) => void;
   reruns: string[];
+  /** Node ids passed to `node.cancel` over the socket. */
+  nodeCancels: string[];
   /** How many times `run.cancel` was called over the socket. */
   cancels: () => number;
   close: () => void;
@@ -57,6 +59,7 @@ export async function serveTestSurface(
   const headerStore = inMemoryStore<RunHeader>(initialHeader);
   const tail = createLogTail();
   const reruns: string[] = [];
+  const nodeCancels: string[] = [];
   let cancels = 0;
   // Forward declaration: the cancel handler can close the listener via the
   // caller's hook, but `closeListener` is only bound after `serveSocket`.
@@ -69,6 +72,10 @@ export async function serveTestSurface(
       node: {
         rerun: async ({ input }) => {
           reruns.push(input.id);
+          return { ok: true };
+        },
+        cancel: async ({ input }) => {
+          nodeCancels.push(input.id);
           return { ok: true };
         },
       },
@@ -100,6 +107,7 @@ export async function serveTestSurface(
     appendLog: (id, text) => tail.append(id, text),
     resetLog: (id, text) => tail.reset(id, text),
     reruns,
+    nodeCancels,
     cancels: () => cancels,
     // Close the listener AND, when the harness owns the dir, remove it so
     // repeated runs don't leak `odu-mcp-test-*` dirs under the system tmpdir.

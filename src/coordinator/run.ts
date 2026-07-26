@@ -688,6 +688,69 @@ async function orchestrate(
     return lane.rerun(namepath);
   };
 
+  // Platforms the operator cancelled mid-run — ignore further lane frames so a
+  // race with close can't resurrect cancelled nodes as running.
+  const cancelledPlatforms = new Set<string>();
+
+  /** Drop one platform lane: mark unfinished nodes `cancelled`, close the lane
+   *  (no `onDead`/errored overlay), free a run-owned venue lease. The rest of
+   *  the run keeps settling (juspay/odu#68). */
+  const cancelPlatform = (platform: string): boolean => {
+    if (cancelledPlatforms.has(platform)) return true;
+    const state = store.get();
+    const hasNodes = state.order.some((id) => onPlatform(id, platform));
+    if (!hasNodes) return false;
+    cancelledPlatforms.add(platform);
+    const lane = lanes.get(platform);
+    // Close first so the runner dies without onDead → errored.
+    lane?.close();
+    lanes.delete(platform);
+    // Free a run-owned lease so the box is reusable; agent-held leases are
+    // never in acquiredLeases.
+    const host = lanesByPlatform[platform];
+    if (host !== undefined) {
+      const idx = acquiredLeases.findIndex((l) => l.host === host);
+      if (idx >= 0) {
+        acquiredLeases[idx]?.release();
+        acquiredLeases.splice(idx, 1);
+      }
+    }
+    const now = Date.now();
+    for (const id of state.order) {
+      if (!onPlatform(id, platform)) continue;
+      const node = state.nodes[id];
+      if (node === undefined) continue;
+      if (node.status === "running") {
+        appendLocal(id, "\n[odu] cancelled by operator (lane)\n");
+        const startedAt = node.startedAt ?? now;
+        updateNode(id, {
+          status: "cancelled",
+          durationMs: now - startedAt,
+        });
+      } else if (node.status === "pending") {
+        updateNode(id, { status: "cancelled" });
+      }
+    }
+    checkSettled();
+    return true;
+  };
+
+  /** Cancel one fan-in node (`ci::fmt@plat`) or a whole platform (`@plat`). */
+  const cancelTarget = async (id: string): Promise<boolean> => {
+    // Platform selector: `@aarch64-darwin` (leading `@`, no second `@`).
+    if (id.startsWith("@")) {
+      const platform = id.slice(1);
+      if (platform === "" || platform.includes("@")) return false;
+      return cancelPlatform(platform);
+    }
+    const { namepath, platform } = splitFanId(id);
+    if (platform === "unknown" || namepath === "") return false;
+    if (cancelledPlatforms.has(platform)) return false;
+    const lane = lanes.get(platform);
+    if (lane === undefined) return false;
+    return lane.cancel(namepath);
+  };
+
   // ── teardown: the single path every cancel-shaped interrupt shares ──
   // Defined above the surface so the `run.cancel` mutation can drive the very
   // same teardown a SIGINT does. `closeSocket` is hoisted (assigned once the
@@ -752,6 +815,7 @@ async function orchestrate(
     procedures: {
       node: {
         rerun: async ({ input }) => ({ ok: await rerunNode(input.id) }),
+        cancel: async ({ input }) => ({ ok: await cancelTarget(input.id) }),
       },
       run: {
         // A second process asked this run to stop. Drive the shared teardown
@@ -1037,6 +1101,7 @@ async function orchestrate(
       resolveDrvPath: runnerDrvResolver(runnerFlake, platform),
       onSetupLine: (line) => appendLocal(setupId, `${line}\n`),
       onNodes: (laneState) => {
+        if (cancelledPlatforms.has(platform)) return;
         for (const laneId of laneState.order) {
           const laneNode = laneState.nodes[laneId];
           if (laneNode === undefined) continue;
@@ -1072,6 +1137,9 @@ async function orchestrate(
         }
       },
       onDead: (error) => {
+        // Operator platform-cancel closes the lane without onDead; if a race
+        // still fires, don't overlay cancelled with errored.
+        if (cancelledPlatforms.has(platform)) return;
         const state = store.get();
         for (const id of state.order) {
           if (!onPlatform(id, platform)) continue;
@@ -1147,7 +1215,7 @@ async function orchestrate(
     state: PipelineState,
     unposted: ReadonlyArray<UnpostedEntry> = [],
   ): number => {
-    const counts = { ok: 0, failed: 0, errored: 0, skipped: 0 };
+    const counts = { ok: 0, failed: 0, errored: 0, skipped: 0, cancelled: 0 };
     const shaLabel = commitLabel({ sha7, dirty: ctx.dirty });
     const lines: string[] = [
       dim(
@@ -1163,6 +1231,7 @@ async function orchestrate(
       else if (node.status === "failed") counts.failed += 1;
       else if (node.status === "errored") counts.errored += 1;
       else if (node.status === "skipped") counts.skipped += 1;
+      else if (node.status === "cancelled") counts.cancelled += 1;
       const color =
         node.status === "ok"
           ? green
@@ -1185,7 +1254,7 @@ async function orchestrate(
     const code = verdictCode(state);
     const debt = unpostedNote(unposted.length);
     lines.push(
-      `${counts.ok} ok · ${counts.failed} failed · ${counts.errored} errored · ${counts.skipped} skipped — ${
+      `${counts.ok} ok · ${counts.failed} failed · ${counts.errored} errored · ${counts.skipped} skipped · ${counts.cancelled} cancelled — ${
         code > 0 ? bold(red("FAILED")) : bold(green("OK"))
       }${debt !== "" ? dim(debt) : ""}`,
     );

@@ -39,6 +39,10 @@ export const NodeStatusSchema = z.enum([
    *  emitted by the runner itself; overlaid by the coordinator. Maps to
    *  GitHub state `error` and `--progress json` status `errored`. */
   "errored",
+  /** Operator intent: a deliberate per-node / per-lane cancel (juspay/odu#68).
+   *  Not red — distinct from failed/errored so wait_for_settle and the ledger
+   *  record cancel rather than a test or infra failure. */
+  "cancelled",
 ]);
 export type NodeStatus = z.infer<typeof NodeStatusSchema>;
 
@@ -51,7 +55,8 @@ export type ProgressStatus =
   | "success"
   | "failed"
   | "skipped"
-  | "errored";
+  | "errored"
+  | "cancelled";
 
 /** The single projection of a `NodeStatus` onto its external-facing
  *  representations: TUI glyph, GitHub state, `--progress json` status, and
@@ -76,6 +81,14 @@ export const STATUS_META: Record<
   failed: { glyph: "✗", github: "failure", progress: "failed", isRed: true },
   skipped: { glyph: "⊘", github: null, progress: "skipped", isRed: false },
   errored: { glyph: "⚠", github: "error", progress: "errored", isRed: true },
+  // Success on GitHub so a deliberate lane drop does not leave a required
+  // context pending or post a spurious failure/error (juspay/odu#68).
+  cancelled: {
+    glyph: "◼",
+    github: "success",
+    progress: "cancelled",
+    isRed: false,
+  },
 };
 
 export const NodeStateSchema = z.object({
@@ -301,8 +314,16 @@ const primitives = {
   },
 } as const;
 
-const rerunProcedure = {
+/** Per-node mutations shared by the lane runner and the coordinator fan-in.
+ *  `rerun` resets a node + dependents; `cancel` stops a running/pending node
+ *  (or, on the fan-in only, a whole platform via `@<platform>` — see
+ *  coordinator cancelTarget). */
+const nodeProcedures = {
   rerun: {
+    input: z.object({ id: TaskIdSchema }),
+    output: z.object({ ok: z.boolean() }),
+  },
+  cancel: {
     input: z.object({ id: TaskIdSchema }),
     output: z.object({ ok: z.boolean() }),
   },
@@ -390,7 +411,7 @@ const leaseProcedures = {
 export const laneSurface = defineSurface({
   ...primitives,
   procedures: {
-    node: rerunProcedure,
+    node: nodeProcedures,
     run: {
       configure: {
         input: ConfigureInputSchema,
@@ -407,7 +428,8 @@ export const laneSurface = defineSurface({
  *  knowing, so an attached face renders the same matrix `run` does, and the
  *  `run.cancel` lifecycle mutation a second process drives teardown through.
  *  (`run.cancel` is fan-in-only — a lane has no run to cancel; it's the
- *  coordinator that owns the run and the lanes.) */
+ *  coordinator that owns the run and the lanes.) `node.cancel` accepts a fan-in
+ *  id (`ci::fmt@aarch64-darwin`) or a whole platform (`@aarch64-darwin`). */
 export const oduSurface = defineSurface({
   ...primitives,
   cells: {
@@ -418,7 +440,7 @@ export const oduSurface = defineSurface({
     },
   },
   procedures: {
-    node: rerunProcedure,
+    node: nodeProcedures,
     run: cancelProcedure,
   },
 });

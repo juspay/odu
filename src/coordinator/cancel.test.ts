@@ -9,7 +9,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { pendingNode, type PipelineState } from "../common/surface";
 import { serveTestSurface, type TestSurface } from "../mcp/serveForTest";
-import { cancelRun } from "./cancel";
+import { cancelNodeOrPlatform, cancelRun } from "./cancel";
 
 function state(): PipelineState {
   return {
@@ -73,5 +73,27 @@ describe("cancelRun", () => {
     });
     expect(s.cancels()).toBe(1);
     expect(result).toEqual({ cancelled: true, confirmed: false });
+  });
+});
+
+describe("cancelNodeOrPlatform", () => {
+  it("is a no-op delivery when no run is live", async () => {
+    const result = await cancelNodeOrPlatform(
+      "ci::e2e@x86_64-linux",
+      "/no/such/odu.sock",
+    );
+    expect(result).toEqual({ delivered: false, ok: false });
+  });
+
+  it("delivers node.cancel to a live surface", async () => {
+    const s = await serve();
+    const result = await cancelNodeOrPlatform(
+      "@aarch64-darwin",
+      s.socketPath,
+    );
+    expect(result).toEqual({ delivered: true, ok: true });
+    expect(s.nodeCancels).toEqual(["@aarch64-darwin"]);
+    // Full-run cancel was not invoked — coordinator stays up.
+    expect(s.cancels()).toBe(0);
   });
 });

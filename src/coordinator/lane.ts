@@ -58,6 +58,8 @@ export interface LaneOptions {
 export interface Lane {
   readonly platform: string;
   rerun(nodeId: string): Promise<boolean>;
+  /** Cancel one lane-local node (pending/running → cancelled). */
+  cancel(nodeId: string): Promise<boolean>;
   /** Graceful teardown at end of run — never triggers `onDead`. */
   close(): void;
 }
@@ -205,6 +207,17 @@ export function startLane(opts: LaneOptions): Lane {
       try {
         const client = await clientPromise;
         const result = await client.surface.node.rerun({ id: nodeId });
+        return result.ok;
+      } catch {
+        return false;
+      }
+    },
+    cancel: async (nodeId: string): Promise<boolean> => {
+      const clientPromise = session.currentClient();
+      if (clientPromise === null) return false;
+      try {
+        const client = await clientPromise;
+        const result = await client.surface.node.cancel({ id: nodeId });
         return result.ok;
       } catch {
         return false;
