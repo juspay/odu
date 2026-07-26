@@ -21,9 +21,8 @@ import { cancelNodeOrPlatform, cancelRun } from "../coordinator/cancel";
 import { createDisplay, progressEvent } from "../coordinator/display";
 import { dialSocket, type OduClient } from "../coordinator/socket";
 import { postingWarning } from "../coordinator/statuses";
-import { exitCode, nodeRow, statusGlyph, summarize } from "./render";
-// exitCode is the single pass/fail projection (includes cancelled → non-zero).
 import { yellow } from "./ansi";
+import { exitCode, nodeRow, statusGlyph, summarize } from "./render";
 
 export async function firstSnapshot(client: OduClient): Promise<PipelineState> {
   for await (const state of await client.surface.nodes.get({})) {

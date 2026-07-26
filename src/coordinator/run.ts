@@ -48,7 +48,6 @@ import {
   type PipelineState,
   type RunHeader,
   type UnpostedEntry,
-  STATUS_META,
 } from "../common/surface";
 import { commitLabel, createDisplay, progressEvent } from "./display";
 import { laneTasks, loadJustPipeline, parseSelector } from "../just/ingest";
