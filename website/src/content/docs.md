@@ -32,6 +32,7 @@ The runner serves three typed primitives over plain ssh using an [oRPC](https://
 | **Cell** | `surface.nodes.get({})` | The whole pipeline: one snapshot, then deltas. |
 | **Stream** | `surface.nodeLog.get({ id })` | Buffered node output, then live appends. |
 | **Procedure** | `surface.node.rerun({ id })` | Reset a node and its dependents, then reschedule. |
+| **Procedure** | `surface.node.cancel({ id })` | Cancel one node, or a whole platform via `@plat`. |
 
 Every interface is a thin adapter over that contract: the terminal dashboard, the MCP server, and future frontends all read the same state.
 
