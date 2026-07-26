@@ -32,8 +32,9 @@ The runner serves three typed primitives over plain ssh using an [oRPC](https://
 | **Cell** | `surface.nodes.get({})` | The whole pipeline: one snapshot, then deltas. |
 | **Stream** | `surface.nodeLog.get({ id })` | Buffered node output, then live appends. |
 | **Procedure** | `surface.node.rerun({ id })` | Reset a node and its dependents, then reschedule. |
-| **Procedure** | `surface.node.cancel({ id })` | Cancel one pending/running node. |
-| **Procedure** | `surface.lane.cancel({ platform })` | Drop one platform lane mid-run. |
+| **Procedure** | `surface.node.cancel({ id })` | Cancel one pending/running node (also on the fan-in). |
+
+Fan-in only (coordinator on `.ci/odu.sock`, not the lane runner): `run.cancel` tears down the whole run; `lane.cancel({ platform })` drops one platform mid-run.
 
 Every interface is a thin adapter over that contract: the terminal dashboard, the MCP server, and future frontends all read the same state.
 

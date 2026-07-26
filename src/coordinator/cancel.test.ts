@@ -82,7 +82,12 @@ describe("cancelNodeOrPlatform", () => {
       "ci::e2e@x86_64-linux",
       "/no/such/odu.sock",
     );
-    expect(result).toEqual({ delivered: false, ok: false });
+    expect(result).toEqual({ kind: "no_run" });
+  });
+
+  it("rejects a bare @ as a bad target (not no_run)", async () => {
+    const result = await cancelNodeOrPlatform("@", "/no/such/odu.sock");
+    expect(result).toEqual({ kind: "bad_target" });
   });
 
   it("delivers node.cancel for a fan-in node id", async () => {
@@ -91,7 +96,7 @@ describe("cancelNodeOrPlatform", () => {
       "ci::e2e@x86_64-linux",
       s.socketPath,
     );
-    expect(result).toEqual({ delivered: true, ok: true });
+    expect(result).toEqual({ kind: "delivered", ok: true });
     expect(s.nodeCancels).toEqual(["ci::e2e@x86_64-linux"]);
     expect(s.laneCancels).toEqual([]);
     // Full-run cancel was not invoked — coordinator stays up.
@@ -101,7 +106,7 @@ describe("cancelNodeOrPlatform", () => {
   it("delivers lane.cancel for @platform sugar", async () => {
     const s = await serve();
     const result = await cancelNodeOrPlatform("@aarch64-darwin", s.socketPath);
-    expect(result).toEqual({ delivered: true, ok: true });
+    expect(result).toEqual({ kind: "delivered", ok: true });
     expect(s.laneCancels).toEqual(["aarch64-darwin"]);
     expect(s.nodeCancels).toEqual([]);
     expect(s.cancels()).toBe(0);

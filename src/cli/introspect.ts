@@ -221,18 +221,34 @@ export async function cancelCommand(
   target?: string,
   socketPath?: string,
 ): Promise<number> {
-  if (target !== undefined && target !== "") {
+  // Present-but-empty positional is a usage error — never escalate to full-run
+  // teardown (scripts with unset $TARGET must not kill the coordinator).
+  if (target !== undefined) {
+    if (target === "") {
+      process.stderr.write(
+        "odu: cancel needs a node id (ci::fmt@plat) or @platform, or no args for full-run cancel\n",
+      );
+      return 1;
+    }
     const result = await cancelNodeOrPlatform(target, socketPath);
-    if (!result.delivered) {
+    if (result.kind === "bad_target") {
+      process.stderr.write(
+        `odu: not a node id or @platform: ${target}\n`,
+      );
+      return 1;
+    }
+    if (result.kind === "no_run") {
       process.stderr.write(
         "odu: no run in progress in this checkout (nothing to cancel)\n",
       );
       return 0;
     }
     if (!result.ok) {
-      process.stderr.write(
-        `odu: could not cancel ${target} (unknown node/platform, or already terminal)\n`,
-      );
+      const detail =
+        result.error !== undefined && result.error !== ""
+          ? result.error
+          : "unknown node/platform, or already terminal";
+      process.stderr.write(`odu: could not cancel ${target} (${detail})\n`);
       return 1;
     }
     process.stdout.write(`odu: cancelled ${target}\n`);

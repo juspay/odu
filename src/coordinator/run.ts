@@ -749,7 +749,10 @@ async function orchestrate(
     // Close so the runner dies without onDead → errored.
     handle?.close();
     // Free a run-owned lease so the box is reusable; agent-held leases are
-    // never in acquiredLeases.
+    // never in acquiredLeases. Accepted window: lane.close() only destroys the
+    // local ssh session — the remote runner's SIGKILL of recipe groups races
+    // with this release (same shape as whole-run shutdown). A new claim may
+    // see a still-terminating process group for a short window.
     const host = lanesByPlatform[platform];
     if (host !== undefined) {
       const idx = acquiredLeases.findIndex((l) => l.host === host);
@@ -1220,14 +1223,19 @@ async function orchestrate(
     }
   };
 
-  // Any red node (failed/errored) → the process exit code.
-  const verdictCode = (state: PipelineState): number =>
-    state.order.some((id) => {
+  // Any red node (failed/errored) OR any operator-cancelled node → non-zero.
+  // Cancel is not red, but a partially-cancelled run is not a clean pass
+  // (juspay/odu#68; ledger outcome `incomplete`).
+  const verdictCode = (state: PipelineState): number => {
+    for (const id of state.order) {
       const node = state.nodes[id];
-      return node !== undefined && STATUS_META[node.status].isRed;
-    })
-      ? 1
-      : 0;
+      if (node === undefined) continue;
+      if (STATUS_META[node.status].isRed || node.status === "cancelled") {
+        return 1;
+      }
+    }
+    return 0;
+  };
 
   // The human verdict summary — foreground completion only, never mid-linger
   // where the live display still owns the screen. Returns the exit code.
@@ -1260,10 +1268,16 @@ async function orchestrate(
     }
     const code = verdictCode(state);
     const debt = unpostedNote(unposted.length);
+    const label =
+      code > 0
+        ? counts.cancelled > 0 && counts.failed + counts.errored === 0
+          ? bold(red("INCOMPLETE"))
+          : bold(red("FAILED"))
+        : bold(green("OK"));
     lines.push(
-      `${counts.ok} ok · ${counts.failed} failed · ${counts.errored} errored · ${counts.skipped} skipped · ${counts.cancelled} cancelled — ${
-        code > 0 ? bold(red("FAILED")) : bold(green("OK"))
-      }${debt !== "" ? dim(debt) : ""}`,
+      `${counts.ok} ok · ${counts.failed} failed · ${counts.errored} errored · ${counts.skipped} skipped · ${counts.cancelled} cancelled — ${label}${
+        debt !== "" ? dim(debt) : ""
+      }`,
     );
     process.stderr.write(`${lines.join("\n")}\n`);
     return code;

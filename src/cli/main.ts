@@ -124,8 +124,19 @@ async function dispatch(argv: string[]): Promise<number> {
       return attachCommand(values.output === "json");
     }
     case "cancel": {
-      const target = rest[0];
-      return cancelCommand(target);
+      const { positionals } = parseArgs({
+        args: rest,
+        allowPositionals: true,
+        options: {},
+      });
+      if (positionals.length > 1) {
+        throw new Error(
+          "odu: cancel takes at most one argument (node id or @platform)",
+        );
+      }
+      // undefined = bare full-run cancel; a present empty string is rejected
+      // inside cancelCommand (never escalates to full-run teardown).
+      return cancelCommand(positionals[0]);
     }
     case "runs": {
       const { values } = parseArgs({

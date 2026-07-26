@@ -58,11 +58,11 @@ export const RunNodeSchema = z.object({
 export type RunNode = z.infer<typeof RunNodeSchema>;
 
 /** A run's outcome — one domain concept with exactly three reachable states:
- *  `passed` only when the run *completed* with no red node; `failed` when it
- *  completed with a red node; `incomplete` when some node was still
- *  pending/running as the record was finalized (a gate that didn't finish
- *  didn't pass). One field, so the illegal "passed but incomplete" combination
- *  is unrepresentable. */
+ *  `passed` only when the run *completed* with no red node and no cancelled
+ *  node; `failed` when it completed with a red node; `incomplete` when some
+ *  node was still pending/running *or* was operator-cancelled (a gate that
+ *  didn't finish didn't pass — juspay/odu#68). One field, so the illegal
+ *  "passed but incomplete" combination is unrepresentable. */
 export const RunOutcomeSchema = z.enum(["passed", "failed", "incomplete"]);
 export type RunOutcome = z.infer<typeof RunOutcomeSchema>;
 
@@ -168,6 +168,9 @@ export function buildRunRecord(input: {
   const nodes = projectNodes(state);
   const complete = nodes.every((n) => isTerminal(n.status));
   const red = nodes.some((n) => STATUS_META[n.status].isRed);
+  // A gate the operator cancelled did not finish — never `passed` (juspay/odu#68).
+  // Distinct from red: cancel is intentional, not a test/infra failure.
+  const cancelled = nodes.some((n) => n.status === "cancelled");
   const unposted =
     input.unposted !== undefined && input.unposted.length > 0
       ? [...input.unposted]
@@ -179,7 +182,7 @@ export function buildRunRecord(input: {
     seq: input.seq,
     dirty: input.dirty,
     pipeline: state.name,
-    outcome: !complete ? "incomplete" : red ? "failed" : "passed",
+    outcome: !complete || cancelled ? "incomplete" : red ? "failed" : "passed",
     startedAt: input.startedAt,
     finishedAt: input.finishedAt,
     lanes: [...input.lanes],

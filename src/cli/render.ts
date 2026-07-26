@@ -141,17 +141,20 @@ export function agentSummary(snap: AgentNodes): {
   done: boolean;
   failed: string[];
   errored: string[];
+  cancelled: string[];
 } {
   const failed: string[] = [];
   const errored: string[] = [];
+  const cancelled: string[] = [];
   let done = true;
   for (const node of snap.nodes) {
     if (NON_TERMINAL_STATUSES.has(node.status as NodeStatus)) done = false;
+    if (node.status === "cancelled") cancelled.push(node.id);
     if (!node.red) continue;
     if (node.status === "failed") failed.push(node.id);
     else if (node.status === "errored") errored.push(node.id);
   }
-  return { done, failed, errored };
+  return { done, failed, errored, cancelled };
 }
 
 /** The default node to attach to: the first running node, else the first

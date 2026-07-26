@@ -75,12 +75,11 @@ export async function cancelRun(
   return { cancelled: true, confirmed: false };
 }
 
-export interface PartialCancelResult {
-  /** A live run was found and a cancel RPC was delivered. */
-  delivered: boolean;
-  /** The coordinator accepted the cancel (`ok: true`). */
-  ok: boolean;
-}
+/** Result of a partial cancel attempt against a live (or missing) run. */
+export type PartialCancelResult =
+  | { kind: "bad_target" }
+  | { kind: "no_run" }
+  | { kind: "delivered"; ok: boolean; error?: string };
 
 /** Parse CLI/MCP sugar: `@plat` → platform drop; else fan-in node id. */
 export function parsePartialCancelTarget(
@@ -99,18 +98,18 @@ export function parsePartialCancelTarget(
 }
 
 /** Cancel one node (`ci::fmt@plat`) or a whole platform lane (`@plat`) on the
- *  live run. Routes to fan-in `node.cancel` / `lane.cancel`. No live run →
- *  `{ delivered: false, ok: false }`. The coordinator stays up (juspay/odu#68). */
+ *  live run. Routes to fan-in `node.cancel` / `lane.cancel`. The coordinator
+ *  stays up (juspay/odu#68). */
 export async function cancelNodeOrPlatform(
   target: string,
   socketPath: string = SOCKET_PATH,
   deps: Pick<CancelDeps, "dial"> = {},
 ): Promise<PartialCancelResult> {
   const parsed = parsePartialCancelTarget(target);
-  if (parsed === null) return { delivered: false, ok: false };
+  if (parsed === null) return { kind: "bad_target" };
   const dial = deps.dial ?? tryDialSocket;
   const dialed = await dial(socketPath);
-  if (dialed === null) return { delivered: false, ok: false };
+  if (dialed === null) return { kind: "no_run" };
   try {
     const result =
       parsed.kind === "platform"
@@ -118,9 +117,13 @@ export async function cancelNodeOrPlatform(
             platform: parsed.platform,
           })
         : await dialed.client.surface.node.cancel({ id: parsed.id });
-    return { delivered: true, ok: result.ok };
-  } catch {
-    return { delivered: true, ok: false };
+    return { kind: "delivered", ok: result.ok };
+  } catch (err) {
+    return {
+      kind: "delivered",
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
   } finally {
     dialed.close();
   }
