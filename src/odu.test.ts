@@ -10,7 +10,12 @@ import { stdioLink } from "@kolu/surface/links/stdio";
 import { createLoopbackPair } from "@kolu/surface/loopback";
 import { serveOverStdio } from "@kolu/surface/peer-server";
 import { afterEach, describe, expect, it } from "vitest";
-import { applyLogFrame, renderLogPane, summarize } from "./cli/render";
+import {
+  applyLogFrame,
+  exitCode,
+  renderLogPane,
+  summarize,
+} from "./cli/render";
 import type { TaskSpec } from "./common/spec";
 import type {
   laneSurface,
@@ -249,6 +254,33 @@ describe("odu lane runner over stdio (loopback)", () => {
     await h.configure(chain);
     const result = await h.client.surface.node.rerun({ id: "nope" });
     expect(result.ok).toBe(false);
+  });
+
+  it("cancels a running node and skips its dependents", async () => {
+    const h = harness();
+    await h.configure([
+      { id: "slow", command: "sleep 30", needs: [] },
+      { id: "after", command: "echo never", needs: ["slow"] },
+    ]);
+    await until(() => last(h).nodes.slow?.status === "running");
+    const result = await h.client.surface.node.cancel({ id: "slow" });
+    expect(result.ok).toBe(true);
+    await until(() => summarize(last(h)).done);
+    expect(last(h).nodes.slow?.status).toBe("cancelled");
+    expect(last(h).nodes.after?.status).toBe("skipped");
+    expect(summarize(last(h)).failedOverall).toBe(false);
+    expect(summarize(last(h)).clean).toBe(false);
+    expect(exitCode(last(h))).toBe(1);
+  });
+
+  it("rejects cancel of an unknown or already-terminal node", async () => {
+    const h = harness();
+    await h.configure([{ id: "ok", command: "true", needs: [] }]);
+    await until(() => summarize(last(h)).done);
+    expect((await h.client.surface.node.cancel({ id: "nope" })).ok).toBe(
+      false,
+    );
+    expect((await h.client.surface.node.cancel({ id: "ok" })).ok).toBe(false);
   });
 });
 

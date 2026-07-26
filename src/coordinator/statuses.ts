@@ -96,15 +96,27 @@ export function statusFor(
   if (state === null) return null;
   const log = logPathFor(sha7, nodeId);
   const dur = formatGoDuration(durationMs ?? 0);
-  const description =
-    status === "running"
-      ? `Running: ${log}`
-      : status === "ok"
-        ? `Succeeded (${dur}): ${log}`
-        : status === "failed"
-          ? `Failed (${dur}): ${log}`
-          : `Errored (${dur}): ${log}`;
-  return { state, context: nodeId, description };
+  // justci wording for posts that fire — keyed by status so a new NodeStatus
+  // is one table row, not another nest of ternaries.
+  const descriptions: Partial<
+    Record<NodeStatus, (d: string, l: string) => string>
+  > = {
+    running: (_d, l) => `Running: ${l}`,
+    ok: (d, l) => `Succeeded (${d}): ${l}`,
+    failed: (d, l) => `Failed (${d}): ${l}`,
+    cancelled: (d, l) => `Cancelled (${d}): ${l}`,
+    errored: (d, l) => `Errored (${d}): ${l}`,
+  };
+  const format = descriptions[status];
+  if (format === undefined) {
+    // Defensive: github non-null should only land for statuses in the table.
+    return { state, context: nodeId, description: `${status}: ${log}` };
+  }
+  return {
+    state,
+    context: nodeId,
+    description: format(dur, log),
+  };
 }
 
 /**

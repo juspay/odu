@@ -17,12 +17,12 @@ import {
   type RunHeader,
   STATUS_META,
 } from "../common/surface";
-import { cancelRun } from "../coordinator/cancel";
+import { cancelNodeOrPlatform, cancelRun } from "../coordinator/cancel";
 import { createDisplay, progressEvent } from "../coordinator/display";
 import { dialSocket, type OduClient } from "../coordinator/socket";
 import { postingWarning } from "../coordinator/statuses";
-import { exitCode, nodeRow, statusGlyph, summarize } from "./render";
 import { yellow } from "./ansi";
+import { exitCode, nodeRow, statusGlyph, summarize } from "./render";
 
 export async function firstSnapshot(client: OduClient): Promise<PipelineState> {
   for await (const state of await client.surface.nodes.get({})) {
@@ -95,7 +95,7 @@ export async function statusCommand(
       );
     }
   }
-  return summarize(state).failedOverall ? 1 : 0;
+  return exitCode(state);
 }
 
 export async function logsCommand(
@@ -213,8 +213,48 @@ async function attachDashboard(
 
 /** `odu cancel` — tell the live run in this checkout to stop, and wait until
  *  its coordinator is gone. No live run is a clean no-op (nothing to cancel),
- *  not an error: cancelling something already finished is success. */
-export async function cancelCommand(socketPath?: string): Promise<number> {
+ *  not an error: cancelling something already finished is success.
+ *
+ *  With a target (`ci::fmt@plat` or `@plat`), cancel only that node or
+ *  platform lane and leave the rest of the run to settle (juspay/odu#68). */
+export async function cancelCommand(
+  target?: string,
+  socketPath?: string,
+): Promise<number> {
+  // Present-but-empty positional is a usage error — never escalate to full-run
+  // teardown (scripts with unset $TARGET must not kill the coordinator).
+  if (target !== undefined) {
+    if (target === "") {
+      process.stderr.write(
+        "odu: cancel needs a node id (ci::fmt@plat) or @platform, or no args for full-run cancel\n",
+      );
+      return 1;
+    }
+    const result = await cancelNodeOrPlatform(target, socketPath);
+    if (result.kind === "bad_target") {
+      process.stderr.write(
+        `odu: not a node id or @platform: ${target}\n`,
+      );
+      return 1;
+    }
+    if (result.kind === "no_run") {
+      process.stderr.write(
+        "odu: no run in progress in this checkout (nothing to cancel)\n",
+      );
+      return 0;
+    }
+    if (!result.ok) {
+      const detail =
+        result.error !== undefined && result.error !== ""
+          ? result.error
+          : "unknown node/platform, or already terminal";
+      process.stderr.write(`odu: could not cancel ${target} (${detail})\n`);
+      return 1;
+    }
+    process.stdout.write(`odu: cancelled ${target}\n`);
+    return 0;
+  }
+
   const result = await cancelRun(socketPath);
   if (!result.cancelled) {
     process.stderr.write(

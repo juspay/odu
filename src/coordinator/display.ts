@@ -344,8 +344,10 @@ export function renderRunFrame(opts: {
 
   const summary = summarize(state);
   const headGlyph = summary.done
-    ? summary.failedOverall
-      ? red("✗")
+    ? !summary.clean
+      ? summary.failedOverall
+        ? red("✗")
+        : yellow("◼")
       : green("✔")
     : yellow(spinnerAt(tick));
   const shaText =

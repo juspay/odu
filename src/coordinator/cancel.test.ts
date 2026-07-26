@@ -9,7 +9,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { pendingNode, type PipelineState } from "../common/surface";
 import { serveTestSurface, type TestSurface } from "../mcp/serveForTest";
-import { cancelRun } from "./cancel";
+import { cancelNodeOrPlatform, cancelRun } from "./cancel";
 
 function state(): PipelineState {
   return {
@@ -73,5 +73,42 @@ describe("cancelRun", () => {
     });
     expect(s.cancels()).toBe(1);
     expect(result).toEqual({ cancelled: true, confirmed: false });
+  });
+});
+
+describe("cancelNodeOrPlatform", () => {
+  it("is a no-op delivery when no run is live", async () => {
+    const result = await cancelNodeOrPlatform(
+      "ci::e2e@x86_64-linux",
+      "/no/such/odu.sock",
+    );
+    expect(result).toEqual({ kind: "no_run" });
+  });
+
+  it("rejects a bare @ as a bad target (not no_run)", async () => {
+    const result = await cancelNodeOrPlatform("@", "/no/such/odu.sock");
+    expect(result).toEqual({ kind: "bad_target" });
+  });
+
+  it("delivers node.cancel for a fan-in node id", async () => {
+    const s = await serve();
+    const result = await cancelNodeOrPlatform(
+      "ci::e2e@x86_64-linux",
+      s.socketPath,
+    );
+    expect(result).toEqual({ kind: "delivered", ok: true });
+    expect(s.nodeCancels).toEqual(["ci::e2e@x86_64-linux"]);
+    expect(s.laneCancels).toEqual([]);
+    // Full-run cancel was not invoked — coordinator stays up.
+    expect(s.cancels()).toBe(0);
+  });
+
+  it("delivers lane.cancel for @platform sugar", async () => {
+    const s = await serve();
+    const result = await cancelNodeOrPlatform("@aarch64-darwin", s.socketPath);
+    expect(result).toEqual({ kind: "delivered", ok: true });
+    expect(s.laneCancels).toEqual(["aarch64-darwin"]);
+    expect(s.nodeCancels).toEqual([]);
+    expect(s.cancels()).toBe(0);
   });
 });

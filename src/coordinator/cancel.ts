@@ -1,14 +1,18 @@
 /**
- * Cancel a live run from a *second* process — the shared core behind the
- * `odu cancel` CLI, the MCP `cancel` tool, and a `--supersede` run.
+ * Cancel a live run (or a node/lane of it) from a *second* process — the
+ * shared core behind the `odu cancel` CLI, the MCP `cancel` / `node_cancel`
+ * tools, and a `--supersede` run.
  *
- * The coordinator owns the run; everyone else only holds a socket to it. So
+ * The coordinator owns the run; everyone else only holds a socket to it. Full
  * cancellation is "dial the coordinator, call `run.cancel`, then wait until its
  * socket is gone." The ack is best-effort: `run.cancel` routes into the
  * coordinator's teardown, which exits the process — the reply can be cut off by
  * the socket closing, so we never depend on it. The *proof* a run is cancelled
  * is the socket no longer answering, which is exactly the precondition a
  * following `run` needs before it can re-bind the checkout's one-run lock.
+ *
+ * Per-node / per-lane cancel (juspay/odu#68) is `node.cancel` over the same
+ * socket and leaves the coordinator up so the rest of the run can settle.
  */
 
 import { SOCKET_PATH, tryDialSocket } from "./socket";
@@ -69,4 +73,58 @@ export async function cancelRun(
     await sleep(pollMs);
   }
   return { cancelled: true, confirmed: false };
+}
+
+/** Result of a partial cancel attempt against a live (or missing) run. */
+export type PartialCancelResult =
+  | { kind: "bad_target" }
+  | { kind: "no_run" }
+  | { kind: "delivered"; ok: boolean; error?: string };
+
+/** Parse CLI/MCP sugar: `@plat` → platform drop; else fan-in node id. */
+export function parsePartialCancelTarget(
+  target: string,
+):
+  | { kind: "platform"; platform: string }
+  | { kind: "node"; id: string }
+  | null {
+  if (target.startsWith("@")) {
+    const platform = target.slice(1);
+    if (platform === "" || platform.includes("@")) return null;
+    return { kind: "platform", platform };
+  }
+  if (target === "") return null;
+  return { kind: "node", id: target };
+}
+
+/** Cancel one node (`ci::fmt@plat`) or a whole platform lane (`@plat`) on the
+ *  live run. Routes to fan-in `node.cancel` / `lane.cancel`. The coordinator
+ *  stays up (juspay/odu#68). */
+export async function cancelNodeOrPlatform(
+  target: string,
+  socketPath: string = SOCKET_PATH,
+  deps: Pick<CancelDeps, "dial"> = {},
+): Promise<PartialCancelResult> {
+  const parsed = parsePartialCancelTarget(target);
+  if (parsed === null) return { kind: "bad_target" };
+  const dial = deps.dial ?? tryDialSocket;
+  const dialed = await dial(socketPath);
+  if (dialed === null) return { kind: "no_run" };
+  try {
+    const result =
+      parsed.kind === "platform"
+        ? await dialed.client.surface.lane.cancel({
+            platform: parsed.platform,
+          })
+        : await dialed.client.surface.node.cancel({ id: parsed.id });
+    return { kind: "delivered", ok: result.ok };
+  } catch (err) {
+    return {
+      kind: "delivered",
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  } finally {
+    dialed.close();
+  }
 }

@@ -66,6 +66,14 @@ describe("statusFor", () => {
     expect(statusFor(id, "skipped", null, "abc1234")).toBeNull();
     expect(statusFor(id, "pending", null, "abc1234")).toBeNull();
   });
+
+  it("maps operator cancel to success with Cancelled wording (not a red check)", () => {
+    expect(statusFor(id, "cancelled", 12_000, "abc1234")).toEqual({
+      state: "success",
+      context: id,
+      description: `Cancelled (12s): ${log}`,
+    });
+  });
 });
 
 describe("interruptStatus", () => {

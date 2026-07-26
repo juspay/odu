@@ -5,7 +5,7 @@
  *   odu status [-o json]                   snapshot a live run ({nodes, posting})
  *   odu logs [-f] <node>                   one node's log (replay + follow)
  *   odu attach [-o json]                   live dashboard / transition stream
- *   odu cancel                             stop the live run in this checkout
+ *   odu cancel [node|@platform]            stop the live run, or one node/lane
  *   odu runs [-o json]                     the durable run history (no live run)
  *   odu hosts                              venue inventory (free / busy / held by)
  *   odu lease [PLAT…] [--no-wait]          agent-held venue lease (cross-run)
@@ -49,7 +49,7 @@ run [recipe[@platform]…] [--platform P]… [--host P=ADDR]… [--root NAMEPATH
 status [-o json]              # json shape: { nodes, posting }
 logs [-f] <node>
 attach [-o json]
-cancel
+cancel [node|@platform]       # bare = whole run; node or @plat = partial
 runs [-o json]
 hosts
 lease [PLAT…] [--no-wait]     hold a free venue across runs (agent layer)
@@ -123,8 +123,21 @@ async function dispatch(argv: string[]): Promise<number> {
       });
       return attachCommand(values.output === "json");
     }
-    case "cancel":
-      return cancelCommand();
+    case "cancel": {
+      const { positionals } = parseArgs({
+        args: rest,
+        allowPositionals: true,
+        options: {},
+      });
+      if (positionals.length > 1) {
+        throw new Error(
+          "odu: cancel takes at most one argument (node id or @platform)",
+        );
+      }
+      // undefined = bare full-run cancel; a present empty string is rejected
+      // inside cancelCommand (never escalates to full-run teardown).
+      return cancelCommand(positionals[0]);
+    }
     case "runs": {
       const { values } = parseArgs({
         args: rest,

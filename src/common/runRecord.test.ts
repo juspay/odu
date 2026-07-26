@@ -126,6 +126,17 @@ describe("buildRunRecord", () => {
     });
     expect(record.unposted).toBeUndefined();
   });
+
+  it("records a cancelled node as incomplete — never a clean pass", () => {
+    const record = buildRunRecord({
+      ...base,
+      state: stateOf([
+        ["ci::fmt@x86_64-linux", "ok", 0, 10],
+        ["ci::fmt@aarch64-darwin", "cancelled", null, 5],
+      ]),
+    });
+    expect(record.outcome).toBe("incomplete");
+  });
 });
 
 describe("formatRunRef", () => {

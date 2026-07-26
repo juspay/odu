@@ -33,6 +33,7 @@ export const STATUS_COLOR: Record<NodeState["status"], (s: string) => string> =
     failed: red,
     skipped: dim,
     errored: magenta,
+    cancelled: dim,
   };
 
 /** The status glyph, coloured for terminals. */
@@ -47,10 +48,14 @@ export interface PipelineSummary {
   skipped: number;
   errored: number;
   pending: number;
+  cancelled: number;
   /** No node is pending or running — the pipeline has settled. */
   done: boolean;
   /** Settled with at least one failure or infrastructure error. */
   failedOverall: boolean;
+  /** Settled with no red and no operator-cancelled nodes — a clean pass.
+   *  Cancel is not red but is also not a clean pass (juspay/odu#68). */
+  clean: boolean;
 }
 
 /** The machine-readable snapshot of one node — the snake_cased projection
@@ -97,12 +102,13 @@ export function rowsOf(state: PipelineState): NodeRow[] {
 }
 
 /** The verdict-on-state projection every consumer reuses: 1 if the latest
- *  state has settled red (any failure or infrastructure error), else 0.
- *  `undefined` (no state yet) is a clean 0. Folds the inline
- *  `summarize(state).failedOverall ? 1 : 0` so the live view and the attach
- *  faces compute the exit code one way. */
+ *  state has settled and is not a clean pass (red *or* cancelled), else 0.
+ *  `undefined` (no state yet) is a clean 0. Folds the inline check so the live
+ *  view and the attach faces compute the exit code one way (juspay/odu#68). */
 export function exitCode(state: PipelineState | undefined): number {
-  return state !== undefined && summarize(state).failedOverall ? 1 : 0;
+  if (state === undefined) return 0;
+  const s = summarize(state);
+  return s.done && !s.clean ? 1 : 0;
 }
 
 export function summarize(state: PipelineState): PipelineSummary {
@@ -113,6 +119,7 @@ export function summarize(state: PipelineState): PipelineSummary {
     skipped: 0,
     errored: 0,
     pending: 0,
+    cancelled: 0,
   };
   for (const id of state.order) {
     const node = state.nodes[id];
@@ -120,10 +127,12 @@ export function summarize(state: PipelineState): PipelineSummary {
     counts[node.status] += 1;
   }
   const done = ![...NON_TERMINAL_STATUSES].some((s) => counts[s] > 0);
+  const red = counts.failed + counts.errored > 0;
   return {
     ...counts,
     done,
-    failedOverall: done && counts.failed + counts.errored > 0,
+    failedOverall: done && red,
+    clean: done && !red && counts.cancelled === 0,
   };
 }
 
@@ -138,17 +147,20 @@ export function agentSummary(snap: AgentNodes): {
   done: boolean;
   failed: string[];
   errored: string[];
+  cancelled: string[];
 } {
   const failed: string[] = [];
   const errored: string[] = [];
+  const cancelled: string[] = [];
   let done = true;
   for (const node of snap.nodes) {
     if (NON_TERMINAL_STATUSES.has(node.status as NodeStatus)) done = false;
+    if (node.status === "cancelled") cancelled.push(node.id);
     if (!node.red) continue;
     if (node.status === "failed") failed.push(node.id);
     else if (node.status === "errored") errored.push(node.id);
   }
-  return { done, failed, errored };
+  return { done, failed, errored, cancelled };
 }
 
 /** The default node to attach to: the first running node, else the first

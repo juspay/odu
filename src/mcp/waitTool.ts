@@ -60,11 +60,14 @@ export class NoLiveRunError extends Error {}
 export interface SettleVerdict {
 	/** Every node reached a terminal state within the timeout. */
 	settled: boolean;
-	/** Settled (or fail-fast tripped) with no red node. `false` while a red
-	 *  node exists or on timeout. */
+	/** Settled with no red node *and* no operator-cancelled node. `false` while
+	 *  a red node exists, any node is `cancelled` (juspay/odu#68), or on timeout. */
 	passed: boolean;
 	failed: string[];
 	errored: string[];
+	/** Nodes the operator cancelled mid-run (status `cancelled`); never red,
+	 *  but a non-empty list means the run is not a clean pass. */
+	cancelled_nodes: string[];
 	/** Returned early because a node went red (fail-fast), before the slow
 	 *  lanes finished. */
 	fail_fast_tripped: boolean;
@@ -225,15 +228,20 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
 	// `nodes` cell) swallows the abort and ends the iterable rather than
 	// rejecting, so both paths must classify an aborted controller as
 	// timeout/cancel, not as a settled run.
+	const emptyRed = {
+		failed: [] as string[],
+		errored: [] as string[],
+		cancelled: [] as string[],
+	};
 	const abortedVerdict = (): SettleVerdict => {
 		const cancelled = opts.signal?.aborted === true;
-		const red =
-			last !== undefined ? agentSummary(last) : { failed: [], errored: [] };
+		const red = last !== undefined ? agentSummary(last) : emptyRed;
 		return {
 			settled: false,
 			passed: false,
 			failed: red.failed,
 			errored: red.errored,
+			cancelled_nodes: red.cancelled,
 			fail_fast_tripped: false,
 			timed_out: !cancelled,
 			cancelled,
@@ -274,11 +282,13 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
 		if (fromRecord !== null) {
 			// One authority supplies every field it knows — pass/fail, the red
 			// node lists, and the posting debt it stamped at finalize.
+			// incomplete/cancelled records never answer here (recordVerdict null).
 			return {
 				settled: true,
 				passed: fromRecord.passed,
 				failed: fromRecord.failed,
 				errored: fromRecord.errored,
+				cancelled_nodes: [],
 				fail_fast_tripped: false,
 				timed_out: false,
 				cancelled: false,
@@ -293,9 +303,13 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
 		const red = agentSummary(last);
 		return {
 			settled: red.done,
-			passed: red.done && red.failed.length + red.errored.length === 0,
+			passed:
+				red.done &&
+				red.failed.length + red.errored.length === 0 &&
+				red.cancelled.length === 0,
 			failed: red.failed,
 			errored: red.errored,
+			cancelled_nodes: red.cancelled,
 			fail_fast_tripped: false,
 			timed_out: false,
 			cancelled: false,
@@ -323,13 +337,15 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
 					`no live run matching ${opts.expectedSha} (this checkout is running ${formatRef(snap.sha7, snap.seq)})`,
 				);
 			}
-			const { done, failed, errored } = agentSummary(snap);
+			const { done, failed, errored, cancelled: cancelledNodes } =
+				agentSummary(snap);
 			if (failFast && failed.length + errored.length > 0) {
 				return {
 					settled: done,
 					passed: false,
 					failed,
 					errored,
+					cancelled_nodes: cancelledNodes,
 					fail_fast_tripped: !done,
 					timed_out: false,
 					cancelled: false,
@@ -341,9 +357,11 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
 			if (done) {
 				return {
 					settled: true,
-					passed: failed.length + errored.length === 0,
+					passed:
+						failed.length + errored.length === 0 && cancelledNodes.length === 0,
 					failed,
 					errored,
+					cancelled_nodes: cancelledNodes,
 					fail_fast_tripped: false,
 					timed_out: false,
 					cancelled: false,
