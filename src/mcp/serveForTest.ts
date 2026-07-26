@@ -29,6 +29,8 @@ export interface TestSurface {
   reruns: string[];
   /** Node ids passed to `node.cancel` over the socket. */
   nodeCancels: string[];
+  /** Platforms passed to `lane.cancel` over the socket. */
+  laneCancels: string[];
   /** How many times `run.cancel` was called over the socket. */
   cancels: () => number;
   close: () => void;
@@ -60,6 +62,7 @@ export async function serveTestSurface(
   const tail = createLogTail();
   const reruns: string[] = [];
   const nodeCancels: string[] = [];
+  const laneCancels: string[] = [];
   let cancels = 0;
   // Forward declaration: the cancel handler can close the listener via the
   // caller's hook, but `closeListener` is only bound after `serveSocket`.
@@ -86,6 +89,12 @@ export async function serveTestSurface(
           return { ok: true };
         },
       },
+      lane: {
+        cancel: async ({ input }) => {
+          laneCancels.push(input.platform);
+          return { ok: true };
+        },
+      },
     },
   });
   // `implementSurface` returns the FINAL top-level router — serve it directly.
@@ -108,6 +117,7 @@ export async function serveTestSurface(
     resetLog: (id, text) => tail.reset(id, text),
     reruns,
     nodeCancels,
+    laneCancels,
     cancels: () => cancels,
     // Close the listener AND, when the harness owns the dir, remove it so
     // repeated runs don't leak `odu-mcp-test-*` dirs under the system tmpdir.

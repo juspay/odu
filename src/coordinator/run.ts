@@ -27,8 +27,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { implementSurface, inMemoryStore } from "@kolu/surface/server";
 import { isLocalHost } from "@kolu/surface-remote";
-import { bold, dim, green, link, magenta, red } from "../cli/ansi";
-import { NON_TERMINAL_STATUSES } from "../cli/render";
+import { bold, dim, green, link, red } from "../cli/ansi";
+import {
+  NON_TERMINAL_STATUSES,
+  statusGlyph,
+  summarize,
+} from "../cli/render";
 import { formatGoDuration } from "../common/duration";
 import { gitTopLevel } from "../common/git";
 import { createLogTail } from "../common/logTail";
@@ -676,35 +680,74 @@ async function orchestrate(
   };
 
   // ── the fan-in surface (status / logs / attach dial this) ──
-  const lanes = new Map<string, Lane>();
+  // (laneEntries defined above with cancel/rerun routing)
+  // Lane registry: live handles plus operator-cancelled tombstones so frame /
+  // death / node-cancel paths share one liveness fact (no parallel Set).
+  type LaneEntry =
+    | { phase: "live"; handle: Lane }
+    | { phase: "operator_cancelled" };
+  const laneEntries = new Map<string, LaneEntry>();
+  const liveLane = (platform: string): Lane | undefined => {
+    const e = laneEntries.get(platform);
+    return e?.phase === "live" ? e.handle : undefined;
+  };
+  const laneAccepting = (platform: string): boolean =>
+    laneEntries.get(platform)?.phase === "live";
+
   // Route a rerun request to the owning lane. A bare lane-local id (no `@`)
   // carries no platform: splitFanId reports it as the "unknown" sentinel, which
   // has no lane, so the request is unroutable — `false`, same as a missing
   // lane. The surface's `node.rerun` and the live view's `r` key both call this.
   const rerunNode = async (id: string): Promise<boolean> => {
     const { namepath, platform } = splitFanId(id);
-    const lane = platform === "unknown" ? undefined : lanes.get(platform);
+    const lane = platform === "unknown" ? undefined : liveLane(platform);
     if (lane === undefined) return false;
     return lane.rerun(namepath);
   };
 
-  // Platforms the operator cancelled mid-run — ignore further lane frames so a
-  // race with close can't resurrect cancelled nodes as running.
-  const cancelledPlatforms = new Set<string>();
+  /** Mark unfinished nodes on a platform terminal — shared by operator lane
+   *  cancel and infrastructure `onDead` (status/log strategy as data). */
+  const terminalizePlatformNodes = (
+    platform: string,
+    strategy: {
+      running: "cancelled" | "errored";
+      pending: "cancelled" | "skipped";
+      log: string;
+    },
+  ): void => {
+    const state = store.get();
+    const now = Date.now();
+    for (const id of state.order) {
+      if (!onPlatform(id, platform)) continue;
+      const node = state.nodes[id];
+      if (node === undefined) continue;
+      if (node.status === "running") {
+        appendLocal(id, strategy.log);
+        const startedAt = node.startedAt ?? now;
+        updateNode(id, {
+          status: strategy.running,
+          durationMs: now - startedAt,
+        });
+      } else if (node.status === "pending") {
+        updateNode(id, { status: strategy.pending });
+      }
+    }
+  };
 
   /** Drop one platform lane: mark unfinished nodes `cancelled`, close the lane
    *  (no `onDead`/errored overlay), free a run-owned venue lease. The rest of
    *  the run keeps settling (juspay/odu#68). */
   const cancelPlatform = (platform: string): boolean => {
-    if (cancelledPlatforms.has(platform)) return true;
+    const entry = laneEntries.get(platform);
+    if (entry?.phase === "operator_cancelled") return true;
     const state = store.get();
     const hasNodes = state.order.some((id) => onPlatform(id, platform));
-    if (!hasNodes) return false;
-    cancelledPlatforms.add(platform);
-    const lane = lanes.get(platform);
-    // Close first so the runner dies without onDead → errored.
-    lane?.close();
-    lanes.delete(platform);
+    if (!hasNodes && entry === undefined) return false;
+    // Tombstone first so a racing frame cannot re-accept updates.
+    const handle = entry?.phase === "live" ? entry.handle : undefined;
+    laneEntries.set(platform, { phase: "operator_cancelled" });
+    // Close so the runner dies without onDead → errored.
+    handle?.close();
     // Free a run-owned lease so the box is reusable; agent-held leases are
     // never in acquiredLeases.
     const host = lanesByPlatform[platform];
@@ -715,38 +758,20 @@ async function orchestrate(
         acquiredLeases.splice(idx, 1);
       }
     }
-    const now = Date.now();
-    for (const id of state.order) {
-      if (!onPlatform(id, platform)) continue;
-      const node = state.nodes[id];
-      if (node === undefined) continue;
-      if (node.status === "running") {
-        appendLocal(id, "\n[odu] cancelled by operator (lane)\n");
-        const startedAt = node.startedAt ?? now;
-        updateNode(id, {
-          status: "cancelled",
-          durationMs: now - startedAt,
-        });
-      } else if (node.status === "pending") {
-        updateNode(id, { status: "cancelled" });
-      }
-    }
+    terminalizePlatformNodes(platform, {
+      running: "cancelled",
+      pending: "cancelled",
+      log: "\n[odu] cancelled by operator (lane)\n",
+    });
     checkSettled();
     return true;
   };
 
-  /** Cancel one fan-in node (`ci::fmt@plat`) or a whole platform (`@plat`). */
-  const cancelTarget = async (id: string): Promise<boolean> => {
-    // Platform selector: `@aarch64-darwin` (leading `@`, no second `@`).
-    if (id.startsWith("@")) {
-      const platform = id.slice(1);
-      if (platform === "" || platform.includes("@")) return false;
-      return cancelPlatform(platform);
-    }
+  /** Cancel one fan-in node (`ci::fmt@plat`). Platform drop is `lane.cancel`. */
+  const cancelNode = async (id: string): Promise<boolean> => {
     const { namepath, platform } = splitFanId(id);
     if (platform === "unknown" || namepath === "") return false;
-    if (cancelledPlatforms.has(platform)) return false;
-    const lane = lanes.get(platform);
+    const lane = liveLane(platform);
     if (lane === undefined) return false;
     return lane.cancel(namepath);
   };
@@ -815,7 +840,7 @@ async function orchestrate(
     procedures: {
       node: {
         rerun: async ({ input }) => ({ ok: await rerunNode(input.id) }),
-        cancel: async ({ input }) => ({ ok: await cancelTarget(input.id) }),
+        cancel: async ({ input }) => ({ ok: await cancelNode(input.id) }),
       },
       run: {
         // A second process asked this run to stop. Drive the shared teardown
@@ -825,6 +850,11 @@ async function orchestrate(
           shutdown(130, "cancelled");
           return { ok: true };
         },
+      },
+      lane: {
+        cancel: async ({ input }) => ({
+          ok: cancelPlatform(input.platform),
+        }),
       },
     },
   });
@@ -875,7 +905,7 @@ async function orchestrate(
     clearIdle();
     const exclusivityLost = opts.exclusivityLost === true;
     const stopWork = (): void => {
-      for (const lane of lanes.values()) lane.close();
+      for (const lane of createdLanes) lane.close();
       // Free venue leases so the remote flock drops immediately rather than
       // waiting for the OS to reap our ssh children on process death (crash
       // paths still free via connection close — this is the clean path). On
@@ -1101,7 +1131,7 @@ async function orchestrate(
       resolveDrvPath: runnerDrvResolver(runnerFlake, platform),
       onSetupLine: (line) => appendLocal(setupId, `${line}\n`),
       onNodes: (laneState) => {
-        if (cancelledPlatforms.has(platform)) return;
+        if (!laneAccepting(platform)) return;
         for (const laneId of laneState.order) {
           const laneNode = laneState.nodes[laneId];
           if (laneNode === undefined) continue;
@@ -1137,31 +1167,21 @@ async function orchestrate(
         }
       },
       onDead: (error) => {
-        // Operator platform-cancel closes the lane without onDead; if a race
-        // still fires, don't overlay cancelled with errored.
-        if (cancelledPlatforms.has(platform)) return;
-        const state = store.get();
-        for (const id of state.order) {
-          if (!onPlatform(id, platform)) continue;
-          const status = state.nodes[id]?.status;
-          if (status === "running") {
-            appendLocal(id, `\n[odu] lane died: ${error}\n`);
-            const startedAt = state.nodes[id]?.startedAt ?? Date.now();
-            updateNode(id, {
-              status: "errored",
-              durationMs: Date.now() - startedAt,
-            });
-          } else if (status === "pending") {
-            updateNode(id, { status: "skipped" });
-          }
-        }
+        // Operator platform-cancel tombstones the entry; if a race still fires,
+        // don't overlay cancelled with errored.
+        if (!laneAccepting(platform)) return;
+        terminalizePlatformNodes(platform, {
+          running: "errored",
+          pending: "skipped",
+          log: `\n[odu] lane died: ${error}\n`,
+        });
       },
     });
     // Register the session for the runCommand `finally` sweep the instant it
-    // exists — before `lanes.set` — so a throw later in this loop still leaves
+    // exists — before laneEntries.set — so a throw later in this loop still leaves
     // every already-built lane reachable for teardown.
     createdLanes.add(lane);
-    lanes.set(platform, lane);
+    laneEntries.set(platform, { phase: "live", handle: lane });
   }
 
   // `shutdown` (the shared teardown) is defined above the surface so the
@@ -1215,7 +1235,7 @@ async function orchestrate(
     state: PipelineState,
     unposted: ReadonlyArray<UnpostedEntry> = [],
   ): number => {
-    const counts = { ok: 0, failed: 0, errored: 0, skipped: 0, cancelled: 0 };
+    const counts = summarize(state);
     const shaLabel = commitLabel({ sha7, dirty: ctx.dirty });
     const lines: string[] = [
       dim(
@@ -1227,20 +1247,7 @@ async function orchestrate(
     for (const id of state.order) {
       const node = state.nodes[id];
       if (node === undefined) continue;
-      if (node.status === "ok") counts.ok += 1;
-      else if (node.status === "failed") counts.failed += 1;
-      else if (node.status === "errored") counts.errored += 1;
-      else if (node.status === "skipped") counts.skipped += 1;
-      else if (node.status === "cancelled") counts.cancelled += 1;
-      const color =
-        node.status === "ok"
-          ? green
-          : node.status === "errored"
-            ? magenta
-            : node.status === "failed"
-              ? red
-              : dim;
-      const glyph = color(STATUS_META[node.status].glyph);
+      const glyph = statusGlyph(node.status);
       const dur =
         node.durationMs !== null
           ? ` ${dim(formatGoDuration(node.durationMs))}`
@@ -1288,7 +1295,7 @@ async function orchestrate(
 
   await allSettled;
 
-  for (const lane of lanes.values()) lane.close();
+  for (const lane of createdLanes) lane.close();
   // Venue locks drop with the run — free them as soon as lanes are done so the
   // next waiter can claim the box while we still finalize statuses/records.
   for (const lease of acquiredLeases) lease.release();

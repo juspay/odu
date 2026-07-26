@@ -20,8 +20,8 @@
  *     back to the durable `.ci/<sha7>/<platform>/<node>.log` when no run is
  *     live — the 64KB clamp + the path-traversal guard live in this handler.
  *   - procedure `node.rerun` → `node.rerun` (pass-through to A).
- *   - procedure `node.cancel` → `node.cancel` (pass-through to A; fan-in id or
- *     `@platform` for a whole lane — juspay/odu#68).
+ *   - procedure `node.cancel` → `node.cancel` (one fan-in node).
+ *   - procedure `lane.cancel` → `lane.cancel` (drop a whole platform lane).
  *
  * `nodes` is live-only by design — when the coordinator socket is gone `nodes`
  * reports `{ run: false }` rather than a finished run's verdict, so within a run
@@ -92,6 +92,9 @@ interface OduSurfaceClient {
     node: {
       rerun: (input: { id: string }) => Promise<{ ok: boolean }>;
       cancel: (input: { id: string }) => Promise<{ ok: boolean }>;
+    };
+    lane: {
+      cancel: (input: { platform: string }) => Promise<{ ok: boolean }>;
     };
   };
 }
@@ -224,6 +227,12 @@ const agentSpec = {
       },
       cancel: {
         input: z.object({ id: TaskIdSchema }),
+        output: z.object({ ok: z.boolean() }),
+      },
+    },
+    lane: {
+      cancel: {
+        input: z.object({ platform: z.string().min(1) }),
         output: z.object({ ok: z.boolean() }),
       },
     },
@@ -440,7 +449,7 @@ export type DialA = () => Promise<{
  *                    `EMPTY_STATE`-shaped frame (mapped to `{ run: false }`).
  *   - `nodeLog.get`— dial, stream A's `nodeLog`; no socket → end immediately so
  *                    the logs store falls back to the durable file.
- *   - `node.rerun` / `node.cancel` — dial, call, close; no socket → `{ ok: false }`.
+ *   - `node.rerun` / `node.cancel` / `lane.cancel` — dial, call, close; no socket → `{ ok: false }`.
  */
 export function redialingAClient(dial: DialA): OduSurfaceClient {
   // Dial fresh, stream the chosen upstream, and close the socket when iteration
@@ -510,6 +519,17 @@ export function redialingAClient(dial: DialA): OduSurfaceClient {
           }
         },
       },
+      lane: {
+        cancel: async (input) => {
+          const dialed = await dial();
+          if (dialed === null) return { ok: false };
+          try {
+            return await dialed.client.surface.lane.cancel(input);
+          } finally {
+            dialed.close();
+          }
+        },
+      },
     },
   };
 }
@@ -563,6 +583,10 @@ function agentDeps(
           a.surface.node.rerun(input),
         cancel: ({ input }: { input: { id: string } }) =>
           a.surface.node.cancel(input),
+      },
+      lane: {
+        cancel: ({ input }: { input: { platform: string } }) =>
+          a.surface.lane.cancel(input),
       },
     },
   };

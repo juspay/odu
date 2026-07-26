@@ -75,26 +75,49 @@ export async function cancelRun(
   return { cancelled: true, confirmed: false };
 }
 
-export interface NodeCancelResult {
-  /** A live run was found and `node.cancel` was delivered. */
+export interface PartialCancelResult {
+  /** A live run was found and a cancel RPC was delivered. */
   delivered: boolean;
   /** The coordinator accepted the cancel (`ok: true`). */
   ok: boolean;
 }
 
+/** Parse CLI/MCP sugar: `@plat` → platform drop; else fan-in node id. */
+export function parsePartialCancelTarget(
+  target: string,
+):
+  | { kind: "platform"; platform: string }
+  | { kind: "node"; id: string }
+  | null {
+  if (target.startsWith("@")) {
+    const platform = target.slice(1);
+    if (platform === "" || platform.includes("@")) return null;
+    return { kind: "platform", platform };
+  }
+  if (target === "") return null;
+  return { kind: "node", id: target };
+}
+
 /** Cancel one node (`ci::fmt@plat`) or a whole platform lane (`@plat`) on the
- *  live run. No live run → `{ delivered: false, ok: false }`. The coordinator
- *  stays up; only the targeted work stops (juspay/odu#68). */
+ *  live run. Routes to fan-in `node.cancel` / `lane.cancel`. No live run →
+ *  `{ delivered: false, ok: false }`. The coordinator stays up (juspay/odu#68). */
 export async function cancelNodeOrPlatform(
   target: string,
   socketPath: string = SOCKET_PATH,
   deps: Pick<CancelDeps, "dial"> = {},
-): Promise<NodeCancelResult> {
+): Promise<PartialCancelResult> {
+  const parsed = parsePartialCancelTarget(target);
+  if (parsed === null) return { delivered: false, ok: false };
   const dial = deps.dial ?? tryDialSocket;
   const dialed = await dial(socketPath);
   if (dialed === null) return { delivered: false, ok: false };
   try {
-    const result = await dialed.client.surface.node.cancel({ id: target });
+    const result =
+      parsed.kind === "platform"
+        ? await dialed.client.surface.lane.cancel({
+            platform: parsed.platform,
+          })
+        : await dialed.client.surface.node.cancel({ id: parsed.id });
     return { delivered: true, ok: result.ok };
   } catch {
     return { delivered: true, ok: false };

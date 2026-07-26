@@ -117,6 +117,7 @@ async function connectWith(
       logs: "resource",
       "node.rerun": { tool: { mutates: true } },
       "node.cancel": { tool: { mutates: true } },
+      "lane.cancel": { tool: { mutates: true } },
     },
     tools,
     serverInfo: { name: "odu", version: "0.0.0" },
@@ -155,7 +156,7 @@ async function connect(s: TestSurface, socketPath: string = s.socketPath) {
 }
 
 describe("odu agent MCP — end to end over the in-memory transport", () => {
-  it("tools/list is exactly [cancel, node_cancel, node_rerun, run, wait_for_settle] (default-deny)", async () => {
+  it("tools/list is exactly [cancel, lane_cancel, node_cancel, node_rerun, run, wait_for_settle] (default-deny)", async () => {
     const s = await serve([["ci::e2e@x86_64-linux", "running"]]);
     const { mcp } = await connect(s);
 
@@ -163,6 +164,7 @@ describe("odu agent MCP — end to end over the in-memory transport", () => {
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([
       "cancel",
+      "lane_cancel",
       "node_cancel",
       "node_rerun",
       "run",
@@ -295,14 +297,30 @@ describe("odu agent MCP — end to end over the in-memory transport", () => {
 
     const res = await mcp.callTool({
       name: "node_cancel",
-      arguments: { id: "@aarch64-darwin" },
+      arguments: { id: "ci::e2e@x86_64-linux" },
     });
     expect(res.isError).toBeFalsy();
     const body = JSON.parse(
       (res.content as Array<{ text: string }>)[0]?.text ?? "null",
     );
     expect(body).toEqual({ ok: true });
-    expect(s.nodeCancels).toEqual(["@aarch64-darwin"]);
+    expect(s.nodeCancels).toEqual(["ci::e2e@x86_64-linux"]);
+  });
+
+  it("lane_cancel proxies the mutation to the coordinator surface", async () => {
+    const s = await serve([["ci::e2e@x86_64-linux", "running"]]);
+    const { mcp } = await connect(s);
+
+    const res = await mcp.callTool({
+      name: "lane_cancel",
+      arguments: { platform: "aarch64-darwin" },
+    });
+    expect(res.isError).toBeFalsy();
+    const body = JSON.parse(
+      (res.content as Array<{ text: string }>)[0]?.text ?? "null",
+    );
+    expect(body).toEqual({ ok: true });
+    expect(s.laneCancels).toEqual(["aarch64-darwin"]);
   });
 
   it("reads a node's live log via the logs collection item", async () => {

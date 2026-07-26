@@ -417,6 +417,8 @@ export function createLaneRunner(): LaneRunner {
     const initial = getState();
     const node = initial.nodes[id];
     if (disposed || node === undefined) return false;
+    // Idempotent: already cancelled is success (same as re-cancel platform).
+    if (node.status === "cancelled") return true;
     if (node.status !== "pending" && node.status !== "running") return false;
     const child = children.get(id);
     if (child !== undefined) {

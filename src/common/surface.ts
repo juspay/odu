@@ -315,9 +315,9 @@ const primitives = {
 } as const;
 
 /** Per-node mutations shared by the lane runner and the coordinator fan-in.
- *  `rerun` resets a node + dependents; `cancel` stops a running/pending node
- *  (or, on the fan-in only, a whole platform via `@<platform>` — see
- *  coordinator cancelTarget). */
+ *  `rerun` resets a node + dependents; `cancel` stops a running/pending node.
+ *  Platform/lane drop is fan-in-only (`lane.cancel` below) — not smuggled into
+ *  the node id (juspay/odu#68). */
 const nodeProcedures = {
   rerun: {
     input: z.object({ id: TaskIdSchema }),
@@ -325,6 +325,16 @@ const nodeProcedures = {
   },
   cancel: {
     input: z.object({ id: TaskIdSchema }),
+    output: z.object({ ok: z.boolean() }),
+  },
+} as const;
+
+/** Fan-in-only: drop one platform lane mid-run without tearing down the
+ *  coordinator. Distinct from `node.cancel` (one unit of work) and `run.cancel`
+ *  (whole-run teardown). */
+const laneCancelProcedure = {
+  cancel: {
+    input: z.object({ platform: z.string().min(1) }),
     output: z.object({ ok: z.boolean() }),
   },
 } as const;
@@ -428,8 +438,8 @@ export const laneSurface = defineSurface({
  *  knowing, so an attached face renders the same matrix `run` does, and the
  *  `run.cancel` lifecycle mutation a second process drives teardown through.
  *  (`run.cancel` is fan-in-only — a lane has no run to cancel; it's the
- *  coordinator that owns the run and the lanes.) `node.cancel` accepts a fan-in
- *  id (`ci::fmt@aarch64-darwin`) or a whole platform (`@aarch64-darwin`). */
+ *  coordinator that owns the run and the lanes.) `lane.cancel` drops one
+ *  platform mid-run; `node.cancel` stops one fan-in node. */
 export const oduSurface = defineSurface({
   ...primitives,
   cells: {
@@ -442,6 +452,7 @@ export const oduSurface = defineSurface({
   procedures: {
     node: nodeProcedures,
     run: cancelProcedure,
+    lane: laneCancelProcedure,
   },
 });
 

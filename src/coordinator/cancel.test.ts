@@ -85,15 +85,25 @@ describe("cancelNodeOrPlatform", () => {
     expect(result).toEqual({ delivered: false, ok: false });
   });
 
-  it("delivers node.cancel to a live surface", async () => {
+  it("delivers node.cancel for a fan-in node id", async () => {
     const s = await serve();
     const result = await cancelNodeOrPlatform(
-      "@aarch64-darwin",
+      "ci::e2e@x86_64-linux",
       s.socketPath,
     );
     expect(result).toEqual({ delivered: true, ok: true });
-    expect(s.nodeCancels).toEqual(["@aarch64-darwin"]);
+    expect(s.nodeCancels).toEqual(["ci::e2e@x86_64-linux"]);
+    expect(s.laneCancels).toEqual([]);
     // Full-run cancel was not invoked — coordinator stays up.
+    expect(s.cancels()).toBe(0);
+  });
+
+  it("delivers lane.cancel for @platform sugar", async () => {
+    const s = await serve();
+    const result = await cancelNodeOrPlatform("@aarch64-darwin", s.socketPath);
+    expect(result).toEqual({ delivered: true, ok: true });
+    expect(s.laneCancels).toEqual(["aarch64-darwin"]);
+    expect(s.nodeCancels).toEqual([]);
     expect(s.cancels()).toBe(0);
   });
 });

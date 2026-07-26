@@ -32,7 +32,8 @@ The runner serves three typed primitives over plain ssh using an [oRPC](https://
 | **Cell** | `surface.nodes.get({})` | The whole pipeline: one snapshot, then deltas. |
 | **Stream** | `surface.nodeLog.get({ id })` | Buffered node output, then live appends. |
 | **Procedure** | `surface.node.rerun({ id })` | Reset a node and its dependents, then reschedule. |
-| **Procedure** | `surface.node.cancel({ id })` | Cancel one node, or a whole platform via `@plat`. |
+| **Procedure** | `surface.node.cancel({ id })` | Cancel one pending/running node. |
+| **Procedure** | `surface.lane.cancel({ platform })` | Drop one platform lane mid-run. |
 
 Every interface is a thin adapter over that contract: the terminal dashboard, the MCP server, and future frontends all read the same state.
 
@@ -190,7 +191,7 @@ odu mcp                           serve the agent interface over stdio
 
 `.ci/odu.sock` identifies the live run in a checkout. Bare `odu cancel` asks the coordinator to finalize statuses, close lanes, remove the socket, and then waits for teardown.
 
-`odu cancel <node>` (e.g. `ci::fmt@aarch64-darwin`) or `odu cancel @<platform>` cancels only that node or whole platform lane — running work is stopped and marked `cancelled` (not `errored`/`failed`), pending work on the lane is cancelled, and a run-owned venue lease for that platform is released. The rest of the run settles normally. MCP twin: `node_cancel`.
+`odu cancel <node>` (e.g. `ci::fmt@aarch64-darwin`) or `odu cancel @<platform>` cancels only that node or whole platform lane — running work is stopped and marked `cancelled` (not `errored`/`failed`), pending work on the lane is cancelled, and a run-owned venue lease for that platform is released. The rest of the run settles normally. MCP twins: `node_cancel` / `lane_cancel` (CLI `@plat` sugar maps to `lane.cancel`).
 
 `odu run --supersede` combines full-run cancel and start for the common “stop this run and test the fix” move. Runs normally exit as soon as they settle; `--linger` keeps the coordinator available so a node can be retried later, then reaps it after an idle period or explicit cancellation.
 
@@ -204,7 +205,8 @@ The interface projects odu's [@kolu/surface](https://kolu.dev/surface/) through 
 | --- | --- |
 | `run` | Start a background coordinator. Supports `supersede`, `linger`, and `no_wait`. Reuses agent-held venues without re-claiming. |
 | `node_rerun` | Reset one node and its transitive dependents. |
-| `node_cancel` | Cancel one node (`ci::fmt@plat`) or a whole platform lane (`@plat`); leaves the rest of the run settling. Marks targets `cancelled` (not red). |
+| `node_cancel` | Cancel one node (`ci::fmt@plat`); leaves the rest of the run settling. Marks `cancelled` (not red). |
+| `lane_cancel` | Drop one platform lane (`platform: aarch64-darwin`); frees a run-owned venue lease. |
 | `wait_for_settle` | Return on settlement or immediately when a node goes red. Carries `sha7`, the reserved `seq`, and `unposted[]` full owed rows (`{context, lastError, attempts}` — reporting debt does not block settle). If the coordinator's socket closes before the terminal frame, the verdict comes from the run's finalized record on disk. Fails loud with no live run or an `expected_sha` mismatch. |
 | `cancel` | Stop and fully tear down the live run. |
 | `runs` | Read durable run history after the coordinator exits. |
