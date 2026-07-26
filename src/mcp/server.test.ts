@@ -693,12 +693,14 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
       // re-derives the whole invariant instead of half of it.
       const s = await serve([["ci::e2e@x86_64-linux", "running"]]);
       const client = await agentWaitClient(s);
-      setTimeout(() => s.close(), 30);
+      // Give the first live frame time to land before closing (darwin flakes
+      // with a 30ms close: streamEnded saw no last.run and threw NoLiveRun).
+      setTimeout(() => s.close(), 80);
       const openNodes = state([["ci::e2e@x86_64-linux", status]]).nodes;
       const v = await waitForSettle({
         client,
         failFast: false,
-        timeoutMs: 300,
+        timeoutMs: 500,
         resolveRunContext: ledgerWith(record("passed", openNodes)),
       });
       expect(v.passed).toBe(false);
