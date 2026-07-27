@@ -18,6 +18,10 @@ const log = (msg: string): void => {
   process.stderr.write(`${msg}\n`);
 };
 
+/** Set once the runner exists so the fatal-error exit below can reap recipe
+ *  process groups too — they are `detached`, so an unswept exit orphans them. */
+let disposeRunner: (() => void) | null = null;
+
 async function main(): Promise<void> {
   const { values } = parseArgs({
     args: process.argv.slice(2),
@@ -31,6 +35,23 @@ async function main(): Promise<void> {
   }
 
   const runner = createLaneRunner();
+  disposeRunner = runner.dispose;
+  // Death by signal must reap the recipe process groups exactly like stdin
+  // EOF does. This is not hypothetical: a localhost lane's teardown
+  // (surface-remote `session.destroy()`) SIGTERMs this very process, and the
+  // default disposition would kill us without running `dispose()` — every
+  // `detached` recipe tree (test drivers, package managers, vitest workers)
+  // would reparent to init and leak forever. `dispose()` sweeps the groups
+  // synchronously (SIGTERM → bounded grace → SIGKILL), so exiting right
+  // after it returns is safe.
+  const signalExitCodes = { SIGHUP: 129, SIGINT: 130, SIGTERM: 143 } as const;
+  for (const signal of ["SIGHUP", "SIGINT", "SIGTERM"] as const) {
+    process.once(signal, () => {
+      runner.dispose();
+      log(`odu-runner: ${signal} — recipe process groups reaped, exiting`);
+      process.exit(signalExitCodes[signal]);
+    });
+  }
   log("odu-runner: idle — waiting for run.configure over stdio");
   const end = await serveOverStdio({
     router: runner.router,
@@ -50,5 +71,8 @@ async function main(): Promise<void> {
 main().catch((err: unknown) => {
   const e = err as Error;
   log(`odu-runner: fatal: ${e.message}\n${e.stack ?? ""}`);
+  // A fatal exit is still a teardown path: sweep the detached recipe groups
+  // (idempotent — a no-op when dispose already ran) before dying.
+  disposeRunner?.();
   process.exit(1);
 });
