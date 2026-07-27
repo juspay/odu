@@ -14,7 +14,9 @@
  *   - **Process-group kills.** A recipe node is `just --no-deps <namepath>`
  *     wrapping `nix develop -c …` wrapping the real work; killing only the
  *     direct child would orphan grandchildren that keep writing into the
- *     workspace. Nodes spawn `detached` and die as a group.
+ *     workspace. Nodes spawn `detached` and die as a group — every teardown
+ *     path routes through one `GroupReaper` (SIGTERM → grace → SIGKILL; see
+ *     reap.ts), including the runner's own death by signal (main.ts).
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
@@ -38,6 +40,7 @@ import {
   type LocalHold,
   probeLocal,
 } from "./leaseHold";
+import { createGroupReaper } from "./reap";
 import { prepareWorkspace } from "./workspace";
 
 export const SETUP_NODE_ID = "_ci-setup";
@@ -110,7 +113,10 @@ export function createLaneRunner(): LaneRunner {
                   `odu-runner: venue lease self-released (${reason})\n`,
                 );
                 // Exit so the coordinator session sees link death and
-                // `lease.lost` fires — flock is already free.
+                // `lease.lost` fires — flock is already free. This is a
+                // teardown path like any other: sweep recipe groups first
+                // (an agent can hold the venue lease AND run a lane).
+                dispose();
                 process.exit(0);
               },
             },
@@ -145,6 +151,11 @@ export function createLaneRunner(): LaneRunner {
 
   const ctx = runtime.ctx;
   const children = new Map<string, ChildProcess>();
+  // Owns the death of every recipe process group (reap.ts): tracked from
+  // spawn, reaped (TERM → grace → KILL) on node exit / cancel / rerun, and
+  // swept synchronously on dispose — the recipe trees are `detached`, so
+  // nothing else would ever kill them.
+  const reaper = createGroupReaper();
   /** Monotonic token per builtin-setup invocation — the async prep analogue
    *  of the child-identity guard on process nodes. */
   let setupGeneration = 0;
@@ -338,6 +349,7 @@ export function createLaneRunner(): LaneRunner {
       },
     );
     children.set(node.id, child);
+    if (child.pid !== undefined) reaper.track(child.pid);
     child.stdout?.setEncoding("utf-8");
     child.stderr?.setEncoding("utf-8");
     const onOutput = (chunk: string): void => {
@@ -349,6 +361,10 @@ export function createLaneRunner(): LaneRunner {
     const finish = (status: NodeStatus, exitCode: number | null): void => {
       if (children.get(node.id) !== child) return;
       children.delete(node.id);
+      // The direct child is gone, but a stray it backgrounded (with its stdio
+      // redirected, so `cat` still saw EOF) may survive in the group — reap it
+      // rather than leaving the group unowned forever.
+      if (child.pid !== undefined) reaper.reap(child.pid);
       setNode(node.id, {
         status,
         exitCode,
@@ -365,15 +381,11 @@ export function createLaneRunner(): LaneRunner {
     child.on("exit", (code) => finish(code === 0 ? "ok" : "failed", code));
   };
 
-  const killGroup = (child: ChildProcess, signal: NodeJS.Signals): void => {
-    if (child.pid === undefined) return;
-    try {
-      // Negative pid ⇒ the whole detached process group (just → nix develop
-      // → pnpm → browsers), not only the shell at the top.
-      process.kill(-child.pid, signal);
-    } catch {
-      child.kill(signal);
-    }
+  // Negative pid ⇒ the whole detached process group (just → nix develop →
+  // pnpm → browsers), not only the shell at the top; the reaper escalates
+  // SIGTERM → grace → SIGKILL so a TERM-ignoring tree still dies.
+  const killGroup = (child: ChildProcess): void => {
+    if (child.pid !== undefined) reaper.reap(child.pid);
   };
 
   // ── rerun: reset target + transitive dependents, then reschedule ──
@@ -397,7 +409,7 @@ export function createLaneRunner(): LaneRunner {
       const child = children.get(rid);
       if (child !== undefined) {
         children.delete(rid);
-        killGroup(child, "SIGTERM");
+        killGroup(child);
       }
       if (rid === SETUP_NODE_ID) setupGeneration += 1;
       tail.reset(rid, "");
@@ -423,7 +435,7 @@ export function createLaneRunner(): LaneRunner {
     const child = children.get(id);
     if (child !== undefined) {
       children.delete(id);
-      killGroup(child, "SIGTERM");
+      killGroup(child);
     }
     if (id === SETUP_NODE_ID) setupGeneration += 1;
     const startedAt = node.startedAt;
@@ -439,27 +451,38 @@ export function createLaneRunner(): LaneRunner {
     return true;
   };
 
+  // ── dispose: the one teardown every exit path shares ──
+  // Called on stdin EOF (main's post-serve line, before the framework-owned
+  // exit), on death by signal (main's handlers), on the fatal-error exit, and
+  // on venue-lease self-release (above). Idempotent — several of those can
+  // stack on one exit. A hoisted function declaration so `onSelfRelease`
+  // (defined earlier in this closure) can reach it.
+  function dispose(): void {
+    if (disposed) return;
+    disposed = true;
+    process.stdin.off("data", onStdinPulse);
+    if (venueHold !== null) {
+      venueHold.release();
+      venueHold = null;
+    }
+    // Synchronous sweep of EVERY group ever spawned — running nodes, but
+    // also TERM-ignoring survivors of a cancel/rerun and strays left behind
+    // by finished nodes. Synchronous because this runs on process-exit
+    // paths (stdin EOF before the framework-owned exit; the signal handlers
+    // in main.ts), where a timer-based escalation would never fire.
+    children.clear();
+    reaper.reapAllSync();
+    // Keep the worktree when anything failed — it is the debugging trail;
+    // the host tmpdir reaper owns the long tail.
+    const state = getState();
+    const settledGreen =
+      state.order.length > 0 &&
+      state.order.every((id) => state.nodes[id]?.status === "ok");
+    if (settledGreen) cleanupWorkspace?.();
+  }
+
   // `implementSurface` returns the FINAL top-level router — serve it directly.
   const router = runtime.router;
 
-  return {
-    router,
-    dispose: () => {
-      disposed = true;
-      process.stdin.off("data", onStdinPulse);
-      if (venueHold !== null) {
-        venueHold.release();
-        venueHold = null;
-      }
-      for (const child of children.values()) killGroup(child, "SIGKILL");
-      children.clear();
-      // Keep the worktree when anything failed — it is the debugging trail;
-      // the host tmpdir reaper owns the long tail.
-      const state = getState();
-      const settledGreen =
-        state.order.length > 0 &&
-        state.order.every((id) => state.nodes[id]?.status === "ok");
-      if (settledGreen) cleanupWorkspace?.();
-    },
-  };
+  return { router, dispose };
 }

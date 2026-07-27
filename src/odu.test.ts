@@ -5,7 +5,9 @@
  * idle-until-configure, the builtin `_ci-setup` node, configure rejection.
  */
 
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { stdioLink } from "@kolu/surface/links/stdio";
 import { createLoopbackPair } from "@kolu/surface/loopback";
 import { serveOverStdio } from "@kolu/surface/peer-server";
@@ -282,6 +284,72 @@ describe("odu lane runner over stdio (loopback)", () => {
     );
     expect((await h.client.surface.node.cancel({ id: "ok" })).ok).toBe(false);
   });
+});
+
+// The production leak (juspay/odu#70-class): recipe trees are spawned
+// `detached` — their own process groups — so the ONLY thing that ever kills
+// them is the runner's explicit group kill. These pin the two in-run paths a
+// tree used to escape through: a cancel whose single SIGTERM was ignored, and
+// a node that finished while a backgrounded stray was still alive in its
+// group. (Runner-death-by-signal — the localhost-lane path — is pinned in
+// runner/processTeardown.test.ts; the reaper's own contract in
+// runner/reap.test.ts.)
+describe("recipe process-tree reaping", () => {
+  const alive = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const readPid = (file: string): number =>
+    Number(readFileSync(file, "utf-8").trim());
+
+  it("cancel escalates a TERM-ignoring recipe tree to SIGKILL", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "odu-reap-"));
+    const pidFile = join(dir, "pid");
+    const h = harness();
+    // $BASHPID (not $$): the recipe body runs in the pipeline subshell, and
+    // that subshell — which ignores SIGTERM and keeps respawning sleeps — is
+    // the process that must NOT survive the cancel.
+    await h.configure([
+      {
+        id: "stubborn",
+        command: `echo $BASHPID > ${pidFile}; trap '' TERM; while :; do sleep 0.1; done`,
+        needs: [],
+      },
+    ]);
+    await until(() => existsSync(pidFile) && readPid(pidFile) > 0);
+    const pid = readPid(pidFile);
+    await until(() => last(h).nodes.stubborn?.status === "running");
+    expect((await h.client.surface.node.cancel({ id: "stubborn" })).ok).toBe(
+      true,
+    );
+    // SIGTERM → bounded grace → SIGKILL: the tree dies even though it
+    // ignores SIGTERM. Before the reaper this leaked forever (ppid 1).
+    await until(() => !alive(pid));
+  }, 15_000);
+
+  it("reaps a stray the recipe left behind in its group when the node finishes", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "odu-reap-"));
+    const strayFile = join(dir, "stray");
+    const h = harness();
+    // The stray redirects its stdio, so `cat` sees EOF and the node settles
+    // ok while the stray lives on in the (otherwise unowned) process group.
+    await h.configure([
+      {
+        id: "leaky",
+        command: `sleep 30 </dev/null >/dev/null 2>&1 & echo $! > ${strayFile}`,
+        needs: [],
+      },
+    ]);
+    await until(() => last(h).nodes.leaky?.status === "ok");
+    const stray = readPid(strayFile);
+    // Node finish reaps the group: the stray dies instead of leaking to init.
+    await until(() => !alive(stray));
+  }, 15_000);
 });
 
 describe("render helpers", () => {
