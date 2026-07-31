@@ -54,13 +54,14 @@ let
           bunNix = ./bun.nix;
         };
 
-        # hoisted linker matches `bunfig.toml`: the @kolu/* sources hydrated
-        # below are raw TypeScript from the store, so their own imports
-        # (@orpc/*, zod, solid-js, …) have to resolve by walking up to ONE
-        # root node_modules. No `--production` — odu has no app/test
-        # dependency split, and the hydrated sources and both suites resolve
-        # out of the same tree.
-        bunInstallFlags = [ "--linker=hoisted" ];
+        # isolated linker, matching `bunfig.toml` — see that file for why
+        # hoisting is not an option here (conflicting transitive versions have
+        # to nest, and bun cannot create the nested trees in the Nix sandbox on
+        # aarch64-darwin). Passed explicitly as well as via bunfig so the flag
+        # survives if the hook ever stops reading bunfig.toml. No
+        # `--production`: odu has no app/test dependency split, and the
+        # hydrated sources and both suites resolve out of the same tree.
+        bunInstallFlags = [ "--linker=isolated" ];
 
         # The fixupPhase walks node_modules and patches shebangs / ELF. For a
         # Bun app this is pure overhead — Bun runs the source directly, no
