@@ -208,10 +208,15 @@ recap, `run` its full per-node summary.
 
 The log pane is a terminal, not a text buffer: a node that redraws with carriage
 returns (`nix build`, `bun test`) shows one progress line rather than hundreds,
-and wide characters are measured, not counted. Colour is consumed rather than
-carried — the pane is monochrome, which is also why escape junk never reaches
-it. The pane takes whatever height your terminal has — resize it and the layout
-follows.
+wide characters are measured rather than counted, and a node's own colours come
+through — a failing test stays red. Escape sequences never reach the pane as
+text; the emulator consumes them and hands back characters with attributes. The
+pane takes whatever height your terminal has, and a resize relayouts rather than
+smearing.
+
+The frame itself is coloured by state: each node's glyph carries its status
+hue, a running node's elapsed clock stays lit while settled durations recede,
+and the counts row is tinted per bucket so a run's shape reads at a glance.
 
 ### Cancel, supersede, and linger
 

@@ -655,6 +655,72 @@ describe("LiveView — keys", () => {
   });
 });
 
+describe("LiveView — mouse", () => {
+  /** The terminal row a matrix recipe was drawn on. */
+  const rowOf = (frame: string, recipe: string): number =>
+    frame.split("\n").findIndex((l) => l.includes(recipe));
+
+  it("clicking a matrix row focuses that node", async () => {
+    const { view, setup, frame } = await mount(96, 30);
+    const y = rowOf(frame(), "install");
+    expect(y).toBeGreaterThan(0);
+    await setup.mockMouse.click(4, y);
+    await until(
+      setup,
+      () => frame().includes("ci::install@"),
+      "the pane to follow the click",
+    );
+    // The pane title names the clicked node, so focus really moved.
+    expect(frame()).toContain("ci::install@");
+    view.stop();
+  });
+
+  it("clicking a matrix row pins focus, as hjkl does", async () => {
+    // Auto-follow must stop, or the next state push would yank the operator
+    // back to whatever is running.
+    const { view, setup, frame } = await mount(96, 30);
+    const y = rowOf(frame(), "install");
+    await setup.mockMouse.click(4, y);
+    await until(setup, () => frame().includes("ci::install@"), "the click");
+    view.update(state); // a push that would re-seed focus if it were unlocked
+    await setup.flush();
+    expect(frame()).toContain("ci::install@");
+    view.stop();
+  });
+
+  it("the wheel scrolls the log and unpins the tail", async () => {
+    const lines = Array.from({ length: 80 }, (_, i) => `line ${i}`).join("\n");
+    const { view, setup, frame } = await mount(96, 30, { log: `${lines}\n` });
+    await until(setup, () => frame().includes("line 79"), "the log tail");
+    expect(frame()).toContain("‹follow›");
+    const paneY = frame().split("\n").findIndex((l) => l.includes("‹follow›")) + 4;
+    await setup.mockMouse.scroll(10, paneY, "up");
+    await until(setup, () => frame().includes("‹pinned›"), "the tail to unpin");
+    // Scrolling up moved away from the newest line.
+    expect(frame()).not.toContain("line 79");
+    view.stop();
+  });
+
+  it("clicking a status hint runs it", async () => {
+    // The bar says `r rerun`; clicking it should rerun, through the same
+    // BINDINGS entry the key uses.
+    const reran: string[] = [];
+    const setup = await createTestRenderer({ width: 120, height: 30 });
+    const view = new LiveView(makeOpts({ setup, rerun: (id) => reran.push(id) }));
+    view.start(state, header);
+    await settle(setup);
+    const frame = () => setup.captureCharFrame();
+    const rows = frame().split("\n");
+    const barY = rows.findIndex((l) => l.includes("r rerun"));
+    expect(barY).toBeGreaterThan(0);
+    const barX = (rows[barY] ?? "").indexOf("r rerun");
+    await setup.mockMouse.click(barX + 1, barY);
+    await until(setup, () => reran.length > 0, "the rerun hint");
+    expect(reran).toEqual(["ci::e2e@aarch64-darwin"]);
+    view.stop();
+  });
+});
+
 describe("LiveView — events land in the frame, never in scrollback", () => {
   it("shows a failed transition inside the frame", async () => {
     const { view, setup, frame } = await mount(96, 30);

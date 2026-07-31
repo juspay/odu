@@ -265,6 +265,48 @@ export class LiveView {
   private searching = false;
   private query = "";
 
+  /** Run the hint under a click at column `x` on the status bar.
+   *
+   *  A hint that reads `r rerun` should rerun when clicked — the bar already
+   *  states what each key does, so requiring the keyboard to act on it is an
+   *  arbitrary restriction. Dispatch goes through the same `BINDINGS` entry the
+   *  key does, so the two can never mean different things. */
+  private pressHintAt(x: number): void {
+    const hit = this.hintHits.find((h) => x >= h.from && x < h.to);
+    if (hit === undefined) return;
+    // The binding's own key id — the multi-key entries (hjkl, digits) act on
+    // their first, which is the one the hint names.
+    const key = hit.binding.keys[0];
+    if (key !== undefined) hit.binding.act(this, key);
+  }
+
+  /** Focus the node under a click at absolute terminal row `y`.
+   *
+   *  The matrix box's own `y` is where the recipes start, offset by one for
+   *  the platform header row. A click on a gap cell (`°`) or outside the rows
+   *  is ignored rather than snapped to a neighbour — guessing which node the
+   *  operator meant is worse than doing nothing. */
+  private focusAtRow(y: number): void {
+    const state = this.state;
+    const box = this.matrixBox;
+    if (state === undefined || box === undefined) return;
+    const index = y - box.y - 1; // -1 for the platform header row
+    const { recipes } = this.shapeOf(state.order);
+    const recipe = recipes[index];
+    if (recipe === undefined) return;
+    // Keep the operator on the platform they were already reading.
+    const current =
+      this.focusedId !== undefined ? splitFanId(this.focusedId).platform : undefined;
+    const target =
+      (current !== undefined ? state.nodes[`${recipe}@${current}`] : undefined) ??
+      state.order
+        .map((id) => state.nodes[id])
+        .find((n) => n !== undefined && splitFanId(n.id).namepath === recipe);
+    if (target === undefined) return;
+    this.focusLocked = true; // a hand-picked node stops auto-follow, as with hjkl
+    this.focus(target.id);
+  }
+
   /** One-slot memo: `state.order` is fixed for the life of a run, and
    *  `matrixShape` is O(N·(R+P)) with an `includes` in its inner loop. */
   private shapeMemo:
@@ -301,6 +343,10 @@ export class LiveView {
   private eventsBox: BoxRenderable | undefined;
   private paneBox: BoxRenderable | undefined;
   private statusLine: TextRenderable | undefined;
+  /** Where each hint was drawn on the status bar, so a click can run it. Built
+   *  during the paint that draws them — the bar is width-dependent, so the
+   *  spans are only knowable at the moment they are laid out. */
+  private hintHits: { from: number; to: number; binding: Binding }[] = [];
   private matrixRows: TextRenderable[] = [];
   private eventRows: TextRenderable[] = [];
   private paneRows: TextRenderable[] = [];
@@ -647,6 +693,11 @@ export class LiveView {
       width: "100%",
       flexShrink: 0,
       flexDirection: "column",
+      // Clicking a matrix row focuses that node — the mouse equivalent of
+      // hjkl, and the only way to reach a node without counting rows. The
+      // handler sits on the box, not on each row, so it survives `syncRows`
+      // rebuilding the rows underneath it.
+      onMouseDown: (e) => this.focusAtRow(e.y),
     });
     frame.add(this.matrixBox);
 
@@ -665,6 +716,19 @@ export class LiveView {
       flexDirection: "column",
       border: true,
       title: "",
+      // The wheel scrolls the log, which is what a reader reaches for first.
+      // Scrolling unpins the tail (see `LogView.scrollBy`) so new output stops
+      // yanking the view away mid-read; `f` or `G` re-pins it.
+      onMouseScroll: (e) => {
+        const scroll = e.scroll;
+        if (scroll === undefined) return;
+        const rows = Math.max(1, scroll.delta);
+        this.withLog((l) =>
+          l.scrollBy(scroll.direction === "up" ? -rows : rows),
+        );
+        this.dirty = true;
+        this.wake();
+      },
     });
     frame.add(this.paneBox);
 
@@ -673,6 +737,8 @@ export class LiveView {
       content: "",
       fg: DIM,
       wrapMode: "none",
+      // The hints name the actions, so they should BE the actions.
+      onMouseDown: (e) => this.pressHintAt(e.x),
     });
     frame.add(this.statusLine);
   }
@@ -1158,16 +1224,27 @@ export class LiveView {
     const width = this.renderer?.terminalWidth ?? 80;
     const plainCounts = countsLine(s);
     chunks.push(faint("    "));
+    // Column of the first hint = everything already pushed.
+    let column = chunks.reduce((n, c) => n + c.text.length, 0);
+    this.hintHits = [];
     // The key itself in the accent, its verb faint: the operator is scanning
     // for the letter, not reading a sentence.
     keyHints(width - plainCounts.length - 6).forEach((hint, i) => {
-      if (i > 0) chunks.push(faint(" · "));
+      if (i > 0) {
+        chunks.push(faint(" · "));
+        column += 3;
+      }
+      const binding = BINDINGS.find((b) => b.hint === hint);
+      if (binding !== undefined) {
+        this.hintHits.push({ from: column, to: column + hint.length, binding });
+      }
       const gap = hint.indexOf(" ");
       if (gap < 0) chunks.push(fg(ACCENT)(hint));
       else {
         chunks.push(fg(ACCENT)(hint.slice(0, gap)));
         chunks.push(faint(hint.slice(gap)));
       }
+      column += hint.length;
     });
     setRow(line, chunks);
   }
