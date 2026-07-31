@@ -26,7 +26,6 @@ export const yellow = wrap(33, 39);
 export const magenta = wrap(35, 39);
 export const cyan = wrap(36, 39);
 
-
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI escapes is the point.
 const ANSI_RE = /\x1b\[[0-9;]*[A-Za-z]/g;
 export function stripAnsi(s: string): string {

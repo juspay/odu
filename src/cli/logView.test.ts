@@ -1,9 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import { LogView } from "./logView";
 
-/** Feed raw bytes the way the surface stream would. */
+/** Feed raw bytes the way the live view does when a surface frame lands: a
+ *  `snapshot` frame resets the buffer first, an `append` just writes. */
 async function feed(view: LogView, text: string, kind: "snapshot" | "append" = "append") {
-  await view.feed({ kind, text });
+  if (kind === "snapshot") view.reset();
+  await view.write(text);
 }
 
 const visible = (view: LogView): string[] =>
@@ -103,7 +105,7 @@ describe("LogView — search", () => {
       await feed(view, i % 10 === 0 ? "AssertionError here\r\n" : `line ${i}\r\n`);
     }
     view.setQuery("assertionerror");
-    expect(view.position().matches).toBe(3);
+    expect(view.matches).toBe(3);
     view.dispose();
   });
 
@@ -118,13 +120,34 @@ describe("LogView — search", () => {
     view.dispose();
   });
 
+  it("recounts after a \\r redraw that leaves the line count alone", async () => {
+    // The memo used to be keyed on the line count, which is precisely the one
+    // key a VT invalidates without changing: `\r`/cursor-up redraws rewrite the
+    // text in place, and the status bar reported a stale count for the rest of
+    // the search.
+    const view = new LogView(40, 4);
+    await feed(view, "needle\r\n");
+    view.setQuery("needle");
+    expect(view.matches).toBe(1);
+    await view.write("\x1b[1A\rhaystack\r\n");
+    expect(view.matches).toBe(0);
+    view.dispose();
+  });
+
+  it("takes the consumer's query at construction, so a focus change keeps it", async () => {
+    const view = new LogView(40, 4, "NEEDLE");
+    await feed(view, "a needle here\r\n");
+    expect(view.matches).toBe(1);
+    view.dispose();
+  });
+
   it("an empty query clears matches", async () => {
     const view = new LogView(40, 4);
     await feed(view, "needle\r\n");
     view.setQuery("needle");
-    expect(view.position().matches).toBe(1);
+    expect(view.matches).toBe(1);
     view.setQuery("");
-    expect(view.position().matches).toBe(0);
+    expect(view.matches).toBe(0);
     expect(view.rows().every((r) => !r.match)).toBe(true);
     view.dispose();
   });

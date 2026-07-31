@@ -47,9 +47,14 @@ import { postingWarning } from "../coordinator/statuses";
 import { formatGoDuration } from "../common/duration";
 import { splitFanId } from "../common/nodeId";
 import {
+  countsLine,
   defaultAttachId,
   matrixShape,
+  OUTCOME_CELL,
+  OUTCOME_MARK,
+  outcomeOf,
   recipeLabel,
+  STATUS_CELL,
   stepFocus,
   summarize,
 } from "./render";
@@ -63,34 +68,46 @@ const TICK_MS = 100;
 
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-/** Terminal-cell colours. Deliberately not the `ansi.ts` helpers: those wrap
- *  text in escape codes for a stream, while here the renderer owns cell
- *  attributes. `ansi.ts` remains the source of truth for the json/plain faces
- *  and for `printVerdict`. */
-const COLOR: Record<NodeState["status"], string> = {
-  pending: "#6b7a80",
-  running: "#e6b24d",
-  ok: "#6fcf8e",
-  failed: "#e8695b",
-  skipped: "#6b7a80",
-  errored: "#bb8ce2",
-  cancelled: "#8a9a9e",
-};
 const DIM = "#6b7a80";
 const FG = "#c6d2d3";
 const ACCENT = "#3ad3b8";
 
-/** What the view needs from its host — the same seam the previous renderer
- *  used, so `run` and `attach` keep their existing wiring verbatim. */
-export interface LiveViewOpts {
+/** The injected dependencies that make the `live` face the shared interactive
+ *  view — the source-agnostic seam between `run` (its in-memory tail, raw
+ *  stderr to hook, its own shutdown) and `attach` (the surface stream, no
+ *  stderr to hook). Push-fed for state (via `Display.update`), pull-fed for the
+ *  focused log (via `openLog`).
+ *
+ *  Declared here, beside the view that consumes it, and re-exported from
+ *  `coordinator/display.ts` for its hosts: transcribing the same five members
+ *  into two interfaces meant a member added to one type-checked against the
+ *  other by structural luck and never reached the view. */
+export interface LiveOpts {
+  /** Read keys + drive focus/rerun/quit; raw-mode the terminal. Off for a
+   *  `run` whose stdin isn't a TTY (output-only live matrix). */
   interactive: boolean;
+  /** Interpose `process.stderr.write` (drop `[host:…]`, re-print the rest
+   *  above the matrix). `run`=true (library chatter shares its stderr);
+   *  `attach`=false (an observer has no such chatter to tame). */
   hookStderr: boolean;
+  /** Pull the focused node's log: a `snapshot` frame then `append`s, so a
+   *  focus change backfills. `run` passes `tail.streamSource` (a synchronous
+   *  generator), `attach` passes `client.surface.nodeLog.get` (a promised
+   *  stream over the socket) — hence the `| Promise`, `await`ed at the call
+   *  site, which is a no-op for the generator. */
   openLog: (
     id: string,
     signal: AbortSignal,
   ) => AsyncIterable<NodeLogFrame> | Promise<AsyncIterable<NodeLogFrame>>;
+  /** The one mutation `r` triggers — re-run the focused node. */
   rerun: (id: string) => void;
+  /** The interrupt path: `q`/Ctrl-C/Ctrl-D request a quit. The view doesn't
+   *  own verdict-on-quit policy — each consumer decides its own exit code (`run`
+   *  always 130 for an interrupt; `attach` the current verdict). */
   onQuit: () => void;
+}
+
+export interface LiveViewOpts extends LiveOpts {
   /** Test seam: supply the renderer instead of opening a real terminal. Only
    *  `liveView.test.ts` passes this (opentui's `createTestRenderer`), so the
    *  frame can be asserted as text without a pty. */
@@ -100,6 +117,96 @@ export interface LiveViewOpts {
 interface Event {
   text: string;
   color: string;
+}
+
+/** One name for a key. Printable keys are identified by their sequence (so `g`
+ *  and `G` stay distinct); named keys by `name`. Dispatch compares against this
+ *  and nothing else — reading `name` for some bindings and `sequence` for
+ *  others gave `G`/`g` a shift distinction while `R`, `Q` and `F` silently
+ *  behaved as their lowercase selves. */
+function keyId(key: ParsedKey): string {
+  const seq = key.sequence ?? "";
+  if (seq.length === 1 && seq >= " ") return seq;
+  return key.name ?? "";
+}
+
+/** Arrow keys and vim keys are the same axis; `stepFocus` keeps its existing
+ *  contract (and its existing tests) instead of learning key names. */
+const MOVES: Record<string, "h" | "j" | "k" | "l"> = {
+  h: "h",
+  j: "j",
+  k: "k",
+  l: "l",
+  left: "h",
+  down: "j",
+  up: "k",
+  right: "l",
+};
+
+const DIGITS = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
+
+interface Binding {
+  /** The `keyId`s that trigger this. */
+  keys: readonly string[];
+  /** What the status bar calls it, `null` for a binding already covered by a
+   *  sibling's slot. Both this and `website/src/content/docs.md`'s table are
+   *  readings of this one list, not parallel prose. */
+  hint: string | null;
+  act: (v: LiveView, id: string) => void;
+}
+
+/** The keymap — the one statement of what each key does. It was three: a
+ *  60-line `if` chain, the status-bar hint (which had already fallen four
+ *  bindings behind the chain), and the docs table. */
+const BINDINGS: readonly Binding[] = [
+  {
+    keys: Object.keys(MOVES),
+    hint: "hjkl move",
+    // The lookup cannot miss (the keys ARE `MOVES`'s); the guard only
+    // satisfies noUncheckedIndexedAccess.
+    act: (v, id) => {
+      const move = MOVES[id];
+      if (move !== undefined) v.moveFocus(move);
+    },
+  },
+  { keys: DIGITS, hint: "1-9 jump", act: (v, id) => v.focusNth(Number(id)) },
+  { keys: ["r"], hint: "r rerun", act: (v) => v.rerunFocused() },
+  {
+    keys: ["f"],
+    hint: "f follow",
+    act: (v) => v.withLog((l) => l.toggleFollow()),
+  },
+  { keys: ["/"], hint: "/ search", act: (v) => v.beginSearch() },
+  { keys: ["n"], hint: "n next", act: (v) => v.withLog((l) => l.next()) },
+  { keys: ["g"], hint: "g/G top/tail", act: (v) => v.withLog((l) => l.toTop()) },
+  { keys: ["G"], hint: null, act: (v) => v.withLog((l) => l.toBottom()) },
+  { keys: ["pageup"], hint: "PgUp/PgDn scroll", act: (v) => v.page(-1) },
+  { keys: ["pagedown"], hint: null, act: (v) => v.page(1) },
+  { keys: ["q"], hint: "q quit", act: (v) => v.quit() },
+];
+
+const HINTS = BINDINGS.map((b) => b.hint).filter(
+  (h): h is string => h !== null,
+);
+
+/** The quit hint is reserved rather than queued: it is the one binding whose
+ *  absence strands the operator, and the bar is the only place it is written
+ *  down. */
+const QUIT_HINT = BINDINGS.find((b) => b.keys.includes("q"))?.hint ?? "q quit";
+
+/** As many key hints as `room` columns allow, in `BINDINGS` order, always
+ *  ending with quit. The bar cannot simply print them all: a `TextRenderable`
+ *  that overflows *wraps*, which would push the frame past the last terminal
+ *  row — and hand-trimming the list is how the hint came to omit four of the
+ *  bindings it describes. */
+function keyHint(room: number): string {
+  const chosen: string[] = [];
+  for (const hint of HINTS) {
+    if (hint === QUIT_HINT) continue;
+    if ([...chosen, hint, QUIT_HINT].join(" · ").length > room) break;
+    chosen.push(hint);
+  }
+  return [...chosen, QUIT_HINT].join(" · ");
 }
 
 /** How many events stay on screen. The lane is a tail, not a log — the full
@@ -146,18 +253,18 @@ export class LiveView {
   private eventRows: TextRenderable[] = [];
   private paneRows: TextRenderable[] = [];
 
-  constructor(private readonly opts: LiveViewOpts) {
-    // Whatever path the process dies by (a throw past orchestrate, a missed
-    // stop()), the terminal must come back. Guarded
-    // on `torndown`, NOT on `stopped`: a stop() that landed before the mount
-    // has not restored anything yet, and guarding on `stopped` would disarm
-    // this net exactly when it is the only thing left to fire.
-    process.once("exit", () => {
-      if (this.torndown) return;
-      this.unhook();
-      this.renderer?.destroy();
-    });
-  }
+  /** Whatever path the process dies by (a throw past orchestrate, a missed
+   *  stop()), the terminal must come back. Guarded on `torndown`, NOT on
+   *  `stopped`: a stop() that landed before the mount has not restored anything
+   *  yet, and guarding on `stopped` would disarm this net exactly when it is
+   *  the only thing left to fire. */
+  private readonly onProcessExit = (): void => {
+    if (this.torndown) return;
+    this.unhook();
+    this.renderer?.destroy();
+  };
+
+  constructor(private readonly opts: LiveViewOpts) {}
 
   /** Synchronous by contract (`Display.start`). Records state, hooks the
    *  streams, and kicks the async mount off without awaiting it.
@@ -170,6 +277,10 @@ export class LiveView {
   start(state: PipelineState, header: RunHeader): void {
     this.state = state;
     this.header = header;
+    // Armed here rather than in the constructor, and removed in `finishStop`:
+    // a per-instance listener that was never removed leaked one per
+    // `createDisplay("live")` and accumulated across the test suite.
+    process.once("exit", this.onProcessExit);
     this.seedFocus(state);
     if (this.opts.hookStderr) this.hook();
     this.mountPromise = this.mount().catch((err: unknown) => {
@@ -220,18 +331,24 @@ export class LiveView {
       }
       renderer.on("resize", () => this.relayout());
       // Focus (and therefore the log emulator) was seeded against the pre-mount
-      // 80x24 fallback, because paneCols/paneRowCount had no renderer to ask.
-      // Push the real geometry now — unconditionally: the emulator always
-      // exists by here, so a `log === undefined` guard would never fire and the
-      // pane would keep the fallback width for the whole run.
+      // fallback, because the pane box had not been laid out yet. Push the real
+      // geometry now — unconditionally: the emulator always exists by here, so
+      // a `log === undefined` guard would never fire and the pane would keep
+      // the fallback width for the whole run.
       this.relayout();
     } finally {
       this.mounting = false;
     }
   }
 
+  /** `run` `start`s on an all-pending snapshot and `update`s as lanes go live,
+   *  so focus must be re-derived from the latest state — not snapshot-ed at
+   *  `start()`. Without this the pane pinned to `_ci-setup` for the whole run
+   *  (and `r` reran it) while the operator watched something else. `seedFocus`
+   *  is a no-op once a keypress has locked focus. */
   update(state: PipelineState): void {
     this.state = state;
+    this.seedFocus(state);
     this.paint();
   }
 
@@ -245,7 +362,7 @@ export class LiveView {
       node.durationMs !== null ? ` (${formatGoDuration(node.durationMs)})` : "";
     this.pushEvent(
       `${STATUS_META[node.status].glyph} ${node.id} ${node.status}${dur}  → ${logPath}`,
-      COLOR[node.status],
+      STATUS_CELL[node.status],
     );
   }
 
@@ -301,6 +418,7 @@ export class LiveView {
   private finishStop(): void {
     if (this.torndown) return;
     this.torndown = true;
+    process.off("exit", this.onProcessExit);
     this.unhook();
     this.renderer?.destroy();
     this.renderer = undefined;
@@ -318,18 +436,8 @@ export class LiveView {
     const state = this.state;
     if (state === undefined) return undefined;
     const s = summarize(state);
-    const mark = !s.done ? "◼" : s.failedOverall ? "✗" : s.clean ? "✔" : "◼";
-    const counts = [
-      s.ok > 0 ? `${s.ok} ok` : null,
-      s.running > 0 ? `${s.running} running` : null,
-      s.pending > 0 ? `${s.pending} pending` : null,
-      s.failed > 0 ? `${s.failed} failed` : null,
-      s.errored > 0 ? `${s.errored} errored` : null,
-      s.cancelled > 0 ? `${s.cancelled} cancelled` : null,
-      s.skipped > 0 ? `${s.skipped} skipped` : null,
-    ]
-      .filter((c): c is string => c !== null)
-      .join(" · ");
+    const mark = OUTCOME_MARK[outcomeOf(s)];
+    const counts = countsLine(s);
     const reds = state.order
       .map((id) => state.nodes[id])
       .filter(
@@ -460,57 +568,60 @@ export class LiveView {
     frame.add(this.statusLine);
   }
 
-  /** SIGWINCH: re-measure and repaint. Nothing depends on the previous frame's
-   *  height, which is what made a resize fatal before. The emulator's columns
-   *  must track the pane width or wide-char measurement drifts. */
+  /** SIGWINCH: repaint. Nothing depends on the previous frame's height, which
+   *  is what made a resize fatal before. `paintPane` is the one site that sizes
+   *  the emulator, so there is nothing else to do here — and yoga has not
+   *  re-measured yet at this point, hence the deferred second pass. */
   private relayout(): void {
-    this.log?.resize(this.paneCols(), this.paneRowCount());
     this.paint();
+    this.repaintAfterLayout();
   }
 
+  /** Yoga measures during a render, so a paint triggered by the event that
+   *  *changed* the layout still reads the previous frame's geometry (zero,
+   *  before the first one). Painting again on the next turn picks up the real
+   *  measurement. */
+  private repaintAfterLayout(): void {
+    const t = setTimeout(() => this.paint(), 0);
+    (t as { unref?: () => void }).unref?.();
+  }
+
+  /** The pane's geometry comes from yoga, not from re-counting the chrome:
+   *  `paneBox` is the frame's only `flexGrow` child, so what it measures IS
+   *  "whatever the fixed regions left". Re-deriving it by hand meant the
+   *  emulator wrapped at a different width than opentui drew at — the ragged
+   *  mid-word breaks in a live run — and any new chrome row silently shortened
+   *  the log with nothing to catch it.
+   *
+   *  The `- 2` is the box's own border, the one inset that is this module's
+   *  business. Arithmetic off the terminal size survives only as the
+   *  before-first-layout fallback, replaced by `repaintAfterLayout`. */
   private paneCols(): number {
-    return Math.max(20, (this.renderer?.terminalWidth ?? 80) - 4);
+    const measured = this.paneBox?.width ?? 0;
+    const outer = measured > 0 ? measured : (this.renderer?.terminalWidth ?? 80);
+    return Math.max(20, outer - 2);
   }
 
-  /** Rows the pane has once the fixed regions take their share.
+  /** Rows the pane has.
    *
    *  `Math.max(0, …)`, not `max(3, …)`: on a terminal shorter than the chrome a
    *  three-row floor pushes the pane's own border and the status bar off the
    *  bottom, so the operator loses the key hints on exactly the small window
-   *  where they are hardest to remember. Zero rows of log is the honest answer.
-   *
-   *  Every caller that draws the pane must size the emulator to the SAME number
-   *  it is about to draw — see `paintPane`. Two independent height calculations
-   *  is what let the emulator hand back a window shorter than the pane and blank
-   *  the bottom rows. */
+   *  where they are hardest to remember. Zero rows of log is the honest answer. */
   private paneRowCount(): number {
-    const total = this.renderer?.terminalHeight ?? 24;
-    const recipes = this.state
-      ? matrixShape(this.state.order).recipes.length
-      : 0;
-    const chrome =
-      2 + // header
-      this.noticeRows() +
-      1 + // matrix column header
-      recipes +
-      Math.min(this.events.length, EVENT_ROWS) +
-      2 + // pane border
-      1; // status bar
-    return Math.max(0, total - chrome);
+    const measured = this.paneBox?.height ?? 0;
+    if (measured > 0) return Math.max(0, measured - 2);
+    return Math.max(0, (this.renderer?.terminalHeight ?? 24) - 12);
   }
 
   /** State-derived warning strips above the matrix (currently just the GitHub
-   *  posting debt, juspay/odu#61). Counted into the chrome so the pane's height
-   *  tracks them appearing and clearing. */
+   *  posting debt, juspay/odu#61). Pure content — yoga sizes the strip, so a
+   *  new notice kind is a line here and nothing else. */
   private notices(): string[] {
     const state = this.state;
     if (state === undefined) return [];
     const warn = postingWarning(postingOf(state));
     return warn === null ? [] : [warn];
-  }
-
-  private noticeRows(): number {
-    return this.notices().length;
   }
 
   // ── focus ────────────────────────────────────────────────────────────────
@@ -535,7 +646,10 @@ export class LiveView {
   private openLog(id: string): void {
     this.logSub?.abort();
     this.log?.dispose();
-    this.log = new LogView(this.paneCols(), this.paneRowCount());
+    // The query rides across: `LiveView` owns the search string (it draws it),
+    // and a fresh buffer that started empty left `n` doing nothing and the
+    // match count reading 0 with no way to tell why.
+    this.log = new LogView(this.paneCols(), this.paneRowCount(), this.query);
     const controller = new AbortController();
     this.logSub = controller;
     const live = (): boolean =>
@@ -547,7 +661,11 @@ export class LiveView {
           controller.signal,
         )) {
           if (!live()) return;
-          await this.log?.feed(frame);
+          // Which frame kind means "start over" is odu's stream protocol, so
+          // the switch stays on this side of the boundary — `LogView` takes
+          // bytes.
+          if (frame.kind === "snapshot") this.log?.reset();
+          await this.log?.write(frame.text);
           if (!live()) return;
           this.paint();
         }
@@ -555,10 +673,9 @@ export class LiveView {
         if (!live()) return;
         // Surfaced in the pane itself, where the operator is already looking,
         // rather than thrown — a broken log stream must not kill the view.
-        await this.log?.feed({
-          kind: "append",
-          text: `\n[odu] log stream error: ${(err as Error).message}\n`,
-        });
+        await this.log?.write(
+          `\n[odu] log stream error: ${(err as Error).message}\n`,
+        );
         this.paint();
       }
     })();
@@ -573,86 +690,83 @@ export class LiveView {
     if (this.searching) {
       if (name === "escape") {
         this.searching = false;
-        this.query = "";
-        this.log?.setQuery("");
+        this.setQuery("");
       } else if (name === "return") {
         this.searching = false;
         this.log?.next();
       } else if (name === "backspace") {
-        this.query = this.query.slice(0, -1);
-        this.log?.setQuery(this.query);
+        this.setQuery(this.query.slice(0, -1));
       } else if (seq.length === 1 && seq >= " ") {
-        this.query += seq;
-        this.log?.setQuery(this.query);
+        this.setQuery(this.query + seq);
       }
       this.paint();
       return;
     }
 
-    if (name === "q" || (key.ctrl === true && (name === "c" || name === "d"))) {
-      this.opts.onQuit();
+    // Ctrl-C/Ctrl-D are the one binding that isn't a plain key identity.
+    if (key.ctrl === true && (name === "c" || name === "d")) {
+      this.quit();
       return;
     }
-    if (name === "r" && this.focusedId !== undefined) {
-      // `r` deliberately does not lock focus — it acts on what you are looking
-      // at, and the run should keep pulling you along.
-      this.opts.rerun(this.focusedId);
-      this.info(`rerun requested: ${this.focusedId}`);
-      return;
-    }
-    if (name === "f") {
-      this.log?.toggleFollow();
-      this.paint();
-      return;
-    }
-    if (seq === "/") {
-      this.searching = true;
-      this.query = "";
-      this.log?.setQuery("");
-      this.paint();
-      return;
-    }
-    if (name === "n") {
-      this.log?.next();
-      this.paint();
-      return;
-    }
-    if (seq === "G") {
-      this.log?.toBottom();
-      this.paint();
-      return;
-    }
-    if (seq === "g") {
-      this.log?.toTop();
-      this.paint();
-      return;
-    }
-    if (name === "pageup" || name === "pagedown") {
-      this.log?.scrollBy(
-        (name === "pageup" ? -1 : 1) * Math.max(1, this.paneRowCount() - 1),
-      );
-      this.paint();
-      return;
-    }
+    const id = keyId(key);
+    const binding = BINDINGS.find((b) => b.keys.includes(id));
+    if (binding === undefined) return;
+    binding.act(this, id);
+    this.paint();
+  }
 
+  // ── what the bindings do ─────────────────────────────────────────────────
+  // Public because `BINDINGS` is module-level: one table beats a method that
+  // re-states the keymap in a `switch`.
+
+  quit(): void {
+    this.opts.onQuit();
+  }
+
+  /** `r` deliberately does not lock focus — it acts on what you are looking at,
+   *  and the run should keep pulling you along. */
+  rerunFocused(): void {
+    const id = this.focusedId;
+    if (id === undefined) return;
+    this.opts.rerun(id);
+    this.info(`rerun requested: ${id}`);
+  }
+
+  withLog(act: (log: LogView) => void): void {
+    if (this.log !== undefined) act(this.log);
+  }
+
+  beginSearch(): void {
+    this.searching = true;
+    this.setQuery("");
+  }
+
+  page(direction: -1 | 1): void {
+    this.log?.scrollBy(direction * Math.max(1, this.paneRowCount() - 1));
+  }
+
+  /** A hand-picked node stops auto-follow — until then focus tracks the run. */
+  moveFocus(key: "h" | "j" | "k" | "l"): void {
     const state = this.state;
     if (state === undefined) return;
-    const move = arrowToVim(name, seq);
-    if (move !== undefined) {
-      const next = stepFocus(state.order, this.focusedId, move);
-      if (next !== undefined) {
-        this.focusLocked = true; // a hand-picked node stops auto-follow
-        this.focus(next);
-      }
-      return;
-    }
-    if (seq >= "1" && seq <= "9") {
-      const next = state.order[Number(seq) - 1];
-      if (next !== undefined) {
-        this.focusLocked = true;
-        this.focus(next);
-      }
-    }
+    const next = stepFocus(state.order, this.focusedId, key);
+    if (next === undefined) return;
+    this.focusLocked = true;
+    this.focus(next);
+  }
+
+  focusNth(n: number): void {
+    const next = this.state?.order[n - 1];
+    if (next === undefined) return;
+    this.focusLocked = true;
+    this.focus(next);
+  }
+
+  /** The search string has one owner (this view draws it); `LogView` is told,
+   *  never asked. */
+  private setQuery(q: string): void {
+    this.query = q;
+    this.log?.setQuery(q);
   }
 
   // ── paint ────────────────────────────────────────────────────────────────
@@ -675,7 +789,11 @@ export class LiveView {
 
     const s = summarize(state);
     const spin = SPINNER[this.tick % SPINNER.length] ?? "⠋";
-    const mark = s.done ? (s.failedOverall ? "✗" : s.clean ? "✔" : "◼") : spin;
+    // One outcome taxonomy for the mark AND its colour, so a settled
+    // cancelled-only run cannot read as a neutral "still going" here while
+    // `printVerdict` calls it INCOMPLETE (juspay/odu#68).
+    const outcome = outcomeOf(s);
+    const mark = outcome === "pending" ? spin : OUTCOME_MARK[outcome];
     const now = Date.now();
     const elapsed =
       header.startedAt > 0 ? formatGoDuration(now - header.startedAt) : "";
@@ -687,7 +805,12 @@ export class LiveView {
       header.commitUrl !== null ? link(label, header.commitUrl) : label;
     if (this.headLine !== undefined) {
       this.headLine.content = `odu ${mark} ${state.name} @ ${commit}  ${elapsed}`;
-      this.headLine.fg = s.done && s.failedOverall ? COLOR.failed : FG;
+      // Only the two outcomes that need the operator's attention take a hue;
+      // a pass and a run still going stay in ordinary foreground.
+      this.headLine.fg =
+        outcome === "failed" || outcome === "incomplete"
+          ? OUTCOME_CELL[outcome]
+          : FG;
     }
     this.paintNotices();
     if (this.laneLine !== undefined) {
@@ -756,7 +879,7 @@ export class LiveView {
     const lines = this.notices();
     this.syncRows(box, this.noticeRowsR, lines.length, "nt", (row, i) => {
       row.content = lines[i] ?? "";
-      row.fg = COLOR.running;
+      row.fg = STATUS_CELL.running;
     });
   }
 
@@ -809,23 +932,19 @@ export class LiveView {
     const line = this.statusLine;
     if (line === undefined) return;
     if (this.searching) {
-      const n = this.log?.position().matches ?? 0;
+      const n = this.log?.matches ?? 0;
       line.content = ` /${this.query}▏   ${n} match${n === 1 ? "" : "es"}   ⏎ next · esc cancel`;
       line.fg = ACCENT;
       return;
     }
-    const counts = [
-      s.ok > 0 ? `${s.ok} ok` : null,
-      s.running > 0 ? `${s.running} running` : null,
-      s.pending > 0 ? `${s.pending} pending` : null,
-      s.failed > 0 ? `${s.failed} failed` : null,
-      s.errored > 0 ? `${s.errored} errored` : null,
-    ]
-      .filter((c): c is string => c !== null)
-      .join(" · ");
-    line.content = this.opts.interactive
-      ? ` ${counts}    hjkl move · r rerun · f follow · / search · q quit`
-      : ` ${counts}`;
+    const counts = countsLine(s);
+    if (!this.opts.interactive) {
+      line.content = ` ${counts}`;
+      line.fg = DIM;
+      return;
+    }
+    const width = this.renderer?.terminalWidth ?? 80;
+    line.content = ` ${counts}    ${keyHint(width - counts.length - 6)}`;
     line.fg = DIM;
   }
 
@@ -857,18 +976,4 @@ export class LiveView {
       fill(row, i);
     }
   }
-}
-
-/** Arrow keys are new; normalizing them here means `stepFocus` keeps its exact
- *  existing contract (and its existing tests) instead of learning key names. */
-function arrowToVim(
-  name: string,
-  seq: string,
-): "h" | "j" | "k" | "l" | undefined {
-  if (seq === "h" || seq === "j" || seq === "k" || seq === "l") return seq;
-  if (name === "left") return "h";
-  if (name === "down") return "j";
-  if (name === "up") return "k";
-  if (name === "right") return "l";
-  return undefined;
 }

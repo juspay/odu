@@ -84,20 +84,28 @@ interface Mounted {
   frame: () => string;
 }
 
-/** Mount the view against opentui's test renderer at a given terminal size. */
+/** Mount the view against opentui's test renderer at a given terminal size.
+ *  `on` overrides the state to start from — `run` starts all-pending, which is
+ *  the case the focus rules are actually about. */
 async function mount(
   width: number,
   height: number,
-  over: Partial<Parameters<typeof makeOpts>[0]> = {},
+  over: Partial<Parameters<typeof makeOpts>[0]> & { on?: PipelineState } = {},
 ): Promise<Mounted> {
+  const { on, ...rest } = over;
   const setup = await createTestRenderer({ width, height });
-  const view = new LiveView(makeOpts({ setup, ...over }));
-  view.start(state, header);
+  const view = new LiveView(makeOpts({ setup, ...rest }));
+  view.start(on ?? state, header);
   // start() is synchronous and mounts in the background; give it a turn.
   await setup.flush();
+  await settle(setup);
+  return { view, setup, frame: () => setup.captureCharFrame() };
+}
+
+/** Let the mount, the log stream and the post-layout repaint all land. */
+async function settle(setup: TestRendererSetup): Promise<void> {
   await new Promise((r) => setTimeout(r, 20));
   await setup.flush();
-  return { view, setup, frame: () => setup.captureCharFrame() };
 }
 
 function makeOpts(o: {
@@ -190,6 +198,25 @@ describe("LiveView — the log pane takes the terminal's height", () => {
     short.view.stop();
 
     expect(tallRows).toBeGreaterThan(shortRows);
+  });
+
+  it("wraps the log at the pane's own inner width, not a guessed inset", async () => {
+    // The emulator's column count and the width opentui actually draws into
+    // must be the same number. They were derived independently
+    // (`terminalWidth - 4` against a bordered box's real inner width), so long
+    // lines broke mid-word two columns early — visible in a real run as ragged
+    // continuation lines.
+    const { view, frame } = await mount(96, 30, { log: `${"z".repeat(240)}\n` });
+    const lines = frame().split("\n");
+    const border = lines.find((l) => l.includes("┌")) ?? "";
+    const inner = border.trimEnd().length - 2; // the box's own left/right border
+    const zRows = lines
+      .filter((l) => l.includes("z"))
+      .map((l) => (l.match(/z/g) ?? []).length);
+    expect(inner).toBeGreaterThan(0);
+    // Every row but the last is a full-width wrap.
+    expect(zRows.slice(0, -1)).toEqual(zRows.slice(0, -1).map(() => inner));
+    view.stop();
   });
 
   it("relayouts on resize instead of smearing the old frame", async () => {
@@ -314,38 +341,105 @@ describe("LiveView — mount ordering", () => {
 });
 
 describe("LiveView — focus and the log subscription", () => {
+  /** What `odu run` actually starts from: nothing has been scheduled yet. */
+  const allPending: PipelineState = {
+    ...state,
+    nodes: Object.fromEntries(
+      state.order.map((id) => [id, node(id, "pending")]),
+    ),
+  };
+
+  /** …and what it looks like once a lane picks a node up. */
+  const oneRunning: PipelineState = {
+    ...allPending,
+    nodes: {
+      ...allPending.nodes,
+      "ci::e2e@aarch64-darwin": node(
+        "ci::e2e@aarch64-darwin",
+        "running",
+        null,
+        940_000,
+      ),
+    },
+  };
+
   it("auto-follows focus onto the running node as lanes go live", async () => {
-    // F2: `run` start()s on an all-pending snapshot and update()s as lanes come
-    // up, so focus must walk off the startup node onto the running one until a
-    // keypress pins it.
-    const pending: PipelineState = {
-      ...state,
-      nodes: {
-        ...state.nodes,
-        "ci::install@x86_64-linux": node("ci::install@x86_64-linux", "pending"),
-        "ci::e2e@aarch64-darwin": node("ci::e2e@aarch64-darwin", "pending"),
-      },
-    };
-    const { view, setup, frame } = await mount(96, 30);
-    view.update(pending);
+    // `run` start()s on an all-pending snapshot and update()s as lanes come up,
+    // so focus must walk off the startup node onto the running one. The pane
+    // title is the readout: it names the focused node.
+    const { view, setup, frame } = await mount(96, 30, { on: allPending });
+    expect(frame()).toContain("ci::install@x86_64-linux");
+    expect(frame()).not.toContain("ci::e2e@aarch64-darwin");
+
+    view.update(oneRunning);
     await setup.flush();
-    const live: PipelineState = {
-      ...pending,
-      nodes: {
-        ...pending.nodes,
-        "ci::e2e@aarch64-darwin": node(
-          "ci::e2e@aarch64-darwin",
-          "running",
-          null,
-          940_000,
-        ),
-      },
-    };
-    view.update(live);
-    await setup.flush();
-    await new Promise((r) => setTimeout(r, 20));
-    await setup.flush();
+    await settle(setup);
+
     expect(frame()).toContain("ci::e2e@aarch64-darwin");
+    expect(frame()).not.toContain("ci::install@x86_64-linux");
+    view.stop();
+  });
+
+  it("stops auto-following once a key picks a node by hand", async () => {
+    // The other half of the same rule: `focusLocked`. An operator reading a
+    // node must not have the pane yanked away by the next state push.
+    const { view, setup, frame } = await mount(96, 30, { on: allPending });
+    setup.mockInput.pressKey("j"); // install → e2e, same platform column
+    await setup.flush();
+    await settle(setup);
+    expect(frame()).toContain("ci::e2e@x86_64-linux");
+
+    view.update(oneRunning);
+    await setup.flush();
+    await settle(setup);
+
+    expect(frame()).toContain("ci::e2e@x86_64-linux");
+    expect(frame()).not.toContain("ci::e2e@aarch64-darwin");
+    view.stop();
+  });
+
+  it("marks the focused CELL per platform, not the whole recipe row", async () => {
+    // A past bug marked every cell of the focused recipe. Focus starts on
+    // e2e@aarch64-darwin; `h` steps to the other platform on the SAME row, so
+    // the row marker must stay put while the cell marker moves.
+    const { view, setup, frame } = await mount(96, 30);
+    const e2eRow = (f: string) =>
+      f.split("\n").find((l) => l.includes("e2e")) ?? "";
+    const before = e2eRow(frame());
+    setup.mockInput.pressKey("h");
+    await setup.flush();
+    await settle(setup);
+    const after = e2eRow(frame());
+
+    expect(before.indexOf("›")).toBe(after.indexOf("›"));
+    expect(before.indexOf("▸")).toBeGreaterThanOrEqual(0);
+    expect(after.indexOf("▸")).not.toBe(before.indexOf("▸"));
+    view.stop();
+  });
+
+  it("carries the search query onto the newly focused node's log", async () => {
+    // The query lived in two objects, and a focus change built a fresh buffer
+    // with an empty one: `n` silently did nothing. `n` finding a hit unpins the
+    // tail, which the pane title reports.
+    const lines = Array.from({ length: 40 }, (_, i) =>
+      i === 0 ? "needle here" : `line ${i}`,
+    ).join("\n");
+    const { view, setup, frame } = await mount(96, 30, { log: `${lines}\n` });
+    setup.mockInput.pressKey("/");
+    await setup.mockInput.typeText("needle");
+    setup.mockInput.pressEnter();
+    await setup.flush();
+    await settle(setup);
+
+    setup.mockInput.pressKey("j"); // focus a different node — new LogView
+    await setup.flush();
+    await settle(setup);
+    expect(frame()).toContain("‹follow›");
+
+    setup.mockInput.pressKey("n");
+    await setup.flush();
+    await settle(setup);
+    expect(frame()).toContain("‹pinned›");
     view.stop();
   });
 

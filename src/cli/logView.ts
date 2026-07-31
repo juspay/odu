@@ -6,35 +6,32 @@
  * carriage returns and cursor motion, so concatenating the bytes and splitting
  * on `\n` turns one progress bar into several hundred junk lines and pushes the
  * useful output out of view. Feeding the same bytes to a headless VT gives the
- * semantics the producer actually intended — `\r` overwrites in place, SGR
- * colour survives, and a wide glyph occupies two cells because the emulator
- * measured it rather than because we counted code points.
+ * semantics the producer actually intended — `\r` overwrites in place, and a
+ * wide glyph occupies two cells because the emulator measured it rather than
+ * because we counted code points.
+ *
+ * Colour is *consumed* here, not carried: `rows()` is plain text, which is why
+ * escape junk never reaches the pane — and also why a node's log renders
+ * monochrome. Carrying it would mean per-cell attribute runs on `LogRow` and a
+ * styled-text row in the consumer; until that exists, this module does not
+ * claim it.
  *
  * The viewport is a window onto that VT's buffer: `follow` pins it to the tail
  * (the default — a running node should stream), and any scroll input unpins it
  * so a failure can be read without quitting. Search is a filter over the same
  * buffer, so `/` never has to re-parse anything.
+ *
+ * Nothing here knows what odu is: it takes bytes and a query, which is the
+ * whole of its contract with a producer.
  */
 
 import { Terminal } from "@xterm/headless";
-import type { NodeLogFrame } from "../common/surface";
 
 /** One visible row of the pane. `match` marks a search hit so the frame can
  *  highlight it without knowing what the query was. */
 export interface LogRow {
   text: string;
   match: boolean;
-}
-
-/** How the pane is currently anchored — surfaced in the status bar so the
- *  operator can tell a live tail from a pinned read. */
-export interface LogPosition {
-  follow: boolean;
-  /** 1-based index of the top visible line, for the `line n/total` readout. */
-  top: number;
-  total: number;
-  /** Search hits in the whole buffer, not just the visible window. */
-  matches: number;
 }
 
 /** The emulator is sized generously in rows: its scrollback is the pane's
@@ -60,12 +57,25 @@ export class LogView {
    *  the cursor would make already-written lines vanish from the pane and from
    *  search. Only a `snapshot` frame — a deliberate "start over" — resets it. */
   private highWater = 0;
-  /** Memoized match count, keyed on what it was computed from: `position()` is
-   *  called on every repaint and a full-buffer scan per frame is not free. */
-  private counted: { query: string; total: number; matches: number } | undefined;
+  /** Bumped on anything that can change the buffer's *contents*. The match memo
+   *  keys on this rather than on `total`, because an emulator's whole point is
+   *  that a `\r` redraw rewrites text without changing the line count — keying
+   *  on the line count left the status bar reporting a stale match count for
+   *  the rest of the search. */
+  private writes = 0;
+  /** Memoized match count, keyed on what it was computed from: it is read on
+   *  every repaint and a full-buffer scan per frame is not free. */
+  private counted:
+    | { query: string; writes: number; matches: number }
+    | undefined;
 
-  constructor(cols: number, height: number) {
+  /** `query` arrives from the consumer rather than being re-derived here: the
+   *  live view owns the search string (it draws it), and a focus change builds
+   *  a fresh `LogView` — one that started empty would silently drop the query
+   *  the operator had just typed. */
+  constructor(cols: number, height: number, query = "") {
     this.height = Math.max(1, height);
+    this.query = query.toLowerCase();
     this.term = new Terminal({
       cols: Math.max(1, cols),
       // The VT's own rows are irrelevant to what we display — we read lines out
@@ -77,20 +87,31 @@ export class LogView {
     });
   }
 
-  /** Feed one surface frame. A `snapshot` replaces the buffer (a focus change
-   *  backfills from scratch), an `append` extends it. Async because the
-   *  emulator parses off-thread: the buffer is NOT current until the write
-   *  callback fires, so every caller must await this before reading rows. */
-  async feed(frame: NodeLogFrame): Promise<void> {
-    if (frame.kind === "snapshot") {
-      this.term.reset();
-      this.follow = true;
-      this.top = 0;
-      this.cursor = -1;
-      this.highWater = 0;
-    }
-    await new Promise<void>((resolve) => this.term.write(frame.text, resolve));
-    this.highWater = Math.max(this.highWater, this.writtenExtent());
+  /** Append bytes. The promise resolves once the emulator has parsed them —
+   *  awaiting it is how a caller reads the *result* of this write, not a
+   *  correctness requirement: `rows()` always returns whatever the buffer holds
+   *  right now, which is the right answer for a live tail. */
+  async write(text: string): Promise<void> {
+    await new Promise<void>((resolve) => this.term.write(text, resolve));
+    this.writes += 1;
+    this.clampAnchor();
+  }
+
+  /** Start over — the producer said "here is the whole thing again". Which
+   *  frames mean that is the producer's protocol, so the decision stays on the
+   *  odu side of this boundary. */
+  reset(): void {
+    this.term.reset();
+    this.follow = true;
+    this.top = 0;
+    this.cursor = -1;
+    this.highWater = 0;
+    this.writes += 1;
+  }
+
+  /** Re-agree the anchor with the buffer after it changed: pinned to the tail,
+   *  or clamped to the last legal offset. */
+  private clampAnchor(): void {
     if (this.follow) this.toBottom();
     else this.top = Math.min(this.top, this.maxTop());
   }
@@ -104,9 +125,10 @@ export class LogView {
     if (next === this.height && cols_ === this.term.cols) return;
     this.height = next;
     this.term.resize(cols_, Math.max(this.height, 24));
-    this.counted = undefined;
-    if (this.follow) this.toBottom();
-    else this.top = Math.min(this.top, this.maxTop());
+    // A reflow rewrites the buffer, so the memo is stale for the same reason a
+    // write makes it stale.
+    this.writes += 1;
+    this.clampAnchor();
   }
 
   /** Lines actually written, scrollback included.
@@ -115,9 +137,14 @@ export class LogView {
    *  count, so a two-line log in a 24-row emulator reports 24 and the tail
    *  window lands on twenty-two blanks. The written extent is where the cursor
    *  has reached — plus the cursor's own line when it holds anything, since
-   *  output without a trailing newline is still output. */
+   *  output without a trailing newline is still output.
+   *
+   *  Advancing the high-water mark here rather than in `write()` gives it one
+   *  owner: it is then also correct after a `resize` reflow, which no write
+   *  callback would have seen. */
   get total(): number {
-    return Math.max(this.highWater, this.writtenExtent());
+    this.highWater = Math.max(this.highWater, this.writtenExtent());
+    return this.highWater;
   }
 
   private writtenExtent(): number {
@@ -131,26 +158,30 @@ export class LogView {
     return this.term.buffer.active.getLine(i)?.translateToString(true) ?? "";
   }
 
+  /** Absolute buffer line the window starts at — the one expression for "where
+   *  is the pane looking", so the tail rule cannot be restated per reader. */
+  private get start(): number {
+    return this.follow ? this.maxTop() : this.top;
+  }
+
   /** The visible window, exactly `height` rows (short buffers pad with blanks
    *  so the pane's geometry never depends on how much has been logged yet). */
   rows(): LogRow[] {
-    const start = this.follow ? Math.max(0, this.total - this.height) : this.top;
+    const start = this.start;
+    const total = this.total;
     const out: LogRow[] = [];
     for (let i = 0; i < this.height; i++) {
-      const text = start + i < this.total ? this.lineAt(start + i) : "";
+      const text = start + i < total ? this.lineAt(start + i) : "";
       out.push({ text, match: this.query !== "" && this.hits(text) });
     }
     return out;
   }
 
-  position(): LogPosition {
-    const start = this.follow ? Math.max(0, this.total - this.height) : this.top;
-    return {
-      follow: this.follow,
-      top: Math.min(this.total, start + 1),
-      total: this.total,
-      matches: this.matchCount(),
-    };
+  /** Search hits across the whole buffer, not just the visible window — what
+   *  the status bar reports while `/` is open, and the only anchoring readout
+   *  any consumer asks for. */
+  get matches(): number {
+    return this.matchCount();
   }
 
   private hits(text: string): boolean {
@@ -159,12 +190,14 @@ export class LogView {
 
   private matchCount(): number {
     if (this.query === "") return 0;
-    const total = this.total;
     const memo = this.counted;
-    if (memo?.query === this.query && memo.total === total) return memo.matches;
+    if (memo?.query === this.query && memo.writes === this.writes) {
+      return memo.matches;
+    }
+    const total = this.total;
     let n = 0;
     for (let i = 0; i < total; i++) if (this.hits(this.lineAt(i))) n++;
-    this.counted = { query: this.query, total, matches: n };
+    this.counted = { query: this.query, writes: this.writes, matches: n };
     return n;
   }
 
@@ -172,10 +205,14 @@ export class LogView {
 
   /** `f` — pin to the tail, or release it where it stands. */
   toggleFollow(): void {
-    if (this.follow) {
-      this.top = Math.max(0, this.total - this.height);
-      this.follow = false;
-    } else this.toBottom();
+    if (this.follow) this.unpin();
+    else this.toBottom();
+  }
+
+  /** Stop following, leaving the window exactly where the operator sees it. */
+  private unpin(): void {
+    this.top = this.maxTop();
+    this.follow = false;
   }
 
   get following(): boolean {
@@ -185,10 +222,7 @@ export class LogView {
   /** Scroll by `delta` rows; any scroll unpins the tail, since an operator who
    *  scrolls is reading, not watching. */
   scrollBy(delta: number): void {
-    if (this.follow) {
-      this.top = Math.max(0, this.total - this.height);
-      this.follow = false;
-    }
+    if (this.follow) this.unpin();
     this.top = Math.max(0, Math.min(this.maxTop(), this.top + delta));
   }
 
@@ -218,10 +252,6 @@ export class LogView {
     this.query = next;
     this.cursor = -1;
     this.counted = undefined;
-  }
-
-  get search(): string {
-    return this.query;
   }
 
   /** Jump to the next match after the last one (wrapping). Unpins the tail so
