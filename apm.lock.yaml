@@ -1,5 +1,5 @@
 lockfile_version: '1'
-generated_at: '2026-07-26T02:32:13.326502+00:00'
+generated_at: '2026-07-31T00:40:19.597098+00:00'
 apm_version: 0.26.0
 dependencies:
 - repo_url: _local/dev
@@ -16,7 +16,7 @@ dependencies:
 - repo_url: juspay/kolu
   name: agents
   host: github.com
-  resolved_commit: cab6a82702ded15634886c290698088944111876
+  resolved_commit: 3971f99d1841a8e224c8d189ea7a720faa2ae7d9
   resolved_ref: master
   version: 0.1.0
   virtual_path: agents
@@ -39,8 +39,12 @@ dependencies:
   - .claude/skills/bridge/dashboard/index.html
   - .claude/skills/bridge/dashboard/index.js
   - .claude/skills/bridge/dashboard/red-alert.mp3
+  - .claude/skills/coordinator
+  - .claude/skills/coordinator/SKILL.md
   - .claude/skills/diataxis
   - .claude/skills/diataxis/SKILL.md
+  - .claude/skills/hostility-review
+  - .claude/skills/hostility-review/SKILL.md
   - .claude/skills/kolu
   - .claude/skills/kolu/SKILL.md
   - .claude/skills/kolu/TUI.md
@@ -57,20 +61,22 @@ dependencies:
     .claude/skills/agent-debate/SKILL.md: sha256:93ae58579a3674ef53e196a19bd2511a07d4d05e57eee24eb2dc78736e5806e0
     .claude/skills/architecture-first-principles/SKILL.md: sha256:f91c89a3546235fb8f2e95489d9a943a540fb4477af37fe4512d731f9e9f312f
     .claude/skills/be-review/RATIONALE.md: sha256:cac9be3c3be87dae93442ed2b6f0549c7d1710fbf4fa9ac2437455810cbcab7a
-    .claude/skills/be-review/SKILL.md: sha256:254f4aa6e1aa0bd9b2a5d5e8a6cc8e15238f1cec0266bfcf6c94ce3c6c48cde5
-    .claude/skills/be/SKILL.md: sha256:43a343aeee556da0051d3066ad20a5e97c58d4d8d1de6d94f75000b2ced058f5
+    .claude/skills/be-review/SKILL.md: sha256:16e46021f0298c32995153e0477ae11f3fad18283c91114e13143b5e96167ad3
+    .claude/skills/be/SKILL.md: sha256:8f77b2aeea41166a2168971b8adb488a57ada572626d66bc1f41c9b4acb91520
     .claude/skills/bridge/SKILL.md: sha256:f9220d5e89b38bc6370cf9e601229992aa1f642fae3ef6d92d9c5a884d5b1cca
     .claude/skills/bridge/dashboard/index.html: sha256:7289bb60245087ce5b57c833bd8bb2b766153cec31b92a413647547b3e9742b0
     .claude/skills/bridge/dashboard/index.js: sha256:f58c4b996f6b9df7f13f30fbd061404cbc95ab3e5881f53066cde199f3501f38
     .claude/skills/bridge/dashboard/red-alert.mp3: sha256:61a535db70bb68738df7929c29b11a3bcb11ca23bf5eb7793a0b84f3e699e0fb
+    .claude/skills/coordinator/SKILL.md: sha256:abac6960f10c8ce2603f94e9101cbbd3e876f073c13e6b3741698d98eaff39c7
     .claude/skills/diataxis/SKILL.md: sha256:596e06f555aa0218ea2138270ceb3419584038a519ba43c8ff1823bf597d9aa6
+    .claude/skills/hostility-review/SKILL.md: sha256:7085957afe45b78b1c4262b6e5e47a462686959d93eb3ff190bcd08c0b2647f4
     .claude/skills/kolu/SKILL.md: sha256:4688c89300aca3571358285502c0dbb8612656020baee760c86f34ff6b979291
     .claude/skills/kolu/TUI.md: sha256:e7a206b1f1d2738bdaf2e2af3bdfdb785da94872df03d45e7ac47ae92361244c
     .claude/skills/lens-debate/RATIONALE.md: sha256:5d27af06f554fb81fc344450f2d5031a097287c3282f19945eec2b55712a656a
-    .claude/skills/lens-debate/SKILL.md: sha256:831fa9c049e0bd12ac5a432f488369c9655ff0e0b92fb014bfcab0728461bd6d
+    .claude/skills/lens-debate/SKILL.md: sha256:e5afec03dd8659583bc724d5bd35691affa8082f0e21f88a137616f062ab813f
     .claude/skills/perfection-review/SKILL.md: sha256:81e96416552beaa8a59299007bfd0280e008c2b41290cb2f9b7e8efa20ec0056
     .claude/skills/surface/SKILL.md: sha256:2bb20756fe7292b5b6f00ed77cb7f9d4239c41d6751bf460a93266927f112eea
-  content_hash: sha256:b6a9ec18e873a111552ff7c12d324efb8a8fdecc116e4ecd012f469c6ffe88af
+  content_hash: sha256:6a5ad55d51101bdd1fa8ffc7b39c1efe1675430a257b5117a2fb0dca7342e438
   is_dev: true
 - repo_url: srid/agency
   name: agency
@@ -136,7 +142,7 @@ dependencies:
 - repo_url: juspay/odu
   name: odu
   host: github.com
-  resolved_commit: 3f6ec33f558e092079b32f888e91e3fb74283f10
+  resolved_commit: fe0e0fc21ff639974868d410ce8d9421fdfaa467
   version: 1.0.0
   depth: 2
   resolved_by: juspay/kolu
@@ -151,7 +157,7 @@ dependencies:
     .claude/skills/odu-mcp/SKILL.md: sha256:e78f8a99ac11428b71ca40f8bdb7f68b0e508266458d6077d74e916bc655788d
     .claude/skills/odu-mcp/bin/serve: sha256:6152e8fc4d3478b70a5cd547c172be596787e600b5757233fb82b307186b9e26
     .claude/skills/odu/SKILL.md: sha256:0ebfc14cbeaa2846b718db303758738d0c3dd57f98b24c3974ac7fbdc4d9fd2e
-  content_hash: sha256:aad0925c472a4ca737b801e2b6465cb04bb9c1fb69ea2ce8acdd26b978f1fe24
+  content_hash: sha256:a08f8496dbb9000c55eb75082b32657562bdd7284d114e53429ecc3ee4cf2f43
   is_dev: true
 - repo_url: juspay/project-unknown
   name: project-unknown
@@ -304,7 +310,7 @@ deployments:
   owners:
   - juspay/kolu/agents
   active_owner: juspay/kolu/agents
-  content_hash: sha256:254f4aa6e1aa0bd9b2a5d5e8a6cc8e15238f1cec0266bfcf6c94ce3c6c48cde5
+  content_hash: sha256:16e46021f0298c32995153e0477ae11f3fad18283c91114e13143b5e96167ad3
 - kind: project-relative
   target: claude
   value: .claude/skills/be/SKILL.md
@@ -313,7 +319,7 @@ deployments:
   owners:
   - juspay/kolu/agents
   active_owner: juspay/kolu/agents
-  content_hash: sha256:43a343aeee556da0051d3066ad20a5e97c58d4d8d1de6d94f75000b2ced058f5
+  content_hash: sha256:8f77b2aeea41166a2168971b8adb488a57ada572626d66bc1f41c9b4acb91520
 - kind: project-relative
   target: claude
   value: .claude/skills/bridge
@@ -377,6 +383,24 @@ deployments:
   - srid/agency
   active_owner: srid/agency
   content_hash: sha256:8d188754eaf56063de720a0c02fa927db3b56ff5fa30d0e612893ca8798da899
+- kind: project-relative
+  target: claude
+  value: .claude/skills/coordinator
+  runtime: null
+  scope: project
+  owners:
+  - juspay/kolu/agents
+  active_owner: juspay/kolu/agents
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/coordinator/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - juspay/kolu/agents
+  active_owner: juspay/kolu/agents
+  content_hash: sha256:abac6960f10c8ce2603f94e9101cbbd3e876f073c13e6b3741698d98eaff39c7
 - kind: project-relative
   target: claude
   value: .claude/skills/diataxis
@@ -550,6 +574,24 @@ deployments:
   content_hash: sha256:c7da3fda455cc17adc5788984954baf95a354f2e83367bff0efd1b01f45a96a3
 - kind: project-relative
   target: claude
+  value: .claude/skills/hostility-review
+  runtime: null
+  scope: project
+  owners:
+  - juspay/kolu/agents
+  active_owner: juspay/kolu/agents
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/hostility-review/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - juspay/kolu/agents
+  active_owner: juspay/kolu/agents
+  content_hash: sha256:7085957afe45b78b1c4262b6e5e47a462686959d93eb3ff190bcd08c0b2647f4
+- kind: project-relative
+  target: claude
   value: .claude/skills/kolu
   runtime: null
   scope: project
@@ -601,7 +643,7 @@ deployments:
   owners:
   - juspay/kolu/agents
   active_owner: juspay/kolu/agents
-  content_hash: sha256:831fa9c049e0bd12ac5a432f488369c9655ff0e0b92fb014bfcab0728461bd6d
+  content_hash: sha256:e5afec03dd8659583bc724d5bd35691affa8082f0e21f88a137616f062ab813f
 - kind: project-relative
   target: claude
   value: .claude/skills/lowy
@@ -628,7 +670,7 @@ deployments:
   owners:
   - juspay/odu
   - .
-  active_owner: juspay/odu
+  active_owner: .
   content_hash: null
 - kind: project-relative
   target: claude
@@ -638,7 +680,7 @@ deployments:
   owners:
   - juspay/odu
   - .
-  active_owner: juspay/odu
+  active_owner: .
   content_hash: null
 - kind: project-relative
   target: claude
@@ -648,7 +690,7 @@ deployments:
   owners:
   - juspay/odu
   - .
-  active_owner: juspay/odu
+  active_owner: .
   content_hash: sha256:e78f8a99ac11428b71ca40f8bdb7f68b0e508266458d6077d74e916bc655788d
 - kind: project-relative
   target: claude
@@ -658,7 +700,7 @@ deployments:
   owners:
   - juspay/odu
   - .
-  active_owner: juspay/odu
+  active_owner: .
   content_hash: sha256:6152e8fc4d3478b70a5cd547c172be596787e600b5757233fb82b307186b9e26
 - kind: project-relative
   target: claude
@@ -668,7 +710,7 @@ deployments:
   owners:
   - juspay/odu
   - .
-  active_owner: juspay/odu
+  active_owner: .
   content_hash: sha256:0ebfc14cbeaa2846b718db303758738d0c3dd57f98b24c3974ac7fbdc4d9fd2e
 - kind: project-relative
   target: claude
