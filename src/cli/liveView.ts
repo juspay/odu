@@ -356,11 +356,16 @@ export class LiveView {
   }
 
   private openTerminal(): CliRenderer {
+    const positive = (n: number | undefined, fallback: number): number =>
+      n !== undefined && n > 0 ? n : fallback;
     return new CliRenderer(
       process.stdin,
       process.stdout,
-      process.stdout.columns ?? 80,
-      process.stdout.rows ?? 24,
+      // NOT `?? 80`: a stdout whose size is unknown reports 0, not undefined,
+      // and a 0x0 renderer is rejected outright — the live view would silently
+      // degrade to nothing on any terminal that has not reported its size yet.
+      positive(process.stdout.columns, 80),
+      positive(process.stdout.rows, 24),
       {
         // The whole point: the session lives on the alternate screen, so the
         // operator's scrollback is never written to while the run is live.
