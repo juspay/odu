@@ -1108,11 +1108,21 @@ export class LiveView {
       const line = rows[i];
       // A search hit is inverted rather than recoloured: log text already
       // carries meaning in its own words, so a hue would compete with it.
-      setRow(row, [
-        line?.match === true
-          ? bg(ACCENT)(fg(INK)(line.text))
-          : plain(line?.text ?? ""),
-      ]);
+      if (line === undefined) {
+        setRow(row, []);
+        return;
+      }
+      // A search hit is inverted rather than recoloured: the producer's own
+      // colours are already carrying meaning in this row, and a hue would
+      // compete with them.
+      if (line.match) {
+        setRow(row, [bg(ACCENT)(fg(INK)(line.text))]);
+        return;
+      }
+      setRow(
+        row,
+        line.spans.map((sp) => (sp.fg === undefined ? plain(sp.text) : fg(sp.fg)(sp.text))),
+      );
     });
   }
 

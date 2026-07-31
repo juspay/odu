@@ -29,15 +29,51 @@ import { Terminal } from "@xterm/headless";
 
 /** One visible row of the pane. `match` marks a search hit so the frame can
  *  highlight it without knowing what the query was. */
+/** A run of same-coloured cells. `fg` is undefined for the terminal's default
+ *  foreground, which the pane paints in its own. */
+export interface LogSpan {
+  text: string;
+  fg: string | undefined;
+}
+
 export interface LogRow {
   text: string;
   match: boolean;
+  /** The same text, split into colour runs — a node's own red failures and
+   *  green ticks, carried out of the emulator rather than flattened. */
+  spans: LogSpan[];
 }
 
 /** The emulator is sized generously in rows: its scrollback is the pane's
  *  history, and a node that logs for half an hour should still be readable
  *  from the top of its failure. */
 const SCROLLBACK = 5000;
+
+/** The 16 ANSI colours, in this view's palette rather than the terminal's, so a
+ *  node's output sits in the same family as the frame around it. */
+const ANSI16 = [
+  "#3b4650", "#e8695b", "#6fcf8e", "#e6b24d",
+  "#6a9fdc", "#bb8ce2", "#5ec8c4", "#c6d2d3",
+  "#5d6d70", "#ef8578", "#8ddba6", "#f0c46e",
+  "#8bb8e8", "#cda6ec", "#7fd8d4", "#e8f0f0",
+] as const;
+
+/** An xterm palette index as a hex colour: 0-15 from the table above, 16-231
+ *  the 6x6x6 cube, 232-255 the greyscale ramp. */
+function paletteHex(i: number): string {
+  const named = ANSI16[i];
+  if (named !== undefined) return named;
+  if (i >= 232) {
+    const v = 8 + (i - 232) * 10;
+    return `#${v.toString(16).padStart(2, "0").repeat(3)}`;
+  }
+  const n = i - 16;
+  const step = (x: number): string =>
+    (x === 0 ? 0 : 55 + x * 40).toString(16).padStart(2, "0");
+  return `#${step(Math.floor(n / 36))}${step(Math.floor(n / 6) % 6)}${step(n % 6)}`;
+}
+
+const hex6 = (n: number): string => `#${(n & 0xffffff).toString(16).padStart(6, "0")}`;
 
 export class LogView {
   private term: Terminal;
@@ -172,6 +208,51 @@ export class LogView {
     return this.term.buffer.active.getLine(i)?.translateToString(true) ?? "";
   }
 
+  /** One buffer line as colour runs.
+   *
+   *  `translateToString` flattens the attributes away, which is why the pane
+   *  used to render every node's output in one foreground. Walking the cells
+   *  keeps the producer's own colours — a failing test's red, a nix path's
+   *  cyan — and costs one pass over a line that is about to be drawn anyway. */
+  private spansAt(i: number): LogSpan[] {
+    const line = this.term.buffer.active.getLine(i);
+    if (line === undefined) return [];
+    const spans: LogSpan[] = [];
+    let text = "";
+    let colour: string | undefined;
+    let started = false;
+    for (let x = 0; x < line.length; x++) {
+      const cell = line.getCell(x);
+      if (cell === undefined) continue;
+      // A wide glyph occupies two cells; the second reports width 0 and no
+      // chars, and emitting it would double the column count.
+      if (cell.getWidth() === 0) continue;
+      const chars = cell.getChars();
+      const next = cell.isFgDefault()
+        ? undefined
+        : cell.isFgRGB()
+          ? hex6(cell.getFgColor())
+          : paletteHex(cell.getFgColor());
+      if (started && next !== colour) {
+        spans.push({ text, fg: colour });
+        text = "";
+      }
+      colour = next;
+      started = true;
+      text += chars === "" ? " " : chars;
+    }
+    if (started) spans.push({ text, fg: colour });
+    // Trailing blanks are padding, not content — the pane sizes its own rows.
+    while (spans.length > 0) {
+      const last = spans[spans.length - 1];
+      if (last === undefined) break;
+      last.text = last.text.replace(/\s+$/, "");
+      if (last.text !== "") break;
+      spans.pop();
+    }
+    return spans;
+  }
+
   /** Absolute buffer line the window starts at — the one expression for "where
    *  is the pane looking", so the tail rule cannot be restated per reader. */
   private get start(): number {
@@ -185,8 +266,14 @@ export class LogView {
     const total = this.total;
     const out: LogRow[] = [];
     for (let i = 0; i < this.height; i++) {
-      const text = start + i < total ? this.lineAt(start + i) : "";
-      out.push({ text, match: this.query !== "" && this.hits(text) });
+      const at = start + i;
+      const inRange = at < total;
+      const text = inRange ? this.lineAt(at) : "";
+      out.push({
+        text,
+        match: this.query !== "" && this.hits(text),
+        spans: inRange ? this.spansAt(at) : [],
+      });
     }
     return out;
   }

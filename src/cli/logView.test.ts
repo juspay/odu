@@ -100,6 +100,33 @@ describe("LogView — reflow", () => {
   });
 });
 
+describe("LogView — colour", () => {
+  it("carries the producer's own colours out of the emulator", async () => {
+    // translateToString flattens attributes away, which rendered every node's
+    // output in one foreground. A failing test's red is information.
+    const view = new LogView(60, 4);
+    await feed(view, "\u001b[31mFAILED\u001b[0m plain \u001b[32mok\u001b[0m\r\n");
+    const row = view.rows().find((r) => r.text.includes("FAILED"));
+    expect(row).toBeDefined();
+    const coloured = (row?.spans ?? []).filter((sp) => sp.fg !== undefined);
+    expect(coloured.length).toBeGreaterThanOrEqual(2);
+    expect(coloured.map((sp) => sp.text.trim())).toContain("FAILED");
+    expect(coloured.map((sp) => sp.text.trim())).toContain("ok");
+    // The two differ — red and green did not collapse to one colour.
+    const hues = new Set(coloured.map((sp) => sp.fg));
+    expect(hues.size).toBeGreaterThanOrEqual(2);
+    view.dispose();
+  });
+
+  it("leaves default-coloured text without a hue for the pane to own", async () => {
+    const view = new LogView(60, 4);
+    await feed(view, "just ordinary output\r\n");
+    const row = view.rows().find((r) => r.text.includes("ordinary"));
+    expect((row?.spans ?? []).every((sp) => sp.fg === undefined)).toBe(true);
+    view.dispose();
+  });
+});
+
 describe("LogView — anchoring", () => {
   async function scrolled(): Promise<LogView> {
     const view = new LogView(40, 5);
