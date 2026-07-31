@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import { RUN_RECORD_VERSION, type RunRecord } from "../common/runRecord";
 import { listRuns } from "./runsTool";
 

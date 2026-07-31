@@ -6,7 +6,7 @@
  * cancelled-but-not-confirmed path via injected deps.
  */
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "bun:test";
 import { pendingNode, type PipelineState } from "../common/surface";
 import { serveTestSurface, type TestSurface } from "../mcp/serveForTest";
 import { cancelNodeOrPlatform, cancelRun } from "./cancel";

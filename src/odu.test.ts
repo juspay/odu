@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { stdioLink } from "@kolu/surface/links/stdio";
 import { createLoopbackPair } from "@kolu/surface/loopback";
 import { serveOverStdio } from "@kolu/surface/peer-server";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "bun:test";
 import {
   applyLogFrame,
   exitCode,

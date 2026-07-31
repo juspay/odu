@@ -9,10 +9,10 @@ nix_shell := if env('IN_NIX_SHELL', '') != '' { '' } else { 'nix develop --accep
 
 [parallel]
 [metadata("ci")]
-default: typecheck unit fmt nix e2e
+default: typecheck unit fmt nix e2e bun-nix-fresh
 
 install:
-    {{ nix_shell }} pnpm install --frozen-lockfile
+    {{ nix_shell }} bun install --frozen-lockfile
     {{ nix_shell }} sh -c 'sh scripts/hydrate-kolu-packages.sh \
       "$ODU_KOLU_SURFACE" @kolu/surface \
       "$ODU_KOLU_SURFACE_MCP" @kolu/surface-mcp \
@@ -22,19 +22,36 @@ install:
       "$ODU_KOLU_LOG" @kolu/log'
 
 typecheck: install
-    {{ nix_shell }} pnpm typecheck
+    {{ nix_shell }} bun run typecheck
 
 unit: install
-    {{ nix_shell }} pnpm test:unit
+    {{ nix_shell }} bun run test:unit
 
 # Black-box e2e: builds the odu binary with nix and drives it against a
 # throwaway fixture repo on a localhost lane (tests/e2e/README.md). Needs the
-# dev shell on PATH (nix, git, just) plus the vitest/tsx deps from `install`.
+# dev shell on PATH (nix, git, just, bun) plus the node_modules from `install`.
 e2e: install
-    {{ nix_shell }} pnpm test:e2e
+    {{ nix_shell }} bun run test:e2e
 
 fmt:
     {{ nix_shell }} nixpkgs-fmt --check *.nix nix/*.nix nix/packages/*.nix
 
 nix:
     nix build .#odu .#odu-runner --no-link
+
+# bun.nix freshness — regenerate from bun.lock into a tmpdir and diff
+# against the committed file. Fails the pipeline if bun.lock has moved
+# without `just regenerate-bun-nix` being run.
+bun-nix-fresh:
+    {{ nix_shell }} sh -c '\
+      set -eu; \
+      tmp=$(mktemp -d); \
+      trap "rm -rf $tmp" EXIT; \
+      nix run .#bun2nix -- -l bun.lock -o "$tmp/bun.nix"; \
+      nixpkgs-fmt "$tmp/bun.nix" >/dev/null; \
+      diff -u bun.nix "$tmp/bun.nix" || { \
+        echo; \
+        echo "bun.nix is stale relative to bun.lock."; \
+        echo "Run: just regenerate-bun-nix && git add bun.nix"; \
+        exit 1; \
+      }'

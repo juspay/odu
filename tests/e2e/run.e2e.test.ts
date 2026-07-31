@@ -9,7 +9,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { beforeAll, describe, expect, it, onTestFinished } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import {
   BIG,
   buildOduBinary,
@@ -30,11 +30,17 @@ beforeAll(() => {
   oduBin = buildOduBinary();
 }, 600_000); // nix build, cold cache
 
-// Materialize a fixture and register its teardown with the running test, so
-// creation and cleanup are co-located (no module-level accumulator to sweep).
+// Materialize a fixture and register its teardown on a file-local registry the
+// `afterEach` below sweeps — bun:test has no per-test `onTestFinished`, so the
+// registry is what keeps creation and cleanup co-located in one helper.
+const created: string[] = [];
+afterEach(() => {
+  for (const dir of created.splice(0)) cleanup(dir);
+});
+
 function fixture(name: string): string {
   const dir = makeFixture(name);
-  onTestFinished(() => cleanup(dir));
+  created.push(dir);
   return dir;
 }
 

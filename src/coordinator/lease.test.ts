@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, jest } from "bun:test";
 import {
   acquireFromPool,
   formatHeldFor,
@@ -15,7 +15,7 @@ const id: LeaseIdentity = { holder: "me@desk", run: "abc1234#1" };
 function held(host: string): ClaimResult {
   return {
     kind: "held",
-    lease: { host, release: vi.fn() },
+    lease: { host, release: jest.fn() },
   };
 }
 
@@ -47,7 +47,7 @@ describe("parseHolderBody / formatHolder", () => {
 
 describe("acquireFromPool", () => {
   it("returns localhost without claiming", async () => {
-    const claim = vi.fn();
+    const claim = jest.fn();
     const r = await acquireFromPool({
       platform: "x86_64-linux",
       pool: ["localhost"],
@@ -67,7 +67,7 @@ describe("acquireFromPool", () => {
     // The rule is judged once at this entry, over the one pool this call
     // leases, and the localhost-beside-remotes branch is gone from the scan
     // rather than special-cased.
-    const claim = vi.fn(
+    const claim = jest.fn(
       async (): Promise<ClaimResult> => ({ kind: "busy", heldBy: null }),
     );
     await expect(
@@ -107,7 +107,7 @@ describe("acquireFromPool", () => {
 
   it("picks the first free host and reports busy siblings", async () => {
     const lines: string[] = [];
-    const claim = vi.fn(async (host: string): Promise<ClaimResult> => {
+    const claim = jest.fn(async (host: string): Promise<ClaimResult> => {
       if (host === "ci-1") return { kind: "busy", heldBy: null };
       if (host === "ci-2") return { kind: "busy", heldBy: null };
       return held(host);
@@ -129,7 +129,7 @@ describe("acquireFromPool", () => {
   });
 
   it("--no-wait fails immediately when every host is busy", async () => {
-    const claim = vi.fn(
+    const claim = jest.fn(
       async (): Promise<ClaimResult> => ({
         kind: "busy",
         heldBy: {
@@ -153,12 +153,12 @@ describe("acquireFromPool", () => {
 
   it("waits and retries when a host frees (no --no-wait)", async () => {
     let attempt = 0;
-    const claim = vi.fn(async (host: string): Promise<ClaimResult> => {
+    const claim = jest.fn(async (host: string): Promise<ClaimResult> => {
       attempt += 1;
       if (attempt <= 2) return { kind: "busy", heldBy: null };
       return held(host);
     });
-    const sleep = vi.fn(async () => {});
+    const sleep = jest.fn(async () => {});
     const r = await acquireFromPool({
       platform: "x86_64-linux",
       pool: ["ci-1"],
@@ -174,7 +174,7 @@ describe("acquireFromPool", () => {
   });
 
   it("fails loud when every host is unreachable (no busy to wait on)", async () => {
-    const claim = vi.fn(
+    const claim = jest.fn(
       async (): Promise<ClaimResult> => ({
         kind: "unreachable",
         error: "connection refused",
@@ -201,7 +201,7 @@ describe("acquireFromPool", () => {
         identity: id,
         noWait: true,
         source: null,
-        claim: vi.fn(),
+        claim: jest.fn(),
       }),
     ).rejects.toThrow(/empty host pool/);
   });
@@ -216,10 +216,10 @@ describe("leaseLanes", () => {
     // `noWait: false` the operator waited forever instead of being told the
     // config is illegal. Judged at the entry the refusal is deterministic —
     // it does not depend on alphabetical order or on who happens to be busy.
-    const claim = vi.fn(
+    const claim = jest.fn(
       async (): Promise<ClaimResult> => ({ kind: "busy", heldBy: null }),
     );
-    const sleep = vi.fn(async () => {});
+    const sleep = jest.fn(async () => {});
     await expect(
       leaseLanes({
         pools: {
@@ -246,7 +246,7 @@ describe("leaseLanes", () => {
     // The mixed x86_64-linux pool is in the same machine-global hosts file,
     // but this run claims only darwin — `platforms` IS the run's lease set, so
     // the illegal pool is none of its business and must not refuse it.
-    const claim = vi.fn(async (host: string): Promise<ClaimResult> => held(host));
+    const claim = jest.fn(async (host: string): Promise<ClaimResult> => held(host));
     const r = await leaseLanes({
       pools: {
         hosts: {
@@ -264,8 +264,8 @@ describe("leaseLanes", () => {
   });
 
   it("releases already-held leases if a later platform fails", async () => {
-    const releaseDarwin = vi.fn();
-    const claim = vi.fn(async (host: string): Promise<ClaimResult> => {
+    const releaseDarwin = jest.fn();
+    const claim = jest.fn(async (host: string): Promise<ClaimResult> => {
       if (host === "mac-1") {
         return { kind: "held", lease: { host, release: releaseDarwin } };
       }
@@ -290,9 +290,9 @@ describe("leaseLanes", () => {
   });
 
   it("multi-platform: does not hold early platforms while waiting on a busy later one", async () => {
-    const releaseDarwin = vi.fn();
+    const releaseDarwin = jest.fn();
     let pass = 0;
-    const claim = vi.fn(async (host: string): Promise<ClaimResult> => {
+    const claim = jest.fn(async (host: string): Promise<ClaimResult> => {
       if (host === "mac-1") {
         return {
           kind: "held",
@@ -302,7 +302,7 @@ describe("leaseLanes", () => {
       if (pass === 0) return { kind: "busy", heldBy: null };
       return held(host);
     });
-    const sleep = vi.fn(async () => {
+    const sleep = jest.fn(async () => {
       pass += 1;
     });
     const r = await leaseLanes({
@@ -329,7 +329,7 @@ describe("leaseLanes", () => {
   });
 
   it("rejects when two platforms list the same remote host (self-livelock)", async () => {
-    const claim = vi.fn(async (host: string): Promise<ClaimResult> => held(host));
+    const claim = jest.fn(async (host: string): Promise<ClaimResult> => held(host));
     await expect(
       leaseLanes({
         pools: {
@@ -351,7 +351,7 @@ describe("leaseLanes", () => {
   });
 
   it("rejects user@host vs bare host across platforms (same machine lock)", async () => {
-    const claim = vi.fn(async (host: string): Promise<ClaimResult> => held(host));
+    const claim = jest.fn(async (host: string): Promise<ClaimResult> => held(host));
     await expect(
       leaseLanes({
         pools: {
@@ -371,7 +371,7 @@ describe("leaseLanes", () => {
   });
 
   it("rejects different users on the same host across platforms", async () => {
-    const claim = vi.fn(async (host: string): Promise<ClaimResult> => held(host));
+    const claim = jest.fn(async (host: string): Promise<ClaimResult> => held(host));
     await expect(
       leaseLanes({
         pools: {
@@ -391,7 +391,7 @@ describe("leaseLanes", () => {
   });
 
   it("allows the same localhost string across platforms (lease-exempt)", async () => {
-    const claim = vi.fn();
+    const claim = jest.fn();
     const r = await leaseLanes({
       pools: {
         hosts: {
@@ -414,7 +414,7 @@ describe("leaseLanes", () => {
   });
 
   it("rejects short name vs FQDN for the same machine across platforms", async () => {
-    const claim = vi.fn(async (host: string): Promise<ClaimResult> => held(host));
+    const claim = jest.fn(async (host: string): Promise<ClaimResult> => held(host));
     await expect(
       leaseLanes({
         pools: {
@@ -434,7 +434,7 @@ describe("leaseLanes", () => {
   });
 
   it("rejects user@short vs bare FQDN aliases", async () => {
-    const claim = vi.fn(async (host: string): Promise<ClaimResult> => held(host));
+    const claim = jest.fn(async (host: string): Promise<ClaimResult> => held(host));
     await expect(
       leaseLanes({
         pools: {
@@ -454,7 +454,7 @@ describe("leaseLanes", () => {
   });
 
   it("does not collapse distinct IPv4 targets via first-dot split", async () => {
-    const claim = vi.fn(async (host: string): Promise<ClaimResult> => held(host));
+    const claim = jest.fn(async (host: string): Promise<ClaimResult> => held(host));
     const r = await leaseLanes({
       pools: {
         hosts: {

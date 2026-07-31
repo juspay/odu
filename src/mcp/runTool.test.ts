@@ -8,7 +8,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, jest } from "bun:test";
 import type { CancelResult } from "../coordinator/cancel";
 import { tryAcquireRunLock } from "../coordinator/checkoutLock";
 import { pendingNode, type PipelineState } from "../common/surface";
@@ -171,7 +171,7 @@ describe("pollUntilSocketOrExit — exit-bounded wait (no fixed startup window)"
     // that many polls; the waiter must not give up while the child is alive.
     const OLD_MAX_POLLS = 240;
     let polls = 0;
-    const ready = vi.fn(async () => {
+    const ready = jest.fn(async () => {
       polls += 1;
       return polls > OLD_MAX_POLLS + 10;
     });
@@ -189,7 +189,7 @@ describe("pollUntilSocketOrExit — exit-bounded wait (no fixed startup window)"
       resolveExit = r;
     });
     let polls = 0;
-    const ready = vi.fn(async () => {
+    const ready = jest.fn(async () => {
       polls += 1;
       if (polls === 3) resolveExit();
       return false;

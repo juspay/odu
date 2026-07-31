@@ -6,9 +6,8 @@ pkgs.mkShell ({
   packages = with pkgs; [
     just
     jq
-    nodejs
-    pnpm
-    tsx
+    bun
+    nodejs # for npm: `just website` builds website/, a standalone npm project
     nixpkgs-fmt
     uv # `just apm` runs apm via `uvx --from apm-cli`
   ];

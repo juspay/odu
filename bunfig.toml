@@ -1,0 +1,8 @@
+# Hoist every dependency into the root node_modules. The @kolu/* surface
+# libraries are hydrated as raw TypeScript from the Nix store
+# (scripts/hydrate-kolu-packages.sh) rather than installed from bun.lock, so
+# their own imports (@orpc/*, zod, solid-js, …) have to resolve by walking up
+# to ONE node_modules. Bun's default isolated linker would scatter those into
+# per-package trees and the hydrated sources would resolve nothing.
+[install]
+linker = "hoisted"

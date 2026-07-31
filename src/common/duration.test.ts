@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import { formatGoDuration } from "./duration";
 
 // Byte-parity with observed justci status descriptions (recon over merged

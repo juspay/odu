@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, jest } from "bun:test";
 import {
   agentLeaseLockPath,
   claimLocal,
@@ -102,7 +102,7 @@ describe.skipIf(!flockAvailable)("claimLocal / probeLocal", () => {
     const lock = tmpLock();
     let clock = 1_000;
     const timers: Array<{ cb: () => void; ms: number; at: number }> = [];
-    const self = vi.fn();
+    const self = jest.fn();
     const c = await claimLocal(
       lock,
       { holder: "t@h", run: null },
@@ -138,7 +138,7 @@ describe.skipIf(!flockAvailable)("claimLocal / probeLocal", () => {
     const lock = tmpLock();
     let clock = 1_000;
     const timers: Array<{ cb: () => void }> = [];
-    const self = vi.fn();
+    const self = jest.fn();
     const c = await claimLocal(
       lock,
       { holder: "t@h", run: null },
@@ -179,7 +179,7 @@ describe.skipIf(!flockAvailable)("claimLocal / probeLocal", () => {
     const lock = tmpLock();
     let clock = 1_000;
     const timers: Array<{ cb: () => void }> = [];
-    const self = vi.fn();
+    const self = jest.fn();
     const c = await claimLocal(
       lock,
       { holder: "t@h", run: null },

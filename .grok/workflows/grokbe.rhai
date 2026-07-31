@@ -454,7 +454,7 @@ if from_arg == "gauntlet" || from_arg == "ship" {
     setup_prompt += "   If already on a suitable non-default feature branch with work, keep it and report it.\n";
 }
 setup_prompt += "4. Read .agency/do.md if it exists — extract check / fmt / test / CI / PR-evidence commands.\n";
-setup_prompt += "   odu defaults if missing: check=`pnpm typecheck`, test=`pnpm test:unit`, fmt=`just fmt` if present else biome/prettier probe.\n";
+setup_prompt += "   odu defaults if missing: check=`bun run typecheck`, test=`bun run test:unit`, fmt=`just fmt` if present else biome/prettier probe.\n";
 setup_prompt += "5. Compute merge-base: git merge-base <base_ref> HEAD\n";
 setup_prompt += "6. Return structured output. ok=true only if branch exists and base_ref is set.\n";
 

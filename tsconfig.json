@@ -16,7 +16,8 @@
     "allowImportingTsExtensions": true,
     "noEmit": true,
     "jsx": "preserve",
-    "lib": ["ES2022"]
+    "lib": ["ESNext"],
+    "types": ["bun", "node"]
   },
   "include": ["src", "tests"]
 }

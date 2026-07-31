@@ -10,7 +10,7 @@
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeAll, describe, expect, it, onTestFinished } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { buildOduBinary, cleanup, hermeticEnv, makeFixture } from "./harness";
 
 let oduBin: string;
@@ -23,15 +23,20 @@ beforeAll(() => {
 }, 600_000);
 
 const live: ChildProcess[] = [];
+// Fixture dirs are swept by the same hook, after the children that hold them
+// open are killed — bun:test has no per-test `onTestFinished`, so the creating
+// helper registers here instead.
+const created: string[] = [];
 afterEach(() => {
   for (const child of live.splice(0)) {
     if (child.exitCode === null) child.kill("SIGKILL");
   }
+  for (const dir of created.splice(0)) cleanup(dir);
 });
 
 function fixture(name: string): string {
   const dir = makeFixture(name);
-  onTestFinished(() => cleanup(dir));
+  created.push(dir);
   return dir;
 }
 
