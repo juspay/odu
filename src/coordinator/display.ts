@@ -21,7 +21,7 @@
  * would be a second copy to keep in sync, which is what this file used to be.
  *
  * Verdict-on-exit is the HOST's policy, not the view's — `run` prints its own
- * `printVerdict`, `attach` asks for `Display.verdict()`.
+ * `printVerdict`, `attach` prints `verdictLine(state)` from `cli/render`.
  */
 
 import { LiveView, type LiveOpts } from "../cli/liveView";
@@ -72,10 +72,6 @@ export interface Display {
   info(msg: string): void;
   /** Stop timers, restore the terminal, paint the final frame. */
   stop(state?: PipelineState): void;
-  /** A one-line recap of how the run ended, for a host with no verdict of its
-   *  own. Only the live face has one — `run` prints its own summary and ignores
-   *  this; the json/plain faces already emit every transition. */
-  verdict?(): string | undefined;
 }
 
 export function createDisplay(mode: DisplayMode, live?: LiveOpts): Display {
@@ -236,10 +232,4 @@ class LiveDisplay implements Display {
     this.view.stop(state);
   }
 
-  /** The one-line recap of how the run ended, for a host that has no verdict
-   *  of its own. `run` ignores this (it prints its own summary); `attach` prints
-   *  it, so leaving the viewport still tells you what happened. */
-  verdict(): string | undefined {
-    return this.view.verdict();
-  }
 }

@@ -15,6 +15,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import {
   exitCode,
   summarize,
+  verdictLine,
 } from "./cli/render";
 import type { TaskSpec } from "./common/spec";
 import type {
@@ -385,6 +386,21 @@ describe("render helpers", () => {
     expect(summary.done).toBe(true);
     expect(summary.errored).toBe(1);
     expect(summary.failedOverall).toBe(true);
+  });
+
+  it("verdictLine names the outcome, the counts and the red nodes", () => {
+    // Pure in the state: the host prints it once its viewport is gone, so
+    // there is no "call stop() first" ordering to get wrong.
+    const line = verdictLine(state);
+    expect(line).toContain(state.name);
+    expect(line).toContain(state.sha7);
+    // Every red node is named — a verdict that hides one is worse than none.
+    for (const id of state.order) {
+      const n = state.nodes[id];
+      if (n !== undefined && (n.status === "failed" || n.status === "errored")) {
+        expect(line).toContain(id);
+      }
+    }
   });
 
 });

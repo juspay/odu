@@ -353,3 +353,29 @@ export function stepFocus(
   }
   return undefined;
 }
+
+/** How a run ended, in the two-or-three lines a host prints once its viewport
+ *  is gone. Pure in the state, so the caller needs nothing from the view and
+ *  there is no "call stop() first" ordering to get wrong: `attach` prints it
+ *  from the last state it saw. `run` has its own `printVerdict` and ignores
+ *  this. */
+export function verdictLine(state: PipelineState): string {
+  const s = summarize(state);
+  const reds = state.order
+    .map((id) => state.nodes[id])
+    .filter(
+      (n): n is NodeState => n !== undefined && STATUS_META[n.status].isRed,
+    );
+  const lines = [
+    `${OUTCOME_MARK[outcomeOf(s)]} ${state.name} @ ${
+      state.dirty ? `${state.sha7}+dirty` : state.sha7
+    }  ${countsLine(s)}`,
+  ];
+  for (const n of reds.slice(0, 3)) {
+    lines.push(`  ${STATUS_META[n.status].glyph} ${n.id}`);
+  }
+  // Say so when the list is clipped — a silent truncation reads as "those are
+  // all the failures", which is the one thing a verdict must not imply.
+  if (reds.length > 3) lines.push(`  … +${reds.length - 3} more`);
+  return `${lines.join("\n")}\n`;
+}

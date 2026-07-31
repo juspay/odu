@@ -388,7 +388,7 @@ export class LiveView {
    *
    *  The view deliberately prints nothing here. `run` already ends with its own
    *  `printVerdict`, so a recap from the view is the same information twice;
-   *  `attach` asks for `verdict()` and prints it itself. Verdict-on-exit is
+   *  `attach` prints `verdictLine(state)` itself. Verdict-on-exit is
    *  host policy, exactly like the exit code — the view owns neither.
    *
    *  Order matters: unhook the streams first so nothing races the teardown,
@@ -427,32 +427,6 @@ export class LiveView {
     // erased by the very teardown that was supposed to surface it.
     for (const ev of this.events) this.stderrWrite(`${ev.text}\n`);
     this.events = [];
-  }
-
-  /** The compact recap a host may print once the viewport is gone. `attach`
-   *  uses it (nothing else would say how the run ended); `run` does not, having
-   *  its own verdict. */
-  verdict(): string | undefined {
-    const state = this.state;
-    if (state === undefined) return undefined;
-    const s = summarize(state);
-    const mark = OUTCOME_MARK[outcomeOf(s)];
-    const counts = countsLine(s);
-    const reds = state.order
-      .map((id) => state.nodes[id])
-      .filter(
-        (n): n is NodeState => n !== undefined && STATUS_META[n.status].isRed,
-      );
-    const lines = [
-      `${mark} ${state.name} @ ${state.sha7}${state.dirty ? "+dirty" : ""}  ${counts}`,
-    ];
-    for (const n of reds.slice(0, 3)) {
-      lines.push(`  ${STATUS_META[n.status].glyph} ${n.id}`);
-    }
-    // Say so when the list is clipped — a silent truncation reads as "those
-    // are all the failures", which is the one thing a verdict must not imply.
-    if (reds.length > 3) lines.push(`  … +${reds.length - 3} more`);
-    return `${lines.join("\n")}\n`;
   }
 
   // ── stream interposition ─────────────────────────────────────────────────

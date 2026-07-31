@@ -526,15 +526,6 @@ describe("LiveView — events land in the frame, never in scrollback", () => {
     void setup;
   });
 
-  it("verdict() reports how the run ended, for a host that wants it", async () => {
-    const { view } = await mount(96, 30);
-    const recap = view.verdict();
-    view.stop();
-    expect(recap).toContain("ci::default");
-    expect(recap).toContain("1 failed");
-    expect(recap).toContain("ci::e2e@x86_64-linux");
-  });
-
   it("an info before the frame exists still reaches the operator", () => {
     // `run` builds the display and calls info() during a venue lease that can
     // block for minutes — long before start(). Pre-mount those must go to real

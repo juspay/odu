@@ -22,7 +22,13 @@ import { createDisplay, progressEvent } from "../coordinator/display";
 import { dialSocket, type OduClient } from "../coordinator/socket";
 import { postingWarning } from "../coordinator/statuses";
 import { yellow } from "./ansi";
-import { exitCode, nodeRow, statusGlyph, summarize } from "./render";
+import {
+  exitCode,
+  nodeRow,
+  statusGlyph,
+  summarize,
+  verdictLine,
+} from "./render";
 
 export async function firstSnapshot(client: OduClient): Promise<PipelineState> {
   for await (const state of await client.surface.nodes.get({})) {
@@ -209,8 +215,7 @@ async function attachDashboard(
   view.stop(last);
   // The viewport is gone; say how the run ended. `run` has its own verdict —
   // an observer would otherwise be left with only an exit code.
-  const recap = view.verdict?.();
-  if (recap !== undefined) process.stdout.write(recap);
+  if (last !== undefined) process.stdout.write(verdictLine(last));
   close();
   return exitCode(last);
 }
