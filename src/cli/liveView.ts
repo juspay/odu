@@ -239,6 +239,21 @@ export class LiveView {
   private mountPromise: Promise<void> | undefined;
 
   private readonly stderrWrite = process.stderr.write.bind(process.stderr);
+  private readonly stdoutWrite = process.stdout.write.bind(process.stdout);
+  /** The terminal has been handed back. Separate from `torndown` because the
+   *  restore must be able to run on its own, synchronously, before the rest of
+   *  the teardown is even possible. */
+  private restored = false;
+  /** The mount promise has settled — successfully or not. `stop()` uses this to
+   *  tell "a continuation is still coming, let it finish the teardown" from
+   *  "no continuation will ever run, finish it here". Without it a failed mount
+   *  left the process `exit` listener armed for the process lifetime. */
+  private mountSettled = false;
+  /** Diagnostics retained for replay on teardown. NOT `events`: that is a
+   *  two-row display ring, so anything older than the last two lines has
+   *  already been shifted out — which made the replay unable to surface the
+   *  fatal message it exists for. */
+  private retained: string[] = [];
   private hooked = false;
 
   private headLine: TextRenderable | undefined;
@@ -284,6 +299,7 @@ export class LiveView {
     this.seedFocus(state);
     if (this.opts.hookStderr) this.hook();
     this.mountPromise = this.mount().catch((err: unknown) => {
+      this.mountSettled = true;
       // A renderer that cannot open must degrade to a silent non-live run, not
       // take the process with it: an unhandled rejection would pick odu's exit
       // code, and odu owns that. Report on the REAL stderr — the hook is torn
@@ -338,6 +354,7 @@ export class LiveView {
       this.relayout();
     } finally {
       this.mounting = false;
+      this.mountSettled = true;
     }
   }
 
@@ -372,6 +389,11 @@ export class LiveView {
     this.pushEvent(msg, DIM);
   }
 
+  /** Cap on retained diagnostics — enough to carry a fatal message and its
+   *  context out of the alternate screen, bounded so a chatty run cannot grow
+   *  it without limit. */
+  private static readonly RETAIN_MAX = 32;
+
   private pushEvent(text: string, color: string): void {
     if (this.renderer === undefined) {
       // Pre-mount (or post-stop): no frame to hold this, so it belongs in the
@@ -381,6 +403,8 @@ export class LiveView {
     }
     this.events.push({ text, color });
     if (this.events.length > EVENT_ROWS) this.events.shift();
+    this.retained.push(text);
+    if (this.retained.length > LiveView.RETAIN_MAX) this.retained.shift();
     this.paint();
   }
 
@@ -401,31 +425,56 @@ export class LiveView {
     this.log?.dispose();
     this.log = undefined;
     if (state !== undefined) this.state = state;
-    if (this.renderer === undefined && this.mountPromise !== undefined) {
-      // The mount is still in flight. It has ALREADY entered the alternate
-      // screen and raw mode (createCliRenderer does both before its first
-      // await), so returning here would leave the terminal wedged — the
-      // renderer we need to destroy simply is not assigned yet. The mount's
-      // own `if (this.stopped)` branch finishes the teardown when it resumes.
-      return;
-    }
+    // Give the terminal back SYNCHRONOUSLY, before anything that might not run.
+    // The mount enters the alternate screen and raw mode before its first
+    // await, so between `start()` and the mount resolving there is a window in
+    // which the screen is switched but `this.renderer` is unassigned. Deferring
+    // the restore to the mount's continuation loses that race outright when the
+    // host exits in the same turn — `attach`'s quit path is
+    // `stop()` then `process.exit()`, and `process.exit` abandons pending
+    // microtasks, so the continuation never runs and the operator is left on
+    // the alternate screen in raw mode.
+    this.restoreTerminal();
     this.finishStop();
   }
 
-  /** The half of `stop()` that needs a renderer — run either by `stop()` when
-   *  one already exists, or by the mount's continuation when `stop()` beat it.
-   *  Idempotent: exactly one of those two paths reaches it. */
+  /** Put the terminal back without needing the renderer object.
+   *
+   *  `renderer.destroy()` is the tidy path and still runs when there is a
+   *  renderer, but it cannot be the ONLY path: the escape sequences are already
+   *  on the wire before opentui hands us anything to call. These writes are
+   *  idempotent and harmless if the screen was never switched. */
+  private restoreTerminal(): void {
+    if (this.restored) return;
+    this.restored = true;
+    try {
+      if (process.stdin.isTTY === true) process.stdin.setRawMode(false);
+    } catch {
+      // A stdin that cannot leave raw mode is not worth failing teardown over.
+    }
+    // Leave the alternate screen, re-show the cursor, and drop the mouse
+    // reporting modes the renderer may have enabled.
+    this.stdoutWrite("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l");
+    this.stdoutWrite("\x1b[?25h\x1b[?1049l");
+  }
+
+  /** The rest of the teardown. Idempotent — reachable from `stop()`, from the
+   *  mount's continuation when `stop()` beat it, and from the exit hook. */
   private finishStop(): void {
     if (this.torndown) return;
     this.torndown = true;
     process.off("exit", this.onProcessExit);
     this.unhook();
+    this.restoreTerminal();
     this.renderer?.destroy();
     this.renderer = undefined;
-    // Whatever the frame was holding dies with the alternate screen, so replay
-    // it: a fatal error that arrived through the stderr hook would otherwise be
-    // erased by the very teardown that was supposed to surface it.
-    for (const ev of this.events) this.stderrWrite(`${ev.text}\n`);
+    // A diagnostic that arrived through the stderr hook dies with the alternate
+    // screen, so replay what was retained. Only when the run did NOT end
+    // cleanly: on a green run this is provisioning chatter the operator already
+    // watched scroll past, and the host is about to print its own verdict.
+    const clean = this.state !== undefined && summarize(this.state).clean;
+    if (!clean) for (const line of this.retained) this.stderrWrite(`${line}\n`);
+    this.retained = [];
     this.events = [];
   }
 

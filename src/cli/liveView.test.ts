@@ -340,6 +340,122 @@ describe("LiveView — mount ordering", () => {
   });
 });
 
+describe("LiveView — the terminal comes back even when nothing else runs", () => {
+  /** Capture what reaches the real stdout while `fn` runs. */
+  function capturingStdout(fn: () => void): string {
+    const out: string[] = [];
+    const original = process.stdout.write.bind(process.stdout);
+    process.stdout.write = ((c: string | Uint8Array) => {
+      out.push(typeof c === "string" ? c : Buffer.from(c).toString());
+      return true;
+    }) as typeof process.stdout.write;
+    try {
+      fn();
+    } finally {
+      process.stdout.write = original;
+    }
+    return out.join("");
+  }
+
+  it("leaves the alternate screen synchronously, without waiting on the mount", async () => {
+    // `attach`'s quit path is `stop()` then `process.exit()`, and process.exit
+    // abandons pending microtasks — so a teardown that defers the restore to
+    // the mount's continuation never runs it, and the operator is left on the
+    // alternate screen in raw mode. The restore must be on the wire before
+    // stop() returns.
+    const setup = await createTestRenderer({ width: 96, height: 30 });
+    // The view binds its writers at CONSTRUCTION (deliberately — teardown must
+    // not write through its own stderr hook), so the capture has to be in place
+    // before the constructor runs.
+    const written = capturingStdout(() => {
+      // Never resolves: models the mount still being in flight at stop() time.
+      const view = new LiveView({
+        ...makeOpts({ setup }),
+        createRenderer: () => new Promise<never>(() => {}),
+      });
+      view.start(state, header);
+      view.stop(state);
+    });
+    // ?1049l leaves the alternate screen; ?25h re-shows the cursor.
+    expect(written).toContain("\x1b[?1049l");
+    expect(written).toContain("\x1b[?25h");
+  });
+
+  it("replays a diagnostic that scrolled out of the two-row events lane", async () => {
+    // The events lane is a 2-row display ring, so a fatal line followed by any
+    // two others has already been shifted out by teardown. Replaying the ring
+    // could therefore never surface the message the replay exists for.
+    const setup = await createTestRenderer({ width: 96, height: 30 });
+    const errs: string[] = [];
+    const original = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((c: string | Uint8Array) => {
+      errs.push(typeof c === "string" ? c : Buffer.from(c).toString());
+      return true;
+    }) as typeof process.stderr.write;
+    // Constructed inside the capture: the view binds its writers up front.
+    const view = new LiveView(makeOpts({ setup }));
+    try {
+      view.start(state, header);
+      await settle(setup);
+      view.info("FATAL: venue lock lost");
+      view.info("noise one");
+      view.info("noise two");
+      // A run that did not end clean — the case the replay is for.
+      view.stop(state);
+    } finally {
+      process.stderr.write = original;
+    }
+    expect(errs.join("")).toContain("FATAL: venue lock lost");
+  });
+
+  it("stays quiet on a clean run instead of re-printing the chatter", async () => {
+    const clean: PipelineState = {
+      ...state,
+      nodes: {
+        ...state.nodes,
+        "ci::e2e@x86_64-linux": node("ci::e2e@x86_64-linux", "ok", 76_000),
+        "ci::e2e@aarch64-darwin": node("ci::e2e@aarch64-darwin", "ok", 80_000),
+      },
+    };
+    const setup = await createTestRenderer({ width: 96, height: 30 });
+    const errs: string[] = [];
+    const original = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((c: string | Uint8Array) => {
+      errs.push(typeof c === "string" ? c : Buffer.from(c).toString());
+      return true;
+    }) as typeof process.stderr.write;
+    const view = new LiveView(makeOpts({ setup }));
+    try {
+      view.start(clean, header);
+      await settle(setup);
+      view.info("provisioning chatter");
+      view.stop(clean);
+    } finally {
+      process.stderr.write = original;
+    }
+    expect(errs.join("")).not.toContain("provisioning chatter");
+  });
+
+  it("does not leak an exit listener when the mount failed", async () => {
+    const before = process.listenerCount("exit");
+    const view = new LiveView({
+      interactive: false,
+      hookStderr: false,
+      openLog: () => snapshot(""),
+      rerun: () => {},
+      onQuit: () => {},
+      createRenderer: () => Promise.reject(new Error("no tty")),
+    });
+    view.start(state, header);
+    await new Promise((r) => setTimeout(r, 40));
+    view.stop(state);
+    await new Promise((r) => setTimeout(r, 10));
+    // stop() after a settled-but-failed mount must complete the teardown; the
+    // listener is only removed there.
+    expect(process.listenerCount("exit")).toBe(before);
+  });
+});
+
 describe("LiveView — focus and the log subscription", () => {
   /** What `odu run` actually starts from: nothing has been scheduled yet. */
   const allPending: PipelineState = {
