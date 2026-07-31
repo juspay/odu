@@ -244,11 +244,6 @@ export class LiveView {
    *  restore must be able to run on its own, synchronously, before the rest of
    *  the teardown is even possible. */
   private restored = false;
-  /** The mount promise has settled — successfully or not. `stop()` uses this to
-   *  tell "a continuation is still coming, let it finish the teardown" from
-   *  "no continuation will ever run, finish it here". Without it a failed mount
-   *  left the process `exit` listener armed for the process lifetime. */
-  private mountSettled = false;
   /** Diagnostics retained for replay on teardown. NOT `events`: that is a
    *  two-row display ring, so anything older than the last two lines has
    *  already been shifted out — which made the replay unable to surface the
@@ -276,6 +271,9 @@ export class LiveView {
   private readonly onProcessExit = (): void => {
     if (this.torndown) return;
     this.unhook();
+    // Restore first: on a crash during the pre-assign mount window there is no
+    // renderer to destroy, and this hook is the only thing left to run.
+    this.restoreTerminal();
     this.renderer?.destroy();
   };
 
@@ -299,7 +297,6 @@ export class LiveView {
     this.seedFocus(state);
     if (this.opts.hookStderr) this.hook();
     this.mountPromise = this.mount().catch((err: unknown) => {
-      this.mountSettled = true;
       // A renderer that cannot open must degrade to a silent non-live run, not
       // take the process with it: an unhandled rejection would pick odu's exit
       // code, and odu owns that. Report on the REAL stderr — the hook is torn
@@ -354,7 +351,6 @@ export class LiveView {
       this.relayout();
     } finally {
       this.mounting = false;
-      this.mountSettled = true;
     }
   }
 
@@ -455,6 +451,8 @@ export class LiveView {
     // Leave the alternate screen, re-show the cursor, and drop the mouse
     // reporting modes the renderer may have enabled.
     this.stdoutWrite("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l");
+    // Bracketed paste and focus reporting are enabled by the native setup too.
+    this.stdoutWrite("\x1b[?2004l\x1b[?1004l");
     this.stdoutWrite("\x1b[?25h\x1b[?1049l");
   }
 
