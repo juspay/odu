@@ -327,6 +327,19 @@ export function matrixShape(order: readonly string[]): {
   return { recipes, platforms };
 }
 
+/** The node in one matrix cell, or undefined for a gap — a recipe that does
+ *  not run on that platform. The one place the (recipe, platform) -> node rule
+ *  lives, so the renderer that draws a cell, the navigator that steps between
+ *  cells, and the mouse that clicks one cannot disagree about which node a cell
+ *  holds. It was three hand-built id strings before. */
+export function cellAt(
+  state: PipelineState,
+  recipe: string,
+  platform: string,
+): NodeState | undefined {
+  return state.nodes[fanId(recipe, platform)];
+}
+
 /** Move the interactive focus one cell across the recipe × platform matrix:
  *  `h`/`l` step between platform columns on the current recipe row, `j`/`k`
  *  between recipe rows in the current platform column. Each axis wraps, and

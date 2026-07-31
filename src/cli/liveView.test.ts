@@ -675,6 +675,76 @@ describe("LiveView — mouse", () => {
     view.stop();
   });
 
+  it("clicking the second platform's cell focuses THAT platform", async () => {
+    // The matrix is 2D and a click specifies a cell, not a row. Resolving only
+    // the row and keeping the previously-focused platform sent every click to
+    // the first lane — clicking the second host focused the first host's node.
+    const { view, setup, frame } = await mount(96, 30);
+    const rows = frame().split("\n");
+    const y = rows.findIndex((l) => l.includes("install"));
+    const header = rows[y - 1] ?? ""; // the matrix column header
+    const firstColumn = header.indexOf("x86_64-linux");
+    const secondColumn = header.indexOf("aarch64-darwin");
+    expect(secondColumn).toBeGreaterThan(0);
+    // Start on the FIRST lane, or "keep the current platform" would land on
+    // darwin by accident and the test would pass against the bug.
+    await setup.mockMouse.click(firstColumn + 1, y);
+    await until(
+      setup,
+      () => frame().includes("ci::install@x86_64-linux"),
+      "focus on the first lane",
+    );
+    await setup.mockMouse.click(secondColumn + 1, y);
+    await until(
+      setup,
+      () => frame().includes("ci::install@aarch64-darwin"),
+      "the second lane's node",
+    );
+    expect(frame()).toContain("ci::install@aarch64-darwin");
+    expect(frame()).not.toContain("ci::install@x86_64-linux —");
+    view.stop();
+  });
+
+  it("clicking the first platform's cell focuses THAT platform", async () => {
+    const { view, setup, frame } = await mount(96, 30);
+    const rows = frame().split("\n");
+    const y = rows.findIndex((l) => l.includes("install"));
+    const header = rows[y - 1] ?? ""; // the matrix column header
+    const firstColumn = header.indexOf("x86_64-linux");
+    await setup.mockMouse.click(firstColumn + 1, y);
+    await until(
+      setup,
+      () => frame().includes("ci::install@x86_64-linux"),
+      "the first lane's node",
+    );
+    expect(frame()).toContain("ci::install@x86_64-linux");
+    view.stop();
+  });
+
+  it("clicking a gap cell does nothing rather than guessing", async () => {
+    // `typecheck` runs only on linux in this fixture, so its darwin cell is a
+    // gap. Snapping to a neighbour would focus a node the operator never
+    // pointed at.
+    const gapped: PipelineState = {
+      ...state,
+      order: [...state.order, "ci::typecheck@x86_64-linux"],
+      nodes: {
+        ...state.nodes,
+        "ci::typecheck@x86_64-linux": node("ci::typecheck@x86_64-linux", "ok", 9000),
+      },
+    };
+    const { view, setup, frame } = await mount(96, 30, { on: gapped });
+    const before = frame().split("\n").find((l) => l.includes("‹")) ?? "";
+    const rows = frame().split("\n");
+    const y = rows.findIndex((l) => l.includes("typecheck"));
+    const header = rows[y - 1] ?? ""; // the matrix column header
+    await setup.mockMouse.click(header.indexOf("aarch64-darwin") + 1, y);
+    await setup.flush();
+    // Focus did not move to some neighbouring node.
+    expect(frame().split("\n").find((l) => l.includes("‹")) ?? "").toBe(before);
+    view.stop();
+  });
+
   it("clicking a matrix row pins focus, as hjkl does", async () => {
     // Auto-follow must stop, or the next state push would yank the operator
     // back to whatever is running.

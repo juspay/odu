@@ -54,6 +54,7 @@ import { formatGoDuration } from "../common/duration";
 import { splitFanId } from "../common/nodeId";
 import {
   commitLabel,
+  cellAt,
   countsLine,
   countsParts,
   operatorLine,
@@ -280,28 +281,40 @@ export class LiveView {
     if (key !== undefined) hit.binding.act(this, key);
   }
 
-  /** Focus the node under a click at absolute terminal row `y`.
+  /** Focus the cell under a click.
    *
-   *  The matrix box's own `y` is where the recipes start, offset by one for
-   *  the platform header row. A click on a gap cell (`°`) or outside the rows
-   *  is ignored rather than snapped to a neighbour — guessing which node the
-   *  operator meant is worse than doing nothing. */
-  private focusAtRow(y: number): void {
+   *  Both axes matter: the row picks the recipe, the column picks the platform.
+   *  Resolving only the row (and keeping whatever platform was already focused)
+   *  meant a click anywhere on a row landed on the first lane — clicking the
+   *  second host's cell silently focused the first host's node.
+   *
+   *  A click left of the columns keeps the current platform, which is what the
+   *  recipe-name area should do. A click on a gap cell (`°`) is ignored rather
+   *  than snapped to a neighbour — guessing which node was meant is worse than
+   *  doing nothing. */
+  private focusAtCell(x: number, y: number): void {
     const state = this.state;
     const box = this.matrixBox;
-    if (state === undefined || box === undefined) return;
+    const geom = this.matrixGeom;
+    if (state === undefined || box === undefined || geom === undefined) return;
     const index = y - box.y - 1; // -1 for the platform header row
     const { recipes } = this.shapeOf(state.order);
     const recipe = recipes[index];
     if (recipe === undefined) return;
-    // Keep the operator on the platform they were already reading.
+
     const current =
-      this.focusedId !== undefined ? splitFanId(this.focusedId).platform : undefined;
-    const target =
-      (current !== undefined ? state.nodes[`${recipe}@${current}`] : undefined) ??
-      state.order
-        .map((id) => state.nodes[id])
-        .find((n) => n !== undefined && splitFanId(n.id).namepath === recipe);
+      this.focusedId !== undefined
+        ? splitFanId(this.focusedId).platform
+        : undefined;
+    const offset = x - box.x - geom.gutter;
+    const platform =
+      offset < 0
+        ? current
+        : geom.platforms[Math.floor(offset / geom.cellW)] ?? current;
+    if (platform === undefined) return;
+
+    const target = cellAt(state, recipe, platform);
+    // A gap: this recipe does not run on the platform that was clicked.
     if (target === undefined) return;
     this.focusLocked = true; // a hand-picked node stops auto-follow, as with hjkl
     this.focus(target.id);
@@ -347,6 +360,11 @@ export class LiveView {
    *  during the paint that draws them — the bar is width-dependent, so the
    *  spans are only knowable at the moment they are laid out. */
   private hintHits: { from: number; to: number; binding: Binding }[] = [];
+  /** Where the matrix drew its columns, so a click can resolve which CELL was
+   *  hit — not just which row. Recorded during the paint that lays them out. */
+  private matrixGeom:
+    | { gutter: number; cellW: number; platforms: string[] }
+    | undefined;
   private matrixRows: TextRenderable[] = [];
   private eventRows: TextRenderable[] = [];
   private paneRows: TextRenderable[] = [];
@@ -697,7 +715,7 @@ export class LiveView {
       // hjkl, and the only way to reach a node without counting rows. The
       // handler sits on the box, not on each row, so it survives `syncRows`
       // rebuilding the rows underneath it.
-      onMouseDown: (e) => this.focusAtRow(e.y),
+      onMouseDown: (e) => this.focusAtCell(e.x, e.y),
     });
     frame.add(this.matrixBox);
 
@@ -1058,6 +1076,9 @@ export class LiveView {
       ...recipes.map((x: string) => recipeLabel(x).length),
     );
     const cellW = Math.max(14, ...platforms.map((x: string) => x.length + 2));
+    // A body row is: marker(1) + " "(1) + name(nameW) + " "(1), then cellW per
+    // platform. That prefix is where the columns start.
+    this.matrixGeom = { gutter: nameW + 3, cellW, platforms: [...platforms] };
 
     const header: Row = [
       faint(`  ${"".padEnd(nameW)}  `),
@@ -1076,7 +1097,7 @@ export class LiveView {
         plain(" "),
       ];
       for (const platform of platforms) {
-        const node = state.nodes[`${recipe}@${platform}`];
+        const node = cellAt(state, recipe, platform);
         const here = onRow && focused?.platform === platform;
         if (node === undefined) {
           // `°` marks a cell with no node — a recipe that does not run on this
