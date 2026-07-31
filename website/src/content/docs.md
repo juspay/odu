@@ -193,7 +193,8 @@ odu mcp                           serve the agent interface over stdio
 `odu run` on a terminal, and `odu attach` from anywhere else, paint the same
 view: a recipes × platforms matrix, an events lane, and the focused node's log
 below it. It runs on the alternate screen, so your scrollback is untouched while
-the run is live and carries a one-line verdict once it exits.
+the run is live and gets a verdict when it exits — `attach` leaves a one-line
+recap, `run` its full per-node summary.
 
 | key | |
 |---|---|
@@ -203,12 +204,14 @@ the run is live and carries a one-line verdict once it exits.
 | `f` | follow the log tail, or pin it where it is |
 | `PgUp` `PgDn`, `g` `G` | scroll the log; `g`/`G` jump to the top/tail |
 | `/` then `Enter`, `n` | search the focused log, next match |
-| `q`, `Ctrl-C` | leave (the run keeps going — attach again any time) |
+| `q`, `Ctrl-C` | in `odu attach`: leave; the run keeps going. In `odu run`: cancel the run (exit 130) |
 
 The log pane is a terminal, not a text buffer: a node that redraws with carriage
 returns (`nix build`, `bun test`) shows one progress line rather than hundreds,
-and wide characters are measured, not counted. The pane takes whatever height
-your terminal has — resize it and the layout follows.
+and wide characters are measured, not counted. Colour is consumed rather than
+carried — the pane is monochrome, which is also why escape junk never reaches
+it. The pane takes whatever height your terminal has — resize it and the layout
+follows.
 
 ### Cancel, supersede, and linger
 
