@@ -15,33 +15,19 @@
  *     instead, which is what made the view scroll.
  *
  * The `live` face is the ONE interactive view, shared by `odu run` and `odu
- * attach` through a source-agnostic seam: state is push-fed (`update(state)`
- * — `run`'s coordinator loop and `attach`'s read-loop both call it) and the
- * focused-node log is pull-fed via an injected `openLog(id, signal)` (`run`
- * passes its in-memory tail, `attach` passes the surface's `nodeLog` stream).
- * Keys (digits / hjkl / arrows / r / f / g / G / PgUp / PgDn / `/` / n / q)
- * drive focus, rerun, log scrolling and search through injected callbacks. When
- * non-interactive (a piped `attach`, or a `run` whose stdin isn't a TTY) the
- * keys and the mouse are simply off.
+ * attach` through the source-agnostic `LiveOpts` seam re-exported below. What
+ * the frame draws, which keys it binds, and the mount-ordering invariants that
+ * hold it together all live in `src/cli/liveView.ts` — restating them here
+ * would be a second copy to keep in sync, which is what this file used to be.
  *
  * Verdict-on-exit is the HOST's policy, not the view's — `run` prints its own
- * `printVerdict`, `attach` asks for `Display.verdict()`. The view leaves the
- * scrollback exactly as it found it. When `hookStderr` (i.e. `run`), library
- * chatter is interposed so surface-remote's `[host:…]` provisioning lines are
- * dropped and everything else becomes an event in the frame; whatever the lane
- * still holds is replayed to the real stderr on teardown, so a fatal message
- * can't die with the alternate screen.
- *
- * `src/cli/liveView.ts` holds the mount-ordering invariants — start() is
- * synchronous while the mount is async, and both stop() and info() have to
- * behave before it lands.
+ * `printVerdict`, `attach` asks for `Display.verdict()`.
  */
 
-import { LiveView } from "../cli/liveView";
+import { LiveView, type LiveOpts } from "../cli/liveView";
 import { formatGoDuration } from "../common/duration";
 import { splitFanId } from "../common/nodeId";
 import {
-  type NodeLogFrame,
   type NodeState,
   type PipelineState,
   type ProgressStatus,
@@ -50,10 +36,9 @@ import {
 } from "../common/surface";
 import { logPathFor } from "./statuses";
 
-/** `stepFocus` moved to `../cli/render` (pure state derivation, where the rest
- *  of the matrix projections live). Re-exported here so existing importers and
- *  their tests keep working against one name. */
-export { stepFocus } from "../cli/render";
+/** The live face's host seam, declared beside the view that consumes it — one
+ *  declaration, so a member added to it cannot reach only half the seam. */
+export type { LiveOpts };
 
 export type DisplayMode = "json" | "plain" | "live";
 
@@ -91,36 +76,6 @@ export interface Display {
    *  own. Only the live face has one — `run` prints its own summary and ignores
    *  this; the json/plain faces already emit every transition. */
   verdict?(): string | undefined;
-}
-
-/** The injected dependencies that make the `live` face the shared interactive
- *  view — the source-agnostic seam between `run` (its in-memory tail, raw
- *  stderr to hook, its own shutdown) and `attach` (the surface stream, no
- *  stderr to hook). Push-fed for state (via `Display.update`), pull-fed for the
- *  focused log (via `openLog`). */
-export interface LiveOpts {
-  /** Read keys + drive focus/rerun/quit; raw-mode the terminal. Off for a
-   *  `run` whose stdin isn't a TTY (output-only live matrix). */
-  interactive: boolean;
-  /** Interpose `process.stderr.write` (drop `[host:…]`, re-print the rest
-   *  above the matrix). `run`=true (library chatter shares its stderr);
-   *  `attach`=false (an observer has no such chatter to tame). */
-  hookStderr: boolean;
-  /** Pull the focused node's log: a `snapshot` frame then `append`s, so a
-   *  focus change backfills. `run` passes `tail.streamSource` (a synchronous
-   *  generator), `attach` passes `client.surface.nodeLog.get` (a promised
-   *  stream over the socket) — hence the `| Promise`, `await`ed at the call
-   *  site, which is a no-op for the generator. */
-  openLog: (
-    id: string,
-    signal: AbortSignal,
-  ) => AsyncIterable<NodeLogFrame> | Promise<AsyncIterable<NodeLogFrame>>;
-  /** The one mutation `r` triggers — re-run the focused node. */
-  rerun: (id: string) => void;
-  /** The interrupt path: `q`/Ctrl-C/Ctrl-D request a quit. The view doesn't
-   *  own verdict-on-quit policy — each consumer decides its own exit code (`run`
-   *  always 130 for an interrupt; `attach` the current verdict). */
-  onQuit: () => void;
 }
 
 export function createDisplay(mode: DisplayMode, live?: LiveOpts): Display {
@@ -252,24 +207,25 @@ class PlainDisplay implements Display {
  *  lands. See `src/cli/liveView.ts` for what the frame actually does. */
 class LiveDisplay implements Display {
   private readonly view: LiveView;
-  private sha7 = "";
 
   constructor(opts: LiveOpts) {
     this.view = new LiveView(opts);
   }
 
   start(state: PipelineState, header: RunHeader): void {
-    this.sha7 = state.sha7;
     this.view.start(state, header);
   }
 
   update(state: PipelineState): void {
-    this.sha7 = state.sha7;
     this.view.update(state);
   }
 
+  /** `progressEvent` is the only construction site of a `ProgressEvent` and it
+   *  always sets `log` from `logPathFor`, so the old `event.log !== ""`
+   *  fallback was unreachable — and the mirrored `sha7` field existed only to
+   *  feed it, giving "where does a node's log live" two callers in one file. */
   transition(event: ProgressEvent, node: NodeState): void {
-    this.view.transition(node, event.log !== "" ? event.log : logPathFor(this.sha7, node.id));
+    this.view.transition(node, event.log);
   }
 
   info(msg: string): void {

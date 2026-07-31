@@ -4,7 +4,8 @@ import type {
   NodeState,
   PipelineState,
 } from "../common/surface";
-import { progressEvent, stepFocus } from "./display";
+import { progressEvent } from "./display";
+import { stepFocus } from "../cli/render";
 
 function node(
   id: string,
