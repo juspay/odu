@@ -1273,9 +1273,6 @@ async function orchestrate(
     }
     const code = verdictCode(state);
     const debt = unpostedNote(unposted.length);
-    // The bucket list and order `odu run`'s summary has always printed. Kept
-    // explicit: the live faces drop zero buckets (a status bar has no room),
-    // but this line is the run's durable verdict and people grep it.
     // The outcome taxonomy and the counts line both come from `render.ts` —
     // this summary, the live header and the live status bar were three
     // hand-rolled versions, and only this one knew about INCOMPLETE.

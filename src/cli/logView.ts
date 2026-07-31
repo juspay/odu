@@ -65,6 +65,12 @@ export class LogView {
   private writes = 0;
   /** Memoized match count, keyed on what it was computed from: it is read on
    *  every repaint and a full-buffer scan per frame is not free. */
+  /** `Terminal.write` defers its callback, and a focus change disposes this
+   *  view synchronously — so the continuation can land after disposal and
+   *  touch a disposed buffer, which xterm reports by printing a stack trace to
+   *  stderr. Exactly the raw-library-chatter-on-the-terminal failure this view
+   *  exists to prevent. */
+  private disposed = false;
   private counted:
     | { query: string; writes: number; matches: number }
     | undefined;
@@ -93,6 +99,10 @@ export class LogView {
    *  right now, which is the right answer for a live tail. */
   async write(text: string): Promise<void> {
     await new Promise<void>((resolve) => this.term.write(text, resolve));
+    // The focus change that disposed this view happened while the write was in
+    // flight; touching the buffer now throws out of xterm and onto the
+    // terminal. Nothing downstream wants the result either.
+    if (this.disposed) return;
     this.writes += 1;
     this.clampAnchor();
   }
@@ -276,6 +286,7 @@ export class LogView {
   }
 
   dispose(): void {
+    this.disposed = true;
     this.term.dispose();
   }
 }

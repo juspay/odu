@@ -14,7 +14,7 @@ import {
   type StatusHue,
 } from "../common/surface";
 import { fanId, splitFanId } from "../common/nodeId";
-import { dim, green, magenta, red, yellow } from "./ansi";
+import { dim, green, magenta, red, stripAnsi, yellow } from "./ansi";
 
 /** The non-terminal statuses: a node in one of these is still in flight, so the
  *  pipeline hasn't settled. The single taxonomy `summarize` (PipelineState) and
@@ -55,7 +55,7 @@ function byStatus<T>(pick: (hue: StatusHue) => T): Record<NodeStatus, T> {
 /** Per-status colour, shared by every face (attach table, run matrix,
  *  verdict) — a no-op when stdout isn't a TTY, so pure-string tests and
  *  captured logs see the bare glyphs. */
-export const STATUS_COLOR: Record<NodeState["status"], (s: string) => string> =
+const STATUS_COLOR: Record<NodeState["status"], (s: string) => string> =
   byStatus((hue) => ANSI_BY_HUE[hue]);
 
 /** The same assignment as a terminal-cell attribute, for the live view's
@@ -185,9 +185,8 @@ const COUNT_KEYS = [
 export function countsLine(
   s: PipelineSummary,
   which: readonly NodeStatus[] = COUNT_KEYS,
-  /** Keep buckets that are zero. The live faces drop them — a status bar has
-   *  no room for `0 errored` — but `run`'s final summary has always printed the
-   *  full row, and a verdict line is the kind of output people grep. */
+  /** Keep buckets that are zero — see `VERDICT_BUCKETS` in `coordinator/run`
+   *  for why its caller wants them and the live faces do not. */
   keepZeros = false,
 ): string {
   return which
@@ -356,6 +355,15 @@ export function stepFocus(
     if (candidate !== undefined) return candidate;
   }
   return undefined;
+}
+
+/** An operator-facing line rendered for a plain stream rather than a frame.
+ *  Both faces that have to emit one before the live frame exists — the display
+ *  adapter while the view is still loading, and the view itself before the
+ *  renderer mounts — go through here, so the two cannot drift on styling.
+ *  Lives in render.ts because the adapter must not import the view eagerly. */
+export function operatorLine(text: string): string {
+  return dim(stripAnsi(text));
 }
 
 /** `3cbac86` for a clean run, `3cbac86+dirty` when the working tree has

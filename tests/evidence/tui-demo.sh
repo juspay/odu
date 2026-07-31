@@ -22,7 +22,11 @@ WT="$2"    # the odu checkout (unused here — the fixture is written inline)
 # Pin this machine's platform to an explicit localhost lane. A bare/empty hosts
 # config is refused (juspay/odu#46), so name the lane for the current system.
 export ODU_HOSTS="$(mktemp -d)/hosts.json"
-printf '{"%s":"localhost"}' "$(nix eval --impure --raw --expr builtins.currentSystem)" > "$ODU_HOSTS"
+# An empty platform would write {"":"localhost"}, which odu refuses
+# (juspay/odu#46) — fail here instead, where the cause is obvious.
+SYSTEM=$(nix eval --impure --raw --expr builtins.currentSystem) || exit 1
+[ -n "$SYSTEM" ] || { echo "could not determine the current system" >&2; exit 1; }
+printf '{"%s":"localhost"}' "$SYSTEM" > "$ODU_HOSTS"
 
 D=$(mktemp -d /tmp/odu-tui-demo-XXXX)
 # A DAG paced for a recording: long enough that the spinners, the elapsed
@@ -45,7 +49,8 @@ e2e:
      echo; echo "  ✗ matrix.e2e.ts > fan-in keeps lane order"; echo "AssertionError: expected order to match"; exit 1
 JUSTFILE
 ( cd "$D" && git init -q && git add -A &&
-  git -c user.email=a@b.c -c user.name=x commit -qm fixture ) >/dev/null 2>&1
+  git -c user.email=a@b.c -c user.name=x commit -qm fixture ) >/dev/null ||
+  { echo "fixture repo setup failed" >&2; exit 1; }
 cd "$D"
 
 P='\033[1;32m$\033[0m'                                   # green prompt
@@ -62,6 +67,8 @@ ls; sleep 1.8
 say "Now a live run. It takes the terminal: matrix, events, and the focused log."
 say "The log pane is a real VT — watch the progress bar redraw in place."
 cmd "odu run --no-strict"
+# The fixture ends red on purpose — that is the point of the demo — so a
+# non-zero exit here is success, not a failure to swallow.
 "$ODU" run --no-strict || true
 sleep 1
 

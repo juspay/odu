@@ -25,7 +25,7 @@
  */
 
 import type { LiveOpts, LiveView } from "../cli/liveView";
-import { commitLabel } from "../cli/render";
+import { commitLabel, operatorLine } from "../cli/render";
 
 /** Re-exported from `cli/render`, where the cross-face projections live. */
 export { commitLabel };
@@ -208,15 +208,22 @@ class LiveDisplay implements Display {
    *  for minutes — long before `start()`, and therefore before the view is
    *  loaded. Pre-view those go straight to stdout, exactly as the view itself
    *  would do pre-mount. */
-  private pending: PipelineState | undefined;
-  private pendingHeader: RunHeader | undefined;
+  /** One field: the two were always written together and read behind a joint
+   *  guard, so two independent optionals let the type express states the code
+   *  never produces. */
+  private pending: { state: PipelineState; header: RunHeader } | undefined;
 
   constructor(private readonly opts: LiveOpts) {}
 
   start(state: PipelineState, header: RunHeader): void {
-    this.pending = state;
-    this.pendingHeader = header;
-    void this.load();
+    this.pending = { state, header };
+    // Caught, not floating: an unhandled rejection here would pick odu's exit
+    // code, and odu owns that. Same reasoning as the view's own mount guard.
+    void this.load().catch((err: unknown) => {
+      process.stderr.write(
+        `odu: live view unavailable (${(err as Error).message}) — continuing without it\n`,
+      );
+    });
   }
 
   private async load(): Promise<void> {
@@ -224,15 +231,14 @@ class LiveDisplay implements Display {
     if (this.stopped) return;
     const view = new Ctor(this.opts);
     this.view = view;
-    const state = this.pending;
-    const header = this.pendingHeader;
-    if (state !== undefined && header !== undefined) view.start(state, header);
+    const pending = this.pending;
+    if (pending !== undefined) view.start(pending.state, pending.header);
   }
 
   private stopped = false;
 
   update(state: PipelineState): void {
-    this.pending = state;
+    if (this.pending !== undefined) this.pending = { ...this.pending, state };
     this.view?.update(state);
   }
 
@@ -245,11 +251,14 @@ class LiveDisplay implements Display {
       this.view.transition(node, event.log);
       return;
     }
-    if (STATUS_META[node.status].isRed) {
-      process.stdout.write(
-        `${STATUS_META[node.status].glyph} ${node.id} ${node.status}  → ${event.log}\n`,
-      );
-    }
+    if (!STATUS_META[node.status].isRed) return;
+    const dur =
+      node.durationMs !== null ? ` (${formatGoDuration(node.durationMs)})` : "";
+    process.stdout.write(
+      `${operatorLine(
+        `${STATUS_META[node.status].glyph} ${node.id} ${node.status}${dur}  → ${event.log}`,
+      )}\n`,
+    );
   }
 
   info(msg: string): void {
@@ -257,12 +266,11 @@ class LiveDisplay implements Display {
       this.view.info(msg);
       return;
     }
-    process.stdout.write(`${msg}\n`);
+    process.stdout.write(`${operatorLine(msg)}\n`);
   }
 
   stop(state?: PipelineState): void {
     this.stopped = true;
-    if (state !== undefined) this.pending = state;
     this.view?.stop(state);
   }
 }

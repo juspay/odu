@@ -203,8 +203,8 @@ recap, `run` its full per-node summary.
 | `r` | rerun the focused node (and its dependants) |
 | `f` | follow the log tail, or pin it where it is |
 | `PgUp` `PgDn`, `g` `G` | scroll the log; `g`/`G` jump to the top/tail |
-| `/` then `Enter`, `n` | search the focused log, next match |
-| `q`, `Ctrl-C` | in `odu attach`: leave; the run keeps going. In `odu run`: cancel the run (exit 130) |
+| `/` then `Enter`, `n` | search the focused log, next match; `Esc` cancels |
+| `q`, `Ctrl-C`, `Ctrl-D` | in `odu attach`: leave; the run keeps going. In `odu run`: cancel the run (exit 130) |
 
 The log pane is a terminal, not a text buffer: a node that redraws with carriage
 returns (`nix build`, `bun test`) shows one progress line rather than hundreds,

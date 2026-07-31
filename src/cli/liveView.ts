@@ -48,6 +48,7 @@ import { splitFanId } from "../common/nodeId";
 import {
   commitLabel,
   countsLine,
+  operatorLine,
   defaultAttachId,
   matrixShape,
   OUTCOME_CELL,
@@ -149,8 +150,8 @@ interface Binding {
   /** The `keyId`s that trigger this. */
   keys: readonly string[];
   /** What the status bar calls it, `null` for a binding already covered by a
-   *  sibling's slot. Both this and `website/src/content/docs.md`'s table are
-   *  readings of this one list, not parallel prose. */
+   *  sibling's slot. The status bar reads this list. `docs.md`'s key table is
+   *  hand-maintained prose and can drift — nothing generates or checks it. */
   hint: string | null;
   act: (v: LiveView, id: string) => void;
 }
@@ -255,6 +256,8 @@ export class LiveView {
    *  opentui renders at 30fps and everything above that is JS the terminal
    *  never sees). The tick flushes it. */
   private dirty = false;
+  /** A resize landed since the last frame — the next one relayouts first. */
+  private resized = false;
   private timer: ReturnType<typeof setInterval> | undefined;
   private stopped = false;
   /** `finishStop()` has run. Distinct from `stopped`, which only records that
@@ -372,7 +375,13 @@ export class LiveView {
     if (this.opts.interactive) {
       renderer.keyInput.on("keypress", (key: ParsedKey) => this.onKey(key));
     }
-    renderer.on("resize", () => this.relayout());
+    // Coalesced, not painted per event: a window drag fires resize many times
+    // a second and each relayout reflows the VT buffer. Same treatment the log
+    // path gets, for the same reason.
+    renderer.on("resize", () => {
+      this.resized = true;
+      this.dirty = true;
+    });
     // Focus (and therefore the log emulator) was seeded against the pre-mount
     // fallback, because the pane box had not been laid out yet. Push the real
     // geometry now — unconditionally: the emulator always exists by here, so a
@@ -447,20 +456,23 @@ export class LiveView {
    *  it without limit. */
   private static readonly RETAIN_MAX = 32;
 
-  private pushEvent(text: string, color: string): void {
+  /** @param now paint immediately. True for the rare, discrete events a host
+   *  raises (a transition, an operator message); false for interposed stderr,
+   *  where a provisioning burst is one call per line and painting each would
+   *  reintroduce the per-source-event repaint the log path just stopped doing. */
+  private pushEvent(text: string, color: string, now = true): void {
     if (this.renderer === undefined) {
       // Pre-mount (or post-stop): no frame to hold this, so it belongs in the
       // scrollback the operator is actually looking at.
-      process.stdout.write(`${dim(stripAnsi(text))}\n`);
+      process.stdout.write(`${operatorLine(text)}\n`);
       return;
     }
     this.events.push({ text, color });
     if (this.events.length > EVENT_ROWS) this.events.shift();
     this.retained.push(text);
     if (this.retained.length > LiveView.RETAIN_MAX) this.retained.shift();
-    // Painted now, not coalesced: events are rare and each one matters. Only
-    // the log-frame path (one frame per stdout chunk) needs the tick.
-    this.paint();
+    if (now) this.paint();
+    else this.dirty = true;
   }
 
   /** Restore the terminal, and leave the scrollback to the host.
@@ -532,7 +544,7 @@ export class LiveView {
       for (const line of text.split("\n")) {
         if (line.trim() === "") continue;
         if (line.startsWith("[host:")) continue;
-        this.pushEvent(stripAnsi(line), DIM);
+        this.pushEvent(stripAnsi(line), DIM, false);
       }
       const cb = [encodingOrCb, maybeCb].find(
         (a): a is () => void => typeof a === "function",
@@ -840,6 +852,11 @@ export class LiveView {
     // frames of the final node would never reach the screen.
     if (!animating && !this.dirty) return;
     this.dirty = false;
+    if (this.resized) {
+      this.resized = false;
+      this.relayout();
+      return;
+    }
     this.paint();
   }
 
@@ -894,6 +911,8 @@ export class LiveView {
     const r = this.renderer;
     if (box === undefined || r === undefined) return;
     const { recipes, platforms } = this.shapeOf(state.order);
+    // Floors, not guesses: 9 keeps the recipe column readable when every name
+    // is short, and 14 is the widest a cell needs for glyph + `1h02m03s`.
     const nameW = Math.max(9, ...recipes.map((x) => recipeLabel(x).length));
     const cellW = Math.max(14, ...platforms.map((p) => p.length + 2));
 
@@ -911,6 +930,9 @@ export class LiveView {
         const here =
           focused?.namepath === recipe && focused?.platform === platform;
         if (node === undefined) {
+          // `°` marks a cell with no node — a recipe that does not run on this
+          // platform. The insets below (2 here, 3 in the live cell) are the
+          // focus marker plus the glyph, so both spellings occupy cellW.
           row += ` °${"".padEnd(cellW - 2)}`;
           continue;
         }
@@ -934,9 +956,6 @@ export class LiveView {
     });
   }
 
-  /** The posting-debt strip and any future state-derived warning. It was in the
-   *  frame the old renderer painted (juspay/odu#61) and has to stay in this
-   *  one: it is how an operator learns a status never made it to GitHub. */
   private shapeOf(order: readonly string[]): ReturnType<typeof matrixShape> {
     const memo = this.shapeMemo;
     if (memo !== undefined && memo.order === order) return memo.shape;
@@ -945,6 +964,9 @@ export class LiveView {
     return shape;
   }
 
+  /** The posting-debt strip and any future state-derived warning. It was in
+   *  the frame the old renderer painted (juspay/odu#61) and has to stay in this
+   *  one: it is how an operator learns a status never made it to GitHub. */
   private paintNotices(): void {
     const box = this.noticeBox;
     if (box === undefined) return;

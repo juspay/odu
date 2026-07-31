@@ -283,25 +283,6 @@ describe("LiveView — mount ordering", () => {
   // other entry point can run before the renderer exists. These pin the two
   // orderings that broke when that was only half-handled.
 
-  it("stop() in the same turn as start() still tears the terminal down", async () => {
-    // `attach` onto an already-settled run does exactly this: start(), see
-    // done, stop() — with no await between. createCliRenderer has already
-    // entered the alternate screen by then, so a stop() that just returned
-    // would leave the terminal wedged on the alt screen in raw mode.
-    const setup = await createTestRenderer({ width: 96, height: 30 });
-    let destroyed = false;
-    const realDestroy = setup.renderer.destroy.bind(setup.renderer);
-    setup.renderer.destroy = () => {
-      destroyed = true;
-      realDestroy();
-    };
-    const view = new LiveView(makeOpts({ setup }));
-    view.start(state, header);
-    view.stop(state); // same synchronous turn — the mount has not resolved
-    await new Promise((r) => setTimeout(r, 40));
-    expect(destroyed).toBe(true);
-  });
-
   it("a renderer that fails to open degrades instead of killing the run", async () => {
     // An unhandled rejection out of the fire-and-forget mount would pick odu's
     // exit code, and odu owns that.
@@ -345,22 +326,6 @@ describe("LiveView — mount ordering", () => {
 });
 
 describe("LiveView — the terminal comes back even when nothing else runs", () => {
-  /** Capture what reaches the real stdout while `fn` runs. */
-  function capturingStdout(fn: () => void): string {
-    const out: string[] = [];
-    const original = process.stdout.write.bind(process.stdout);
-    process.stdout.write = ((c: string | Uint8Array) => {
-      out.push(typeof c === "string" ? c : Buffer.from(c).toString());
-      return true;
-    }) as typeof process.stdout.write;
-    try {
-      fn();
-    } finally {
-      process.stdout.write = original;
-    }
-    return out.join("");
-  }
-
   it("destroys the renderer even when stop() lands in start()'s own turn", async () => {
     // `attach` onto a settled run does start() → see done → stop() with no
     // await between, then `process.exit()` — which abandons pending

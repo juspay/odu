@@ -55,6 +55,34 @@ describe("LogView — a terminal, not a string buffer", () => {
   });
 });
 
+describe("LogView — disposal", () => {
+  it("a write in flight when the view is disposed touches nothing", async () => {
+    // xterm defers its write callback, and a focus change disposes the old view
+    // synchronously — so the continuation lands after dispose() and reads a
+    // disposed buffer. xterm reports that by printing a stack trace, which is
+    // raw library chatter on the operator's terminal: the exact failure this
+    // view exists to prevent. Note it goes through console.error, NOT
+    // process.stderr.write — a stderr spy sees nothing and passes either way.
+    const shouted: string[] = [];
+    const realError = console.error;
+    const realWarn = console.warn;
+    console.error = (...a: unknown[]) => shouted.push(a.map(String).join(" "));
+    console.warn = (...a: unknown[]) => shouted.push(a.map(String).join(" "));
+    try {
+      const view = new LogView(60, 6);
+      const inFlight: Promise<void>[] = [];
+      for (let i = 0; i < 200; i++) inFlight.push(view.write(`line ${i}\r\n`));
+      view.dispose(); // focus moved on while those were still in flight
+      await Promise.allSettled(inFlight);
+      await new Promise((r) => setTimeout(r, 40));
+    } finally {
+      console.error = realError;
+      console.warn = realWarn;
+    }
+    expect(shouted.join("")).not.toContain("DisposableStore");
+  });
+});
+
 describe("LogView — anchoring", () => {
   async function scrolled(): Promise<LogView> {
     const view = new LogView(40, 5);
