@@ -91,6 +91,18 @@ import {
   unpostedNote,
 } from "./statuses";
 
+/** The bucket list and order `odu run`'s final summary has always printed.
+ *  Kept explicit and zero-inclusive: the live faces drop empty buckets (a
+ *  status bar has no room for `0 errored`), but this line is the run's durable
+ *  verdict and is the kind of output people grep. */
+const VERDICT_BUCKETS = [
+  "ok",
+  "failed",
+  "errored",
+  "skipped",
+  "cancelled",
+] as const;
+
 const SETUP = "_ci-setup";
 
 export interface RunArgs {
@@ -1261,13 +1273,16 @@ async function orchestrate(
     }
     const code = verdictCode(state);
     const debt = unpostedNote(unposted.length);
+    // The bucket list and order `odu run`'s summary has always printed. Kept
+    // explicit: the live faces drop zero buckets (a status bar has no room),
+    // but this line is the run's durable verdict and people grep it.
     // The outcome taxonomy and the counts line both come from `render.ts` —
     // this summary, the live header and the live status bar were three
     // hand-rolled versions, and only this one knew about INCOMPLETE.
     const outcome = outcomeOf(counts);
     const label = bold(OUTCOME_COLOR[outcome](OUTCOME_LABEL[outcome]));
     lines.push(
-      `${countsLine(counts)} — ${label}${debt !== "" ? dim(debt) : ""}`,
+      `${countsLine(counts, VERDICT_BUCKETS, true)} — ${label}${debt !== "" ? dim(debt) : ""}`,
     );
     process.stderr.write(`${lines.join("\n")}\n`);
     return code;

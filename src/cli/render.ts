@@ -185,9 +185,13 @@ const COUNT_KEYS = [
 export function countsLine(
   s: PipelineSummary,
   which: readonly NodeStatus[] = COUNT_KEYS,
+  /** Keep buckets that are zero. The live faces drop them — a status bar has
+   *  no room for `0 errored` — but `run`'s final summary has always printed the
+   *  full row, and a verdict line is the kind of output people grep. */
+  keepZeros = false,
 ): string {
   return which
-    .filter((k) => s[k] > 0)
+    .filter((k) => keepZeros || s[k] > 0)
     .map((k) => `${s[k]} ${k}`)
     .join(" · ");
 }
