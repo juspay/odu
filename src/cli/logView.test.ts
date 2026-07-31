@@ -2,7 +2,11 @@ import { describe, expect, it } from "bun:test";
 import { LogView } from "./logView";
 
 /** Feed raw bytes the way the live view does when a surface frame lands: a
- *  `snapshot` frame resets the buffer first, an `append` just writes. */
+ *  `snapshot` frame resets the buffer first, an `append` just writes.
+ *
+ *  Lines here end with a BARE `\n`, because that is what a captured child
+ *  process actually emits — the tty translation to `\n` never happens on a
+ *  pipe. Fixtures that used `\n` hid the cursor-column bug entirely. */
 async function feed(view: LogView, text: string, kind: "snapshot" | "append" = "append") {
   if (kind === "snapshot") view.reset();
   await view.write(text);
@@ -28,7 +32,7 @@ describe("LogView — a terminal, not a string buffer", () => {
 
   it("measures a wide glyph as two cells (the code-point count was wrong)", async () => {
     const view = new LogView(10, 4);
-    await feed(view, "東京東京東京\r\n");
+    await feed(view, "東京東京東京\n");
     // Six double-width glyphs in ten columns wrap after five — a code-point
     // count would have said they all fit.
     expect(view.total).toBeGreaterThan(1);
@@ -37,10 +41,10 @@ describe("LogView — a terminal, not a string buffer", () => {
 
   it("resets on a snapshot frame and appends on a delta", async () => {
     const view = new LogView(40, 6);
-    await feed(view, "first\r\n");
-    await feed(view, "second\r\n");
+    await feed(view, "first\n");
+    await feed(view, "second\n");
     expect(visible(view).join("\n")).toContain("first");
-    await feed(view, "fresh\r\n", "snapshot");
+    await feed(view, "fresh\n", "snapshot");
     const rows = visible(view).join("\n");
     expect(rows).toContain("fresh");
     expect(rows).not.toContain("first");
@@ -49,7 +53,7 @@ describe("LogView — a terminal, not a string buffer", () => {
 
   it("pads the window so pane geometry never depends on how much was logged", async () => {
     const view = new LogView(40, 8);
-    await feed(view, "one\r\n");
+    await feed(view, "one\n");
     expect(view.rows()).toHaveLength(8);
     view.dispose();
   });
@@ -71,7 +75,7 @@ describe("LogView — disposal", () => {
     try {
       const view = new LogView(60, 6);
       const inFlight: Promise<void>[] = [];
-      for (let i = 0; i < 200; i++) inFlight.push(view.write(`line ${i}\r\n`));
+      for (let i = 0; i < 200; i++) inFlight.push(view.write(`line ${i}\n`));
       view.dispose(); // focus moved on while those were still in flight
       await Promise.allSettled(inFlight);
       await new Promise((r) => setTimeout(r, 40));
@@ -91,7 +95,7 @@ describe("LogView — reflow", () => {
     // self-heals, because no further write pushes the extent back up. That is
     // exactly the node an operator widens their terminal to read.
     const view = new LogView(20, 5);
-    for (let i = 0; i < 4; i++) await feed(view, `line ${i} with enough text to wrap at twenty columns\r\n`);
+    for (let i = 0; i < 4; i++) await feed(view, `line ${i} with enough text to wrap at twenty columns\n`);
     expect(visible(view).length).toBeGreaterThan(0);
     view.resize(80, 5);
     expect(visible(view).length).toBeGreaterThan(0);
@@ -103,7 +107,7 @@ describe("LogView — reflow", () => {
 describe("LogView — line endings", () => {
   it("starts each line at column 0, even after a bare newline", async () => {
     // odu captures a child's stdout through a PIPE, so the tty never
-    // translated \n to \r\n. A terminal moves down and keeps the column, which
+    // translated \n to \n. A terminal moves down and keeps the column, which
     // made every line after a progress bar start where the previous one ended.
     const view = new LogView(60, 6);
     await feed(view, "building [####] 100%");
@@ -122,7 +126,7 @@ describe("LogView — colour", () => {
     // translateToString flattens attributes away, which rendered every node's
     // output in one foreground. A failing test's red is information.
     const view = new LogView(60, 4);
-    await feed(view, "\u001b[31mFAILED\u001b[0m plain \u001b[32mok\u001b[0m\r\n");
+    await feed(view, "\u001b[31mFAILED\u001b[0m plain \u001b[32mok\u001b[0m\n");
     const row = view.rows().find((r) => r.text.includes("FAILED"));
     expect(row).toBeDefined();
     const coloured = (row?.spans ?? []).filter((sp) => sp.fg !== undefined);
@@ -137,7 +141,7 @@ describe("LogView — colour", () => {
 
   it("leaves default-coloured text without a hue for the pane to own", async () => {
     const view = new LogView(60, 4);
-    await feed(view, "just ordinary output\r\n");
+    await feed(view, "just ordinary output\n");
     const row = view.rows().find((r) => r.text.includes("ordinary"));
     expect((row?.spans ?? []).every((sp) => sp.fg === undefined)).toBe(true);
     view.dispose();
@@ -147,7 +151,7 @@ describe("LogView — colour", () => {
 describe("LogView — anchoring", () => {
   async function scrolled(): Promise<LogView> {
     const view = new LogView(40, 5);
-    for (let i = 0; i < 40; i++) await feed(view, `line ${i}\r\n`);
+    for (let i = 0; i < 40; i++) await feed(view, `line ${i}\n`);
     return view;
   }
 
@@ -178,10 +182,10 @@ describe("LogView — anchoring", () => {
 
   it("keeps following as new output arrives, but not once pinned", async () => {
     const view = await scrolled();
-    await feed(view, "newest\r\n");
+    await feed(view, "newest\n");
     expect(visible(view).join("\n")).toContain("newest");
     view.toggleFollow(); // pin
-    await feed(view, "after-pin\r\n");
+    await feed(view, "after-pin\n");
     expect(visible(view).join("\n")).not.toContain("after-pin");
     view.dispose();
   });
@@ -191,7 +195,7 @@ describe("LogView — search", () => {
   it("counts matches across the whole buffer, not just the visible window", async () => {
     const view = new LogView(40, 4);
     for (let i = 0; i < 30; i++) {
-      await feed(view, i % 10 === 0 ? "AssertionError here\r\n" : `line ${i}\r\n`);
+      await feed(view, i % 10 === 0 ? "AssertionError here\n" : `line ${i}\n`);
     }
     view.setQuery("assertionerror");
     expect(view.matches).toBe(3);
@@ -200,8 +204,8 @@ describe("LogView — search", () => {
 
   it("jumps to a match and marks the row for highlighting", async () => {
     const view = new LogView(40, 4);
-    for (let i = 0; i < 30; i++) await feed(view, `line ${i}\r\n`);
-    await feed(view, "needle\r\n");
+    for (let i = 0; i < 30; i++) await feed(view, `line ${i}\n`);
+    await feed(view, "needle\n");
     view.setQuery("needle");
     view.next();
     const hit = view.rows().find((r) => r.match);
@@ -215,24 +219,24 @@ describe("LogView — search", () => {
     // text in place, and the status bar reported a stale count for the rest of
     // the search.
     const view = new LogView(40, 4);
-    await feed(view, "needle\r\n");
+    await feed(view, "needle\n");
     view.setQuery("needle");
     expect(view.matches).toBe(1);
-    await view.write("\x1b[1A\rhaystack\r\n");
+    await view.write("\x1b[1A\rhaystack\n");
     expect(view.matches).toBe(0);
     view.dispose();
   });
 
   it("takes the consumer's query at construction, so a focus change keeps it", async () => {
     const view = new LogView(40, 4, "NEEDLE");
-    await feed(view, "a needle here\r\n");
+    await feed(view, "a needle here\n");
     expect(view.matches).toBe(1);
     view.dispose();
   });
 
   it("an empty query clears matches", async () => {
     const view = new LogView(40, 4);
-    await feed(view, "needle\r\n");
+    await feed(view, "needle\n");
     view.setQuery("needle");
     expect(view.matches).toBe(1);
     view.setQuery("");
