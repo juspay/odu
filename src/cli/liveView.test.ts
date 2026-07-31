@@ -96,18 +96,39 @@ async function mount(
   const setup = await createTestRenderer({ width, height });
   const view = new LiveView(makeOpts({ setup, ...rest }));
   view.start(on ?? state, header);
-  // start() is synchronous and mounts in the background; give it a turn.
-  await setup.flush();
+  // start() is synchronous and mounts in the background.
   await settle(setup);
   return { view, setup, frame: () => setup.captureCharFrame() };
 }
 
-/** Let the mount, the log stream and the post-layout repaint all land.
- *  Longer than one frame tick: log frames are coalesced into the tick rather
- *  than painted per chunk, so a pane assertion has to wait for one. */
+/** Wait for a condition, flushing as we go — never for a fixed duration.
+ *
+ *  The mount is async, log frames arrive on their own schedule, and repaints
+ *  are coalesced into a 100ms tick, so "sleep a bit then assert" encodes an
+ *  assumption about how fast the machine is. It held here and failed on a
+ *  loaded CI runner. Polling costs nothing when the condition is already true
+ *  and simply waits longer when it is not. */
+async function until(
+  setup: TestRendererSetup,
+  predicate: () => boolean,
+  what = "condition",
+): Promise<void> {
+  const deadline = Date.now() + 4000;
+  for (;;) {
+    await setup.flush();
+    if (predicate()) return;
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
+/** The frame has been painted at least once — the mount landed and a tick ran. */
 async function settle(setup: TestRendererSetup): Promise<void> {
-  await new Promise((r) => setTimeout(r, 140));
-  await setup.flush();
+  await until(
+    setup,
+    () => setup.captureCharFrame().trim() !== "",
+    "the first frame",
+  );
 }
 
 function makeOpts(o: {
@@ -185,8 +206,11 @@ describe("LiveView — the frame", () => {
       makeOpts({ setup, log: "Scenario: canvas maximize\nassertion failed\n" }),
     );
     view.start(state, header);
-    await setup.flush();
-    await settle(setup);
+    await until(
+      setup,
+      () => setup.captureCharFrame().includes("Scenario: canvas maximize"),
+      "the focused node's log",
+    );
     expect(setup.captureCharFrame()).toContain("Scenario: canvas maximize");
     view.stop();
   });
@@ -262,10 +286,9 @@ describe("LiveView — keys", () => {
     const setup = await createTestRenderer({ width: 96, height: 30 });
     const view = new LiveView(makeOpts({ setup, onQuit: () => quit++ }));
     view.start(state, header);
-    await setup.flush();
-    await new Promise((r) => setTimeout(r, 20));
+    await settle(setup);
     setup.mockInput.pressKey("q");
-    await setup.flush();
+    await until(setup, () => quit > 0, "the quit callback");
     expect(quit).toBe(1);
     view.stop();
   });
@@ -275,10 +298,9 @@ describe("LiveView — keys", () => {
     const setup = await createTestRenderer({ width: 96, height: 30 });
     const view = new LiveView(makeOpts({ setup, rerun: (id) => reran.push(id) }));
     view.start(state, header);
-    await setup.flush();
-    await new Promise((r) => setTimeout(r, 20));
+    await settle(setup);
     setup.mockInput.pressKey("r");
-    await setup.flush();
+    await until(setup, () => reran.length > 0, "the rerun callback");
     // Focus auto-follows the run, so `r` targets the running node.
     expect(reran).toEqual(["ci::e2e@aarch64-darwin"]);
     view.stop();
@@ -290,9 +312,7 @@ describe("LiveView — keys", () => {
       f.split("\n").find((l) => l.includes("›")) ?? "";
     const before = markedRow(frame());
     setup.mockInput.pressKey("k");
-    await setup.flush();
-    await new Promise((r) => setTimeout(r, 20));
-    await setup.flush();
+    await until(setup, () => markedRow(frame()) !== before, "focus to move");
     expect(markedRow(frame())).not.toBe(before);
     view.stop();
   });
@@ -323,7 +343,11 @@ describe("LiveView — mount ordering", () => {
         createRenderer: () => Promise.reject(new Error("no tty here")),
       });
       view.start(state, header);
-      await new Promise((r) => setTimeout(r, 60));
+      const deadline = Date.now() + 4000;
+      while (!errs.join("").includes("live view unavailable")) {
+        if (Date.now() > deadline) break;
+        await new Promise((r) => setTimeout(r, 10));
+      }
     } finally {
       process.stderr.write = original;
     }
@@ -336,7 +360,10 @@ describe("LiveView — mount ordering", () => {
     // Focus (and the emulator) is seeded before the mount, when paneCols() can
     // only answer with the 80x24 fallback. If the mount doesn't push the real
     // geometry, the pane wraps at 76 columns forever on a wide terminal.
-    const { view, frame } = await mount(160, 30, { log: `${"y".repeat(150)}\n` });
+    const { view, setup, frame } = await mount(160, 30, {
+      log: `${"y".repeat(150)}\n`,
+    });
+    await until(setup, () => frame().includes("yyy"), "the wide log line");
     const wide = frame().split("\n").find((l) => l.includes("yyy")) ?? "";
     // The line is 150 chars: visible in full only if the emulator knows it has
     // more than the fallback's 76 columns.
@@ -364,7 +391,7 @@ describe("LiveView — the terminal comes back even when nothing else runs", () 
     const view = new LiveView(makeOpts({ setup }));
     view.start(state, header);
     view.stop(state); // same synchronous turn
-    await new Promise((r) => setTimeout(r, 40));
+    await until(setup, () => destroyed > 0, "the renderer to be destroyed");
     expect(destroyed).toBeGreaterThan(0);
   });
 
@@ -434,9 +461,19 @@ describe("LiveView — the terminal comes back even when nothing else runs", () 
       createRenderer: () => Promise.reject(new Error("no tty")),
     });
     view.start(state, header);
-    await new Promise((r) => setTimeout(r, 40));
+    // The mount must have settled (and failed) before stop(), or this asserts
+    // the wrong branch.
+    const settled = Date.now() + 4000;
+    while (process.listenerCount("exit") === before) {
+      if (Date.now() > settled) break;
+      await new Promise((r) => setTimeout(r, 10));
+    }
     view.stop(state);
-    await new Promise((r) => setTimeout(r, 10));
+    const gone = Date.now() + 4000;
+    while (process.listenerCount("exit") !== before) {
+      if (Date.now() > gone) break;
+      await new Promise((r) => setTimeout(r, 10));
+    }
     // stop() after a settled-but-failed mount must complete the teardown; the
     // listener is only removed there.
     expect(process.listenerCount("exit")).toBe(before);
@@ -577,17 +614,23 @@ describe("LiveView — focus and the log subscription", () => {
       createRenderer: async () => setup.renderer,
     });
     view.start(state, header);
-    await setup.flush();
-    await new Promise((r) => setTimeout(r, 30));
+    await settle(setup);
     // Move focus, then let the superseded stream yield.
     setup.mockInput.pressKey("1");
     await setup.flush();
     setup.mockInput.pressKey("j");
-    await setup.flush();
-    await new Promise((r) => setTimeout(r, 20));
+    await until(
+      setup,
+      () => setup.captureCharFrame().includes("FRESH-FROM-B"),
+      "the new focus's log",
+    );
     releaseStale?.();
-    await new Promise((r) => setTimeout(r, 40));
-    await setup.flush();
+    // The stale frame, if it were going to leak, would arrive on the next few
+    // ticks — give it every chance to before asserting it did not.
+    for (let i = 0; i < 20; i++) {
+      await setup.flush();
+      await new Promise((r) => setTimeout(r, 10));
+    }
     expect(setup.captureCharFrame()).not.toContain("STALE-FROM-A");
     view.stop();
   });
@@ -606,7 +649,7 @@ describe("LiveView — keys", () => {
     setup.mockInput.pressKey("/"); // open the search prompt
     await setup.flush();
     setup.mockInput.pressKey("c", { ctrl: true });
-    await setup.flush();
+    await until(setup, () => quit > 0, "quit from the search prompt");
     expect(quit).toBe(1);
     view.stop();
   });
