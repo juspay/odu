@@ -102,9 +102,11 @@ async function mount(
   return { view, setup, frame: () => setup.captureCharFrame() };
 }
 
-/** Let the mount, the log stream and the post-layout repaint all land. */
+/** Let the mount, the log stream and the post-layout repaint all land.
+ *  Longer than one frame tick: log frames are coalesced into the tick rather
+ *  than painted per chunk, so a pane assertion has to wait for one. */
 async function settle(setup: TestRendererSetup): Promise<void> {
-  await new Promise((r) => setTimeout(r, 20));
+  await new Promise((r) => setTimeout(r, 140));
   await setup.flush();
 }
 
@@ -164,8 +166,7 @@ describe("LiveView — the frame", () => {
     );
     view.start(state, header);
     await setup.flush();
-    await new Promise((r) => setTimeout(r, 30));
-    await setup.flush();
+    await settle(setup);
     expect(setup.captureCharFrame()).toContain("Scenario: canvas maximize");
     view.stop();
   });

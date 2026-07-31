@@ -213,6 +213,21 @@ function keyHint(room: number): string {
  *  history is in the run's log files, and the frame must not grow. */
 const EVENT_ROWS = 2;
 
+/** Set a row's text only when it actually changed.
+ *
+ *  `TextRenderable`'s own guard compares the incoming `StyledText` by
+ *  REFERENCE, and assigning a string allocates a fresh one every time — so the
+ *  guard never fires and each assignment re-parses and re-measures the row.
+ *  Measured at 23.5us per no-op assignment against 0.01us guarded; across ~38
+ *  rows that is a 14x difference on a steady-state frame, which at 10fps is
+ *  most of what the view costs when nothing is happening. */
+const LAST_TEXT = new WeakMap<TextRenderable, string>();
+function setText(row: TextRenderable, text: string): void {
+  if (LAST_TEXT.get(row) === text) return;
+  LAST_TEXT.set(row, text);
+  row.content = text;
+}
+
 export class LiveView {
   private renderer: CliRenderer | undefined;
   private state: PipelineState | undefined;
@@ -228,7 +243,18 @@ export class LiveView {
   private searching = false;
   private query = "";
 
+  /** One-slot memo: `state.order` is fixed for the life of a run, and
+   *  `matrixShape` is O(N·(R+P)) with an `includes` in its inner loop. */
+  private shapeMemo:
+    | { order: readonly string[]; shape: ReturnType<typeof matrixShape> }
+    | undefined;
   private tick = 0;
+  /** A repaint is owed. Set instead of painting inline: log frames arrive once
+   *  per child-process stdout chunk, so a chatty node drove a full-frame
+   *  reprojection per chunk (~1000 paints where ~24 would reach the screen —
+   *  opentui renders at 30fps and everything above that is JS the terminal
+   *  never sees). The tick flushes it. */
+  private dirty = false;
   private timer: ReturnType<typeof setInterval> | undefined;
   private stopped = false;
   /** `finishStop()` has run. Distinct from `stopped`, which only records that
@@ -432,6 +458,8 @@ export class LiveView {
     if (this.events.length > EVENT_ROWS) this.events.shift();
     this.retained.push(text);
     if (this.retained.length > LiveView.RETAIN_MAX) this.retained.shift();
+    // Painted now, not coalesced: events are rare and each one matters. Only
+    // the log-frame path (one frame per stdout chunk) needs the tick.
     this.paint();
   }
 
@@ -697,7 +725,7 @@ export class LiveView {
           if (frame.kind === "snapshot") this.log?.reset();
           await this.log?.write(frame.text);
           if (!live()) return;
-          this.paint();
+          this.dirty = true;
         }
       } catch (err) {
         if (!live()) return;
@@ -806,12 +834,17 @@ export class LiveView {
   private onTick(): void {
     const s = this.state;
     if (s === undefined || this.renderer === undefined) return;
-    if (summarize(s).running === 0) return;
-    this.tick += 1;
+    const animating = summarize(s).running > 0;
+    if (animating) this.tick += 1;
+    // A settled run still flushes a pending repaint — otherwise the last log
+    // frames of the final node would never reach the screen.
+    if (!animating && !this.dirty) return;
+    this.dirty = false;
     this.paint();
   }
 
   private paint(): void {
+    this.dirty = false;
     if (this.stopped || this.renderer === undefined) return;
     const state = this.state;
     const header = this.header;
@@ -834,7 +867,7 @@ export class LiveView {
     const commit =
       header.commitUrl !== null ? link(label, header.commitUrl) : label;
     if (this.headLine !== undefined) {
-      this.headLine.content = `odu ${mark} ${state.name} @ ${commit}  ${elapsed}`;
+      setText(this.headLine, `odu ${mark} ${state.name} @ ${commit}  ${elapsed}`);
       // Only the two outcomes that need the operator's attention take a hue;
       // a pass and a run still going stay in ordinary foreground.
       this.headLine.fg =
@@ -844,9 +877,10 @@ export class LiveView {
     }
     this.paintNotices();
     if (this.laneLine !== undefined) {
-      this.laneLine.content = header.lanes
-        .map((l) => `${l.platform} ▸ ${l.host}`)
-        .join("   ");
+      setText(
+        this.laneLine,
+        header.lanes.map((l) => `${l.platform} ▸ ${l.host}`).join("   "),
+      );
     }
 
     this.paintMatrix(state, now, spin);
@@ -859,7 +893,7 @@ export class LiveView {
     const box = this.matrixBox;
     const r = this.renderer;
     if (box === undefined || r === undefined) return;
-    const { recipes, platforms } = matrixShape(state.order);
+    const { recipes, platforms } = this.shapeOf(state.order);
     const nameW = Math.max(9, ...recipes.map((x) => recipeLabel(x).length));
     const cellW = Math.max(14, ...platforms.map((p) => p.length + 2));
 
@@ -895,7 +929,7 @@ export class LiveView {
 
     // Renderables are reused across repaints; only the shape change costs.
     this.syncRows(box, this.matrixRows, lines.length, "mx", (row, i) => {
-      row.content = lines[i] ?? "";
+      setText(row, lines[i] ?? "");
       row.fg = i === 0 ? DIM : FG;
     });
   }
@@ -903,12 +937,20 @@ export class LiveView {
   /** The posting-debt strip and any future state-derived warning. It was in the
    *  frame the old renderer painted (juspay/odu#61) and has to stay in this
    *  one: it is how an operator learns a status never made it to GitHub. */
+  private shapeOf(order: readonly string[]): ReturnType<typeof matrixShape> {
+    const memo = this.shapeMemo;
+    if (memo !== undefined && memo.order === order) return memo.shape;
+    const shape = matrixShape(order);
+    this.shapeMemo = { order, shape };
+    return shape;
+  }
+
   private paintNotices(): void {
     const box = this.noticeBox;
     if (box === undefined) return;
     const lines = this.notices();
     this.syncRows(box, this.noticeRowsR, lines.length, "nt", (row, i) => {
-      row.content = lines[i] ?? "";
+      setText(row, lines[i] ?? "");
       row.fg = STATUS_CELL.running;
     });
   }
@@ -918,7 +960,7 @@ export class LiveView {
     if (box === undefined) return;
     this.syncRows(box, this.eventRows, this.events.length, "ev", (row, i) => {
       const ev = this.events[i];
-      row.content = ev?.text ?? "";
+      setText(row, ev?.text ?? "");
       row.fg = ev?.color ?? DIM;
     });
   }
@@ -953,7 +995,7 @@ export class LiveView {
     const rows = this.log?.rows() ?? [];
     this.syncRows(box, this.paneRows, height, "pane", (row, i) => {
       const line = rows[i];
-      row.content = line?.text ?? "";
+      setText(row, line?.text ?? "");
       row.fg = line?.match === true ? ACCENT : FG;
     });
   }
@@ -963,18 +1005,18 @@ export class LiveView {
     if (line === undefined) return;
     if (this.searching) {
       const n = this.log?.matches ?? 0;
-      line.content = ` /${this.query}▏   ${n} match${n === 1 ? "" : "es"}   ⏎ next · esc cancel`;
+      setText(line, ` /${this.query}▏   ${n} match${n === 1 ? "" : "es"}   ⏎ next · esc cancel`);
       line.fg = ACCENT;
       return;
     }
     const counts = countsLine(s);
     if (!this.opts.interactive) {
-      line.content = ` ${counts}`;
+      setText(line, ` ${counts}`);
       line.fg = DIM;
       return;
     }
     const width = this.renderer?.terminalWidth ?? 80;
-    line.content = ` ${counts}    ${keyHint(width - counts.length - 6)}`;
+    setText(line, ` ${counts}    ${keyHint(width - counts.length - 6)}`);
     line.fg = DIM;
   }
 

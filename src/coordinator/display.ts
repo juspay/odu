@@ -24,7 +24,7 @@
  * `printVerdict`, `attach` prints `verdictLine(state)` from `cli/render`.
  */
 
-import { LiveView, type LiveOpts } from "../cli/liveView";
+import type { LiveOpts, LiveView } from "../cli/liveView";
 import { commitLabel } from "../cli/render";
 
 /** Re-exported from `cli/render`, where the cross-face projections live. */
@@ -192,24 +192,48 @@ class PlainDisplay implements Display {
 
 // ── live ────────────────────────────────────────────────────────────────────
 
-/** The interactive face, delegated to the opentui view. This class is the
- *  adapter that keeps `Display`'s synchronous contract over a renderer whose
- *  mount is async: `LiveView.start` records state and kicks the mount off
- *  without awaiting, and every other entry point tolerates running before it
- *  lands. See `src/cli/liveView.ts` for what the frame actually does. */
+/** The interactive face, delegated to the opentui view.
+ *
+ *  The view is imported LAZILY. `cli/main.ts` reaches this module for every
+ *  command, and a static import of `liveView` drags in @opentui/core's native
+ *  library and @xterm/headless — about 125ms, roughly half the wall time of an
+ *  `odu runs` or `odu status` that never draws a frame.
+ *
+ *  This class also keeps `Display`'s synchronous contract over a view whose
+ *  construction is now async: state is recorded regardless, and every entry
+ *  point tolerates running before the view exists. See `src/cli/liveView.ts`. */
 class LiveDisplay implements Display {
-  private readonly view: LiveView;
+  private view: LiveView | undefined;
+  /** Queued because `run` calls `info()` during a venue lease that can block
+   *  for minutes — long before `start()`, and therefore before the view is
+   *  loaded. Pre-view those go straight to stdout, exactly as the view itself
+   *  would do pre-mount. */
+  private pending: PipelineState | undefined;
+  private pendingHeader: RunHeader | undefined;
 
-  constructor(opts: LiveOpts) {
-    this.view = new LiveView(opts);
-  }
+  constructor(private readonly opts: LiveOpts) {}
 
   start(state: PipelineState, header: RunHeader): void {
-    this.view.start(state, header);
+    this.pending = state;
+    this.pendingHeader = header;
+    void this.load();
   }
 
+  private async load(): Promise<void> {
+    const { LiveView: Ctor } = await import("../cli/liveView");
+    if (this.stopped) return;
+    const view = new Ctor(this.opts);
+    this.view = view;
+    const state = this.pending;
+    const header = this.pendingHeader;
+    if (state !== undefined && header !== undefined) view.start(state, header);
+  }
+
+  private stopped = false;
+
   update(state: PipelineState): void {
-    this.view.update(state);
+    this.pending = state;
+    this.view?.update(state);
   }
 
   /** `progressEvent` is the only construction site of a `ProgressEvent` and it
@@ -217,15 +241,28 @@ class LiveDisplay implements Display {
    *  fallback was unreachable — and the mirrored `sha7` field existed only to
    *  feed it, giving "where does a node's log live" two callers in one file. */
   transition(event: ProgressEvent, node: NodeState): void {
-    this.view.transition(node, event.log);
+    if (this.view !== undefined) {
+      this.view.transition(node, event.log);
+      return;
+    }
+    if (STATUS_META[node.status].isRed) {
+      process.stdout.write(
+        `${STATUS_META[node.status].glyph} ${node.id} ${node.status}  → ${event.log}\n`,
+      );
+    }
   }
 
   info(msg: string): void {
-    this.view.info(msg);
+    if (this.view !== undefined) {
+      this.view.info(msg);
+      return;
+    }
+    process.stdout.write(`${msg}\n`);
   }
 
   stop(state?: PipelineState): void {
-    this.view.stop(state);
+    this.stopped = true;
+    if (state !== undefined) this.pending = state;
+    this.view?.stop(state);
   }
-
 }
