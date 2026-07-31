@@ -29,36 +29,24 @@
  * matrix.
  */
 
-import {
-  bold,
-  dim,
-  green,
-  link,
-  magenta,
-  red,
-  spinnerAt,
-  stripAnsi,
-  yellow,
-} from "../cli/ansi";
-import {
-  applyLogFrame,
-  defaultAttachId,
-  renderLogPane,
-  STATUS_COLOR,
-  summarize,
-} from "../cli/render";
+import { summarize } from "../cli/render";
+import { LiveView } from "../cli/liveView";
 import { formatGoDuration } from "../common/duration";
-import { fanId, splitFanId } from "../common/nodeId";
+import { splitFanId } from "../common/nodeId";
 import {
   type NodeLogFrame,
   type NodeState,
   type PipelineState,
-  postingOf,
   type ProgressStatus,
   type RunHeader,
   STATUS_META,
 } from "../common/surface";
-import { logPathFor, postingWarning } from "./statuses";
+import { logPathFor } from "./statuses";
+
+/** `stepFocus` moved to `../cli/render` (pure state derivation, where the rest
+ *  of the matrix projections live). Re-exported here so existing importers and
+ *  their tests keep working against one name. */
+export { stepFocus } from "../cli/render";
 
 export type DisplayMode = "json" | "plain" | "live";
 
@@ -157,81 +145,6 @@ export function progressEvent(
     log: logPathFor(sha7, id),
   };
 }
-
-/** Short display name for a fan-in node id: `ci::e2e@x86_64-linux` → `e2e`
- *  (the matrix's columns carry the platform; `ci::` is the one module prefix
- *  every kolu pipeline shares, so it's noise in a narrow cell). */
-function recipeLabel(namepath: string): string {
-  return namepath.startsWith("ci::") ? namepath.slice(4) : namepath;
-}
-
-function glyphFor(status: NodeState["status"], tick: number): string {
-  const raw =
-    status === "running" ? spinnerAt(tick) : STATUS_META[status].glyph;
-  return STATUS_COLOR[status](raw);
-}
-
-/** Project the flat node-id `order` into the matrix axes the live view draws:
- *  the recipe rows and platform columns, each in first-seen order. The one home
- *  for the "flat list → 2D shape" rule, so the renderer and the hjkl navigator
- *  can never drift on how rows and columns are derived. */
-function matrixShape(order: readonly string[]): {
-  recipes: string[];
-  platforms: string[];
-} {
-  const recipes: string[] = [];
-  const platforms: string[] = [];
-  for (const id of order) {
-    const { namepath, platform } = splitFanId(id);
-    if (!recipes.includes(namepath)) recipes.push(namepath);
-    if (!platforms.includes(platform)) platforms.push(platform);
-  }
-  return { recipes, platforms };
-}
-
-/** Move the interactive focus one cell across the recipe × platform matrix:
- *  `h`/`l` step between platform columns on the current recipe row, `j`/`k`
- *  between recipe rows in the current platform column. Each axis wraps, and
- *  missing cells (a recipe that doesn't run on a platform — the `°` gaps) are
- *  skipped, so focus only ever lands on a real node. With no focus yet, lands on
- *  the first node; returns undefined when no other cell exists along that axis. */
-export function stepFocus(
-  order: readonly string[],
-  focusedId: string | undefined,
-  key: "h" | "j" | "k" | "l",
-): string | undefined {
-  if (focusedId === undefined) return order[0];
-  const { recipes, platforms } = matrixShape(order);
-  // Each existing cell keyed by `fanId(recipe, platform)` back to its original
-  // id, so a step returns the real id rather than a re-synthesized one — a
-  // lane-local id without `@` would otherwise rebuild into a different string
-  // and never match.
-  const cells = new Map(
-    order.map((id) => {
-      const { namepath, platform } = splitFanId(id);
-      return [fanId(namepath, platform), id] as const;
-    }),
-  );
-  const { namepath, platform } = splitFanId(focusedId);
-  const horizontal = key === "h" || key === "l";
-  const axis = horizontal ? platforms : recipes;
-  const delta = key === "l" || key === "j" ? 1 : -1;
-  const start = axis.indexOf(horizontal ? platform : namepath);
-  if (start === -1) return undefined;
-  for (let stepCount = 1; stepCount < axis.length; stepCount++) {
-    const pos =
-      (((start + delta * stepCount) % axis.length) + axis.length) % axis.length;
-    // `pos` is always in range; the guard only satisfies noUncheckedIndexedAccess.
-    const at = axis[pos];
-    if (at === undefined) continue;
-    const candidate = horizontal
-      ? cells.get(fanId(namepath, at))
-      : cells.get(fanId(at, platform));
-    if (candidate !== undefined) return candidate;
-  }
-  return undefined;
-}
-
 // ── json ────────────────────────────────────────────────────────────────────
 
 class JsonDisplay implements Display {
@@ -321,409 +234,38 @@ class PlainDisplay implements Display {
 
 // ── live ────────────────────────────────────────────────────────────────────
 
-const TICK_MS = 120;
-
-/** Pure frame renderer — exported for tests (ANSI auto-disables off-TTY). */
-export function renderRunFrame(opts: {
-  state: PipelineState;
-  header: RunHeader;
-  tick: number;
-  startedAt: number;
-  now: number;
-  columns: number;
-  /** The interactive focus — marks the specific matrix cell (recipe ×
-   *  platform) whose log the pane below is showing and which `r` reruns, so the
-   *  same recipe on two platforms stays distinguishable. Undefined before the
-   *  first focus lands. */
-  focusedId?: string;
-}): string {
-  const { state, header, tick, now } = opts;
-  const focused =
-    opts.focusedId !== undefined ? splitFanId(opts.focusedId) : undefined;
-  const { recipes, platforms } = matrixShape(state.order);
-
-  const summary = summarize(state);
-  const headGlyph = summary.done
-    ? !summary.clean
-      ? summary.failedOverall
-        ? red("✗")
-        : yellow("◼")
-      : green("✔")
-    : yellow(spinnerAt(tick));
-  const shaText =
-    header.commitUrl !== null
-      ? link(commitLabel(state), header.commitUrl)
-      : commitLabel(state);
-  const sha = state.dirty ? yellow(`@ ${shaText}`) : dim(`@ ${shaText}`);
-  const lines: string[] = [
-    `${bold("odu")} ${headGlyph} ${state.name} ${sha} ${dim(
-      formatGoDuration(now - opts.startedAt),
-    )}`,
-    dim(
-      `  ${header.lanes.map((l) => `${l.platform} = ${l.host}`).join(" · ")}`,
-    ),
-  ];
-  // GitHub posting debt strip (juspay/odu#61) — gone when the debt clears.
-  const warn = postingWarning(postingOf(state));
-  if (warn !== null) lines.push(yellow(warn));
-  lines.push("");
-
-  const nameWidth = Math.max(9, ...recipes.map((r) => recipeLabel(r).length));
-  const cellWidth = Math.max(14, ...platforms.map((p) => p.length + 2));
-  lines.push(
-    dim(
-      `  ${"".padEnd(nameWidth)}  ${platforms
-        .map((p) => p.padEnd(cellWidth))
-        .join("")}`,
-    ),
-  );
-  for (const recipe of recipes) {
-    const cells = platforms.map((platform) => {
-      const node = state.nodes[`${recipe}@${platform}`];
-      // Focus lands on one specific cell (recipe × platform), not a whole row —
-      // a `›` on the cell so the same recipe on two platforms is
-      // distinguishable and `r`'s target is unambiguous.
-      const cellMark =
-        focused?.namepath === recipe && focused?.platform === platform
-          ? "›"
-          : " ";
-      if (node === undefined) return `${cellMark}${"".padEnd(cellWidth)}`;
-      const glyph = glyphFor(node.status, tick);
-      const time =
-        node.status === "running"
-          ? formatGoDuration(now - (node.startedAt ?? now))
-          : node.durationMs !== null
-            ? formatGoDuration(node.durationMs)
-            : "";
-      const plain = `${STATUS_META[node.status].glyph} ${time}`;
-      return `${cellMark}${glyph} ${dim(time)}${"".padEnd(Math.max(0, cellWidth - plain.length))}`;
-    });
-    const marker = focused?.namepath === recipe ? "›" : " ";
-    lines.push(
-      `${marker} ${recipeLabel(recipe).padEnd(nameWidth)} ${cells.join("")}`,
-    );
-  }
-
-  lines.push("");
-  const counts = [
-    summary.ok > 0 ? green(`${summary.ok} ok`) : null,
-    summary.running > 0 ? yellow(`${summary.running} running`) : null,
-    summary.pending > 0 ? dim(`${summary.pending} pending`) : null,
-    summary.failed > 0 ? red(`${summary.failed} failed`) : null,
-    summary.errored > 0 ? magenta(`${summary.errored} errored`) : null,
-    summary.skipped > 0 ? dim(`${summary.skipped} skipped`) : null,
-  ].filter((s): s is string => s !== null);
-  lines.push(`  ${counts.join(dim(" · "))}`);
-
-  return lines.join("\n");
-}
-
-const KEY_HINT = "[digits] focus · [hjkl] move · [r] rerun · [q] quit";
-
-// biome-ignore lint/suspicious/noControlCharactersInRegex: matching ANSI escapes is the point.
-const CSI_TOKEN = /^\x1b\[[0-9;]*[A-Za-z]/;
-// An OSC token: `\x1b]…(ST|BEL)`. The OSC 8 hyperlink is `\x1b]8;;<uri>\x1b\\`
-// (or BEL-terminated); a `<uri>`-less one (`\x1b]8;;\x1b\\`) *closes* the link.
-// biome-ignore lint/suspicious/noControlCharactersInRegex: matching OSC escapes is the point.
-const OSC_TOKEN = /^\x1b\]([^\x07\x1b]*)(?:\x07|\x1b\\)/;
-const OSC8_CLOSE = "\x1b]8;;\x1b\\";
-
-/** The *visible* width of a styled line: glyph columns only, with CSI and OSC
- *  escapes (incl. an OSC 8 hyperlink's long URL) uncounted. `stripAnsi` only
- *  drops CSI, so it would wrongly count a hyperlink's URL bytes against the
- *  budget — a header whose visible text fits but whose commit URL is long would
- *  read as over-budget and get truncated. */
-function visibleWidth(line: string): number {
-  let visible = 0;
-  let i = 0;
-  while (i < line.length) {
-    const rest = line.slice(i);
-    const esc = CSI_TOKEN.exec(rest) ?? OSC_TOKEN.exec(rest);
-    if (esc !== null) {
-      i += esc[0].length;
-      continue;
-    }
-    visible += 1;
-    i += 1;
-  }
-  return visible;
-}
-
-/** Truncate a styled line to `width` *visible* columns, leaving CSI/OSC escapes
- *  uncounted, so the embedded log pane's wide command/log lines can't wrap. A
- *  line already within budget passes through byte-for-byte (so the OSC 8 commit
- *  link in the header survives intact); a truncated one gets a trailing reset so
- *  cut-off styling can't bleed into the next row, and — since an SGR reset does
- *  NOT close an OSC 8 hyperlink — an OSC 8 close first if truncation lands while
- *  a link is still open, so the link can't stay active across following rows.
- *  The repaint counts one terminal row per clamped line, exact once nothing
- *  wraps. */
-export function clampLine(line: string, width: number): string {
-  if (width <= 0 || visibleWidth(line) <= width) return line;
-  let out = "";
-  let visible = 0;
-  let i = 0;
-  let linkOpen = false;
-  while (i < line.length && visible < width) {
-    const rest = line.slice(i);
-    const csi = CSI_TOKEN.exec(rest);
-    if (csi !== null) {
-      out += csi[0];
-      i += csi[0].length;
-      continue;
-    }
-    const osc = OSC_TOKEN.exec(rest);
-    if (osc !== null) {
-      out += osc[0];
-      i += osc[0].length;
-      // `]8;;<uri>` opens a hyperlink; the `<uri>`-less `]8;;` closes it.
-      const body = osc[1] ?? "";
-      if (body.startsWith("8;;")) linkOpen = body !== "8;;";
-      continue;
-    }
-    out += line[i];
-    visible += 1;
-    i += 1;
-  }
-  return `${out}${linkOpen ? OSC8_CLOSE : ""}\x1b[0m`;
-}
-
+/** The interactive face, delegated to the opentui view. This class is the
+ *  adapter that keeps `Display`'s synchronous contract over a renderer whose
+ *  mount is async: `LiveView.start` records state and kicks the mount off
+ *  without awaiting, and every other entry point tolerates running before it
+ *  lands. See `src/cli/liveView.ts` for what the frame actually does. */
 class LiveDisplay implements Display {
-  private header: RunHeader | undefined;
-  private state: PipelineState | undefined;
-  private focusedId: string | undefined;
-  /** Until the operator picks a node by hand (hjkl/digits), focus auto-follows
-   *  the run: it re-tracks the best default node (first running, else first
-   *  pending, else last) on every state update, so a `run` that `start`s with
-   *  everything pending advances off `_ci-setup` onto the active node instead of
-   *  staying pinned to the startup snapshot. A keypress locks it. */
-  private focusLocked = false;
-  private focusedLog = "";
-  private logSub: AbortController | undefined;
-  private tick = 0;
-  private prevHeight = 0;
-  private timer: NodeJS.Timeout | undefined;
-  private readonly stderrWrite = process.stderr.write.bind(process.stderr);
-  private stopped = false;
-  private readonly keyHandler = (key: string): void => this.onKey(key);
+  private readonly view: LiveView;
+  private sha7 = "";
 
-  constructor(private readonly opts: LiveOpts) {}
+  constructor(opts: LiveOpts) {
+    this.view = new LiveView(opts);
+  }
 
   start(state: PipelineState, header: RunHeader): void {
-    this.state = state;
-    this.header = header;
-    process.stdout.write("\x1b[?25l");
-    if (this.opts.hookStderr) this.hookStderr();
-    if (this.opts.interactive) {
-      process.stdin.setRawMode(true);
-      process.stdin.resume();
-      process.stdin.setEncoding("utf-8");
-      process.stdin.on("data", this.keyHandler);
-    }
-    // Whatever path the process dies by (a throw past orchestrate, a missed
-    // stop()), the terminal must come back: cursor shown, raw mode off, stderr
-    // unhooked.
-    process.once("exit", () => {
-      if (!this.stopped) {
-        if (this.opts.hookStderr) process.stderr.write = this.stderrWrite;
-        if (this.opts.interactive) {
-          process.stdin.setRawMode(false);
-        }
-        process.stdout.write("\x1b[?25h");
-      }
-    });
-    this.seedFocus(state);
-    this.timer = setInterval(() => {
-      this.tick += 1;
-      this.paint();
-    }, TICK_MS);
-    this.timer.unref?.();
+    this.sha7 = state.sha7;
+    this.view.start(state, header);
   }
 
   update(state: PipelineState): void {
-    this.state = state;
-    this.seedFocus(state);
-  }
-
-  /** Auto-follow the best default node (first running, else first pending, else
-   *  last) until the operator pins focus with a key. `run` `start`s on an
-   *  all-pending snapshot then `update`s as lanes go live, so re-tracking here
-   *  walks focus off `_ci-setup` onto the running node; `attach` may `start` on
-   *  an already-settled snapshot and never `update`, so both call this. Once
-   *  `focusLocked`, the operator's choice stands. */
-  private seedFocus(state: PipelineState): void {
-    if (this.focusLocked) return;
-    const id = defaultAttachId(state);
-    if (id !== undefined) this.focus(id);
+    this.sha7 = state.sha7;
+    this.view.update(state);
   }
 
   transition(event: ProgressEvent, node: NodeState): void {
-    // Reds persist in scrollback; greens live in the matrix.
-    if (node.status !== "failed" && node.status !== "errored") return;
-    const color = node.status === "failed" ? red : magenta;
-    const dur =
-      node.durationMs !== null ? ` (${formatGoDuration(node.durationMs)})` : "";
-    this.printAbove(
-      color(
-        `${STATUS_META[node.status].glyph} ${event.node} ${node.status}${dur}`,
-      ) + dim(`  → ${event.log}`),
-    );
+    this.view.transition(node, event.log !== "" ? event.log : logPathFor(this.sha7, node.id));
   }
 
   info(msg: string): void {
-    this.printAbove(msg);
+    this.view.info(msg);
   }
 
   stop(state?: PipelineState): void {
-    if (this.stopped) return;
-    this.stopped = true;
-    if (this.timer !== undefined) clearInterval(this.timer);
-    this.logSub?.abort();
-    if (state !== undefined) this.state = state;
-    this.paint();
-    if (this.opts.hookStderr) process.stderr.write = this.stderrWrite;
-    if (this.opts.interactive) {
-      process.stdin.off("data", this.keyHandler);
-      process.stdin.setRawMode(false);
-      process.stdin.pause();
-    }
-    process.stdout.write("\x1b[?25h");
-    this.prevHeight = 0;
-  }
-
-  /** Move focus to `id`, abort the previous log subscription, and pull the new
-   *  node's log via the injected `openLog` (a `snapshot` frame then `append`s,
-   *  so a focus change backfills the buffer). */
-  private focus(id: string): void {
-    if (id === this.focusedId) return;
-    this.focusedId = id;
-    this.focusedLog = "";
-    this.logSub?.abort();
-    const controller = new AbortController();
-    this.logSub = controller;
-    // A frame from this subscription is only the focused log's if this is still
-    // the live subscription: a fast focus switch (or `stop()`) can leave the
-    // previous `openLog` resolving or yielding a queued frame after focus has
-    // moved on (notably `attach`'s socket stream, which can lag the abort), and
-    // applying it would paint A's bytes under B's header. Drop anything from a
-    // superseded/stopped subscription before it touches `focusedLog` or paints.
-    const live = (): boolean =>
-      !controller.signal.aborted && this.logSub === controller && !this.stopped;
-    void (async () => {
-      try {
-        for await (const frame of await this.opts.openLog(
-          id,
-          controller.signal,
-        )) {
-          if (!live()) return;
-          this.focusedLog = applyLogFrame(this.focusedLog, frame);
-          this.paint();
-        }
-      } catch (err) {
-        if (!live()) return;
-        this.focusedLog += `\n[odu] log stream error: ${
-          (err as Error).message
-        }\n`;
-        this.paint();
-      }
-    })();
-    this.paint();
-  }
-
-  private onKey(key: string): void {
-    if (key === "q" || key === "\x03" || key === "\x04") {
-      this.opts.onQuit();
-      return;
-    }
-    if (key === "r" && this.focusedId !== undefined) {
-      this.opts.rerun(this.focusedId);
-      return;
-    }
-    const state = this.state;
-    if (state === undefined) return;
-    if (key === "h" || key === "j" || key === "k" || key === "l") {
-      const next = stepFocus(state.order, this.focusedId, key);
-      if (next !== undefined) {
-        this.focusLocked = true; // a hand-picked node stops auto-follow
-        this.focus(next);
-      }
-      return;
-    }
-    if (key >= "1" && key <= "9") {
-      const next = state.order[Number(key) - 1];
-      if (next !== undefined) {
-        this.focusLocked = true; // a hand-picked node stops auto-follow
-        this.focus(next);
-      }
-    }
-  }
-
-  /** Library chatter must not shred the repaint region: `[host:…]` lines
-   *  (surface-remote provisioning — already mirrored into `_ci-setup`'s
-   *  log file) are dropped; everything else re-prints above the matrix. */
-  private hookStderr(): void {
-    const handler: typeof process.stderr.write = (
-      chunk: Uint8Array | string,
-      encodingOrCb?: unknown,
-      maybeCb?: unknown,
-    ): boolean => {
-      const text =
-        typeof chunk === "string"
-          ? chunk
-          : Buffer.from(chunk).toString("utf-8");
-      for (const line of text.split("\n")) {
-        if (line.trim() === "") continue;
-        if (line.startsWith("[host:")) continue;
-        this.printAbove(dim(stripAnsi(line)));
-      }
-      const cb = [encodingOrCb, maybeCb].find(
-        (a): a is () => void => typeof a === "function",
-      );
-      cb?.();
-      return true;
-    };
-    process.stderr.write = handler;
-  }
-
-  /** Print a persistent line above the live region: erase the region, emit
-   *  the line into normal scrollback, repaint below it. */
-  private printAbove(line: string): void {
-    let out = "";
-    if (this.prevHeight > 0) out += `\x1b[${this.prevHeight}F\x1b[0J`;
-    this.prevHeight = 0;
-    out += `${line}\n`;
-    process.stdout.write(out);
-    this.paint();
-  }
-
-  private paint(): void {
-    if (this.header === undefined || this.state === undefined) return;
-    const frame = renderRunFrame({
-      state: this.state,
-      header: this.header,
-      tick: this.tick,
-      startedAt: this.header.startedAt,
-      now: Date.now(),
-      columns: process.stdout.columns ?? 100,
-      focusedId: this.focusedId,
-    });
-    const focusedNode =
-      this.focusedId !== undefined
-        ? this.state.nodes[this.focusedId]
-        : undefined;
-    const raw =
-      `${frame}\n${renderLogPane(focusedNode, this.focusedLog)}` +
-      (this.opts.interactive ? `\n\n${dim(KEY_HINT)}` : "");
-    // The bounded repaint moves up exactly `prevHeight` rows, so every painted
-    // line must occupy exactly one terminal row: clamp each (the embedded log
-    // pane carries arbitrarily wide command/log lines that would otherwise wrap
-    // and leave the cursor-up undercounting, smearing stale output below).
-    const columns = process.stdout.columns ?? 100;
-    const lines = raw.split("\n").map((l) => clampLine(l, columns));
-    let out = "";
-    if (this.prevHeight > 0) out += `\x1b[${this.prevHeight}F\x1b[0J`;
-    out += `${lines.join("\n")}\n`;
-    process.stdout.write(out);
-    this.prevHeight = lines.length;
+    this.view.stop(state);
   }
 }

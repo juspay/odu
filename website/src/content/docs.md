@@ -188,6 +188,28 @@ odu protect [--dry-run]           sync required GitHub status contexts
 odu mcp                           serve the agent interface over stdio
 ```
 
+### The live dashboard
+
+`odu run` on a terminal, and `odu attach` from anywhere else, paint the same
+view: a recipes × platforms matrix, an events lane, and the focused node's log
+below it. It runs on the alternate screen, so your scrollback is untouched while
+the run is live and carries a one-line verdict once it exits.
+
+| key | |
+|---|---|
+| `h` `j` `k` `l`, arrows | move the focus between matrix cells |
+| `1`–`9` | jump straight to a node |
+| `r` | rerun the focused node (and its dependants) |
+| `f` | follow the log tail, or pin it where it is |
+| `PgUp` `PgDn`, `g` `G` | scroll the log; `g`/`G` jump to the top/tail |
+| `/` then `Enter`, `n` | search the focused log, next match |
+| `q`, `Ctrl-C` | leave (the run keeps going — attach again any time) |
+
+The log pane is a terminal, not a text buffer: a node that redraws with carriage
+returns (`nix build`, `bun test`) shows one progress line rather than hundreds,
+and wide characters are measured, not counted. The pane takes whatever height
+your terminal has — resize it and the layout follows.
+
 ### Cancel, supersede, and linger
 
 `.ci/odu.sock` identifies the live run in a checkout. Bare `odu cancel` asks the coordinator to finalize statuses, close lanes, remove the socket, and then waits for teardown.

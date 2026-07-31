@@ -13,9 +13,7 @@ import { createLoopbackPair } from "@kolu/surface/loopback";
 import { serveOverStdio } from "@kolu/surface/peer-server";
 import { afterEach, describe, expect, it } from "bun:test";
 import {
-  applyLogFrame,
   exitCode,
-  renderLogPane,
   summarize,
 } from "./cli/render";
 import type { TaskSpec } from "./common/spec";
@@ -389,22 +387,4 @@ describe("render helpers", () => {
     expect(summary.failedOverall).toBe(true);
   });
 
-  it("renderLogPane names the focused node id, command + log tail", () => {
-    const pane = renderLogPane(state.nodes.b, "line one\nline two");
-    // The full node id labels the rule — the matrix above can't tell which
-    // platform's log is attached, so the pane must.
-    expect(pane).toContain("── b ");
-    expect(pane).toContain("$ echo b");
-    expect(pane).toContain("line two");
-    // No focus → just the rule (the matrix above carries the overview).
-    expect(renderLogPane(undefined, "")).toBe("─".repeat(60));
-  });
-
-  it("applyLogFrame resets on snapshot, appends on delta", () => {
-    let buffer = applyLogFrame("", { kind: "append", text: "one" });
-    buffer = applyLogFrame(buffer, { kind: "append", text: " two" });
-    expect(buffer).toBe("one two");
-    buffer = applyLogFrame(buffer, { kind: "snapshot", text: "fresh" });
-    expect(buffer).toBe("fresh");
-  });
 });

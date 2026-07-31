@@ -7,12 +7,12 @@
 
 import type { AgentNodes } from "../mcp/agentSurface";
 import {
-  clampLog,
   type NodeState,
   type NodeStatus,
   type PipelineState,
   STATUS_META,
 } from "../common/surface";
+import { fanId, splitFanId } from "../common/nodeId";
 import { dim, green, magenta, red, yellow } from "./ansi";
 
 /** The non-terminal statuses: a node in one of these is still in flight, so the
@@ -177,28 +177,72 @@ export function defaultAttachId(state: PipelineState): string | undefined {
   return state.order.at(-1);
 }
 
-/** Keep a log buffer in sync with a stream of `nodeLog` frames — reset on a
- *  `snapshot` frame, append on a delta. Returns the new buffer. */
-export function applyLogFrame(
-  buffer: string,
-  frame: { kind: "snapshot" | "append"; text: string },
-): string {
-  return clampLog(frame.kind === "snapshot" ? frame.text : buffer + frame.text);
+/** Short display name for a fan-in node id: `ci::e2e@x86_64-linux` → `e2e`
+ *  (the matrix's columns carry the platform; `ci::` is the one module prefix
+ *  every kolu pipeline shares, so it's noise in a narrow cell). */
+export function recipeLabel(namepath: string): string {
+  return namepath.startsWith("ci::") ? namepath.slice(4) : namepath;
 }
 
-/** The focused node's log pane — the bottom half of `attach`'s view, below the
- *  matrix: a rule labelled with the *full* focused node id (so a matrix with
- *  the same recipe on two platforms reads unambiguously, and the operator knows
- *  which lane `r` will rerun), the node's command, then the last `logRows`
- *  lines of its captured output. `logRows` bounds how much of a long log we
- *  paint. */
-export function renderLogPane(
-  node: NodeState | undefined,
-  log: string,
-  logRows = 12,
-): string {
-  const rule = "─".repeat(60);
-  if (node === undefined) return rule;
-  const tail = log.split("\n").slice(-logRows).join("\n");
-  return `── ${node.id} ${"─".repeat(Math.max(0, 57 - node.id.length))}\n$ ${node.command}\n${tail}`;
+/** Project the flat node-id `order` into the matrix axes the live view draws:
+ *  the recipe rows and platform columns, each in first-seen order. The one home
+ *  for the "flat list → 2D shape" rule, so the renderer and the hjkl navigator
+ *  can never drift on how rows and columns are derived. */
+export function matrixShape(order: readonly string[]): {
+  recipes: string[];
+  platforms: string[];
+} {
+  const recipes: string[] = [];
+  const platforms: string[] = [];
+  for (const id of order) {
+    const { namepath, platform } = splitFanId(id);
+    if (!recipes.includes(namepath)) recipes.push(namepath);
+    if (!platforms.includes(platform)) platforms.push(platform);
+  }
+  return { recipes, platforms };
 }
+
+/** Move the interactive focus one cell across the recipe × platform matrix:
+ *  `h`/`l` step between platform columns on the current recipe row, `j`/`k`
+ *  between recipe rows in the current platform column. Each axis wraps, and
+ *  missing cells (a recipe that doesn't run on a platform — the `°` gaps) are
+ *  skipped, so focus only ever lands on a real node. With no focus yet, lands on
+ *  the first node; returns undefined when no other cell exists along that axis. */
+export function stepFocus(
+  order: readonly string[],
+  focusedId: string | undefined,
+  key: "h" | "j" | "k" | "l",
+): string | undefined {
+  if (focusedId === undefined) return order[0];
+  const { recipes, platforms } = matrixShape(order);
+  // Each existing cell keyed by `fanId(recipe, platform)` back to its original
+  // id, so a step returns the real id rather than a re-synthesized one — a
+  // lane-local id without `@` would otherwise rebuild into a different string
+  // and never match.
+  const cells = new Map(
+    order.map((id) => {
+      const { namepath, platform } = splitFanId(id);
+      return [fanId(namepath, platform), id] as const;
+    }),
+  );
+  const { namepath, platform } = splitFanId(focusedId);
+  const horizontal = key === "h" || key === "l";
+  const axis = horizontal ? platforms : recipes;
+  const delta = key === "l" || key === "j" ? 1 : -1;
+  const start = axis.indexOf(horizontal ? platform : namepath);
+  if (start === -1) return undefined;
+  for (let stepCount = 1; stepCount < axis.length; stepCount++) {
+    const pos =
+      (((start + delta * stepCount) % axis.length) + axis.length) % axis.length;
+    // `pos` is always in range; the guard only satisfies noUncheckedIndexedAccess.
+    const at = axis[pos];
+    if (at === undefined) continue;
+    const candidate = horizontal
+      ? cells.get(fanId(namepath, at))
+      : cells.get(fanId(at, platform));
+    if (candidate !== undefined) return candidate;
+  }
+  return undefined;
+}
+
+
