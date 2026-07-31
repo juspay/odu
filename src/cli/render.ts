@@ -354,6 +354,17 @@ export function stepFocus(
   return undefined;
 }
 
+/** `3cbac86` for a clean run, `3cbac86+dirty` when the working tree has
+ *  uncommitted changes — every face shows which code the verdict is about.
+ *  Lives here, with the other cross-face projections, because the live view,
+ *  the verdict line and `printVerdict` all need it and `cli/` cannot import
+ *  from `coordinator/`. */
+export function commitLabel(
+  state: Pick<PipelineState, "sha7" | "dirty">,
+): string {
+  return state.dirty ? `${state.sha7}+dirty` : state.sha7;
+}
+
 /** How a run ended, in the two-or-three lines a host prints once its viewport
  *  is gone. Pure in the state, so the caller needs nothing from the view and
  *  there is no "call stop() first" ordering to get wrong: `attach` prints it
@@ -367,9 +378,7 @@ export function verdictLine(state: PipelineState): string {
       (n): n is NodeState => n !== undefined && STATUS_META[n.status].isRed,
     );
   const lines = [
-    `${OUTCOME_MARK[outcomeOf(s)]} ${state.name} @ ${
-      state.dirty ? `${state.sha7}+dirty` : state.sha7
-    }  ${countsLine(s)}`,
+    `${OUTCOME_MARK[outcomeOf(s)]} ${state.name} @ ${commitLabel(state)}  ${countsLine(s)}`,
   ];
   for (const n of reds.slice(0, 3)) {
     lines.push(`  ${STATUS_META[n.status].glyph} ${n.id}`);

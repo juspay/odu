@@ -25,6 +25,10 @@
  */
 
 import { LiveView, type LiveOpts } from "../cli/liveView";
+import { commitLabel } from "../cli/render";
+
+/** Re-exported from `cli/render`, where the cross-face projections live. */
+export { commitLabel };
 import { formatGoDuration } from "../common/duration";
 import { splitFanId } from "../common/nodeId";
 import {
@@ -51,14 +55,6 @@ export interface ProgressEvent {
   log: string;
 }
 
-/** `3cbac86` for a clean run, `3cbac86+dirty` when the working tree has
- *  uncommitted changes — every face shows which code the verdict is about.
- *  Commit identity lives on `PipelineState`, so the label is fed from state. */
-export function commitLabel(
-  state: Pick<PipelineState, "sha7" | "dirty">,
-): string {
-  return state.dirty ? `${state.sha7}+dirty` : state.sha7;
-}
 
 export interface Display {
   /** Commit identity comes from `state`; the run-env (lanes, hosts source,

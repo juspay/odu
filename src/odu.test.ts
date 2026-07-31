@@ -13,7 +13,10 @@ import { createLoopbackPair } from "@kolu/surface/loopback";
 import { serveOverStdio } from "@kolu/surface/peer-server";
 import { afterEach, describe, expect, it } from "bun:test";
 import {
+  countsLine,
   exitCode,
+  OUTCOME_MARK,
+  outcomeOf,
   summarize,
   verdictLine,
 } from "./cli/render";
@@ -394,13 +397,12 @@ describe("render helpers", () => {
     const line = verdictLine(state);
     expect(line).toContain(state.name);
     expect(line).toContain(state.sha7);
-    // Every red node is named — a verdict that hides one is worse than none.
-    for (const id of state.order) {
-      const n = state.nodes[id];
-      if (n !== undefined && (n.status === "failed" || n.status === "errored")) {
-        expect(line).toContain(id);
-      }
-    }
+    // The outcome mark and the counts, asserted against the same projections
+    // the frame uses — not restated here, or the test pins a second spelling.
+    expect(line).toContain(OUTCOME_MARK[outcomeOf(summarize(state))]);
+    expect(line).toContain(countsLine(summarize(state)));
+    // The red node is named. A verdict that hides one is worse than none.
+    expect(line).toContain("⚠ b");
   });
 
 });

@@ -170,11 +170,14 @@ describe("LiveView — the frame", () => {
     view.stop();
   });
 
-  it("keeps the whole frame inside the terminal — nothing overflows", async () => {
+  it("keeps the chrome on screen on a small terminal", async () => {
+    // Asserting rows <= height would be vacuous: captureCharFrame decodes a
+    // width x height cell buffer, so an overflowing frame is clipped before the
+    // assertion sees it. What overflow actually destroys is the chrome — the
+    // status bar is the last thing drawn, so it is the first thing lost.
     const { view, setup } = await mount(80, 24);
-    const rows = setup.captureCharFrame().split("\n").filter((r) => r !== "");
-    expect(rows.length).toBeLessThanOrEqual(24);
-    for (const row of rows) expect(row.length).toBeLessThanOrEqual(80);
+    const rows = setup.captureCharFrame().split("\n").filter((r) => r.trim() !== "");
+    expect(rows[rows.length - 1]).toContain("hjkl move");
     view.stop();
   });
 });
@@ -357,28 +360,26 @@ describe("LiveView — the terminal comes back even when nothing else runs", () 
     return out.join("");
   }
 
-  it("leaves the alternate screen synchronously, without waiting on the mount", async () => {
-    // `attach`'s quit path is `stop()` then `process.exit()`, and process.exit
-    // abandons pending microtasks — so a teardown that defers the restore to
-    // the mount's continuation never runs it, and the operator is left on the
-    // alternate screen in raw mode. The restore must be on the wire before
-    // stop() returns.
+  it("destroys the renderer even when stop() lands in start()'s own turn", async () => {
+    // `attach` onto a settled run does start() → see done → stop() with no
+    // await between, then `process.exit()` — which abandons pending
+    // microtasks. In production the window is closed structurally: the renderer
+    // is constructed synchronously and only `setupTerminal()` is awaited, so
+    // `this.renderer` is assigned before any escape reaches the terminal. Here
+    // the test seam is necessarily async, so this pins the other half — that
+    // the teardown completes and destroys, whichever side gets there first.
     const setup = await createTestRenderer({ width: 96, height: 30 });
-    // The view binds its writers at CONSTRUCTION (deliberately — teardown must
-    // not write through its own stderr hook), so the capture has to be in place
-    // before the constructor runs.
-    const written = capturingStdout(() => {
-      // Never resolves: models the mount still being in flight at stop() time.
-      const view = new LiveView({
-        ...makeOpts({ setup }),
-        createRenderer: () => new Promise<never>(() => {}),
-      });
-      view.start(state, header);
-      view.stop(state);
-    });
-    // ?1049l leaves the alternate screen; ?25h re-shows the cursor.
-    expect(written).toContain("\x1b[?1049l");
-    expect(written).toContain("\x1b[?25h");
+    let destroyed = 0;
+    const realDestroy = setup.renderer.destroy.bind(setup.renderer);
+    setup.renderer.destroy = () => {
+      destroyed++;
+      realDestroy();
+    };
+    const view = new LiveView(makeOpts({ setup }));
+    view.start(state, header);
+    view.stop(state); // same synchronous turn
+    await new Promise((r) => setTimeout(r, 40));
+    expect(destroyed).toBeGreaterThan(0);
   });
 
   it("replays a diagnostic that scrolled out of the two-row events lane", async () => {
@@ -589,10 +590,7 @@ describe("LiveView — focus and the log subscription", () => {
       ...opts,
       createRenderer: async () => setup.renderer,
     });
-    view.start(
-      { ...state, order: state.order, nodes: state.nodes },
-      header,
-    );
+    view.start(state, header);
     await setup.flush();
     await new Promise((r) => setTimeout(r, 30));
     // Move focus, then let the superseded stream yield.
@@ -626,7 +624,7 @@ describe("LiveView — events land in the frame, never in scrollback", () => {
   it("stop() prints nothing — verdict-on-exit is the host's policy", async () => {
     // `run` ends with its own printVerdict. A recap from the view too meant the
     // same information twice on every run; the host asks for verdict() instead.
-    const { view, setup } = await mount(96, 30);
+    const { view } = await mount(96, 30);
     const written: string[] = [];
     const original = process.stdout.write.bind(process.stdout);
     process.stdout.write = ((c: string | Uint8Array) => {
@@ -639,7 +637,6 @@ describe("LiveView — events land in the frame, never in scrollback", () => {
       process.stdout.write = original;
     }
     expect(written.join("")).toBe("");
-    void setup;
   });
 
   it("an info before the frame exists still reaches the operator", () => {

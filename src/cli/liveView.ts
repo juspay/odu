@@ -30,8 +30,7 @@
 
 import {
   BoxRenderable,
-  type CliRenderer,
-  createCliRenderer,
+  CliRenderer,
   type ParsedKey,
   TextRenderable,
 } from "@opentui/core";
@@ -47,6 +46,7 @@ import { postingWarning } from "../coordinator/statuses";
 import { formatGoDuration } from "../common/duration";
 import { splitFanId } from "../common/nodeId";
 import {
+  commitLabel,
   countsLine,
   defaultAttachId,
   matrixShape,
@@ -215,7 +215,6 @@ const EVENT_ROWS = 2;
 
 export class LiveView {
   private renderer: CliRenderer | undefined;
-  private mounting = false;
   private state: PipelineState | undefined;
   private header: RunHeader | undefined;
 
@@ -233,17 +232,10 @@ export class LiveView {
   private timer: ReturnType<typeof setInterval> | undefined;
   private stopped = false;
   /** `finishStop()` has run. Distinct from `stopped`, which only records that
-   *  `stop()` was *called* — the terminal may still be un-restored at that
-   *  point if the mount had not landed yet. */
+   *  `stop()` was *called*. */
   private torndown = false;
-  private mountPromise: Promise<void> | undefined;
 
   private readonly stderrWrite = process.stderr.write.bind(process.stderr);
-  private readonly stdoutWrite = process.stdout.write.bind(process.stdout);
-  /** The terminal has been handed back. Separate from `torndown` because the
-   *  restore must be able to run on its own, synchronously, before the rest of
-   *  the teardown is even possible. */
-  private restored = false;
   /** Diagnostics retained for replay on teardown. NOT `events`: that is a
    *  two-row display ring, so anything older than the last two lines has
    *  already been shifted out — which made the replay unable to surface the
@@ -273,7 +265,6 @@ export class LiveView {
     this.unhook();
     // Restore first: on a crash during the pre-assign mount window there is no
     // renderer to destroy, and this hook is the only thing left to run.
-    this.restoreTerminal();
     this.renderer?.destroy();
   };
 
@@ -296,7 +287,7 @@ export class LiveView {
     process.once("exit", this.onProcessExit);
     this.seedFocus(state);
     if (this.opts.hookStderr) this.hook();
-    this.mountPromise = this.mount().catch((err: unknown) => {
+    void this.mount().catch((err: unknown) => {
       // A renderer that cannot open must degrade to a silent non-live run, not
       // take the process with it: an unhandled rejection would pick odu's exit
       // code, and odu owns that. Report on the REAL stderr — the hook is torn
@@ -311,47 +302,80 @@ export class LiveView {
     (this.timer as { unref?: () => void }).unref?.();
   }
 
+  /** Open the terminal.
+   *
+   *  Deliberately NOT `createCliRenderer`: that helper is `new CliRenderer(…)`
+   *  followed by `await setupTerminal()`, and only the second step touches the
+   *  terminal (raw mode, alternate screen, mouse). Bundled, they leave a window
+   *  where the screen has been switched but the renderer this class would need
+   *  to switch it back has not been assigned — and a host that exits in the same
+   *  turn (`attach`: `stop()` then `process.exit()`) never gets it.
+   *
+   *  Split, the reference exists before any escape reaches the wire, so
+   *  `destroy()` is reachable on every teardown path and there is no need to
+   *  hand-copy opentui's escape list to undo it — a copy that was already
+   *  missing three modes it sets (modifyOtherKeys, grapheme clustering, theme
+   *  reporting), which would have left a shell delivering `CSI 27;…u` for
+   *  modified keys. */
   private async mount(): Promise<void> {
-    if (this.mounting || this.stopped) return;
-    this.mounting = true;
-    try {
-      const renderer = await (this.opts.createRenderer ?? (() =>
-        createCliRenderer({
-          // The whole point: the session lives on the alternate screen, so the
-          // operator's scrollback is never written to while the run is live.
-          screenMode: "alternate-screen",
-          // odu owns its shutdown and exit codes — the renderer must never call
-          // process.exit out from under `run`'s poster finalization.
-          exitOnCtrlC: false,
-          exitSignals: [],
-          // opentui's console overlay would otherwise swallow console.* for the
-          // whole process.
-          consoleMode: "disabled",
-          useMouse: this.opts.interactive,
-          targetFps: 30,
-        })))();
-      if (this.stopped) {
-        // stop() already ran — it could not reach a renderer that did not yet
-        // exist, so the teardown finishes here instead.
+    if (this.stopped) return;
+    const renderer =
+      this.opts.createRenderer !== undefined
+        ? await this.opts.createRenderer()
+        : this.openTerminal();
+    // Assigned before `setupTerminal()` — that is the whole point of the split.
+    this.renderer = renderer;
+    if (this.opts.createRenderer === undefined) {
+      try {
+        await renderer.setupTerminal();
+      } catch (err) {
+        // What `createCliRenderer` does on failure: some constructor side
+        // effects do not roll back on their own.
         renderer.destroy();
-        this.finishStop();
-        return;
+        this.renderer = undefined;
+        throw err;
       }
-      this.renderer = renderer;
-      this.build();
-      if (this.opts.interactive) {
-        renderer.keyInput.on("keypress", (key: ParsedKey) => this.onKey(key));
-      }
-      renderer.on("resize", () => this.relayout());
-      // Focus (and therefore the log emulator) was seeded against the pre-mount
-      // fallback, because the pane box had not been laid out yet. Push the real
-      // geometry now — unconditionally: the emulator always exists by here, so
-      // a `log === undefined` guard would never fire and the pane would keep
-      // the fallback width for the whole run.
-      this.relayout();
-    } finally {
-      this.mounting = false;
     }
+    if (this.stopped) {
+      // stop() ran while the terminal was being set up. It already called
+      // finishStop(), which destroyed whatever was assigned — nothing to build.
+      renderer.destroy();
+      return;
+    }
+    this.build();
+    if (this.opts.interactive) {
+      renderer.keyInput.on("keypress", (key: ParsedKey) => this.onKey(key));
+    }
+    renderer.on("resize", () => this.relayout());
+    // Focus (and therefore the log emulator) was seeded against the pre-mount
+    // fallback, because the pane box had not been laid out yet. Push the real
+    // geometry now — unconditionally: the emulator always exists by here, so a
+    // `log === undefined` guard would never fire and the pane would keep the
+    // fallback width for the whole run.
+    this.relayout();
+  }
+
+  private openTerminal(): CliRenderer {
+    return new CliRenderer(
+      process.stdin,
+      process.stdout,
+      process.stdout.columns ?? 80,
+      process.stdout.rows ?? 24,
+      {
+        // The whole point: the session lives on the alternate screen, so the
+        // operator's scrollback is never written to while the run is live.
+        screenMode: "alternate-screen",
+        // odu owns its shutdown and exit codes — the renderer must never call
+        // process.exit out from under `run`'s poster finalization.
+        exitOnCtrlC: false,
+        exitSignals: [],
+        // opentui's console overlay would otherwise swallow console.* for the
+        // whole process.
+        consoleMode: "disabled",
+        useMouse: this.opts.interactive,
+        targetFps: 30,
+      },
+    );
   }
 
   /** `run` `start`s on an all-pending snapshot and `update`s as lanes go live,
@@ -370,7 +394,9 @@ export class LiveView {
    *  frame. Pre-mount they still go to stdout, so a failure during a long
    *  venue lease is never swallowed. */
   transition(node: NodeState, logPath: string): void {
-    if (node.status !== "failed" && node.status !== "errored") return;
+    // STATUS_META.isRed is the single source of redness — spelling the pair
+    // out here means a new red status silently skips the events lane.
+    if (!STATUS_META[node.status].isRed) return;
     const dur =
       node.durationMs !== null ? ` (${formatGoDuration(node.durationMs)})` : "";
     this.pushEvent(
@@ -430,30 +456,7 @@ export class LiveView {
     // `stop()` then `process.exit()`, and `process.exit` abandons pending
     // microtasks, so the continuation never runs and the operator is left on
     // the alternate screen in raw mode.
-    this.restoreTerminal();
     this.finishStop();
-  }
-
-  /** Put the terminal back without needing the renderer object.
-   *
-   *  `renderer.destroy()` is the tidy path and still runs when there is a
-   *  renderer, but it cannot be the ONLY path: the escape sequences are already
-   *  on the wire before opentui hands us anything to call. These writes are
-   *  idempotent and harmless if the screen was never switched. */
-  private restoreTerminal(): void {
-    if (this.restored) return;
-    this.restored = true;
-    try {
-      if (process.stdin.isTTY === true) process.stdin.setRawMode(false);
-    } catch {
-      // A stdin that cannot leave raw mode is not worth failing teardown over.
-    }
-    // Leave the alternate screen, re-show the cursor, and drop the mouse
-    // reporting modes the renderer may have enabled.
-    this.stdoutWrite("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l");
-    // Bracketed paste and focus reporting are enabled by the native setup too.
-    this.stdoutWrite("\x1b[?2004l\x1b[?1004l");
-    this.stdoutWrite("\x1b[?25h\x1b[?1049l");
   }
 
   /** The rest of the teardown. Idempotent — reachable from `stop()`, from the
@@ -463,7 +466,6 @@ export class LiveView {
     this.torndown = true;
     process.off("exit", this.onProcessExit);
     this.unhook();
-    this.restoreTerminal();
     this.renderer?.destroy();
     this.renderer = undefined;
     // A diagnostic that arrived through the stderr hook dies with the alternate
@@ -540,6 +542,7 @@ export class LiveView {
       id: "head-2",
       content: "",
       fg: DIM,
+      wrapMode: "none",
     });
     head.add(this.headLine);
     head.add(this.laneLine);
@@ -585,6 +588,7 @@ export class LiveView {
       id: "status",
       content: "",
       fg: DIM,
+      wrapMode: "none",
     });
     frame.add(this.statusLine);
   }
@@ -821,7 +825,7 @@ export class LiveView {
     // The sha stays an OSC 8 hyperlink where the forge gave us a commit URL —
     // the escape rides inside the cell content, so a terminal that supports it
     // makes the sha clickable and one that doesn't shows the bare label.
-    const label = `${state.sha7}${state.dirty ? "+dirty" : ""}`;
+    const label = commitLabel(state);
     const commit =
       header.commitUrl !== null ? link(label, header.commitUrl) : label;
     if (this.headLine !== undefined) {
@@ -990,7 +994,14 @@ export class LiveView {
     for (let i = 0; i < count; i++) {
       let row = rows[i];
       if (row === undefined) {
-        row = new TextRenderable(r, { id: `${prefix}-${i}`, content: "" });
+        row = new TextRenderable(r, {
+          id: `${prefix}-${i}`,
+          content: "",
+          // Rows wrap by default, and a wrapped row makes its strip taller —
+          // stealing height from the log pane. Event text is arbitrary
+          // interposed stderr, so this is reachable in an ordinary run.
+          wrapMode: "none",
+        });
         rows.push(row);
         box.add(row);
       }
