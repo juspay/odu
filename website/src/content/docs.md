@@ -203,6 +203,7 @@ recap, `run` its full per-node summary.
 | `r` | rerun the focused node (and its dependants) |
 | `f` | follow the log tail, or pin it where it is |
 | `PgUp` `PgDn`, `g` `G` | scroll the log; `g`/`G` jump to the top/tail |
+| mouse | click a matrix cell to focus it, wheel over the log to scroll, click a status hint to run it |
 | `/` then `Enter`, `n` | search the focused log, next match; `Esc` cancels |
 | `q`, `Ctrl-C`, `Ctrl-D` | in `odu attach`: leave; the run keeps going. In `odu run`: cancel the run (exit 130) |
 

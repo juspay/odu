@@ -83,6 +83,9 @@ const FG = "#c6d2d3";
 const ACCENT = "#3ad3b8";
 /** The frame's own ground, for text that sits on an accent fill. */
 const INK = "#0b1013";
+/** The scrollbar's unfilled track — present enough to read as a bar, quiet
+ *  enough not to compete with the log beside it. */
+const TRACK = "#2a343a";
 
 /** The injected dependencies that make the `live` face the shared interactive
  *  view — the source-agnostic seam between `run` (its in-memory tail, raw
@@ -355,6 +358,9 @@ export class LiveView {
   private matrixBox: BoxRenderable | undefined;
   private eventsBox: BoxRenderable | undefined;
   private paneBox: BoxRenderable | undefined;
+  private paneRowsBox: BoxRenderable | undefined;
+  private paneScrollBox: BoxRenderable | undefined;
+  private scrollRows: TextRenderable[] = [];
   private statusLine: TextRenderable | undefined;
   /** Where each hint was drawn on the status bar, so a click can run it. Built
    *  during the paint that draws them — the bar is width-dependent, so the
@@ -750,6 +756,31 @@ export class LiveView {
     });
     frame.add(this.paneBox);
 
+    // Rows and scrollbar are siblings in a row-direction split rather than the
+    // bar being padded onto the end of each line: padding would have to measure
+    // the visible width of text that can contain wide glyphs, and would be
+    // clipped by the same `wrapMode: "none"` that keeps rows one row tall.
+    const split = new BoxRenderable(r, {
+      id: "pane-split",
+      width: "100%",
+      flexGrow: 1,
+      flexDirection: "row",
+    });
+    this.paneBox.add(split);
+    this.paneRowsBox = new BoxRenderable(r, {
+      id: "pane-rows",
+      flexGrow: 1,
+      flexDirection: "column",
+    });
+    split.add(this.paneRowsBox);
+    this.paneScrollBox = new BoxRenderable(r, {
+      id: "pane-scroll",
+      width: 1,
+      flexShrink: 0,
+      flexDirection: "column",
+    });
+    split.add(this.paneScrollBox);
+
     this.statusLine = new TextRenderable(r, {
       id: "status",
       content: "",
@@ -789,10 +820,15 @@ export class LiveView {
    *  The `- 2` is the box's own border, the one inset that is this module's
    *  business. Arithmetic off the terminal size survives only as the
    *  before-first-layout fallback, replaced by `repaintAfterLayout`. */
+  /** The emulator's column count: the width of the ROWS column, which is the
+   *  bordered pane minus its border and minus the scrollbar gutter. Measuring
+   *  the laid-out box rather than deriving it from the terminal width is what
+   *  keeps the emulator's wrap point and the drawn width the same number. */
   private paneCols(): number {
-    const measured = this.paneBox?.width ?? 0;
-    const outer = measured > 0 ? measured : (this.renderer?.terminalWidth ?? 80);
-    return Math.max(20, outer - 2);
+    const measured = this.paneRowsBox?.width ?? 0;
+    if (measured > 0) return Math.max(20, measured);
+    const outer = this.paneBox?.width ?? (this.renderer?.terminalWidth ?? 80);
+    return Math.max(20, outer - 3); // 2 border + 1 gutter
   }
 
   /** Rows the pane has.
@@ -1191,7 +1227,9 @@ export class LiveView {
     const height = this.paneRowCount();
     this.log?.resize(this.paneCols(), height);
     const rows = this.log?.rows() ?? [];
-    this.syncRows(box, this.paneRows, height, "pane", (row, i) => {
+    const rowsBox = this.paneRowsBox ?? box;
+    this.paintScrollbar(height);
+    this.syncRows(rowsBox, this.paneRows, height, "pane", (row, i) => {
       const line = rows[i];
       // A search hit is inverted rather than recoloured: log text already
       // carries meaning in its own words, so a hue would compete with it.
@@ -1210,6 +1248,37 @@ export class LiveView {
         row,
         line.spans.map((sp) => (sp.fg === undefined ? plain(sp.text) : fg(sp.fg)(sp.text))),
       );
+    });
+  }
+
+  /** The log's scroll position, as a one-column thumb beside the rows.
+   *
+   *  A pane that scrolls with no indication of where you are in the buffer is
+   *  the terminal equivalent of an unlabelled slider: `f`/`G` tell you the
+   *  anchor but nothing tells you how much log there is or how far down you
+   *  are. The gutter is blank when everything fits — a scrollbar that is always
+   *  full is noise. */
+  private paintScrollbar(height: number): void {
+    const box = this.paneScrollBox;
+    const log = this.log;
+    if (box === undefined) return;
+    const total = log?.total ?? 0;
+    if (log === undefined || total <= height || height <= 0) {
+      this.syncRows(box, this.scrollRows, height, "sb", (row) => {
+        setRow(row, [plain(" ")]);
+      });
+      return;
+    }
+    const start = log.windowTop;
+    const maxStart = Math.max(1, total - height);
+    // At least one row, so the thumb never vanishes on a very long log.
+    const thumb = Math.max(1, Math.floor((height * height) / total));
+    const at = Math.round((start / maxStart) * (height - thumb));
+    this.syncRows(box, this.scrollRows, height, "sb", (row, i) => {
+      const onThumb = i >= at && i < at + thumb;
+      setRow(row, [
+        onThumb ? fg(ACCENT)("█") : fg(TRACK)("│"),
+      ]);
     });
   }
 

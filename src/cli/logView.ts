@@ -261,6 +261,13 @@ export class LogView {
 
   /** Absolute buffer line the window starts at — the one expression for "where
    *  is the pane looking", so the tail rule cannot be restated per reader. */
+  /** Absolute buffer line the window starts at. Public because the scrollbar
+   *  needs to say WHERE in the buffer you are — an earlier readout API was
+   *  removed for having no consumer, and this is the consumer. */
+  get windowTop(): number {
+    return this.start;
+  }
+
   private get start(): number {
     return this.follow ? this.maxTop() : this.top;
   }

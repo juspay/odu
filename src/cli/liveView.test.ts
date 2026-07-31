@@ -655,6 +655,50 @@ describe("LiveView — keys", () => {
   });
 });
 
+describe("LiveView — the log scrollbar", () => {
+  const longLog = `${Array.from({ length: 200 }, (_, i) => `line ${i}`).join("\n")}\n`;
+  /** The gutter column: the last cell of each row inside the pane border. */
+  const thumbRows = (frame: string): number[] => {
+    const out: number[] = [];
+    frame.split("\n").forEach((l, i) => {
+      if (l.includes("█")) out.push(i);
+    });
+    return out;
+  };
+
+  it("shows a thumb once the log outgrows the pane", async () => {
+    const { view, setup, frame } = await mount(96, 30, { log: longLog });
+    await until(setup, () => frame().includes("line 199"), "the log tail");
+    expect(thumbRows(frame()).length).toBeGreaterThan(0);
+    view.stop();
+  });
+
+  it("stays blank while everything fits", async () => {
+    // A scrollbar that is always full is noise, not information.
+    const { view, setup, frame } = await mount(96, 30, { log: "one\ntwo\n" });
+    await until(setup, () => frame().includes("two"), "the short log");
+    expect(thumbRows(frame())).toEqual([]);
+    view.stop();
+  });
+
+  it("moves the thumb up as you scroll back", async () => {
+    const { view, setup, frame } = await mount(96, 30, { log: longLog });
+    await until(setup, () => frame().includes("line 199"), "the log tail");
+    const atTail = thumbRows(frame());
+    expect(atTail.length).toBeGreaterThan(0);
+    view.withLog((l) => l.toTop());
+    await until(
+      setup,
+      () => thumbRows(frame())[0] !== atTail[0],
+      "the thumb to move",
+    );
+    const atTop = thumbRows(frame());
+    // Scrolled to the top of the buffer, the thumb sits above where it was.
+    expect(atTop[0]).toBeLessThan(atTail[0] ?? 0);
+    view.stop();
+  });
+});
+
 describe("LiveView — mouse", () => {
   /** The terminal row a matrix recipe was drawn on. */
   const rowOf = (frame: string, recipe: string): number =>
