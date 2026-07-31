@@ -247,6 +247,158 @@ describe("LiveView — keys", () => {
   });
 });
 
+describe("LiveView — mount ordering", () => {
+  // Display.start() is synchronous while opentui's mount is async, so every
+  // other entry point can run before the renderer exists. These pin the two
+  // orderings that broke when that was only half-handled.
+
+  it("stop() in the same turn as start() still tears the terminal down", async () => {
+    // `attach` onto an already-settled run does exactly this: start(), see
+    // done, stop() — with no await between. createCliRenderer has already
+    // entered the alternate screen by then, so a stop() that just returned
+    // would leave the terminal wedged on the alt screen in raw mode.
+    const setup = await createTestRenderer({ width: 96, height: 30 });
+    let destroyed = false;
+    const realDestroy = setup.renderer.destroy.bind(setup.renderer);
+    setup.renderer.destroy = () => {
+      destroyed = true;
+      realDestroy();
+    };
+    const view = new LiveView(makeOpts({ setup }));
+    view.start(state, header);
+    view.stop(state); // same synchronous turn — the mount has not resolved
+    await new Promise((r) => setTimeout(r, 40));
+    expect(destroyed).toBe(true);
+  });
+
+  it("a renderer that fails to open degrades instead of killing the run", async () => {
+    // An unhandled rejection out of the fire-and-forget mount would pick odu's
+    // exit code, and odu owns that.
+    const errs: string[] = [];
+    const original = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((c: string | Uint8Array) => {
+      errs.push(typeof c === "string" ? c : Buffer.from(c).toString());
+      return true;
+    }) as typeof process.stderr.write;
+    let view: LiveView | undefined;
+    try {
+      view = new LiveView({
+        interactive: false,
+        hookStderr: true,
+        openLog: () => snapshot(""),
+        rerun: () => {},
+        onQuit: () => {},
+        createRenderer: () => Promise.reject(new Error("no tty here")),
+      });
+      view.start(state, header);
+      await new Promise((r) => setTimeout(r, 60));
+    } finally {
+      process.stderr.write = original;
+    }
+    expect(errs.join("")).toContain("live view unavailable");
+    expect(errs.join("")).toContain("no tty here");
+    view?.stop();
+  });
+
+  it("sizes the log pane to the real terminal, not the pre-mount fallback", async () => {
+    // Focus (and the emulator) is seeded before the mount, when paneCols() can
+    // only answer with the 80x24 fallback. If the mount doesn't push the real
+    // geometry, the pane wraps at 76 columns forever on a wide terminal.
+    const { view, frame } = await mount(160, 30, { log: `${"y".repeat(150)}\n` });
+    const wide = frame().split("\n").find((l) => l.includes("yyy")) ?? "";
+    // The line is 150 chars: visible in full only if the emulator knows it has
+    // more than the fallback's 76 columns.
+    expect(wide.replace(/[^y]/g, "").length).toBeGreaterThan(120);
+    view.stop();
+  });
+});
+
+describe("LiveView — focus and the log subscription", () => {
+  it("auto-follows focus onto the running node as lanes go live", async () => {
+    // F2: `run` start()s on an all-pending snapshot and update()s as lanes come
+    // up, so focus must walk off the startup node onto the running one until a
+    // keypress pins it.
+    const pending: PipelineState = {
+      ...state,
+      nodes: {
+        ...state.nodes,
+        "ci::install@x86_64-linux": node("ci::install@x86_64-linux", "pending"),
+        "ci::e2e@aarch64-darwin": node("ci::e2e@aarch64-darwin", "pending"),
+      },
+    };
+    const { view, setup, frame } = await mount(96, 30);
+    view.update(pending);
+    await setup.flush();
+    const live: PipelineState = {
+      ...pending,
+      nodes: {
+        ...pending.nodes,
+        "ci::e2e@aarch64-darwin": node(
+          "ci::e2e@aarch64-darwin",
+          "running",
+          null,
+          940_000,
+        ),
+      },
+    };
+    view.update(live);
+    await setup.flush();
+    await new Promise((r) => setTimeout(r, 20));
+    await setup.flush();
+    expect(frame()).toContain("ci::e2e@aarch64-darwin");
+    view.stop();
+  });
+
+  it("drops late frames from a superseded log subscription", async () => {
+    // F1: a fast focus switch can leave the previous stream yielding after
+    // focus moved on. Applying it would paint one node's bytes under another's
+    // header.
+    let releaseStale: (() => void) | undefined;
+    const opts = {
+      interactive: true,
+      hookStderr: false,
+      openLog: (id: string): AsyncIterable<NodeLogFrame> => {
+        if (id === "ci::install@x86_64-linux") {
+          return {
+            async *[Symbol.asyncIterator]() {
+              yield { kind: "snapshot" as const, text: "INITIAL-A\n" };
+              await new Promise<void>((r) => {
+                releaseStale = r;
+              });
+              yield { kind: "append" as const, text: "STALE-FROM-A\n" };
+            },
+          };
+        }
+        return snapshot("FRESH-FROM-B\n");
+      },
+      rerun: () => {},
+      onQuit: () => {},
+    };
+    const setup = await createTestRenderer({ width: 96, height: 30 });
+    const view = new LiveView({
+      ...opts,
+      createRenderer: async () => setup.renderer,
+    });
+    view.start(
+      { ...state, order: state.order, nodes: state.nodes },
+      header,
+    );
+    await setup.flush();
+    await new Promise((r) => setTimeout(r, 30));
+    // Move focus, then let the superseded stream yield.
+    setup.mockInput.pressKey("1");
+    await setup.flush();
+    setup.mockInput.pressKey("j");
+    await setup.flush();
+    await new Promise((r) => setTimeout(r, 20));
+    releaseStale?.();
+    await new Promise((r) => setTimeout(r, 40));
+    await setup.flush();
+    expect(setup.captureCharFrame()).not.toContain("STALE-FROM-A");
+    view.stop();
+  });
+});
+
 describe("LiveView — events land in the frame, never in scrollback", () => {
   it("shows a failed transition inside the frame", async () => {
     const { view, setup, frame } = await mount(96, 30);

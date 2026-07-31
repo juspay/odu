@@ -47,8 +47,22 @@ export class LogView {
   private follow = true;
   /** Absolute buffer line index of the top visible row while unpinned. */
   private top = 0;
+  /** Where `next()` last landed. Kept apart from `top` because `top` is clamped
+   *  to the last full window — a hit inside the final `height` lines would
+   *  otherwise clamp to the same row every time and `n` would never advance. */
+  private cursor = -1;
   private query = "";
   private height: number;
+  /** High-water mark of the written extent.
+   *
+   *  The cursor is not monotonic: a producer that redraws with cursor-up (or
+   *  clears the screen) moves it backwards, and reading the extent straight off
+   *  the cursor would make already-written lines vanish from the pane and from
+   *  search. Only a `snapshot` frame — a deliberate "start over" — resets it. */
+  private highWater = 0;
+  /** Memoized match count, keyed on what it was computed from: `position()` is
+   *  called on every repaint and a full-buffer scan per frame is not free. */
+  private counted: { query: string; total: number; matches: number } | undefined;
 
   constructor(cols: number, height: number) {
     this.height = Math.max(1, height);
@@ -72,17 +86,27 @@ export class LogView {
       this.term.reset();
       this.follow = true;
       this.top = 0;
+      this.cursor = -1;
+      this.highWater = 0;
     }
     await new Promise<void>((resolve) => this.term.write(frame.text, resolve));
+    this.highWater = Math.max(this.highWater, this.writtenExtent());
     if (this.follow) this.toBottom();
+    else this.top = Math.min(this.top, this.maxTop());
   }
 
-  /** Re-size the emulator to the pane's new width. Rows track the pane height
-   *  so a wrapped line stays wrapped the way the operator sees it. */
+  /** Re-size the emulator to the pane's geometry. Rows track the pane height so
+   *  a wrapped line stays wrapped the way the operator sees it, and `top` is
+   *  re-clamped because a taller pane shrinks the last legal scroll offset. */
   resize(cols: number, height: number): void {
-    this.height = Math.max(1, height);
-    this.term.resize(Math.max(1, cols), Math.max(this.height, 24));
+    const next = Math.max(1, height);
+    const cols_ = Math.max(1, cols);
+    if (next === this.height && cols_ === this.term.cols) return;
+    this.height = next;
+    this.term.resize(cols_, Math.max(this.height, 24));
+    this.counted = undefined;
     if (this.follow) this.toBottom();
+    else this.top = Math.min(this.top, this.maxTop());
   }
 
   /** Lines actually written, scrollback included.
@@ -93,6 +117,10 @@ export class LogView {
    *  has reached — plus the cursor's own line when it holds anything, since
    *  output without a trailing newline is still output. */
   get total(): number {
+    return Math.max(this.highWater, this.writtenExtent());
+  }
+
+  private writtenExtent(): number {
     const b = this.term.buffer.active;
     const at = b.baseY + b.cursorY;
     const current = b.getLine(at)?.translateToString(true) ?? "";
@@ -131,8 +159,12 @@ export class LogView {
 
   private matchCount(): number {
     if (this.query === "") return 0;
+    const total = this.total;
+    const memo = this.counted;
+    if (memo?.query === this.query && memo.total === total) return memo.matches;
     let n = 0;
-    for (let i = 0; i < this.total; i++) if (this.hits(this.lineAt(i))) n++;
+    for (let i = 0; i < total; i++) if (this.hits(this.lineAt(i))) n++;
+    this.counted = { query: this.query, total, matches: n };
     return n;
   }
 
@@ -181,22 +213,32 @@ export class LogView {
   /** Case-insensitive; empty clears. Setting a query does not move the
    *  viewport — `next()` does, so typing stays cheap on a long buffer. */
   setQuery(q: string): void {
-    this.query = q.toLowerCase();
+    const next = q.toLowerCase();
+    if (next === this.query) return;
+    this.query = next;
+    this.cursor = -1;
+    this.counted = undefined;
   }
 
   get search(): string {
     return this.query;
   }
 
-  /** Jump to the next match after the current top (wrapping). Unpins the tail
-   *  so the hit stays put instead of being scrolled away by new output. */
+  /** Jump to the next match after the last one (wrapping). Unpins the tail so
+   *  the hit stays put instead of being scrolled away by new output.
+   *
+   *  Scanning resumes from `cursor`, not from `top`: `top` is clamped to the
+   *  last full window, so for any hit inside the final `height` lines the two
+   *  differ and resuming from `top` would re-find the same line forever. */
   next(): void {
-    if (this.query === "" || this.total === 0) return;
-    const from = this.follow ? 0 : this.top + 1;
-    for (let n = 0; n < this.total; n++) {
-      const i = (from + n) % this.total;
+    const total = this.total;
+    if (this.query === "" || total === 0) return;
+    const from = this.cursor < 0 ? 0 : this.cursor + 1;
+    for (let n = 0; n < total; n++) {
+      const i = (((from + n) % total) + total) % total;
       if (this.hits(this.lineAt(i))) {
         this.follow = false;
+        this.cursor = i;
         this.top = Math.min(this.maxTop(), i);
         return;
       }

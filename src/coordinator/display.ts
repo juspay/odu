@@ -7,29 +7,36 @@
  *   - `plain` (stdout is a pipe/file): one line per transition with glyph +
  *     duration, plus a 60-second heartbeat naming the still-running nodes so
  *     a captured log never *looks* hung between transitions.
- *   - `live`  (stdout is a TTY): an in-place recipes × lanes matrix with
- *     spinners, ticking elapsed times, and the focused node's log pane below
- *     it. Terminal failures also print a persistent line above the matrix so
- *     they survive in scrollback.
+ *   - `live`  (stdout is a TTY): a recipes × lanes matrix with spinners,
+ *     ticking elapsed times, an events lane, and the focused node's log pane —
+ *     drawn on the ALTERNATE screen for the session's lifetime, so nothing it
+ *     paints ever enters the operator's scrollback. Failures land in the events
+ *     lane inside the frame; the older renderer printed them above the matrix
+ *     instead, which is what made the view scroll.
  *
  * The `live` face is the ONE interactive view, shared by `odu run` and `odu
  * attach` through a source-agnostic seam: state is push-fed (`update(state)`
  * — `run`'s coordinator loop and `attach`'s read-loop both call it) and the
  * focused-node log is pull-fed via an injected `openLog(id, signal)` (`run`
  * passes its in-memory tail, `attach` passes the surface's `nodeLog` stream).
- * Keys (digits / h / j / k / l / r / q) drive focus, rerun, and quit through
- * injected callbacks. When non-interactive (a piped `attach`, or a `run` whose
- * stdin isn't a TTY) the keys + raw mode are simply off.
+ * Keys (digits / hjkl / arrows / r / f / g / G / PgUp / PgDn / `/` / n / q)
+ * drive focus, rerun, log scrolling and search through injected callbacks. When
+ * non-interactive (a piped `attach`, or a `run` whose stdin isn't a TTY) the
+ * keys and the mouse are simply off.
  *
- * The live renderer owns the terminal: it hides the cursor, repaints a
- * bounded region, and (when `hookStderr`, i.e. `run`) interposes
- * `process.stderr.write` so library chatter (surface-remote's `[host:…]`
- * provisioning lines — already duplicated into `_ci-setup`'s log) can't shred
- * the region; anything else written to stderr is re-printed intact above the
- * matrix.
+ * Verdict-on-exit is the HOST's policy, not the view's — `run` prints its own
+ * `printVerdict`, `attach` asks for `Display.verdict()`. The view leaves the
+ * scrollback exactly as it found it. When `hookStderr` (i.e. `run`), library
+ * chatter is interposed so surface-remote's `[host:…]` provisioning lines are
+ * dropped and everything else becomes an event in the frame; whatever the lane
+ * still holds is replayed to the real stderr on teardown, so a fatal message
+ * can't die with the alternate screen.
+ *
+ * `src/cli/liveView.ts` holds the mount-ordering invariants — start() is
+ * synchronous while the mount is async, and both stop() and info() have to
+ * behave before it lands.
  */
 
-import { summarize } from "../cli/render";
 import { LiveView } from "../cli/liveView";
 import { formatGoDuration } from "../common/duration";
 import { splitFanId } from "../common/nodeId";

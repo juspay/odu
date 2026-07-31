@@ -39,9 +39,11 @@ import {
   type NodeLogFrame,
   type NodeState,
   type PipelineState,
+  postingOf,
   type RunHeader,
   STATUS_META,
 } from "../common/surface";
+import { postingWarning } from "../coordinator/statuses";
 import { formatGoDuration } from "../common/duration";
 import { splitFanId } from "../common/nodeId";
 import {
@@ -51,7 +53,7 @@ import {
   stepFocus,
   summarize,
 } from "./render";
-import { dim, stripAnsi } from "./ansi";
+import { dim, link, stripAnsi } from "./ansi";
 import { LogView } from "./logView";
 
 /** Repaint cadence while something is animating (a spinner, a ticking elapsed
@@ -123,12 +125,19 @@ export class LiveView {
   private tick = 0;
   private timer: ReturnType<typeof setInterval> | undefined;
   private stopped = false;
+  /** `finishStop()` has run. Distinct from `stopped`, which only records that
+   *  `stop()` was *called* — the terminal may still be un-restored at that
+   *  point if the mount had not landed yet. */
+  private torndown = false;
+  private mountPromise: Promise<void> | undefined;
 
   private readonly stderrWrite = process.stderr.write.bind(process.stderr);
   private hooked = false;
 
   private headLine: TextRenderable | undefined;
   private laneLine: TextRenderable | undefined;
+  private noticeBox: BoxRenderable | undefined;
+  private noticeRowsR: TextRenderable[] = [];
   private matrixBox: BoxRenderable | undefined;
   private eventsBox: BoxRenderable | undefined;
   private paneBox: BoxRenderable | undefined;
@@ -139,23 +148,41 @@ export class LiveView {
 
   constructor(private readonly opts: LiveViewOpts) {
     // Whatever path the process dies by (a throw past orchestrate, a missed
-    // stop()), the terminal must come back: streams unhooked, alternate screen
-    // released. Guarded so the normal stop() path doesn't double-restore.
+    // stop()), the terminal must come back. Guarded
+    // on `torndown`, NOT on `stopped`: a stop() that landed before the mount
+    // has not restored anything yet, and guarding on `stopped` would disarm
+    // this net exactly when it is the only thing left to fire.
     process.once("exit", () => {
-      if (this.stopped) return;
+      if (this.torndown) return;
       this.unhook();
       this.renderer?.destroy();
     });
   }
 
   /** Synchronous by contract (`Display.start`). Records state, hooks the
-   *  streams, and kicks the async mount off without awaiting it. */
+   *  streams, and kicks the async mount off without awaiting it.
+   *
+   *  The mount promise is retained: `stop()` can land in the SAME synchronous
+   *  turn as `start()` (an `attach` onto an already-settled run does exactly
+   *  that), and by then `createCliRenderer` has already entered the alternate
+   *  screen and raw mode even though `this.renderer` is not assigned yet. Only
+   *  by settling that promise can the teardown reach the renderer at all. */
   start(state: PipelineState, header: RunHeader): void {
     this.state = state;
     this.header = header;
     this.seedFocus(state);
     if (this.opts.hookStderr) this.hook();
-    void this.mount();
+    this.mountPromise = this.mount().catch((err: unknown) => {
+      // A renderer that cannot open must degrade to a silent non-live run, not
+      // take the process with it: an unhandled rejection would pick odu's exit
+      // code, and odu owns that. Report on the REAL stderr — the hook is torn
+      // down first, or the diagnostic would come back through pushEvent onto
+      // stdout, dimmed and line-shredded.
+      this.unhook();
+      this.stderrWrite(
+        `odu: live view unavailable (${(err as Error).message}) — continuing without it\n`,
+      );
+    });
     this.timer = setInterval(() => this.onTick(), TICK_MS);
     (this.timer as { unref?: () => void }).unref?.();
   }
@@ -180,7 +207,10 @@ export class LiveView {
           targetFps: 30,
         })))();
       if (this.stopped) {
+        // stop() already ran — it could not reach a renderer that did not yet
+        // exist, so the teardown finishes here instead.
         renderer.destroy();
+        this.finishStop();
         return;
       }
       this.renderer = renderer;
@@ -189,11 +219,12 @@ export class LiveView {
         renderer.keyInput.on("keypress", (key: ParsedKey) => this.onKey(key));
       }
       renderer.on("resize", () => this.relayout());
-      // Focus was seeded before the mount, so the log stream may not have been
-      // opened yet — open it now that a pane exists to paint into.
-      const id = this.focusedId;
-      if (id !== undefined && this.log === undefined) this.openLog(id);
-      this.paint();
+      // Focus (and therefore the log emulator) was seeded against the pre-mount
+      // 80x24 fallback, because paneCols/paneRowCount had no renderer to ask.
+      // Push the real geometry now — unconditionally: the emulator always
+      // exists by here, so a `log === undefined` guard would never fire and the
+      // pane would keep the fallback width for the whole run.
+      this.relayout();
     } finally {
       this.mounting = false;
     }
@@ -201,7 +232,6 @@ export class LiveView {
 
   update(state: PipelineState): void {
     this.state = state;
-    this.seedFocus(state);
     this.paint();
   }
 
@@ -254,9 +284,31 @@ export class LiveView {
     this.log?.dispose();
     this.log = undefined;
     if (state !== undefined) this.state = state;
+    if (this.renderer === undefined && this.mountPromise !== undefined) {
+      // The mount is still in flight. It has ALREADY entered the alternate
+      // screen and raw mode (createCliRenderer does both before its first
+      // await), so returning here would leave the terminal wedged — the
+      // renderer we need to destroy simply is not assigned yet. The mount's
+      // own `if (this.stopped)` branch finishes the teardown when it resumes.
+      return;
+    }
+    this.finishStop();
+  }
+
+  /** The half of `stop()` that needs a renderer — run either by `stop()` when
+   *  one already exists, or by the mount's continuation when `stop()` beat it.
+   *  Idempotent: exactly one of those two paths reaches it. */
+  private finishStop(): void {
+    if (this.torndown) return;
+    this.torndown = true;
     this.unhook();
     this.renderer?.destroy();
     this.renderer = undefined;
+    // Whatever the frame was holding dies with the alternate screen, so replay
+    // it: a fatal error that arrived through the stderr hook would otherwise be
+    // erased by the very teardown that was supposed to surface it.
+    for (const ev of this.events) this.stderrWrite(`${ev.text}\n`);
+    this.events = [];
   }
 
   /** The compact recap a host may print once the viewport is gone. `attach`
@@ -270,6 +322,7 @@ export class LiveView {
     const counts = [
       s.ok > 0 ? `${s.ok} ok` : null,
       s.running > 0 ? `${s.running} running` : null,
+      s.pending > 0 ? `${s.pending} pending` : null,
       s.failed > 0 ? `${s.failed} failed` : null,
       s.errored > 0 ? `${s.errored} errored` : null,
       s.cancelled > 0 ? `${s.cancelled} cancelled` : null,
@@ -288,6 +341,9 @@ export class LiveView {
     for (const n of reds.slice(0, 3)) {
       lines.push(`  ${STATUS_META[n.status].glyph} ${n.id}`);
     }
+    // Say so when the list is clipped — a silent truncation reads as "those
+    // are all the failures", which is the one thing a verdict must not imply.
+    if (reds.length > 3) lines.push(`  … +${reds.length - 3} more`);
     return `${lines.join("\n")}\n`;
   }
 
@@ -360,6 +416,16 @@ export class LiveView {
     head.add(this.laneLine);
     frame.add(head);
 
+    // Variable-height strip for state-derived warnings, so a new one is a line
+    // in `notices()` rather than another hand-counted row.
+    this.noticeBox = new BoxRenderable(r, {
+      id: "notices",
+      width: "100%",
+      flexShrink: 0,
+      flexDirection: "column",
+    });
+    frame.add(this.noticeBox);
+
     this.matrixBox = new BoxRenderable(r, {
       id: "matrix",
       width: "100%",
@@ -406,7 +472,17 @@ export class LiveView {
     return Math.max(20, (this.renderer?.terminalWidth ?? 80) - 4);
   }
 
-  /** Rows the pane has once the fixed regions take their share. */
+  /** Rows the pane has once the fixed regions take their share.
+   *
+   *  `Math.max(0, …)`, not `max(3, …)`: on a terminal shorter than the chrome a
+   *  three-row floor pushes the pane's own border and the status bar off the
+   *  bottom, so the operator loses the key hints on exactly the small window
+   *  where they are hardest to remember. Zero rows of log is the honest answer.
+   *
+   *  Every caller that draws the pane must size the emulator to the SAME number
+   *  it is about to draw — see `paintPane`. Two independent height calculations
+   *  is what let the emulator hand back a window shorter than the pane and blank
+   *  the bottom rows. */
   private paneRowCount(): number {
     const total = this.renderer?.terminalHeight ?? 24;
     const recipes = this.state
@@ -414,12 +490,27 @@ export class LiveView {
       : 0;
     const chrome =
       2 + // header
+      this.noticeRows() +
       1 + // matrix column header
       recipes +
       Math.min(this.events.length, EVENT_ROWS) +
       2 + // pane border
       1; // status bar
-    return Math.max(3, total - chrome);
+    return Math.max(0, total - chrome);
+  }
+
+  /** State-derived warning strips above the matrix (currently just the GitHub
+   *  posting debt, juspay/odu#61). Counted into the chrome so the pane's height
+   *  tracks them appearing and clearing. */
+  private notices(): string[] {
+    const state = this.state;
+    if (state === undefined) return [];
+    const warn = postingWarning(postingOf(state));
+    return warn === null ? [] : [warn];
+  }
+
+  private noticeRows(): number {
+    return this.notices().length;
   }
 
   // ── focus ────────────────────────────────────────────────────────────────
@@ -588,11 +679,17 @@ export class LiveView {
     const now = Date.now();
     const elapsed =
       header.startedAt > 0 ? formatGoDuration(now - header.startedAt) : "";
-    const commit = `${state.sha7}${state.dirty ? "+dirty" : ""}`;
+    // The sha stays an OSC 8 hyperlink where the forge gave us a commit URL —
+    // the escape rides inside the cell content, so a terminal that supports it
+    // makes the sha clickable and one that doesn't shows the bare label.
+    const label = `${state.sha7}${state.dirty ? "+dirty" : ""}`;
+    const commit =
+      header.commitUrl !== null ? link(label, header.commitUrl) : label;
     if (this.headLine !== undefined) {
       this.headLine.content = `odu ${mark} ${state.name} @ ${commit}  ${elapsed}`;
       this.headLine.fg = s.done && s.failedOverall ? COLOR.failed : FG;
     }
+    this.paintNotices();
     if (this.laneLine !== undefined) {
       this.laneLine.content = header.lanes
         .map((l) => `${l.platform} ▸ ${l.host}`)
@@ -650,6 +747,19 @@ export class LiveView {
     });
   }
 
+  /** The posting-debt strip and any future state-derived warning. It was in the
+   *  frame the old renderer painted (juspay/odu#61) and has to stay in this
+   *  one: it is how an operator learns a status never made it to GitHub. */
+  private paintNotices(): void {
+    const box = this.noticeBox;
+    if (box === undefined) return;
+    const lines = this.notices();
+    this.syncRows(box, this.noticeRowsR, lines.length, "nt", (row, i) => {
+      row.content = lines[i] ?? "";
+      row.fg = COLOR.running;
+    });
+  }
+
   private paintEvents(): void {
     const box = this.eventsBox;
     if (box === undefined) return;
@@ -665,7 +775,7 @@ export class LiveView {
     if (box === undefined) return;
     const id = this.focusedId;
     const node = id !== undefined ? state.nodes[id] : undefined;
-    const pos = this.log?.position();
+    const following = this.log?.following !== false;
     const meta =
       node === undefined
         ? ""
@@ -678,10 +788,15 @@ export class LiveView {
                   : ""
               }`
             : node.status;
-    const anchor = pos?.follow === false ? "‹pinned›" : "‹follow›";
+    const anchor = following ? "‹follow›" : "‹pinned›";
     box.title = `${id ?? ""}${meta === "" ? "" : ` — ${meta}`}  ${anchor}`;
 
+    // Size the emulator to exactly the number of rows about to be drawn,
+    // before reading them. The height changes whenever an event or a notice
+    // appears, not only on SIGWINCH, and an emulator left at a stale height
+    // hands back a short window whose missing rows paint as blanks.
     const height = this.paneRowCount();
+    this.log?.resize(this.paneCols(), height);
     const rows = this.log?.rows() ?? [];
     this.syncRows(box, this.paneRows, height, "pane", (row, i) => {
       const line = rows[i];
