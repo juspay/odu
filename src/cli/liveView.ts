@@ -444,6 +444,8 @@ export class LiveView {
     this.pushEvent(
       `${STATUS_META[node.status].glyph} ${node.id} ${node.status}${dur}  → ${logPath}`,
       STATUS_CELL[node.status],
+      true,
+      false,
     );
   }
 
@@ -461,8 +463,11 @@ export class LiveView {
   /** @param now paint immediately. True for the rare, discrete events a host
    *  raises (a transition, an operator message); false for interposed stderr,
    *  where a provisioning burst is one call per line and painting each would
-   *  reintroduce the per-source-event repaint the log path just stopped doing. */
-  private pushEvent(text: string, color: string, now = true): void {
+   *  reintroduce the per-source-event repaint the log path just stopped doing.
+   *  @param retain replay this on teardown. Only for text no other face will
+   *  reprint: library stderr and operator messages. A transition is already in
+   *  the host's own summary, so retaining it printed every failure twice. */
+  private pushEvent(text: string, color: string, now = true, retain = true): void {
     if (this.renderer === undefined) {
       // Pre-mount (or post-stop): no frame to hold this, so it belongs in the
       // scrollback the operator is actually looking at.
@@ -474,8 +479,10 @@ export class LiveView {
     // Drop from the TAIL, not the head: a burst is almost always a stack
     // trace, whose first line carries the message and whose remainder is
     // frames. Shifting oldest-first kept the frames and discarded the reason.
-    if (this.retained.length < LiveView.RETAIN_MAX) this.retained.push(text);
-    else this.retained[LiveView.RETAIN_MAX - 1] = text;
+    if (retain) {
+      if (this.retained.length < LiveView.RETAIN_MAX) this.retained.push(text);
+      else this.retained[LiveView.RETAIN_MAX - 1] = text;
+    }
     if (now) this.paint();
     else {
       this.dirty = true;
