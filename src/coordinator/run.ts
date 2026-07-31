@@ -27,10 +27,14 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { implementSurface, inMemoryStore } from "@kolu/surface/server";
 import { isLocalHost } from "@kolu/surface-remote";
-import { bold, dim, green, link, red, yellow } from "../cli/ansi";
+import { bold, dim, link } from "../cli/ansi";
 import {
+  countsLine,
   exitCode,
   NON_TERMINAL_STATUSES,
+  OUTCOME_COLOR,
+  OUTCOME_LABEL,
+  outcomeOf,
   statusGlyph,
   summarize,
 } from "../cli/render";
@@ -1257,16 +1261,13 @@ async function orchestrate(
     }
     const code = verdictCode(state);
     const debt = unpostedNote(unposted.length);
-    const label =
-      code > 0
-        ? counts.cancelled > 0 && counts.failed + counts.errored === 0
-          ? bold(yellow("INCOMPLETE"))
-          : bold(red("FAILED"))
-        : bold(green("OK"));
+    // The outcome taxonomy and the counts line both come from `render.ts` —
+    // this summary, the live header and the live status bar were three
+    // hand-rolled versions, and only this one knew about INCOMPLETE.
+    const outcome = outcomeOf(counts);
+    const label = bold(OUTCOME_COLOR[outcome](OUTCOME_LABEL[outcome]));
     lines.push(
-      `${counts.ok} ok · ${counts.failed} failed · ${counts.errored} errored · ${counts.skipped} skipped · ${counts.cancelled} cancelled — ${label}${
-        debt !== "" ? dim(debt) : ""
-      }`,
+      `${countsLine(counts)} — ${label}${debt !== "" ? dim(debt) : ""}`,
     );
     process.stderr.write(`${lines.join("\n")}\n`);
     return code;

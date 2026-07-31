@@ -66,6 +66,12 @@ export type ProgressStatus =
  *  (render's glyph table, run's progress + verdict, statuses' state). The
  *  byte-parity wording (justci's `Running:`/`Succeeded`/… descriptions) stays
  *  with the poster — it encodes a different volatility. */
+/** The semantic colour of a status, named by meaning rather than by medium.
+ *  Each face maps it to its own encoding — `render.ts` to an ansi wrapper for a
+ *  stream, and to a hex cell attribute for the live view's renderer — so the
+ *  assignment ("errored is violet") is made once and rendered twice. */
+export type StatusHue = "grey" | "amber" | "green" | "red" | "violet";
+
 export const STATUS_META: Record<
   NodeStatus,
   {
@@ -73,14 +79,45 @@ export const STATUS_META: Record<
     github: GithubState | null;
     progress: ProgressStatus | null;
     isRed: boolean;
+    hue: StatusHue;
   }
 > = {
-  pending: { glyph: "◦", github: null, progress: null, isRed: false },
-  running: { glyph: "▶", github: "pending", progress: "running", isRed: false },
-  ok: { glyph: "✔", github: "success", progress: "success", isRed: false },
-  failed: { glyph: "✗", github: "failure", progress: "failed", isRed: true },
-  skipped: { glyph: "⊘", github: null, progress: "skipped", isRed: false },
-  errored: { glyph: "⚠", github: "error", progress: "errored", isRed: true },
+  pending: { glyph: "◦", github: null, progress: null, isRed: false, hue: "grey" },
+  running: {
+    glyph: "▶",
+    github: "pending",
+    progress: "running",
+    isRed: false,
+    hue: "amber",
+  },
+  ok: {
+    glyph: "✔",
+    github: "success",
+    progress: "success",
+    isRed: false,
+    hue: "green",
+  },
+  failed: {
+    glyph: "✗",
+    github: "failure",
+    progress: "failed",
+    isRed: true,
+    hue: "red",
+  },
+  skipped: {
+    glyph: "⊘",
+    github: null,
+    progress: "skipped",
+    isRed: false,
+    hue: "grey",
+  },
+  errored: {
+    glyph: "⚠",
+    github: "error",
+    progress: "errored",
+    isRed: true,
+    hue: "violet",
+  },
   // Success on GitHub so a deliberate lane drop does not leave a required
   // context pending or post a spurious failure/error (juspay/odu#68).
   cancelled: {
@@ -88,6 +125,7 @@ export const STATUS_META: Record<
     github: "success",
     progress: "cancelled",
     isRed: false,
+    hue: "grey",
   },
 };
 

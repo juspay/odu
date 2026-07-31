@@ -11,6 +11,7 @@ import {
   type NodeStatus,
   type PipelineState,
   STATUS_META,
+  type StatusHue,
 } from "../common/surface";
 import { fanId, splitFanId } from "../common/nodeId";
 import { dim, green, magenta, red, yellow } from "./ansi";
@@ -22,19 +23,46 @@ import { dim, green, magenta, red, yellow } from "./ansi";
  *  here rather than silently defaulting to "terminal". */
 export const NON_TERMINAL_STATUSES = new Set<NodeStatus>(["pending", "running"]);
 
+/** The two encodings of `STATUS_META`'s hue. Which *medium* a face paints in is
+ *  a real difference — a stream takes escape wrappers, opentui takes cell
+ *  attributes — but which *hue* a status gets is not, and stating it twice is
+ *  how the live matrix and `printVerdict` came to disagree about `cancelled`.
+ *  Adding a `NodeStatus` is still one edit, in `STATUS_META`. */
+const ANSI_BY_HUE: Record<StatusHue, (s: string) => string> = {
+  grey: dim,
+  amber: yellow,
+  green,
+  red,
+  violet: magenta,
+};
+
+const CELL_BY_HUE: Record<StatusHue, string> = {
+  grey: "#6b7a80",
+  amber: "#e6b24d",
+  green: "#6fcf8e",
+  red: "#e8695b",
+  violet: "#bb8ce2",
+};
+
+function byStatus<T>(pick: (hue: StatusHue) => T): Record<NodeStatus, T> {
+  const out = {} as Record<NodeStatus, T>;
+  for (const status of Object.keys(STATUS_META) as NodeStatus[]) {
+    out[status] = pick(STATUS_META[status].hue);
+  }
+  return out;
+}
+
 /** Per-status colour, shared by every face (attach table, run matrix,
  *  verdict) — a no-op when stdout isn't a TTY, so pure-string tests and
  *  captured logs see the bare glyphs. */
 export const STATUS_COLOR: Record<NodeState["status"], (s: string) => string> =
-  {
-    pending: dim,
-    running: yellow,
-    ok: green,
-    failed: red,
-    skipped: dim,
-    errored: magenta,
-    cancelled: dim,
-  };
+  byStatus((hue) => ANSI_BY_HUE[hue]);
+
+/** The same assignment as a terminal-cell attribute, for the live view's
+ *  renderer (which owns cells, not escape sequences). */
+export const STATUS_CELL: Record<NodeState["status"], string> = byStatus(
+  (hue) => CELL_BY_HUE[hue],
+);
 
 /** The status glyph, coloured for terminals. */
 export function statusGlyph(status: NodeState["status"]): string {
@@ -135,6 +163,87 @@ export function summarize(state: PipelineState): PipelineSummary {
     clean: done && !red && counts.cancelled === 0,
   };
 }
+
+/** The status buckets a counts line can show, in the order every face shows
+ *  them. */
+const COUNT_KEYS = [
+  "ok",
+  "running",
+  "pending",
+  "failed",
+  "errored",
+  "cancelled",
+  "skipped",
+] as const satisfies readonly NodeStatus[];
+
+/** `3 ok · 1 failed` — the counts line every face shows, so adding a
+ *  `NodeStatus` cannot land in two of three renderings. Empty buckets are
+ *  dropped; `which` narrows the set for a face with no room for all of them.
+ *  This was three hand-rolled folds, and they had already drifted: the live
+ *  status bar omitted `cancelled` entirely, so a cancelled lane had no in-frame
+ *  readout at all (juspay/odu#68, #69). */
+export function countsLine(
+  s: PipelineSummary,
+  which: readonly NodeStatus[] = COUNT_KEYS,
+): string {
+  return which
+    .filter((k) => s[k] > 0)
+    .map((k) => `${s[k]} ${k}`)
+    .join(" · ");
+}
+
+/** How a settled run turned out. Three-way since juspay/odu#68: a run whose
+ *  only non-ok nodes were cancelled is neither a pass nor a failure, and
+ *  `exitCode` already returns 1 for it. */
+export type Outcome = "pending" | "ok" | "incomplete" | "failed";
+
+export function outcomeOf(s: PipelineSummary): Outcome {
+  if (!s.done) return "pending";
+  if (s.failedOverall) return "failed";
+  return s.clean ? "ok" : "incomplete";
+}
+
+/** The one-glyph rendering of an `Outcome`, for the live view's header and its
+ *  recap. `pending` never reaches the frame (a spinner takes its place) but is
+ *  what a recap of an unsettled run shows. */
+export const OUTCOME_MARK: Record<Outcome, string> = {
+  pending: "◼",
+  ok: "✔",
+  incomplete: "◼",
+  failed: "✗",
+};
+
+/** The word `printVerdict` stamps on the summary line. */
+export const OUTCOME_LABEL: Record<Outcome, string> = {
+  pending: "RUNNING",
+  ok: "OK",
+  incomplete: "INCOMPLETE",
+  failed: "FAILED",
+};
+
+/** The hue an outcome reads in — one assignment, both media, so the live
+ *  header and `printVerdict` agree that an INCOMPLETE run is amber rather than
+ *  neutral. */
+const OUTCOME_HUE: Record<Outcome, StatusHue> = {
+  pending: "grey",
+  ok: "green",
+  incomplete: "amber",
+  failed: "red",
+};
+
+export const OUTCOME_COLOR: Record<Outcome, (s: string) => string> = {
+  pending: ANSI_BY_HUE[OUTCOME_HUE.pending],
+  ok: ANSI_BY_HUE[OUTCOME_HUE.ok],
+  incomplete: ANSI_BY_HUE[OUTCOME_HUE.incomplete],
+  failed: ANSI_BY_HUE[OUTCOME_HUE.failed],
+};
+
+export const OUTCOME_CELL: Record<Outcome, string> = {
+  pending: CELL_BY_HUE[OUTCOME_HUE.pending],
+  ok: CELL_BY_HUE[OUTCOME_HUE.ok],
+  incomplete: CELL_BY_HUE[OUTCOME_HUE.incomplete],
+  failed: CELL_BY_HUE[OUTCOME_HUE.failed],
+};
 
 /** The agent-face parallel of `summarize`, over the flattened `AgentNodes`
  *  rows: `done` when no row holds a non-terminal status (the same
@@ -244,5 +353,3 @@ export function stepFocus(
   }
   return undefined;
 }
-
-
