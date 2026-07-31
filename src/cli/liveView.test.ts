@@ -892,3 +892,108 @@ describe("LiveView — events land in the frame, never in scrollback", () => {
     expect(written.join("")).toContain("leasing x86_64-linux");
   });
 });
+
+/**
+ * Every affordance the frame presents, exercised once.
+ *
+ * The failure this guards against is shipping the DRAWN half of a feature
+ * without the WIRED half: mouse reporting enabled with no listener, a scrollbar
+ * that renders but cannot be grabbed, an events lane that names a node but does
+ * nothing when clicked. Each of those shipped, and each was found by a human
+ * looking at the screen rather than by a test.
+ *
+ * A new interactive region belongs here on the day it is added.
+ */
+/** Real terminal sequences. `pressKey("pageup")` types the LETTERS p-a-g-e-u-p,
+ *  whose `g` means "jump to top" — so a test written that way exercises a
+ *  different binding and reports success. `KeyCodes` has no paging entries. */
+const PAGE_UP = "\u001b[5~";
+const PAGE_DOWN = "\u001b[6~";
+const ESCAPE = "\u001b";
+
+describe("LiveView — every affordance is wired", () => {
+  const longLog = `${Array.from({ length: 200 }, (_, i) => `line ${i}`).join("\n")}\n`;
+
+  it("drag the scrollbar thumb to move through the log", async () => {
+    const { view, setup, frame } = await mount(96, 30, { log: longLog });
+    await until(setup, () => frame().includes("line 199"), "the log tail");
+    const rows = () => frame().split("\n");
+    // len-1 is the pane border; the gutter sits just inside it.
+    const gutterX = (rows()[6] ?? "").length - 2;
+    const thumbY = rows().findIndex((l) => l.includes("█"));
+    expect(thumbY).toBeGreaterThan(0);
+    // Grab the thumb and drag it up.
+    await setup.mockMouse.pressDown(gutterX, thumbY);
+    await setup.mockMouse.drag(gutterX, thumbY, gutterX, thumbY - 5);
+    await until(
+      setup,
+      () => !frame().includes("line 199"),
+      "the drag to move the window",
+    );
+    expect(frame()).toContain("‹pinned›");
+    view.stop();
+  });
+
+  it("click the scrollbar track to jump there", async () => {
+    const { view, setup, frame } = await mount(96, 30, { log: longLog });
+    await until(setup, () => frame().includes("line 199"), "the log tail");
+    const rows = () => frame().split("\n");
+    // len-1 is the pane border; the gutter sits just inside it.
+    const gutterX = (rows()[6] ?? "").length - 2;
+    // The first gutter row, i.e. immediately below the pane title. It maps to
+    // window start 0 — a click further down maps proportionally, not to the top.
+    const firstGutterRow = rows().findIndex((l) => l.includes("‹follow›")) + 1;
+    await setup.mockMouse.click(gutterX, firstGutterRow);
+    await until(setup, () => frame().includes("line 0"), "a jump to the top");
+    expect(frame()).toContain("line 0");
+    expect(frame()).toContain("‹pinned›");
+    view.stop();
+  });
+
+  it("click an events-lane entry to read that node's log", async () => {
+    const { view, setup, frame } = await mount(96, 30);
+    view.transition(
+      node("ci::install@x86_64-linux", "failed", 41_000),
+      ".odu/logs/x/install.log",
+    );
+    await until(
+      setup,
+      () => frame().includes("ci::install@x86_64-linux failed"),
+      "the event",
+    );
+    const y = frame()
+      .split("\n")
+      .findIndex((l) => l.includes("ci::install@x86_64-linux failed"));
+    await setup.mockMouse.click(4, y);
+    await until(
+      setup,
+      () => frame().includes("ci::install@x86_64-linux —"),
+      "the pane to follow the event",
+    );
+    view.stop();
+  });
+
+  it("every keyboard binding does something observable", async () => {
+    // Not a behaviour test for each key — those exist above. This asserts the
+    // dispatch table is wired end to end, so a binding cannot be listed in the
+    // status bar and the docs while doing nothing.
+    const { view, setup, frame } = await mount(96, 30, { log: longLog });
+    await until(setup, () => frame().includes("line 199"), "the log tail");
+
+    setup.mockInput.pressKey("f"); // follow -> pinned
+    await until(setup, () => frame().includes("‹pinned›"), "f");
+    setup.mockInput.pressKey("g"); // top
+    await until(setup, () => frame().includes("line 0"), "g");
+    setup.mockInput.pressKey("G"); // tail
+    await until(setup, () => frame().includes("line 199"), "G");
+    setup.mockInput.pressKey(PAGE_UP);
+    await until(setup, () => !frame().includes("line 199"), "PgUp");
+    setup.mockInput.pressKey(PAGE_DOWN);
+    await until(setup, () => frame().includes("line 199"), "PgDn");
+    setup.mockInput.pressKey("/"); // search prompt
+    await until(setup, () => frame().includes("esc cancel"), "/");
+    setup.mockInput.pressKey(ESCAPE);
+    await until(setup, () => !frame().includes("esc cancel"), "escape");
+    view.stop();
+  });
+});

@@ -340,6 +340,20 @@ export class LogView {
     this.top = Math.max(0, Math.min(this.maxTop(), this.top + delta));
   }
 
+  /** Put the window at an absolute buffer line, clamped. Unpins the tail for
+   *  the same reason `scrollBy` does: an operator who is aiming at a position
+   *  is reading, not watching. */
+  scrollTo(line: number): void {
+    this.unpin();
+    this.top = Math.max(0, Math.min(this.maxTop(), Math.round(line)));
+  }
+
+  /** The last legal window start — exposed so a scrollbar can map a gutter row
+   *  back to a buffer line without re-deriving the rule. */
+  get maxWindowTop(): number {
+    return this.maxTop();
+  }
+
   private maxTop(): number {
     return Math.max(0, this.total - this.height);
   }

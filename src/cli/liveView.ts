@@ -132,6 +132,10 @@ export interface LiveViewOpts extends LiveOpts {
 interface Event {
   text: string;
   color: string;
+  /** The node this event is about, when it is about one. Carried rather than
+   *  parsed back out of `text`: the lane is the place an operator looks when
+   *  something goes red, so clicking an entry jumps to that node's log. */
+  nodeId?: string;
 }
 
 /** One name for a key. Printable keys are identified by their sequence (so `g`
@@ -361,6 +365,13 @@ export class LiveView {
   private paneRowsBox: BoxRenderable | undefined;
   private paneScrollBox: BoxRenderable | undefined;
   private scrollRows: TextRenderable[] = [];
+  /** The scrollbar's drawn geometry, recorded by the paint that lays it out —
+   *  the inverse of the thumb math, so a grab maps back to a buffer line
+   *  without a second copy of the rule. `undefined` while everything fits. */
+  private scrollGeom: { height: number; thumb: number; at: number } | undefined;
+  /** Where in the thumb the drag was grabbed, so it moves WITH the pointer
+   *  rather than snapping its top to the cursor on every event. */
+  private grabOffset = 0;
   private statusLine: TextRenderable | undefined;
   /** Where each hint was drawn on the status bar, so a click can run it. Built
    *  during the paint that draws them — the bar is width-dependent, so the
@@ -536,6 +547,7 @@ export class LiveView {
       STATUS_CELL[node.status],
       true,
       false,
+      node.id,
     );
   }
 
@@ -557,14 +569,20 @@ export class LiveView {
    *  @param retain replay this on teardown. Only for text no other face will
    *  reprint: library stderr and operator messages. A transition is already in
    *  the host's own summary, so retaining it printed every failure twice. */
-  private pushEvent(text: string, color: string, now = true, retain = true): void {
+  private pushEvent(
+    text: string,
+    color: string,
+    now = true,
+    retain = true,
+    nodeId?: string,
+  ): void {
     if (this.renderer === undefined) {
       // Pre-mount (or post-stop): no frame to hold this, so it belongs in the
       // scrollback the operator is actually looking at.
       process.stdout.write(`${operatorLine(text)}\n`);
       return;
     }
-    this.events.push({ text, color });
+    this.events.push({ text, color, nodeId });
     if (this.events.length > EVENT_ROWS) this.events.shift();
     // Drop from the TAIL, not the head: a burst is almost always a stack
     // trace, whose first line carries the message and whose remainder is
@@ -730,6 +748,9 @@ export class LiveView {
       width: "100%",
       flexShrink: 0,
       flexDirection: "column",
+      // The lane is where you look when a node goes red; clicking the entry is
+      // the obvious way to read that node's log.
+      onMouseDown: (e) => this.focusEventAt(e.y),
     });
     frame.add(this.eventsBox);
 
@@ -778,6 +799,9 @@ export class LiveView {
       width: 1,
       flexShrink: 0,
       flexDirection: "column",
+      // Press inside the thumb to grab it; press on the track to jump there.
+      onMouseDown: (e) => this.grabScrollbar(e.y),
+      onMouseDrag: (e) => this.dragScrollbar(e.y),
     });
     split.add(this.paneScrollBox);
 
@@ -1264,6 +1288,7 @@ export class LiveView {
     if (box === undefined) return;
     const total = log?.total ?? 0;
     if (log === undefined || total <= height || height <= 0) {
+      this.scrollGeom = undefined;
       this.syncRows(box, this.scrollRows, height, "sb", (row) => {
         setRow(row, [plain(" ")]);
       });
@@ -1274,12 +1299,65 @@ export class LiveView {
     // At least one row, so the thumb never vanishes on a very long log.
     const thumb = Math.max(1, Math.floor((height * height) / total));
     const at = Math.round((start / maxStart) * (height - thumb));
+    this.scrollGeom = { height, thumb, at };
     this.syncRows(box, this.scrollRows, height, "sb", (row, i) => {
       const onThumb = i >= at && i < at + thumb;
       setRow(row, [
         onThumb ? fg(ACCENT)("█") : fg(TRACK)("│"),
       ]);
     });
+  }
+
+  /** Focus the node an events-lane entry is about. Entries that name no node
+   *  (an operator message, library chatter) are inert rather than focusing
+   *  something arbitrary. */
+  private focusEventAt(y: number): void {
+    const box = this.eventsBox;
+    const state = this.state;
+    if (box === undefined || state === undefined) return;
+    const event = this.events[y - box.y];
+    const id = event?.nodeId;
+    if (id === undefined || state.nodes[id] === undefined) return;
+    this.focusLocked = true;
+    this.focus(id);
+  }
+
+  /** Gutter row -> the window start that would draw the thumb there. The exact
+   *  inverse of `paintScrollbar`'s placement, so grabbing the thumb and reading
+   *  it agree. */
+  private scrollbarRowToLine(row: number): number | undefined {
+    const geom = this.scrollGeom;
+    const log = this.log;
+    if (geom === undefined || log === undefined) return undefined;
+    const travel = geom.height - geom.thumb;
+    if (travel <= 0) return 0;
+    const at = Math.max(0, Math.min(travel, row));
+    return (at / travel) * log.maxWindowTop;
+  }
+
+  /** A press in the gutter. Inside the thumb it starts a drag from where it was
+   *  grabbed; on the track it jumps so the thumb's top lands under the pointer,
+   *  which is what a click on empty track is asking for. */
+  private grabScrollbar(y: number): void {
+    const box = this.paneScrollBox;
+    const geom = this.scrollGeom;
+    if (box === undefined || geom === undefined) return;
+    const row = y - box.y;
+    // Straight from the geometry the paint recorded — reading the thumb back
+    // out of the drawn glyphs would be a second source of truth for where it is.
+    this.grabOffset =
+      row >= geom.at && row < geom.at + geom.thumb ? row - geom.at : 0;
+    this.dragScrollbar(y);
+  }
+
+  private dragScrollbar(y: number): void {
+    const box = this.paneScrollBox;
+    if (box === undefined) return;
+    const line = this.scrollbarRowToLine(y - box.y - this.grabOffset);
+    if (line === undefined) return;
+    this.withLog((l) => l.scrollTo(line));
+    this.dirty = true;
+    this.wake();
   }
 
   private paintStatus(s: ReturnType<typeof summarize>): void {
@@ -1352,10 +1430,11 @@ export class LiveView {
     if (r === undefined) return;
     while (rows.length > count) {
       const extra = rows.pop();
-      if (extra !== undefined) {
-        box.remove(extra);
-        extra.destroy();
-      }
+      // destroy() unparents itself. Calling remove() first left the child with
+      // a stale parent pointer, so the renderer's own recursive teardown later
+      // asked a box to remove a child it no longer had — which threw out of
+      // every single stop(), swallowed into console.error by opentui.
+      extra?.destroy();
     }
     for (let i = 0; i < count; i++) {
       let row = rows[i];
