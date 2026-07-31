@@ -100,6 +100,23 @@ describe("LogView — reflow", () => {
   });
 });
 
+describe("LogView — line endings", () => {
+  it("starts each line at column 0, even after a bare newline", async () => {
+    // odu captures a child's stdout through a PIPE, so the tty never
+    // translated \n to \r\n. A terminal moves down and keeps the column, which
+    // made every line after a progress bar start where the previous one ended.
+    const view = new LogView(60, 6);
+    await feed(view, "building [####] 100%");
+    await feed(view, "\n  ✓ done\n");
+    const rows = view.rows().map((r) => r.text).filter((t) => t !== "");
+    const done = rows.find((t) => t.includes("done"));
+    expect(done).toBeDefined();
+    // Two leading spaces from the producer, not thirty from the cursor.
+    expect(done?.startsWith("  ✓")).toBe(true);
+    view.dispose();
+  });
+});
+
 describe("LogView — colour", () => {
   it("carries the producer's own colours out of the emulator", async () => {
     // translateToString flattens attributes away, which rendered every node's

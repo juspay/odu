@@ -37,16 +37,22 @@ cat > "$D/justfile" <<'JUSTFILE'
 [metadata("ci")]
 default: fmt unit e2e
 
+# The fixture emits real SGR: the pane carries a producer's own colours, so the
+# demo has to produce some for that to be visible.
 fmt:
-    @echo "treefmt: traversed 214 files"; sleep 3; echo "formatted"
+    @printf '\033[2mtreefmt: traversed 214 files\033[0m\n'; sleep 3; printf '\033[32m✓\033[0m formatted\n'
 
 unit:
-    @for i in $(seq 1 6); do echo "  ✓ suite $i passed"; sleep 1; done
+    @for i in $(seq 1 6); do printf '  \033[32m✓\033[0m suite %d \033[2mpassed\033[0m\n' $i; sleep 1; done
 
 e2e:
-    @echo "RUN  v4.1.0"; sleep 2; \
-     for i in $(seq 1 20); do printf "\rbuilding [%-20s] %d%%" "$(printf '#%.0s' $(seq 1 $i))" $((i*5)); sleep 0.3; done; \
-     echo; echo "  ✗ matrix.e2e.ts > fan-in keeps lane order"; echo "AssertionError: expected order to match"; exit 1
+    @printf '\033[1mRUN\033[0m  v4.1.0\n'; sleep 2; \
+     for i in $(seq 1 20); do printf "\rbuilding [%-20s] %d%%" "$(printf '#%.0s' $(seq 1 $i))" $((i*5)); sleep 0.3; done; echo; \
+     printf '  \033[32m✓\033[0m lease.e2e.ts \033[2m4.2s\033[0m\n'; sleep 1; \
+     printf '  \033[31m✗\033[0m matrix.e2e.ts > fan-in keeps lane order\n'; \
+     printf '\033[31mAssertionError\033[0m: expected order to match\n'; \
+     printf '    \033[32m- Expected\033[0m\n    \033[31m+ Received\033[0m\n'; \\
+     sleep 5; exit 1   # hold the red on screen — it is what the pane is for
 JUSTFILE
 ( cd "$D" && git init -q && git add -A &&
   git -c user.email=a@b.c -c user.name=x commit -qm fixture ) >/dev/null ||

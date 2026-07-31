@@ -125,6 +125,12 @@ export class LogView {
       // to show, or the emulator wraps content we would then read back short.
       rows: Math.max(this.height, 24),
       scrollback: SCROLLBACK,
+      // The bytes come from a PIPE, not a pty, so the termios `\n` -> `\r\n`
+      // translation never happened. Without this xterm faithfully does what a
+      // raw terminal does — move down a row and KEEP the column — so every
+      // line after a progress bar started wherever the previous one ended,
+      // giving the pane a staircase of indented, wrapped text.
+      convertEol: true,
       allowProposedApi: true,
     });
   }
