@@ -30,9 +30,15 @@
  */
 
 import {
+  bg,
+  bold,
   BoxRenderable,
   CliRenderer,
+  fg,
+  link,
   type ParsedKey,
+  StyledText,
+  type TextChunk,
   TextRenderable,
 } from "@opentui/core";
 import {
@@ -49,6 +55,7 @@ import { splitFanId } from "../common/nodeId";
 import {
   commitLabel,
   countsLine,
+  countsParts,
   operatorLine,
   defaultAttachId,
   matrixShape,
@@ -60,7 +67,7 @@ import {
   stepFocus,
   summarize,
 } from "./render";
-import { dim, link, stripAnsi } from "./ansi";
+import { stripAnsi } from "./ansi";
 import { LogView } from "./logView";
 
 /** Repaint cadence while something is animating (a spinner, a ticking elapsed
@@ -73,6 +80,8 @@ const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", 
 const DIM = "#6b7a80";
 const FG = "#c6d2d3";
 const ACCENT = "#3ad3b8";
+/** The frame's own ground, for text that sits on an accent fill. */
+const INK = "#0b1013";
 
 /** The injected dependencies that make the `live` face the shared interactive
  *  view — the source-agnostic seam between `run` (its in-memory tail, raw
@@ -201,34 +210,45 @@ const QUIT_HINT = BINDINGS.find((b) => b.keys.includes("q"))?.hint ?? "q quit";
  *  that overflows *wraps*, which would push the frame past the last terminal
  *  row — and hand-trimming the list is how the hint came to omit four of the
  *  bindings it describes. */
-function keyHint(room: number): string {
+function keyHints(room: number): string[] {
   const chosen: string[] = [];
   for (const hint of HINTS) {
     if (hint === QUIT_HINT) continue;
     if ([...chosen, hint, QUIT_HINT].join(" · ").length > room) break;
     chosen.push(hint);
   }
-  return [...chosen, QUIT_HINT].join(" · ");
+  return [...chosen, QUIT_HINT];
 }
 
 /** How many events stay on screen. The lane is a tail, not a log — the full
  *  history is in the run's log files, and the frame must not grow. */
 const EVENT_ROWS = 2;
 
-/** Set a row's text only when it actually changed.
+/** A row's cells, as coloured spans. `row.fg` paints a whole renderable one
+ *  colour, which is why the matrix used to render monochrome — the status
+ *  glyphs live inside a string, so their hue has to travel with them. */
+type Row = readonly TextChunk[];
+
+/** Set a row's spans only when they actually changed.
  *
  *  `TextRenderable`'s own guard compares the incoming `StyledText` by
- *  REFERENCE, and assigning a string allocates a fresh one every time — so the
+ *  REFERENCE, and building one allocates a fresh object every time — so the
  *  guard never fires and each assignment re-parses and re-measures the row.
  *  Measured at 23.5us per no-op assignment against 0.01us guarded; across ~38
- *  rows that is a 14x difference on a steady-state frame, which at 10fps is
- *  most of what the view costs when nothing is happening. */
+ *  rows that is a 14x difference on a steady-state frame. The cache key is the
+ *  spans' text plus colour, which is what a reader sees change. */
 const LAST_TEXT = new WeakMap<TextRenderable, string>();
-function setText(row: TextRenderable, text: string): void {
-  if (LAST_TEXT.get(row) === text) return;
-  LAST_TEXT.set(row, text);
-  row.content = text;
+function setRow(row: TextRenderable, chunks: Row): void {
+  const key = chunks.map((c) => `${c.fg ?? ""}\u0000${c.text}`).join("\u0001");
+  if (LAST_TEXT.get(row) === key) return;
+  LAST_TEXT.set(row, key);
+  row.content = new StyledText([...chunks]);
 }
+
+/** A plain span in the frame's ordinary foreground. */
+const plain = (text: string): TextChunk => fg(FG)(text);
+/** A span the eye should skip — labels, separators, elapsed times. */
+const faint = (text: string): TextChunk => fg(DIM)(text);
 
 export class LiveView {
   private renderer: CliRenderer | undefined;
@@ -597,7 +617,11 @@ export class LiveView {
       flexShrink: 0,
       flexDirection: "column",
     });
-    this.headLine = new TextRenderable(r, { id: "head-1", content: "" });
+    this.headLine = new TextRenderable(r, {
+      id: "head-1",
+      content: "",
+      wrapMode: "none",
+    });
     this.laneLine = new TextRenderable(r, {
       id: "head-2",
       content: "",
@@ -916,27 +940,38 @@ export class LiveView {
     const now = Date.now();
     const elapsed =
       header.startedAt > 0 ? formatGoDuration(now - header.startedAt) : "";
-    // The sha stays an OSC 8 hyperlink where the forge gave us a commit URL —
-    // the escape rides inside the cell content, so a terminal that supports it
-    // makes the sha clickable and one that doesn't shows the bare label.
+    // The sha carries the commit URL as a chunk `link`, not as an embedded
+    // OSC 8 escape: opentui's cell buffer has no escape parser, so the escape
+    // was painted as literal text — the URL's 40-char sha appeared in the
+    // header and pushed it onto a second row.
     const label = commitLabel(state);
-    const commit =
-      header.commitUrl !== null ? link(label, header.commitUrl) : label;
     if (this.headLine !== undefined) {
-      setText(this.headLine, `odu ${mark} ${state.name} @ ${commit}  ${elapsed}`);
-      // Only the two outcomes that need the operator's attention take a hue;
-      // a pass and a run still going stay in ordinary foreground.
-      this.headLine.fg =
-        outcome === "failed" || outcome === "incomplete"
-          ? OUTCOME_CELL[outcome]
-          : FG;
+      const markHue =
+        outcome === "pending" ? STATUS_CELL.running : OUTCOME_CELL[outcome];
+      // opentui carries the URL as a chunk property, so a terminal that
+      // supports hyperlinks makes the sha clickable and one that does not shows
+      // the bare label — no escape ever reaches the cell buffer as text.
+      const sha =
+        header.commitUrl !== null
+          ? link(header.commitUrl)(faint(label))
+          : faint(label);
+      setRow(this.headLine, [
+        bold(plain("odu ")),
+        fg(markHue)(`${mark} `),
+        bold(plain(state.name)),
+        faint(" @ "),
+        sha,
+        faint(elapsed === "" ? "" : `  ${elapsed}`),
+      ]);
     }
     this.paintNotices();
     if (this.laneLine !== undefined) {
-      setText(
-        this.laneLine,
-        header.lanes.map((l) => `${l.platform} ▸ ${l.host}`).join("   "),
-      );
+      const lanes: TextChunk[] = [];
+      for (const l of header.lanes) {
+        if (lanes.length > 0) lanes.push(faint("   "));
+        lanes.push(plain(l.platform), faint(" ▸ "), faint(l.host));
+      }
+      setRow(this.laneLine, lanes);
     }
 
     this.paintMatrix(state, now, spin);
@@ -952,27 +987,35 @@ export class LiveView {
     const { recipes, platforms } = this.shapeOf(state.order);
     // Floors, not guesses: 9 keeps the recipe column readable when every name
     // is short, and 14 is the widest a cell needs for glyph + `1h02m03s`.
-    const nameW = Math.max(9, ...recipes.map((x) => recipeLabel(x).length));
-    const cellW = Math.max(14, ...platforms.map((p) => p.length + 2));
+    const nameW = Math.max(
+      9,
+      ...recipes.map((x: string) => recipeLabel(x).length),
+    );
+    const cellW = Math.max(14, ...platforms.map((x: string) => x.length + 2));
 
-    const lines: string[] = [
-      `  ${"".padEnd(nameW)}  ${platforms.map((p) => p.padEnd(cellW)).join("")}`,
+    const header: Row = [
+      faint(`  ${"".padEnd(nameW)}  `),
+      ...platforms.map((pl: string) => faint(pl.padEnd(cellW))),
     ];
+    const rows: Row[] = [header];
     const focused =
       this.focusedId !== undefined ? splitFanId(this.focusedId) : undefined;
     for (const recipe of recipes) {
-      let row = `${focused?.namepath === recipe ? "›" : " "} ${recipeLabel(
-        recipe,
-      ).padEnd(nameW)} `;
+      const onRow = focused?.namepath === recipe;
+      const cells: TextChunk[] = [
+        fg(ACCENT)(onRow ? "› " : "  "),
+        onRow
+          ? bold(plain(recipeLabel(recipe).padEnd(nameW)))
+          : plain(recipeLabel(recipe).padEnd(nameW)),
+        plain(" "),
+      ];
       for (const platform of platforms) {
         const node = state.nodes[`${recipe}@${platform}`];
-        const here =
-          focused?.namepath === recipe && focused?.platform === platform;
+        const here = onRow && focused?.platform === platform;
         if (node === undefined) {
           // `°` marks a cell with no node — a recipe that does not run on this
-          // platform. The insets below (2 here, 3 in the live cell) are the
-          // focus marker plus the glyph, so both spellings occupy cellW.
-          row += ` °${"".padEnd(cellW - 2)}`;
+          // platform. Insets keep the gap and a live cell the same width.
+          cells.push(faint(` °${"".padEnd(cellW - 2)}`));
           continue;
         }
         const glyph =
@@ -983,18 +1026,27 @@ export class LiveView {
             : node.durationMs !== null
               ? formatGoDuration(node.durationMs)
               : "";
-        row += `${here ? "▸" : " "}${glyph} ${time.padEnd(Math.max(0, cellW - 3))}`;
+        cells.push(fg(ACCENT)(here ? "▸" : " "));
+        cells.push(fg(STATUS_CELL[node.status])(`${glyph} `));
+        // A running clock is the one number that keeps changing, so it stays
+        // legible; a settled duration recedes.
+        cells.push(
+          node.status === "running"
+            ? fg(STATUS_CELL.running)(time.padEnd(Math.max(0, cellW - 3)))
+            : faint(time.padEnd(Math.max(0, cellW - 3))),
+        );
       }
-      lines.push(row);
+      rows.push(cells);
     }
 
     // Renderables are reused across repaints; only the shape change costs.
-    this.syncRows(box, this.matrixRows, lines.length, "mx", (row, i) => {
-      setText(row, lines[i] ?? "");
-      row.fg = i === 0 ? DIM : FG;
+    this.syncRows(box, this.matrixRows, rows.length, "mx", (row, i) => {
+      setRow(row, rows[i] ?? []);
     });
   }
 
+  /** One-slot memo: `state.order` is fixed for the life of a run, and
+   *  `matrixShape` is O(N·(R+P)) with an `includes` in its inner loop. */
   private shapeOf(order: readonly string[]): ReturnType<typeof matrixShape> {
     const memo = this.shapeMemo;
     if (memo !== undefined && memo.order === order) return memo.shape;
@@ -1011,8 +1063,7 @@ export class LiveView {
     if (box === undefined) return;
     const lines = this.notices();
     this.syncRows(box, this.noticeRowsR, lines.length, "nt", (row, i) => {
-      setText(row, lines[i] ?? "");
-      row.fg = STATUS_CELL.running;
+      setRow(row, [fg(STATUS_CELL.running)(lines[i] ?? "")]);
     });
   }
 
@@ -1021,8 +1072,7 @@ export class LiveView {
     if (box === undefined) return;
     this.syncRows(box, this.eventRows, this.events.length, "ev", (row, i) => {
       const ev = this.events[i];
-      setText(row, ev?.text ?? "");
-      row.fg = ev?.color ?? DIM;
+      setRow(row, [fg(ev?.color ?? DIM)(ev?.text ?? "")]);
     });
   }
 
@@ -1056,8 +1106,13 @@ export class LiveView {
     const rows = this.log?.rows() ?? [];
     this.syncRows(box, this.paneRows, height, "pane", (row, i) => {
       const line = rows[i];
-      setText(row, line?.text ?? "");
-      row.fg = line?.match === true ? ACCENT : FG;
+      // A search hit is inverted rather than recoloured: log text already
+      // carries meaning in its own words, so a hue would compete with it.
+      setRow(row, [
+        line?.match === true
+          ? bg(ACCENT)(fg(INK)(line.text))
+          : plain(line?.text ?? ""),
+      ]);
     });
   }
 
@@ -1066,19 +1121,45 @@ export class LiveView {
     if (line === undefined) return;
     if (this.searching) {
       const n = this.log?.matches ?? 0;
-      setText(line, ` /${this.query}▏   ${n} match${n === 1 ? "" : "es"}   ⏎ next · esc cancel`);
-      line.fg = ACCENT;
+      setRow(line, [
+        fg(ACCENT)(` /${this.query}`),
+        fg(ACCENT)("▏"),
+        faint(`   ${n} match${n === 1 ? "" : "es"}   `),
+        fg(ACCENT)("⏎"),
+        faint(" next · "),
+        fg(ACCENT)("esc"),
+        faint(" cancel"),
+      ]);
       return;
     }
-    const counts = countsLine(s);
+    // Each bucket in its own status hue — the counts row is the one place the
+    // whole run's shape is visible at a glance, and colour is what makes it
+    // readable without counting words.
+    const parts = countsParts(s);
+    const chunks: TextChunk[] = [faint(" ")];
+    parts.forEach((part, i) => {
+      if (i > 0) chunks.push(faint(" · "));
+      chunks.push(fg(STATUS_CELL[part.status])(part.text));
+    });
     if (!this.opts.interactive) {
-      setText(line, ` ${counts}`);
-      line.fg = DIM;
+      setRow(line, chunks);
       return;
     }
     const width = this.renderer?.terminalWidth ?? 80;
-    setText(line, ` ${counts}    ${keyHint(width - counts.length - 6)}`);
-    line.fg = DIM;
+    const plainCounts = countsLine(s);
+    chunks.push(faint("    "));
+    // The key itself in the accent, its verb faint: the operator is scanning
+    // for the letter, not reading a sentence.
+    keyHints(width - plainCounts.length - 6).forEach((hint, i) => {
+      if (i > 0) chunks.push(faint(" · "));
+      const gap = hint.indexOf(" ");
+      if (gap < 0) chunks.push(fg(ACCENT)(hint));
+      else {
+        chunks.push(fg(ACCENT)(hint.slice(0, gap)));
+        chunks.push(faint(hint.slice(gap)));
+      }
+    });
+    setRow(line, chunks);
   }
 
   /** Grow/shrink a region's rows to `count`, then fill them. Reusing the

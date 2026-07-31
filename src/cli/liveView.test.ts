@@ -159,6 +159,26 @@ describe("LiveView — the frame", () => {
     dirty.view.stop();
   });
 
+  it("keeps the commit URL out of the header text", async () => {
+    // The link was once embedded as an OSC 8 escape inside the content string.
+    // opentui's cell buffer has no escape parser, so the URL was painted as
+    // literal characters: the header showed a 40-char sha and wrapped onto a
+    // second row. The URL now rides on the chunk, not in the text.
+    const withUrl: RunHeader = {
+      ...header,
+      commitUrl: "https://github.com/juspay/odu/commit/1c787fbdeadbeef0123456789abcdef012345678",
+    };
+    const setup = await createTestRenderer({ width: 96, height: 30 });
+    const view = new LiveView(makeOpts({ setup }));
+    view.start(state, withUrl);
+    await settle(setup);
+    const f = setup.captureCharFrame();
+    expect(f).toContain("3cbac86");
+    expect(f).not.toContain("github.com");
+    expect(f).not.toContain("deadbeef");
+    view.stop();
+  });
+
   it("paints the focused node's log inside the pane", async () => {
     const setup = await createTestRenderer({ width: 96, height: 30 });
     const view = new LiveView(

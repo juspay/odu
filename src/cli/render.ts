@@ -182,16 +182,29 @@ const COUNT_KEYS = [
  *  This was three hand-rolled folds, and they had already drifted: the live
  *  status bar omitted `cancelled` entirely, so a cancelled lane had no in-frame
  *  readout at all (juspay/odu#68, #69). */
+export function countsParts(
+  s: PipelineSummary,
+  which: readonly NodeStatus[] = COUNT_KEYS,
+  keepZeros = false,
+): { status: NodeStatus; text: string }[] {
+  return which
+    .filter((k) => keepZeros || s[k] > 0)
+    .map((k) => ({ status: k, text: `${s[k]} ${k}` }));
+}
+
+/** The counts row as one string. The live face renders `countsParts` instead,
+ *  so each bucket can carry its own status hue — but both read the same list,
+ *  in the same order, so the two faces cannot drift on what a run contains.
+ *
+ *  @param keepZeros keep buckets that are zero — see `VERDICT_BUCKETS` in
+ *  `coordinator/run` for why its caller wants them and the live faces do not. */
 export function countsLine(
   s: PipelineSummary,
   which: readonly NodeStatus[] = COUNT_KEYS,
-  /** Keep buckets that are zero — see `VERDICT_BUCKETS` in `coordinator/run`
-   *  for why its caller wants them and the live faces do not. */
   keepZeros = false,
 ): string {
-  return which
-    .filter((k) => keepZeros || s[k] > 0)
-    .map((k) => `${s[k]} ${k}`)
+  return countsParts(s, which, keepZeros)
+    .map((part) => part.text)
     .join(" · ");
 }
 
