@@ -261,6 +261,34 @@ describe("LiveView — events land in the frame, never in scrollback", () => {
     view.stop();
   });
 
+  it("stop() prints nothing — verdict-on-exit is the host's policy", async () => {
+    // `run` ends with its own printVerdict. A recap from the view too meant the
+    // same information twice on every run; the host asks for verdict() instead.
+    const { view, setup } = await mount(96, 30);
+    const written: string[] = [];
+    const original = process.stdout.write.bind(process.stdout);
+    process.stdout.write = ((c: string | Uint8Array) => {
+      written.push(typeof c === "string" ? c : Buffer.from(c).toString());
+      return true;
+    }) as typeof process.stdout.write;
+    try {
+      view.stop();
+    } finally {
+      process.stdout.write = original;
+    }
+    expect(written.join("")).toBe("");
+    void setup;
+  });
+
+  it("verdict() reports how the run ended, for a host that wants it", async () => {
+    const { view } = await mount(96, 30);
+    const recap = view.verdict();
+    view.stop();
+    expect(recap).toContain("ci::default");
+    expect(recap).toContain("1 failed");
+    expect(recap).toContain("ci::e2e@x86_64-linux");
+  });
+
   it("an info before the frame exists still reaches the operator", () => {
     // `run` builds the display and calls info() during a venue lease that can
     // block for minutes — long before start(). Pre-mount those must go to real

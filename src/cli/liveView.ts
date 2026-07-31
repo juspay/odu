@@ -237,10 +237,15 @@ export class LiveView {
     this.paint();
   }
 
-  /** Restore the terminal and leave exactly one verdict behind in the real
-   *  scrollback — the part of a run worth keeping once the viewport is gone.
-   *  Order matters: unhook the streams first, tear the renderer down second,
-   *  and only then write, so the recap lands in the primary buffer. */
+  /** Restore the terminal, and leave the scrollback to the host.
+   *
+   *  The view deliberately prints nothing here. `run` already ends with its own
+   *  `printVerdict`, so a recap from the view is the same information twice;
+   *  `attach` asks for `verdict()` and prints it itself. Verdict-on-exit is
+   *  host policy, exactly like the exit code — the view owns neither.
+   *
+   *  Order matters: unhook the streams first so nothing races the teardown,
+   *  then destroy the renderer, which restores the primary buffer. */
   stop(state?: PipelineState): void {
     if (this.stopped) return;
     this.stopped = true;
@@ -249,15 +254,15 @@ export class LiveView {
     this.log?.dispose();
     this.log = undefined;
     if (state !== undefined) this.state = state;
-    const recap = this.verdict();
     this.unhook();
     this.renderer?.destroy();
     this.renderer = undefined;
-    if (recap !== undefined) process.stdout.write(recap);
   }
 
-  /** The compact recap printed on the way out. */
-  private verdict(): string | undefined {
+  /** The compact recap a host may print once the viewport is gone. `attach`
+   *  uses it (nothing else would say how the run ended); `run` does not, having
+   *  its own verdict. */
+  verdict(): string | undefined {
     const state = this.state;
     if (state === undefined) return undefined;
     const s = summarize(state);

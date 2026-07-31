@@ -207,6 +207,10 @@ async function attachDashboard(
     if (summarize(state).done) break;
   }
   view.stop(last);
+  // The viewport is gone; say how the run ended. `run` has its own verdict —
+  // an observer would otherwise be left with only an exit code.
+  const recap = view.verdict?.();
+  if (recap !== undefined) process.stdout.write(recap);
   close();
   return exitCode(last);
 }

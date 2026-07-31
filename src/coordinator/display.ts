@@ -80,6 +80,10 @@ export interface Display {
   info(msg: string): void;
   /** Stop timers, restore the terminal, paint the final frame. */
   stop(state?: PipelineState): void;
+  /** A one-line recap of how the run ended, for a host with no verdict of its
+   *  own. Only the live face has one — `run` prints its own summary and ignores
+   *  this; the json/plain faces already emit every transition. */
+  verdict?(): string | undefined;
 }
 
 /** The injected dependencies that make the `live` face the shared interactive
@@ -267,5 +271,12 @@ class LiveDisplay implements Display {
 
   stop(state?: PipelineState): void {
     this.view.stop(state);
+  }
+
+  /** The one-line recap of how the run ended, for a host that has no verdict
+   *  of its own. `run` ignores this (it prints its own summary); `attach` prints
+   *  it, so leaving the viewport still tells you what happened. */
+  verdict(): string | undefined {
+    return this.view.verdict();
   }
 }
