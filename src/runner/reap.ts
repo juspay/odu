@@ -5,8 +5,8 @@
  * deliberately decouples the tree from the runner's own death — so the ONLY
  * thing that ever kills a recipe tree is an explicit group kill from here.
  * Before this module, three teardown paths never (or only partially) did
- * that, and the recipe's descendants (test drivers, package managers, vitest
- * workers) reparented to init and leaked forever on CI boxes:
+ * that, and the recipe's descendants (test drivers, package managers, test
+ * fork workers) reparented to init and leaked forever on CI boxes:
  *
  *   - the runner killed by a signal — a localhost lane's `session.destroy()`
  *     SIGTERMs the odu-runner process directly (surface-remote's connector

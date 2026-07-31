@@ -382,8 +382,9 @@ export function createLaneRunner(): LaneRunner {
   };
 
   // Negative pid ⇒ the whole detached process group (just → nix develop →
-  // pnpm → browsers), not only the shell at the top; the reaper escalates
-  // SIGTERM → grace → SIGKILL so a TERM-ignoring tree still dies.
+  // bun → the recipe's own children), not only the shell at the top; the
+  // reaper escalates SIGTERM → grace → SIGKILL so a TERM-ignoring tree still
+  // dies.
   const killGroup = (child: ChildProcess): void => {
     if (child.pid !== undefined) reaper.reap(child.pid);
   };

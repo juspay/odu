@@ -11,12 +11,18 @@
  * library's per-user runtime-dir convention, and translates the library's
  * structured outcomes into odu-flavored verdicts: `already-served` IS the
  * one-run-per-checkout lock, and a dial failure IS "no run in progress".
+ *
+ * Both library entry points below assume Node's async-connect-error contract,
+ * which Bun does not always honor — importing `asyncConnectError` (for its
+ * side effect) restores it. This is odu's single unix-socket seam, so the
+ * import here covers every dial and serve in the repo.
  */
 
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { unixSocketLink } from "@kolu/surface/links/unix-socket";
 import { serveOverUnixSocket } from "@kolu/surface/unix-socket";
+import "../common/asyncConnectError";
 import type { ContractRouterClient } from "@orpc/contract";
 import type { oduSurface } from "../common/surface";
 import { RUN_LOCK_PATH } from "./checkoutLock";

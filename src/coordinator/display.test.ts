@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import type {
   NodeLogFrame,
   NodeState,
@@ -71,7 +71,7 @@ const header = {
   startedAt: 940_000,
 };
 
-// ANSI is auto-disabled off-TTY (vitest), so frames are plain strings here.
+// ANSI is auto-disabled off-TTY (bun test), so frames are plain strings here.
 describe("renderRunFrame", () => {
   const frame = renderRunFrame({
     state,

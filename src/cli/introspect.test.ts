@@ -7,7 +7,7 @@
  * `run`'s glyph + ProgressStatus wording.
  */
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "bun:test";
 import { pendingNode, type PipelineState } from "../common/surface";
 import { dialSocket } from "../coordinator/socket";
 import { serveTestSurface, type TestSurface } from "../mcp/serveForTest";

@@ -10,7 +10,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, jest } from "bun:test";
 import {
   applyInterruptStopWork,
   ensureCheckoutFree,
@@ -39,20 +39,20 @@ function checkout(): { socketPath: string; lockPath: string } {
 
 describe("ensureCheckoutFree — cancel/refuse before venue claim", () => {
   it("is a no-op when no socket is live and supersede is off", async () => {
-    const dial = vi.fn(async () => null);
-    const cancel = vi.fn();
+    const dial = jest.fn(async () => null);
+    const cancel = jest.fn();
     const r = await ensureCheckoutFree(checkout(), false, { dial, cancel });
     expect(r).toEqual({ ok: true });
-    expect(dial).toHaveBeenCalledOnce();
+    expect(dial).toHaveBeenCalledTimes(1);
     expect(cancel).not.toHaveBeenCalled();
   });
 
   it("refuses immediately when a run is live and supersede is off", async () => {
-    const dial = vi.fn(async () => ({
+    const dial = jest.fn(async () => ({
       client: {} as never,
-      close: vi.fn(),
+      close: jest.fn(),
     }));
-    const cancel = vi.fn();
+    const cancel = jest.fn();
     const r = await ensureCheckoutFree(checkout(), false, { dial, cancel });
     expect(r.ok).toBe(false);
     if (r.ok) throw new Error("expected refuse");
@@ -63,8 +63,8 @@ describe("ensureCheckoutFree — cancel/refuse before venue claim", () => {
   });
 
   it("supersede cancels the live run and returns ready when confirmed", async () => {
-    const cancel = vi.fn(async () => ({ cancelled: true, confirmed: true }));
-    const dial = vi.fn();
+    const cancel = jest.fn(async () => ({ cancelled: true, confirmed: true }));
+    const dial = jest.fn();
     const paths = checkout();
     const r = await ensureCheckoutFree(paths, true, { dial, cancel });
     expect(r).toEqual({ ok: true });
@@ -74,7 +74,7 @@ describe("ensureCheckoutFree — cancel/refuse before venue claim", () => {
   });
 
   it("supersede fails when the holder does not shut down in time", async () => {
-    const cancel = vi.fn(async () => ({ cancelled: true, confirmed: false }));
+    const cancel = jest.fn(async () => ({ cancelled: true, confirmed: false }));
     const r = await ensureCheckoutFree(checkout(), true, { cancel });
     expect(r.ok).toBe(false);
     if (r.ok) throw new Error("expected supersede-timeout");
@@ -94,13 +94,13 @@ describe("cancel-before-claim — single-host pool supersede (ordering)", () => 
     const events: string[] = [];
     let holderBusy = true;
 
-    const cancel = vi.fn(async () => {
+    const cancel = jest.fn(async () => {
       events.push("cancel");
       holderBusy = false;
       return { cancelled: true, confirmed: true };
     });
 
-    const claim = vi.fn(
+    const claim = jest.fn(
       async (_host: string, _id: LeaseIdentity): Promise<ClaimResult> => {
         events.push("claim");
         if (holderBusy) {
@@ -118,7 +118,7 @@ describe("cancel-before-claim — single-host pool supersede (ordering)", () => 
         }
         return {
           kind: "held",
-          lease: { host: "ci-1", release: vi.fn() },
+          lease: { host: "ci-1", release: jest.fn() },
         };
       },
     );
@@ -139,15 +139,15 @@ describe("cancel-before-claim — single-host pool supersede (ordering)", () => 
     expect(acquired.host).toBe("ci-1");
     expect(acquired.lease).not.toBeNull();
     expect(events).toEqual(["cancel", "claim"]);
-    expect(cancel).toHaveBeenCalledOnce();
-    expect(claim).toHaveBeenCalledOnce();
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(claim).toHaveBeenCalledTimes(1);
   });
 
   it("claim-before-cancel on a busy single host fails under --no-wait (deadlock shape)", async () => {
     // Documents the pre-fix failure mode: leasing while the prior run still
     // holds the only box fails/waits — supersede cancel never runs if ordered
     // after the lease.
-    const claim = vi.fn(
+    const claim = jest.fn(
       async (): Promise<ClaimResult> => ({
         kind: "busy",
         heldBy: {

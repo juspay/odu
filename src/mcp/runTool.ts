@@ -59,12 +59,16 @@ export interface RunResult {
 
 /** The argv prefix that re-invokes the odu CLI. The nix wrapper bakes
  *  `ODU_SELF` to its own store path; in a dev checkout we re-exec the entry
- *  through `tsx`. */
+ *  through the very bun that is running us (`process.execPath`), so the child
+ *  gets this exact runtime rather than whatever a bare `bun` on its PATH
+ *  resolves to. */
 export function oduSelfArgv(): string[] {
   const self = process.env.ODU_SELF;
   if (self !== undefined && self !== "") return [self];
   const entry = process.argv[1];
-  return entry !== undefined ? ["tsx", entry] : ["tsx"];
+  return entry !== undefined
+    ? [process.execPath, entry]
+    : [process.execPath];
 }
 
 function runArgsFrom(input: RunInput): string[] {
@@ -156,10 +160,10 @@ async function defaultWaitForSocket(
 }
 
 /** Bring the run up. The wait stops the instant the child dies (a dirty-tree
- *  refusal, a missing `tsx`, or a bad justfile kills it early), so a failed
- *  run is reported at once. While the child lives we keep polling — lease
- *  queue time is unbounded. The socket coming up always wins — a clean run can
- *  fork a detached coordinator and let the launcher exit. */
+ *  refusal, an odu entry bun can't load, or a bad justfile kills it early), so
+ *  a failed run is reported at once. While the child lives we keep polling —
+ *  lease queue time is unbounded. The socket coming up always wins — a clean
+ *  run can fork a detached coordinator and let the launcher exit. */
 async function awaitStartup(
   waitForSocket: (s: string, exited: Promise<unknown>) => Promise<boolean>,
   socketPath: string,

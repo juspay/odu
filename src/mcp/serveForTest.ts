@@ -3,8 +3,9 @@
  * test harness for the MCP/agent face and the introspection commands. Mirrors
  * the coordinator's serve wiring (src/coordinator/run.ts) so consumers are
  * exercised over the same transport they hit in production; the test drives
- * node states and log appends directly. Not a test file (no vitest import), so
- * it isn't collected as a suite — it's imported by the *.test.ts harnesses.
+ * node states and log appends directly. Not a test file (no `bun:test` import,
+ * and the name misses the `*.test.ts` glob), so it isn't collected as a suite —
+ * it's imported by the *.test.ts harnesses.
  */
 
 import { mkdtempSync, rmSync } from "node:fs";

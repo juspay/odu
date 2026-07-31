@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, jest } from "bun:test";
 import {
   fetchUrlFor,
   interruptStatus,
@@ -13,6 +13,19 @@ import {
   type StatusPayload,
 } from "./statuses";
 import { EMPTY_POSTING } from "../common/surface";
+
+/** bun:test's fake timers advance synchronously — there is no
+ *  `advanceTimersByTimeAsync`. Drain the microtask queue on both sides of the
+ *  advance: before, so the promise chains that arm the timers (the poster's
+ *  send queue arms its hang-timeout inside a `.then`) have actually armed them
+ *  when the clock moves; after, so the chains those timers kicked off have
+ *  settled before the assertion runs. The async advance this replaces
+ *  interleaved both itself. */
+async function advanceTimersByTimeAsync(ms: number): Promise<void> {
+  for (let i = 0; i < 20; i += 1) await Promise.resolve();
+  jest.advanceTimersByTime(ms);
+  for (let i = 0; i < 20; i += 1) await Promise.resolve();
+}
 
 // The context/description/log-path formats are byte-compatible with what
 // justci posted (verified against live statuses on merged kolu PRs) — these
@@ -173,12 +186,12 @@ function payload(
 
 describe("StatusPoster — honest dedup + retry", () => {
   afterEach(() => {
-    vi.useRealTimers();
+    jest.useRealTimers();
   });
 
   it("records confirmed only after a successful send (fails N times then succeeds)", async () => {
     let calls = 0;
-    const sendGh = vi.fn(async (): Promise<GhSendResult> => {
+    const sendGh = jest.fn(async (): Promise<GhSendResult> => {
       calls += 1;
       if (calls < 3) return { ok: false, error: "403 rate limited" };
       return { ok: true };
@@ -217,7 +230,7 @@ describe("StatusPoster — honest dedup + retry", () => {
   });
 
   it("leaves owed contexts unconfirmed when send never succeeds", async () => {
-    const sendGh = vi.fn(async (): Promise<GhSendResult> => ({
+    const sendGh = jest.fn(async (): Promise<GhSendResult> => ({
       ok: false,
       error: "API down",
     }));
@@ -252,7 +265,7 @@ describe("StatusPoster — honest dedup + retry", () => {
   });
 
   it("pendingContexts lists contexts still desired/confirmed as pending", async () => {
-    const sendGh = vi.fn(async (): Promise<GhSendResult> => ({ ok: true }));
+    const sendGh = jest.fn(async (): Promise<GhSendResult> => ({ ok: true }));
     const poster = new StatusPoster({
       owner: "o",
       repo: "r",
@@ -279,7 +292,7 @@ describe("StatusPoster — honest dedup + retry", () => {
   });
 
   it("pendingContexts ignores seeded foreign pending contexts", async () => {
-    const sendGh = vi.fn(async (): Promise<GhSendResult> => ({ ok: true }));
+    const sendGh = jest.fn(async (): Promise<GhSendResult> => ({ ok: true }));
     const poster = new StatusPoster({
       owner: "o",
       repo: "r",
@@ -318,7 +331,7 @@ describe("StatusPoster — honest dedup + retry", () => {
   });
 
   it("seed skips remote states that are not valid GitHub states", async () => {
-    const sendGh = vi.fn(async (): Promise<GhSendResult> => ({ ok: true }));
+    const sendGh = jest.fn(async (): Promise<GhSendResult> => ({ ok: true }));
     const poster = new StatusPoster({
       owner: "o",
       repo: "r",
@@ -344,11 +357,11 @@ describe("StatusPoster — honest dedup + retry", () => {
       }),
     );
     await poster.settle();
-    expect(sendGh).toHaveBeenCalledOnce();
+    expect(sendGh).toHaveBeenCalledTimes(1);
   });
 
   it("records confirmed even when desired moves mid-flight", async () => {
-    vi.useFakeTimers();
+    jest.useFakeTimers();
     let release: ((r: GhSendResult) => void) | undefined;
     const sent: string[] = [];
     const poster = new StatusPoster({
@@ -381,7 +394,7 @@ describe("StatusPoster — honest dedup + retry", () => {
     );
     release?.({ ok: true });
     await poster.settle();
-    await vi.advanceTimersByTimeAsync(0);
+    await advanceTimersByTimeAsync(0);
     await poster.settle();
     // Pending success was recorded; success must still be sent (not discarded).
     expect(sent).toContain("pending");
@@ -390,7 +403,7 @@ describe("StatusPoster — honest dedup + retry", () => {
   });
 
   it("times out a hung send and does not block later posts", async () => {
-    vi.useFakeTimers();
+    jest.useFakeTimers();
     const order: string[] = [];
     const poster = new StatusPoster({
       owner: "o",
@@ -412,7 +425,7 @@ describe("StatusPoster — honest dedup + retry", () => {
     });
     poster.post(payload({ context: "hang", description: "Running: h" }));
     poster.post(payload({ context: "next" }));
-    await vi.advanceTimersByTimeAsync(60);
+    await advanceTimersByTimeAsync(60);
     await poster.settle();
     expect(order).toContain("next");
     expect(poster.health().owed.some((o) => o.context === "hang")).toBe(true);
@@ -423,7 +436,7 @@ describe("StatusPoster — honest dedup + retry", () => {
   });
 
   it("seed makes an identical post a no-op", async () => {
-    const sendGh = vi.fn(async (): Promise<GhSendResult> => ({ ok: true }));
+    const sendGh = jest.fn(async (): Promise<GhSendResult> => ({ ok: true }));
     const poster = new StatusPoster({
       owner: "o",
       repo: "r",
@@ -452,7 +465,7 @@ describe("StatusPoster — honest dedup + retry", () => {
   });
 
   it("coalesces rapid flips to the latest desired state", async () => {
-    vi.useFakeTimers();
+    jest.useFakeTimers();
     const sent: string[] = [];
     const poster = new StatusPoster({
       owner: "o",
@@ -476,13 +489,13 @@ describe("StatusPoster — honest dedup + retry", () => {
     poster.post(
       payload({ context: ctx, state: "pending", description: "Running: b" }),
     );
-    await vi.advanceTimersByTimeAsync(25);
+    await advanceTimersByTimeAsync(25);
     await poster.settle();
     expect(sent).toEqual(["pending:Running: b"]);
   });
 
   it("post(confirmed) does not drop a different desired still in flight", async () => {
-    vi.useFakeTimers();
+    jest.useFakeTimers();
     const sent: string[] = [];
     const poster = new StatusPoster({
       owner: "o",
@@ -517,14 +530,14 @@ describe("StatusPoster — honest dedup + retry", () => {
         description: "Succeeded (1s): .ci/x/y.log",
       }),
     );
-    await vi.advanceTimersByTimeAsync(25);
+    await advanceTimersByTimeAsync(25);
     await poster.settle();
     expect(sent).toEqual(["failure"]);
     expect(poster.health().owed).toEqual([]);
   });
 
   it("finalize flushes a pending debounce and attempts the payload", async () => {
-    vi.useFakeTimers();
+    jest.useFakeTimers();
     const sent: string[] = [];
     const poster = new StatusPoster({
       owner: "o",

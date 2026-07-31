@@ -31,7 +31,7 @@ cmd "odu status"
 "$ODU" status 2>&1 || true; sleep 1.4
 
 # Pick the first running node id if any, else the first non-ok id.
-NODE=$("$ODU" status -o json 2>/dev/null | node -e '
+NODE=$("$ODU" status -o json 2>/dev/null | bun -e '
   let s=""; process.stdin.on("data",d=>s+=d); process.stdin.on("end",()=>{
     try {
       const j=JSON.parse(s);

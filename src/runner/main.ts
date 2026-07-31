@@ -40,7 +40,7 @@ async function main(): Promise<void> {
   // EOF does. This is not hypothetical: a localhost lane's teardown
   // (surface-remote `session.destroy()`) SIGTERMs this very process, and the
   // default disposition would kill us without running `dispose()` — every
-  // `detached` recipe tree (test drivers, package managers, vitest workers)
+  // `detached` recipe tree (test drivers, package managers, test fork workers)
   // would reparent to init and leak forever. `dispose()` sweeps the groups
   // synchronously (SIGTERM → bounded grace → SIGKILL), so exiting right
   // after it returns is safe.

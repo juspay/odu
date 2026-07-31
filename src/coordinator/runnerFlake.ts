@@ -1,7 +1,7 @@
 /**
  * Where the GENERIC lane runner (`odu-runner`) comes from.
  *
- * The runner is odu's own tsx wrapper + a fixed toolchain — it carries none of
+ * The runner is odu's own bun wrapper + a fixed toolchain — it carries none of
  * the repo-under-test's code — so it is resolved from odu's OWN flake, never
  * the consumer's. The `odu` wrapper bakes `ODU_RUNNER_FLAKE` = odu's
  * `self.outPath` at build time (default.nix), and that is the SINGLE source: the
@@ -14,7 +14,7 @@
  * pool claim/probe and lane CI share this resolution path.
  *
  * There is deliberately NO fallback either: a coordinator that carries no baked
- * flake is misbuilt (a raw `tsx src/cli/main.ts`, or a non-flake `nix-build`),
+ * flake is misbuilt (a raw `bun src/cli/main.ts`, or a non-flake `nix-build`),
  * and resolving the runner from the consumer's flake is exactly the silent
  * failure this indirection exists to remove. So we refuse loudly.
  */
@@ -34,7 +34,7 @@ export function resolveRunnerFlake(env: NodeJS.ProcessEnv): string {
     throw new Error(
       "odu: ODU_RUNNER_FLAKE is unset — the coordinator resolves the lane " +
         "runner from odu's own flake, baked onto the `odu` wrapper at build " +
-        "time. This binary carries none (a raw `tsx src/cli/main.ts`, or a " +
+        "time. This binary carries none (a raw `bun src/cli/main.ts`, or a " +
         "non-flake `nix-build`). Set ODU_RUNNER_FLAKE to an odu flake " +
         "(`github:juspay/odu`, or `git+file://$PWD` in an odu checkout).",
     );

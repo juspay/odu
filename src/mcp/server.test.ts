@@ -20,7 +20,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ResourceUpdatedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import { serveSurfaceAsMcp } from "@kolu/surface-mcp";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "bun:test";
 import { gitRunContext } from "../common/git";
 import type { RunOutcome, RunRecord } from "../common/runRecord";
 import { writeRunRecord } from "../coordinator/ledger";

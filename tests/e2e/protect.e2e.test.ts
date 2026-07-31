@@ -13,7 +13,7 @@ import { type SpawnSyncReturns, spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeAll, describe, expect, it, onTestFinished } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { BIG, buildOduBinary, cleanup, makeFixture } from "./harness";
 
 let oduBin: string;
@@ -25,9 +25,17 @@ beforeAll(() => {
   oduBin = buildOduBinary();
 }, 600_000); // nix build, cold cache
 
+// Every temp dir a test makes — fixture repos and per-test hosts dirs alike —
+// lands here and is swept after the test. bun:test has no per-test
+// `onTestFinished`, so one file-local registry stands in for it.
+const created: string[] = [];
+afterEach(() => {
+  for (const dir of created.splice(0)) cleanup(dir);
+});
+
 function fixture(name: string): string {
   const dir = makeFixture(name);
-  onTestFinished(() => cleanup(dir));
+  created.push(dir);
   return dir;
 }
 
@@ -44,7 +52,7 @@ function oduProtect(
   args: string[] = [],
 ): { res: SpawnSyncReturns<string>; hostsFile: string } {
   const hostsDir = mkdtempSync(join(tmpdir(), "odu-e2e-protect-"));
-  onTestFinished(() => cleanup(hostsDir));
+  created.push(hostsDir);
   const hostsFile = join(hostsDir, "hosts.json");
   writeFileSync(
     hostsFile,

@@ -5,11 +5,11 @@
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "scripts": {
-    "start": "tsx src/cli/main.ts",
-    "start:runner": "tsx src/runner/main.ts --stdio",
+    "start": "bun src/cli/main.ts",
+    "start:runner": "bun src/runner/main.ts --stdio",
     "typecheck": "tsc --noEmit",
-    "test:unit": "vitest run",
-    "test:e2e": "vitest run --config vitest.e2e.config.ts"
+    "test:unit": "bun test src",
+    "test:e2e": "bun test tests/e2e"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
@@ -28,10 +28,9 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@types/bun": "^1.2.0",
     "@types/node": "^22.0.0",
     "@types/split2": "^4.2.3",
-    "tsx": "^4.19.0",
-    "typescript": "^5.8.0",
-    "vitest": "^4.1.0"
+    "typescript": "^5.8.0"
   }
 }

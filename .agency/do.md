@@ -1,10 +1,11 @@
 # /do config
 
 ## Check command
-`pnpm typecheck` — runs `tsc --noEmit` over the package.
+`bun run typecheck` — runs `tsc --noEmit` over the package.
 
 ## Test command
-`pnpm test:unit` — runs the vitest suite (`vitest run`).
+`bun run test:unit` — runs the unit suite (`bun test src`).
+`bun run test:e2e` — runs the black-box e2e suite (`bun test tests/e2e`).
 
 ## Documentation
 Keep `README.md` in sync with user-facing changes.

@@ -13,17 +13,21 @@ projection → exit code.
 ```
 tests/e2e/
 ├── harness.ts            # nix build, fixture materialization, run + parse
-├── run.e2e.test.ts       # the assertions (Vitest)
+├── run.e2e.test.ts       # the run assertions (bun:test)
+├── cancel.e2e.test.ts    # cancel / supersede / linger, driven from a 2nd process
+├── protect.e2e.test.ts   # `odu protect --dry-run` context enumeration
+├── mcp.e2e.test.ts       # the `odu mcp` agent face over a real MCP client
 ├── fixtures/
 │   ├── pass/justfile     # a DAG that goes green
-│   └── fail/justfile     # a DAG whose node fails (exit 1)
+│   ├── fail/justfile     # a DAG whose node fails (exit 1)
+│   └── sleep/justfile    # a DAG that stays running, to cancel out from under
 └── README.md
 ```
 
 Run locally:
 
 ```sh
-pnpm test:e2e            # vitest run --config vitest.e2e.config.ts
+bun run test:e2e         # bun test tests/e2e
 ```
 
 In CI it's the `e2e` step in `ci/mod.just`.
@@ -58,6 +62,14 @@ so the test exercises *odu's* machinery, not a real toolchain.
 - **Black-box.** `harness.ts` imports nothing from `src/` — the contract under
   test is the binary's observable behavior, so internal refactors don't ripple
   into these tests.
+- **No separate runner config.** These suites need far longer deadlines than a
+  unit test and must not run concurrently with each other — a fixture binds the
+  one-run lock and `.ci/odu.sock` in its own repo, but two suites racing the
+  same nix build and the same machine is how this suite used to flake. Both
+  facts are now stated where they apply rather than in a config file: each
+  `it`/`beforeAll` names its own timeout as a trailing argument, and `bun test`
+  already runs test *files* one at a time. So `bun test tests/e2e` needs no
+  flags beyond the path.
 
 ## Follow-ups
 

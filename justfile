@@ -6,11 +6,11 @@ mod ci 'ci/mod.just'
 default:
     @just --list
 
-# Install npm deps and hydrate the @kolu/* surface libraries from the
+# Install deps (bun) and hydrate the @kolu/* surface libraries from the
 # npins kolu pin (sh -c so $ODU_KOLU_* expand inside the dev shell that
 # exports them).
 install:
-    {{ nix_shell }} pnpm install --frozen-lockfile
+    {{ nix_shell }} bun install --frozen-lockfile
     {{ nix_shell }} sh -c 'sh scripts/hydrate-kolu-packages.sh \
       "$ODU_KOLU_SURFACE" @kolu/surface \
       "$ODU_KOLU_SURFACE_MCP" @kolu/surface-mcp \
@@ -21,27 +21,27 @@ install:
 
 # TypeScript type checking
 typecheck: install
-    {{ nix_shell }} pnpm typecheck
+    {{ nix_shell }} bun run typecheck
 
 # Unit tests (the loopback falsifiability suite)
 test: install
-    {{ nix_shell }} pnpm test:unit
+    {{ nix_shell }} bun run test:unit
 
 # Black-box e2e: build the odu binary with nix and drive it against a
 # throwaway fixture repo on a localhost lane (tests/e2e/README.md).
 e2e: install
-    {{ nix_shell }} pnpm test:e2e
+    {{ nix_shell }} bun run test:e2e
 
 # Run odu from source: `just run -- run --no-strict biome`. The nix build bakes
-# ODU_RUNNER_FLAKE onto the `odu` wrapper, but `pnpm start` is a raw tsx entry
+# ODU_RUNNER_FLAKE onto the `odu` wrapper, but `bun run start` is a raw bun entry
 # with no wrapper — and there is no fallback — so point the runner at this
 # checkout (odu's own flake exports odu-runner; git+file sees live tracked edits
 # and skips node_modules).
 run *args: install
-    {{ nix_shell }} env ODU_RUNNER_FLAKE="git+file://{{ justfile_directory() }}" pnpm start {{ args }}
+    {{ nix_shell }} env ODU_RUNNER_FLAKE="git+file://{{ justfile_directory() }}" bun run start {{ args }}
 
 # The site lives in website/ as a standalone npm project (its own
-# package-lock.json, not the root pnpm), so this shells in and uses npm. Pass
+# package-lock.json, not the root bun.lock), so this shells in and uses npm. Pass
 # Astro flags through, e.g. `just website --port 3000 --open`.
 # Preview the marketing website locally (Astro dev server, hot reload).
 website *args:
@@ -53,6 +53,11 @@ fmt:
 
 fmt-check:
     {{ nix_shell }} nixpkgs-fmt --check *.nix nix/*.nix nix/packages/*.nix
+
+# Regenerate bun.nix from bun.lock. Run this after any change to bun.lock
+# (i.e. after `bun install`/`bun add`).
+regenerate-bun-nix:
+    {{ nix_shell }} sh -c 'nix run .#bun2nix -- -l bun.lock -o bun.nix && nixpkgs-fmt bun.nix'
 
 # Update the kolu / nixpkgs pins
 update-pins:

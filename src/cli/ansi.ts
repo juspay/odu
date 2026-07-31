@@ -1,6 +1,6 @@
 /**
  * Minimal ANSI styling — no deps, auto-disabled when stdout isn't a TTY or
- * `NO_COLOR` is set (so vitest, `run.sh`-captured logs, and `--progress
+ * `NO_COLOR` is set (so `bun test`, `run.sh`-captured logs, and `--progress
  * json` consumers always see plain bytes).
  */
 
