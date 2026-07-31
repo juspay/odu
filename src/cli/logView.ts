@@ -135,6 +135,9 @@ export class LogView {
     if (next === this.height && cols_ === this.term.cols) return;
     this.height = next;
     this.term.resize(cols_, Math.max(this.height, 24));
+    // A reflow re-derives the extent: wrapped lines rejoin when the pane widens,
+    // so the previous mark is an overcount and would blank the pane.
+    this.highWater = 0;
     // A reflow rewrites the buffer, so the memo is stale for the same reason a
     // write makes it stale.
     this.writes += 1;
@@ -143,15 +146,16 @@ export class LogView {
 
   /** Lines actually written, scrollback included.
    *
-   *  NOT `buffer.active.length`: that is scrollback + the emulator's full row
-   *  count, so a two-line log in a 24-row emulator reports 24 and the tail
-   *  window lands on twenty-two blanks. The written extent is where the cursor
-   *  has reached — plus the cursor's own line when it holds anything, since
-   *  output without a trailing newline is still output.
+   *  NOT `buffer.active.length`: that is scrollback plus the emulator's full
+   *  row count, so a two-line log in a 24-row emulator reports 24 and the tail
+   *  window lands on twenty-two blanks.
    *
-   *  Advancing the high-water mark here rather than in `write()` gives it one
-   *  owner: it is then also correct after a `resize` reflow, which no write
-   *  callback would have seen. */
+   *  A high-water mark, because the cursor is not monotonic — a producer that
+   *  redraws with cursor-up moves it backwards, and reading the extent straight
+   *  off the cursor would make written lines vanish. It is NOT monotonic across
+   *  a reflow: widening rejoins wrapped lines, so the real extent SHRINKS, and
+   *  keeping the pre-reflow figure pointed the window past the end of the
+   *  content and blanked the pane. `resize()` clears the mark for that reason. */
   get total(): number {
     this.highWater = Math.max(this.highWater, this.writtenExtent());
     return this.highWater;

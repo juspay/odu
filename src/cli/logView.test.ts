@@ -83,6 +83,23 @@ describe("LogView — disposal", () => {
   });
 });
 
+describe("LogView — reflow", () => {
+  it("still shows the log after the pane is widened", async () => {
+    // Widening rejoins wrapped lines, so the written extent SHRINKS. A
+    // high-water mark that survives the reflow points the window past the end
+    // of the content and the pane paints blank — on a settled node it never
+    // self-heals, because no further write pushes the extent back up. That is
+    // exactly the node an operator widens their terminal to read.
+    const view = new LogView(20, 5);
+    for (let i = 0; i < 4; i++) await feed(view, `line ${i} with enough text to wrap at twenty columns\r\n`);
+    expect(visible(view).length).toBeGreaterThan(0);
+    view.resize(80, 5);
+    expect(visible(view).length).toBeGreaterThan(0);
+    expect(visible(view).join("\n")).toContain("line 3");
+    view.dispose();
+  });
+});
+
 describe("LogView — anchoring", () => {
   async function scrolled(): Promise<LogView> {
     const view = new LogView(40, 5);

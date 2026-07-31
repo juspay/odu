@@ -573,6 +573,25 @@ describe("LiveView — focus and the log subscription", () => {
   });
 });
 
+describe("LiveView — keys", () => {
+  it("Ctrl-C quits even with the search prompt open", async () => {
+    // Raw mode means no SIGINT, and the renderer is configured not to exit on
+    // its own — so if the search prompt swallows Ctrl-C the operator is stuck
+    // on the alternate screen with no way out but guessing esc.
+    let quit = 0;
+    const setup = await createTestRenderer({ width: 96, height: 30 });
+    const view = new LiveView(makeOpts({ setup, onQuit: () => quit++ }));
+    view.start(state, header);
+    await settle(setup);
+    setup.mockInput.pressKey("/"); // open the search prompt
+    await setup.flush();
+    setup.mockInput.pressKey("c", { ctrl: true });
+    await setup.flush();
+    expect(quit).toBe(1);
+    view.stop();
+  });
+});
+
 describe("LiveView — events land in the frame, never in scrollback", () => {
   it("shows a failed transition inside the frame", async () => {
     const { view, setup, frame } = await mount(96, 30);

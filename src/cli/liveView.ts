@@ -16,7 +16,8 @@
  * are constraints rather than arithmetic, and the log pane — pinned to twelve
  * rows before, on any size terminal — takes whatever height is left. Repaints
  * are damage-tracked by opentui's cell buffer, so a spinner tick rewrites a
- * spinner rather than a frame.
+ * spinner rather than a frame, and the frame clock stops outright once the run
+ * settles — it is re-armed by the next state or log frame that needs one.
  *
  * Two orderings here are load-bearing and easy to undo by accident:
  *
@@ -327,8 +328,7 @@ export class LiveView {
         `odu: live view unavailable (${(err as Error).message}) — continuing without it\n`,
       );
     });
-    this.timer = setInterval(() => this.onTick(), TICK_MS);
-    (this.timer as { unref?: () => void }).unref?.();
+    this.wake();
   }
 
   /** Open the terminal.
@@ -381,6 +381,7 @@ export class LiveView {
     renderer.on("resize", () => {
       this.resized = true;
       this.dirty = true;
+      this.wake();
     });
     // Focus (and therefore the log emulator) was seeded against the pre-mount
     // fallback, because the pane box had not been laid out yet. Push the real
@@ -425,6 +426,7 @@ export class LiveView {
    *  is a no-op once a keypress has locked focus. */
   update(state: PipelineState): void {
     this.state = state;
+    this.wake();
     this.seedFocus(state);
     this.paint();
   }
@@ -469,10 +471,16 @@ export class LiveView {
     }
     this.events.push({ text, color });
     if (this.events.length > EVENT_ROWS) this.events.shift();
-    this.retained.push(text);
-    if (this.retained.length > LiveView.RETAIN_MAX) this.retained.shift();
+    // Drop from the TAIL, not the head: a burst is almost always a stack
+    // trace, whose first line carries the message and whose remainder is
+    // frames. Shifting oldest-first kept the frames and discarded the reason.
+    if (this.retained.length < LiveView.RETAIN_MAX) this.retained.push(text);
+    else this.retained[LiveView.RETAIN_MAX - 1] = text;
     if (now) this.paint();
-    else this.dirty = true;
+    else {
+      this.dirty = true;
+      this.wake();
+    }
   }
 
   /** Restore the terminal, and leave the scrollback to the host.
@@ -487,7 +495,7 @@ export class LiveView {
   stop(state?: PipelineState): void {
     if (this.stopped) return;
     this.stopped = true;
-    if (this.timer !== undefined) clearInterval(this.timer);
+    this.sleep();
     this.logSub?.abort();
     this.log?.dispose();
     this.log = undefined;
@@ -738,6 +746,7 @@ export class LiveView {
           await this.log?.write(frame.text);
           if (!live()) return;
           this.dirty = true;
+          this.wake();
         }
       } catch (err) {
         if (!live()) return;
@@ -757,6 +766,14 @@ export class LiveView {
     const name = key.name ?? "";
     const seq = key.sequence ?? "";
 
+    // Checked before the search prompt consumes the key: raw mode means no
+    // SIGINT and the renderer is configured not to exit on its own, so an
+    // operator who opens `/` and hits Ctrl-C would otherwise be stuck on the
+    // alternate screen with no way out but guessing `esc`.
+    if (key.ctrl === true && (name === "c" || name === "d")) {
+      this.quit();
+      return;
+    }
     if (this.searching) {
       if (name === "escape") {
         this.searching = false;
@@ -773,11 +790,6 @@ export class LiveView {
       return;
     }
 
-    // Ctrl-C/Ctrl-D are the one binding that isn't a plain key identity.
-    if (key.ctrl === true && (name === "c" || name === "d")) {
-      this.quit();
-      return;
-    }
     const id = keyId(key);
     const binding = BINDINGS.find((b) => b.keys.includes(id));
     if (binding === undefined) return;
@@ -841,16 +853,34 @@ export class LiveView {
 
   // ── paint ────────────────────────────────────────────────────────────────
 
-  /** The frame clock only advances while something is animating; a settled run
-   *  stops ticking, so an idle `attach` costs nothing. */
+  /** Advance the spinner and flush any owed repaint. When neither is needed
+   *  the clock is STOPPED, not merely idled: a bare 10Hz wakeup that walks
+   *  `state.order` to decide it has nothing to do is worse than the 120ms
+   *  interval this view replaced. `wake()` re-arms it. */
+  /** Arm the frame clock if it is not already running. */
+  private wake(): void {
+    if (this.timer !== undefined || this.stopped) return;
+    this.timer = setInterval(() => this.onTick(), TICK_MS);
+    (this.timer as { unref?: () => void }).unref?.();
+  }
+
+  /** Stop it. Nothing is animating and nothing is owed, so a wakeup would only
+   *  re-derive that fact. */
+  private sleep(): void {
+    if (this.timer === undefined) return;
+    clearInterval(this.timer);
+    this.timer = undefined;
+  }
+
   private onTick(): void {
     const s = this.state;
     if (s === undefined || this.renderer === undefined) return;
     const animating = summarize(s).running > 0;
+    if (!animating && !this.dirty) {
+      this.sleep();
+      return;
+    }
     if (animating) this.tick += 1;
-    // A settled run still flushes a pending repaint — otherwise the last log
-    // frames of the final node would never reach the screen.
-    if (!animating && !this.dirty) return;
     this.dirty = false;
     if (this.resized) {
       this.resized = false;
@@ -861,11 +891,13 @@ export class LiveView {
   }
 
   private paint(): void {
-    this.dirty = false;
     if (this.stopped || this.renderer === undefined) return;
     const state = this.state;
     const header = this.header;
     if (state === undefined || header === undefined) return;
+    // Cleared only once the frame is actually buildable: clearing above the
+    // guards let an early return swallow a log repaint that then never landed.
+    this.dirty = false;
 
     const s = summarize(state);
     const spin = SPINNER[this.tick % SPINNER.length] ?? "⠋";
