@@ -53,8 +53,11 @@ describe("scratch: settled attach", () => {
     }) as typeof process.stdout.write;
     let err: unknown;
     try {
+      process.stdout.write("PROBE-BEFORE");
       view.start(state, header);
+      process.stdout.write("PROBE-AFTER-START");
       view.stop(state);
+      process.stdout.write("PROBE-AFTER-STOP");
     } catch (e) {
       err = e;
     } finally {
@@ -62,6 +65,13 @@ describe("scratch: settled attach", () => {
     }
     console.log("threw:", err);
     console.log("chunks:", JSON.stringify(chunks));
+    const v = view as unknown as {
+      state: unknown;
+      stopped: boolean;
+      verdict: () => string | undefined;
+    };
+    console.log("state set:", v.state !== undefined, "stopped:", v.stopped);
+    console.log("verdict():", JSON.stringify(v.verdict.call(view)));
     console.log("destroyed right after stop:", setup.renderer.isDestroyed);
     await new Promise((r) => setTimeout(r, 30));
     console.log("destroyed after mount settles:", setup.renderer.isDestroyed);

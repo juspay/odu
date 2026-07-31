@@ -66,5 +66,5 @@ cmd "odu run --no-strict"
 sleep 1
 
 say "Back in the shell — and the history above is exactly where it was."
-say "The run left one verdict line. Nothing else touched your scrollback."
+say "The run left its verdict. Nothing else touched your scrollback."
 sleep 4
