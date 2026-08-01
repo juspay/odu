@@ -365,9 +365,10 @@ describe("LiveView — mount ordering", () => {
     });
     await until(setup, () => frame().includes("yyy"), "the wide log line");
     const wide = frame().split("\n").find((l) => l.includes("yyy")) ?? "";
-    // The line is 150 chars: visible in full only if the emulator knows it has
-    // more than the fallback's 76 columns.
-    expect(wide.replace(/[^y]/g, "").length).toBeGreaterThan(120);
+    // The line is 150 chars. On a terminal this wide the matrix sits beside
+    // the pane, so the pane is not the full 150 — but it is far past the
+    // fallback's 76 columns, which is the whole point of the assertion.
+    expect(wide.replace(/[^y]/g, "").length).toBeGreaterThan(100);
     view.stop();
   });
 });
@@ -543,8 +544,11 @@ describe("LiveView — focus and the log subscription", () => {
     // e2e@aarch64-darwin; `h` steps to the other platform on the SAME row, so
     // the row marker must stay put while the cell marker moves.
     const { view, setup, frame } = await mount(96, 30);
+    // Anchored to the start of the line: the pane's border title also contains
+    // "e2e" (it names the focused node) AND a `›` from its ‹follow› marker, so
+    // a bare `includes` reads the title's geometry instead of the matrix's.
     const e2eRow = (f: string) =>
-      f.split("\n").find((l) => l.includes("e2e")) ?? "";
+      f.split("\n").find((l) => /^[›\s]\s*e2e\s/.test(l)) ?? "";
     const before = e2eRow(frame());
     setup.mockInput.pressKey("h");
     await setup.flush();
@@ -807,8 +811,13 @@ describe("LiveView — mouse", () => {
     const { view, setup, frame } = await mount(96, 30, { log: `${lines}\n` });
     await until(setup, () => frame().includes("line 79"), "the log tail");
     expect(frame()).toContain("‹follow›");
-    const paneY = frame().split("\n").findIndex((l) => l.includes("‹follow›")) + 4;
-    await setup.mockMouse.scroll(10, paneY, "up");
+    const shown = frame().split("\n");
+    const paneY = shown.findIndex((l) => l.includes("‹follow›")) + 4;
+    // The matrix sits beside the pane on a terminal this wide, so a column
+    // picked near the left edge is over the matrix and the wheel never
+    // reaches the log. Aim inside the pane's own border.
+    const paneX = (shown[2] ?? "").indexOf("┌") + 5;
+    await setup.mockMouse.scroll(paneX, paneY, "up");
     await until(setup, () => frame().includes("‹pinned›"), "the tail to unpin");
     // Scrolling up moved away from the newest line.
     expect(frame()).not.toContain("line 79");
@@ -893,6 +902,129 @@ describe("LiveView — events land in the frame, never in scrollback", () => {
   });
 });
 
+/** A pipeline of `n` recipes across two platforms — the shape that reduced the
+ *  log pane to a single row, because the matrix was sized to its content and
+ *  the pane took whatever was left. */
+function manyRecipes(n: number): PipelineState {
+  const platforms = ["x86_64-linux", "aarch64-darwin"];
+  const order: string[] = [];
+  const nodes: Record<string, NodeState> = {};
+  for (let i = 0; i < n; i++) {
+    for (const platform of platforms) {
+      const id = `ci::recipe-${String(i).padStart(2, "0")}@${platform}`;
+      order.push(id);
+      nodes[id] = node(id, "ok", 1_000 + i);
+    }
+  }
+  return {
+    name: "ci::default",
+    sha7: "3cbac86",
+    dirty: false,
+    order,
+    nodes,
+    posting: { owed: [] },
+  };
+}
+
+const logLines = (n: number): string =>
+  `${Array.from({ length: n }, (_, i) => `line ${i}`).join("\n")}\n`;
+/** Rows of actual log on screen — the number the layout exists to protect. */
+const logRowCount = (f: string): number =>
+  f.split("\n").filter((l) => /line \d+/.test(l)).length;
+
+describe("LiveView — the frame has two layouts", () => {
+  const big = manyRecipes(25);
+
+  it("sits the matrix beside the log when the terminal is wide enough", async () => {
+    // 25 recipes on a 33-row terminal left the pane exactly one row: the
+    // matrix is sized to its content and the pane took the remainder. Across
+    // instead of down, the pane's height stops depending on the recipe count.
+    const { view, setup, frame } = await mount(130, 33, {
+      on: big,
+      log: logLines(120),
+    });
+    await until(setup, () => logRowCount(frame()) > 0, "the log");
+    const rows = frame().split("\n");
+    // The proof of "beside": one line holds a matrix row AND the pane's border.
+    const shared = rows.find((l) => /recipe-00/.test(l));
+    expect(shared).toBeDefined();
+    expect(shared).toContain("│");
+    expect(logRowCount(frame())).toBeGreaterThanOrEqual(20);
+    // Every recipe is still there — the log's height cost the matrix nothing.
+    expect(frame()).toContain("recipe-24");
+    view.stop();
+  });
+
+  it("keeps the log a floor of rows when it has to stack", async () => {
+    // Too narrow to sit side by side, so the matrix yields height instead —
+    // the case that used to produce a one-row pane.
+    const { view, setup, frame } = await mount(70, 33, {
+      on: big,
+      log: logLines(120),
+    });
+    await until(setup, () => logRowCount(frame()) > 0, "the log");
+    expect(logRowCount(frame())).toBeGreaterThanOrEqual(8);
+    view.stop();
+  });
+
+  it("says how many recipes it is holding back rather than just stopping", async () => {
+    // A matrix that ends at the terminal's edge reads as a shorter pipeline.
+    const { view, setup, frame } = await mount(70, 33, {
+      on: big,
+      log: logLines(120),
+    });
+    await until(setup, () => /⋯ \d+ more/.test(frame()), "the held-back count");
+    expect(frame()).toMatch(/⋯ \d+ more/);
+    view.stop();
+  });
+
+  it("clicks the recipe under the pointer once the matrix has scrolled", async () => {
+    // The window offset has to be part of resolving a click. Without it a
+    // click reads the unwindowed list and focuses whatever recipe WOULD have
+    // been at that row — the same defect as a click resolving only the row.
+    const { view, setup, frame } = await mount(70, 33, {
+      on: big,
+      log: logLines(10),
+    });
+    await until(setup, () => /⋯ \d+ more/.test(frame()), "a windowed matrix");
+    // Drive focus down until the window has scrolled off the first recipe.
+    for (let i = 0; i < 24; i++) setup.mockInput.pressKey("j");
+    await until(
+      setup,
+      () => !frame().includes("recipe-00"),
+      "the matrix to scroll",
+    );
+
+    // Read a recipe's name straight off the screen, click that line, and the
+    // pane must end up showing that same recipe.
+    const rows = frame().split("\n");
+    const y = rows.findIndex((l) => /^[›\s]\s*recipe-\d\d\s/.test(l));
+    const name = (rows[y] ?? "").match(/recipe-\d\d/)?.[0] ?? "";
+    expect(name).not.toBe("");
+    await setup.mockMouse.click(4, y);
+    await until(
+      setup,
+      () => frame().includes(`ci::${name}@`),
+      `the pane to show ${name}`,
+    );
+    view.stop();
+  });
+
+  it("still names the focused node when the pane is narrower than the terminal", async () => {
+    // opentui draws a border title only when it fits ENTIRELY, so a title
+    // built for the full terminal width is dropped outright beside the matrix
+    // — taking with it the one place the frame names what you are reading.
+    const { view, setup, frame } = await mount(90, 30);
+    await until(
+      setup,
+      () => frame().includes("ci::e2e@aarch64-darwin"),
+      "the pane title",
+    );
+    expect(frame()).toContain("‹follow›");
+    view.stop();
+  });
+});
+
 /**
  * Every affordance the frame presents, exercised once.
  *
@@ -910,6 +1042,8 @@ describe("LiveView — events land in the frame, never in scrollback", () => {
 const PAGE_UP = "\u001b[5~";
 const PAGE_DOWN = "\u001b[6~";
 const ESCAPE = "\u001b";
+const HOME = "\u001b[H";
+const END = "\u001b[F";
 
 describe("LiveView — every affordance is wired", () => {
   const longLog = `${Array.from({ length: 200 }, (_, i) => `line ${i}`).join("\n")}\n`;
@@ -947,6 +1081,42 @@ describe("LiveView — every affordance is wired", () => {
     await until(setup, () => frame().includes("line 0"), "a jump to the top");
     expect(frame()).toContain("line 0");
     expect(frame()).toContain("‹pinned›");
+    view.stop();
+  });
+
+  it("drag the scrollbar without leaving a selection behind", async () => {
+    // opentui runs its own mouse text-selection, so a drag painted a highlight
+    // across every cell it crossed and left it there — visible residue on the
+    // gutter after every scrollbar drag, with no copy behind it to justify it.
+    const { view, setup, frame } = await mount(96, 30, { log: longLog });
+    await until(setup, () => frame().includes("line 199"), "the log tail");
+    const rows = () => frame().split("\n");
+    const gutterX = (rows()[6] ?? "").length - 2;
+    const thumbY = rows().findIndex((l) => l.includes("█"));
+    expect(thumbY).toBeGreaterThan(0);
+    // A bare drag, NOT pressDown-then-drag: `drag` ends with a release, and a
+    // release finishes an empty one-column selection by discarding it. Asserted
+    // after that sequence the residue is already gone and the assertion holds
+    // whether or not the rows are selectable — which is how the first version
+    // of this test passed against the unfixed code.
+    await setup.mockMouse.drag(gutterX, thumbY, gutterX, thumbY - 6);
+    await setup.flush();
+    expect(setup.renderer.hasSelection).toBe(false);
+    view.stop();
+  });
+
+  it("End jumps to the tail and Home to the top", async () => {
+    // The keys someone reaches for when the wheel is not getting them to the
+    // end of a long log. `g`/`G` did this already, and neither is guessable.
+    const { view, setup, frame } = await mount(96, 30, { log: longLog });
+    await until(setup, () => frame().includes("line 199"), "the log tail");
+    setup.mockInput.pressKey(HOME);
+    await until(setup, () => frame().includes("line 0"), "Home");
+    expect(frame()).toContain("‹pinned›");
+    setup.mockInput.pressKey(END);
+    await until(setup, () => frame().includes("line 199"), "End");
+    // End is "follow the tail again", not merely "scroll there once".
+    expect(frame()).toContain("‹follow›");
     view.stop();
   });
 
