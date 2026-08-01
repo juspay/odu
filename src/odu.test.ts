@@ -13,10 +13,12 @@ import { createLoopbackPair } from "@kolu/surface/loopback";
 import { serveOverStdio } from "@kolu/surface/peer-server";
 import { afterEach, describe, expect, it } from "bun:test";
 import {
-  applyLogFrame,
+  countsLine,
   exitCode,
-  renderLogPane,
+  OUTCOME_MARK,
+  outcomeOf,
   summarize,
+  verdictLine,
 } from "./cli/render";
 import type { TaskSpec } from "./common/spec";
 import type {
@@ -389,22 +391,18 @@ describe("render helpers", () => {
     expect(summary.failedOverall).toBe(true);
   });
 
-  it("renderLogPane names the focused node id, command + log tail", () => {
-    const pane = renderLogPane(state.nodes.b, "line one\nline two");
-    // The full node id labels the rule — the matrix above can't tell which
-    // platform's log is attached, so the pane must.
-    expect(pane).toContain("── b ");
-    expect(pane).toContain("$ echo b");
-    expect(pane).toContain("line two");
-    // No focus → just the rule (the matrix above carries the overview).
-    expect(renderLogPane(undefined, "")).toBe("─".repeat(60));
+  it("verdictLine names the outcome, the counts and the red nodes", () => {
+    // Pure in the state: the host prints it once its viewport is gone, so
+    // there is no "call stop() first" ordering to get wrong.
+    const line = verdictLine(state);
+    expect(line).toContain(state.name);
+    expect(line).toContain(state.sha7);
+    // The outcome mark and the counts, asserted against the same projections
+    // the frame uses — not restated here, or the test pins a second spelling.
+    expect(line).toContain(OUTCOME_MARK[outcomeOf(summarize(state))]);
+    expect(line).toContain(countsLine(summarize(state)));
+    // The red node is named. A verdict that hides one is worse than none.
+    expect(line).toContain("⚠ b");
   });
 
-  it("applyLogFrame resets on snapshot, appends on delta", () => {
-    let buffer = applyLogFrame("", { kind: "append", text: "one" });
-    buffer = applyLogFrame(buffer, { kind: "append", text: " two" });
-    expect(buffer).toBe("one two");
-    buffer = applyLogFrame(buffer, { kind: "snapshot", text: "fresh" });
-    expect(buffer).toBe("fresh");
-  });
 });

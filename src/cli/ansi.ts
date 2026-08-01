@@ -26,13 +26,6 @@ export const yellow = wrap(33, 39);
 export const magenta = wrap(35, 39);
 export const cyan = wrap(36, 39);
 
-/** Braille spinner — the always-moving glyph that makes a 40-minute e2e node
- *  look alive instead of hung. */
-const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-export function spinnerAt(tick: number): string {
-  return SPINNER[tick % SPINNER.length] as string;
-}
-
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI escapes is the point.
 const ANSI_RE = /\x1b\[[0-9;]*[A-Za-z]/g;
 export function stripAnsi(s: string): string {

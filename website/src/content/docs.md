@@ -188,6 +188,46 @@ odu protect [--dry-run]           sync required GitHub status contexts
 odu mcp                           serve the agent interface over stdio
 ```
 
+### The live dashboard
+
+`odu run` on a terminal, and `odu attach` from anywhere else, paint the same
+view: a recipes × platforms matrix, the focused node's log, and an events lane
+above the status bar. It runs on the alternate screen, so your scrollback is
+untouched while the run is live and gets a verdict when it exits — `attach`
+leaves a one-line recap, `run` its full per-node summary.
+
+On a terminal wide enough for both, the matrix sits **beside** the log rather
+than above it, and the log gets the frame's full height. A pipeline's recipe
+count then costs the log nothing: 25 recipes on a 33-row terminal leaves 27
+rows of log side by side, against one row stacked. Narrower than that, the view
+stacks and the matrix yields instead — the log keeps a floor of 8 rows, and the
+matrix becomes a window that follows the focused cell and says how many recipes
+it is holding back.
+
+| key | |
+|---|---|
+| `h` `j` `k` `l`, arrows | move the focus between matrix cells |
+| `1`–`9` | jump straight to a node |
+| `r` | rerun the focused node (and its dependants) |
+| `f` | follow the log tail, or pin it where it is |
+| `PgUp` `PgDn` | scroll the log a page at a time |
+| `Home` `End`, `g` `G` | jump to the top of the log, or back to the tail |
+| mouse | click a matrix cell or an events entry to focus it, wheel over the log to scroll, drag the scrollbar, click a status hint to run it |
+| `/` then `Enter`, `n` | search the focused log, next match; `Esc` cancels |
+| `q`, `Ctrl-C`, `Ctrl-D` | in `odu attach`: leave; the run keeps going. In `odu run`: cancel the run (exit 130) |
+
+The log pane is a terminal, not a text buffer: a node that redraws with carriage
+returns (`nix build`, `bun test`) shows one progress line rather than hundreds,
+wide characters are measured rather than counted, and a node's own colours come
+through — a failing test stays red. Escape sequences never reach the pane as
+text; the emulator consumes them and hands back characters with attributes. The
+pane takes whatever height the layout gives it, and a resize relayouts — and
+re-orients between the stacked and side-by-side frames — rather than smearing.
+
+The frame itself is coloured by state: each node's glyph carries its status
+hue, a running node's elapsed clock stays lit while settled durations recede,
+and the counts row is tinted per bucket so a run's shape reads at a glance.
+
 ### Cancel, supersede, and linger
 
 `.ci/odu.sock` identifies the live run in a checkout. Bare `odu cancel` asks the coordinator to finalize statuses, close lanes, remove the socket, and then waits for teardown.
