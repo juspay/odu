@@ -12,22 +12,25 @@
     "test:e2e": "bun test tests/e2e"
   },
   "dependencies": {
+    "@effect/platform-node": "4.0.0-beta.102",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@opentui/core": "^0.4.5",
-    "@orpc/client": "^1.13.13",
-    "@orpc/contract": "^1.13.13",
-    "@orpc/server": "^1.13.13",
-    "@orpc/standard-server": "^1.13.13",
-    "@orpc/standard-server-peer": "^1.13.13",
     "@preact/signals-core": "^1.8.0",
     "@solid-primitives/scheduled": "^1.5.3",
     "@xterm/headless": "^6.0.0",
+    "dequal": "^2.0.3",
+    "effect": "4.0.0-beta.102",
     "neverthrow": "^8.2.0",
     "quick-lru": "^7.3.0",
     "solid-js": "^1.9.0",
     "split2": "^4.2.0",
     "ts-pattern": "^5.9.0",
     "zod": "^4.3.6"
+  },
+  "//overrides": "One effect instance, always. The @kolu/* sources are hydrated from the Nix store and resolve `effect` by walking up to this root node_modules (bunfig.toml explains the isolated-linker invariant), so a second copy arriving transitively would give kolu's _tag-based error narrowing two class realms to disagree about.",
+  "overrides": {
+    "effect": "4.0.0-beta.102",
+    "@effect/platform-node": "4.0.0-beta.102"
   },
   "devDependencies": {
     "@types/bun": "^1.2.0",
