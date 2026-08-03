@@ -12,6 +12,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { implementSurface, inMemoryStore } from "@kolu/surface/server";
+import { Effect } from "effect";
 import { createLogTail } from "../common/logTail";
 import { serveSocket } from "../coordinator/socket";
 import {
@@ -74,41 +75,43 @@ export async function serveTestSurface(
     streams: { nodeLog: { source: tail.streamSource } },
     procedures: {
       node: {
-        rerun: async ({ input }) => {
-          reruns.push(input.id);
-          return { ok: true };
-        },
-        cancel: async ({ input }) => {
-          nodeCancels.push(input.id);
-          return { ok: true };
-        },
+        rerun: ({ input }) =>
+          Effect.sync(() => {
+            reruns.push(input.id);
+            return { ok: true };
+          }),
+        cancel: ({ input }) =>
+          Effect.sync(() => {
+            nodeCancels.push(input.id);
+            return { ok: true };
+          }),
       },
       run: {
-        cancel: async () => {
-          cancels += 1;
-          options.onCancel?.(() => closeListener());
-          return { ok: true };
-        },
+        cancel: () =>
+          Effect.sync(() => {
+            cancels += 1;
+            options.onCancel?.(() => closeListener());
+            return { ok: true };
+          }),
       },
       lane: {
-        cancel: async ({ input }) => {
-          laneCancels.push(input.platform);
-          return { ok: true };
-        },
+        cancel: ({ input }) =>
+          Effect.sync(() => {
+            laneCancels.push(input.platform);
+            return { ok: true };
+          }),
       },
     },
   });
-  // `implementSurface` returns the FINAL top-level router — serve it directly.
-  const router = runtime.router;
+  const served = { group: runtime.group, handlers: runtime.handlers };
 
   // A pinned path is caller-owned (the caller removes it); otherwise the harness
   // owns a fresh temp dir + socket and removes them on `close`.
   const dir = pinnedSocketPath ? null : mkdtempSync(join(tmpdir(), "odu-mcp-test-"));
   const socketPath = pinnedSocketPath ?? join(dir as string, "odu.sock");
-  // Reuse the coordinator's serve (mkdir + 0700 chmod + outcome handling); it
-  // types `router` as `any` — implementSurface's returned router is `any`, same
-  // as run.ts serves.
-  closeListener = await serveSocket(router, socketPath);
+  // Reuse the coordinator.s serve (mkdir + 0700 chmod + outcome handling) over
+  // the same typed { group, handlers } pair run.ts serves.
+  closeListener = await serveSocket(served, socketPath);
 
   return {
     socketPath,

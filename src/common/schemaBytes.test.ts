@@ -41,18 +41,13 @@ import {
 
 /** Decode then re-encode, and hand back the bytes. A format is frozen when this
  *  is the identity function on every spelling a peer may send. */
-function roundTrip(
-  schema: Parameters<typeof Schema.decodeUnknownSync>[0],
-  json: string,
-): string {
+function roundTrip<T>(schema: Schema.Codec<T, unknown>, json: string): string {
   const decoded = Schema.decodeUnknownSync(schema)(JSON.parse(json));
   return JSON.stringify(Schema.encodeUnknownSync(schema)(decoded));
 }
 
-const accepts = (
-  schema: Parameters<typeof Schema.decodeUnknownResult>[0],
-  value: unknown,
-): boolean => Result.isSuccess(Schema.decodeUnknownResult(schema)(value));
+const accepts = <T,>(schema: Schema.Codec<T, unknown>, value: unknown): boolean =>
+  Result.isSuccess(Schema.decodeUnknownResult(schema)(value));
 
 const NODE =
   '{"id":"ci::unit@x86_64-linux","name":"ci::unit","command":"just --no-deps ci::unit",' +
@@ -88,7 +83,7 @@ describe("PipelineState — the cell that crosses both wires", () => {
     expect(roundTrip(PipelineStateSchema, bytes)).not.toContain("null");
   });
 
-  it("a present-but-undefined seq is REJECTED, not silently dropped", () => {
+  it("a present-but-undefined seq is REJECTED on DECODE, not silently dropped", () => {
     // PLAN #17: `optionalKey` is stricter than zod's `.optional()`. Every
     // producer must OMIT the key. This is the assertion that gives that rule
     // teeth — a producer spelling `seq: undefined` fails loudly here.
@@ -102,6 +97,25 @@ describe("PipelineState — the cell that crosses both wires", () => {
         seq: undefined,
       }),
     ).toBe(false);
+  });
+
+  it("a present-but-undefined seq is REJECTED on ENCODE too", () => {
+    // The half that actually bit. `run.ts` used to publish
+    // `{ ...state, seq: seq ?? undefined }` onto the fan-in cell, which zod's
+    // `.optional()` tolerated; `optionalKey` refuses it in BOTH directions, so
+    // on the rare no-reserved-seq path the whole cell became un-encodable and
+    // every attach / status / agent read of that run would have died. The
+    // producer now spreads the key in only when there is one.
+    expect(() =>
+      Schema.encodeUnknownSync(PipelineStateSchema)({
+        name: "ci",
+        sha7: "",
+        dirty: false,
+        order: [],
+        nodes: {},
+        seq: undefined,
+      }),
+    ).toThrow();
   });
 });
 

@@ -26,6 +26,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { implementSurface, inMemoryStore } from "@kolu/surface/server";
+import { Effect } from "effect";
 import { isLocalHost } from "@kolu/surface-remote";
 import { bold, dim, link } from "../cli/ansi";
 import {
@@ -430,7 +431,7 @@ async function orchestrate(
       ? createDisplay("live", {
           interactive: process.stdin.isTTY === true,
           hookStderr: true,
-          openLog: (id, sig) => tail.streamSource({ id }, sig),
+          openLog: (id) => tail.streamSource({ id }),
           rerun: (id) => void rerunNode(id),
           onQuit: () => shutdown(130),
         })
@@ -856,30 +857,35 @@ async function orchestrate(
     streams: {
       nodeLog: { source: tail.streamSource },
     },
+    // One arm per procedure — `({ input }) => Effect<Out>`. The two that await
+    // a promise-shaped mutation keep it inside `Effect.promise`; the two that
+    // never awaited are `Effect.sync`.
     procedures: {
       node: {
-        rerun: async ({ input }) => ({ ok: await rerunNode(input.id) }),
-        cancel: async ({ input }) => ({ ok: await cancelNode(input.id) }),
+        rerun: ({ input }) =>
+          Effect.promise(async () => ({ ok: await rerunNode(input.id) })),
+        cancel: ({ input }) =>
+          Effect.promise(async () => ({ ok: await cancelNode(input.id) })),
       },
       run: {
         // A second process asked this run to stop. Drive the shared teardown
         // and ack at once — the caller confirms the run is gone by the socket
         // closing, not by this reply (the process exits as the queue drains).
-        cancel: async () => {
-          shutdown(130, "cancelled");
-          return { ok: true };
-        },
+        cancel: () =>
+          Effect.sync(() => {
+            shutdown(130, "cancelled");
+            return { ok: true };
+          }),
       },
       lane: {
-        cancel: async ({ input }) => ({
-          ok: cancelPlatform(input.platform),
-        }),
+        cancel: ({ input }) =>
+          Effect.sync(() => ({ ok: cancelPlatform(input.platform) })),
       },
     },
   });
-  // `implementSurface` now returns the FINAL top-level router (the framework
-  // owns its own in-memory channel and the oRPC finalize) — serve it directly.
-  const router = runtime.router;
+  // `implementSurface` hands back the group it advertises and the handlers
+  // bound to it, already route-set-checked against each other — serve the pair.
+  const served = { group: runtime.group, handlers: runtime.handlers };
 
   // Poster after fan-in cell exists: onHealth is real from construction.
   const poster = new StatusPoster({
@@ -1081,11 +1087,21 @@ async function orchestrate(
   };
   // Stamp the reserved seq onto the fan-in state so every face — the agent
   // `wait_for_settle` verdict especially — reads the run's full identity
-  // `<sha7>#<seq>`. Set once here, before the socket serves; `updateNode` spreads
-  // the whole state, so it survives every node update. `undefined` (no reserved
-  // seq) leaves the field absent, mapped to `null` on the agent surface.
+  // `<sha7>#<seq>`. Set once here, before the socket serves; `updateNode`
+  // spreads the whole state, so it survives every node update.
   // (seq itself was reserved before the venue lease — see above.)
-  runtime.ctx.cells.nodes.set({ ...store.get(), seq: seq ?? undefined });
+  //
+  // The key is SPREAD IN, never spelled `seq: undefined`. `PipelineState.seq`
+  // is `Schema.optionalKey` (PLAN #17), which rejects a present-but-undefined
+  // key on ENCODE as well as decode — so on the rare path where no seq could be
+  // reserved, writing the key would have made the whole fan-in cell
+  // un-encodable and killed every `attach` / `status` / agent read of that run.
+  // Absent is the honest value: the run claims `sha7` but no unique
+  // `<sha7>#<seq>`, and the agent surface maps that to `seq: null`.
+  runtime.ctx.cells.nodes.set({
+    ...store.get(),
+    ...(seq === null ? {} : { seq }),
+  });
   if (seq !== null) {
     finalizeRunRecord = (state, unposted): void => {
       try {
@@ -1119,7 +1135,7 @@ async function orchestrate(
   headerStore.set(header);
   // Checkout run-lock is already held (covers lease wait); serveSocket is the
   // attach surface and a second exclusivity gate for the post-lease window.
-  closeSocket = await serveSocket(router, socketPath);
+  closeSocket = await serveSocket(served, socketPath);
   // The identity is now observable: a reader can see `sha7#seq` and key a
   // verdict on it, so the ordinal must never be handed to another run even if
   // finalizing this one's record fails. A no-op when no seq was ever reserved

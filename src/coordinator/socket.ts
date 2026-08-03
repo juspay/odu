@@ -21,11 +21,14 @@
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { unixSocketLink } from "@kolu/surface/links/unix-socket";
+import type { SurfaceHandlers } from "@kolu/surface/server";
 import { serveOverUnixSocket } from "@kolu/surface/unix-socket";
 import "../common/asyncConnectError";
-import type { ContractRouterClient } from "@orpc/contract";
-import type { oduSurface } from "../common/surface";
+import type { Rpc, RpcGroup } from "effect/unstable/rpc";
+import { type OduClient, oduClientOver, oduSurface } from "../common/surface";
 import { RUN_LOCK_PATH } from "./checkoutLock";
+
+export type { OduClient };
 
 export const SOCKET_PATH = ".ci/odu.sock";
 
@@ -45,16 +48,21 @@ export function checkoutPaths(repoRoot: string): {
   };
 }
 
-export type OduClient = ContractRouterClient<typeof oduSurface.contract>;
-
-/** Serve `router` on the unix socket; refuses when another run is live in
- *  this checkout (one run per checkout — justci's `.ci/pc.sock` rule). The
- *  library reclaims a provably-stale socket left by a crashed coordinator
+/** Serve the fan-in surface on the unix socket; refuses when another run is
+ *  live in this checkout (one run per checkout — justci's `.ci/pc.sock` rule).
+ *  The library reclaims a provably-stale socket left by a crashed coordinator
  *  and refuses to serve from a world-readable directory, so `.ci` is
- *  tightened to owner-only first (it holds nothing but this run's logs). */
+ *  tightened to owner-only first (it holds nothing but this run's logs).
+ *
+ *  The served value is now the `{ group, handlers }` pair `implementSurface`
+ *  hands back, and it is TYPED — the `any` this parameter used to be existed
+ *  only because oRPC's router had no nameable shape. A tag carries its own
+ *  route, so there is nothing to re-prefix at the mount site. */
 export async function serveSocket(
-  // biome-ignore lint/suspicious/noExplicitAny: same router-shape constraint as serveOverUnixSocket's own options (implementSurface types its returned router as `any` — its spec walk is dynamic).
-  router: any,
+  served: {
+    group: RpcGroup.RpcGroup<Rpc.Any>;
+    handlers: SurfaceHandlers;
+  },
   path: string = SOCKET_PATH,
 ): Promise<() => void> {
   const dir = dirname(path);
@@ -63,7 +71,11 @@ export async function serveSocket(
   // created `.ci` under the umask), and the library refuses non-private dirs.
   chmodSync(dir, 0o700);
 
-  const listener = await serveOverUnixSocket({ socketPath: path, router });
+  const listener = await serveOverUnixSocket({
+    socketPath: path,
+    group: served.group,
+    handlers: served.handlers,
+  });
   const { outcome } = listener;
   switch (outcome.kind) {
     case "listening":
@@ -95,22 +107,32 @@ export async function serveSocket(
  *  rather than a process exit. */
 export async function tryDialSocket(
   path: string = SOCKET_PATH,
-): Promise<{ client: OduClient; close: () => void } | null> {
+): Promise<DialedSocket | null> {
   try {
-    const { client, dispose } = await unixSocketLink<
-      typeof oduSurface.contract
-    >({ socketPath: path });
-    return { client, close: dispose };
+    // The link owns a `Scope` holding the protocol's dial/ping/response
+    // fibers, so `close()` is genuinely async now — dropping it unawaited
+    // leaks them. Every call site awaits.
+    const link = await unixSocketLink({
+      group: oduSurface.group,
+      socketPath: path,
+    });
+    return { client: oduClientOver(link.dispatch), close: link.dispose };
   } catch {
     return null;
   }
+}
+
+/** A dialled fan-in socket: the typed face plus the link teardown. */
+export interface DialedSocket {
+  client: OduClient;
+  close: () => Promise<void>;
 }
 
 /** Dial the socket of a live run. Exits with the justci-parity message when
  *  no run is in progress. */
 export async function dialSocket(
   path: string = SOCKET_PATH,
-): Promise<{ client: OduClient; close: () => void }> {
+): Promise<DialedSocket> {
   const dialed = await tryDialSocket(path);
   if (dialed !== null) return dialed;
   process.stderr.write(

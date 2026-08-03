@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stdioLink } from "@kolu/surface/links/stdio";
 import { afterEach, describe, expect, it } from "bun:test";
-import type { laneSurface } from "../common/surface";
+import { laneClientOver, laneSurface } from "../common/surface";
 
 // The child is spawned with the very same Bun that runs this suite — no
 // launcher shim in node_modules/.bin to find, `bun src/runner/main.ts` is
@@ -62,10 +62,12 @@ describe("runner death by signal", () => {
     if (runner.stdout === null || runner.stdin === null) {
       throw new Error("runner spawned without stdio pipes");
     }
-    const client = stdioLink<typeof laneSurface.contract>({
+    const link = await stdioLink({
+      group: laneSurface.group,
       read: runner.stdout,
       write: runner.stdin,
     });
+    const client = laneClientOver(link.dispatch);
 
     const ack = await client.surface.run.configure({
       name: "sigterm-test",

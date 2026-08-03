@@ -21,17 +21,18 @@ import {
   verdictLine,
 } from "./cli/render";
 import type { TaskSpec } from "./common/spec";
-import type {
+import {
+  type LaneClient,
+  laneClientOver,
   laneSurface,
-  NodesSnapshot,
-  PipelineState,
+  type NodesSnapshot,
+  type PipelineState,
 } from "./common/surface";
+import { firstFrame, subscribe } from "./common/stream";
 import { createLaneRunner, SETUP_NODE_ID } from "./runner/runner";
 
-type Client = ReturnType<typeof stdioLink<typeof laneSurface.contract>>;
-
 interface Harness {
-  client: Client;
+  client: LaneClient;
   states: NodesSnapshot[];
   configure: (
     tasks: TaskSpec[],
@@ -48,19 +49,28 @@ afterEach(() => {
   while (cleanups.length > 0) cleanups.pop()?.();
 });
 
-function harness(): Harness {
+async function harness(): Promise<Harness> {
   const runner = createLaneRunner();
   const pair = createLoopbackPair();
-  void serveOverStdio({ router: runner.router, transport: pair.server });
-  const client = stdioLink<typeof laneSurface.contract>({
+  void serveOverStdio({
+    group: runner.group,
+    handlers: runner.handlers,
+    transport: pair.server,
+  });
+  // Every wire link is ASYNC now (building the protocol layer and its fibers is
+  // an effect) and owns a scope holding those fibers — hence the await here and
+  // the `dispose()` in teardown.
+  const link = await stdioLink({
+    group: laneSurface.group,
     read: pair.client.read,
     write: pair.client.write,
   });
+  const client = laneClientOver(link.dispatch);
 
   const states: NodesSnapshot[] = [];
   void (async () => {
     try {
-      for await (const state of await client.surface.nodes.get({})) {
+      for await (const state of subscribe(client.surface.nodes.get(undefined))) {
         states.push(state);
       }
     } catch {
@@ -70,7 +80,8 @@ function harness(): Harness {
 
   const dispose = (): void => {
     // Client goes away first (runner sees EOF and disposes), then the
-    // client's inbound closes so live iterators end — mini-ci's ordering.
+    // client.s inbound closes so live iterators end — mini-ci.s ordering.
+    void link.dispose();
     pair.client.write.end();
     runner.dispose();
     pair.client.read.destroy();
@@ -124,7 +135,7 @@ const chain: TaskSpec[] = [
 
 describe("odu lane runner over stdio (loopback)", () => {
   it("spawns idle, then configure seeds _ci-setup + tasks and runs to green", async () => {
-    const h = harness();
+    const h = await harness();
     const ack = await h.configure(chain);
     expect(ack).toEqual({ ok: true, error: null });
 
@@ -151,7 +162,7 @@ describe("odu lane runner over stdio (loopback)", () => {
   });
 
   it("rejects a second configure (one run per lane process)", async () => {
-    const h = harness();
+    const h = await harness();
     expect((await h.configure(chain)).ok).toBe(true);
     const again = await h.configure(chain);
     expect(again.ok).toBe(false);
@@ -159,7 +170,7 @@ describe("odu lane runner over stdio (loopback)", () => {
   });
 
   it("fails _ci-setup on a missing workspace and skip-cascades every task", async () => {
-    const h = harness();
+    const h = await harness();
     const ack = await h.configure(chain, "/nonexistent/odu-workspace");
     expect(ack.ok).toBe(true); // ack-fast: the failure surfaces as the node
     await until(() => summarize(last(h)).done);
@@ -171,36 +182,31 @@ describe("odu lane runner over stdio (loopback)", () => {
   });
 
   it("gives a late subscriber the full snapshot as its first frame", async () => {
-    const h = harness();
+    const h = await harness();
     await h.configure(chain);
     await until(() => summarize(last(h)).done && last(h).order.length === 3);
 
-    let first: NodesSnapshot | undefined;
-    for await (const state of await h.client.surface.nodes.get({})) {
-      first = state;
-      break;
-    }
+    // A late subscriber still leads with the CURRENT snapshot — the cell.s
+    // snapshot is taken at subscribe time (the stream is lazy), not when the
+    // handler was built.
+    const first = await firstFrame(h.client.surface.nodes.get(undefined));
     expect(first?.nodes.test?.status).toBe("ok");
   });
 
   it("replays a node's log to a late subscriber as a snapshot frame", async () => {
-    const h = harness();
+    const h = await harness();
     await h.configure([
       { id: "mark", command: "echo MARK-ODU-LOG", needs: [] },
     ]);
     await until(() => last(h).nodes.mark?.status === "ok");
 
-    for await (const frame of await h.client.surface.nodeLog.get({
-      id: "mark",
-    })) {
-      expect(frame.kind).toBe("snapshot");
-      expect(frame.text).toContain("MARK-ODU-LOG");
-      break;
-    }
+    const frame = await firstFrame(h.client.surface.nodeLog.get({ id: "mark" }));
+    expect(frame?.kind).toBe("snapshot");
+    expect(frame?.text).toContain("MARK-ODU-LOG");
   });
 
   it("reruns a node and its transitive dependents", async () => {
-    const h = harness();
+    const h = await harness();
     await h.configure(chain);
     await until(() => summarize(last(h)).done && last(h).order.length === 3);
 
@@ -217,7 +223,7 @@ describe("odu lane runner over stdio (loopback)", () => {
   });
 
   it("skips dependents of a failed node — no false greens", async () => {
-    const h = harness();
+    const h = await harness();
     await h.configure([
       { id: "build", command: "exit 3", needs: [] },
       { id: "test", command: "echo never", needs: ["build"] },
@@ -235,7 +241,7 @@ describe("odu lane runner over stdio (loopback)", () => {
     // socket by path, so without the `| cat` interposition this exact shape
     // (cucumber's pretty:/dev/stderr) dies with ENXIO. Regression for the
     // first dogfood run's ci::e2e@x86_64-linux failure.
-    const h = harness();
+    const h = await harness();
     await h.configure([
       { id: "reopen", command: "echo REOPENED > /dev/stderr", needs: [] },
     ]);
@@ -245,23 +251,21 @@ describe("odu lane runner over stdio (loopback)", () => {
     );
     expect(last(h).nodes.reopen?.status).toBe("ok");
 
-    for await (const frame of await h.client.surface.nodeLog.get({
-      id: "reopen",
-    })) {
-      expect(frame.text).toContain("REOPENED");
-      break;
-    }
+    const frame = await firstFrame(
+      h.client.surface.nodeLog.get({ id: "reopen" }),
+    );
+    expect(frame?.text).toContain("REOPENED");
   });
 
   it("rejects rerun of an unknown node", async () => {
-    const h = harness();
+    const h = await harness();
     await h.configure(chain);
     const result = await h.client.surface.node.rerun({ id: "nope" });
     expect(result.ok).toBe(false);
   });
 
   it("cancels a running node and skips its dependents", async () => {
-    const h = harness();
+    const h = await harness();
     await h.configure([
       { id: "slow", command: "sleep 30", needs: [] },
       { id: "after", command: "echo never", needs: ["slow"] },
@@ -278,7 +282,7 @@ describe("odu lane runner over stdio (loopback)", () => {
   });
 
   it("rejects cancel of an unknown or already-terminal node", async () => {
-    const h = harness();
+    const h = await harness();
     await h.configure([{ id: "ok", command: "true", needs: [] }]);
     await until(() => summarize(last(h)).done);
     expect((await h.client.surface.node.cancel({ id: "nope" })).ok).toBe(
@@ -312,7 +316,7 @@ describe("recipe process-tree reaping", () => {
   it("cancel escalates a TERM-ignoring recipe tree to SIGKILL", async () => {
     const dir = mkdtempSync(join(tmpdir(), "odu-reap-"));
     const pidFile = join(dir, "pid");
-    const h = harness();
+    const h = await harness();
     // $BASHPID (not $$): the recipe body runs in the pipeline subshell, and
     // that subshell — which ignores SIGTERM and keeps respawning sleeps — is
     // the process that must NOT survive the cancel.
@@ -337,7 +341,7 @@ describe("recipe process-tree reaping", () => {
   it("reaps a stray the recipe left behind in its group when the node finishes", async () => {
     const dir = mkdtempSync(join(tmpdir(), "odu-reap-"));
     const strayFile = join(dir, "stray");
-    const h = harness();
+    const h = await harness();
     // The stray redirects its stdio, so `cat` sees EOF and the node settles
     // ok while the stray lives on in the (otherwise unowned) process group.
     await h.configure([
