@@ -21,12 +21,16 @@
 
 import { spawnSync } from "node:child_process";
 import {
+  type AgentBinaryCache,
+  agentBinaryCache,
   type AgentDerivation,
   directAgentDerivation,
   type SshConnectorOptions,
 } from "@kolu/surface-remote";
+import type { SurfaceSpec } from "@kolu/surface/define";
 
-export type ResolveRunnerDrv = SshConnectorOptions["resolveDrvPath"];
+export type ResolveRunnerDrv =
+  SshConnectorOptions<SurfaceSpec>["resolveDrvPath"];
 
 export function resolveRunnerFlake(env: NodeJS.ProcessEnv): string {
   const flake = env.ODU_RUNNER_FLAKE;
@@ -40,6 +44,48 @@ export function resolveRunnerFlake(env: NodeJS.ProcessEnv): string {
     );
   }
   return flake;
+}
+
+/**
+ * Where the runner's closure may be prefetched from (kolu#2018).
+ *
+ * surface-remote's provisioning copies the agent's OUTPUT closure into the
+ * coordinator's local store before shipping it to the lane host, because a
+ * declared substituter can only act in the local store — a remote-store
+ * realisation substitutes with the far daemon's own nix.conf, and the cold
+ * build ships only the `.drv` closure. So the caches odu trusts have to travel
+ * with the derivation, and `directAgentDerivation` makes that REQUIRED rather
+ * than opt-in: there is no cache-blind arm to accidentally construct.
+ *
+ * Baked onto the `odu` wrapper from `nix/binary-cache.nix` (default.nix), the
+ * same way `ODU_RUNNER_FLAKE` is, and for the same reason: the values are one
+ * fact odu's flake already states in its `nixConfig`, and hand-writing them in
+ * TypeScript would be a second authority that drifts silently. No fallback and
+ * no override — a coordinator built without them is misbuilt, and the honest
+ * response to a misbuilt binary is to refuse.
+ */
+export function resolveAgentBinaryCache(
+  env: NodeJS.ProcessEnv,
+): AgentBinaryCache {
+  const substituters = splitList(env.ODU_AGENT_SUBSTITUTERS);
+  const trustedPublicKeys = splitList(env.ODU_AGENT_TRUSTED_PUBLIC_KEYS);
+  if (substituters.length === 0 || trustedPublicKeys.length === 0) {
+    throw new Error(
+      "odu: ODU_AGENT_SUBSTITUTERS / ODU_AGENT_TRUSTED_PUBLIC_KEYS are unset " +
+        "— the coordinator prefetches the lane runner's closure from odu's own " +
+        "binary cache, baked onto the `odu` wrapper at build time from " +
+        "nix/binary-cache.nix. This binary carries none (a raw " +
+        "`bun src/cli/main.ts`, or a non-flake `nix-build`), and provisioning " +
+        "refuses to run cache-blind.",
+    );
+  }
+  return agentBinaryCache({ substituters, trustedPublicKeys });
+}
+
+/** Nix's own spelling for these settings is a space-separated list, so the
+ *  baked env vars use it too — one format across the flake and the wrapper. */
+function splitList(raw: string | undefined): string[] {
+  return (raw ?? "").split(/\s+/).filter((s) => s !== "");
 }
 
 /**
@@ -73,6 +119,7 @@ export function missingRunnerError(
 export function evalOduRunnerDrv(
   runnerFlake: string,
   platform: string,
+  binaryCache: AgentBinaryCache = resolveAgentBinaryCache(process.env),
 ): AgentDerivation {
   const attr = `${runnerFlake}#packages.${platform}.odu-runner.drvPath`;
   const result = spawnSync(
@@ -89,13 +136,17 @@ export function evalOduRunnerDrv(
     if (directed !== null) throw new Error(directed);
     throw new Error(`nix eval odu-runner drv failed:\n${result.stderr}`);
   }
-  return directAgentDerivation(result.stdout.trim());
+  return directAgentDerivation(result.stdout.trim(), binaryCache);
 }
 
-/** Bind one platform's runner evaluation to surface-remote's dial contract. */
+/** Bind one platform's runner evaluation to surface-remote's dial contract.
+ *  The binary cache is resolved ONCE here rather than per dial: it is a
+ *  property of this build, and reading it at bind time means a misbuilt
+ *  coordinator refuses before it starts spawning ssh sessions. */
 export function runnerDrvResolver(
   runnerFlake: string,
   platform: string,
 ): ResolveRunnerDrv {
-  return async () => evalOduRunnerDrv(runnerFlake, platform);
+  const binaryCache = resolveAgentBinaryCache(process.env);
+  return async () => evalOduRunnerDrv(runnerFlake, platform, binaryCache);
 }

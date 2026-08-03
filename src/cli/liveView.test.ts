@@ -7,6 +7,7 @@
  * string-equality tests and obvious in a captured frame.
  */
 
+import { Stream } from "effect";
 import { describe, expect, it } from "bun:test";
 import { createTestRenderer } from "@opentui/core/testing";
 import type { TestRendererSetup } from "@opentui/core/testing";
@@ -74,8 +75,11 @@ const header: RunHeader = {
   startedAt: 940_000,
 };
 
-async function* snapshot(text: string): AsyncGenerator<NodeLogFrame> {
-  yield { kind: "snapshot", text };
+/** A one-frame log stream — the shape `openLog` hands the view now that both
+ *  its producers (the runner.s in-memory tail, a socket `nodeLog.get`) return a
+ *  lazy `Stream`. */
+function snapshot(text: string): Stream.Stream<NodeLogFrame> {
+  return Stream.make({ kind: "snapshot" as const, text });
 }
 
 interface Mounted {
@@ -595,17 +599,21 @@ describe("LiveView — focus and the log subscription", () => {
     const opts = {
       interactive: true,
       hookStderr: false,
-      openLog: (id: string): AsyncIterable<NodeLogFrame> => {
+      openLog: (id: string): Stream.Stream<NodeLogFrame> => {
         if (id === "ci::install@x86_64-linux") {
-          return {
-            async *[Symbol.asyncIterator]() {
+          // Emits, then PARKS until released — the superseded subscription this
+          // test is about. Built from an async generator so the park is
+          // expressible; `Stream.fromAsyncIterable` is the bridge.
+          return Stream.fromAsyncIterable(
+            (async function* (): AsyncGenerator<NodeLogFrame> {
               yield { kind: "snapshot" as const, text: "INITIAL-A\n" };
               await new Promise<void>((r) => {
                 releaseStale = r;
               });
               yield { kind: "append" as const, text: "STALE-FROM-A\n" };
-            },
-          };
+            })(),
+            (e) => e,
+          ) as Stream.Stream<NodeLogFrame>;
         }
         return snapshot("FRESH-FROM-B\n");
       },

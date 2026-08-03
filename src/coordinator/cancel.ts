@@ -60,7 +60,7 @@ export async function cancelRun(
     // failure, so swallow the rejection and confirm via the socket below.
     await dialed.client.surface.run.cancel({}).catch(() => {});
   } finally {
-    dialed.close();
+    await dialed.close();
   }
 
   // Confirm teardown: poll until the socket no longer answers, so a following
@@ -69,7 +69,7 @@ export async function cancelRun(
   for (let i = 0; i < attempts; i += 1) {
     const probe = await dial(socketPath);
     if (probe === null) return { cancelled: true, confirmed: true };
-    probe.close();
+    await probe.close();
     await sleep(pollMs);
   }
   return { cancelled: true, confirmed: false };
@@ -125,6 +125,6 @@ export async function cancelNodeOrPlatform(
       error: err instanceof Error ? err.message : String(err),
     };
   } finally {
-    dialed.close();
+    await dialed.close();
   }
 }

@@ -9,6 +9,7 @@
  * reporting health is machine-readable (juspay/odu#61).
  */
 
+import { firstFrame, subscribe } from "../common/stream";
 import {
   EMPTY_HEADER,
   type NodeState,
@@ -31,10 +32,11 @@ import {
 } from "./render";
 
 export async function firstSnapshot(client: OduClient): Promise<PipelineState> {
-  for await (const state of await client.surface.nodes.get({})) {
-    return state;
+  const state = await firstFrame(client.surface.nodes.get(undefined));
+  if (state === undefined) {
+    throw new Error("odu: coordinator closed before sending state");
   }
-  throw new Error("odu: coordinator closed before sending state");
+  return state;
 }
 
 /** The run header off the surface — `run` publishes it before serving, so the
@@ -43,10 +45,11 @@ export async function firstSnapshot(client: OduClient): Promise<PipelineState> {
  *  the coordinator closed before sending — a protocol failure we surface
  *  rather than mask with a blank banner (mirrors `firstSnapshot`). */
 export async function firstHeader(client: OduClient): Promise<RunHeader> {
-  for await (const header of await client.surface.header.get({})) {
-    return header;
+  const header = await firstFrame(client.surface.header.get(undefined));
+  if (header === undefined) {
+    throw new Error("odu: coordinator closed before sending header");
   }
-  throw new Error("odu: coordinator closed before sending header");
+  return header;
 }
 
 /** Resolve a node argument against the live state: exact id, or unique
@@ -71,7 +74,7 @@ export async function statusCommand(
 ): Promise<number> {
   const { client, close } = await dialSocket(socketPath);
   const state = await firstSnapshot(client);
-  close();
+  await close();
   const posting = postingOf(state);
   if (json) {
     const rows = state.order
@@ -111,11 +114,11 @@ export async function logsCommand(
   const { client, close } = await dialSocket();
   const state = await firstSnapshot(client);
   const id = resolveNodeId(state, token);
-  for await (const frame of await client.surface.nodeLog.get({ id })) {
+  for await (const frame of subscribe(client.surface.nodeLog.get({ id }))) {
     process.stdout.write(frame.text);
     if (!follow && frame.kind === "snapshot") break;
   }
-  close();
+  await close();
   return 0;
 }
 
@@ -139,14 +142,14 @@ export async function attachCommand(json: boolean): Promise<number> {
  *  are byte-identical to `run` rather than a drifted re-implementation. */
 export async function attachStream(
   client: OduClient,
-  close: () => void,
+  close: () => Promise<void>,
   json: boolean,
 ): Promise<number> {
   const display = createDisplay(json ? "json" : "plain");
   const seen = new Map<string, NodeState["status"]>();
   let last: PipelineState | undefined;
   let started = false;
-  for await (const state of await client.surface.nodes.get({})) {
+  for await (const state of subscribe(client.surface.nodes.get(undefined))) {
     last = state;
     if (!started) {
       started = true;
@@ -168,7 +171,7 @@ export async function attachStream(
     if (summarize(state).done) break;
   }
   display.stop(last);
-  close();
+  await close();
   return exitCode(last);
 }
 
@@ -180,7 +183,7 @@ export async function attachStream(
  *  surface, so this is the same matrix, not a separate table. */
 async function attachDashboard(
   client: OduClient,
-  close: () => void,
+  close: () => Promise<void>,
 ): Promise<number> {
   const header = await firstHeader(client);
   // The one binding for the latest state: both the completion path (`view.stop`,
@@ -190,19 +193,22 @@ async function attachDashboard(
   let last: PipelineState | undefined;
   const quit = (code: number): void => {
     view.stop(last);
-    close();
+    // Fire-and-forget: the process is exiting, and the link teardown it just
+    // issued needs no witness — awaiting it would park the exit behind a
+    // protocol scope that may be waiting on the very socket we are leaving.
+    void close();
     process.exit(code);
   };
   const view = createDisplay("live", {
     interactive: true,
     hookStderr: false,
-    openLog: (id, sig) => client.surface.nodeLog.get({ id }, { signal: sig }),
+    openLog: (id) => client.surface.nodeLog.get({ id }),
     rerun: (id) => void client.surface.node.rerun({ id }),
     onQuit: () => quit(exitCode(last)),
   });
 
   let first = true;
-  for await (const state of await client.surface.nodes.get({})) {
+  for await (const state of subscribe(client.surface.nodes.get(undefined))) {
     last = state;
     if (first) {
       first = false;
@@ -216,7 +222,7 @@ async function attachDashboard(
   // The viewport is gone; say how the run ended. `run` has its own verdict —
   // an observer would otherwise be left with only an exit code.
   if (last !== undefined) process.stdout.write(verdictLine(last));
-  close();
+  await close();
   return exitCode(last);
 }
 

@@ -95,7 +95,7 @@ export interface LeaseCliResult {
   message: string;
 }
 
-function resolvePlatforms(requested: string[]): string[] {
+function resolvePlatforms(requested: readonly string[]): string[] {
   const hostsConfig = loadHosts();
   const pools = fanoutPools(
     hostsConfig,
@@ -126,7 +126,7 @@ function resolvePlatforms(requested: string[]): string[] {
  * CLI default: poll until held (or noWait fail).
  */
 export async function leaseCommand(opts: {
-  platforms: string[];
+  platforms: readonly string[];
   noWait: boolean;
   repoRoot?: string;
   nonBlocking: boolean;
@@ -299,7 +299,7 @@ function waitingMessage(
 }
 
 export function releaseCommand(opts: {
-  platforms: string[];
+  platforms: readonly string[];
   repoRoot?: string;
 }): number {
   const repoRoot = opts.repoRoot ?? process.cwd();
