@@ -25,11 +25,11 @@ Strict mode refuses a dirty tree, tests a pinned `HEAD`, and posts GitHub commit
 
 Batch CI turns a task graph into a process and leaves logs behind. odu keeps the pipeline alive as a service you can query and mutate while it runs.
 
-The runner serves three typed primitives over plain ssh using an [oRPC](https://orpc.io) contract—no daemon, port, or preinstalled remote agent:
+The runner serves three typed primitives over plain ssh using an [Effect RPC](https://effect.website) surface—no daemon, port, or preinstalled remote agent:
 
 | Primitive | Call | Carries |
 | --- | --- | --- |
-| **Cell** | `surface.nodes.get({})` | The whole pipeline: one snapshot, then deltas. |
+| **Cell** | `surface.nodes.get()` | The whole pipeline: one snapshot, then deltas. |
 | **Stream** | `surface.nodeLog.get({ id })` | Buffered node output, then live appends. |
 | **Procedure** | `surface.node.rerun({ id })` | Reset a node and its dependents, then reschedule. |
 | **Procedure** | `surface.node.cancel({ id })` | Cancel one pending/running node (also on the fan-in). |

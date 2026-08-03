@@ -1,5 +1,5 @@
 ---
-description: When odu's user-facing surface changes (CLI commands/flags, MCP tools, the oRPC surface), keep the README and the ci/odu-mcp skills in sync in the same change
+description: When odu s user-facing surface changes (CLI commands/flags, MCP tools, the typed surface itself), keep the README and the ci/odu-mcp skills in sync in the same change
 applyTo: "src/cli/main.ts,src/cli/mcp.ts,src/common/surface.ts,src/mcp/**,src/coordinator/cancel.ts"
 ---
 
@@ -10,7 +10,7 @@ a code change forgets them. When you add or change any of:
 
 - a **CLI command or flag** (`src/cli/main.ts`),
 - an **MCP tool or its inputs** (`src/mcp/*Tool.ts`, registered in `src/cli/mcp.ts`),
-- the **oRPC surface** procedures/cells/streams (`src/common/surface.ts`),
+- the **typed surface** procedures/cells/streams (`src/common/surface.ts`),
 
 update **all three** in the *same* change:
 
