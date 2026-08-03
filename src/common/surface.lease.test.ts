@@ -9,17 +9,15 @@ import { DEFAULT_LEASE_LOCK, laneSurface } from "./surface";
  * contract so a regression cannot reintroduce host-PATH flock scripts.
  */
 describe("laneSurface lease procedures", () => {
-  it("exposes claim, probe, and release on the agent contract", () => {
-    const surface = (
-      laneSurface.contract as {
-        surface?: { lease?: Record<string, unknown> };
-      }
-    ).surface;
-    const lease = surface?.lease;
-    expect(lease).toBeDefined();
-    expect(lease).toHaveProperty("claim");
-    expect(lease).toHaveProperty("probe");
-    expect(lease).toHaveProperty("release");
+  it("advertises claim, probe and release as lane surface routes", () => {
+    // Restated on the tag axis: the oRPC `contract` tree is gone, and a
+    // surface's identity is now its flat route set — the exact keys
+    // `defineSurface` minted and `implementSurface` asserts handlers for at
+    // boot. Reading `group.requests` is reading what a peer can actually call.
+    const tags = [...laneSurface.group.requests.keys()];
+    expect(tags).toContain("surface/lease/claim");
+    expect(tags).toContain("surface/lease/probe");
+    expect(tags).toContain("surface/lease/release");
   });
 
   it("defaults the venue lock path to /tmp/odu.lease", () => {

@@ -25,7 +25,7 @@
  * ledger.
  */
 
-import { z } from "zod";
+import { Schema } from "effect";
 import { shortSha } from "./git";
 import {
   type NodeStatus,
@@ -48,14 +48,14 @@ export const RUN_RECORD_VERSION = 1;
  *  omitted: a record answers "what was the outcome", not "what was the graph".
  *  `id` is the fan-in `<namepath>@<platform>`, so a reader splits it for the
  *  (recipe × platform) matrix exactly as every live face does. */
-export const RunNodeSchema = z.object({
-  id: z.string(),
-  name: z.string(),
+export const RunNodeSchema = Schema.Struct({
+  id: Schema.String,
+  name: Schema.String,
   status: NodeStatusSchema,
-  exitCode: z.number().int().nullable(),
-  durationMs: z.number().nullable(),
+  exitCode: Schema.NullOr(Schema.Int),
+  durationMs: Schema.NullOr(Schema.Number),
 });
-export type RunNode = z.infer<typeof RunNodeSchema>;
+export type RunNode = typeof RunNodeSchema.Type;
 
 /** A run's outcome — one domain concept with exactly three reachable states:
  *  `passed` only when the run *completed* with no red node and no cancelled
@@ -63,27 +63,31 @@ export type RunNode = z.infer<typeof RunNodeSchema>;
  *  node was still pending/running *or* was operator-cancelled (a gate that
  *  didn't finish didn't pass — juspay/odu#68). One field, so the illegal
  *  "passed but incomplete" combination is unrepresentable. */
-export const RunOutcomeSchema = z.enum(["passed", "failed", "incomplete"]);
-export type RunOutcome = z.infer<typeof RunOutcomeSchema>;
+export const RunOutcomeSchema = Schema.Literals([
+  "passed",
+  "failed",
+  "incomplete",
+]);
+export type RunOutcome = typeof RunOutcomeSchema.Type;
 
-export const RunRecordSchema = z.object({
-  version: z.literal(RUN_RECORD_VERSION),
+export const RunRecordSchema = Schema.Struct({
+  version: Schema.Literal(RUN_RECORD_VERSION),
   /** `owner/repo` for a GitHub origin; `null` for a local-only checkout with
    *  no recognized remote (the zero-config newcomer run). The repo axis a
    *  multi-repo service face fans in on. */
-  repo: z.string().nullable(),
+  repo: Schema.NullOr(Schema.String),
   /** The run's commit (full 40-hex). The short form is derived (`shortSha`) at
    *  read sites rather than stored, so a record can't carry a sha7 that
    *  disagrees with its sha. */
-  sha: z.string(),
+  sha: Schema.String,
   /** This run's ordinal among runs of the same `sha` in this checkout, 1-based
    *  — a rerun of one commit gets `seq` 2, 3, … so its record never overwrites
    *  the prior run's. */
-  seq: z.number().int().positive(),
+  seq: Schema.Int.check(Schema.isGreaterThan(0)),
   /** The working tree had uncommitted changes — the verdict is about that tree,
    *  not the bare commit. */
-  dirty: z.boolean(),
-  pipeline: z.string(),
+  dirty: Schema.Boolean,
+  pipeline: Schema.String,
   /** The run's tri-state outcome. `incomplete` covers a record finalized by
    *  cancel/interrupt/idle teardown mid-run (a node still pending/running);
    *  `failed` a completed run with a red node; `passed` a completed run with
@@ -91,15 +95,17 @@ export const RunRecordSchema = z.object({
    *  `outcome === "passed"`. */
   outcome: RunOutcomeSchema,
   /** Wall-clock (`Date.now()`) bounds of the run. */
-  startedAt: z.number(),
-  finishedAt: z.number(),
-  lanes: z.array(z.object({ platform: z.string(), host: z.string() })),
-  nodes: z.array(RunNodeSchema),
+  startedAt: Schema.Number,
+  finishedAt: Schema.Number,
+  lanes: Schema.Array(
+    Schema.Struct({ platform: Schema.String, host: Schema.String }),
+  ),
+  nodes: Schema.Array(RunNodeSchema),
   /** Commit statuses that never reached GitHub by finalize time (juspay/odu#61).
    *  Absent / empty when every post confirmed — older records omit the field. */
-  unposted: z.array(UnpostedEntrySchema).optional(),
+  unposted: Schema.optionalKey(Schema.Array(UnpostedEntrySchema)),
 });
-export type RunRecord = z.infer<typeof RunRecordSchema>;
+export type RunRecord = typeof RunRecordSchema.Type;
 
 /** The atomic run-ref spelling over the identity pair both consumers hold: a
  *  short sha and a seq (`null` when the run carried none, rendered `?`). The one
