@@ -17,10 +17,10 @@
 
 import { isDeadTransportError } from "@kolu/surface/errors";
 import type { BespokeTool } from "@kolu/surface-mcp";
-import { Schema } from "effect";
+import { Effect, Schema } from "effect";
 import { agentSummary, NON_TERMINAL_STATUSES } from "../cli/render";
 import { gitRunContext } from "../common/git";
-import { subscribe } from "../common/stream";
+import { subscribe } from "../common/effectEdge";
 import { formatRef, type RunRecord } from "../common/runRecord";
 import { liftUnposted, type OwedStatus } from "../common/surface";
 import { readRunRecord } from "../coordinator/ledger";
@@ -442,16 +442,35 @@ export function makeWaitTool(
 			"finalized record on disk (never green for a run torn down mid-flight).",
 		input: waitInput,
 		mutates: false,
-		handler: (args, client, signal) => {
-			const a = args as WaitInput;
-			return waitForSettle({
-				client: client as AgentNodesReader,
-				timeoutMs: a.timeout_ms,
-				failFast: a.fail_fast,
-				expectedSha: a.expected_sha,
-				signal,
-				resolveRunContext,
-			});
-		},
+		// `waitForSettle` stays Promise-shaped and keeps its OWN `AbortSignal`:
+		// it owns a timeout/cancel/settle race whose losing arms must be unwound in
+		// a specific order, and the signal is the vocabulary that race is written
+		// in. `BespokeTool.handler` keeps the `signal` parameter for exactly this
+		// case (see its doc), so the MCP request's cancellation still reaches the
+		// wait.
+		//
+		// `tryPromise` with an explicit `catch` that passes the error THROUGH, not
+		// the bare form. `NoLiveRunError` is a declared refusal this tool raises on
+		// purpose (juspay/odu#49) and whose MESSAGE is the contract — surface-mcp
+		// renders a failure as an `isError` result carrying that text. The bare
+		// `tryPromise` wraps a rejection in `Cause.UnknownError`, which swaps the
+		// loud "no run in progress in this checkout" for a generic string and
+		// silently guts the refusal. (`Effect.promise` would be worse still: a
+		// defect, escaping as a protocol error rather than a tool result.)
+		handler: (args, client, signal) =>
+			Effect.tryPromise({
+				catch: (e) => e,
+				try: () => {
+					const a = args as WaitInput;
+					return waitForSettle({
+						client: client as AgentNodesReader,
+						timeoutMs: a.timeout_ms,
+						failFast: a.fail_fast,
+						expectedSha: a.expected_sha,
+						signal,
+						resolveRunContext,
+					});
+				},
+			}),
 	};
 }

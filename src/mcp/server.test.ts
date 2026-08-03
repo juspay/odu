@@ -24,7 +24,7 @@ import {
   serveSurfaceAsMcp,
   type SurfaceClientCallable,
 } from "@kolu/surface-mcp";
-import { Stream } from "effect";
+import { Effect, Stream } from "effect";
 import { afterEach, describe, expect, it } from "bun:test";
 import { gitRunContext } from "../common/git";
 import type { RunOutcome, RunRecord } from "../common/runRecord";
@@ -156,12 +156,12 @@ async function connect(s: TestSurface, socketPath: string = s.socketPath) {
       run: {
         description: "stub",
         // No real spawn in the smoke test — assert tools/list only.
-        handler: () => ({ ok: false, started: false }),
+        handler: () => Effect.succeed({ ok: false, started: false }),
         mutates: true,
       },
       wait_for_settle: {
         description: "stub",
-        handler: () => ({ settled: false }),
+        handler: () => Effect.succeed({ settled: false }),
       },
       cancel: cancelTool,
     },
@@ -393,7 +393,7 @@ describe("no-run state — the face stays usable with no coordinator socket", ()
   /** Stand up the server exactly as `mcpCommand` does for the no-socket case:
    *  the factory returns the no-run fallback client (no dial). This is the
    *  state an agent is in when it calls `run` to start a pipeline. */
-  async function connectNoRun(runHandler: () => unknown) {
+  async function connectNoRun(runHandler: () => Effect.Effect<unknown, unknown>) {
     // A re-dialing A-client whose dial always fails (no coordinator socket) —
     // the exact wiring `mcpCommand` uses, minus a live socket.
     const { mcp } = await connectWith(async () => null, {
@@ -404,17 +404,21 @@ describe("no-run state — the face stays usable with no coordinator socket", ()
 
   it("run reaches its handler with no socket (does not throw 'no run in progress')", async () => {
     let reached = false;
-    const mcp = await connectNoRun(() => {
-      reached = true;
-      return { ok: true, started: true };
-    });
+    const mcp = await connectNoRun(() =>
+      Effect.sync(() => {
+        reached = true;
+        return { ok: true, started: true };
+      }),
+    );
     const res = await mcp.callTool({ name: "run", arguments: {} });
     expect(res.isError).toBeFalsy();
     expect(reached).toBe(true);
   });
 
   it("nodes reads { run: false } with no socket (mirrors old get_nodes)", async () => {
-    const mcp = await connectNoRun(() => ({ ok: true, started: true }));
+    const mcp = await connectNoRun(() =>
+      Effect.succeed({ ok: true, started: true }),
+    );
     const read = await mcp.readResource({ uri: "surface://streams/nodes" });
     const body = JSON.parse((read.contents[0] as { text: string }).text);
     expect(body).toEqual({
@@ -631,10 +635,17 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     const client = await agentWaitClient(s);
     setTimeout(() => s.close(), 30);
     const tool = makeWaitTool(ledgerWith(record("passed")));
-    const v = (await tool.handler(
-      { fail_fast: false, timeout_ms: 300 },
-      client as never,
-      undefined,
+    // RUN the handler.s Effect — do not `await` it. A bespoke handler returns a
+    // description now, and awaiting one resolves to the Effect object without
+    // ever dispatching, so this assertion would have passed against a verdict
+    // that was never computed. That exact shape is what kolu.s governance check
+    // (and odu.s, in effectEdges.test.ts) exists to ban.
+    const v = (await Effect.runPromise(
+      tool.handler(
+        { fail_fast: false, timeout_ms: 300 },
+        client as never,
+        undefined,
+      ),
     )) as SettleVerdict;
     expect(v).toMatchObject({ settled: true, passed: true });
   });

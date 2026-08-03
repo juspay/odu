@@ -15,6 +15,7 @@
  * socket and leaves the coordinator up so the rest of the run can settle.
  */
 
+import { runUnary } from "../common/effectEdge";
 import { SOCKET_PATH, tryDialSocket } from "./socket";
 
 export interface CancelResult {
@@ -58,7 +59,7 @@ export async function cancelRun(
     // The coordinator tears down and exits in response, which can sever this
     // call before the ack arrives — that's the cancel taking effect, not a
     // failure, so swallow the rejection and confirm via the socket below.
-    await dialed.client.surface.run.cancel({}).catch(() => {});
+    await runUnary(dialed.client.surface.run.cancel({})).catch(() => {});
   } finally {
     await dialed.close();
   }
@@ -111,12 +112,11 @@ export async function cancelNodeOrPlatform(
   const dialed = await dial(socketPath);
   if (dialed === null) return { kind: "no_run" };
   try {
-    const result =
+    const result = await runUnary(
       parsed.kind === "platform"
-        ? await dialed.client.surface.lane.cancel({
-            platform: parsed.platform,
-          })
-        : await dialed.client.surface.node.cancel({ id: parsed.id });
+        ? dialed.client.surface.lane.cancel({ platform: parsed.platform })
+        : dialed.client.surface.node.cancel({ id: parsed.id }),
+    );
     return { kind: "delivered", ok: result.ok };
   } catch (err) {
     return {

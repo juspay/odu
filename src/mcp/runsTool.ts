@@ -16,7 +16,7 @@
  */
 
 import type { BespokeTool } from "@kolu/surface-mcp";
-import { Schema } from "effect";
+import { Effect, Schema } from "effect";
 import { gitTopLevel } from "../common/git";
 import type { RunRecord } from "../common/runRecord";
 import { readLedger } from "../coordinator/ledger";
@@ -77,5 +77,8 @@ export const runsTool: BespokeTool = {
     "coordinator has exited. Optional `limit` (default 20).",
   input: runsInput,
   mutates: false,
-  handler: (args) => listRuns({ limit: (args as RunsInput).limit }),
+  // Synchronous work (a disk read), so `Effect.sync` — the handler is a
+  // description either way, and surface-mcp runs it at its one edge.
+  handler: (args) =>
+    Effect.sync(() => listRuns({ limit: (args as RunsInput).limit })),
 };

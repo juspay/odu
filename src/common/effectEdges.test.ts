@@ -25,11 +25,12 @@ import { describe, expect, it } from "bun:test";
  *  that grows this list has stopped drawing a boundary. */
 const SANCTIONED = new Map<string, string>([
   [
-    "common/stream.ts",
-    "odu's ONE bridge from a surface Stream back to the pull-a-frame-at-a-time " +
-      "shape the CLI and the MCP tools are written in. `firstFrame` runs the " +
-      "stream's head; `subscribe` hands back an async iterator. Both exist so " +
-      "no consumer re-derives the laziness and teardown rules.",
+    "common/effectEdge.ts",
+    "odu's ONE edge between Effect's world and the Promise world the " +
+      "coordinator and CLI are written in. `runUnary` dispatches a unary member " +
+      "call; `firstFrame` runs a stream's head; `subscribe` hands back an async " +
+      "iterator. All three exist so no consumer re-derives the laziness, " +
+      "teardown and dispatch rules — nor invents a second boundary.",
   ],
 ]);
 
@@ -70,6 +71,56 @@ describe("Effect.run* edge discipline", () => {
         "to SANCTIONED with the reason; if it should not, hand the Effect to a " +
         "caller that already is one (a surface handler returns an Effect; a " +
         "Stream consumer goes through common/stream.ts).",
+    ).toEqual([]);
+  });
+
+  it("never `await`s or `void`s a member-face call — it compiles and never dispatches", () => {
+    // THE governance-grade hazard of the Effect face, and the reason this test
+    // is not merely stylistic.
+    //
+    // `client.surface.node.rerun({ id })` returns an `Effect` — a description
+    // of the call. An Effect is not a thenable, so `await` on one resolves to
+    // the Effect OBJECT and dispatches nothing, and `void` on one discards it
+    // just as silently. Both compile. Both read exactly like the line that was
+    // correct before the face flipped. `tsc` cannot see it wherever the result
+    // is discarded or loosely typed, and review does not catch it either —
+    // kolu hit this five times in a single wave, once disabling the very drain
+    // a daemon acceptance test existed to prove.
+    //
+    // odu shipped one too: `introspect.ts`'s attach dashboard spelled
+    // `rerun: (id) => void client.surface.node.rerun({ id })`, so pressing `r`
+    // in an attached session silently did nothing.
+    //
+    // The pattern is deliberately NARROW — `await`/`void` applied DIRECTLY to a
+    // face call, with nothing between but a reference path. So the one
+    // legitimate spelling, `await runUnary(client.surface.ns.verb(x))`, does
+    // not match. That restraint is the design: a check that condemned the
+    // sanctioned form would be switched off within a week, and then the real
+    // ones ride back in.
+    const BAD = /\b(?:await|void)\s+[A-Za-z_$][\w$.]*\.surface\.[\w$]+\.[\w$]+\s*\(/;
+    // Comment lines are skipped, and that is not a loophole — it is the point.
+    // The banned shape has to be SPELLABLE in prose so a doc comment can teach
+    // it as the wrong answer (this file does, and so does `effectEdge.ts`'s
+    // header). A check that condemned its own explanation would force the
+    // explanation out, which is how the knowledge gets lost.
+    const isComment = (line: string): boolean =>
+      /^\s*(?:\/\/|\/\*|\*)/.test(line);
+    const offenders: string[] = [];
+    for (const path of tsFilesUnder(srcRoot)) {
+      const rel = path.slice(srcRoot.length + 1);
+      const lines = readFileSync(path, "utf-8").split("\n");
+      lines.forEach((line, i) => {
+        if (!isComment(line) && BAD.test(line)) {
+          offenders.push(`${rel}:${i + 1}: ${line.trim()}`);
+        }
+      });
+    }
+    expect(
+      offenders,
+      `${offenders.join("\n")}\n\nA member-face call is an Effect. ` +
+        "`await` and `void` on one compile and dispatch NOTHING. Run it: " +
+        "`await runUnary(<call>)` from a Promise-shaped caller, or compose it " +
+        "(`yield*` / Effect.* ) from an Effect-shaped one.",
     ).toEqual([]);
   });
 

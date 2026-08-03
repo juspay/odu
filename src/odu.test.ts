@@ -28,7 +28,7 @@ import {
   type NodesSnapshot,
   type PipelineState,
 } from "./common/surface";
-import { firstFrame, subscribe } from "./common/stream";
+import { firstFrame, runUnary, subscribe } from "./common/effectEdge";
 import { createLaneRunner, SETUP_NODE_ID } from "./runner/runner";
 
 interface Harness {
@@ -92,13 +92,15 @@ async function harness(): Promise<Harness> {
     client,
     states,
     configure: (tasks, workspace = tmpdir()) =>
-      client.surface.run.configure({
+      runUnary(
+        client.surface.run.configure({
         name: "test",
         origin: null,
         sha: null,
-        workspace,
-        tasks,
-      }),
+          workspace,
+          tasks,
+        }),
+      ),
     dispose,
   };
 }
@@ -211,7 +213,7 @@ describe("odu lane runner over stdio (loopback)", () => {
     await until(() => summarize(last(h)).done && last(h).order.length === 3);
 
     const before = h.states.length;
-    const result = await h.client.surface.node.rerun({ id: "build" });
+    const result = await runUnary(h.client.surface.node.rerun({ id: "build" }));
     expect(result.ok).toBe(true);
     await until(() => h.states.length > before && summarize(last(h)).done);
     const reran = h.states
@@ -260,7 +262,7 @@ describe("odu lane runner over stdio (loopback)", () => {
   it("rejects rerun of an unknown node", async () => {
     const h = await harness();
     await h.configure(chain);
-    const result = await h.client.surface.node.rerun({ id: "nope" });
+    const result = await runUnary(h.client.surface.node.rerun({ id: "nope" }));
     expect(result.ok).toBe(false);
   });
 
@@ -271,7 +273,7 @@ describe("odu lane runner over stdio (loopback)", () => {
       { id: "after", command: "echo never", needs: ["slow"] },
     ]);
     await until(() => last(h).nodes.slow?.status === "running");
-    const result = await h.client.surface.node.cancel({ id: "slow" });
+    const result = await runUnary(h.client.surface.node.cancel({ id: "slow" }));
     expect(result.ok).toBe(true);
     await until(() => summarize(last(h)).done);
     expect(last(h).nodes.slow?.status).toBe("cancelled");
@@ -285,10 +287,10 @@ describe("odu lane runner over stdio (loopback)", () => {
     const h = await harness();
     await h.configure([{ id: "ok", command: "true", needs: [] }]);
     await until(() => summarize(last(h)).done);
-    expect((await h.client.surface.node.cancel({ id: "nope" })).ok).toBe(
+    expect((await runUnary(h.client.surface.node.cancel({ id: "nope" }))).ok).toBe(
       false,
     );
-    expect((await h.client.surface.node.cancel({ id: "ok" })).ok).toBe(false);
+    expect((await runUnary(h.client.surface.node.cancel({ id: "ok" }))).ok).toBe(false);
   });
 });
 
@@ -330,7 +332,7 @@ describe("recipe process-tree reaping", () => {
     await until(() => existsSync(pidFile) && readPid(pidFile) > 0);
     const pid = readPid(pidFile);
     await until(() => last(h).nodes.stubborn?.status === "running");
-    expect((await h.client.surface.node.cancel({ id: "stubborn" })).ok).toBe(
+    expect((await runUnary(h.client.surface.node.cancel({ id: "stubborn" }))).ok).toBe(
       true,
     );
     // SIGTERM → bounded grace → SIGKILL: the tree dies even though it

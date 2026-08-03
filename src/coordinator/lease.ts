@@ -33,6 +33,7 @@ import {
 } from "../common/surface";
 import { type HostPool, type ResolvedPools, shortHost } from "./hosts";
 import type { ResolveRunnerDrv } from "./runnerFlake";
+import { runUnary } from "../common/effectEdge";
 import {
   lineLogger,
   localhostSpawnEnv,
@@ -215,11 +216,13 @@ export async function tryClaim(
     );
 
     const result = await withTimeout(
-      client.surface.lease.claim({
-        holder: identity.holder,
-        run: identity.run,
-        ...lockPathKey(opts.lockPath),
-      }),
+      runUnary(
+        client.surface.lease.claim({
+          holder: identity.holder,
+          run: identity.run,
+          ...lockPathKey(opts.lockPath),
+        }),
+      ),
       timeoutMs,
       `lease claim ${shortHost(host)}`,
     );
@@ -251,7 +254,7 @@ export async function tryClaim(
         host,
         release: () => {
           intentionalRelease = true;
-          void client.surface.lease.release({}).catch(() => {
+          void runUnary(client.surface.lease.release({})).catch(() => {
             /* session may already be dead */
           });
           session.destroy();
@@ -300,7 +303,7 @@ export async function probeHost(
     );
     session.markConnected();
     const result = await withTimeout(
-      client.surface.lease.probe(lockPathKey(opts.lockPath)),
+      runUnary(client.surface.lease.probe(lockPathKey(opts.lockPath))),
       timeoutMs,
       `lease probe ${shortHost(host)}`,
     );

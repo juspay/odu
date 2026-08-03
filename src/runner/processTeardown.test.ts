@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stdioLink } from "@kolu/surface/links/stdio";
 import { afterEach, describe, expect, it } from "bun:test";
+import { runUnary } from "../common/effectEdge";
 import { laneClientOver, laneSurface } from "../common/surface";
 
 // The child is spawned with the very same Bun that runs this suite — no
@@ -69,19 +70,21 @@ describe("runner death by signal", () => {
     });
     const client = laneClientOver(link.dispatch);
 
-    const ack = await client.surface.run.configure({
-      name: "sigterm-test",
-      origin: null,
-      sha: null,
-      workspace: dir,
-      tasks: [
-        {
-          id: "long",
-          command: `echo $BASHPID > ${pidFile}; sleep 60`,
-          needs: [],
-        },
-      ],
-    });
+    const ack = await runUnary(
+      client.surface.run.configure({
+        name: "sigterm-test",
+        origin: null,
+        sha: null,
+        workspace: dir,
+        tasks: [
+          {
+            id: "long",
+            command: `echo $BASHPID > ${pidFile}; sleep 60`,
+            needs: [],
+          },
+        ],
+      }),
+    );
     expect(ack.ok).toBe(true);
     await until(
       () => existsSync(pidFile) && readFileSync(pidFile, "utf-8").trim() !== "",

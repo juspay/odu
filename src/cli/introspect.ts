@@ -9,7 +9,7 @@
  * reporting health is machine-readable (juspay/odu#61).
  */
 
-import { firstFrame, subscribe } from "../common/stream";
+import { firstFrame, runUnary, subscribe } from "../common/effectEdge";
 import {
   EMPTY_HEADER,
   type NodeState,
@@ -203,7 +203,16 @@ async function attachDashboard(
     interactive: true,
     hookStderr: false,
     openLog: (id) => client.surface.nodeLog.get({ id }),
-    rerun: (id) => void client.surface.node.rerun({ id }),
+    // `runUnary`, not `void` — a unary verb is an Effect, and `void`ing one
+    // DESCRIBES the rerun without ever dispatching it. That is exactly what this
+    // line did after the first Effect wave: pressing `r` in the attached
+    // dashboard silently did nothing, and nothing in the type system said so.
+    // The rejection is swallowed deliberately (the view is fire-and-forget; a
+    // failed rerun shows up as the node not moving), but it is swallowed from a
+    // call that actually happened.
+    rerun: (id) => {
+      void runUnary(client.surface.node.rerun({ id })).catch(() => {});
+    },
     onQuit: () => quit(exitCode(last)),
   });
 

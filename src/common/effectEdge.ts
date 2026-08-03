@@ -1,6 +1,18 @@
 /**
- * odu's ONE bridge from a surface stream member back to the pull-a-frame-at-a-
- * time shape the coordinator, the CLI and the MCP tools are written in.
+ * odu's ONE edge between Effect's world and the Promise world its coordinator
+ * and CLI are written in — for BOTH member shapes a surface exposes.
+ *
+ * A unary verb is an `Effect` now, not a `Promise`: there is no other spelling,
+ * and `await`ing one silently yields the Effect object instead of dispatching
+ * the call (see `runUnary`). A streaming verb is a lazy `Stream`. Neither can
+ * be consumed by an `async` function without something running it, and that
+ * something lives here, once, so no caller re-derives the rules — nor
+ * accidentally invents a second boundary.
+ *
+ * The file is named for what it IS (the Effect edge) rather than for the first
+ * shape it carried, because `src/common/effectEdges.test.ts` enumerates it as
+ * odu's only sanctioned `Effect.run*` site and a misnamed edge is how a second
+ * one gets added without anyone noticing.
  *
  * Every streaming member used to be `await client.surface.X.get(input, {signal})
  * → AsyncIterable<T>`; under Effect it is `client.surface.X.get(input) →
@@ -33,6 +45,36 @@
  */
 
 import { Effect, Option, Stream } from "effect";
+
+/**
+ * Dispatch a UNARY member call and hand back a Promise.
+ *
+ * `client.surface.<ns>.<verb>(input)` returns an `Effect` — a *description* of
+ * the call, not the call. An `Effect` is not a thenable, so
+ *
+ *     const ack = await client.surface.run.configure(input);   // ← WRONG
+ *
+ * compiles, resolves `ack` to the Effect object itself, and **never dispatches
+ * anything**. It reads exactly like the line that used to be right, which is
+ * why kolu banned the shape repo-side after it bit five times in one wave —
+ * including one that had quietly disabled the drain a daemon acceptance test
+ * existed to prove. `src/common/effectEdges.test.ts` bans it here too.
+ *
+ * So: an odu caller that genuinely lives in Promise-land runs the call through
+ * this function, and nowhere else. `Effect.runPromise` rejects with the
+ * SQUASHED failure, i.e. the declared tagged-error instance with its `_tag` and
+ * data intact, so a `catch` site can still narrow on it exactly as before.
+ *
+ * A caller that is ALREADY Effect-shaped — every `BespokeTool.handler`, every
+ * surface handler — must NOT use this. It composes the Effect instead, and
+ * inherits interruption (an MCP request cancelled mid-call tears the call down
+ * through its own finalizers) which this edge, being a Promise, cannot offer.
+ */
+export async function runUnary<T>(
+  call: Effect.Effect<T, unknown>,
+): Promise<T> {
+  return Effect.runPromise(call);
+}
 
 /**
  * The first frame of `stream`, or `undefined` when it ends without emitting.

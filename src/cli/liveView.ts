@@ -50,7 +50,7 @@ import {
   STATUS_META,
 } from "../common/surface";
 import type { Stream } from "effect";
-import { subscribe } from "../common/stream";
+import { subscribe } from "../common/effectEdge";
 import { postingWarning } from "../coordinator/statuses";
 import { formatGoDuration } from "../common/duration";
 import { splitFanId } from "../common/nodeId";

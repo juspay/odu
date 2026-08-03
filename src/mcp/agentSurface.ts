@@ -53,7 +53,7 @@ import { deriveStream, projectSurface } from "@kolu/surface/project";
 import type { SurfaceHandlers } from "@kolu/surface/server";
 import { Effect, Schema, Stream } from "effect";
 import type { Rpc, RpcGroup } from "effect/unstable/rpc";
-import { subscribe } from "../common/stream";
+import { subscribe } from "../common/effectEdge";
 import { rowsOf } from "../cli/render";
 import { splitFanId } from "../common/nodeId";
 import {
@@ -474,19 +474,29 @@ export function redialingAClient(dial: DialA): OduSurfaceClient {
     );
   }
 
-  /** Dial, call, close — the unary half. No socket is `{ ok: false }`, which is
-   *  the "there is no run to mutate" answer, not an error. */
-  async function callFresh(
-    pick: (a: OduSurfaceClient) => Promise<{ ok: boolean }>,
-  ): Promise<{ ok: boolean }> {
-    const dialed = await dial();
-    if (dialed === null) return { ok: false };
-    try {
-      return await pick(dialed.client);
-    } finally {
-      await dialed.close();
-    }
+  /** Dial, call, close — the unary half, and an `Effect` now, because a unary
+   *  member call is one. No socket is `{ ok: false }`, which is the "there is no
+   *  run to mutate" answer, not an error.
+   *
+   *  `acquireUseRelease` rather than a `try/finally`: the release runs on
+   *  INTERRUPTION too, so a `tools/call` the MCP host cancels mid-flight still
+   *  closes the socket it opened. A `finally` around an `await` could not
+   *  promise that. */
+  function callFresh<A extends { readonly ok: boolean }, E>(
+    pick: (a: OduSurfaceClient) => Effect.Effect<A, E>,
+    onNoRun: A,
+  ): Effect.Effect<A, E> {
+    return Effect.acquireUseRelease(
+      Effect.promise(() => dial()),
+      (dialed) => (dialed === null ? Effect.succeed(onNoRun) : pick(dialed.client)),
+      (dialed) =>
+        dialed === null ? Effect.void : Effect.promise(() => dialed.close()),
+    );
   }
+
+  /** The no-run answer for every forwarded mutation: there is no live run to
+   *  rerun or cancel, which is a `false` ack, not a failure. */
+  const NO_RUN_ACK = { ok: false } as const;
 
   return {
     surface: {
@@ -505,11 +515,14 @@ export function redialingAClient(dial: DialA): OduSurfaceClient {
           ),
       },
       node: {
-        rerun: (input) => callFresh((a) => a.surface.node.rerun(input)),
-        cancel: (input) => callFresh((a) => a.surface.node.cancel(input)),
+        rerun: (input) =>
+          callFresh((a) => a.surface.node.rerun(input), NO_RUN_ACK),
+        cancel: (input) =>
+          callFresh((a) => a.surface.node.cancel(input), NO_RUN_ACK),
       },
       lane: {
-        cancel: (input) => callFresh((a) => a.surface.lane.cancel(input)),
+        cancel: (input) =>
+          callFresh((a) => a.surface.lane.cancel(input), NO_RUN_ACK),
       },
     },
   };
@@ -557,20 +570,29 @@ function agentDeps(
     collections: {
       logs,
     },
-    // A forwarded procedure is an `Effect` now, and the forward is a Promise —
-    // `Effect.promise`, deliberately not `tryPromise`: a rejection here is A's
-    // transport dying, which no B-side schema declares, so it is a DEFECT and
-    // must surface as one rather than being laundered into a member failure.
+    // A forwarded procedure is JUST the upstream call now. Both sides are
+    // Effects, so the `Effect.promise` lift these carried is gone — that is the
+    // "forwarder suppliers get simpler" row, and it removes a real hazard with
+    // it: `Effect.promise` over a value that is ALREADY an Effect would have
+    // succeeded with the Effect object rather than the result.
+    //
+    // `orDie` is the disposition, and it is the same one `deriveStream` takes
+    // for an upstream stream failure. B.s spec declares no procedure error, so
+    // a `SurfaceCallFailure` from A — the coordinator socket dying mid-call —
+    // is by definition UNDECLARED on this surface. D4 says an undeclared
+    // failure is a defect, and a defect is what an agent must see: laundering a
+    // dropped link into a `{ ok: false }` would tell it the rerun was refused
+    // when nobody was there to refuse it.
     procedures: {
       node: {
         rerun: ({ input }: { input: { id: string } }) =>
-          Effect.promise(() => a.surface.node.rerun(input)),
+          Effect.orDie(a.surface.node.rerun(input)),
         cancel: ({ input }: { input: { id: string } }) =>
-          Effect.promise(() => a.surface.node.cancel(input)),
+          Effect.orDie(a.surface.node.cancel(input)),
       },
       lane: {
         cancel: ({ input }: { input: { platform: string } }) =>
-          Effect.promise(() => a.surface.lane.cancel(input)),
+          Effect.orDie(a.surface.lane.cancel(input)),
       },
     },
   };

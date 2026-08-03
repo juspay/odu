@@ -21,7 +21,7 @@ import {
   sshConnector,
 } from "@kolu/surface-remote";
 import type { TaskSpec } from "../common/spec";
-import { subscribe } from "../common/stream";
+import { runUnary, subscribe } from "../common/effectEdge";
 import {
   type LaneClient,
   laneSurface,
@@ -169,13 +169,15 @@ export function startLane(opts: LaneOptions): Lane {
         configured = true;
         attached = true;
         session.markConnected();
-        const ack = await client.surface.run.configure({
-          name: opts.pipelineName,
-          origin: opts.origin,
-          sha: opts.sha,
-          workspace: opts.workspace,
-          tasks: opts.tasks,
-        });
+        const ack = await runUnary(
+          client.surface.run.configure({
+            name: opts.pipelineName,
+            origin: opts.origin,
+            sha: opts.sha,
+            workspace: opts.workspace,
+            tasks: opts.tasks,
+          }),
+        );
         if (!ack.ok) {
           die(`configure rejected: ${ack.error ?? "unknown"}`);
           return;
@@ -229,7 +231,7 @@ export function startLane(opts: LaneOptions): Lane {
     if (session.currentClient() === null) return false;
     try {
       const client = await pinLaneFace(session);
-      const result = await client.surface.node[op]({ id: nodeId });
+      const result = await runUnary(client.surface.node[op]({ id: nodeId }));
       return result.ok;
     } catch {
       return false;

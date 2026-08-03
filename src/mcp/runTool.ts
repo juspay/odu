@@ -19,8 +19,8 @@ import {
   type WriteStream,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { firstFrame } from "../common/stream";
-import { Schema } from "effect";
+import { firstFrame } from "../common/effectEdge";
+import { Effect, Schema } from "effect";
 import type { BespokeTool } from "@kolu/surface-mcp";
 import { type CancelResult, cancelRun } from "../coordinator/cancel";
 import {
@@ -388,5 +388,5 @@ export const runTool: BespokeTool = {
     "against the working tree. One run per checkout.",
   input: runInput,
   mutates: true,
-  handler: (args) => startRun(args as RunInput),
+  handler: (args) => Effect.promise(() => startRun(args as RunInput)),
 };
