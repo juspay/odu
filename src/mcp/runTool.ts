@@ -4,8 +4,8 @@
  * `run` is genuinely call-shaped (it spawns a background `odu run` process and
  * blocks until that run's coordinator is serving its socket), so it can't be
  * an exposed surface procedure — it composes over the *process*, not the live
- * client. It rides `@kolu/surface-mcp`'s bespoke-tool slot: a zod `input`, a
- * `handler`, and the `mutates` flag, sharing the package's zod→JSON-Schema +
+ * client. It rides `@kolu/surface-mcp`'s bespoke-tool slot: an Effect Schema
+ * `input`, a `handler`, and the `mutates` flag, sharing the package's
  * result-framing + signal spine.
  *
  * The spawn machinery (startup polling, child reaping) is migrated wholesale
@@ -19,7 +19,8 @@ import {
   type WriteStream,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { z } from "zod";
+import { firstFrame } from "../common/stream";
+import { Schema } from "effect";
 import type { BespokeTool } from "@kolu/surface-mcp";
 import { type CancelResult, cancelRun } from "../coordinator/cancel";
 import {
@@ -29,26 +30,26 @@ import {
 } from "../coordinator/checkoutLock";
 import { SOCKET_PATH, tryDialSocket } from "../coordinator/socket";
 
-export const runInput = z.object({
-  selectors: z.array(z.string()).optional(),
-  platforms: z.array(z.string()).optional(),
+export const runInput = Schema.Struct({
+  selectors: Schema.optionalKey(Schema.Array(Schema.String)),
+  platforms: Schema.optionalKey(Schema.Array(Schema.String)),
   /** `PLATFORM=ADDR` host pins, one per platform (mirrors `odu run --host`). */
-  hosts: z.array(z.string()).optional(),
-  root: z.string().optional(),
-  no_strict: z.boolean().optional(),
-  no_snapshot: z.boolean().optional(),
-  no_post: z.boolean().optional(),
+  hosts: Schema.optionalKey(Schema.Array(Schema.String)),
+  root: Schema.optionalKey(Schema.String),
+  no_strict: Schema.optionalKey(Schema.Boolean),
+  no_snapshot: Schema.optionalKey(Schema.Boolean),
+  no_post: Schema.optionalKey(Schema.Boolean),
   /** Cancel a run already live in this checkout and start fresh, instead of
    *  refusing — the "stop this, run the fixed commit" move after a fail-fast. */
-  supersede: z.boolean().optional(),
+  supersede: Schema.optionalKey(Schema.Boolean),
   /** Keep the coordinator alive after the run drains so a node can be rerun
    *  post-settle; call `cancel` (or `run` with supersede) when done. */
-  linger: z.boolean().optional(),
+  linger: Schema.optionalKey(Schema.Boolean),
   /** Fail immediately when every host in a platform's pool is busy, instead of
    *  waiting in line (mirrors `odu run --no-wait`). */
-  no_wait: z.boolean().optional(),
+  no_wait: Schema.optionalKey(Schema.Boolean),
 });
-export type RunInput = z.infer<typeof runInput>;
+export type RunInput = typeof runInput.Type;
 
 export interface RunResult {
   ok: boolean;
@@ -153,7 +154,7 @@ async function defaultWaitForSocket(
   // to know it answers, not to hold it open.
   const serving = async (): Promise<boolean> => {
     const d = await tryDialSocket(socketPath);
-    d?.close();
+    await d?.close();
     return d !== null;
   };
   return pollUntilSocketOrExit(serving, exited);
@@ -201,7 +202,7 @@ export async function startRun(
   const busy = existing !== null || liveRunLockPid(lockPath) !== null;
 
   if (busy) {
-    if (existing !== null) existing.close();
+    if (existing !== null) await existing.close();
     if (!input.supersede) {
       return {
         ok: false,
@@ -345,13 +346,12 @@ export async function openRunLog(
   const dialed = await tryDialSocket(socketPath);
   if (dialed === null) return null;
   try {
-    let sha7 = "";
-    let seq: number | undefined;
-    for await (const state of await dialed.client.surface.nodes.get({})) {
-      sha7 = state.sha7;
-      seq = state.seq;
-      break;
-    }
+    // ONE frame, then done. `firstFrame` ends the stream, which releases the
+    // subscription through its own finalizers — the socket below is closed
+    // right after, and a held-open `get` would have outlived it.
+    const state = await firstFrame(dialed.client.surface.nodes.get(undefined));
+    const sha7 = state?.sha7 ?? "";
+    const seq = state?.seq;
     if (sha7 === "" || seq === undefined) return null;
     const dir = join(dirname(socketPath), sha7, "runs");
     mkdirSync(dir, { recursive: true });
@@ -362,7 +362,7 @@ export async function openRunLog(
     // run tool — the agent still gets live surface frames without a disk tee.
     return null;
   } finally {
-    dialed.close();
+    await dialed.close();
   }
 }
 

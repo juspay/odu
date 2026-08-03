@@ -15,18 +15,29 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
-import { directLink } from "@kolu/surface/links/direct";
+import { buildSurfaceFace } from "@kolu/surface/client";
+import { directDispatch } from "@kolu/surface/links/direct";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ResourceUpdatedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
-import { serveSurfaceAsMcp } from "@kolu/surface-mcp";
+import {
+  serveSurfaceAsMcp,
+  type SurfaceClientCallable,
+} from "@kolu/surface-mcp";
+import { Stream } from "effect";
 import { afterEach, describe, expect, it } from "bun:test";
 import { gitRunContext } from "../common/git";
 import type { RunOutcome, RunRecord } from "../common/runRecord";
 import { writeRunRecord } from "../coordinator/ledger";
 import { tryDialSocket } from "../coordinator/socket";
-import { oduSurface, pendingNode, type PipelineState } from "../common/surface";
 import {
+  oduClientOver,
+  oduSurface,
+  pendingNode,
+  type PipelineState,
+} from "../common/surface";
+import {
+  type AgentNodes,
   type AgentNodesReader,
   buildAgentProjection,
   type DialA,
@@ -107,8 +118,10 @@ async function connectWith(
   const projection = buildAgentProjection(oduSurface, gitRunContext);
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const aClient = redialingAClient(dial);
-  const { router } = projection.implement(aClient);
-  const bClient = directLink<typeof projection.surface.contract>(router);
+  const bClient = buildSurfaceFace(
+    projection.surface,
+    directDispatch(projection.implement(aClient)),
+  ) as unknown as SurfaceClientCallable;
   const served = await serveSurfaceAsMcp({
     surface: projection.surface,
     client: () => bClient,
@@ -474,18 +487,21 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
   async function agentWaitClient(s: TestSurface): Promise<AgentNodesReader> {
     const { unixSocketLink } = await import("@kolu/surface/links/unix-socket");
     const projection = buildAgentProjection(oduSurface, gitRunContext);
-    const dialed = await unixSocketLink<typeof oduSurface.contract>({
+    const link = await unixSocketLink({
+      group: oduSurface.group,
       socketPath: s.socketPath,
     });
-    const { router } = projection.implement(dialed.client);
-    closers.push(() => dialed.dispose());
-    // `as unknown as`: every surface contract now intersects the framework-reserved
-    // `system.live` proc (kolu#1568), so the inferred client type surfaces
-    // `surface.system.live` and no longer structurally overlaps the narrower
-    // `AgentNodesReader` for a direct cast. The runtime router DOES serve
-    // `surface.nodes` (the agent projection), so the narrowing is sound.
-    return directLink<typeof projection.surface.contract>(
-      router,
+    closers.push(() => {
+      void link.dispose();
+    });
+    // `as unknown as`: `buildSurfaceFace` returns the deliberately STRUCTURAL
+    // `SurfaceFace` (per-member precision lives one layer up — kolu PLAN D2), so
+    // it does not structurally overlap the narrower `AgentNodesReader`. The
+    // runtime face DOES carry `surface.nodes`, minted by the projection.s own
+    // tag walk, so the narrowing is sound.
+    return buildSurfaceFace(
+      projection.surface,
+      directDispatch(projection.implement(oduClientOver(link.dispatch))),
     ) as unknown as AgentNodesReader;
   }
 
@@ -770,9 +786,9 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
   function agentNoRunClient(): AgentNodesReader {
     const projection = buildAgentProjection(oduSurface, gitRunContext);
     const aClient = redialingAClient(async () => null);
-    const { router } = projection.implement(aClient);
-    return directLink<typeof projection.surface.contract>(
-      router,
+    return buildSurfaceFace(
+      projection.surface,
+      directDispatch(projection.implement(aClient)),
     ) as unknown as AgentNodesReader;
   }
 
@@ -834,7 +850,11 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     // so it publishes state with `seq` absent. An observed run's verdict then
     // carries `sha7` but `seq: null` — no unique `sha7#seq` is claimed
     // (juspay/odu#49 F5); the identity is honestly partial, never fabricated.
-    const noSeq = { ...state([["ci::unit@x86_64-linux", "ok"]]), seq: undefined };
+    // The key is OMITTED, not spelled `undefined` — `PipelineState.seq` is
+    // `Schema.optionalKey` (PLAN #17) and rejects a present-but-undefined key on
+    // encode, so this fixture is spelled the way the real producer must spell it
+    // (`run.ts` spreads the key in only when a seq was reserved).
+    const { seq: _dropped, ...noSeq } = state([["ci::unit@x86_64-linux", "ok"]]);
     const s = await serveTestSurface(noSeq);
     open.push(s);
     const client = await agentWaitClient(s);
@@ -902,8 +922,9 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     const client: AgentNodesReader = {
       surface: {
         nodes: {
-          get: async () => ({
-            async *[Symbol.asyncIterator]() {
+          get: () =>
+            Stream.fromAsyncIterable(
+              (async function* () {
               ac.abort(); // controller aborted before the throw propagates
               yield {
                 run: true,
@@ -922,8 +943,9 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
                 ],
                 unposted: [],
               };
-            },
-          }),
+              })(),
+              (e) => e,
+            ) as Stream.Stream<AgentNodes, unknown>,
         },
       },
     };

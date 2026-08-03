@@ -235,9 +235,7 @@ describe("openRunLog — durable coordinator log path", () => {
     const dir = mkdtempSync(join(tmpdir(), "odu-runlog-"));
     const socketPath = join(dir, "odu.sock");
     // Serve a surface with sha7+seq so openRunLog can place the file.
-    const state = liveState();
-    state.sha7 = "abc1234";
-    state.seq = 7;
+    const state = { ...liveState(), sha7: "abc1234", seq: 7 };
     const s = await serveTestSurface(state, undefined, { socketPath });
     open.push(s);
     try {

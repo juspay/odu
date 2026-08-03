@@ -15,11 +15,12 @@
  * agent client `@kolu/surface-mcp` hands the handler.
  */
 
-import { isDeadTransportError } from "@kolu/surface/client";
+import { isDeadTransportError } from "@kolu/surface/errors";
 import type { BespokeTool } from "@kolu/surface-mcp";
-import { z } from "zod";
+import { Schema } from "effect";
 import { agentSummary, NON_TERMINAL_STATUSES } from "../cli/render";
 import { gitRunContext } from "../common/git";
+import { subscribe } from "../common/stream";
 import { formatRef, type RunRecord } from "../common/runRecord";
 import { liftUnposted, type OwedStatus } from "../common/surface";
 import { readRunRecord } from "../coordinator/ledger";
@@ -31,22 +32,26 @@ import {
 	type ResolveRunContext,
 } from "./agentSurface";
 
-export const waitInput = z.object({
-	timeout_ms: z.number().optional(),
-	fail_fast: z.boolean().optional(),
+export const waitInput = Schema.Struct({
+	/** `Schema.Int`, not `Schema.Number`: a millisecond bound is an integer, and
+	 *  `Number`.s JSON Schema offers a host the string `"NaN"` (PLAN D8). */
+	timeout_ms: Schema.optionalKey(Schema.Int),
+	fail_fast: Schema.optionalKey(Schema.Boolean),
 	/** Refuse loudly unless the live run's commit matches this sha (a prefix
 	 *  either way, so a 7- or 40-char sha both work) — the "wait for the run I
 	 *  just dispatched, not a stale one" guard (juspay/odu#49 ask 3). */
-	expected_sha: z
-		.string()
-		.describe(
-			"Refuse loudly unless the live run's commit matches this. Prefix-matched " +
-				"against the run's sha7 either way, so a full 40-char sha or the 7-char " +
+	// `.describe(...)` becomes an ANNOTATION — the description is what a host
+	// shows an agent about this argument, so it has to survive the port.
+	expected_sha: Schema.optionalKey(
+		Schema.String.annotate({
+			description:
+				"Refuse loudly unless the live run.s commit matches this. Prefix-matched " +
+				"against the run.s sha7 either way, so a full 40-char sha or the 7-char " +
 				"sha7 from a prior verdict both work.",
-		)
-		.optional(),
+		}),
+	),
 });
-export type WaitInput = z.infer<typeof waitInput>;
+export type WaitInput = typeof waitInput.Type;
 
 /** The loud refusal `wait_for_settle` raises instead of returning a semantically
  *  empty verdict: no run is live in this checkout, or the live run's commit
@@ -86,7 +91,7 @@ export interface SettleVerdict {
 	seq: number | null;
 	/** Full owed GitHub status rows not yet confirmed (juspay/odu#61).
 	 *  Reporting debt does not block settle — the test verdict stays the truth. */
-	unposted: OwedStatus[];
+	unposted: readonly OwedStatus[];
 }
 
 export interface WaitOptions {
@@ -146,7 +151,7 @@ function recordVerdict(rec: RunRecord | null): {
 	passed: boolean;
 	failed: string[];
 	errored: string[];
-	unposted: OwedStatus[];
+	unposted: readonly OwedStatus[];
 } | null {
 	if (rec === null) return null;
 	if (rec.outcome !== "passed" && rec.outcome !== "failed") return null;
@@ -188,7 +193,7 @@ function identityOf(
 
 /** The posting debt a FRAME reports. A record-sourced verdict uses the
  *  record's instead — see `recordVerdict`. */
-function debtOf(snap: AgentNodes | undefined): OwedStatus[] {
+function debtOf(snap: AgentNodes | undefined): readonly OwedStatus[] {
 	return (snap ?? EMPTY_NODES).unposted ?? [];
 }
 
@@ -320,9 +325,16 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
 	};
 
 	try {
-		for await (const snap of await opts.client.surface.nodes.get(undefined, {
-			signal: controller.signal,
-		})) {
+		// The subscription is the WAIT: a `Stream` registers nothing until it is
+		// pulled, so the settle watcher is armed by this loop.s first `next()`, not
+		// by the call that produced the stream value. `subscribe` wires the
+		// controller.s abort to closing the subscription (fiber interruption), which
+		// is what the `{ signal }` call option used to do — there is no signal on a
+		// surface call any more (kolu PLAN D10/#18).
+		for await (const snap of subscribe(
+			opts.client.surface.nodes.get(undefined),
+			controller.signal,
+		)) {
 			last = snap;
 			// The pre-run / no-run snapshot (`run: false`, empty rows) is not a
 			// settled verdict — keep waiting for a real run's frames.
@@ -384,9 +396,13 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
 		// An abort that surfaces as a rejection (rather than a clean end) is the
 		// same timeout/cancel verdict.
 		if (controller.signal.aborted) return abortedVerdict();
-		// Peer process/socket death used to end the async iterator cleanly; newer
-		// @kolu/surface rejects with SURFACE_STDIO_TRANSPORT_CLOSED. Treat that as
-		// the same end-of-stream verdict (never a false green, never an uncaught).
+		// Peer process/socket death used to end the async iterator cleanly; the
+		// surface fails it instead. The discriminant is now the error.s `_tag`
+		// (`SurfaceStdioTransportClosed` / `SurfaceTransportRetired`), read through
+		// the shared predicate rather than compared against a magic code string —
+		// which also survives a second `effect` module instance, where an
+		// `instanceof` would silently stop recognising it. Same verdict as before:
+		// end-of-stream, never a false green and never an uncaught.
 		if (isDeadTransportError(err)) return streamEndedVerdict();
 		throw err;
 	} finally {

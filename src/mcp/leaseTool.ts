@@ -6,16 +6,16 @@
  * observe the line. Never blocks the MCP session on a multi-hour queue.
  */
 
-import { z } from "zod";
+import { Schema } from "effect";
 import type { BespokeTool } from "@kolu/surface-mcp";
 import { leaseCommand, releaseCommand } from "../cli/leaseCmd";
 import type { HolderInfo } from "../coordinator/lease";
 
-export const leaseInput = z.object({
-  platforms: z.array(z.string()).optional(),
-  no_wait: z.boolean().optional(),
+export const leaseInput = Schema.Struct({
+  platforms: Schema.optionalKey(Schema.Array(Schema.String)),
+  no_wait: Schema.optionalKey(Schema.Boolean),
 });
-export type LeaseInput = z.infer<typeof leaseInput>;
+export type LeaseInput = typeof leaseInput.Type;
 
 export interface LeaseToolResult {
   ok: boolean;
@@ -60,10 +60,10 @@ export const leaseTool: BespokeTool = {
   },
 };
 
-export const releaseInput = z.object({
-  platforms: z.array(z.string()).optional(),
+export const releaseInput = Schema.Struct({
+  platforms: Schema.optionalKey(Schema.Array(Schema.String)),
 });
-export type ReleaseInput = z.infer<typeof releaseInput>;
+export type ReleaseInput = typeof releaseInput.Type;
 
 export interface ReleaseToolResult {
   ok: boolean;

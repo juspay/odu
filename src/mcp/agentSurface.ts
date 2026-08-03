@@ -50,13 +50,18 @@
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 import { deriveStream, projectSurface } from "@kolu/surface/project";
-import { z } from "zod";
+import type { SurfaceHandlers } from "@kolu/surface/server";
+import { Effect, Schema, Stream } from "effect";
+import type { Rpc, RpcGroup } from "effect/unstable/rpc";
+import { subscribe } from "../common/stream";
 import { rowsOf } from "../cli/render";
 import { splitFanId } from "../common/nodeId";
 import {
   clampLog,
   EMPTY_STATE,
   MAX_LOG_CHARS,
+  type NodeLogFrame,
+  type OduClient,
   type oduSurface,
   OwedStatusSchema,
   type PipelineState,
@@ -66,68 +71,68 @@ import { logPathFor } from "../coordinator/statuses";
 import { TaskIdSchema } from "../common/spec";
 
 /**
- * The slice of the live A-client (`oduSurface`) the projection actually uses.
+ * The slice of the live A-client (`oduSurface`) this projection consumes.
  *
- * Spelled by hand rather than as `SurfaceClientOf<typeof oduSurface.spec>`:
- * the full per-spec client union for `oduSurface` (whose `run.configure` input
- * carries the deeply-nested `TaskSpecSchema`) overflows TS's union budget
- * (TS2590) when materialized inside `projectSurface`'s `deps` position. We only
- * call three leaves, so a minimal structural client is both sufficient and
- * cheap, and the projection's `deps` is cast onto the package's signature (the
- * same union-budget dodge the package itself documents in project.ts). */
-interface OduSurfaceClient {
-  surface: {
-    nodes: {
-      get: (
-        input: Record<string, never>,
-        opts?: { signal?: AbortSignal },
-      ) => Promise<AsyncIterable<PipelineState>>;
-    };
-    nodeLog: {
-      get: (
-        input: { id: string },
-        opts?: { signal?: AbortSignal },
-      ) => Promise<AsyncIterable<{ kind: string; text: string }>>;
-    };
-    node: {
-      rerun: (input: { id: string }) => Promise<{ ok: boolean }>;
-      cancel: (input: { id: string }) => Promise<{ ok: boolean }>;
-    };
-    lane: {
-      cancel: (input: { platform: string }) => Promise<{ ok: boolean }>;
-    };
-  };
-}
+ * This used to be a hand-SPELLED four-member interface — a structural mirror of
+ * A written out by hand, because materializing the full per-spec oRPC client
+ * union for `oduSurface` (whose `run.configure` input carries the deeply-nested
+ * `TaskSpecSchema`) overflowed TS's union budget with TS2590 inside
+ * `projectSurface`'s `deps` position.
+ *
+ * That is no longer true, so the mirror is DERIVED now instead of transcribed:
+ * `SurfaceClientOf` resolves to the narrow READ face (one `get` per cell and
+ * stream, plus the declared procedures — a projection consumes A, it never
+ * mutates it), so the expensive half of the union is never built at all.
+ * Re-measured on this surface rather than assumed: `deps` names the real
+ * spec-derived type and the `as never` cast that used to hide the overflow is
+ * deleted, along with the risk that it was hiding a genuine type error too.
+ *
+ * It stays a `Pick` of exactly the four members the projection calls, because
+ * `redialingAClient` implements exactly those — a type claiming `header.get`
+ * over an object that has none would be a lie the compiler helps tell.
+ */
+type OduSurfaceClient = {
+  surface: Pick<
+    OduClient["surface"],
+    "nodes" | "nodeLog" | "node" | "lane"
+  >;
+};
 
 // ── B's spec ──────────────────────────────────────────────────────────────
 
 /** The agent `nodes` snapshot: the pipeline flattened to rows the agent
  *  triages. `run: false` (with a null pipeline and no rows) is the pre-run /
  *  no-run value, mirroring the old `get_nodes` tool's `NodesResult`. */
-const NodeRowSchema = z.object({
-  id: z.string(),
-  name: z.string(),
-  status: z.string(),
-  exit_code: z.number().nullable(),
-  duration_ms: z.number().nullable(),
-  red: z.boolean(),
+/** MCP-facing numerics are `Schema.Int`, not `Schema.Number` (kolu PLAN D8,
+ *  divergence 2): `Schema.Number` is a codec tolerant of Infinity/NaN, and its
+ *  JSON Schema is an `anyOf` that offers a host the literal string `"NaN"` as a
+ *  valid value. These are an exit code and a millisecond duration — integers by
+ *  construction — so the faithful spelling is also the one that advertises
+ *  `{"type":"integer"}`. */
+const NodeRowSchema = Schema.Struct({
+  id: Schema.String,
+  name: Schema.String,
+  status: Schema.String,
+  exit_code: Schema.NullOr(Schema.Int),
+  duration_ms: Schema.NullOr(Schema.Int),
+  red: Schema.Boolean,
 });
 
-const AgentNodesSchema = z.object({
-  run: z.boolean(),
-  pipeline: z.string().nullable(),
+const AgentNodesSchema = Schema.Struct({
+  run: Schema.Boolean,
+  pipeline: Schema.NullOr(Schema.String),
   /** The live run's identity, projected from `PipelineState` so an agent
    *  verdict says WHICH run it describes (juspay/odu#49): `sha7` the 7-char
    *  commit, `seq` its ordinal among runs of that commit (`<sha7>#<seq>`).
    *  Both are the no-run value (`""` / `null`) when `run` is false. */
-  sha7: z.string(),
-  seq: z.number().nullable(),
-  nodes: z.array(NodeRowSchema),
+  sha7: Schema.String,
+  seq: Schema.NullOr(Schema.Int),
+  nodes: Schema.Array(NodeRowSchema),
   /** Full owed GitHub status rows not yet confirmed (juspay/odu#61).
    *  Empty when posting is healthy or disabled; test verdict stays the truth. */
-  unposted: z.array(OwedStatusSchema),
+  unposted: Schema.Array(OwedStatusSchema),
 });
-export type AgentNodes = z.infer<typeof AgentNodesSchema>;
+export type AgentNodes = typeof AgentNodesSchema.Type;
 
 /**
  * The B-side read slice: the projected agent client's `nodes` stream read
@@ -141,10 +146,7 @@ export type AgentNodes = z.infer<typeof AgentNodesSchema>;
 export interface AgentNodesReader {
   surface: {
     nodes: {
-      get: (
-        input: void,
-        opts: { signal?: AbortSignal },
-      ) => Promise<AsyncIterable<AgentNodes>>;
+      get: (input: void) => Stream.Stream<AgentNodes, unknown>;
     };
   };
 }
@@ -162,38 +164,16 @@ export const EMPTY_NODES: AgentNodes = {
   unposted: [],
 };
 
-/**
- * The node-id identity axis as a *collection key*: `TaskIdSchema` minus the
- * `.min(1)` the surface-mcp URI decoder's empty-string probe can't tolerate.
- *
- * The same "what is a valid node id" contract `TaskIdSchema` (`z.string()
- * .min(1)`) spells everywhere else in the surface (node.rerun's input, A's
- * primitives) is deliberately relaxed here for the `logs` collection key:
- * `@kolu/surface-mcp`'s collection-item URI decoder classifies a key as
- * "string-typed" via `keySchema.safeParse("").success`, which a `.min(1)`
- * string rejects — it would then try `JSON.parse` on the id segment and fail to
- * address any real node id. A node id is never empty in practice, so dropping
- * just the lower bound is safe and makes `logs/{id}` addressable.
- *
- * This is the same base string type as `TaskIdSchema` with only the lower
- * bound dropped — named here so the divergence between the two id contracts is
- * a single, intentional, documented difference rather than two independent
- * literals that could silently drift. Should the id ever grow a *format*
- * constraint (a regex/brand beyond the min), tighten it on `TaskIdSchema` and
- * mirror it here, keeping this the lone deliberate relaxation.
- */
-const NodeIdKeySchema = z.string();
-
 /** One node's log, keyed by node id in the `logs` collection. `source` says
  *  where the text came from: "live" (the running coordinator's buffered
  *  snapshot), "file" (the durable per-SHA log after the run process exited),
  *  or "missing" (neither). */
-const LogEntrySchema = z.object({
-  node: z.string(),
-  source: z.enum(["live", "file", "missing"]),
-  text: z.string(),
+const LogEntrySchema = Schema.Struct({
+  node: Schema.String,
+  source: Schema.Literals(["live", "file", "missing"]),
+  text: Schema.String,
 });
-export type LogEntry = z.infer<typeof LogEntrySchema>;
+export type LogEntry = typeof LogEntrySchema.Type;
 
 const agentSpec = {
   streams: {
@@ -208,32 +188,40 @@ const agentSpec = {
     // lifetimes). `inputSchema` accepts `undefined` so it exposes as the
     // no-input static resource `surface://streams/nodes`.
     nodes: {
-      inputSchema: z.void(),
+      inputSchema: Schema.Void,
       outputSchema: AgentNodesSchema,
     },
   },
   collections: {
-    // `NodeIdKeySchema` is `TaskIdSchema` minus the `.min(1)` the surface-mcp
-    // URI decoder's empty-string probe can't tolerate (see its definition): the
-    // node-id contract is named once and the `.min(1)` divergence is the single
-    // intentional difference, not two hand-divergent literals.
-    logs: { keySchema: NodeIdKeySchema, schema: LogEntrySchema },
+    // ONE node-id contract now — `TaskIdSchema`, the same `.min(1)` string the
+    // rest of the surface spells. The deliberate relaxation that used to live
+    // here is DELETED, and its reason with it: surface-mcp's old collection-item
+    // URI decoder classified a key as "string-typed" by probing
+    // `keySchema.safeParse("")`, which a `.min(1)` string rejects, so it fell
+    // through to `JSON.parse` and could not address any real node id. The Effect
+    // decoder tries the id VERBATIM first and only falls back to `JSON.parse`
+    // for numeric/boolean keys, so a min-length string key addresses correctly.
+    // Re-verified against the real decoder, not assumed — see
+    // `agentSurface.keys.test.ts`.
+    logs: { keySchema: TaskIdSchema, schema: LogEntrySchema },
   },
   procedures: {
     node: {
       rerun: {
-        input: z.object({ id: TaskIdSchema }),
-        output: z.object({ ok: z.boolean() }),
+        input: Schema.Struct({ id: TaskIdSchema }),
+        output: Schema.Struct({ ok: Schema.Boolean }),
       },
       cancel: {
-        input: z.object({ id: TaskIdSchema }),
-        output: z.object({ ok: z.boolean() }),
+        input: Schema.Struct({ id: TaskIdSchema }),
+        output: Schema.Struct({ ok: Schema.Boolean }),
       },
     },
     lane: {
       cancel: {
-        input: z.object({ platform: z.string().min(1) }),
-        output: z.object({ ok: z.boolean() }),
+        input: Schema.Struct({
+          platform: Schema.String.check(Schema.isMinLength(1)),
+        }),
+        output: Schema.Struct({ ok: Schema.Boolean }),
       },
     },
   },
@@ -372,9 +360,8 @@ function makeLogsStore(
     following.add(id);
     void (async () => {
       try {
-        const stream = await client.surface.nodeLog.get({ id });
         let text = "";
-        for await (const frame of stream) {
+        for await (const frame of subscribe(client.surface.nodeLog.get({ id }))) {
           text =
             frame.kind === "append"
               ? clampLog(text + frame.text)
@@ -424,7 +411,7 @@ function makeLogsStore(
  *  dial in `mcp.ts`. */
 export type DialA = () => Promise<{
   client: OduSurfaceClient;
-  close: () => void;
+  close: () => Promise<void>;
 } | null>;
 
 /**
@@ -452,83 +439,77 @@ export type DialA = () => Promise<{
  *   - `node.rerun` / `node.cancel` / `lane.cancel` — dial, call, close; no socket → `{ ok: false }`.
  */
 export function redialingAClient(dial: DialA): OduSurfaceClient {
-  // Dial fresh, stream the chosen upstream, and close the socket when iteration
-  // ends (consumer return/abort, or A closing the stream). `onNoRun` supplies
-  // the frames to yield when no coordinator is live.
-  async function* streamFresh<F>(
-    pick: (a: OduSurfaceClient) => Promise<AsyncIterable<F>>,
-    onNoRun: () => AsyncIterable<F>,
-  ): AsyncGenerator<F> {
-    const dialed = await dial();
-    if (dialed === null) {
-      yield* onNoRun();
-      return;
-    }
-    try {
-      yield* await pick(dialed.client);
-    } finally {
-      dialed.close();
-    }
+  /**
+   * Dial fresh, stream the chosen upstream, and close the socket when the
+   * subscription ends — for ANY reason, including the consumer walking away.
+   *
+   * This is the shape that got honest under Effect. The old version was an
+   * async generator whose `finally { dialed.close() }` ran only if the consumer
+   * resumed it, and whose `close()` was synchronous and could not have been
+   * awaited from there anyway. `Stream.unwrapScoped` over an `acquireRelease`
+   * makes the DIAL a scoped resource of the stream: the release is part of the
+   * stream's own teardown, an interruption runs it, and it is an `Effect` so
+   * the now-async `close()` is genuinely awaited before the scope closes.
+   *
+   * The laziness is load-bearing and is the reason the re-dial-per-call
+   * contract still holds: nothing is dialled when the stream VALUE is made,
+   * only when a consumer pulls. So each `nodes` read and each log follow still
+   * sees the run that is live at subscribe time, never one cached from before.
+   */
+  function streamFresh<F>(
+    pick: (a: OduSurfaceClient) => Stream.Stream<F, unknown>,
+    onNoRun: Stream.Stream<F>,
+  ): Stream.Stream<F, unknown> {
+    return Stream.unwrap(
+      Effect.map(
+        Effect.acquireRelease(
+          Effect.promise(() => dial()),
+          (dialed) =>
+            dialed === null
+              ? Effect.void
+              : Effect.promise(() => dialed.close()),
+        ),
+        (dialed) => (dialed === null ? onNoRun : pick(dialed.client)),
+      ),
+    );
   }
 
-  async function* one<F>(value: F): AsyncIterable<F> {
-    yield value;
-  }
-  // biome-ignore lint/correctness/useYield: an empty stream — no frames.
-  async function* none<F>(): AsyncIterable<F> {
-    return;
+  /** Dial, call, close — the unary half. No socket is `{ ok: false }`, which is
+   *  the "there is no run to mutate" answer, not an error. */
+  async function callFresh(
+    pick: (a: OduSurfaceClient) => Promise<{ ok: boolean }>,
+  ): Promise<{ ok: boolean }> {
+    const dialed = await dial();
+    if (dialed === null) return { ok: false };
+    try {
+      return await pick(dialed.client);
+    } finally {
+      await dialed.close();
+    }
   }
 
   return {
     surface: {
       nodes: {
-        get: (_input, opts) =>
-          Promise.resolve(
-            streamFresh<PipelineState>(
-              (a) => a.surface.nodes.get({}, opts),
-              () => one(EMPTY_STATE),
-            ),
+        get: () =>
+          streamFresh<PipelineState>(
+            (a) => a.surface.nodes.get(undefined),
+            Stream.make(EMPTY_STATE),
           ),
       },
       nodeLog: {
-        get: (input, opts) =>
-          Promise.resolve(
-            streamFresh<{ kind: string; text: string }>(
-              (a) => a.surface.nodeLog.get(input, opts),
-              () => none(),
-            ),
+        get: (input) =>
+          streamFresh<NodeLogFrame>(
+            (a) => a.surface.nodeLog.get(input),
+            Stream.empty,
           ),
       },
       node: {
-        rerun: async (input) => {
-          const dialed = await dial();
-          if (dialed === null) return { ok: false };
-          try {
-            return await dialed.client.surface.node.rerun(input);
-          } finally {
-            dialed.close();
-          }
-        },
-        cancel: async (input) => {
-          const dialed = await dial();
-          if (dialed === null) return { ok: false };
-          try {
-            return await dialed.client.surface.node.cancel(input);
-          } finally {
-            dialed.close();
-          }
-        },
+        rerun: (input) => callFresh((a) => a.surface.node.rerun(input)),
+        cancel: (input) => callFresh((a) => a.surface.node.cancel(input)),
       },
       lane: {
-        cancel: async (input) => {
-          const dialed = await dial();
-          if (dialed === null) return { ok: false };
-          try {
-            return await dialed.client.surface.lane.cancel(input);
-          } finally {
-            dialed.close();
-          }
-        },
+        cancel: (input) => callFresh((a) => a.surface.lane.cancel(input)),
       },
     },
   };
@@ -555,8 +536,7 @@ function agentDeps(
       // A's current snapshot mapped — a one-shot read awaits the real upstream
       // value, and a subscriber gets deltas on every transition.
       nodes: deriveStream(
-        (_input: void, opts: { signal?: AbortSignal }) =>
-          a.surface.nodes.get({}, opts),
+        (_input: void) => a.surface.nodes.get(undefined),
         (state: PipelineState): AgentNodes =>
           // An empty pipeline (no nodes) is the no-run / pre-run value the
           // re-dialing A-client yields when no coordinator is live (EMPTY_STATE)
@@ -577,16 +557,20 @@ function agentDeps(
     collections: {
       logs,
     },
+    // A forwarded procedure is an `Effect` now, and the forward is a Promise —
+    // `Effect.promise`, deliberately not `tryPromise`: a rejection here is A's
+    // transport dying, which no B-side schema declares, so it is a DEFECT and
+    // must surface as one rather than being laundered into a member failure.
     procedures: {
       node: {
         rerun: ({ input }: { input: { id: string } }) =>
-          a.surface.node.rerun(input),
+          Effect.promise(() => a.surface.node.rerun(input)),
         cancel: ({ input }: { input: { id: string } }) =>
-          a.surface.node.cancel(input),
+          Effect.promise(() => a.surface.node.cancel(input)),
       },
       lane: {
         cancel: ({ input }: { input: { platform: string } }) =>
-          a.surface.lane.cancel(input),
+          Effect.promise(() => a.surface.lane.cancel(input)),
       },
     },
   };
@@ -596,9 +580,12 @@ function agentDeps(
  *  broadcasting publish from the implemented ctx. */
 export interface AgentProjection {
   surface: ReturnType<typeof projectSurface>["surface"];
+  /** The served pair a host mounts: the flat group B advertises and the
+   *  tag-keyed handlers bound to it. The `any`-typed oRPC router this returned
+   *  is gone — a tag carries its own route, so there is nothing opaque left. */
   implement: (client: { surface: Record<string, unknown> }) => {
-    // biome-ignore lint/suspicious/noExplicitAny: implementSurface's router is opaque (its surface walk is dynamic).
-    router: any;
+    group: RpcGroup.RpcGroup<Rpc.Any>;
+    handlers: SurfaceHandlers;
   };
 }
 
@@ -627,14 +614,14 @@ export function buildAgentProjection(
   let pendingStore: LogsStore | null = null;
   const projection = projectSurface(source, {
     spec: agentSpec,
-    // `deps` is cast (`as never`): its declared param is
-    // `SurfaceClientOf<typeof oduSurface.spec>`, materializing which here
-    // overflows TS's union budget (TS2590). `A` is still inferred from
-    // `source` and `B` from `spec`, so the return type stays precise.
-    deps: ((client: OduSurfaceClient) =>
+    // No cast. `deps`'s declared param is `SurfaceClientOf<typeof
+    // oduSurface.spec>` — the narrow READ face — which this now names directly;
+    // the `as never` that used to hide a TS2590 overflow is deleted, and with it
+    // the risk that a genuine type error was being hidden alongside it.
+    deps: (client) =>
       agentDeps(client, resolveRunContext, (store) => {
         pendingStore = store;
-      })) as never,
+      }),
   });
   return {
     surface: projection.surface,
@@ -648,7 +635,7 @@ export function buildAgentProjection(
         collections: { logs: { upsert: (k: string, v: LogEntry) => void } };
       };
       store?.setPublish((id, value) => ctx.collections.logs.upsert(id, value));
-      return { router: implemented.router };
+      return { group: implemented.group, handlers: implemented.handlers };
     },
   };
 }

@@ -10,10 +10,15 @@
  */
 
 import type { BespokeTool } from "@kolu/surface-mcp";
-import { z } from "zod";
+import { Schema } from "effect";
 import { cancelRun } from "../coordinator/cancel";
 
-export const cancelInput = z.object({});
+/** An empty struct, NOT `Schema.Void`: a no-arg tool must still advertise
+ *  `{"type":"object"}` to a host. (`Schema.Void` encodes as `{"type":"null"}`,
+ *  which surface-mcp special-cases back to an empty object for a member with no
+ *  input — but a bespoke tool that spells its input explicitly should spell the
+ *  object it means.) */
+export const cancelInput = Schema.Struct({});
 
 export interface CancelToolResult {
   ok: boolean;

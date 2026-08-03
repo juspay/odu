@@ -16,17 +16,21 @@
  */
 
 import type { BespokeTool } from "@kolu/surface-mcp";
-import { z } from "zod";
+import { Schema } from "effect";
 import { gitTopLevel } from "../common/git";
 import type { RunRecord } from "../common/runRecord";
 import { readLedger } from "../coordinator/ledger";
 
-export const runsInput = z.object({
+export const runsInput = Schema.Struct({
   /** Cap the number of (newest-first) runs returned; default `DEFAULT_LIMIT`
-   *  so a long-lived checkout's ledger never floods the agent's context. */
-  limit: z.number().int().positive().optional(),
+   *  so a long-lived checkout.s ledger never floods the agent.s context.
+   *
+   *  `Schema.Int`, not `Schema.Number`: this is a count, and `Number` is a
+   *  codec tolerant of Infinity/NaN whose JSON Schema offers a host the string
+   *  `"NaN"` as a valid limit (kolu PLAN D8, divergence 2). */
+  limit: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0))),
 });
-export type RunsInput = z.infer<typeof runsInput>;
+export type RunsInput = typeof runsInput.Type;
 
 export interface RunsResult {
   runs: RunRecord[];
