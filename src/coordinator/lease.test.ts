@@ -1,3 +1,7 @@
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, jest } from "bun:test";
 import {
   acquireFromPool,
@@ -488,4 +492,127 @@ describe("isMixedPool — the shape the lease seam refuses", () => {
     expect(isMixedPool(["localhost"])).toBe(false);
     expect(isMixedPool(["ci-1", "ci-2", "ci-3"])).toBe(false);
   });
+});
+
+/**
+ * Waiting in line must KEEP THE PROCESS ALIVE.
+ *
+ * `odu run --progress=json` exited 0 in the middle of a wait: with a platform
+ * busy, the multi-platform loop releases the holds it already took — and those
+ * ssh/runner children were the only ref'd handles keeping the event loop fed —
+ * then sleeps until the next poll. Built on an unref'd timer, that sleep is
+ * invisible to the loop: Bun sees nothing left to do and exits cleanly, so the
+ * run reports success without ever running. Interactive progress hid it, since
+ * the live view keeps stdin ref'd on the process's behalf.
+ *
+ * Every other test here injects `opts.sleep`, which routes around the defect
+ * completely. To see it at all the poll has to be the REAL one, in a process
+ * with nothing else holding the loop open — hence a child.
+ */
+describe("the wait poll holds the process open", () => {
+  const leaseModule = join(import.meta.dir, "lease.ts");
+  const POLL_MS = 250;
+
+  /**
+   * Run `body` as a standalone Bun process and report what it managed to say.
+   * The child is shaped like `src/cli/main.ts` — the work hangs off a promise
+   * chain, never a top-level await, because a pending top-level await is by
+   * itself a reason for Bun to stay alive and would mask exactly the defect
+   * under test.
+   */
+  function runAlone(body: string): {
+    status: number | null;
+    stdout: string;
+    stderr: string;
+    elapsedMs: number;
+  } {
+    const dir = mkdtempSync(join(tmpdir(), "odu-lease-waitpoll-"));
+    try {
+      const file = join(dir, "waiter.ts");
+      writeFileSync(file, body);
+      const started = Date.now();
+      const r = spawnSync(process.execPath, [file], {
+        encoding: "utf8",
+        env: { ...process.env, ODU_LEASE_WAIT_POLL_MS: String(POLL_MS) },
+        timeout: 30_000,
+      });
+      return {
+        status: r.status,
+        stdout: r.stdout ?? "",
+        stderr: r.stderr ?? "",
+        elapsedMs: Date.now() - started,
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  /** Busy on the first look at `busyHost`, free on every later one. The fake
+   *  leases hold no handles, so once the loop releases them the timer is all
+   *  that stands between this process and a silent exit. */
+  const claimSource = (busyHost: string) => `
+    let looks = 0;
+    const claim = async (host) => {
+      if (host === ${JSON.stringify(busyHost)}) {
+        looks += 1;
+        if (looks === 1) return { kind: "busy", heldBy: null };
+      }
+      return { kind: "held", lease: { host, release() {} } };
+    };
+  `;
+
+  const drive = (call: string) => `
+    async function main() {
+      const r = await ${call};
+      console.log("WAITED-THEN-ACQUIRED", JSON.stringify(r.lanes ?? r.host));
+    }
+    main().then(
+      () => process.exit(0),
+      (e) => { console.error(e); process.exit(1); },
+    );
+  `;
+
+  it("leaseLanes polls again after releasing partial holds", () => {
+    const r = runAlone(`
+      import { leaseLanes } from ${JSON.stringify(leaseModule)};
+      ${claimSource("linux-1")}
+      ${drive(`leaseLanes({
+        pools: {
+          hosts: { "x86_64-linux": ["linux-1"], "aarch64-darwin": ["mac-1"] },
+          source: null,
+        },
+        platforms: ["x86_64-linux", "aarch64-darwin"],
+        identity: { holder: "me@desk", run: null },
+        noWait: false,
+        claim,
+      })`)}
+    `);
+
+    // Not "it exited non-zero" — the defect's whole shape is a clean exit 0
+    // with the work undone, which is why the run looked like a success.
+    expect(`${r.stdout}${r.stderr}`).toContain("WAITED-THEN-ACQUIRED");
+    expect(r.status).toBe(0);
+    // And it really waited, rather than being fixed by a sleep that no-ops.
+    expect(r.elapsedMs).toBeGreaterThanOrEqual(POLL_MS);
+  }, 30_000);
+
+  it("acquireFromPool polls again while its only host is busy", () => {
+    const r = runAlone(`
+      import { acquireFromPool } from ${JSON.stringify(leaseModule)};
+      ${claimSource("ci-1")}
+      ${drive(`acquireFromPool({
+        platform: "x86_64-linux",
+        pool: ["ci-1"],
+        identity: { holder: "me@desk", run: null },
+        noWait: false,
+        source: null,
+        claim,
+        rotateBy: 0,
+      })`)}
+    `);
+
+    expect(`${r.stdout}${r.stderr}`).toContain("WAITED-THEN-ACQUIRED");
+    expect(r.status).toBe(0);
+    expect(r.elapsedMs).toBeGreaterThanOrEqual(POLL_MS);
+  }, 30_000);
 });
