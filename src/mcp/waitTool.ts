@@ -18,14 +18,6 @@ import {
   type ResolveRunContext,
 } from "./agentSurface";
 
-// Re-export the core for tests that historically imported from this module.
-export {
-  NoLiveRunError,
-  type SettleVerdict,
-  type WaitOptions,
-  waitForSettle,
-} from "../coordinator/waitForSettle";
-
 export const waitInput = z.object({
   timeout_ms: z.number().optional(),
   fail_fast: z.boolean().optional(),

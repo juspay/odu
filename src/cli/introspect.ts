@@ -320,16 +320,8 @@ export interface WaitCommandOpts {
  *  live run's `nodes` stream and print one JSON verdict line. Default is
  *  fail-fast; `--settle` waits for the whole run. Exit 0 only on a fully-settled
  *  all-green run. Shares `waitForSettle` with the MCP `wait_for_settle` tool. */
-export async function waitCommand(
-  opts: WaitCommandOpts | boolean,
-  socketPathArg?: string,
-): Promise<number> {
-  // Support the older (settle, socketPath) form used by early tests.
-  const o: WaitCommandOpts =
-    typeof opts === "boolean"
-      ? { settle: opts, socketPath: socketPathArg }
-      : opts;
-  const socketPath = o.socketPath ?? SOCKET_PATH;
+export async function waitCommand(opts: WaitCommandOpts): Promise<number> {
+  const socketPath = opts.socketPath ?? SOCKET_PATH;
   const dialed = await tryDialSocket(socketPath);
   if (dialed === null) {
     noRunInProgress(socketPath);
@@ -339,9 +331,9 @@ export async function waitCommand(
     const verdict = await waitForSettle({
       client: agentReaderFromA(dialed.client),
       // CLI default = fail-fast; `--settle` opts out (failFast: false).
-      failFast: !o.settle,
-      timeoutMs: o.timeoutMs,
-      expectedSha: o.expectedSha,
+      failFast: !opts.settle,
+      timeoutMs: opts.timeoutMs,
+      expectedSha: opts.expectedSha,
       socketPath,
     });
     process.stdout.write(`${JSON.stringify(verdict)}\n`);
@@ -366,13 +358,23 @@ export async function waitCommand(
  *
  *  Mirrors `odu cancel`'s node / `@platform` sugar and adds the bare-recipe
  *  form cancel doesn't need (cancel has `lane.cancel`; rerun is only per-node). */
+/** Fan-in bookkeeping node the coordinator owns — every task's `needs` includes
+ *  `_ci-setup@plat`, so including it in `@platform` expansion would collapse
+ *  multi-rerun to "re-provision the lane only". Explicit id still works. */
+function isSetupNode(id: string): boolean {
+  return splitFanId(id).namepath === "_ci-setup";
+}
+
 export function resolveRerunTargets(
   state: PipelineState,
   selector: string,
 ): string[] {
   const platform = parseAtPlatform(selector);
   if (platform !== null) {
-    const ids = state.order.filter((id) => onPlatform(id, platform));
+    // Recipe nodes on the lane only — not `_ci-setup@plat` (see isSetupNode).
+    const ids = state.order.filter(
+      (id) => onPlatform(id, platform) && !isSetupNode(id),
+    );
     if (ids.length === 0) {
       throw new Error(`odu: no nodes on platform "${platform}"`);
     }
@@ -396,12 +398,13 @@ export function resolveRerunTargets(
 
 /** Collapse multi-target rerun to dependency-minimal roots so a dependent that
  *  is already in another selected root's transitive `needs` closure is not
- *  issued its own `node.rerun` (each call resets id + dependents). */
+ *  issued its own `node.rerun` (each call resets id + dependents). Closures
+ *  are computed once per target (CI pipelines are small; still O(t·n²) not
+ *  O(t²·n²)). */
 export function minimalRerunRoots(
   state: PipelineState,
   targets: string[],
 ): string[] {
-  const set = new Set(targets);
   const dependentsOf = (root: string): Set<string> => {
     const out = new Set<string>([root]);
     let grew = true;
@@ -419,10 +422,12 @@ export function minimalRerunRoots(
     out.delete(root);
     return out;
   };
+  const coveredBy = new Map<string, Set<string>>();
+  for (const t of targets) coveredBy.set(t, dependentsOf(t));
   return targets.filter((id) => {
-    for (const other of set) {
+    for (const other of targets) {
       if (other === id) continue;
-      if (dependentsOf(other).has(id)) return false;
+      if (coveredBy.get(other)?.has(id) === true) return false;
     }
     return true;
   });

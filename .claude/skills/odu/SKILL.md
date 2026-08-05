@@ -178,7 +178,7 @@ nix run github:juspay/odu -- wait            # fail-fast JSON verdict (MCP wait_
 nix run github:juspay/odu -- wait --settle   # block until the whole run settles
 nix run github:juspay/odu -- wait --expected-sha SHA [--timeout-ms N]
 nix run github:juspay/odu -- rerun ci::unit@x86_64-linux   # one node
-nix run github:juspay/odu -- rerun @x86_64-linux           # every node on that lane
+nix run github:juspay/odu -- rerun @x86_64-linux           # recipe nodes on that lane (not _ci-setup)
 nix run github:juspay/odu -- rerun unit                    # that recipe on every lane
 nix run github:juspay/odu -- cancel          # stop the live run, cleanly
 nix run github:juspay/odu -- cancel @aarch64-darwin   # drop one platform lane

@@ -380,25 +380,32 @@ describe("rerunCommand", () => {
     expect(surface.reruns).toEqual(["ci::e2e@x86_64-linux"]);
   });
 
-  it("reruns every node on a @platform lane", async () => {
-    const surface = await served(
-      doneState([
-        ["ci::unit@x86_64-linux", "ok", 0],
-        ["ci::e2e@x86_64-linux", "failed", 1],
-        ["ci::unit@aarch64-darwin", "ok", 0],
-      ]),
-    );
+  it("reruns every node on a @platform lane (excluding _ci-setup)", async () => {
+    // Production lanes always have `_ci-setup@plat` and every task needs it;
+    // @platform must expand to recipe nodes only, then collapse to roots.
+    const state = doneState([
+      ["_ci-setup@x86_64-linux", "ok", 0],
+      ["ci::unit@x86_64-linux", "ok", 0],
+      ["ci::e2e@x86_64-linux", "failed", 1],
+      ["ci::unit@aarch64-darwin", "ok", 0],
+    ]);
+    const setupId = "_ci-setup@x86_64-linux";
+    for (const id of ["ci::unit@x86_64-linux", "ci::e2e@x86_64-linux"]) {
+      const n = state.nodes[id];
+      if (n !== undefined) n.needs = [setupId, ...(n.needs ?? [])];
+    }
+    const e2e = state.nodes["ci::e2e@x86_64-linux"];
+    if (e2e !== undefined) {
+      e2e.needs = [setupId, "ci::unit@x86_64-linux"];
+    }
+    const surface = await served(state);
     const { out, result } = await capturingStdout(() =>
       rerunCommand("@x86_64-linux", surface.socketPath),
     );
     expect(result).toBe(0);
-    expect(out).toBe(
-      "odu: reran ci::unit@x86_64-linux, ci::e2e@x86_64-linux\n",
-    );
-    expect(surface.reruns).toEqual([
-      "ci::unit@x86_64-linux",
-      "ci::e2e@x86_64-linux",
-    ]);
+    // Setup excluded; e2e covered by unit's transitive reset → only unit.
+    expect(out).toBe("odu: reran ci::unit@x86_64-linux\n");
+    expect(surface.reruns).toEqual(["ci::unit@x86_64-linux"]);
   });
 
   it("reruns a bare recipe on every lane", async () => {

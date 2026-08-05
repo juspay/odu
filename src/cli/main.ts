@@ -147,7 +147,14 @@ async function dispatch(argv: string[]): Promise<number> {
       }
       let timeoutMs: number | undefined;
       if (values["timeout-ms"] !== undefined) {
-        timeoutMs = Number(values["timeout-ms"]);
+        const raw = values["timeout-ms"].trim();
+        // Number("") === 0 would silently mean "timeout immediately".
+        if (raw === "") {
+          throw new Error(
+            `odu: --timeout-ms must be a non-negative number (got "${values["timeout-ms"]}")`,
+          );
+        }
+        timeoutMs = Number(raw);
         if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
           throw new Error(
             `odu: --timeout-ms must be a non-negative number (got "${values["timeout-ms"]}")`,
