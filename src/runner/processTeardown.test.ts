@@ -13,6 +13,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { awaitStdioReadiness } from "@kolu/surface/links/readiness";
 import { stdioLink } from "@kolu/surface/links/stdio";
 import { afterEach, describe, expect, it } from "bun:test";
 import { runUnary } from "../common/effectEdge";
@@ -23,6 +24,21 @@ import { laneClientOver, laneSurface } from "../common/surface";
 // the entrypoint.
 const BUN = process.execPath;
 const MAIN = join(process.cwd(), "src", "runner", "main.ts");
+
+/** How long this LOCAL child may take to put its readiness banner on stdout.
+ *
+ * Deliberately NOT the ssh leg's 180s: that budget is the sum of a remote
+ * daemon's convergence ceilings (cross-epoch takeover, socket rebind, probe
+ * silence) plus network round-trips, and none of those exist here. This wait is
+ * one Bun start, one module graph, one `createLaneRunner()` — and `main.ts`
+ * hands `serveOverStdio` no explicit transport, so the PROCESS is the agent and
+ * the framework writes the banner before the first frame.
+ *
+ * 15s is the budget this suite already gives every other local liveness fact
+ * (`until`'s default), and half the test's own 30s ceiling — so a runner that
+ * never greets fails here as a *classified* readiness verdict, with the peer's
+ * prelude quoted, instead of expiring later as an opaque "test timed out". */
+const RUNNER_GREET_BUDGET_MS = 15_000;
 
 const alive = (pid: number): boolean => {
   try {
@@ -63,10 +79,21 @@ describe("runner death by signal", () => {
     if (runner.stdout === null || runner.stdin === null) {
       throw new Error("runner spawned without stdio pipes");
     }
+    // The epoch gate (juspay/kolu#2101): read the runner's readiness banner
+    // BEFORE building the link, because building it starts Effect RPC's pinger
+    // and a peer of an unknown epoch answers nothing. This is the coordinator's
+    // own move against a real `odu-runner --stdio` child, minus ssh — the
+    // `awaitStdioReadiness` proof is the only way `stdioLink` constructs.
+    const readiness = await awaitStdioReadiness({
+      read: runner.stdout,
+      deadlineMs: RUNNER_GREET_BUDGET_MS,
+      describe: "odu-runner --stdio",
+    });
     const link = await stdioLink({
       group: laneSurface.group,
       read: runner.stdout,
       write: runner.stdin,
+      readiness,
     });
     const client = laneClientOver(link.dispatch);
 

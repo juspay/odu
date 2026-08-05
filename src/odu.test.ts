@@ -9,7 +9,7 @@ import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stdioLink } from "@kolu/surface/links/stdio";
-import { createLoopbackPair } from "@kolu/surface/loopback";
+import { createLoopbackPair, greetLoopback } from "@kolu/surface/loopback";
 import { serveOverStdio } from "@kolu/surface/peer-server";
 import { afterEach, describe, expect, it } from "bun:test";
 import {
@@ -57,6 +57,14 @@ async function harness(): Promise<Harness> {
     handlers: runner.handlers,
     transport: pair.server,
   });
+  // The epoch gate (juspay/kolu#2101). `serveOverStdio` greets on its own only
+  // when the PROCESS is the agent — the construction-time discriminant is
+  // exactly the `transport` we pass above, so over an explicit loopback the
+  // caller plays the server and greets, as a daemon front does after it
+  // converges. `greetLoopback` is the real protocol, not a shortcut around it:
+  // it writes the banner on the server half and reads it back off the client
+  // half, which is what keeps this round-trip honest evidence about the ssh leg.
+  const readiness = await greetLoopback(pair);
   // Every wire link is ASYNC now (building the protocol layer and its fibers is
   // an effect) and owns a scope holding those fibers — hence the await here and
   // the `dispose()` in teardown.
@@ -64,6 +72,7 @@ async function harness(): Promise<Harness> {
     group: laneSurface.group,
     read: pair.client.read,
     write: pair.client.write,
+    readiness,
   });
   const client = laneClientOver(link.dispatch);
 
