@@ -14,6 +14,7 @@ import { serveTestSurface, type TestSurface } from "../mcp/serveForTest";
 import {
   attachStream,
   firstHeader,
+  minimalRerunRoots,
   rerunCommand,
   resolveRerunTargets,
   statusCommand,
@@ -219,7 +220,7 @@ describe("firstHeader", () => {
 describe("waitCommand", () => {
   it("fails loud with no live socket (never hang, never exit 0)", async () => {
     const { err, result } = await capturingStderr(() =>
-      waitCommand(false, "/no/such/odu.sock"),
+      waitCommand({ settle: false, socketPath: "/no/such/odu.sock" }),
     );
     expect(result).toBe(1);
     expect(err).toMatch(/no run in progress/);
@@ -234,7 +235,7 @@ describe("waitCommand", () => {
       ]),
     );
     const { out, result } = await capturingStdout(() =>
-      waitCommand(true, surface.socketPath),
+      waitCommand({ settle: true, socketPath: surface.socketPath }),
     );
     const verdict = JSON.parse(out.trim());
     expect(verdict).toMatchObject({
@@ -257,7 +258,7 @@ describe("waitCommand", () => {
     );
     // Default is fail-fast; state is already red so the first frame trips.
     const { out, result } = await capturingStdout(() =>
-      waitCommand(false, surface.socketPath),
+      waitCommand({ settle: false, socketPath: surface.socketPath }),
     );
     const verdict = JSON.parse(out.trim());
     expect(verdict.passed).toBe(false);
@@ -275,7 +276,7 @@ describe("waitCommand", () => {
       ]),
     );
     const { out, result } = await capturingStdout(() =>
-      waitCommand(true, surface.socketPath),
+      waitCommand({ settle: true, socketPath: surface.socketPath }),
     );
     const verdict = JSON.parse(out.trim());
     expect(verdict).toMatchObject({
@@ -285,6 +286,21 @@ describe("waitCommand", () => {
       failed: ["ci::e2e@x86_64-linux"],
     });
     expect(result).toBe(1);
+  });
+
+  it("refuses when --expected-sha does not match the live run", async () => {
+    const surface = await served(
+      doneState([["ci::unit@x86_64-linux", "ok", 0]]),
+    );
+    const { err, result } = await capturingStderr(() =>
+      waitCommand({
+        settle: true,
+        socketPath: surface.socketPath,
+        expectedSha: "deadbeef",
+      }),
+    );
+    expect(result).toBe(1);
+    expect(err).toMatch(/no live run matching deadbeef/);
   });
 });
 
@@ -318,6 +334,26 @@ describe("resolveRerunTargets", () => {
 
   it("rejects an unknown selector", () => {
     expect(() => resolveRerunTargets(multi, "nope")).toThrow(/no node matches/);
+  });
+});
+
+describe("minimalRerunRoots", () => {
+  it("drops dependents already covered by another selected root's needs", () => {
+    // unit → e2e on the same lane; @plat would expand to both, but only unit
+    // needs its own node.rerun (which resets e2e transitively).
+    const state = doneState([
+      ["ci::unit@x86_64-linux", "ok", 0],
+      ["ci::e2e@x86_64-linux", "failed", 1],
+    ]);
+    // Wire needs: e2e depends on unit.
+    const e2e = state.nodes["ci::e2e@x86_64-linux"];
+    if (e2e !== undefined) e2e.needs = ["ci::unit@x86_64-linux"];
+    expect(
+      minimalRerunRoots(state, [
+        "ci::unit@x86_64-linux",
+        "ci::e2e@x86_64-linux",
+      ]),
+    ).toEqual(["ci::unit@x86_64-linux"]);
   });
 });
 

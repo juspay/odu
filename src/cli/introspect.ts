@@ -20,7 +20,7 @@ import {
   type RunHeader,
   STATUS_META,
 } from "../common/surface";
-import { onPlatform, splitFanId } from "../common/nodeId";
+import { onPlatform, parseAtPlatform, splitFanId } from "../common/nodeId";
 import { cancelNodeOrPlatform, cancelRun } from "../coordinator/cancel";
 import { createDisplay, progressEvent } from "../coordinator/display";
 import {
@@ -31,9 +31,10 @@ import {
 } from "../coordinator/socket";
 import { postingWarning } from "../coordinator/statuses";
 import {
-  agentReaderFromA,
-} from "../mcp/agentSurface";
-import { NoLiveRunError, waitForSettle } from "../mcp/waitTool";
+  NoLiveRunError,
+  waitForSettle,
+} from "../coordinator/waitForSettle";
+import { agentReaderFromA } from "../mcp/agentSurface";
 import { yellow } from "./ansi";
 import {
   exitCode,
@@ -62,14 +63,22 @@ export async function firstHeader(client: OduClient): Promise<RunHeader> {
   throw new Error("odu: coordinator closed before sending header");
 }
 
+/** All live node ids matching a CLI token: exact id, `::token` / `::token@`
+ *  suffix-ish forms, or full namepath. Shared by unique resolve (`logs`) and
+ *  multi-match expand (`rerun` recipe-wide). */
+export function matchNodeIds(state: PipelineState, token: string): string[] {
+  if (state.nodes[token] !== undefined) return [token];
+  return state.order.filter((id) => {
+    if (id === token) return true;
+    if (id.endsWith(`::${token}`) || id.includes(`::${token}@`)) return true;
+    return splitFanId(id).namepath === token;
+  });
+}
+
 /** Resolve a node argument against the live state: exact id, or unique
  *  suffix-ish match (`e2e@x86_64-linux` ≡ `ci::e2e@x86_64-linux`). */
 export function resolveNodeId(state: PipelineState, token: string): string {
-  if (state.nodes[token] !== undefined) return token;
-  const matches = state.order.filter(
-    (id) =>
-      id === token || id.endsWith(`::${token}`) || id.includes(`::${token}@`),
-  );
+  const matches = matchNodeIds(state, token);
   if (matches.length === 1 && matches[0] !== undefined) return matches[0];
   throw new Error(
     matches.length === 0
@@ -300,14 +309,27 @@ function noRunInProgress(path: string): void {
   );
 }
 
-/** `odu wait [--settle]` — block on the live run's `nodes` stream and print
- *  one JSON verdict line. Default is fail-fast (return the instant a node goes
- *  red); `--settle` waits for the whole run. Exit 0 only on a fully-settled
+export interface WaitCommandOpts {
+  settle: boolean;
+  timeoutMs?: number;
+  expectedSha?: string;
+  socketPath?: string;
+}
+
+/** `odu wait [--settle] [--timeout-ms N] [--expected-sha SHA]` — block on the
+ *  live run's `nodes` stream and print one JSON verdict line. Default is
+ *  fail-fast; `--settle` waits for the whole run. Exit 0 only on a fully-settled
  *  all-green run. Shares `waitForSettle` with the MCP `wait_for_settle` tool. */
 export async function waitCommand(
-  settle: boolean,
-  socketPath: string = SOCKET_PATH,
+  opts: WaitCommandOpts | boolean,
+  socketPathArg?: string,
 ): Promise<number> {
+  // Support the older (settle, socketPath) form used by early tests.
+  const o: WaitCommandOpts =
+    typeof opts === "boolean"
+      ? { settle: opts, socketPath: socketPathArg }
+      : opts;
+  const socketPath = o.socketPath ?? SOCKET_PATH;
   const dialed = await tryDialSocket(socketPath);
   if (dialed === null) {
     noRunInProgress(socketPath);
@@ -317,7 +339,10 @@ export async function waitCommand(
     const verdict = await waitForSettle({
       client: agentReaderFromA(dialed.client),
       // CLI default = fail-fast; `--settle` opts out (failFast: false).
-      failFast: !settle,
+      failFast: !o.settle,
+      timeoutMs: o.timeoutMs,
+      expectedSha: o.expectedSha,
+      socketPath,
     });
     process.stdout.write(`${JSON.stringify(verdict)}\n`);
     // Exit 0 only on a fully-settled clean pass — fail-fast red, timeout,
@@ -345,38 +370,62 @@ export function resolveRerunTargets(
   state: PipelineState,
   selector: string,
 ): string[] {
-  if (selector.startsWith("@")) {
-    const platform = selector.slice(1);
-    if (platform === "" || platform.includes("@")) {
-      throw new Error(
-        `odu: not a node id, @platform, or recipe: ${selector}`,
-      );
-    }
+  const platform = parseAtPlatform(selector);
+  if (platform !== null) {
     const ids = state.order.filter((id) => onPlatform(id, platform));
     if (ids.length === 0) {
       throw new Error(`odu: no nodes on platform "${platform}"`);
     }
     return ids;
   }
+  if (selector.startsWith("@")) {
+    throw new Error(
+      `odu: not a node id, @platform, or recipe: ${selector}`,
+    );
+  }
 
-  if (state.nodes[selector] !== undefined) return [selector];
-
-  // Same token rules as resolveNodeId, plus an exact namepath match so a
-  // bare `ci::unit` covers every platform of that recipe. Multi-match is
-  // intentional for recipe-wide rerun — not an ambiguity error.
-  const matches = state.order.filter((id) => {
-    if (id === selector) return true;
-    if (id.endsWith(`::${selector}`) || id.includes(`::${selector}@`)) {
-      return true;
-    }
-    return splitFanId(id).namepath === selector;
-  });
+  // Multi-match is intentional for recipe-wide rerun — not an ambiguity error.
+  const matches = matchNodeIds(state, selector);
   if (matches.length === 0) {
     throw new Error(
       `odu: no node matches "${selector}" (try: ${state.order.join(", ")})`,
     );
   }
   return matches;
+}
+
+/** Collapse multi-target rerun to dependency-minimal roots so a dependent that
+ *  is already in another selected root's transitive `needs` closure is not
+ *  issued its own `node.rerun` (each call resets id + dependents). */
+export function minimalRerunRoots(
+  state: PipelineState,
+  targets: string[],
+): string[] {
+  const set = new Set(targets);
+  const dependentsOf = (root: string): Set<string> => {
+    const out = new Set<string>([root]);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const id of state.order) {
+        if (out.has(id)) continue;
+        const needs = state.nodes[id]?.needs ?? [];
+        if (needs.some((d) => out.has(d))) {
+          out.add(id);
+          grew = true;
+        }
+      }
+    }
+    out.delete(root);
+    return out;
+  };
+  return targets.filter((id) => {
+    for (const other of set) {
+      if (other === id) continue;
+      if (dependentsOf(other).has(id)) return false;
+    }
+    return true;
+  });
 }
 
 /** `odu rerun <selector>` — headless face of surface `node.rerun`. Selector
@@ -407,9 +456,11 @@ export async function rerunCommand(
       process.stderr.write(`${(err as Error).message}\n`);
       return 1;
     }
+    // Collapse same-lane multi-id expansions so dependents aren't double-reset.
+    const roots = minimalRerunRoots(state, targets);
     const ok: string[] = [];
     const failed: string[] = [];
-    for (const id of targets) {
+    for (const id of roots) {
       const result = await dialed.client.surface.node.rerun({ id });
       if (result.ok) ok.push(id);
       else failed.push(id);

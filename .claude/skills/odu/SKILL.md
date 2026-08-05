@@ -176,6 +176,7 @@ nix run github:juspay/odu -- attach          # live TUI dashboard on a tty
 nix run github:juspay/odu -- logs -f e2e@x86_64-linux
 nix run github:juspay/odu -- wait            # fail-fast JSON verdict (MCP wait_for_settle)
 nix run github:juspay/odu -- wait --settle   # block until the whole run settles
+nix run github:juspay/odu -- wait --expected-sha SHA [--timeout-ms N]
 nix run github:juspay/odu -- rerun ci::unit@x86_64-linux   # one node
 nix run github:juspay/odu -- rerun @x86_64-linux           # every node on that lane
 nix run github:juspay/odu -- rerun unit                    # that recipe on every lane

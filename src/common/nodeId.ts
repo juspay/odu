@@ -23,3 +23,14 @@ export function splitFanId(id: string): { namepath: string; platform: string } {
 export function onPlatform(id: string, platform: string): boolean {
   return id.endsWith(`@${platform}`);
 }
+
+/** Parse `@platform` sugar shared by `odu cancel` and `odu rerun`. Returns the
+ *  platform name, or `null` when the token is not a valid `@plat` form
+ *  (missing `@`, empty after `@`, or nested `@`). Non-`@` tokens return null
+ *  so callers keep their own node/recipe branch. */
+export function parseAtPlatform(selector: string): string | null {
+  if (!selector.startsWith("@")) return null;
+  const platform = selector.slice(1);
+  if (platform === "" || platform.includes("@")) return null;
+  return platform;
+}

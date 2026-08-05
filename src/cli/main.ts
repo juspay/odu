@@ -53,7 +53,8 @@ run [recipe[@platform]…] [--platform P]… [--host P=ADDR]… [--root NAMEPATH
 status [-o json]              # json shape: { nodes, posting }
 logs [-f] <node>
 attach [-o json]
-wait [--settle]               # fail-fast verdict JSON; --settle = full settle
+wait [--settle] [--timeout-ms N] [--expected-sha SHA]
+                              # fail-fast verdict JSON; --settle = full settle
 rerun <node|@platform|recipe> # restart node(s) on the still-live run
 cancel [node|@platform]       # bare = whole run; node or @plat = partial
 runs [-o json]
@@ -133,12 +134,31 @@ async function dispatch(argv: string[]): Promise<number> {
       const { values, positionals } = parseArgs({
         args: rest,
         allowPositionals: true,
-        options: { settle: { type: "boolean" } },
+        options: {
+          settle: { type: "boolean" },
+          "timeout-ms": { type: "string" },
+          "expected-sha": { type: "string" },
+        },
       });
       if (positionals.length > 0) {
-        throw new Error("odu: wait takes no positional arguments (use --settle)");
+        throw new Error(
+          "odu: wait takes no positional arguments (use --settle / --timeout-ms / --expected-sha)",
+        );
       }
-      return waitCommand(values.settle ?? false);
+      let timeoutMs: number | undefined;
+      if (values["timeout-ms"] !== undefined) {
+        timeoutMs = Number(values["timeout-ms"]);
+        if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+          throw new Error(
+            `odu: --timeout-ms must be a non-negative number (got "${values["timeout-ms"]}")`,
+          );
+        }
+      }
+      return waitCommand({
+        settle: values.settle ?? false,
+        timeoutMs,
+        expectedSha: values["expected-sha"],
+      });
     }
     case "rerun": {
       const { positionals } = parseArgs({
