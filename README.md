@@ -15,6 +15,8 @@ nix run github:juspay/odu -- run --host x86_64-linux=localhost
 
 ```sh
 odu attach          # live matrix + logs from another terminal
+odu wait            # fail-fast JSON verdict (or `wait --settle`)
+odu rerun unit      # restart a recipe on the still-live run
 odu mcp             # same run, agent face (MCP over stdio)
 ```
 

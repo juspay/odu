@@ -5,6 +5,8 @@
  *   odu status [-o json]                   snapshot a live run ({nodes, posting})
  *   odu logs [-f] <node>                   one node's log (replay + follow)
  *   odu attach [-o json]                   live dashboard / transition stream
+ *   odu wait [--settle]                    block for fail-fast / settle verdict
+ *   odu rerun <node|@plat|recipe>          restart node(s) on the live run
  *   odu cancel [node|@platform]            stop the live run, or one node/lane
  *   odu runs [-o json]                     the durable run history (no live run)
  *   odu hosts                              venue inventory (free / busy / held by)
@@ -29,7 +31,9 @@ import {
   attachCommand,
   cancelCommand,
   logsCommand,
+  rerunCommand,
   statusCommand,
+  waitCommand,
 } from "./introspect";
 import { hostsCommand } from "./hosts";
 import {
@@ -41,7 +45,7 @@ import { mcpCommand } from "./mcp";
 import { protectCommand } from "./protect";
 import { runsCommand } from "./runs";
 
-const USAGE = `usage: odu <run|status|logs|attach|cancel|runs|hosts|lease|release|dump|graph|protect|mcp> [args]
+const USAGE = `usage: odu <run|status|logs|attach|wait|rerun|cancel|runs|hosts|lease|release|dump|graph|protect|mcp> [args]
 
 run [recipe[@platform]…] [--platform P]… [--host P=ADDR]… [--root NAMEPATH]
     [--no-deps] [--no-strict] [--no-snapshot] [--no-post] [--progress json]
@@ -49,6 +53,8 @@ run [recipe[@platform]…] [--platform P]… [--host P=ADDR]… [--root NAMEPATH
 status [-o json]              # json shape: { nodes, posting }
 logs [-f] <node>
 attach [-o json]
+wait [--settle]               # fail-fast verdict JSON; --settle = full settle
+rerun <node|@platform|recipe> # restart node(s) on the still-live run
 cancel [node|@platform]       # bare = whole run; node or @plat = partial
 runs [-o json]
 hosts
@@ -122,6 +128,30 @@ async function dispatch(argv: string[]): Promise<number> {
         options: { output: { type: "string", short: "o" } },
       });
       return attachCommand(values.output === "json");
+    }
+    case "wait": {
+      const { values, positionals } = parseArgs({
+        args: rest,
+        allowPositionals: true,
+        options: { settle: { type: "boolean" } },
+      });
+      if (positionals.length > 0) {
+        throw new Error("odu: wait takes no positional arguments (use --settle)");
+      }
+      return waitCommand(values.settle ?? false);
+    }
+    case "rerun": {
+      const { positionals } = parseArgs({
+        args: rest,
+        allowPositionals: true,
+        options: {},
+      });
+      if (positionals.length !== 1 || positionals[0] === undefined) {
+        throw new Error(
+          "odu: rerun needs exactly one argument (node id, @platform, or recipe)",
+        );
+      }
+      return rerunCommand(positionals[0]);
     }
     case "cancel": {
       const { positionals } = parseArgs({

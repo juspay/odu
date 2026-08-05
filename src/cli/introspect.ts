@@ -1,12 +1,15 @@
 /**
  * In-band commands against a live run — `odu status` / `logs` / `attach`
  * attach to the coordinator's fan-in surface on `.ci/odu.sock`; `odu cancel`
- * drives its teardown. The same primitives every face speaks: one snapshot of
- * the `nodes` cell, a log stream with snapshot-then-append replay, the
- * dashboard with `r`erun, and the `run.cancel` lifecycle mutation.
+ * drives its teardown; `odu wait` blocks for a settle/fail-fast verdict; and
+ * `odu rerun` is the headless face of the surface `node.rerun` procedure.
+ * The same primitives every face speaks: one snapshot of the `nodes` cell, a
+ * log stream with snapshot-then-append replay, the dashboard with `r`erun, and
+ * the `run.cancel` lifecycle mutation.
  *
  * `status -o json` emits `{ nodes, posting }` (not a bare array) so GitHub
- * reporting health is machine-readable (juspay/odu#61).
+ * reporting health is machine-readable (juspay/odu#61). `wait` prints the
+ * MCP `wait_for_settle` verdict shape as one JSON line.
  */
 
 import {
@@ -17,10 +20,20 @@ import {
   type RunHeader,
   STATUS_META,
 } from "../common/surface";
+import { onPlatform, splitFanId } from "../common/nodeId";
 import { cancelNodeOrPlatform, cancelRun } from "../coordinator/cancel";
 import { createDisplay, progressEvent } from "../coordinator/display";
-import { dialSocket, type OduClient } from "../coordinator/socket";
+import {
+  dialSocket,
+  type OduClient,
+  SOCKET_PATH,
+  tryDialSocket,
+} from "../coordinator/socket";
 import { postingWarning } from "../coordinator/statuses";
+import {
+  agentReaderFromA,
+} from "../mcp/agentSurface";
+import { NoLiveRunError, waitForSettle } from "../mcp/waitTool";
 import { yellow } from "./ansi";
 import {
   exitCode,
@@ -277,4 +290,145 @@ export async function cancelCommand(
       : "odu: cancel requested — the coordinator is still shutting down\n",
   );
   return 0;
+}
+
+/** Loud "no run" message — same wording `odu status` / `dialSocket` use so a
+ *  plain-CLI agent gets one recognizable refusal across every attach face. */
+function noRunInProgress(path: string): void {
+  process.stderr.write(
+    `odu: no run in progress in this checkout (no live socket at ${path})\n`,
+  );
+}
+
+/** `odu wait [--settle]` — block on the live run's `nodes` stream and print
+ *  one JSON verdict line. Default is fail-fast (return the instant a node goes
+ *  red); `--settle` waits for the whole run. Exit 0 only on a fully-settled
+ *  all-green run. Shares `waitForSettle` with the MCP `wait_for_settle` tool. */
+export async function waitCommand(
+  settle: boolean,
+  socketPath: string = SOCKET_PATH,
+): Promise<number> {
+  const dialed = await tryDialSocket(socketPath);
+  if (dialed === null) {
+    noRunInProgress(socketPath);
+    return 1;
+  }
+  try {
+    const verdict = await waitForSettle({
+      client: agentReaderFromA(dialed.client),
+      // CLI default = fail-fast; `--settle` opts out (failFast: false).
+      failFast: !settle,
+    });
+    process.stdout.write(`${JSON.stringify(verdict)}\n`);
+    // Exit 0 only on a fully-settled clean pass — fail-fast red, timeout,
+    // cancelled nodes, and partial settles are all non-zero.
+    return verdict.settled && verdict.passed ? 0 : 1;
+  } catch (err) {
+    if (err instanceof NoLiveRunError) {
+      process.stderr.write(`odu: ${err.message}\n`);
+      return 1;
+    }
+    throw err;
+  } finally {
+    dialed.close();
+  }
+}
+
+/** Expand a rerun selector against live state into fan-in node ids:
+ *  - `ci::unit@plat` — one node (exact id, or the unique `resolveNodeId` match)
+ *  - `@plat` — every node on that platform lane
+ *  - `unit` / `ci::unit` — that recipe on every lane (multi-match is the point)
+ *
+ *  Mirrors `odu cancel`'s node / `@platform` sugar and adds the bare-recipe
+ *  form cancel doesn't need (cancel has `lane.cancel`; rerun is only per-node). */
+export function resolveRerunTargets(
+  state: PipelineState,
+  selector: string,
+): string[] {
+  if (selector.startsWith("@")) {
+    const platform = selector.slice(1);
+    if (platform === "" || platform.includes("@")) {
+      throw new Error(
+        `odu: not a node id, @platform, or recipe: ${selector}`,
+      );
+    }
+    const ids = state.order.filter((id) => onPlatform(id, platform));
+    if (ids.length === 0) {
+      throw new Error(`odu: no nodes on platform "${platform}"`);
+    }
+    return ids;
+  }
+
+  if (state.nodes[selector] !== undefined) return [selector];
+
+  // Same token rules as resolveNodeId, plus an exact namepath match so a
+  // bare `ci::unit` covers every platform of that recipe. Multi-match is
+  // intentional for recipe-wide rerun — not an ambiguity error.
+  const matches = state.order.filter((id) => {
+    if (id === selector) return true;
+    if (id.endsWith(`::${selector}`) || id.includes(`::${selector}@`)) {
+      return true;
+    }
+    return splitFanId(id).namepath === selector;
+  });
+  if (matches.length === 0) {
+    throw new Error(
+      `odu: no node matches "${selector}" (try: ${state.order.join(", ")})`,
+    );
+  }
+  return matches;
+}
+
+/** `odu rerun <selector>` — headless face of surface `node.rerun`. Selector
+ *  forms: one node, `@platform` (every node on that lane), or a recipe name
+ *  (that recipe on every lane). Prints what was rerun; no socket / all
+ *  `{ ok: false }` → loud error, non-zero exit. */
+export async function rerunCommand(
+  selector: string,
+  socketPath: string = SOCKET_PATH,
+): Promise<number> {
+  if (selector === "") {
+    process.stderr.write(
+      "odu: rerun needs a node id (ci::fmt@plat), @platform, or recipe\n",
+    );
+    return 1;
+  }
+  const dialed = await tryDialSocket(socketPath);
+  if (dialed === null) {
+    noRunInProgress(socketPath);
+    return 1;
+  }
+  try {
+    const state = await firstSnapshot(dialed.client);
+    let targets: string[];
+    try {
+      targets = resolveRerunTargets(state, selector);
+    } catch (err) {
+      process.stderr.write(`${(err as Error).message}\n`);
+      return 1;
+    }
+    const ok: string[] = [];
+    const failed: string[] = [];
+    for (const id of targets) {
+      const result = await dialed.client.surface.node.rerun({ id });
+      if (result.ok) ok.push(id);
+      else failed.push(id);
+    }
+    if (ok.length === 0) {
+      process.stderr.write(
+        `odu: could not rerun ${selector} ({ ok: false } for ${failed.join(", ")})\n`,
+      );
+      return 1;
+    }
+    process.stdout.write(`odu: reran ${ok.join(", ")}\n`);
+    if (failed.length > 0) {
+      process.stderr.write(
+        `odu: failed to rerun ${failed.join(", ")}\n`,
+      );
+      return 1;
+    }
+    return 0;
+  } finally {
+    dialed.close();
+  }
 }
