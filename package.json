@@ -8,7 +8,7 @@
     "start": "bun src/cli/main.ts",
     "start:runner": "bun src/runner/main.ts --stdio",
     "typecheck": "tsc --noEmit",
-    "test:unit": "bun test src",
+    "test:unit": "bun test ./src",
     "test:e2e": "bun test tests/e2e"
   },
   "dependencies": {
