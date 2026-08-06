@@ -20,11 +20,17 @@ import {
   type RunHeader,
   STATUS_META,
 } from "../common/surface";
-import { onPlatform, parseAtPlatform, splitFanId } from "../common/nodeId";
+import {
+  onPlatform,
+  parseAtPlatform,
+  SETUP_NAMEPATH,
+  splitFanId,
+} from "../common/nodeId";
 import { cancelNodeOrPlatform, cancelRun } from "../coordinator/cancel";
 import { createDisplay, progressEvent } from "../coordinator/display";
 import {
   dialSocket,
+  noRunInProgressMessage,
   type OduClient,
   SOCKET_PATH,
   tryDialSocket,
@@ -301,12 +307,10 @@ export async function cancelCommand(
   return 0;
 }
 
-/** Loud "no run" message — same wording `odu status` / `dialSocket` use so a
- *  plain-CLI agent gets one recognizable refusal across every attach face. */
+/** Loud "no run" message — same wording `dialSocket` uses so a plain-CLI agent
+ *  gets one recognizable refusal across every attach face. */
 function noRunInProgress(path: string): void {
-  process.stderr.write(
-    `odu: no run in progress in this checkout (no live socket at ${path})\n`,
-  );
+  process.stderr.write(noRunInProgressMessage(path));
 }
 
 export interface WaitCommandOpts {
@@ -351,20 +355,20 @@ export async function waitCommand(opts: WaitCommandOpts): Promise<number> {
   }
 }
 
-/** Expand a rerun selector against live state into fan-in node ids:
- *  - `ci::unit@plat` — one node (exact id, or the unique `resolveNodeId` match)
- *  - `@plat` — every node on that platform lane
- *  - `unit` / `ci::unit` — that recipe on every lane (multi-match is the point)
- *
- *  Mirrors `odu cancel`'s node / `@platform` sugar and adds the bare-recipe
- *  form cancel doesn't need (cancel has `lane.cancel`; rerun is only per-node). */
 /** Fan-in bookkeeping node the coordinator owns — every task's `needs` includes
  *  `_ci-setup@plat`, so including it in `@platform` expansion would collapse
  *  multi-rerun to "re-provision the lane only". Explicit id still works. */
 function isSetupNode(id: string): boolean {
-  return splitFanId(id).namepath === "_ci-setup";
+  return splitFanId(id).namepath === SETUP_NAMEPATH;
 }
 
+/** Expand a rerun selector against live state into fan-in node ids:
+ *  - `ci::unit@plat` — one node (exact id, or the unique `resolveNodeId` match)
+ *  - `@plat` — recipe nodes on that platform lane (not `_ci-setup`)
+ *  - `unit` / `ci::unit` — that recipe on every lane (multi-match is the point)
+ *
+ *  Mirrors `odu cancel`'s node / `@platform` sugar and adds the bare-recipe
+ *  form cancel doesn't need (cancel has `lane.cancel`; rerun is only per-node). */
 export function resolveRerunTargets(
   state: PipelineState,
   selector: string,
@@ -463,6 +467,12 @@ export async function rerunCommand(
     }
     // Collapse same-lane multi-id expansions so dependents aren't double-reset.
     const roots = minimalRerunRoots(state, targets);
+    if (roots.length === 0) {
+      process.stderr.write(
+        `odu: no rerun roots after dependency collapse for ${selector}\n`,
+      );
+      return 1;
+    }
     const ok: string[] = [];
     const failed: string[] = [];
     for (const id of roots) {

@@ -14,7 +14,10 @@ import { gitRunContext } from "../common/git";
 import { formatRef, type RunRecord } from "../common/runRecord";
 import { liftUnposted, type OwedStatus } from "../common/surface";
 import { readRunRecord } from "../coordinator/ledger";
-import { SOCKET_PATH } from "../coordinator/socket";
+import {
+  noRunInProgressMessage,
+  SOCKET_PATH,
+} from "../coordinator/socket";
 import {
   type AgentNodes,
   type AgentNodesReader,
@@ -139,6 +142,9 @@ function recordVerdict(rec: RunRecord | null): {
   // exactly the half-observed run this path must never call green), `passed`
   // with no red node, and `failed` with at least one.
   if (rec.nodes.some((n) => NON_TERMINAL_STATUSES.has(n.status))) return null;
+  // buildRunRecord never emits passed/failed with cancelled nodes (those are
+  // `incomplete`) — refuse a hand-written or torn record that claims otherwise.
+  if (rec.nodes.some((n) => n.status === "cancelled")) return null;
   const red = failed.length + errored.length;
   if (rec.outcome === "passed" && red > 0) return null;
   if (rec.outcome === "failed" && red === 0) return null;
@@ -242,8 +248,12 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
     // CLI (`odu status`), rather than an instant empty verdict a caller can't
     // tell apart from a real one (juspay/odu#49 ask 1).
     if (last === undefined || !last.run) {
+      // Strip the `odu: ` prefix + trailing newline — CLI wait re-adds `odu: `,
+      // MCP surfaces the body as the tool error message.
       throw new NoLiveRunError(
-        `no run in progress in this checkout (no live socket at ${opts.socketPath ?? SOCKET_PATH})`,
+        noRunInProgressMessage(opts.socketPath ?? SOCKET_PATH)
+          .replace(/^odu: /, "")
+          .trimEnd(),
       );
     }
     // A live run WAS observed, but the coordinator then closed the socket

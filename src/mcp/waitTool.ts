@@ -19,7 +19,9 @@ import {
 } from "./agentSurface";
 
 export const waitInput = z.object({
-  timeout_ms: z.number().optional(),
+  // Finite + non-negative: NaN/negative would fire setTimeout immediately and
+  // look like a genuine timeout verdict rather than bad input.
+  timeout_ms: z.number().finite().nonnegative().optional(),
   fail_fast: z.boolean().optional(),
   /** Refuse loudly unless the live run's commit matches this sha (a prefix
    *  either way, so a 7- or 40-char sha both work) — the "wait for the run I

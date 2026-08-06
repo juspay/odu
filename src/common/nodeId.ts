@@ -21,8 +21,12 @@ export function splitFanId(id: string): { namepath: string; platform: string } {
 }
 
 export function onPlatform(id: string, platform: string): boolean {
-  return id.endsWith(`@${platform}`);
+  // Exact platform field — not suffix match (`@linux` must not hit `x86_64-linux`).
+  return splitFanId(id).platform === platform;
 }
+
+/** Coordinator bookkeeping namepath fanned as `_ci-setup@<platform>`. */
+export const SETUP_NAMEPATH = "_ci-setup";
 
 /** Parse `@platform` sugar shared by `odu cancel` and `odu rerun`. Returns the
  *  platform name, or `null` when the token is not a valid `@plat` form
