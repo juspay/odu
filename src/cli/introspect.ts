@@ -25,6 +25,7 @@ import {
   parseAtPlatform,
   SETUP_NAMEPATH,
   splitFanId,
+  transitiveDependents,
 } from "../common/nodeId";
 import { cancelNodeOrPlatform, cancelRun } from "../coordinator/cancel";
 import { createDisplay, progressEvent } from "../coordinator/display";
@@ -402,32 +403,19 @@ export function resolveRerunTargets(
 
 /** Collapse multi-target rerun to dependency-minimal roots so a dependent that
  *  is already in another selected root's transitive `needs` closure is not
- *  issued its own `node.rerun` (each call resets id + dependents). Closures
- *  are computed once per target (CI pipelines are small; still O(t·n²) not
- *  O(t²·n²)). */
+ *  issued its own `node.rerun` (each call resets id + dependents via the same
+ *  `transitiveDependents` rule the runner uses). Closures are computed once
+ *  per target. */
 export function minimalRerunRoots(
   state: PipelineState,
   targets: string[],
 ): string[] {
-  const dependentsOf = (root: string): Set<string> => {
-    const out = new Set<string>([root]);
-    let grew = true;
-    while (grew) {
-      grew = false;
-      for (const id of state.order) {
-        if (out.has(id)) continue;
-        const needs = state.nodes[id]?.needs ?? [];
-        if (needs.some((d) => out.has(d))) {
-          out.add(id);
-          grew = true;
-        }
-      }
-    }
-    out.delete(root);
-    return out;
-  };
+  const needsOf = (id: string): readonly string[] =>
+    state.nodes[id]?.needs ?? [];
   const coveredBy = new Map<string, Set<string>>();
-  for (const t of targets) coveredBy.set(t, dependentsOf(t));
+  for (const t of targets) {
+    coveredBy.set(t, transitiveDependents(state.order, needsOf, t));
+  }
   return targets.filter((id) => {
     for (const other of targets) {
       if (other === id) continue;
@@ -435,6 +423,22 @@ export function minimalRerunRoots(
     }
     return true;
   });
+}
+
+/** Format `odu: reran …` including dependents the runner will also reset. */
+export function formatReranLine(
+  state: PipelineState,
+  roots: string[],
+): string {
+  const needsOf = (id: string): readonly string[] =>
+    state.nodes[id]?.needs ?? [];
+  const parts = roots.map((root) => {
+    const deps = [...transitiveDependents(state.order, needsOf, root)];
+    return deps.length === 0
+      ? root
+      : `${root} (resets ${deps.join(", ")})`;
+  });
+  return `odu: reran ${parts.join("; ")}\n`;
 }
 
 /** `odu rerun <selector>` — headless face of surface `node.rerun`. Selector
@@ -462,7 +466,8 @@ export async function rerunCommand(
     try {
       targets = resolveRerunTargets(state, selector);
     } catch (err) {
-      process.stderr.write(`${(err as Error).message}\n`);
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`${msg}\n`);
       return 1;
     }
     // Collapse same-lane multi-id expansions so dependents aren't double-reset.
@@ -482,14 +487,14 @@ export async function rerunCommand(
     }
     if (ok.length === 0) {
       process.stderr.write(
-        `odu: could not rerun ${selector} ({ ok: false } for ${failed.join(", ")})\n`,
+        `odu: could not rerun ${selector} (${failed.join(", ")}: unknown node, or its lane is gone)\n`,
       );
       return 1;
     }
-    process.stdout.write(`odu: reran ${ok.join(", ")}\n`);
+    process.stdout.write(formatReranLine(state, ok));
     if (failed.length > 0) {
       process.stderr.write(
-        `odu: failed to rerun ${failed.join(", ")}\n`,
+        `odu: failed to rerun ${failed.join(", ")} (unknown node, or its lane is gone)\n`,
       );
       return 1;
     }

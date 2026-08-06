@@ -20,6 +20,7 @@ import {
   type SshProv,
   sshConnector,
 } from "@kolu/surface-remote";
+import { SETUP_NAMEPATH } from "../common/nodeId";
 import type { TaskSpec } from "../common/spec";
 import type {
   laneSurface,
@@ -172,7 +173,7 @@ export function startLane(opts: LaneOptions): Lane {
   const attachLogs = (
     client: Awaited<ReturnType<typeof session.pin>>,
   ): void => {
-    for (const id of ["_ci-setup", ...opts.tasks.map((t) => t.id)]) {
+    for (const id of [SETUP_NAMEPATH, ...opts.tasks.map((t) => t.id)]) {
       const controller = new AbortController();
       aborts.push(controller);
       void (async () => {

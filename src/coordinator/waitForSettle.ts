@@ -192,11 +192,26 @@ function shaMatches(observed: string, expected: string): boolean {
 export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
   const failFast = opts.failFast ?? true;
   const timeoutMs = opts.timeoutMs ?? 600_000;
+  // Empty expectedSha would always fail shaMatches and report a fake mismatch.
+  if (opts.expectedSha !== undefined && opts.expectedSha === "") {
+    throw new NoLiveRunError("expected_sha must be a non-empty commit sha");
+  }
+  // setTimeout's delay is a signed 32-bit int — values above 2^31-1 clamp to
+  // ~1ms and would return an instant false timed_out verdict (odu#49 class).
+  const MAX_TIMEOUT_MS = 2_147_483_647;
+  if (timeoutMs > MAX_TIMEOUT_MS) {
+    throw new NoLiveRunError(
+      `timeout_ms ${timeoutMs} exceeds the platform timer limit (${MAX_TIMEOUT_MS})`,
+    );
+  }
   const now = opts.now ?? Date.now;
   const started = now();
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = setTimeout(
+    () => controller.abort(),
+    Math.min(timeoutMs, MAX_TIMEOUT_MS),
+  );
   // Caller cancellation (MCP request cancelled) aborts the same controller so
   // the read loop tears down promptly rather than held until settle/timeout.
   const onCallerAbort = (): void => controller.abort();

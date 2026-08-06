@@ -19,15 +19,16 @@ import {
 } from "./agentSurface";
 
 export const waitInput = z.object({
-  // Finite + non-negative: NaN/negative would fire setTimeout immediately and
-  // look like a genuine timeout verdict rather than bad input.
-  timeout_ms: z.number().finite().nonnegative().optional(),
+  // Finite + non-negative + within setTimeout's signed-32-bit delay limit —
+  // larger values clamp to ~1ms and look like a genuine timeout (odu#49 class).
+  timeout_ms: z.number().finite().nonnegative().max(2_147_483_647).optional(),
   fail_fast: z.boolean().optional(),
   /** Refuse loudly unless the live run's commit matches this sha (a prefix
    *  either way, so a 7- or 40-char sha both work) — the "wait for the run I
    *  just dispatched, not a stale one" guard (juspay/odu#49 ask 3). */
   expected_sha: z
     .string()
+    .min(1)
     .describe(
       "Refuse loudly unless the live run's commit matches this. Prefix-matched " +
         "against the run's sha7 either way, so a full 40-char sha or the 7-char " +

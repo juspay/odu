@@ -403,8 +403,11 @@ describe("rerunCommand", () => {
       rerunCommand("@x86_64-linux", surface.socketPath),
     );
     expect(result).toBe(0);
-    // Setup excluded; e2e covered by unit's transitive reset → only unit.
-    expect(out).toBe("odu: reran ci::unit@x86_64-linux\n");
+    // Setup excluded; e2e covered by unit's transitive reset → only unit,
+    // but the report names dependents the runner will also reset.
+    expect(out).toBe(
+      "odu: reran ci::unit@x86_64-linux (resets ci::e2e@x86_64-linux)\n",
+    );
     expect(surface.reruns).toEqual(["ci::unit@x86_64-linux"]);
   });
 
@@ -421,7 +424,7 @@ describe("rerunCommand", () => {
     );
     expect(result).toBe(0);
     expect(out).toBe(
-      "odu: reran ci::unit@x86_64-linux, ci::unit@aarch64-darwin\n",
+      "odu: reran ci::unit@x86_64-linux; ci::unit@aarch64-darwin\n",
     );
     expect(surface.reruns).toEqual([
       "ci::unit@x86_64-linux",

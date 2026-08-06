@@ -150,16 +150,25 @@ async function dispatch(argv: string[]): Promise<number> {
         const raw = values["timeout-ms"].trim();
         // Number("") === 0 would silently mean "timeout immediately".
         timeoutMs = raw === "" ? Number.NaN : Number(raw);
-        if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+        // setTimeout signed-32-bit limit — larger values are a usage error.
+        if (
+          !Number.isFinite(timeoutMs) ||
+          timeoutMs < 0 ||
+          timeoutMs > 2_147_483_647
+        ) {
           throw new Error(
-            `odu: --timeout-ms must be a non-negative number (got "${values["timeout-ms"]}")`,
+            `odu: --timeout-ms must be a non-negative number ≤ 2147483647 (got "${values["timeout-ms"]}")`,
           );
         }
+      }
+      const expectedSha = values["expected-sha"];
+      if (expectedSha !== undefined && expectedSha.trim() === "") {
+        throw new Error("odu: --expected-sha needs a commit sha");
       }
       return waitCommand({
         settle: values.settle ?? false,
         timeoutMs,
-        expectedSha: values["expected-sha"],
+        expectedSha,
       });
     }
     case "rerun": {
