@@ -1,17 +1,24 @@
 /**
  * `just` → PipelineSpec: the translator that replaces justci's DAG ingestion.
  *
- * `just --dump --dump-format json` (just ≥ 1.50) emits the whole justfile
+ * `just --dump --dump-format json` (just ≥ 1.57) emits the whole justfile
  * tree; odu discovers the unique recipe tagged `[metadata("ci")]`, expands
  * its reachable dependency subgraph, and turns every reachable recipe into a
  * task executed as `just --no-deps <namepath>` — exactly the invocation
  * justci used, so recipe-internal conventions (the `install` funnel, the
  * `nix_shell` wrapper) carry over unchanged.
  *
- * Dump-shape notes (just 1.50.0):
+ * Dump-shape notes (just 1.57.0):
  *   - module recipes live at `.modules.<m>.recipes.<name>`, recursively;
- *   - `dependencies[].recipe` is the *module-local* bare name — resolved
- *     within the recipe's own module (cross-module deps are a hard error);
+ *   - `dependencies[].recipe` is written as `just` wrote it, relative to the
+ *     depending recipe's own module: a bare name for a sibling (`test`), or a
+ *     `::`-path down into a child module (`counters::check`) — `just` itself
+ *     admits no other direction, a module cannot see its siblings or parent.
+ *     The module path is why odu's floor is 1.57: `just` has *run* deps on a
+ *     submodule's recipe since 1.42, but only serialized the path in the dump
+ *     from 1.57 (casey/just#3651). Older dumps say `check` for `sub::check`,
+ *     losing the one thing that distinguishes it from a same-module dep, so
+ *     odu cannot resolve it — hence the pinned `just` in default.nix;
  *   - attributes are strings or single-key objects:
  *     `["linux", {"metadata": ["ci"]}, "parallel"]`;
  *   - `namepath` is the qualified name (`ci::e2e`) — the prefix of the
@@ -37,8 +44,8 @@ interface DumpModule {
 
 interface FlatRecipe {
   recipe: DumpRecipe;
-  /** The module's recipe table — dependency names resolve against this. */
-  siblings: Record<string, DumpRecipe>;
+  /** The module the recipe lives in — its dependency names resolve from here. */
+  module: DumpModule;
 }
 
 function flatten(
@@ -46,11 +53,30 @@ function flatten(
   byNamepath: Map<string, FlatRecipe>,
 ): void {
   for (const recipe of Object.values(module.recipes ?? {})) {
-    byNamepath.set(recipe.namepath, { recipe, siblings: module.recipes });
+    byNamepath.set(recipe.namepath, { recipe, module });
   }
   for (const sub of Object.values(module.modules ?? {})) {
     flatten(sub, byNamepath);
   }
+}
+
+/** Resolve one `dependencies[].recipe` name from the module that wrote it: a
+ *  bare name is that module's own recipe, and each `::` segment descends into
+ *  a child module first (`counters::check`, `a::b::check`) — mirroring what
+ *  `just` resolves natively. Undefined when nothing there answers to the name. */
+function resolveDep(
+  module: DumpModule,
+  name: string,
+): { recipe: DumpRecipe; module: DumpModule } | undefined {
+  const path = name.split("::");
+  const leaf = path.pop();
+  if (leaf === undefined) return undefined;
+  let owner: DumpModule | undefined = module;
+  for (const segment of path) owner = owner?.modules?.[segment];
+  const recipe = owner?.recipes?.[leaf];
+  return recipe === undefined || owner === undefined
+    ? undefined
+    : { recipe, module: owner };
 }
 
 function hasCiMetadata(recipe: DumpRecipe): boolean {
@@ -169,17 +195,18 @@ export function pipelineFromDump(
     const current = queue.shift();
     if (current === undefined) break;
     for (const dep of current.recipe.dependencies) {
-      const sibling = current.siblings[dep.recipe];
-      if (sibling === undefined) {
+      const resolved = resolveDep(current.module, dep.recipe);
+      if (resolved === undefined) {
         throw new Error(
           `odu: recipe "${current.recipe.namepath}" depends on "${dep.recipe}", ` +
-            "which is not in the same module (cross-module deps are unsupported)",
+            "which names no recipe in its module or a child module " +
+            "(a dependency on a child module's recipe needs just >= 1.57 — " +
+            "older versions drop the module path from --dump)",
         );
       }
-      if (!reachable.has(sibling.namepath)) {
-        const flat = { recipe: sibling, siblings: current.siblings };
-        reachable.set(sibling.namepath, flat);
-        queue.push(flat);
+      if (!reachable.has(resolved.recipe.namepath)) {
+        reachable.set(resolved.recipe.namepath, resolved);
+        queue.push(resolved);
       }
     }
   }
@@ -190,12 +217,12 @@ export function pipelineFromDump(
   if (includeRoot) reachable.set(root.recipe.namepath, root);
 
   const tasks: TaskSpec[] = [...reachable.values()].map(
-    ({ recipe, siblings }) => ({
+    ({ recipe, module }) => ({
       id: recipe.namepath,
       name: recipe.namepath,
       command: `just --no-deps ${recipe.namepath}`,
       needs: recipe.dependencies
-        .map((dep) => siblings[dep.recipe]?.namepath)
+        .map((dep) => resolveDep(module, dep.recipe)?.recipe.namepath)
         .filter((np): np is string => np !== undefined && reachable.has(np)),
       os: osAttributes(recipe),
     }),

@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { arch, platform as osPlatform } from "node:process";
@@ -103,6 +103,95 @@ describe("pipelineFromDump", () => {
       "ci::e2e",
       "ci::install",
     ]);
+  });
+
+  it("resolves a dependency on a child module's recipe, at any depth", () => {
+    // `ci::default: unit counters::check` — the CI module names the child's
+    // *path* and nothing else; the child owns its own recipe and deps.
+    const spec = pipelineFromDump({
+      recipes: {},
+      modules: {
+        ci: {
+          recipes: {
+            default: ciRecipe(
+              "default",
+              ["unit", "counters::check", "counters::deep::probe"],
+              { attributes: [{ metadata: ["ci"] }], body: [] },
+            ),
+            unit: ciRecipe("unit", []),
+          },
+          modules: {
+            counters: {
+              recipes: {
+                // The child's own dep is bare — resolved in the child, not in ci.
+                check: {
+                  name: "check",
+                  namepath: "ci::counters::check",
+                  attributes: [],
+                  body: [["nix build .#counters"]],
+                  dependencies: [{ arguments: [], recipe: "fixture" }],
+                },
+                fixture: {
+                  name: "fixture",
+                  namepath: "ci::counters::fixture",
+                  attributes: [],
+                  body: [["echo fixture"]],
+                  dependencies: [],
+                },
+              },
+              modules: {
+                deep: {
+                  recipes: {
+                    probe: {
+                      name: "probe",
+                      namepath: "ci::counters::deep::probe",
+                      attributes: [],
+                      body: [["echo probe"]],
+                      dependencies: [],
+                    },
+                  },
+                  modules: {},
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+    expect(spec.tasks.map((t) => t.id).sort()).toEqual([
+      "ci::counters::check",
+      "ci::counters::deep::probe",
+      "ci::counters::fixture",
+      "ci::unit",
+    ]);
+    // Nodes are named and invoked by namepath, as everywhere else.
+    const check = spec.tasks.find((t) => t.id === "ci::counters::check");
+    expect(check?.command).toBe("just --no-deps ci::counters::check");
+    expect(check?.needs).toEqual(["ci::counters::fixture"]);
+    // A bare selector still finds the child's recipe by leaf name.
+    expect(
+      laneTasks(spec, "x86_64-linux", [{ recipe: "check" }], true).map(
+        (t) => t.id,
+      ),
+    ).toEqual(["ci::counters::check"]);
+  });
+
+  it("rejects a dependency that names no recipe anywhere below its module", () => {
+    const tree = {
+      recipes: {},
+      modules: {
+        ci: {
+          recipes: {
+            default: ciRecipe("default", ["nope::missing"], {
+              attributes: [{ metadata: ["ci"] }],
+              body: [],
+            }),
+          },
+          modules: {},
+        },
+      },
+    };
+    expect(() => pipelineFromDump(tree)).toThrow(/names no recipe/);
   });
 
   it("rejects an unknown --root and a missing ci tag", () => {
@@ -353,6 +442,39 @@ describe.skipIf(!hasJust)("loadJustPipeline (real just --dump)", () => {
     expect(same).toContain("portable");
     expect(foreign).not.toContain("same-os"); // pruned off the foreign lane
     expect(foreign).toContain("portable"); // untagged still fans out
+  });
+
+  it("expands a real child-module dependency into its namepath node", () => {
+    // What `just` resolves natively (`mod sub` + `root: sub::check`), pinned
+    // against real `just --dump` output rather than a hand-shaped tree.
+    const dir = justfileDir(
+      [
+        "mod sub 'sub/mod.just'",
+        "",
+        '[metadata("ci")]',
+        "default: sub::check",
+        "",
+      ].join("\n"),
+    );
+    mkdirSync(join(dir, "sub"));
+    writeFileSync(
+      join(dir, "sub", "mod.just"),
+      ["check: helper", "    echo check", "", "helper:", "    echo helper", ""].join(
+        "\n",
+      ),
+    );
+    const spec = loadJustPipeline(dir);
+    expect(spec.tasks.map((t) => t.id).sort()).toEqual([
+      "sub::check",
+      "sub::helper",
+    ]);
+    expect(spec.tasks.find((t) => t.id === "sub::check")?.needs).toEqual([
+      "sub::helper",
+    ]);
+    // And the command odu runs is one `just` accepts.
+    expect(
+      spawnSync("just", ["--no-deps", "sub::check"], { cwd: dir }).status,
+    ).toBe(0);
   });
 
   it("cannot see a foreign-OS recipe — just drops it from the JSON dump (the limitation)", () => {
