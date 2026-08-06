@@ -15,6 +15,7 @@
  * socket and leaves the coordinator up so the rest of the run can settle.
  */
 
+import { parseAtPlatform } from "../common/nodeId";
 import { SOCKET_PATH, tryDialSocket } from "./socket";
 
 export interface CancelResult {
@@ -88,11 +89,10 @@ export function parsePartialCancelTarget(
   | { kind: "platform"; platform: string }
   | { kind: "node"; id: string }
   | null {
-  if (target.startsWith("@")) {
-    const platform = target.slice(1);
-    if (platform === "" || platform.includes("@")) return null;
-    return { kind: "platform", platform };
-  }
+  const platform = parseAtPlatform(target);
+  if (platform !== null) return { kind: "platform", platform };
+  // Bare `@` / `@a@b` are invalid platform sugar, not node ids.
+  if (target.startsWith("@")) return null;
   if (target === "") return null;
   return { kind: "node", id: target };
 }

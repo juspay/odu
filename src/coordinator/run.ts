@@ -41,7 +41,12 @@ import {
 import { formatGoDuration } from "../common/duration";
 import { gitTopLevel } from "../common/git";
 import { createLogTail } from "../common/logTail";
-import { fanId, onPlatform, splitFanId } from "../common/nodeId";
+import {
+  fanId,
+  onPlatform,
+  SETUP_NAMEPATH,
+  splitFanId,
+} from "../common/nodeId";
 import type { TaskSpec } from "../common/spec";
 import {
   EMPTY_HEADER,
@@ -103,7 +108,7 @@ const VERDICT_BUCKETS = [
   "cancelled",
 ] as const;
 
-const SETUP = "_ci-setup";
+const SETUP = SETUP_NAMEPATH;
 
 export interface RunArgs {
   selectors: string[];

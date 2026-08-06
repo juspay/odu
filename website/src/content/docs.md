@@ -176,6 +176,9 @@ odu run [recipe[@platform]…]      run selectors; bare recipes fan out
 odu status [-o json]              snapshot the live run (json: {nodes, posting})
 odu logs [-f] <node>              replay and optionally follow a node log
 odu attach [-o json]              attach the live dashboard or event stream
+odu wait [--settle] [--timeout-ms N] [--expected-sha SHA]
+                                  fail-fast JSON verdict; --settle = full settle
+odu rerun <node|@platform|recipe> restart node(s) on the still-live run
 odu cancel [node|@platform]       stop the live run, or one node / lane
 odu runs [-o json]                read durable run history
 odu hosts                         venue inventory (free / busy / held by)

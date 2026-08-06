@@ -106,6 +106,12 @@ export async function tryDialSocket(
   }
 }
 
+/** The shared no-run refusal string — CLI wait/rerun and `dialSocket` all cite
+ *  the same wording so agents match one phrase. */
+export function noRunInProgressMessage(path: string): string {
+  return `odu: no run in progress in this checkout (no live socket at ${path})\n`;
+}
+
 /** Dial the socket of a live run. Exits with the justci-parity message when
  *  no run is in progress. */
 export async function dialSocket(
@@ -113,8 +119,6 @@ export async function dialSocket(
 ): Promise<{ client: OduClient; close: () => void }> {
   const dialed = await tryDialSocket(path);
   if (dialed !== null) return dialed;
-  process.stderr.write(
-    `odu: no run in progress in this checkout (no live socket at ${path})\n`,
-  );
+  process.stderr.write(noRunInProgressMessage(path));
   process.exit(1);
 }
