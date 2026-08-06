@@ -156,9 +156,13 @@ plus a once-a-minute "… still running" heartbeat when piped.
 nix run github:juspay/odu -- dump            # resolved pipeline as JSON
 nix run github:juspay/odu -- graph           # dependency graph (Mermaid)
 nix run github:juspay/odu -- protect --dry-run   # the (recipe × platform) contexts
-nix run github:juspay/odu -- protect             # PATCH branch protection to them
+nix run github:juspay/odu -- protect             # require exactly those on the branch
+nix run github:juspay/odu -- protect --create    # …making the ruleset if absent
 # --platform P (repeatable) pins the repo's platform set with no hosts config;
 # omitted, the set derives from the machine's hosts file (warned on stderr).
+# The contexts land in the GitHub ruleset governing the branch; classic branch
+# protection is not written. Without a ruleset protect refuses — `--create`
+# makes one holding only the required checks, enforcing, exempting nobody.
 ```
 
 ## Live introspection (attach to a run in progress)

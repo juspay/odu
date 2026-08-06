@@ -153,9 +153,34 @@ nix-bundle:
     nix bundle .#app
 ```
 
-Multiple OS attributes are OR-ed. Untagged recipes run on every configured lane. `odu protect` derives the same filtered status contexts for branch protection.
+Multiple OS attributes are OR-ed. Untagged recipes run on every configured lane. `odu protect` applies the same filter, so a `[linux]`-only recipe is never required on a darwin lane that will never post it.
 
 > **Same-OS limitation.** `just --dump` resolves OS attributes on the coordinator before odu sees the DAG. Attributes can prune a recipe from other lanes, but cannot introduce a foreign-OS recipe that was absent from the coordinator's dump. Run each OS family's exclusive recipes from a coordinator on that OS.
+
+### Require the checks on a branch
+
+`odu run` posts a commit status per `<recipe>@<platform>`; `odu protect` makes GitHub require exactly that set, so a merge waits for the pipeline a run actually produces. `--dry-run` prints the contexts and touches nothing:
+
+```sh
+odu protect --dry-run --platform x86_64-linux --platform aarch64-darwin
+odu protect --platform x86_64-linux --platform aarch64-darwin
+```
+
+The contexts are written into the [repository ruleset](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets) governing the branch, replacing whatever it required before — the stale `build-and-test (ubuntu-latest)` contexts a repo carries over from GitHub Actions are exactly what must go, since nothing posts them any more. Every other rule in the ruleset, and the checks rule's own strictness policy, are left alone.
+
+So the branch needs a ruleset. `--create` makes one when none covers the branch:
+
+```sh
+odu protect --create --platform x86_64-linux --platform aarch64-darwin
+```
+
+It holds exactly one rule — the required checks. Review requirements, deletion and force-push protection are the repo's own policy, and a `protect` that quietly decided reviews were required would be answering a question nobody asked it. Enforcement is `active`, and **`bypass_actors` is empty, so nobody is exempt — admins included**. Granting a bypass is a permission decision, easy to add afterwards under Settings → Rules and impossible to take back unnoticed. A branch odu resolved from the repo's default is matched as `~DEFAULT_BRANCH`, so the ruleset follows a later rename; a branch you named with `--branch` is pinned literally.
+
+Creating is opt-in rather than automatic because `protect` is driven by agents and scripts here, and bringing merge-blocking policy into existence is not something a wrong `origin` should manage on the way past. `--create` is also only a fallback: against a branch a ruleset already covers it updates that one, since a second ruleset beside it would make GitHub require the union and strand the old contexts as permanently-blocking checks.
+
+odu still refuses when two rulesets both require checks, for the same union reason, and when the ruleset is owned by an org or enterprise — the repo-scoped endpoint cannot write it.
+
+Classic branch protection is not written. A branch governed by a ruleset reports `protected: true` while the classic API answers `Branch not protected (HTTP 404)`, which is what an older `odu protect` ran into.
 
 ## CLI reference
 
@@ -188,6 +213,8 @@ odu dump | graph                  emit the resolved DAG as JSON or Mermaid
 odu protect [--dry-run]           sync required GitHub status contexts
     --platform P (repeatable)     explicit repo platform set; no hosts needed
     --branch B                    branch to protect (default: repo default)
+    --create                      make the branch's ruleset if absent
+                                  writes the branch's ruleset; see below
 odu mcp                           serve the agent interface over stdio
 ```
 
