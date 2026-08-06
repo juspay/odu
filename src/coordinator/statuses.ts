@@ -169,6 +169,15 @@ export interface StatusPosterOptions {
 interface ContextPost {
   desired?: StatusPayload;
   confirmed?: StatusPayload;
+  /**
+   * The payload of a send currently on the wire for this context.
+   *
+   * `confirmed` is what GitHub had when the last send finished, so while a send
+   * is in flight it is stale — it does not yet reflect the payload about to
+   * land. Dedup against it in that window and a status gets dropped as
+   * redundant against a state GitHub is in the act of leaving.
+   */
+  inFlight?: StatusPayload;
   lastError?: string;
   attempts: number;
   /** Single wake timer: debounce before first send, or backoff after failure. */
@@ -331,13 +340,30 @@ export class StatusPoster {
     const post = this.entry(payload.context);
     post.owned = true;
     if (
+      post.inFlight === undefined &&
       post.confirmed !== undefined &&
       payloadEqual(post.confirmed, payload)
     ) {
-      // Incoming matches confirmed — clear debt only when desired is the *same*
-      // payload. A newer different desired must not be discarded (e.g. seed
-      // success, failure still in debounce, then success re-post).
-      if (post.desired !== undefined && payloadEqual(post.desired, payload)) {
+      // Incoming matches confirmed: GitHub already shows exactly this, so there
+      // is nothing to send. What matters is the desired still queued behind it.
+      // post() sees transitions in order, so a *different* desired is older
+      // than `payload` and describes a state this one supersedes.
+      //
+      // Drop it when it is non-terminal. A `pending` left armed here is the
+      // stuck-check bug: seed loads the previous run's success as confirmed, a
+      // warm-cache node finishes inside its own debounce and re-posts a
+      // byte-identical success, and the un-sent pending then fires and moves
+      // GitHub *backwards* from a terminal status to "Running" — blocking the
+      // merge on a node that has finished, with nothing owed to show for it.
+      //
+      // A terminal desired stays: it may be a failure waiting behind a
+      // redundant success re-post, and dropping that would report a red node
+      // green. Losing a "was running" blip is free; losing a failure is not.
+      const stale = post.desired;
+      if (
+        stale !== undefined &&
+        (payloadEqual(stale, payload) || stale.state === "pending")
+      ) {
         this.settleDesired(payload.context, post);
       }
       return;
@@ -460,7 +486,14 @@ export class StatusPoster {
       return;
     }
 
+    post.inFlight = payload;
     const result = await this.send(payload);
+    post.inFlight = undefined;
+    // Record the send before the phase check, not after: a status that reached
+    // GitHub as the poster closed is still on GitHub, and dropping the
+    // confirmation makes `unposted` report reporting debt (attempts: 0) for a
+    // status nobody owes — a green run that looks like it failed to report.
+    if (result.ok) post.confirmed = payload;
     if (this.currentPhase() === "closed") return;
 
     // Desired may have moved while the request was in flight.
@@ -469,9 +502,8 @@ export class StatusPoster {
       still !== undefined && !payloadEqual(still, payload);
 
     if (result.ok) {
-      // Always record a successful send — even when desired moved mid-flight —
-      // so the next comparison is against what GitHub actually has.
-      post.confirmed = payload;
+      // Confirmed above — recorded even when desired moved mid-flight, so the
+      // next comparison is against what GitHub actually has.
       if (!desiredMoved) {
         this.settleDesired(context, post);
         return;
