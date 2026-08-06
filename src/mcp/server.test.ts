@@ -47,7 +47,11 @@ import {
 } from "./agentSurface";
 import { cancelTool } from "./cancelTool";
 import { serveTestSurface, type TestSurface } from "./serveForTest";
-import { makeWaitTool, type SettleVerdict, waitForSettle } from "./waitTool";
+import {
+  type SettleVerdict,
+  waitForSettle,
+} from "../coordinator/waitForSettle";
+import { makeWaitTool } from "./waitTool";
 
 
 type Row = [id: string, status: PipelineState["nodes"][string]["status"]];

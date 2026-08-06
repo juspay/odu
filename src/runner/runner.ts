@@ -46,10 +46,12 @@ import {
   type LocalHold,
   probeLocal,
 } from "./leaseHold";
+import { SETUP_NAMEPATH, transitiveDependents } from "../common/nodeId";
 import { createGroupReaper } from "./reap";
 import { prepareWorkspace } from "./workspace";
 
-export const SETUP_NODE_ID = "_ci-setup";
+/** Lane-local setup node id — same namepath as fan-in `_ci-setup@plat`. */
+export const SETUP_NODE_ID = SETUP_NAMEPATH;
 
 export interface LaneRunner {
   /** The served surface: the flat `RpcGroup` `defineSurface` minted and the
@@ -416,19 +418,15 @@ export function createLaneRunner(): LaneRunner {
   const rerun = (id: string): boolean => {
     const initial = getState();
     if (disposed || initial.nodes[id] === undefined) return false;
-    const toReset = new Set<string>([id]);
-    let grew = true;
-    while (grew) {
-      grew = false;
-      for (const candidate of initial.order) {
-        if (toReset.has(candidate)) continue;
-        const needs = initial.nodes[candidate]?.needs ?? [];
-        if (needs.some((dep) => toReset.has(dep))) {
-          toReset.add(candidate);
-          grew = true;
-        }
-      }
-    }
+    // Same DAG closure as CLI multi-rerun collapse (`transitiveDependents`).
+    const toReset = new Set<string>([
+      id,
+      ...transitiveDependents(
+        initial.order,
+        (cid) => initial.nodes[cid]?.needs ?? [],
+        id,
+      ),
+    ]);
     for (const rid of toReset) {
       const child = children.get(rid);
       if (child !== undefined) {

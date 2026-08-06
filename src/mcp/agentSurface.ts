@@ -164,6 +164,46 @@ export const EMPTY_NODES: AgentNodes = {
   unposted: [],
 };
 
+/** Project a coordinator `PipelineState` onto the agent `nodes` frame — the
+ *  same mapping the live projection applies on every A→B delta. Shared so the
+ *  CLI `odu wait` path can feed `waitForSettle` without re-deriving rows or
+ *  drifting from the MCP face. An empty order is the no-run / pre-run value
+ *  (`EMPTY_STATE` when no coordinator is live). */
+export function toAgentNodes(state: PipelineState): AgentNodes {
+  return state.order.length === 0
+    ? EMPTY_NODES
+    : {
+        run: true,
+        pipeline: state.name,
+        sha7: state.sha7,
+        seq: state.seq ?? null,
+        nodes: rowsOf(state),
+        unposted: [...postingOf(state).owed],
+      };
+}
+
+/** Wrap a live A-client (`PipelineState` cell) as the `AgentNodesReader`
+ *  `waitForSettle` expects — map every frame with `toAgentNodes`. One
+ *  subscription held for the wait, same as the MCP tool's single dial.
+ *
+ *  A `Stream` maps with `Stream.map`, so there is no hand-rolled async
+ *  generator here and no `{ signal }` to thread: the wait's cancellation
+ *  travels as fiber interruption when `subscribe` closes the subscription
+ *  (kolu PLAN D10/#18), not as a per-call option. */
+export function agentReaderFromA(client: {
+  surface: Pick<OduClient["surface"], "nodes">;
+}): AgentNodesReader {
+  return {
+    surface: {
+      nodes: {
+        get: (_input: void) =>
+          Stream.map(client.surface.nodes.get(undefined), toAgentNodes),
+      },
+    },
+  };
+}
+
+
 /** One node's log, keyed by node id in the `logs` collection. `source` says
  *  where the text came from: "live" (the running coordinator's buffered
  *  snapshot), "file" (the durable per-SHA log after the run process exited),
@@ -550,21 +590,10 @@ function agentDeps(
       // value, and a subscriber gets deltas on every transition.
       nodes: deriveStream(
         (_input: void) => a.surface.nodes.get(undefined),
-        (state: PipelineState): AgentNodes =>
-          // An empty pipeline (no nodes) is the no-run / pre-run value the
-          // re-dialing A-client yields when no coordinator is live (EMPTY_STATE)
-          // — map it to `{ run: false }`, mirroring the old `get_nodes`. A live
-          // run always has at least one node.
-          state.order.length === 0
-            ? EMPTY_NODES
-            : {
-                run: true,
-                pipeline: state.name,
-                sha7: state.sha7,
-                seq: state.seq ?? null,
-                nodes: rowsOf(state),
-                unposted: [...postingOf(state).owed],
-              },
+        // An empty pipeline is the no-run / pre-run value (EMPTY_STATE when no
+        // coordinator is live) — `toAgentNodes` maps it to `{ run: false }`.
+        // A live run always has at least one node.
+        (state: PipelineState): AgentNodes => toAgentNodes(state),
       ),
     },
     collections: {

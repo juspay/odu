@@ -20,6 +20,7 @@ import {
   type SshProv,
   sshConnector,
 } from "@kolu/surface-remote";
+import { SETUP_NAMEPATH } from "../common/nodeId";
 import type { TaskSpec } from "../common/spec";
 import { runUnary, subscribe } from "../common/effectEdge";
 import {
@@ -191,7 +192,7 @@ export function startLane(opts: LaneOptions): Lane {
   };
 
   const attachLogs = (client: LaneClient): void => {
-    for (const id of ["_ci-setup", ...opts.tasks.map((t) => t.id)]) {
+    for (const id of [SETUP_NAMEPATH, ...opts.tasks.map((t) => t.id)]) {
       void (async () => {
         try {
           for await (const frame of subscribe(
