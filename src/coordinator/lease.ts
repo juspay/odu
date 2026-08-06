@@ -343,10 +343,26 @@ function rotatePool(pool: HostPool, by: number): string[] {
   return [...pool.slice(offset), ...pool.slice(0, offset)];
 }
 
+/**
+ * The wait between polls — and, while the run is waiting in line, the ONLY
+ * thing keeping this process alive.
+ *
+ * The timer must stay ref'd. `leaseLanes` gives back the holds it already took
+ * before it sleeps, and those holds owned the ssh/runner children — the only
+ * ref'd handles the run had. Unref this and the event loop is empty for the
+ * duration of the wait, so Bun exits 0 and the run reports success without
+ * ever running (invisible under interactive progress, which keeps stdin ref'd,
+ * and fatal under `--progress=json`, which does not).
+ *
+ * Nothing is leaked by keeping it: exactly one sleep is outstanding at a time,
+ * and the loop only reaches here when it intends to still be here afterwards.
+ * The unref'd timer above (`withTimeout`) is a different animal — a deadline on
+ * an in-flight RPC that has ref'd handles of its own, and that must not be the
+ * reason a finished run lingers.
+ */
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
-    const t = setTimeout(resolve, ms);
-    t.unref?.();
+    setTimeout(resolve, ms);
   });
 }
 
