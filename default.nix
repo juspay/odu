@@ -135,9 +135,14 @@ let
       meta.mainProgram = "odu";
     } ''
     mkdir -p $out/bin
+    # ODU_GH_BIN is --set-default, not --set: the pinned `gh` is the floor (odu
+    # must not depend on one being on PATH), but a caller naming its own must
+    # win. As an unconditional --set it read as an override while silently
+    # being a hard pin, so a test pointing $ODU_GH_BIN at a stand-in got the
+    # real `gh` — and the real GitHub — without a word.
     makeWrapper ${pkgs.bun}/bin/bun $out/bin/odu \
       --add-flags "${base}/src/cli/main.ts" \
-      --set ODU_GH_BIN "${pkgs.gh}/bin/gh" \
+      --set-default ODU_GH_BIN "${pkgs.gh}/bin/gh" \
       --set ODU_SELF "$out/bin/odu" \
       --set ODU_AGENT_SUBSTITUTERS "${pkgs.lib.concatStringsSep " " binaryCache.substituters}" \
       --set ODU_AGENT_TRUSTED_PUBLIC_KEYS "${pkgs.lib.concatStringsSep " " binaryCache.trustedPublicKeys}" \

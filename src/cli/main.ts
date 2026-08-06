@@ -14,7 +14,7 @@
  *   odu release [PLAT…]                    drop agent-held lease(s)
  *   odu dump                               resolved pipeline as JSON
  *   odu graph                              dependency graph (Mermaid)
- *   odu protect [--dry-run] [--branch B]   sync required status checks
+ *   odu protect [--dry-run] [--create]     sync required status checks
  *   odu mcp                                serve the agent face (MCP, stdio)
  *
  * Strict by default: refuses a dirty tree, pins HEAD via `git worktree`,
@@ -63,7 +63,8 @@ lease [PLAT…] [--no-wait]     hold a free venue across runs (agent layer)
 release [PLAT…]               drop agent-held lease(s)
 dump [--root NAMEPATH]
 graph [--root NAMEPATH]
-protect [--dry-run] [--branch B] [--platform P]…
+protect [--dry-run] [--branch B] [--platform P]… [--create]
+                              # --create: make the branch's ruleset if absent
 mcp
 `;
 
@@ -269,12 +270,14 @@ async function dispatch(argv: string[]): Promise<number> {
           "dry-run": { type: "boolean" },
           branch: { type: "string" },
           platform: { type: "string", multiple: true },
+          create: { type: "boolean" },
         },
       });
       return protectCommand({
         dryRun: values["dry-run"] ?? false,
         branch: values.branch,
         platforms: values.platform ?? [],
+        create: values.create ?? false,
       });
     }
     case "mcp":

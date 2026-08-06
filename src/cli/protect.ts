@@ -1,21 +1,41 @@
 /**
- * `odu protect` — PATCH GitHub branch-protection's required_status_checks to
- * the (recipe × platform) contexts the canonical DAG produces, justci's
- * `protect` equivalent. `--dry-run` prints the contexts without touching the
- * API. The bookkeeping `_ci-setup@<platform>` context is posted but never
- * required, matching the protection list observed under justci.
+ * `odu protect` — point a branch's required status checks at the
+ * (recipe × platform) contexts the canonical DAG produces, justci's `protect`
+ * equivalent. `--dry-run` prints the contexts without touching the API. The
+ * bookkeeping `_ci-setup@<platform>` context is posted but never required,
+ * matching the protection list observed under justci.
+ *
+ * The checks are written into the GitHub **ruleset** governing the branch
+ * (rulesets.ts). This command used to PATCH classic branch protection, which
+ * 404s on a ruleset-governed branch however protected that branch really is —
+ * see rulesets.ts for why classic protection is not a fallback.
  */
 
 import { spawnSync } from "node:child_process";
+import { Result, Schema } from "effect";
 import { fanId } from "../common/nodeId";
 import { loadHosts } from "../coordinator/hosts";
 import { parseGithubRemote } from "../coordinator/statuses";
 import { laneTasks, loadJustPipeline } from "../just/ingest";
+import {
+  BranchRulesSchema,
+  chooseRuleset,
+  createBody,
+  CREATED_RULESET_NAME,
+  RulesetSchema,
+  rulesetId,
+  updateBody,
+} from "./rulesets";
 
 export interface ProtectArgs {
   dryRun: boolean;
   branch?: string;
   platforms: string[];
+  /** Create the ruleset when no ruleset covers the branch, instead of refusing.
+   *  Opt-in on purpose: protect is driven by agents and scripts here (the MCP
+   *  face, the odu skill), and bringing merge-blocking policy into existence is
+   *  not something a wrong `origin` should be able to do on the way past. */
+  create: boolean;
 }
 
 /** The platform set protection covers, as pure data — the decision writes no
@@ -63,6 +83,48 @@ function protectPlatforms(explicit: readonly string[]): PlatformSet {
     return { kind: "none", source: config.source };
   }
   return { kind: "derived", platforms, source: config.source };
+}
+
+type GhResult = { ok: true; stdout: string } | { ok: false; error: string };
+
+/** One `gh` call. Every GitHub read and write protect makes goes through here,
+ *  so they share the `$ODU_GH_BIN` seam — the default-branch lookup used to
+ *  spawn a hard-coded `gh` while only the write honoured the override, leaving
+ *  the command half-fakeable and its worst path (the write) untested. */
+function gh(args: string[], input?: string): GhResult {
+  const res = spawnSync(process.env.ODU_GH_BIN ?? "gh", args, {
+    input,
+    encoding: "utf-8",
+  });
+  if (res.status === 0) return { ok: true, stdout: res.stdout };
+  const error =
+    res.stderr?.trim() ||
+    res.error?.message ||
+    `gh exited ${String(res.status)}`;
+  return { ok: false, error };
+}
+
+/** `gh api` output through an Effect Schema. GitHub answering something
+ *  unmodelled is a real (if rare) outcome — an unhandled decode issue would
+ *  reach the operator as a wall of path/expected noise, so it is named as the
+ *  API surprise it is. `decodeUnknownResult` keeps that in the RETURN type: the
+ *  refusal is a value here, never a throw. */
+function decode<T>(
+  schema: Schema.Codec<T, unknown>,
+  raw: string,
+  what: string,
+): T | null {
+  try {
+    const decoded = Schema.decodeUnknownResult(schema)(
+      JSON.parse(raw) as unknown,
+    );
+    if (Result.isSuccess(decoded)) return decoded.success;
+  } catch {
+    // fall through to the shared refusal — a non-JSON body and a JSON body of
+    // the wrong shape are the same problem to the operator.
+  }
+  process.stderr.write(`odu: protect could not read ${what} from gh\n`);
+  return null;
 }
 
 export async function protectCommand(args: ProtectArgs): Promise<number> {
@@ -113,41 +175,127 @@ export async function protectCommand(args: ProtectArgs): Promise<number> {
     process.stderr.write("odu: protect needs a github.com origin remote\n");
     return 1;
   }
-  const branch =
-    args.branch ??
-    spawnSync(
-      "gh",
-      [
-        "api",
-        `repos/${github.owner}/${github.repo}`,
-        "--jq",
-        ".default_branch",
-      ],
-      { encoding: "utf-8" },
-    ).stdout.trim();
+  const slug = `${github.owner}/${github.repo}`;
 
-  const body = JSON.stringify({
-    strict: false,
-    contexts,
-  });
-  const result = spawnSync(
-    process.env.ODU_GH_BIN ?? "gh",
+  let branch = args.branch;
+  if (branch === undefined) {
+    const head = gh(["api", `repos/${slug}`, "--jq", ".default_branch"]);
+    if (!head.ok) {
+      process.stderr.write(
+        `odu: protect could not resolve the default branch of ${slug}:\n${head.error}\n`,
+      );
+      return 1;
+    }
+    branch = head.stdout.trim();
+    // An empty answer used to flow on into `branches//protection`, turning a
+    // failed lookup into a confusing 404 about the wrong thing.
+    if (branch === "") {
+      process.stderr.write(
+        `odu: protect could not resolve the default branch of ${slug} — pass --branch\n`,
+      );
+      return 1;
+    }
+  }
+
+  const covering = gh(["api", `repos/${slug}/rules/branches/${branch}`]);
+  if (!covering.ok) {
+    process.stderr.write(
+      `odu: protect could not read the rules on ${branch}:\n${covering.error}\n`,
+    );
+    return 1;
+  }
+  const branchRules = decode(
+    BranchRulesSchema,
+    covering.stdout,
+    `the rules on ${branch}`,
+  );
+  if (branchRules === null) return 1;
+
+  const choice = chooseRuleset(branchRules);
+  const rulesetUrl = (id: number): string =>
+    `https://github.com/${slug}/rules/${id}`;
+  switch (choice.kind) {
+    case "none": {
+      if (!args.create) {
+        process.stderr.write(
+          `odu: protect found no ruleset covering ${branch} of ${slug}\n` +
+            "     odu requires checks through a repository ruleset — re-run with\n" +
+            "     --create to make one, or create it under Settings → Rules with\n" +
+            `     ${branch} in its ref conditions\n`,
+        );
+        return 1;
+      }
+      const made = gh(
+        ["api", "--method", "POST", `repos/${slug}/rulesets`, "--input", "-"],
+        createBody({ branch, isDefault: args.branch === undefined, contexts }),
+      );
+      if (!made.ok) {
+        process.stderr.write(
+          `odu: protect could not create a ruleset on ${branch}:\n${made.error}\n`,
+        );
+        return 1;
+      }
+      const id = rulesetId(made.stdout);
+      // Say what was brought into existence, not just that it worked: this is
+      // the one path where protect leaves the repo with a merge gate it did not
+      // have a moment ago, and the empty bypass list is the part that surprises.
+      process.stdout.write(
+        `odu: created ruleset "${CREATED_RULESET_NAME}"` +
+          `${id === null ? "" : ` (#${id})`} on ${branch} — ` +
+          `${contexts.length} contexts now required\n` +
+          "     nobody bypasses it, admins included; add bypass actors under\n" +
+          "     Settings → Rules if you need them\n",
+      );
+      return 0;
+    }
+    case "ambiguous":
+      process.stderr.write(
+        `odu: protect found ${choice.ids.length} rulesets requiring status checks on ${branch}:\n` +
+          `${choice.ids.map((id) => `       ${rulesetUrl(id)}\n`).join("")}` +
+          "     GitHub requires the union of them, so writing one would leave the\n" +
+          "     others' contexts required and blocking — keep required_status_checks\n" +
+          "     on exactly one ruleset\n",
+      );
+      return 1;
+    case "foreign": {
+      const owner = choice.source === "" ? choice.sourceType : choice.source;
+      process.stderr.write(
+        `odu: protect cannot edit the ${choice.sourceType.toLowerCase()} ruleset requiring\n` +
+          `     status checks on ${branch} — ${owner} owns it, and a repository\n` +
+          `     token cannot write it: ${rulesetUrl(choice.id)}\n`,
+      );
+      return 1;
+    }
+  }
+
+  const read = gh(["api", `repos/${slug}/rulesets/${choice.id}`]);
+  if (!read.ok) {
+    process.stderr.write(
+      `odu: protect could not read ruleset ${choice.id}:\n${read.error}\n`,
+    );
+    return 1;
+  }
+  const ruleset = decode(RulesetSchema, read.stdout, `ruleset ${choice.id}`);
+  if (ruleset === null) return 1;
+
+  const write = gh(
     [
       "api",
       "--method",
-      "PATCH",
-      `repos/${github.owner}/${github.repo}/branches/${branch}/protection/required_status_checks`,
+      "PUT",
+      `repos/${slug}/rulesets/${ruleset.id}`,
       "--input",
       "-",
     ],
-    { input: body, encoding: "utf-8" },
+    updateBody(ruleset, contexts),
   );
-  if (result.status !== 0) {
-    process.stderr.write(`odu: protect PATCH failed:\n${result.stderr}`);
+  if (!write.ok) {
+    process.stderr.write(`odu: protect PUT failed:\n${write.error}\n`);
     return 1;
   }
   process.stdout.write(
-    `odu: required_status_checks on ${branch} set to ${contexts.length} contexts\n`,
+    `odu: ruleset "${ruleset.name}" (#${ruleset.id}) now requires ` +
+      `${contexts.length} contexts on ${branch}\n`,
   );
   return 0;
 }
