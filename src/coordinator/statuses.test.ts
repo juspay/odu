@@ -464,6 +464,116 @@ describe("StatusPoster — honest dedup + retry", () => {
     expect(sendGh).not.toHaveBeenCalled();
   });
 
+  // The stuck-pending bug: a re-run of an already-green sha left five contexts
+  // showing "Running" on GitHub while the run itself passed and `unposted`
+  // reported nothing owed — so the merge stayed blocked with no sign anything
+  // was wrong. Seed loads the previous run's terminal statuses as `confirmed`;
+  // a node fast enough to finish inside its own debounce then re-posts a
+  // byte-identical success (same duration on a warm cache), which matched
+  // `confirmed` and returned early — leaving the un-sent `pending` armed as
+  // desired. The debounce then fired and put GitHub *back* to "Running".
+  it("drops a stale pending when the terminal status GitHub has is re-posted", async () => {
+    jest.useFakeTimers();
+    const sent: StatusPayload[] = [];
+    const ctx = "ci::fmt@x86_64-linux";
+    const done = payload({
+      context: ctx,
+      state: "success",
+      description: "Succeeded (0s): .ci/x/y.log",
+    });
+    const poster = new StatusPoster({
+      owner: "o",
+      repo: "r",
+      sha: "abc",
+      enabled: true,
+      onLine: () => {},
+      debounceMs: 20,
+      sendGh: async (p) => {
+        sent.push(p);
+        return { ok: true };
+      },
+      // The previous run on this same sha left the context green.
+      listStatuses: async () => [
+        { context: ctx, state: "success", description: done.description },
+      ],
+    });
+    await poster.seed();
+
+    poster.post(
+      payload({ context: ctx, state: "pending", description: "Running: x" }),
+    );
+    // Warm cache: the recipe finishes before its own pending has been sent.
+    poster.post(done);
+
+    await advanceTimersByTimeAsync(50);
+    await poster.settle();
+
+    // Nothing needed sending — GitHub already showed exactly this success — and
+    // above all the obsolete pending must not have been sent on top of it.
+    expect(sent.map((p) => p.state)).toEqual([]);
+    expect(poster.pendingContexts()).toEqual([]);
+    expect(poster.health().owed).toEqual([]);
+  });
+
+  it("still refuses to let a redundant success re-post swallow a failure", async () => {
+    // The guard this narrows: a *terminal* desired outranks a re-post of the
+    // status GitHub already has, so a red node can never be reported green.
+    jest.useFakeTimers();
+    const sent: string[] = [];
+    const ctx = "ci::unit@x86_64-linux";
+    const seeded = "Succeeded (1s): .ci/x/y.log";
+    const poster = new StatusPoster({
+      owner: "o",
+      repo: "r",
+      sha: "abc",
+      enabled: true,
+      onLine: () => {},
+      debounceMs: 20,
+      sendGh: async (p) => {
+        sent.push(p.state);
+        return { ok: true };
+      },
+      listStatuses: async () => [
+        { context: ctx, state: "success", description: seeded },
+      ],
+    });
+    await poster.seed();
+    poster.post(
+      payload({ context: ctx, state: "failure", description: "Failed: a" }),
+    );
+    poster.post(payload({ context: ctx, description: seeded }));
+    await advanceTimersByTimeAsync(25);
+    await poster.settle();
+    expect(sent).toEqual(["failure"]);
+  });
+
+  it("keeps a successful send that landed as the poster closed", async () => {
+    // The mirror-image false alarm: `finalize` flipped to closed while the send
+    // was in flight, so an ok result was discarded and the run reported a
+    // status as owed (attempts: 0) that GitHub had in fact received.
+    let release = (): void => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const poster = new StatusPoster({
+      owner: "o",
+      repo: "r",
+      sha: "abc",
+      enabled: true,
+      onLine: () => {},
+      debounceMs: 0,
+      sendGh: async () => {
+        await gate;
+        return { ok: true };
+      },
+    });
+    poster.post(payload({ context: "ci::nix@x86_64-linux" }));
+    const finalized = poster.finalize();
+    release();
+    expect(await finalized).toEqual([]);
+    expect(poster.unposted()).toEqual([]);
+  });
+
   it("coalesces rapid flips to the latest desired state", async () => {
     jest.useFakeTimers();
     const sent: string[] = [];
