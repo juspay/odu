@@ -515,6 +515,65 @@ describe("StatusPoster — honest dedup + retry", () => {
     expect(poster.health().owed).toEqual([]);
   });
 
+  // The same stuck check, one beat later: here the pending is already on the
+  // wire when the success arrives. `confirmed` still names what GitHub had
+  // *before* that send — the seeded success — so the incoming success looked
+  // redundant and was dropped, and the pending it was racing then landed and
+  // stayed. Observed live: `_ci-setup@aarch64-darwin` and
+  // `ci::typecheck@aarch64-darwin` finished in 1-4s and sat on "Running" while
+  // the 18s node beside them reported fine.
+  it("does not dedup against confirmed while a send is on the wire", async () => {
+    const sent: StatusPayload[] = [];
+    const ctx = "ci::typecheck@aarch64-darwin";
+    const done = payload({
+      context: ctx,
+      state: "success",
+      description: "Succeeded (1s): .ci/x/y.log",
+    });
+    let release = (): void => {};
+    const onWire = new Promise<void>((r) => {
+      release = r;
+    });
+    let gateFirst = true;
+    const poster = new StatusPoster({
+      owner: "o",
+      repo: "r",
+      sha: "abc",
+      enabled: true,
+      onLine: () => {},
+      debounceMs: 0,
+      sendGh: async (p) => {
+        sent.push(p);
+        if (gateFirst) {
+          gateFirst = false;
+          await onWire;
+        }
+        return { ok: true };
+      },
+      // The previous run on this sha left the context green with this exact
+      // description — a cached recipe reproduces its duration.
+      listStatuses: async () => [
+        { context: ctx, state: "success", description: done.description },
+      ],
+    });
+    await poster.seed();
+
+    poster.post(
+      payload({ context: ctx, state: "pending", description: "Running: x" }),
+    );
+    // Let the pending reach the wire, then finish the node under it.
+    await Promise.resolve();
+    poster.post(done);
+    release();
+    await poster.finalize();
+
+    // The success must follow the pending, so GitHub ends terminal rather than
+    // stranded on "Running".
+    expect(sent.map((p) => p.state)).toEqual(["pending", "success"]);
+    expect(poster.pendingContexts()).toEqual([]);
+    expect(poster.health().owed).toEqual([]);
+  });
+
   it("still refuses to let a redundant success re-post swallow a failure", async () => {
     // The guard this narrows: a *terminal* desired outranks a re-post of the
     // status GitHub already has, so a red node can never be reported green.

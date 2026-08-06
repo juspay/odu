@@ -169,6 +169,15 @@ export interface StatusPosterOptions {
 interface ContextPost {
   desired?: StatusPayload;
   confirmed?: StatusPayload;
+  /**
+   * The payload of a send currently on the wire for this context.
+   *
+   * `confirmed` is what GitHub had when the last send finished, so while a send
+   * is in flight it is stale — it does not yet reflect the payload about to
+   * land. Dedup against it in that window and a status gets dropped as
+   * redundant against a state GitHub is in the act of leaving.
+   */
+  inFlight?: StatusPayload;
   lastError?: string;
   attempts: number;
   /** Single wake timer: debounce before first send, or backoff after failure. */
@@ -331,6 +340,7 @@ export class StatusPoster {
     const post = this.entry(payload.context);
     post.owned = true;
     if (
+      post.inFlight === undefined &&
       post.confirmed !== undefined &&
       payloadEqual(post.confirmed, payload)
     ) {
@@ -476,7 +486,9 @@ export class StatusPoster {
       return;
     }
 
+    post.inFlight = payload;
     const result = await this.send(payload);
+    post.inFlight = undefined;
     // Record the send before the phase check, not after: a status that reached
     // GitHub as the poster closed is still on GitHub, and dropping the
     // confirmation makes `unposted` report reporting debt (attempts: 0) for a
