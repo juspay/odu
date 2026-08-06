@@ -8,9 +8,12 @@ import { describe, expect, it } from "bun:test";
 import {
   BranchRulesSchema,
   chooseRuleset,
+  createBody,
+  CREATED_RULESET_NAME,
   type Rule,
   requireContexts,
   RulesetSchema,
+  rulesetId,
   updateBody,
 } from "./rulesets";
 
@@ -182,6 +185,67 @@ describe("requireContexts", () => {
   it("requires nothing when the DAG produces no contexts", () => {
     const [out] = requireContexts([checksRule(["stale"])], []);
     expect(out?.parameters?.required_status_checks).toEqual([]);
+  });
+});
+
+describe("createBody", () => {
+  const made = (opts: { branch: string; isDefault: boolean }) =>
+    JSON.parse(
+      createBody({ ...opts, contexts: ["alpha@x86_64-linux"] }),
+    ) as Record<string, unknown>;
+
+  it("requires the contexts and nothing else", () => {
+    // A `pull_request` or `deletion` rule here would be protect deciding the
+    // repo's review and history policy on the strength of being asked about
+    // status checks.
+    const rules = made({ branch: "master", isDefault: true }).rules as Rule[];
+    expect(rules.map((r) => r.type)).toEqual(["required_status_checks"]);
+    expect(rules[0]?.parameters?.required_status_checks).toEqual([
+      { context: "alpha@x86_64-linux" },
+    ]);
+  });
+
+  it("follows a later rename when the branch came from the repo's default", () => {
+    // "Protect the default branch" stays true across a rename; pinning the name
+    // odu happened to resolve today would quietly stop covering anything.
+    expect(made({ branch: "master", isDefault: true }).conditions).toEqual({
+      ref_name: { include: ["~DEFAULT_BRANCH"], exclude: [] },
+    });
+  });
+
+  it("pins an explicitly named branch literally", () => {
+    expect(made({ branch: "release", isDefault: false }).conditions).toEqual({
+      ref_name: { include: ["refs/heads/release"], exclude: [] },
+    });
+  });
+
+  it("enforces for real, and exempts nobody", () => {
+    // `evaluate` would create a gate that never gates; a bypass actor would be
+    // protect granting a permission it was never asked to grant.
+    const body = made({ branch: "master", isDefault: true });
+    expect(body.enforcement).toBe("active");
+    expect(body.target).toBe("branch");
+    expect(body.bypass_actors).toEqual([]);
+    expect(body.name).toBe(CREATED_RULESET_NAME);
+  });
+});
+
+describe("rulesetId", () => {
+  it("reads the id of a created ruleset", () => {
+    const created = {
+      id: 42,
+      name: CREATED_RULESET_NAME,
+      target: "branch",
+      enforcement: "active",
+    };
+    expect(rulesetId(JSON.stringify(created))).toBe(42);
+  });
+
+  it("is null, not a throw, when the answer is unmodelled", () => {
+    // The create already happened by then — failing here would report a
+    // successful write as an error.
+    expect(rulesetId("not json {{{")).toBeNull();
+    expect(rulesetId('{"unexpected":true}')).toBeNull();
   });
 });
 

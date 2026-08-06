@@ -141,6 +141,64 @@ export function requireContexts(
   return rules.map((rule) => (rule.type === CHECKS_RULE ? rewritten : rule));
 }
 
+/** The name odu gives a ruleset it creates. Self-identifying, so a maintainer
+ *  meeting it under Settings → Rules can tell what made it and what maintains
+ *  it. Stable: protect finds it again by coverage, not by name, but a renamed
+ *  one would read as somebody else's. */
+export const CREATED_RULESET_NAME = "odu: required checks";
+
+/**
+ * Body for `POST /repos/{owner}/{repo}/rulesets` — the ruleset `--create` makes
+ * for a branch no ruleset covers.
+ *
+ * It holds exactly one rule. `pull_request`, `deletion` and the rest are the
+ * repo's own policy, and a `protect` that quietly decided reviews were required
+ * would be answering a question nobody asked it. What is left is nearly all
+ * derived: the conditions are the branch protect was pointed at, the rule is the
+ * contexts it already computed, and `active` is the only enforcement under which
+ * requiring a check means anything (`evaluate` is a dry run, which `--dry-run`
+ * already covers).
+ *
+ * `bypass_actors` is empty, so nobody — admins included — is exempt. That is the
+ * conservative end: granting a bypass is a permission decision, easy to add
+ * later under Settings → Rules and impossible to take back unnoticed. A branch
+ * asked for `~DEFAULT_BRANCH` follows a later rename, which is what "protect the
+ * default branch" meant; an explicitly named one is pinned literally, because
+ * naming it is the operator saying which branch they meant.
+ */
+export function createBody(opts: {
+  branch: string;
+  /** The branch came from the repo's default, not from `--branch`. */
+  isDefault: boolean;
+  contexts: readonly string[];
+}): string {
+  return JSON.stringify({
+    name: CREATED_RULESET_NAME,
+    target: "branch",
+    enforcement: "active",
+    conditions: {
+      ref_name: {
+        include: [opts.isDefault ? "~DEFAULT_BRANCH" : `refs/heads/${opts.branch}`],
+        exclude: [],
+      },
+    },
+    bypass_actors: [],
+    rules: requireContexts([], opts.contexts),
+  });
+}
+
+/** The id of a just-created ruleset, for the report. A create that succeeded but
+ *  answered something unmodelled is still a create, so this is `null` rather
+ *  than an error — the id is a nicety, not the outcome. */
+export function rulesetId(raw: string): number | null {
+  try {
+    const parsed = RulesetSchema.safeParse(JSON.parse(raw) as unknown);
+    return parsed.success ? parsed.data.id : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Body for `PUT /repos/{owner}/{repo}/rulesets/{id}` that changes only the
  * required contexts.

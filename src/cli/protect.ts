@@ -20,7 +20,10 @@ import { laneTasks, loadJustPipeline } from "../just/ingest";
 import {
   BranchRulesSchema,
   chooseRuleset,
+  createBody,
+  CREATED_RULESET_NAME,
   RulesetSchema,
+  rulesetId,
   updateBody,
 } from "./rulesets";
 
@@ -28,6 +31,11 @@ export interface ProtectArgs {
   dryRun: boolean;
   branch?: string;
   platforms: string[];
+  /** Create the ruleset when no ruleset covers the branch, instead of refusing.
+   *  Opt-in on purpose: protect is driven by agents and scripts here (the MCP
+   *  face, the odu skill), and bringing merge-blocking policy into existence is
+   *  not something a wrong `origin` should be able to do on the way past. */
+  create: boolean;
 }
 
 /** The platform set protection covers, as pure data — the decision writes no
@@ -199,15 +207,39 @@ export async function protectCommand(args: ProtectArgs): Promise<number> {
   const rulesetUrl = (id: number): string =>
     `https://github.com/${slug}/rules/${id}`;
   switch (choice.kind) {
-    case "none":
-      // Creating the ruleset would mean odu inventing this repo's enforcement,
-      // ref conditions and bypass actors — policy the operator owns.
-      process.stderr.write(
-        `odu: protect found no ruleset covering ${branch} of ${slug}\n` +
-          "     odu requires checks through a repository ruleset — create one under\n" +
-          `     Settings → Rules with ${branch} in its ref conditions, then re-run\n`,
+    case "none": {
+      if (!args.create) {
+        process.stderr.write(
+          `odu: protect found no ruleset covering ${branch} of ${slug}\n` +
+            "     odu requires checks through a repository ruleset — re-run with\n" +
+            "     --create to make one, or create it under Settings → Rules with\n" +
+            `     ${branch} in its ref conditions\n`,
+        );
+        return 1;
+      }
+      const made = gh(
+        ["api", "--method", "POST", `repos/${slug}/rulesets`, "--input", "-"],
+        createBody({ branch, isDefault: args.branch === undefined, contexts }),
       );
-      return 1;
+      if (!made.ok) {
+        process.stderr.write(
+          `odu: protect could not create a ruleset on ${branch}:\n${made.error}\n`,
+        );
+        return 1;
+      }
+      const id = rulesetId(made.stdout);
+      // Say what was brought into existence, not just that it worked: this is
+      // the one path where protect leaves the repo with a merge gate it did not
+      // have a moment ago, and the empty bypass list is the part that surprises.
+      process.stdout.write(
+        `odu: created ruleset "${CREATED_RULESET_NAME}"` +
+          `${id === null ? "" : ` (#${id})`} on ${branch} — ` +
+          `${contexts.length} contexts now required\n` +
+          "     nobody bypasses it, admins included; add bypass actors under\n" +
+          "     Settings → Rules if you need them\n",
+      );
+      return 0;
+    }
     case "ambiguous":
       process.stderr.write(
         `odu: protect found ${choice.ids.length} rulesets requiring status checks on ${branch}:\n` +
