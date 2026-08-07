@@ -27,12 +27,18 @@ import {
 } from "@kolu/surface-remote";
 import {
   DEFAULT_LEASE_LOCK,
+  type LaneClient,
   laneSurface,
   type LeaseHolder,
 } from "../common/surface";
 import { type HostPool, type ResolvedPools, shortHost } from "./hosts";
 import type { ResolveRunnerDrv } from "./runnerFlake";
-import { lineLogger, localhostSpawnEnv } from "./surfaceRemoteOpts";
+import { runUnary } from "../common/effectEdge";
+import {
+  lineLogger,
+  localhostSpawnEnv,
+  pinLaneFace,
+} from "./surfaceRemoteOpts";
 
 export type HolderInfo = LeaseHolder;
 
@@ -128,7 +134,19 @@ export function parseHolderBody(body: string): HolderInfo | null {
   return { holder: line, run: null, sinceMs: Date.now() };
 }
 
-export type LaneAgentClient = AgentClient<typeof laneSurface.contract>;
+export type LaneAgentClient = LaneClient;
+
+/** Spread the lock-path override in only when there IS one.
+ *
+ *  `lockPath` is `Schema.optionalKey` on both lease inputs (PLAN #17), which
+ *  REJECTS a present-but-undefined key — zod.s `.optional()` tolerated it. An
+ *  `AgentDialOpts` with no override would otherwise spell `lockPath: undefined`
+ *  and fail its first round-trip with `Expected string, got undefined`, which is
+ *  not the "use the agent default" request the caller means. The default path
+ *  is the AGENT.s to choose (`ODU_LEASE_LOCK` / DEFAULT_LEASE_LOCK), so the key
+ *  must be absent, not null and not guessed here. */
+const lockPathKey = (lockPath: string | undefined): { lockPath?: string } =>
+  lockPath === undefined ? {} : { lockPath };
 
 export interface AgentDialOpts {
   resolveDrvPath: ResolveRunnerDrv;
@@ -174,8 +192,9 @@ export async function tryClaim(
   }
 
   const timeoutMs = opts.timeoutMs ?? CLAIM_TIMEOUT_MS;
-  const session = makeSession<LaneAgentClient, SshProv>({
-    connectOnce: sshConnector<typeof laneSurface.contract>({
+  const session = makeSession<AgentClient, SshProv>({
+    connectOnce: sshConnector({
+      surface: laneSurface,
       host,
       binary: "odu-runner",
       resolveDrvPath: opts.resolveDrvPath,
@@ -191,17 +210,19 @@ export async function tryClaim(
 
   try {
     const client = await withTimeout(
-      session.pin(),
+      pinLaneFace(session),
       timeoutMs,
       `lease pin ${shortHost(host)}`,
     );
 
     const result = await withTimeout(
-      client.surface.lease.claim({
-        holder: identity.holder,
-        run: identity.run,
-        lockPath: opts.lockPath,
-      }),
+      runUnary(
+        client.surface.lease.claim({
+          holder: identity.holder,
+          run: identity.run,
+          ...lockPathKey(opts.lockPath),
+        }),
+      ),
       timeoutMs,
       `lease claim ${shortHost(host)}`,
     );
@@ -233,7 +254,7 @@ export async function tryClaim(
         host,
         release: () => {
           intentionalRelease = true;
-          void client.surface.lease.release({}).catch(() => {
+          void runUnary(client.surface.lease.release({})).catch(() => {
             /* session may already be dead */
           });
           session.destroy();
@@ -261,8 +282,9 @@ export async function probeHost(
   }
 
   const timeoutMs = opts.timeoutMs ?? CLAIM_TIMEOUT_MS;
-  const session = makeSession<LaneAgentClient, SshProv>({
-    connectOnce: sshConnector<typeof laneSurface.contract>({
+  const session = makeSession<AgentClient, SshProv>({
+    connectOnce: sshConnector({
+      surface: laneSurface,
       host,
       binary: "odu-runner",
       resolveDrvPath: opts.resolveDrvPath,
@@ -275,13 +297,13 @@ export async function probeHost(
 
   try {
     const client = await withTimeout(
-      session.pin(),
+      pinLaneFace(session),
       timeoutMs,
       `lease probe pin ${shortHost(host)}`,
     );
     session.markConnected();
     const result = await withTimeout(
-      client.surface.lease.probe({ lockPath: opts.lockPath }),
+      runUnary(client.surface.lease.probe(lockPathKey(opts.lockPath))),
       timeoutMs,
       `lease probe ${shortHost(host)}`,
     );

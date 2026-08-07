@@ -16,6 +16,14 @@
 let
   version = (pkgs.lib.importJSON ./package.json).version;
 
+  # The agent's binary-cache declaration, baked onto the `odu` wrapper the same
+  # way ODU_RUNNER_FLAKE is: surface-remote REQUIRES one on every
+  # `AgentDerivation` (kolu#2018), and a coordinator that carries none is
+  # misbuilt — `runnerFlake.ts` refuses loudly rather than provisioning
+  # cache-blind. Spelled once in nix/binary-cache.nix, which asserts it matches
+  # flake.nix's nixConfig.
+  binaryCache = import ./nix/binary-cache.nix;
+
   src = pkgs.lib.fileset.toSource {
     root = ./.;
     fileset = pkgs.lib.fileset.unions [
@@ -136,6 +144,8 @@ let
       --add-flags "${base}/src/cli/main.ts" \
       --set-default ODU_GH_BIN "${pkgs.gh}/bin/gh" \
       --set ODU_SELF "$out/bin/odu" \
+      --set ODU_AGENT_SUBSTITUTERS "${pkgs.lib.concatStringsSep " " binaryCache.substituters}" \
+      --set ODU_AGENT_TRUSTED_PUBLIC_KEYS "${pkgs.lib.concatStringsSep " " binaryCache.trustedPublicKeys}" \
       ${pkgs.lib.optionalString (selfFlake != null) ''--set ODU_RUNNER_FLAKE "${selfFlake}"''} \
       --prefix PATH : ${pkgs.lib.makeBinPath [
         pkgs.bun

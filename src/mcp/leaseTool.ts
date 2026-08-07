@@ -6,16 +6,16 @@
  * observe the line. Never blocks the MCP session on a multi-hour queue.
  */
 
-import { z } from "zod";
+import { Effect, Schema } from "effect";
 import type { BespokeTool } from "@kolu/surface-mcp";
 import { leaseCommand, releaseCommand } from "../cli/leaseCmd";
 import type { HolderInfo } from "../coordinator/lease";
 
-export const leaseInput = z.object({
-  platforms: z.array(z.string()).optional(),
-  no_wait: z.boolean().optional(),
+export const leaseInput = Schema.Struct({
+  platforms: Schema.optionalKey(Schema.Array(Schema.String)),
+  no_wait: Schema.optionalKey(Schema.Boolean),
 });
-export type LeaseInput = z.infer<typeof leaseInput>;
+export type LeaseInput = typeof leaseInput.Type;
 
 export interface LeaseToolResult {
   ok: boolean;
@@ -37,7 +37,8 @@ export const leaseTool: BespokeTool = {
     "without re-claiming. Call release when done.",
   input: leaseInput,
   mutates: true,
-  handler: async (input): Promise<LeaseToolResult> => {
+  handler: (input) =>
+    Effect.promise(async (): Promise<LeaseToolResult> => {
     const args = input as LeaseInput;
     const r = await leaseCommand({
       platforms: args.platforms ?? [],
@@ -57,13 +58,13 @@ export const leaseTool: BespokeTool = {
         message: x.message,
       })),
     };
-  },
+  }),
 };
 
-export const releaseInput = z.object({
-  platforms: z.array(z.string()).optional(),
+export const releaseInput = Schema.Struct({
+  platforms: Schema.optionalKey(Schema.Array(Schema.String)),
 });
-export type ReleaseInput = z.infer<typeof releaseInput>;
+export type ReleaseInput = typeof releaseInput.Type;
 
 export interface ReleaseToolResult {
   ok: boolean;
@@ -76,11 +77,13 @@ export const releaseTool: BespokeTool = {
     "Omit platforms to release all agent-held leases in this checkout.",
   input: releaseInput,
   mutates: true,
-  handler: async (input): Promise<ReleaseToolResult> => {
-    const args = input as ReleaseInput;
-    const code = releaseCommand({
-      platforms: args.platforms ?? [],
-    });
-    return { ok: code === 0, code };
-  },
+  // `Effect.promise` over `releaseCommand`, which is SYNCHRONOUS (it SIGTERMs
+  // holder processes) — kept promise-shaped only because its sibling above is,
+  // so both tools read the same way.
+  handler: (input) =>
+    Effect.promise(async (): Promise<ReleaseToolResult> => {
+      const args = input as ReleaseInput;
+      const code = releaseCommand({ platforms: args.platforms ?? [] });
+      return { ok: code === 0, code };
+    }),
 };

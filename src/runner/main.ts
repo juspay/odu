@@ -54,7 +54,8 @@ async function main(): Promise<void> {
   }
   log("odu-runner: idle — waiting for run.configure over stdio");
   const end = await serveOverStdio({
-    router: runner.router,
+    group: runner.group,
+    handlers: runner.handlers,
     onFirstRequest: () =>
       log("odu-runner: first RPC received — coordinator attached"),
   });

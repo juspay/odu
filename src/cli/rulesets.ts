@@ -15,7 +15,7 @@
  * vocabulary lands here alone.
  */
 
-import { z } from "zod";
+import { Effect, Result, Schema } from "effect";
 
 /** The rule type odu writes. Every other rule in a ruleset is passed through
  *  untouched. */
@@ -26,37 +26,52 @@ const CHECKS_RULE = "required_status_checks";
  *  fields the choice turns on are modelled; a rule's `parameters` are read from
  *  the ruleset itself, not from here. `ruleset_source_type` is absent on some
  *  responses, and a repo-owned ruleset is the only kind the repo-scoped write
- *  endpoint can reach, so that is the default the choice then re-checks. */
-const BranchRuleSchema = z.object({
-  type: z.string(),
-  ruleset_id: z.number(),
-  ruleset_source_type: z.string().default("Repository"),
-  ruleset_source: z.string().default(""),
+ *  endpoint can reach, so that is the default the choice then re-checks.
+ *
+ *  Effect Schema, like every other wire shape in this repo (src/common/spec.ts
+ *  states the zod→Effect mapping this file follows): `.default(v)` is
+ *  `withDecodingDefaultKey`, which substitutes for an ABSENT key only. Every
+ *  value here is decoded straight out of `JSON.parse` of a `gh api` body, where
+ *  a present-but-`undefined` key cannot occur, so the stricter reading costs
+ *  nothing. */
+const BranchRuleSchema = Schema.Struct({
+  type: Schema.String,
+  ruleset_id: Schema.Number,
+  ruleset_source_type: Schema.String.pipe(
+    Schema.withDecodingDefaultKey(Effect.succeed("Repository")),
+  ),
+  ruleset_source: Schema.String.pipe(
+    Schema.withDecodingDefaultKey(Effect.succeed("")),
+  ),
 });
-export type BranchRule = z.infer<typeof BranchRuleSchema>;
-export const BranchRulesSchema = z.array(BranchRuleSchema);
+export type BranchRule = typeof BranchRuleSchema.Type;
+export const BranchRulesSchema = Schema.Array(BranchRuleSchema);
 
 /** One rule inside `GET /repos/{owner}/{repo}/rulesets/{id}`. `parameters` stays
  *  an opaque bag: odu rewrites exactly one key of one rule type, and every
  *  unmodelled rule has to survive the read-modify-write byte-for-byte. */
-const RuleSchema = z.object({
-  type: z.string(),
-  parameters: z.record(z.string(), z.unknown()).optional(),
+const RuleSchema = Schema.Struct({
+  type: Schema.String,
+  parameters: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
 });
-export type Rule = z.infer<typeof RuleSchema>;
+export type Rule = typeof RuleSchema.Type;
 
 /** `GET /repos/{owner}/{repo}/rulesets/{id}` — read in full because the write
  *  echoes it back (see `updateBody`). */
-export const RulesetSchema = z.object({
-  id: z.number(),
-  name: z.string(),
-  target: z.string(),
-  enforcement: z.string(),
-  conditions: z.unknown().optional(),
-  bypass_actors: z.array(z.unknown()).default([]),
-  rules: z.array(RuleSchema).default([]),
+export const RulesetSchema = Schema.Struct({
+  id: Schema.Number,
+  name: Schema.String,
+  target: Schema.String,
+  enforcement: Schema.String,
+  conditions: Schema.optionalKey(Schema.Unknown),
+  bypass_actors: Schema.Array(Schema.Unknown).pipe(
+    Schema.withDecodingDefaultKey(Effect.succeed<readonly unknown[]>([])),
+  ),
+  rules: Schema.Array(RuleSchema).pipe(
+    Schema.withDecodingDefaultKey(Effect.succeed<readonly Rule[]>([])),
+  ),
 });
-export type Ruleset = z.infer<typeof RulesetSchema>;
+export type Ruleset = typeof RulesetSchema.Type;
 
 /** Which ruleset `protect` should write the contexts into.
  *
@@ -192,12 +207,17 @@ export function createBody(opts: {
  *  than an error — the id is a nicety, not the outcome. */
 export function rulesetId(raw: string): number | null {
   try {
-    const parsed = RulesetSchema.safeParse(JSON.parse(raw) as unknown);
-    return parsed.success ? parsed.data.id : null;
+    const decoded = decodeRuleset(JSON.parse(raw) as unknown);
+    return Result.isSuccess(decoded) ? decoded.success.id : null;
   } catch {
     return null;
   }
 }
+
+/** Built once at module scope, as everywhere else a schema meets a decoder in
+ *  this repo (src/coordinator/ledger.ts) — the decoder is derived from the
+ *  schema, not from the value. */
+const decodeRuleset = Schema.decodeUnknownResult(RulesetSchema);
 
 /**
  * Body for `PUT /repos/{owner}/{repo}/rulesets/{id}` that changes only the

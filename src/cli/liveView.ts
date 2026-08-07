@@ -49,6 +49,8 @@ import {
   type RunHeader,
   STATUS_META,
 } from "../common/surface";
+import type { Stream } from "effect";
+import { subscribe } from "../common/effectEdge";
 import { postingWarning } from "../coordinator/statuses";
 import { formatGoDuration } from "../common/duration";
 import { splitFanId } from "../common/nodeId";
@@ -106,14 +108,14 @@ export interface LiveOpts {
    *  `attach`=false (an observer has no such chatter to tame). */
   hookStderr: boolean;
   /** Pull the focused node's log: a `snapshot` frame then `append`s, so a
-   *  focus change backfills. `run` passes `tail.streamSource` (a synchronous
-   *  generator), `attach` passes `client.surface.nodeLog.get` (a promised
-   *  stream over the socket) — hence the `| Promise`, `await`ed at the call
-   *  site, which is a no-op for the generator. */
-  openLog: (
-    id: string,
-    signal: AbortSignal,
-  ) => AsyncIterable<NodeLogFrame> | Promise<AsyncIterable<NodeLogFrame>>;
+   *  focus change backfills. `run` passes `tail.streamSource` (its in-memory
+   *  tail), `attach` passes a call to `client.surface.nodeLog.get` (over the
+   *  socket) — and under Effect both are the SAME shape, a lazy `Stream`
+   *  returned synchronously. The old `| Promise` half of this union existed
+   *  only to reconcile a generator with a promised async-iterable; there is
+   *  nothing left to reconcile, and no `AbortSignal` to thread: the view
+   *  cancels by closing its subscription (see `subscribe`). */
+  openLog: (id: string) => Stream.Stream<NodeLogFrame, unknown>;
   /** The one mutation `r` triggers — re-run the focused node. */
   rerun: (id: string) => void;
   /** The interrupt path: `q`/Ctrl-C/Ctrl-D request a quit. The view doesn't
@@ -1101,8 +1103,8 @@ export class LiveView {
       !controller.signal.aborted && this.logSub === controller && !this.stopped;
     void (async () => {
       try {
-        for await (const frame of await this.opts.openLog(
-          id,
+        for await (const frame of subscribe(
+          this.opts.openLog(id),
           controller.signal,
         )) {
           if (!live()) return;

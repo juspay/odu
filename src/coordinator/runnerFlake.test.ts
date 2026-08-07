@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { missingRunnerError, resolveRunnerFlake } from "./runnerFlake";
+import {
+  missingRunnerError,
+  resolveAgentBinaryCache,
+  resolveRunnerFlake,
+} from "./runnerFlake";
 
 describe("resolveRunnerFlake", () => {
   it("uses the wrapper-baked ODU_RUNNER_FLAKE — the single source", () => {
@@ -59,5 +63,54 @@ describe("missingRunnerError", () => {
       missingRunnerError(flake, plat, "error: unable to download: Couldn't resolve host"),
     ).toBeNull();
     expect(missingRunnerError(flake, plat, "error: path does not exist")).toBeNull();
+  });
+});
+
+describe("resolveAgentBinaryCache", () => {
+  it("reads the wrapper-baked pair — nix's own space-separated spelling", () => {
+    const cache = resolveAgentBinaryCache({
+      ODU_AGENT_SUBSTITUTERS: "https://cache.nixos.asia/oss",
+      ODU_AGENT_TRUSTED_PUBLIC_KEYS: "oss:abc=",
+    });
+    expect(cache.substituters).toEqual(["https://cache.nixos.asia/oss"]);
+    expect(cache.trustedPublicKeys).toEqual(["oss:abc="]);
+  });
+
+  it("splits multiple entries on whitespace", () => {
+    const cache = resolveAgentBinaryCache({
+      ODU_AGENT_SUBSTITUTERS: "https://a  https://b",
+      ODU_AGENT_TRUSTED_PUBLIC_KEYS: "k1= k2=",
+    });
+    expect(cache.substituters).toEqual(["https://a", "https://b"]);
+    expect(cache.trustedPublicKeys).toEqual(["k1=", "k2="]);
+  });
+
+  it("refuses (no fallback) when the wrapper baked nothing", () => {
+    // kolu#2018 made the declaration REQUIRED so no consumer can assemble a
+    // cache-blind provisioning path. odu's answer to a misbuilt binary is the
+    // same as ODU_RUNNER_FLAKE's: refuse loudly, never degrade.
+    expect(() => resolveAgentBinaryCache({})).toThrow(
+      /ODU_AGENT_SUBSTITUTERS/,
+    );
+  });
+
+  it("refuses when only one half was baked", () => {
+    expect(() =>
+      resolveAgentBinaryCache({ ODU_AGENT_SUBSTITUTERS: "https://a" }),
+    ).toThrow(/refuses to run cache-blind/);
+    expect(() =>
+      resolveAgentBinaryCache({ ODU_AGENT_TRUSTED_PUBLIC_KEYS: "k=" }),
+    ).toThrow(/refuses to run cache-blind/);
+  });
+
+  it("refuses a blank-only declaration rather than passing it to nix", () => {
+    // A whitespace-only substituter would satisfy "non-empty" and then fail at
+    // `nix copy` looking exactly like a cache miss.
+    expect(() =>
+      resolveAgentBinaryCache({
+        ODU_AGENT_SUBSTITUTERS: "   ",
+        ODU_AGENT_TRUSTED_PUBLIC_KEYS: "   ",
+      }),
+    ).toThrow(/refuses to run cache-blind/);
   });
 });

@@ -9,7 +9,7 @@ dependencies:
   deployed_files:
   - .claude/rules/surface-docs-sync.md
   deployed_file_hashes:
-    .claude/rules/surface-docs-sync.md: sha256:be464c63e9007b32768796bf67d42047d0148bfb3fa22a26d93c89914bef5d09
+    .claude/rules/surface-docs-sync.md: sha256:7587bab26e1da6cc50f5b87a6713240a532cb6c97ab031a221f2b8a6a752cb05
   source: local
   local_path: ./dev
   is_dev: true
@@ -220,7 +220,7 @@ deployments:
   owners:
   - ./dev
   active_owner: ./dev
-  content_hash: sha256:be464c63e9007b32768796bf67d42047d0148bfb3fa22a26d93c89914bef5d09
+  content_hash: sha256:7587bab26e1da6cc50f5b87a6713240a532cb6c97ab031a221f2b8a6a752cb05
 - kind: project-relative
   target: claude
   value: .claude/skills/agent-debate

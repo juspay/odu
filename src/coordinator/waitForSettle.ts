@@ -8,8 +8,9 @@
  * live outside this module and call `waitForSettle`.
  */
 
-import { isDeadTransportError } from "@kolu/surface/client";
+import { isDeadTransportError } from "@kolu/surface/errors";
 import { agentSummary, NON_TERMINAL_STATUSES } from "../cli/render";
+import { subscribe } from "../common/effectEdge";
 import { gitRunContext } from "../common/git";
 import { formatRef, type RunRecord } from "../common/runRecord";
 import { liftUnposted, type OwedStatus } from "../common/surface";
@@ -63,7 +64,7 @@ export interface SettleVerdict {
   seq: number | null;
   /** Full owed GitHub status rows not yet confirmed (juspay/odu#61).
    *  Reporting debt does not block settle — the test verdict stays the truth. */
-  unposted: OwedStatus[];
+  unposted: readonly OwedStatus[];
 }
 
 export interface WaitOptions {
@@ -126,7 +127,7 @@ function recordVerdict(rec: RunRecord | null): {
   passed: boolean;
   failed: string[];
   errored: string[];
-  unposted: OwedStatus[];
+  unposted: readonly OwedStatus[];
 } | null {
   if (rec === null) return null;
   if (rec.outcome !== "passed" && rec.outcome !== "failed") return null;
@@ -171,7 +172,7 @@ function identityOf(
 
 /** The posting debt a FRAME reports. A record-sourced verdict uses the
  *  record's instead — see `recordVerdict`. */
-function debtOf(snap: AgentNodes | undefined): OwedStatus[] {
+function debtOf(snap: AgentNodes | undefined): readonly OwedStatus[] {
   return (snap ?? EMPTY_NODES).unposted ?? [];
 }
 
@@ -322,9 +323,16 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
   };
 
   try {
-    for await (const snap of await opts.client.surface.nodes.get(undefined, {
-      signal: controller.signal,
-    })) {
+    // The subscription is the WAIT: a `Stream` registers nothing until it is
+    // pulled, so the settle watcher is armed by this loop's first `next()`, not
+    // by the call that produced the stream value. `subscribe` wires the
+    // controller's abort to closing the subscription (fiber interruption), which
+    // is what the `{ signal }` call option used to do — there is no signal on a
+    // surface call any more (kolu PLAN D10/#18).
+    for await (const snap of subscribe(
+      opts.client.surface.nodes.get(undefined),
+      controller.signal,
+    )) {
       last = snap;
       // The pre-run / no-run snapshot (`run: false`, empty rows) is not a
       // settled verdict — keep waiting for a real run's frames.
@@ -386,9 +394,13 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
     // An abort that surfaces as a rejection (rather than a clean end) is the
     // same timeout/cancel verdict.
     if (controller.signal.aborted) return abortedVerdict();
-    // Peer process/socket death used to end the async iterator cleanly; newer
-    // @kolu/surface rejects with SURFACE_STDIO_TRANSPORT_CLOSED. Treat that as
-    // the same end-of-stream verdict (never a false green, never an uncaught).
+    // Peer process/socket death used to end the async iterator cleanly; the
+    // surface fails it instead. The discriminant is now the error's `_tag`
+    // (`SurfaceStdioTransportClosed` / `SurfaceTransportRetired`), read through
+    // the shared predicate rather than compared against a magic code string —
+    // which also survives a second `effect` module instance, where an
+    // `instanceof` would silently stop recognising it. Same verdict as before:
+    // end-of-stream, never a false green and never an uncaught.
     if (isDeadTransportError(err)) return streamEndedVerdict();
     throw err;
   } finally {

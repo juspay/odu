@@ -14,7 +14,7 @@ a code change forgets them. When you add or change any of:
 
 - a **CLI command or flag** (`src/cli/main.ts`),
 - an **MCP tool or its inputs** (`src/mcp/*Tool.ts`, registered in `src/cli/mcp.ts`),
-- the **oRPC surface** procedures/cells/streams (`src/common/surface.ts`),
+- the **typed surface** procedures/cells/streams (`src/common/surface.ts`),
 
 update **all three** in the *same* change:
 
