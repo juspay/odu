@@ -8,32 +8,48 @@
  * mirroring justci's `_ci-setup@<platform>` bookkeeping context.
  */
 
-import { z } from "zod";
+import { Effect, Schema } from "effect";
 
-export const TaskIdSchema = z.string().min(1);
-export type TaskId = z.infer<typeof TaskIdSchema>;
+export const TaskIdSchema = Schema.String.check(Schema.isMinLength(1));
+export type TaskId = typeof TaskIdSchema.Type;
 
-export const TaskSpecSchema = z.object({
+/** The zod→Effect mapping is LAW here (kolu PLAN #17), and both idioms in this
+ *  file are wire-bearing — `TaskSpecSchema` is embedded in `ConfigureInput`,
+ *  which crosses the stdio wire to `odu-runner`:
+ *
+ *    - `.optional()` → `Schema.optionalKey`, never `Schema.optional`. Absent
+ *      means ABSENT on this wire; `optional` would round-trip an explicit
+ *      `undefined` through `null`.
+ *    - `.default(v)` → `Schema.withDecodingDefaultKey`. STRICTER than zod on an
+ *      in-memory `undefined`: zod's `.default([])` accepted `{needs: undefined}`
+ *      and substituted; this rejects it. Every in-process producer must OMIT the
+ *      key rather than spell it `undefined` (`just/ingest.ts` builds `needs` and
+ *      `os` totally, which is why nothing here needs a conditional spread). */
+export const TaskSpecSchema = Schema.Struct({
   id: TaskIdSchema,
   /** Display name; defaults to the id. */
-  name: z.string().optional(),
+  name: Schema.optionalKey(Schema.String),
   /** Shell command, run via `sh -c` from the workspace root. */
-  command: z.string().min(1),
-  needs: z.array(TaskIdSchema).default([]),
+  command: Schema.String.check(Schema.isMinLength(1)),
+  needs: Schema.Array(TaskIdSchema).pipe(
+    Schema.withDecodingDefaultKey(Effect.succeed<readonly string[]>([])),
+  ),
   /** `just` OS-family attributes (`[linux]` / `[macos]` / `[unix]` / …) that
    *  restrict which platforms schedule this recipe; absent / empty ⇒ every
    *  platform. Consumed coordinator-side at fan-out (src/just/ingest.ts
    *  `laneTasks`); the runner ignores it, since a task only ever reaches a lane
    *  it's enabled on. */
-  os: z.array(z.string()).optional(),
+  os: Schema.optionalKey(Schema.Array(Schema.String)),
 });
-export type TaskSpec = z.infer<typeof TaskSpecSchema>;
+export type TaskSpec = typeof TaskSpecSchema.Type;
 
-export const PipelineSpecSchema = z.object({
-  name: z.string().default("pipeline"),
-  tasks: z.array(TaskSpecSchema).min(1),
+export const PipelineSpecSchema = Schema.Struct({
+  name: Schema.String.pipe(
+    Schema.withDecodingDefaultKey(Effect.succeed("pipeline")),
+  ),
+  tasks: Schema.Array(TaskSpecSchema).check(Schema.isMinLength(1)),
 });
-export type PipelineSpec = z.infer<typeof PipelineSpecSchema>;
+export type PipelineSpec = typeof PipelineSpecSchema.Type;
 
 /** Throws unless every dependency names a declared task, ids are unique, and
  *  the `needs` graph is acyclic (Kahn's algorithm as a cycle check: if not

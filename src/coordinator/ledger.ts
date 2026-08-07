@@ -27,6 +27,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import { Result, Schema } from "effect";
 import { type RunRecord, RunRecordSchema } from "../common/runRecord";
 
 const RUNS_SUBDIR = "runs";
@@ -209,9 +210,13 @@ function readRecord(path: string): RunRecord | null {
   // reserved-but-unfinalized run stays out of `odu runs` explicitly (see
   // RESERVED_MARKER), independent of whether it would also fail the schema.
   if (isReservationSentinel(parsed)) return null;
-  const result = RunRecordSchema.safeParse(parsed);
-  return result.success ? result.data : null;
+  const result = decodeRunRecord(parsed);
+  return Result.isSuccess(result) ? result.success : null;
 }
+
+/** Built once at module scope: `readLedger` decodes every record in the
+ *  checkout, and rebuilding the decoder per file would be work per row. */
+const decodeRunRecord = Schema.decodeUnknownResult(RunRecordSchema);
 
 /** The finalized record for ONE run identity, or `null` when it is missing,
  *  still a reservation sentinel, or unparseable. The addressed counterpart to

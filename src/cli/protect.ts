@@ -12,7 +12,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import type { z } from "zod";
+import { Result, Schema } from "effect";
 import { fanId } from "../common/nodeId";
 import { loadHosts } from "../coordinator/hosts";
 import { parseGithubRemote } from "../coordinator/statuses";
@@ -104,13 +104,21 @@ function gh(args: string[], input?: string): GhResult {
   return { ok: false, error };
 }
 
-/** `gh api` output through a zod schema. GitHub answering something unmodelled
- *  is a real (if rare) outcome — an unhandled ZodError would reach the operator
- *  as a wall of path/expected noise, so it is named as the API surprise it is. */
-function decode<T>(schema: z.ZodType<T>, raw: string, what: string): T | null {
+/** `gh api` output through an Effect Schema. GitHub answering something
+ *  unmodelled is a real (if rare) outcome — an unhandled decode issue would
+ *  reach the operator as a wall of path/expected noise, so it is named as the
+ *  API surprise it is. `decodeUnknownResult` keeps that in the RETURN type: the
+ *  refusal is a value here, never a throw. */
+function decode<T>(
+  schema: Schema.Codec<T, unknown>,
+  raw: string,
+  what: string,
+): T | null {
   try {
-    const parsed = schema.safeParse(JSON.parse(raw) as unknown);
-    if (parsed.success) return parsed.data;
+    const decoded = Schema.decodeUnknownResult(schema)(
+      JSON.parse(raw) as unknown,
+    );
+    if (Result.isSuccess(decoded)) return decoded.success;
   } catch {
     // fall through to the shared refusal — a non-JSON body and a JSON body of
     // the wrong shape are the same problem to the operator.

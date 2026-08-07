@@ -7,7 +7,7 @@
  */
 
 import type { BespokeTool } from "@kolu/surface-mcp";
-import { z } from "zod";
+import { Effect, Schema } from "effect";
 import { gitRunContext } from "../common/git";
 import {
   waitForSettle,
@@ -18,25 +18,36 @@ import {
   type ResolveRunContext,
 } from "./agentSurface";
 
-export const waitInput = z.object({
-  // Finite + non-negative + within setTimeout's signed-32-bit delay limit —
-  // larger values clamp to ~1ms and look like a genuine timeout (odu#49 class).
-  timeout_ms: z.number().finite().nonnegative().max(2_147_483_647).optional(),
-  fail_fast: z.boolean().optional(),
+export const waitInput = Schema.Struct({
+  /** `Schema.Int`, not `Schema.Number`: a millisecond bound is an integer, and
+   *  `Number`'s JSON Schema offers a host the string `"NaN"` (PLAN D8). The
+   *  bounds are the same ones `waitForSettle` re-checks face-neutrally: a
+   *  negative delay is nonsense and anything past setTimeout's signed-32-bit
+   *  limit clamps to ~1ms and looks like a genuine timeout (odu#49 class).
+   *  `Schema.Int` already rejects the non-finite values `z.number().finite()`
+   *  had to exclude by hand. */
+  timeout_ms: Schema.optionalKey(
+    Schema.Int.check(
+      Schema.isGreaterThanOrEqualTo(0),
+      Schema.isLessThanOrEqualTo(2_147_483_647),
+    ),
+  ),
+  fail_fast: Schema.optionalKey(Schema.Boolean),
   /** Refuse loudly unless the live run's commit matches this sha (a prefix
    *  either way, so a 7- or 40-char sha both work) — the "wait for the run I
    *  just dispatched, not a stale one" guard (juspay/odu#49 ask 3). */
-  expected_sha: z
-    .string()
-    .min(1)
-    .describe(
-      "Refuse loudly unless the live run's commit matches this. Prefix-matched " +
+  // `.describe(...)` becomes an ANNOTATION — the description is what a host
+  // shows an agent about this argument, so it has to survive the port.
+  expected_sha: Schema.optionalKey(
+    Schema.String.check(Schema.isMinLength(1)).annotate({
+      description:
+        "Refuse loudly unless the live run's commit matches this. Prefix-matched " +
         "against the run's sha7 either way, so a full 40-char sha or the 7-char " +
         "sha7 from a prior verdict both work.",
-    )
-    .optional(),
+    }),
+  ),
 });
-export type WaitInput = z.infer<typeof waitInput>;
+export type WaitInput = typeof waitInput.Type;
 
 /** The `wait_for_settle` bespoke tool, over one injected view of the world.
  *  Read-only (`mutates: false`): it observes the run, it doesn't change it. The
@@ -69,17 +80,36 @@ export function makeWaitTool(
       "finalized record on disk (never green for a run torn down mid-flight).",
     input: waitInput,
     mutates: false,
-    handler: (args, client, signal) => {
-      const a = args as WaitInput;
-      const opts: WaitOptions = {
-        client: client as AgentNodesReader,
-        timeoutMs: a.timeout_ms,
-        failFast: a.fail_fast,
-        expectedSha: a.expected_sha,
-        signal,
-        resolveRunContext,
-      };
-      return waitForSettle(opts);
-    },
+    // `waitForSettle` stays Promise-shaped and keeps its OWN `AbortSignal`:
+    // it owns a timeout/cancel/settle race whose losing arms must be unwound in
+    // a specific order, and the signal is the vocabulary that race is written
+    // in. `BespokeTool.handler` keeps the `signal` parameter for exactly this
+    // case (see its doc), so the MCP request's cancellation still reaches the
+    // wait.
+    //
+    // `tryPromise` with an explicit `catch` that passes the error THROUGH, not
+    // the bare form. `NoLiveRunError` is a declared refusal the settle core
+    // raises on purpose (juspay/odu#49) and whose MESSAGE is the contract —
+    // surface-mcp renders a failure as an `isError` result carrying that text.
+    // The bare `tryPromise` wraps a rejection in `Cause.UnknownError`, which
+    // swaps the loud "no run in progress in this checkout" for a generic string
+    // and silently guts the refusal. (`Effect.promise` would be worse still: a
+    // defect, escaping as a protocol error rather than a tool result.)
+    handler: (args, client, signal) =>
+      Effect.tryPromise({
+        catch: (e) => e,
+        try: () => {
+          const a = args as WaitInput;
+          const opts: WaitOptions = {
+            client: client as AgentNodesReader,
+            timeoutMs: a.timeout_ms,
+            failFast: a.fail_fast,
+            expectedSha: a.expected_sha,
+            signal,
+            resolveRunContext,
+          };
+          return waitForSettle(opts);
+        },
+      }),
   };
 }

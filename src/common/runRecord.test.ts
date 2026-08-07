@@ -1,18 +1,26 @@
 import { describe, expect, it } from "bun:test";
+import { Result, Schema } from "effect";
 import {
   buildRunRecord,
   formatRunRef,
   RUN_RECORD_VERSION,
   RunRecordSchema,
 } from "./runRecord";
-import { pendingNode, type PipelineState } from "./surface";
+import {
+  type NodeState,
+  pendingNode,
+  type PipelineState,
+} from "./surface";
+
+const decodesAsRecord = (value: unknown): boolean =>
+  Result.isSuccess(Schema.decodeUnknownResult(RunRecordSchema)(value));
 
 /** A PipelineState with `order`-respecting nodes built from terse tuples. */
 function stateOf(
   rows: Array<[id: string, status: PipelineState["nodes"][string]["status"], exit: number | null, dur: number | null]>,
 ): PipelineState {
   const order = rows.map(([id]) => id);
-  const nodes: PipelineState["nodes"] = {};
+  const nodes: Record<string, NodeState> = {};
   for (const [id, status, exitCode, durationMs] of rows) {
     nodes[id] = {
       ...pendingNode({ id, name: id, command: "x", needs: [] }),
@@ -46,7 +54,7 @@ describe("buildRunRecord", () => {
     expect(record.outcome).toBe("passed");
     expect(record.version).toBe(RUN_RECORD_VERSION);
     // The record validates against its own schema (the ledger reader's gate).
-    expect(RunRecordSchema.safeParse(record).success).toBe(true);
+    expect(decodesAsRecord(record)).toBe(true);
   });
 
   it("fails when a node is red, even though the run completed", () => {
@@ -115,7 +123,7 @@ describe("buildRunRecord", () => {
     expect(record.unposted).toEqual([
       { context: "ci::unit@x86_64-linux", lastError: "403 rate limited" },
     ]);
-    expect(RunRecordSchema.safeParse(record).success).toBe(true);
+    expect(decodesAsRecord(record)).toBe(true);
   });
 
   it("omits unposted when the list is empty", () => {

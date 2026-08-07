@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it } from "bun:test";
+import { Schema } from "effect";
 import {
   BranchRulesSchema,
   chooseRuleset,
@@ -30,7 +31,7 @@ const branchRule = (
     : { ruleset_source_type: source.sourceType, ruleset_source: source.source }),
 });
 
-const parseRules = (items: unknown[]) => BranchRulesSchema.parse(items);
+const parseRules = Schema.decodeUnknownSync(BranchRulesSchema);
 
 describe("chooseRuleset", () => {
   it("refuses an unruled branch rather than inventing a ruleset", () => {
@@ -252,7 +253,7 @@ describe("rulesetId", () => {
 describe("updateBody", () => {
   // Verbatim from `GET /repos/juspay/olai/rulesets/20468764`, trimmed to the
   // fields the write echoes — the shape that made `odu protect` 404.
-  const ruleset = RulesetSchema.parse({
+  const ruleset = Schema.decodeUnknownSync(RulesetSchema)({
     id: 20468764,
     name: "master: PRs + green CI",
     target: "branch",

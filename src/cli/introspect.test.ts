@@ -43,6 +43,26 @@ function doneState(rows: Row[]): PipelineState {
   return { name: "ci::default", sha7: "3cbac86", dirty: false, order, nodes };
 }
 
+/** Wire dependency edges onto a `doneState` — `{ nodeId: needs }`, rebuilt
+ *  rather than mutated in place. Every surface struct is `readonly` under
+ *  Effect Schema, so a test wires an edge the same way the coordinator does:
+ *  by publishing a new state value. Throws on an unknown id so a renamed node
+ *  fails the test loudly instead of silently wiring nothing. */
+function withNeeds(
+  state: PipelineState,
+  edges: Record<string, string[]>,
+): PipelineState {
+  const nodes: Record<string, PipelineState["nodes"][string]> = {
+    ...state.nodes,
+  };
+  for (const [id, needs] of Object.entries(edges)) {
+    const node = nodes[id];
+    if (node === undefined) throw new Error(`withNeeds: no such node ${id}`);
+    nodes[id] = { ...node, needs };
+  }
+  return { ...state, nodes };
+}
+
 const open: TestSurface[] = [];
 afterEach(() => {
   for (const s of open.splice(0)) s.close();
@@ -346,10 +366,11 @@ describe("minimalRerunRoots", () => {
       ["ci::e2e@x86_64-linux", "failed", 1],
     ]);
     // Wire needs: e2e depends on unit.
-    const e2e = state.nodes["ci::e2e@x86_64-linux"];
-    if (e2e !== undefined) e2e.needs = ["ci::unit@x86_64-linux"];
+    const wired = withNeeds(state, {
+      "ci::e2e@x86_64-linux": ["ci::unit@x86_64-linux"],
+    });
     expect(
-      minimalRerunRoots(state, [
+      minimalRerunRoots(wired, [
         "ci::unit@x86_64-linux",
         "ci::e2e@x86_64-linux",
       ]),
@@ -390,15 +411,12 @@ describe("rerunCommand", () => {
       ["ci::unit@aarch64-darwin", "ok", 0],
     ]);
     const setupId = "_ci-setup@x86_64-linux";
-    for (const id of ["ci::unit@x86_64-linux", "ci::e2e@x86_64-linux"]) {
-      const n = state.nodes[id];
-      if (n !== undefined) n.needs = [setupId, ...(n.needs ?? [])];
-    }
-    const e2e = state.nodes["ci::e2e@x86_64-linux"];
-    if (e2e !== undefined) {
-      e2e.needs = [setupId, "ci::unit@x86_64-linux"];
-    }
-    const surface = await served(state);
+    const surface = await served(
+      withNeeds(state, {
+        "ci::unit@x86_64-linux": [setupId],
+        "ci::e2e@x86_64-linux": [setupId, "ci::unit@x86_64-linux"],
+      }),
+    );
     const { out, result } = await capturingStdout(() =>
       rerunCommand("@x86_64-linux", surface.socketPath),
     );

@@ -10,10 +10,15 @@
  */
 
 import type { BespokeTool } from "@kolu/surface-mcp";
-import { z } from "zod";
+import { Effect, Schema } from "effect";
 import { cancelRun } from "../coordinator/cancel";
 
-export const cancelInput = z.object({});
+/** An empty struct, NOT `Schema.Void`: a no-arg tool must still advertise
+ *  `{"type":"object"}` to a host. (`Schema.Void` encodes as `{"type":"null"}`,
+ *  which surface-mcp special-cases back to an empty object for a member with no
+ *  input — but a bespoke tool that spells its input explicitly should spell the
+ *  object it means.) */
+export const cancelInput = Schema.Struct({});
 
 export interface CancelToolResult {
   ok: boolean;
@@ -35,8 +40,19 @@ export const cancelTool: BespokeTool = {
     "it out.",
   input: cancelInput,
   mutates: true,
-  handler: async (): Promise<CancelToolResult> => {
-    const result = await cancelRun();
-    return { ok: true, cancelled: result.cancelled, confirmed: result.confirmed };
-  },
+  // A bespoke handler DESCRIBES its work now; surface-mcp runs it at its one
+  // request edge, under the MCP request.s own signal — so a cancelled
+  // `tools/call` interrupts this for free, with nothing to thread.
+  // `Effect.promise`, not `tryPromise`: `cancelRun` swallows its own dial and
+  // ack failures by design (the proof a run is cancelled is the socket going
+  // away, not the reply), so a rejection here is a defect, not an outcome.
+  handler: () =>
+    Effect.promise(async (): Promise<CancelToolResult> => {
+      const result = await cancelRun();
+      return {
+        ok: true,
+        cancelled: result.cancelled,
+        confirmed: result.confirmed,
+      };
+    }),
 };

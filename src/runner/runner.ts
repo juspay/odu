@@ -21,7 +21,13 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { implementSurface, inMemoryStore } from "@kolu/surface/server";
+import {
+  implementSurface,
+  inMemoryStore,
+  type SurfaceHandlers,
+} from "@kolu/surface/server";
+import { Effect } from "effect";
+import type { Rpc, RpcGroup } from "effect/unstable/rpc";
 import { createLogTail } from "../common/logTail";
 import { validatePipeline } from "../common/spec";
 import {
@@ -48,10 +54,14 @@ import { prepareWorkspace } from "./workspace";
 export const SETUP_NODE_ID = SETUP_NAMEPATH;
 
 export interface LaneRunner {
-  /** Top-level router from `implementSurface` — the FINAL oRPC router (the
-   *  framework owns its channel + finalize), ready for `serveOverStdio({ router })`. */
-  // biome-ignore lint/suspicious/noExplicitAny: implementSurface types its router as `any` (its spec walk is dynamic); the runtime shape is a valid oRPC router.
-  router: any;
+  /** The served surface: the flat `RpcGroup` `defineSurface` minted and the
+   *  tag-keyed handler record `implementSurface` bound to it — the pair
+   *  `serveOverStdio({ group, handlers })` takes. `implementSurface` asserts at
+   *  boot that the two agree in BOTH directions (no advertised tag unbound, no
+   *  handler at a tag the group never minted), which is what retired the
+   *  `any`-typed oRPC router this field used to be. */
+  group: RpcGroup.RpcGroup<Rpc.Any>;
+  handlers: SurfaceHandlers;
   /** Kill running process groups and stop scheduling; cleans up this run's
    *  worktree when the pipeline settled green. */
   dispose(): void;
@@ -76,77 +86,90 @@ export function createLaneRunner(): LaneRunner {
     streams: {
       nodeLog: { source: tail.streamSource },
     },
+    // A procedure is now ONE arm — `({ input }) => Effect<Out>` — where it used
+    // to be an `async` function. `Effect.sync` for the bodies that never
+    // awaited, `Effect.promise` for the one that does (`claimLocal`). Nothing
+    // here declares a failure channel: every "no" this surface says is a value
+    // on the success side (`{ ok: false }`, `{ status: "error" }`), which is
+    // what its schemas have always spelled. An unexpected throw stays a DEFECT
+    // and dies loudly rather than masquerading as a member failure.
     procedures: {
       node: {
-        rerun: async ({ input }) => {
-          venueHold?.noteActivity();
-          return { ok: rerun(input.id) };
-        },
-        cancel: async ({ input }) => {
-          venueHold?.noteActivity();
-          return { ok: cancel(input.id) };
-        },
+        rerun: ({ input }) =>
+          Effect.sync(() => {
+            venueHold?.noteActivity();
+            return { ok: rerun(input.id) };
+          }),
+        cancel: ({ input }) =>
+          Effect.sync(() => {
+            venueHold?.noteActivity();
+            return { ok: cancel(input.id) };
+          }),
       },
       run: {
-        configure: async ({ input }) => {
-          venueHold?.noteActivity();
-          return configure(input);
-        },
+        configure: ({ input }) =>
+          Effect.sync(() => {
+            venueHold?.noteActivity();
+            return configure(input);
+          }),
       },
       lease: {
-        claim: async ({ input }) => {
-          if (disposed) {
-            return { status: "error" as const, error: "runner is disposed" };
-          }
-          if (venueHold !== null) {
-            return {
-              status: "error" as const,
-              error: "agent already holds a venue lease",
-            };
-          }
-          const lockPath = agentLeaseLockPath(input.lockPath);
-          const result = await claimLocal(
-            lockPath,
-            { holder: input.holder, run: input.run },
-            {
-              onSelfRelease: (reason) => {
-                venueHold = null;
-                process.stderr.write(
-                  `odu-runner: venue lease self-released (${reason})\n`,
-                );
-                // Exit so the coordinator session sees link death and
-                // `lease.lost` fires — flock is already free. This is a
-                // teardown path like any other: sweep recipe groups first
-                // (an agent can hold the venue lease AND run a lane).
-                dispose();
-                process.exit(0);
+        claim: ({ input }) =>
+          Effect.promise(async () => {
+            if (disposed) {
+              return { status: "error" as const, error: "runner is disposed" };
+            }
+            if (venueHold !== null) {
+              return {
+                status: "error" as const,
+                error: "agent already holds a venue lease",
+              };
+            }
+            const lockPath = agentLeaseLockPath(input.lockPath);
+            const result = await claimLocal(
+              lockPath,
+              { holder: input.holder, run: input.run },
+              {
+                onSelfRelease: (reason) => {
+                  venueHold = null;
+                  process.stderr.write(
+                    `odu-runner: venue lease self-released (${reason})\n`,
+                  );
+                  // Exit so the coordinator session sees link death and
+                  // `lease.lost` fires — flock is already free. This is a
+                  // teardown path like any other: sweep recipe groups first
+                  // (an agent can hold the venue lease AND run a lane).
+                  dispose();
+                  process.exit(0);
+                },
               },
-            },
-          );
-          if (result.status === "held") {
-            venueHold = result.hold;
-            return { status: "held" as const };
-          }
-          if (result.status === "busy") {
-            return {
-              status: "busy" as const,
-              heldBy: result.heldBy,
-            };
-          }
-          return { status: "error" as const, error: result.error };
-        },
-        probe: async ({ input }) => {
-          venueHold?.noteActivity();
-          const lockPath = agentLeaseLockPath(input.lockPath);
-          return probeLocal(lockPath);
-        },
-        release: async () => {
-          if (venueHold !== null) {
-            venueHold.release();
-            venueHold = null;
-          }
-          return { ok: true };
-        },
+            );
+            if (result.status === "held") {
+              venueHold = result.hold;
+              return { status: "held" as const };
+            }
+            if (result.status === "busy") {
+              return {
+                status: "busy" as const,
+                heldBy: result.heldBy,
+              };
+            }
+            return { status: "error" as const, error: result.error };
+          }),
+        probe: ({ input }) =>
+          Effect.sync(() => {
+            venueHold?.noteActivity();
+            const lockPath = agentLeaseLockPath(input.lockPath);
+            return probeLocal(lockPath);
+          }),
+        release: () =>
+          Effect.sync(() => {
+            if (venueHold !== null) {
+              venueHold.release();
+              venueHold = null;
+            }
+            return { ok: true };
+          }),
       },
     },
   });
@@ -480,8 +503,9 @@ export function createLaneRunner(): LaneRunner {
     if (settledGreen) cleanupWorkspace?.();
   }
 
-  // `implementSurface` returns the FINAL top-level router — serve it directly.
-  const router = runtime.router;
+  // `implementSurface` returns the group it advertises and the handlers bound
+  // to it, already route-set-checked against each other — serve the pair.
+  const { group, handlers } = runtime;
 
-  return { router, dispose };
+  return { group, handlers, dispose };
 }

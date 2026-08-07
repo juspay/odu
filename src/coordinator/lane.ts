@@ -22,13 +22,15 @@ import {
 } from "@kolu/surface-remote";
 import { SETUP_NAMEPATH } from "../common/nodeId";
 import type { TaskSpec } from "../common/spec";
-import type {
+import { runUnary, subscribe } from "../common/effectEdge";
+import {
+  type LaneClient,
   laneSurface,
-  NodeLogFrame,
-  PipelineState,
+  type NodeLogFrame,
+  type PipelineState,
 } from "../common/surface";
 import type { ResolveRunnerDrv } from "./runnerFlake";
-import { localhostSpawnEnv } from "./surfaceRemoteOpts";
+import { localhostSpawnEnv, pinLaneFace } from "./surfaceRemoteOpts";
 
 const MAX_CONNECT_ATTEMPTS = 3;
 const CONNECT_DEADLINE_MS = Number(
@@ -70,14 +72,24 @@ export function startLane(opts: LaneOptions): Lane {
   let dead = false;
   let attached = false;
   let disconnects = 0;
-  const aborts: AbortController[] = [];
+  /** ONE cancellation scope for every subscription this lane opens — the state
+   *  pump and the per-node log taps. Under Effect a subscription is a fiber and
+   *  unsubscribing is closing it, so the array of per-stream `AbortController`s
+   *  this used to keep has nothing left to distinguish: teardown wants them all
+   *  gone at once, and that is exactly one abort. */
+  const lifetime = new AbortController();
 
-  const session = makeSession<AgentClient<typeof laneSurface.contract>, SshProv>({
+  const session = makeSession<AgentClient, SshProv>({
     // The ssh connector opens at its first provisioning phase: the arch/warm
     // realise probe (`probing`), advancing to `provisioning` itself only on a
     // cold host.
     initialConnection: "probing",
-    connectOnce: sshConnector<typeof laneSurface.contract>({
+    // The surface travels as a VALUE now, not a type argument: Effect RPC needs
+    // the flat `RpcGroup` to build the wire client, which oRPC could conjure
+    // from a type alone. It is also what makes the dialled face and the served
+    // group provably the same tag set.
+    connectOnce: sshConnector({
+      surface: laneSurface,
       host: opts.host,
       binary: "odu-runner",
       resolveDrvPath: opts.resolveDrvPath,
@@ -97,8 +109,7 @@ export function startLane(opts: LaneOptions): Lane {
   };
 
   const teardown = (): void => {
-    for (const controller of aborts) controller.abort();
-    aborts.length = 0;
+    lifetime.abort();
     clearTimeout(deadline);
     session.destroy();
   };
@@ -139,25 +150,35 @@ export function startLane(opts: LaneOptions): Lane {
   });
 
   const pump = async (): Promise<void> => {
-    const client = await session.pin();
+    const client = await pinLaneFace(session);
 
     // First RPC must be cheap (a cold configure would trip the connect
     // watchdog): pump the nodes cell; flip the session to connected on the
     // first frame; configure once, after.
+    //
+    // Note the laziness this depends on: `nodes.get(...)` only makes a stream
+    // VALUE — nothing is dialled until the loop's first pull. Which is the
+    // order we want, and the same order the old `await …get()` produced, but
+    // for a different reason worth naming.
     let configured = false;
-    for await (const state of await client.surface.nodes.get({})) {
+    for await (const state of subscribe(
+      client.surface.nodes.get(undefined),
+      lifetime.signal,
+    )) {
       if (closed || dead) return;
       if (!configured) {
         configured = true;
         attached = true;
         session.markConnected();
-        const ack = await client.surface.run.configure({
-          name: opts.pipelineName,
-          origin: opts.origin,
-          sha: opts.sha,
-          workspace: opts.workspace,
-          tasks: opts.tasks,
-        });
+        const ack = await runUnary(
+          client.surface.run.configure({
+            name: opts.pipelineName,
+            origin: opts.origin,
+            sha: opts.sha,
+            workspace: opts.workspace,
+            tasks: opts.tasks,
+          }),
+        );
         if (!ack.ok) {
           die(`configure rejected: ${ack.error ?? "unknown"}`);
           return;
@@ -170,23 +191,23 @@ export function startLane(opts: LaneOptions): Lane {
     if (!closed && !dead) die("lane state stream ended");
   };
 
-  const attachLogs = (
-    client: Awaited<ReturnType<typeof session.pin>>,
-  ): void => {
+  const attachLogs = (client: LaneClient): void => {
     for (const id of [SETUP_NAMEPATH, ...opts.tasks.map((t) => t.id)]) {
-      const controller = new AbortController();
-      aborts.push(controller);
       void (async () => {
         try {
-          for await (const frame of await client.surface.nodeLog.get(
-            { id },
-            { signal: controller.signal },
+          for await (const frame of subscribe(
+            client.surface.nodeLog.get({ id }),
+            lifetime.signal,
           )) {
             if (closed || dead) return;
             opts.onLogFrame(id, frame);
           }
         } catch (err) {
-          if (controller.signal.aborted || closed || dead) return;
+          // A torn-down subscription reports NOTHING: an interruption is not a
+          // failure, so `subscribe` ends the loop cleanly rather than throwing.
+          // Anything that lands here is the feed genuinely dying, and the lane
+          // says so in the node's own log rather than swallowing it.
+          if (lifetime.signal.aborted || closed || dead) return;
           opts.onLogFrame(id, {
             kind: "append",
             text: `\n[odu] log stream error: ${(err as Error).message}\n`,
@@ -204,11 +225,14 @@ export function startLane(opts: LaneOptions): Lane {
     op: "rerun" | "cancel",
     nodeId: string,
   ): Promise<boolean> => {
-    const clientPromise = session.currentClient();
-    if (clientPromise === null) return false;
+    // `currentClient()` is the liveness-blind "dialing-or-connected" pointer,
+    // read here only to avoid opening a dial for a mutation nobody can serve;
+    // the typed face is rebuilt off the CURRENT dispatch rather than cached,
+    // since a face outlives no reconnect.
+    if (session.currentClient() === null) return false;
     try {
-      const client = await clientPromise;
-      const result = await client.surface.node[op]({ id: nodeId });
+      const client = await pinLaneFace(session);
+      const result = await runUnary(client.surface.node[op]({ id: nodeId }));
       return result.ok;
     } catch {
       return false;

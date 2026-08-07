@@ -25,11 +25,28 @@
  *   surface.run.configure({ … })   — lane only; idempotence: second call errors
  */
 
+import { buildSurfaceFace } from "@kolu/surface/client";
 import { defineSurface, type SurfaceTypes } from "@kolu/surface/define";
-import { z } from "zod";
+import type { SurfaceDispatch } from "@kolu/surface/link";
+import type { SurfaceClientOf } from "@kolu/surface/project";
+import { Schema } from "effect";
 import { TaskIdSchema, TaskSpecSchema } from "./spec";
 
-export const NodeStatusSchema = z.enum([
+/** The zod→Effect Schema mapping is LAW on both surfaces (kolu PLAN #17), and
+ *  every field below is wire-bearing:
+ *
+ *    - `.optional()` → `Schema.optionalKey`, never `Schema.optional`. Absent
+ *      means ABSENT; `optional` round-trips an explicit `undefined` through
+ *      `null` and would put a `null` where a key used to be missing.
+ *    - `optionalKey` REJECTS a present-but-`undefined` key on decode AND on
+ *      encode. Every producer of `seq` / `posting` / `unposted` must omit the
+ *      key rather than spell it `undefined` — see `surface.bytes.test.ts`,
+ *      which pins both directions.
+ *
+ *  The encoded bytes of `PipelineState`, `NodeLogMessage` and both lease output
+ *  unions are frozen: they cross the unix socket, the stdio wire to
+ *  `odu-runner`, and (via `runRecord`) the on-disk ledger. */
+export const NodeStatusSchema = Schema.Literals([
   "pending",
   "running",
   "ok",
@@ -44,7 +61,7 @@ export const NodeStatusSchema = z.enum([
    *  record cancel rather than a test or infra failure. */
   "cancelled",
 ]);
-export type NodeStatus = z.infer<typeof NodeStatusSchema>;
+export type NodeStatus = typeof NodeStatusSchema.Type;
 
 /** GitHub commit-status state (the `state` field of the statuses API). */
 export type GithubState = "pending" | "success" | "failure" | "error";
@@ -129,42 +146,42 @@ export const STATUS_META: Record<
   },
 };
 
-export const NodeStateSchema = z.object({
+export const NodeStateSchema = Schema.Struct({
   id: TaskIdSchema,
-  name: z.string(),
-  command: z.string(),
-  needs: z.array(TaskIdSchema),
+  name: Schema.String,
+  command: Schema.String,
+  needs: Schema.Array(TaskIdSchema),
   status: NodeStatusSchema,
   /** Process exit code once terminal; `null` while pending/running or when
    *  the process never spawned (a spawn failure is `failed` + `null`). */
-  exitCode: z.number().int().nullable(),
+  exitCode: Schema.NullOr(Schema.Int),
   /** `Date.now()` when the node started running; `null` until then. */
-  startedAt: z.number().nullable(),
+  startedAt: Schema.NullOr(Schema.Number),
   /** Wall-clock run time in ms once terminal; `null` otherwise. */
-  durationMs: z.number().nullable(),
+  durationMs: Schema.NullOr(Schema.Number),
 });
-export type NodeState = z.infer<typeof NodeStateSchema>;
+export type NodeState = typeof NodeStateSchema.Type;
 
 /** One GitHub context still owed a confirmed post (live surface + agent face).
  *  Degraded posting is derived from `owed.length > 0` — no separate state flag. */
-export const OwedStatusSchema = z.object({
-  context: z.string(),
-  lastError: z.string().nullable(),
-  attempts: z.number().int().nonnegative(),
+export const OwedStatusSchema = Schema.Struct({
+  context: Schema.String,
+  lastError: Schema.NullOr(Schema.String),
+  attempts: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
 });
-export type OwedStatus = z.infer<typeof OwedStatusSchema>;
+export type OwedStatus = typeof OwedStatusSchema.Type;
 
 /** Final unconfirmed debt stamped into the durable run record: a live
  *  {@link OwedStatus} with `lastError` required at write. `attempts` is
  *  optional ONLY so records written before it existed still parse — a reader
  *  that finds it absent knows the count wasn't recorded, rather than being
  *  handed a fabricated `0` it can't tell apart from "no retries yet". */
-export const UnpostedEntrySchema = z.object({
-  context: z.string(),
-  lastError: z.string(),
-  attempts: z.number().int().nonnegative().optional(),
+export const UnpostedEntrySchema = Schema.Struct({
+  context: Schema.String,
+  lastError: Schema.String,
+  attempts: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
 });
-export type UnpostedEntry = z.infer<typeof UnpostedEntrySchema>;
+export type UnpostedEntry = typeof UnpostedEntrySchema.Type;
 
 /** Project live owed rows into durable unposted entries (juspay/odu#61). The
  *  only narrowing left is `lastError`: a row that never reported one is written
@@ -196,10 +213,10 @@ export function liftUnposted(
 /** GitHub status-posting health for a live run. Empty `owed` when every post
  *  is confirmed (or posting disabled). Surfaces (`status` / `attach` / MCP)
  *  read this so a reporting divergence is never silent (juspay/odu#61). */
-export const PostingHealthSchema = z.object({
-  owed: z.array(OwedStatusSchema),
+export const PostingHealthSchema = Schema.Struct({
+  owed: Schema.Array(OwedStatusSchema),
 });
-export type PostingHealth = z.infer<typeof PostingHealthSchema>;
+export type PostingHealth = typeof PostingHealthSchema.Type;
 
 export const EMPTY_POSTING: PostingHealth = { owed: [] };
 
@@ -222,8 +239,8 @@ export function pendingNode(seed: {
   };
 }
 
-export const PipelineStateSchema = z.object({
-  name: z.string(),
+export const PipelineStateSchema = Schema.Struct({
+  name: Schema.String,
   /** The run's commit, 7 hex chars — `odu run` stamps it from HEAD onto the
    *  fan-in surface so `attach` renders the durable log path (`.ci/<sha7>/…`)
    *  and the sha label from surface state: its banner (via `commitLabel`) and
@@ -232,12 +249,12 @@ export const PipelineStateSchema = z.object({
    *  resource's durable-file fallback derives the sha from git HEAD instead —
    *  no live socket exists in that branch — so this field is `attach`'s, not
    *  the agent face's. Empty in the pre-run EMPTY_STATE. */
-  sha7: z.string(),
+  sha7: Schema.String,
   /** The run's working tree had uncommitted changes — the verdict is about
    *  that tree, not the commit. Drives the `+dirty` sha label every face
    *  shows. Authoritative only on the coordinator's fan-in (the lane copy is
    *  advisory; see runner.ts). */
-  dirty: z.boolean(),
+  dirty: Schema.Boolean,
   /** This run's ordinal among runs of the same `sha7` in this checkout (1-based
    *  — the ledger's `seq`, `<sha7>#<seq>` = `formatRunRef`). Completes the run's
    *  identity on the surface so a verdict says WHICH run it describes, not just
@@ -247,15 +264,15 @@ export const PipelineStateSchema = z.object({
    *  coordinator couldn't durably reserve a seq (then the run claims `sha7` but
    *  no unique `<sha7>#<seq>`). Authoritative only on the coordinator's fan-in,
    *  like `dirty`. */
-  seq: z.number().int().positive().optional(),
+  seq: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0))),
   /** Node ids in scheduling order — the row order dashboards paint. */
-  order: z.array(TaskIdSchema),
-  nodes: z.record(TaskIdSchema, NodeStateSchema),
+  order: Schema.Array(TaskIdSchema),
+  nodes: Schema.Record(TaskIdSchema, NodeStateSchema),
   /** GitHub commit-status posting health (juspay/odu#61). Fan-in only; absent
    *  or empty `owed` means nothing owed. Lane copies omit it. */
-  posting: PostingHealthSchema.optional(),
+  posting: Schema.optionalKey(PostingHealthSchema),
 });
-export type PipelineState = z.infer<typeof PipelineStateSchema>;
+export type PipelineState = typeof PipelineStateSchema.Type;
 
 /** Posting health on a state, defaulting to healthy when absent. */
 export function postingOf(state: Pick<PipelineState, "posting">): PostingHealth {
@@ -271,11 +288,14 @@ export const EMPTY_STATE: PipelineState = {
   posting: EMPTY_POSTING,
 };
 
-export const NodeLogMessageSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("snapshot"), text: z.string() }),
-  z.object({ kind: z.literal("append"), text: z.string() }),
+/** `Schema.Union`, not `Schema.TaggedUnion` — the discriminant is `kind`, not
+ *  `_tag`, and these bytes are frozen (they cross both the stdio wire and the
+ *  fan-in socket). */
+export const NodeLogMessageSchema = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("snapshot"), text: Schema.String }),
+  Schema.Struct({ kind: Schema.Literal("append"), text: Schema.String }),
 ]);
-export type NodeLogMessage = z.infer<typeof NodeLogMessageSchema>;
+export type NodeLogMessage = typeof NodeLogMessageSchema.Type;
 
 /** In-memory log tail kept per node for late subscribers. The full log is
  *  durable elsewhere: the coordinator streams every `append` into
@@ -291,20 +311,20 @@ export function clampLog(buffer: string): string {
  *  as-is — the coordinator's HEAD snapshot on a localhost lane) or
  *  `origin` + `sha` (the runner fetches the pushed SHA into a per-SHA
  *  worktree under ~/.cache/odu). */
-export const ConfigureInputSchema = z.object({
-  name: z.string(),
-  origin: z.string().nullable(),
-  sha: z.string().nullable(),
-  workspace: z.string().nullable(),
-  tasks: z.array(TaskSpecSchema).min(1),
+export const ConfigureInputSchema = Schema.Struct({
+  name: Schema.String,
+  origin: Schema.NullOr(Schema.String),
+  sha: Schema.NullOr(Schema.String),
+  workspace: Schema.NullOr(Schema.String),
+  tasks: Schema.Array(TaskSpecSchema).check(Schema.isMinLength(1)),
 });
-export type ConfigureInput = z.infer<typeof ConfigureInputSchema>;
+export type ConfigureInput = typeof ConfigureInputSchema.Type;
 
-export const ConfigureOutputSchema = z.object({
-  ok: z.boolean(),
-  error: z.string().nullable(),
+export const ConfigureOutputSchema = Schema.Struct({
+  ok: Schema.Boolean,
+  error: Schema.NullOr(Schema.String),
 });
-export type ConfigureOutput = z.infer<typeof ConfigureOutputSchema>;
+export type ConfigureOutput = typeof ConfigureOutputSchema.Type;
 
 /** The run's *environment* — what `run` set up that the `nodes`/`header`
  *  state can't already tell you: the lane→host map, where it came from, and
@@ -312,21 +332,23 @@ export type ConfigureOutput = z.infer<typeof ConfigureOutputSchema>;
  *  on `PipelineState`, so it isn't duplicated here. `run` has this in-process;
  *  an `attach`-er reads it from the fan-in `header` cell so its matrix shows the
  *  real lane→host map and commit link, not an observer stub. Static for a run. */
-export const RunHeaderSchema = z.object({
+export const RunHeaderSchema = Schema.Struct({
   /** Forge page for the commit (GitHub origins); the sha label becomes an
    *  OSC 8 hyperlink where supported. Null elsewhere. */
-  commitUrl: z.string().nullable(),
-  lanes: z.array(z.object({ platform: z.string(), host: z.string() })),
+  commitUrl: Schema.NullOr(Schema.String),
+  lanes: Schema.Array(
+    Schema.Struct({ platform: Schema.String, host: Schema.String }),
+  ),
   /** Where the lane→host map came from (`hosts.json`, a pool lease, …);
    *  null before the run publishes its header. */
-  hostsSource: z.string().nullable(),
+  hostsSource: Schema.NullOr(Schema.String),
   /** The run's start wall-clock (`Date.now()`), set once by `run` — the matrix
    *  elapsed timer counts from it. Every face reads one value rather than each
    *  deriving its own start, so a piped attach and the live matrix agree. `0`
    *  before the run publishes its header. */
-  startedAt: z.number(),
+  startedAt: Schema.Number,
 });
-export type RunHeader = z.infer<typeof RunHeaderSchema>;
+export type RunHeader = typeof RunHeaderSchema.Type;
 
 /** The pre-run header — `attach` before the coordinator publishes, and the
  *  cell default. An empty `lanes` collapses the banner's host line. */
@@ -346,7 +368,7 @@ const primitives = {
   },
   streams: {
     nodeLog: {
-      inputSchema: z.object({ id: TaskIdSchema }),
+      inputSchema: Schema.Struct({ id: TaskIdSchema }),
       outputSchema: NodeLogMessageSchema,
     },
   },
@@ -358,12 +380,12 @@ const primitives = {
  *  the node id (juspay/odu#68). */
 const nodeProcedures = {
   rerun: {
-    input: z.object({ id: TaskIdSchema }),
-    output: z.object({ ok: z.boolean() }),
+    input: Schema.Struct({ id: TaskIdSchema }),
+    output: Schema.Struct({ ok: Schema.Boolean }),
   },
   cancel: {
-    input: z.object({ id: TaskIdSchema }),
-    output: z.object({ ok: z.boolean() }),
+    input: Schema.Struct({ id: TaskIdSchema }),
+    output: Schema.Struct({ ok: Schema.Boolean }),
   },
 } as const;
 
@@ -372,8 +394,10 @@ const nodeProcedures = {
  *  (whole-run teardown). */
 const laneCancelProcedure = {
   cancel: {
-    input: z.object({ platform: z.string().min(1) }),
-    output: z.object({ ok: z.boolean() }),
+    input: Schema.Struct({
+      platform: Schema.String.check(Schema.isMinLength(1)),
+    }),
+    output: Schema.Struct({ ok: Schema.Boolean }),
   },
 } as const;
 
@@ -387,53 +411,59 @@ const laneCancelProcedure = {
  *  ack (the coordinator may exit before the reply flushes). */
 const cancelProcedure = {
   cancel: {
-    input: z.object({}),
-    output: z.object({ ok: z.boolean() }),
+    input: Schema.Struct({}),
+    output: Schema.Struct({ ok: Schema.Boolean }),
   },
 } as const;
 
 /** Who holds a venue lock (`holder|run|sinceMs` on the agent). Shared by the
  *  lane's `lease.*` procedures and the coordinator's `odu hosts` rendering. */
-export const LeaseHolderSchema = z.object({
-  holder: z.string(),
-  run: z.string().nullable(),
-  sinceMs: z.number(),
+export const LeaseHolderSchema = Schema.Struct({
+  holder: Schema.String,
+  run: Schema.NullOr(Schema.String),
+  sinceMs: Schema.Number,
 });
-export type LeaseHolder = z.infer<typeof LeaseHolderSchema>;
+export type LeaseHolder = typeof LeaseHolderSchema.Type;
 
 /** Default remote venue lock path; override via claim/probe input or
  *  `ODU_LEASE_LOCK` on the agent. */
 export const DEFAULT_LEASE_LOCK = "/tmp/odu.lease";
 
-const LeaseClaimInputSchema = z.object({
-  holder: z.string().min(1),
-  run: z.string().nullable(),
+const LeaseClaimInputSchema = Schema.Struct({
+  holder: Schema.String.check(Schema.isMinLength(1)),
+  run: Schema.NullOr(Schema.String),
   /** Absolute path on the agent host. Omit → agent default (`ODU_LEASE_LOCK`
-   *  or {@link DEFAULT_LEASE_LOCK}). */
-  lockPath: z.string().optional(),
+   *  or {@link DEFAULT_LEASE_LOCK}). `optionalKey`, so a caller with no override
+   *  must OMIT the key — spelling it `undefined` is a decode failure. */
+  lockPath: Schema.optionalKey(Schema.String),
 });
 
-const LeaseClaimOutputSchema = z.discriminatedUnion("status", [
-  z.object({ status: z.literal("held") }),
-  z.object({
-    status: z.literal("busy"),
-    heldBy: LeaseHolderSchema.nullable(),
+/** Discriminated on `status`, not `_tag` — `Schema.Union` keeps the frozen
+ *  bytes; `TaggedUnion` would rename the discriminant. */
+export const LeaseClaimOutputSchema = Schema.Union([
+  Schema.Struct({ status: Schema.Literal("held") }),
+  Schema.Struct({
+    status: Schema.Literal("busy"),
+    heldBy: Schema.NullOr(LeaseHolderSchema),
   }),
-  z.object({ status: z.literal("error"), error: z.string() }),
+  Schema.Struct({ status: Schema.Literal("error"), error: Schema.String }),
 ]);
+export type LeaseClaimOutput = typeof LeaseClaimOutputSchema.Type;
 
-const LeaseProbeInputSchema = z.object({
-  lockPath: z.string().optional(),
+const LeaseProbeInputSchema = Schema.Struct({
+  lockPath: Schema.optionalKey(Schema.String),
 });
 
-const LeaseProbeOutputSchema = z.discriminatedUnion("state", [
-  z.object({ state: z.literal("free"), heldBy: z.null() }),
-  z.object({
-    state: z.literal("busy"),
-    heldBy: LeaseHolderSchema.nullable(),
+/** Discriminated on `state` — same reasoning as {@link LeaseClaimOutputSchema}. */
+export const LeaseProbeOutputSchema = Schema.Union([
+  Schema.Struct({ state: Schema.Literal("free"), heldBy: Schema.Null }),
+  Schema.Struct({
+    state: Schema.Literal("busy"),
+    heldBy: Schema.NullOr(LeaseHolderSchema),
   }),
-  z.object({ state: z.literal("error"), error: z.string() }),
+  Schema.Struct({ state: Schema.Literal("error"), error: Schema.String }),
 ]);
+export type LeaseProbeOutput = typeof LeaseProbeOutputSchema.Type;
 
 /** Venue lock on the lane agent — non-blocking claim/probe/release.
  *  Flock is local to the agent process (util-linux on odu-runner's Nix PATH);
@@ -450,8 +480,8 @@ const leaseProcedures = {
     output: LeaseProbeOutputSchema,
   },
   release: {
-    input: z.object({}),
-    output: z.object({ ok: z.boolean() }),
+    input: Schema.Struct({}),
+    output: Schema.Struct({ ok: Schema.Boolean }),
   },
 } as const;
 
@@ -497,3 +527,52 @@ export const oduSurface = defineSurface({
 type LaneSF = SurfaceTypes<typeof laneSurface.spec>;
 export type NodesSnapshot = LaneSF["cells"]["nodes"]["Value"];
 export type NodeLogFrame = LaneSF["streams"]["nodeLog"]["Output"];
+
+// ── The two typed faces, and the one way to build each ──────────────────
+//
+// The surface framework splits a client in two (kolu PLAN D2): a
+// transport-neutral, tag-keyed `SurfaceDispatch` that a LINK produces
+// (`unixSocketLink`, `stdioLink`, `directDispatch`, an ssh dial), and a nested
+// member FACE built over it. `buildSurfaceFace` returns the deliberately
+// STRUCTURAL `SurfaceFace` — per-member precision is spec-derived and lives one
+// layer up, because a second precise mapped type in the same evaluation pass is
+// the union-budget blowup D2 exists to avoid.
+//
+// So the projection is pinned HERE, once, beside the surface it projects. Every
+// consumer — the fan-in socket dial, the ssh lane dial, the lease dial, the
+// in-process MCP projection — holds the SAME type and reaches members the same
+// way, and a schema edit is a compile error at every call site.
+//
+// Two shape changes every call site sees:
+//   - a PROCEDURE still returns `Promise<Out>`, but its INPUT is the ENCODED
+//     side of the schema (D2/#13) — the face decodes at its edge, exactly where
+//     zod's `.parse`-at-input used to run;
+//   - a CELL / STREAM member returns a lazy `Stream<Out>` SYNCHRONOUSLY (was
+//     `Promise<AsyncIterable<Out>>` plus an `AbortSignal` call option).
+//     Subscribing is PULLING: the producer starts on the first pull, not when
+//     the value is made. Cancellation is fiber interruption (D10/#18).
+//
+// `SurfaceReadFace` declines to spell cell MUTATION verbs, which costs these two
+// surfaces nothing: every writer is in-process (`ctx.cells.nodes.set`), and no
+// remote caller has ever written a cell.
+
+/** The coordinator's fan-in face (`.ci/odu.sock`): `nodes`, `nodeLog`, `header`,
+ *  plus `node.rerun` / `node.cancel` / `run.cancel` / `lane.cancel`. */
+export type OduClient = SurfaceClientOf<typeof oduSurface.spec>;
+
+/** The lane agent's face (`odu-runner --stdio`): `nodes`, `nodeLog`, plus
+ *  `node.*`, `run.configure` and `lease.*`. */
+export type LaneClient = SurfaceClientOf<typeof laneSurface.spec>;
+
+/** Build the fan-in face over any dispatch. ONE cast, here, so no consumer
+ *  writes its own: the runtime object carries every member the type names
+ *  (minted by `defineSurface`'s own tag algebra); the cast only tells the
+ *  compiler which projection of that walk it is looking at. */
+export function oduClientOver(dispatch: SurfaceDispatch): OduClient {
+  return buildSurfaceFace(oduSurface, dispatch) as unknown as OduClient;
+}
+
+/** Build the lane face over any dispatch — see {@link oduClientOver}. */
+export function laneClientOver(dispatch: SurfaceDispatch): LaneClient {
+  return buildSurfaceFace(laneSurface, dispatch) as unknown as LaneClient;
+}

@@ -24,8 +24,12 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { directLink } from "@kolu/surface/links/direct";
-import { serveSurfaceAsMcp } from "@kolu/surface-mcp";
+import { buildSurfaceFace } from "@kolu/surface/client";
+import { directDispatch } from "@kolu/surface/links/direct";
+import {
+  serveSurfaceAsMcp,
+  type SurfaceClientCallable,
+} from "@kolu/surface-mcp";
 import { buildAgentProjection, redialingAClient } from "../mcp/agentSurface";
 import { cancelTool } from "../mcp/cancelTool";
 import { leaseTool, releaseTool } from "../mcp/leaseTool";
@@ -72,8 +76,21 @@ export async function mcpCommand(socketPath: string = SOCKET_PATH): Promise<numb
     const dialed = await tryDialSocket(socketPath);
     return dialed === null ? null : { client: dialed.client, close: dialed.close };
   });
-  const { router } = projection.implement(aClient);
-  const bClient = directLink<typeof projection.surface.contract>(router);
+  // `directDispatch` over the served handlers is the in-process transport: a
+  // tag-keyed dispatcher that invokes each handler effect directly, with zero
+  // serialization and no wire at all. `buildSurfaceFace` re-nests those flat
+  // tags into the `surface.<member>.<verb>` face the MCP adapter drives — the
+  // SAME two layers a real socket link produces, which is why the adapter
+  // cannot tell the two apart.
+  // The cast is the one `buildSurfaceFace` always needs at an adapter seam: the
+  // face is deliberately STRUCTURAL (`Record<string, Record<string, unknown>>`)
+  // because per-member precision lives one layer up, and the adapter wants the
+  // callable-leaved view of the same object. Same cast kolu.s own
+  // surface-mcp composition test makes, for the same reason.
+  const bClient = buildSurfaceFace(
+    projection.surface,
+    directDispatch(projection.implement(aClient)),
+  ) as unknown as SurfaceClientCallable;
 
   const { server, close } = await serveSurfaceAsMcp({
     surface: projection.surface,
