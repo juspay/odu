@@ -2,8 +2,6 @@ name: odu
 version: 1.0.0
 type: hybrid
 
-target: claude
-
 # Gate exactly what odu publishes to consumers (e.g. kolu). `includes` is an
 # allow-list — only these paths ship. odu's agent face is its two skills; the
 # odu MCP server ships separately via `dependencies.mcp` below. Internal dev
