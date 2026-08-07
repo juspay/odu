@@ -84,7 +84,12 @@ import {
 } from "./checkoutLock";
 import { releaseReservation, reserveNextSeq, writeRunRecord } from "./ledger";
 import { buildRunRecord, projectNodes } from "../common/runRecord";
-import { checkoutPaths, serveSocket, tryDialSocket } from "./socket";
+import {
+  checkoutPaths,
+  serveSocket,
+  socketLogger,
+  tryDialSocket,
+} from "./socket";
 import {
   fetchUrlFor,
   interruptStatus,
@@ -1140,7 +1145,7 @@ async function orchestrate(
   headerStore.set(header);
   // Checkout run-lock is already held (covers lease wait); serveSocket is the
   // attach surface and a second exclusivity gate for the post-lease window.
-  closeSocket = await serveSocket(served, socketPath);
+  closeSocket = await serveSocket(served, socketPath, socketLogger(info));
   // The identity is now observable: a reader can see `sha7#seq` and key a
   // verdict on it, so the ordinal must never be handed to another run even if
   // finalizing this one's record fails. A no-op when no seq was ever reserved

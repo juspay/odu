@@ -20,6 +20,7 @@
 
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
+import type { Logger } from "@kolu/log";
 import { unixSocketLink } from "@kolu/surface/links/unix-socket";
 import type { SurfaceHandlers } from "@kolu/surface/server";
 import { serveOverUnixSocket } from "@kolu/surface/unix-socket";
@@ -48,6 +49,31 @@ export function checkoutPaths(repoRoot: string): {
   };
 }
 
+/** odu's plug for the transport's listener-lifetime seam, which juspay/kolu#2101
+ *  N3 made REQUIRED precisely so no caller can serve a socket nobody is watching
+ *  the health of. The two tiers are not the same event:
+ *
+ *   - `warn`/`error` — a post-listen listener fault. The socket IS `attach` /
+ *     `status` / every agent read, so a coordinator whose listener died while
+ *     the lanes run on is exactly the comatose-and-silent shape #2101 was made
+ *     of. Straight to the operator feed.
+ *   - `info`/`debug` — bound, closed, and a peer dying mid-frame. Routine by
+ *     construction: every `odu status` dial ends in a peer close, so routing
+ *     these to the feed would bury the tier above in noise from healthy runs.
+ *
+ *  The division of voice matches kaval's wrapper: the transport narrates the
+ *  LISTENER, {@link serveSocket} below owns the BIND-TIME verdicts (they are
+ *  `outcome` values, and the odu-flavored advice for each is not the
+ *  transport's vocabulary). */
+export function socketLogger(onLine: (line: string) => void): Logger {
+  const quiet = (): void => {};
+  const loud = (obj: Record<string, unknown>, msg: string): void => {
+    const err = obj.err;
+    onLine(err === undefined ? `odu: ${msg}` : `odu: ${msg}: ${String(err)}`);
+  };
+  return { debug: quiet, info: quiet, warn: loud, error: loud };
+}
+
 /** Serve the fan-in surface on the unix socket; refuses when another run is
  *  live in this checkout (one run per checkout — justci's `.ci/pc.sock` rule).
  *  The library reclaims a provably-stale socket left by a crashed coordinator
@@ -57,13 +83,17 @@ export function checkoutPaths(repoRoot: string): {
  *  The served value is now the `{ group, handlers }` pair `implementSurface`
  *  hands back, and it is TYPED — the `any` this parameter used to be existed
  *  only because oRPC's router had no nameable shape. A tag carries its own
- *  route, so there is nothing to re-prefix at the mount site. */
+ *  route, so there is nothing to re-prefix at the mount site.
+ *
+ *  `log` is required for the same reason the transport requires it — see
+ *  {@link socketLogger}. Both call sites pass a path, so it takes one too. */
 export async function serveSocket(
   served: {
     group: RpcGroup.RpcGroup<Rpc.Any>;
     handlers: SurfaceHandlers;
   },
-  path: string = SOCKET_PATH,
+  path: string,
+  log: Logger,
 ): Promise<() => void> {
   const dir = dirname(path);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -75,6 +105,7 @@ export async function serveSocket(
     socketPath: path,
     group: served.group,
     handlers: served.handlers,
+    log,
   });
   const { outcome } = listener;
   switch (outcome.kind) {

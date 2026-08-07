@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { implementSurface, inMemoryStore } from "@kolu/surface/server";
 import { Effect } from "effect";
 import { createLogTail } from "../common/logTail";
-import { serveSocket } from "../coordinator/socket";
+import { serveSocket, socketLogger } from "../coordinator/socket";
 import {
   EMPTY_HEADER,
   oduSurface,
@@ -111,7 +111,13 @@ export async function serveTestSurface(
   const socketPath = pinnedSocketPath ?? join(dir as string, "odu.sock");
   // Reuse the coordinator.s serve (mkdir + 0700 chmod + outcome handling) over
   // the same typed { group, handlers } pair run.ts serves.
-  closeListener = await serveSocket(served, socketPath);
+  // A harness has no operator feed, so listener faults go to stderr — a socket
+  // that dies under a test is a bug in the thing under test, never noise.
+  closeListener = await serveSocket(
+    served,
+    socketPath,
+    socketLogger((line) => process.stderr.write(`${line}\n`)),
+  );
 
   return {
     socketPath,
