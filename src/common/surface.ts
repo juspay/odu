@@ -12,10 +12,13 @@
  *
  *   - `oduSurface` — the fan-in the coordinator serves on `.ci/odu.sock` for
  *     `odu status` / `logs` / `attach`. The lane's three primitives plus one
- *     fan-in-only cell, `header` (the run *environment*: lane→host map +
- *     commit link + start clock; commit identity lives on the `nodes` state),
- *     which `attach` reads to paint the same matrix `run` does; node ids are
- *     `<namepath>@<platform>`.
+ *     fan-in-only cell, `header` (the run *environment*: lane→host map + the
+ *     lanes still being claimed + commit link + start clock; commit identity
+ *     lives on the `nodes` state), which `attach` reads to paint the same matrix
+ *     `run` does; node ids are `<namepath>@<platform>`. The coordinator serves
+ *     this before it claims a machine (juspay/odu#84), so `header` changes
+ *     during a run and every reader FOLLOWS the cell rather than latching its
+ *     first frame.
  *
  * Call shapes (idiomatic):
  *   surface.nodes.get({})          — snapshot of the whole pipeline, then deltas
@@ -326,19 +329,43 @@ export const ConfigureOutputSchema = Schema.Struct({
 });
 export type ConfigureOutput = typeof ConfigureOutputSchema.Type;
 
+/** One platform whose venue lease has not resolved yet, and the pool it is
+ *  claiming a machine from. A run carrying any of these is still
+ *  PROVISIONING — it holds the checkout and is claiming/booting a box (on a
+ *  cold host, `nix copy`ing the runner closure over ssh-ng), which is minutes
+ *  of live work with no lane behind it yet. */
+export const ClaimingLaneSchema = Schema.Struct({
+  platform: Schema.String,
+  pool: Schema.Array(Schema.String),
+});
+export type ClaimingLane = typeof ClaimingLaneSchema.Type;
+
 /** The run's *environment* — what `run` set up that the `nodes`/`header`
  *  state can't already tell you: the lane→host map, where it came from, and
  *  the forge commit link. Commit identity (pipeline name + sha7 + dirty) lives
  *  on `PipelineState`, so it isn't duplicated here. `run` has this in-process;
  *  an `attach`-er reads it from the fan-in `header` cell so its matrix shows the
- *  real lane→host map and commit link, not an observer stub. Static for a run. */
+ *  real lane→host map and commit link, not an observer stub.
+ *
+ *  Published TWICE per run, not once: the coordinator serves the socket before
+ *  it claims a venue (juspay/odu#84), so the first header describes a run whose
+ *  lanes don't exist yet (`claiming` non-empty, `lanes` holding only the
+ *  agent-held platforms that needed no claim), and the second — once every
+ *  lease resolves — is the full lane→host map with `claiming` empty. Every
+ *  reader of `lanes` must therefore follow the cell rather than keep its first
+ *  frame. */
 export const RunHeaderSchema = Schema.Struct({
   /** Forge page for the commit (GitHub origins); the sha label becomes an
    *  OSC 8 hyperlink where supported. Null elsewhere. */
   commitUrl: Schema.NullOr(Schema.String),
+  /** The platforms whose venue lease HAS resolved, and the machine each got.
+   *  Empty while a run is still claiming its first box. */
   lanes: Schema.Array(
     Schema.Struct({ platform: Schema.String, host: Schema.String }),
   ),
+  /** The platforms still being claimed — see {@link ClaimingLaneSchema}. Empty
+   *  once every lane has a host, which is what {@link runPhase} reads. */
+  claiming: Schema.Array(ClaimingLaneSchema),
   /** Where the lane→host map came from (`hosts.json`, a pool lease, …);
    *  null before the run publishes its header. */
   hostsSource: Schema.NullOr(Schema.String),
@@ -355,9 +382,29 @@ export type RunHeader = typeof RunHeaderSchema.Type;
 export const EMPTY_HEADER: RunHeader = {
   commitUrl: null,
   lanes: [],
+  claiming: [],
   hostsSource: null,
   startedAt: 0,
 };
+
+/** Where a run is in its lifecycle, as far as the *environment* is concerned:
+ *
+ *  - `provisioning` — the run exists, holds the checkout and its ordinal, and is
+ *    claiming a machine for at least one lane. On a cold host that is a multi-
+ *    minute `nix copy` of the runner closure with no lane behind it yet. Before
+ *    juspay/odu#84 this window had no socket at all, so `status` / `attach` /
+ *    `logs` / `wait` all answered "no run in progress" — the same words they use
+ *    for a run that died or never started.
+ *  - `lanes` — every lane has a host; the run is the lane fanout the rest of the
+ *    surface describes.
+ *
+ *  Derived from `claiming` rather than stored beside it, so the phase and the
+ *  reason for it cannot disagree. */
+export type RunPhase = "provisioning" | "lanes";
+
+export function runPhase(header: Pick<RunHeader, "claiming">): RunPhase {
+  return header.claiming.length > 0 ? "provisioning" : "lanes";
+}
 
 const primitives = {
   cells: {

@@ -60,6 +60,12 @@ export interface Display {
   /** Commit identity comes from `state`; the run-env (lanes, hosts source,
    *  commit link, start clock) from `header`. */
   start(state: PipelineState, header: RunHeader): void;
+  /** A NEW run environment for a run already started. The run header is
+   *  published twice — once while the venue claim is still in flight, once with
+   *  the resolved lane→host map (juspay/odu#84) — so a face that latched its
+   *  first header would spend the run showing a lane map that was empty at the
+   *  instant it read it. */
+  setHeader(header: RunHeader): void;
   /** Latest fan-in state — live repaints from it, plain heartbeats off it. */
   update(state: PipelineState): void;
   /** A node crossed a status boundary (the diff-driven event feed). */
@@ -107,6 +113,9 @@ export function progressEvent(
 
 class JsonDisplay implements Display {
   start(): void {}
+  // The NDJSON contract is one line per node transition; the run environment
+  // never appears in it, so a new header changes nothing to emit.
+  setHeader(): void {}
   update(): void {}
   transition(event: ProgressEvent): void {
     process.stdout.write(`${JSON.stringify(event)}\n`);
@@ -121,22 +130,39 @@ class JsonDisplay implements Display {
 
 const HEARTBEAT_MS = 60_000;
 
+/** `x86_64-linux=kolu-ci-5 · aarch64-darwin=rasam`, or `""` when no lane has a
+ *  host yet. Shared by the banner, the later lane-resolved line, and `odu
+ *  status`, so every plain face renders one lane map. */
+export function laneText(header: RunHeader): string {
+  return header.lanes.map((l) => `${l.platform}=${l.host}`).join(" · ");
+}
+
+/** `claiming x86_64-linux from kolu-ci-5, kolu-ci-6` — what a run with no lanes
+ *  yet is doing, so a captured log says which pool it is waiting on rather than
+ *  going silent until the first transition (juspay/odu#84). */
+export function claimingText(header: RunHeader): string {
+  return header.claiming
+    .map((c) => `${c.platform} from ${c.pool.join(", ")}`)
+    .join(" · ");
+}
+
 class PlainDisplay implements Display {
   private state: PipelineState | undefined;
   private timer: NodeJS.Timeout | undefined;
   private lastWrite = Date.now();
+  private lanes = "";
 
   start(state: PipelineState, header: RunHeader): void {
     // Commit identity (pipeline name + sha) comes from state; `run` carries
     // lanes + a hosts source on the header, so the banner shows both; an
     // observer (`attach`) has neither, so those clauses drop out and the
-    // banner is just `odu · <pipeline> @ <sha>`.
+    // banner is just `odu · <pipeline> @ <sha>`. A run that hasn't claimed a
+    // machine yet has no lanes to show and says what it is claiming instead.
+    this.lanes = laneText(header);
     const parts = [`odu · ${state.name} @ ${commitLabel(state)}`];
-    if (header.lanes.length > 0) {
-      parts.push(
-        header.lanes.map((l) => `${l.platform}=${l.host}`).join(" · "),
-      );
-    }
+    if (this.lanes !== "") parts.push(this.lanes);
+    const claiming = claimingText(header);
+    if (claiming !== "") parts.push(`claiming ${claiming}`);
     const banner = parts.join(" · ");
     this.say(
       header.hostsSource !== null
@@ -145,6 +171,13 @@ class PlainDisplay implements Display {
     );
     this.timer = setInterval(() => this.heartbeat(), HEARTBEAT_MS);
     this.timer.unref?.();
+  }
+
+  setHeader(header: RunHeader): void {
+    const lanes = laneText(header);
+    if (lanes === "" || lanes === this.lanes) return;
+    this.lanes = lanes;
+    this.say(`odu · lanes ${lanes}`);
   }
 
   update(state: PipelineState): void {
@@ -236,6 +269,14 @@ class LiveDisplay implements Display {
   }
 
   private stopped = false;
+
+  /** Reaches the view once it exists; before that it revises the snapshot
+   *  `load()` will start it with, so a header published during the venue claim
+   *  (while the opentui import is still in flight) isn't lost. */
+  setHeader(header: RunHeader): void {
+    if (this.pending !== undefined) this.pending = { ...this.pending, header };
+    this.view?.setHeader(header);
+  }
 
   update(state: PipelineState): void {
     if (this.pending !== undefined) this.pending = { ...this.pending, state };

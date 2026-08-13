@@ -46,12 +46,13 @@ This is built with [**@kolu/surface**](https://kolu.dev/surface/), a framework f
 odu run  (coordinator, your machine)
  ├─ strict gate: refuse a dirty tree, pin HEAD via git worktree
  ├─ ingest: just --dump → [metadata("ci")] dependency DAG
+ ├─ serve: .ci/odu.sock is live from here on — before any machine is claimed
  ├─ venue lease: pick a free host per platform (pool) and hold it
  │    (or reuse an agent-held lease from `odu lease` / MCP lease)
  ├─ per-platform lane:
  │    dial odu-runner over surface-remote → configure over the surface →
  │    fetch the pushed SHA → run each node with just --no-deps
- ├─ fan-in: merge lane state and serve it on .ci/odu.sock
+ ├─ fan-in: merge lane state into the surface already being served
  ├─ logs: .ci/<sha>/<platform>/<recipe>.log
  ├─ record: .ci/<sha>/runs/<seq>.json
  └─ GitHub: one commit status per recipe@platform transition
@@ -128,6 +129,27 @@ Rules:
 
 `odu hosts` probes free / busy / held-by without acquiring (same agent, `lease.probe`). Lock file default: `/tmp/odu.lease` (`ODU_LEASE_LOCK` to override).
 
+#### Watching a run provision
+
+Claiming a machine is not instant: a host that has never seen odu-runner
+receives its whole Nix closure over ssh first, which on a cold store is minutes.
+The coordinator serves `.ci/odu.sock` **before** it claims, so that window is a
+phase you can watch rather than a silence
+([juspay/odu#84](https://github.com/juspay/odu/issues/84)):
+
+- `odu status` prints `provisioning <elapsed>` and the pool each lane is claiming from — `-o json` carries it as `run: {phase, elapsed_ms, lanes, claiming}`.
+- `odu attach` draws the matrix, with the lane line showing `x86_64-linux ▸ claiming ci-1, ci-2` until a host is picked.
+- `_ci-setup@<platform>` is `running` from the claim, and the copy narrates itself into that node's log: `odu logs -f _ci-setup@x86_64-linux`.
+- `odu wait` blocks on the run instead of reporting there is nothing to wait for.
+
+The pin deadline is an **idle** bound, not a total one: it restarts on every
+store path the copy reports, so a slow cold host is never killed for being slow,
+while one that goes quiet still fails — and says what it was doing
+(`still copying the runner closure — 24 store paths so far, last python3-3.14.6`).
+A claim that never succeeds ends the run as a red `_ci-setup@<platform>` with the
+reason in its log, so it lands in `odu runs` and in an agent's `wait_for_settle`
+verdict like any other failure.
+
 On the agent, half-open links self-release after ~45s without inbound activity including framework `system.live` probes (`ODU_LEASE_DEAD_MAN_MS`). Forgotten holds self-release after 1h (`ODU_LEASE_MAX_HOLD_MS`; `0` = unlimited).
 
 ### Agent-held leases (cross-run)
@@ -198,7 +220,8 @@ odu run [recipe[@platform]…]      run selectors; bare recipes fan out
     --linger                      keep serving after settlement
     --no-wait                     fail if every host in a pool is busy
 
-odu status [-o json]              snapshot the live run (json: {nodes, posting})
+odu status [-o json]              snapshot the live run
+                                  (json: {nodes, posting, run})
 odu logs [-f] <node>              replay and optionally follow a node log
 odu attach [-o json]              attach the live dashboard or event stream
 odu wait [--settle] [--timeout-ms N] [--expected-sha SHA]

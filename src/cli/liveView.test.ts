@@ -71,6 +71,7 @@ const header: RunHeader = {
     { platform: "x86_64-linux", host: "builder-01" },
     { platform: "aarch64-darwin", host: "mac-mini" },
   ],
+  claiming: [],
   hostsSource: "~/.config/odu/hosts.json",
   startedAt: 940_000,
 };

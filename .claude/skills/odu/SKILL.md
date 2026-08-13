@@ -171,8 +171,9 @@ While `odu run` is live in a checkout, these attach to its surface over
 `.ci/odu.sock`:
 
 ```sh
-nix run github:juspay/odu -- status          # snapshot; -o json → {nodes, posting}
-                                             # (warns while GitHub posts are owed)
+nix run github:juspay/odu -- status          # snapshot; -o json → {nodes, posting, run}
+                                             # (warns while GitHub posts are owed;
+                                             #  `run` = {phase, elapsed_ms, lanes, claiming})
 nix run github:juspay/odu -- attach          # live TUI dashboard on a tty
                                              # (digits attach · n/p cycle ·
                                              #  r rerun · q quit); -o json
@@ -193,6 +194,17 @@ nix run github:juspay/odu -- runs            # durable history (flags unposted s
 No run in progress ⇒ exit non-zero with `no run in progress in this
 checkout (no live socket at .ci/odu.sock)`. One run per checkout — a
 second `odu run` refuses while the socket is live.
+
+**A run is attachable before it has lanes.** The socket comes up *before* the
+venue claim, so `status` / `attach` / `logs -f` / `wait` all see a run from the
+moment it exists — including the minutes a cold host spends receiving the runner
+closure, which used to read as "no run in progress". In that window `status`
+prints a `provisioning <elapsed>` block naming the pool each lane is claiming
+from (`run.phase` is `provisioning` under `-o json`), `_ci-setup@<platform>` is
+`running` with the copy's own `copying path …` narration in its log
+(`logs -f _ci-setup@x86_64-linux`), and `wait` blocks instead of refusing. A
+claim that never succeeds lands as a red `_ci-setup@<platform>` with the reason
+in its log — a verdict and a `runs` record, not a vanished socket.
 
 **Wait / rerun (plain-CLI agent loop).** `odu wait` is the CLI twin of MCP
 `wait_for_settle`: default fail-fast (return the instant a node goes red),
@@ -232,8 +244,13 @@ free machine and leases it for the run: the coordinator dials **odu-runner**
 is a Nix dep of odu-runner, held by the agent process. Releases on finish /
 agent death unless an **agent-held** lease (`odu lease` / MCP `lease`) already
 covers the platform — then run reuses that host and leaves the lock alone.
-Busy pool → wait in line (or `--no-wait` fails). `odu hosts` probes via
-`lease.probe`. Platforms absent from an *existing* config silently drop from
+Busy pool → wait in line (or `--no-wait` fails); the whole claim is watchable
+live (see "attachable before it has lanes" above). A **cold** host is bounded by
+going quiet, not by total time — the pin deadline restarts on every store path
+the closure copy reports, so a first run against a fresh box is not killed for
+being slow, and a genuine stall says so (`… timed out after 180000ms without
+progress (still copying the runner closure — N store paths so far, last …)`).
+`odu hosts` probes via `lease.probe`. Platforms absent from an *existing* config silently drop from
 the fanout, but a run that resolves **zero** lanes — no file anywhere, no
 `--host`, no `--platform` — is **refused**, not defaulted to `localhost`
 (juspay/odu#46). `--host PLAT=ADDR` pins one box for the run; run on this

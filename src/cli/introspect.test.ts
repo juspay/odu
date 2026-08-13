@@ -217,6 +217,7 @@ describe("firstHeader", () => {
       {
         commitUrl: null,
         lanes: [{ platform: "x86_64-linux", host: "kolu-ci-1" }],
+        claiming: [],
         hostsSource: "~/.config/odu/hosts.json",
         startedAt: 0,
       },

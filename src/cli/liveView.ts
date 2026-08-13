@@ -515,6 +515,15 @@ export class LiveView {
     this.wake();
   }
 
+  /** A revised run environment for a run already started — the resolved
+   *  lane→host map replacing the one published while the venue claim was still
+   *  in flight (juspay/odu#84). The lane line repaints from `this.header` on
+   *  every frame, so this is a field write plus a wake. */
+  setHeader(header: RunHeader): void {
+    this.header = header;
+    this.wake();
+  }
+
   /** Open the terminal.
    *
    *  Deliberately NOT `createCliRenderer`: that helper is `new CliRenderer(…)`
@@ -1308,6 +1317,17 @@ export class LiveView {
       for (const l of header.lanes) {
         if (lanes.length > 0) lanes.push(faint("   "));
         lanes.push(plain(l.platform), faint(" ▸ "), faint(l.host));
+      }
+      // A lane still being claimed has no host to name — show the pool it is
+      // claiming from, so the line says what the run is doing instead of going
+      // blank for the whole provisioning window.
+      for (const c of header.claiming) {
+        if (lanes.length > 0) lanes.push(faint("   "));
+        lanes.push(
+          plain(c.platform),
+          faint(" ▸ "),
+          faint(`claiming ${c.pool.join(", ")}`),
+        );
       }
       setRow(this.laneLine, lanes);
     }

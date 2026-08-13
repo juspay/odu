@@ -19,8 +19,11 @@ import {
   type PipelineState,
   postingOf,
   type RunHeader,
+  type RunPhase,
+  runPhase,
   STATUS_META,
 } from "../common/surface";
+import { formatGoDuration } from "../common/duration";
 import {
   onPlatform,
   parseAtPlatform,
@@ -29,7 +32,12 @@ import {
   transitiveDependents,
 } from "../common/nodeId";
 import { cancelNodeOrPlatform, cancelRun } from "../coordinator/cancel";
-import { createDisplay, progressEvent } from "../coordinator/display";
+import {
+  claimingText,
+  createDisplay,
+  laneText,
+  progressEvent,
+} from "../coordinator/display";
 import {
   dialSocket,
   noRunInProgressMessage,
@@ -97,12 +105,60 @@ export function resolveNodeId(state: PipelineState, token: string): string {
   );
 }
 
+/** The run-environment block `odu status` prints above the node rows while a
+ *  run is still PROVISIONING — which host(s) each lane is claiming and how long
+ *  it has been at it (juspay/odu#84). Nothing once every lane has a machine: the
+ *  node rows are the run's state then, and a run that reached its lanes keeps
+ *  the output it has always had. */
+export function provisioningLines(
+  header: RunHeader,
+  nowMs = Date.now(),
+): string[] {
+  if (runPhase(header) !== "provisioning") return [];
+  const elapsed =
+    header.startedAt > 0 ? ` ${formatGoDuration(nowMs - header.startedAt)}` : "";
+  const lines = [`provisioning${elapsed}`];
+  const claiming = claimingText(header);
+  if (claiming !== "") lines.push(`  claiming ${claiming}`);
+  // A partly-claimed multi-platform run: the lanes that already have a machine.
+  const lanes = laneText(header);
+  if (lanes !== "") lines.push(`  lanes ${lanes}`);
+  return lines;
+}
+
+/** The machine-readable run environment on `odu status -o json`. Additive: the
+ *  `nodes` / `posting` keys older readers use are untouched. `elapsed_ms` is
+ *  null only for a header no run ever published. */
+export function runEnvJson(
+  header: RunHeader,
+  nowMs = Date.now(),
+): {
+  phase: RunPhase;
+  elapsed_ms: number | null;
+  lanes: { platform: string; host: string }[];
+  claiming: { platform: string; pool: string[] }[];
+} {
+  return {
+    phase: runPhase(header),
+    elapsed_ms: header.startedAt > 0 ? nowMs - header.startedAt : null,
+    lanes: header.lanes.map((l) => ({ platform: l.platform, host: l.host })),
+    claiming: header.claiming.map((c) => ({
+      platform: c.platform,
+      pool: [...c.pool],
+    })),
+  };
+}
+
 export async function statusCommand(
   json: boolean,
   socketPath?: string,
 ): Promise<number> {
   const { client, close } = await dialSocket(socketPath);
   const state = await firstSnapshot(client);
+  // The run environment, read from the same dial: a run that has no lanes yet
+  // has nothing to say through `nodes` alone, and "no rows" is exactly the
+  // ambiguity juspay/odu#84 is about.
+  const header = await firstHeader(client);
   await close();
   const posting = postingOf(state);
   if (json) {
@@ -113,11 +169,14 @@ export async function statusCommand(
     // Object form carries posting health verbatim (juspay/odu#61); older
     // clients that expected a bare array should read `.nodes`.
     process.stdout.write(
-      `${JSON.stringify({ nodes: rows, posting }, null, 2)}\n`,
+      `${JSON.stringify({ nodes: rows, posting, run: runEnvJson(header) }, null, 2)}\n`,
     );
   } else {
     const warn = postingWarning(posting);
     if (warn !== null) process.stderr.write(`${yellow(warn)}\n`);
+    for (const line of provisioningLines(header)) {
+      process.stdout.write(`${line}\n`);
+    }
     for (const id of state.order) {
       const node = state.nodes[id];
       if (node === undefined) continue;
@@ -244,6 +303,24 @@ async function attachDashboard(
     },
     onQuit: () => quit(exitCode(last)),
   });
+
+  // Follow the header for the rest of the session. `run` publishes it twice —
+  // once while it is still claiming a machine, once with the resolved lane→host
+  // map (juspay/odu#84) — so a dashboard attached during provisioning (exactly
+  // when an operator reaches for one) would otherwise show the claiming line for
+  // the whole run. The cell yields its current value first, so re-applying the
+  // header we already have is a no-op, not a flicker. Ends when the link closes
+  // with the dashboard.
+  void (async () => {
+    try {
+      for await (const next of subscribe(client.surface.header.get(undefined))) {
+        view.setHeader(next);
+      }
+    } catch {
+      // The link went away with the run (or with `quit`) — nothing to report:
+      // the node stream below owns how this session ends.
+    }
+  })();
 
   let first = true;
   for await (const state of subscribe(client.surface.nodes.get(undefined))) {

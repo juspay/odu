@@ -1,12 +1,16 @@
 /**
  * Checkout run-lock — exclusivity for the whole coordinator lifetime, including
- * the unbounded venue-lease wait that precedes `.ci/odu.sock`.
+ * the startup window that precedes `.ci/odu.sock`.
  *
  * `serveSocket` remains the attach surface and a second exclusivity gate, but
- * it only comes up after `leaseLanes`. Without this earlier lock, concurrent
- * `odu run` / MCP `run` starters all see no socket, each reserve a seq, and
- * co-queue on the venue pool (wasted sibling hosts, or accidental serial
- * double-CI on a single-host pool).
+ * it cannot be the first one: it comes up after the DAG ingest, the strict-mode
+ * gate and the seq reservation. Without this earlier lock, concurrent `odu run`
+ * / MCP `run` starters all see no socket, each reserve a seq, and co-queue on
+ * the venue pool (wasted sibling hosts, or accidental serial double-CI on a
+ * single-host pool). That window used to also contain the whole unbounded
+ * venue-lease wait; since juspay/odu#84 the socket serves *before* the claim, so
+ * what this lock covers is startup rather than provisioning — a much shorter
+ * race, and still a real one.
  *
  * Mechanism: exclusive create (`O_EXCL`) of a PID file under `.ci/`. Held open
  * for the process lifetime; released on `release()` / process exit. A dead

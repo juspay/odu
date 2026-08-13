@@ -61,7 +61,12 @@ function envNumber(name: string, fallback: number, min: number): number {
 }
 
 const WAIT_POLL_MS = envNumber("ODU_LEASE_WAIT_POLL_MS", 5_000, 1);
-/** Bound for pin + claim RPC (includes cold provisioning of odu-runner). */
+/** Bound for pin + claim RPC (includes cold provisioning of odu-runner). For
+ *  the PIN it is an idle bound, not a total one: a cold host legitimately
+ *  spends longer than this receiving the runner closure, so the countdown
+ *  restarts on every store path the copy reports (see {@link copyProgress}).
+ *  The claim RPC that follows is a round-trip on an established session and
+ *  keeps the absolute bound. */
 const CLAIM_TIMEOUT_MS = envNumber("ODU_LEASE_CLAIM_TIMEOUT_MS", 180_000, 1);
 
 export interface LeaseIdentity {
@@ -157,23 +162,108 @@ export interface AgentDialOpts {
   lockPath?: string;
 }
 
-function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+interface TimeoutOpts {
+  /** Hands the caller a `bump` that RESTARTS the countdown, turning the bound
+   *  from "finish within `ms`" into "go quiet for `ms`". Wire it to a real
+   *  progress signal only — a bump with no evidence behind it is an unbounded
+   *  wait wearing a timeout's clothes. */
+  heartbeat?: (bump: () => void) => void;
+  /** Appended to the timeout message: what the call was waiting ON, so the
+   *  refusal is a diagnosis rather than a duration. */
+  note?: () => string;
+}
+
+/** Exported for its unit test: the heartbeat turns an absolute bound into an
+ *  idle one, and that difference is the whole of whether a cold host can be
+ *  provisioned at all — it deserves a test that doesn't need an ssh session. */
+export function withTimeout<T>(
+  p: Promise<T>,
+  ms: number,
+  label: string,
+  opts: TimeoutOpts = {},
+): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const t = setTimeout(() => {
-      reject(new Error(`odu: ${label} timed out after ${ms}ms`));
-    }, ms);
-    t.unref?.();
+    let t: ReturnType<typeof setTimeout>;
+    let settled = false;
+    const bound = opts.heartbeat === undefined ? "" : " without progress";
+    const arm = (): void => {
+      t = setTimeout(() => {
+        reject(
+          new Error(
+            `odu: ${label} timed out after ${ms}ms${bound}${opts.note?.() ?? ""}`,
+          ),
+        );
+      }, ms);
+      t.unref?.();
+    };
+    const finish = (): void => {
+      settled = true;
+      clearTimeout(t);
+    };
+    arm();
+    opts.heartbeat?.(() => {
+      if (settled) return;
+      clearTimeout(t);
+      arm();
+    });
     p.then(
       (v) => {
-        clearTimeout(t);
+        finish();
         resolve(v);
       },
       (e: unknown) => {
-        clearTimeout(t);
+        finish();
         reject(e);
       },
     );
   });
+}
+
+/** `/nix/store/<hash>-git-2.55.0-doc` → `git-2.55.0-doc`; anything else
+ *  verbatim. Only for naming the path a stalled copy was last on. */
+function storePathName(path: string): string {
+  const base = path.slice(path.lastIndexOf("/") + 1);
+  const dash = base.indexOf("-");
+  return dash > 0 ? base.slice(dash + 1) : base;
+}
+
+/**
+ * What the runner-closure copy has done so far, read off the session's own log
+ * lines — `nix` narrates each store path it pushes (`copying path '/nix/store/…'
+ * to 'ssh-ng://host'`) and that narration is the ONLY progress signal this seam
+ * gets. Two consumers, one observation:
+ *
+ *   - it pushes back the pin deadline while the copy is visibly moving, so a
+ *     cold nix store is bounded by "went quiet", not by "took longer than the
+ *     window" (the run in juspay/odu#84 died at 180s mid-copy on a fresh box);
+ *   - it turns the timeout message into a diagnosis, so `lease pin … timed out`
+ *     no longer reads as "unreachable machine" when the machine was in fact
+ *     busy receiving a few hundred megabytes of closure.
+ */
+export function copyProgress(): {
+  /** Feed one log line; true when it was copy progress. */
+  observe: (line: string) => boolean;
+  /** Timeout-message suffix; empty when nothing was ever copied (the genuinely
+   *  unreachable case, which must not claim a copy was in flight). */
+  note: () => string;
+} {
+  let paths = 0;
+  let last: string | null = null;
+  return {
+    observe: (line) => {
+      const match = /copying path '([^']*)'/.exec(line);
+      if (match === null) return false;
+      paths += 1;
+      last = match[1] ?? null;
+      return true;
+    },
+    note: () =>
+      paths === 0
+        ? ""
+        : ` (still copying the runner closure — ${paths} store path${
+            paths === 1 ? "" : "s"
+          } so far, last ${last === null ? "?" : storePathName(last)})`,
+  };
 }
 
 /**
@@ -192,6 +282,17 @@ export async function tryClaim(
   }
 
   const timeoutMs = opts.timeoutMs ?? CLAIM_TIMEOUT_MS;
+  // The session log is now read as well as forwarded: `bumpPin` is live only
+  // while the pin is outstanding, so copy progress extends THAT deadline and
+  // nothing else. Wired unconditionally (not only when a caller passes
+  // `onLog`), because the deadline must not depend on whether anyone is
+  // listening.
+  const progress = copyProgress();
+  let bumpPin: (() => void) | null = null;
+  const onLine = (line: string): void => {
+    if (progress.observe(line)) bumpPin?.();
+    opts.onLog?.(line);
+  };
   const session = makeSession<AgentClient, SshProv>({
     connectOnce: sshConnector({
       surface: laneSurface,
@@ -203,7 +304,7 @@ export async function tryClaim(
     initialConnection: "probing",
     label: `lease:${shortHost(host)}`,
     // makeSession takes a structured Logger (kolu#1876+); adapt the line sink.
-    ...(opts.onLog !== undefined ? { log: lineLogger(opts.onLog) } : {}),
+    log: lineLogger(onLine),
   });
 
   let intentionalRelease = false;
@@ -213,7 +314,14 @@ export async function tryClaim(
       pinLaneFace(session),
       timeoutMs,
       `lease pin ${shortHost(host)}`,
+      {
+        heartbeat: (bump) => {
+          bumpPin = bump;
+        },
+        note: progress.note,
+      },
     );
+    bumpPin = null;
 
     const result = await withTimeout(
       runUnary(
@@ -282,6 +390,15 @@ export async function probeHost(
   }
 
   const timeoutMs = opts.timeoutMs ?? CLAIM_TIMEOUT_MS;
+  // Same cold-store bound as `tryClaim`: probing a host that has never seen
+  // odu-runner copies the whole closure, so the pin deadline tracks progress
+  // rather than total elapsed.
+  const progress = copyProgress();
+  let bumpPin: (() => void) | null = null;
+  const onLine = (line: string): void => {
+    if (progress.observe(line)) bumpPin?.();
+    opts.onLog?.(line);
+  };
   const session = makeSession<AgentClient, SshProv>({
     connectOnce: sshConnector({
       surface: laneSurface,
@@ -292,7 +409,7 @@ export async function probeHost(
     }),
     initialConnection: "probing",
     label: `lease-probe:${shortHost(host)}`,
-    ...(opts.onLog !== undefined ? { log: lineLogger(opts.onLog) } : {}),
+    log: lineLogger(onLine),
   });
 
   try {
@@ -300,7 +417,14 @@ export async function probeHost(
       pinLaneFace(session),
       timeoutMs,
       `lease probe pin ${shortHost(host)}`,
+      {
+        heartbeat: (bump) => {
+          bumpPin = bump;
+        },
+        note: progress.note,
+      },
     );
+    bumpPin = null;
     session.markConnected();
     const result = await withTimeout(
       runUnary(client.surface.lease.probe(lockPathKey(opts.lockPath))),
@@ -592,7 +716,12 @@ export interface LeaseLanesOpts {
   platforms: readonly string[];
   identity: LeaseIdentity;
   noWait: boolean;
-  onLine?: (msg: string) => void;
+  /** Narration sink, told WHICH lane each line belongs to. A multi-platform
+   *  lease interleaves two hosts' `nix copy` output on one stream, and the
+   *  coordinator now files these lines under that lane's `_ci-setup@<platform>`
+   *  log (juspay/odu#84) — which it can only do if the platform travels with the
+   *  line rather than being guessed from its text. */
+  onLine?: (msg: string, platform: string) => void;
   claim?: AcquireFromPoolOpts["claim"];
   /**
    * Resolve odu-runner drv for a platform (used when `claim` is not
@@ -722,6 +851,13 @@ export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
   const rotateBy = now();
   let waited = false;
 
+  /** This lane's slice of the narration sink — every line the scan or the ssh
+   *  session emits while claiming `platform` is attributed to it. */
+  const lineFor =
+    (platform: string) =>
+    (msg: string): void =>
+      opts.onLine?.(msg, platform);
+
   const claimFor = (
     platform: string,
   ): ((host: string, identity: LeaseIdentity) => Promise<ClaimResult>) => {
@@ -737,7 +873,7 @@ export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
     return (h, id) =>
       tryClaim(h, id, {
         resolveDrvPath: resolve,
-        onLog: opts.onLine,
+        onLog: lineFor(platform),
       });
   };
 
@@ -763,7 +899,7 @@ export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
           platform,
           pool,
           identity: opts.identity,
-          onLine: opts.onLine,
+          onLine: lineFor(platform),
           claim: claimFor(platform),
           rotateBy,
         });
@@ -813,7 +949,7 @@ export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
       !waited && platforms.length > 1
         ? " (releasing other platforms until the full set is free)"
         : "";
-    opts.onLine?.(`${blocked.platform}: ${note}${multi}`);
+    opts.onLine?.(`${blocked.platform}: ${note}${multi}`, blocked.platform);
     waited = true;
     await sleep(WAIT_POLL_MS);
   }
