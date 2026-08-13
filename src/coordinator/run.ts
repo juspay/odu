@@ -1294,6 +1294,16 @@ async function orchestrate(
     // speak. `allSettled` resolves off these transitions and the normal
     // completion path below writes the record and prints the verdict.
     info(claimFailure.message);
+    // Nothing is being claimed any more, so say so. Leaving `claiming`
+    // populated would have `runPhase` report a settled, fully-errored run as
+    // "provisioning" for the rest of the coordinator's life — the whole
+    // finalize window, and up to the idle backstop under `--linger`. The header
+    // is published BEFORE the terminalize so no observer sees a terminal node
+    // set beside a claiming header. (`lanes` keeps whatever actually resolved,
+    // which for a total failure is nothing — `runPhase` then reads `no_lanes`,
+    // the state that exists precisely so an empty `claiming` can't claim
+    // otherwise.)
+    publishHeader({ ...header, claiming: [] });
     for (const platform of activePlatforms) {
       terminalizePlatformNodes(platform, {
         running: "errored",
@@ -1313,7 +1323,39 @@ async function orchestrate(
     });
   }
 
-  const lanesToStart = claimFailure === null ? activePlatforms : [];
+  // Which lanes actually start. Three ways a platform drops out, all of them
+  // newly reachable because the socket (and therefore `lane.cancel`, `cancel`
+  // and the signals) is live across an `await` that did not exist before:
+  //
+  //   - the claim failed, so there is no machine for any lane;
+  //   - the whole run is tearing down — `shutdown` set `shuttingDown` and is
+  //     awaiting `poster.finalize()` before it exits, and starting an ssh lane
+  //     on a coordinator that is on its way out strands the work it spawns;
+  //   - the operator dropped THIS platform mid-claim (`odu cancel @plat` / MCP
+  //     `lane_cancel`). `cancelPlatform` tombstones the entry, but this loop
+  //     ends in `laneEntries.set(platform, {phase:"live"})` — which would
+  //     overwrite the tombstone, re-open every `laneAccepting`-gated mirror
+  //     path, resurrect the nodes the cancel marked `cancelled`, and start the
+  //     lane on the machine the operator just dropped.
+  const cancelledDuringClaim = (platform: string): boolean =>
+    laneEntries.get(platform)?.phase === "operator_cancelled";
+  const lanesToStart =
+    claimFailure !== null || shuttingDown
+      ? []
+      : activePlatforms.filter((platform) => !cancelledDuringClaim(platform));
+  // A platform cancelled while its lease was in flight owns a lease nobody will
+  // use — `cancelPlatform` could not release it, because the claim had not
+  // handed the host over yet when the tombstone was set.
+  for (const platform of activePlatforms) {
+    if (!cancelledDuringClaim(platform)) continue;
+    const host = lanesByPlatform[platform];
+    if (host === undefined) continue;
+    const idx = acquiredLeases.findIndex((l) => l.host === host);
+    if (idx >= 0) {
+      acquiredLeases[idx]?.release();
+      acquiredLeases.splice(idx, 1);
+    }
+  }
   for (const platform of lanesToStart) {
     const host = lanesByPlatform[platform] as string;
     const tasks = tasksByPlatform.get(platform) ?? [];

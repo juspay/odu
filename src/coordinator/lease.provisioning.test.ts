@@ -44,6 +44,19 @@ describe("copyProgress", () => {
     p.observe(COPY_LINE("/nix/store/aaaa-git-2.55.0-doc"));
     expect(p.note()).toContain("1 store path so far");
   });
+
+  it("counts a path once however many times it is narrated", () => {
+    // Provisioning copies each path twice on a cold host — once pulling it into
+    // the local store, once shipping it to the remote. Counting narration lines
+    // would report a 300-path closure as 600, which no `nix path-info` can
+    // reconcile.
+    const p = copyProgress();
+    expect(p.observe(COPY_LINE("/nix/store/aaaa-git-2.55.0-doc"))).toBe(true);
+    expect(p.observe(COPY_LINE("/nix/store/aaaa-git-2.55.0-doc"))).toBe(false);
+    expect(p.note()).toContain("1 store path so far");
+    // A repeat still updates "last" — it is where the copy actually is.
+    expect(p.note()).toContain("git-2.55.0-doc");
+  });
 });
 
 describe("withTimeout", () => {

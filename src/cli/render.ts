@@ -10,6 +10,7 @@ import {
   type NodeState,
   type NodeStatus,
   type PipelineState,
+  type RunHeader,
   STATUS_META,
   type StatusHue,
 } from "../common/surface";
@@ -390,6 +391,23 @@ export function stepFocus(
  *  Lives in render.ts because the adapter must not import the view eagerly. */
 export function operatorLine(text: string): string {
   return dim(stripAnsi(text));
+}
+
+/** `x86_64-linux=kolu-ci-5 · aarch64-darwin=rasam`, or `""` when no lane has a
+ *  host yet. Here with the other cross-face projections because three faces
+ *  render it — `run`'s plain banner, its lane-resolved line, and `odu status`
+ *  — and this file is where "the projection every face shares" lives. */
+export function laneText(header: Pick<RunHeader, "lanes">): string {
+  return header.lanes.map((l) => `${l.platform}=${l.host}`).join(" · ");
+}
+
+/** `x86_64-linux from kolu-ci-5, kolu-ci-6` — what a run with no lanes yet is
+ *  doing, so a captured log says which pool it is waiting on rather than going
+ *  silent until the first transition (juspay/odu#84). */
+export function claimingText(header: Pick<RunHeader, "claiming">): string {
+  return header.claiming
+    .map((c) => `${c.platform} from ${c.pool.join(", ")}`)
+    .join(" · ");
 }
 
 /** `3cbac86` for a clean run, `3cbac86+dirty` when the working tree has

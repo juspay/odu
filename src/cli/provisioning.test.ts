@@ -119,6 +119,15 @@ describe("runPhase", () => {
       }),
     ).toBe("provisioning");
   });
+
+  it("is no_lanes when nothing is claimed and nothing was got", () => {
+    // The two ways to get here: the pre-publish default, and a run whose claim
+    // failed and cleared `claiming` without ever filling `lanes`. Neither is
+    // the `lanes` phase, and answering `lanes` for a run that has none is the
+    // joint-distribution lie the third value exists to prevent.
+    expect(runPhase(EMPTY_HEADER)).toBe("no_lanes");
+    expect(runPhase({ ...provisioningHeader(), claiming: [] })).toBe("no_lanes");
+  });
 });
 
 describe("provisioningLines", () => {
@@ -207,6 +216,32 @@ describe("odu status during provisioning", () => {
     // The keys older readers use are untouched.
     expect(parsed.nodes).toHaveLength(2);
     expect(parsed.posting).toBeDefined();
+  });
+
+  it("stops saying provisioning once a failed claim clears it", async () => {
+    // What `orchestrate` publishes when the claim throws: `claiming` cleared,
+    // `lanes` still empty, every node terminal. Reporting this as
+    // `provisioning` — which it did until the failure path learned to
+    // republish — leaves a dead run counting elapsed time at the operator.
+    const state = provisioningState();
+    const surface = await serveTestSurface(state, {
+      ...provisioningHeader(),
+      claiming: [],
+    });
+    open.push(surface);
+    surface.setState({
+      ...state,
+      nodes: {
+        ...state.nodes,
+        [SETUP]: { ...state.nodes[SETUP]!, status: "errored" },
+        [FMT]: { ...state.nodes[FMT]!, status: "skipped" },
+      },
+    });
+    const { out } = await capturingStdout(() =>
+      statusCommand(true, surface.socketPath),
+    );
+    const parsed = JSON.parse(out) as { run: { phase: string } };
+    expect(parsed.run.phase).toBe("no_lanes");
   });
 
   it("leaves a lane-phase run's output exactly as it was", async () => {

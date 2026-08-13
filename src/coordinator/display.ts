@@ -25,7 +25,12 @@
  */
 
 import type { LiveOpts, LiveView } from "../cli/liveView";
-import { commitLabel, operatorLine } from "../cli/render";
+import {
+  claimingText,
+  commitLabel,
+  laneText,
+  operatorLine,
+} from "../cli/render";
 
 /** Re-exported from `cli/render`, where the cross-face projections live. */
 export { commitLabel };
@@ -130,22 +135,6 @@ class JsonDisplay implements Display {
 
 const HEARTBEAT_MS = 60_000;
 
-/** `x86_64-linux=kolu-ci-5 · aarch64-darwin=rasam`, or `""` when no lane has a
- *  host yet. Shared by the banner, the later lane-resolved line, and `odu
- *  status`, so every plain face renders one lane map. */
-export function laneText(header: RunHeader): string {
-  return header.lanes.map((l) => `${l.platform}=${l.host}`).join(" · ");
-}
-
-/** `claiming x86_64-linux from kolu-ci-5, kolu-ci-6` — what a run with no lanes
- *  yet is doing, so a captured log says which pool it is waiting on rather than
- *  going silent until the first transition (juspay/odu#84). */
-export function claimingText(header: RunHeader): string {
-  return header.claiming
-    .map((c) => `${c.platform} from ${c.pool.join(", ")}`)
-    .join(" · ");
-}
-
 class PlainDisplay implements Display {
   private state: PipelineState | undefined;
   private timer: NodeJS.Timeout | undefined;
@@ -249,7 +238,9 @@ class LiveDisplay implements Display {
   constructor(private readonly opts: LiveOpts) {}
 
   start(state: PipelineState, header: RunHeader): void {
-    this.pending = { state, header };
+    // A header that arrived before `start` is newer than the one the host is
+    // starting us with — prefer it (see `latest`).
+    this.pending = { state, header: this.latest ?? header };
     // Caught, not floating: an unhandled rejection here would pick odu's exit
     // code, and odu owns that. Same reasoning as the view's own mount guard.
     void this.load().catch((err: unknown) => {
@@ -272,8 +263,17 @@ class LiveDisplay implements Display {
 
   /** Reaches the view once it exists; before that it revises the snapshot
    *  `load()` will start it with, so a header published during the venue claim
-   *  (while the opentui import is still in flight) isn't lost. */
+   *  (while the opentui import is still in flight) isn't lost.
+   *
+   *  `latest` covers the window before `start()` has run at all — `attach`
+   *  opens its header follow-loop before the first `nodes` frame arrives, so a
+   *  header can land here with `pending` still undefined. Dropping it silently
+   *  would strand the view on a stale lane map for the whole run, because `run`
+   *  publishes the header exactly twice and never again. */
+  private latest: RunHeader | undefined;
+
   setHeader(header: RunHeader): void {
+    this.latest = header;
     if (this.pending !== undefined) this.pending = { ...this.pending, header };
     this.view?.setHeader(header);
   }

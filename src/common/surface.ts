@@ -397,13 +397,22 @@ export const EMPTY_HEADER: RunHeader = {
  *    for a run that died or never started.
  *  - `lanes` — every lane has a host; the run is the lane fanout the rest of the
  *    surface describes.
+ *  - `no_lanes` — nothing is being claimed and nothing was ever got: the
+ *    pre-publish {@link EMPTY_HEADER}, or a run whose claim failed and cleared
+ *    `claiming` without ever filling `lanes`. It exists so an EMPTY `claiming`
+ *    cannot answer `lanes` for a run that has none — "lanes is the complete
+ *    map" is only true once there IS one, and leaving that as a precondition on
+ *    a sibling field is exactly the joint-distribution lie a flat product hides.
  *
- *  Derived from `claiming` rather than stored beside it, so the phase and the
- *  reason for it cannot disagree. */
-export type RunPhase = "provisioning" | "lanes";
+ *  Derived from the two lists rather than stored beside them, so the phase and
+ *  the reason for it cannot disagree. */
+export type RunPhase = "provisioning" | "lanes" | "no_lanes";
 
-export function runPhase(header: Pick<RunHeader, "claiming">): RunPhase {
-  return header.claiming.length > 0 ? "provisioning" : "lanes";
+export function runPhase(
+  header: Pick<RunHeader, "claiming" | "lanes">,
+): RunPhase {
+  if (header.claiming.length > 0) return "provisioning";
+  return header.lanes.length > 0 ? "lanes" : "no_lanes";
 }
 
 const primitives = {

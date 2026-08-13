@@ -32,12 +32,7 @@ import {
   transitiveDependents,
 } from "../common/nodeId";
 import { cancelNodeOrPlatform, cancelRun } from "../coordinator/cancel";
-import {
-  claimingText,
-  createDisplay,
-  laneText,
-  progressEvent,
-} from "../coordinator/display";
+import { createDisplay, progressEvent } from "../coordinator/display";
 import {
   dialSocket,
   noRunInProgressMessage,
@@ -53,7 +48,9 @@ import {
 import { agentReaderFromA } from "../mcp/agentSurface";
 import { yellow } from "./ansi";
 import {
+  claimingText,
   exitCode,
+  laneText,
   nodeRow,
   statusGlyph,
   summarize,
@@ -68,11 +65,18 @@ export async function firstSnapshot(client: OduClient): Promise<PipelineState> {
   return state;
 }
 
-/** The run header off the surface — `run` publishes it before serving, so the
- *  first value is the real lane→host map. The `header` cell always yields its
- *  current value (EMPTY_HEADER until `run` publishes), so an empty stream means
- *  the coordinator closed before sending — a protocol failure we surface
- *  rather than mask with a blank banner (mirrors `firstSnapshot`). */
+/** The run header off the surface, AS OF DIAL TIME. The `header` cell always
+ *  yields its current value, so an empty stream means the coordinator closed
+ *  before sending — a protocol failure we surface rather than mask with a blank
+ *  banner (mirrors `firstSnapshot`).
+ *
+ *  It is NOT the run's final lane→host map. `run` serves the socket before it
+ *  claims a machine (juspay/odu#84) and publishes the header twice — once while
+ *  claiming, once resolved — so a reader that dials during provisioning gets a
+ *  header with empty `lanes`. One-shot readers (`odu status`) want exactly
+ *  that: the environment as it stands right now. Anything that lives longer
+ *  than one snapshot must SUBSCRIBE to `client.surface.header.get(undefined)`
+ *  instead — see `attachDashboard`, which follows the cell for its lane line. */
 export async function firstHeader(client: OduClient): Promise<RunHeader> {
   const header = await firstFrame(client.surface.header.get(undefined));
   if (header === undefined) {

@@ -142,10 +142,13 @@ phase you can watch rather than a silence
 - `_ci-setup@<platform>` is `running` from the claim, and the copy narrates itself into that node's log: `odu logs -f _ci-setup@x86_64-linux`.
 - `odu wait` blocks on the run instead of reporting there is nothing to wait for.
 
-The pin deadline is an **idle** bound, not a total one: it restarts on every
-store path the copy reports, so a slow cold host is never killed for being slow,
-while one that goes quiet still fails — and says what it was doing
-(`still copying the runner closure — 24 store paths so far, last python3-3.14.6`).
+The pin deadline is an **idle** bound, not a total one: it restarts on every line
+the dial narrates, so a cold host is never killed for being slow — whether it is
+copying, evaluating or building — while one that goes silent still fails, and
+says what it was doing (`still copying the runner closure — 24 store paths so
+far, last python3-3.14.6`). It is deliberately the outermost of three: the
+underlying surface-remote session already re-arms its own provisioning backstops
+on every line, and both of them make a wedged dial terminal on their own terms.
 A claim that never succeeds ends the run as a red `_ci-setup@<platform>` with the
 reason in its log, so it lands in `odu runs` and in an agent's `wait_for_settle`
 verdict like any other failure.

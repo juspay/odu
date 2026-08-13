@@ -61,12 +61,25 @@ function envNumber(name: string, fallback: number, min: number): number {
 }
 
 const WAIT_POLL_MS = envNumber("ODU_LEASE_WAIT_POLL_MS", 5_000, 1);
-/** Bound for pin + claim RPC (includes cold provisioning of odu-runner). For
- *  the PIN it is an idle bound, not a total one: a cold host legitimately
- *  spends longer than this receiving the runner closure, so the countdown
- *  restarts on every store path the copy reports (see {@link copyProgress}).
- *  The claim RPC that follows is a round-trip on an established session and
- *  keeps the absolute bound. */
+/** Bound for pin + claim RPC (includes cold provisioning of odu-runner).
+ *
+ *  For the PIN it is an idle bound over TOTAL SILENCE, not a total-elapsed one,
+ *  and it is deliberately the outermost and least opinionated of three:
+ *  `@kolu/surface-remote` already bounds provisioning by progress at two layers
+ *  — the session's pre-connected backstop (`DEFAULT_PRE_CONNECTED_LIVENESS_MS`,
+ *  20 min, re-armed on every provisioning line) and each provisioning step's
+ *  `progress-liveness` policy (`PROVISION_STEP_SILENCE_BASE_MS` doubling to
+ *  `PROVISION_STEP_MAX_EXPIRIES`, `PROVISION_COPY_SILENCE_MS` for the copy) —
+ *  and both make a wedged dial terminal, which settles the pin on their own
+ *  terms with their own diagnosis.
+ *
+ *  So this one exists only for the case those cannot see: the session itself
+ *  going silent. It therefore re-arms on ANY line the session emits, not on
+ *  copy lines alone. An absolute cap here is what juspay/odu#84 actually died
+ *  of — 180s of *total elapsed* sitting under a stack whose own bounds are
+ *  10-20x longer and already progress-aware — and a cap that re-armed only on
+ *  `copying path` would just relocate that death into `nix build`'s evaluation
+ *  phase, which narrates plenty but copies nothing. */
 const CLAIM_TIMEOUT_MS = envNumber("ODU_LEASE_CLAIM_TIMEOUT_MS", 180_000, 1);
 
 export interface LeaseIdentity {
@@ -230,38 +243,47 @@ function storePathName(path: string): string {
 /**
  * What the runner-closure copy has done so far, read off the session's own log
  * lines — `nix` narrates each store path it pushes (`copying path '/nix/store/…'
- * to 'ssh-ng://host'`) and that narration is the ONLY progress signal this seam
- * gets. Two consumers, one observation:
+ * to 'ssh-ng://host'`).
  *
- *   - it pushes back the pin deadline while the copy is visibly moving, so a
- *     cold nix store is bounded by "went quiet", not by "took longer than the
- *     window" (the run in juspay/odu#84 died at 180s mid-copy on a fresh box);
- *   - it turns the timeout message into a diagnosis, so `lease pin … timed out`
- *     no longer reads as "unreachable machine" when the machine was in fact
- *     busy receiving a few hundred megabytes of closure.
+ * DIAGNOSIS ONLY. This deliberately does not bound anything: provisioning
+ * liveness belongs to `@kolu/surface-remote`, which already re-arms on every
+ * line at two layers (see {@link CLAIM_TIMEOUT_MS}), and a bound keyed on copy
+ * lines alone would kill a host that is busy evaluating rather than copying.
+ * What it buys is the sentence at the end of a timeout: `lease pin … timed out`
+ * reads as "unreachable machine", and on a cold box that is the wrong
+ * diagnosis — the machine was in fact receiving a few hundred megabytes of
+ * closure (juspay/odu#84).
+ *
+ * Paths are counted DISTINCT, not per narration line: provisioning copies each
+ * path twice on a cold host — once pulling it into the local store, once
+ * shipping it to the remote — so counting lines would report a 300-path closure
+ * as 600 and turn the diagnosis into a number nobody can reconcile with `nix
+ * path-info`.
  */
 export function copyProgress(): {
-  /** Feed one log line; true when it was copy progress. */
+  /** Feed one log line; true when it named a store path not seen before. */
   observe: (line: string) => boolean;
   /** Timeout-message suffix; empty when nothing was ever copied (the genuinely
    *  unreachable case, which must not claim a copy was in flight). */
   note: () => string;
 } {
-  let paths = 0;
+  const seen = new Set<string>();
   let last: string | null = null;
   return {
     observe: (line) => {
       const match = /copying path '([^']*)'/.exec(line);
       if (match === null) return false;
-      paths += 1;
-      last = match[1] ?? null;
+      const path = match[1] ?? "";
+      last = path;
+      if (seen.has(path)) return false;
+      seen.add(path);
       return true;
     },
     note: () =>
-      paths === 0
+      seen.size === 0
         ? ""
-        : ` (still copying the runner closure — ${paths} store path${
-            paths === 1 ? "" : "s"
+        : ` (still copying the runner closure — ${seen.size} store path${
+            seen.size === 1 ? "" : "s"
           } so far, last ${last === null ? "?" : storePathName(last)})`,
   };
 }
@@ -282,15 +304,19 @@ export async function tryClaim(
   }
 
   const timeoutMs = opts.timeoutMs ?? CLAIM_TIMEOUT_MS;
-  // The session log is now read as well as forwarded: `bumpPin` is live only
-  // while the pin is outstanding, so copy progress extends THAT deadline and
-  // nothing else. Wired unconditionally (not only when a caller passes
-  // `onLog`), because the deadline must not depend on whether anyone is
-  // listening.
+  // The session log is now read as well as forwarded. ANY line is the liveness
+  // signal — a session that is still narrating is a session that is alive, and
+  // provisioning spends long stretches evaluating and building rather than
+  // copying (see CLAIM_TIMEOUT_MS). `copyProgress` rides along purely to make
+  // the timeout message a diagnosis. `bumpPin` is live only while the pin is
+  // outstanding, so this extends THAT deadline and nothing else; wired
+  // unconditionally (not only when a caller passes `onLog`), because the
+  // deadline must not depend on whether anyone is listening.
   const progress = copyProgress();
   let bumpPin: (() => void) | null = null;
   const onLine = (line: string): void => {
-    if (progress.observe(line)) bumpPin?.();
+    progress.observe(line);
+    bumpPin?.();
     opts.onLog?.(line);
   };
   const session = makeSession<AgentClient, SshProv>({
@@ -391,12 +417,13 @@ export async function probeHost(
 
   const timeoutMs = opts.timeoutMs ?? CLAIM_TIMEOUT_MS;
   // Same cold-store bound as `tryClaim`: probing a host that has never seen
-  // odu-runner copies the whole closure, so the pin deadline tracks progress
-  // rather than total elapsed.
+  // odu-runner provisions the whole closure, so the pin deadline tracks
+  // liveness rather than total elapsed.
   const progress = copyProgress();
   let bumpPin: (() => void) | null = null;
   const onLine = (line: string): void => {
-    if (progress.observe(line)) bumpPin?.();
+    progress.observe(line);
+    bumpPin?.();
     opts.onLog?.(line);
   };
   const session = makeSession<AgentClient, SshProv>({
