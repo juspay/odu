@@ -201,6 +201,11 @@ export function withTimeout<T>(
     const bound = opts.heartbeat === undefined ? "" : " without progress";
     const arm = (): void => {
       t = setTimeout(() => {
+        // The timeout SETTLES the promise too — mark it, or a bump arriving
+        // afterwards re-arms a fresh timer against an already-rejected promise,
+        // and since the heartbeat now fires on every session line that repeats
+        // for as long as the peer keeps talking.
+        settled = true;
         reject(
           new Error(
             `odu: ${label} timed out after ${ms}ms${bound}${opts.note?.() ?? ""}`,

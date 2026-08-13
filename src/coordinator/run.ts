@@ -679,9 +679,12 @@ async function orchestrate(
     nodes,
     posting: EMPTY_POSTING,
   });
-  // The run environment (lane→host map + commit link + start clock), published
-  // on the surface so an `attach`-er paints the same matrix `run` does. Filled
-  // in once the lanes resolve (below), before the socket starts serving.
+  // The run environment (lane→host map + what is still being claimed + commit
+  // link + start clock), published on the surface so an `attach`-er paints the
+  // same matrix `run` does. Published twice: once before the socket serves,
+  // describing a run that is still claiming, and again once the lanes resolve
+  // (or the claim fails) — so this cell CHANGES during a run and its readers
+  // follow it.
   const headerStore = inMemoryStore<RunHeader>(EMPTY_HEADER);
 
   // ── per-node local logs: the in-memory tail (late socket subscribers) plus
@@ -1052,9 +1055,11 @@ async function orchestrate(
    *  own log is how every face (status rows, the attach matrix, `logs -f`,
    *  `wait`) learns the run is alive without a second vocabulary for it.
    *
-   *  Idempotent: the lane loop calls it again for platforms whose claim already
-   *  opened the bracket, and re-stamping `startedAt` there would silently
-   *  discount the provisioning it is supposed to measure. */
+   *  Guarded on `pending` so it can only ever OPEN the bracket: re-stamping
+   *  `startedAt` on a lane already provisioning would silently discount the
+   *  very wait this node exists to measure, and a lane whose setup already went
+   *  terminal (a claim that failed for it) must not be dragged back to
+   *  `running`. */
   const startSetup = (platform: string): void => {
     const id = fanId(SETUP, platform);
     if (store.get().nodes[id]?.status !== "pending") return;
