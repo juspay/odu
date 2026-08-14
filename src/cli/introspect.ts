@@ -65,19 +65,18 @@ export async function firstSnapshot(client: OduClient): Promise<PipelineState> {
   return state;
 }
 
-/** The run header off the surface, AS OF DIAL TIME. The `header` cell always
- *  yields its current value, so an empty stream means the coordinator closed
- *  before sending — a protocol failure we surface rather than mask with a blank
- *  banner (mirrors `firstSnapshot`).
+/** The run header off the surface, AS OF DIAL TIME — a SNAPSHOT, which is what
+ *  the name is for. `run` serves the socket before it claims a machine
+ *  (juspay/odu#84) and publishes the header twice, so this is not the run's
+ *  final lane roster; a one-shot face (`odu status`) wants exactly that, the
+ *  environment as it stands right now, and anything that outlives one snapshot
+ *  subscribes to the cell instead (see `attachDashboard`, whose header loop is
+ *  its only header path).
  *
- *  It is NOT the run's final lane→host map. `run` serves the socket before it
- *  claims a machine (juspay/odu#84) and publishes the header twice — once while
- *  claiming, once resolved — so a reader that dials during provisioning gets a
- *  header with empty `lanes`. One-shot readers (`odu status`) want exactly
- *  that: the environment as it stands right now. Anything that lives longer
- *  than one snapshot must SUBSCRIBE to `client.surface.header.get(undefined)`
- *  instead — see `attachDashboard`, which follows the cell for its lane line. */
-export async function firstHeader(client: OduClient): Promise<RunHeader> {
+ *  The `header` cell always yields its current value, so an empty stream means
+ *  the coordinator closed before sending — a protocol failure we surface rather
+ *  than mask with a blank banner (mirrors `firstSnapshot`). */
+export async function headerSnapshot(client: OduClient): Promise<RunHeader> {
   const header = await firstFrame(client.surface.header.get(undefined));
   if (header === undefined) {
     throw new Error("odu: coordinator closed before sending header");
@@ -109,6 +108,17 @@ export function resolveNodeId(state: PipelineState, token: string): string {
   );
 }
 
+/** When this run started provisioning: the earliest `_ci-setup@<platform>` that
+ *  is still `running`, which the coordinator stamps at the venue claim. Null
+ *  when no lane's bracket is open. */
+function setupStartedAt(state: PipelineState): number | null {
+  const starts = state.order
+    .filter((id) => isSetupNode(id) && state.nodes[id]?.status === "running")
+    .map((id) => state.nodes[id]?.startedAt)
+    .filter((t): t is number => typeof t === "number");
+  return starts.length === 0 ? null : Math.min(...starts);
+}
+
 /** The run-environment block `odu status` prints above the node rows while a
  *  run is still PROVISIONING — which host(s) each lane is claiming and how long
  *  it has been at it (juspay/odu#84). Nothing once every lane has a machine: the
@@ -116,11 +126,18 @@ export function resolveNodeId(state: PipelineState, token: string): string {
  *  the output it has always had. */
 export function provisioningLines(
   header: RunHeader,
+  state: PipelineState,
   nowMs = Date.now(),
 ): string[] {
   if (runPhase(header) !== "provisioning") return [];
-  const elapsed =
-    header.startedAt > 0 ? ` ${formatGoDuration(nowMs - header.startedAt)}` : "";
+  // The PROVISIONING clock, off the bracket that measures it. `header.startedAt`
+  // is the RUN start — captured before the socket serves, before signals, before
+  // `poster.seed()`'s GitHub round trip — so the number under the word
+  // "provisioning" was not the provisioning duration. `_ci-setup@<platform>`
+  // is stamped `running` at the claim itself; the earliest one still running is
+  // when this run began provisioning.
+  const since = setupStartedAt(state) ?? (header.startedAt > 0 ? header.startedAt : null);
+  const elapsed = since === null ? "" : ` ${formatGoDuration(nowMs - since)}`;
   const lines = [`provisioning${elapsed}`];
   const claiming = claimingText(header);
   if (claiming !== "") lines.push(`  claiming ${claiming}`);
@@ -161,11 +178,19 @@ export async function statusCommand(
   socketPath?: string,
 ): Promise<number> {
   const { client, close } = await dialSocket(socketPath);
-  const state = await firstSnapshot(client);
   // The run environment, read from the same dial: a run that has no lanes yet
   // has nothing to say through `nodes` alone, and "no rows" is exactly the
   // ambiguity juspay/odu#84 is about.
-  const header = await firstHeader(client);
+  //
+  // BEFORE the rows, not after: these are two cells read at two instants, and
+  // the banner heads the rows. A header at least as old as the rows can
+  // under-report (say `provisioning` while the rows have moved on by a few ms);
+  // read after them it could assert a phase the rows have already left, which
+  // is the direction that reads as a contradiction. Note this read can THROW on
+  // a coordinator whose header cell closes empty — deliberately, as a protocol
+  // failure — so it now fails before any rows are printed rather than after.
+  const header = await headerSnapshot(client);
+  const state = await firstSnapshot(client);
   await close();
   const posting = postingOf(state);
   if (json) {
@@ -181,7 +206,7 @@ export async function statusCommand(
   } else {
     const warn = postingWarning(posting);
     if (warn !== null) process.stderr.write(`${yellow(warn)}\n`);
-    for (const line of provisioningLines(header)) {
+    for (const line of provisioningLines(header, state)) {
       process.stdout.write(`${line}\n`);
     }
     for (const id of state.order) {

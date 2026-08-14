@@ -1,5 +1,8 @@
 /**
- * juspay/odu#84 — a run that exists but has no lanes yet.
+ * juspay/odu#84 — a run that exists but has no lanes yet, through the read
+ * faces in `cli/introspect` (`provisioningLines`, `runEnvJson`,
+ * `statusCommand`). `runPhase` itself is tested beside its own module, in
+ * `src/common/surface.provisioning.test.ts`.
  *
  * The coordinator now serves `.ci/odu.sock` *before* it claims a machine, so
  * this suite asserts the thing that window is for: that every read face
@@ -20,10 +23,8 @@ import {
   pendingNode,
   type PipelineState,
   type RunHeader,
-  runPhase,
 } from "../common/surface";
-import { toAgentNodes } from "../mcp/agentSurface";
-import { agentReaderFromA } from "../mcp/agentSurface";
+import { agentReaderFromA, toAgentNodes } from "../mcp/agentSurface";
 import { dialSocket } from "../coordinator/socket";
 import { waitForSettle } from "../coordinator/waitForSettle";
 import { serveTestSurface, type TestSurface } from "../mcp/serveForTest";
@@ -123,48 +124,54 @@ async function capturingStdout<T>(
   }
 }
 
-describe("runPhase", () => {
-  it("is provisioning while any lane is still claiming", () => {
-    expect(runPhase(provisioningHeader())).toBe("provisioning");
-  });
-
-  it("is lanes once every lane has a host", () => {
-    expect(runPhase(lanesHeader())).toBe("lanes");
-  });
-
-  it("reads a partly-claimed multi-platform run as provisioning", () => {
-    // One lane resolved, one still claiming: the run has not reached its
-    // fanout, so it is not in the `lanes` phase yet.
-    expect(runPhase(partlyClaimedHeader())).toBe("provisioning");
-  });
-
-  it("tells a run that never started apart from one that got nothing", () => {
-    // These were ONE value (`no_lanes`) until the lens review, distinguishable
-    // only by `elapsed_ms` on a sibling JSON field — a precondition-on-a-sibling
-    // exactly like the one the phase enum exists to abolish. A pre-publish
-    // header is `unstarted`; a run that tried and got no machine is `no_lanes`.
-    expect(runPhase(EMPTY_HEADER)).toBe("unstarted");
-    expect(runPhase(noLanesHeader())).toBe("no_lanes");
-  });
-});
-
 describe("provisioningLines", () => {
   it("names the phase, the pool and how long it has been at it", () => {
-    const lines = provisioningLines(provisioningHeader(), 1_000 + 252_000);
+    const lines = provisioningLines(
+      provisioningHeader(),
+      provisioningState(),
+      1_000 + 252_000,
+    );
     expect(lines[0]).toBe("provisioning 4m12s");
     expect(lines.join("\n")).toContain(
       "claiming x86_64-linux from kolu-ci-5, kolu-ci-6",
     );
   });
 
+  it("counts from the claim, not from the run start", () => {
+    // `header.startedAt` is the RUN start — captured before the socket serves,
+    // before signals, before `poster.seed()`'s GitHub round trip. The number
+    // under the word "provisioning" is the `_ci-setup` bracket's own clock,
+    // stamped at the claim.
+    const lines = provisioningLines(
+      { ...provisioningHeader(), startedAt: 1_000 },
+      {
+        ...provisioningState(),
+        // The bracket opened 4 seconds after the run did.
+        nodes: {
+          ...provisioningState().nodes,
+          [SETUP]: {
+            ...provisioningState().nodes[SETUP]!,
+            startedAt: 5_000,
+          },
+        },
+      },
+      65_000,
+    );
+    expect(lines[0]).toBe("provisioning 1m0s");
+  });
+
   it("says nothing once the lanes resolve", () => {
     // A run that reached its lanes keeps the output `odu status` has always
     // had — the node rows ARE its state then.
-    expect(provisioningLines(lanesHeader())).toEqual([]);
+    expect(provisioningLines(lanesHeader(), provisioningState())).toEqual([]);
   });
 
   it("shows the lanes already claimed beside the ones still claiming", () => {
-    const lines = provisioningLines(partlyClaimedHeader(), 1_000);
+    const lines = provisioningLines(
+      partlyClaimedHeader(),
+      provisioningState(),
+      1_000,
+    );
     expect(lines.join("\n")).toContain(
       "claiming x86_64-linux from kolu-ci-5, kolu-ci-6",
     );

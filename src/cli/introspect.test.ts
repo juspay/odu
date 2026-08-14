@@ -13,7 +13,7 @@ import { dialSocket } from "../coordinator/socket";
 import { serveTestSurface, type TestSurface } from "../mcp/serveForTest";
 import {
   attachStream,
-  firstHeader,
+  headerSnapshot,
   minimalRerunRoots,
   rerunCommand,
   resolveRerunTargets,
@@ -210,7 +210,7 @@ describe("statusCommand — plain", () => {
 // The data gap #6 closes: an attached face reads the run's lane→host map off the
 // surface `header` cell, so its matrix banner matches run's instead of an
 // observer stub.
-describe("firstHeader", () => {
+describe("headerSnapshot", () => {
   it("reads the run header (lane→host map) off the surface", async () => {
     const surface = await serveTestSurface(
       doneState([["ci::e2e@x86_64-linux", "ok", 0]]),
@@ -226,7 +226,7 @@ describe("firstHeader", () => {
     open.push(surface);
     const { client, close } = await dialSocket(surface.socketPath);
     try {
-      const header = await firstHeader(client);
+      const header = await headerSnapshot(client);
       expect(header.lanes).toEqual([
         { state: "leased", platform: "x86_64-linux", host: "kolu-ci-1" },
       ]);
