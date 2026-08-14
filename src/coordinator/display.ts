@@ -242,14 +242,11 @@ class PlainDisplay implements Display {
  *  point tolerates running before the view exists. See `src/cli/liveView.ts`. */
 class LiveDisplay implements Display {
   private view: LiveView | undefined;
-  /** Queued because `run` calls `info()` during a venue lease that can block
-   *  for minutes — long before `start()`, and therefore before the view is
-   *  loaded. Pre-view those go straight to stdout, exactly as the view itself
-   *  would do pre-mount. */
-  /** One field: the two were always written together and read behind a joint
-   *  guard, so two independent optionals let the type express states the code
-   *  never produces. */
-  private pending: { state: PipelineState } | undefined;
+  /** The state `start()` was called with, held until the lazily-imported view
+   *  exists to be started with it. `undefined` means `start()` has not been
+   *  called yet — pre-view `info()`/`transition()` then go straight to stdout,
+   *  exactly as the view itself would do pre-mount. */
+  private pending: PipelineState | undefined;
   /** The current run environment, wherever in the lifecycle it arrived. One
    *  field, one writer: `setHeader` is the only way a header gets here, so
    *  "which of these two headers is newer" is a question nobody can ask. */
@@ -258,7 +255,7 @@ class LiveDisplay implements Display {
   constructor(private readonly opts: LiveOpts) {}
 
   start(state: PipelineState): void {
-    this.pending = { state };
+    this.pending = state;
     // Caught, not floating: an unhandled rejection here would pick odu's exit
     // code, and odu owns that. Same reasoning as the view's own mount guard.
     void this.load().catch((err: unknown) => {
@@ -274,7 +271,7 @@ class LiveDisplay implements Display {
     const view = new Ctor(this.opts);
     this.view = view;
     const pending = this.pending;
-    if (pending !== undefined) view.start(pending.state, this.header);
+    if (pending !== undefined) view.start(pending, this.header);
   }
 
   private stopped = false;
@@ -290,7 +287,7 @@ class LiveDisplay implements Display {
   }
 
   update(state: PipelineState): void {
-    if (this.pending !== undefined) this.pending = { ...this.pending, state };
+    if (this.pending !== undefined) this.pending = state;
     this.view?.update(state);
   }
 

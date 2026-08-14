@@ -135,10 +135,11 @@ export function provisioningLines(
   // `poster.seed()`'s GitHub round trip — so the number under the word
   // "provisioning" was not the provisioning duration. `_ci-setup@<platform>`
   // is stamped `running` at the claim itself; the earliest one still running is
-  // when this run began provisioning.
-  const since = setupStartedAt(state) ?? (header.startedAt > 0 ? header.startedAt : null);
-  const elapsed = since === null ? "" : ` ${formatGoDuration(nowMs - since)}`;
-  const lines = [`provisioning${elapsed}`];
+  // when this run began provisioning. `header.startedAt` is the fallback only in
+  // principle: `runPhase` above already answered `provisioning`, which it never
+  // does for the pre-publish `startedAt === 0` header.
+  const since = setupStartedAt(state) ?? header.startedAt;
+  const lines = [`provisioning ${formatGoDuration(nowMs - since)}`];
   const claiming = claimingText(header);
   if (claiming !== "") lines.push(`  claiming ${claiming}`);
   // A partly-claimed multi-platform run: the lanes that already have a machine.
@@ -165,11 +166,10 @@ export function runEnvJson(
   return {
     phase: runPhase(header),
     elapsed_ms: header.startedAt > 0 ? nowMs - header.startedAt : null,
-    lanes: header.lanes.map((l) =>
-      l.state === "leased"
-        ? { state: l.state, platform: l.platform, host: l.host }
-        : { state: l.state, platform: l.platform, pool: [...l.pool] },
-    ),
+    // The roster verbatim: it already IS `RunLane[]`, and reconstructing it
+    // field-by-field per variant was two branches that had to track
+    // `RunLaneSchema` by hand.
+    lanes: [...header.lanes],
   };
 }
 

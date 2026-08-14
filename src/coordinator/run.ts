@@ -639,15 +639,6 @@ async function orchestrate(
     );
   }
 
-  /** The machines a lane may land on: the one it already holds (agent lease),
-   *  else the pool it is about to claim from. The roster's `claiming` entries
-   *  are the one place this is stated, so a lane with no host yet is described
-   *  by its real candidates rather than by a placeholder host. */
-  const candidatesFor = (platform: string): string[] => {
-    const held = lanesByPlatform[platform];
-    return held !== undefined ? [held] : [...(poolsByPlatform[platform] ?? [])];
-  };
-
   // ── fan-in state: one PipelineState keyed `<node>@<platform>` ──
   // Poster is bound after `implementSurface` so `onHealth` publishes onto the
   // cell from construction (no deferred rebinding).
@@ -701,13 +692,22 @@ async function orchestrate(
    *  clear. */
   const rosterFrom = (
     platforms: readonly string[],
-    claimInFlight: boolean,
+    beforeClaim: boolean,
   ): RunLane[] =>
     platforms.flatMap((platform): RunLane[] => {
       const host = lanesByPlatform[platform];
       if (host !== undefined) return [{ state: "leased", platform, host }];
-      return claimInFlight
-        ? [{ state: "claiming", platform, pool: candidatesFor(platform) }]
+      // No host yet, so the pool is the honest candidate set: a lane still
+      // claiming is described by the machines it may land on, never by a
+      // placeholder host.
+      return beforeClaim
+        ? [
+            {
+              state: "claiming",
+              platform,
+              pool: [...(poolsByPlatform[platform] ?? [])],
+            },
+          ]
         : [];
     });
 
@@ -813,6 +813,19 @@ async function orchestrate(
     log: "\n[odu] cancelled by operator (lane)\n",
   } as const;
 
+  /** Give back the run-owned lease on `host`, if there is one. The only writer
+   *  of `acquiredLeases` on the drop path, so "released" and "still in the
+   *  array" cannot come apart — the two call sites (an operator lane cancel,
+   *  and the post-claim sweep of lanes cancelled while their lease was in
+   *  flight) used to maintain that invariant separately. A no-op for an
+   *  agent-held lane, which is never in `acquiredLeases`. */
+  const releaseLeaseFor = (host: string): void => {
+    const idx = acquiredLeases.findIndex((l) => l.host === host);
+    if (idx < 0) return;
+    acquiredLeases[idx]?.release();
+    acquiredLeases.splice(idx, 1);
+  };
+
   /** Mark unfinished nodes on a platform terminal — shared by operator lane
    *  cancel and infrastructure `onDead` (status/log strategy as data). */
   const terminalizePlatformNodes = (
@@ -862,13 +875,7 @@ async function orchestrate(
     // with this release (same shape as whole-run shutdown). A new claim may
     // see a still-terminating process group for a short window.
     const host = lanesByPlatform[platform];
-    if (host !== undefined) {
-      const idx = acquiredLeases.findIndex((l) => l.host === host);
-      if (idx >= 0) {
-        acquiredLeases[idx]?.release();
-        acquiredLeases.splice(idx, 1);
-      }
-    }
+    if (host !== undefined) releaseLeaseFor(host);
     // Terminalizing is DEFERRED while a claim is outstanding, because the node
     // states are the run's answer to "is this over" for every reader outside
     // this process: `wait_for_settle` and `odu wait` judge the `nodes` cell, not
@@ -1425,20 +1432,20 @@ async function orchestrate(
   // here is precisely the second write this park exists to prevent.
   if (shuttingDown) return await parkForShutdown();
 
-  // Which lanes actually start. Three ways a platform drops out, all of them
-  // newly reachable because the socket (and therefore `lane.cancel`, `cancel`
-  // and the signals) is live across an `await` that did not exist before:
+  // Which lanes actually start. Two ways a platform drops out, both newly
+  // reachable because the socket (and therefore `lane.cancel`, `cancel` and the
+  // signals) is live across an `await` that did not exist before:
   //
   //   - the claim failed, so there is no machine for any lane;
-  //   - the whole run is tearing down — `shutdown` set `shuttingDown` and is
-  //     awaiting `poster.finalize()` before it exits, and starting an ssh lane
-  //     on a coordinator that is on its way out strands the work it spawns;
   //   - the operator dropped THIS platform mid-claim (`odu cancel @plat` / MCP
   //     `lane_cancel`). `cancelPlatform` tombstones the entry, but the lane loop
   //     below ends in `laneEntries.set(platform, {phase:"live"})` — which would
   //     overwrite the tombstone, re-open every `laneAccepting`-gated mirror
   //     path, resurrect the nodes the cancel marked `cancelled`, and start the
   //     lane on the machine the operator just dropped.
+  //
+  // A whole-run teardown is not a third way: `shuttingDown` parked above, and
+  // there is no `await` between that check and here.
   const cancelledDuringClaim = (platform: string): boolean =>
     laneEntries.get(platform)?.phase === "operator_cancelled";
   // A platform cancelled while its lease was in flight owns a lease nobody will
@@ -1456,24 +1463,22 @@ async function orchestrate(
     terminalizePlatformNodes(platform, CANCELLED_BY_OPERATOR);
     const host = lanesByPlatform[platform];
     if (host === undefined) continue;
-    const idx = acquiredLeases.findIndex((l) => l.host === host);
-    if (idx >= 0) {
-      acquiredLeases[idx]?.release();
-      acquiredLeases.splice(idx, 1);
-    }
+    releaseLeaseFor(host);
     delete lanesByPlatform[platform];
   }
   const survivors = activePlatforms.filter(
     (platform) => !cancelledDuringClaim(platform),
   );
-  const lanesToStart = !outcome.ok || shuttingDown ? [] : survivors;
 
   // ONE republish, on every exit from the claim, built from the lanes that
   // actually survived it. The roster is `claiming`-free by construction once
   // the claim has resolved (see `rosterFrom`), so a settled run can never be
   // reported as "provisioning" for the rest of the coordinator's life — and
   // there is no second branch that has to remember to say so.
-  publishHeader({ ...runtime.ctx.cells.header.get(), lanes: rosterFrom(survivors, false) });
+  publishHeader({
+    ...runtime.ctx.cells.header.get(),
+    lanes: rosterFrom(survivors, false),
+  });
 
   if (!outcome.ok) {
     // Provisioning failed — the run has no lanes and never will. Terminalize
@@ -1492,11 +1497,11 @@ async function orchestrate(
     // `errored` with a message about a pool it never saw publishes a node that
     // lies about itself. It is still stopped — the run is fail-closed — but as
     // an abort, not as this failure.
-    const claimed = new Set(platformsToClaim);
+    const claimedPlatforms = new Set(platformsToClaim);
     for (const platform of activePlatforms) {
       terminalizePlatformNodes(
         platform,
-        claimed.has(platform)
+        claimedPlatforms.has(platform)
           ? {
               running: "errored",
               pending: "skipped",
@@ -1519,7 +1524,10 @@ async function orchestrate(
   // would hang. One call, here, answers all three.
   checkSettled();
 
-  for (const platform of lanesToStart) {
+  // A failed claim got no machine for anything, so nothing starts: the
+  // terminalize above is the whole of the run's state and the completion path
+  // below writes its record and prints its verdict.
+  for (const platform of outcome.ok ? survivors : []) {
     // No cast: a successful claim filled every platform it covered, agent-held
     // lanes arrived with a host, and lanes cancelled mid-claim were dropped
     // from the map above — so this is total in practice, and `continue` is the
@@ -1694,8 +1702,7 @@ async function orchestrate(
     };
     // A run that already drained before we reached here fires the hook once.
     checkSettled();
-    await new Promise<void>(() => {});
-    return 0; // unreachable: shutdown() exits the process
+    return await parkForShutdown();
   }
 
   await allSettled;

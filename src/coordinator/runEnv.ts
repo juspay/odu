@@ -110,11 +110,7 @@ export async function claimVenues(
           resolveDrvPath: opts.resolveDrvPath,
           ...(opts.claim === undefined ? {} : { claim: opts.claim }),
         });
-        return {
-          ok: true,
-          lanes: { ...claimed.lanes },
-          leases: [...claimed.leases],
-        };
+        return { ok: true, lanes: claimed.lanes, leases: claimed.leases };
       } catch (err) {
         return {
           ok: false,

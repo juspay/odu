@@ -232,14 +232,18 @@ export function withTimeout<T>(
     let ceiling: ReturnType<typeof setTimeout> | undefined;
     let settled = false;
     const bound = opts.heartbeat === undefined ? "" : " without progress";
-    // The timeout SETTLES the promise too — mark it, or a bump arriving
-    // afterwards re-arms a fresh timer against an already-rejected promise,
-    // and since the heartbeat now fires on every session line that repeats
-    // for as long as the peer keeps talking.
-    const expire = (message: string): void => {
+    /** This call is over: stop both timers and refuse further bumps. */
+    const finish = (): void => {
       settled = true;
       clearTimeout(t);
       if (ceiling !== undefined) clearTimeout(ceiling);
+    };
+    // A timeout SETTLES the promise too, so it finishes exactly as a resolution
+    // does — otherwise a bump arriving afterwards re-arms a fresh timer against
+    // an already-rejected promise, and since the heartbeat fires on every
+    // session line that repeats for as long as the peer keeps talking.
+    const expire = (message: string): void => {
+      finish();
       reject(new Error(message));
     };
     const arm = (): void => {
@@ -251,11 +255,6 @@ export function withTimeout<T>(
         ms,
       );
       t.unref?.();
-    };
-    const finish = (): void => {
-      settled = true;
-      clearTimeout(t);
-      if (ceiling !== undefined) clearTimeout(ceiling);
     };
     arm();
     if (opts.ceilingMs !== undefined) {
