@@ -7,7 +7,7 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ClaimResult } from "./lease";
@@ -103,5 +103,47 @@ describe("claimVenues", () => {
     const outcome = await claimVenues({ ...base(repoRoot), platforms: [] });
     expect(outcome).toEqual({ ok: true, lanes: {}, leases: [] });
     expect(readLeaseRecord(repoRoot)).toEqual({});
+  });
+
+  it("keeps a successful claim when the bookkeeping write fails", async () => {
+    // The clear-out runs in a `finally`, and a throw there REPLACES the value
+    // the `try` produced. So an unwritable lease file would have discarded a
+    // claim that actually succeeded, rejected out of a function documented not
+    // to throw, and stranded the lease: `orchestrate` never reaches the merge
+    // into `acquiredLeases`, so nothing left alive can release it. A stale row
+    // in an inventory file is the smaller problem, and the one that loses.
+    const repoRoot = repo();
+    // `.ci` as a FILE, so every mkdir/write beneath it raises ENOTDIR — the
+    // real disk failures (ENOSPC, EACCES, a raced rename) take the same path.
+    writeFileSync(join(repoRoot, ".ci"), "not a directory");
+
+    const released: string[] = [];
+    const outcome = await claimVenues({
+      ...base(repoRoot),
+      claim: async (host): Promise<ClaimResult> => ({
+        kind: "held",
+        lease: { host, release: () => released.push(host) },
+      }),
+    });
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.lanes).toEqual({ "x86_64-linux": "ci-1" });
+    // The caller gets the lease and therefore the ability to release it.
+    expect(outcome.leases.map((l) => l.host)).toEqual(["ci-1"]);
+    expect(released).toEqual([]);
+  });
+
+  it("reports an unforeseen throw as a value, honouring its own contract", async () => {
+    const repoRoot = repo();
+    const outcome = await claimVenues({
+      ...base(repoRoot),
+      claim: () => {
+        throw new Error("odu: something nobody planned for");
+      },
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.message).toContain("nobody planned for");
   });
 });

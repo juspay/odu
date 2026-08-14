@@ -50,6 +50,30 @@ export interface ClaimVenuesOpts {
   claim?: LeaseLanesOpts["claim"];
 }
 
+/** Run one lease-file bookkeeping write, and never let it decide the claim's
+ *  fate. These rows are OBSERVABILITY — they tell `odu hosts` in another
+ *  process that this run is queueing — while the claim's result is a real ssh
+ *  lease on a real machine.
+ *
+ *  Load-bearing because `writeLeaseRecord` does uncaught `mkdirSync` /
+ *  `writeFileSync` / `renameSync`, and the clear-out below runs in a `finally`:
+ *  a throw there REPLACES the value the `try` already produced. So a disk that
+ *  filled up between the claim succeeding and its row being cleared would
+ *  discard a successful `ClaimOutcome`, reject out of a function documented not
+ *  to throw, and strand the leases it had just taken — `orchestrate` never
+ *  reaches the merge into `acquiredLeases`, so nothing left can release them.
+ *  A stale row in an inventory file is a far smaller problem than an orphaned
+ *  remote flock, so it is the one that loses. Narrated, never silent. */
+function bookkeep(what: string, write: () => void, warn: Warn): void {
+  try {
+    write();
+  } catch (err) {
+    warn(`odu: lease bookkeeping (${what}) failed: ${String(err)}`);
+  }
+}
+
+type Warn = (msg: string) => void;
+
 /** Hold the observable "waiting" rows in `.ci/odu-lease.json` for exactly the
  *  duration of `fn`, so the cross-process inventory (`odu hosts`) and this
  *  run's own claim cannot disagree about whether it is still waiting. One
@@ -58,24 +82,36 @@ async function withWaitingRecords<T>(
   repoRoot: string,
   platforms: readonly string[],
   runLabel: string,
+  warn: Warn,
   fn: () => Promise<T>,
 ): Promise<T> {
   for (const platform of platforms) {
-    upsertPlatformLease(repoRoot, platform, {
-      host: null,
-      holderPid: process.pid,
-      since: Date.now(),
-      state: "waiting",
-      waitingBehind: null,
-      run: runLabel,
-    });
+    bookkeep(
+      `mark ${platform} waiting`,
+      () =>
+        upsertPlatformLease(repoRoot, platform, {
+          host: null,
+          holderPid: process.pid,
+          since: Date.now(),
+          state: "waiting",
+          waitingBehind: null,
+          run: runLabel,
+        }),
+      warn,
+    );
   }
   try {
     return await fn();
   } finally {
     // Drop run-owned waiting records (this pid). Agent-held platforms were
     // never in `platforms`, so their records stay.
-    for (const platform of platforms) removePlatformLease(repoRoot, platform);
+    for (const platform of platforms) {
+      bookkeep(
+        `clear ${platform}`,
+        () => removePlatformLease(repoRoot, platform),
+        warn,
+      );
+    }
   }
 }
 
@@ -95,28 +131,40 @@ export async function claimVenues(
   if (opts.platforms.length === 0) {
     return { ok: true, lanes: {}, leases: [] };
   }
-  return withWaitingRecords(
-    opts.repoRoot,
-    opts.platforms,
-    opts.runLabel,
-    async (): Promise<ClaimOutcome> => {
-      try {
-        const claimed = await leaseLanes({
-          pools: opts.pools,
-          platforms: opts.platforms,
-          identity: opts.identity,
-          noWait: opts.noWait,
-          onLine: opts.onLine,
-          resolveDrvPath: opts.resolveDrvPath,
-          ...(opts.claim === undefined ? {} : { claim: opts.claim }),
-        });
-        return { ok: true, lanes: claimed.lanes, leases: claimed.leases };
-      } catch (err) {
-        return {
-          ok: false,
-          error: err instanceof Error ? err : new Error(String(err)),
-        };
-      }
-    },
-  );
+  const asError = (err: unknown): Error =>
+    err instanceof Error ? err : new Error(String(err));
+  // The lane narration sink doubles as the warning sink; a bookkeeping failure
+  // is a run-level fact, not one platform's, so it carries no platform.
+  const warn: Warn = (msg) => opts.onLine?.(msg, opts.platforms[0] ?? "");
+  try {
+    return await withWaitingRecords(
+      opts.repoRoot,
+      opts.platforms,
+      opts.runLabel,
+      warn,
+      async (): Promise<ClaimOutcome> => {
+        try {
+          const claimed = await leaseLanes({
+            pools: opts.pools,
+            platforms: opts.platforms,
+            identity: opts.identity,
+            noWait: opts.noWait,
+            onLine: opts.onLine,
+            resolveDrvPath: opts.resolveDrvPath,
+            ...(opts.claim === undefined ? {} : { claim: opts.claim }),
+          });
+          return { ok: true, lanes: claimed.lanes, leases: claimed.leases };
+        } catch (err) {
+          return { ok: false, error: asError(err) };
+        }
+      },
+    );
+  } catch (err) {
+    // The contract in this function's doc, made true rather than merely stated.
+    // `bookkeep` already stops the expected escape route, so reaching here means
+    // something genuinely unforeseen threw — and the caller has a socket, an
+    // ordinal and a published state that an exception would unwind straight
+    // past. It gets a value it can terminalize, like every other failure.
+    return { ok: false, error: asError(err) };
+  }
 }
