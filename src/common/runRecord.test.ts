@@ -7,6 +7,7 @@ import {
   RunRecordSchema,
 } from "./runRecord";
 import {
+  leasedLanes,
   type NodeState,
   pendingNode,
   type PipelineState,
@@ -133,6 +134,27 @@ describe("buildRunRecord", () => {
       unposted: [],
     });
     expect(record.unposted).toBeUndefined();
+  });
+
+  it("writes only platform+host per lane, whatever shape the caller passed", () => {
+    // The coordinator feeds this `leasedLanes(header)`, whose elements are
+    // `LeasedLane` and therefore also carry `state: "leased"`. Structural typing
+    // lets that through the parameter, so a spread would write an undeclared key
+    // into every durable `.ci/<sha7>/runs/<seq>.json` lane entry.
+    const record = buildRunRecord({
+      ...base,
+      lanes: leasedLanes({
+        lanes: [{ state: "leased", platform: "x86_64-linux", host: "kolu-ci-5" }],
+      }),
+      state: stateOf([["ci::fmt@x86_64-linux", "ok", 0, 10]]),
+    });
+    for (const lane of record.lanes) {
+      expect(Object.keys(lane).sort()).toEqual(["host", "platform"]);
+    }
+    expect(record.lanes).toEqual([
+      { platform: "x86_64-linux", host: "kolu-ci-5" },
+    ]);
+    expect(decodesAsRecord(record)).toBe(true);
   });
 
   it("records a cancelled node as incomplete — never a clean pass", () => {
