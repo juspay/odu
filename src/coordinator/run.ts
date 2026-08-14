@@ -752,17 +752,30 @@ async function orchestrate(
   //    addition, layered on top of each tail mutation. ──
   const tail = createLogTail();
   const fileFor = (id: string): string => join(repoRoot, logPathFor(sha7, id));
+  /** The log directories this process has already created. A run's node set is
+   *  fixed, so this is bounded by the lane count — and since juspay/odu#84 the
+   *  provisioning narration flows through `appendLocal` one line at a time
+   *  (thousands of `copying path` lines), on the same event loop that serves
+   *  `.ci/odu.sock`. An `mkdirSync` per line is a sync syscall burst degrading
+   *  the very window the socket was moved ahead of the claim to make watchable.
+   *  `appendFileSync` stays: a durable log that survives a SIGKILL is the point. */
+  const madeDirs = new Set<string>();
+  const openFor = (id: string): string => {
+    const file = fileFor(id);
+    const dir = dirname(file);
+    if (!madeDirs.has(dir)) {
+      mkdirSync(dir, { recursive: true });
+      madeDirs.add(dir);
+    }
+    return file;
+  };
   const appendLocal = (id: string, text: string): void => {
     tail.append(id, text);
-    const file = fileFor(id);
-    mkdirSync(dirname(file), { recursive: true });
-    appendFileSync(file, text);
+    appendFileSync(openFor(id), text);
   };
   const resetLocal = (id: string, text: string): void => {
     tail.reset(id, text);
-    const file = fileFor(id);
-    mkdirSync(dirname(file), { recursive: true });
-    writeFileSync(file, text);
+    writeFileSync(openFor(id), text);
   };
 
   // ── the fan-in surface (status / logs / attach dial this) ──
@@ -1341,32 +1354,20 @@ async function orchestrate(
    *  behaviour the post-lane one always had. */
   const parkForShutdown = (): Promise<never> => new Promise<never>(() => {});
 
-  // Read-before-write, ahead of the first post: contexts GitHub already shows in
-  // the desired state become no-ops (eliminates the restart "pending wave").
-  // After `serveSocket` so a slow GitHub never delays the run becoming
-  // attachable, and before `startSetup` below, whose `running` transition is the
-  // first thing this run posts.
-  if (ctx.posting && github !== null) {
-    await poster.seed();
-  }
-  // A cancel during that round trip must not go on to stamp `_ci-setup` running
-  // (posting `pending` to GitHub *after* the interrupt statuses) and then open a
-  // multi-minute closure copy on a coordinator that is already exiting.
-  if (shuttingDown) return await parkForShutdown();
-
   // ── venue claim: one free machine per platform, lock held for the run ──
-  // The `_ci-setup` bracket opens for the lanes whose claim it BRACKETS: from
-  // here until such a lane is up, this node IS the run's visible state, and its
-  // log is where the claim narrates itself. An agent-held lane claims nothing,
-  // so opening its bracket here would have its `_ci-setup` duration measure a
-  // sibling platform's claim wait — the one number that node exists to measure,
-  // measuring something else. It opens at its own lane start instead.
-  for (const platform of platformsToClaim) startSetup(platform);
-
-  // Latched across the claim: a cancel arriving mid-claim may terminalize every
-  // node, but the run is not over until the claim that holds the box is.
+  //
+  // Read-before-write ahead of the first post: contexts GitHub already shows in
+  // the desired state become no-ops (eliminates the restart "pending wave").
+  // Started ALONGSIDE the claim rather than ahead of it — the two share nothing,
+  // and one is a GitHub round trip while the other is minutes of ssh. The only
+  // real constraint is that the seed precede the first POST, which is
+  // `startSetup`'s `running` transition, so that is where the join is.
+  const seeded =
+    ctx.posting && github !== null ? poster.seed() : Promise.resolve();
+  // Latched before the claim starts: a cancel arriving mid-claim may terminalize
+  // every node, but the run is not over until the claim that holds the box is.
   claimInFlight = platformsToClaim.length > 0;
-  const outcome = await (deps.claimVenues ?? claimVenues)({
+  const claim = (deps.claimVenues ?? claimVenues)({
     repoRoot,
     pools: resolvedPools,
     platforms: platformsToClaim,
@@ -1376,6 +1377,31 @@ async function orchestrate(
     onLine: setupLine,
     resolveDrvPath: (platform) => runnerDrvResolver(runnerFlake, platform),
   });
+  await seeded;
+  // A cancel during that round trip must not go on to stamp `_ci-setup` running
+  // (posting `pending` to GitHub *after* the interrupt statuses) on a
+  // coordinator that is already exiting.
+  if (shuttingDown) {
+    // The claim is outstanding and nothing downstream will merge its handles
+    // into `acquiredLeases`, so hand them straight back rather than leaving a
+    // remote flock held by a coordinator on its way out. Best-effort: `shutdown`
+    // may well `process.exit` first, which frees the same locks by dropping the
+    // ssh connections.
+    void claim.then((o) => {
+      if (o.ok) for (const lease of o.leases) lease.release();
+    });
+    return await parkForShutdown();
+  }
+
+  // The `_ci-setup` bracket opens for the lanes whose claim it BRACKETS: from
+  // here until such a lane is up, this node IS the run's visible state, and its
+  // log is where the claim narrates itself. An agent-held lane claims nothing,
+  // so opening its bracket here would have its `_ci-setup` duration measure a
+  // sibling platform's claim wait — the one number that node exists to measure,
+  // measuring something else. It opens at its own lane start instead.
+  for (const platform of platformsToClaim) startSetup(platform);
+
+  const outcome = await claim;
   // Merged at ONE visible site: the claim's outputs are a value, so nothing
   // downstream depends on mutations its signature declines to mention.
   if (outcome.ok) {

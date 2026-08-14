@@ -644,9 +644,15 @@ export class LiveView {
   }
 
   /** Operator-facing message. Called from the venue lease and the status
-   *  poster long before `start()`, so pre-mount it must reach real stdout. */
+   *  poster; pre-mount it must reach real stdout.
+   *
+   *  COALESCED (`now: false`). Since juspay/odu#84 the renderer is mounted
+   *  before the claim, so provisioning narration — one call per `copying path`
+   *  line, thousands of them — arrives here with a frame to repaint. Painting
+   *  each is the per-source-event repaint {@link pushEvent} documents; the
+   *  dirty flag plus `wake()`'s tick shows every line, batched at TICK_MS. */
   info(msg: string): void {
-    this.pushEvent(msg, DIM);
+    this.pushEvent(msg, DIM, false);
   }
 
   /** Cap on retained diagnostics — enough to carry a fatal message and its

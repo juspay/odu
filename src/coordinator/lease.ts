@@ -315,6 +315,8 @@ function storePathName(path: string): string {
  * as 600 and turn the diagnosis into a number nobody can reconcile with `nix
  * path-info`.
  */
+const COPY_PATH_RE = /copying path '([^']*)'/;
+
 export function copyProgress(): {
   /** Feed one log line. Nothing is returned: "did this line advance the copy?"
    *  is the wire the design deliberately stopped plugging in when the pin
@@ -325,19 +327,30 @@ export function copyProgress(): {
   /** Timeout-message suffix; empty when nothing was ever copied (the genuinely
    *  unreachable case, which must not claim a copy was in flight). */
   note: () => string;
+  /** No further note will be asked for — release the path set and make
+   *  `observe` a no-op. See {@link provisionSink}, the only caller. */
+  done: () => void;
 } {
-  const seen = new Set<string>();
+  let seen: Set<string> | null = new Set<string>();
   let last: string | null = null;
   return {
     observe: (line) => {
-      const match = /copying path '([^']*)'/.exec(line);
+      if (seen === null) return;
+      // Cheap reject first: this runs on every session line, and only a
+      // vanishing fraction of them are copy narration.
+      if (!line.includes("copying path")) return;
+      const match = COPY_PATH_RE.exec(line);
       if (match === null) return;
       const path = match[1] ?? "";
       last = path;
       seen.add(path);
     },
+    done: () => {
+      seen = null;
+      last = null;
+    },
     note: () =>
-      seen.size === 0
+      seen === null || seen.size === 0
         ? ""
         : ` (still copying the runner closure — ${seen.size} store path${
             seen.size === 1 ? "" : "s"
@@ -363,10 +376,19 @@ export function copyProgress(): {
  * inside `withTimeout` itself, so nothing has to be unwired afterwards.
  * Wired unconditionally (not only when a caller passes `onLog`), because the
  * deadline must not depend on whether anyone is listening.
+ *
+ * The diagnosis half is SCOPED TO THE PIN, via `done()`. This sink stays the
+ * session's `log` for the whole lease lifetime — hours on a held lane — but
+ * `note` and the `bump` have no reader once the pin settles. Left armed it
+ * would run a match over every session line of the run and grow a store-path
+ * `Set` nobody will ever read. `done()` drops both, so the rest of the run
+ * pays only `onLog?.(line)`.
  */
 function provisionSink(onLog?: (line: string) => void): {
   log: ReturnType<typeof lineLogger>;
   pin: TimeoutOpts;
+  /** Call once the pin's `withTimeout` has settled, either way. */
+  done: () => void;
 } {
   const progress = copyProgress();
   let bump: (() => void) | null = null;
@@ -382,6 +404,10 @@ function provisionSink(onLog?: (line: string) => void): {
       },
       note: progress.note,
       ceilingMs: PIN_CEILING_MS,
+    },
+    done: () => {
+      bump = null;
+      progress.done();
     },
   };
 }
@@ -422,12 +448,14 @@ export async function tryClaim(
   let intentionalRelease = false;
 
   try {
+    // `.finally` and not a post-await line: the pin's diagnosis must be
+    // released on the throw path too, and this session's log outlives it.
     const client = await withTimeout(
       pinLaneFace(session),
       timeoutMs,
       `lease pin ${shortHost(host)}`,
       sink.pin,
-    );
+    ).finally(sink.done);
 
     const result = await withTimeout(
       runUnary(
@@ -519,7 +547,7 @@ export async function probeHost(
       timeoutMs,
       `lease probe pin ${shortHost(host)}`,
       sink.pin,
-    );
+    ).finally(sink.done);
     session.markConnected();
     const result = await withTimeout(
       runUnary(client.surface.lease.probe(lockPathKey(opts.lockPath))),
