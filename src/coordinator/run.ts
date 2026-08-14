@@ -1285,7 +1285,10 @@ async function orchestrate(
   process.once("SIGINT", () => shutdown(130));
   process.once("SIGTERM", () => shutdown(130));
 
-  display.start(store.get(), header);
+  // The header first: it is the only way a face learns the run environment, and
+  // the plain banner `start` prints renders it.
+  display.setHeader(header);
+  display.start(store.get());
   display.update(store.get());
 
   // Read-before-write, ahead of the first post: contexts GitHub already shows in

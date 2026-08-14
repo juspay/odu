@@ -37,10 +37,12 @@ export { commitLabel };
 import { formatGoDuration } from "../common/duration";
 import { splitFanId } from "../common/nodeId";
 import {
+  EMPTY_HEADER,
   type NodeState,
   type PipelineState,
   type ProgressStatus,
   type RunHeader,
+  runPhase,
   STATUS_META,
 } from "../common/surface";
 import { logPathFor } from "./statuses";
@@ -62,14 +64,14 @@ export interface ProgressEvent {
 
 
 export interface Display {
-  /** Commit identity comes from `state`; the run-env (lanes, hosts source,
-   *  commit link, start clock) from `header`. */
-  start(state: PipelineState, header: RunHeader): void;
-  /** A NEW run environment for a run already started. The run header is
-   *  published twice — once while the venue claim is still in flight, once with
-   *  the resolved lane→host map (juspay/odu#84) — so a face that latched its
-   *  first header would spend the run showing a lane map that was empty at the
-   *  instant it read it. */
+  /** Commit identity comes from `state`. The run-env does NOT: it arrives only
+   *  through {@link Display.setHeader}, before or after this call. */
+  start(state: PipelineState): void;
+  /** The run environment, at any time. The ONE way a header reaches a face —
+   *  the run header is published twice (once while the venue claim is in
+   *  flight, once with the resolved lane→host map, juspay/odu#84), so a second
+   *  entry point would only force each implementation to arbitrate between two
+   *  headers and get "which one is newer" right by hand. */
   setHeader(header: RunHeader): void;
   /** Latest fan-in state — live repaints from it, plain heartbeats off it. */
   update(state: PipelineState): void;
@@ -139,34 +141,48 @@ class PlainDisplay implements Display {
   private state: PipelineState | undefined;
   private timer: NodeJS.Timeout | undefined;
   private lastWrite = Date.now();
-  private lanes = "";
+  /** The header itself, not its rendering. Caching `laneText(header)` to dedupe
+   *  against made the face hold a formatted shadow copy of the run environment,
+   *  kept true to it by two assignments in two methods. */
+  private header: RunHeader = EMPTY_HEADER;
+  private started = false;
 
-  start(state: PipelineState, header: RunHeader): void {
+  start(state: PipelineState): void {
     // Commit identity (pipeline name + sha) comes from state; `run` carries
     // lanes + a hosts source on the header, so the banner shows both; an
     // observer (`attach`) has neither, so those clauses drop out and the
     // banner is just `odu · <pipeline> @ <sha>`. A run that hasn't claimed a
     // machine yet has no lanes to show and says what it is claiming instead.
-    this.lanes = laneText(header);
+    this.started = true;
     const parts = [`odu · ${state.name} @ ${commitLabel(state)}`];
-    if (this.lanes !== "") parts.push(this.lanes);
-    const claiming = claimingText(header);
+    const lanes = laneText(this.header);
+    if (lanes !== "") parts.push(lanes);
+    const claiming = claimingText(this.header);
     if (claiming !== "") parts.push(`claiming ${claiming}`);
     const banner = parts.join(" · ");
     this.say(
-      header.hostsSource !== null
-        ? `${banner} (hosts: ${header.hostsSource})`
+      this.header.hostsSource !== null
+        ? `${banner} (hosts: ${this.header.hostsSource})`
         : banner,
     );
     this.timer = setInterval(() => this.heartbeat(), HEARTBEAT_MS);
     this.timer.unref?.();
   }
 
+  /** Announce on a PHASE change, not on a lane-string diff. The string rule
+   *  said two things at once — "nothing changed" and "an empty lane map is
+   *  never worth announcing" — and the second half swallowed the claim-failure
+   *  republish, so a captured CI log got no line marking the end of
+   *  provisioning. The phase rule fires exactly once when provisioning ends,
+   *  whichever way it ends. Nothing is said before `start`: there is no banner
+   *  to revise yet, and the banner itself renders this header. */
   setHeader(header: RunHeader): void {
+    const before = this.header;
+    this.header = header;
+    if (!this.started) return;
+    if (runPhase(before) === runPhase(header)) return;
     const lanes = laneText(header);
-    if (lanes === "" || lanes === this.lanes) return;
-    this.lanes = lanes;
-    this.say(`odu · lanes ${lanes}`);
+    this.say(`odu · ${lanes === "" ? runPhase(header) : `lanes ${lanes}`}`);
   }
 
   update(state: PipelineState): void {
@@ -233,14 +249,16 @@ class LiveDisplay implements Display {
   /** One field: the two were always written together and read behind a joint
    *  guard, so two independent optionals let the type express states the code
    *  never produces. */
-  private pending: { state: PipelineState; header: RunHeader } | undefined;
+  private pending: { state: PipelineState } | undefined;
+  /** The current run environment, wherever in the lifecycle it arrived. One
+   *  field, one writer: `setHeader` is the only way a header gets here, so
+   *  "which of these two headers is newer" is a question nobody can ask. */
+  private header: RunHeader = EMPTY_HEADER;
 
   constructor(private readonly opts: LiveOpts) {}
 
-  start(state: PipelineState, header: RunHeader): void {
-    // A header that arrived before `start` is newer than the one the host is
-    // starting us with — prefer it (see `latest`).
-    this.pending = { state, header: this.latest ?? header };
+  start(state: PipelineState): void {
+    this.pending = { state };
     // Caught, not floating: an unhandled rejection here would pick odu's exit
     // code, and odu owns that. Same reasoning as the view's own mount guard.
     void this.load().catch((err: unknown) => {
@@ -256,25 +274,18 @@ class LiveDisplay implements Display {
     const view = new Ctor(this.opts);
     this.view = view;
     const pending = this.pending;
-    if (pending !== undefined) view.start(pending.state, pending.header);
+    if (pending !== undefined) view.start(pending.state, this.header);
   }
 
   private stopped = false;
 
-  /** Reaches the view once it exists; before that it revises the snapshot
-   *  `load()` will start it with, so a header published during the venue claim
-   *  (while the opentui import is still in flight) isn't lost.
-   *
-   *  `latest` covers the window before `start()` has run at all — `attach`
-   *  opens its header follow-loop before the first `nodes` frame arrives, so a
-   *  header can land here with `pending` still undefined. Dropping it silently
-   *  would strand the view on a stale lane map for the whole run, because `run`
-   *  publishes the header exactly twice and never again. */
-  private latest: RunHeader | undefined;
-
+  /** Reaches the view once it exists; before that it is simply the header
+   *  `load()` will start the view with — so a header published during the venue
+   *  claim (while the opentui import is still in flight), or before `start()`
+   *  has run at all (`attach` opens its header follow-loop before the first
+   *  `nodes` frame arrives), is never lost. */
   setHeader(header: RunHeader): void {
-    this.latest = header;
-    if (this.pending !== undefined) this.pending = { ...this.pending, header };
+    this.header = header;
     this.view?.setHeader(header);
   }
 

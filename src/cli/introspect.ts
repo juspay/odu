@@ -14,7 +14,6 @@
 
 import { firstFrame, runUnary, subscribe } from "../common/effectEdge";
 import {
-  EMPTY_HEADER,
   type NodeState,
   type PipelineState,
   postingOf,
@@ -251,10 +250,10 @@ export async function attachStream(
       started = true;
       // Commit identity (pipeline name + sha) comes from the snapshot's state;
       // an observer has no run-env (no leased hosts, no forge origin, no own
-      // start clock), so it passes EMPTY_HEADER and the banner collapses to
-      // `odu · <pipeline> @ <sha>`. The matrix dashboard reads the real
-      // run-env off the surface `header` cell instead (`firstHeader`).
-      display.start(state, EMPTY_HEADER);
+      // start clock), so it never calls `setHeader` and the banner collapses to
+      // `odu · <pipeline> @ <sha>`. The matrix dashboard follows the surface
+      // `header` cell instead (see `attachDashboard`).
+      display.start(state);
     }
     display.update(state); // drives the plain heartbeat
     for (const id of state.order) {
@@ -281,7 +280,6 @@ async function attachDashboard(
   client: OduClient,
   close: () => Promise<void>,
 ): Promise<number> {
-  const header = await firstHeader(client);
   // The one binding for the latest state: both the completion path (`view.stop`,
   // the returned verdict) and the quit path read it. `attach` owns its own
   // exit-code policy (the view no longer carries it on `onQuit`): the current
@@ -312,30 +310,31 @@ async function attachDashboard(
     onQuit: () => quit(exitCode(last)),
   });
 
-  // Follow the header for the rest of the session. `run` publishes it twice —
-  // once while it is still claiming a machine, once with the resolved lane→host
-  // map (juspay/odu#84) — so a dashboard attached during provisioning (exactly
-  // when an operator reaches for one) would otherwise show the claiming line for
-  // the whole run. The cell yields its current value first, so re-applying the
-  // header we already have is a no-op, not a flicker. Ends when the link closes
-  // with the dashboard.
-  void (async () => {
-    try {
-      for await (const next of subscribe(client.surface.header.get(undefined))) {
-        view.setHeader(next);
-      }
-    } catch {
-      // The link went away with the run (or with `quit`) — nothing to report:
-      // the node stream below owns how this session ends.
+  // Follow the header for the rest of the session — the ONE path by which this
+  // face learns the run environment. `run` publishes it twice — once while it is
+  // still claiming a machine, once with the resolved lane→host map
+  // (juspay/odu#84) — so a dashboard attached during provisioning (exactly when
+  // an operator reaches for one) would otherwise show the claiming line for the
+  // whole run. The cell yields its current value first, so the display has the
+  // real header before the first `nodes` frame starts the view.
+  //
+  // Held as a handle rather than left floating: it is a second timeline over the
+  // same link, and the function must not return while it is still running. The
+  // node loop below owns how the session ends; this one ends with the link.
+  const headerLoop = (async () => {
+    for await (const next of subscribe(client.surface.header.get(undefined))) {
+      view.setHeader(next);
     }
-  })();
+  })().catch(() => {
+    // The link went away with the run (or with `quit`) — nothing to report.
+  });
 
   let first = true;
   for await (const state of subscribe(client.surface.nodes.get(undefined))) {
     last = state;
     if (first) {
       first = false;
-      view.start(state, header);
+      view.start(state);
     } else {
       view.update(state);
     }
@@ -346,6 +345,9 @@ async function attachDashboard(
   // an observer would otherwise be left with only an exit code.
   if (last !== undefined) process.stdout.write(verdictLine(last));
   await close();
+  // The subscription is torn down with the link, so this settles rather than
+  // stranding a live `for await` past the function that opened it.
+  await headerLoop;
   return exitCode(last);
 }
 

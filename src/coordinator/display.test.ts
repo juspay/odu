@@ -2,8 +2,9 @@ import { describe, expect, it } from "bun:test";
 import type {
   NodeState,
   PipelineState,
+  RunHeader,
 } from "../common/surface";
-import { progressEvent } from "./display";
+import { createDisplay, progressEvent } from "./display";
 import { stepFocus } from "../cli/render";
 
 function node(
@@ -55,15 +56,96 @@ const state: PipelineState = {
   },
 };
 
-const header = {
+const header: RunHeader = {
   commitUrl: "https://github.com/juspay/kolu/commit/3cbac86f",
   lanes: [
-    { platform: "x86_64-linux", host: "kolu-ci-5" },
-    { platform: "aarch64-darwin", host: "rasam" },
+    { state: "leased", platform: "x86_64-linux", host: "kolu-ci-5" },
+    { state: "leased", platform: "aarch64-darwin", host: "rasam" },
   ],
   hostsSource: "~/.config/odu/hosts.json",
   startedAt: 940_000,
 };
+
+const claimingHeader: RunHeader = {
+  ...header,
+  lanes: [
+    {
+      state: "claiming",
+      platform: "x86_64-linux",
+      pool: ["kolu-ci-5", "kolu-ci-6"],
+    },
+  ],
+};
+
+function capturingStdout(fn: () => void): string {
+  const chunks: string[] = [];
+  const original = process.stdout.write.bind(process.stdout);
+  process.stdout.write = ((chunk: string | Uint8Array): boolean => {
+    chunks.push(
+      typeof chunk === "string" ? chunk : Buffer.from(chunk).toString(),
+    );
+    return true;
+  }) as typeof process.stdout.write;
+  try {
+    fn();
+    return chunks.join("");
+  } finally {
+    process.stdout.write = original;
+  }
+}
+
+/** `setHeader` is the ONE way a run environment reaches a face — `start` takes
+ *  state alone — so a display can never be handed two headers to arbitrate
+ *  between. These pin the two consequences on the plain face. */
+describe("PlainDisplay — the run environment arrives through setHeader", () => {
+  it("banners the header delivered before start", () => {
+    const display = createDisplay("plain");
+    const out = capturingStdout(() => {
+      display.setHeader(claimingHeader);
+      display.start(state);
+      display.stop();
+    });
+    expect(out).toContain("odu · ci::default @ 3cbac86");
+    expect(out).toContain("claiming x86_64-linux from kolu-ci-5, kolu-ci-6");
+  });
+
+  it("announces the end of provisioning whichever way it ends", () => {
+    // The old rule diffed the rendered lane string and refused to announce an
+    // EMPTY one, so the claim-failure republish (a roster that resolved to no
+    // lanes at all) was silently swallowed and a captured CI log got no line
+    // marking the transition out of provisioning.
+    const failed = createDisplay("plain");
+    const outFailed = capturingStdout(() => {
+      failed.setHeader(claimingHeader);
+      failed.start(state);
+      failed.setHeader({ ...claimingHeader, lanes: [] });
+      failed.stop();
+    });
+    expect(outFailed).toContain("odu · no_lanes");
+
+    const resolved = createDisplay("plain");
+    const outResolved = capturingStdout(() => {
+      resolved.setHeader(claimingHeader);
+      resolved.start(state);
+      resolved.setHeader(header);
+      resolved.stop();
+    });
+    expect(outResolved).toContain(
+      "odu · lanes x86_64-linux=kolu-ci-5 · aarch64-darwin=rasam",
+    );
+  });
+
+  it("says nothing for a republish that does not change the phase", () => {
+    const display = createDisplay("plain");
+    const out = capturingStdout(() => {
+      display.setHeader(header);
+      display.start(state);
+      display.setHeader({ ...header, hostsSource: "elsewhere" });
+      display.stop();
+    });
+    expect(out.split("\n").filter((l) => l !== "")).toHaveLength(1);
+  });
+});
 
 // The single projection `run` and `attach` share so their json/plain faces
 // can't drift (juspay/odu#4). The fields a node-status-only emitter used to
