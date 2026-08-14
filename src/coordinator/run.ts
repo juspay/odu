@@ -700,12 +700,21 @@ async function orchestrate(
   // that is still claiming, and again once the lanes resolve (or the claim
   // fails) — so this cell CHANGES during a run and its readers follow it.
   //
-  // The STORE is the only place this value lives. A `let header` beside it,
-  // written through a `publishHeader` that "everything goes through, except
-  // once", is a convention with a documented exception — and the one reader
-  // that took the local (`finalizeRunRecord`) then depended on read-after-the-
-  // right-write ordering rather than on a single source.
-  const headerStore = inMemoryStore<RunHeader>({
+  // The CELL is the only place this value lives, and it is reached only through
+  // `runtime.ctx.cells.header` — there is deliberately no store binding in this
+  // scope to write. A `CellStore.set` is `value = v` and nothing else; the bus
+  // publish that wakes every subscriber lives on the ctx write path. Holding a
+  // store variable here once meant `publishHeader` could — and did — update the
+  // value while notifying no attached reader, and no test could catch it,
+  // because the test harness writes through the ctx path that production
+  // skipped. Naming no store makes that write unspellable rather than merely
+  // discouraged. (`header` below is passed straight into `implementSurface`.)
+  //
+  // A `let header` beside the cell would be the same mistake in another shape: a
+  // convention with a documented exception, whose one reader
+  // (`finalizeRunRecord`) then depends on read-after-the-right-write ordering
+  // rather than on a single source.
+  const initialHeader = ((): RunHeader => ({
     commitUrl:
       github !== null
         ? `https://github.com/${github.owner}/${github.repo}/commit/${sha}`
@@ -718,7 +727,7 @@ async function orchestrate(
     // matrix + attach) counts elapsed from the same instant. Commit identity
     // (pipeline name + sha7 + dirty) is already on `store`'s state.
     startedAt: Date.now(),
-  });
+  }))();
 
   // ── per-node local logs: the in-memory tail (late socket subscribers) plus
   //    the durable per-SHA file (.ci/<sha7>/<plat>/<node>.log, justci's layout).
@@ -830,12 +839,26 @@ async function orchestrate(
     return true;
   };
 
-  /** Cancel one fan-in node (`ci::fmt@plat`). Platform drop is `lane.cancel`. */
+  /** Cancel one fan-in node (`ci::fmt@plat`). Platform drop is `lane.cancel`.
+   *
+   *  `_ci-setup@<platform>` with no live lane is the one node the coordinator
+   *  can cancel by itself, and since juspay/odu#84 it is reachable: the bracket
+   *  opens at the venue claim, so for the whole provisioning window `odu status`
+   *  shows `_ci-setup@plat` RUNNING while no lane exists to route a cancel to.
+   *  Refusing there means the id an operator can see is the one id they cannot
+   *  act on. Cancelling that node is by definition dropping the lane it brackets
+   *  — there is nothing else in it yet — so it routes to `cancelPlatform`.
+   *
+   *  Only that node. A pending `ci::fmt@plat` in the same window still refuses:
+   *  escalating a one-node cancel into a lane drop is the escalation `odu
+   *  cancel` guards against everywhere else. */
   const cancelNode = async (id: string): Promise<boolean> => {
     const { namepath, platform } = splitFanId(id);
     if (platform === "unknown" || namepath === "") return false;
     const lane = liveLane(platform);
-    if (lane === undefined) return false;
+    if (lane === undefined) {
+      return namepath === SETUP ? cancelPlatform(platform) : false;
+    }
     return lane.cancel(namepath);
   };
 
@@ -898,7 +921,7 @@ async function orchestrate(
   };
 
   const runtime = implementSurface(oduSurface, {
-    cells: { nodes: { store }, header: { store: headerStore } },
+    cells: { nodes: { store }, header: { store: inMemoryStore<RunHeader>(initialHeader) } },
     streams: {
       nodeLog: { source: tail.streamSource },
     },
@@ -1023,7 +1046,21 @@ async function orchestrate(
   const allSettled = new Promise<void>((resolve) => {
     settled = resolve;
   });
+  /** Is a venue claim outstanding right now? While it is, this run is NOT
+   *  settleable however terminal its nodes look.
+   *
+   *  `lane.cancel` during the claim tombstones the lane and terminalizes its
+   *  nodes at once — which, on a single-platform run, makes every node terminal
+   *  while `claimVenues` is still copying a closure onto a box, still holding
+   *  the checkout's one-run lock, and still about to hand back a lease. A
+   *  `wait_for_settle` answering "settled, cancelled" there tells an agent the
+   *  run is over; its next `run()` hits "a run is already in progress". The
+   *  claim's own return is what ends this window, and it clears the latch and
+   *  re-judges settle itself. */
+  let claimInFlight = false;
+
   const checkSettled = (): void => {
+    if (claimInFlight) return;
     const state = store.get();
     const done = state.order.every((id) => {
       const status = state.nodes[id]?.status;
@@ -1144,18 +1181,29 @@ async function orchestrate(
 
   // The header's own value — one construction site, read back rather than
   // rebuilt beside it.
-  const commitUrl = headerStore.get().commitUrl;
+  const commitUrl = runtime.ctx.cells.header.get().commitUrl;
   /** The platforms that still need a machine, derived from the roster rather
    *  than tracked as a second list beside it. */
-  const platformsToClaim = claimingLanes(headerStore.get()).map(
+  const platformsToClaim = claimingLanes(runtime.ctx.cells.header.get()).map(
     (l) => l.platform,
   );
 
   /** Publish a new header to the surface and to `run`'s own live view, so an
    *  attached face and the foreground matrix repaint the same lane map. The
-   *  store IS the value — there is no local copy to keep in step. */
+   *  store IS the value — there is no local copy to keep in step.
+   *
+   *  Through the CELL, which is the only writer in scope by construction (see
+   *  `initialHeader`). A bare `CellStore.set` is `value = v` and nothing else;
+   *  the bus publish that wakes every subscriber lives on the ctx write path
+   *  (`ctxApply`: `store.set(next); bus.publish(next)`) — the same path
+   *  `updateNode` has always used for the `nodes` cell. Writing a store directly
+   *  left the second publish visible to `get()` and to `display` (told
+   *  separately, on the next line) while reaching no attached reader at all: an
+   *  `odu attach` opened during provisioning — the exact operator move
+   *  juspay/odu#84 is about — would take the claiming roster as its first frame
+   *  and never see the resolved one. */
   const publishHeader = (next: RunHeader): void => {
-    headerStore.set(next);
+    runtime.ctx.cells.header.set(next);
     display.setHeader(next);
   };
   // Stamp the reserved seq onto the fan-in state so every face — the agent
@@ -1186,13 +1234,13 @@ async function orchestrate(
             sha,
             seq,
             dirty: ctx.dirty,
-            startedAt: headerStore.get().startedAt,
+            startedAt: runtime.ctx.cells.header.get().startedAt,
             finishedAt: Date.now(),
             // The record describes machines the run actually had; a lane still
             // claiming one has nothing to record. Read off the store every
             // face reads, so the record cannot describe a different run
             // environment from the one the surface published.
-            lanes: leasedLanes(headerStore.get()),
+            lanes: leasedLanes(runtime.ctx.cells.header.get()),
             state,
             unposted: unposted ?? poster.unposted(),
           }),
@@ -1238,9 +1286,27 @@ async function orchestrate(
 
   // The header first: it is the only way a face learns the run environment, and
   // the plain banner `start` prints renders it.
-  display.setHeader(headerStore.get());
+  display.setHeader(runtime.ctx.cells.header.get());
   display.start(store.get());
   display.update(store.get());
+
+  /** Hand the process to `shutdown` and never come back.
+   *
+   *  Between `serveSocket` and the lane loop there are now awaits — `poster.seed`'s
+   *  GitHub round trip, and the venue claim itself — and the socket, the signal
+   *  handlers and `run.cancel` are all live across them. So a teardown can begin
+   *  mid-window, and `shutdown` is the ONLY terminal owner once it has: it
+   *  finalizes posted statuses, writes the record from the snapshot it took at
+   *  the interrupt, drops the socket and calls `process.exit`.
+   *
+   *  Resuming the main flow past a started teardown gives one run two terminal
+   *  owners — a second `poster.finalize`, a second record write from a LATER
+   *  snapshot, a second `closeSocket`, and an exit code decided by whichever
+   *  lands last (130 or 1, by race). Parking is exactly what the post-lane path
+   *  already does: a SIGINT mid-run leaves `await allSettled` pending forever and
+   *  lets `shutdown` exit the process. This gives the pre-lane windows the
+   *  behaviour the post-lane one always had. */
+  const parkForShutdown = (): Promise<never> => new Promise<never>(() => {});
 
   // Read-before-write, ahead of the first post: contexts GitHub already shows in
   // the desired state become no-ops (eliminates the restart "pending wave").
@@ -1250,6 +1316,10 @@ async function orchestrate(
   if (ctx.posting && github !== null) {
     await poster.seed();
   }
+  // A cancel during that round trip must not go on to stamp `_ci-setup` running
+  // (posting `pending` to GitHub *after* the interrupt statuses) and then open a
+  // multi-minute closure copy on a coordinator that is already exiting.
+  if (shuttingDown) return await parkForShutdown();
 
   // ── venue claim: one free machine per platform, lock held for the run ──
   // The `_ci-setup` bracket opens for the lanes whose claim it BRACKETS: from
@@ -1260,6 +1330,9 @@ async function orchestrate(
   // measuring something else. It opens at its own lane start instead.
   for (const platform of platformsToClaim) startSetup(platform);
 
+  // Latched across the claim: a cancel arriving mid-claim may terminalize every
+  // node, but the run is not over until the claim that holds the box is.
+  claimInFlight = platformsToClaim.length > 0;
   const outcome = await claimVenues({
     repoRoot,
     pools: resolvedPools,
@@ -1279,6 +1352,19 @@ async function orchestrate(
       watchLease(lease);
     }
   }
+  // The claim is no longer in flight, so settle may be judged again — a cancel
+  // that arrived mid-claim deliberately did not resolve it (see
+  // `claimInFlight`), and the re-judgement happens once, below, after this
+  // block has published what the claim actually left behind.
+  claimInFlight = false;
+  // A teardown that began during the claim owns the run from here. Terminalizing
+  // a failed claim past this point would write a SECOND durable record — from a
+  // post-terminalize snapshot, contradicting the pre-terminalize one `shutdown`
+  // already took — and race a second `closeSocket` against a superseder that is
+  // watching the socket to confirm we are gone. No `checkSettled` on the way
+  // out: in `--linger` it would fire `onSettledEach`, and finalizing a record
+  // here is precisely the second write this park exists to prevent.
+  if (shuttingDown) return await parkForShutdown();
 
   // Which lanes actually start. Three ways a platform drops out, all of them
   // newly reachable because the socket (and therefore `lane.cancel`, `cancel`
@@ -1323,7 +1409,7 @@ async function orchestrate(
   // the claim has resolved (see `rosterFrom`), so a settled run can never be
   // reported as "provisioning" for the rest of the coordinator's life — and
   // there is no second branch that has to remember to say so.
-  publishHeader({ ...headerStore.get(), lanes: rosterFrom(survivors, false) });
+  publishHeader({ ...runtime.ctx.cells.header.get(), lanes: rosterFrom(survivors, false) });
 
   if (!outcome.ok) {
     // Provisioning failed — the run has no lanes and never will. Terminalize
@@ -1359,8 +1445,15 @@ async function orchestrate(
             },
       );
     }
-    checkSettled();
   }
+
+  // The one re-judgement after the claim, covering every way out of it. The
+  // failed-claim branch above terminalizes; a `lane.cancel` that landed
+  // mid-claim already terminalized its own lane and was refused a settle by the
+  // `claimInFlight` latch; and a run whose every lane was cancelled that way
+  // starts no lane below, so nothing else would ever ask again and `allSettled`
+  // would hang. One call, here, answers all three.
+  checkSettled();
 
   for (const platform of lanesToStart) {
     // No cast: a successful claim filled every platform it covered, agent-held

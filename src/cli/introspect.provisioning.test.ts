@@ -23,7 +23,9 @@ import {
   pendingNode,
   type PipelineState,
   type RunHeader,
+  runPhase,
 } from "../common/surface";
+import { subscribe } from "../common/effectEdge";
 import { agentReaderFromA, toAgentNodes } from "../mcp/agentSurface";
 import { dialSocket } from "../coordinator/socket";
 import { waitForSettle } from "../coordinator/waitForSettle";
@@ -104,6 +106,19 @@ const open: TestSurface[] = [];
 afterEach(() => {
   for (const s of open.splice(0)) s.close();
 });
+
+/** Poll a predicate to a deadline — for ordering against a live subscription,
+ *  where the alternative is a fixed sleep that is either flaky or slow. */
+async function waitFor(
+  pred: () => boolean,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!pred()) {
+    if (Date.now() > deadline) throw new Error("waitFor: timed out");
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
 
 async function capturingStdout<T>(
   fn: () => Promise<T>,
@@ -356,6 +371,51 @@ describe("the agent face during provisioning", () => {
       expect(verdict.settled).toBe(true);
       expect(verdict.passed).toBe(false);
       expect(verdict.errored).toEqual([SETUP]);
+    } finally {
+      await dialed.close();
+    }
+  });
+});
+
+describe("a live header subscriber", () => {
+  it("receives the resolved roster as a second frame", async () => {
+    // The regression test for the reason this whole change exists. `attach`
+    // SUBSCRIBES to the header cell — it does not re-read it — so the second
+    // publish has to arrive as a frame on an open subscription. It did not:
+    // `publishHeader` wrote the backing store directly (`CellStore.set` is
+    // `value = v` and nothing more), so the value changed and the bus never
+    // published. `odu run`'s own matrix looked correct because the display is
+    // told separately, which is exactly what hid it — and no test could have
+    // caught it, because the test harness writes through `ctx.cells.header.set`
+    // (the publishing path) while production did not.
+    const surface = await serveTestSurface(
+      provisioningState(),
+      provisioningHeader(),
+    );
+    open.push(surface);
+    const dialed = await dialSocket(surface.socketPath);
+    try {
+      const frames: RunHeader[] = [];
+      const done = (async () => {
+        for await (const h of subscribe(
+          dialed.client.surface.header.get(undefined),
+        )) {
+          frames.push(h);
+          if (frames.length === 2) break;
+        }
+      })();
+      // Let the subscription land its snapshot before the second publish, so
+      // this asserts a genuine DELTA rather than a lucky first frame.
+      await waitFor(() => frames.length === 1);
+      surface.setHeader(lanesHeader());
+      await done;
+
+      expect(frames).toHaveLength(2);
+      expect(runPhase(frames[0]!)).toBe("provisioning");
+      expect(runPhase(frames[1]!)).toBe("lanes");
+      expect(frames[1]!.lanes).toEqual([
+        { state: "leased", platform: "x86_64-linux", host: "kolu-ci-5" },
+      ]);
     } finally {
       await dialed.close();
     }

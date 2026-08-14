@@ -247,12 +247,16 @@ agent death unless an **agent-held** lease (`odu lease` / MCP `lease`) already
 covers the platform — then run reuses that host and leaves the lock alone.
 Busy pool → wait in line (or `--no-wait` fails); the whole claim is watchable
 live (see "attachable before it has lanes" above). A **cold** host is bounded by
-going *silent*, not by total time: surface-remote already re-arms its own
-provisioning backstops on every line, and odu's outermost pin bound
-(`ODU_LEASE_CLAIM_TIMEOUT_MS`) does the same, so a first run against a fresh box
-is not killed for being slow whether it is copying, evaluating or building. A
-genuine stall says what it was doing (`… timed out after 180000ms without
-progress (still copying the runner closure — N store paths so far, last …)`).
+going *silent*, not by total time — the pin's idle bound
+(`ODU_LEASE_CLAIM_TIMEOUT_MS`, 180s) re-arms on every line the dial narrates, so
+a first run against a fresh box is not killed for being slow whether it is
+copying, evaluating or building. A second, absolute ceiling
+(`ODU_LEASE_PIN_CEILING_MS`, 45m) no line can move catches the other shape: the
+surface-remote session's own backstop *retries* rather than giving up and
+announces each retry as a progress line, so an idle-only bound would never fire
+on a host that keeps talking without finishing. The timeout message names which
+bound fired and what it was doing (`… timed out after 180000ms without progress
+(still copying the runner closure — N store paths so far, last …)`).
 `odu hosts` probes via `lease.probe`. Platforms absent from an *existing* config silently drop from
 the fanout, but a run that resolves **zero** lanes — no file anywhere, no
 `--host`, no `--platform` — is **refused**, not defaulted to `localhost`

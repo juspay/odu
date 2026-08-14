@@ -142,13 +142,24 @@ phase you can watch rather than a silence
 - `_ci-setup@<platform>` is `running` from the claim, and the copy narrates itself into that node's log: `odu logs -f _ci-setup@x86_64-linux`.
 - `odu wait` blocks on the run instead of reporting there is nothing to wait for.
 
-The pin deadline is an **idle** bound, not a total one: it restarts on every line
-the dial narrates, so a cold host is never killed for being slow — whether it is
-copying, evaluating or building — while one that goes silent still fails, and
-says what it was doing (`still copying the runner closure — 24 store paths so
-far, last python3-3.14.6`). It is deliberately the outermost of three: the
-underlying surface-remote session already re-arms its own provisioning backstops
-on every line, and both of them make a wedged dial terminal on their own terms.
+The pin carries **two** bounds, and the timeout message names which one fired:
+
+| bound | default | env | fires when |
+| --- | --- | --- | --- |
+| idle | 180s | `ODU_LEASE_CLAIM_TIMEOUT_MS` | the dial goes **silent** for that long — it re-arms on every line, so a cold host is never killed for being slow, whether it is copying, evaluating or building |
+| ceiling | 45m | `ODU_LEASE_PIN_CEILING_MS` | one pin has run that long in **total**, no matter how chatty |
+
+The ceiling is not the total-elapsed cap [juspay/odu#84](https://github.com/juspay/odu/issues/84)
+died of — it sits well above the framework's own 20-minute provisioning backstop,
+so it cannot pre-empt honest cold-host work. It exists because the idle bound
+alone has a hole: the surface-remote session's backstop *retries* rather than
+giving up, and announces each retry as a progress line, which re-arms an
+idle-only bound forever. A host that keeps talking and never finishes would hang
+the run with no terminal bound at all.
+
+A dial that goes silent still fails with what it was doing
+(`still copying the runner closure — 24 store paths so
+far, last python3-3.14.6`).
 A claim that never succeeds ends the run as a red `_ci-setup@<platform>` with the
 reason in its log, so it lands in `odu runs` and in an agent's `wait_for_settle`
 verdict like any other failure.
