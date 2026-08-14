@@ -283,7 +283,20 @@ function tryGit(repo: string, args: string[]): string | null {
   return result.status === 0 ? result.stdout.trim() : null;
 }
 
-export async function runCommand(args: RunArgs): Promise<number> {
+/** Injectable collaborators. One member, and it exists for one reason: the venue
+ *  claim is the only thing in `orchestrate` that both takes minutes and cannot
+ *  be reached from a test — it dials ssh. Everything the socket must get right
+ *  *while a claim is outstanding* (a cancel that lands mid-claim, a teardown
+ *  that starts mid-claim) is therefore untestable without a claim a test can
+ *  hold open. Same shape as `ensureCheckoutFree`'s `deps`. */
+export interface RunDeps {
+  claimVenues?: typeof claimVenues;
+}
+
+export async function runCommand(
+  args: RunArgs,
+  deps: RunDeps = {},
+): Promise<number> {
   // Resolve where the generic lane runner comes from before any side effect
   // (worktree snapshot, socket) — a misbuilt binary with no runner flake should
   // refuse instantly, not after pinning HEAD. Throws when ODU_RUNNER_FLAKE is
@@ -385,6 +398,7 @@ export async function runCommand(args: RunArgs): Promise<number> {
       acquiredLeases,
       reservation,
       runLock,
+      deps,
     );
   } finally {
     cleanupSnapshot();
@@ -430,6 +444,9 @@ async function orchestrate(
   /** runCommand-owned checkout run-lock; claimed right after ensureCheckoutFree
    *  and released in runCommand's finally / process exit. */
   runLock: { handle: RunLockHandle | null },
+  /** See {@link RunDeps} — the venue claim, injectable so a test can hold one
+   *  open across the socket's cancel/teardown paths. */
+  deps: RunDeps,
 ): Promise<number> {
   const { repoRoot, specSource, runnerFlake, sha, sha7 } = ctx;
   // Where stdout points picks the face: NDJSON for the /do contract, an
@@ -774,6 +791,15 @@ async function orchestrate(
     return lane.rerun(namepath);
   };
 
+  /** What an operator lane-drop does to a lane's unfinished nodes. Named once
+   *  because it is applied from two places now: immediately, when the lane is
+   *  live, and deferred to the claim's return when the drop landed mid-claim. */
+  const CANCELLED_BY_OPERATOR = {
+    running: "cancelled",
+    pending: "cancelled",
+    log: "\n[odu] cancelled by operator (lane)\n",
+  } as const;
+
   /** Mark unfinished nodes on a platform terminal — shared by operator lane
    *  cancel and infrastructure `onDead` (status/log strategy as data). */
   const terminalizePlatformNodes = (
@@ -830,11 +856,18 @@ async function orchestrate(
         acquiredLeases.splice(idx, 1);
       }
     }
-    terminalizePlatformNodes(platform, {
-      running: "cancelled",
-      pending: "cancelled",
-      log: "\n[odu] cancelled by operator (lane)\n",
-    });
+    // Terminalizing is DEFERRED while a claim is outstanding, because the node
+    // states are the run's answer to "is this over" for every reader outside
+    // this process: `wait_for_settle` and `odu wait` judge the `nodes` cell, not
+    // this module's `checkSettled`. Marking a single-platform run's nodes
+    // terminal here would answer "settled, cancelled" while `claimVenues` is
+    // still copying a closure onto a box, still holding the checkout's one-run
+    // lock, and still owed a lease — so an agent that reads that verdict as "the
+    // run is over" gets "a run is already in progress" from its next `run()`.
+    // The claim's return is what ends the window; it terminalizes the lanes
+    // tombstoned here (see `cancelledDuringClaim`) and re-judges settle once.
+    if (claimInFlight) return true;
+    terminalizePlatformNodes(platform, CANCELLED_BY_OPERATOR);
     checkSettled();
     return true;
   };
@@ -1333,7 +1366,7 @@ async function orchestrate(
   // Latched across the claim: a cancel arriving mid-claim may terminalize every
   // node, but the run is not over until the claim that holds the box is.
   claimInFlight = platformsToClaim.length > 0;
-  const outcome = await claimVenues({
+  const outcome = await (deps.claimVenues ?? claimVenues)({
     repoRoot,
     pools: resolvedPools,
     platforms: platformsToClaim,
@@ -1390,6 +1423,11 @@ async function orchestrate(
   // that lane into the durable record.
   for (const platform of activePlatforms) {
     if (!cancelledDuringClaim(platform)) continue;
+    // The terminalize `cancelPlatform` deferred: while the claim was in flight
+    // this lane's nodes had to keep saying "not over", because they are what
+    // every out-of-process reader judges settle by. The claim has returned, so
+    // the cancel is now the whole truth about this lane.
+    terminalizePlatformNodes(platform, CANCELLED_BY_OPERATOR);
     const host = lanesByPlatform[platform];
     if (host === undefined) continue;
     const idx = acquiredLeases.findIndex((l) => l.host === host);
