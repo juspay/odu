@@ -63,24 +63,46 @@ function envNumber(name: string, fallback: number, min: number): number {
 const WAIT_POLL_MS = envNumber("ODU_LEASE_WAIT_POLL_MS", 5_000, 1);
 /** Bound for pin + claim RPC (includes cold provisioning of odu-runner).
  *
- *  For the PIN it is an idle bound over TOTAL SILENCE, not a total-elapsed one,
- *  and it is deliberately the outermost and least opinionated of three:
- *  `@kolu/surface-remote` already bounds provisioning by progress at two layers
- *  — the session's pre-connected backstop (`DEFAULT_PRE_CONNECTED_LIVENESS_MS`,
- *  20 min, re-armed on every provisioning line) and each provisioning step's
+ *  For the PIN it is an idle bound over TOTAL SILENCE, not a total-elapsed one.
+ *  `@kolu/surface-remote` bounds provisioning by progress at two layers of its
+ *  own — the session's pre-connected backstop
+ *  (`DEFAULT_PRE_CONNECTED_LIVENESS_MS`, 20 min, re-armed on every progress
+ *  line and every phase change) and each provisioning step's
  *  `progress-liveness` policy (`PROVISION_STEP_SILENCE_BASE_MS` doubling to
- *  `PROVISION_STEP_MAX_EXPIRIES`, `PROVISION_COPY_SILENCE_MS` for the copy) —
- *  and both make a wedged dial terminal, which settles the pin on their own
- *  terms with their own diagnosis.
+ *  `PROVISION_STEP_MAX_EXPIRIES`, `PROVISION_COPY_SILENCE_MS` for the copy).
  *
- *  So this one exists only for the case those cannot see: the session itself
- *  going silent. It therefore re-arms on ANY line the session emits, not on
- *  copy lines alone. An absolute cap here is what juspay/odu#84 actually died
- *  of — 180s of *total elapsed* sitting under a stack whose own bounds are
- *  10-20x longer and already progress-aware — and a cap that re-armed only on
- *  `copying path` would just relocate that death into `nix build`'s evaluation
- *  phase, which narrates plenty but copies nothing. */
+ *  Neither of those is TERMINAL for a `pin()`. `armPreConnected` expires into
+ *  `forceCycle`, which is `localProgress(reason); session.recheck()` — a RETRY:
+ *  the session announces the cycle and dials again, forever. `pin()` is left
+ *  outstanding across every cycle, and `MAX_CONSECUTIVE_FAILURES` bounds
+ *  consecutive *remote rejections*, not a host that keeps re-connecting. So odu's
+ *  bound is the only terminal one on this path — which is exactly why it must
+ *  not be removed in favour of "the framework already handles it".
+ *
+ *  It re-arms on ANY line the session emits, not on copy lines alone: a cap that
+ *  re-armed only on `copying path` would relocate juspay/odu#84's death into
+ *  `nix build`'s evaluation phase, which narrates plenty but copies nothing.
+ *  Note that the framework's own cycle announcement arrives through
+ *  `localProgress`, so it re-arms this bound too — see {@link PIN_CEILING_MS}
+ *  for the bound that catches that. */
 const CLAIM_TIMEOUT_MS = envNumber("ODU_LEASE_CLAIM_TIMEOUT_MS", 180_000, 1);
+
+/** Absolute ceiling on ONE pin, beside the idle bound above.
+ *
+ *  The idle bound alone has a hole: `forceCycle` narrates through
+ *  `localProgress`, so a host that never finishes provisioning but keeps
+ *  cycling emits a progress line on every cycle, re-arms
+ *  {@link CLAIM_TIMEOUT_MS} forever, and hangs the run with no terminal bound
+ *  at all. This is that bound, and it is deliberately generous: well above the
+ *  framework's 20-minute pre-connected backstop, so it can never pre-empt
+ *  legitimate cold-host provisioning (a first `nix copy` of the runner closure
+ *  onto a bare box is tens of minutes of honest work). It catches only "alive,
+ *  narrating, and never finishing".
+ *
+ *  juspay/odu#84 died of a 180s *total elapsed* cap; this is not that cap
+ *  restored. The timeout message names which of the two bounds fired, so the
+ *  two failures are never confused for one another. */
+const PIN_CEILING_MS = envNumber("ODU_LEASE_PIN_CEILING_MS", 45 * 60_000, 1);
 
 export interface LeaseIdentity {
   holder: string;
@@ -179,11 +201,21 @@ interface TimeoutOpts {
   /** Hands the caller a `bump` that RESTARTS the countdown, turning the bound
    *  from "finish within `ms`" into "go quiet for `ms`". Wire it to a real
    *  progress signal only — a bump with no evidence behind it is an unbounded
-   *  wait wearing a timeout's clothes. */
+   *  wait wearing a timeout's clothes.
+   *
+   *  A `bump` after the call settles (either way) is a no-op — callers need not
+   *  unwire it, and a second guard at the call site would only be a weaker copy
+   *  of this one. */
   heartbeat?: (bump: () => void) => void;
   /** Appended to the timeout message: what the call was waiting ON, so the
    *  refusal is a diagnosis rather than a duration. */
   note?: () => string;
+  /** Total-elapsed backstop that a `bump` can NEVER re-arm. Only meaningful
+   *  beside a `heartbeat`: an idle bound is unbounded in total time by
+   *  construction, so a peer that narrates forever without finishing needs this
+   *  to have any terminal bound at all. Set it generously — it is the last
+   *  resort, not the working deadline. */
+  ceilingMs?: number;
 }
 
 /** Exported for its unit test: the heartbeat turns an absolute bound into an
@@ -197,28 +229,46 @@ export function withTimeout<T>(
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     let t: ReturnType<typeof setTimeout>;
+    let ceiling: ReturnType<typeof setTimeout> | undefined;
     let settled = false;
     const bound = opts.heartbeat === undefined ? "" : " without progress";
+    // The timeout SETTLES the promise too — mark it, or a bump arriving
+    // afterwards re-arms a fresh timer against an already-rejected promise,
+    // and since the heartbeat now fires on every session line that repeats
+    // for as long as the peer keeps talking.
+    const expire = (message: string): void => {
+      settled = true;
+      clearTimeout(t);
+      if (ceiling !== undefined) clearTimeout(ceiling);
+      reject(new Error(message));
+    };
     const arm = (): void => {
-      t = setTimeout(() => {
-        // The timeout SETTLES the promise too — mark it, or a bump arriving
-        // afterwards re-arms a fresh timer against an already-rejected promise,
-        // and since the heartbeat now fires on every session line that repeats
-        // for as long as the peer keeps talking.
-        settled = true;
-        reject(
-          new Error(
+      t = setTimeout(
+        () =>
+          expire(
             `odu: ${label} timed out after ${ms}ms${bound}${opts.note?.() ?? ""}`,
           ),
-        );
-      }, ms);
+        ms,
+      );
       t.unref?.();
     };
     const finish = (): void => {
       settled = true;
       clearTimeout(t);
+      if (ceiling !== undefined) clearTimeout(ceiling);
     };
     arm();
+    if (opts.ceilingMs !== undefined) {
+      // Armed once and never re-armed — this is the bound a bump cannot move.
+      ceiling = setTimeout(
+        () =>
+          expire(
+            `odu: ${label} timed out after ${opts.ceilingMs}ms (absolute ceiling — still reporting progress, never finished)${opts.note?.() ?? ""}`,
+          ),
+        opts.ceilingMs,
+      );
+      ceiling.unref?.();
+    }
     opts.heartbeat?.(() => {
       if (settled) return;
       clearTimeout(t);
@@ -266,8 +316,12 @@ function storePathName(path: string): string {
  * path-info`.
  */
 export function copyProgress(): {
-  /** Feed one log line; true when it named a store path not seen before. */
-  observe: (line: string) => boolean;
+  /** Feed one log line. Nothing is returned: "did this line advance the copy?"
+   *  is the wire the design deliberately stopped plugging in when the pin
+   *  heartbeat moved to any-line, and an interface shaped by its test rather
+   *  than by a consumer is one nobody can change. The distinct-path dedupe is
+   *  asserted through {@link note} instead. */
+  observe: (line: string) => void;
   /** Timeout-message suffix; empty when nothing was ever copied (the genuinely
    *  unreachable case, which must not claim a copy was in flight). */
   note: () => string;
@@ -277,12 +331,10 @@ export function copyProgress(): {
   return {
     observe: (line) => {
       const match = /copying path '([^']*)'/.exec(line);
-      if (match === null) return false;
+      if (match === null) return;
       const path = match[1] ?? "";
       last = path;
-      if (seen.has(path)) return false;
       seen.add(path);
-      return true;
     },
     note: () =>
       seen.size === 0
@@ -290,6 +342,47 @@ export function copyProgress(): {
         : ` (still copying the runner closure — ${seen.size} store path${
             seen.size === 1 ? "" : "s"
           } so far, last ${last === null ? "?" : storePathName(last)})`,
+  };
+}
+
+/**
+ * The session-line sink every provisioning dial shares, wired once.
+ *
+ * Both dials that pin a lane face (`tryClaim`, `probeHost`) need the same three
+ * things off one line stream: the copy diagnosis, the pin's liveness bump, and
+ * the caller's own sink — plus the pin's two bounds (idle + ceiling). Wiring
+ * that at each call site is how the liveness policy comes to exist twice and
+ * drift on the subtle half (which deadline a bump extends).
+ *
+ * ANY line is the liveness signal — a session that is still narrating is a
+ * session that is alive, and provisioning spends long stretches evaluating and
+ * building rather than copying (see {@link CLAIM_TIMEOUT_MS}). `copyProgress`
+ * rides along purely to make the timeout message a diagnosis. The bump reaches
+ * only the pin's deadline: the claim/probe RPC that follows is a separate
+ * `withTimeout` with no heartbeat, and a bump after the pin settles is a no-op
+ * inside `withTimeout` itself, so nothing has to be unwired afterwards.
+ * Wired unconditionally (not only when a caller passes `onLog`), because the
+ * deadline must not depend on whether anyone is listening.
+ */
+function provisionSink(onLog?: (line: string) => void): {
+  log: ReturnType<typeof lineLogger>;
+  pin: TimeoutOpts;
+} {
+  const progress = copyProgress();
+  let bump: (() => void) | null = null;
+  return {
+    log: lineLogger((line) => {
+      progress.observe(line);
+      bump?.();
+      onLog?.(line);
+    }),
+    pin: {
+      heartbeat: (b) => {
+        bump = b;
+      },
+      note: progress.note,
+      ceilingMs: PIN_CEILING_MS,
+    },
   };
 }
 
@@ -309,21 +402,9 @@ export async function tryClaim(
   }
 
   const timeoutMs = opts.timeoutMs ?? CLAIM_TIMEOUT_MS;
-  // The session log is now read as well as forwarded. ANY line is the liveness
-  // signal — a session that is still narrating is a session that is alive, and
-  // provisioning spends long stretches evaluating and building rather than
-  // copying (see CLAIM_TIMEOUT_MS). `copyProgress` rides along purely to make
-  // the timeout message a diagnosis. `bumpPin` is live only while the pin is
-  // outstanding, so this extends THAT deadline and nothing else; wired
-  // unconditionally (not only when a caller passes `onLog`), because the
-  // deadline must not depend on whether anyone is listening.
-  const progress = copyProgress();
-  let bumpPin: (() => void) | null = null;
-  const onLine = (line: string): void => {
-    progress.observe(line);
-    bumpPin?.();
-    opts.onLog?.(line);
-  };
+  // The session log is read as well as forwarded — see `provisionSink`, which
+  // owns the diagnosis + liveness wiring both dials share.
+  const sink = provisionSink(opts.onLog);
   const session = makeSession<AgentClient, SshProv>({
     connectOnce: sshConnector({
       surface: laneSurface,
@@ -335,7 +416,7 @@ export async function tryClaim(
     initialConnection: "probing",
     label: `lease:${shortHost(host)}`,
     // makeSession takes a structured Logger (kolu#1876+); adapt the line sink.
-    log: lineLogger(onLine),
+    log: sink.log,
   });
 
   let intentionalRelease = false;
@@ -345,14 +426,8 @@ export async function tryClaim(
       pinLaneFace(session),
       timeoutMs,
       `lease pin ${shortHost(host)}`,
-      {
-        heartbeat: (bump) => {
-          bumpPin = bump;
-        },
-        note: progress.note,
-      },
+      sink.pin,
     );
-    bumpPin = null;
 
     const result = await withTimeout(
       runUnary(
@@ -421,16 +496,10 @@ export async function probeHost(
   }
 
   const timeoutMs = opts.timeoutMs ?? CLAIM_TIMEOUT_MS;
-  // Same cold-store bound as `tryClaim`: probing a host that has never seen
-  // odu-runner provisions the whole closure, so the pin deadline tracks
-  // liveness rather than total elapsed.
-  const progress = copyProgress();
-  let bumpPin: (() => void) | null = null;
-  const onLine = (line: string): void => {
-    progress.observe(line);
-    bumpPin?.();
-    opts.onLog?.(line);
-  };
+  // Same cold-store bounds as `tryClaim`, from the same sink: probing a host
+  // that has never seen odu-runner provisions the whole closure, so the pin
+  // deadline tracks liveness rather than total elapsed.
+  const sink = provisionSink(opts.onLog);
   const session = makeSession<AgentClient, SshProv>({
     connectOnce: sshConnector({
       surface: laneSurface,
@@ -441,7 +510,7 @@ export async function probeHost(
     }),
     initialConnection: "probing",
     label: `lease-probe:${shortHost(host)}`,
-    log: lineLogger(onLine),
+    log: sink.log,
   });
 
   try {
@@ -449,14 +518,8 @@ export async function probeHost(
       pinLaneFace(session),
       timeoutMs,
       `lease probe pin ${shortHost(host)}`,
-      {
-        heartbeat: (bump) => {
-          bumpPin = bump;
-        },
-        note: progress.note,
-      },
+      sink.pin,
     );
-    bumpPin = null;
     session.markConnected();
     const result = await withTimeout(
       runUnary(client.surface.lease.probe(lockPathKey(opts.lockPath))),

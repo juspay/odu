@@ -21,7 +21,7 @@ const COPY_LINE = (path: string): string =>
 describe("copyProgress", () => {
   it("says nothing when no copy was ever observed", () => {
     const p = copyProgress();
-    expect(p.observe("kolu-ci-5: connecting")).toBe(false);
+    p.observe("kolu-ci-5: connecting");
     // An unreachable machine must not be reported as one that was mid-copy —
     // that is the misdiagnosis in the other direction.
     expect(p.note()).toBe("");
@@ -29,8 +29,8 @@ describe("copyProgress", () => {
 
   it("counts store paths and names the last one, stripped of its hash", () => {
     const p = copyProgress();
-    expect(p.observe(COPY_LINE("/nix/store/aaaa-git-2.55.0-doc"))).toBe(true);
-    expect(p.observe(COPY_LINE("/nix/store/bbbb-python3-3.14.6"))).toBe(true);
+    p.observe(COPY_LINE("/nix/store/aaaa-git-2.55.0-doc"));
+    p.observe(COPY_LINE("/nix/store/bbbb-python3-3.14.6"));
     const note = p.note();
     expect(note).toContain("still copying the runner closure");
     expect(note).toContain("2 store paths");
@@ -51,8 +51,8 @@ describe("copyProgress", () => {
     // would report a 300-path closure as 600, which no `nix path-info` can
     // reconcile.
     const p = copyProgress();
-    expect(p.observe(COPY_LINE("/nix/store/aaaa-git-2.55.0-doc"))).toBe(true);
-    expect(p.observe(COPY_LINE("/nix/store/aaaa-git-2.55.0-doc"))).toBe(false);
+    p.observe(COPY_LINE("/nix/store/aaaa-git-2.55.0-doc"));
+    p.observe(COPY_LINE("/nix/store/aaaa-git-2.55.0-doc"));
     expect(p.note()).toContain("1 store path so far");
     // A repeat still updates "last" — it is where the copy actually is.
     expect(p.note()).toContain("git-2.55.0-doc");
@@ -96,6 +96,61 @@ describe("withTimeout", () => {
     setTimeout(() => clearInterval(ticker), 60);
     await expect(pending).rejects.toThrow("timed out after 40ms without progress");
     expect(Date.now() - started).toBeGreaterThanOrEqual(80);
+  });
+
+  it("fires the absolute ceiling on a peer that narrates but never finishes", async () => {
+    // The hole the idle bound alone leaves: `@kolu/surface-remote`'s
+    // pre-connected backstop expires into `forceCycle`, which RETRIES and
+    // announces the retry through `localProgress` — a progress line that re-arms
+    // the idle bound. A host stuck in that loop would keep the pin outstanding
+    // forever. The ceiling is the one bound a bump cannot move.
+    let bump = (): void => {};
+    const ticker = setInterval(() => bump(), 5);
+    const started = Date.now();
+    const pending = withTimeout(
+      new Promise(() => {}),
+      30, // idle bound — perpetually re-armed by the ticker
+      "lease pin kolu-ci-5",
+      {
+        heartbeat: (b) => {
+          bump = b;
+        },
+        ceilingMs: 60,
+      },
+    );
+    try {
+      // The message must say WHICH bound fired: a ceiling expiry is a host that
+      // was alive the whole time, which is a different diagnosis from silence.
+      await expect(pending).rejects.toThrow(
+        "timed out after 60ms (absolute ceiling",
+      );
+      expect(Date.now() - started).toBeGreaterThanOrEqual(55);
+    } finally {
+      clearInterval(ticker);
+    }
+  });
+
+  it("lets the idle bound fire first when the peer goes silent", async () => {
+    // The ceiling is a backstop, never the working deadline: a genuinely silent
+    // session must still be diagnosed as silence, with its copy note attached.
+    const p = copyProgress();
+    p.observe(COPY_LINE("/nix/store/aaaa-git-2.55.0-doc"));
+    await expect(
+      withTimeout(new Promise(() => {}), 20, "lease pin kolu-ci-5", {
+        heartbeat: () => {},
+        note: p.note,
+        ceilingMs: 10_000,
+      }),
+    ).rejects.toThrow("timed out after 20ms without progress");
+  });
+
+  it("does not fire the ceiling on a call that settles in time", async () => {
+    await expect(
+      withTimeout(Promise.resolve("pinned"), 50, "lease pin kolu-ci-5", {
+        heartbeat: () => {},
+        ceilingMs: 20,
+      }),
+    ).resolves.toBe("pinned");
   });
 
   it("stops bumping once the call settles", async () => {
