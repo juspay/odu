@@ -6,31 +6,8 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import { EMPTY_HEADER, type RunHeader, runPhase } from "./surface";
-
-function provisioningHeader(startedAt = 1_000): RunHeader {
-  return {
-    commitUrl: null,
-    lanes: [
-      {
-        state: "claiming",
-        platform: "x86_64-linux",
-        pool: ["kolu-ci-5", "kolu-ci-6"],
-      },
-    ],
-    hostsSource: "~/.config/odu/hosts.json",
-    startedAt,
-  };
-}
-
-function lanesHeader(): RunHeader {
-  return {
-    commitUrl: null,
-    lanes: [{ state: "leased", platform: "x86_64-linux", host: "kolu-ci-5" }],
-    hostsSource: "~/.config/odu/hosts.json",
-    startedAt: 1_000,
-  };
-}
+import { lanesHeader, provisioningHeader } from "./scaffoldForTest";
+import { EMPTY_HEADER, runPhase } from "./surface";
 
 describe("runPhase", () => {
   it("is provisioning while any lane is still claiming", () => {

@@ -4,6 +4,7 @@ import type {
   PipelineState,
   RunHeader,
 } from "../common/surface";
+import { capturingStdout } from "../common/scaffoldForTest";
 import { createDisplay, progressEvent } from "./display";
 import { stepFocus } from "../cli/render";
 
@@ -77,30 +78,13 @@ const claimingHeader: RunHeader = {
   ],
 };
 
-function capturingStdout(fn: () => void): string {
-  const chunks: string[] = [];
-  const original = process.stdout.write.bind(process.stdout);
-  process.stdout.write = ((chunk: string | Uint8Array): boolean => {
-    chunks.push(
-      typeof chunk === "string" ? chunk : Buffer.from(chunk).toString(),
-    );
-    return true;
-  }) as typeof process.stdout.write;
-  try {
-    fn();
-    return chunks.join("");
-  } finally {
-    process.stdout.write = original;
-  }
-}
-
 /** `setHeader` is the ONE way a run environment reaches a face — `start` takes
  *  state alone — so a display can never be handed two headers to arbitrate
  *  between. These pin the two consequences on the plain face. */
 describe("PlainDisplay — the run environment arrives through setHeader", () => {
-  it("banners the header delivered before start", () => {
+  it("banners the header delivered before start", async () => {
     const display = createDisplay("plain");
-    const out = capturingStdout(() => {
+    const { out } = await capturingStdout(() => {
       display.setHeader(claimingHeader);
       display.start(state);
       display.stop();
@@ -109,13 +93,13 @@ describe("PlainDisplay — the run environment arrives through setHeader", () =>
     expect(out).toContain("claiming x86_64-linux from kolu-ci-5, kolu-ci-6");
   });
 
-  it("announces the end of provisioning whichever way it ends", () => {
+  it("announces the end of provisioning whichever way it ends", async () => {
     // The old rule diffed the rendered lane string and refused to announce an
     // EMPTY one, so the claim-failure republish (a roster that resolved to no
     // lanes at all) was silently swallowed and a captured CI log got no line
     // marking the transition out of provisioning.
     const failed = createDisplay("plain");
-    const outFailed = capturingStdout(() => {
+    const { out: outFailed } = await capturingStdout(() => {
       failed.setHeader(claimingHeader);
       failed.start(state);
       failed.setHeader({ ...claimingHeader, lanes: [] });
@@ -127,7 +111,7 @@ describe("PlainDisplay — the run environment arrives through setHeader", () =>
     expect(outFailed).not.toContain("no_lanes");
 
     const resolved = createDisplay("plain");
-    const outResolved = capturingStdout(() => {
+    const { out: outResolved } = await capturingStdout(() => {
       resolved.setHeader(claimingHeader);
       resolved.start(state);
       resolved.setHeader(header);
@@ -138,9 +122,9 @@ describe("PlainDisplay — the run environment arrives through setHeader", () =>
     );
   });
 
-  it("says nothing for a republish that does not change the phase", () => {
+  it("says nothing for a republish that does not change the phase", async () => {
     const display = createDisplay("plain");
-    const out = capturingStdout(() => {
+    const { out } = await capturingStdout(() => {
       display.setHeader(header);
       display.start(state);
       display.setHeader({ ...header, hostsSource: "elsewhere" });

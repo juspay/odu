@@ -25,6 +25,12 @@ import {
   type RunHeader,
   runPhase,
 } from "../common/surface";
+import {
+  capturingStdout,
+  lanesHeader,
+  provisioningHeader,
+  waitFor,
+} from "../common/scaffoldForTest";
 import { subscribe } from "../common/effectEdge";
 import { agentReaderFromA, toAgentNodes } from "../mcp/agentSurface";
 import { dialSocket } from "../coordinator/socket";
@@ -57,30 +63,6 @@ function provisioningState(): PipelineState {
   };
 }
 
-function provisioningHeader(startedAt = 1_000): RunHeader {
-  return {
-    commitUrl: null,
-    lanes: [
-      {
-        state: "claiming",
-        platform: "x86_64-linux",
-        pool: ["kolu-ci-5", "kolu-ci-6"],
-      },
-    ],
-    hostsSource: "~/.config/odu/hosts.json",
-    startedAt,
-  };
-}
-
-function lanesHeader(): RunHeader {
-  return {
-    commitUrl: null,
-    lanes: [{ state: "leased", platform: "x86_64-linux", host: "kolu-ci-5" }],
-    hostsSource: "~/.config/odu/hosts.json",
-    startedAt: 1_000,
-  };
-}
-
 /** A partly-claimed multi-platform run — one lane leased, one still claiming,
  *  in the run's own platform order. */
 function partlyClaimedHeader(): RunHeader {
@@ -106,38 +88,6 @@ const open: TestSurface[] = [];
 afterEach(() => {
   for (const s of open.splice(0)) s.close();
 });
-
-/** Poll a predicate to a deadline — for ordering against a live subscription,
- *  where the alternative is a fixed sleep that is either flaky or slow. */
-async function waitFor(
-  pred: () => boolean,
-  timeoutMs = 5_000,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!pred()) {
-    if (Date.now() > deadline) throw new Error("waitFor: timed out");
-    await new Promise((r) => setTimeout(r, 10));
-  }
-}
-
-async function capturingStdout<T>(
-  fn: () => Promise<T>,
-): Promise<{ out: string; result: T }> {
-  const chunks: string[] = [];
-  const original = process.stdout.write.bind(process.stdout);
-  process.stdout.write = ((chunk: string | Uint8Array): boolean => {
-    chunks.push(
-      typeof chunk === "string" ? chunk : Buffer.from(chunk).toString(),
-    );
-    return true;
-  }) as typeof process.stdout.write;
-  try {
-    const result = await fn();
-    return { out: chunks.join(""), result };
-  } finally {
-    process.stdout.write = original;
-  }
-}
 
 describe("provisioningLines", () => {
   it("names the phase, the pool and how long it has been at it", () => {

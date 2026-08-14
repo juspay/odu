@@ -25,9 +25,9 @@ import {
 } from "../common/surface";
 import { formatGoDuration } from "../common/duration";
 import {
+  isSetupNode,
   onPlatform,
   parseAtPlatform,
-  SETUP_NAMEPATH,
   splitFanId,
   transitiveDependents,
 } from "../common/nodeId";
@@ -484,13 +484,6 @@ export async function waitCommand(opts: WaitCommandOpts): Promise<number> {
     // is actually released.
     await dialed.close();
   }
-}
-
-/** Fan-in bookkeeping node the coordinator owns — every task's `needs` includes
- *  `_ci-setup@plat`, so including it in `@platform` expansion would collapse
- *  multi-rerun to "re-provision the lane only". Explicit id still works. */
-function isSetupNode(id: string): boolean {
-  return splitFanId(id).namepath === SETUP_NAMEPATH;
 }
 
 /** Expand a rerun selector against live state into fan-in node ids:

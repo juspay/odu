@@ -8,6 +8,10 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
+import {
+  capturingStderr,
+  capturingStdout,
+} from "../common/scaffoldForTest";
 import { pendingNode, type PipelineState } from "../common/surface";
 import { dialSocket } from "../coordinator/socket";
 import { serveTestSurface, type TestSurface } from "../mcp/serveForTest";
@@ -67,46 +71,6 @@ const open: TestSurface[] = [];
 afterEach(() => {
   for (const s of open.splice(0)) s.close();
 });
-
-/** Run `fn` with process.stdout captured; returns what it wrote + fn's result. */
-async function capturingStdout<T>(
-  fn: () => Promise<T>,
-): Promise<{ out: string; result: T }> {
-  const chunks: string[] = [];
-  const original = process.stdout.write.bind(process.stdout);
-  process.stdout.write = ((chunk: string | Uint8Array): boolean => {
-    chunks.push(
-      typeof chunk === "string" ? chunk : Buffer.from(chunk).toString(),
-    );
-    return true;
-  }) as typeof process.stdout.write;
-  try {
-    const result = await fn();
-    return { out: chunks.join(""), result };
-  } finally {
-    process.stdout.write = original;
-  }
-}
-
-/** Same as capturingStdout but for stderr. */
-async function capturingStderr<T>(
-  fn: () => Promise<T>,
-): Promise<{ err: string; result: T }> {
-  const chunks: string[] = [];
-  const original = process.stderr.write.bind(process.stderr);
-  process.stderr.write = ((chunk: string | Uint8Array): boolean => {
-    chunks.push(
-      typeof chunk === "string" ? chunk : Buffer.from(chunk).toString(),
-    );
-    return true;
-  }) as typeof process.stderr.write;
-  try {
-    const result = await fn();
-    return { err: chunks.join(""), result };
-  } finally {
-    process.stderr.write = original;
-  }
-}
 
 async function served(state: PipelineState): Promise<TestSurface> {
   const surface = await serveTestSurface(state);

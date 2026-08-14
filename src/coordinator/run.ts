@@ -54,6 +54,7 @@ import { gitTopLevel } from "../common/git";
 import { createLogTail } from "../common/logTail";
 import {
   fanId,
+  isSetupNode,
   onPlatform,
   SETUP_NAMEPATH,
   splitFanId,
@@ -910,7 +911,7 @@ async function orchestrate(
     if (platform === "unknown" || namepath === "") return false;
     const lane = liveLane(platform);
     if (lane === undefined) {
-      return namepath === SETUP ? cancelPlatform(platform) : false;
+      return isSetupNode(id) ? cancelPlatform(platform) : false;
     }
     return lane.cancel(namepath);
   };

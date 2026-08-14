@@ -26,6 +26,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
 import { runUnary } from "../common/effectEdge";
+import { waitFor } from "../common/scaffoldForTest";
 import { agentReaderFromA } from "../mcp/agentSurface";
 import { waitForSettle } from "./waitForSettle";
 import type { ClaimOutcome } from "./runEnv";
@@ -98,14 +99,6 @@ function fixture(): string {
   return dir;
 }
 
-async function waitFor(pred: () => boolean, timeoutMs = 20_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!pred()) {
-    if (Date.now() > deadline) throw new Error("waitFor: timed out");
-    await new Promise((r) => setTimeout(r, 25));
-  }
-}
-
 /** Poll the checkout socket until the coordinator answers. */
 async function dialUntilServing(
   socketPath: string,
@@ -159,7 +152,7 @@ describe.if(hasJust)("a cancel that lands mid-claim", () => {
     const runOutcome = run.catch((err: unknown) => err);
 
     // The socket comes up BEFORE the claim — the whole point of #84.
-    await waitFor(() => claimEntered);
+    await waitFor(() => claimEntered, 20_000);
     const dialed = await dialUntilServing(socketPath);
 
     try {
