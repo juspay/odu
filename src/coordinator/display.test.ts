@@ -2,8 +2,10 @@ import { describe, expect, it } from "bun:test";
 import type {
   NodeState,
   PipelineState,
+  RunHeader,
 } from "../common/surface";
-import { progressEvent } from "./display";
+import { capturingStdout } from "../common/scaffoldForTest";
+import { createDisplay, progressEvent } from "./display";
 import { stepFocus } from "../cli/render";
 
 function node(
@@ -55,15 +57,82 @@ const state: PipelineState = {
   },
 };
 
-const header = {
+const header: RunHeader = {
   commitUrl: "https://github.com/juspay/kolu/commit/3cbac86f",
   lanes: [
-    { platform: "x86_64-linux", host: "kolu-ci-5" },
-    { platform: "aarch64-darwin", host: "rasam" },
+    { state: "leased", platform: "x86_64-linux", host: "kolu-ci-5" },
+    { state: "leased", platform: "aarch64-darwin", host: "rasam" },
   ],
   hostsSource: "~/.config/odu/hosts.json",
   startedAt: 940_000,
 };
+
+const claimingHeader: RunHeader = {
+  ...header,
+  lanes: [
+    {
+      state: "claiming",
+      platform: "x86_64-linux",
+      pool: ["kolu-ci-5", "kolu-ci-6"],
+    },
+  ],
+};
+
+/** `setHeader` is the ONE way a run environment reaches a face — `start` takes
+ *  state alone — so a display can never be handed two headers to arbitrate
+ *  between. These pin the two consequences on the plain face. */
+describe("PlainDisplay — the run environment arrives through setHeader", () => {
+  it("banners the header delivered before start", async () => {
+    const display = createDisplay("plain");
+    const { out } = await capturingStdout(() => {
+      display.setHeader(claimingHeader);
+      display.start(state);
+      display.stop();
+    });
+    expect(out).toContain("odu · ci::default @ 3cbac86");
+    expect(out).toContain("claiming x86_64-linux from kolu-ci-5, kolu-ci-6");
+  });
+
+  it("announces the end of provisioning whichever way it ends", async () => {
+    // The old rule diffed the rendered lane string and refused to announce an
+    // EMPTY one, so the claim-failure republish (a roster that resolved to no
+    // lanes at all) was silently swallowed and a captured CI log got no line
+    // marking the transition out of provisioning.
+    const failed = createDisplay("plain");
+    const { out: outFailed } = await capturingStdout(() => {
+      failed.setHeader(claimingHeader);
+      failed.start(state);
+      failed.setHeader({ ...claimingHeader, lanes: [] });
+      failed.stop();
+    });
+    // In the face's own words — `no_lanes` is the JSON contract's enum, not a
+    // sentence to print at an operator.
+    expect(outFailed).toContain("odu · no lanes — the run got no machine");
+    expect(outFailed).not.toContain("no_lanes");
+
+    const resolved = createDisplay("plain");
+    const { out: outResolved } = await capturingStdout(() => {
+      resolved.setHeader(claimingHeader);
+      resolved.start(state);
+      resolved.setHeader(header);
+      resolved.stop();
+    });
+    expect(outResolved).toContain(
+      "odu · lanes x86_64-linux=kolu-ci-5 · aarch64-darwin=rasam",
+    );
+  });
+
+  it("says nothing for a republish that does not change the phase", async () => {
+    const display = createDisplay("plain");
+    const { out } = await capturingStdout(() => {
+      display.setHeader(header);
+      display.start(state);
+      display.setHeader({ ...header, hostsSource: "elsewhere" });
+      display.stop();
+    });
+    expect(out.split("\n").filter((l) => l !== "")).toHaveLength(1);
+  });
+});
 
 // The single projection `run` and `attach` share so their json/plain faces
 // can't drift (juspay/odu#4). The fields a node-status-only emitter used to

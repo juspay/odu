@@ -61,8 +61,42 @@ function envNumber(name: string, fallback: number, min: number): number {
 }
 
 const WAIT_POLL_MS = envNumber("ODU_LEASE_WAIT_POLL_MS", 5_000, 1);
-/** Bound for pin + claim RPC (includes cold provisioning of odu-runner). */
+/** Bound for pin + claim RPC (includes cold provisioning of odu-runner).
+ *
+ *  For the PIN it is an idle bound over TOTAL SILENCE, not a total-elapsed one.
+ *  `@kolu/surface-remote` bounds provisioning by progress at two layers of its
+ *  own — the session's pre-connected backstop
+ *  (`DEFAULT_PRE_CONNECTED_LIVENESS_MS`, 20 min, re-armed on every progress
+ *  line and every phase change) and each provisioning step's
+ *  `progress-liveness` policy (`PROVISION_STEP_SILENCE_BASE_MS` doubling to
+ *  `PROVISION_STEP_MAX_EXPIRIES`, `PROVISION_COPY_SILENCE_MS` for the copy).
+ *
+ *  Neither of those is TERMINAL for a `pin()` — see {@link PIN_CEILING_MS} for
+ *  the `forceCycle` retry loop that is why, and for the bound that catches it.
+ *  So odu's bound is the only terminal one on this path, which is exactly why it
+ *  must not be removed in favour of "the framework already handles it".
+ *
+ *  It re-arms on ANY line the session emits, not on copy lines alone: a cap that
+ *  re-armed only on `copying path` would relocate juspay/odu#84's death into
+ *  `nix build`'s evaluation phase, which narrates plenty but copies nothing. */
 const CLAIM_TIMEOUT_MS = envNumber("ODU_LEASE_CLAIM_TIMEOUT_MS", 180_000, 1);
+
+/** Absolute ceiling on ONE pin, beside the idle bound above.
+ *
+ *  The idle bound alone has a hole: `forceCycle` narrates through
+ *  `localProgress`, so a host that never finishes provisioning but keeps
+ *  cycling emits a progress line on every cycle, re-arms
+ *  {@link CLAIM_TIMEOUT_MS} forever, and hangs the run with no terminal bound
+ *  at all. This is that bound, and it is deliberately generous: well above the
+ *  framework's 20-minute pre-connected backstop, so it can never pre-empt
+ *  legitimate cold-host provisioning (a first `nix copy` of the runner closure
+ *  onto a bare box is tens of minutes of honest work). It catches only "alive,
+ *  narrating, and never finishing".
+ *
+ *  juspay/odu#84 died of a 180s *total elapsed* cap; this is not that cap
+ *  restored. The timeout message names which of the two bounds fired, so the
+ *  two failures are never confused for one another. */
+const PIN_CEILING_MS = envNumber("ODU_LEASE_PIN_CEILING_MS", 45 * 60_000, 1);
 
 export interface LeaseIdentity {
   holder: string;
@@ -157,23 +191,211 @@ export interface AgentDialOpts {
   lockPath?: string;
 }
 
-function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+interface TimeoutOpts {
+  /** Hands the caller a `bump` that RESTARTS the countdown, turning the bound
+   *  from "finish within `ms`" into "go quiet for `ms`". Wire it to a real
+   *  progress signal only — a bump with no evidence behind it is an unbounded
+   *  wait wearing a timeout's clothes.
+   *
+   *  A `bump` after the call settles (either way) is a no-op — callers need not
+   *  unwire it, and a second guard at the call site would only be a weaker copy
+   *  of this one. */
+  heartbeat?: (bump: () => void) => void;
+  /** Appended to the timeout message: what the call was waiting ON, so the
+   *  refusal is a diagnosis rather than a duration. */
+  note?: () => string;
+  /** Total-elapsed backstop that a `bump` can NEVER re-arm. Only meaningful
+   *  beside a `heartbeat`: an idle bound is unbounded in total time by
+   *  construction, so a peer that narrates forever without finishing needs this
+   *  to have any terminal bound at all. Set it generously — it is the last
+   *  resort, not the working deadline. */
+  ceilingMs?: number;
+}
+
+/** Exported for its unit test: the heartbeat turns an absolute bound into an
+ *  idle one, and that difference is the whole of whether a cold host can be
+ *  provisioned at all — it deserves a test that doesn't need an ssh session. */
+export function withTimeout<T>(
+  p: Promise<T>,
+  ms: number,
+  label: string,
+  opts: TimeoutOpts = {},
+): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const t = setTimeout(() => {
-      reject(new Error(`odu: ${label} timed out after ${ms}ms`));
-    }, ms);
-    t.unref?.();
+    let t: ReturnType<typeof setTimeout>;
+    let ceiling: ReturnType<typeof setTimeout> | undefined;
+    let settled = false;
+    const bound = opts.heartbeat === undefined ? "" : " without progress";
+    /** This call is over: stop both timers and refuse further bumps. */
+    const finish = (): void => {
+      settled = true;
+      clearTimeout(t);
+      if (ceiling !== undefined) clearTimeout(ceiling);
+    };
+    // A timeout SETTLES the promise too, so it finishes exactly as a resolution
+    // does — otherwise a bump arriving afterwards re-arms a fresh timer against
+    // an already-rejected promise, and since the heartbeat fires on every
+    // session line that repeats for as long as the peer keeps talking.
+    const expire = (message: string): void => {
+      finish();
+      reject(new Error(message));
+    };
+    const arm = (): void => {
+      t = setTimeout(
+        () =>
+          expire(
+            `odu: ${label} timed out after ${ms}ms${bound}${opts.note?.() ?? ""}`,
+          ),
+        ms,
+      );
+      t.unref?.();
+    };
+    arm();
+    if (opts.ceilingMs !== undefined) {
+      // Armed once and never re-armed — this is the bound a bump cannot move.
+      ceiling = setTimeout(
+        () =>
+          expire(
+            `odu: ${label} timed out after ${opts.ceilingMs}ms (absolute ceiling — still reporting progress, never finished)${opts.note?.() ?? ""}`,
+          ),
+        opts.ceilingMs,
+      );
+      ceiling.unref?.();
+    }
+    opts.heartbeat?.(() => {
+      if (settled) return;
+      clearTimeout(t);
+      arm();
+    });
     p.then(
       (v) => {
-        clearTimeout(t);
+        finish();
         resolve(v);
       },
       (e: unknown) => {
-        clearTimeout(t);
+        finish();
         reject(e);
       },
     );
   });
+}
+
+/** `/nix/store/<hash>-git-2.55.0-doc` → `git-2.55.0-doc`; anything else
+ *  verbatim. Only for naming the path a stalled copy was last on. */
+function storePathName(path: string): string {
+  const base = path.slice(path.lastIndexOf("/") + 1);
+  const dash = base.indexOf("-");
+  return dash > 0 ? base.slice(dash + 1) : base;
+}
+
+/**
+ * What the runner-closure copy has done so far, read off the session's own log
+ * lines — `nix` narrates each store path it pushes (`copying path '/nix/store/…'
+ * to 'ssh-ng://host'`).
+ *
+ * DIAGNOSIS ONLY — it bounds nothing (see {@link CLAIM_TIMEOUT_MS}). What it
+ * buys is the sentence at the end of a timeout: `lease pin … timed out` reads as
+ * "unreachable machine", and on a cold box that is the wrong diagnosis — the
+ * machine was in fact receiving a few hundred megabytes of closure
+ * (juspay/odu#84).
+ *
+ * Paths are counted DISTINCT, not per narration line: provisioning copies each
+ * path twice on a cold host — once pulling it into the local store, once
+ * shipping it to the remote — so counting lines would report a 300-path closure
+ * as 600 and turn the diagnosis into a number nobody can reconcile with `nix
+ * path-info`.
+ */
+const COPY_PATH_RE = /copying path '([^']*)'/;
+
+export function copyProgress(): {
+  /** Feed one log line. Returns nothing: no consumer asks "did this line advance
+   *  the copy?" — the pin heartbeat fires on any line. The distinct-path dedupe
+   *  is asserted through {@link note}. */
+  observe: (line: string) => void;
+  /** Timeout-message suffix; empty when nothing was ever copied (the genuinely
+   *  unreachable case, which must not claim a copy was in flight). */
+  note: () => string;
+  /** No further note will be asked for — release the path set and make
+   *  `observe` a no-op. See {@link provisionSink}, the only caller. */
+  done: () => void;
+} {
+  let seen: Set<string> | null = new Set<string>();
+  let last: string | null = null;
+  return {
+    observe: (line) => {
+      if (seen === null) return;
+      // Cheap reject first: this runs on every session line, and only a
+      // vanishing fraction of them are copy narration.
+      if (!line.includes("copying path")) return;
+      const match = COPY_PATH_RE.exec(line);
+      if (match === null) return;
+      const path = match[1] ?? "";
+      last = path;
+      seen.add(path);
+    },
+    done: () => {
+      seen = null;
+      last = null;
+    },
+    note: () =>
+      seen === null || seen.size === 0
+        ? ""
+        : ` (still copying the runner closure — ${seen.size} store path${
+            seen.size === 1 ? "" : "s"
+          } so far, last ${last === null ? "?" : storePathName(last)})`,
+  };
+}
+
+/**
+ * The session-line sink every provisioning dial shares, wired once.
+ *
+ * Both dials that pin a lane face (`tryClaim`, `probeHost`) need the same three
+ * things off one line stream: the copy diagnosis, the pin's liveness bump, and
+ * the caller's own sink — plus the pin's two bounds (idle + ceiling). Wiring
+ * that at each call site is how the liveness policy comes to exist twice and
+ * drift on the subtle half (which deadline a bump extends).
+ *
+ * ANY line is the liveness signal (see {@link CLAIM_TIMEOUT_MS}); `copyProgress`
+ * rides along purely to make the timeout message a diagnosis. The bump reaches
+ * only the pin's deadline: the claim/probe RPC that follows is a separate
+ * `withTimeout` with no heartbeat, and a bump after the pin settles is a no-op
+ * inside `withTimeout` itself. Wired unconditionally (not only when a caller
+ * passes `onLog`), because the deadline must not depend on whether anyone is
+ * listening.
+ *
+ * The diagnosis half is SCOPED TO THE PIN, via `done()`. This sink stays the
+ * session's `log` for the whole lease lifetime — hours on a held lane — but
+ * `note` and the `bump` have no reader once the pin settles. Left armed it
+ * would run a match over every session line of the run and grow a store-path
+ * `Set` nobody will ever read. `done()` drops both, so the rest of the run
+ * pays only `onLog?.(line)`.
+ */
+function provisionSink(onLog?: (line: string) => void): {
+  log: ReturnType<typeof lineLogger>;
+  pin: TimeoutOpts;
+  /** Call once the pin's `withTimeout` has settled, either way. */
+  done: () => void;
+} {
+  const progress = copyProgress();
+  let bump: (() => void) | null = null;
+  return {
+    log: lineLogger((line) => {
+      progress.observe(line);
+      bump?.();
+      onLog?.(line);
+    }),
+    pin: {
+      heartbeat: (b) => {
+        bump = b;
+      },
+      note: progress.note,
+      ceilingMs: PIN_CEILING_MS,
+    },
+    done: () => {
+      bump = null;
+      progress.done();
+    },
+  };
 }
 
 /**
@@ -192,6 +414,9 @@ export async function tryClaim(
   }
 
   const timeoutMs = opts.timeoutMs ?? CLAIM_TIMEOUT_MS;
+  // The session log is read as well as forwarded — see `provisionSink`, which
+  // owns the diagnosis + liveness wiring both dials share.
+  const sink = provisionSink(opts.onLog);
   const session = makeSession<AgentClient, SshProv>({
     connectOnce: sshConnector({
       surface: laneSurface,
@@ -203,17 +428,20 @@ export async function tryClaim(
     initialConnection: "probing",
     label: `lease:${shortHost(host)}`,
     // makeSession takes a structured Logger (kolu#1876+); adapt the line sink.
-    ...(opts.onLog !== undefined ? { log: lineLogger(opts.onLog) } : {}),
+    log: sink.log,
   });
 
   let intentionalRelease = false;
 
   try {
+    // `.finally` and not a post-await line: the pin's diagnosis must be
+    // released on the throw path too, and this session's log outlives it.
     const client = await withTimeout(
       pinLaneFace(session),
       timeoutMs,
       `lease pin ${shortHost(host)}`,
-    );
+      sink.pin,
+    ).finally(sink.done);
 
     const result = await withTimeout(
       runUnary(
@@ -282,6 +510,10 @@ export async function probeHost(
   }
 
   const timeoutMs = opts.timeoutMs ?? CLAIM_TIMEOUT_MS;
+  // Same cold-store bounds as `tryClaim`, from the same sink: probing a host
+  // that has never seen odu-runner provisions the whole closure, so the pin
+  // deadline tracks liveness rather than total elapsed.
+  const sink = provisionSink(opts.onLog);
   const session = makeSession<AgentClient, SshProv>({
     connectOnce: sshConnector({
       surface: laneSurface,
@@ -292,7 +524,7 @@ export async function probeHost(
     }),
     initialConnection: "probing",
     label: `lease-probe:${shortHost(host)}`,
-    ...(opts.onLog !== undefined ? { log: lineLogger(opts.onLog) } : {}),
+    log: sink.log,
   });
 
   try {
@@ -300,7 +532,8 @@ export async function probeHost(
       pinLaneFace(session),
       timeoutMs,
       `lease probe pin ${shortHost(host)}`,
-    );
+      sink.pin,
+    ).finally(sink.done);
     session.markConnected();
     const result = await withTimeout(
       runUnary(client.surface.lease.probe(lockPathKey(opts.lockPath))),
@@ -592,7 +825,12 @@ export interface LeaseLanesOpts {
   platforms: readonly string[];
   identity: LeaseIdentity;
   noWait: boolean;
-  onLine?: (msg: string) => void;
+  /** Narration sink, told WHICH lane each line belongs to. A multi-platform
+   *  lease interleaves two hosts' `nix copy` output on one stream, and the
+   *  coordinator now files these lines under that lane's `_ci-setup@<platform>`
+   *  log (juspay/odu#84) — which it can only do if the platform travels with the
+   *  line rather than being guessed from its text. */
+  onLine?: (msg: string, platform: string) => void;
   claim?: AcquireFromPoolOpts["claim"];
   /**
    * Resolve odu-runner drv for a platform (used when `claim` is not
@@ -722,6 +960,13 @@ export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
   const rotateBy = now();
   let waited = false;
 
+  /** This lane's slice of the narration sink — every line the scan or the ssh
+   *  session emits while claiming `platform` is attributed to it. */
+  const lineFor =
+    (platform: string) =>
+    (msg: string): void =>
+      opts.onLine?.(msg, platform);
+
   const claimFor = (
     platform: string,
   ): ((host: string, identity: LeaseIdentity) => Promise<ClaimResult>) => {
@@ -737,7 +982,7 @@ export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
     return (h, id) =>
       tryClaim(h, id, {
         resolveDrvPath: resolve,
-        onLog: opts.onLine,
+        onLog: lineFor(platform),
       });
   };
 
@@ -763,7 +1008,7 @@ export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
           platform,
           pool,
           identity: opts.identity,
-          onLine: opts.onLine,
+          onLine: lineFor(platform),
           claim: claimFor(platform),
           rotateBy,
         });
@@ -813,7 +1058,7 @@ export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
       !waited && platforms.length > 1
         ? " (releasing other platforms until the full set is free)"
         : "";
-    opts.onLine?.(`${blocked.platform}: ${note}${multi}`);
+    opts.onLine?.(`${blocked.platform}: ${note}${multi}`, blocked.platform);
     waited = true;
     await sleep(WAIT_POLL_MS);
   }

@@ -5,10 +5,20 @@
  * drops.
  *
  *   strict gate → HEAD snapshot → `just` DAG ingest → free checkout
- *   (supersede/refuse) → reserve seq → lease one free host per platform → fan
- *   lanes out (an ssh session each) → merge lane state into one fan-in surface
- *   served on `.ci/odu.sock` → write per-SHA logs + post commit statuses on
- *   transitions → verdict → release leases.
+ *   (supersede/refuse) → reserve seq → serve the fan-in surface on
+ *   `.ci/odu.sock` → lease one free host per platform → fan lanes out (an ssh
+ *   session each) → merge lane state into that surface → write per-SHA logs +
+ *   post commit statuses on transitions → verdict → release leases.
+ *
+ * The socket comes up BEFORE the venue lease (juspay/odu#84). Claiming a cold
+ * host is a multi-minute `nix copy` of the runner closure, and with the socket
+ * still down that whole window answered `status` / `attach` / `logs` / `wait`
+ * with "no run in progress" — the same words as a run that died or never
+ * started. Serving first costs nothing (every input the surface needs is
+ * already resolved) and makes provisioning a phase the run can be watched
+ * through: `_ci-setup@<platform>` runs from the claim, its log carries the
+ * copy's own narration, and the run header says which pool each lane is
+ * claiming from until it has a host.
  *
  * Status posting and `--progress json` are both *diff-driven off the fan-in
  * state*, so every observer derives from the same source of truth the
@@ -44,35 +54,31 @@ import { gitTopLevel } from "../common/git";
 import { createLogTail } from "../common/logTail";
 import {
   fanId,
+  isSetupNode,
   onPlatform,
   SETUP_NAMEPATH,
   splitFanId,
 } from "../common/nodeId";
 import type { TaskSpec } from "../common/spec";
 import {
-  EMPTY_HEADER,
+  claimingLanes,
   EMPTY_POSTING,
+  leasedLanes,
   type NodeState,
   oduSurface,
   pendingNode,
   type PipelineState,
   type RunHeader,
+  type RunLane,
   type UnpostedEntry,
 } from "../common/surface";
 import { commitLabel, createDisplay, progressEvent } from "./display";
 import { laneTasks, loadJustPipeline, parseSelector } from "../just/ingest";
 import { fanoutPools, loadHosts, shortHost } from "./hosts";
 import { type Lane, startLane } from "./lane";
-import {
-  type LeaseHandle,
-  leaseLanes,
-  localHolderId,
-} from "./lease";
-import {
-  liveHeldPlatforms,
-  upsertPlatformLease,
-  removePlatformLease,
-} from "./leaseRecord";
+import { type LeaseHandle, localHolderId } from "./lease";
+import { claimVenues } from "./runEnv";
+import { liveHeldPlatforms } from "./leaseRecord";
 import { resolveRunnerFlake, runnerDrvResolver } from "./runnerFlake";
 import { cancelRun } from "./cancel";
 import {
@@ -142,12 +148,12 @@ export interface RunArgs {
  * single-host pool can't deadlock: the live run holds the only remote flock,
  * and a waiter that claimed first would block forever and never reach cancel.
  *
- * Checks both the attach socket *and* the PID run-lock: lease wait happens
- * before `serveSocket`, so a live socket alone misses concurrent starters
- * that are still queued on the venue pool.
+ * Checks both the attach socket *and* the PID run-lock: startup (strict gate,
+ * DAG ingest, seq reservation) happens before `serveSocket`, so a live socket
+ * alone misses a concurrent starter that has not reached it yet.
  *
  * Mirrors MCP `startRun`: supersede cancels-then-confirms (socket when up,
- * SIGTERM on the run-lock holder when only the lease wait is live); without
+ * SIGTERM on the run-lock holder when only startup is live); without
  * supersede a live socket/lock is an immediate refuse.
  * Exported for unit tests that assert cancel-before-claim ordering.
  *
@@ -187,7 +193,7 @@ export async function ensureCheckoutFree(
 
   if (supersede) {
     // Prefer graceful surface cancel when the socket is up; always clear a
-    // lease-waiting holder that never reached serveSocket.
+    // still-starting holder that never reached serveSocket.
     const supersedeTimeout = {
       ok: false as const,
       reason: "supersede-timeout" as const,
@@ -278,7 +284,20 @@ function tryGit(repo: string, args: string[]): string | null {
   return result.status === 0 ? result.stdout.trim() : null;
 }
 
-export async function runCommand(args: RunArgs): Promise<number> {
+/** Injectable collaborators. One member, and it exists for one reason: the venue
+ *  claim is the only thing in `orchestrate` that both takes minutes and cannot
+ *  be reached from a test — it dials ssh. Everything the socket must get right
+ *  *while a claim is outstanding* (a cancel that lands mid-claim, a teardown
+ *  that starts mid-claim) is therefore untestable without a claim a test can
+ *  hold open. Same shape as `ensureCheckoutFree`'s `deps`. */
+export interface RunDeps {
+  claimVenues?: typeof claimVenues;
+}
+
+export async function runCommand(
+  args: RunArgs,
+  deps: RunDeps = {},
+): Promise<number> {
   // Resolve where the generic lane runner comes from before any side effect
   // (worktree snapshot, socket) — a misbuilt binary with no runner flake should
   // refuse instantly, not after pinning HEAD. Throws when ODU_RUNNER_FLAKE is
@@ -345,8 +364,8 @@ export async function runCommand(args: RunArgs): Promise<number> {
   const acquiredLeases: LeaseHandle[] = [];
   // Checkout run-lock (PID file under `.ci/`). Claimed inside orchestrate
   // immediately after ensureCheckoutFree and held for the whole run — including
-  // the unbounded venue-lease wait before serveSocket. `finally` + process-exit
-  // both release so a second starter never co-queues during lease wait.
+  // the startup window before serveSocket. `finally` + process-exit both
+  // release so a second starter never co-queues on the venue pool.
   const runLock: { handle: RunLockHandle | null } = { handle: null };
   // runCommand-owned holder for the seq this run reserved, so the `finally` can
   // reclaim an orphaned reservation sentinel on an early-throw — the same
@@ -380,6 +399,7 @@ export async function runCommand(args: RunArgs): Promise<number> {
       acquiredLeases,
       reservation,
       runLock,
+      deps,
     );
   } finally {
     cleanupSnapshot();
@@ -425,6 +445,9 @@ async function orchestrate(
   /** runCommand-owned checkout run-lock; claimed right after ensureCheckoutFree
    *  and released in runCommand's finally / process exit. */
   runLock: { handle: RunLockHandle | null },
+  /** See {@link RunDeps} — the venue claim, injectable so a test can hold one
+   *  open across the socket's cancel/teardown paths. */
+  deps: RunDeps,
 ): Promise<number> {
   const { repoRoot, specSource, runnerFlake, sha, sha7 } = ctx;
   // Where stdout points picks the face: NDJSON for the /do contract, an
@@ -526,9 +549,9 @@ async function orchestrate(
   // holds the only remote flock, and a waiter that claimed first would block
   // forever without ever reaching supersede cancel (or fail later at
   // serveSocket after waiting the whole prior run). Same order as MCP startRun.
-  // The PID run-lock (claimed immediately below) covers the whole lease-wait
-  // window; serveSocket remains the attach surface, not the sole exclusivity
-  // gate.
+  // The PID run-lock (claimed immediately below) covers the startup window
+  // before the socket serves; serveSocket remains the attach surface, not the
+  // sole exclusivity gate.
   const { socketPath, lockPath } = checkoutPaths(repoRoot);
   const checkout = await ensureCheckoutFree(
     { socketPath, lockPath },
@@ -540,8 +563,8 @@ async function orchestrate(
   }
 
   // Exclusive claim for this process — closes the TOCTOU between the free
-  // check and serveSocket (which can be minutes of venue wait). A second
-  // starter that lost the race refuses here rather than co-queuing.
+  // check and serveSocket. A second starter that lost the race refuses here
+  // rather than co-queuing.
   const claimed = tryAcquireRunLock(lockPath);
   if (claimed === null) {
     process.stderr.write(
@@ -579,7 +602,7 @@ async function orchestrate(
     reservation.current = { status: "reserved", seq, published: false };
   }
 
-  // ── venue lease: one free machine per platform, lock held for the run ──
+  // ── lane assignment: which machine each platform will run on ──
   // Two layers (juspay/odu#54 CR1):
   //   1) Agent-held: `odu lease` / MCP lease left a live holder in
   //      `.ci/odu-lease.json` → use that host, skip claim/release entirely
@@ -587,63 +610,32 @@ async function orchestrate(
   //   2) Run auto-lease: claim for the rest, release on run exit.
   // `--host` pins still force a claim path (override agent hold).
   // After checkout free + run-lock + seq reserve so supersede can't deadlock.
+  //
+  // Only the SPLIT happens here; the claim itself waits until the fan-in socket
+  // is serving (juspay/odu#84 — see the module header). What the split decides
+  // is what the surface can honestly say during that window: an agent-held
+  // platform already knows its host, the rest carry a pool and no host until
+  // their lease resolves.
   const activePlatforms = [...tasksByPlatform.keys()].sort();
   const runLabel = seq !== null ? `${sha7}#${seq}` : sha7;
   const pinPlatforms = new Set(
     args.hostPins.map((p) => p.split("=")[0]).filter((x): x is string => !!x),
   );
   const agentHeld = liveHeldPlatforms(repoRoot);
+  // Only the platforms that already HAVE a machine are recorded here. "Which
+  // platforms need a claim" is not a second list to keep in step with this one
+  // — it is every active platform this map does not cover, which is what the
+  // header roster says (`claimingLanes(header)`), from one source of truth.
   const lanesByPlatform: Record<string, string> = {};
-  const platformsToClaim: string[] = [];
   for (const platform of activePlatforms) {
-    if (pinPlatforms.has(platform)) {
-      platformsToClaim.push(platform);
-      continue;
-    }
+    // A `--host` pin forces the claim path even when an agent holds the lane.
+    if (pinPlatforms.has(platform)) continue;
     const held = agentHeld[platform];
-    if (held !== undefined) {
-      lanesByPlatform[platform] = held;
-      info(
-        `${platform}: using agent-held ${held} (odu lease — lock untouched on run exit)`,
-      );
-      continue;
-    }
-    platformsToClaim.push(platform);
-  }
-  if (platformsToClaim.length > 0) {
-    // Observable wait: record waiting state for platforms we're about to claim
-    // so `odu hosts` / re-reads of the lease file see the line (CR2).
-    for (const platform of platformsToClaim) {
-      upsertPlatformLease(repoRoot, platform, {
-        host: null,
-        holderPid: process.pid,
-        since: Date.now(),
-        state: "waiting",
-        waitingBehind: null,
-        run: runLabel,
-      });
-    }
-    try {
-      const claimed = await leaseLanes({
-        pools: resolvedPools,
-        platforms: platformsToClaim,
-        identity: { holder: localHolderId(), run: runLabel },
-        noWait: args.noWait,
-        onLine: info,
-        resolveDrvPath: (platform) =>
-          runnerDrvResolver(runnerFlake, platform),
-      });
-      for (const [p, h] of Object.entries(claimed.lanes)) {
-        lanesByPlatform[p] = h;
-      }
-      acquiredLeases.push(...claimed.leases);
-    } finally {
-      // Drop run-owned waiting records (this pid). Agent-held platforms were
-      // never in platformsToClaim, so their records stay.
-      for (const platform of platformsToClaim) {
-        removePlatformLease(repoRoot, platform);
-      }
-    }
+    if (held === undefined) continue;
+    lanesByPlatform[platform] = held;
+    info(
+      `${platform}: using agent-held ${held} (odu lease — lock untouched on run exit)`,
+    );
   }
 
   // ── fan-in state: one PipelineState keyed `<node>@<platform>` ──
@@ -651,7 +643,6 @@ async function orchestrate(
   // cell from construction (no deferred rebinding).
   const order: string[] = [];
   const nodes: Record<string, NodeState> = {};
-  const laneStart = new Map<string, number>();
   for (const platform of [...tasksByPlatform.keys()].sort()) {
     const tasks = tasksByPlatform.get(platform) ?? [];
     const setupId = fanId(SETUP, platform);
@@ -659,7 +650,16 @@ async function orchestrate(
     nodes[setupId] = pendingNode({
       id: setupId,
       name: setupId,
-      command: `(provision ${lanesByPlatform[platform]})`,
+      // No machine named here, in either direction. Every other node's
+      // `command` is the shell it runs; this one is a parenthetical nobody on
+      // the fan-in side reads, and WHICH machine this lane is on is a fact the
+      // header's roster owns — `claiming` with its pool, then `leased` with its
+      // host. Naming it here too would be a second copy of that fact, seeded
+      // before the claim and therefore stale from the moment the lease
+      // resolves; the alternative, rewriting it on resolve, is upkeep on a
+      // duplicate with no reader. The roster is the answer to "where"; this is
+      // just what the node does.
+      command: "(provision)",
       needs: [],
     });
     for (const task of tasks) {
@@ -682,10 +682,58 @@ async function orchestrate(
     nodes,
     posting: EMPTY_POSTING,
   });
-  // The run environment (lane→host map + commit link + start clock), published
-  // on the surface so an `attach`-er paints the same matrix `run` does. Filled
-  // in once the lanes resolve (below), before the socket starts serving.
-  const headerStore = inMemoryStore<RunHeader>(EMPTY_HEADER);
+  /** The lane roster for `platforms`, in platform order, from the one source of
+   *  truth (`lanesByPlatform`): a platform with a host is `leased`; one without
+   *  is `claiming` from its candidate pool while the claim is in flight, and
+   *  simply ABSENT once it has resolved. So "claiming" cannot survive the claim
+   *  on any exit path, including ones nobody has thought of yet — it is a
+   *  property of how the roster is built, not a field someone must remember to
+   *  clear. */
+  const rosterFrom = (
+    platforms: readonly string[],
+    beforeClaim: boolean,
+  ): RunLane[] =>
+    platforms.flatMap((platform): RunLane[] => {
+      const host = lanesByPlatform[platform];
+      if (host !== undefined) return [{ state: "leased", platform, host }];
+      // No host yet, so the pool is the honest candidate set: a lane still
+      // claiming is described by the machines it may land on, never by a
+      // placeholder host.
+      return beforeClaim
+        ? [
+            {
+              state: "claiming",
+              platform,
+              pool: [...(poolsByPlatform[platform] ?? [])],
+            },
+          ]
+        : [];
+    });
+
+  // The run environment (the lane roster + commit link + start clock),
+  // published on the surface so an `attach`-er paints the same matrix `run`
+  // does. Published twice: once as the store's initial value, describing a run
+  // that is still claiming, and again once the lanes resolve (or the claim
+  // fails) — so this cell CHANGES during a run and its readers follow it.
+  //
+  // The CELL is the only place this value lives: no store binding for it exists
+  // in this scope, deliberately, so the non-publishing write is unspellable
+  // rather than merely discouraged — see `publishHeader`. This value goes
+  // straight into `implementSurface` as the cell's initial value.
+  const initialHeader = ((): RunHeader => ({
+    commitUrl:
+      github !== null
+        ? `https://github.com/${github.owner}/${github.repo}/commit/${sha}`
+        : null,
+    // Only what is already decided is `leased`: platforms running on an
+    // agent-held lease. Everything else is `claiming` until its lease resolves.
+    lanes: rosterFrom(activePlatforms, true),
+    hostsSource: hostsConfig.source,
+    // One run-start wall-clock, carried on the header so every face (live
+    // matrix + attach) counts elapsed from the same instant. Commit identity
+    // (pipeline name + sha7 + dirty) is already on `store`'s state.
+    startedAt: Date.now(),
+  }))();
 
   // ── per-node local logs: the in-memory tail (late socket subscribers) plus
   //    the durable per-SHA file (.ci/<sha7>/<plat>/<node>.log, justci's layout).
@@ -693,17 +741,30 @@ async function orchestrate(
   //    addition, layered on top of each tail mutation. ──
   const tail = createLogTail();
   const fileFor = (id: string): string => join(repoRoot, logPathFor(sha7, id));
+  /** The log directories this process has already created. A run's node set is
+   *  fixed, so this is bounded by the lane count — and since juspay/odu#84 the
+   *  provisioning narration flows through `appendLocal` one line at a time
+   *  (thousands of `copying path` lines), on the same event loop that serves
+   *  `.ci/odu.sock`. An `mkdirSync` per line is a sync syscall burst degrading
+   *  the very window the socket was moved ahead of the claim to make watchable.
+   *  `appendFileSync` stays: a durable log that survives a SIGKILL is the point. */
+  const madeDirs = new Set<string>();
+  const openFor = (id: string): string => {
+    const file = fileFor(id);
+    const dir = dirname(file);
+    if (!madeDirs.has(dir)) {
+      mkdirSync(dir, { recursive: true });
+      madeDirs.add(dir);
+    }
+    return file;
+  };
   const appendLocal = (id: string, text: string): void => {
     tail.append(id, text);
-    const file = fileFor(id);
-    mkdirSync(dirname(file), { recursive: true });
-    appendFileSync(file, text);
+    appendFileSync(openFor(id), text);
   };
   const resetLocal = (id: string, text: string): void => {
     tail.reset(id, text);
-    const file = fileFor(id);
-    mkdirSync(dirname(file), { recursive: true });
-    writeFileSync(file, text);
+    writeFileSync(openFor(id), text);
   };
 
   // ── the fan-in surface (status / logs / attach dial this) ──
@@ -730,6 +791,28 @@ async function orchestrate(
     const lane = platform === "unknown" ? undefined : liveLane(platform);
     if (lane === undefined) return false;
     return lane.rerun(namepath);
+  };
+
+  /** What an operator lane-drop does to a lane's unfinished nodes. Named once
+   *  because it is applied from two places now: immediately, when the lane is
+   *  live, and deferred to the claim's return when the drop landed mid-claim. */
+  const CANCELLED_BY_OPERATOR = {
+    running: "cancelled",
+    pending: "cancelled",
+    log: "\n[odu] cancelled by operator (lane)\n",
+  } as const;
+
+  /** Give back the run-owned lease on `host`, if there is one. The only writer
+   *  of `acquiredLeases` on the drop path, so "released" and "still in the
+   *  array" cannot come apart — the two call sites (an operator lane cancel,
+   *  and the post-claim sweep of lanes cancelled while their lease was in
+   *  flight) used to maintain that invariant separately. A no-op for an
+   *  agent-held lane, which is never in `acquiredLeases`. */
+  const releaseLeaseFor = (host: string): void => {
+    const idx = acquiredLeases.findIndex((l) => l.host === host);
+    if (idx < 0) return;
+    acquiredLeases[idx]?.release();
+    acquiredLeases.splice(idx, 1);
   };
 
   /** Mark unfinished nodes on a platform terminal — shared by operator lane
@@ -781,28 +864,36 @@ async function orchestrate(
     // with this release (same shape as whole-run shutdown). A new claim may
     // see a still-terminating process group for a short window.
     const host = lanesByPlatform[platform];
-    if (host !== undefined) {
-      const idx = acquiredLeases.findIndex((l) => l.host === host);
-      if (idx >= 0) {
-        acquiredLeases[idx]?.release();
-        acquiredLeases.splice(idx, 1);
-      }
-    }
-    terminalizePlatformNodes(platform, {
-      running: "cancelled",
-      pending: "cancelled",
-      log: "\n[odu] cancelled by operator (lane)\n",
-    });
+    if (host !== undefined) releaseLeaseFor(host);
+    // Terminalizing is DEFERRED while a claim is outstanding — see
+    // `claimInFlight` for why, and `cancelledDuringClaim` for where the claim's
+    // return picks these lanes back up.
+    if (claimInFlight) return true;
+    terminalizePlatformNodes(platform, CANCELLED_BY_OPERATOR);
     checkSettled();
     return true;
   };
 
-  /** Cancel one fan-in node (`ci::fmt@plat`). Platform drop is `lane.cancel`. */
+  /** Cancel one fan-in node (`ci::fmt@plat`). Platform drop is `lane.cancel`.
+   *
+   *  `_ci-setup@<platform>` with no live lane is the one node the coordinator
+   *  can cancel by itself, and since juspay/odu#84 it is reachable: the bracket
+   *  opens at the venue claim, so for the whole provisioning window `odu status`
+   *  shows `_ci-setup@plat` RUNNING while no lane exists to route a cancel to.
+   *  Refusing there means the id an operator can see is the one id they cannot
+   *  act on. Cancelling that node is by definition dropping the lane it brackets
+   *  — there is nothing else in it yet — so it routes to `cancelPlatform`.
+   *
+   *  Only that node. A pending `ci::fmt@plat` in the same window still refuses:
+   *  escalating a one-node cancel into a lane drop is the escalation `odu
+   *  cancel` guards against everywhere else. */
   const cancelNode = async (id: string): Promise<boolean> => {
     const { namepath, platform } = splitFanId(id);
     if (platform === "unknown" || namepath === "") return false;
     const lane = liveLane(platform);
-    if (lane === undefined) return false;
+    if (lane === undefined) {
+      return isSetupNode(id) ? cancelPlatform(platform) : false;
+    }
     return lane.cancel(namepath);
   };
 
@@ -843,7 +934,7 @@ async function orchestrate(
   let onSettledEach: (() => void) | null = null;
 
   let shuttingDown = false;
-  // Hoisted: cancel procedure + lease.lost wire before the real body is assigned
+  // Hoisted: the cancel procedure wires before the real body is assigned
   // (poster is constructed after implementSurface so onHealth is live).
   let shutdown: (
     code: number,
@@ -851,19 +942,24 @@ async function orchestrate(
     opts?: { exclusivityLost?: boolean },
   ) => void = () => {};
 
-  // Fail closed if a remote hold dies mid-run (ssh drop, optional MAX_HOLD,
-  // remote kill): exclusivity is gone and another laptop can claim the same
-  // flock. Intentional `release()` does not fire `lost`.
-  for (const lease of acquiredLeases) {
+  /** Fail closed if a remote hold dies mid-run (ssh drop, optional MAX_HOLD,
+   *  remote kill): exclusivity is gone and another laptop can claim the same
+   *  flock. Intentional `release()` does not fire `lost`. Called once per lease
+   *  as the claim hands it over — the claim now runs *after* this point (the
+   *  socket serves first, juspay/odu#84), so there is no set to sweep here. */
+  const watchLease = (lease: LeaseHandle): void => {
     void lease.lost?.then(() => {
       shutdown(1, `venue lease lost on ${shortHost(lease.host)}`, {
         exclusivityLost: true,
       });
     });
-  }
+  };
 
   const runtime = implementSurface(oduSurface, {
-    cells: { nodes: { store }, header: { store: headerStore } },
+    cells: {
+      nodes: { store },
+      header: { store: inMemoryStore<RunHeader>(initialHeader) },
+    },
     streams: {
       nodeLog: { source: tail.streamSource },
     },
@@ -912,11 +1008,6 @@ async function orchestrate(
       display.update(store.get());
     },
   });
-  // Read-before-write: contexts GitHub already shows in the desired state
-  // become no-ops (eliminates the restart "pending wave").
-  if (ctx.posting && github !== null) {
-    await poster.seed();
-  }
 
   // The single shutdown every interrupt source shares: SIGTERM/SIGINT, the live
   // view's `q` (via `onQuit`), the `run.cancel` surface mutation a second
@@ -993,7 +1084,24 @@ async function orchestrate(
   const allSettled = new Promise<void>((resolve) => {
     settled = resolve;
   });
+  /** Is a venue claim outstanding right now? While it is, this run is NOT
+   *  settleable however terminal its nodes look.
+   *
+   *  The node states are the run's answer to "is this over" for every reader
+   *  outside this process — `wait_for_settle` and `odu wait` judge the `nodes`
+   *  cell, not this module's `checkSettled`. So a `lane.cancel` during the claim
+   *  that terminalized its lane at once would, on a single-platform run, make
+   *  every node terminal while `claimVenues` is still copying a closure onto a
+   *  box, still holding the checkout's one-run lock, and still about to hand
+   *  back a lease. A `wait_for_settle` answering "settled, cancelled" there
+   *  tells an agent the run is over; its next `run()` hits "a run is already in
+   *  progress". The claim's own return is what ends this window: it clears the
+   *  latch, terminalizes the lanes tombstoned meanwhile, and re-judges settle
+   *  once. */
+  let claimInFlight = false;
+
   const checkSettled = (): void => {
+    if (claimInFlight) return;
     const state = store.get();
     const done = state.order.every((id) => {
       const status = state.nodes[id]?.status;
@@ -1010,13 +1118,15 @@ async function orchestrate(
     const prev = cur.nodes[id];
     if (prev === undefined) return;
     const next = { ...prev, ...patch };
-    if (
-      next.status === prev.status &&
-      next.exitCode === prev.exitCode &&
-      next.durationMs === prev.durationMs
-    ) {
-      return;
-    }
+    // Shallow equality over the keys the PATCH names, not over three chosen
+    // ones. The signature says `Partial<NodeState>` and the spread above
+    // applies all of it, so a three-field guard silently discarded any patch
+    // touching only other fields — a contract wider than what it honours, and
+    // the reason "we can't correct that field" ever looked true. Every
+    // transition side effect below stays gated on `next.status !== prev.status`
+    // exactly as before, so nothing fires for a non-status change.
+    const keys = Object.keys(patch) as (keyof NodeState)[];
+    if (keys.every((k) => next[k] === prev[k])) return;
     runtime.ctx.cells.nodes.set({
       ...cur,
       nodes: { ...cur.nodes, [id]: next },
@@ -1051,10 +1161,34 @@ async function orchestrate(
     }
   };
 
+  /** Provisioning has begun for this lane. `_ci-setup@<platform>` is the run's
+   *  bracket around it, opening at the VENUE CLAIM rather than at lane start
+   *  (juspay/odu#84 — see the module header).
+   *
+   *  Guarded on `pending` so it can only ever OPEN the bracket: re-stamping
+   *  `startedAt` on a lane already provisioning would silently discount the
+   *  very wait this node exists to measure, and a lane whose setup already went
+   *  terminal (a claim that failed for it) must not be dragged back to
+   *  `running`. */
+  const startSetup = (platform: string): void => {
+    const id = fanId(SETUP, platform);
+    if (store.get().nodes[id]?.status !== "pending") return;
+    updateNode(id, { status: "running", startedAt: Date.now() });
+  };
+
+  /** Narrate one provisioning line into the lane's `_ci-setup` log as well as
+   *  the operator feed. The claim's ssh session emits the `copying path …`
+   *  progress this run is otherwise silent about; filed here it reaches
+   *  `odu logs -f _ci-setup@<platform>` and the attach log pane. */
+  const setupLine = (msg: string, platform: string): void => {
+    info(msg);
+    appendLocal(fanId(SETUP, platform), `${msg}\n`);
+  };
+
   // The _ci-setup node's lifecycle is coordinator-owned, not lane-mirrored:
   // its `running` start is stamped when the coordinator begins provisioning
-  // (laneStart, below), and its duration is coordinator-measured because our
-  // _ci-setup brackets provision+fetch+worktree, which precedes the lane
+  // (`startSetup`, above), and its duration is coordinator-measured because our
+  // _ci-setup brackets claim+provision+fetch+worktree, which precedes the lane
   // stream. From the lane we take only the terminal verdict (ok/failed).
   const finishSetup = (
     platform: string,
@@ -1065,9 +1199,11 @@ async function orchestrate(
     // Freeze the duration at the first terminal transition: lane frames keep
     // arriving for the rest of the run, and re-deriving Date.now() − start
     // on each one silently inflates the settled number.
-    const current = store.get().nodes[id]?.status;
-    if (current !== "pending" && current !== "running") return;
-    const startedAt = laneStart.get(platform) ?? Date.now();
+    const node = store.get().nodes[id];
+    if (node === undefined) return;
+    if (node.status !== "pending" && node.status !== "running") return;
+    // Off the node `startSetup` stamped it on — one home for the instant.
+    const startedAt = node.startedAt ?? Date.now();
     updateNode(id, {
       status,
       exitCode,
@@ -1079,21 +1215,32 @@ async function orchestrate(
   // ── socket + lanes ──
   mkdirSync(join(repoRoot, ".ci"), { recursive: true });
 
-  const commitUrl =
-    github !== null
-      ? `https://github.com/${github.owner}/${github.repo}/commit/${sha}`
-      : null;
-  // One run-start wall-clock, captured here and carried on the header so every
-  // face (live matrix + attach) counts elapsed from the same instant. Commit
-  // identity (pipeline name + sha7 + dirty) is already on `store`'s state.
-  const header: RunHeader = {
-    commitUrl,
-    lanes: [...tasksByPlatform.keys()].sort().map((platform) => ({
-      platform,
-      host: lanesByPlatform[platform] as string,
-    })),
-    hostsSource: hostsConfig.source,
-    startedAt: Date.now(),
+  // The header's own value — one construction site, read back rather than
+  // rebuilt beside it.
+  const commitUrl = runtime.ctx.cells.header.get().commitUrl;
+  /** The platforms that still need a machine, derived from the roster rather
+   *  than tracked as a second list beside it. */
+  const platformsToClaim = claimingLanes(runtime.ctx.cells.header.get()).map(
+    (l) => l.platform,
+  );
+
+  /** Publish a new header to the surface and to `run`'s own live view, so an
+   *  attached face and the foreground matrix repaint the same lane map. The
+   *  store IS the value — there is no local copy to keep in step.
+   *
+   *  Through the CELL, which is the only writer in scope by construction (see
+   *  `initialHeader`). A bare `CellStore.set` is `value = v` and nothing else;
+   *  the bus publish that wakes every subscriber lives on the ctx write path
+   *  (`ctxApply`: `store.set(next); bus.publish(next)`) — the same path
+   *  `updateNode` has always used for the `nodes` cell. Writing a store directly
+   *  left the second publish visible to `get()` and to `display` (told
+   *  separately, on the next line) while reaching no attached reader at all: an
+   *  `odu attach` opened during provisioning — the exact operator move
+   *  juspay/odu#84 is about — would take the claiming roster as its first frame
+   *  and never see the resolved one. */
+  const publishHeader = (next: RunHeader): void => {
+    runtime.ctx.cells.header.set(next);
+    display.setHeader(next);
   };
   // Stamp the reserved seq onto the fan-in state so every face — the agent
   // `wait_for_settle` verdict especially — reads the run's full identity
@@ -1123,9 +1270,13 @@ async function orchestrate(
             sha,
             seq,
             dirty: ctx.dirty,
-            startedAt: header.startedAt,
+            startedAt: runtime.ctx.cells.header.get().startedAt,
             finishedAt: Date.now(),
-            lanes: header.lanes,
+            // The record describes machines the run actually had; a lane still
+            // claiming one has nothing to record. Read off the store every
+            // face reads, so the record cannot describe a different run
+            // environment from the one the surface published.
+            lanes: leasedLanes(runtime.ctx.cells.header.get()),
             state,
             unposted: unposted ?? poster.unposted(),
           }),
@@ -1137,14 +1288,18 @@ async function orchestrate(
       }
     };
   }
-  // No reserved seq → `finalizeRunRecord` stays the default no-op: a run that
-  // couldn't reserve an identity writes no record and claims no `<sha7>#<seq>`.
 
-  // Publish before serving so an `attach` connecting in the first instant reads
-  // the real header, not the EMPTY_HEADER default.
-  headerStore.set(header);
-  // Checkout run-lock is already held (covers lease wait); serveSocket is the
-  // attach surface and a second exclusivity gate for the post-lease window.
+  // The header cell already holds the provisioning header — it is the store's
+  // initial value — so an `attach` connecting in the first instant reads the
+  // real run environment rather than the EMPTY_HEADER default, with no
+  // "publish before serving" step to remember.
+  //
+  // Checkout run-lock is already held (covers the claim); serveSocket is the
+  // attach surface and a second exclusivity gate for the rest of the run.
+  //
+  // BEFORE the venue claim, not after (juspay/odu#84 — see the module header).
+  // Everything the socket needs is decided by now: the DAG, the run's identity,
+  // the lane→pool split.
   closeSocket = await serveSocket(served, socketPath, socketLogger(info));
   // The identity is now observable: a reader can see `sha7#seq` and key a
   // verdict on it, so the ordinal must never be handed to another run even if
@@ -1154,15 +1309,212 @@ async function orchestrate(
     reservation.current = { ...reservation.current, published: true };
   }
 
-  display.start(store.get(), header);
+  // Signals attach here rather than after the lanes start: the socket is up, so
+  // an interrupt during the claim now has a coordinator to tear down gracefully
+  // (finalize posted statuses, write the record, drop the socket) instead of
+  // dying by default disposition halfway through a closure copy.
+  process.once("SIGINT", () => shutdown(130));
+  process.once("SIGTERM", () => shutdown(130));
+
+  // The header first: it is the only way a face learns the run environment, and
+  // the plain banner `start` prints renders it.
+  display.setHeader(runtime.ctx.cells.header.get());
+  display.start(store.get());
   display.update(store.get());
 
-  for (const platform of [...tasksByPlatform.keys()].sort()) {
-    const host = lanesByPlatform[platform] as string;
+  /** Hand the process to `shutdown` and never come back.
+   *
+   *  Between `serveSocket` and the lane loop there are now awaits — `poster.seed`'s
+   *  GitHub round trip, and the venue claim itself — and the socket, the signal
+   *  handlers and `run.cancel` are all live across them. So a teardown can begin
+   *  mid-window, and `shutdown` is the ONLY terminal owner once it has: it
+   *  finalizes posted statuses, writes the record from the snapshot it took at
+   *  the interrupt, drops the socket and calls `process.exit`.
+   *
+   *  Resuming the main flow past a started teardown gives one run two terminal
+   *  owners — a second `poster.finalize`, a second record write from a LATER
+   *  snapshot, a second `closeSocket`, and an exit code decided by whichever
+   *  lands last (130 or 1, by race). Parking is exactly what the post-lane path
+   *  already does: a SIGINT mid-run leaves `await allSettled` pending forever and
+   *  lets `shutdown` exit the process. This gives the pre-lane windows the
+   *  behaviour the post-lane one always had. */
+  const parkForShutdown = (): Promise<never> => new Promise<never>(() => {});
+
+  // ── venue claim: one free machine per platform, lock held for the run ──
+  //
+  // Read-before-write ahead of the first post: contexts GitHub already shows in
+  // the desired state become no-ops (eliminates the restart "pending wave").
+  // Started ALONGSIDE the claim rather than ahead of it — the two share nothing,
+  // and one is a GitHub round trip while the other is minutes of ssh. The only
+  // real constraint is that the seed precede the first POST, which is
+  // `startSetup`'s `running` transition, so that is where the join is.
+  const seeded =
+    ctx.posting && github !== null ? poster.seed() : Promise.resolve();
+  // Latched before the claim starts: a cancel arriving mid-claim may terminalize
+  // every node, but the run is not over until the claim that holds the box is.
+  claimInFlight = platformsToClaim.length > 0;
+  const claim = (deps.claimVenues ?? claimVenues)({
+    repoRoot,
+    pools: resolvedPools,
+    platforms: platformsToClaim,
+    identity: { holder: localHolderId(), run: runLabel },
+    noWait: args.noWait,
+    runLabel,
+    onLine: setupLine,
+    resolveDrvPath: (platform) => runnerDrvResolver(runnerFlake, platform),
+  });
+  await seeded;
+  // A cancel during that round trip must not go on to stamp `_ci-setup` running
+  // (posting `pending` to GitHub *after* the interrupt statuses) on a
+  // coordinator that is already exiting.
+  if (shuttingDown) {
+    // The claim is outstanding and nothing downstream will merge its handles
+    // into `acquiredLeases`, so hand them straight back rather than leaving a
+    // remote flock held by a coordinator on its way out. Best-effort: `shutdown`
+    // may well `process.exit` first, which frees the same locks by dropping the
+    // ssh connections.
+    void claim.then((o) => {
+      if (o.ok) for (const lease of o.leases) lease.release();
+    });
+    return await parkForShutdown();
+  }
+
+  // The `_ci-setup` bracket opens for the lanes whose claim it BRACKETS: from
+  // here until such a lane is up, this node IS the run's visible state, and its
+  // log is where the claim narrates itself. An agent-held lane claims nothing,
+  // so opening its bracket here would have its `_ci-setup` duration measure a
+  // sibling platform's claim wait — the one number that node exists to measure,
+  // measuring something else. It opens at its own lane start instead.
+  for (const platform of platformsToClaim) startSetup(platform);
+
+  const outcome = await claim;
+  if (outcome.ok) {
+    Object.assign(lanesByPlatform, outcome.lanes);
+    for (const lease of outcome.leases) {
+      acquiredLeases.push(lease);
+      watchLease(lease);
+    }
+  }
+  // The claim is no longer in flight, so settle may be judged again — a cancel
+  // that arrived mid-claim deliberately did not resolve it (see
+  // `claimInFlight`), and the re-judgement happens once, below, after this
+  // block has published what the claim actually left behind.
+  claimInFlight = false;
+  // A teardown that began during the claim owns the run from here. Terminalizing
+  // a failed claim past this point would write a SECOND durable record — from a
+  // post-terminalize snapshot, contradicting the pre-terminalize one `shutdown`
+  // already took — and race a second `closeSocket` against a superseder that is
+  // watching the socket to confirm we are gone. No `checkSettled` on the way
+  // out: in `--linger` it would fire `onSettledEach`, and finalizing a record
+  // here is precisely the second write this park exists to prevent.
+  if (shuttingDown) return await parkForShutdown();
+
+  // Which lanes actually start. Two ways a platform drops out, both newly
+  // reachable because the socket (and therefore `lane.cancel`, `cancel` and the
+  // signals) is live across an `await` that did not exist before:
+  //
+  //   - the claim failed, so there is no machine for any lane;
+  //   - the operator dropped THIS platform mid-claim (`odu cancel @plat` / MCP
+  //     `lane_cancel`). `cancelPlatform` tombstones the entry, but the lane loop
+  //     below ends in `laneEntries.set(platform, {phase:"live"})` — which would
+  //     overwrite the tombstone, re-open every `laneAccepting`-gated mirror
+  //     path, resurrect the nodes the cancel marked `cancelled`, and start the
+  //     lane on the machine the operator just dropped.
+  //
+  // A whole-run teardown is not a third way: `shuttingDown` parked above, and
+  // there is no `await` between that check and here.
+  const cancelledDuringClaim = (platform: string): boolean =>
+    laneEntries.get(platform)?.phase === "operator_cancelled";
+  // A platform cancelled while its lease was in flight owns a lease nobody will
+  // use — `cancelPlatform` could not release it, because the claim had not
+  // handed the host over yet when the tombstone was set. Released BEFORE the
+  // header is republished: publishing first would advertise a lane on a host
+  // the coordinator has already given back, and `finalizeRunRecord` would write
+  // that lane into the durable record.
+  for (const platform of activePlatforms) {
+    if (!cancelledDuringClaim(platform)) continue;
+    // The terminalize `cancelPlatform` deferred: while the claim was in flight
+    // this lane's nodes had to keep saying "not over", because they are what
+    // every out-of-process reader judges settle by. The claim has returned, so
+    // the cancel is now the whole truth about this lane.
+    terminalizePlatformNodes(platform, CANCELLED_BY_OPERATOR);
+    const host = lanesByPlatform[platform];
+    if (host === undefined) continue;
+    releaseLeaseFor(host);
+    delete lanesByPlatform[platform];
+  }
+  const survivors = activePlatforms.filter(
+    (platform) => !cancelledDuringClaim(platform),
+  );
+
+  // ONE republish, on every exit from the claim, built from the lanes that
+  // actually survived it. The roster is `claiming`-free by construction once
+  // the claim has resolved (see `rosterFrom`), so a settled run can never be
+  // reported as "provisioning" for the rest of the coordinator's life — and
+  // there is no second branch that has to remember to say so.
+  publishHeader({
+    ...runtime.ctx.cells.header.get(),
+    lanes: rosterFrom(survivors, false),
+  });
+
+  if (!outcome.ok) {
+    // Provisioning failed — the run has no lanes and never will. Terminalize
+    // through the same path a dead lane takes, so the failure is a red
+    // `_ci-setup@<platform>` with the reason in its log rather than a bare
+    // stderr line: `runs`, `wait_for_settle`, the commit statuses and the
+    // verdict summary then all describe it in the vocabulary they already
+    // speak. `allSettled` resolves off these transitions and the normal
+    // completion path below writes the record and prints the verdict. The
+    // header is published BEFORE this so no observer sees a terminal node set
+    // beside a claiming header.
+    //
+    // Scoped by what the claim actually covered. `leaseLanes` owns the
+    // all-or-nothing policy over `platformsToClaim`; an agent-held lane has a
+    // real host from `odu lease` and touched no pool, so reporting it as
+    // `errored` with a message about a pool it never saw publishes a node that
+    // lies about itself. It is still stopped — the run is fail-closed — but as
+    // an abort, not as this failure.
+    const claimedPlatforms = new Set(platformsToClaim);
+    for (const platform of activePlatforms) {
+      terminalizePlatformNodes(
+        platform,
+        claimedPlatforms.has(platform)
+          ? {
+              running: "errored",
+              pending: "skipped",
+              log: `\n[odu] ${outcome.error.message}\n`,
+            }
+          : {
+              running: "cancelled",
+              pending: "skipped",
+              log: `\n[odu] aborted: no machine for ${platformsToClaim.join(", ")}\n`,
+            },
+      );
+    }
+  }
+
+  // The one re-judgement after the claim, covering every way out of it. The
+  // failed-claim branch above terminalizes; a `lane.cancel` that landed
+  // mid-claim already terminalized its own lane and was refused a settle by the
+  // `claimInFlight` latch; and a run whose every lane was cancelled that way
+  // starts no lane below, so nothing else would ever ask again and `allSettled`
+  // would hang. One call, here, answers all three.
+  checkSettled();
+
+  // A failed claim got no machine for anything, so nothing starts: the
+  // terminalize above is the whole of the run's state and the completion path
+  // below writes its record and prints its verdict.
+  for (const platform of outcome.ok ? survivors : []) {
+    // Total in practice — a successful claim filled every platform it covered,
+    // agent-held lanes arrived with a host, and lanes cancelled mid-claim were
+    // dropped from the map above. `continue` is the honest answer if it isn't.
+    const host = lanesByPlatform[platform];
+    if (host === undefined) continue;
+    // The provisioning bracket for a lane that claimed nothing opens here, at
+    // its own start, rather than at a claim it was never part of.
+    startSetup(platform);
     const tasks = tasksByPlatform.get(platform) ?? [];
     const setupId = fanId(SETUP, platform);
-    laneStart.set(platform, Date.now());
-    updateNode(setupId, { status: "running", startedAt: Date.now() });
 
     const local = isLocalHost(host);
     const lane = startLane({
@@ -1228,11 +1580,6 @@ async function orchestrate(
     createdLanes.add(lane);
     laneEntries.set(platform, { phase: "live", handle: lane });
   }
-
-  // `shutdown` (the shared teardown) is defined above the surface so the
-  // `run.cancel` mutation can drive it; here we only attach the OS signals.
-  process.once("SIGINT", () => shutdown(130));
-  process.once("SIGTERM", () => shutdown(130));
 
   // ── verdict artifacts ──
   // The per-node timing sidecar report.sh scrapes — durations odu owns in its
@@ -1331,8 +1678,7 @@ async function orchestrate(
     };
     // A run that already drained before we reached here fires the hook once.
     checkSettled();
-    await new Promise<void>(() => {});
-    return 0; // unreachable: shutdown() exits the process
+    return await parkForShutdown();
   }
 
   await allSettled;
@@ -1352,6 +1698,17 @@ async function orchestrate(
   closeSocket();
 
   display.stop(finalState);
+  // A run that never got a machine says WHY on the real stderr, once the live
+  // view has handed the terminal back: the reason is in `_ci-setup`'s log and
+  // the verdict names that path, but a config refusal ("pool must not mix
+  // localhost with remote hosts") is a message the operator should not have to
+  // go read a log file for. ONCE, from here — `PlainDisplay.info` and
+  // `JsonDisplay.info` both write straight to stderr, so an `info()` at the
+  // failure site printed the same text twice on exactly the piped/CI runs where
+  // it is most likely to be read by a machine.
+  if (!outcome.ok) {
+    process.stderr.write(`${outcome.error.message}\n`);
+  }
   return printVerdict(finalState, unposted);
 }
 

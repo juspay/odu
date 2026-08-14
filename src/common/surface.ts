@@ -12,10 +12,13 @@
  *
  *   - `oduSurface` — the fan-in the coordinator serves on `.ci/odu.sock` for
  *     `odu status` / `logs` / `attach`. The lane's three primitives plus one
- *     fan-in-only cell, `header` (the run *environment*: lane→host map +
- *     commit link + start clock; commit identity lives on the `nodes` state),
- *     which `attach` reads to paint the same matrix `run` does; node ids are
- *     `<namepath>@<platform>`.
+ *     fan-in-only cell, `header` (the run *environment*: lane→host map + the
+ *     lanes still being claimed + commit link + start clock; commit identity
+ *     lives on the `nodes` state), which `attach` reads to paint the same matrix
+ *     `run` does; node ids are `<namepath>@<platform>`. The coordinator serves
+ *     this before it claims a machine (juspay/odu#84), so `header` changes
+ *     during a run and every reader FOLLOWS the cell rather than latching its
+ *     first frame.
  *
  * Call shapes (idiomatic):
  *   surface.nodes.get({})          — snapshot of the whole pipeline, then deltas
@@ -326,19 +329,70 @@ export const ConfigureOutputSchema = Schema.Struct({
 });
 export type ConfigureOutput = typeof ConfigureOutputSchema.Type;
 
+/** One platform's place in the run's lane roster — ONE concept with two
+ *  states, not two parallel lists:
+ *
+ *  - `claiming` — the venue lease has not resolved yet, and `pool` is the set
+ *    of machines it may land on. A run carrying any of these is still
+ *    provisioning (see {@link runPhase}).
+ *  - `leased` — the lease resolved and `host` is the machine the lane runs on.
+ *
+ *  A discriminated union rather than `lanes` + `claiming` arrays: a platform is
+ *  in exactly one state, and two arrays let the type express a platform in both
+ *  (or neither) — an invariant every reader would then have to re-join by hand,
+ *  in whatever order it happened to traverse them. */
+export const RunLaneSchema = Schema.Union([
+  Schema.Struct({
+    state: Schema.Literal("claiming"),
+    platform: Schema.String,
+    pool: Schema.Array(Schema.String),
+  }),
+  Schema.Struct({
+    state: Schema.Literal("leased"),
+    platform: Schema.String,
+    host: Schema.String,
+  }),
+]);
+export type RunLane = typeof RunLaneSchema.Type;
+export type LeasedLane = Extract<RunLane, { state: "leased" }>;
+export type ClaimingLane = Extract<RunLane, { state: "claiming" }>;
+
+/** The leased half of a roster, IN ROSTER ORDER — for the readers that can only
+ *  speak about lanes that have a machine (the durable run record, the
+ *  `plat=host` projections). */
+export function leasedLanes(
+  header: Pick<RunHeader, "lanes">,
+): LeasedLane[] {
+  return header.lanes.filter((l): l is LeasedLane => l.state === "leased");
+}
+
+/** The claiming half of a roster, in roster order. */
+export function claimingLanes(
+  header: Pick<RunHeader, "lanes">,
+): ClaimingLane[] {
+  return header.lanes.filter((l): l is ClaimingLane => l.state === "claiming");
+}
+
 /** The run's *environment* — what `run` set up that the `nodes`/`header`
  *  state can't already tell you: the lane→host map, where it came from, and
  *  the forge commit link. Commit identity (pipeline name + sha7 + dirty) lives
  *  on `PipelineState`, so it isn't duplicated here. `run` has this in-process;
  *  an `attach`-er reads it from the fan-in `header` cell so its matrix shows the
- *  real lane→host map and commit link, not an observer stub. Static for a run. */
+ *  real lane→host map and commit link, not an observer stub.
+ *
+ *  Published TWICE per run, not once (juspay/odu#84, see the module header): a
+ *  claiming roster first, the resolved lane→host map once every lease settles.
+ *  Every reader of `lanes` must therefore follow the cell rather than keep its
+ *  first frame. */
 export const RunHeaderSchema = Schema.Struct({
   /** Forge page for the commit (GitHub origins); the sha label becomes an
    *  OSC 8 hyperlink where supported. Null elsewhere. */
   commitUrl: Schema.NullOr(Schema.String),
-  lanes: Schema.Array(
-    Schema.Struct({ platform: Schema.String, host: Schema.String }),
-  ),
+  /** The run's lane roster, one entry per active platform in platform order —
+   *  see {@link RunLaneSchema}. Every reader traverses this ONE list, so no two
+   *  faces can order the run's platforms differently. Empty only for a run that
+   *  has published nothing (or one whose claim got nothing at all). */
+  lanes: Schema.Array(RunLaneSchema),
   /** Where the lane→host map came from (`hosts.json`, a pool lease, …);
    *  null before the run publishes its header. */
   hostsSource: Schema.NullOr(Schema.String),
@@ -358,6 +412,44 @@ export const EMPTY_HEADER: RunHeader = {
   hostsSource: null,
   startedAt: 0,
 };
+
+/** Where a run is in its lifecycle, as far as the *environment* is concerned:
+ *
+ *  - `unstarted` — no run ever published this header: the cell default that
+ *    `attach` reads before the coordinator writes, and the stub an observer
+ *    with no run-env of its own passes ({@link EMPTY_HEADER}).
+ *  - `provisioning` — the run exists, holds the checkout and its ordinal, and is
+ *    claiming a machine for at least one lane. On a cold host that is a multi-
+ *    minute `nix copy` of the runner closure with no lane behind it yet; before
+ *    juspay/odu#84 the window had no socket at all (see `src/coordinator/run.ts`
+ *    for what that cost).
+ *  - `lanes` — every lane has a host; the run is the lane fanout the rest of the
+ *    surface describes.
+ *  - `no_lanes` — a run that tried and got nothing: it published a roster and
+ *    its claim resolved to no lanes at all. It exists so an empty roster cannot
+ *    answer `lanes` for a run that has none — "lanes is the complete map" is
+ *    only true once there IS one, and leaving that as a precondition on a
+ *    sibling field is exactly the joint-distribution lie a flat product hides.
+ *
+ *  `unstarted` and `no_lanes` were one value until the lens review: the fact
+ *  that separates them is `startedAt`, so a three-valued enum forced every JSON
+ *  reader to learn "`no_lanes` with a null elapsed means unstarted" — the same
+ *  precondition-on-a-sibling-field this type was introduced to abolish. The
+ *  derivation therefore reads `startedAt` itself.
+ *
+ *  Derived from the roster rather than stored beside it, so the phase and the
+ *  reason for it cannot disagree. */
+export type RunPhase = "unstarted" | "provisioning" | "lanes" | "no_lanes";
+
+export function runPhase(
+  header: Pick<RunHeader, "lanes" | "startedAt">,
+): RunPhase {
+  if (header.startedAt === 0) return "unstarted";
+  if (header.lanes.length === 0) return "no_lanes";
+  return header.lanes.some((l) => l.state === "claiming")
+    ? "provisioning"
+    : "lanes";
+}
 
 const primitives = {
   cells: {

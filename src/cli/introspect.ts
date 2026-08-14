@@ -14,17 +14,20 @@
 
 import { firstFrame, runUnary, subscribe } from "../common/effectEdge";
 import {
-  EMPTY_HEADER,
   type NodeState,
   type PipelineState,
   postingOf,
   type RunHeader,
+  type RunLane,
+  type RunPhase,
+  runPhase,
   STATUS_META,
 } from "../common/surface";
+import { formatGoDuration } from "../common/duration";
 import {
+  isSetupNode,
   onPlatform,
   parseAtPlatform,
-  SETUP_NAMEPATH,
   splitFanId,
   transitiveDependents,
 } from "../common/nodeId";
@@ -45,7 +48,9 @@ import {
 import { agentReaderFromA } from "../mcp/agentSurface";
 import { yellow } from "./ansi";
 import {
+  claimingText,
   exitCode,
+  laneText,
   nodeRow,
   statusGlyph,
   summarize,
@@ -60,12 +65,18 @@ export async function firstSnapshot(client: OduClient): Promise<PipelineState> {
   return state;
 }
 
-/** The run header off the surface — `run` publishes it before serving, so the
- *  first value is the real lane→host map. The `header` cell always yields its
- *  current value (EMPTY_HEADER until `run` publishes), so an empty stream means
- *  the coordinator closed before sending — a protocol failure we surface
- *  rather than mask with a blank banner (mirrors `firstSnapshot`). */
-export async function firstHeader(client: OduClient): Promise<RunHeader> {
+/** The run header off the surface, AS OF DIAL TIME — a SNAPSHOT, which is what
+ *  the name is for. `run` serves the socket before it claims a machine
+ *  (juspay/odu#84) and publishes the header twice, so this is not the run's
+ *  final lane roster; a one-shot face (`odu status`) wants exactly that, the
+ *  environment as it stands right now, and anything that outlives one snapshot
+ *  subscribes to the cell instead (see `attachDashboard`, whose header loop is
+ *  its only header path).
+ *
+ *  The `header` cell always yields its current value, so an empty stream means
+ *  the coordinator closed before sending — a protocol failure we surface rather
+ *  than mask with a blank banner (mirrors `firstSnapshot`). */
+export async function headerSnapshot(client: OduClient): Promise<RunHeader> {
   const header = await firstFrame(client.surface.header.get(undefined));
   if (header === undefined) {
     throw new Error("odu: coordinator closed before sending header");
@@ -97,11 +108,88 @@ export function resolveNodeId(state: PipelineState, token: string): string {
   );
 }
 
+/** When this run started provisioning: the earliest `_ci-setup@<platform>` that
+ *  is still `running`, which the coordinator stamps at the venue claim. Null
+ *  when no lane's bracket is open. */
+function setupStartedAt(state: PipelineState): number | null {
+  const starts = state.order
+    .filter((id) => isSetupNode(id) && state.nodes[id]?.status === "running")
+    .map((id) => state.nodes[id]?.startedAt)
+    .filter((t): t is number => typeof t === "number");
+  return starts.length === 0 ? null : Math.min(...starts);
+}
+
+/** The run-environment block `odu status` prints above the node rows while a
+ *  run is still PROVISIONING — which host(s) each lane is claiming and how long
+ *  it has been at it (juspay/odu#84). Nothing once every lane has a machine: the
+ *  node rows are the run's state then, and a run that reached its lanes keeps
+ *  the output it has always had. */
+export function provisioningLines(
+  header: RunHeader,
+  state: PipelineState,
+  nowMs = Date.now(),
+): string[] {
+  if (runPhase(header) !== "provisioning") return [];
+  // The PROVISIONING clock, off the bracket that measures it. `header.startedAt`
+  // is the RUN start — captured before the socket serves, before signals, before
+  // `poster.seed()`'s GitHub round trip — so the number under the word
+  // "provisioning" was not the provisioning duration. `_ci-setup@<platform>`
+  // is stamped `running` at the claim itself; the earliest one still running is
+  // when this run began provisioning. `header.startedAt` is the fallback only in
+  // principle: `runPhase` above already answered `provisioning`, which it never
+  // does for the pre-publish `startedAt === 0` header.
+  const since = setupStartedAt(state) ?? header.startedAt;
+  const lines = [`provisioning ${formatGoDuration(nowMs - since)}`];
+  const claiming = claimingText(header);
+  if (claiming !== "") lines.push(`  claiming ${claiming}`);
+  // A partly-claimed multi-platform run: the lanes that already have a machine.
+  const lanes = laneText(header);
+  if (lanes !== "") lines.push(`  lanes ${lanes}`);
+  return lines;
+}
+
+/** The machine-readable run environment on `odu status -o json`. Additive: the
+ *  `nodes` / `posting` keys older readers use are untouched. `elapsed_ms` is
+ *  null only for a header no run ever published.
+ *
+ *  One `lanes` array carrying each entry's `state`, not two arrays a reader has
+ *  to zip: an agent asking "where is this run" gets the roster in one traversal,
+ *  in the run's own platform order. */
+export function runEnvJson(
+  header: RunHeader,
+  nowMs = Date.now(),
+): {
+  phase: RunPhase;
+  elapsed_ms: number | null;
+  lanes: RunLane[];
+} {
+  return {
+    phase: runPhase(header),
+    elapsed_ms: header.startedAt > 0 ? nowMs - header.startedAt : null,
+    // The roster verbatim: it already IS `RunLane[]`, and reconstructing it
+    // field-by-field per variant was two branches that had to track
+    // `RunLaneSchema` by hand.
+    lanes: [...header.lanes],
+  };
+}
+
 export async function statusCommand(
   json: boolean,
   socketPath?: string,
 ): Promise<number> {
   const { client, close } = await dialSocket(socketPath);
+  // The run environment, read from the same dial: a run that has no lanes yet
+  // has nothing to say through `nodes` alone, and "no rows" is exactly the
+  // ambiguity juspay/odu#84 is about.
+  //
+  // BEFORE the rows, not after: these are two cells read at two instants, and
+  // the banner heads the rows. A header at least as old as the rows can
+  // under-report (say `provisioning` while the rows have moved on by a few ms);
+  // read after them it could assert a phase the rows have already left, which
+  // is the direction that reads as a contradiction. Note this read can THROW on
+  // a coordinator whose header cell closes empty — deliberately, as a protocol
+  // failure — so it now fails before any rows are printed rather than after.
+  const header = await headerSnapshot(client);
   const state = await firstSnapshot(client);
   await close();
   const posting = postingOf(state);
@@ -113,11 +201,14 @@ export async function statusCommand(
     // Object form carries posting health verbatim (juspay/odu#61); older
     // clients that expected a bare array should read `.nodes`.
     process.stdout.write(
-      `${JSON.stringify({ nodes: rows, posting }, null, 2)}\n`,
+      `${JSON.stringify({ nodes: rows, posting, run: runEnvJson(header) }, null, 2)}\n`,
     );
   } else {
     const warn = postingWarning(posting);
     if (warn !== null) process.stderr.write(`${yellow(warn)}\n`);
+    for (const line of provisioningLines(header, state)) {
+      process.stdout.write(`${line}\n`);
+    }
     for (const id of state.order) {
       const node = state.nodes[id];
       if (node === undefined) continue;
@@ -184,10 +275,10 @@ export async function attachStream(
       started = true;
       // Commit identity (pipeline name + sha) comes from the snapshot's state;
       // an observer has no run-env (no leased hosts, no forge origin, no own
-      // start clock), so it passes EMPTY_HEADER and the banner collapses to
-      // `odu · <pipeline> @ <sha>`. The matrix dashboard reads the real
-      // run-env off the surface `header` cell instead (`firstHeader`).
-      display.start(state, EMPTY_HEADER);
+      // start clock), so it never calls `setHeader` and the banner collapses to
+      // `odu · <pipeline> @ <sha>`. The matrix dashboard follows the surface
+      // `header` cell instead (see `attachDashboard`).
+      display.start(state);
     }
     display.update(state); // drives the plain heartbeat
     for (const id of state.order) {
@@ -214,7 +305,6 @@ async function attachDashboard(
   client: OduClient,
   close: () => Promise<void>,
 ): Promise<number> {
-  const header = await firstHeader(client);
   // The one binding for the latest state: both the completion path (`view.stop`,
   // the returned verdict) and the quit path read it. `attach` owns its own
   // exit-code policy (the view no longer carries it on `onQuit`): the current
@@ -245,12 +335,31 @@ async function attachDashboard(
     onQuit: () => quit(exitCode(last)),
   });
 
+  // Follow the header for the rest of the session — the ONE path by which this
+  // face learns the run environment. `run` publishes it twice — once while it is
+  // still claiming a machine, once with the resolved lane→host map
+  // (juspay/odu#84) — so a dashboard attached during provisioning (exactly when
+  // an operator reaches for one) would otherwise show the claiming line for the
+  // whole run. The cell yields its current value first, so the display has the
+  // real header before the first `nodes` frame starts the view.
+  //
+  // Held as a handle rather than left floating: it is a second timeline over the
+  // same link, and the function must not return while it is still running. The
+  // node loop below owns how the session ends; this one ends with the link.
+  const headerLoop = (async () => {
+    for await (const next of subscribe(client.surface.header.get(undefined))) {
+      view.setHeader(next);
+    }
+  })().catch(() => {
+    // The link went away with the run (or with `quit`) — nothing to report.
+  });
+
   let first = true;
   for await (const state of subscribe(client.surface.nodes.get(undefined))) {
     last = state;
     if (first) {
       first = false;
-      view.start(state, header);
+      view.start(state);
     } else {
       view.update(state);
     }
@@ -261,6 +370,9 @@ async function attachDashboard(
   // an observer would otherwise be left with only an exit code.
   if (last !== undefined) process.stdout.write(verdictLine(last));
   await close();
+  // The subscription is torn down with the link, so this settles rather than
+  // stranding a live `for await` past the function that opened it.
+  await headerLoop;
   return exitCode(last);
 }
 
@@ -372,13 +484,6 @@ export async function waitCommand(opts: WaitCommandOpts): Promise<number> {
     // is actually released.
     await dialed.close();
   }
-}
-
-/** Fan-in bookkeeping node the coordinator owns — every task's `needs` includes
- *  `_ci-setup@plat`, so including it in `@platform` expansion would collapse
- *  multi-rerun to "re-provision the lane only". Explicit id still works. */
-function isSetupNode(id: string): boolean {
-  return splitFanId(id).namepath === SETUP_NAMEPATH;
 }
 
 /** Expand a rerun selector against live state into fan-in node ids:

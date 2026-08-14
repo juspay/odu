@@ -32,7 +32,13 @@ blocks settle — the test verdict stays the truth).
 Called with **no run live**
 it fails loud (an error mirroring `odu status`, not an empty `settled: false`),
 and an optional `expected_sha` (prefix-matched against the run's `sha7`) refuses
-loud when the live run's commit doesn't match. If the coordinator's socket
+loud when the live run's commit doesn't match. A run that is still PROVISIONING
+— `run` returns as soon as the coordinator serves its socket, which is now
+*before* it claims a machine — is a live run: `wait_for_settle` blocks on it, the
+`nodes` resource shows `_ci-setup@<platform>` running, and its log resource
+carries the runner closure's `copying path …` progress. A claim that never
+succeeds arrives as a red `_ci-setup@<platform>` verdict rather than as a
+`run`-time error. If the coordinator's socket
 closes before it publishes a terminal frame, the verdict comes from the run's
 finalized record on disk — never green for a run torn down mid-flight. The
 `nodes` resource carries the same `unposted`. MCP `run` tees coordinator

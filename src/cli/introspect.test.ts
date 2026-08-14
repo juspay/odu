@@ -8,12 +8,16 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
+import {
+  capturingStderr,
+  capturingStdout,
+} from "../common/scaffoldForTest";
 import { pendingNode, type PipelineState } from "../common/surface";
 import { dialSocket } from "../coordinator/socket";
 import { serveTestSurface, type TestSurface } from "../mcp/serveForTest";
 import {
   attachStream,
-  firstHeader,
+  headerSnapshot,
   minimalRerunRoots,
   rerunCommand,
   resolveRerunTargets,
@@ -67,46 +71,6 @@ const open: TestSurface[] = [];
 afterEach(() => {
   for (const s of open.splice(0)) s.close();
 });
-
-/** Run `fn` with process.stdout captured; returns what it wrote + fn's result. */
-async function capturingStdout<T>(
-  fn: () => Promise<T>,
-): Promise<{ out: string; result: T }> {
-  const chunks: string[] = [];
-  const original = process.stdout.write.bind(process.stdout);
-  process.stdout.write = ((chunk: string | Uint8Array): boolean => {
-    chunks.push(
-      typeof chunk === "string" ? chunk : Buffer.from(chunk).toString(),
-    );
-    return true;
-  }) as typeof process.stdout.write;
-  try {
-    const result = await fn();
-    return { out: chunks.join(""), result };
-  } finally {
-    process.stdout.write = original;
-  }
-}
-
-/** Same as capturingStdout but for stderr. */
-async function capturingStderr<T>(
-  fn: () => Promise<T>,
-): Promise<{ err: string; result: T }> {
-  const chunks: string[] = [];
-  const original = process.stderr.write.bind(process.stderr);
-  process.stderr.write = ((chunk: string | Uint8Array): boolean => {
-    chunks.push(
-      typeof chunk === "string" ? chunk : Buffer.from(chunk).toString(),
-    );
-    return true;
-  }) as typeof process.stderr.write;
-  try {
-    const result = await fn();
-    return { err: chunks.join(""), result };
-  } finally {
-    process.stderr.write = original;
-  }
-}
 
 async function served(state: PipelineState): Promise<TestSurface> {
   const surface = await serveTestSurface(state);
@@ -210,13 +174,15 @@ describe("statusCommand — plain", () => {
 // The data gap #6 closes: an attached face reads the run's lane→host map off the
 // surface `header` cell, so its matrix banner matches run's instead of an
 // observer stub.
-describe("firstHeader", () => {
+describe("headerSnapshot", () => {
   it("reads the run header (lane→host map) off the surface", async () => {
     const surface = await serveTestSurface(
       doneState([["ci::e2e@x86_64-linux", "ok", 0]]),
       {
         commitUrl: null,
-        lanes: [{ platform: "x86_64-linux", host: "kolu-ci-1" }],
+        lanes: [
+          { state: "leased", platform: "x86_64-linux", host: "kolu-ci-1" },
+        ],
         hostsSource: "~/.config/odu/hosts.json",
         startedAt: 0,
       },
@@ -224,9 +190,9 @@ describe("firstHeader", () => {
     open.push(surface);
     const { client, close } = await dialSocket(surface.socketPath);
     try {
-      const header = await firstHeader(client);
+      const header = await headerSnapshot(client);
       expect(header.lanes).toEqual([
-        { platform: "x86_64-linux", host: "kolu-ci-1" },
+        { state: "leased", platform: "x86_64-linux", host: "kolu-ci-1" },
       ]);
       expect(header.hostsSource).toBe("~/.config/odu/hosts.json");
     } finally {

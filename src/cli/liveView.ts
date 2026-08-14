@@ -515,6 +515,15 @@ export class LiveView {
     this.wake();
   }
 
+  /** A revised run environment for a run already started — the resolved
+   *  lane→host map replacing the one published while the venue claim was still
+   *  in flight (juspay/odu#84). The lane line repaints from `this.header` on
+   *  every frame, so this is a field write plus a wake. */
+  setHeader(header: RunHeader): void {
+    this.header = header;
+    this.wake();
+  }
+
   /** Open the terminal.
    *
    *  Deliberately NOT `createCliRenderer`: that helper is `new CliRenderer(…)`
@@ -635,9 +644,15 @@ export class LiveView {
   }
 
   /** Operator-facing message. Called from the venue lease and the status
-   *  poster long before `start()`, so pre-mount it must reach real stdout. */
+   *  poster; pre-mount it must reach real stdout.
+   *
+   *  COALESCED (`now: false`). Since juspay/odu#84 the renderer is mounted
+   *  before the claim, so provisioning narration — one call per `copying path`
+   *  line, thousands of them — arrives here with a frame to repaint. Painting
+   *  each is the per-source-event repaint {@link pushEvent} documents; the
+   *  dirty flag plus `wake()`'s tick shows every line, batched at TICK_MS. */
   info(msg: string): void {
-    this.pushEvent(msg, DIM);
+    this.pushEvent(msg, DIM, false);
   }
 
   /** Cap on retained diagnostics — enough to carry a fatal message and its
@@ -1304,10 +1319,22 @@ export class LiveView {
     }
     this.paintNotices();
     if (this.laneLine !== undefined) {
+      // ONE loop over the roster, so the styled face lists a partly-claimed
+      // run's platforms in the run's own order — two loops grouped them by
+      // internal representation instead, which is an ordering no other face
+      // used. A lane still being claimed has no host to name, so it shows the
+      // pool it is claiming from rather than going blank for the whole
+      // provisioning window.
       const lanes: TextChunk[] = [];
       for (const l of header.lanes) {
         if (lanes.length > 0) lanes.push(faint("   "));
-        lanes.push(plain(l.platform), faint(" ▸ "), faint(l.host));
+        lanes.push(
+          plain(l.platform),
+          faint(" ▸ "),
+          faint(
+            l.state === "leased" ? l.host : `claiming ${l.pool.join(", ")}`,
+          ),
+        );
       }
       setRow(this.laneLine, lanes);
     }

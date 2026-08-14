@@ -117,11 +117,16 @@ export interface SpawnDeps {
 /**
  * Poll until the coordinator socket answers or the child exits.
  *
- * No fixed startup window: venue-lease wait-in-line (juspay/odu#54) can exceed
- * minutes while the child is healthy and has not yet served `.ci/odu.sock`
- * (`leaseLanes` runs before `serveSocket`). Bounding the poll and SIGTERM-ing
- * a still-alive waiter was a regression vs pre-lease spawn. Child exit is the
- * only failure bound — a dirty-tree refusal / bad justfile dies immediately.
+ * No fixed startup window. The socket now comes up before the venue claim
+ * (juspay/odu#84), so the poll is normally short — but the startup ahead of it
+ * (strict gate, `just` DAG ingest, seq reservation) is still unbounded work on a
+ * loaded machine, and bounding the poll to SIGTERM a healthy child was a
+ * regression once before (juspay/odu#54's lease wait). Child exit is the only
+ * failure bound — a dirty-tree refusal / bad justfile dies immediately.
+ *
+ * A run that returns here is live but may still be PROVISIONING: `wait_for_settle`
+ * blocks on it correctly (its nodes are seeded pending), and a claim that fails
+ * lands as a red `_ci-setup@<platform>` rather than as this call's error.
  *
  * Exported for unit tests of the exit-bounded policy.
  */

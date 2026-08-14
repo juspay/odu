@@ -31,6 +31,19 @@ export function onPlatform(id: string, platform: string): boolean {
  *  One spelling for run.ts, runner.ts, and CLI `@platform` exclusion. */
 export const SETUP_NAMEPATH = "_ci-setup";
 
+/** Is this fan-in id the coordinator's own bookkeeping node for a lane?
+ *
+ *  Beside {@link SETUP_NAMEPATH} because three unrelated policies turn on it and
+ *  each was re-deriving the split: `@platform` rerun expansion excludes it
+ *  (every task `needs` it, so including it would collapse a multi-rerun into
+ *  "re-provision the lane"), `odu status`'s provisioning clock reads its
+ *  `startedAt`, and a `node.cancel` on it with no live lane routes to a lane
+ *  drop. Splits the id rather than matching a prefix, so a recipe merely NAMED
+ *  like the sentinel cannot pass. */
+export function isSetupNode(id: string): boolean {
+  return splitFanId(id).namepath === SETUP_NAMEPATH;
+}
+
 /** Transitive dependents of `root` under a needs graph (root itself excluded).
  *  Shared by runner `rerun` reset and CLI multi-target root collapse so both
  *  close over the same DAG rule. */

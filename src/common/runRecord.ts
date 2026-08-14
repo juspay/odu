@@ -165,6 +165,10 @@ export function buildRunRecord(input: {
   dirty: boolean;
   startedAt: number;
   finishedAt: number;
+  /** The lane→host map, structurally typed so a caller may hand over a richer
+   *  value (`leasedLanes()` yields `LeasedLane`, which also carries `state`).
+   *  Projected field-by-field below rather than spread, so no caller's extra
+   *  keys can reach a record the schema does not declare them on. */
   lanes: ReadonlyArray<{ platform: string; host: string }>;
   state: PipelineState;
   /** Statuses still unconfirmed when the record is finalized (juspay/odu#61). */
@@ -191,7 +195,7 @@ export function buildRunRecord(input: {
     outcome: !complete || cancelled ? "incomplete" : red ? "failed" : "passed",
     startedAt: input.startedAt,
     finishedAt: input.finishedAt,
-    lanes: [...input.lanes],
+    lanes: input.lanes.map((l) => ({ platform: l.platform, host: l.host })),
     nodes,
     ...(unposted !== undefined ? { unposted } : {}),
   };
