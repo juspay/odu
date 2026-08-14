@@ -46,7 +46,7 @@ function provisioningState(): PipelineState {
     order: [SETUP, FMT],
     nodes: {
       [SETUP]: {
-        ...seed(SETUP, "(provision kolu-ci-5 | kolu-ci-6)"),
+        ...seed(SETUP, "(provision)"),
         status: "running",
         startedAt: 1_000,
       },

@@ -623,10 +623,9 @@ async function orchestrate(
   }
 
   /** The machines a lane may land on: the one it already holds (agent lease),
-   *  else the pool it is about to claim from. One rule for the two places that
-   *  must describe a lane before its host is decided — `_ci-setup`'s command
-   *  and the header's `claiming` entries — so neither has to invent a
-   *  placeholder host. */
+   *  else the pool it is about to claim from. The roster's `claiming` entries
+   *  are the one place this is stated, so a lane with no host yet is described
+   *  by its real candidates rather than by a placeholder host. */
   const candidatesFor = (platform: string): string[] => {
     const held = lanesByPlatform[platform];
     return held !== undefined ? [held] : [...(poolsByPlatform[platform] ?? [])];
@@ -644,11 +643,16 @@ async function orchestrate(
     nodes[setupId] = pendingNode({
       id: setupId,
       name: setupId,
-      // The candidate set, not the leased host — the state is seeded before any
-      // claim, and a lane with a real pool has no single host to name yet. The
-      // one it lands on is published on `header.lanes` and narrated into this
-      // node's own log as the claim runs.
-      command: `(provision ${candidatesFor(platform).join(" | ")})`,
+      // No machine named here, in either direction. Every other node's
+      // `command` is the shell it runs; this one is a parenthetical nobody on
+      // the fan-in side reads, and WHICH machine this lane is on is a fact the
+      // header's roster owns — `claiming` with its pool, then `leased` with its
+      // host. Naming it here too would be a second copy of that fact, seeded
+      // before the claim and therefore stale from the moment the lease
+      // resolves; the alternative, rewriting it on resolve, is upkeep on a
+      // duplicate with no reader. The roster is the answer to "where"; this is
+      // just what the node does.
+      command: "(provision)",
       needs: [],
     });
     for (const task of tasks) {
