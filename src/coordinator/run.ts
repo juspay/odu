@@ -611,13 +611,11 @@ async function orchestrate(
   // `--host` pins still force a claim path (override agent hold).
   // After checkout free + run-lock + seq reserve so supersede can't deadlock.
   //
-  // Only the SPLIT happens here. The claim itself waits until the fan-in socket
-  // is serving (juspay/odu#84): claiming a cold box copies the runner closure
-  // over ssh-ng for minutes, and with the socket still down that window was
-  // indistinguishable — to `status`, `attach`, `logs` and `wait` alike — from no
-  // run at all. What the split decides is what the surface can honestly say
-  // during it: an agent-held platform already knows its host, the rest carry a
-  // pool and no host until their lease resolves.
+  // Only the SPLIT happens here; the claim itself waits until the fan-in socket
+  // is serving (juspay/odu#84 — see the module header). What the split decides
+  // is what the surface can honestly say during that window: an agent-held
+  // platform already knows its host, the rest carry a pool and no host until
+  // their lease resolves.
   const activePlatforms = [...tasksByPlatform.keys()].sort();
   const runLabel = seq !== null ? `${sha7}#${seq}` : sha7;
   const pinPlatforms = new Set(
@@ -718,20 +716,10 @@ async function orchestrate(
   // that is still claiming, and again once the lanes resolve (or the claim
   // fails) — so this cell CHANGES during a run and its readers follow it.
   //
-  // The CELL is the only place this value lives, and it is reached only through
-  // `runtime.ctx.cells.header` — there is deliberately no store binding in this
-  // scope to write. A `CellStore.set` is `value = v` and nothing else; the bus
-  // publish that wakes every subscriber lives on the ctx write path. Holding a
-  // store variable here once meant `publishHeader` could — and did — update the
-  // value while notifying no attached reader, and no test could catch it,
-  // because the test harness writes through the ctx path that production
-  // skipped. Naming no store makes that write unspellable rather than merely
-  // discouraged. (`header` below is passed straight into `implementSurface`.)
-  //
-  // A `let header` beside the cell would be the same mistake in another shape: a
-  // convention with a documented exception, whose one reader
-  // (`finalizeRunRecord`) then depends on read-after-the-right-write ordering
-  // rather than on a single source.
+  // The CELL is the only place this value lives: no store binding for it exists
+  // in this scope, deliberately, so the non-publishing write is unspellable
+  // rather than merely discouraged — see `publishHeader`. This value goes
+  // straight into `implementSurface` as the cell's initial value.
   const initialHeader = ((): RunHeader => ({
     commitUrl:
       github !== null
@@ -877,16 +865,9 @@ async function orchestrate(
     // see a still-terminating process group for a short window.
     const host = lanesByPlatform[platform];
     if (host !== undefined) releaseLeaseFor(host);
-    // Terminalizing is DEFERRED while a claim is outstanding, because the node
-    // states are the run's answer to "is this over" for every reader outside
-    // this process: `wait_for_settle` and `odu wait` judge the `nodes` cell, not
-    // this module's `checkSettled`. Marking a single-platform run's nodes
-    // terminal here would answer "settled, cancelled" while `claimVenues` is
-    // still copying a closure onto a box, still holding the checkout's one-run
-    // lock, and still owed a lease — so an agent that reads that verdict as "the
-    // run is over" gets "a run is already in progress" from its next `run()`.
-    // The claim's return is what ends the window; it terminalizes the lanes
-    // tombstoned here (see `cancelledDuringClaim`) and re-judges settle once.
+    // Terminalizing is DEFERRED while a claim is outstanding — see
+    // `claimInFlight` for why, and `cancelledDuringClaim` for where the claim's
+    // return picks these lanes back up.
     if (claimInFlight) return true;
     terminalizePlatformNodes(platform, CANCELLED_BY_OPERATOR);
     checkSettled();
@@ -1106,14 +1087,17 @@ async function orchestrate(
   /** Is a venue claim outstanding right now? While it is, this run is NOT
    *  settleable however terminal its nodes look.
    *
-   *  `lane.cancel` during the claim tombstones the lane and terminalizes its
-   *  nodes at once — which, on a single-platform run, makes every node terminal
-   *  while `claimVenues` is still copying a closure onto a box, still holding
-   *  the checkout's one-run lock, and still about to hand back a lease. A
-   *  `wait_for_settle` answering "settled, cancelled" there tells an agent the
-   *  run is over; its next `run()` hits "a run is already in progress". The
-   *  claim's own return is what ends this window, and it clears the latch and
-   *  re-judges settle itself. */
+   *  The node states are the run's answer to "is this over" for every reader
+   *  outside this process — `wait_for_settle` and `odu wait` judge the `nodes`
+   *  cell, not this module's `checkSettled`. So a `lane.cancel` during the claim
+   *  that terminalized its lane at once would, on a single-platform run, make
+   *  every node terminal while `claimVenues` is still copying a closure onto a
+   *  box, still holding the checkout's one-run lock, and still about to hand
+   *  back a lease. A `wait_for_settle` answering "settled, cancelled" there
+   *  tells an agent the run is over; its next `run()` hits "a run is already in
+   *  progress". The claim's own return is what ends this window: it clears the
+   *  latch, terminalizes the lanes tombstoned meanwhile, and re-judges settle
+   *  once. */
   let claimInFlight = false;
 
   const checkSettled = (): void => {
@@ -1178,11 +1162,8 @@ async function orchestrate(
   };
 
   /** Provisioning has begun for this lane. `_ci-setup@<platform>` is the run's
-   *  bracket around it, and since juspay/odu#84 that bracket opens at the VENUE
-   *  CLAIM rather than at lane start — claiming is where a cold host spends its
-   *  minutes, and a node that is `running` with its `nix copy` narration in its
-   *  own log is how every face (status rows, the attach matrix, `logs -f`,
-   *  `wait`) learns the run is alive without a second vocabulary for it.
+   *  bracket around it, opening at the VENUE CLAIM rather than at lane start
+   *  (juspay/odu#84 — see the module header).
    *
    *  Guarded on `pending` so it can only ever OPEN the bracket: re-stamping
    *  `startedAt` on a lane already provisioning would silently discount the
@@ -1221,9 +1202,7 @@ async function orchestrate(
     const node = store.get().nodes[id];
     if (node === undefined) return;
     if (node.status !== "pending" && node.status !== "running") return;
-    // Off the node `startSetup` stamped it on — a side Map holding the same
-    // instant was a second copy of the node's own `startedAt`, read back only
-    // to be written into the node it came from.
+    // Off the node `startSetup` stamped it on — one home for the instant.
     const startedAt = node.startedAt ?? Date.now();
     updateNode(id, {
       status,
@@ -1309,8 +1288,6 @@ async function orchestrate(
       }
     };
   }
-  // No reserved seq → `finalizeRunRecord` stays the default no-op: a run that
-  // couldn't reserve an identity writes no record and claims no `<sha7>#<seq>`.
 
   // The header cell already holds the provisioning header — it is the store's
   // initial value — so an `attach` connecting in the first instant reads the
@@ -1320,11 +1297,9 @@ async function orchestrate(
   // Checkout run-lock is already held (covers the claim); serveSocket is the
   // attach surface and a second exclusivity gate for the rest of the run.
   //
-  // BEFORE the venue claim, not after (juspay/odu#84). Everything the socket
-  // needs is decided by now — the DAG, the run's identity, the lane→pool split
-  // — and the claim is minutes of live work an operator most wants to watch, so
-  // serving first is what lets `status` / `attach` / `logs -f` / `wait` see the
-  // run from the moment it exists rather than from the moment it has lanes.
+  // BEFORE the venue claim, not after (juspay/odu#84 — see the module header).
+  // Everything the socket needs is decided by now: the DAG, the run's identity,
+  // the lane→pool split.
   closeSocket = await serveSocket(served, socketPath, socketLogger(info));
   // The identity is now observable: a reader can see `sha7#seq` and key a
   // verdict on it, so the ordinal must never be handed to another run even if
@@ -1413,8 +1388,6 @@ async function orchestrate(
   for (const platform of platformsToClaim) startSetup(platform);
 
   const outcome = await claim;
-  // Merged at ONE visible site: the claim's outputs are a value, so nothing
-  // downstream depends on mutations its signature declines to mention.
   if (outcome.ok) {
     Object.assign(lanesByPlatform, outcome.lanes);
     for (const lease of outcome.leases) {
@@ -1532,10 +1505,9 @@ async function orchestrate(
   // terminalize above is the whole of the run's state and the completion path
   // below writes its record and prints its verdict.
   for (const platform of outcome.ok ? survivors : []) {
-    // No cast: a successful claim filled every platform it covered, agent-held
-    // lanes arrived with a host, and lanes cancelled mid-claim were dropped
-    // from the map above — so this is total in practice, and `continue` is the
-    // honest answer if it ever isn't.
+    // Total in practice — a successful claim filled every platform it covered,
+    // agent-held lanes arrived with a host, and lanes cancelled mid-claim were
+    // dropped from the map above. `continue` is the honest answer if it isn't.
     const host = lanesByPlatform[platform];
     if (host === undefined) continue;
     // The provisioning bracket for a lane that claimed nothing opens here, at

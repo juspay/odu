@@ -71,20 +71,14 @@ const WAIT_POLL_MS = envNumber("ODU_LEASE_WAIT_POLL_MS", 5_000, 1);
  *  `progress-liveness` policy (`PROVISION_STEP_SILENCE_BASE_MS` doubling to
  *  `PROVISION_STEP_MAX_EXPIRIES`, `PROVISION_COPY_SILENCE_MS` for the copy).
  *
- *  Neither of those is TERMINAL for a `pin()`. `armPreConnected` expires into
- *  `forceCycle`, which is `localProgress(reason); session.recheck()` — a RETRY:
- *  the session announces the cycle and dials again, forever. `pin()` is left
- *  outstanding across every cycle, and `MAX_CONSECUTIVE_FAILURES` bounds
- *  consecutive *remote rejections*, not a host that keeps re-connecting. So odu's
- *  bound is the only terminal one on this path — which is exactly why it must
- *  not be removed in favour of "the framework already handles it".
+ *  Neither of those is TERMINAL for a `pin()` — see {@link PIN_CEILING_MS} for
+ *  the `forceCycle` retry loop that is why, and for the bound that catches it.
+ *  So odu's bound is the only terminal one on this path, which is exactly why it
+ *  must not be removed in favour of "the framework already handles it".
  *
  *  It re-arms on ANY line the session emits, not on copy lines alone: a cap that
  *  re-armed only on `copying path` would relocate juspay/odu#84's death into
- *  `nix build`'s evaluation phase, which narrates plenty but copies nothing.
- *  Note that the framework's own cycle announcement arrives through
- *  `localProgress`, so it re-arms this bound too — see {@link PIN_CEILING_MS}
- *  for the bound that catches that. */
+ *  `nix build`'s evaluation phase, which narrates plenty but copies nothing. */
 const CLAIM_TIMEOUT_MS = envNumber("ODU_LEASE_CLAIM_TIMEOUT_MS", 180_000, 1);
 
 /** Absolute ceiling on ONE pin, beside the idle bound above.
@@ -299,14 +293,11 @@ function storePathName(path: string): string {
  * lines — `nix` narrates each store path it pushes (`copying path '/nix/store/…'
  * to 'ssh-ng://host'`).
  *
- * DIAGNOSIS ONLY. This deliberately does not bound anything: provisioning
- * liveness belongs to `@kolu/surface-remote`, which already re-arms on every
- * line at two layers (see {@link CLAIM_TIMEOUT_MS}), and a bound keyed on copy
- * lines alone would kill a host that is busy evaluating rather than copying.
- * What it buys is the sentence at the end of a timeout: `lease pin … timed out`
- * reads as "unreachable machine", and on a cold box that is the wrong
- * diagnosis — the machine was in fact receiving a few hundred megabytes of
- * closure (juspay/odu#84).
+ * DIAGNOSIS ONLY — it bounds nothing (see {@link CLAIM_TIMEOUT_MS}). What it
+ * buys is the sentence at the end of a timeout: `lease pin … timed out` reads as
+ * "unreachable machine", and on a cold box that is the wrong diagnosis — the
+ * machine was in fact receiving a few hundred megabytes of closure
+ * (juspay/odu#84).
  *
  * Paths are counted DISTINCT, not per narration line: provisioning copies each
  * path twice on a cold host — once pulling it into the local store, once
@@ -317,11 +308,9 @@ function storePathName(path: string): string {
 const COPY_PATH_RE = /copying path '([^']*)'/;
 
 export function copyProgress(): {
-  /** Feed one log line. Nothing is returned: "did this line advance the copy?"
-   *  is the wire the design deliberately stopped plugging in when the pin
-   *  heartbeat moved to any-line, and an interface shaped by its test rather
-   *  than by a consumer is one nobody can change. The distinct-path dedupe is
-   *  asserted through {@link note} instead. */
+  /** Feed one log line. Returns nothing: no consumer asks "did this line advance
+   *  the copy?" — the pin heartbeat fires on any line. The distinct-path dedupe
+   *  is asserted through {@link note}. */
   observe: (line: string) => void;
   /** Timeout-message suffix; empty when nothing was ever copied (the genuinely
    *  unreachable case, which must not claim a copy was in flight). */
@@ -366,15 +355,13 @@ export function copyProgress(): {
  * that at each call site is how the liveness policy comes to exist twice and
  * drift on the subtle half (which deadline a bump extends).
  *
- * ANY line is the liveness signal — a session that is still narrating is a
- * session that is alive, and provisioning spends long stretches evaluating and
- * building rather than copying (see {@link CLAIM_TIMEOUT_MS}). `copyProgress`
+ * ANY line is the liveness signal (see {@link CLAIM_TIMEOUT_MS}); `copyProgress`
  * rides along purely to make the timeout message a diagnosis. The bump reaches
  * only the pin's deadline: the claim/probe RPC that follows is a separate
  * `withTimeout` with no heartbeat, and a bump after the pin settles is a no-op
- * inside `withTimeout` itself, so nothing has to be unwired afterwards.
- * Wired unconditionally (not only when a caller passes `onLog`), because the
- * deadline must not depend on whether anyone is listening.
+ * inside `withTimeout` itself. Wired unconditionally (not only when a caller
+ * passes `onLog`), because the deadline must not depend on whether anyone is
+ * listening.
  *
  * The diagnosis half is SCOPED TO THE PIN, via `done()`. This sink stays the
  * session's `log` for the whole lease lifetime — hours on a held lane — but

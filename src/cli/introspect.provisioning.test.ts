@@ -331,13 +331,11 @@ describe("a live header subscriber", () => {
   it("receives the resolved roster as a second frame", async () => {
     // The regression test for the reason this whole change exists. `attach`
     // SUBSCRIBES to the header cell — it does not re-read it — so the second
-    // publish has to arrive as a frame on an open subscription. It did not:
-    // `publishHeader` wrote the backing store directly (`CellStore.set` is
-    // `value = v` and nothing more), so the value changed and the bus never
-    // published. `odu run`'s own matrix looked correct because the display is
-    // told separately, which is exactly what hid it — and no test could have
-    // caught it, because the test harness writes through `ctx.cells.header.set`
-    // (the publishing path) while production did not.
+    // publish has to arrive as a frame on an open subscription. It did not,
+    // because `publishHeader` wrote the backing store directly instead of going
+    // through the ctx path (see `publishHeader` in src/coordinator/run.ts), and
+    // no test could have caught it: this harness writes through the publishing
+    // path that production skipped.
     const surface = await serveTestSurface(
       provisioningState(),
       provisioningHeader(),

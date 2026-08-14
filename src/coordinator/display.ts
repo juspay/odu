@@ -141,9 +141,8 @@ class PlainDisplay implements Display {
   private state: PipelineState | undefined;
   private timer: NodeJS.Timeout | undefined;
   private lastWrite = Date.now();
-  /** The header itself, not its rendering. Caching `laneText(header)` to dedupe
-   *  against made the face hold a formatted shadow copy of the run environment,
-   *  kept true to it by two assignments in two methods. */
+  /** The header itself, not its rendering — one value, not a formatted shadow
+   *  copy of it. */
   private header: RunHeader = EMPTY_HEADER;
   private started = false;
 

@@ -334,9 +334,7 @@ export type ConfigureOutput = typeof ConfigureOutputSchema.Type;
  *
  *  - `claiming` — the venue lease has not resolved yet, and `pool` is the set
  *    of machines it may land on. A run carrying any of these is still
- *    PROVISIONING: it holds the checkout and is claiming/booting a box (on a
- *    cold host, `nix copy`ing the runner closure over ssh-ng), which is minutes
- *    of live work with no lane behind it yet.
+ *    provisioning (see {@link runPhase}).
  *  - `leased` — the lease resolved and `host` is the machine the lane runs on.
  *
  *  A discriminated union rather than `lanes` + `claiming` arrays: a platform is
@@ -382,12 +380,10 @@ export function claimingLanes(
  *  an `attach`-er reads it from the fan-in `header` cell so its matrix shows the
  *  real lane→host map and commit link, not an observer stub.
  *
- *  Published TWICE per run, not once: the coordinator serves the socket before
- *  it claims a venue (juspay/odu#84), so the first roster describes a run whose
- *  lanes don't exist yet (every platform that needs a claim is `claiming`; the
- *  agent-held ones are already `leased`), and the second — once every lease
- *  resolves — is the full lane→host map. Every reader of `lanes` must therefore
- *  follow the cell rather than keep its first frame. */
+ *  Published TWICE per run, not once (juspay/odu#84, see the module header): a
+ *  claiming roster first, the resolved lane→host map once every lease settles.
+ *  Every reader of `lanes` must therefore follow the cell rather than keep its
+ *  first frame. */
 export const RunHeaderSchema = Schema.Struct({
   /** Forge page for the commit (GitHub origins); the sha label becomes an
    *  OSC 8 hyperlink where supported. Null elsewhere. */
@@ -424,10 +420,9 @@ export const EMPTY_HEADER: RunHeader = {
  *    with no run-env of its own passes ({@link EMPTY_HEADER}).
  *  - `provisioning` — the run exists, holds the checkout and its ordinal, and is
  *    claiming a machine for at least one lane. On a cold host that is a multi-
- *    minute `nix copy` of the runner closure with no lane behind it yet. Before
- *    juspay/odu#84 this window had no socket at all, so `status` / `attach` /
- *    `logs` / `wait` all answered "no run in progress" — the same words they use
- *    for a run that died or never started.
+ *    minute `nix copy` of the runner closure with no lane behind it yet; before
+ *    juspay/odu#84 the window had no socket at all (see `src/coordinator/run.ts`
+ *    for what that cost).
  *  - `lanes` — every lane has a host; the run is the lane fanout the rest of the
  *    surface describes.
  *  - `no_lanes` — a run that tried and got nothing: it published a roster and
