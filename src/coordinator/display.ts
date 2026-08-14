@@ -175,14 +175,28 @@ class PlainDisplay implements Display {
    *  republish, so a captured CI log got no line marking the end of
    *  provisioning. The phase rule fires exactly once when provisioning ends,
    *  whichever way it ends. Nothing is said before `start`: there is no banner
-   *  to revise yet, and the banner itself renders this header. */
+   *  to revise yet, and the banner itself renders this header.
+   *
+   *  In this face's own words, never the phase enum: `RunPhase` is the JSON
+   *  contract's vocabulary (`runEnvJson`), and printing `odu · no_lanes` at an
+   *  operator both leaks a wire identifier into a CI log and couples that
+   *  contract to human text. */
   setHeader(header: RunHeader): void {
     const before = this.header;
     this.header = header;
     if (!this.started) return;
     if (runPhase(before) === runPhase(header)) return;
     const lanes = laneText(header);
-    this.say(`odu · ${lanes === "" ? runPhase(header) : `lanes ${lanes}`}`);
+    if (lanes !== "") {
+      this.say(`odu · lanes ${lanes}`);
+      return;
+    }
+    const claiming = claimingText(header);
+    this.say(
+      claiming !== ""
+        ? `odu · claiming ${claiming}`
+        : "odu · no lanes — the run got no machine",
+    );
   }
 
   update(state: PipelineState): void {

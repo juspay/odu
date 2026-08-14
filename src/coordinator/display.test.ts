@@ -121,7 +121,10 @@ describe("PlainDisplay — the run environment arrives through setHeader", () =>
       failed.setHeader({ ...claimingHeader, lanes: [] });
       failed.stop();
     });
-    expect(outFailed).toContain("odu · no_lanes");
+    // In the face's own words — `no_lanes` is the JSON contract's enum, not a
+    // sentence to print at an operator.
+    expect(outFailed).toContain("odu · no lanes — the run got no machine");
+    expect(outFailed).not.toContain("no_lanes");
 
     const resolved = createDisplay("plain");
     const outResolved = capturingStdout(() => {

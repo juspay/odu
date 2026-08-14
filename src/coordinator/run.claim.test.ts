@@ -188,10 +188,17 @@ describe.if(hasJust)("a cancel that lands mid-claim", () => {
         error: new Error("odu: test released the claim"),
       });
       await dialed.close();
+      // Cleared on the happy path: an armed 10s timer holds the loop open long
+      // after the assertions pass, which is the whole run's wall time for a
+      // backstop that exists only for the case where the run never returns.
+      let backstop: ReturnType<typeof setTimeout> | undefined;
       await Promise.race([
         runOutcome,
-        new Promise((r) => setTimeout(r, 10_000)),
+        new Promise((r) => {
+          backstop = setTimeout(r, 10_000);
+        }),
       ]);
+      if (backstop !== undefined) clearTimeout(backstop);
     }
   }, 60_000);
 });

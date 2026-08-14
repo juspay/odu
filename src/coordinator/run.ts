@@ -974,7 +974,10 @@ async function orchestrate(
   };
 
   const runtime = implementSurface(oduSurface, {
-    cells: { nodes: { store }, header: { store: inMemoryStore<RunHeader>(initialHeader) } },
+    cells: {
+      nodes: { store },
+      header: { store: inMemoryStore<RunHeader>(initialHeader) },
+    },
     streams: {
       nodeLog: { source: tail.streamSource },
     },
