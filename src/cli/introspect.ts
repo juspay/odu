@@ -19,6 +19,7 @@ import {
   type PipelineState,
   postingOf,
   type RunHeader,
+  type RunLane,
   type RunPhase,
   runPhase,
   STATUS_META,
@@ -132,24 +133,27 @@ export function provisioningLines(
 
 /** The machine-readable run environment on `odu status -o json`. Additive: the
  *  `nodes` / `posting` keys older readers use are untouched. `elapsed_ms` is
- *  null only for a header no run ever published. */
+ *  null only for a header no run ever published.
+ *
+ *  One `lanes` array carrying each entry's `state`, not two arrays a reader has
+ *  to zip: an agent asking "where is this run" gets the roster in one traversal,
+ *  in the run's own platform order. */
 export function runEnvJson(
   header: RunHeader,
   nowMs = Date.now(),
 ): {
   phase: RunPhase;
   elapsed_ms: number | null;
-  lanes: { platform: string; host: string }[];
-  claiming: { platform: string; pool: string[] }[];
+  lanes: RunLane[];
 } {
   return {
     phase: runPhase(header),
     elapsed_ms: header.startedAt > 0 ? nowMs - header.startedAt : null,
-    lanes: header.lanes.map((l) => ({ platform: l.platform, host: l.host })),
-    claiming: header.claiming.map((c) => ({
-      platform: c.platform,
-      pool: [...c.pool],
-    })),
+    lanes: header.lanes.map((l) =>
+      l.state === "leased"
+        ? { state: l.state, platform: l.platform, host: l.host }
+        : { state: l.state, platform: l.platform, pool: [...l.pool] },
+    ),
   };
 }
 

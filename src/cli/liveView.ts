@@ -1313,20 +1313,21 @@ export class LiveView {
     }
     this.paintNotices();
     if (this.laneLine !== undefined) {
+      // ONE loop over the roster, so the styled face lists a partly-claimed
+      // run's platforms in the run's own order — two loops grouped them by
+      // internal representation instead, which is an ordering no other face
+      // used. A lane still being claimed has no host to name, so it shows the
+      // pool it is claiming from rather than going blank for the whole
+      // provisioning window.
       const lanes: TextChunk[] = [];
       for (const l of header.lanes) {
         if (lanes.length > 0) lanes.push(faint("   "));
-        lanes.push(plain(l.platform), faint(" ▸ "), faint(l.host));
-      }
-      // A lane still being claimed has no host to name — show the pool it is
-      // claiming from, so the line says what the run is doing instead of going
-      // blank for the whole provisioning window.
-      for (const c of header.claiming) {
-        if (lanes.length > 0) lanes.push(faint("   "));
         lanes.push(
-          plain(c.platform),
+          plain(l.platform),
           faint(" ▸ "),
-          faint(`claiming ${c.pool.join(", ")}`),
+          faint(
+            l.state === "leased" ? l.host : `claiming ${l.pool.join(", ")}`,
+          ),
         );
       }
       setRow(this.laneLine, lanes);

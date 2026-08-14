@@ -7,6 +7,8 @@
 
 import type { AgentNodes } from "../mcp/agentSurface";
 import {
+  claimingLanes,
+  leasedLanes,
   type NodeState,
   type NodeStatus,
   type PipelineState,
@@ -398,14 +400,20 @@ export function operatorLine(text: string): string {
  *  render it — `run`'s plain banner, its lane-resolved line, and `odu status`
  *  — and this file is where "the projection every face shares" lives. */
 export function laneText(header: Pick<RunHeader, "lanes">): string {
-  return header.lanes.map((l) => `${l.platform}=${l.host}`).join(" · ");
+  return leasedLanes(header)
+    .map((l) => `${l.platform}=${l.host}`)
+    .join(" · ");
 }
 
 /** `x86_64-linux from kolu-ci-5, kolu-ci-6` — what a run with no lanes yet is
  *  doing, so a captured log says which pool it is waiting on rather than going
- *  silent until the first transition (juspay/odu#84). */
-export function claimingText(header: Pick<RunHeader, "claiming">): string {
-  return header.claiming
+ *  silent until the first transition (juspay/odu#84).
+ *
+ *  A second sentence over the same roster, not a second list: leased and
+ *  claiming lanes read as different English ("x=host" vs "x from pool"), and
+ *  `odu status` prints them on separate lines. */
+export function claimingText(header: Pick<RunHeader, "lanes">): string {
+  return claimingLanes(header)
     .map((c) => `${c.platform} from ${c.pool.join(", ")}`)
     .join(" · ");
 }

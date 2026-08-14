@@ -191,13 +191,12 @@ describe("odu status reports the run environment (black-box)", () => {
       run: {
         phase: string;
         elapsed_ms: number | null;
-        lanes: { platform: string; host: string }[];
-        claiming: unknown[];
+        lanes: { state: string; platform: string; host?: string }[];
       };
     };
     expect(parsed.run.phase).toBe("lanes");
-    expect(parsed.run.claiming).toEqual([]);
     expect(parsed.run.lanes.length).toBeGreaterThan(0);
+    expect(parsed.run.lanes.every((l) => l.state === "leased")).toBe(true);
     expect(parsed.run.lanes[0]?.host).toBe("localhost");
     expect(parsed.run.elapsed_ms).toBeGreaterThanOrEqual(0);
     // The keys that predate the `run` block are untouched.

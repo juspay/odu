@@ -329,16 +329,51 @@ export const ConfigureOutputSchema = Schema.Struct({
 });
 export type ConfigureOutput = typeof ConfigureOutputSchema.Type;
 
-/** One platform whose venue lease has not resolved yet, and the pool it is
- *  claiming a machine from. A run carrying any of these is still
- *  PROVISIONING — it holds the checkout and is claiming/booting a box (on a
- *  cold host, `nix copy`ing the runner closure over ssh-ng), which is minutes
- *  of live work with no lane behind it yet. */
-export const ClaimingLaneSchema = Schema.Struct({
-  platform: Schema.String,
-  pool: Schema.Array(Schema.String),
-});
-export type ClaimingLane = typeof ClaimingLaneSchema.Type;
+/** One platform's place in the run's lane roster — ONE concept with two
+ *  states, not two parallel lists:
+ *
+ *  - `claiming` — the venue lease has not resolved yet, and `pool` is the set
+ *    of machines it may land on. A run carrying any of these is still
+ *    PROVISIONING: it holds the checkout and is claiming/booting a box (on a
+ *    cold host, `nix copy`ing the runner closure over ssh-ng), which is minutes
+ *    of live work with no lane behind it yet.
+ *  - `leased` — the lease resolved and `host` is the machine the lane runs on.
+ *
+ *  A discriminated union rather than `lanes` + `claiming` arrays: a platform is
+ *  in exactly one state, and two arrays let the type express a platform in both
+ *  (or neither) — an invariant every reader would then have to re-join by hand,
+ *  in whatever order it happened to traverse them. */
+export const RunLaneSchema = Schema.Union([
+  Schema.Struct({
+    state: Schema.Literal("claiming"),
+    platform: Schema.String,
+    pool: Schema.Array(Schema.String),
+  }),
+  Schema.Struct({
+    state: Schema.Literal("leased"),
+    platform: Schema.String,
+    host: Schema.String,
+  }),
+]);
+export type RunLane = typeof RunLaneSchema.Type;
+export type LeasedLane = Extract<RunLane, { state: "leased" }>;
+export type ClaimingLane = Extract<RunLane, { state: "claiming" }>;
+
+/** The leased half of a roster, IN ROSTER ORDER — for the readers that can only
+ *  speak about lanes that have a machine (the durable run record, the
+ *  `plat=host` projections). */
+export function leasedLanes(
+  header: Pick<RunHeader, "lanes">,
+): LeasedLane[] {
+  return header.lanes.filter((l): l is LeasedLane => l.state === "leased");
+}
+
+/** The claiming half of a roster, in roster order. */
+export function claimingLanes(
+  header: Pick<RunHeader, "lanes">,
+): ClaimingLane[] {
+  return header.lanes.filter((l): l is ClaimingLane => l.state === "claiming");
+}
 
 /** The run's *environment* — what `run` set up that the `nodes`/`header`
  *  state can't already tell you: the lane→host map, where it came from, and
@@ -348,24 +383,20 @@ export type ClaimingLane = typeof ClaimingLaneSchema.Type;
  *  real lane→host map and commit link, not an observer stub.
  *
  *  Published TWICE per run, not once: the coordinator serves the socket before
- *  it claims a venue (juspay/odu#84), so the first header describes a run whose
- *  lanes don't exist yet (`claiming` non-empty, `lanes` holding only the
- *  agent-held platforms that needed no claim), and the second — once every
- *  lease resolves — is the full lane→host map with `claiming` empty. Every
- *  reader of `lanes` must therefore follow the cell rather than keep its first
- *  frame. */
+ *  it claims a venue (juspay/odu#84), so the first roster describes a run whose
+ *  lanes don't exist yet (every platform that needs a claim is `claiming`; the
+ *  agent-held ones are already `leased`), and the second — once every lease
+ *  resolves — is the full lane→host map. Every reader of `lanes` must therefore
+ *  follow the cell rather than keep its first frame. */
 export const RunHeaderSchema = Schema.Struct({
   /** Forge page for the commit (GitHub origins); the sha label becomes an
    *  OSC 8 hyperlink where supported. Null elsewhere. */
   commitUrl: Schema.NullOr(Schema.String),
-  /** The platforms whose venue lease HAS resolved, and the machine each got.
-   *  Empty while a run is still claiming its first box. */
-  lanes: Schema.Array(
-    Schema.Struct({ platform: Schema.String, host: Schema.String }),
-  ),
-  /** The platforms still being claimed — see {@link ClaimingLaneSchema}. Empty
-   *  once every lane has a host, which is what {@link runPhase} reads. */
-  claiming: Schema.Array(ClaimingLaneSchema),
+  /** The run's lane roster, one entry per active platform in platform order —
+   *  see {@link RunLaneSchema}. Every reader traverses this ONE list, so no two
+   *  faces can order the run's platforms differently. Empty only for a run that
+   *  has published nothing (or one whose claim got nothing at all). */
+  lanes: Schema.Array(RunLaneSchema),
   /** Where the lane→host map came from (`hosts.json`, a pool lease, …);
    *  null before the run publishes its header. */
   hostsSource: Schema.NullOr(Schema.String),
@@ -382,13 +413,15 @@ export type RunHeader = typeof RunHeaderSchema.Type;
 export const EMPTY_HEADER: RunHeader = {
   commitUrl: null,
   lanes: [],
-  claiming: [],
   hostsSource: null,
   startedAt: 0,
 };
 
 /** Where a run is in its lifecycle, as far as the *environment* is concerned:
  *
+ *  - `unstarted` — no run ever published this header: the cell default that
+ *    `attach` reads before the coordinator writes, and the stub an observer
+ *    with no run-env of its own passes ({@link EMPTY_HEADER}).
  *  - `provisioning` — the run exists, holds the checkout and its ordinal, and is
  *    claiming a machine for at least one lane. On a cold host that is a multi-
  *    minute `nix copy` of the runner closure with no lane behind it yet. Before
@@ -397,22 +430,30 @@ export const EMPTY_HEADER: RunHeader = {
  *    for a run that died or never started.
  *  - `lanes` — every lane has a host; the run is the lane fanout the rest of the
  *    surface describes.
- *  - `no_lanes` — nothing is being claimed and nothing was ever got: the
- *    pre-publish {@link EMPTY_HEADER}, or a run whose claim failed and cleared
- *    `claiming` without ever filling `lanes`. It exists so an EMPTY `claiming`
- *    cannot answer `lanes` for a run that has none — "lanes is the complete
- *    map" is only true once there IS one, and leaving that as a precondition on
- *    a sibling field is exactly the joint-distribution lie a flat product hides.
+ *  - `no_lanes` — a run that tried and got nothing: it published a roster and
+ *    its claim resolved to no lanes at all. It exists so an empty roster cannot
+ *    answer `lanes` for a run that has none — "lanes is the complete map" is
+ *    only true once there IS one, and leaving that as a precondition on a
+ *    sibling field is exactly the joint-distribution lie a flat product hides.
  *
- *  Derived from the two lists rather than stored beside them, so the phase and
- *  the reason for it cannot disagree. */
-export type RunPhase = "provisioning" | "lanes" | "no_lanes";
+ *  `unstarted` and `no_lanes` were one value until the lens review: the fact
+ *  that separates them is `startedAt`, so a three-valued enum forced every JSON
+ *  reader to learn "`no_lanes` with a null elapsed means unstarted" — the same
+ *  precondition-on-a-sibling-field this type was introduced to abolish. The
+ *  derivation therefore reads `startedAt` itself.
+ *
+ *  Derived from the roster rather than stored beside it, so the phase and the
+ *  reason for it cannot disagree. */
+export type RunPhase = "unstarted" | "provisioning" | "lanes" | "no_lanes";
 
 export function runPhase(
-  header: Pick<RunHeader, "claiming" | "lanes">,
+  header: Pick<RunHeader, "lanes" | "startedAt">,
 ): RunPhase {
-  if (header.claiming.length > 0) return "provisioning";
-  return header.lanes.length > 0 ? "lanes" : "no_lanes";
+  if (header.startedAt === 0) return "unstarted";
+  if (header.lanes.length === 0) return "no_lanes";
+  return header.lanes.some((l) => l.state === "claiming")
+    ? "provisioning"
+    : "lanes";
 }
 
 const primitives = {

@@ -216,8 +216,9 @@ describe("firstHeader", () => {
       doneState([["ci::e2e@x86_64-linux", "ok", 0]]),
       {
         commitUrl: null,
-        lanes: [{ platform: "x86_64-linux", host: "kolu-ci-1" }],
-        claiming: [],
+        lanes: [
+          { state: "leased", platform: "x86_64-linux", host: "kolu-ci-1" },
+        ],
         hostsSource: "~/.config/odu/hosts.json",
         startedAt: 0,
       },
@@ -227,7 +228,7 @@ describe("firstHeader", () => {
     try {
       const header = await firstHeader(client);
       expect(header.lanes).toEqual([
-        { platform: "x86_64-linux", host: "kolu-ci-1" },
+        { state: "leased", platform: "x86_64-linux", host: "kolu-ci-1" },
       ]);
       expect(header.hostsSource).toBe("~/.config/odu/hosts.json");
     } finally {

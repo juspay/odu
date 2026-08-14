@@ -173,7 +173,8 @@ While `odu run` is live in a checkout, these attach to its surface over
 ```sh
 nix run github:juspay/odu -- status          # snapshot; -o json → {nodes, posting, run}
                                              # (warns while GitHub posts are owed;
-                                             #  `run` = {phase, elapsed_ms, lanes, claiming})
+                                             #  `run` = {phase, elapsed_ms, lanes[]}
+                                             #  lane = {state: claiming|leased, …})
 nix run github:juspay/odu -- attach          # live TUI dashboard on a tty
                                              # (digits attach · n/p cycle ·
                                              #  r rerun · q quit); -o json

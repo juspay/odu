@@ -62,11 +62,13 @@ import type { TaskSpec } from "../common/spec";
 import {
   EMPTY_HEADER,
   EMPTY_POSTING,
+  leasedLanes,
   type NodeState,
   oduSurface,
   pendingNode,
   type PipelineState,
   type RunHeader,
+  type RunLane,
   type UnpostedEntry,
 } from "../common/surface";
 import { commitLabel, createDisplay, progressEvent } from "./display";
@@ -1119,20 +1121,30 @@ async function orchestrate(
    *  it at every terminal path, and a run torn down mid-claim must record the
    *  lanes it actually had — none — rather than a map assembled from hosts it
    *  never got. */
+  /** The lane roster for `platforms`, in platform order, from the one source of
+   *  truth (`lanesByPlatform`): a platform with a host is `leased`; one without
+   *  is `claiming` from its candidate pool while the claim is in flight, and
+   *  simply ABSENT once it has resolved. So "claiming" cannot survive the claim
+   *  on any exit path, including ones nobody has thought of yet — it is a
+   *  property of how the roster is built, not a field someone must remember to
+   *  clear. */
+  const rosterFrom = (
+    platforms: readonly string[],
+    claimInFlight: boolean,
+  ): RunLane[] =>
+    platforms.flatMap((platform): RunLane[] => {
+      const host = lanesByPlatform[platform];
+      if (host !== undefined) return [{ state: "leased", platform, host }];
+      return claimInFlight
+        ? [{ state: "claiming", platform, pool: candidatesFor(platform) }]
+        : [];
+    });
+
   let header: RunHeader = {
     commitUrl,
-    // Only what is already decided: platforms running on an agent-held lease.
-    // Everything else is `claiming` until its lease resolves.
-    lanes: activePlatforms
-      .filter((platform) => lanesByPlatform[platform] !== undefined)
-      .map((platform) => ({
-        platform,
-        host: lanesByPlatform[platform] as string,
-      })),
-    claiming: platformsToClaim.map((platform) => ({
-      platform,
-      pool: candidatesFor(platform),
-    })),
+    // Only what is already decided is `leased`: platforms running on an
+    // agent-held lease. Everything else is `claiming` until its lease resolves.
+    lanes: rosterFrom(activePlatforms, true),
     hostsSource: hostsConfig.source,
     startedAt,
   };
@@ -1227,7 +1239,9 @@ async function orchestrate(
             dirty: ctx.dirty,
             startedAt: header.startedAt,
             finishedAt: Date.now(),
-            lanes: header.lanes,
+            // The record describes machines the run actually had; a lane still
+            // claiming one has nothing to record.
+            lanes: leasedLanes(header),
             state,
             unposted: unposted ?? poster.unposted(),
           }),
@@ -1308,7 +1322,7 @@ async function orchestrate(
     // which for a total failure is nothing — `runPhase` then reads `no_lanes`,
     // the state that exists precisely so an empty `claiming` can't claim
     // otherwise.)
-    publishHeader({ ...header, claiming: [] });
+    publishHeader({ ...header, lanes: rosterFrom(activePlatforms, false) });
     for (const platform of activePlatforms) {
       terminalizePlatformNodes(platform, {
         running: "errored",
@@ -1318,14 +1332,7 @@ async function orchestrate(
     }
     checkSettled();
   } else {
-    publishHeader({
-      ...header,
-      lanes: activePlatforms.map((platform) => ({
-        platform,
-        host: lanesByPlatform[platform] as string,
-      })),
-      claiming: [],
-    });
+    publishHeader({ ...header, lanes: rosterFrom(activePlatforms, false) });
   }
 
   // Which lanes actually start. Three ways a platform drops out, all of them

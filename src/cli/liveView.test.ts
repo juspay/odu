@@ -68,10 +68,9 @@ const state: PipelineState = {
 const header: RunHeader = {
   commitUrl: null,
   lanes: [
-    { platform: "x86_64-linux", host: "builder-01" },
-    { platform: "aarch64-darwin", host: "mac-mini" },
+    { state: "leased", platform: "x86_64-linux", host: "builder-01" },
+    { state: "leased", platform: "aarch64-darwin", host: "mac-mini" },
   ],
-  claiming: [],
   hostsSource: "~/.config/odu/hosts.json",
   startedAt: 940_000,
 };

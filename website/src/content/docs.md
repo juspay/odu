@@ -137,7 +137,7 @@ The coordinator serves `.ci/odu.sock` **before** it claims, so that window is a
 phase you can watch rather than a silence
 ([juspay/odu#84](https://github.com/juspay/odu/issues/84)):
 
-- `odu status` prints `provisioning <elapsed>` and the pool each lane is claiming from — `-o json` carries it as `run: {phase, elapsed_ms, lanes, claiming}`.
+- `odu status` prints `provisioning <elapsed>` and the pool each lane is claiming from — `-o json` carries it as `run: {phase, elapsed_ms, lanes}`, one roster entry per platform tagged `state: "claiming" | "leased"`.
 - `odu attach` draws the matrix, with the lane line showing `x86_64-linux ▸ claiming ci-1, ci-2` until a host is picked.
 - `_ci-setup@<platform>` is `running` from the claim, and the copy narrates itself into that node's log: `odu logs -f _ci-setup@x86_64-linux`.
 - `odu wait` blocks on the run instead of reporting there is nothing to wait for.
