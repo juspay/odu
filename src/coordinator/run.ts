@@ -60,7 +60,7 @@ import {
 } from "../common/nodeId";
 import type { TaskSpec } from "../common/spec";
 import {
-  EMPTY_HEADER,
+  claimingLanes,
   EMPTY_POSTING,
   leasedLanes,
   type NodeState,
@@ -75,16 +75,9 @@ import { commitLabel, createDisplay, progressEvent } from "./display";
 import { laneTasks, loadJustPipeline, parseSelector } from "../just/ingest";
 import { fanoutPools, loadHosts, shortHost } from "./hosts";
 import { type Lane, startLane } from "./lane";
-import {
-  type LeaseHandle,
-  leaseLanes,
-  localHolderId,
-} from "./lease";
-import {
-  liveHeldPlatforms,
-  upsertPlatformLease,
-  removePlatformLease,
-} from "./leaseRecord";
+import { type LeaseHandle, localHolderId } from "./lease";
+import { claimVenues } from "./runEnv";
+import { liveHeldPlatforms } from "./leaseRecord";
 import { resolveRunnerFlake, runnerDrvResolver } from "./runnerFlake";
 import { cancelRun } from "./cancel";
 import {
@@ -613,22 +606,20 @@ async function orchestrate(
     args.hostPins.map((p) => p.split("=")[0]).filter((x): x is string => !!x),
   );
   const agentHeld = liveHeldPlatforms(repoRoot);
+  // Only the platforms that already HAVE a machine are recorded here. "Which
+  // platforms need a claim" is not a second list to keep in step with this one
+  // — it is every active platform this map does not cover, which is what the
+  // header roster says (`claimingLanes(header)`), from one source of truth.
   const lanesByPlatform: Record<string, string> = {};
-  const platformsToClaim: string[] = [];
   for (const platform of activePlatforms) {
-    if (pinPlatforms.has(platform)) {
-      platformsToClaim.push(platform);
-      continue;
-    }
+    // A `--host` pin forces the claim path even when an agent holds the lane.
+    if (pinPlatforms.has(platform)) continue;
     const held = agentHeld[platform];
-    if (held !== undefined) {
-      lanesByPlatform[platform] = held;
-      info(
-        `${platform}: using agent-held ${held} (odu lease — lock untouched on run exit)`,
-      );
-      continue;
-    }
-    platformsToClaim.push(platform);
+    if (held === undefined) continue;
+    lanesByPlatform[platform] = held;
+    info(
+      `${platform}: using agent-held ${held} (odu lease — lock untouched on run exit)`,
+    );
   }
 
   /** The machines a lane may land on: the one it already holds (agent lease),
@@ -646,7 +637,6 @@ async function orchestrate(
   // cell from construction (no deferred rebinding).
   const order: string[] = [];
   const nodes: Record<string, NodeState> = {};
-  const laneStart = new Map<string, number>();
   for (const platform of [...tasksByPlatform.keys()].sort()) {
     const tasks = tasksByPlatform.get(platform) ?? [];
     const setupId = fanId(SETUP, platform);
@@ -681,13 +671,50 @@ async function orchestrate(
     nodes,
     posting: EMPTY_POSTING,
   });
-  // The run environment (lane→host map + what is still being claimed + commit
-  // link + start clock), published on the surface so an `attach`-er paints the
-  // same matrix `run` does. Published twice: once before the socket serves,
-  // describing a run that is still claiming, and again once the lanes resolve
-  // (or the claim fails) — so this cell CHANGES during a run and its readers
-  // follow it.
-  const headerStore = inMemoryStore<RunHeader>(EMPTY_HEADER);
+  /** The lane roster for `platforms`, in platform order, from the one source of
+   *  truth (`lanesByPlatform`): a platform with a host is `leased`; one without
+   *  is `claiming` from its candidate pool while the claim is in flight, and
+   *  simply ABSENT once it has resolved. So "claiming" cannot survive the claim
+   *  on any exit path, including ones nobody has thought of yet — it is a
+   *  property of how the roster is built, not a field someone must remember to
+   *  clear. */
+  const rosterFrom = (
+    platforms: readonly string[],
+    claimInFlight: boolean,
+  ): RunLane[] =>
+    platforms.flatMap((platform): RunLane[] => {
+      const host = lanesByPlatform[platform];
+      if (host !== undefined) return [{ state: "leased", platform, host }];
+      return claimInFlight
+        ? [{ state: "claiming", platform, pool: candidatesFor(platform) }]
+        : [];
+    });
+
+  // The run environment (the lane roster + commit link + start clock),
+  // published on the surface so an `attach`-er paints the same matrix `run`
+  // does. Published twice: once as the store's initial value, describing a run
+  // that is still claiming, and again once the lanes resolve (or the claim
+  // fails) — so this cell CHANGES during a run and its readers follow it.
+  //
+  // The STORE is the only place this value lives. A `let header` beside it,
+  // written through a `publishHeader` that "everything goes through, except
+  // once", is a convention with a documented exception — and the one reader
+  // that took the local (`finalizeRunRecord`) then depended on read-after-the-
+  // right-write ordering rather than on a single source.
+  const headerStore = inMemoryStore<RunHeader>({
+    commitUrl:
+      github !== null
+        ? `https://github.com/${github.owner}/${github.repo}/commit/${sha}`
+        : null,
+    // Only what is already decided is `leased`: platforms running on an
+    // agent-held lease. Everything else is `claiming` until its lease resolves.
+    lanes: rosterFrom(activePlatforms, true),
+    hostsSource: hostsConfig.source,
+    // One run-start wall-clock, carried on the header so every face (live
+    // matrix + attach) counts elapsed from the same instant. Commit identity
+    // (pipeline name + sha7 + dirty) is already on `store`'s state.
+    startedAt: Date.now(),
+  });
 
   // ── per-node local logs: the in-memory tail (late socket subscribers) plus
   //    the durable per-SHA file (.ci/<sha7>/<plat>/<node>.log, justci's layout).
@@ -1009,13 +1036,15 @@ async function orchestrate(
     const prev = cur.nodes[id];
     if (prev === undefined) return;
     const next = { ...prev, ...patch };
-    if (
-      next.status === prev.status &&
-      next.exitCode === prev.exitCode &&
-      next.durationMs === prev.durationMs
-    ) {
-      return;
-    }
+    // Shallow equality over the keys the PATCH names, not over three chosen
+    // ones. The signature says `Partial<NodeState>` and the spread above
+    // applies all of it, so a three-field guard silently discarded any patch
+    // touching only other fields — a contract wider than what it honours, and
+    // the reason "we can't correct that field" ever looked true. Every
+    // transition side effect below stays gated on `next.status !== prev.status`
+    // exactly as before, so nothing fires for a non-status change.
+    const keys = Object.keys(patch) as (keyof NodeState)[];
+    if (keys.every((k) => next[k] === prev[k])) return;
     runtime.ctx.cells.nodes.set({
       ...cur,
       nodes: { ...cur.nodes, [id]: next },
@@ -1065,9 +1094,7 @@ async function orchestrate(
   const startSetup = (platform: string): void => {
     const id = fanId(SETUP, platform);
     if (store.get().nodes[id]?.status !== "pending") return;
-    const now = Date.now();
-    laneStart.set(platform, now);
-    updateNode(id, { status: "running", startedAt: now });
+    updateNode(id, { status: "running", startedAt: Date.now() });
   };
 
   /** Narrate one provisioning line into the lane's `_ci-setup` log as well as
@@ -1093,9 +1120,13 @@ async function orchestrate(
     // Freeze the duration at the first terminal transition: lane frames keep
     // arriving for the rest of the run, and re-deriving Date.now() − start
     // on each one silently inflates the settled number.
-    const current = store.get().nodes[id]?.status;
-    if (current !== "pending" && current !== "running") return;
-    const startedAt = laneStart.get(platform) ?? Date.now();
+    const node = store.get().nodes[id];
+    if (node === undefined) return;
+    if (node.status !== "pending" && node.status !== "running") return;
+    // Off the node `startSetup` stamped it on — a side Map holding the same
+    // instant was a second copy of the node's own `startedAt`, read back only
+    // to be written into the node it came from.
+    const startedAt = node.startedAt ?? Date.now();
     updateNode(id, {
       status,
       exitCode,
@@ -1107,107 +1138,21 @@ async function orchestrate(
   // ── socket + lanes ──
   mkdirSync(join(repoRoot, ".ci"), { recursive: true });
 
-  const commitUrl =
-    github !== null
-      ? `https://github.com/${github.owner}/${github.repo}/commit/${sha}`
-      : null;
-  // One run-start wall-clock, captured here and carried on the header so every
-  // face (live matrix + attach) counts elapsed from the same instant. Commit
-  // identity (pipeline name + sha7 + dirty) is already on `store`'s state.
-  const startedAt = Date.now();
-  /** The header as last published. Two states, not one (juspay/odu#84): the
-   *  provisioning header below, then the resolved lane→host map once the claim
-   *  returns. Held in a variable because `finalizeRunRecord` reads `lanes` off
-   *  it at every terminal path, and a run torn down mid-claim must record the
-   *  lanes it actually had — none — rather than a map assembled from hosts it
-   *  never got. */
-  /** The lane roster for `platforms`, in platform order, from the one source of
-   *  truth (`lanesByPlatform`): a platform with a host is `leased`; one without
-   *  is `claiming` from its candidate pool while the claim is in flight, and
-   *  simply ABSENT once it has resolved. So "claiming" cannot survive the claim
-   *  on any exit path, including ones nobody has thought of yet — it is a
-   *  property of how the roster is built, not a field someone must remember to
-   *  clear. */
-  const rosterFrom = (
-    platforms: readonly string[],
-    claimInFlight: boolean,
-  ): RunLane[] =>
-    platforms.flatMap((platform): RunLane[] => {
-      const host = lanesByPlatform[platform];
-      if (host !== undefined) return [{ state: "leased", platform, host }];
-      return claimInFlight
-        ? [{ state: "claiming", platform, pool: candidatesFor(platform) }]
-        : [];
-    });
+  // The header's own value — one construction site, read back rather than
+  // rebuilt beside it.
+  const commitUrl = headerStore.get().commitUrl;
+  /** The platforms that still need a machine, derived from the roster rather
+   *  than tracked as a second list beside it. */
+  const platformsToClaim = claimingLanes(headerStore.get()).map(
+    (l) => l.platform,
+  );
 
-  let header: RunHeader = {
-    commitUrl,
-    // Only what is already decided is `leased`: platforms running on an
-    // agent-held lease. Everything else is `claiming` until its lease resolves.
-    lanes: rosterFrom(activePlatforms, true),
-    hostsSource: hostsConfig.source,
-    startedAt,
-  };
   /** Publish a new header to the surface and to `run`'s own live view, so an
-   *  attached face and the foreground matrix repaint the same lane map. */
+   *  attached face and the foreground matrix repaint the same lane map. The
+   *  store IS the value — there is no local copy to keep in step. */
   const publishHeader = (next: RunHeader): void => {
-    header = next;
     headerStore.set(next);
     display.setHeader(next);
-  };
-
-  /**
-   * Claim a venue for every platform that still needs one, filling
-   * `lanesByPlatform` and `acquiredLeases`.
-   *
-   * Returns the failure rather than throwing it. By the time this runs the run
-   * already has a socket, an ordinal and a fan-in state that observers are
-   * reading, so a failure to get a machine is a fact ABOUT this run — it
-   * belongs in the run's own state (a red `_ci-setup`, a durable record, a
-   * verdict) rather than in an exception that unwinds past all three and leaves
-   * every reader with a socket that simply vanished.
-   */
-  const claimVenues = async (): Promise<Error | null> => {
-    if (platformsToClaim.length === 0) return null;
-    // Observable wait: record waiting state for platforms we're about to claim
-    // so `odu hosts` / re-reads of the lease file see the line (CR2).
-    for (const platform of platformsToClaim) {
-      upsertPlatformLease(repoRoot, platform, {
-        host: null,
-        holderPid: process.pid,
-        since: Date.now(),
-        state: "waiting",
-        waitingBehind: null,
-        run: runLabel,
-      });
-    }
-    try {
-      const claimed = await leaseLanes({
-        pools: resolvedPools,
-        platforms: platformsToClaim,
-        identity: { holder: localHolderId(), run: runLabel },
-        noWait: args.noWait,
-        onLine: setupLine,
-        resolveDrvPath: (platform) =>
-          runnerDrvResolver(runnerFlake, platform),
-      });
-      for (const [p, h] of Object.entries(claimed.lanes)) {
-        lanesByPlatform[p] = h;
-      }
-      for (const lease of claimed.leases) {
-        acquiredLeases.push(lease);
-        watchLease(lease);
-      }
-      return null;
-    } catch (err) {
-      return err instanceof Error ? err : new Error(String(err));
-    } finally {
-      // Drop run-owned waiting records (this pid). Agent-held platforms were
-      // never in platformsToClaim, so their records stay.
-      for (const platform of platformsToClaim) {
-        removePlatformLease(repoRoot, platform);
-      }
-    }
   };
   // Stamp the reserved seq onto the fan-in state so every face — the agent
   // `wait_for_settle` verdict especially — reads the run's full identity
@@ -1237,11 +1182,13 @@ async function orchestrate(
             sha,
             seq,
             dirty: ctx.dirty,
-            startedAt: header.startedAt,
+            startedAt: headerStore.get().startedAt,
             finishedAt: Date.now(),
             // The record describes machines the run actually had; a lane still
-            // claiming one has nothing to record.
-            lanes: leasedLanes(header),
+            // claiming one has nothing to record. Read off the store every
+            // face reads, so the record cannot describe a different run
+            // environment from the one the surface published.
+            lanes: leasedLanes(headerStore.get()),
             state,
             unposted: unposted ?? poster.unposted(),
           }),
@@ -1256,11 +1203,11 @@ async function orchestrate(
   // No reserved seq → `finalizeRunRecord` stays the default no-op: a run that
   // couldn't reserve an identity writes no record and claims no `<sha7>#<seq>`.
 
-  // Publish before serving so an `attach` connecting in the first instant reads
-  // the real header, not the EMPTY_HEADER default. The store directly, not
-  // `publishHeader`: the display has not started yet, and telling it about a
-  // header it is about to be started with would print the lane map twice.
-  headerStore.set(header);
+  // The header cell already holds the provisioning header — it is the store's
+  // initial value — so an `attach` connecting in the first instant reads the
+  // real run environment rather than the EMPTY_HEADER default, with no
+  // "publish before serving" step to remember.
+  //
   // Checkout run-lock is already held (covers the claim); serveSocket is the
   // attach surface and a second exclusivity gate for the rest of the run.
   //
@@ -1287,7 +1234,7 @@ async function orchestrate(
 
   // The header first: it is the only way a face learns the run environment, and
   // the plain banner `start` prints renders it.
-  display.setHeader(header);
+  display.setHeader(headerStore.get());
   display.start(store.get());
   display.update(store.get());
 
@@ -1301,41 +1248,32 @@ async function orchestrate(
   }
 
   // ── venue claim: one free machine per platform, lock held for the run ──
-  // The `_ci-setup` bracket opens first, for every lane: from here until a lane
-  // is up, this node IS the run's visible state, and its log is where the claim
-  // narrates itself.
-  for (const platform of activePlatforms) startSetup(platform);
+  // The `_ci-setup` bracket opens for the lanes whose claim it BRACKETS: from
+  // here until such a lane is up, this node IS the run's visible state, and its
+  // log is where the claim narrates itself. An agent-held lane claims nothing,
+  // so opening its bracket here would have its `_ci-setup` duration measure a
+  // sibling platform's claim wait — the one number that node exists to measure,
+  // measuring something else. It opens at its own lane start instead.
+  for (const platform of platformsToClaim) startSetup(platform);
 
-  const claimFailure = await claimVenues();
-  if (claimFailure !== null) {
-    // Provisioning failed — the run has no lanes and never will. Terminalize
-    // through the same path a dead lane takes, so the failure is a red
-    // `_ci-setup@<platform>` with the reason in its log rather than a bare
-    // stderr line: `runs`, `wait_for_settle`, the commit statuses and the
-    // verdict summary then all describe it in the vocabulary they already
-    // speak. `allSettled` resolves off these transitions and the normal
-    // completion path below writes the record and prints the verdict.
-    info(claimFailure.message);
-    // Nothing is being claimed any more, so say so. Leaving `claiming`
-    // populated would have `runPhase` report a settled, fully-errored run as
-    // "provisioning" for the rest of the coordinator's life — the whole
-    // finalize window, and up to the idle backstop under `--linger`. The header
-    // is published BEFORE the terminalize so no observer sees a terminal node
-    // set beside a claiming header. (`lanes` keeps whatever actually resolved,
-    // which for a total failure is nothing — `runPhase` then reads `no_lanes`,
-    // the state that exists precisely so an empty `claiming` can't claim
-    // otherwise.)
-    publishHeader({ ...header, lanes: rosterFrom(activePlatforms, false) });
-    for (const platform of activePlatforms) {
-      terminalizePlatformNodes(platform, {
-        running: "errored",
-        pending: "skipped",
-        log: `\n[odu] ${claimFailure.message}\n`,
-      });
+  const outcome = await claimVenues({
+    repoRoot,
+    pools: resolvedPools,
+    platforms: platformsToClaim,
+    identity: { holder: localHolderId(), run: runLabel },
+    noWait: args.noWait,
+    runLabel,
+    onLine: setupLine,
+    resolveDrvPath: (platform) => runnerDrvResolver(runnerFlake, platform),
+  });
+  // Merged at ONE visible site: the claim's outputs are a value, so nothing
+  // downstream depends on mutations its signature declines to mention.
+  if (outcome.ok) {
+    Object.assign(lanesByPlatform, outcome.lanes);
+    for (const lease of outcome.leases) {
+      acquiredLeases.push(lease);
+      watchLease(lease);
     }
-    checkSettled();
-  } else {
-    publishHeader({ ...header, lanes: rosterFrom(activePlatforms, false) });
   }
 
   // Which lanes actually start. Three ways a platform drops out, all of them
@@ -1347,20 +1285,19 @@ async function orchestrate(
   //     awaiting `poster.finalize()` before it exits, and starting an ssh lane
   //     on a coordinator that is on its way out strands the work it spawns;
   //   - the operator dropped THIS platform mid-claim (`odu cancel @plat` / MCP
-  //     `lane_cancel`). `cancelPlatform` tombstones the entry, but this loop
-  //     ends in `laneEntries.set(platform, {phase:"live"})` — which would
+  //     `lane_cancel`). `cancelPlatform` tombstones the entry, but the lane loop
+  //     below ends in `laneEntries.set(platform, {phase:"live"})` — which would
   //     overwrite the tombstone, re-open every `laneAccepting`-gated mirror
   //     path, resurrect the nodes the cancel marked `cancelled`, and start the
   //     lane on the machine the operator just dropped.
   const cancelledDuringClaim = (platform: string): boolean =>
     laneEntries.get(platform)?.phase === "operator_cancelled";
-  const lanesToStart =
-    claimFailure !== null || shuttingDown
-      ? []
-      : activePlatforms.filter((platform) => !cancelledDuringClaim(platform));
   // A platform cancelled while its lease was in flight owns a lease nobody will
   // use — `cancelPlatform` could not release it, because the claim had not
-  // handed the host over yet when the tombstone was set.
+  // handed the host over yet when the tombstone was set. Released BEFORE the
+  // header is republished: publishing first would advertise a lane on a host
+  // the coordinator has already given back, and `finalizeRunRecord` would write
+  // that lane into the durable record.
   for (const platform of activePlatforms) {
     if (!cancelledDuringClaim(platform)) continue;
     const host = lanesByPlatform[platform];
@@ -1370,9 +1307,67 @@ async function orchestrate(
       acquiredLeases[idx]?.release();
       acquiredLeases.splice(idx, 1);
     }
+    delete lanesByPlatform[platform];
   }
+  const survivors = activePlatforms.filter(
+    (platform) => !cancelledDuringClaim(platform),
+  );
+  const lanesToStart = !outcome.ok || shuttingDown ? [] : survivors;
+
+  // ONE republish, on every exit from the claim, built from the lanes that
+  // actually survived it. The roster is `claiming`-free by construction once
+  // the claim has resolved (see `rosterFrom`), so a settled run can never be
+  // reported as "provisioning" for the rest of the coordinator's life — and
+  // there is no second branch that has to remember to say so.
+  publishHeader({ ...headerStore.get(), lanes: rosterFrom(survivors, false) });
+
+  if (!outcome.ok) {
+    // Provisioning failed — the run has no lanes and never will. Terminalize
+    // through the same path a dead lane takes, so the failure is a red
+    // `_ci-setup@<platform>` with the reason in its log rather than a bare
+    // stderr line: `runs`, `wait_for_settle`, the commit statuses and the
+    // verdict summary then all describe it in the vocabulary they already
+    // speak. `allSettled` resolves off these transitions and the normal
+    // completion path below writes the record and prints the verdict. The
+    // header is published BEFORE this so no observer sees a terminal node set
+    // beside a claiming header.
+    //
+    // Scoped by what the claim actually covered. `leaseLanes` owns the
+    // all-or-nothing policy over `platformsToClaim`; an agent-held lane has a
+    // real host from `odu lease` and touched no pool, so reporting it as
+    // `errored` with a message about a pool it never saw publishes a node that
+    // lies about itself. It is still stopped — the run is fail-closed — but as
+    // an abort, not as this failure.
+    const claimed = new Set(platformsToClaim);
+    for (const platform of activePlatforms) {
+      terminalizePlatformNodes(
+        platform,
+        claimed.has(platform)
+          ? {
+              running: "errored",
+              pending: "skipped",
+              log: `\n[odu] ${outcome.error.message}\n`,
+            }
+          : {
+              running: "cancelled",
+              pending: "skipped",
+              log: `\n[odu] aborted: no machine for ${platformsToClaim.join(", ")}\n`,
+            },
+      );
+    }
+    checkSettled();
+  }
+
   for (const platform of lanesToStart) {
-    const host = lanesByPlatform[platform] as string;
+    // No cast: a successful claim filled every platform it covered, agent-held
+    // lanes arrived with a host, and lanes cancelled mid-claim were dropped
+    // from the map above — so this is total in practice, and `continue` is the
+    // honest answer if it ever isn't.
+    const host = lanesByPlatform[platform];
+    if (host === undefined) continue;
+    // The provisioning bracket for a lane that claimed nothing opens here, at
+    // its own start, rather than at a claim it was never part of.
+    startSetup(platform);
     const tasks = tasksByPlatform.get(platform) ?? [];
     const setupId = fanId(SETUP, platform);
 
@@ -1563,9 +1558,12 @@ async function orchestrate(
   // view has handed the terminal back: the reason is in `_ci-setup`'s log and
   // the verdict names that path, but a config refusal ("pool must not mix
   // localhost with remote hosts") is a message the operator should not have to
-  // go read a log file for.
-  if (claimFailure !== null) {
-    process.stderr.write(`${claimFailure.message}\n`);
+  // go read a log file for. ONCE, from here — `PlainDisplay.info` and
+  // `JsonDisplay.info` both write straight to stderr, so an `info()` at the
+  // failure site printed the same text twice on exactly the piped/CI runs where
+  // it is most likely to be read by a machine.
+  if (!outcome.ok) {
+    process.stderr.write(`${outcome.error.message}\n`);
   }
   return printVerdict(finalState, unposted);
 }
