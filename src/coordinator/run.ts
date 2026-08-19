@@ -757,6 +757,33 @@ async function orchestrate(
     for (const id of store.get().order) endLocal(id);
   };
 
+  /** Say what a torn-down run's logs lost, before `endRunLogs` says they ended.
+   *
+   *  Which nodes were owed output is answered from what each log IS, not from
+   *  what its node's status suggests: a log that has not published its terminal
+   *  is one the run was still expecting bytes for. Status only excludes the
+   *  nodes that were never owed anything — `pending` (never started) and
+   *  `skipped` (never runs, and the runner ends its log at the moment it is
+   *  skipped). Stamping those would be its own small lie, and the whole reason
+   *  this notice exists is that a truncation notice is worth exactly as much as
+   *  its worst sentence. No duration: nothing was measured here, the run was
+   *  simply stopped. */
+  const stampUnfinishedLogs = (): void => {
+    const state = store.get();
+    for (const id of state.order) {
+      const status = state.nodes[id]?.status;
+      if (status === undefined || status === "pending" || status === "skipped") {
+        continue;
+      }
+      if (logs.isEnded(id)) continue;
+      appendLocal(
+        id,
+        "\n[odu] log truncated: the run was stopped with this node's output" +
+          " still owed — what follows the last line was never received\n",
+      );
+    }
+  };
+
   /** Wait for every lane to finish streaming the output it still owes, and
    *  stamp the ones that never did. Truncation stops being a thing you notice
    *  weeks later by grepping for a summary that isn't there: either the log is
@@ -1079,7 +1106,15 @@ async function orchestrate(
       // exclusivity fast is the point — but it does stop writing, and a reader
       // is owed that fact either way: without a terminal here, an `odu logs -f`
       // attached to a cancelled run's node hangs until its own process is
-      // killed. What the log lost is a separate question from whether it ended.
+      // killed. What the log lost is a separate question from whether it ended,
+      // so SAY what was lost before saying it ended: a terminal on a silently
+      // short log is the very failure this issue is about, and an agent reaches
+      // this path by default — `wait_for_settle` returns on STATUS, so the
+      // `run({supersede})` / `odu cancel` / linger-idle that follows a settle
+      // lands here with a just-finished node's summary still on the wire.
+      // Stamping is a synchronous append, so unlike draining it costs this path
+      // nothing it is trying to protect.
+      stampUnfinishedLogs();
       endRunLogs();
       // Free venue leases so the remote flock drops immediately rather than
       // waiting for the OS to reap our ssh children on process death (crash

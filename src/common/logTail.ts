@@ -88,6 +88,10 @@ export interface CreateLogTailResult {
    *  predicate, not bolting a further clause onto each caller's `if`. Which is
    *  exactly how the clause about the `ended` latch came to be missing. */
   isNoopReset: (id: string, text: string) => boolean;
+  /** Has this node published its terminal? Asked rather than read off the
+   *  entry, so "is this log finished" stays the tail's fact to answer and not a
+   *  predicate every caller re-derives from raw fields. */
+  isEnded: (id: string) => boolean;
   /** `nodeLog` stream source: snapshot then live deltas for one node. Plugs
    *  straight into `implementSurface`'s `streams.nodeLog.source` slot on all
    *  three servers (the lane runner, the coordinator fan-in, the MCP test
@@ -137,6 +141,8 @@ export function createLogTail(): CreateLogTailResult {
     log.bus.publish({ kind: "end" });
   };
 
+  const isEnded = (id: string): boolean => logFor(id).ended;
+
   const isNoopReset = (id: string, text: string): boolean => {
     const log = logFor(id);
     return text === "" && log.buffer === "" && !log.ended;
@@ -176,5 +182,5 @@ export function createLogTail(): CreateLogTailResult {
       yield* deltas;
     });
 
-  return { append, reset, end, isNoopReset, streamSource };
+  return { append, reset, end, isEnded, isNoopReset, streamSource };
 }

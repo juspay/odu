@@ -24,13 +24,15 @@ export interface NodeLogSink {
   append: (id: string, text: string) => void;
   /** Replace the tail's buffer and the file's contents (a rerun's snapshot). */
   reset: (id: string, text: string) => void;
-  /** This node's log is complete — publish the terminal, having claimed the
-   *  file, so a node whose only news is that it finished still owns its path. */
+  /** Publish this node's log terminal. Does NOT claim the file — see the body. */
   end: (id: string) => void;
   /** Claim a node's file for this run without writing anything. */
   claim: (id: string) => void;
   /** Would `reset(id, text)` change anything a reader can observe? */
   isNoopReset: CreateLogTailResult["isNoopReset"];
+  /** Has this node's log published its terminal — i.e. is the run done
+   *  expecting bytes for it? */
+  isEnded: CreateLogTailResult["isEnded"];
   /** The `nodeLog` source this coordinator serves on `.ci/odu.sock`, and the
    *  live view's `openLog` seam. */
   streamSource: CreateLogTailResult["streamSource"];
@@ -101,6 +103,7 @@ export function createNodeLogSink(repoRoot: string, sha7: string): NodeLogSink {
     claim: (id) => {
       claimLog(id);
     },
+    isEnded: tail.isEnded,
     isNoopReset: tail.isNoopReset,
     streamSource: tail.streamSource,
   };
