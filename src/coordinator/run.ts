@@ -775,7 +775,16 @@ async function orchestrate(
       if (status === undefined || status === "pending" || status === "skipped") {
         continue;
       }
-      if (logs.isEnded(id)) continue;
+      // `_ci-setup` is the one node whose open log does NOT mean bytes are
+      // owed: the fan-in withholds its terminal on purpose, so the coordinator
+      // can keep narrating lane death and operator cancels into it long after
+      // the lane is done. `isEnded` is therefore permanently false for it, and
+      // the general test would stamp every interrupted run that merely got past
+      // provisioning with a loss that did not happen. For setup the honest
+      // question is whether the prep itself was cut — i.e. is it still running.
+      if (splitFanId(id).namepath === SETUP) {
+        if (status !== "running") continue;
+      } else if (logs.isEnded(id)) continue;
       appendLocal(
         id,
         "\n[odu] log truncated: the run was stopped with this node's output" +
