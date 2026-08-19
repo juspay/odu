@@ -210,8 +210,9 @@ in its log — a verdict and a `runs` record, not a vanished socket.
 
 **A red node's log holds the whole recipe, summary and all.** That is the point
 of drilling into it, so a run that settles on its own does not close a lane
-until every node has finished streaming (one you cancel or interrupt closes
-them at once, and its logs may end mid-recipe): a node's status arrives on a different stream than its
+until every node has finished streaming (one that does not settle on its own — cancelled,
+interrupted, or self-reaped after `--linger` goes idle — closes them at once,
+and its logs may end mid-recipe): a node's status arrives on a different stream than its
 output and gets there first, and a recipe's final lines — the `N scenarios (2
 failed)` that says what went wrong — are the last to land. The same holds for
 the durable file and for `logs -f`. A lane that goes silent still owing output

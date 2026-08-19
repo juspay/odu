@@ -295,6 +295,14 @@ export const EMPTY_STATE: PipelineState = {
  *  `_tag`, and these bytes are frozen (they cross both the stdio wire and the
  *  fan-in socket).
  *
+ *  FROZEN means no arm is ever removed or reshaped. ADDING one — as `end` is
+ *  added here — is a ONE-WAY compatibility step: the runner is pinned to the
+ *  build that shipped its coordinator (`runnerFlake.ts`, no override), but the
+ *  fan-in socket is dialled by whatever `odu` the operator has, and a reader
+ *  older than this build fails to decode `{"kind":"end"}` off `.ci/odu.sock`.
+ *  Accepted because reader and coordinator are normally the same binary — and
+ *  it is why a fourth arm needs a reason, not just a use.
+ *
  *  Three frames, because a node's log is FINITE and the stream must be able to
  *  say so. `snapshot` seeds a subscriber, `append` extends, and `end` is the
  *  terminal: this node has produced all the output it ever will (its process

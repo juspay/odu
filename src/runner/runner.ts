@@ -449,6 +449,17 @@ export function createLaneRunner(): LaneRunner {
       // phase — not a second flag beside it — is what makes the first one win.
       if (!current() || inv.phase !== "running") return;
       inv.phase = "settled";
+      // Backstop for a child that never spawned. The status obligation has two
+      // producers (`exit` and `error`, because a spawn failure emits no exit);
+      // the log terminal has one, `close`. A child with no pid has no stdio to
+      // drain, so this is the last moment its (empty) log is complete — and a
+      // log left unterminated here would cost a 15s drain and then a truncation
+      // notice stamped on a node that finished, which is the class of lie the
+      // notice exists to prevent.
+      if (child.pid === undefined) {
+        inv.phase = "closed";
+        tail.end(node.id);
+      }
       // The direct child is gone, but a stray it backgrounded (with its stdio
       // redirected, so `cat` still saw EOF) may survive in the group — reap it
       // rather than leaving the group unowned forever.

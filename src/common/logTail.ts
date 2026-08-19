@@ -151,7 +151,11 @@ export function createLogTail(): CreateLogTailResult {
       // Register on the bus BEFORE reading the buffer, and read `ended` in the
       // same synchronous breath as the snapshot: a frame published between the
       // two would otherwise be neither in the snapshot nor on our subscription.
-      const deltas = log.bus.subscribe(signal)[Symbol.asyncIterator]();
+      // `subscribe()` adds the subscriber to the registry before it RETURNS
+      // (see `inMemoryChannel` in @kolu/surface), which is why holding the
+      // iterable is already the registration — the framework's own
+      // `subscribeBeforeSnapshot` acquires it exactly this way.
+      const deltas = log.bus.subscribe(signal);
       const snapshot = log.buffer;
       const alreadyEnded = log.ended;
       yield { kind: "snapshot", text: snapshot } satisfies NodeLogMessage;
@@ -159,11 +163,10 @@ export function createLogTail(): CreateLogTailResult {
       // replay one so completion is a property of the LOG, not of when you
       // happened to attach.
       if (alreadyEnded) yield { kind: "end" } satisfies NodeLogMessage;
-      for (;;) {
-        const next = await deltas.next();
-        if (next.done === true) return;
-        yield next.value;
-      }
+      // `yield*` over the iterable is self-cleaning — the consumer leaving
+      // calls `return()` on it — so the abort controller stays the teardown of
+      // last resort rather than the only one.
+      yield* deltas;
     });
 
   return { append, reset, end, isNoopReset, streamSource };
