@@ -16,6 +16,8 @@
  * was all", which the coordinator needs before it may tear a lane down
  * (juspay/odu#87). `end` is idempotent, and `reset` RE-OPENS an ended log: a
  * rerun starts the node's output over, so its stream gets a fresh terminal too.
+ * `append` after `end` THROWS: the terminal is a promise to every reader that
+ * nothing more is coming, and a producer with more to say must re-open the log.
  *
  * `Channel<T>` is deliberately unchanged by the Effect migration — it keeps its
  * `subscribe(signal): AsyncIterable<T>` shape, because it is a framework-
@@ -35,9 +37,13 @@ import {
 import type { Stream } from "effect";
 import { clampLog, type NodeLogMessage } from "./surface";
 
-export interface LogTail {
-  /** The in-memory entry for a node — its tail buffer and its delta channel —
-   *  created lazily on first touch. */
+/** The in-memory entry for a node — its tail buffer and its delta channel —
+ *  created lazily on first touch. Deliberately NOT exported: `buffer` and
+ *  `ended` are this module's own state, and a consumer that reads them is
+ *  coding against the implementation instead of the contract — which is
+ *  precisely how the fan-in's emptiness guard came to be wrong. Every question
+ *  a consumer has about a log is a named query on {@link CreateLogTailResult}. */
+interface LogTail {
   buffer: string;
   bus: Channel<NodeLogMessage>;
   /** This node has produced all the output it ever will. Latched by `end`,
@@ -48,10 +54,23 @@ export interface LogTail {
   ended: boolean;
 }
 
+/** What a frame does to a log's completion: `end` latches it, `snapshot`
+ *  withdraws it (a rerun re-opens the log), `append` leaves it alone.
+ *
+ *  Exported because this is ONE rule with two appliers: `createLogTail` applies
+ *  it to a log it owns, and a lane tracking a REMOTE log applies it to frames
+ *  arriving off the wire. Two hand-written copies of a table this small are two
+ *  chances to drift on the day the protocol grows an arm — over bytes declared
+ *  frozen precisely because everything downstream depends on them. */
+export function endedAfter(prev: boolean, frame: NodeLogMessage): boolean {
+  if (frame.kind === "end") return true;
+  if (frame.kind === "snapshot") return false;
+  return prev;
+}
+
 export interface CreateLogTailResult {
-  /** Lazily-created tail entry for a node. */
-  logFor: (id: string) => LogTail;
-  /** Clamp `buffer + text` and publish an `append` frame. */
+  /** Clamp `buffer + text` and publish an `append` frame. Throws on a log that
+   *  has already ended — see the body for why that is loud rather than lenient. */
   append: (id: string, text: string) => void;
   /** Clamp `text` as the new buffer and publish a `snapshot` frame. Re-opens an
    *  ended log — the node is about to produce output again. */
@@ -60,6 +79,15 @@ export interface CreateLogTailResult {
    *  Idempotent: a node reaches its terminal status once, but several teardown
    *  paths may say so. */
   end: (id: string) => void;
+  /** Would `reset(id, text)` change anything a reader can observe? False only
+   *  for an empty snapshot over an empty, still-open log: nothing to show,
+   *  nothing to withdraw, no terminal to lift.
+   *
+   *  Named HERE, beside the state it interrogates, because every observable a
+   *  log has lives in this module — so adding one means extending this
+   *  predicate, not bolting a further clause onto each caller's `if`. Which is
+   *  exactly how the clause about the `ended` latch came to be missing. */
+  isNoopReset: (id: string, text: string) => boolean;
   /** `nodeLog` stream source: snapshot then live deltas for one node. Plugs
    *  straight into `implementSurface`'s `streams.nodeLog.source` slot on all
    *  three servers (the lane runner, the coordinator fan-in, the MCP test
@@ -80,6 +108,19 @@ export function createLogTail(): CreateLogTailResult {
 
   const append = (id: string, text: string): void => {
     const log = logFor(id);
+    // Loud, not lenient. `end` told every reader this node had produced all the
+    // output it ever will, and a reader that acted on it (`odu logs -f` breaks
+    // out of its loop the moment it lands) is already gone — so bytes published
+    // here are bytes nobody will ever see, the exact class of silent loss this
+    // protocol exists to remove. A producer with more to say must `reset` and
+    // re-open the log. Anything else is an ordering bug in the caller, and it
+    // fails fast here instead of being maintained by a comment in another
+    // module about which ids are safe to keep writing to.
+    if (log.ended) {
+      throw new Error(
+        `logTail: append to ${id} after its log ended — a terminal frame promises no further bytes; call reset() to re-open the log instead`,
+      );
+    }
     log.buffer = clampLog(log.buffer + text);
     log.bus.publish({ kind: "append", text });
   };
@@ -94,6 +135,11 @@ export function createLogTail(): CreateLogTailResult {
     if (log.ended) return;
     log.ended = true;
     log.bus.publish({ kind: "end" });
+  };
+
+  const isNoopReset = (id: string, text: string): boolean => {
+    const log = logFor(id);
+    return text === "" && log.buffer === "" && !log.ended;
   };
 
   const streamSource = ({ id }: { id: string }): Stream.Stream<NodeLogMessage> =>
@@ -120,5 +166,5 @@ export function createLogTail(): CreateLogTailResult {
       }
     });
 
-  return { logFor, append, reset, end, streamSource };
+  return { append, reset, end, isNoopReset, streamSource };
 }
