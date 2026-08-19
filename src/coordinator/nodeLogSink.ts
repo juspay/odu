@@ -84,12 +84,18 @@ export function createNodeLogSink(repoRoot: string, sha7: string): NodeLogSink {
       tail.reset(id, text);
       writeFileSync(claimLog(id), text);
     },
-    // Composed like the other two rather than open-coded at its call sites: a
-    // caller ending a fan-in log must not have to rediscover that the file is
-    // claimed first, and since every coordinator-owned outcome ends a log there
-    // are several of them.
+    // Publishes the terminal and NOTHING else — deliberately not a claim.
+    //
+    // Ending a log says "no more output is coming"; it does not say this run
+    // produced any. Those came bundled once, and the bundle destroyed evidence:
+    // the interrupt sweep ends every node in the DAG, so cancelling a re-run of
+    // the same SHA during the venue copy — before a single recipe had written a
+    // byte — truncated the PREVIOUS run's logs and left empty files in their
+    // place. Wipe without replace, which is the bug this file exists to prevent
+    // wearing the opposite mask. A claim belongs where the run has actually
+    // produced that node's outcome: a write, or a lane frame saying the node
+    // finished under this run (`claim` below).
     end: (id) => {
-      claimLog(id);
       tail.end(id);
     },
     claim: (id) => {

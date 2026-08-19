@@ -762,30 +762,33 @@ async function orchestrate(
    *  weeks later by grepping for a summary that isn't there: either the log is
    *  complete, or it says so in its own last line.
    *
-   *  Only an `idle` drain is stamped. A `gone` lane — operator-cancelled, or
-   *  dead — already wrote the true reason into each affected node's log
-   *  (`cancelled by operator (lane)`, `lane died: …`), so adding "silent for
-   *  15s" beneath it would be a second, fabricated account of the same event:
-   *  no stopwatch ran on that path. A truncation notice is only worth having
-   *  while every one of them is true. The elapsed silence comes off the drain's
-   *  own answer, so the sentence quotes what was measured rather than what the
-   *  caller assumed.
-   *
-   *  EVERY undrained node is stamped, empty log included. A node whose lane went
-   *  quiet before it emitted a byte is the one most easily mistaken for a
-   *  quiet recipe, and its file is also the one that would otherwise keep a
-   *  previous run's output under this run's verdict — the notice is both the
-   *  explanation and the claim. */
+   *  EVERY undrained node is stamped, on `gone` as well as `idle`, empty log
+   *  included — what differs between them is only what the sentence may claim.
+   *  An `idle` drain measured a silence and quotes it; a `gone` lane never
+   *  started a stopwatch, so its notice says the lane went away and offers no
+   *  duration. Stamping only `idle` was the earlier shape, and it left the
+   *  worst case silent: `terminalizePlatformNodes` writes its `lane died` /
+   *  `cancelled by operator` line only for nodes still running or pending, so a
+   *  node that had already gone **ok** with its summary still on the wire got
+   *  no line at all — and then `endRunLogs` published a terminal certifying
+   *  that truncated file as complete. That is juspay/odu#87 exactly, with a
+   *  completion frame vouching for the loss. A notice on every undrained node
+   *  is what closes it; the rule was never "stamp less", it was "never claim
+   *  something that did not happen". */
   const drainLaneLogs = async (lanes: Iterable<Lane>): Promise<void> => {
     await Promise.all(
       [...lanes].map(async (lane) => {
         const drained = await lane.drain();
-        if (drained.reason !== "idle") return;
+        if (drained.reason === "complete") return;
+        const why =
+          drained.reason === "idle"
+            ? `went silent for ${drained.idleMs / 1000}s`
+            : "went away (closed or died)";
         for (const laneId of drained.undrained) {
           appendLocal(
             fanId(laneId, lane.platform),
-            `\n[odu] log truncated: ${lane.platform} stopped streaming this node's` +
-              ` output with more still owed (silent for ${drained.idleMs / 1000}s)\n`,
+            `\n[odu] log truncated: ${lane.platform} ${why} with this node's` +
+              ` output still owed — what follows the last line was never received\n`,
           );
         }
       }),

@@ -162,7 +162,14 @@ export function createLogTail(): CreateLogTailResult {
       // A subscriber that arrives after the node finished missed its `end`;
       // replay one so completion is a property of the LOG, not of when you
       // happened to attach.
-      if (alreadyEnded) yield { kind: "end" } satisfies NodeLogMessage;
+      //
+      // Re-read the latch: the `yield` above SUSPENDS this generator, and a
+      // rerun's `reset` in that window re-opens the log. Replaying the stale
+      // `alreadyEnded` would then forge completion for an invocation that is
+      // starting over — `logs -f` breaks on the first `end`, so it would exit
+      // and never show the new output. The reopening snapshot is already
+      // queued on `deltas`; letting it through is the whole fix.
+      if (alreadyEnded && log.ended) yield { kind: "end" } satisfies NodeLogMessage;
       // `yield*` over the iterable is self-cleaning — the consumer leaving
       // calls `return()` on it — so the abort controller stays the teardown of
       // last resort rather than the only one.
