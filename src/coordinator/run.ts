@@ -27,7 +27,6 @@
 
 import { spawnSync } from "node:child_process";
 import {
-  appendFileSync,
   mkdirSync,
   mkdtempSync,
   rmSync,
@@ -51,7 +50,7 @@ import {
 } from "../cli/render";
 import { formatGoDuration } from "../common/duration";
 import { gitTopLevel } from "../common/git";
-import { createLogTail } from "../common/logTail";
+import { createNodeLogSink } from "./nodeLogSink";
 import {
   fanId,
   isSetupNode,
@@ -464,7 +463,7 @@ async function orchestrate(
       ? createDisplay("live", {
           interactive: process.stdin.isTTY === true,
           hookStderr: true,
-          openLog: (id) => tail.streamSource({ id }),
+          openLog: (id) => logs.streamSource({ id }),
           rerun: (id) => void rerunNode(id),
           onQuit: () => shutdown(130),
         })
@@ -737,65 +736,13 @@ async function orchestrate(
 
   // ── per-node local logs: the in-memory tail (late socket subscribers) plus
   //    the durable per-SHA file (.ci/<sha7>/<plat>/<node>.log, justci's layout).
-  //    The tail is the shared primitive; durability is this coordinator's
-  //    addition, layered on top of each tail mutation. ──
-  const tail = createLogTail();
-  const fileFor = (id: string): string => join(repoRoot, logPathFor(sha7, id));
-  /** The log directories this process has already created. A run's node set is
-   *  fixed, so this is bounded by the lane count — and since juspay/odu#84 the
-   *  provisioning narration flows through `appendLocal` one line at a time
-   *  (thousands of `copying path` lines), on the same event loop that serves
-   *  `.ci/odu.sock`. An `mkdirSync` per line is a sync syscall burst degrading
-   *  the very window the socket was moved ahead of the claim to make watchable.
-   *  `appendFileSync` stays: a durable log that survives a SIGKILL is the point. */
-  const madeDirs = new Set<string>();
-  /** Node log files this run has already opened. The first write of a run
-   *  TRUNCATES: `.ci/<sha7>/<plat>/<node>.log` is addressed by commit, not by
-   *  run, so without this a second run of the same SHA appends its output onto
-   *  the first run's with nothing marking the seam — a file that reads like one
-   *  recipe emitting everything twice (juspay/odu#87). A node rerun *within* a
-   *  run already resets the file through the snapshot frame; truncating here
-   *  makes a whole re-run behave the same way. Ownership is claimed on a node's
-   *  first WRITE or on its log terminal, whichever lands first — so a node that
-   *  emits nothing this time (a skipped one, a silent success) still replaces
-   *  its predecessor's output rather than quietly inheriting it under this
-   *  run's verdict. Bounded by the run's node set, like `madeDirs`. */
-  const openedFiles = new Set<string>();
-  /** Resolve a node's durable path and CLAIM it for this run: the first touch
-   *  truncates. Named for the claim rather than for the path resolution because
-   *  the claim is the policy — "which run owns this file" — and the path is
-   *  just how it is addressed. Returns the path so writers can chain; called
-   *  bare where the claim itself is the whole point. */
-  const claimLog = (id: string): string => {
-    const file = fileFor(id);
-    const dir = dirname(file);
-    if (!madeDirs.has(dir)) {
-      mkdirSync(dir, { recursive: true });
-      madeDirs.add(dir);
-    }
-    if (!openedFiles.has(file)) {
-      openedFiles.add(file);
-      writeFileSync(file, "");
-    }
-    return file;
-  };
-  const appendLocal = (id: string, text: string): void => {
-    tail.append(id, text);
-    appendFileSync(claimLog(id), text);
-  };
-  const resetLocal = (id: string, text: string): void => {
-    tail.reset(id, text);
-    writeFileSync(claimLog(id), text);
-  };
-  /** The third tail mutation, composed like the other two. `end` had been
-   *  open-coded at its one call site, so the next caller that needed to end a
-   *  fan-in log had to rediscover that the file must be claimed first — and
-   *  there are now several, because every coordinator-owned outcome ends a log
-   *  (see `terminalizePlatformNodes` and `endRunLogs`). */
-  const endLocal = (id: string): void => {
-    claimLog(id);
-    tail.end(id);
-  };
+  //    The sink owns the durability mechanics — path, ownership, syscalls; what
+  //    stays here is the run's own policy: which frame routes where, and when a
+  //    node's log has had this run's last word. ──
+  const logs = createNodeLogSink(repoRoot, sha7);
+  const appendLocal = logs.append;
+  const resetLocal = logs.reset;
+  const endLocal = logs.end;
   /** The run's last word on every node's log. `end` is a promise to a reader
    *  that nothing more is coming, and only the party still able to write can
    *  make it: for a recipe node that is its lane, but for `_ci-setup@<plat>` it
@@ -1054,7 +1001,7 @@ async function orchestrate(
       header: { store: inMemoryStore<RunHeader>(initialHeader) },
     },
     streams: {
-      nodeLog: { source: tail.streamSource },
+      nodeLog: { source: logs.streamSource },
     },
     // One arm per procedure — `({ input }) => Effect<Out>`. The two that await
     // a promise-shaped mutation keep it inside `Effect.promise`; the two that
@@ -1519,7 +1466,7 @@ async function orchestrate(
   // at. The run knows its whole node set here; that is the authority to claim
   // from, rather than a downstream event stream. Idempotent, so the setup logs
   // the claim already narrated into keep their lines.
-  for (const id of store.get().order) claimLog(id);
+  for (const id of store.get().order) logs.claim(id);
 
   // Which lanes actually start. Two ways a platform drops out, both newly
   // reachable because the socket (and therefore `lane.cancel`, `cancel` and the
@@ -1678,7 +1625,7 @@ async function orchestrate(
           // Never reset _ci-setup: the coordinator's provision lines precede
           // the lane stream and must survive the lane's snapshot frame.
           if (frame.text !== "") appendLocal(id, frame.text);
-        } else if (!tail.isNoopReset(id, frame.text)) {
+        } else if (!logs.isNoopReset(id, frame.text)) {
           // One question — "would this snapshot change anything a reader can
           // observe?" — asked of the tail, which is where every observable a
           // log has lives. Asked here as a hand-built disjunct it grew a clause
