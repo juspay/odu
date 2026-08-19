@@ -20,6 +20,7 @@ import {
   type SshProv,
   sshConnector,
 } from "@kolu/surface-remote";
+import { endedAfter } from "../common/logTail";
 import { SETUP_NAMEPATH } from "../common/nodeId";
 import type { TaskSpec } from "../common/spec";
 import { runUnary, subscribe } from "../common/effectEdge";
@@ -30,12 +31,30 @@ import {
   type PipelineState,
 } from "../common/surface";
 import type { ResolveRunnerDrv } from "./runnerFlake";
+import { withTimeout } from "../common/withTimeout";
 import { localhostSpawnEnv, pinLaneFace } from "./surfaceRemoteOpts";
 
 const MAX_CONNECT_ATTEMPTS = 3;
 const CONNECT_DEADLINE_MS = Number(
   process.env.ODU_LANE_CONNECT_TIMEOUT_MS ?? 30 * 60 * 1000,
 );
+
+/** How long a lane may go completely SILENT during the end-of-run log drain
+ *  before what it still owes is declared lost. Not a budget for the drain — a
+ *  lane with a huge backlog on a slow link keeps every second it needs, because
+ *  each frame that lands resets the clock. This bounds only the failure case: a
+ *  lane that has stopped talking altogether and will not resume.
+ *
+ *  It lives HERE, beside `CONNECT_DEADLINE_MS`, because "how long may this
+ *  transport be unresponsive before we call it dead" is a property of the ssh
+ *  link, not of the DAG the orchestrator runs over it.
+ *
+ *  Must stay comfortably above the runner's post-exit stdio-close latency
+ *  (`TERM_GRACE_MS` in src/runner/reap.ts, 2s): a recipe that backgrounds a
+ *  process holding its stdio delays `close` — and so the log's `end` — until
+ *  the reaper escalates. Fall below it and a completed node is stamped
+ *  truncated, which is exactly the lie that notice exists to prevent. */
+const LOG_DRAIN_IDLE_MS = 15_000;
 
 export interface LaneOptions {
   platform: string;
@@ -66,16 +85,18 @@ export interface LaneOptions {
  *  from under us", and stamping a measured silence that never elapsed makes the
  *  truncation notice itself untrustworthy — which defeats the point of having
  *  one. */
-export interface LaneDrain {
-  /** `complete` — every node delivered its log terminal, nothing is owed.
-   *  `idle` — the lane went silent with output still owed; the wait timed out.
-   *  `gone` — the lane was closed or died, so nothing further was ever coming;
-   *  its own cancel/death line is already in each affected node's log and is
-   *  the honest account of why. */
-  reason: "complete" | "idle" | "gone";
-  /** Nodes whose log never reached its terminal. Empty iff `complete`. */
-  undrained: string[];
-}
+export type LaneDrain =
+  /** Every node delivered its log terminal; nothing is owed, and there is no
+   *  loss to describe — which is why this arm carries no list at all. */
+  | { reason: "complete" }
+  /** The lane went silent with output still owed. `idleMs` is the silence that
+   *  actually elapsed, carried on the answer so a truncation notice quotes a
+   *  measured number instead of the caller re-deriving one. */
+  | { reason: "idle"; idleMs: number; undrained: readonly [string, ...string[]] }
+  /** The lane was closed or died, so nothing further was ever coming; its own
+   *  cancel/death line is already in each affected node's log and is the honest
+   *  account of why. No stopwatch ran, so no duration is offered. */
+  | { reason: "gone"; undrained: readonly [string, ...string[]] };
 
 export interface Lane {
   readonly platform: string;
@@ -97,11 +118,14 @@ export interface Lane {
    *
    * Bounded by SILENCE, not by a wall clock: as long as frames keep arriving
    * the drain keeps waiting, however big the backlog, so a slow link costs
-   * time rather than output. `idleMs` with nothing arriving means the lane has
-   * stopped talking and never will — give up and name the nodes, so the caller
-   * can mark the truncation in the log instead of leaving it to be discovered.
+   * time rather than output. `LOG_DRAIN_IDLE_MS` with nothing arriving means
+   * the lane has stopped talking and never will — give up and name the nodes,
+   * so the caller can mark the truncation in the log instead of leaving it to
+   * be discovered. The bound is the lane's own (see the constant): a caller
+   * that had to pass it in would have to know the drain is silence-bounded at
+   * all, and would then be picking the ssh link's liveness threshold.
    */
-  drain(idleMs: number): Promise<LaneDrain>;
+  drain(): Promise<LaneDrain>;
   /** Graceful teardown at end of run — never triggers `onDead`. */
   close(): void;
 }
@@ -139,6 +163,17 @@ export function startLane(opts: LaneOptions): Lane {
     label: `host:${opts.host}`,
   });
 
+  /** Every in-flight drain's progress listener. A SET, not a slot: two drains
+   *  on one lane are a legal question, and a second must not disarm the first
+   *  by overwriting its callback — nothing in `drain`'s type says it is
+   *  single-shot, and `--linger` already calls back on every settle. Woken by
+   *  each log frame (the liveness signal) and by teardown (the lane going
+   *  away), which are the only two things that can change a drain's answer. */
+  const logWaiters = new Set<() => void>();
+  const wakeDrains = (): void => {
+    for (const wake of [...logWaiters]) wake();
+  };
+
   const die = (error: string): void => {
     if (dead || closed) return;
     dead = true;
@@ -151,6 +186,9 @@ export function startLane(opts: LaneOptions): Lane {
     lifetime.abort();
     clearTimeout(deadline);
     session.destroy();
+    // A lane going away is an EVENT, not something a drain should discover by
+    // polling: whatever it is still owed is never coming now.
+    wakeDrains();
   };
 
   const deadline = setTimeout(() => {
@@ -235,9 +273,6 @@ export function startLane(opts: LaneOptions): Lane {
   const loggedIds = [SETUP_NAMEPATH, ...opts.tasks.map((t) => t.id)];
   /** Nodes whose log stream has delivered its terminal `end` frame. */
   const logComplete = new Set<string>();
-  /** When this lane last delivered ANY log frame — the drain's liveness signal. */
-  let lastLogFrameAt = Date.now();
-  let onLogProgress: (() => void) | null = null;
 
   const attachLogs = (client: LaneClient): void => {
     for (const id of loggedIds) {
@@ -248,16 +283,17 @@ export function startLane(opts: LaneOptions): Lane {
             lifetime.signal,
           )) {
             if (closed || dead) return;
-            lastLogFrameAt = Date.now();
             // Completion is not a latch: a rerun re-opens the node's log, and
-            // the snapshot that starts its new output withdraws it again.
-            if (frame.kind === "end") logComplete.add(id);
-            else if (frame.kind === "snapshot") logComplete.delete(id);
+            // the snapshot that starts its new output withdraws it again. The
+            // table itself is the tail's — this lane tracks a REMOTE log by the
+            // same rule the tail applies to a local one, from one definition.
+            if (endedAfter(logComplete.has(id), frame)) logComplete.add(id);
+            else logComplete.delete(id);
             // Every frame is forwarded, `end` included — the fan-in serves the
             // same three-frame protocol to attach clients, so completion is a
             // fact readers downstream get too, not one this lane keeps.
             opts.onLogFrame(id, frame);
-            onLogProgress?.();
+            wakeDrains();
           }
         } catch (err) {
           // A torn-down subscription reports NOTHING: an interruption is not a
@@ -299,44 +335,63 @@ export function startLane(opts: LaneOptions): Lane {
   /** Nodes still owing output — the drain's remaining work, and its answer. */
   const undrained = (): string[] => loggedIds.filter((id) => !logComplete.has(id));
 
-  const drain = (idleMs: number): Promise<LaneDrain> =>
-    new Promise<LaneDrain>((resolve) => {
-      const answer = (reason: LaneDrain["reason"]): LaneDrain => {
-        const ids = undrained();
-        // `complete` is the state of the lane, not the caller's hope: a lane
-        // that went quiet having nonetheless delivered every terminal is
-        // complete, whichever branch noticed.
-        return { reason: ids.length === 0 ? "complete" : reason, undrained: ids };
-      };
-      // A lane that is closed or dead will never send another frame: whatever
-      // has not arrived never will, and saying so at once beats idling out.
-      if (closed || dead) {
-        resolve(answer("gone"));
-        return;
-      }
-      let poll: ReturnType<typeof setInterval> | undefined;
-      const settle = (reason: LaneDrain["reason"]): void => {
-        onLogProgress = null;
-        if (poll !== undefined) clearInterval(poll);
-        resolve(answer(reason));
-      };
-      const done = (): boolean => undrained().length === 0;
-      onLogProgress = () => {
-        if (done()) settle("complete");
-      };
-      if (done()) {
-        settle("complete");
-        return;
-      }
-      poll = setInterval(() => {
-        // A lane that goes away mid-drain is `gone`, not silent — the run has
-        // its cancel/death narration already and must not be told a stopwatch
-        // ran that never did.
-        if (closed || dead) settle("gone");
-        else if (Date.now() - lastLogFrameAt >= idleMs) settle("idle");
-      }, Math.min(idleMs, 500));
-      poll.unref?.();
+  /** The drain's answer, built from what the lane actually still owes rather
+   *  than from the branch that noticed: a lane that went quiet having
+   *  nonetheless delivered every terminal is `complete`, and only a genuinely
+   *  non-empty loss can wear a losing reason. The type carries that coupling,
+   *  so no consumer has to re-derive "did I actually lose anything". */
+  const answer = (reason: "idle" | "gone"): LaneDrain => {
+    const [first, ...rest] = undrained();
+    if (first === undefined) return { reason: "complete" };
+    return reason === "idle"
+      ? { reason, idleMs: LOG_DRAIN_IDLE_MS, undrained: [first, ...rest] }
+      : { reason, undrained: [first, ...rest] };
+  };
+
+  const drain = async (): Promise<LaneDrain> => {
+    // A lane that is closed or dead will never send another frame: whatever
+    // has not arrived never will, and saying so at once beats idling out.
+    if (closed || dead) return answer("gone");
+    if (undrained().length === 0) return { reason: "complete" };
+    // Three events feeding one combinator: a frame arriving (which may complete
+    // the drain, and always restarts the silence clock), the lane going away,
+    // and the idle bound expiring. `withTimeout`'s heartbeat is what makes the
+    // bound an IDLE one — the same primitive, and the same reason for it, as
+    // the lease's cold-host provisioning pin.
+    let bump: (() => void) | undefined;
+    let arrive: () => void = () => {};
+    const nothingMoreIsComing = new Promise<void>((resolve) => {
+      arrive = resolve;
     });
+    const listener = (): void => {
+      bump?.();
+      // Either every terminal has landed, or the lane went away with output
+      // still owed. Which one it was is not this callback's to decide — it is
+      // read off what is still owed, once, in `answer`.
+      if (undrained().length === 0 || closed || dead) arrive();
+    };
+    logWaiters.add(listener);
+    try {
+      await withTimeout(
+        nothingMoreIsComing,
+        LOG_DRAIN_IDLE_MS,
+        `lane ${opts.platform} log drain`,
+        {
+          heartbeat: (b) => {
+            bump = b;
+          },
+        },
+      );
+      // The wait ended before the idle bound: a lane that went away mid-drain is
+      // `gone`, not silent — the run has its cancel/death narration already and
+      // must not be told a stopwatch ran that never did.
+      return answer("gone");
+    } catch {
+      return answer("idle");
+    } finally {
+      logWaiters.delete(listener);
+    }
+  };
 
   return {
     platform: opts.platform,
