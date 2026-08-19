@@ -6,8 +6,16 @@
  *
  *   - `append(id, text)` — clamp `buffer + text`, publish an `append` frame.
  *   - `reset(id, text)`  — clamp `text` to the buffer, publish a `snapshot`.
+ *   - `end(id)`          — this node's log is COMPLETE; publish the terminal.
  *   - `streamSource`     — the `nodeLog` source: emit the buffered snapshot,
  *                          then forward every later frame off the bus.
+ *
+ * A node's log is finite — its process closes its stdio, or the node reaches a
+ * terminal status without ever running — and `end` is the only place that fact
+ * is representable. It is what lets a reader tell "still arriving" from "that
+ * was all", which the coordinator needs before it may tear a lane down
+ * (juspay/odu#87). `end` is idempotent, and `reset` RE-OPENS an ended log: a
+ * rerun starts the node's output over, so its stream gets a fresh terminal too.
  *
  * `Channel<T>` is deliberately unchanged by the Effect migration — it keeps its
  * `subscribe(signal): AsyncIterable<T>` shape, because it is a framework-
@@ -32,6 +40,12 @@ export interface LogTail {
    *  created lazily on first touch. */
   buffer: string;
   bus: Channel<NodeLogMessage>;
+  /** This node has produced all the output it ever will. Latched by `end`,
+   *  cleared by `reset` (a rerun re-opens the log). Kept on the entry — not
+   *  inferred from the channel — because `inMemoryChannel` has no publisher-side
+   *  close, and because a LATE subscriber must learn completion too: it missed
+   *  the `end` frame, so `streamSource` replays one after the snapshot. */
+  ended: boolean;
 }
 
 export interface CreateLogTailResult {
@@ -39,8 +53,13 @@ export interface CreateLogTailResult {
   logFor: (id: string) => LogTail;
   /** Clamp `buffer + text` and publish an `append` frame. */
   append: (id: string, text: string) => void;
-  /** Clamp `text` as the new buffer and publish a `snapshot` frame. */
+  /** Clamp `text` as the new buffer and publish a `snapshot` frame. Re-opens an
+   *  ended log — the node is about to produce output again. */
   reset: (id: string, text: string) => void;
+  /** Latch this node's log complete and publish the terminal `end` frame.
+   *  Idempotent: a node reaches its terminal status once, but several teardown
+   *  paths may say so. */
+  end: (id: string) => void;
   /** `nodeLog` stream source: snapshot then live deltas for one node. Plugs
    *  straight into `implementSurface`'s `streams.nodeLog.source` slot on all
    *  three servers (the lane runner, the coordinator fan-in, the MCP test
@@ -53,7 +72,7 @@ export function createLogTail(): CreateLogTailResult {
   const logFor = (id: string): LogTail => {
     let log = logs.get(id);
     if (log === undefined) {
-      log = { buffer: "", bus: inMemoryChannel<NodeLogMessage>() };
+      log = { buffer: "", bus: inMemoryChannel<NodeLogMessage>(), ended: false };
       logs.set(id, log);
     }
     return log;
@@ -67,7 +86,14 @@ export function createLogTail(): CreateLogTailResult {
   const reset = (id: string, text: string): void => {
     const log = logFor(id);
     log.buffer = clampLog(text);
+    log.ended = false;
     log.bus.publish({ kind: "snapshot", text: log.buffer });
+  };
+  const end = (id: string): void => {
+    const log = logFor(id);
+    if (log.ended) return;
+    log.ended = true;
+    log.bus.publish({ kind: "end" });
   };
 
   const streamSource = ({ id }: { id: string }): Stream.Stream<NodeLogMessage> =>
@@ -76,9 +102,23 @@ export function createLogTail(): CreateLogTailResult {
       // made: a `Stream` is lazy, and a snapshot taken any earlier would be
       // stale by the time the consumer pulls it.
       const log = logFor(id);
-      yield { kind: "snapshot", text: log.buffer } satisfies NodeLogMessage;
-      for await (const msg of log.bus.subscribe(signal)) yield msg;
+      // Register on the bus BEFORE reading the buffer, and read `ended` in the
+      // same synchronous breath as the snapshot: a frame published between the
+      // two would otherwise be neither in the snapshot nor on our subscription.
+      const deltas = log.bus.subscribe(signal)[Symbol.asyncIterator]();
+      const snapshot = log.buffer;
+      const alreadyEnded = log.ended;
+      yield { kind: "snapshot", text: snapshot } satisfies NodeLogMessage;
+      // A subscriber that arrives after the node finished missed its `end`;
+      // replay one so completion is a property of the LOG, not of when you
+      // happened to attach.
+      if (alreadyEnded) yield { kind: "end" } satisfies NodeLogMessage;
+      for (;;) {
+        const next = await deltas.next();
+        if (next.done === true) return;
+        yield next.value;
+      }
     });
 
-  return { logFor, append, reset, streamSource };
+  return { logFor, append, reset, end, streamSource };
 }

@@ -181,9 +181,21 @@ export function createLaneRunner(): LaneRunner {
   // swept synchronously on dispose — the recipe trees are `detached`, so
   // nothing else would ever kill them.
   const reaper = createGroupReaper();
-  /** Monotonic token per builtin-setup invocation — the async prep analogue
-   *  of the child-identity guard on process nodes. */
-  let setupGeneration = 0;
+  /** Monotonic token per node INVOCATION — bumped on every start and on every
+   *  supersession (rerun / cancel). One mechanism for both node kinds: the
+   *  builtin setup node needed it because its prep is async, and recipe nodes
+   *  used to infer the same fact from `children` map membership, which cannot
+   *  tell "this child finished" from "this child was replaced". It has to,
+   *  because a child keeps delivering output *after* it is out of that map:
+   *  `exit` fires when the process dies, `close` only once its stdio has
+   *  drained, and both the tail of the output and the log's `end` frame live in
+   *  that window (juspay/odu#87). */
+  const generations = new Map<string, number>();
+  const bumpGeneration = (id: string): number => {
+    const next = (generations.get(id) ?? 0) + 1;
+    generations.set(id, next);
+    return next;
+  };
   let disposed = false;
   let config: ConfigureInput | undefined;
   let workspace: string | undefined;
@@ -292,6 +304,10 @@ export function createLaneRunner(): LaneRunner {
         if (node === undefined || node.status !== "pending") continue;
         if (blocked(node)) {
           setNode(id, { status: "skipped" });
+          // A skipped node never runs, so its (empty) log is complete the
+          // instant it is skipped. Terminal status and log terminal stay in
+          // lockstep on EVERY path, so a reader can wait on all nodes alike.
+          tail.end(id);
           changed = true;
         } else if (runnable(node) && !children.has(id)) {
           if (id === SETUP_NODE_ID) runSetup();
@@ -306,10 +322,11 @@ export function createLaneRunner(): LaneRunner {
   const runSetup = (): void => {
     const cfg = config;
     if (cfg === undefined) return;
-    const generation = ++setupGeneration;
+    const generation = bumpGeneration(SETUP_NODE_ID);
     const startedAt = Date.now();
     setNode(SETUP_NODE_ID, { status: "running", startedAt });
-    const live = (): boolean => !disposed && generation === setupGeneration;
+    const live = (): boolean =>
+      !disposed && generations.get(SETUP_NODE_ID) === generation;
     const finish = (ok: boolean): void => {
       if (!live()) return;
       setNode(SETUP_NODE_ID, {
@@ -317,6 +334,9 @@ export function createLaneRunner(): LaneRunner {
         exitCode: ok ? 0 : 1,
         durationMs: Date.now() - startedAt,
       });
+      // Setup writes its narration synchronously through `tail.append`, so
+      // reaching a terminal status IS the last of its output.
+      tail.end(SETUP_NODE_ID);
       tick();
     };
 
@@ -354,6 +374,13 @@ export function createLaneRunner(): LaneRunner {
 
   // ── recipe nodes: own process group, merged output ──
   const spawnNode = (node: NodeState): void => {
+    const generation = bumpGeneration(node.id);
+    /** This invocation is still the node's current one — i.e. no rerun/cancel
+     *  has replaced it. Deliberately NOT `children.get(node.id) === child`: the
+     *  child leaves that map at `exit`, while its stdio keeps delivering until
+     *  `close`, and output in that window belongs to this node. */
+    const current = (): boolean => generations.get(node.id) === generation;
+    let finished = false;
     const startedAt = Date.now();
     setNode(node.id, { status: "running", startedAt });
     // Node's 'pipe' stdio is an AF_UNIX socketpair, and Linux cannot open() a
@@ -378,13 +405,14 @@ export function createLaneRunner(): LaneRunner {
     child.stdout?.setEncoding("utf-8");
     child.stderr?.setEncoding("utf-8");
     const onOutput = (chunk: string): void => {
-      if (children.get(node.id) !== child) return;
+      if (!current()) return;
       tail.append(node.id, chunk);
     };
     child.stdout?.on("data", onOutput);
     child.stderr?.on("data", onOutput);
     const finish = (status: NodeStatus, exitCode: number | null): void => {
-      if (children.get(node.id) !== child) return;
+      if (!current() || finished) return;
+      finished = true;
       children.delete(node.id);
       // The direct child is gone, but a stray it backgrounded (with its stdio
       // redirected, so `cat` still saw EOF) may survive in the group — reap it
@@ -398,12 +426,20 @@ export function createLaneRunner(): LaneRunner {
       tick();
     };
     child.on("error", (err) => {
-      if (children.get(node.id) === child) {
+      if (current()) {
         tail.append(node.id, `\n[odu] spawn failed: ${err.message}\n`);
       }
       finish("failed", null);
     });
     child.on("exit", (code) => finish(code === 0 ? "ok" : "failed", code));
+    // `close`, not `exit`: exit fires when the process dies, close only once
+    // its stdio has drained, so the last chunks of a recipe's output — its
+    // summary, the part worth reading — arrive between the two. Ending the log
+    // here is what makes "I have all of this node's output" a fact the
+    // coordinator can wait on instead of a race it loses (juspay/odu#87).
+    child.on("close", () => {
+      if (current()) tail.end(node.id);
+    });
   };
 
   // Negative pid ⇒ the whole detached process group (just → nix develop →
@@ -433,7 +469,10 @@ export function createLaneRunner(): LaneRunner {
         children.delete(rid);
         killGroup(child);
       }
-      if (rid === SETUP_NODE_ID) setupGeneration += 1;
+      // Supersede whatever invocation held this node — a running child, an
+      // in-flight setup prep, or a finished child whose `close` has yet to
+      // fire — so none of them can write into the log this rerun just opened.
+      bumpGeneration(rid);
       tail.reset(rid, "");
       setNode(rid, {
         status: "pending",
@@ -459,7 +498,7 @@ export function createLaneRunner(): LaneRunner {
       children.delete(id);
       killGroup(child);
     }
-    if (id === SETUP_NODE_ID) setupGeneration += 1;
+    bumpGeneration(id);
     const startedAt = node.startedAt;
     const durationMs =
       startedAt !== null ? Date.now() - startedAt : null;
@@ -469,6 +508,9 @@ export function createLaneRunner(): LaneRunner {
       exitCode: null,
       durationMs,
     });
+    // The generation bump above already silenced the killed child, so this
+    // cancel line is the log's last word.
+    tail.end(id);
     tick();
     return true;
   };

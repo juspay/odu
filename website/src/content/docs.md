@@ -237,6 +237,7 @@ odu run [recipe[@platform]…]      run selectors; bare recipes fan out
 odu status [-o json]              snapshot the live run
                                   (json: {nodes, posting, run})
 odu logs [-f] <node>              replay and optionally follow a node log
+                                  (-f returns when that node's log is complete)
 odu attach [-o json]              attach the live dashboard or event stream
 odu wait [--settle] [--timeout-ms N] [--expected-sha SHA]
                                   fail-fast JSON verdict; --settle = full settle
@@ -324,7 +325,7 @@ The interface projects odu's [@kolu/surface](https://kolu.dev/surface/) through 
 Pipeline state and logs are subscribable resources rather than tools:
 
 - `surface://streams/nodes` — `{ run, pipeline, sha7, seq, nodes[], unposted[] }`: run identity, every node's status/exit/duration/red verdict, and full owed GitHub status rows not yet confirmed.
-- `surface://collections/logs/{id}` — buffered live output, or the durable log after exit.
+- `surface://collections/logs/{id}` — buffered live output, or the durable log after exit. A finished node's entry is its whole output, summary included: the run waits for the lane to finish streaming before tearing it down.
 
 Both support `resources/subscribe` and `notifications/resources/updated`. `wait_for_settle` is the blocking fallback for hosts that do not wake a model on notifications.
 
@@ -364,6 +365,7 @@ Repositories using [APM](https://github.com/juspay/apm) can depend on `juspay/od
 - **Live-tree mode is localhost-only.** A dirty tree with remote lanes is rejected rather than silently testing stale source. Select local platforms or commit and push.
 - **Lanes are one-shot.** A broken ssh connection marks unfinished nodes `errored`. Durable logs and run records survive; live node state does not survive runner restart.
 - **One run per checkout.** `.ci/odu.sock` is the lock. Use `cancel` or `--supersede` before starting another run.
+- **A node's durable log is complete.** A run does not close its lanes until every node has finished streaming — a recipe's summary is the last thing to arrive and used to be the first thing lost. A lane that goes silent still owing output says so in the log itself (`[odu] log truncated: …`) rather than ending mid-line. Logs are addressed by commit, not by run, so re-running the same SHA REPLACES `.ci/<sha>/<platform>/<recipe>.log` instead of appending to it.
 - **History is durable; live attachment is not.** `odu runs` reads completed records, but `status`, `logs`, and `attach` always target the currently live run and take no historical selector.
 
 Each terminal run writes a `(repo, sha, seq)` record to `.ci/<sha>/runs/<seq>.json`, including interrupted runs. A run that ends still owing GitHub status posts records them as `unposted` (visible in `odu runs` as e.g. `passed, 1 status never reached GitHub`). MCP-spawned coordinators also tee stdout/stderr to `.ci/<sha>/runs/<seq>.log`. Use `odu runs -o json` to inspect old outcomes and per-node results.

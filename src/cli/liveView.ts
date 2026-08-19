@@ -1126,6 +1126,10 @@ export class LiveView {
           // Which frame kind means "start over" is odu's stream protocol, so
           // the switch stays on this side of the boundary — `LogView` takes
           // bytes.
+          // `end` carries no bytes — the node simply has no more output. The
+          // pane keeps showing what it has (and stays subscribed, so a rerun's
+          // snapshot still lands), so there is nothing to write.
+          if (frame.kind === "end") continue;
           if (frame.kind === "snapshot") this.log?.reset();
           await this.log?.write(frame.text);
           if (!live()) return;

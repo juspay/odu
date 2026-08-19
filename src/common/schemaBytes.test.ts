@@ -130,6 +130,11 @@ describe("NodeLogMessage — the log stream's frame", () => {
     expect(roundTrip(NodeLogMessageSchema, bytes)).toBe(bytes);
   });
 
+  it("the end arm carries NO text — it says 'finished', not 'here is more'", () => {
+    const bytes = '{"kind":"end"}';
+    expect(roundTrip(NodeLogMessageSchema, bytes)).toBe(bytes);
+  });
+
   it("`_tag` is not the discriminant on this wire", () => {
     expect(accepts(NodeLogMessageSchema, { _tag: "append", text: "x" })).toBe(
       false,

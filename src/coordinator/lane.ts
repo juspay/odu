@@ -63,6 +63,26 @@ export interface Lane {
   rerun(nodeId: string): Promise<boolean>;
   /** Cancel one lane-local node (pending/running → cancelled). */
   cancel(nodeId: string): Promise<boolean>;
+  /**
+   * Wait until every node on this lane has streamed its log to completion —
+   * i.e. each `nodeLog` subscription has seen the terminal `end` frame — and
+   * resolve with the ids of any that did not.
+   *
+   * A node's status and its output travel on two different streams, and the
+   * status one wins: a recipe's last chunks are still in flight through the
+   * runner's channel and the stdio wire when its node already reads `ok`. So a
+   * run that tears its lanes down the instant the DAG settles throws that
+   * backlog away — silently, and worst on exactly the long noisy recipes whose
+   * logs you need, because they build the largest backlog. That is the bug in
+   * juspay/odu#87, where a 3m42s `e2e` node kept its head and lost its summary.
+   *
+   * Bounded by SILENCE, not by a wall clock: as long as frames keep arriving
+   * the drain keeps waiting, however big the backlog, so a slow link costs
+   * time rather than output. `idleMs` with nothing arriving means the lane has
+   * stopped talking and never will — give up and name the nodes, so the caller
+   * can mark the truncation in the log instead of leaving it to be discovered.
+   */
+  drain(idleMs: number): Promise<string[]>;
   /** Graceful teardown at end of run — never triggers `onDead`. */
   close(): void;
 }
@@ -191,8 +211,17 @@ export function startLane(opts: LaneOptions): Lane {
     if (!closed && !dead) die("lane state stream ended");
   };
 
+  /** Every node this lane taps a log for — the runner prepends `_ci-setup`
+   *  itself, and ends the log of every node it owns, skipped ones included. */
+  const loggedIds = [SETUP_NAMEPATH, ...opts.tasks.map((t) => t.id)];
+  /** Nodes whose log stream has delivered its terminal `end` frame. */
+  const logComplete = new Set<string>();
+  /** When this lane last delivered ANY log frame — the drain's liveness signal. */
+  let lastLogFrameAt = Date.now();
+  let onLogProgress: (() => void) | null = null;
+
   const attachLogs = (client: LaneClient): void => {
-    for (const id of [SETUP_NAMEPATH, ...opts.tasks.map((t) => t.id)]) {
+    for (const id of loggedIds) {
       void (async () => {
         try {
           for await (const frame of subscribe(
@@ -200,7 +229,16 @@ export function startLane(opts: LaneOptions): Lane {
             lifetime.signal,
           )) {
             if (closed || dead) return;
+            lastLogFrameAt = Date.now();
+            // Completion is not a latch: a rerun re-opens the node's log, and
+            // the snapshot that starts its new output withdraws it again.
+            if (frame.kind === "end") logComplete.add(id);
+            else if (frame.kind === "snapshot") logComplete.delete(id);
+            // Every frame is forwarded, `end` included — the fan-in serves the
+            // same three-frame protocol to attach clients, so completion is a
+            // fact readers downstream get too, not one this lane keeps.
             opts.onLogFrame(id, frame);
+            onLogProgress?.();
           }
         } catch (err) {
           // A torn-down subscription reports NOTHING: an interruption is not a
@@ -239,10 +277,42 @@ export function startLane(opts: LaneOptions): Lane {
     }
   };
 
+  /** Nodes still owing output — the drain's remaining work, and its answer. */
+  const undrained = (): string[] => loggedIds.filter((id) => !logComplete.has(id));
+
+  const drain = (idleMs: number): Promise<string[]> =>
+    new Promise<string[]>((resolve) => {
+      // A lane that is closed or dead will never send another frame: whatever
+      // has not arrived never will, and saying so at once beats idling out.
+      if (closed || dead) {
+        resolve(undrained());
+        return;
+      }
+      let poll: ReturnType<typeof setInterval> | undefined;
+      const settle = (): void => {
+        onLogProgress = null;
+        if (poll !== undefined) clearInterval(poll);
+        resolve(undrained());
+      };
+      const done = (): boolean => undrained().length === 0;
+      onLogProgress = () => {
+        if (done()) settle();
+      };
+      if (done()) {
+        settle();
+        return;
+      }
+      poll = setInterval(() => {
+        if (closed || dead || Date.now() - lastLogFrameAt >= idleMs) settle();
+      }, Math.min(idleMs, 500));
+      poll.unref?.();
+    });
+
   return {
     platform: opts.platform,
     rerun: (nodeId) => nodeCall("rerun", nodeId),
     cancel: (nodeId) => nodeCall("cancel", nodeId),
+    drain,
     close: (): void => {
       if (closed || dead) return;
       closed = true;

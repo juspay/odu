@@ -25,6 +25,7 @@ import {
   type LaneClient,
   laneClientOver,
   laneSurface,
+  type NodeLogMessage,
   type NodesSnapshot,
   type PipelineState,
 } from "./common/surface";
@@ -42,6 +43,13 @@ interface Harness {
     error: string | null;
   }>;
   dispose: () => void;
+}
+
+/** The text a log frame carries. `end` carries none — it says the node has
+ *  finished producing output, not what it said — so the assertions below can
+ *  read as "what is in this log" instead of as a union narrowing. */
+function frameText(frame: NodeLogMessage | undefined): string {
+  return frame !== undefined && frame.kind !== "end" ? frame.text : "";
 }
 
 const cleanups: Array<() => void> = [];
@@ -213,7 +221,71 @@ describe("odu lane runner over stdio (loopback)", () => {
 
     const frame = await firstFrame(h.client.surface.nodeLog.get({ id: "mark" }));
     expect(frame?.kind).toBe("snapshot");
-    expect(frame?.text).toContain("MARK-ODU-LOG");
+    expect(frameText(frame)).toContain("MARK-ODU-LOG");
+  });
+
+  it("ends a finished node's log, so a reader can tell 'that was all'", async () => {
+    // The whole of juspay/odu#87 in one assertion: without a terminal frame,
+    // "the lane still owes me this node's output" is unobservable, and the
+    // coordinator's only option is to guess — which it lost, silently, at
+    // exactly the moment a long recipe's summary was still in flight.
+    const h = await harness();
+    await h.configure([{ id: "mark", command: "echo MARK-ODU-LOG", needs: [] }]);
+    await until(() => last(h).nodes.mark?.status === "ok");
+
+    const frames: string[] = [];
+    for await (const frame of subscribe(
+      h.client.surface.nodeLog.get({ id: "mark" }),
+    )) {
+      frames.push(frame.kind);
+      if (frame.kind === "end") break;
+    }
+    // A LATE subscriber missed the live `end`, so the log replays one: whether
+    // this node is finished is a property of the log, not of when you attached.
+    expect(frames).toEqual(["snapshot", "end"]);
+  });
+
+  it("ends the log of a node that never ran — skipped counts as complete", async () => {
+    // Terminal status and log terminal stay in lockstep on every path, so a
+    // reader waiting for the whole lane can wait on all nodes alike instead of
+    // knowing which ones were going to produce output.
+    const h = await harness();
+    await h.configure([
+      { id: "build", command: "exit 3", needs: [] },
+      { id: "test", command: "echo never", needs: ["build"] },
+    ]);
+    await until(() => last(h).nodes.test?.status === "skipped");
+
+    const sub = subscribe(h.client.surface.nodeLog.get({ id: "test" }));
+    await sub.next(); // the snapshot; the frame after it is the one under test
+    expect((await sub.next()).value?.kind).toBe("end");
+    void sub.return?.();
+  });
+
+  it("re-opens an ended log on rerun — completion is not a latch", async () => {
+    const h = await harness();
+    await h.configure([{ id: "mark", command: "echo FIRST", needs: [] }]);
+    await until(() => last(h).nodes.mark?.status === "ok");
+
+    // Subscribe while the node is already finished, then rerun underneath the
+    // subscription: the ended log must re-open, or a rerun's output would
+    // arrive on a stream its reader had already written off as complete.
+    const frames: Array<{ kind: string; text?: string }> = [];
+    const sub = subscribe(h.client.surface.nodeLog.get({ id: "mark" }));
+    void (async () => {
+      for await (const frame of sub) {
+        frames.push(frame.kind === "end" ? { kind: "end" } : frame);
+      }
+    })();
+    await until(() => frames.length === 2); // snapshot, end
+
+    expect((await runUnary(h.client.surface.node.rerun({ id: "mark" }))).ok).toBe(
+      true,
+    );
+    // A fresh snapshot re-opens the log, and the new invocation ends it again.
+    await until(() => frames.length > 2 && frames.at(-1)?.kind === "end");
+    expect(frames.slice(2).map((f) => f.kind)).toContain("snapshot");
+    void sub.return?.();
   });
 
   it("reruns a node and its transitive dependents", async () => {
@@ -265,7 +337,7 @@ describe("odu lane runner over stdio (loopback)", () => {
     const frame = await firstFrame(
       h.client.surface.nodeLog.get({ id: "reopen" }),
     );
-    expect(frame?.text).toContain("REOPENED");
+    expect(frameText(frame)).toContain("REOPENED");
   });
 
   it("rejects rerun of an unknown node", async () => {

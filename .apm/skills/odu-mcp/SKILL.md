@@ -44,6 +44,14 @@ finalized record on disk — never green for a run torn down mid-flight. The
 `nodes` resource carries the same `unposted`. MCP `run` tees coordinator
 stdout/stderr to `.ci/<sha7>/runs/<seq>.log`.
 
+A settled node's `surface://collections/logs/{id}` is its COMPLETE output: the
+run holds its lanes open until every node has finished streaming, because a
+node's status and its output travel on different streams and the status one
+arrives first — so the recipe summary the agent came for used to be the part
+that never made it. A lane that stops streaming with output still owed stamps
+`[odu] log truncated: …` into the log, so a drill-in never reads a cut log as a
+complete one.
+
 `cancel` stops the live run and waits until it's torn down; `node_cancel` stops
 one node (`ci::fmt@plat`) and `lane_cancel` drops a whole platform while the rest
 of the run settles (status `cancelled`, not `errored`/`failed`). `run`'s `supersede`

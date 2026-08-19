@@ -112,6 +112,13 @@ import {
  *  Kept explicit and zero-inclusive: the live faces drop empty buckets (a
  *  status bar has no room for `0 errored`), but this line is the run's durable
  *  verdict and is the kind of output people grep. */
+/** How long a lane may go completely SILENT during the end-of-run log drain
+ *  before what it still owes is declared lost. Not a budget for the drain — a
+ *  lane with a huge backlog on a slow link keeps every second it needs, because
+ *  each frame that lands resets the clock. This bounds only the failure case: a
+ *  lane that has stopped talking altogether and will not resume. */
+const LOG_DRAIN_IDLE_MS = 15_000;
+
 const VERDICT_BUCKETS = [
   "ok",
   "failed",
@@ -749,12 +756,26 @@ async function orchestrate(
    *  the very window the socket was moved ahead of the claim to make watchable.
    *  `appendFileSync` stays: a durable log that survives a SIGKILL is the point. */
   const madeDirs = new Set<string>();
+  /** Node log files this run has already opened. The first write of a run
+   *  TRUNCATES: `.ci/<sha7>/<plat>/<node>.log` is addressed by commit, not by
+   *  run, so without this a second run of the same SHA appends its output onto
+   *  the first run's with nothing marking the seam — a file that reads like one
+   *  recipe emitting everything twice (juspay/odu#87). A node rerun *within* a
+   *  run already resets the file through the snapshot frame; truncating here
+   *  makes a whole re-run behave the same way, so the file always holds exactly
+   *  the latest run of that node at that commit. Bounded by the run's node set,
+   *  like `madeDirs`. */
+  const openedFiles = new Set<string>();
   const openFor = (id: string): string => {
     const file = fileFor(id);
     const dir = dirname(file);
     if (!madeDirs.has(dir)) {
       mkdirSync(dir, { recursive: true });
       madeDirs.add(dir);
+    }
+    if (!openedFiles.has(file)) {
+      openedFiles.add(file);
+      writeFileSync(file, "");
     }
     return file;
   };
@@ -765,6 +786,28 @@ async function orchestrate(
   const resetLocal = (id: string, text: string): void => {
     tail.reset(id, text);
     writeFileSync(openFor(id), text);
+  };
+
+  /** Wait for every lane to finish streaming the output it still owes, and
+   *  stamp the ones that never did. Truncation stops being a thing you notice
+   *  weeks later by grepping for a summary that isn't there: either the log is
+   *  complete, or it says so in its own last line. Only logs with content are
+   *  stamped — a skipped node owes nothing, and a lane that DIED already
+   *  explains itself in each affected node's log. */
+  const drainLaneLogs = async (lanes: Iterable<Lane>): Promise<void> => {
+    await Promise.all(
+      [...lanes].map(async (lane) => {
+        for (const laneId of await lane.drain(LOG_DRAIN_IDLE_MS)) {
+          const id = fanId(laneId, lane.platform);
+          if (tail.logFor(id).buffer === "") continue;
+          appendLocal(
+            id,
+            `\n[odu] log truncated: ${lane.platform} stopped streaming this node's` +
+              ` output with more still owed (silent for ${LOG_DRAIN_IDLE_MS / 1000}s)\n`,
+          );
+        }
+      }),
+    );
   };
 
   // ── the fan-in surface (status / logs / attach dial this) ──
@@ -1555,6 +1598,13 @@ async function orchestrate(
         const id = fanId(laneId, platform);
         if (frame.kind === "append") {
           appendLocal(id, frame.text);
+        } else if (frame.kind === "end") {
+          // Pass the log's terminal on to the fan-in's own readers — except for
+          // _ci-setup, for the same reason its snapshot is dropped below: the
+          // coordinator keeps writing to that node's log after the lane is done
+          // with it (lane death, operator cancel), so it is not complete just
+          // because the lane's half is.
+          if (laneId !== SETUP) tail.end(id);
         } else if (laneId === SETUP) {
           // Never reset _ci-setup: the coordinator's provision lines precede
           // the lane stream and must survive the lane's snapshot frame.
@@ -1682,6 +1732,12 @@ async function orchestrate(
   }
 
   await allSettled;
+
+  // The DAG has settled, but the LOGS have not: a node's status and its output
+  // travel on different streams, and the status one arrives first. Join them
+  // here — before the lanes are closed — or the tail of every noisy recipe,
+  // summary included, dies with the subscription (juspay/odu#87).
+  await drainLaneLogs(createdLanes);
 
   for (const lane of createdLanes) lane.close();
   // Venue locks drop with the run — free them as soon as lanes are done so the
