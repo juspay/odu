@@ -175,27 +175,56 @@ export function createLaneRunner(): LaneRunner {
   });
 
   const ctx = runtime.ctx;
-  const children = new Map<string, ChildProcess>();
   // Owns the death of every recipe process group (reap.ts): tracked from
   // spawn, reaped (TERM → grace → KILL) on node exit / cancel / rerun, and
   // swept synchronously on dispose — the recipe trees are `detached`, so
   // nothing else would ever kill them.
   const reaper = createGroupReaper();
-  /** Monotonic token per node INVOCATION — bumped on every start and on every
-   *  supersession (rerun / cancel). One mechanism for both node kinds: the
-   *  builtin setup node needed it because its prep is async, and recipe nodes
-   *  used to infer the same fact from `children` map membership, which cannot
-   *  tell "this child finished" from "this child was replaced". It has to,
-   *  because a child keeps delivering output *after* it is out of that map:
-   *  `exit` fires when the process dies, `close` only once its stdio has
-   *  drained, and both the tail of the output and the log's `end` frame live in
-   *  that window (juspay/odu#87). */
-  const generations = new Map<string, number>();
-  const bumpGeneration = (id: string): number => {
-    const next = (generations.get(id) ?? 0) + 1;
-    generations.set(id, next);
-    return next;
+  /** One START of one node, and the whole of that start's state.
+   *
+   *  IDENTITY IS THE RECORD. A rerun or a cancel REPLACES a node's entry, so
+   *  every closure still holding the old one fails `isCurrent` forever after,
+   *  on every handler, with nothing to compare and no counter to keep. That is
+   *  the distinction map-membership could not make: a child keeps delivering
+   *  output *after* it has finished — `exit` fires when the process dies,
+   *  `close` only once its stdio has drained, and both the tail of a recipe's
+   *  output and its log's `end` frame live in that window (juspay/odu#87) — so
+   *  "this one finished" and "this one was replaced" must not be the same fact.
+   *
+   *  `phase` names the three states an invocation actually has, so no
+   *  combination of separate flags can spell one the domain does not:
+   *    running — spawned, or (for the builtin setup node) preparing;
+   *    settled — status stamped, stdio still draining;
+   *    closed  — log terminal published; nothing more will ever be written.
+   *
+   *  `child` is null for the setup node, whose work is async prep rather than a
+   *  process — one mechanism covering both node kinds, as the generation
+   *  counter it replaces did. */
+  interface Invocation {
+    phase: "running" | "settled" | "closed";
+    child: ChildProcess | null;
+  }
+  const invocations = new Map<string, Invocation>();
+  const isCurrent = (id: string, inv: Invocation): boolean =>
+    !disposed && invocations.get(id) === inv;
+  /** Begin an invocation of `id`, superseding whatever held it. */
+  const beginInvocation = (id: string): Invocation => {
+    supersede(id);
+    const inv: Invocation = { phase: "running", child: null };
+    invocations.set(id, inv);
+    return inv;
   };
+  /** Retire whatever invocation holds `id`: kill its process group and drop the
+   *  record, so nothing it left behind can write into the log the next one
+   *  opens. The counter this replaces spelled both verbs — "begin invocation N"
+   *  and "invalidate whatever is current" — with one call whose meaning was the
+   *  caller's choice to keep or discard its return value. */
+  function supersede(id: string): void {
+    const inv = invocations.get(id);
+    if (inv === undefined) return;
+    invocations.delete(id);
+    if (inv.child !== null) killGroup(inv.child);
+  }
   let disposed = false;
   let config: ConfigureInput | undefined;
   let workspace: string | undefined;
@@ -309,7 +338,7 @@ export function createLaneRunner(): LaneRunner {
           // lockstep on EVERY path, so a reader can wait on all nodes alike.
           tail.end(id);
           changed = true;
-        } else if (runnable(node) && !children.has(id)) {
+        } else if (runnable(node) && invocations.get(id)?.phase !== "running") {
           if (id === SETUP_NODE_ID) runSetup();
           else spawnNode(node);
           changed = true;
@@ -322,13 +351,12 @@ export function createLaneRunner(): LaneRunner {
   const runSetup = (): void => {
     const cfg = config;
     if (cfg === undefined) return;
-    const generation = bumpGeneration(SETUP_NODE_ID);
+    const inv = beginInvocation(SETUP_NODE_ID);
     const startedAt = Date.now();
     setNode(SETUP_NODE_ID, { status: "running", startedAt });
-    const live = (): boolean =>
-      !disposed && generations.get(SETUP_NODE_ID) === generation;
+    const live = (): boolean => isCurrent(SETUP_NODE_ID, inv);
     const finish = (ok: boolean): void => {
-      if (!live()) return;
+      if (!live() || inv.phase !== "running") return;
       setNode(SETUP_NODE_ID, {
         status: ok ? "ok" : "failed",
         exitCode: ok ? 0 : 1,
@@ -336,6 +364,7 @@ export function createLaneRunner(): LaneRunner {
       });
       // Setup writes its narration synchronously through `tail.append`, so
       // reaching a terminal status IS the last of its output.
+      inv.phase = "closed";
       tail.end(SETUP_NODE_ID);
       tick();
     };
@@ -357,7 +386,12 @@ export function createLaneRunner(): LaneRunner {
       // configure() validated origin+sha when workspace is null
       { origin: cfg.origin as string, sha: cfg.sha as string },
       (line) => {
-        if (live()) tail.append(SETUP_NODE_ID, `${line}\n`);
+        // Narration belongs to a prep that is still running: a superseded one
+        // must not write into the log its replacement opened, and a finished
+        // one has already published its terminal.
+        if (live() && inv.phase === "running") {
+          tail.append(SETUP_NODE_ID, `${line}\n`);
+        }
       },
     ).then((result) => {
       if (!live()) {
@@ -374,13 +408,12 @@ export function createLaneRunner(): LaneRunner {
 
   // ── recipe nodes: own process group, merged output ──
   const spawnNode = (node: NodeState): void => {
-    const generation = bumpGeneration(node.id);
+    const inv = beginInvocation(node.id);
     /** This invocation is still the node's current one — i.e. no rerun/cancel
-     *  has replaced it. Deliberately NOT `children.get(node.id) === child`: the
-     *  child leaves that map at `exit`, while its stdio keeps delivering until
-     *  `close`, and output in that window belongs to this node. */
-    const current = (): boolean => generations.get(node.id) === generation;
-    let finished = false;
+     *  has replaced it. The record stays in the map across `exit`, because the
+     *  child's stdio keeps delivering until `close` and output in that window
+     *  belongs to this node; it leaves only on SUPERSESSION. */
+    const current = (): boolean => isCurrent(node.id, inv);
     const startedAt = Date.now();
     setNode(node.id, { status: "running", startedAt });
     // Node's 'pipe' stdio is an AF_UNIX socketpair, and Linux cannot open() a
@@ -400,7 +433,7 @@ export function createLaneRunner(): LaneRunner {
         detached: true,
       },
     );
-    children.set(node.id, child);
+    inv.child = child;
     if (child.pid !== undefined) reaper.track(child.pid);
     child.stdout?.setEncoding("utf-8");
     child.stderr?.setEncoding("utf-8");
@@ -411,9 +444,11 @@ export function createLaneRunner(): LaneRunner {
     child.stdout?.on("data", onOutput);
     child.stderr?.on("data", onOutput);
     const finish = (status: NodeStatus, exitCode: number | null): void => {
-      if (!current() || finished) return;
-      finished = true;
-      children.delete(node.id);
+      // `exit` and `error` can BOTH fire for one invocation (a child that fails
+      // to spawn emits no exit; one that spawns and dies emits no error), so the
+      // phase — not a second flag beside it — is what makes the first one win.
+      if (!current() || inv.phase !== "running") return;
+      inv.phase = "settled";
       // The direct child is gone, but a stray it backgrounded (with its stdio
       // redirected, so `cat` still saw EOF) may survive in the group — reap it
       // rather than leaving the group unowned forever.
@@ -438,7 +473,9 @@ export function createLaneRunner(): LaneRunner {
     // here is what makes "I have all of this node's output" a fact the
     // coordinator can wait on instead of a race it loses (juspay/odu#87).
     child.on("close", () => {
-      if (current()) tail.end(node.id);
+      if (!current() || inv.phase === "closed") return;
+      inv.phase = "closed";
+      tail.end(node.id);
     });
   };
 
@@ -464,15 +501,10 @@ export function createLaneRunner(): LaneRunner {
       ),
     ]);
     for (const rid of toReset) {
-      const child = children.get(rid);
-      if (child !== undefined) {
-        children.delete(rid);
-        killGroup(child);
-      }
       // Supersede whatever invocation held this node — a running child, an
       // in-flight setup prep, or a finished child whose `close` has yet to
       // fire — so none of them can write into the log this rerun just opened.
-      bumpGeneration(rid);
+      supersede(rid);
       tail.reset(rid, "");
       setNode(rid, {
         status: "pending",
@@ -493,12 +525,7 @@ export function createLaneRunner(): LaneRunner {
     // Idempotent: already cancelled is success (same as re-cancel platform).
     if (node.status === "cancelled") return true;
     if (node.status !== "pending" && node.status !== "running") return false;
-    const child = children.get(id);
-    if (child !== undefined) {
-      children.delete(id);
-      killGroup(child);
-    }
-    bumpGeneration(id);
+    supersede(id);
     const startedAt = node.startedAt;
     const durationMs =
       startedAt !== null ? Date.now() - startedAt : null;
@@ -534,7 +561,7 @@ export function createLaneRunner(): LaneRunner {
     // by finished nodes. Synchronous because this runs on process-exit
     // paths (stdin EOF before the framework-owned exit; the signal handlers
     // in main.ts), where a timer-based escalation would never fire.
-    children.clear();
+    invocations.clear();
     reaper.reapAllSync();
     // Keep the worktree when anything failed — it is the debugging trail;
     // the host tmpdir reaper owns the long tail.
