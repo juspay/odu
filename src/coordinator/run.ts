@@ -762,9 +762,11 @@ async function orchestrate(
    *  the first run's with nothing marking the seam — a file that reads like one
    *  recipe emitting everything twice (juspay/odu#87). A node rerun *within* a
    *  run already resets the file through the snapshot frame; truncating here
-   *  makes a whole re-run behave the same way, so the file always holds exactly
-   *  the latest run of that node at that commit. Bounded by the run's node set,
-   *  like `madeDirs`. */
+   *  makes a whole re-run behave the same way. Ownership is claimed on a node's
+   *  first WRITE or on its log terminal, whichever lands first — so a node that
+   *  emits nothing this time (a skipped one, a silent success) still replaces
+   *  its predecessor's output rather than quietly inheriting it under this
+   *  run's verdict. Bounded by the run's node set, like `madeDirs`. */
   const openedFiles = new Set<string>();
   const openFor = (id: string): string => {
     const file = fileFor(id);
@@ -791,13 +793,20 @@ async function orchestrate(
   /** Wait for every lane to finish streaming the output it still owes, and
    *  stamp the ones that never did. Truncation stops being a thing you notice
    *  weeks later by grepping for a summary that isn't there: either the log is
-   *  complete, or it says so in its own last line. Only logs with content are
-   *  stamped — a skipped node owes nothing, and a lane that DIED already
-   *  explains itself in each affected node's log. */
+   *  complete, or it says so in its own last line.
+   *
+   *  Only an `idle` drain is stamped, and only over a log with content. A
+   *  `gone` lane — operator-cancelled, or dead — already wrote the true reason
+   *  into each affected node's log (`cancelled by operator (lane)`, `lane
+   *  died: …`), so adding "silent for 15s" beneath it would be a second,
+   *  fabricated account of the same event: no stopwatch ran on that path. A
+   *  truncation notice is only worth having while every one of them is true. */
   const drainLaneLogs = async (lanes: Iterable<Lane>): Promise<void> => {
     await Promise.all(
       [...lanes].map(async (lane) => {
-        for (const laneId of await lane.drain(LOG_DRAIN_IDLE_MS)) {
+        const { reason, undrained } = await lane.drain(LOG_DRAIN_IDLE_MS);
+        if (reason !== "idle") return;
+        for (const laneId of undrained) {
           const id = fanId(laneId, lane.platform);
           if (tail.logFor(id).buffer === "") continue;
           appendLocal(
@@ -1604,12 +1613,31 @@ async function orchestrate(
           // coordinator keeps writing to that node's log after the lane is done
           // with it (lane death, operator cancel), so it is not complete just
           // because the lane's half is.
-          if (laneId !== SETUP) tail.end(id);
+          if (laneId !== SETUP) {
+            // Claim the file even for a node that never emitted a byte. A
+            // skipped node still has a log PATH at this commit, and leaving it
+            // untouched leaves the previous run's output sitting under this
+            // run's verdict — the same stale-by-address bug as appending, just
+            // quieter. Its terminal is where this run learns the node has a
+            // final log to own.
+            openFor(id);
+            tail.end(id);
+          }
         } else if (laneId === SETUP) {
           // Never reset _ci-setup: the coordinator's provision lines precede
           // the lane stream and must survive the lane's snapshot frame.
           if (frame.text !== "") appendLocal(id, frame.text);
-        } else if (frame.text !== "" || tail.logFor(id).buffer !== "") {
+        } else if (
+          frame.text !== "" ||
+          tail.logFor(id).buffer !== "" ||
+          // …or the log was ENDED and is now re-opening. A rerun of a node that
+          // produced nothing — a skipped one, the diff's own advertised
+          // workflow — sends an empty snapshot over an empty buffer, and
+          // without this the emptiness guard swallows it and the fan-in's
+          // `ended` latch stays set: `logs -f` on the rerunning node would exit
+          // at once insisting the log was complete.
+          tail.logFor(id).ended
+        ) {
           resetLocal(id, frame.text);
         }
       },

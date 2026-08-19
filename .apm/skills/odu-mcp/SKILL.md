@@ -44,11 +44,12 @@ finalized record on disk — never green for a run torn down mid-flight. The
 `nodes` resource carries the same `unposted`. MCP `run` tees coordinator
 stdout/stderr to `.ci/<sha7>/runs/<seq>.log`.
 
-A settled node's `surface://collections/logs/{id}` is its COMPLETE output: the
-run holds its lanes open until every node has finished streaming, because a
-node's status and its output travel on different streams and the status one
-arrives first — so the recipe summary the agent came for used to be the part
-that never made it. A lane that stops streaming with output still owed stamps
+A settled node's `surface://collections/logs/{id}` is the last 64KB of its output
+and now reliably ENDS at the recipe's final line: a run that settles on its own
+holds its lanes open until every node has finished streaming, because a node's
+status and its output travel on different streams and the status one arrives
+first — so the recipe summary the agent came for used to be the part that never
+made it. Read `.ci/<sha7>/<platform>/<node>.log` for the whole thing. A lane that stops streaming with output still owed stamps
 `[odu] log truncated: …` into the log, so a drill-in never reads a cut log as a
 complete one.
 

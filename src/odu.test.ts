@@ -262,6 +262,37 @@ describe("odu lane runner over stdio (loopback)", () => {
     void sub.return?.();
   });
 
+  it("re-opens the EMPTY log of a rerun skipped node — the silent case", async () => {
+    // The nastiest shape of "completion is not a latch": a skipped node's log
+    // is empty AND ended, so its rerun's snapshot carries no text over no
+    // buffer. Anything downstream that guards its reset on emptiness will
+    // swallow that frame and keep insisting the log is complete — which is
+    // exactly how a coordinator-side latch stayed stuck (caught in review).
+    const h = await harness();
+    await h.configure([
+      { id: "build", command: "exit 3", needs: [] },
+      { id: "test", command: "echo never", needs: ["build"] },
+    ]);
+    await until(() => last(h).nodes.test?.status === "skipped");
+
+    const kinds: string[] = [];
+    const sub = subscribe(h.client.surface.nodeLog.get({ id: "test" }));
+    void (async () => {
+      for await (const frame of sub) kinds.push(frame.kind);
+    })();
+    await until(() => kinds.length === 2); // snapshot(""), end
+    expect(kinds).toEqual(["snapshot", "end"]);
+
+    // Rerun the FAILED dep so the skipped node becomes pending again.
+    expect(
+      (await runUnary(h.client.surface.node.rerun({ id: "build" }))).ok,
+    ).toBe(true);
+    // The re-opening snapshot must arrive even though it carries nothing.
+    await until(() => kinds.length > 2);
+    expect(kinds[2]).toBe("snapshot");
+    void sub.return?.();
+  });
+
   it("re-opens an ended log on rerun — completion is not a latch", async () => {
     const h = await harness();
     await h.configure([{ id: "mark", command: "echo FIRST", needs: [] }]);

@@ -58,6 +58,25 @@ export interface LaneOptions {
   onDead: (error: string) => void;
 }
 
+/** Why a lane stopped owing output, and what it still owes.
+ *
+ *  The reason is part of the ANSWER because only the lane knows it, and a
+ *  caller that has to guess writes the guess into a durable log: a bare list of
+ *  unfinished nodes cannot tell "went quiet mid-stream" from "was cancelled out
+ *  from under us", and stamping a measured silence that never elapsed makes the
+ *  truncation notice itself untrustworthy — which defeats the point of having
+ *  one. */
+export interface LaneDrain {
+  /** `complete` — every node delivered its log terminal, nothing is owed.
+   *  `idle` — the lane went silent with output still owed; the wait timed out.
+   *  `gone` — the lane was closed or died, so nothing further was ever coming;
+   *  its own cancel/death line is already in each affected node's log and is
+   *  the honest account of why. */
+  reason: "complete" | "idle" | "gone";
+  /** Nodes whose log never reached its terminal. Empty iff `complete`. */
+  undrained: string[];
+}
+
 export interface Lane {
   readonly platform: string;
   rerun(nodeId: string): Promise<boolean>;
@@ -82,7 +101,7 @@ export interface Lane {
    * stopped talking and never will — give up and name the nodes, so the caller
    * can mark the truncation in the log instead of leaving it to be discovered.
    */
-  drain(idleMs: number): Promise<string[]>;
+  drain(idleMs: number): Promise<LaneDrain>;
   /** Graceful teardown at end of run — never triggers `onDead`. */
   close(): void;
 }
@@ -280,30 +299,41 @@ export function startLane(opts: LaneOptions): Lane {
   /** Nodes still owing output — the drain's remaining work, and its answer. */
   const undrained = (): string[] => loggedIds.filter((id) => !logComplete.has(id));
 
-  const drain = (idleMs: number): Promise<string[]> =>
-    new Promise<string[]>((resolve) => {
+  const drain = (idleMs: number): Promise<LaneDrain> =>
+    new Promise<LaneDrain>((resolve) => {
+      const answer = (reason: LaneDrain["reason"]): LaneDrain => {
+        const ids = undrained();
+        // `complete` is the state of the lane, not the caller's hope: a lane
+        // that went quiet having nonetheless delivered every terminal is
+        // complete, whichever branch noticed.
+        return { reason: ids.length === 0 ? "complete" : reason, undrained: ids };
+      };
       // A lane that is closed or dead will never send another frame: whatever
       // has not arrived never will, and saying so at once beats idling out.
       if (closed || dead) {
-        resolve(undrained());
+        resolve(answer("gone"));
         return;
       }
       let poll: ReturnType<typeof setInterval> | undefined;
-      const settle = (): void => {
+      const settle = (reason: LaneDrain["reason"]): void => {
         onLogProgress = null;
         if (poll !== undefined) clearInterval(poll);
-        resolve(undrained());
+        resolve(answer(reason));
       };
       const done = (): boolean => undrained().length === 0;
       onLogProgress = () => {
-        if (done()) settle();
+        if (done()) settle("complete");
       };
       if (done()) {
-        settle();
+        settle("complete");
         return;
       }
       poll = setInterval(() => {
-        if (closed || dead || Date.now() - lastLogFrameAt >= idleMs) settle();
+        // A lane that goes away mid-drain is `gone`, not silent — the run has
+        // its cancel/death narration already and must not be told a stopwatch
+        // ran that never did.
+        if (closed || dead) settle("gone");
+        else if (Date.now() - lastLogFrameAt >= idleMs) settle("idle");
       }, Math.min(idleMs, 500));
       poll.unref?.();
     });
