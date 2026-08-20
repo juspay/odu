@@ -55,6 +55,15 @@ const CONNECT_DEADLINE_MS = Number(
  *  truncated, which is exactly the lie that notice exists to prevent. */
 const LOG_DRAIN_IDLE_MS = 15_000;
 
+/** The idle bound above is unbounded in TOTAL time by construction (every
+ *  frame resets it), so a lane that keeps narrating — just under the idle
+ *  window, forever, without ever reaching a terminal — would hold the
+ *  coordinator's exit open with no backstop at all. This is that backstop: a
+ *  bump can never move it. Generous on purpose — it is the last resort for a
+ *  genuinely stuck stream, not a budget for a slow one, mirroring
+ *  `PIN_CEILING_MS` in `lease.ts` for the identical shape of risk. */
+const LOG_DRAIN_CEILING_MS = 30 * 60_000;
+
 export interface LaneOptions {
   platform: string;
   host: string;
@@ -369,22 +378,30 @@ export function startLane(opts: LaneOptions): Lane {
       if (undrained().length === 0 || closed || dead) arrive();
     };
     logWaiters.add(listener);
+    const label = `lane ${opts.platform} log drain`;
     try {
-      await withTimeout(
-        nothingMoreIsComing,
-        LOG_DRAIN_IDLE_MS,
-        `lane ${opts.platform} log drain`,
-        {
-          heartbeat: (b) => {
-            bump = b;
-          },
+      await withTimeout(nothingMoreIsComing, LOG_DRAIN_IDLE_MS, label, {
+        heartbeat: (b) => {
+          bump = b;
         },
-      );
+        ceilingMs: LOG_DRAIN_CEILING_MS,
+      });
       // The wait ended before the idle bound: a lane that went away mid-drain is
       // `gone`, not silent — the run has its cancel/death narration already and
       // must not be told a stopwatch ran that never did.
       return answer("gone");
-    } catch {
+    } catch (e) {
+      // `nothingMoreIsComing` only ever RESOLVES (see `arrive` above) — it has
+      // no reject path of its own — so the one thing this call can throw is
+      // `withTimeout`'s own idle/ceiling expiry, and that error's message
+      // always starts with the label we gave it. Anything else is a bug
+      // somewhere in the drain machinery, not a lane that went quiet, and
+      // relabeling it "idle" would stamp a fabricated reason into a truncation
+      // notice this whole feature exists to keep honest — so it is rethrown
+      // instead of swallowed into an answer.
+      if (!(e instanceof Error) || !e.message.startsWith(`odu: ${label}`)) {
+        throw e;
+      }
       return answer("idle");
     } finally {
       logWaiters.delete(listener);

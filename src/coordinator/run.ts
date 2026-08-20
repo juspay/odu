@@ -757,17 +757,6 @@ async function orchestrate(
     for (const id of store.get().order) endLocal(id);
   };
 
-  /** Say what a torn-down run's logs lost, before `endRunLogs` says they ended.
-   *
-   *  Which nodes were owed output is answered from what each log IS, not from
-   *  what its node's status suggests: a log that has not published its terminal
-   *  is one the run was still expecting bytes for. Status only excludes the
-   *  nodes that were never owed anything — `pending` (never started) and
-   *  `skipped` (never runs, and the runner ends its log at the moment it is
-   *  skipped). Stamping those would be its own small lie, and the whole reason
-   *  this notice exists is that a truncation notice is worth exactly as much as
-   *  its worst sentence. No duration: nothing was measured here, the run was
-   *  simply stopped. */
   /** Write the one sentence that says a node's log is short, and why.
    *
    *  ONE producer, because this notice is a contract: the e2e suite greps for
@@ -796,6 +785,15 @@ async function orchestrate(
     );
   };
 
+  /** Say what a torn-down run's logs lost, before `endRunLogs` says they ended.
+   *
+   *  Which nodes were owed output is answered from what each log IS, not from
+   *  what its node's status suggests: a log that has not published its terminal
+   *  is one the run was still expecting bytes for. Status only excludes the
+   *  nodes that were never owed anything — `pending` (never started) and
+   *  `skipped` (never runs, and the runner ends its log at the moment it is
+   *  skipped). Stamping those would be its own small lie. No duration: nothing
+   *  was measured here, the run was simply stopped. */
   const stampUnfinishedLogs = (): void => {
     const state = store.get();
     for (const id of state.order) {
@@ -1822,12 +1820,26 @@ async function orchestrate(
   }
 
   await allSettled;
+  // `allSettled` resolving says every node reached a terminal status — it says
+  // nothing about whether `shutdown` also fired meanwhile (`run.cancel`,
+  // SIGINT, lease.lost — all live across this await). See `parkForShutdown`
+  // above: once `shuttingDown` is true, `shutdown` is this run's one terminal
+  // owner, and this path must not resume past it.
+  if (shuttingDown) return await parkForShutdown();
 
   // The DAG has settled, but the LOGS have not: a node's status and its output
   // travel on different streams, and the status one arrives first. Join them
   // here — before the lanes are closed — or the tail of every noisy recipe,
   // summary included, dies with the subscription (juspay/odu#87).
   await drainLaneLogs(createdLanes);
+  // `drainLaneLogs` can run for `LOG_DRAIN_IDLE_MS`+ (a lane narrating a real
+  // backlog) — long enough for `shutdown` to fire mid-drain now, where the
+  // pre-drain code here had no such window. Re-check: resuming past a
+  // `shutdown` that started during the wait gives this run two terminal owners
+  // — a second `poster.finalize`, a second record write, a second
+  // `closeSocket`, a `process.exit` race — exactly what `parkForShutdown`
+  // exists to prevent.
+  if (shuttingDown) return await parkForShutdown();
 
   for (const lane of createdLanes) lane.close();
   // Lanes are shut: nothing can append to any node's log after this line, so
