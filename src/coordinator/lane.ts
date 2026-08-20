@@ -20,7 +20,6 @@ import {
   type SshProv,
   sshConnector,
 } from "@kolu/surface-remote";
-import { endedAfter } from "../common/logTail";
 import { SETUP_NAMEPATH } from "../common/nodeId";
 import type { TaskSpec } from "../common/spec";
 import { runUnary, subscribe } from "../common/effectEdge";
@@ -284,11 +283,9 @@ export function startLane(opts: LaneOptions): Lane {
           )) {
             if (closed || dead) return;
             // Completion is not a latch: a rerun re-opens the node's log, and
-            // the snapshot that starts its new output withdraws it again. The
-            // table itself is the tail's — this lane tracks a REMOTE log by the
-            // same rule the tail applies to a local one, from one definition.
-            if (endedAfter(logComplete.has(id), frame)) logComplete.add(id);
-            else logComplete.delete(id);
+            // the snapshot that starts its new output withdraws it again.
+            if (frame.kind === "end") logComplete.add(id);
+            else if (frame.kind === "snapshot") logComplete.delete(id);
             // Every frame is forwarded, `end` included — the fan-in serves the
             // same three-frame protocol to attach clients, so completion is a
             // fact readers downstream get too, not one this lane keeps.
@@ -351,8 +348,9 @@ export function startLane(opts: LaneOptions): Lane {
   const drain = async (): Promise<LaneDrain> => {
     // A lane that is closed or dead will never send another frame: whatever
     // has not arrived never will, and saying so at once beats idling out.
-    if (closed || dead) return answer("gone");
-    if (undrained().length === 0) return { reason: "complete" };
+    // (`answer` collapses to `complete` on its own when nothing is undrained,
+    // so an already-drained live lane needs no separate arm here.)
+    if (closed || dead || undrained().length === 0) return answer("gone");
     // Three events feeding one combinator: a frame arriving (which may complete
     // the drain, and always restarts the silence clock), the lane going away,
     // and the idle bound expiring. `withTimeout`'s heartbeat is what makes the

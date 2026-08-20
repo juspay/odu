@@ -54,20 +54,6 @@ interface LogTail {
   ended: boolean;
 }
 
-/** What a frame does to a log's completion: `end` latches it, `snapshot`
- *  withdraws it (a rerun re-opens the log), `append` leaves it alone.
- *
- *  Exported because this is ONE rule with two appliers: `createLogTail` applies
- *  it to a log it owns, and a lane tracking a REMOTE log applies it to frames
- *  arriving off the wire. Two hand-written copies of a table this small are two
- *  chances to drift on the day the protocol grows an arm — over bytes declared
- *  frozen precisely because everything downstream depends on them. */
-export function endedAfter(prev: boolean, frame: NodeLogMessage): boolean {
-  if (frame.kind === "end") return true;
-  if (frame.kind === "snapshot") return false;
-  return prev;
-}
-
 export interface CreateLogTailResult {
   /** Clamp `buffer + text` and publish an `append` frame. Throws on a log that
    *  has already ended — see the body for why that is loud rather than lenient. */

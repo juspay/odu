@@ -9,10 +9,16 @@
  */
 
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
-import { buildOduBinary, cleanup, hermeticEnv, makeFixture } from "./harness";
+import {
+  buildOduBinary,
+  cleanup,
+  currentNixSystem,
+  hermeticEnv,
+  makeFixture,
+} from "./harness";
 
 let oduBin: string;
 // Pin every spawned run to a localhost lane regardless of the machine's ambient
@@ -71,6 +77,14 @@ async function waitUntil(
   }
 }
 
+/** The fixture's own HEAD, short — how its durable logs are addressed. */
+function sha7Of(dir: string): string {
+  return execFileSync("git", ["rev-parse", "--short=7", "HEAD"], {
+    cwd: dir,
+    encoding: "utf-8",
+  }).trim();
+}
+
 function statusExit(dir: string): number {
   try {
     execFileSync(oduBin, ["status"], { cwd: dir, stdio: "ignore", env });
@@ -87,6 +101,76 @@ function runIsLive(dir: string): boolean {
 }
 
 describe("odu cancel / supersede / linger (black-box)", () => {
+  it(
+    "drops one lane and still settles cleanly — no crash, no invented notice",
+    async () => {
+      // Lane-drop followed by NATURAL settle was untested, and it is the shape
+      // that bites: the coordinator seals the dropped node's log with its own
+      // `cancelled by operator (lane)` line, and the settle that follows finds
+      // that same node still listed as owing output by the lane it was dropped
+      // from. Stamping a truncation notice onto a sealed log is a hard throw by
+      // design (`logTail: append to <node> after its log ended`), so the run
+      // died on a documented operator command while every other e2e test here
+      // stayed green — whole-run `cancel` was covered, `cancel @<platform>`
+      // was not.
+      const dir = fixture("sleep");
+      // stderr is CAPTURED here, unlike the other tests: a crashed coordinator
+      // and a cleanly-settled one both exit non-zero and both leave a log with
+      // no truncation line, so the exit code cannot tell them apart. The
+      // difference is whether the run reached its verdict block or died with
+      // the throw — which only stderr shows.
+      const child = spawn(oduBin, ["run", "--no-strict", "--progress", "json"], {
+        cwd: dir,
+        stdio: ["ignore", "ignore", "pipe"],
+        env,
+      });
+      live.push(child);
+      let stderr = "";
+      child.stderr?.setEncoding("utf-8");
+      child.stderr?.on("data", (c: string) => {
+        stderr += c;
+      });
+      const exited = new Promise<number>((resolve) => {
+        child.on("exit", (code) => resolve(code ?? -1));
+        child.on("error", () => resolve(-1));
+      });
+      await waitUntil(() => runIsLive(dir), 600_000, "the run to serve its socket");
+
+      const platform = currentNixSystem();
+      // Wait for the node to be RUNNING, not merely for the socket. Since
+      // juspay/odu#85 the socket is served *before* the venue claim, so a
+      // cancel here would land before the lane exists — nothing in
+      // `createdLanes`, nothing to drain, and the defect this test exists for
+      // never gets its chance. The durable log gaining bytes is the signal that
+      // the lane is up and the recipe is talking.
+      const slowLog = (): string =>
+        join(dir, ".ci", sha7Of(dir), platform, "slow.log");
+      await waitUntil(
+        () => existsSync(slowLog()) && readFileSync(slowLog(), "utf-8") !== "",
+        600_000,
+        "the slow node to start producing output",
+      );
+
+      execFileSync(oduBin, ["cancel", `@${platform}`], { cwd: dir, env });
+
+      // Dropping the only lane leaves nothing left to run, so the run settles
+      // on its own. INCOMPLETE — a cancelled node is not a pass.
+      expect(await exited).toBeGreaterThan(0);
+
+      // THE assertion: the coordinator reached its verdict instead of dying on
+      // the way there. Both halves matter — the absence of the throw, and the
+      // presence of the summary that proves we got past where it was thrown.
+      expect(stderr).not.toContain("after its log ended");
+      expect(stderr).toContain("ci run summary");
+
+      // The log keeps the true reason, and gains no second invented account.
+      const log = readFileSync(slowLog(), "utf-8");
+      expect(log).toContain("[odu] cancelled by operator (lane)");
+      expect(log).not.toContain("[odu] log truncated");
+    },
+    900_000,
+  );
+
   it("cancels a live run from a second process and drops the socket", async () => {
     const dir = fixture("sleep");
     const { exited } = spawnOdu(dir, ["run", "--no-strict"]);

@@ -768,6 +768,34 @@ async function orchestrate(
    *  this notice exists is that a truncation notice is worth exactly as much as
    *  its worst sentence. No duration: nothing was measured here, the run was
    *  simply stopped. */
+  /** Write the one sentence that says a node's log is short, and why.
+   *
+   *  ONE producer, because this notice is a contract: the e2e suite greps for
+   *  it, and every round of review on it has been about the same rule — a
+   *  truncation notice is worth exactly its worst sentence. Two copies of the
+   *  wording are two chances for one to drift out of that guarantee.
+   *
+   *  Sealed logs are skipped, and that is the load-bearing half. A log ends
+   *  when its owner has said its last word, and `append` after `end` THROWS by
+   *  design — so a second party stamping a sealed log does not merely repeat
+   *  itself, it kills the coordinator. That is not hypothetical: an operator
+   *  `odu cancel @<platform>` ends the dropped lane's node logs with the true
+   *  `cancelled by operator (lane)` line, and the settle that follows found
+   *  those same nodes still in the lane's undrained set and stamped them again
+   *  — `logTail: append to slow@x86_64-linux after its log ended`, run dead.
+   *  Two bookkeepings of "is this node still owed output" (the lane's, from
+   *  frames it received; the sink's, from logs it sealed) will disagree at
+   *  exactly the moments that matter, so the one that knows the log is SEALED
+   *  gets the last say. */
+  const stampTruncated = (id: string, cause: string): void => {
+    if (logs.isEnded(id)) return;
+    appendLocal(
+      id,
+      `\n[odu] log truncated: ${cause} with this node's output still owed` +
+        " — what follows the last line was never received\n",
+    );
+  };
+
   const stampUnfinishedLogs = (): void => {
     const state = store.get();
     for (const id of state.order) {
@@ -782,14 +810,10 @@ async function orchestrate(
       // the general test would stamp every interrupted run that merely got past
       // provisioning with a loss that did not happen. For setup the honest
       // question is whether the prep itself was cut — i.e. is it still running.
-      if (splitFanId(id).namepath === SETUP) {
-        if (status !== "running") continue;
-      } else if (logs.isEnded(id)) continue;
-      appendLocal(
-        id,
-        "\n[odu] log truncated: the run was stopped with this node's output" +
-          " still owed — what follows the last line was never received\n",
-      );
+      // (Every other node is filtered by `stampTruncated`'s sealed-log test,
+      // which is the same question asked of the party that can answer it.)
+      if (splitFanId(id).namepath === SETUP && status !== "running") continue;
+      stampTruncated(id, "the run was stopped");
     }
   };
 
@@ -821,11 +845,7 @@ async function orchestrate(
             ? `went silent for ${drained.idleMs / 1000}s`
             : "went away (closed or died)";
         for (const laneId of drained.undrained) {
-          appendLocal(
-            fanId(laneId, lane.platform),
-            `\n[odu] log truncated: ${lane.platform} ${why} with this node's` +
-              ` output still owed — what follows the last line was never received\n`,
-          );
+          stampTruncated(fanId(laneId, lane.platform), `${lane.platform} ${why}`);
         }
       }),
     );

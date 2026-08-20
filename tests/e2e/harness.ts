@@ -23,7 +23,7 @@ export const BIG = 256 * 1024 * 1024;
  *  under emulation / cross setups; `builtins.currentSystem` is what odu will
  *  actually build `odu-runner` against, so it is the tuple the lane must name.
  *  Synchronous, like this file's other `nix`/`git` calls; no import from `src/`. */
-function currentNixSystem(): string {
+export function currentNixSystem(): string {
   return execFileSync(
     "nix",
     ["eval", "--impure", "--raw", "--expr", "builtins.currentSystem"],

@@ -546,7 +546,7 @@ export function createLaneRunner(): LaneRunner {
       exitCode: null,
       durationMs,
     });
-    // The generation bump above already silenced the killed child, so this
+    // The supersession above already silenced the killed child, so this
     // cancel line is the log's last word.
     tail.end(id);
     tick();
