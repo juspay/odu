@@ -17,10 +17,12 @@ tests/e2e/
 ├── cancel.e2e.test.ts    # cancel / supersede / linger, driven from a 2nd process
 ├── protect.e2e.test.ts   # `odu protect --dry-run` context enumeration
 ├── mcp.e2e.test.ts       # the `odu mcp` agent face over a real MCP client
+├── logs.e2e.test.ts      # durable node logs: complete to the last line, one run per file
 ├── fixtures/
 │   ├── pass/justfile     # a DAG that goes green
 │   ├── fail/justfile     # a DAG whose node fails (exit 1)
-│   └── sleep/justfile    # a DAG that stays running, to cancel out from under
+│   ├── sleep/justfile    # a DAG that stays running, to cancel out from under
+│   └── noisy/justfile    # a DAG that outruns the log wire, then exits at once
 └── README.md
 ```
 

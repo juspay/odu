@@ -179,7 +179,8 @@ nix run github:juspay/odu -- attach          # live TUI dashboard on a tty
                                              # (digits attach · n/p cycle ·
                                              #  r rerun · q quit); -o json
                                              # = transition stream
-nix run github:juspay/odu -- logs -f e2e@x86_64-linux
+nix run github:juspay/odu -- logs -f e2e@x86_64-linux   # -f returns once that
+                                             # node's log is complete
 nix run github:juspay/odu -- wait            # fail-fast JSON verdict (MCP wait_for_settle)
 nix run github:juspay/odu -- wait --settle   # block until the whole run settles
 nix run github:juspay/odu -- wait --expected-sha SHA [--timeout-ms N]
@@ -206,6 +207,19 @@ from (`run.phase` is `provisioning` under `-o json`), `_ci-setup@<platform>` is
 (`logs -f _ci-setup@x86_64-linux`), and `wait` blocks instead of refusing. A
 claim that never succeeds lands as a red `_ci-setup@<platform>` with the reason
 in its log — a verdict and a `runs` record, not a vanished socket.
+
+**A red node's log holds the whole recipe, summary and all.** That is the point
+of drilling into it, so a run that settles on its own does not close a lane
+until every node has finished streaming (one that does not settle on its own — cancelled,
+interrupted, or self-reaped after `--linger` goes idle — closes them at once,
+and its logs may end mid-recipe): a node's status arrives on a different stream than its
+output and gets there first, and a recipe's final lines — the `N scenarios (2
+failed)` that says what went wrong — are the last to land. The same holds for
+the durable file and for `logs -f`. A lane that goes silent still owing output
+stamps `[odu] log truncated: …` into the log rather than ending mid-line, so a
+short log is never mistaken for a quiet recipe. And because the file is
+addressed by commit, not by run, re-running the same SHA REPLACES
+`.ci/<sha>/<plat>/<recipe>.log` — you are never reading two runs concatenated.
 
 **Wait / rerun (plain-CLI agent loop).** `odu wait` is the CLI twin of MCP
 `wait_for_settle`: default fail-fast (return the instant a node goes red),

@@ -42,3 +42,19 @@ jobs:
             --no-post \
             --platform ${{ matrix.system }} \
             --host ${{ matrix.system }}=localhost
+
+      # A red node prints the PATH to its log, and on a runner that path dies
+      # with the machine — so the Actions log is left naming evidence nobody can
+      # ever read, and a CI-only failure has to be guessed at from the recipe
+      # name alone. Print the logs here, folded per node so a green run costs
+      # one collapsed group and a red one is a click. `if: failure()` only: a
+      # passing run's logs are noise.
+      - name: Node logs
+        if: failure()
+        run: |
+          shopt -s nullglob
+          for f in .ci/*/*/*.log; do
+            echo "::group::$f"
+            tail -c 200000 "$f"
+            echo "::endgroup::"
+          done

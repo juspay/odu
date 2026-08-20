@@ -13,7 +13,8 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import { copyProgress, withTimeout } from "./lease";
+import { copyProgress } from "./lease";
+import { withTimeout } from "../common/withTimeout";
 
 const COPY_LINE = (path: string): string =>
   `kolu-ci-5: copying path '${path}' to 'ssh-ng://kolu-ci-5'...`;

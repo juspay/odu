@@ -235,6 +235,11 @@ export async function logsCommand(
   const state = await firstSnapshot(client);
   const id = resolveNodeId(state, token);
   for await (const frame of subscribe(client.surface.nodeLog.get({ id }))) {
+    // `end` means this node produced all the output it ever will, so `-f` has
+    // nothing left to follow — stop, rather than holding the terminal open
+    // until the whole run exits. Without it a `logs -f` on a finished node
+    // never returns, which is precisely the wait an agent cannot afford.
+    if (frame.kind === "end") break;
     process.stdout.write(frame.text);
     if (!follow && frame.kind === "snapshot") break;
   }

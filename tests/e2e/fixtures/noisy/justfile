@@ -1,0 +1,21 @@
+# A fixture whose ci DAG emits far more output than the lane's log stream can
+# deliver in real time, then exits immediately. That gap is the whole point: a
+# node's status and its output travel on different streams, the status one wins,
+# and a run that tears its lanes down at settle throws the backlog away — so the
+# recipe's LAST line, the summary, is the first casualty (juspay/odu#87).
+#
+# The volume is chosen to outrun the wire on a fast machine, not to be big for
+# its own sake: before the fix this lost ~80% of its output, and the final
+# marker was never captured once.
+
+[metadata("ci")]
+default: noisy
+
+noisy:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for i in $(seq 1 200000); do
+      echo "noisy line $i — padding so each line is about seventy bytes wide"
+    done
+    echo "NOISY SUMMARY: 200000 lines emitted"
+    echo "__ODU_NOISY_END__"

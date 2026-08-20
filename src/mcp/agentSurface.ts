@@ -402,6 +402,10 @@ function makeLogsStore(
       try {
         let text = "";
         for await (const frame of subscribe(client.surface.nodeLog.get({ id }))) {
+          // `end` adds no bytes and republishing the unchanged text would only
+          // wake every subscriber for nothing. Stay on the stream: a rerun
+          // re-opens this node's log with a fresh snapshot.
+          if (frame.kind === "end") continue;
           text =
             frame.kind === "append"
               ? clampLog(text + frame.text)
