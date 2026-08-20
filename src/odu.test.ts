@@ -147,6 +147,26 @@ const last = (h: Harness): NodesSnapshot => {
   return state;
 };
 
+/**
+ * Wait for a CONFIGURED pipeline of `nodes` nodes to settle.
+ *
+ * The count is load-bearing, not decoration. `summarize().done` means "no node
+ * is pending or running", which an EMPTY node set satisfies VACUOUSLY — so in
+ * the window before configure's first frame lands, `done` is already true, and
+ * a bare `until(() => summarize(last(h)).done)` returns immediately on a state
+ * with no nodes in it. Every assertion after it then reads `undefined` and the
+ * test fails with `Expected: "failed" / Received: undefined`.
+ *
+ * It only loses that race on a loaded machine, which is why it survived here
+ * for so long and then went red on a busy CI runner — twice, on two different
+ * tests, in the two files that spelled the wait without a count. Waiting for
+ * the node set to EXIST and then settle is one thought, so it gets one name
+ * rather than a clause each caller has to remember (`_ci-setup` is why the
+ * count is tasks + 1).
+ */
+const settledWith = (h: Harness, nodes: number): Promise<void> =>
+  until(() => last(h).order.length === nodes && summarize(last(h)).done);
+
 const chain: TaskSpec[] = [
   { id: "build", command: "echo building", needs: [] },
   { id: "test", command: "echo testing", needs: ["build"] },
@@ -158,7 +178,7 @@ describe("odu lane runner over stdio (loopback)", () => {
     const ack = await h.configure(chain);
     expect(ack).toEqual({ ok: true, error: null });
 
-    await until(() => summarize(last(h)).done && last(h).order.length === 3);
+    await settledWith(h, 3);
     const final = last(h);
     expect(final.order).toEqual([SETUP_NODE_ID, "build", "test"]);
     for (const id of final.order) {
@@ -192,7 +212,7 @@ describe("odu lane runner over stdio (loopback)", () => {
     const h = await harness();
     const ack = await h.configure(chain, "/nonexistent/odu-workspace");
     expect(ack.ok).toBe(true); // ack-fast: the failure surfaces as the node
-    await until(() => summarize(last(h)).done);
+    await settledWith(h, 3);
     const final = last(h);
     expect(final.nodes[SETUP_NODE_ID]?.status).toBe("failed");
     expect(final.nodes.build?.status).toBe("skipped");
@@ -203,7 +223,7 @@ describe("odu lane runner over stdio (loopback)", () => {
   it("gives a late subscriber the full snapshot as its first frame", async () => {
     const h = await harness();
     await h.configure(chain);
-    await until(() => summarize(last(h)).done && last(h).order.length === 3);
+    await settledWith(h, 3);
 
     // A late subscriber still leads with the CURRENT snapshot — the cell.s
     // snapshot is taken at subscribe time (the stream is lazy), not when the
@@ -322,7 +342,7 @@ describe("odu lane runner over stdio (loopback)", () => {
   it("reruns a node and its transitive dependents", async () => {
     const h = await harness();
     await h.configure(chain);
-    await until(() => summarize(last(h)).done && last(h).order.length === 3);
+    await settledWith(h, 3);
 
     const before = h.states.length;
     const result = await runUnary(h.client.surface.node.rerun({ id: "build" }));
@@ -342,7 +362,7 @@ describe("odu lane runner over stdio (loopback)", () => {
       { id: "build", command: "exit 3", needs: [] },
       { id: "test", command: "echo never", needs: ["build"] },
     ]);
-    await until(() => summarize(last(h)).done);
+    await settledWith(h, 3);
     const final = last(h);
     expect(final.nodes.build?.status).toBe("failed");
     expect(final.nodes.build?.exitCode).toBe(3);
@@ -387,7 +407,7 @@ describe("odu lane runner over stdio (loopback)", () => {
     await until(() => last(h).nodes.slow?.status === "running");
     const result = await runUnary(h.client.surface.node.cancel({ id: "slow" }));
     expect(result.ok).toBe(true);
-    await until(() => summarize(last(h)).done);
+    await settledWith(h, 3);
     expect(last(h).nodes.slow?.status).toBe("cancelled");
     expect(last(h).nodes.after?.status).toBe("skipped");
     expect(summarize(last(h)).failedOverall).toBe(false);
@@ -398,7 +418,7 @@ describe("odu lane runner over stdio (loopback)", () => {
   it("rejects cancel of an unknown or already-terminal node", async () => {
     const h = await harness();
     await h.configure([{ id: "ok", command: "true", needs: [] }]);
-    await until(() => summarize(last(h)).done);
+    await settledWith(h, 2);
     expect((await runUnary(h.client.surface.node.cancel({ id: "nope" }))).ok).toBe(
       false,
     );
