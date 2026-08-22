@@ -20,11 +20,14 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import {
+  awaitRunSocket,
   buildOduBinary,
   cleanup,
   currentNixSystem,
   makeFixture,
+  oduCli,
   oduRun,
+  oduRunBackground,
 } from "./harness";
 
 let oduBin: string;
@@ -116,4 +119,79 @@ describe("durable node logs", () => {
     // rather than papered over. What matters is single-run-ness and
     // completeness, and those are now asserted for what they are.
   });
+});
+
+/**
+ * The residual #88 left behind: a run is observably SETTLED before its logs
+ * have joined, so the agent loop `wait_for_settle` was built for — settle, then
+ * drill into the node's log — still reads a file that stops mid-recipe, with
+ * nothing saying so.
+ *
+ * #88 joined the two streams at TEARDOWN: `runCommand` awaits `drainLaneLogs`
+ * before closing its lanes. But the settle every consumer acts on is derived
+ * from node STATUSES on the coordinator's socket, and those are published the
+ * instant the DAG settles — ahead of the drain, and in `--linger` (where the
+ * coordinator parks instead of tearing down) ahead of a drain that never runs
+ * at all. So the join protects the run's own exit and nothing else.
+ *
+ * Field forensics (olai's CI, 2026-08-21, post-#88): three characterized
+ * occurrences, `settled: true` in all three, node logs of 11,469 / 9,959 /
+ * 10,469 bytes against a recipe that emits thousands of lines — no summary in
+ * any of them, and no `[odu] log truncated` marker in any of them either.
+ */
+describe("a settled run's log", () => {
+  it("is whole the moment the run reports itself settled", async () => {
+    const dir = fixture("noisy");
+    // `--linger` is the agent's own run shape (MCP `run` → `wait_for_settle` →
+    // read the log), and the one the field hit twice: the coordinator parks at
+    // settle instead of exiting, so nothing about this test depends on winning a
+    // race against a teardown. What it observes is the settle SIGNAL, which is
+    // what every consumer of a run acts on.
+    const { exited } = oduRunBackground(oduBin, dir, [
+      "--no-strict",
+      "--linger",
+      "--progress",
+      "json",
+    ]);
+    try {
+      await awaitRunSocket(dir);
+      const wait = oduCli(oduBin, dir, [
+        "wait",
+        "--settle",
+        "--timeout-ms",
+        String(RUN_TIMEOUT),
+      ]);
+      const verdict = JSON.parse(wait.stdout) as {
+        settled: boolean;
+        passed: boolean;
+      };
+      expect(verdict.settled).toBe(true);
+      expect(verdict.passed).toBe(true);
+
+      // Read at once, the way an agent handed a settled verdict does. Anything
+      // this misses is something the run told the world it was finished with.
+      const log = noisyLog(dir);
+      // Asserted as ONE object rather than four `expect`s: the failure is then a
+      // four-field diff naming exactly where the bytes stopped, instead of bun
+      // printing a multi-megabyte `toContain` receipt into the CI log — which is
+      // its own small version of this bug's lesson about unreadable evidence.
+      expect({
+        lines: log.match(/^noisy line \d+ /gm)?.length ?? 0,
+        summary: log.includes("NOISY SUMMARY: 200000 lines emitted"),
+        endsAtRecipeEnd: log.trimEnd().endsWith("__ODU_NOISY_END__"),
+        // Either the log is complete, or it says it isn't. Silent loss is the
+        // one forbidden outcome — and nothing was actually lost here, so the
+        // log is whole and the notice is absent.
+        truncationNotice: log.includes("[odu] log truncated"),
+      }).toEqual({
+        lines: 200000,
+        summary: true,
+        endsAtRecipeEnd: true,
+        truncationNotice: false,
+      });
+    } finally {
+      oduCli(oduBin, dir, ["cancel"]);
+      await exited;
+    }
+  }, RUN_TIMEOUT);
 });

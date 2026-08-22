@@ -1,5 +1,5 @@
 lockfile_version: '1'
-generated_at: '2026-08-14T00:59:45.776315+00:00'
+generated_at: '2026-08-22T00:19:45.937599+00:00'
 apm_version: 0.28.0
 dependencies:
 - repo_url: _local/dev
@@ -154,9 +154,9 @@ dependencies:
   - .claude/skills/odu-mcp/bin/serve
   - .claude/skills/odu/SKILL.md
   deployed_file_hashes:
-    .claude/skills/odu-mcp/SKILL.md: sha256:70454bc56bb39cfdff3410b49a6c358f1b668889f435a51f563659021e0621a2
+    .claude/skills/odu-mcp/SKILL.md: sha256:e24efdef922c0144df904276246df0fed64c4fb195fa9c30364ff8c9ef2615ab
     .claude/skills/odu-mcp/bin/serve: sha256:6152e8fc4d3478b70a5cd547c172be596787e600b5757233fb82b307186b9e26
-    .claude/skills/odu/SKILL.md: sha256:c35057861f47ea4d1c08df49458b1897b88c3d7d931cf91646bad7c82326ba33
+    .claude/skills/odu/SKILL.md: sha256:a55f311eeb961fbf6ae24f008bd09addbd68462696419606e9ec6077da702e83
   content_hash: sha256:a08f8496dbb9000c55eb75082b32657562bdd7284d114e53429ecc3ee4cf2f43
   is_dev: true
 - repo_url: juspay/project-unknown
@@ -691,7 +691,7 @@ deployments:
   - juspay/odu
   - .
   active_owner: juspay/odu
-  content_hash: sha256:70454bc56bb39cfdff3410b49a6c358f1b668889f435a51f563659021e0621a2
+  content_hash: sha256:e24efdef922c0144df904276246df0fed64c4fb195fa9c30364ff8c9ef2615ab
 - kind: project-relative
   target: claude
   value: .claude/skills/odu-mcp/bin/serve
@@ -711,7 +711,7 @@ deployments:
   - juspay/odu
   - .
   active_owner: juspay/odu
-  content_hash: sha256:c35057861f47ea4d1c08df49458b1897b88c3d7d931cf91646bad7c82326ba33
+  content_hash: sha256:a55f311eeb961fbf6ae24f008bd09addbd68462696419606e9ec6077da702e83
 - kind: project-relative
   target: claude
   value: .claude/skills/perfection-review
@@ -851,6 +851,6 @@ local_deployed_files:
 - .claude/skills/odu-mcp/bin/serve
 - .claude/skills/odu/SKILL.md
 local_deployed_file_hashes:
-  .claude/skills/odu-mcp/SKILL.md: sha256:70454bc56bb39cfdff3410b49a6c358f1b668889f435a51f563659021e0621a2
+  .claude/skills/odu-mcp/SKILL.md: sha256:e24efdef922c0144df904276246df0fed64c4fb195fa9c30364ff8c9ef2615ab
   .claude/skills/odu-mcp/bin/serve: sha256:6152e8fc4d3478b70a5cd547c172be596787e600b5757233fb82b307186b9e26
-  .claude/skills/odu/SKILL.md: sha256:c35057861f47ea4d1c08df49458b1897b88c3d7d931cf91646bad7c82326ba33
+  .claude/skills/odu/SKILL.md: sha256:a55f311eeb961fbf6ae24f008bd09addbd68462696419606e9ec6077da702e83

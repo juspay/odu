@@ -51,6 +51,7 @@ import {
 import { formatGoDuration } from "../common/duration";
 import { gitTopLevel } from "../common/git";
 import { createNodeLogSink } from "./nodeLogSink";
+import { createVerdictGate } from "./verdictGate";
 import {
   fanId,
   isSetupNode,
@@ -820,6 +821,11 @@ async function orchestrate(
    *  weeks later by grepping for a summary that isn't there: either the log is
    *  complete, or it says so in its own last line.
    *
+   *  This is the verdict gate's BOUND (`drainLogs`), reached only when the DAG
+   *  is done and nothing but output is outstanding. It is not a teardown sweep
+   *  any more: a run whose lanes deliver never gets here at all, since each
+   *  `end` frame releases its own node's verdict as it lands.
+   *
    *  EVERY undrained node is stamped, on `gone` as well as `idle`, empty log
    *  included — what differs between them is only what the sentence may claim.
    *  An `idle` drain measured a silence and quotes it; a `gone` lane never
@@ -907,6 +913,14 @@ async function orchestrate(
       log: string;
     },
   ): void => {
+    // A verdict held for a log still in flight is still a verdict, and this
+    // lane is going away — its output is now as complete as it will ever be.
+    // Publish the truth before overwriting it: without this, a node that
+    // finished **ok** with its tail on the wire would be recorded `errored` or
+    // `cancelled` for the sole reason that the coordinator had not yet got
+    // round to saying it was ok. (What its log lost is a separate question,
+    // answered by `drainLaneLogs` / `stampUnfinishedLogs` in the log itself.)
+    verdicts.releaseAll((id) => onPlatform(id, platform));
     const state = store.get();
     const now = Date.now();
     for (const id of state.order) {
@@ -1106,6 +1120,31 @@ async function orchestrate(
     },
   });
 
+  /** Let what this run has just published reach the readers holding it open,
+   *  before the socket carrying it is severed.
+   *
+   *  `UnixSocketListener.close()` disconnects every established peer
+   *  unconditionally and DROPS their unflushed outbound frames — the framework
+   *  says so in as many words, as a deliberate fail-fast ("a host that closed
+   *  is closed"). Which makes not-closing-while-still-owing-a-frame the host's
+   *  job, and this run's last words are exactly that: a node's log terminal and
+   *  its final status, published turns before the close, to an `odu logs -f` or
+   *  `odu attach` that has nowhere else to learn them from.
+   *
+   *  A turn of the loop rather than a timer: `setImmediate` runs after the
+   *  current turn's I/O callbacks, by which point the frames those publishes
+   *  queued have been handed to the socket. It is a heuristic and it is named
+   *  as one — the transport offers no drain to wait on instead — but an
+   *  UNNAMED one is what this was until now: the coordinator's teardown drain
+   *  (retired above) happened to yield here, and `run.claim.test.ts`'s
+   *  attached reader has been passing on that accident. A promise the run makes
+   *  and then severs the channel for is the same defect as juspay/odu#87 one
+   *  layer down; it deserves a line that says what it is doing. */
+  const flushToReaders = (): Promise<void> =>
+    new Promise((resolve) => {
+      setImmediate(resolve);
+    });
+
   // The single shutdown every interrupt source shares: SIGTERM/SIGINT, the live
   // view's `q` (via `onQuit`), the `run.cancel` surface mutation a second
   // process drives (`odu cancel`, the MCP `cancel` tool, a `--supersede` start),
@@ -1126,6 +1165,12 @@ async function orchestrate(
     if (shuttingDown) return;
     shuttingDown = true;
     clearIdle();
+    // Before anything reads the state this run will be remembered by: a node
+    // whose verdict is being held for its log has FINISHED, and a record that
+    // called it `running` would make an ordinary interrupted run `incomplete`
+    // over output the coordinator was merely still ingesting. `stopWork` below
+    // stamps what those logs actually lost.
+    verdicts.releaseAll();
     const exclusivityLost = opts.exclusivityLost === true;
     const stopWork = (): void => {
       for (const lane of createdLanes) lane.close();
@@ -1167,7 +1212,7 @@ async function orchestrate(
     for (const context of poster.pendingContexts()) {
       poster.post(interruptStatus(context, reason, sha7));
     }
-    void poster.finalize().then((unposted) => {
+    void poster.finalize().then(async (unposted) => {
       applyInterruptStopWork("after-settle", exclusivityLost, stopWork);
       // Record this run before the socket closes: a superseding run waits on
       // that close to confirm we're gone, so writing first guarantees our
@@ -1178,6 +1223,10 @@ async function orchestrate(
       // same paired durable state every other terminal path writes.
       writeTimingSidecar(interruptedState);
       finalizeRunRecord(interruptedState, unposted);
+      // `stopWork` above stamped and ended every unfinished log — the last
+      // words this run will ever publish, and this path exits the process the
+      // moment the socket is gone. Same turn owed, same reason.
+      await flushToReaders();
       closeSocket();
       display.stop(interruptedState);
       process.exit(code);
@@ -1211,17 +1260,61 @@ async function orchestrate(
    *  once. */
   let claimInFlight = false;
 
+  // ── the log join: a node's verdict waits for its output ──
+  //
+  // A node's verdict and a node's output are two halves of one fact — "this
+  // node is done" — travelling on two streams, of which the verdict's is
+  // always the faster: it is a few bytes on the state cell while the output is
+  // a backlog on the log stream. juspay/odu#88 joined them at TEARDOWN, so the
+  // run's own exit stopped dropping tails. But settle is not teardown. Every
+  // OTHER consumer of a run — `odu wait --settle`, the MCP `wait_for_settle` an
+  // agent loops on, the durable record, the posted commit status — reads
+  // settled-ness off the node statuses on this socket, and a status published
+  // ahead of its log promises them a finished run whose output is still on the
+  // wire. Under `--linger` the coordinator never tears down at all, so there
+  // was no drain behind that promise whatsoever.
+  //
+  // So the join belongs where the promise is made, not where the process ends:
+  // a recipe node's TERMINAL status is withheld until its log has ended.
+  // "Settled" then means what every reader already took it to mean, on every
+  // path, without a single reader having to learn that logs exist.
+  //
+  // `_ci-setup@<platform>` never comes through here: the coordinator owns its
+  // verdict (`finishSetup`) and keeps writing to its log long after the lane is
+  // done with it, so it has no log terminal to wait for — the same carve-out,
+  // for the same reason, that the fan-in makes for its `end` frame.
+  const verdicts = createVerdictGate({
+    isLogEnded: logs.isEnded,
+    publishedStatus: (id) => store.get().nodes[id]?.status,
+    nodeIds: () => store.get().order,
+    publish: (id, patch) => updateNode(id, patch),
+    drainLogs: () => drainLaneLogs(createdLanes),
+  });
+
   const checkSettled = (): void => {
     if (claimInFlight) return;
+    // A run being torn down does not announce a fresh settle: `shutdown` owns
+    // the terminal path from here, and it releases held verdicts on its way out
+    // (so the record describes finished nodes as finished) — which lands right
+    // back in this function.
+    if (shuttingDown) return;
     const state = store.get();
-    const done = state.order.every((id) => {
-      const status = state.nodes[id]?.status;
-      return status !== "pending" && status !== "running";
-    });
+    // The taxonomy, not a hand-rolled pair of string comparisons — the same
+    // `NON_TERMINAL_STATUSES` the agent face judges settle by (`agentSummary`)
+    // and the verdict gate holds against, so the three cannot drift on what
+    // "done" means.
+    const done = state.order.every(
+      (id) => !NON_TERMINAL_STATUSES.has(state.nodes[id]?.status ?? "pending"),
+    );
     if (done) {
       settled();
       onSettledEach?.();
+      return;
     }
+    // Not settled — but if the only nodes left non-terminal are ones whose
+    // verdicts the gate is holding, the DAG is done and the output is all that
+    // is outstanding. Bound the wait for it.
+    verdicts.boundIfOnlyLogsOutstanding();
   };
 
   const updateNode = (id: string, patch: Partial<NodeState>): void => {
@@ -1667,7 +1760,7 @@ async function orchestrate(
             }
             continue;
           }
-          updateNode(fanId(laneId, platform), {
+          verdicts.offer(fanId(laneId, platform), {
             status: laneNode.status,
             exitCode: laneNode.exitCode,
             startedAt: laneNode.startedAt,
@@ -1685,7 +1778,15 @@ async function orchestrate(
           // coordinator keeps writing to that node's log after the lane is done
           // with it (lane death, operator cancel), so it is not complete just
           // because the lane's half is. `endRunLogs` ends it when the RUN is.
-          if (laneId !== SETUP) endLocal(id);
+          if (laneId !== SETUP) {
+            // Seal FIRST, release second: the file is whole the instant this
+            // frame is handled (its appends came ahead of it on the same
+            // stream, and the sink writes them synchronously), and sealing
+            // before publishing is what makes the verdict's promise — "this
+            // node is done, go read its log" — true at the moment it is made.
+            endLocal(id);
+            verdicts.release(id);
+          }
         } else if (laneId === SETUP) {
           // Never reset _ci-setup: the coordinator's provision lines precede
           // the lane stream and must survive the lane's snapshot frame.
@@ -1827,20 +1928,14 @@ async function orchestrate(
   // owner, and this path must not resume past it.
   if (shuttingDown) return await parkForShutdown();
 
-  // The DAG has settled, but the LOGS have not: a node's status and its output
-  // travel on different streams, and the status one arrives first. Join them
-  // here — before the lanes are closed — or the tail of every noisy recipe,
-  // summary included, dies with the subscription (juspay/odu#87).
-  await drainLaneLogs(createdLanes);
-  // `drainLaneLogs` can run for `LOG_DRAIN_IDLE_MS`+ (a lane narrating a real
-  // backlog) — long enough for `shutdown` to fire mid-drain now, where the
-  // pre-drain code here had no such window. Re-check: resuming past a
-  // `shutdown` that started during the wait gives this run two terminal owners
-  // — a second `poster.finalize`, a second record write, a second
-  // `closeSocket`, a `process.exit` race — exactly what `parkForShutdown`
-  // exists to prevent.
-  if (shuttingDown) return await parkForShutdown();
-
+  // No drain here any more, and that is the point. `allSettled` resolving now
+  // MEANS the logs are in: a node reaches a terminal status on the fan-in only
+  // once its log has ended or been stamped short (see "the log join" above), so
+  // by the time this line runs every lane has already delivered what it owed.
+  // A second drain at teardown would be the old shape wearing a belt — and the
+  // old shape is precisely what taught readers that teardown is where this is
+  // handled, when teardown is the one moment nobody but the run itself is
+  // watching (juspay/odu#87, and the settle-shaped residual after it).
   for (const lane of createdLanes) lane.close();
   // Lanes are shut: nothing can append to any node's log after this line, so
   // this is where the run says its last word about every one of them.
@@ -1856,6 +1951,7 @@ async function orchestrate(
   writeTimingSidecar(finalState);
   const unposted = await poster.finalize();
   finalizeRunRecord(finalState, unposted);
+  await flushToReaders();
   closeSocket();
 
   display.stop(finalState);
