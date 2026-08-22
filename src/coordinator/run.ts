@@ -1299,10 +1299,13 @@ async function orchestrate(
     // back in this function.
     if (shuttingDown) return;
     const state = store.get();
-    const done = state.order.every((id) => {
-      const status = state.nodes[id]?.status;
-      return status !== "pending" && status !== "running";
-    });
+    // The taxonomy, not a hand-rolled pair of string comparisons — the same
+    // `NON_TERMINAL_STATUSES` the agent face judges settle by (`agentSummary`)
+    // and the verdict gate holds against, so the three cannot drift on what
+    // "done" means.
+    const done = state.order.every(
+      (id) => !NON_TERMINAL_STATUSES.has(state.nodes[id]?.status ?? "pending"),
+    );
     if (done) {
       settled();
       onSettledEach?.();
