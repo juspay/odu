@@ -31,8 +31,13 @@ process-compose, no separately-versioned socket client.
 >
 > **Don't block on the full run — fail-fast is the point.** `wait_for_settle`
 > defaults to `fail_fast: true`: it returns the **instant the first node goes
-> red**, while the slow lanes (e2e, build) keep running. That early return *is*
-> your unblock signal — drill into the red node's log and start fixing at once;
+> red**, while the slow lanes (e2e, build) keep running. That instant includes
+> that node's LOG — a verdict is not published until the node's output is on
+> disk — so when you drill in, the summary is already there rather than still
+> on the wire. What you wait for is that one node's remaining backlog, not the
+> rest of the DAG: a red `fmt` unblocks you while e2e is still running, and a
+> node whose log ended first publishes with no wait at all. That early return
+> *is* your unblock signal — drill into the red node's log and start fixing at once;
 > never sit through the remaining lanes to "see the full status". The verdict is
 > explicitly partial when it trips: `fail_fast_tripped: true` with
 > `settled: false`, and `failed[]`/`errored[]` list only what's red **so far** —
@@ -209,14 +214,19 @@ claim that never succeeds lands as a red `_ci-setup@<platform>` with the reason
 in its log — a verdict and a `runs` record, not a vanished socket.
 
 **A red node's log holds the whole recipe, summary and all.** That is the point
-of drilling into it, so a run that settles on its own does not close a lane
-until every node has finished streaming (one that does not settle on its own — cancelled,
-interrupted, or self-reaped after `--linger` goes idle — closes them at once,
-and its logs may end mid-recipe): a node's status arrives on a different stream than its
-output and gets there first, and a recipe's final lines — the `N scenarios (2
-failed)` that says what went wrong — are the last to land. The same holds for
-the durable file and for `logs -f`. A lane that goes silent still owing output
-stamps `[odu] log truncated: …` into the log rather than ending mid-line, so a
+of drilling into it, so a node's VERDICT waits for its output: a terminal status
+is not published until that node's log has ended, sealed in the same breath the
+durable file is. By the time anything tells you a node went red — `wait_for_settle`,
+`odu wait`, the commit status, the `runs` record, the settle verdict itself —
+the summary is already on disk. That holds on every path, `--linger` included,
+where the coordinator never tears down at all: the promise is kept where it is
+made rather than on the way out. The join is needed because a node's status
+arrives on a different stream than its output and gets there first, and a
+recipe's final lines — the `N scenarios (2 failed)` that says what went wrong —
+are the last to land. The same holds for the durable file and for `logs -f`. A
+lane that goes silent still owing output, or a run stopped before a node
+finished (`cancel`, an interrupt, the `--linger` idle self-reap), stamps
+`[odu] log truncated: …` into the log rather than ending mid-line, so a
 short log is never mistaken for a quiet recipe. And because the file is
 addressed by commit, not by run, re-running the same SHA REPLACES
 `.ci/<sha>/<plat>/<recipe>.log` — you are never reading two runs concatenated.
