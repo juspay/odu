@@ -1134,16 +1134,23 @@ async function orchestrate(
    *  A turn of the loop rather than a timer: `setImmediate` runs after the
    *  current turn's I/O callbacks, by which point the frames those publishes
    *  queued have been handed to the socket. It is a heuristic and it is named
-   *  as one — the transport offers no drain to wait on instead — but an
-   *  UNNAMED one is what this was until now: the coordinator's teardown drain
-   *  (retired above) happened to yield here, and `run.claim.test.ts`'s
-   *  attached reader has been passing on that accident. A promise the run makes
-   *  and then severs the channel for is the same defect as juspay/odu#87 one
-   *  layer down; it deserves a line that says what it is doing. */
-  const flushToReaders = (): Promise<void> =>
-    new Promise((resolve) => {
-      setImmediate(resolve);
-    });
+   *  as one — the transport offers no drain to wait on instead.
+   *
+   *  One turn used to be enough: the RPC server pulled the producer directly,
+   *  so a publish resumed it on a microtask and the write landed before the
+   *  close. kolu's STREAM_AHEAD buffer puts a pump fiber between them, and
+   *  Effect schedules that fiber on `setImmediate` — the same queue this
+   *  flush uses. One hop races the pump; three lets the pump run, the RPC
+   *  fiber take the chunk, and the write leave, then we close. */
+  const flushToReaders = async (): Promise<void> => {
+    const tick = (): Promise<void> =>
+      new Promise((resolve) => {
+        setImmediate(resolve);
+      });
+    await tick();
+    await tick();
+    await tick();
+  };
 
   // The single shutdown every interrupt source shares: SIGTERM/SIGINT, the live
   // view's `q` (via `onQuit`), the `run.cancel` surface mutation a second
