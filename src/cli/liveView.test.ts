@@ -580,14 +580,20 @@ describe("LiveView — focus and the log subscription", () => {
     await settle(setup);
 
     setup.mockInput.pressKey("j"); // focus a different node — new LogView
-    await setup.flush();
-    await settle(setup);
+    // The new pane starts empty; `n` on an empty buffer is a no-op and
+    // leaves ‹follow›. Wait for the snapshot the way the wheel test waits
+    // for the tail — settle() only proves a frame exists, not that the
+    // stream has written into this LogView. "needle here" is line 0, so
+    // follow-mode shows the last lines, not the needle.
+    await until(
+      setup,
+      () => frame().includes("line 39"),
+      "the newly focused log",
+    );
     expect(frame()).toContain("‹follow›");
 
     setup.mockInput.pressKey("n");
-    await setup.flush();
-    await settle(setup);
-    expect(frame()).toContain("‹pinned›");
+    await until(setup, () => frame().includes("‹pinned›"), "n to unpin on the hit");
     view.stop();
   });
 
