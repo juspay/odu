@@ -39,10 +39,17 @@ fmt:
 nix:
     nix build .#odu .#odu-runner --no-link
 
+# crates.io 403s the `curl/*` User-Agent nixpkgs fetchurl sends, so building
+# bun2nix from source (askama / basic-toml / jsonc-parser …) fails on a runner
+# whose store lacks it. Idempotent and cheap warm. See the script.
+[private]
+_prefetch-crates:
+    {{ nix_shell }} bash scripts/ci-prefetch-crates.sh .
+
 # bun.nix freshness — regenerate from bun.lock into a tmpdir and diff
 # against the committed file. Fails the pipeline if bun.lock has moved
 # without `just regenerate-bun-nix` being run.
-bun-nix-fresh:
+bun-nix-fresh: _prefetch-crates
     {{ nix_shell }} sh -c '\
       set -eu; \
       tmp=$(mktemp -d); \
