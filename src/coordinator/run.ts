@@ -27,7 +27,6 @@
 
 import { spawnSync } from "node:child_process";
 import {
-  appendFileSync,
   mkdirSync,
   mkdtempSync,
   rmSync,
@@ -51,7 +50,8 @@ import {
 } from "../cli/render";
 import { formatGoDuration } from "../common/duration";
 import { gitTopLevel } from "../common/git";
-import { createLogTail } from "../common/logTail";
+import { appendIfOpen, createNodeLogSink } from "./nodeLogSink";
+import { createVerdictGate } from "./verdictGate";
 import {
   fanId,
   isSetupNode,
@@ -464,7 +464,7 @@ async function orchestrate(
       ? createDisplay("live", {
           interactive: process.stdin.isTTY === true,
           hookStderr: true,
-          openLog: (id) => tail.streamSource({ id }),
+          openLog: (id) => logs.streamSource({ id }),
           rerun: (id) => void rerunNode(id),
           onQuit: () => shutdown(130),
         })
@@ -737,34 +737,123 @@ async function orchestrate(
 
   // ── per-node local logs: the in-memory tail (late socket subscribers) plus
   //    the durable per-SHA file (.ci/<sha7>/<plat>/<node>.log, justci's layout).
-  //    The tail is the shared primitive; durability is this coordinator's
-  //    addition, layered on top of each tail mutation. ──
-  const tail = createLogTail();
-  const fileFor = (id: string): string => join(repoRoot, logPathFor(sha7, id));
-  /** The log directories this process has already created. A run's node set is
-   *  fixed, so this is bounded by the lane count — and since juspay/odu#84 the
-   *  provisioning narration flows through `appendLocal` one line at a time
-   *  (thousands of `copying path` lines), on the same event loop that serves
-   *  `.ci/odu.sock`. An `mkdirSync` per line is a sync syscall burst degrading
-   *  the very window the socket was moved ahead of the claim to make watchable.
-   *  `appendFileSync` stays: a durable log that survives a SIGKILL is the point. */
-  const madeDirs = new Set<string>();
-  const openFor = (id: string): string => {
-    const file = fileFor(id);
-    const dir = dirname(file);
-    if (!madeDirs.has(dir)) {
-      mkdirSync(dir, { recursive: true });
-      madeDirs.add(dir);
+  //    The sink owns the durability mechanics — path, ownership, syscalls; what
+  //    stays here is the run's own policy: which frame routes where, and when a
+  //    node's log has had this run's last word. ──
+  const logs = createNodeLogSink(repoRoot, sha7);
+  const appendLocal = (id: string, text: string): void =>
+    appendIfOpen(logs, id, text);
+  const resetLocal = logs.reset;
+  const endLocal = logs.end;
+  /** The run's last word on every node's log. `end` is a promise to a reader
+   *  that nothing more is coming, and only the party still able to write can
+   *  make it: for a recipe node that is its lane, but for `_ci-setup@<plat>` it
+   *  is the RUN — the coordinator keeps narrating lane death and operator
+   *  cancels into that log long after the lane's own half of it is done, which
+   *  is why the lane's `end` frame for it is deliberately dropped. Called once
+   *  the lanes are closed, from both terminal paths (natural completion and
+   *  `shutdown`), so the fan-in's three-frame protocol is TOTAL: every node
+   *  that reaches a terminal status gets its log ended by whoever owns that
+   *  outcome, and `odu logs -f <node>` returns on every one of them. */
+  const endRunLogs = (): void => {
+    for (const id of store.get().order) endLocal(id);
+  };
+
+  /** Write the one sentence that says a node's log is short, and why.
+   *
+   *  ONE producer, because this notice is a contract: the e2e suite greps for
+   *  it, and every round of review on it has been about the same rule — a
+   *  truncation notice is worth exactly its worst sentence. Two copies of the
+   *  wording are two chances for one to drift out of that guarantee.
+   *
+   *  Sealed logs are skipped by `appendLocal` (`appendIfOpen`). A log ends
+   *  when its owner has said its last word, and `append` after `end` THROWS by
+   *  design — so a second party stamping a sealed log does not merely repeat
+   *  itself, it kills the coordinator. That is not hypothetical: an operator
+   *  `odu cancel @<platform>` ends the dropped lane's node logs with the true
+   *  `cancelled by operator (lane)` line, and the settle that follows found
+   *  those same nodes still in the lane's undrained set and stamped them again
+   *  — `logTail: append to slow@x86_64-linux after its log ended`, run dead.
+   *  Two bookkeepings of "is this node still owed output" (the lane's, from
+   *  frames it received; the sink's, from logs it sealed) will disagree at
+   *  exactly the moments that matter, so the one that knows the log is SEALED
+   *  gets the last say — and every coordinator write, not only this stamp,
+   *  asks it. */
+  const stampTruncated = (id: string, cause: string): void => {
+    appendLocal(
+      id,
+      `\n[odu] log truncated: ${cause} with this node's output still owed` +
+        " — what follows the last line was never received\n",
+    );
+  };
+
+  /** Say what a torn-down run's logs lost, before `endRunLogs` says they ended.
+   *
+   *  Which nodes were owed output is answered from what each log IS, not from
+   *  what its node's status suggests: a log that has not published its terminal
+   *  is one the run was still expecting bytes for. Status only excludes the
+   *  nodes that were never owed anything — `pending` (never started) and
+   *  `skipped` (never runs, and the runner ends its log at the moment it is
+   *  skipped). Stamping those would be its own small lie. No duration: nothing
+   *  was measured here, the run was simply stopped. */
+  const stampUnfinishedLogs = (): void => {
+    const state = store.get();
+    for (const id of state.order) {
+      const status = state.nodes[id]?.status;
+      if (status === undefined || status === "pending" || status === "skipped") {
+        continue;
+      }
+      // `_ci-setup` is the one node whose open log does NOT mean bytes are
+      // owed: the fan-in withholds its terminal on purpose, so the coordinator
+      // can keep narrating lane death and operator cancels into it long after
+      // the lane is done. `isEnded` is therefore permanently false for it, and
+      // the general test would stamp every interrupted run that merely got past
+      // provisioning with a loss that did not happen. For setup the honest
+      // question is whether the prep itself was cut — i.e. is it still running.
+      // (Every other node is filtered by `stampTruncated`'s sealed-log test,
+      // which is the same question asked of the party that can answer it.)
+      if (splitFanId(id).namepath === SETUP && status !== "running") continue;
+      stampTruncated(id, "the run was stopped");
     }
-    return file;
   };
-  const appendLocal = (id: string, text: string): void => {
-    tail.append(id, text);
-    appendFileSync(openFor(id), text);
-  };
-  const resetLocal = (id: string, text: string): void => {
-    tail.reset(id, text);
-    writeFileSync(openFor(id), text);
+
+  /** Wait for every lane to finish streaming the output it still owes, and
+   *  stamp the ones that never did. Truncation stops being a thing you notice
+   *  weeks later by grepping for a summary that isn't there: either the log is
+   *  complete, or it says so in its own last line.
+   *
+   *  This is the verdict gate's BOUND (`drainLogs`), reached only when the DAG
+   *  is done and nothing but output is outstanding. It is not a teardown sweep
+   *  any more: a run whose lanes deliver never gets here at all, since each
+   *  `end` frame releases its own node's verdict as it lands.
+   *
+   *  EVERY undrained node is stamped, on `gone` as well as `idle`, empty log
+   *  included — what differs between them is only what the sentence may claim.
+   *  An `idle` drain measured a silence and quotes it; a `gone` lane never
+   *  started a stopwatch, so its notice says the lane went away and offers no
+   *  duration. Stamping only `idle` was the earlier shape, and it left the
+   *  worst case silent: `terminalizePlatformNodes` writes its `lane died` /
+   *  `cancelled by operator` line only for nodes still running or pending, so a
+   *  node that had already gone **ok** with its summary still on the wire got
+   *  no line at all — and then `endRunLogs` published a terminal certifying
+   *  that truncated file as complete. That is juspay/odu#87 exactly, with a
+   *  completion frame vouching for the loss. A notice on every undrained node
+   *  is what closes it; the rule was never "stamp less", it was "never claim
+   *  something that did not happen". */
+  const drainLaneLogs = async (lanes: Iterable<Lane>): Promise<void> => {
+    await Promise.all(
+      [...lanes].map(async (lane) => {
+        const drained = await lane.drain();
+        if (drained.reason === "complete") return;
+        const why =
+          drained.reason === "idle"
+            ? `went silent for ${drained.idleMs / 1000}s`
+            : "went away (closed or died)";
+        for (const laneId of drained.undrained) {
+          stampTruncated(fanId(laneId, lane.platform), `${lane.platform} ${why}`);
+        }
+      }),
+    );
   };
 
   // ── the fan-in surface (status / logs / attach dial this) ──
@@ -825,6 +914,14 @@ async function orchestrate(
       log: string;
     },
   ): void => {
+    // A verdict held for a log still in flight is still a verdict, and this
+    // lane is going away — its output is now as complete as it will ever be.
+    // Publish the truth before overwriting it: without this, a node that
+    // finished **ok** with its tail on the wire would be recorded `errored` or
+    // `cancelled` for the sole reason that the coordinator had not yet got
+    // round to saying it was ok. (What its log lost is a separate question,
+    // answered by `drainLaneLogs` / `stampUnfinishedLogs` in the log itself.)
+    verdicts.releaseAll((id) => onPlatform(id, platform));
     const state = store.get();
     const now = Date.now();
     for (const id of state.order) {
@@ -832,6 +929,10 @@ async function orchestrate(
       const node = state.nodes[id];
       if (node === undefined) continue;
       if (node.status === "running") {
+        // Status `running` is not "log is open": the node's `end` frame can
+        // land before its terminal status (two streams, no order). `appendLocal`
+        // skips a sealed log so a transport death in that window cannot throw
+        // mid-loop and leave the remaining nodes unterminated.
         appendLocal(id, strategy.log);
         const startedAt = node.startedAt ?? now;
         updateNode(id, {
@@ -840,7 +941,22 @@ async function orchestrate(
         });
       } else if (node.status === "pending") {
         updateNode(id, { status: strategy.pending });
+      } else {
+        continue;
       }
+      // The coordinator has just decided this node's fate, so it has said its
+      // last word about it: end the log in the same breath as the status, the
+      // way the runner does on every path it owns. Without this the fan-in
+      // serves a terminal for nodes a LANE finished and none for the ones the
+      // coordinator finished, and `odu logs -f e2e@linux` against a lane that
+      // died never returns — the wait an agent cannot afford, on exactly the
+      // runs most worth reading.
+      //
+      // `_ci-setup` excepted, and only here: this very function appends the
+      // death/cancel line to it, and more coordinator narration can still
+      // follow. Its terminal belongs to `endRunLogs`, at the point the RUN is
+      // done with the node rather than the lane.
+      if (splitFanId(id).namepath !== SETUP) endLocal(id);
     }
   };
 
@@ -961,7 +1077,7 @@ async function orchestrate(
       header: { store: inMemoryStore<RunHeader>(initialHeader) },
     },
     streams: {
-      nodeLog: { source: tail.streamSource },
+      nodeLog: { source: logs.streamSource },
     },
     // One arm per procedure — `({ input }) => Effect<Out>`. The two that await
     // a promise-shaped mutation keep it inside `Effect.promise`; the two that
@@ -1009,6 +1125,38 @@ async function orchestrate(
     },
   });
 
+  /** Let what this run has just published reach the readers holding it open,
+   *  before the socket carrying it is severed.
+   *
+   *  `UnixSocketListener.close()` disconnects every established peer
+   *  unconditionally and DROPS their unflushed outbound frames — the framework
+   *  says so in as many words, as a deliberate fail-fast ("a host that closed
+   *  is closed"). Which makes not-closing-while-still-owing-a-frame the host's
+   *  job, and this run's last words are exactly that: a node's log terminal and
+   *  its final status, published turns before the close, to an `odu logs -f` or
+   *  `odu attach` that has nowhere else to learn them from.
+   *
+   *  A turn of the loop rather than a timer: `setImmediate` runs after the
+   *  current turn's I/O callbacks, by which point the frames those publishes
+   *  queued have been handed to the socket. It is a heuristic and it is named
+   *  as one — the transport offers no drain to wait on instead.
+   *
+   *  One turn used to be enough: the RPC server pulled the producer directly,
+   *  so a publish resumed it on a microtask and the write landed before the
+   *  close. kolu's STREAM_AHEAD buffer puts a pump fiber between them, and
+   *  Effect schedules that fiber on `setImmediate` — the same queue this
+   *  flush uses. One hop races the pump; three lets the pump run, the RPC
+   *  fiber take the chunk, and the write leave, then we close. */
+  const flushToReaders = async (): Promise<void> => {
+    const tick = (): Promise<void> =>
+      new Promise((resolve) => {
+        setImmediate(resolve);
+      });
+    await tick();
+    await tick();
+    await tick();
+  };
+
   // The single shutdown every interrupt source shares: SIGTERM/SIGINT, the live
   // view's `q` (via `onQuit`), the `run.cancel` surface mutation a second
   // process drives (`odu cancel`, the MCP `cancel` tool, a `--supersede` start),
@@ -1029,9 +1177,29 @@ async function orchestrate(
     if (shuttingDown) return;
     shuttingDown = true;
     clearIdle();
+    // Before anything reads the state this run will be remembered by: a node
+    // whose verdict is being held for its log has FINISHED, and a record that
+    // called it `running` would make an ordinary interrupted run `incomplete`
+    // over output the coordinator was merely still ingesting. `stopWork` below
+    // stamps what those logs actually lost.
+    verdicts.releaseAll();
     const exclusivityLost = opts.exclusivityLost === true;
     const stopWork = (): void => {
       for (const lane of createdLanes) lane.close();
+      // An interrupted run does not drain — freeing the terminal and the
+      // exclusivity fast is the point — but it does stop writing, and a reader
+      // is owed that fact either way: without a terminal here, an `odu logs -f`
+      // attached to a cancelled run's node hangs until its own process is
+      // killed. What the log lost is a separate question from whether it ended,
+      // so SAY what was lost before saying it ended: a terminal on a silently
+      // short log is the very failure this issue is about, and an agent reaches
+      // this path by default — `wait_for_settle` returns on STATUS, so the
+      // `run({supersede})` / `odu cancel` / linger-idle that follows a settle
+      // lands here with a just-finished node's summary still on the wire.
+      // Stamping is a synchronous append, so unlike draining it costs this path
+      // nothing it is trying to protect.
+      stampUnfinishedLogs();
+      endRunLogs();
       // Free venue leases so the remote flock drops immediately rather than
       // waiting for the OS to reap our ssh children on process death (crash
       // paths still free via connection close — this is the clean path). On
@@ -1056,7 +1224,7 @@ async function orchestrate(
     for (const context of poster.pendingContexts()) {
       poster.post(interruptStatus(context, reason, sha7));
     }
-    void poster.finalize().then((unposted) => {
+    void poster.finalize().then(async (unposted) => {
       applyInterruptStopWork("after-settle", exclusivityLost, stopWork);
       // Record this run before the socket closes: a superseding run waits on
       // that close to confirm we're gone, so writing first guarantees our
@@ -1067,6 +1235,10 @@ async function orchestrate(
       // same paired durable state every other terminal path writes.
       writeTimingSidecar(interruptedState);
       finalizeRunRecord(interruptedState, unposted);
+      // `stopWork` above stamped and ended every unfinished log — the last
+      // words this run will ever publish, and this path exits the process the
+      // moment the socket is gone. Same turn owed, same reason.
+      await flushToReaders();
       closeSocket();
       display.stop(interruptedState);
       process.exit(code);
@@ -1100,17 +1272,61 @@ async function orchestrate(
    *  once. */
   let claimInFlight = false;
 
+  // ── the log join: a node's verdict waits for its output ──
+  //
+  // A node's verdict and a node's output are two halves of one fact — "this
+  // node is done" — travelling on two streams, of which the verdict's is
+  // always the faster: it is a few bytes on the state cell while the output is
+  // a backlog on the log stream. juspay/odu#88 joined them at TEARDOWN, so the
+  // run's own exit stopped dropping tails. But settle is not teardown. Every
+  // OTHER consumer of a run — `odu wait --settle`, the MCP `wait_for_settle` an
+  // agent loops on, the durable record, the posted commit status — reads
+  // settled-ness off the node statuses on this socket, and a status published
+  // ahead of its log promises them a finished run whose output is still on the
+  // wire. Under `--linger` the coordinator never tears down at all, so there
+  // was no drain behind that promise whatsoever.
+  //
+  // So the join belongs where the promise is made, not where the process ends:
+  // a recipe node's TERMINAL status is withheld until its log has ended.
+  // "Settled" then means what every reader already took it to mean, on every
+  // path, without a single reader having to learn that logs exist.
+  //
+  // `_ci-setup@<platform>` never comes through here: the coordinator owns its
+  // verdict (`finishSetup`) and keeps writing to its log long after the lane is
+  // done with it, so it has no log terminal to wait for — the same carve-out,
+  // for the same reason, that the fan-in makes for its `end` frame.
+  const verdicts = createVerdictGate({
+    isLogEnded: logs.isEnded,
+    publishedStatus: (id) => store.get().nodes[id]?.status,
+    nodeIds: () => store.get().order,
+    publish: (id, patch) => updateNode(id, patch),
+    drainLogs: () => drainLaneLogs(createdLanes),
+  });
+
   const checkSettled = (): void => {
     if (claimInFlight) return;
+    // A run being torn down does not announce a fresh settle: `shutdown` owns
+    // the terminal path from here, and it releases held verdicts on its way out
+    // (so the record describes finished nodes as finished) — which lands right
+    // back in this function.
+    if (shuttingDown) return;
     const state = store.get();
-    const done = state.order.every((id) => {
-      const status = state.nodes[id]?.status;
-      return status !== "pending" && status !== "running";
-    });
+    // The taxonomy, not a hand-rolled pair of string comparisons — the same
+    // `NON_TERMINAL_STATUSES` the agent face judges settle by (`agentSummary`)
+    // and the verdict gate holds against, so the three cannot drift on what
+    // "done" means.
+    const done = state.order.every(
+      (id) => !NON_TERMINAL_STATUSES.has(state.nodes[id]?.status ?? "pending"),
+    );
     if (done) {
       settled();
       onSettledEach?.();
+      return;
     }
+    // Not settled — but if the only nodes left non-terminal are ones whose
+    // verdicts the gate is holding, the DAG is done and the output is all that
+    // is outstanding. Bound the wait for it.
+    verdicts.boundIfOnlyLogsOutstanding();
   };
 
   const updateNode = (id: string, patch: Partial<NodeState>): void => {
@@ -1409,6 +1625,19 @@ async function orchestrate(
   // here is precisely the second write this park exists to prevent.
   if (shuttingDown) return await parkForShutdown();
 
+  // This run owns every node's log file from the instant it has both a node set
+  // and a machine to run on. Ownership used to be claimed off the LANE's frame
+  // stream — a node's first write, or its log terminal — so a platform whose
+  // claim failed, a lane that died provisioning, a lane cancelled before it
+  // attached, left every node on it `skipped`/`errored` with no byte written and
+  // `.ci/<sha7>/<plat>/<node>.log` still holding the PREVIOUS run's full output
+  // under this run's red verdict: the same stale-by-address bug the claim was
+  // added to close, surviving in the cases a reader is likeliest to go looking
+  // at. The run knows its whole node set here; that is the authority to claim
+  // from, rather than a downstream event stream. Idempotent, so the setup logs
+  // the claim already narrated into keep their lines.
+  for (const id of store.get().order) logs.claim(id);
+
   // Which lanes actually start. Two ways a platform drops out, both newly
   // reachable because the socket (and therefore `lane.cancel`, `cancel` and the
   // signals) is live across an `await` that did not exist before:
@@ -1543,7 +1772,7 @@ async function orchestrate(
             }
             continue;
           }
-          updateNode(fanId(laneId, platform), {
+          verdicts.offer(fanId(laneId, platform), {
             status: laneNode.status,
             exitCode: laneNode.exitCode,
             startedAt: laneNode.startedAt,
@@ -1554,12 +1783,37 @@ async function orchestrate(
       onLogFrame: (laneId, frame) => {
         const id = fanId(laneId, platform);
         if (frame.kind === "append") {
+          // Sealed-log skip lives on `appendLocal` (`appendIfOpen`) — one
+          // producer, so a tap frame, a lane-death line, and a setup narration
+          // cannot disagree about whether a sealed log is writable.
           appendLocal(id, frame.text);
+        } else if (frame.kind === "end") {
+          // Pass the log's terminal on to the fan-in's own readers — except for
+          // _ci-setup, for the same reason its snapshot is dropped below: the
+          // coordinator keeps writing to that node's log after the lane is done
+          // with it (lane death, operator cancel), so it is not complete just
+          // because the lane's half is. `endRunLogs` ends it when the RUN is.
+          if (laneId !== SETUP) {
+            // Seal FIRST, release second: the file is whole the instant this
+            // frame is handled (its appends came ahead of it on the same
+            // stream, and the sink writes them synchronously), and sealing
+            // before publishing is what makes the verdict's promise — "this
+            // node is done, go read its log" — true at the moment it is made.
+            endLocal(id);
+            verdicts.release(id);
+          }
         } else if (laneId === SETUP) {
           // Never reset _ci-setup: the coordinator's provision lines precede
           // the lane stream and must survive the lane's snapshot frame.
           if (frame.text !== "") appendLocal(id, frame.text);
-        } else if (frame.text !== "" || tail.logFor(id).buffer !== "") {
+        } else if (!logs.isNoopReset(id, frame.text)) {
+          // One question — "would this snapshot change anything a reader can
+          // observe?" — asked of the tail, which is where every observable a
+          // log has lives. Asked here as a hand-built disjunct it grew a clause
+          // per defect found (the last one: a rerun of a node that produced
+          // nothing sends an empty snapshot over an empty buffer, and swallowing
+          // it left the `ended` latch set, so `logs -f` on the rerunning node
+          // exited at once insisting the log was complete).
           resetLocal(id, frame.text);
         }
       },
@@ -1682,8 +1936,25 @@ async function orchestrate(
   }
 
   await allSettled;
+  // `allSettled` resolving says every node reached a terminal status — it says
+  // nothing about whether `shutdown` also fired meanwhile (`run.cancel`,
+  // SIGINT, lease.lost — all live across this await). See `parkForShutdown`
+  // above: once `shuttingDown` is true, `shutdown` is this run's one terminal
+  // owner, and this path must not resume past it.
+  if (shuttingDown) return await parkForShutdown();
 
+  // No drain here any more, and that is the point. `allSettled` resolving now
+  // MEANS the logs are in: a node reaches a terminal status on the fan-in only
+  // once its log has ended or been stamped short (see "the log join" above), so
+  // by the time this line runs every lane has already delivered what it owed.
+  // A second drain at teardown would be the old shape wearing a belt — and the
+  // old shape is precisely what taught readers that teardown is where this is
+  // handled, when teardown is the one moment nobody but the run itself is
+  // watching (juspay/odu#87, and the settle-shaped residual after it).
   for (const lane of createdLanes) lane.close();
+  // Lanes are shut: nothing can append to any node's log after this line, so
+  // this is where the run says its last word about every one of them.
+  endRunLogs();
   // Venue locks drop with the run — free them as soon as lanes are done so the
   // next waiter can claim the box while we still finalize statuses/records.
   for (const lease of acquiredLeases) lease.release();
@@ -1695,6 +1966,7 @@ async function orchestrate(
   writeTimingSidecar(finalState);
   const unposted = await poster.finalize();
   finalizeRunRecord(finalState, unposted);
+  await flushToReaders();
   closeSocket();
 
   display.stop(finalState);

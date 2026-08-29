@@ -25,6 +25,7 @@ import {
   type LaneClient,
   laneClientOver,
   laneSurface,
+  type NodeLogMessage,
   type NodesSnapshot,
   type PipelineState,
 } from "./common/surface";
@@ -42,6 +43,13 @@ interface Harness {
     error: string | null;
   }>;
   dispose: () => void;
+}
+
+/** The text a log frame carries. `end` carries none — it says the node has
+ *  finished producing output, not what it said — so the assertions below can
+ *  read as "what is in this log" instead of as a union narrowing. */
+function frameText(frame: NodeLogMessage | undefined): string {
+  return frame !== undefined && frame.kind !== "end" ? frame.text : "";
 }
 
 const cleanups: Array<() => void> = [];
@@ -139,6 +147,26 @@ const last = (h: Harness): NodesSnapshot => {
   return state;
 };
 
+/**
+ * Wait for a CONFIGURED pipeline of `nodes` nodes to settle.
+ *
+ * The count is load-bearing, not decoration. `summarize().done` means "no node
+ * is pending or running", which an EMPTY node set satisfies VACUOUSLY — so in
+ * the window before configure's first frame lands, `done` is already true, and
+ * a bare `until(() => summarize(last(h)).done)` returns immediately on a state
+ * with no nodes in it. Every assertion after it then reads `undefined` and the
+ * test fails with `Expected: "failed" / Received: undefined`.
+ *
+ * It only loses that race on a loaded machine, which is why it survived here
+ * for so long and then went red on a busy CI runner — twice, on two different
+ * tests, in the two files that spelled the wait without a count. Waiting for
+ * the node set to EXIST and then settle is one thought, so it gets one name
+ * rather than a clause each caller has to remember (`_ci-setup` is why the
+ * count is tasks + 1).
+ */
+const settledWith = (h: Harness, nodes: number): Promise<void> =>
+  until(() => last(h).order.length === nodes && summarize(last(h)).done);
+
 const chain: TaskSpec[] = [
   { id: "build", command: "echo building", needs: [] },
   { id: "test", command: "echo testing", needs: ["build"] },
@@ -150,7 +178,7 @@ describe("odu lane runner over stdio (loopback)", () => {
     const ack = await h.configure(chain);
     expect(ack).toEqual({ ok: true, error: null });
 
-    await until(() => summarize(last(h)).done && last(h).order.length === 3);
+    await settledWith(h, 3);
     const final = last(h);
     expect(final.order).toEqual([SETUP_NODE_ID, "build", "test"]);
     for (const id of final.order) {
@@ -184,7 +212,7 @@ describe("odu lane runner over stdio (loopback)", () => {
     const h = await harness();
     const ack = await h.configure(chain, "/nonexistent/odu-workspace");
     expect(ack.ok).toBe(true); // ack-fast: the failure surfaces as the node
-    await until(() => summarize(last(h)).done);
+    await settledWith(h, 3);
     const final = last(h);
     expect(final.nodes[SETUP_NODE_ID]?.status).toBe("failed");
     expect(final.nodes.build?.status).toBe("skipped");
@@ -195,7 +223,7 @@ describe("odu lane runner over stdio (loopback)", () => {
   it("gives a late subscriber the full snapshot as its first frame", async () => {
     const h = await harness();
     await h.configure(chain);
-    await until(() => summarize(last(h)).done && last(h).order.length === 3);
+    await settledWith(h, 3);
 
     // A late subscriber still leads with the CURRENT snapshot — the cell.s
     // snapshot is taken at subscribe time (the stream is lazy), not when the
@@ -213,13 +241,108 @@ describe("odu lane runner over stdio (loopback)", () => {
 
     const frame = await firstFrame(h.client.surface.nodeLog.get({ id: "mark" }));
     expect(frame?.kind).toBe("snapshot");
-    expect(frame?.text).toContain("MARK-ODU-LOG");
+    expect(frameText(frame)).toContain("MARK-ODU-LOG");
+  });
+
+  it("ends a finished node's log, so a reader can tell 'that was all'", async () => {
+    // The whole of juspay/odu#87 in one assertion: without a terminal frame,
+    // "the lane still owes me this node's output" is unobservable, and the
+    // coordinator's only option is to guess — which it lost, silently, at
+    // exactly the moment a long recipe's summary was still in flight.
+    const h = await harness();
+    await h.configure([{ id: "mark", command: "echo MARK-ODU-LOG", needs: [] }]);
+    await until(() => last(h).nodes.mark?.status === "ok");
+
+    const frames: string[] = [];
+    for await (const frame of subscribe(
+      h.client.surface.nodeLog.get({ id: "mark" }),
+    )) {
+      frames.push(frame.kind);
+      if (frame.kind === "end") break;
+    }
+    // A LATE subscriber missed the live `end`, so the log replays one: whether
+    // this node is finished is a property of the log, not of when you attached.
+    expect(frames).toEqual(["snapshot", "end"]);
+  });
+
+  it("ends the log of a node that never ran — skipped counts as complete", async () => {
+    // Terminal status and log terminal stay in lockstep on every path, so a
+    // reader waiting for the whole lane can wait on all nodes alike instead of
+    // knowing which ones were going to produce output.
+    const h = await harness();
+    await h.configure([
+      { id: "build", command: "exit 3", needs: [] },
+      { id: "test", command: "echo never", needs: ["build"] },
+    ]);
+    await until(() => last(h).nodes.test?.status === "skipped");
+
+    const sub = subscribe(h.client.surface.nodeLog.get({ id: "test" }));
+    await sub.next(); // the snapshot; the frame after it is the one under test
+    expect((await sub.next()).value?.kind).toBe("end");
+    void sub.return?.();
+  });
+
+  it("re-opens the EMPTY log of a rerun skipped node — the silent case", async () => {
+    // The nastiest shape of "completion is not a latch": a skipped node's log
+    // is empty AND ended, so its rerun's snapshot carries no text over no
+    // buffer. Anything downstream that guards its reset on emptiness will
+    // swallow that frame and keep insisting the log is complete — which is
+    // exactly how a coordinator-side latch stayed stuck (caught in review).
+    const h = await harness();
+    await h.configure([
+      { id: "build", command: "exit 3", needs: [] },
+      { id: "test", command: "echo never", needs: ["build"] },
+    ]);
+    await until(() => last(h).nodes.test?.status === "skipped");
+
+    const kinds: string[] = [];
+    const sub = subscribe(h.client.surface.nodeLog.get({ id: "test" }));
+    void (async () => {
+      for await (const frame of sub) kinds.push(frame.kind);
+    })();
+    await until(() => kinds.length === 2); // snapshot(""), end
+    expect(kinds).toEqual(["snapshot", "end"]);
+
+    // Rerun the FAILED dep so the skipped node becomes pending again.
+    expect(
+      (await runUnary(h.client.surface.node.rerun({ id: "build" }))).ok,
+    ).toBe(true);
+    // The re-opening snapshot must arrive even though it carries nothing.
+    await until(() => kinds.length > 2);
+    expect(kinds[2]).toBe("snapshot");
+    void sub.return?.();
+  });
+
+  it("re-opens an ended log on rerun — completion is not a latch", async () => {
+    const h = await harness();
+    await h.configure([{ id: "mark", command: "echo FIRST", needs: [] }]);
+    await until(() => last(h).nodes.mark?.status === "ok");
+
+    // Subscribe while the node is already finished, then rerun underneath the
+    // subscription: the ended log must re-open, or a rerun's output would
+    // arrive on a stream its reader had already written off as complete.
+    const frames: Array<{ kind: string; text?: string }> = [];
+    const sub = subscribe(h.client.surface.nodeLog.get({ id: "mark" }));
+    void (async () => {
+      for await (const frame of sub) {
+        frames.push(frame.kind === "end" ? { kind: "end" } : frame);
+      }
+    })();
+    await until(() => frames.length === 2); // snapshot, end
+
+    expect((await runUnary(h.client.surface.node.rerun({ id: "mark" }))).ok).toBe(
+      true,
+    );
+    // A fresh snapshot re-opens the log, and the new invocation ends it again.
+    await until(() => frames.length > 2 && frames.at(-1)?.kind === "end");
+    expect(frames.slice(2).map((f) => f.kind)).toContain("snapshot");
+    void sub.return?.();
   });
 
   it("reruns a node and its transitive dependents", async () => {
     const h = await harness();
     await h.configure(chain);
-    await until(() => summarize(last(h)).done && last(h).order.length === 3);
+    await settledWith(h, 3);
 
     const before = h.states.length;
     const result = await runUnary(h.client.surface.node.rerun({ id: "build" }));
@@ -239,7 +362,7 @@ describe("odu lane runner over stdio (loopback)", () => {
       { id: "build", command: "exit 3", needs: [] },
       { id: "test", command: "echo never", needs: ["build"] },
     ]);
-    await until(() => summarize(last(h)).done);
+    await settledWith(h, 3);
     const final = last(h);
     expect(final.nodes.build?.status).toBe("failed");
     expect(final.nodes.build?.exitCode).toBe(3);
@@ -265,7 +388,7 @@ describe("odu lane runner over stdio (loopback)", () => {
     const frame = await firstFrame(
       h.client.surface.nodeLog.get({ id: "reopen" }),
     );
-    expect(frame?.text).toContain("REOPENED");
+    expect(frameText(frame)).toContain("REOPENED");
   });
 
   it("rejects rerun of an unknown node", async () => {
@@ -284,7 +407,7 @@ describe("odu lane runner over stdio (loopback)", () => {
     await until(() => last(h).nodes.slow?.status === "running");
     const result = await runUnary(h.client.surface.node.cancel({ id: "slow" }));
     expect(result.ok).toBe(true);
-    await until(() => summarize(last(h)).done);
+    await settledWith(h, 3);
     expect(last(h).nodes.slow?.status).toBe("cancelled");
     expect(last(h).nodes.after?.status).toBe("skipped");
     expect(summarize(last(h)).failedOverall).toBe(false);
@@ -295,7 +418,7 @@ describe("odu lane runner over stdio (loopback)", () => {
   it("rejects cancel of an unknown or already-terminal node", async () => {
     const h = await harness();
     await h.configure([{ id: "ok", command: "true", needs: [] }]);
-    await until(() => summarize(last(h)).done);
+    await settledWith(h, 2);
     expect((await runUnary(h.client.surface.node.cancel({ id: "nope" }))).ok).toBe(
       false,
     );

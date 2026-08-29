@@ -7,8 +7,19 @@
  * tests/e2e/README.md for the design tradeoffs this harness commits to.
  */
 
-import { execFileSync, spawnSync } from "node:child_process";
-import { cpSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  type ChildProcess,
+  execFileSync,
+  spawn,
+  spawnSync,
+} from "node:child_process";
+import {
+  cpSync,
+  existsSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,7 +34,7 @@ export const BIG = 256 * 1024 * 1024;
  *  under emulation / cross setups; `builtins.currentSystem` is what odu will
  *  actually build `odu-runner` against, so it is the tuple the lane must name.
  *  Synchronous, like this file's other `nix`/`git` calls; no import from `src/`. */
-function currentNixSystem(): string {
+export function currentNixSystem(): string {
   return execFileSync(
     "nix",
     ["eval", "--impure", "--raw", "--expr", "builtins.currentSystem"],
@@ -177,5 +188,62 @@ export function cleanup(dir: string): void {
     rmSync(dir, { recursive: true, force: true });
   } catch (err) {
     process.stderr.write(`e2e: failed to remove fixture ${dir}: ${String(err)}\n`);
+  }
+}
+
+/** One synchronous `odu <argv…>` call in `dir` — the plain-CLI face used for
+ *  the introspection commands (`wait`, `cancel`) a background run is driven
+ *  through. Separate from `oduRun` because those return a verdict on stdout
+ *  rather than an NDJSON progress stream, and their exit code is a verdict too
+ *  (`odu wait` exits non-zero on a red run), so callers read the JSON. */
+export function oduCli(
+  oduBin: string,
+  dir: string,
+  argv: string[],
+): { status: number | null; stdout: string; stderr: string } {
+  const res = spawnSync(oduBin, argv, {
+    cwd: dir,
+    encoding: "utf-8",
+    maxBuffer: BIG,
+    env: hermeticEnv,
+  });
+  return { status: res.status, stdout: res.stdout, stderr: res.stderr };
+}
+
+/** Start `odu run …` in `dir` as a background child, the way an agent's `run`
+ *  tool does: the coordinator outlives the call and is observed over its socket
+ *  instead of by waiting on the process. Returns the child and a promise that
+ *  resolves when it exits, so a test can tear the run down deterministically. */
+export function oduRunBackground(
+  oduBin: string,
+  dir: string,
+  argv: string[],
+): { child: ChildProcess; exited: Promise<void> } {
+  const child = spawn(oduBin, ["run", ...argv], {
+    cwd: dir,
+    env: hermeticEnv,
+    stdio: "ignore",
+  });
+  const exited = new Promise<void>((resolve) => {
+    child.on("exit", () => resolve());
+  });
+  return { child, exited };
+}
+
+/** Block until the background coordinator has published its socket, so the
+ *  first `odu wait` doesn't race the spawn and get the loud no-run refusal.
+ *  Polls rather than watches: the file appears once, early, and a watcher on a
+ *  directory that does not exist yet is its own race. */
+export async function awaitRunSocket(
+  dir: string,
+  timeoutMs = 120_000,
+): Promise<void> {
+  const sock = join(dir, ".ci", "odu.sock");
+  const deadline = Date.now() + timeoutMs;
+  while (!existsSync(sock)) {
+    if (Date.now() > deadline) {
+      throw new Error(`e2e: no ${sock} within ${timeoutMs}ms`);
+    }
+    await new Promise((r) => setTimeout(r, 100));
   }
 }
