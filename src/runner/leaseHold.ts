@@ -21,10 +21,7 @@
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { shellQuoteArg } from "@kolu/shell-quote";
-import {
-  DEFAULT_LEASE_LOCK,
-  type LeaseHolder,
-} from "../common/surface";
+import { DEFAULT_LEASE_LOCK, type LeaseHolder } from "../common/laneSurface";
 
 /** Idle without inbound activity before the hold self-releases (ms). */
 export function deadManMs(): number {

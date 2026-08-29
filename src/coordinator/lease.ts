@@ -30,7 +30,7 @@ import {
   type LaneClient,
   laneSurface,
   type LeaseHolder,
-} from "../common/surface";
+} from "../common/laneSurface";
 import { type HostPool, type ResolvedPools, shortHost } from "./hosts";
 import type { ResolveRunnerDrv } from "./runnerFlake";
 import { type TimeoutOpts, withTimeout } from "../common/withTimeout";

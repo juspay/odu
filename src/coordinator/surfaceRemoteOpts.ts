@@ -9,7 +9,7 @@
 
 import type { Logger } from "@kolu/log";
 import type { AgentClient, Session, SshProv } from "@kolu/surface-remote";
-import { type LaneClient, laneClientOver } from "../common/surface";
+import { type LaneClient, laneClientOver } from "../common/laneSurface";
 
 /** Wait for the session to hold a client, then build odu's TYPED lane face over
  *  the same wire.

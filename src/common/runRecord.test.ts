@@ -11,7 +11,7 @@ import {
   type NodeState,
   pendingNode,
   type PipelineState,
-} from "./surface";
+} from "@odu/run-client/surface";
 
 const decodesAsRecord = (value: unknown): boolean =>
   Result.isSuccess(Schema.decodeUnknownResult(RunRecordSchema)(value));

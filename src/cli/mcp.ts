@@ -37,8 +37,8 @@ import { killRuns, runTool } from "../mcp/runTool";
 import { runsTool } from "../mcp/runsTool";
 import { makeWaitTool } from "../mcp/waitTool";
 import { gitRunContext } from "../common/git";
-import { oduSurface } from "../common/surface";
-import { SOCKET_PATH, tryDialSocket } from "../coordinator/socket";
+import { oduSurface } from "@odu/run-client/surface";
+import { dialRun, SOCKET_PATH } from "@odu/run-client/dial";
 
 
 function version(): string {
@@ -73,7 +73,7 @@ export async function mcpCommand(socketPath: string = SOCKET_PATH): Promise<numb
   // `logs` reads the durable file, and `run` (which ignores the client) spawns a
   // coordinator.
   const aClient = redialingAClient(async () => {
-    const dialed = await tryDialSocket(socketPath);
+    const dialed = await dialRun(socketPath);
     return dialed === null ? null : { client: dialed.client, close: dialed.close };
   });
   // `directDispatch` over the served handlers is the in-process transport: a

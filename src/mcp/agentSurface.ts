@@ -55,7 +55,7 @@ import { Effect, Schema, Stream } from "effect";
 import type { Rpc, RpcGroup } from "effect/unstable/rpc";
 import { subscribe } from "../common/effectEdge";
 import { rowsOf } from "../cli/render";
-import { splitFanId } from "../common/nodeId";
+import { NodeIdSchema, splitFanId } from "@odu/run-client/nodeId";
 import {
   clampLog,
   EMPTY_STATE,
@@ -66,9 +66,8 @@ import {
   OwedStatusSchema,
   type PipelineState,
   postingOf,
-} from "../common/surface";
+} from "@odu/run-client/surface";
 import { logPathFor } from "../coordinator/statuses";
-import { TaskIdSchema } from "../common/spec";
 
 /**
  * The slice of the live A-client (`oduSurface`) this projection consumes.
@@ -233,7 +232,7 @@ const agentSpec = {
     },
   },
   collections: {
-    // ONE node-id contract now — `TaskIdSchema`, the same `.min(1)` string the
+    // ONE node-id contract now — `NodeIdSchema`, the same `.min(1)` string the
     // rest of the surface spells. The deliberate relaxation that used to live
     // here is DELETED, and its reason with it: surface-mcp's old collection-item
     // URI decoder classified a key as "string-typed" by probing
@@ -243,16 +242,16 @@ const agentSpec = {
     // for numeric/boolean keys, so a min-length string key addresses correctly.
     // Re-verified against the real decoder, not assumed — see
     // `agentSurface.keys.test.ts`.
-    logs: { keySchema: TaskIdSchema, schema: LogEntrySchema },
+    logs: { keySchema: NodeIdSchema, schema: LogEntrySchema },
   },
   procedures: {
     node: {
       rerun: {
-        input: Schema.Struct({ id: TaskIdSchema }),
+        input: Schema.Struct({ id: NodeIdSchema }),
         output: Schema.Struct({ ok: Schema.Boolean }),
       },
       cancel: {
-        input: Schema.Struct({ id: TaskIdSchema }),
+        input: Schema.Struct({ id: NodeIdSchema }),
         output: Schema.Struct({ ok: Schema.Boolean }),
       },
     },

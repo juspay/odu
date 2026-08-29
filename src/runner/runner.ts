@@ -31,22 +31,25 @@ import type { Rpc, RpcGroup } from "effect/unstable/rpc";
 import { createLogTail } from "../common/logTail";
 import { validatePipeline } from "../common/spec";
 import {
-  type ConfigureInput,
-  type ConfigureOutput,
   EMPTY_STATE,
-  laneSurface,
   type NodeState,
   type NodeStatus,
   pendingNode,
   type PipelineState,
-} from "../common/surface";
+} from "@odu/run-client/surface";
+import {
+  type ConfigureInput,
+  type ConfigureOutput,
+  laneSurface,
+} from "../common/laneSurface";
 import {
   agentLeaseLockPath,
   claimLocal,
   type LocalHold,
   probeLocal,
 } from "./leaseHold";
-import { SETUP_NAMEPATH, transitiveDependents } from "../common/nodeId";
+import { SETUP_NAMEPATH } from "@odu/run-client/nodeId";
+import { transitiveDependents } from "../common/nodeId";
 import { createGroupReaper } from "./reap";
 import { prepareWorkspace } from "./workspace";
 
@@ -310,7 +313,7 @@ export function createLaneRunner(): LaneRunner {
     node.status === "pending" &&
     node.needs.some((dep) => {
       const s = statusOf(dep);
-      // 'errored' is coordinator-only (surface.ts) and unreachable in lane
+      // 'errored' is coordinator-only (@odu/run-client/surface) and unreachable in lane
       // state; kept so blocked() reads as the full failed-set and survives any
       // future in-lane errored. 'cancelled' is deliberate operator cancel —
       // dependents skip the same way as failed (juspay/odu#68).

@@ -1,0 +1,19 @@
+{
+  "name": "@odu/run-client",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "sideEffects": false,
+  "//": "WHAT A CLIENT OF A LIVE ODU RUN HOLDS — see README.md, which argues the whole boundary. What this manifest is FOR is the wall: odu depends on this package and it depends on nothing of odu's, so the direction is physics rather than discipline, and src/closure.test.ts walks the import graph to keep it that way.",
+  "//dependencies": "`@kolu/surface` is deliberately ABSENT here, and that is not an omission: odu hydrates the @kolu/* sources as raw TypeScript from the Nix store (see bunfig.toml at the root) rather than installing them from bun.lock, so naming one in any manifest in this tree would send bun to the registry for a package that is not there. A consumer hydrates this package the same way — copy the directory, satisfy this manifest, and supply @kolu/surface from its own kolu pin — which is exactly what olai already does for @kolu/padi-client. The set of hydrated imports is pinned by src/closure.test.ts, so a new one is a decision rather than a surprise for every downstream. `effect` IS declared: it is a normal npm dependency, and it must be the SAME instance the rest of the tree resolves (the root's `overrides` pins it) — two copies would give Effect's _tag-based error narrowing two class realms to disagree about.",
+  "exports": {
+    "./surface": "./src/surface.ts",
+    "./nodeId": "./src/nodeId.ts",
+    "./dial": "./src/dial.ts",
+    "./asyncConnectError": "./src/asyncConnectError.ts"
+  },
+  "dependencies": {
+    "effect": "4.0.0-rc.112"
+  }
+}

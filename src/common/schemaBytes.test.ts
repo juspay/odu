@@ -28,16 +28,17 @@
 
 import { describe, expect, it } from "bun:test";
 import { Result, Schema } from "effect";
-import { RunRecordSchema } from "./runRecord";
+import { RunRecordSchema, UnpostedEntrySchema } from "./runRecord";
 import { TaskSpecSchema } from "./spec";
+import {
+  NodeLogMessageSchema,
+  PipelineStateSchema,
+} from "@odu/run-client/surface";
 import {
   ConfigureInputSchema,
   LeaseClaimOutputSchema,
   LeaseProbeOutputSchema,
-  NodeLogMessageSchema,
-  PipelineStateSchema,
-  UnpostedEntrySchema,
-} from "./surface";
+} from "./laneSurface";
 
 /** Decode then re-encode, and hand back the bytes. A format is frozen when this
  *  is the identity function on every spelling a peer may send. */

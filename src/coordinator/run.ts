@@ -58,7 +58,7 @@ import {
   onPlatform,
   SETUP_NAMEPATH,
   splitFanId,
-} from "../common/nodeId";
+} from "@odu/run-client/nodeId";
 import type { TaskSpec } from "../common/spec";
 import {
   claimingLanes,
@@ -70,8 +70,7 @@ import {
   type PipelineState,
   type RunHeader,
   type RunLane,
-  type UnpostedEntry,
-} from "../common/surface";
+} from "@odu/run-client/surface";
 import { commitLabel, createDisplay, progressEvent } from "./display";
 import { laneTasks, loadJustPipeline, parseSelector } from "../just/ingest";
 import { fanoutPools, loadHosts, shortHost } from "./hosts";
@@ -88,13 +87,17 @@ import {
   waitForRunLockFree,
   type RunLockHandle,
 } from "./checkoutLock";
+import { dialRun } from "@odu/run-client/dial";
 import { releaseReservation, reserveNextSeq, writeRunRecord } from "./ledger";
-import { buildRunRecord, projectNodes } from "../common/runRecord";
+import {
+  buildRunRecord,
+  projectNodes,
+  type UnpostedEntry,
+} from "../common/runRecord";
 import {
   checkoutPaths,
   serveSocket,
   socketLogger,
-  tryDialSocket,
 } from "./socket";
 import {
   fetchUrlFor,
@@ -167,7 +170,7 @@ export async function ensureCheckoutFree(
   supersede: boolean,
   deps: {
     cancel?: typeof cancelRun;
-    dial?: typeof tryDialSocket;
+    dial?: typeof dialRun;
     signalLock?: typeof signalRunLockHolder;
     waitLockFree?: typeof waitForRunLockFree;
     liveLockPid?: typeof liveRunLockPid;
@@ -177,7 +180,7 @@ export async function ensureCheckoutFree(
   | { ok: false; reason: "live" | "supersede-timeout"; message: string }
 > {
   const { socketPath, lockPath } = paths;
-  const dial = deps.dial ?? tryDialSocket;
+  const dial = deps.dial ?? dialRun;
   const cancel = deps.cancel ?? cancelRun;
   const signalLock = deps.signalLock ?? signalRunLockHolder;
   const waitLockFree = deps.waitLockFree ?? waitForRunLockFree;

@@ -13,7 +13,8 @@
  * error escapes the caller entirely instead of resolving its promise.
  *
  * Two @kolu/surface call sites depend on the async contract and are the reason
- * this exists — both reached from src/coordinator/socket.ts:
+ * this exists — one on each side of the socket, which is why the shim ships
+ * with the DIAL rather than with the coordinator that serves it:
  *   - `probeSocket` (unix-socket.ts), which classifies ENOENT as "free to
  *     bind". Serving a socket on a fresh path is the NORMAL case, so the
  *     escaping error turns every successful serve into a thrown ENOENT.
@@ -28,9 +29,11 @@
  * this is a pass-through.
  *
  * Importing this module installs the patch — it is a runtime compat shim, so
- * the side effect IS the export. src/coordinator/socket.ts imports it, which
- * covers both odu processes and the test harness: every unix-socket dial and
- * serve in this repo goes through that module.
+ * the side effect IS the export. `./dial` imports it, so a consumer that
+ * hydrates this package and dials a run is covered without knowing the shim
+ * exists. It is published as its own entry for the other caller: odu's
+ * coordinator, which SERVES a socket and reaches `probeSocket` without going
+ * through any dial, imports it by name.
  */
 
 import { Socket } from "node:net";

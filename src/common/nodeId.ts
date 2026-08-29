@@ -1,48 +1,17 @@
 /**
- * The fan-in node id: `<namepath>@<platform>`. This is the one primitive that
- * joins lane-local state, fan-in state, GitHub contexts, log paths, and CLI
- * selectors, so its wire format (the `@` separator) lives here rather than
- * being re-derived at every consumer.
+ * What odu DOES with a node id — as distinct from what one IS.
  *
- * Invariant: the namepath never leads with `@`, so `lastIndexOf("@")` with an
- * `at > 0` guard splits unambiguously. A lane-local id (no `@`) is the
- * asymmetric edge case — it defaults platform to "unknown".
+ * The format itself (`<namepath>@<platform>`), the schema every member names it
+ * by, and the folds a READER performs on it (`splitFanId`, `onPlatform`,
+ * `isSetupNode`, `SETUP_NAMEPATH`) are wire vocabulary and live in
+ * `@odu/run-client/nodeId`, where a downstream face reading the matrix gets
+ * them without installing odu.
+ *
+ * What is left here is odu's own: the argv grammar its CLI parses selectors
+ * with, and the DAG walk its rerun does over them. Neither is something a
+ * reader of the surface reads — one is a command line, the other is what a
+ * WRITER computes before it mutates.
  */
-export function fanId(namepath: string, platform: string): string {
-  return `${namepath}@${platform}`;
-}
-
-export function splitFanId(id: string): { namepath: string; platform: string } {
-  const at = id.lastIndexOf("@");
-  if (at > 0) {
-    return { namepath: id.slice(0, at), platform: id.slice(at + 1) };
-  }
-  return { namepath: id, platform: "unknown" };
-}
-
-export function onPlatform(id: string, platform: string): boolean {
-  // Platform is the field after the last `@` (see splitFanId), not a free
-  // suffix of the whole id — so a namepath that itself contains `@` cannot
-  // make an unrelated platform string match.
-  return splitFanId(id).platform === platform;
-}
-
-/** Coordinator / lane bookkeeping namepath fanned as `_ci-setup@<platform>`.
- *  One spelling for run.ts, runner.ts, and CLI `@platform` exclusion. */
-export const SETUP_NAMEPATH = "_ci-setup";
-
-/** Is this fan-in id the coordinator's own bookkeeping node for a lane?
- *
- *  Beside {@link SETUP_NAMEPATH} because three unrelated policies turn on it and
- *  each was re-deriving the split: `@platform` rerun expansion excludes it
- *  (every task `needs` it, so including it would collapse a multi-rerun into
- *  "re-provision the lane"), `odu status`'s provisioning clock reads its
- *  `startedAt`, and a `node.cancel` on it with no live lane routes to a lane
- *  drop. Splits the id rather than matching a prefix, so a recipe merely NAMED
- *  like the sentinel cannot pass. */
-export function isSetupNode(id: string): boolean {
-  return splitFanId(id).namepath === SETUP_NAMEPATH;
-}
 
 /** Transitive dependents of `root` under a needs graph (root itself excluded).
  *  Shared by runner `rerun` reset and CLI multi-target root collapse so both

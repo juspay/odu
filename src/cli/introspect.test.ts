@@ -8,12 +8,9 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
-import {
-  capturingStderr,
-  capturingStdout,
-} from "../common/scaffoldForTest";
-import { pendingNode, type PipelineState } from "../common/surface";
-import { dialSocket } from "../coordinator/socket";
+import { capturingStderr, capturingStdout } from "../common/scaffoldForTest";
+import { pendingNode, type PipelineState } from "@odu/run-client/surface";
+import { dialRunOrExit } from "../coordinator/socket";
 import { serveTestSurface, type TestSurface } from "../mcp/serveForTest";
 import {
   attachStream,
@@ -84,7 +81,7 @@ async function streamOf(
   json: boolean,
 ): Promise<{ out: string; code: number }> {
   const surface = await served(state);
-  const { client, close } = await dialSocket(surface.socketPath);
+  const { client, close } = await dialRunOrExit(surface.socketPath);
   const { out, result } = await capturingStdout(() =>
     attachStream(client, close, json),
   );
@@ -188,7 +185,7 @@ describe("headerSnapshot", () => {
       },
     );
     open.push(surface);
-    const { client, close } = await dialSocket(surface.socketPath);
+    const { client, close } = await dialRunOrExit(surface.socketPath);
     try {
       const header = await headerSnapshot(client);
       expect(header.lanes).toEqual([

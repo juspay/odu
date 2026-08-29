@@ -20,7 +20,7 @@ import {
   oduSurface,
   type PipelineState,
   type RunHeader,
-} from "../common/surface";
+} from "@odu/run-client/surface";
 
 export interface TestSurface {
   socketPath: string;

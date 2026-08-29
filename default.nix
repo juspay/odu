@@ -33,6 +33,7 @@ let
       ./bun.nix
       ./tsconfig.json
       ./src
+      ./packages
       ./scripts
     ];
   };

@@ -4,14 +4,19 @@
   "private": true,
   "license": "AGPL-3.0-or-later",
   "type": "module",
+  "//workspaces": "odu became a workspace for ONE reason: packages/run-client is the half of odu a CLIENT of a live run holds (the fan-in surface + the dial), carved out so a downstream can subscribe a run cells by hydrating that directory alone — the arrangement kolu made for @kolu/padi-client. A workspace rather than a folder of relative imports because the wall has to be REAL: a package cannot depend back on odu, so the direction is physics rather than discipline, and packages/run-client/src/closure.test.ts walks the import graph to prove it. The member is listed in `dependencies` below as well as here: the isolated linker symlinks only the root package DIRECT dependencies into the root node_modules, so without that entry `@odu/run-client` would not resolve from src/.",
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "start": "bun src/cli/main.ts",
     "start:runner": "bun src/runner/main.ts --stdio",
     "typecheck": "tsc --noEmit",
-    "test:unit": "bun test ./src",
+    "test:unit": "bun test ./src ./packages",
     "test:e2e": "bun test ./tests/e2e"
   },
   "dependencies": {
+    "@odu/run-client": "workspace:*",
     "@effect/platform-node": "4.0.0-rc.112",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@opentui/core": "^0.4.5",

@@ -48,12 +48,12 @@ import {
   postingOf,
   type RunHeader,
   STATUS_META,
-} from "../common/surface";
+} from "@odu/run-client/surface";
 import type { Stream } from "effect";
 import { subscribe } from "../common/effectEdge";
 import { postingWarning } from "../coordinator/statuses";
 import { formatGoDuration } from "../common/duration";
-import { splitFanId } from "../common/nodeId";
+import { splitFanId } from "@odu/run-client/nodeId";
 import {
   commitLabel,
   cellAt,

@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "bun:test";
-import { DEFAULT_LEASE_LOCK, laneSurface } from "./surface";
+import { DEFAULT_LEASE_LOCK, laneSurface } from "./laneSurface";
 
 /**
  * Venue lease must stay on the lane agent surface (surface-remote dial),

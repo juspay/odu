@@ -35,7 +35,7 @@ import {
   streamFromAbortableSource,
 } from "@kolu/surface/server";
 import type { Stream } from "effect";
-import { clampLog, type NodeLogMessage } from "./surface";
+import { clampLog, type NodeLogMessage } from "@odu/run-client/surface";
 
 /** The in-memory entry for a node — its tail buffer and its delta channel —
  *  created lazily on first touch. Deliberately NOT exported: `buffer` and

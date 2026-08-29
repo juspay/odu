@@ -29,13 +29,13 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { gitRunContext } from "../common/git";
 import type { RunOutcome, RunRecord } from "../common/runRecord";
 import { writeRunRecord } from "../coordinator/ledger";
-import { tryDialSocket } from "../coordinator/socket";
+import { dialRun } from "@odu/run-client/dial";
 import {
   oduClientOver,
   oduSurface,
   pendingNode,
   type PipelineState,
-} from "../common/surface";
+} from "@odu/run-client/surface";
 import {
   type AgentNodes,
   type AgentNodesReader,
@@ -153,7 +153,7 @@ async function connectWith(
 async function connect(s: TestSurface, socketPath: string = s.socketPath) {
   return connectWith(
     async () => {
-      const dialed = await tryDialSocket(socketPath);
+      const dialed = await dialRun(socketPath);
       return dialed === null ? null : { client: dialed.client, close: dialed.close };
     },
     {

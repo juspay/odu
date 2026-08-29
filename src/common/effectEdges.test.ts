@@ -12,8 +12,11 @@
  * call sites are ENUMERATED, and a new one is a failing test with a message
  * telling the author what decision they are actually making.
  *
- * **Scope: every `.ts` under `src/` and `tests/`** — the two trees `tsconfig`
- * compiles, harness code included. `*.test.ts` / `*.test-d.ts` is out of the
+ * **Scope: every `.ts` under `src/`, `tests/` and `packages/`** — the three
+ * trees `tsconfig` compiles, harness code included. `packages/` is in scope
+ * because an extracted package is still odu source: `@odu/run-client` hands a
+ * consumer `Stream`s and `Effect`s to run at ITS own edge, and a run smuggled
+ * into the package would be an Effect boundary odu ships to everyone. `*.test.ts` / `*.test-d.ts` is out of the
  * run-edge budget and out of that budget ONLY: a test file IS a process edge
  * (the runner calls it from a Promise, so it must run the effect it asserts
  * about), and enumerating those runs would budget the harness rather than the
@@ -249,7 +252,7 @@ interface Scanned {
 /** Every scanned file, sorted, already blanked both ways. */
 function scannedSources(): Scanned[] {
   const files: string[] = [];
-  for (const root of ["src", "tests"])
+  for (const root of ["src", "tests", "packages"])
     files.push(...tsFilesUnder(join(repoRoot, root)));
   return files
     .map((full) => relative(repoRoot, full).split(sep).join("/"))

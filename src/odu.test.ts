@@ -22,13 +22,15 @@ import {
 } from "./cli/render";
 import type { TaskSpec } from "./common/spec";
 import {
-  type LaneClient,
-  laneClientOver,
-  laneSurface,
   type NodeLogMessage,
   type NodesSnapshot,
   type PipelineState,
-} from "./common/surface";
+} from "@odu/run-client/surface";
+import {
+  type LaneClient,
+  laneClientOver,
+  laneSurface,
+} from "./common/laneSurface";
 import { firstFrame, runUnary, subscribe } from "./common/effectEdge";
 import { createLaneRunner, SETUP_NODE_ID } from "./runner/runner";
 

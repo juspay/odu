@@ -16,7 +16,7 @@ import type {
   NodeState,
   PipelineState,
   RunHeader,
-} from "../common/surface";
+} from "@odu/run-client/surface";
 import { LiveView } from "./liveView";
 
 function node(

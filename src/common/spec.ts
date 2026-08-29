@@ -8,10 +8,8 @@
  * mirroring justci's `_ci-setup@<platform>` bookkeeping context.
  */
 
+import { NodeIdSchema } from "@odu/run-client/nodeId";
 import { Effect, Schema } from "effect";
-
-export const TaskIdSchema = Schema.String.check(Schema.isMinLength(1));
-export type TaskId = typeof TaskIdSchema.Type;
 
 /** The zod→Effect mapping is LAW here (kolu PLAN #17), and both idioms in this
  *  file are wire-bearing — `TaskSpecSchema` is embedded in `ConfigureInput`,
@@ -26,12 +24,12 @@ export type TaskId = typeof TaskIdSchema.Type;
  *      key rather than spell it `undefined` (`just/ingest.ts` builds `needs` and
  *      `os` totally, which is why nothing here needs a conditional spread). */
 export const TaskSpecSchema = Schema.Struct({
-  id: TaskIdSchema,
+  id: NodeIdSchema,
   /** Display name; defaults to the id. */
   name: Schema.optionalKey(Schema.String),
   /** Shell command, run via `sh -c` from the workspace root. */
   command: Schema.String.check(Schema.isMinLength(1)),
-  needs: Schema.Array(TaskIdSchema).pipe(
+  needs: Schema.Array(NodeIdSchema).pipe(
     Schema.withDecodingDefaultKey(Effect.succeed<readonly string[]>([])),
   ),
   /** `just` OS-family attributes (`[linux]` / `[macos]` / `[unix]` / …) that

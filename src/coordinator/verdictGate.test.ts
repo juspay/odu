@@ -9,7 +9,7 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import type { NodeState, NodeStatus } from "../common/surface";
+import type { NodeState, NodeStatus } from "@odu/run-client/surface";
 import { createVerdictGate, type VerdictGate } from "./verdictGate";
 
 /** A run of `ids`, with the gate wired to a recording fan-in. The doubles are
