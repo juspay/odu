@@ -43,14 +43,15 @@ import ts from "typescript";
 
 const packageRoot = join(import.meta.dirname, "..");
 
+const MANIFEST = JSON.parse(
+  readFileSync(join(packageRoot, "package.json"), "utf-8"),
+) as {
+  dependencies?: Record<string, string>;
+  sideEffects?: false | readonly string[];
+};
+
 /** Declared in `package.json` and installed from the lockfile. */
-const DECLARED = Object.keys(
-  (
-    JSON.parse(
-      readFileSync(join(packageRoot, "package.json"), "utf-8"),
-    ) as { dependencies?: Record<string, string> }
-  ).dependencies ?? {},
-);
+const DECLARED = Object.keys(MANIFEST.dependencies ?? {});
 
 /** What a consumer must install, pinned as a literal set — the number IS the
  *  claim the README makes, and an unpinned "smaller than odu" would rot
@@ -122,6 +123,29 @@ function specifiersIn(source: string, fileName: string): string[] {
   return out;
 }
 
+/** The modules a file imports for their EFFECT — a bare `import "x"`, no
+ *  bindings. The specifier alone cannot say this, and it is the exact question
+ *  `sideEffects` in the manifest answers for a bundler. */
+function sideEffectImportsIn(source: string, fileName: string): string[] {
+  const parsed = ts.createSourceFile(
+    fileName,
+    source,
+    ts.ScriptTarget.Latest,
+    /* setParentNodes */ false,
+    ts.ScriptKind.TS,
+  );
+  return parsed.statements
+    .filter(
+      (node): node is ts.ImportDeclaration =>
+        ts.isImportDeclaration(node) && node.importClause === undefined,
+    )
+    .flatMap((node) =>
+      ts.isStringLiteralLike(node.moduleSpecifier)
+        ? [node.moduleSpecifier.text]
+        : [],
+    );
+}
+
 /** `@scope/name/sub` → `@scope/name`; `name/sub` → `name`. */
 function packageOf(specifier: string): string {
   const parts = specifier.split("/");
@@ -133,18 +157,28 @@ function packageOf(specifier: string): string {
 interface Scanned {
   readonly rel: string;
   readonly specifiers: readonly string[];
+  /** Bare `import "…"` targets, as package-relative paths where they are
+   *  local — the form `sideEffects` is written in. */
+  readonly sideEffectImports: readonly string[];
 }
 
 const sources: Scanned[] = tsFilesUnder(join(packageRoot, "src"))
   .map((full) => relative(packageRoot, full).split(sep).join("/"))
   .sort()
-  .map((rel) => ({
-    rel,
-    specifiers: specifiersIn(
-      readFileSync(join(packageRoot, rel), "utf-8"),
+  .map((rel) => {
+    const source = readFileSync(join(packageRoot, rel), "utf-8");
+    return {
       rel,
-    ),
-  }));
+      specifiers: specifiersIn(source, rel),
+      sideEffectImports: sideEffectImportsIn(source, rel).map((spec) => {
+        if (!spec.startsWith(".")) return spec;
+        // Local imports are extensionless by repo convention; `sideEffects` names
+        // files. Resolve to the one the manifest would have to list.
+        const path = join(rel, "..", spec).split(sep).join("/");
+        return `./${path.endsWith(".ts") ? path : `${path}.ts`}`;
+      }),
+    };
+  });
 
 describe("@odu/run-client's import closure", () => {
   it("has sources to police", () => {
@@ -213,6 +247,34 @@ describe("@odu/run-client's import closure", () => {
         "costs every consumer's install) or hydrate it — a new @kolu/* is a " +
         "new directory every downstream must copy, so widening HYDRATED is a " +
         "decision, not a formality.",
+    ).toEqual([]);
+  });
+
+  it("never lets a bundler drop a module that exists for its effect", () => {
+    // `asyncConnectError` patches `Socket.prototype.connect`; `dial` imports it
+    // for that alone. A blanket `sideEffects: false` invites a bundler to drop
+    // both, and then the ENOENT dial this package answers `null` for THROWS
+    // instead — the one failure it promises never to surprise a face with.
+    // Read off the parse rather than remembered: a second shim is covered the
+    // day it is written.
+    const listed = new Set(
+      MANIFEST.sideEffects === false ? [] : (MANIFEST.sideEffects ?? []),
+    );
+    const impure = new Set<string>();
+    for (const { rel, sideEffectImports } of sources) {
+      if (rel.endsWith(".test.ts")) continue;
+      for (const target of sideEffectImports) {
+        if (!target.startsWith("./")) continue;
+        impure.add(target).add(`./${rel}`);
+      }
+    }
+    const unlisted = [...impure].filter((m) => !listed.has(m)).sort();
+    expect(
+      unlisted,
+      `${unlisted.join(", ")} is imported for its side effect but is not in ` +
+        "the manifest's `sideEffects`. A bundler that trusts the manifest will " +
+        "drop it, and the effect goes with it. List the module AND the file " +
+        "that imports it, or stop relying on the effect.",
     ).toEqual([]);
   });
 
