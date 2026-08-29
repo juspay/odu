@@ -1778,6 +1778,13 @@ async function orchestrate(
       onLogFrame: (laneId, frame) => {
         const id = fanId(laneId, platform);
         if (frame.kind === "append") {
+          // Sealed logs stay sealed. A transport death errors every still-open
+          // nodeLog subscription — including nodes that already published `end`
+          // (they stay subscribed so a rerun snapshot can land). Appending into
+          // those throws by design (`logTail`) and that throw, uncaught in the
+          // lane tap, killed the coordinator: finished-node stacks while e2e
+          // was the only node still running. Same skip as `stampTruncated`.
+          if (logs.isEnded(id)) return;
           appendLocal(id, frame.text);
         } else if (frame.kind === "end") {
           // Pass the log's terminal on to the fan-in's own readers — except for

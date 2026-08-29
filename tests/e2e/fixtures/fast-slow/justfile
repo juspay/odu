@@ -1,0 +1,14 @@
+# One node that finishes, one that stays running — the shape of a dropped
+# ssh keep-alive mid-slow-lane: finished logs are already sealed, the live
+# node's subscription is not. Killing the runner (the stdio/ssh pipe) must
+# error the live node without throwing append-after-end on the finished one.
+
+[parallel]
+[metadata("ci")]
+default: fast slow
+
+fast:
+    echo "fast done"
+
+slow:
+    sleep 120

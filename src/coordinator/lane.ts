@@ -138,6 +138,44 @@ export interface Lane {
   close(): void;
 }
 
+/**
+ * The attachLogs tap's feed-death path. Exported so a test can pin the two
+ * things this path must guarantee:
+ *
+ *   1. The lane dies FIRST (`die`), so every other tap's catch sees `dead`
+ *      / abort and stays quiet — stream errors vs `session` disconnected
+ *      used to race, and the log taps often won.
+ *   2. NOTHING this function does may escape. `onLogFrame` throws on a
+ *      sealed log (`logTail: append after end`), and that throw — inside
+ *      this catch, in a `void` async IIFE — used to kill the coordinator
+ *      while the still-running node was already marked `errored`.
+ *
+ * `die()` first is race hardening, not a substitute for the sealed-log skip
+ * in `onLogFrame` or for this swallow: `die` → `onDead` seals the *running*
+ * node's log, then the append below would throw into that newly sealed log;
+ * and `die` itself can throw if `onDead` does. The swallow is the last line.
+ */
+export function reportLogStreamDeath(opts: {
+  silenced: boolean;
+  die: (error: string) => void;
+  onLogFrame: (nodeId: string, frame: NodeLogFrame) => void;
+  nodeId: string;
+  error: unknown;
+}): void {
+  if (opts.silenced) return;
+  try {
+    opts.die(
+      `log stream died (${opts.nodeId}): ${(opts.error as Error).message}`,
+    );
+    opts.onLogFrame(opts.nodeId, {
+      kind: "append",
+      text: `\n[odu] log stream error: ${(opts.error as Error).message}\n`,
+    });
+  } catch {
+    // Never escape the tap. See the header.
+  }
+}
+
 export function startLane(opts: LaneOptions): Lane {
   let closed = false;
   let dead = false;
@@ -304,12 +342,13 @@ export function startLane(opts: LaneOptions): Lane {
         } catch (err) {
           // A torn-down subscription reports NOTHING: an interruption is not a
           // failure, so `subscribe` ends the loop cleanly rather than throwing.
-          // Anything that lands here is the feed genuinely dying, and the lane
-          // says so in the node's own log rather than swallowing it.
-          if (lifetime.signal.aborted || closed || dead) return;
-          opts.onLogFrame(id, {
-            kind: "append",
-            text: `\n[odu] log stream error: ${(err as Error).message}\n`,
+          // Anything that lands here is the feed genuinely dying.
+          reportLogStreamDeath({
+            silenced: lifetime.signal.aborted || closed || dead,
+            die,
+            onLogFrame: opts.onLogFrame,
+            nodeId: id,
+            error: err,
           });
         }
       })();
