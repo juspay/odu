@@ -12,7 +12,6 @@
  * MCP `wait_for_settle` verdict shape as one JSON line.
  */
 
-import { firstFrame, runUnary, subscribe } from "../common/effectEdge";
 import {
   type NodeState,
   type OduClient,
@@ -24,12 +23,13 @@ import {
   runPhase,
   STATUS_META,
 } from "@odu/run-client/surface";
-import { formatGoDuration } from "../common/duration";
 import { isSetupNode, onPlatform, splitFanId } from "@odu/run-client/nodeId";
+import { dialRun, SOCKET_PATH } from "@odu/run-client/dial";
+import { firstFrame, runUnary, subscribe } from "../common/effectEdge";
+import { formatGoDuration } from "../common/duration";
 import { parseAtPlatform, transitiveDependents } from "../common/nodeId";
 import { cancelNodeOrPlatform, cancelRun } from "../coordinator/cancel";
 import { createDisplay, progressEvent } from "../coordinator/display";
-import { dialRun, SOCKET_PATH } from "@odu/run-client/dial";
 import { dialRunOrExit, noRunInProgressMessage } from "../coordinator/socket";
 import { postingWarning } from "../coordinator/statuses";
 import { NoLiveRunError, waitForSettle } from "../coordinator/waitForSettle";

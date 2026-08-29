@@ -33,8 +33,8 @@ import { buildSurfaceFace } from "@kolu/surface/client";
 import { defineSurface } from "@kolu/surface/define";
 import type { SurfaceDispatch } from "@kolu/surface/link";
 import type { SurfaceClientOf } from "@kolu/surface/project";
-import { nodePrimitives, nodeProcedures } from "@odu/run-client/surface";
 import { Schema } from "effect";
+import { nodePrimitives, nodeProcedures } from "@odu/run-client/surface";
 import { TaskSpecSchema } from "./spec";
 
 /** `run.configure` input: either `workspace` (a checkout the runner can use

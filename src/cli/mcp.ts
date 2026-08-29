@@ -30,6 +30,8 @@ import {
   serveSurfaceAsMcp,
   type SurfaceClientCallable,
 } from "@kolu/surface-mcp";
+import { oduSurface } from "@odu/run-client/surface";
+import { dialRun, SOCKET_PATH } from "@odu/run-client/dial";
 import { buildAgentProjection, redialingAClient } from "../mcp/agentSurface";
 import { cancelTool } from "../mcp/cancelTool";
 import { leaseTool, releaseTool } from "../mcp/leaseTool";
@@ -37,9 +39,6 @@ import { killRuns, runTool } from "../mcp/runTool";
 import { runsTool } from "../mcp/runsTool";
 import { makeWaitTool } from "../mcp/waitTool";
 import { gitRunContext } from "../common/git";
-import { oduSurface } from "@odu/run-client/surface";
-import { dialRun, SOCKET_PATH } from "@odu/run-client/dial";
-
 
 function version(): string {
   try {

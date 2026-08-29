@@ -21,10 +21,10 @@ import {
   sshConnector,
 } from "@kolu/surface-remote";
 import { SETUP_NAMEPATH } from "@odu/run-client/nodeId";
+import { type NodeLogFrame, type PipelineState } from "@odu/run-client/surface";
 import { absorbSealedLogAppend } from "../common/logTail";
 import type { TaskSpec } from "../common/spec";
 import { runUnary, subscribe } from "../common/effectEdge";
-import { type NodeLogFrame, type PipelineState } from "@odu/run-client/surface";
 import { type LaneClient, laneSurface } from "../common/laneSurface";
 import type { ResolveRunnerDrv } from "./runnerFlake";
 import { withTimeout } from "../common/withTimeout";

@@ -5,7 +5,6 @@
  * status and CI-sized node ids.
  */
 
-import type { AgentNodes } from "../mcp/agentSurface";
 import {
   claimingLanes,
   leasedLanes,
@@ -17,6 +16,7 @@ import {
   type StatusHue,
 } from "@odu/run-client/surface";
 import { fanId, splitFanId } from "@odu/run-client/nodeId";
+import type { AgentNodes } from "../mcp/agentSurface";
 import { dim, green, magenta, red, stripAnsi, yellow } from "./ansi";
 
 /** The non-terminal statuses: a node in one of these is still in flight, so the

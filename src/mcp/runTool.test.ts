@@ -11,7 +11,6 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, jest } from "bun:test";
 import type { CancelResult } from "../coordinator/cancel";
 import { tryAcquireRunLock } from "../coordinator/checkoutLock";
-import { pendingNode, type PipelineState } from "@odu/run-client/surface";
 import { serveTestSurface, type TestSurface } from "./serveForTest";
 import {
   appendPreOpen,
@@ -20,6 +19,7 @@ import {
   startRun,
 } from "./runTool";
 import { existsSync, readFileSync } from "node:fs";
+import { pendingNode, type PipelineState } from "@odu/run-client/surface";
 
 function liveState(): PipelineState {
   return {

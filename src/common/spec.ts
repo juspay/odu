@@ -8,8 +8,8 @@
  * mirroring justci's `_ci-setup@<platform>` bookkeeping context.
  */
 
-import { NodeIdSchema } from "@odu/run-client/nodeId";
 import { Effect, Schema } from "effect";
+import { NodeIdSchema } from "@odu/run-client/nodeId";
 
 /** The zod→Effect mapping is LAW here (kolu PLAN #17), and both idioms in this
  *  file are wire-bearing — `TaskSpecSchema` is embedded in `ConfigureInput`,

@@ -53,8 +53,6 @@ import { deriveStream, projectSurface } from "@kolu/surface/project";
 import type { SurfaceHandlers } from "@kolu/surface/server";
 import { Effect, Schema, Stream } from "effect";
 import type { Rpc, RpcGroup } from "effect/unstable/rpc";
-import { subscribe } from "../common/effectEdge";
-import { rowsOf } from "../cli/render";
 import { NodeIdSchema, splitFanId } from "@odu/run-client/nodeId";
 import {
   clampLog,
@@ -67,6 +65,8 @@ import {
   type PipelineState,
   postingOf,
 } from "@odu/run-client/surface";
+import { subscribe } from "../common/effectEdge";
+import { rowsOf } from "../cli/render";
 import { logPathFor } from "../coordinator/statuses";
 
 /**

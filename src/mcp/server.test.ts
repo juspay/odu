@@ -26,9 +26,6 @@ import {
 } from "@kolu/surface-mcp";
 import { Effect, Stream } from "effect";
 import { afterEach, describe, expect, it } from "bun:test";
-import { gitRunContext } from "../common/git";
-import type { RunOutcome, RunRecord } from "../common/runRecord";
-import { writeRunRecord } from "../coordinator/ledger";
 import { dialRun } from "@odu/run-client/dial";
 import {
   oduClientOver,
@@ -36,6 +33,9 @@ import {
   pendingNode,
   type PipelineState,
 } from "@odu/run-client/surface";
+import { gitRunContext } from "../common/git";
+import type { RunOutcome, RunRecord } from "../common/runRecord";
+import { writeRunRecord } from "../coordinator/ledger";
 import {
   type AgentNodes,
   type AgentNodesReader,
@@ -52,7 +52,6 @@ import {
   waitForSettle,
 } from "../coordinator/waitForSettle";
 import { makeWaitTool } from "./waitTool";
-
 
 type Row = [id: string, status: PipelineState["nodes"][string]["status"]];
 

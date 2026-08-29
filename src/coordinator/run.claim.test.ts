@@ -31,13 +31,13 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
+import { dialRun } from "@odu/run-client/dial";
 import { runUnary, subscribe } from "../common/effectEdge";
 import { waitFor } from "../common/scaffoldForTest";
 import { agentReaderFromA } from "../mcp/agentSurface";
 import { waitForSettle } from "./waitForSettle";
 import type { ClaimOutcome } from "./runEnv";
 import { runCommand } from "./run";
-import { dialRun } from "@odu/run-client/dial";
 
 const hasJust =
   spawnSync("just", ["--version"], { encoding: "utf-8" }).status === 0;

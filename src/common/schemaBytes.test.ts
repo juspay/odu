@@ -28,12 +28,12 @@
 
 import { describe, expect, it } from "bun:test";
 import { Result, Schema } from "effect";
-import { RunRecordSchema, UnpostedEntrySchema } from "./runRecord";
-import { TaskSpecSchema } from "./spec";
 import {
   NodeLogMessageSchema,
   PipelineStateSchema,
 } from "@odu/run-client/surface";
+import { RunRecordSchema, UnpostedEntrySchema } from "./runRecord";
+import { TaskSpecSchema } from "./spec";
 import {
   ConfigureInputSchema,
   LeaseClaimOutputSchema,

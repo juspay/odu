@@ -25,6 +25,7 @@ import { dirname, join } from "node:path";
 import type { Logger } from "@kolu/log";
 import type { SurfaceHandlers } from "@kolu/surface/server";
 import { serveOverUnixSocket } from "@kolu/surface/unix-socket";
+import type { Rpc, RpcGroup } from "effect/unstable/rpc";
 import "@odu/run-client/asyncConnectError";
 import {
   type DialedRun,
@@ -32,7 +33,6 @@ import {
   SOCKET_PATH,
   runSocketPath,
 } from "@odu/run-client/dial";
-import type { Rpc, RpcGroup } from "effect/unstable/rpc";
 import { RUN_LOCK_PATH } from "./checkoutLock";
 
 /** The two per-checkout coordinator paths, derived TOGETHER from the checkout

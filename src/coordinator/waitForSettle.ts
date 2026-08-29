@@ -9,6 +9,8 @@
  */
 
 import { isDeadTransportError } from "@kolu/surface/errors";
+import type { OwedStatus } from "@odu/run-client/surface";
+import { SOCKET_PATH } from "@odu/run-client/dial";
 import { agentSummary, NON_TERMINAL_STATUSES } from "../cli/render";
 import { subscribe } from "../common/effectEdge";
 import { gitRunContext } from "../common/git";
@@ -17,9 +19,7 @@ import {
   liftUnposted,
   type RunRecord,
 } from "../common/runRecord";
-import type { OwedStatus } from "@odu/run-client/surface";
 import { readRunRecord } from "../coordinator/ledger";
-import { SOCKET_PATH } from "@odu/run-client/dial";
 import { noRunInProgressMessage } from "../coordinator/socket";
 import {
   type AgentNodes,

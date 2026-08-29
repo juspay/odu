@@ -8,8 +8,8 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import { lanesHeader, provisioningHeader } from "./scaffoldForTest";
 import { EMPTY_HEADER, runPhase } from "@odu/run-client/surface";
+import { lanesHeader, provisioningHeader } from "./scaffoldForTest";
 
 describe("runPhase", () => {
   it("is provisioning while any lane is still claiming", () => {

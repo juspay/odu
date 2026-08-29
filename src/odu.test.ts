@@ -13,6 +13,11 @@ import { createLoopbackPair, greetLoopback } from "@kolu/surface/loopback";
 import { serveOverStdio } from "@kolu/surface/peer-server";
 import { afterEach, describe, expect, it } from "bun:test";
 import {
+  type NodeLogMessage,
+  type NodesSnapshot,
+  type PipelineState,
+} from "@odu/run-client/surface";
+import {
   countsLine,
   exitCode,
   OUTCOME_MARK,
@@ -21,11 +26,6 @@ import {
   verdictLine,
 } from "./cli/render";
 import type { TaskSpec } from "./common/spec";
-import {
-  type NodeLogMessage,
-  type NodesSnapshot,
-  type PipelineState,
-} from "@odu/run-client/surface";
 import {
   type LaneClient,
   laneClientOver,

@@ -1,17 +1,17 @@
 import { describe, expect, it } from "bun:test";
 import { Result, Schema } from "effect";
 import {
-  buildRunRecord,
-  formatRunRef,
-  RUN_RECORD_VERSION,
-  RunRecordSchema,
-} from "./runRecord";
-import {
   leasedLanes,
   type NodeState,
   pendingNode,
   type PipelineState,
 } from "@odu/run-client/surface";
+import {
+  buildRunRecord,
+  formatRunRef,
+  RUN_RECORD_VERSION,
+  RunRecordSchema,
+} from "./runRecord";
 
 const decodesAsRecord = (value: unknown): boolean =>
   Result.isSuccess(Schema.decodeUnknownResult(RunRecordSchema)(value));

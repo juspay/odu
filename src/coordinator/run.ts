@@ -37,6 +37,25 @@ import { dirname, join } from "node:path";
 import { implementSurface, inMemoryStore } from "@kolu/surface/server";
 import { Effect } from "effect";
 import { isLocalHost } from "@kolu/surface-remote";
+import {
+  fanId,
+  isSetupNode,
+  onPlatform,
+  SETUP_NAMEPATH,
+  splitFanId,
+} from "@odu/run-client/nodeId";
+import {
+  claimingLanes,
+  EMPTY_POSTING,
+  leasedLanes,
+  type NodeState,
+  oduSurface,
+  pendingNode,
+  type PipelineState,
+  type RunHeader,
+  type RunLane,
+} from "@odu/run-client/surface";
+import { dialRun } from "@odu/run-client/dial";
 import { bold, dim, link } from "../cli/ansi";
 import {
   countsLine,
@@ -52,25 +71,7 @@ import { formatGoDuration } from "../common/duration";
 import { gitTopLevel } from "../common/git";
 import { appendIfOpen, createNodeLogSink } from "./nodeLogSink";
 import { createVerdictGate } from "./verdictGate";
-import {
-  fanId,
-  isSetupNode,
-  onPlatform,
-  SETUP_NAMEPATH,
-  splitFanId,
-} from "@odu/run-client/nodeId";
 import type { TaskSpec } from "../common/spec";
-import {
-  claimingLanes,
-  EMPTY_POSTING,
-  leasedLanes,
-  type NodeState,
-  oduSurface,
-  pendingNode,
-  type PipelineState,
-  type RunHeader,
-  type RunLane,
-} from "@odu/run-client/surface";
 import { commitLabel, createDisplay, progressEvent } from "./display";
 import { laneTasks, loadJustPipeline, parseSelector } from "../just/ingest";
 import { fanoutPools, loadHosts, shortHost } from "./hosts";
@@ -87,7 +88,6 @@ import {
   waitForRunLockFree,
   type RunLockHandle,
 } from "./checkoutLock";
-import { dialRun } from "@odu/run-client/dial";
 import { releaseReservation, reserveNextSeq, writeRunRecord } from "./ledger";
 import {
   buildRunRecord,

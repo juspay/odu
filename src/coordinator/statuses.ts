@@ -25,7 +25,6 @@
  */
 
 import { spawn } from "node:child_process";
-import { formatGoDuration } from "../common/duration";
 import { splitFanId } from "@odu/run-client/nodeId";
 import {
   type GithubState,
@@ -35,6 +34,7 @@ import {
   EMPTY_POSTING,
   STATUS_META,
 } from "@odu/run-client/surface";
+import { formatGoDuration } from "../common/duration";
 import { projectUnposted, type UnpostedEntry } from "../common/runRecord";
 
 export type { GithubState, OwedStatus, PostingHealth, UnpostedEntry };

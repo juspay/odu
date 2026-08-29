@@ -8,8 +8,8 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { capturingStderr, capturingStdout } from "../common/scaffoldForTest";
 import { pendingNode, type PipelineState } from "@odu/run-client/surface";
+import { capturingStderr, capturingStdout } from "../common/scaffoldForTest";
 import { dialRunOrExit } from "../coordinator/socket";
 import { serveTestSurface, type TestSurface } from "../mcp/serveForTest";
 import {

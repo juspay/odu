@@ -25,6 +25,7 @@
  * ledger.
  */
 
+import { Schema } from "effect";
 import {
   type NodeStatus,
   NodeStatusSchema,
@@ -32,7 +33,6 @@ import {
   type PipelineState,
   STATUS_META,
 } from "@odu/run-client/surface";
-import { Schema } from "effect";
 import { shortSha } from "./git";
 
 /** Final unconfirmed posting debt, stamped into the durable record: a live

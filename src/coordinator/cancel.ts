@@ -15,9 +15,9 @@
  * socket and leaves the coordinator up so the rest of the run can settle.
  */
 
+import { dialRun, SOCKET_PATH } from "@odu/run-client/dial";
 import { runUnary } from "../common/effectEdge";
 import { parseAtPlatform } from "../common/nodeId";
-import { dialRun, SOCKET_PATH } from "@odu/run-client/dial";
 
 export interface CancelResult {
   /** A live run was found and asked to stop. `false` means there was nothing

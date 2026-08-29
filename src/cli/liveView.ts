@@ -41,6 +41,7 @@ import {
   type TextChunk,
   TextRenderable,
 } from "@opentui/core";
+import type { Stream } from "effect";
 import {
   type NodeLogFrame,
   type NodeState,
@@ -49,11 +50,10 @@ import {
   type RunHeader,
   STATUS_META,
 } from "@odu/run-client/surface";
-import type { Stream } from "effect";
+import { splitFanId } from "@odu/run-client/nodeId";
 import { subscribe } from "../common/effectEdge";
 import { postingWarning } from "../coordinator/statuses";
 import { formatGoDuration } from "../common/duration";
-import { splitFanId } from "@odu/run-client/nodeId";
 import {
   commitLabel,
   cellAt,

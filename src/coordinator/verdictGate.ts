@@ -26,8 +26,8 @@
  * test (`verdictGate.test.ts`).
  */
 
-import { NON_TERMINAL_STATUSES } from "../cli/render";
 import type { NodeState, NodeStatus } from "@odu/run-client/surface";
+import { NON_TERMINAL_STATUSES } from "../cli/render";
 
 export interface VerdictGateDeps {
   /** Has this node's log published its terminal — is the run done expecting

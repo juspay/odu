@@ -22,13 +22,13 @@ import { dirname, join } from "node:path";
 import { firstFrame } from "../common/effectEdge";
 import { Effect, Schema } from "effect";
 import type { BespokeTool } from "@kolu/surface-mcp";
+import { dialRun, SOCKET_PATH } from "@odu/run-client/dial";
 import { type CancelResult, cancelRun } from "../coordinator/cancel";
 import {
   liveRunLockPid,
   signalRunLockHolder,
   waitForRunLockFree,
 } from "../coordinator/checkoutLock";
-import { dialRun, SOCKET_PATH } from "@odu/run-client/dial";
 
 export const runInput = Schema.Struct({
   selectors: Schema.optionalKey(Schema.Array(Schema.String)),

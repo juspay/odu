@@ -28,8 +28,6 @@ import {
 } from "@kolu/surface/server";
 import { Effect } from "effect";
 import type { Rpc, RpcGroup } from "effect/unstable/rpc";
-import { createLogTail } from "../common/logTail";
-import { validatePipeline } from "../common/spec";
 import {
   EMPTY_STATE,
   type NodeState,
@@ -37,6 +35,9 @@ import {
   pendingNode,
   type PipelineState,
 } from "@odu/run-client/surface";
+import { SETUP_NAMEPATH } from "@odu/run-client/nodeId";
+import { createLogTail } from "../common/logTail";
+import { validatePipeline } from "../common/spec";
 import {
   type ConfigureInput,
   type ConfigureOutput,
@@ -48,7 +49,6 @@ import {
   type LocalHold,
   probeLocal,
 } from "./leaseHold";
-import { SETUP_NAMEPATH } from "@odu/run-client/nodeId";
 import { transitiveDependents } from "../common/nodeId";
 import { createGroupReaper } from "./reap";
 import { prepareWorkspace } from "./workspace";
