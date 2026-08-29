@@ -108,3 +108,17 @@ export function createNodeLogSink(repoRoot: string, sha7: string): NodeLogSink {
     streamSource: tail.streamSource,
   };
 }
+
+/** The coordinator's one sealed-log skip. `append` THROWS on an ended log by
+ *  design; every coordinator write that might race a seal — a tap frame, a
+ *  lane-death line, a setup narration, a truncation stamp — goes through here
+ *  instead, so "status is running" and "log is open" disagreeing cannot kill
+ *  the process. The throw stays on the sink for anyone who bypasses this. */
+export function appendIfOpen(
+  sink: Pick<NodeLogSink, "append" | "isEnded">,
+  id: string,
+  text: string,
+): void {
+  if (sink.isEnded(id)) return;
+  sink.append(id, text);
+}

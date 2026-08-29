@@ -170,3 +170,17 @@ export function createLogTail(): CreateLogTailResult {
 
   return { append, reset, end, isEnded, isNoopReset, streamSource };
 }
+
+/** The throw `append` raises on a sealed log — the one class a fire-and-forget
+ *  log tap may absorb. Anything else is a handler bug and must stay loud. */
+export function isSealedLogAppendError(err: unknown): err is Error {
+  return err instanceof Error && err.message.includes("after its log ended");
+}
+
+/** Re-throw unless this is a sealed-log append. The absorbed case is written
+ *  to stderr: never picking the process exit code is not the same as leaving
+ *  no trace. */
+export function absorbSealedLogAppend(err: unknown): void {
+  if (!isSealedLogAppendError(err)) throw err;
+  process.stderr.write(`odu: ${err.message}\n`);
+}

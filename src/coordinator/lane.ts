@@ -21,6 +21,7 @@ import {
   sshConnector,
 } from "@kolu/surface-remote";
 import { SETUP_NAMEPATH } from "../common/nodeId";
+import { absorbSealedLogAppend } from "../common/logTail";
 import type { TaskSpec } from "../common/spec";
 import { runUnary, subscribe } from "../common/effectEdge";
 import {
@@ -139,40 +140,60 @@ export interface Lane {
 }
 
 /**
- * The attachLogs tap's feed-death path. Exported so a test can pin the two
- * things this path must guarantee:
+ * Announce a lane death so teardown cannot be skipped if `announce` throws:
+ * `dead` is already latched by the caller; this is the try/finally that
+ * keeps `session.destroy` / abort / `onDead` running. `onDead`'s own
+ * failure does not eat the teardown — it propagates after.
+ */
+export function runLaneDeath(
+  announce: () => void,
+  teardown: () => void,
+  onDead: (error: string) => void,
+  error: string,
+): void {
+  try {
+    announce();
+  } finally {
+    teardown();
+    onDead(error);
+  }
+}
+
+/**
+ * The attachLogs tap's feed-death path. Exported so a test can pin:
  *
- *   1. The lane dies FIRST (`die`), so every other tap's catch sees `dead`
- *      / abort and stays quiet — stream errors vs `session` disconnected
- *      used to race, and the log taps often won.
- *   2. NOTHING this function does may escape. `onLogFrame` throws on a
- *      sealed log (`logTail: append after end`), and that throw — inside
- *      this catch, in a `void` async IIFE — used to kill the coordinator
- *      while the still-running node was already marked `errored`.
+ *   - `die` only when the transport is already down (an isolated stream
+ *     fault stays a per-node note; a handler bug must not error the lane).
+ *   - `die` runs BEFORE the note, outside the absorb, so `onDead` is not
+ *     wrapped in a swallow that could hang `allSettled`.
+ *   - the only throw this absorbs is the sealed-log class. Anything else
+ *     rethrows — a genuine handler bug still dies loudly.
  *
- * `die()` first is race hardening, not a substitute for the sealed-log skip
- * in `onLogFrame` or for this swallow: `die` → `onDead` seals the *running*
- * node's log, then the append below would throw into that newly sealed log;
- * and `die` itself can throw if `onDead` does. The swallow is the last line.
+ * The sink's `isEnded` is the skip, not the lane's `logComplete`: those two
+ * bookkeepings disagree at the moments that matter (an `end` frame seals
+ * the log before the node's status leaves `running`). Asking the party that
+ * sealed the log is the same rule as `stampTruncated`.
  */
 export function reportLogStreamDeath(opts: {
   silenced: boolean;
+  transportDown: boolean;
   die: (error: string) => void;
   onLogFrame: (nodeId: string, frame: NodeLogFrame) => void;
   nodeId: string;
   error: unknown;
 }): void {
   if (opts.silenced) return;
+  const message = (opts.error as Error).message;
+  if (opts.transportDown) {
+    opts.die(`log stream died (${opts.nodeId}): ${message}`);
+  }
   try {
-    opts.die(
-      `log stream died (${opts.nodeId}): ${(opts.error as Error).message}`,
-    );
     opts.onLogFrame(opts.nodeId, {
       kind: "append",
-      text: `\n[odu] log stream error: ${(opts.error as Error).message}\n`,
+      text: `\n[odu] log stream error: ${message}\n`,
     });
-  } catch {
-    // Never escape the tap. See the header.
+  } catch (err) {
+    absorbSealedLogAppend(err);
   }
 }
 
@@ -223,9 +244,13 @@ export function startLane(opts: LaneOptions): Lane {
   const die = (error: string): void => {
     if (dead || closed) return;
     dead = true;
-    opts.onSetupLine(`[odu] lane ${opts.platform} died: ${error}`);
-    teardown();
-    opts.onDead(error);
+    runLaneDeath(
+      () =>
+        opts.onSetupLine(`[odu] lane ${opts.platform} died: ${error}`),
+      teardown,
+      opts.onDead,
+      error,
+    );
   };
 
   const teardown = (): void => {
@@ -323,33 +348,49 @@ export function startLane(opts: LaneOptions): Lane {
   const attachLogs = (client: LaneClient): void => {
     for (const id of loggedIds) {
       void (async () => {
-        try {
-          for await (const frame of subscribe(
-            client.surface.nodeLog.get({ id }),
-            lifetime.signal,
-          )) {
-            if (closed || dead) return;
-            // Completion is not a latch: a rerun re-opens the node's log, and
-            // the snapshot that starts its new output withdraws it again.
-            if (frame.kind === "end") logComplete.add(id);
-            else if (frame.kind === "snapshot") logComplete.delete(id);
-            // Every frame is forwarded, `end` included — the fan-in serves the
-            // same three-frame protocol to attach clients, so completion is a
-            // fact readers downstream get too, not one this lane keeps.
-            opts.onLogFrame(id, frame);
-            wakeDrains();
+        // Pull and handler are separate tries: a sealed-log throw from
+        // `onLogFrame` must not be recast as feed death, and a handler bug
+        // must not be recast as lane death. `for await` would put both in
+        // one catch.
+        const frames = subscribe(
+          client.surface.nodeLog.get({ id }),
+          lifetime.signal,
+        );
+        for (;;) {
+          let next: IteratorResult<NodeLogFrame>;
+          try {
+            next = await frames.next();
+          } catch (err) {
+            // A torn-down subscription reports NOTHING: an interruption is
+            // not a failure, so `subscribe` ends the loop cleanly rather
+            // than throwing. Anything that lands here is the feed dying.
+            const phase = session.currentState().phase;
+            reportLogStreamDeath({
+              silenced: lifetime.signal.aborted || closed || dead,
+              transportDown: phase === "disconnected" || phase === "failed",
+              die,
+              onLogFrame: opts.onLogFrame,
+              nodeId: id,
+              error: err,
+            });
+            return;
           }
-        } catch (err) {
-          // A torn-down subscription reports NOTHING: an interruption is not a
-          // failure, so `subscribe` ends the loop cleanly rather than throwing.
-          // Anything that lands here is the feed genuinely dying.
-          reportLogStreamDeath({
-            silenced: lifetime.signal.aborted || closed || dead,
-            die,
-            onLogFrame: opts.onLogFrame,
-            nodeId: id,
-            error: err,
-          });
+          if (next.done) return;
+          const frame = next.value;
+          if (closed || dead) return;
+          // Completion is not a latch: a rerun re-opens the node's log, and
+          // the snapshot that starts its new output withdraws it again.
+          if (frame.kind === "end") logComplete.add(id);
+          else if (frame.kind === "snapshot") logComplete.delete(id);
+          // Every frame is forwarded, `end` included — the fan-in serves the
+          // same three-frame protocol to attach clients, so completion is a
+          // fact readers downstream get too, not one this lane keeps.
+          try {
+            opts.onLogFrame(id, frame);
+          } catch (err) {
+            absorbSealedLogAppend(err);
+          }
+          wakeDrains();
         }
       })();
     }

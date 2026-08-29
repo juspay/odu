@@ -1,9 +1,9 @@
 /**
- * Black-box: kill the localhost runner (the stdio pipe) after one node has
- * finished and another is still running. The coordinator must error the live
- * node and settle — not die on `logTail: append to <finished> after its log
- * ended`. That throw, uncaught, is how a dropped ssh keep-alive took a whole
- * live run down.
+ * Black-box: kill the localhost runner (the stdio pipe) after MANY nodes have
+ * finished and one is still running. The incident was eight sealed-log throws
+ * in one burst; N=1 survived on master (throw printed, record still written).
+ * The coordinator must error the live node and settle — not die on
+ * `logTail: append to <finished> after its log ended`.
  */
 
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
@@ -123,7 +123,7 @@ function jsonEvents(stdout: string): { recipe: string; status: string }[] {
 
 describe("odu lane transport death (black-box)", () => {
   it(
-    "killing the runner after a finished node errors the live one — no sealed-log crash",
+    "killing the runner after eight finished nodes errors the live one — no sealed-log crash",
     async () => {
       const dir = makeFixture("fast-slow");
       created.push(dir);
@@ -152,12 +152,18 @@ describe("odu lane transport death (black-box)", () => {
         child.on("error", () => resolve(-1));
       });
 
+      const finished = ["a", "b", "c", "d", "e", "f", "g", "h"];
       await waitUntil(
-        () =>
-          jsonEvents(stdout).some((e) => e.recipe === "fast" && e.status === "success") &&
-          jsonEvents(stdout).some((e) => e.recipe === "slow" && e.status === "running"),
+        () => {
+          const ev = jsonEvents(stdout);
+          return (
+            finished.every((r) =>
+              ev.some((e) => e.recipe === r && e.status === "success"),
+            ) && ev.some((e) => e.recipe === "slow" && e.status === "running")
+          );
+        },
         600_000,
-        "fast to succeed while slow is still running",
+        "eight recipes to succeed while slow is still running",
       );
 
       const runnerPid = findRunnerPid(oduPid);

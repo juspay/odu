@@ -1,14 +1,28 @@
-# One node that finishes, one that stays running — the shape of a dropped
-# ssh keep-alive mid-slow-lane: finished logs are already sealed, the live
-# node's subscription is not. Killing the runner (the stdio/ssh pipe) must
-# error the live node without throwing append-after-end on the finished one.
+# The incident's shape: many nodes already finished (their logs sealed, their
+# nodeLog taps still open for a rerun snapshot) and one still running when
+# the transport dies. N=1 survived on master — Bun printed the throw and
+# still wrote a run record. N≈8 in one burst is what produced the Bun
+# footer and the reserved sentinel.
 
 [parallel]
 [metadata("ci")]
-default: fast slow
+default: a b c d e f g h slow
 
-fast:
-    echo "fast done"
-
+a:
+    echo a
+b:
+    echo b
+c:
+    echo c
+d:
+    echo d
+e:
+    echo e
+f:
+    echo f
+g:
+    echo g
+h:
+    echo h
 slow:
     sleep 120
