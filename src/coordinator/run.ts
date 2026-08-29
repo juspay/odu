@@ -214,7 +214,11 @@ export async function ensureCheckoutFree(
 
   const existing = await dial(socketPath);
   if (existing !== null) {
-    existing.close();
+    // Awaited, not dropped: the link owns a scope holding the protocol fibers
+    // (`DialedRun.close` is async for that reason), and this probe runs on
+    // every `odu run` — the one path that dials only to find out whether
+    // anyone is home. `runTool.ts`'s identical probe already awaits it.
+    await existing.close();
     return refuseLive;
   }
   if (liveLockPid(lockPath) !== null) return refuseLive;
