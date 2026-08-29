@@ -40,12 +40,12 @@ import { NodeIdSchema } from "./nodeId";
  *      `null` and would put a `null` where a key used to be missing.
  *    - `optionalKey` REJECTS a present-but-`undefined` key on decode AND on
  *      encode. Every producer of `seq` / `posting` must omit the key rather
- *      than spell it `undefined` — see odu's `src/common/schemaBytes.test.ts`,
- *      which pins both directions.
+ *      than spell it `undefined`; odu's byte-parity suite pins both
+ *      directions.
  *
  *  The encoded bytes of `PipelineState` and `NodeLogMessage` are frozen: they
- *  cross the unix socket, the stdio wire to `odu-runner`, and (via odu's
- *  `runRecord`) the on-disk ledger. */
+ *  cross the unix socket, the stdio wire to the lane agent, and the on-disk
+ *  ledger odu projects them into. */
 export const NodeStatusSchema = Schema.Literals([
   "pending",
   "running",
@@ -76,25 +76,20 @@ export type ProgressStatus =
   | "cancelled";
 
 /** The semantic colour of a status, named by meaning rather than by medium.
- *  Each face maps it to its own encoding — odu's `render.ts` to an ansi wrapper
- *  for a stream, and to a hex cell attribute for the live view's renderer — so
- *  the assignment ("errored is violet") is made once and rendered many times. */
+ *  Each face maps it to its own encoding — an ansi wrapper for a stream, a hex
+ *  cell attribute for a grid renderer — so the assignment ("errored is violet")
+ *  is made once and rendered many times. */
 export type StatusHue = "grey" | "amber" | "green" | "red" | "violet";
 
 /** The single projection of a `NodeStatus` onto its external-facing
  *  representations: TUI glyph, GitHub state, `--progress json` status, whether
  *  the status counts as "red" in the verdict, and its semantic hue. Adding a
- *  `NodeStatus` is a single edit here that the compiler enforces across every
- *  consumer (render's glyph table, run's progress + verdict, statuses' state,
- *  and any downstream face). The byte-parity wording (justci's
- *  `Running:`/`Succeeded`/… descriptions) stays with odu's poster — it encodes
- *  a different volatility.
- *
- *  `github` and `progress` are here rather than behind odu's own wall on
- *  purpose: they cost a consumer nothing (this is a frozen table of literals),
- *  and the alternative is two tables that can disagree about what a status
- *  MEANS. What a status IS on the wire and what it means to a reader are the
- *  same fact, so they are stated once. */
+ *  `NodeStatus` is a single edit here that the compiler enforces at every
+ *  consumer, in this tree and downstream. What a status IS on the wire and what
+ *  it MEANS to a reader are the same fact, so no face keeps a second table.
+ *  What is not here is wording: justci's byte-parity commit-status
+ *  descriptions stay with the poster that emits them — a different
+ *  volatility. */
 export const STATUS_META: Record<
   NodeStatus,
   {
@@ -223,7 +218,7 @@ export const PipelineStateSchema = Schema.Struct({
    *  advisory). */
   dirty: Schema.Boolean,
   /** This run's ordinal among runs of the same `sha7` in this checkout (1-based
-   *  — the ledger's `seq`, `<sha7>#<seq>` = odu's `formatRunRef`). Completes the
+   *  — the ledger's `seq`, rendered `<sha7>#<seq>`). Completes the
    *  run's identity on the surface so a verdict says WHICH run it describes, not
    *  just which commit — the fix for the agent face's stale/no-run ambiguity
    *  (juspay/odu#49). Absent (not a fake `0`) when no ordinal was reserved: the
@@ -260,13 +255,10 @@ export const EMPTY_STATE: PipelineState = {
  *  fan-in socket).
  *
  *  FROZEN means no arm is ever removed or reshaped. ADDING one — as `end` was
- *  added — is a ONE-WAY compatibility step: the runner is pinned to the build
- *  that shipped its coordinator (odu's `runnerFlake.ts`, no override), but the
- *  fan-in socket is dialled by whatever client the operator has, and a reader
- *  older than the serving build fails to decode `{"kind":"end"}` off
- *  `.ci/odu.sock`. That asymmetry is the whole reason this half is a package: a
- *  client can be a different build from the coordinator it dials, so a fourth
- *  arm needs a reason, not just a use.
+ *  added — is a ONE-WAY compatibility step. A client of this socket is
+ *  routinely a DIFFERENT BUILD from the coordinator serving it, so a reader
+ *  older than the server fails to decode `{"kind":"end"}` and there is no
+ *  handshake to catch it. A fourth arm needs a reason, not just a use.
  *
  *  Three frames, because a node's log is FINITE and the stream must be able to
  *  say so. `snapshot` seeds a subscriber, `append` extends, and `end` is the
@@ -292,10 +284,9 @@ export type NodeLogMessage = typeof NodeLogMessageSchema.Type;
  *  elsewhere (the coordinator streams every `append` into
  *  `.ci/<sha>/<platform>/<node>.log` as it arrives).
  *
- *  Here rather than with the server because it is a promise the WIRE makes —
- *  a subscriber's first frame is a tail, not a beginning — and because a face
- *  that re-clamps a log it has re-assembled (odu's own agent projection does)
- *  must apply the same bound the producer did, not a second one beside it. */
+ *  It is a promise the WIRE makes — a subscriber's first frame is a tail, not a
+ *  beginning — so a face that re-assembles and re-clamps a log applies THIS
+ *  bound rather than a second one beside it. */
 export const MAX_LOG_CHARS = 64 * 1024;
 export function clampLog(buffer: string): string {
   return buffer.length > MAX_LOG_CHARS
@@ -516,10 +507,10 @@ export type NodeLogFrame = OduSF["streams"]["nodeLog"]["Output"];
 // the union-budget blowup D2 exists to avoid.
 //
 // So the projection is pinned HERE, once, beside the surface it projects. Every
-// consumer — odu's own socket dial, its in-process MCP projection, an
-// out-of-repo consumer over a hydrated copy of this package — holds the SAME
-// type and reaches members the same way, and a schema edit is a compile error
-// at every call site.
+// consumer — a socket dial, an in-process projection, an out-of-repo reader
+// over a hydrated copy of this package — holds the SAME type and reaches
+// members the same way, and a schema edit is a compile error at every call
+// site.
 //
 // Two shapes every call site sees:
 //   - a PROCEDURE returns `Effect<Out>`, and its INPUT is the ENCODED side of
