@@ -51,6 +51,26 @@ describe("runLaneDeath", () => {
     ).toThrow("onDead boom");
     expect(order).toEqual(["announce", "teardown", "onDead"]);
   });
+
+  it("runs onDead even when teardown throws, then propagates", () => {
+    const order: string[] = [];
+    expect(() =>
+      runLaneDeath(
+        () => {
+          order.push("announce");
+        },
+        () => {
+          order.push("teardown");
+          throw new Error("teardown boom");
+        },
+        (error) => {
+          order.push(`onDead:${error}`);
+        },
+        "pipe died",
+      ),
+    ).toThrow("teardown boom");
+    expect(order).toEqual(["announce", "teardown", "onDead:pipe died"]);
+  });
 });
 
 describe("reportLogStreamDeath", () => {

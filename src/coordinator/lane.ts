@@ -140,10 +140,10 @@ export interface Lane {
 }
 
 /**
- * Announce a lane death so teardown cannot be skipped if `announce` throws:
- * `dead` is already latched by the caller; this is the try/finally that
- * keeps `session.destroy` / abort / `onDead` running. `onDead`'s own
- * failure does not eat the teardown — it propagates after.
+ * Announce a lane death so neither teardown nor `onDead` can be skipped if
+ * an earlier step throws: `dead` is already latched by the caller. Nested
+ * finally so a throw from `teardown()` still runs `onDead` — otherwise
+ * nodes stay `running` and `allSettled` parks with no stack.
  */
 export function runLaneDeath(
   announce: () => void,
@@ -154,8 +154,11 @@ export function runLaneDeath(
   try {
     announce();
   } finally {
-    teardown();
-    onDead(error);
+    try {
+      teardown();
+    } finally {
+      onDead(error);
+    }
   }
 }
 
