@@ -38,8 +38,7 @@ manifest names `@modelcontextprotocol/sdk`, `@opentui/core`, `@xterm/headless`,
 `solid-js`, `@preact/signals-core` — an MCP server, a TUI renderer, a terminal
 emulator and two reactive runtimes — because odu is a CI *tool*: it renders a
 live matrix, serves an agent face, and drives lanes over ssh. None of that is
-needed to read a `nodes` cell. This package's manifest names one npm package,
-`effect`, and one hydrated source, `@kolu/surface`.
+needed to read a `nodes` cell.
 
 |  | `odu` | `@odu/run-client` |
 | --- | --- | --- |
