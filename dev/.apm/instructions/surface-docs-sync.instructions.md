@@ -1,6 +1,6 @@
 ---
 description: When odu s user-facing surface changes (CLI commands/flags, MCP tools, the typed surface itself), keep the README and the ci/odu-mcp skills in sync in the same change
-applyTo: "src/cli/main.ts,src/cli/mcp.ts,src/common/surface.ts,src/mcp/**,src/coordinator/cancel.ts"
+applyTo: "src/cli/main.ts,src/cli/mcp.ts,packages/run-client/src/surface.ts,src/common/laneSurface.ts,src/mcp/**,src/coordinator/cancel.ts"
 ---
 
 ## Keep the surface docs in sync
@@ -10,7 +10,8 @@ a code change forgets them. When you add or change any of:
 
 - a **CLI command or flag** (`src/cli/main.ts`),
 - an **MCP tool or its inputs** (`src/mcp/*Tool.ts`, registered in `src/cli/mcp.ts`),
-- the **typed surface** procedures/cells/streams (`src/common/surface.ts`),
+- the **typed surface** procedures/cells/streams (`packages/run-client/src/surface.ts`
+  for the fan-in a client dials, `src/common/laneSurface.ts` for the lane wire),
 
 update **all three** in the *same* change:
 

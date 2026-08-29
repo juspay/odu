@@ -30,6 +30,8 @@ import {
   serveSurfaceAsMcp,
   type SurfaceClientCallable,
 } from "@kolu/surface-mcp";
+import { oduSurface } from "@odu/run-client/surface";
+import { dialRun, SOCKET_PATH } from "@odu/run-client/dial";
 import { buildAgentProjection, redialingAClient } from "../mcp/agentSurface";
 import { cancelTool } from "../mcp/cancelTool";
 import { leaseTool, releaseTool } from "../mcp/leaseTool";
@@ -37,9 +39,6 @@ import { killRuns, runTool } from "../mcp/runTool";
 import { runsTool } from "../mcp/runsTool";
 import { makeWaitTool } from "../mcp/waitTool";
 import { gitRunContext } from "../common/git";
-import { oduSurface } from "../common/surface";
-import { SOCKET_PATH, tryDialSocket } from "../coordinator/socket";
-
 
 function version(): string {
   try {
@@ -73,7 +72,7 @@ export async function mcpCommand(socketPath: string = SOCKET_PATH): Promise<numb
   // `logs` reads the durable file, and `run` (which ignores the client) spawns a
   // coordinator.
   const aClient = redialingAClient(async () => {
-    const dialed = await tryDialSocket(socketPath);
+    const dialed = await dialRun(socketPath);
     return dialed === null ? null : { client: dialed.client, close: dialed.close };
   });
   // `directDispatch` over the served handlers is the in-process transport: a

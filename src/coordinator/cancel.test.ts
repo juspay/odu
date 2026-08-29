@@ -7,7 +7,7 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { pendingNode, type PipelineState } from "../common/surface";
+import { pendingNode, type PipelineState } from "@odu/run-client/surface";
 import { serveTestSurface, type TestSurface } from "../mcp/serveForTest";
 import { cancelNodeOrPlatform, cancelRun } from "./cancel";
 

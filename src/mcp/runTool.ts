@@ -22,13 +22,13 @@ import { dirname, join } from "node:path";
 import { firstFrame } from "../common/effectEdge";
 import { Effect, Schema } from "effect";
 import type { BespokeTool } from "@kolu/surface-mcp";
+import { dialRun, SOCKET_PATH } from "@odu/run-client/dial";
 import { type CancelResult, cancelRun } from "../coordinator/cancel";
 import {
   liveRunLockPid,
   signalRunLockHolder,
   waitForRunLockFree,
 } from "../coordinator/checkoutLock";
-import { SOCKET_PATH, tryDialSocket } from "../coordinator/socket";
 
 export const runInput = Schema.Struct({
   selectors: Schema.optionalKey(Schema.Array(Schema.String)),
@@ -158,7 +158,7 @@ async function defaultWaitForSocket(
   // Probe the socket and release the probe connection at once — we only want
   // to know it answers, not to hold it open.
   const serving = async (): Promise<boolean> => {
-    const d = await tryDialSocket(socketPath);
+    const d = await dialRun(socketPath);
     await d?.close();
     return d !== null;
   };
@@ -203,7 +203,7 @@ export async function startRun(
   // Sibling of the socket (`.ci/odu.run.lock`); absolute when socketPath is.
   const lockPath = join(dirname(socketPath), "odu.run.lock");
 
-  const existing = await tryDialSocket(socketPath);
+  const existing = await dialRun(socketPath);
   const busy = existing !== null || liveRunLockPid(lockPath) !== null;
 
   if (busy) {
@@ -348,7 +348,7 @@ export function appendPreOpen(
 export async function openRunLog(
   socketPath: string,
 ): Promise<WriteStream | null> {
-  const dialed = await tryDialSocket(socketPath);
+  const dialed = await dialRun(socketPath);
   if (dialed === null) return null;
   try {
     // ONE frame, then done. `firstFrame` ends the stream, which releases the

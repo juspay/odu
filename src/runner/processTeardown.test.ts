@@ -17,7 +17,7 @@ import { awaitStdioReadiness } from "@kolu/surface/links/readiness";
 import { stdioLink } from "@kolu/surface/links/stdio";
 import { afterEach, describe, expect, it } from "bun:test";
 import { runUnary } from "../common/effectEdge";
-import { laneClientOver, laneSurface } from "../common/surface";
+import { laneClientOver, laneSurface } from "../common/laneSurface";
 
 // The child is spawned with the very same Bun that runs this suite — no
 // launcher shim in node_modules/.bin to find, `bun src/runner/main.ts` is

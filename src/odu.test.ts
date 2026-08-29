@@ -13,6 +13,11 @@ import { createLoopbackPair, greetLoopback } from "@kolu/surface/loopback";
 import { serveOverStdio } from "@kolu/surface/peer-server";
 import { afterEach, describe, expect, it } from "bun:test";
 import {
+  type NodeLogMessage,
+  type NodesSnapshot,
+  type PipelineState,
+} from "@odu/run-client/surface";
+import {
   countsLine,
   exitCode,
   OUTCOME_MARK,
@@ -25,10 +30,7 @@ import {
   type LaneClient,
   laneClientOver,
   laneSurface,
-  type NodeLogMessage,
-  type NodesSnapshot,
-  type PipelineState,
-} from "./common/surface";
+} from "./common/laneSurface";
 import { firstFrame, runUnary, subscribe } from "./common/effectEdge";
 import { createLaneRunner, SETUP_NODE_ID } from "./runner/runner";
 

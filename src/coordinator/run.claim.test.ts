@@ -31,13 +31,13 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
+import { dialRun } from "@odu/run-client/dial";
 import { runUnary, subscribe } from "../common/effectEdge";
 import { waitFor } from "../common/scaffoldForTest";
 import { agentReaderFromA } from "../mcp/agentSurface";
 import { waitForSettle } from "./waitForSettle";
 import type { ClaimOutcome } from "./runEnv";
 import { runCommand } from "./run";
-import { tryDialSocket } from "./socket";
 
 const hasJust =
   spawnSync("just", ["--version"], { encoding: "utf-8" }).status === 0;
@@ -109,10 +109,10 @@ function fixture(): string {
 async function dialUntilServing(
   socketPath: string,
   timeoutMs = 20_000,
-): Promise<NonNullable<Awaited<ReturnType<typeof tryDialSocket>>>> {
+): Promise<NonNullable<Awaited<ReturnType<typeof dialRun>>>> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    const dialed = await tryDialSocket(socketPath);
+    const dialed = await dialRun(socketPath);
     if (dialed !== null) return dialed;
     if (Date.now() > deadline) throw new Error("the coordinator never served");
     await new Promise((r) => setTimeout(r, 25));

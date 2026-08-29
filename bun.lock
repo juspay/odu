@@ -7,6 +7,7 @@
       "dependencies": {
         "@effect/platform-node": "4.0.0-rc.112",
         "@modelcontextprotocol/sdk": "^1.29.0",
+        "@odu/run-client": "workspace:*",
         "@opentui/core": "^0.4.5",
         "@preact/signals-core": "^1.8.0",
         "@solid-primitives/scheduled": "^1.5.3",
@@ -24,6 +25,13 @@
         "@types/node": "^22.0.0",
         "@types/split2": "^4.2.3",
         "typescript": "^5.8.0",
+      },
+    },
+    "packages/run-client": {
+      "name": "@odu/run-client",
+      "version": "0.1.0",
+      "dependencies": {
+        "effect": "4.0.0-rc.112",
       },
     },
   },
@@ -51,6 +59,8 @@
     "@msgpackr-extract/msgpackr-extract-linux-x64": ["@msgpackr-extract/msgpackr-extract-linux-x64@3.0.4", "", { "os": "linux", "cpu": "x64" }, "sha512-8TNXMEjJc3QEy7R/x1INhgiU+XakDAFUzBhaz7+Rbrs8NH5UQeHQxxmzsSBJGyV6I1jW79undiQm8tOI+D+8FQ=="],
 
     "@msgpackr-extract/msgpackr-extract-win32-x64": ["@msgpackr-extract/msgpackr-extract-win32-x64@3.0.4", "", { "os": "win32", "cpu": "x64" }, "sha512-CmCXPQrkbwExx3j946/PtHWHbYJiCRBRDl4BlkRQcJB/YOwQxJRTpoo7aTsortjgoJ1x7opzTSxn7C+ASSLVjQ=="],
+
+    "@odu/run-client": ["@odu/run-client@workspace:packages/run-client"],
 
     "@opentui/core": ["@opentui/core@0.4.5", "", { "dependencies": { "bun-ffi-structs": "0.2.4", "diff": "9.0.0", "marked": "17.0.1", "string-width": "7.2.0", "strip-ansi": "7.1.2" }, "optionalDependencies": { "@opentui/core-darwin-arm64": "0.4.5", "@opentui/core-darwin-x64": "0.4.5", "@opentui/core-linux-arm64": "0.4.5", "@opentui/core-linux-arm64-musl": "0.4.5", "@opentui/core-linux-x64": "0.4.5", "@opentui/core-linux-x64-musl": "0.4.5", "@opentui/core-win32-arm64": "0.4.5", "@opentui/core-win32-x64": "0.4.5" }, "peerDependencies": { "web-tree-sitter": "0.25.10" } }, "sha512-JsgRTPkA6e+Vxmumxai6SElOSlRQkbzNKHlCfemlArRiLhfC1IZ9RXJo2QH4xSu+uBOWAM90uss73/pPlkdEig=="],
 

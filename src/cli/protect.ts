@@ -13,7 +13,7 @@
 
 import { spawnSync } from "node:child_process";
 import { Result, Schema } from "effect";
-import { fanId } from "../common/nodeId";
+import { fanId } from "@odu/run-client/nodeId";
 import { loadHosts } from "../coordinator/hosts";
 import { parseGithubRemote } from "../coordinator/statuses";
 import { laneTasks, loadJustPipeline } from "../just/ingest";

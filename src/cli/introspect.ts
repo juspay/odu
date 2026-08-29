@@ -12,9 +12,9 @@
  * MCP `wait_for_settle` verdict shape as one JSON line.
  */
 
-import { firstFrame, runUnary, subscribe } from "../common/effectEdge";
 import {
   type NodeState,
+  type OduClient,
   type PipelineState,
   postingOf,
   type RunHeader,
@@ -22,29 +22,17 @@ import {
   type RunPhase,
   runPhase,
   STATUS_META,
-} from "../common/surface";
+} from "@odu/run-client/surface";
+import { isSetupNode, onPlatform, splitFanId } from "@odu/run-client/nodeId";
+import { dialRun, SOCKET_PATH } from "@odu/run-client/dial";
+import { firstFrame, runUnary, subscribe } from "../common/effectEdge";
 import { formatGoDuration } from "../common/duration";
-import {
-  isSetupNode,
-  onPlatform,
-  parseAtPlatform,
-  splitFanId,
-  transitiveDependents,
-} from "../common/nodeId";
+import { parseAtPlatform, transitiveDependents } from "../common/nodeId";
 import { cancelNodeOrPlatform, cancelRun } from "../coordinator/cancel";
 import { createDisplay, progressEvent } from "../coordinator/display";
-import {
-  dialSocket,
-  noRunInProgressMessage,
-  type OduClient,
-  SOCKET_PATH,
-  tryDialSocket,
-} from "../coordinator/socket";
+import { dialRunOrExit, noRunInProgressMessage } from "../coordinator/socket";
 import { postingWarning } from "../coordinator/statuses";
-import {
-  NoLiveRunError,
-  waitForSettle,
-} from "../coordinator/waitForSettle";
+import { NoLiveRunError, waitForSettle } from "../coordinator/waitForSettle";
 import { agentReaderFromA } from "../mcp/agentSurface";
 import { yellow } from "./ansi";
 import {
@@ -177,7 +165,7 @@ export async function statusCommand(
   json: boolean,
   socketPath?: string,
 ): Promise<number> {
-  const { client, close } = await dialSocket(socketPath);
+  const { client, close } = await dialRunOrExit(socketPath);
   // The run environment, read from the same dial: a run that has no lanes yet
   // has nothing to say through `nodes` alone, and "no rows" is exactly the
   // ambiguity juspay/odu#84 is about.
@@ -231,7 +219,7 @@ export async function logsCommand(
   token: string,
   follow: boolean,
 ): Promise<number> {
-  const { client, close } = await dialSocket();
+  const { client, close } = await dialRunOrExit();
   const state = await firstSnapshot(client);
   const id = resolveNodeId(state, token);
   for await (const frame of subscribe(client.surface.nodeLog.get({ id }))) {
@@ -255,7 +243,7 @@ export async function attachCommand(json: boolean): Promise<number> {
   // (juspay/odu#4), so a piped `attach` and a piped `run` emit one contract.
   const interactive =
     !json && process.stdin.isTTY === true && process.stdout.isTTY === true;
-  const { client, close } = await dialSocket();
+  const { client, close } = await dialRunOrExit();
   if (!interactive) return attachStream(client, close, json);
   return attachDashboard(client, close);
 }
@@ -440,7 +428,7 @@ export async function cancelCommand(
   return 0;
 }
 
-/** Loud "no run" message — same wording `dialSocket` uses so a plain-CLI agent
+/** Loud "no run" message — same wording `dialRunOrExit` uses so a plain-CLI agent
  *  gets one recognizable refusal across every attach face. */
 function noRunInProgress(path: string): void {
   process.stderr.write(noRunInProgressMessage(path));
@@ -459,7 +447,7 @@ export interface WaitCommandOpts {
  *  all-green run. Shares `waitForSettle` with the MCP `wait_for_settle` tool. */
 export async function waitCommand(opts: WaitCommandOpts): Promise<number> {
   const socketPath = opts.socketPath ?? SOCKET_PATH;
-  const dialed = await tryDialSocket(socketPath);
+  const dialed = await dialRun(socketPath);
   if (dialed === null) {
     noRunInProgress(socketPath);
     return 1;
@@ -583,7 +571,7 @@ export async function rerunCommand(
     );
     return 1;
   }
-  const dialed = await tryDialSocket(socketPath);
+  const dialed = await dialRun(socketPath);
   if (dialed === null) {
     noRunInProgress(socketPath);
     return 1;

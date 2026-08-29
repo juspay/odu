@@ -8,6 +8,11 @@
 # something odu does not itself depend on, declare it in package.json rather
 # than switching linkers.
 #
+# The workspace member (packages/run-client) is no exception: isolated gives it
+# a node_modules holding only what its OWN manifest declares, so its
+# @kolu/surface import walks up past that to the root copy — the same walk a
+# downstream reproduces when it hydrates the package beside its own kolu pin.
+#
 # Hoisted is NOT usable here. odu's tree carries genuinely conflicting
 # transitive versions — express wants cookie@0.7 while @orpc/server wants
 # cookie@1, and body-parser/type-is want content-type@2 while the MCP SDK and

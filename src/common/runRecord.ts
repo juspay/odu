@@ -26,17 +26,55 @@
  */
 
 import { Schema } from "effect";
-import { shortSha } from "./git";
 import {
   type NodeStatus,
   NodeStatusSchema,
+  type OwedStatus,
   type PipelineState,
   STATUS_META,
-  UnpostedEntrySchema,
-  type UnpostedEntry,
-} from "./surface";
+} from "@odu/run-client/surface";
+import { shortSha } from "./git";
 
-export type { UnpostedEntry };
+/** Final unconfirmed posting debt, stamped into the durable record: a live
+ *  `OwedStatus` (the fan-in surface's shape) with `lastError` REQUIRED at
+ *  write. `attempts` is optional ONLY so records written before it existed
+ *  still parse — a reader that finds it absent knows the count wasn't
+ *  recorded, rather than being handed a fabricated `0` it can't tell apart
+ *  from "no retries yet".
+ *
+ *  It lives here, with the durable record, and not on the surface it is derived
+ *  from: these bytes are a FILE odu writes and reads, and the two projections
+ *  below are the whole of the relationship between the two shapes. A consumer
+ *  of the live socket never sees this type. */
+export const UnpostedEntrySchema = Schema.Struct({
+  context: Schema.String,
+  lastError: Schema.String,
+  attempts: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+});
+export type UnpostedEntry = typeof UnpostedEntrySchema.Type;
+
+/** Project live owed rows into durable unposted entries (juspay/odu#61). The
+ *  only narrowing left is `lastError`: a row that never reported one is written
+ *  as "not posted" so the durable shape can require it. */
+export function projectUnposted(owed: readonly OwedStatus[]): UnpostedEntry[] {
+  return owed.map((o) => ({
+    context: o.context,
+    lastError: o.lastError ?? "not posted",
+    attempts: o.attempts,
+  }));
+}
+
+/** Lift durable unposted entries back to live owed rows — the inverse of
+ *  {@link projectUnposted}, and its neighbour so a field added to either type
+ *  updates one place instead of whichever consumer needed the reverse first.
+ *  A record written before `attempts` was persisted reports 0. */
+export function liftUnposted(entries: readonly UnpostedEntry[]): OwedStatus[] {
+  return entries.map((e) => ({
+    context: e.context,
+    lastError: e.lastError,
+    attempts: e.attempts ?? 0,
+  }));
+}
 
 /** The current record format. Bumped only when a field changes shape; the
  *  ledger reader tolerates records it can't parse (skips them) so a newer

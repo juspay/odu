@@ -13,14 +13,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { implementSurface, inMemoryStore } from "@kolu/surface/server";
 import { Effect } from "effect";
-import { createLogTail } from "../common/logTail";
-import { serveSocket, socketLogger } from "../coordinator/socket";
 import {
   EMPTY_HEADER,
   oduSurface,
   type PipelineState,
   type RunHeader,
-} from "../common/surface";
+} from "@odu/run-client/surface";
+import { createLogTail } from "../common/logTail";
+import { serveSocket, socketLogger } from "../coordinator/socket";
 
 export interface TestSurface {
   socketPath: string;

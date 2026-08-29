@@ -15,9 +15,9 @@
  * socket and leaves the coordinator up so the rest of the run can settle.
  */
 
+import { dialRun, SOCKET_PATH } from "@odu/run-client/dial";
 import { runUnary } from "../common/effectEdge";
 import { parseAtPlatform } from "../common/nodeId";
-import { SOCKET_PATH, tryDialSocket } from "./socket";
 
 export interface CancelResult {
   /** A live run was found and asked to stop. `false` means there was nothing
@@ -31,7 +31,7 @@ export interface CancelResult {
 
 export interface CancelDeps {
   /** Injected for tests; defaults to the real unix-socket dial. */
-  dial?: (path: string) => ReturnType<typeof tryDialSocket>;
+  dial?: (path: string) => ReturnType<typeof dialRun>;
   /** Total time to wait for the socket to disappear after the cancel call. */
   settleTimeoutMs?: number;
   /** Poll interval while waiting for the socket to disappear. */
@@ -49,7 +49,7 @@ export async function cancelRun(
   socketPath: string = SOCKET_PATH,
   deps: CancelDeps = {},
 ): Promise<CancelResult> {
-  const dial = deps.dial ?? tryDialSocket;
+  const dial = deps.dial ?? dialRun;
   const sleep = deps.sleep ?? defaultSleep;
   const settleTimeoutMs = deps.settleTimeoutMs ?? 10_000;
   const pollMs = deps.pollMs ?? 100;
@@ -108,7 +108,7 @@ export async function cancelNodeOrPlatform(
 ): Promise<PartialCancelResult> {
   const parsed = parsePartialCancelTarget(target);
   if (parsed === null) return { kind: "bad_target" };
-  const dial = deps.dial ?? tryDialSocket;
+  const dial = deps.dial ?? dialRun;
   const dialed = await dial(socketPath);
   if (dialed === null) return { kind: "no_run" };
   try {

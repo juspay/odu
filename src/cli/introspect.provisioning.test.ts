@@ -2,7 +2,7 @@
  * juspay/odu#84 — a run that exists but has no lanes yet, through the read
  * faces in `cli/introspect` (`provisioningLines`, `runEnvJson`,
  * `statusCommand`). `runPhase` itself is tested beside its own module, in
- * `src/common/surface.provisioning.test.ts`.
+ * `src/common/runPhase.test.ts`.
  *
  * The coordinator now serves `.ci/odu.sock` *before* it claims a machine, so
  * this suite asserts the thing that window is for: that every read face
@@ -24,7 +24,7 @@ import {
   type PipelineState,
   type RunHeader,
   runPhase,
-} from "../common/surface";
+} from "@odu/run-client/surface";
 import {
   capturingStdout,
   lanesHeader,
@@ -33,7 +33,7 @@ import {
 } from "../common/scaffoldForTest";
 import { subscribe } from "../common/effectEdge";
 import { agentReaderFromA, toAgentNodes } from "../mcp/agentSurface";
-import { dialSocket } from "../coordinator/socket";
+import { dialRunOrExit } from "../coordinator/socket";
 import { waitForSettle } from "../coordinator/waitForSettle";
 import { serveTestSurface, type TestSurface } from "../mcp/serveForTest";
 import { provisioningLines, runEnvJson, statusCommand } from "./introspect";
@@ -277,7 +277,7 @@ describe("the agent face during provisioning", () => {
       provisioningHeader(),
     );
     open.push(surface);
-    const dialed = await dialSocket(surface.socketPath);
+    const dialed = await dialRunOrExit(surface.socketPath);
     try {
       const verdict = await waitForSettle({
         client: agentReaderFromA(dialed.client),
@@ -298,7 +298,7 @@ describe("the agent face during provisioning", () => {
     const state = provisioningState();
     const surface = await serveTestSurface(state, provisioningHeader());
     open.push(surface);
-    const dialed = await dialSocket(surface.socketPath);
+    const dialed = await dialRunOrExit(surface.socketPath);
     try {
       const pending = waitForSettle({
         client: agentReaderFromA(dialed.client),
@@ -341,7 +341,7 @@ describe("a live header subscriber", () => {
       provisioningHeader(),
     );
     open.push(surface);
-    const dialed = await dialSocket(surface.socketPath);
+    const dialed = await dialRunOrExit(surface.socketPath);
     try {
       const frames: RunHeader[] = [];
       const done = (async () => {

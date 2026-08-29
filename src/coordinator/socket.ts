@@ -1,50 +1,62 @@
 /**
- * The in-band introspection rendezvous: while `odu run` is live, the
- * coordinator serves the fan-in surface on `.ci/odu.sock`, and
- * `odu status` / `logs` / `attach` dial it.
+ * THIS checkout's end of the run rendezvous — the two halves only odu has:
+ * SERVING the fan-in surface on `.ci/odu.sock` while `odu run` is live, and
+ * REFUSING in odu's own words when a face finds no run there.
  *
- * Transport is `@kolu/surface`'s first-class unix-socket pair
- * (`serveOverUnixSocket` / `unixSocketLink`) — same base64-newline framing
- * as every other odu transport, and unlike justci's `.ci/pc.sock`, what is
- * served is the same typed surface every other face speaks. odu keeps the
+ * Reaching a live run is `@odu/run-client/dial`'s, in this repo and out of it;
+ * {@link dialRunOrExit} only adds the exit a one-shot command wants.
+ *
+ * That exit is a FACE's decision, and it is the half of this file that must
+ * never travel. A later extract reading the filename as "the socket" would take
+ * {@link dialRunOrExit} and {@link noRunInProgressMessage} across with the
+ * serving side; then a library would be deciding that a dashboard's process
+ * should die because a run settled. Absence is a state — the package answers
+ * `null` and every caller says what that means for it.
+ *
+ * Transport is `@kolu/surface`'s `serveOverUnixSocket` — same base64-newline
+ * framing as every other odu transport, and unlike justci's `.ci/pc.sock`, what
+ * is served is the same typed surface every other face speaks. odu keeps the
  * checkout-scoped path (one run per checkout, like justci) rather than the
  * library's per-user runtime-dir convention, and translates the library's
  * structured outcomes into odu-flavored verdicts: `already-served` IS the
  * one-run-per-checkout lock, and a dial failure IS "no run in progress".
  *
- * Both library entry points below assume Node's async-connect-error contract,
- * which Bun does not always honor — importing `asyncConnectError` (for its
- * side effect) restores it. This is odu's single unix-socket seam, so the
- * import here covers every dial and serve in the repo.
+ * `serveOverUnixSocket` assumes Node's async-connect-error contract, which Bun
+ * does not always honor — importing `asyncConnectError` (for its side effect)
+ * restores it. `@odu/run-client/dial` installs the same shim for itself, so
+ * between the two every unix-socket dial and serve in this repo is covered.
  */
 
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Logger } from "@kolu/log";
-import { unixSocketLink } from "@kolu/surface/links/unix-socket";
 import type { SurfaceHandlers } from "@kolu/surface/server";
 import { serveOverUnixSocket } from "@kolu/surface/unix-socket";
-import "../common/asyncConnectError";
 import type { Rpc, RpcGroup } from "effect/unstable/rpc";
-import { type OduClient, oduClientOver, oduSurface } from "../common/surface";
+import "@odu/run-client/asyncConnectError";
+import {
+  type DialedRun,
+  dialRun,
+  SOCKET_PATH,
+  runSocketPath,
+} from "@odu/run-client/dial";
 import { RUN_LOCK_PATH } from "./checkoutLock";
-
-export type { OduClient };
-
-export const SOCKET_PATH = ".ci/odu.sock";
 
 /** The two per-checkout coordinator paths, derived TOGETHER from the checkout
  *  root — never one from the other. `ensureCheckoutFree` SIGTERMs whoever holds
  *  the run lock, so a lock path inferred from a relative socket path is a kill
  *  aimed at whatever checkout the process happens to be cwd'd into (that is how
  *  odu's own suite once killed the run executing it). Taking a root makes the
- *  pair unambiguous at every call site. */
+ *  pair unambiguous at every call site.
+ *
+ *  The socket half is `@odu/run-client`'s own path algebra, so the place a
+ *  coordinator BINDS and the place a foreign client DIALS are one formula. */
 export function checkoutPaths(repoRoot: string): {
   socketPath: string;
   lockPath: string;
 } {
   return {
-    socketPath: join(repoRoot, SOCKET_PATH),
+    socketPath: runSocketPath(repoRoot),
     lockPath: join(repoRoot, RUN_LOCK_PATH),
   };
 }
@@ -80,10 +92,9 @@ export function socketLogger(onLine: (line: string) => void): Logger {
  *  and refuses to serve from a world-readable directory, so `.ci` is
  *  tightened to owner-only first (it holds nothing but this run's logs).
  *
- *  The served value is now the `{ group, handlers }` pair `implementSurface`
- *  hands back, and it is TYPED — the `any` this parameter used to be existed
- *  only because oRPC's router had no nameable shape. A tag carries its own
- *  route, so there is nothing to re-prefix at the mount site.
+ *  The served value is the `{ group, handlers }` pair `implementSurface` hands
+ *  back, and it is TYPED — a tag carries its own route, so there is nothing to
+ *  re-prefix at the mount site.
  *
  *  `log` is required for the same reason the transport requires it — see
  *  {@link socketLogger}. Both call sites pass a path, so it takes one too. */
@@ -132,45 +143,21 @@ export async function serveSocket(
   }
 }
 
-/** Dial the socket of a live run, or `null` when no run is in progress (a
- *  dead/absent server rejects with ECONNREFUSED/ENOENT). The non-exiting
- *  variant: the MCP face turns "no live run" into a structured tool result
- *  rather than a process exit. */
-export async function tryDialSocket(
-  path: string = SOCKET_PATH,
-): Promise<DialedSocket | null> {
-  try {
-    // The link owns a `Scope` holding the protocol's dial/ping/response
-    // fibers, so `close()` is genuinely async now — dropping it unawaited
-    // leaks them. Every call site awaits.
-    const link = await unixSocketLink({
-      group: oduSurface.group,
-      socketPath: path,
-    });
-    return { client: oduClientOver(link.dispatch), close: link.dispose };
-  } catch {
-    return null;
-  }
-}
-
-/** A dialled fan-in socket: the typed face plus the link teardown. */
-export interface DialedSocket {
-  client: OduClient;
-  close: () => Promise<void>;
-}
-
-/** The shared no-run refusal string — CLI wait/rerun and `dialSocket` all cite
- *  the same wording so agents match one phrase. */
+/** The shared no-run refusal string — CLI wait/rerun and `dialRunOrExit` all
+ *  cite the same wording so agents match one phrase. */
 export function noRunInProgressMessage(path: string): string {
   return `odu: no run in progress in this checkout (no live socket at ${path})\n`;
 }
 
-/** Dial the socket of a live run. Exits with the justci-parity message when
- *  no run is in progress. */
-export async function dialSocket(
+/** {@link dialRun}, for a face that has nothing to say without a run: exits
+ *  with the justci-parity message instead of handing back `null`.
+ *
+ *  Dying is a one-shot command's decision, never a library's — which is the
+ *  whole reason this wrapper is here and not in the package. */
+export async function dialRunOrExit(
   path: string = SOCKET_PATH,
-): Promise<DialedSocket> {
-  const dialed = await tryDialSocket(path);
+): Promise<DialedRun> {
+  const dialed = await dialRun(path);
   if (dialed !== null) return dialed;
   process.stderr.write(noRunInProgressMessage(path));
   process.exit(1);

@@ -37,6 +37,25 @@ import { dirname, join } from "node:path";
 import { implementSurface, inMemoryStore } from "@kolu/surface/server";
 import { Effect } from "effect";
 import { isLocalHost } from "@kolu/surface-remote";
+import {
+  fanId,
+  isSetupNode,
+  onPlatform,
+  SETUP_NAMEPATH,
+  splitFanId,
+} from "@odu/run-client/nodeId";
+import {
+  claimingLanes,
+  EMPTY_POSTING,
+  leasedLanes,
+  type NodeState,
+  oduSurface,
+  pendingNode,
+  type PipelineState,
+  type RunHeader,
+  type RunLane,
+} from "@odu/run-client/surface";
+import { dialRun } from "@odu/run-client/dial";
 import { bold, dim, link } from "../cli/ansi";
 import {
   countsLine,
@@ -52,26 +71,7 @@ import { formatGoDuration } from "../common/duration";
 import { gitTopLevel } from "../common/git";
 import { appendIfOpen, createNodeLogSink } from "./nodeLogSink";
 import { createVerdictGate } from "./verdictGate";
-import {
-  fanId,
-  isSetupNode,
-  onPlatform,
-  SETUP_NAMEPATH,
-  splitFanId,
-} from "../common/nodeId";
 import type { TaskSpec } from "../common/spec";
-import {
-  claimingLanes,
-  EMPTY_POSTING,
-  leasedLanes,
-  type NodeState,
-  oduSurface,
-  pendingNode,
-  type PipelineState,
-  type RunHeader,
-  type RunLane,
-  type UnpostedEntry,
-} from "../common/surface";
 import { commitLabel, createDisplay, progressEvent } from "./display";
 import { laneTasks, loadJustPipeline, parseSelector } from "../just/ingest";
 import { fanoutPools, loadHosts, shortHost } from "./hosts";
@@ -89,12 +89,15 @@ import {
   type RunLockHandle,
 } from "./checkoutLock";
 import { releaseReservation, reserveNextSeq, writeRunRecord } from "./ledger";
-import { buildRunRecord, projectNodes } from "../common/runRecord";
+import {
+  buildRunRecord,
+  projectNodes,
+  type UnpostedEntry,
+} from "../common/runRecord";
 import {
   checkoutPaths,
   serveSocket,
   socketLogger,
-  tryDialSocket,
 } from "./socket";
 import {
   fetchUrlFor,
@@ -167,7 +170,7 @@ export async function ensureCheckoutFree(
   supersede: boolean,
   deps: {
     cancel?: typeof cancelRun;
-    dial?: typeof tryDialSocket;
+    dial?: typeof dialRun;
     signalLock?: typeof signalRunLockHolder;
     waitLockFree?: typeof waitForRunLockFree;
     liveLockPid?: typeof liveRunLockPid;
@@ -177,7 +180,7 @@ export async function ensureCheckoutFree(
   | { ok: false; reason: "live" | "supersede-timeout"; message: string }
 > {
   const { socketPath, lockPath } = paths;
-  const dial = deps.dial ?? tryDialSocket;
+  const dial = deps.dial ?? dialRun;
   const cancel = deps.cancel ?? cancelRun;
   const signalLock = deps.signalLock ?? signalRunLockHolder;
   const waitLockFree = deps.waitLockFree ?? waitForRunLockFree;
@@ -211,7 +214,11 @@ export async function ensureCheckoutFree(
 
   const existing = await dial(socketPath);
   if (existing !== null) {
-    existing.close();
+    // Awaited, not dropped: the link owns a scope holding the protocol fibers
+    // (`DialedRun.close` is async for that reason), and this probe runs on
+    // every `odu run` — the one path that dials only to find out whether
+    // anyone is home. `runTool.ts`'s identical probe already awaits it.
+    await existing.close();
     return refuseLive;
   }
   if (liveLockPid(lockPath) !== null) return refuseLive;

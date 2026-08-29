@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, jest } from "bun:test";
+import { EMPTY_POSTING } from "@odu/run-client/surface";
 import {
   fetchUrlFor,
   interruptStatus,
@@ -12,7 +13,6 @@ import {
   type GhSendResult,
   type StatusPayload,
 } from "./statuses";
-import { EMPTY_POSTING } from "../common/surface";
 
 /** bun:test's fake timers advance synchronously — there is no
  *  `advanceTimersByTimeAsync`. Drain the microtask queue on both sides of the

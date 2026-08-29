@@ -3,7 +3,7 @@ import type {
   NodeState,
   PipelineState,
   RunHeader,
-} from "../common/surface";
+} from "@odu/run-client/surface";
 import { capturingStdout } from "../common/scaffoldForTest";
 import { createDisplay, progressEvent } from "./display";
 import { stepFocus } from "../cli/render";

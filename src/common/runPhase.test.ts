@@ -1,13 +1,15 @@
 /**
  * `runPhase` — where a run is in its lifecycle as far as the *environment* is
  * concerned (juspay/odu#84), derived from the lane roster rather than stored
- * beside it. Colocated with the module that owns it; the faces that render the
- * phase are tested in `src/cli/introspect.provisioning.test.ts`.
+ * beside it. The fold itself now lives in `@odu/run-client/surface` — a client
+ * of the socket reads the phase rather than re-deriving it — but its test stays
+ * here, with odu's shared `RunHeader` fixtures; the faces that RENDER the phase
+ * are tested in `src/cli/introspect.provisioning.test.ts`.
  */
 
 import { describe, expect, it } from "bun:test";
+import { EMPTY_HEADER, runPhase } from "@odu/run-client/surface";
 import { lanesHeader, provisioningHeader } from "./scaffoldForTest";
-import { EMPTY_HEADER, runPhase } from "./surface";
 
 describe("runPhase", () => {
   it("is provisioning while any lane is still claiming", () => {

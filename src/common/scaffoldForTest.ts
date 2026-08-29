@@ -13,7 +13,7 @@
  * Same convention as `src/mcp/serveForTest.ts`.
  */
 
-import type { RunHeader } from "./surface";
+import type { RunHeader } from "@odu/run-client/surface";
 
 /** Run `fn` with `process.stdout` captured; returns what it wrote plus `fn`'s
  *  own result. Takes a sync or async body, because the faces under test are

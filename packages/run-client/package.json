@@ -1,0 +1,23 @@
+{
+  "name": "@odu/run-client",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "//sideEffects": "NOT `false`, and the difference is the dial answer. `asyncConnectError.ts` exists to patch Socket.prototype.connect — the side effect IS the export — and `dial.ts` imports it for that effect alone. A bundler that believes a blanket `false` may drop both, and then the ENOENT path `dialRun` returns null for throws instead of rejecting, which is the one failure this package promises never to surprise a face with. Every other module here is pure, so the list is these two rather than the flag being dropped: a consumer still gets tree-shaking everywhere it is safe.",
+  "sideEffects": [
+    "./src/asyncConnectError.ts",
+    "./src/dial.ts"
+  ],
+  "//": "WHAT A CLIENT OF A LIVE ODU RUN HOLDS — see README.md, which argues the whole boundary. This manifest is the wall: odu depends on this package and it depends on nothing of odu, so the direction is physics rather than discipline, and src/closure.test.ts walks the import graph to keep it that way.",
+  "//dependencies": "BEFORE ADDING ONE, read what it costs: a consumer hydrates this directory and satisfies this manifest, so an entry here is an entry in every downstream install. `@kolu/surface` is deliberately ABSENT and that is not an omission — the @kolu/* sources are hydrated as raw TypeScript from a Nix pin (see bunfig.toml at the root), so naming one in any manifest in this tree would send bun to the registry for a package that is not there; src/closure.test.ts pins the hydrated set instead. `effect` IS declared, and must stay at the version the rest of the tree resolves (the root `overrides` pins it): two copies give Effect _tag-based error narrowing two class realms to disagree about, and the symptom is a decode failure on a well-formed frame.",
+  "exports": {
+    "./surface": "./src/surface.ts",
+    "./nodeId": "./src/nodeId.ts",
+    "./dial": "./src/dial.ts",
+    "./asyncConnectError": "./src/asyncConnectError.ts"
+  },
+  "dependencies": {
+    "effect": "4.0.0-rc.112"
+  }
+}
