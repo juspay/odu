@@ -23,18 +23,6 @@
  * The coordinator serves this BEFORE it claims a machine (juspay/odu#84), so
  * `header` changes during a run and every reader FOLLOWS the cell rather than
  * latching its first frame.
- *
- * ── What this module is, and what odu still owns ────────────────────────────
- *
- * The two blocks {@link nodePrimitives} and {@link nodeProcedures} are exported
- * because odu's LANE surface (`odu-runner --stdio`, coordinator↔runner) is
- * built from them: what a lane serves and what the fan-in re-serves are the
- * same three primitives, and one definition is why a lane frame and a fan-in
- * frame can never disagree. The arrow runs one way — odu depends on this
- * package, never the reverse — so there is one spec, in one place, and the
- * coordinator serves the same object its clients dial. The lane surface itself
- * stays in odu (`src/common/laneSurface.ts`): its two ends ship as one pinned
- * build, so it is a private protocol rather than a contract anyone dials.
  */
 
 import { buildSurfaceFace } from "@kolu/surface/client";

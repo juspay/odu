@@ -7,36 +7,17 @@
  * one every other odu transport speaks and what is served is the same typed
  * surface every other face reads.
  *
- * ── Absence is a STATE, not an error ────────────────────────────────────────
- *
- * This is where odu differs from the package it is modelled on
- * (`@kolu/padi-client`). padi's socket belongs to a per-host DAEMON that is
- * meant to be up, so `connectPadi` REJECTS when it cannot reach one — being
- * down is news. odu's socket belongs to a RUN: it is created when the run
- * starts, and it is gone the moment the run settles. Sock-absent is the
- * ordinary steady state of a checkout, and the great majority of the time.
- *
- * So {@link dialRun} returns `null` rather than rejecting, and a face is
- * expected to treat that as "no run in progress" — odu's CLI turns it into
- * justci's one-line refusal, its MCP face into a structured `{ run: false }`
- * tool result, and a downstream dashboard into the last durable verdict (or
- * nothing at all). A client that dials on a timer will get `null` on nearly
- * every tick; that is the design, not a degraded mode.
- *
- * The consequence for the SURFACE half is stated on `NodeLogMessageSchema`: a
- * client is routinely a different build from the coordinator it dials, so the
- * wire is frozen and an added union arm is a one-way compatibility step. There
- * is deliberately no version handshake here — odu's surface carries no `hello`
- * sibling, and inventing a gate this package cannot enforce on the serving side
- * would be a promise it does not keep.
- *
- * ── Finding the socket ──────────────────────────────────────────────────────
+ * THE CONTRACT A CALLER MUST KNOW: {@link dialRun} answers `null` when there is
+ * no run, and never rejects for one. A run's socket exists only between `odu
+ * run` and settle, so absence is a checkout's ordinary steady state — a face
+ * polling on a timer gets `null` on nearly every tick, and needs an answer for
+ * it rather than an error path. The README argues why the package is shaped
+ * that way, and how it departs from `@kolu/padi-client` in doing so.
  *
  * Be told the checkout; don't guess it. {@link runSocketPath} is pure path
- * algebra over a checkout root — no probing — and it is exactly right, because
- * unlike padi's runtime-dir digest there is nothing environmental to get wrong:
- * a run's socket is a file inside the tree it is testing. What a caller must
- * supply is WHICH tree.
+ * algebra over a checkout root, and there is nothing environmental to get
+ * wrong: a run's socket is a file inside the tree it is testing. What a caller
+ * must supply is WHICH tree.
  */
 
 import { join } from "node:path";
@@ -64,13 +45,13 @@ export interface DialedRun {
   close: () => Promise<void>;
 }
 
-/** Dial the run live in this checkout, or `null` when there is none — a
- *  dead/absent server rejects the connect with ECONNREFUSED/ENOENT, and this
- *  package's whole position is that neither is news (see the module header).
+/** Dial the run live at `path`, or `null` when there is none: a dead or absent
+ *  server rejects the connect with ECONNREFUSED/ENOENT, and neither is news
+ *  (see the module header).
  *
- *  `path` is a socket path, not a checkout root: pass
- *  `runSocketPath(checkout)`, or the {@link SOCKET_PATH} default to mean the
- *  process's own cwd. */
+ *  `path` is a socket path, not a checkout root — pass
+ *  `runSocketPath(checkout)`, or take the {@link SOCKET_PATH} default to mean
+ *  the process's own cwd. */
 export async function dialRun(
   path: string = SOCKET_PATH,
 ): Promise<DialedRun | null> {

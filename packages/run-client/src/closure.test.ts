@@ -1,32 +1,24 @@
 /**
  * The WALL, enforced — what this package is allowed to import.
  *
- * `@odu/run-client` exists so a consumer can subscribe a run's cells without
- * installing odu. Hydration is per-PACKAGE: a repo that consumes odu from a
- * content-addressed pin copies this directory and satisfies THIS manifest, so
- * what it pays is the transitive closure of the declared dependencies, not the
- * set of modules its own code happens to reach. Two failures follow from that,
- * and neither is visible to `tsc` inside this repo — where odu's own
- * node_modules resolves everything:
+ * Two ways to break a consumer that `tsc` cannot see from inside this repo,
+ * where odu's own node_modules resolves everything:
  *
  *   - an import that reaches back into odu's `src/` compiles here and is a
- *     `TS2307` in the consumer, because odu's src was never copied;
+ *     `TS2307` downstream, because only this directory was copied;
  *   - an import of a package this manifest does not declare compiles here
  *     (odu's root node_modules has it) and is a missing module downstream.
  *
- * So the closure is walked and checked rather than asserted in a README. This
- * is the same instrument `@kolu/padi-client` carries as
- * `hydrate.closure.test.ts`, for the same reason and against the same class of
- * bug — and it is the test that makes "the arrow never points back" a fact
- * instead of a convention.
+ * So the closure is walked rather than asserted in prose — the instrument
+ * `@kolu/padi-client` carries as `hydrate.closure.test.ts`, against the same
+ * class of bug. It is what makes "the arrow never points back" a fact instead
+ * of a convention; the README says why that matters.
  *
- * `@kolu/*` is admitted with a note rather than a manifest entry: those sources
- * are hydrated from the Nix store, never installed from a lockfile, so odu's
- * root manifest cannot name them and neither can this one (bun would try to
- * resolve them from the registry and fail the install). The manifest's
- * `//dependencies` note says so, and this scan pins the exact set — a NEW
- * `@kolu/*` import is a new thing a consumer must hydrate, which is precisely
- * the fact that must not slip in silently.
+ * `@kolu/*` is admitted by {@link HYDRATED} rather than by the manifest,
+ * because those sources are hydrated from a Nix pin and never installed — see
+ * the manifest's `//dependencies`. Pinning the exact set here is the point: a
+ * NEW `@kolu/*` import is a new directory every downstream must copy, and that
+ * is not a fact that may slip in silently.
  */
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
