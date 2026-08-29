@@ -7,11 +7,12 @@
 # The consumer is built the way a downstream really consumes odu: a scratch
 # directory outside the checkout, whose node_modules holds a COPY of
 # packages/run-client (not the workspace symlink — a symlink would resolve
-# odu's own tree and prove nothing) plus exactly what that package's manifest
-# and hydration note ask for, `effect` and `@kolu/surface`. If the package
-# reached back into `src/`, or named a dependency the manifest does not, this
-# script is where it fails — the same wall
-# packages/run-client/src/closure.test.ts asserts statically.
+# odu's own tree and prove nothing) plus exactly what that package's manifest,
+# its hydration note, and the one library it hydrates ask for — the four names
+# listed at the consumer's setup below. If the package reached back into
+# `src/`, or named a dependency the manifest does not, this script is where it
+# fails — the same wall packages/run-client/src/closure.test.ts asserts
+# statically.
 #
 # Run from odu's dev shell (it needs `bun` and $ODU_KOLU_SURFACE):
 #
@@ -29,22 +30,37 @@ WT="$2"    # the odu checkout (source of packages/run-client and the fixture)
 : "${ODU_KOLU_SURFACE:?run this inside the odu dev shell (nix develop)}"
 command -v bun >/dev/null || { echo "bun not on PATH — run inside nix develop" >&2; exit 1; }
 
+# Poll a predicate to a deadline. Returns non-zero on timeout rather than
+# deciding what that means: "the socket never came up" and "the run is still
+# alive" want different words, and `set -e` would take the choice away.
+wait_until() {   # $1 = attempts, 250ms apart; the rest is the predicate
+  attempts="$1"; shift
+  while [ "$attempts" -gt 0 ]; do
+    if "$@"; then return 0; fi
+    attempts=$((attempts - 1))
+    sleep 0.25
+  done
+  return 1
+}
+
 SCRATCH="$(mktemp -d)"
 CONSUMER="$SCRATCH/consumer"
 FIXTURE="$SCRATCH/fixture"
 RUN_PID=""
 
+socket_live() { [ -S "$FIXTURE/.ci/odu.sock" ]; }
+socket_gone() { [ ! -S "$FIXTURE/.ci/odu.sock" ]; }
+run_gone()    { ! kill -0 "$RUN_PID" 2>/dev/null; }
+# The wait that ends either way: the socket came up, or the run died trying.
+serving_or_dead() { socket_live || run_gone; }
+
 cleanup() {
   # EXPLICIT pid only — never a pkill. The coordinator is asked to stop
   # through its own surface first; the signal is the fallback for a run that
   # is already gone or never came up.
-  if [ -n "$RUN_PID" ] && kill -0 "$RUN_PID" 2>/dev/null; then
+  if [ -n "$RUN_PID" ] && ! run_gone; then
     (cd "$FIXTURE" && "$ODU" cancel >/dev/null 2>&1) || true
-    for _ in $(seq 1 40); do
-      if ! kill -0 "$RUN_PID" 2>/dev/null; then break; fi
-      sleep 0.25
-    done
-    kill -0 "$RUN_PID" 2>/dev/null && kill "$RUN_PID" 2>/dev/null || true
+    wait_until 40 run_gone || kill "$RUN_PID" 2>/dev/null || true
   fi
   rm -rf "$SCRATCH"
 }
@@ -202,35 +218,28 @@ printf '{"%s":"localhost"}' "$SYS" > "$ODU_HOSTS"
 RUN_PID=$!
 
 echo "# waiting for the run's socket …"
-for _ in $(seq 1 240); do
-  if [ -S "$FIXTURE/.ci/odu.sock" ]; then break; fi
-  if ! kill -0 "$RUN_PID" 2>/dev/null; then
-    echo "the run exited before serving a socket:" >&2
-    cat "$SCRATCH/run.log" >&2
-    exit 1
-  fi
-  sleep 0.5
-done
-if [ ! -S "$FIXTURE/.ci/odu.sock" ]; then
-  echo "no socket after 120s:" >&2; cat "$SCRATCH/run.log" >&2; exit 1
+wait_until 480 serving_or_dead || true
+if ! socket_live; then
+  run_gone && echo "the run exited before serving a socket:" >&2 \
+           || echo "no socket after two minutes:" >&2
+  cat "$SCRATCH/run.log" >&2
+  exit 1
 fi
 # Give the fast nodes a moment to finish so the matrix shows both states.
 sleep 3
 
 echo
-echo "\$ bun watch.ts $FIXTURE          # from $CONSUMER"
-echo "# the consumer node_modules, in full:"
+echo "# the consumer's node_modules, in full:"
 (cd "$CONSUMER" && ls node_modules node_modules/@odu node_modules/@kolu node_modules/@effect | sed "s/^/  /")
+echo
+echo "\$ bun watch.ts $FIXTURE          # from $CONSUMER"
 echo
 (cd "$CONSUMER" && bun watch.ts "$FIXTURE") || echo "  [watch.ts exited $?]"
 
 echo
 echo "# the run is cancelled; the socket goes away with it"
 (cd "$FIXTURE" && "$ODU" cancel >/dev/null 2>&1) || true
-for _ in $(seq 1 40); do
-  if [ ! -S "$FIXTURE/.ci/odu.sock" ]; then break; fi
-  sleep 0.25
-done
+wait_until 40 socket_gone || true
 echo
 echo "\$ bun watch.ts $FIXTURE          # same script, no run"
 (cd "$CONSUMER" && bun watch.ts "$FIXTURE") || echo "  [watch.ts exited $?]"
