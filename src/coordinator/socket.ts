@@ -1,17 +1,14 @@
 /**
- * The in-band introspection rendezvous, SERVING side: while `odu run` is live,
- * the coordinator serves the fan-in surface on `.ci/odu.sock`.
+ * THIS checkout's end of the run rendezvous — the two halves only odu has:
+ * SERVING the fan-in surface on `.ci/odu.sock` while `odu run` is live, and
+ * REFUSING in odu's own words when a face finds no run there.
  *
- * The DIALLING side moved out — `@odu/run-client/dial` is how anything reaches
- * a live run, in this repo and out of it, and `dialRunOrExit` below is the one
- * thing odu adds to it: the CLI's refusal when there is no run. That split is
- * the whole point of the package. A client may be a different build from the
- * coordinator it dials; a server is the build it is.
+ * Reaching a live run is `@odu/run-client/dial`'s, in this repo and out of it;
+ * {@link dialRunOrExit} only adds the exit a one-shot command wants.
  *
- * Transport is `@kolu/surface`'s first-class unix-socket pair
- * (`serveOverUnixSocket` / `unixSocketLink`) — same base64-newline framing
- * as every other odu transport, and unlike justci's `.ci/pc.sock`, what is
- * served is the same typed surface every other face speaks. odu keeps the
+ * Transport is `@kolu/surface`'s `serveOverUnixSocket` — same base64-newline
+ * framing as every other odu transport, and unlike justci's `.ci/pc.sock`, what
+ * is served is the same typed surface every other face speaks. odu keeps the
  * checkout-scoped path (one run per checkout, like justci) rather than the
  * library's per-user runtime-dir convention, and translates the library's
  * structured outcomes into odu-flavored verdicts: `already-served` IS the
@@ -19,8 +16,8 @@
  *
  * `serveOverUnixSocket` assumes Node's async-connect-error contract, which Bun
  * does not always honor — importing `asyncConnectError` (for its side effect)
- * restores it. The dial half of the package installs the same shim for itself,
- * so between the two every unix-socket dial and serve in this repo is covered.
+ * restores it. `@odu/run-client/dial` installs the same shim for itself, so
+ * between the two every unix-socket dial and serve in this repo is covered.
  */
 
 import { chmodSync, mkdirSync } from "node:fs";
@@ -148,10 +145,8 @@ export function noRunInProgressMessage(path: string): string {
 /** {@link dialRun}, for a face that has nothing to say without a run: exits
  *  with the justci-parity message instead of handing back `null`.
  *
- *  The EXITING variant is odu's alone, which is why it is here rather than in
- *  the package. To the package, no-run is an ordinary state and the answer is a
- *  `null` every caller decides about; a one-shot CLI command decides to die,
- *  and a library that made that decision for a dashboard would be wrong. */
+ *  Dying is a one-shot command's decision, never a library's — which is the
+ *  whole reason this wrapper is here and not in the package. */
 export async function dialRunOrExit(
   path: string = SOCKET_PATH,
 ): Promise<DialedRun> {
