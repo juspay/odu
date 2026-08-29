@@ -24,6 +24,12 @@
  * The runner spawns idle (HostSession argv is fixed to `--stdio`); the
  * coordinator dials it over surface-remote for both the pool lease and the CI
  * lane.
+ *
+ * The zod→Effect Schema mapping is LAW here as on the fan-in (kolu PLAN #17):
+ * `.optional()` → `Schema.optionalKey`, never `Schema.optional`, because absent
+ * means ABSENT on this wire too. The encoded bytes of `ConfigureInput` and both
+ * lease output unions are frozen — they cross the stdio wire to `odu-runner`,
+ * and `schemaBytes.test.ts` pins them.
  */
 
 import { buildSurfaceFace } from "@kolu/surface/client";
@@ -33,12 +39,6 @@ import type { SurfaceClientOf } from "@kolu/surface/project";
 import { nodePrimitives, nodeProcedures } from "@odu/run-client/surface";
 import { Schema } from "effect";
 import { TaskSpecSchema } from "./spec";
-
-/** The zod→Effect Schema mapping is LAW here as on the fan-in (kolu PLAN #17):
- *  `.optional()` → `Schema.optionalKey`, never `Schema.optional`, because
- *  absent means ABSENT on this wire too. The encoded bytes of `ConfigureInput`
- *  and both lease output unions are frozen — they cross the stdio wire to
- *  `odu-runner`, and `src/common/schemaBytes.test.ts` pins them. */
 
 /** `run.configure` input: either `workspace` (a checkout the runner can use
  *  as-is — the coordinator's HEAD snapshot on a localhost lane) or

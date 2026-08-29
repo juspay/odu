@@ -29,7 +29,6 @@ import { Schema } from "effect";
  *  holding — the SERVER decides that, and a reader that needs the split calls
  *  {@link splitFanId}. */
 export const NodeIdSchema = Schema.String.check(Schema.isMinLength(1));
-export type NodeId = typeof NodeIdSchema.Type;
 
 export function fanId(namepath: string, platform: string): string {
   return `${namepath}@${platform}`;

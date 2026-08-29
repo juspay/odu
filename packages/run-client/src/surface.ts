@@ -5,8 +5,8 @@
  *
  * The coordinator fans every lane in and serves THIS surface; `odu status` /
  * `logs` / `attach`, the `odu mcp` agent face, and an out-of-repo consumer that
- * hydrates this package alone are all the same kind of client of it. Three
- * primitives plus one fan-in-only cell:
+ * hydrates this package alone are all the same kind of client of it. The lane
+ * primitives, the fan-in-only `header` cell, and the mutations:
  *
  *   surface.nodes.get({})          — the whole pipeline, then deltas
  *   surface.nodeLog.get({ id })    — buffered snapshot frame, then appends
