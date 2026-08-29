@@ -6,6 +6,13 @@
  * Reaching a live run is `@odu/run-client/dial`'s, in this repo and out of it;
  * {@link dialRunOrExit} only adds the exit a one-shot command wants.
  *
+ * That exit is a FACE's decision, and it is the half of this file that must
+ * never travel. A later extract reading the filename as "the socket" would take
+ * {@link dialRunOrExit} and {@link noRunInProgressMessage} across with the
+ * serving side; then a library would be deciding that a dashboard's process
+ * should die because a run settled. Absence is a state — the package answers
+ * `null` and every caller says what that means for it.
+ *
  * Transport is `@kolu/surface`'s `serveOverUnixSocket` — same base64-newline
  * framing as every other odu transport, and unlike justci's `.ci/pc.sock`, what
  * is served is the same typed surface every other face speaks. odu keeps the
