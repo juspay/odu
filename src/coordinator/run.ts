@@ -50,7 +50,7 @@ import {
 } from "../cli/render";
 import { formatGoDuration } from "../common/duration";
 import { gitTopLevel } from "../common/git";
-import { createNodeLogSink } from "./nodeLogSink";
+import { appendIfOpen, createNodeLogSink } from "./nodeLogSink";
 import { createVerdictGate } from "./verdictGate";
 import {
   fanId,
@@ -741,7 +741,8 @@ async function orchestrate(
   //    stays here is the run's own policy: which frame routes where, and when a
   //    node's log has had this run's last word. ──
   const logs = createNodeLogSink(repoRoot, sha7);
-  const appendLocal = logs.append;
+  const appendLocal = (id: string, text: string): void =>
+    appendIfOpen(logs, id, text);
   const resetLocal = logs.reset;
   const endLocal = logs.end;
   /** The run's last word on every node's log. `end` is a promise to a reader
@@ -765,7 +766,7 @@ async function orchestrate(
    *  truncation notice is worth exactly its worst sentence. Two copies of the
    *  wording are two chances for one to drift out of that guarantee.
    *
-   *  Sealed logs are skipped, and that is the load-bearing half. A log ends
+   *  Sealed logs are skipped by `appendLocal` (`appendIfOpen`). A log ends
    *  when its owner has said its last word, and `append` after `end` THROWS by
    *  design — so a second party stamping a sealed log does not merely repeat
    *  itself, it kills the coordinator. That is not hypothetical: an operator
@@ -776,9 +777,9 @@ async function orchestrate(
    *  Two bookkeepings of "is this node still owed output" (the lane's, from
    *  frames it received; the sink's, from logs it sealed) will disagree at
    *  exactly the moments that matter, so the one that knows the log is SEALED
-   *  gets the last say. */
+   *  gets the last say — and every coordinator write, not only this stamp,
+   *  asks it. */
   const stampTruncated = (id: string, cause: string): void => {
-    if (logs.isEnded(id)) return;
     appendLocal(
       id,
       `\n[odu] log truncated: ${cause} with this node's output still owed` +
@@ -928,6 +929,10 @@ async function orchestrate(
       const node = state.nodes[id];
       if (node === undefined) continue;
       if (node.status === "running") {
+        // Status `running` is not "log is open": the node's `end` frame can
+        // land before its terminal status (two streams, no order). `appendLocal`
+        // skips a sealed log so a transport death in that window cannot throw
+        // mid-loop and leave the remaining nodes unterminated.
         appendLocal(id, strategy.log);
         const startedAt = node.startedAt ?? now;
         updateNode(id, {
@@ -1778,6 +1783,9 @@ async function orchestrate(
       onLogFrame: (laneId, frame) => {
         const id = fanId(laneId, platform);
         if (frame.kind === "append") {
+          // Sealed-log skip lives on `appendLocal` (`appendIfOpen`) — one
+          // producer, so a tap frame, a lane-death line, and a setup narration
+          // cannot disagree about whether a sealed log is writable.
           appendLocal(id, frame.text);
         } else if (frame.kind === "end") {
           // Pass the log's terminal on to the fan-in's own readers — except for
