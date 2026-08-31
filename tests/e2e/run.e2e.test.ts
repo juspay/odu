@@ -51,7 +51,7 @@ const shape = (e: ProgressEvent | undefined): ProgressEvent => {
 
 describe("odu run (local, black-box)", () => {
   it("runs a passing DAG to success and exits 0", () => {
-    const { status, events } = oduRun(oduBin, fixture("pass"));
+    const { status, events, stderr } = oduRun(oduBin, fixture("pass"));
 
     expect(events.length).toBeGreaterThan(0);
     const last = terminalStatuses(events);
@@ -61,6 +61,13 @@ describe("odu run (local, black-box)", () => {
       expect(shape(last.get(recipe)).status).toBe("success");
     }
     expect(status).toBe(0);
+    // juspay/odu#18: every green run tears down the lane pipe AFTER the
+    // nodes have already passed. That close used to crash with unhandled
+    // `write EPIPE` and pick exit 1; the summary is how we tell a clean
+    // verdict from a crash that happened on the way out.
+    expect(stderr).toContain("ci run summary");
+    expect(stderr).not.toContain("write EPIPE");
+    expect(stderr).not.toContain("after its log ended");
   }, RUN_TIMEOUT);
 
   it("runs a consumer that exports no odu-runner — the runner is odu's own (#30)", () => {

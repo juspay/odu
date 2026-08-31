@@ -49,6 +49,7 @@ import {
   EMPTY_POSTING,
   leasedLanes,
   type NodeState,
+  type NodeStatus,
   oduSurface,
   pendingNode,
   type PipelineState,
@@ -299,6 +300,22 @@ function tryGit(repo: string, args: string[]): string | null {
  *  hold open. Same shape as `ensureCheckoutFree`'s `deps`. */
 export interface RunDeps {
   claimVenues?: typeof claimVenues;
+}
+
+/** Status overlay `terminalizePlatformNodes` applies when a lane dies or is
+ *  cancelled. `undefined` means leave the node — already terminal, `ok`
+ *  included. A green run survives a post-verdict lane death because this
+ *  returns `undefined` for `ok`, not because teardown cannot write statuses. */
+export function overlayOnLaneStop(
+  status: NodeStatus,
+  strategy: {
+    running: "cancelled" | "errored";
+    pending: "cancelled" | "skipped";
+  },
+): NodeStatus | undefined {
+  if (status === "running") return strategy.running;
+  if (status === "pending") return strategy.pending;
+  return undefined;
 }
 
 export async function runCommand(
@@ -935,6 +952,8 @@ async function orchestrate(
       if (!onPlatform(id, platform)) continue;
       const node = state.nodes[id];
       if (node === undefined) continue;
+      const next = overlayOnLaneStop(node.status, strategy);
+      if (next === undefined) continue;
       if (node.status === "running") {
         // Status `running` is not "log is open": the node's `end` frame can
         // land before its terminal status (two streams, no order). `appendLocal`
@@ -943,13 +962,11 @@ async function orchestrate(
         appendLocal(id, strategy.log);
         const startedAt = node.startedAt ?? now;
         updateNode(id, {
-          status: strategy.running,
+          status: next,
           durationMs: now - startedAt,
         });
-      } else if (node.status === "pending") {
-        updateNode(id, { status: strategy.pending });
       } else {
-        continue;
+        updateNode(id, { status: next });
       }
       // The coordinator has just decided this node's fate, so it has said its
       // last word about it: end the log in the same breath as the status, the
@@ -1874,6 +1891,9 @@ async function orchestrate(
   };
 
   // One rule with attach/status: settled and not clean → non-zero (juspay/odu#68).
+  // A node that already reached `ok` is never re-terminalized by `onDead`
+  // (see `terminalizePlatformNodes`), so a lane pipe dying after a green
+  // verdict cannot move this projection (juspay/odu#18).
   const verdictCode = (state: PipelineState): number => exitCode(state);
 
   // The human verdict summary — foreground completion only, never mid-linger

@@ -33,6 +33,7 @@ import {
 } from "./common/laneSurface";
 import { firstFrame, runUnary, subscribe } from "./common/effectEdge";
 import { createLaneRunner, SETUP_NODE_ID } from "./runner/runner";
+import { overlayOnLaneStop } from "./coordinator/run";
 
 interface Harness {
   client: LaneClient;
@@ -529,6 +530,102 @@ describe("render helpers", () => {
     expect(summary.done).toBe(true);
     expect(summary.errored).toBe(1);
     expect(summary.failedOverall).toBe(true);
+  });
+
+  it("exitCode is 0 iff the settled run is clean", () => {
+    // `clean` is done && !red && cancelled === 0. Dropping the cancelled
+    // clause (`s.done && s.failedOverall ? 1 : 0`) still passes red→1 and
+    // all-ok→0; dropping the `done` gate (`!s.clean ? 1 : 0`) still passes
+    // both of those too. The cancelled-only and unsettled arms are what
+    // make the iff real (juspay/odu#68).
+    expect(exitCode(state)).toBe(1);
+    const allOk: PipelineState = {
+      ...state,
+      nodes: {
+        a: mkNode("a", "ok", 9_000),
+        b: mkNode("b", "ok", 61_000),
+        c: mkNode("c", "ok", 1_000),
+      },
+    };
+    expect(summarize(allOk).clean).toBe(true);
+    expect(exitCode(allOk)).toBe(0);
+
+    const cancelledOnly: PipelineState = {
+      ...state,
+      nodes: {
+        a: mkNode("a", "ok", 9_000),
+        b: mkNode("b", "cancelled", 61_000),
+        c: mkNode("c", "skipped", null),
+      },
+    };
+    expect(summarize(cancelledOnly).failedOverall).toBe(false);
+    expect(summarize(cancelledOnly).clean).toBe(false);
+    expect(exitCode(cancelledOnly)).toBe(1);
+
+    const unsettled: PipelineState = {
+      ...state,
+      nodes: {
+        a: mkNode("a", "ok", 9_000),
+        b: mkNode("b", "running", null),
+        c: mkNode("c", "pending", null),
+      },
+    };
+    expect(summarize(unsettled).done).toBe(false);
+    expect(exitCode(unsettled)).toBe(0);
+  });
+
+  it("an ok node is immune to a post-verdict lane-death overlay", () => {
+    // Production overlay, not a mirror: `terminalizePlatformNodes` calls
+    // `overlayOnLaneStop`. A default: arm that re-terminalized `ok` would
+    // change this function and fail here without waiting on the e2e.
+    const onDead = { running: "errored" as const, pending: "skipped" as const };
+    expect(overlayOnLaneStop("ok", onDead)).toBeUndefined();
+    expect(overlayOnLaneStop("failed", onDead)).toBeUndefined();
+    expect(overlayOnLaneStop("errored", onDead)).toBeUndefined();
+    expect(overlayOnLaneStop("cancelled", onDead)).toBeUndefined();
+    expect(overlayOnLaneStop("skipped", onDead)).toBeUndefined();
+    expect(overlayOnLaneStop("running", onDead)).toBe("errored");
+    expect(overlayOnLaneStop("pending", onDead)).toBe("skipped");
+
+    const overlay = (s: PipelineState): PipelineState => ({
+      ...s,
+      nodes: Object.fromEntries(
+        s.order.flatMap((id) => {
+          const node = s.nodes[id];
+          if (node === undefined) return [];
+          const next = overlayOnLaneStop(node.status, onDead);
+          return [[id, next === undefined ? node : { ...node, status: next }]];
+        }),
+      ),
+    });
+
+    const allOk: PipelineState = {
+      ...state,
+      nodes: {
+        a: mkNode("a", "ok", 9_000),
+        b: mkNode("b", "ok", 61_000),
+        c: mkNode("c", "ok", 1_000),
+      },
+    };
+    const afterGreen = overlay(allOk);
+    expect(afterGreen.nodes.a?.status).toBe("ok");
+    expect(afterGreen.nodes.b?.status).toBe("ok");
+    expect(afterGreen.nodes.c?.status).toBe("ok");
+    expect(exitCode(afterGreen)).toBe(0);
+
+    const stillRunning: PipelineState = {
+      ...state,
+      nodes: {
+        a: mkNode("a", "ok", 9_000),
+        b: mkNode("b", "running", null),
+        c: mkNode("c", "pending", null),
+      },
+    };
+    const afterMid = overlay(stillRunning);
+    expect(afterMid.nodes.a?.status).toBe("ok");
+    expect(afterMid.nodes.b?.status).toBe("errored");
+    expect(afterMid.nodes.c?.status).toBe("skipped");
+    expect(exitCode(afterMid)).toBe(1);
   });
 
   it("verdictLine names the outcome, the counts and the red nodes", () => {
