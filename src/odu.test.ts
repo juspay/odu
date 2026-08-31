@@ -33,6 +33,7 @@ import {
 } from "./common/laneSurface";
 import { firstFrame, runUnary, subscribe } from "./common/effectEdge";
 import { createLaneRunner, SETUP_NODE_ID } from "./runner/runner";
+import { overlayOnLaneStop } from "./coordinator/run";
 
 interface Harness {
   client: LaneClient;
@@ -574,25 +575,26 @@ describe("render helpers", () => {
   });
 
   it("an ok node is immune to a post-verdict lane-death overlay", () => {
-    // `onDead` → `terminalizePlatformNodes` (run.ts): running → errored,
-    // pending → skipped, everything already terminal (ok included) is
-    // left alone. Teardown DOES write node statuses — that is why a
-    // still-running node at kill time correctly picks exit 1. What saves
-    // a green run is the `else { continue }` on ok, not "teardown is not
-    // an input" (juspay/odu#18).
-    const overlayNode = (
-      node: PipelineState["nodes"][string],
-    ): PipelineState["nodes"][string] => {
-      if (node.status === "running") return { ...node, status: "errored" };
-      if (node.status === "pending") return { ...node, status: "skipped" };
-      return node;
-    };
+    // Production overlay, not a mirror: `terminalizePlatformNodes` calls
+    // `overlayOnLaneStop`. A default: arm that re-terminalized `ok` would
+    // change this function and fail here without waiting on the e2e.
+    const onDead = { running: "errored" as const, pending: "skipped" as const };
+    expect(overlayOnLaneStop("ok", onDead)).toBeUndefined();
+    expect(overlayOnLaneStop("failed", onDead)).toBeUndefined();
+    expect(overlayOnLaneStop("errored", onDead)).toBeUndefined();
+    expect(overlayOnLaneStop("cancelled", onDead)).toBeUndefined();
+    expect(overlayOnLaneStop("skipped", onDead)).toBeUndefined();
+    expect(overlayOnLaneStop("running", onDead)).toBe("errored");
+    expect(overlayOnLaneStop("pending", onDead)).toBe("skipped");
+
     const overlay = (s: PipelineState): PipelineState => ({
       ...s,
       nodes: Object.fromEntries(
         s.order.flatMap((id) => {
           const node = s.nodes[id];
-          return node === undefined ? [] : [[id, overlayNode(node)]];
+          if (node === undefined) return [];
+          const next = overlayOnLaneStop(node.status, onDead);
+          return [[id, next === undefined ? node : { ...node, status: next }]];
         }),
       ),
     });

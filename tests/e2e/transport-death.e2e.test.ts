@@ -105,6 +105,18 @@ function killIfAlive(pid: number): void {
   }
 }
 
+/** Resolves when the stream has closed — register at spawn, await after
+ *  `exit`, so a crash footer that lands between `exit` and `close` is in
+ *  the buffer before we grep. */
+function whenClosed(
+  stream: NodeJS.ReadableStream | null | undefined,
+): Promise<void> {
+  if (stream === null || stream === undefined) return Promise.resolve();
+  return new Promise((resolve) => {
+    stream.on("close", () => resolve());
+  });
+}
+
 function jsonEvents(stdout: string): { recipe: string; status: string }[] {
   const events: { recipe: string; status: string }[] = [];
   for (const line of stdout.split("\n")) {
@@ -242,7 +254,7 @@ describe("odu lane transport death (black-box)", () => {
       created.push(dir);
       const lingerEnv: NodeJS.ProcessEnv = {
         ...env,
-        ODU_LINGER_IDLE_MS: "3000",
+        ODU_LINGER_IDLE_MS: "30000",
       };
 
       const child = spawn(
@@ -268,20 +280,21 @@ describe("odu lane transport death (black-box)", () => {
       child.stderr?.on("data", (c: string) => {
         stderr += c;
       });
+      const stdoutClosed = whenClosed(child.stdout);
+      const stderrClosed = whenClosed(child.stderr);
       const exited = new Promise<number>((resolve) => {
         child.on("exit", (code) => resolve(code ?? -1));
         child.on("error", () => resolve(-1));
       });
 
+      // The pass fixture's nodes (plus builtin `_ci-setup`). Wait on this
+      // set — not on whatever has arrived so far — or `_ci-setup` success
+      // alone would trip the predicate while alpha/beta are still pending.
+      const recipes = ["_ci-setup", "alpha", "beta"];
       await waitUntil(
-        () => {
-          const last = lastStatuses(stdout);
-          return (
-            last.size > 0 && [...last.values()].every((s) => s === "success")
-          );
-        },
+        () => recipes.every((r) => lastStatuses(stdout).get(r) === "success"),
         600_000,
-        "every seen recipe's last status to be success",
+        "every recipe of the pass fixture to succeed",
       );
 
       const runnerPid = findRunnerPid(oduPid);
@@ -289,6 +302,7 @@ describe("odu lane transport death (black-box)", () => {
       killIfAlive(runnerPid);
 
       const code = await exited;
+      await Promise.all([stdoutClosed, stderrClosed]);
       for (const p of recipeTree) killIfAlive(p.pid);
       killIfAlive(runnerPid);
 
