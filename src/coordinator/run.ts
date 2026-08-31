@@ -1874,9 +1874,9 @@ async function orchestrate(
   };
 
   // One rule with attach/status: settled and not clean → non-zero (juspay/odu#68).
-  // This is a projection of NODE state, not of teardown: closing the lane
-  // pipe after a green verdict must not pick the process exit code
-  // (juspay/odu#18).
+  // A node that already reached `ok` is never re-terminalized by `onDead`
+  // (see `terminalizePlatformNodes`), so a lane pipe dying after a green
+  // verdict cannot move this projection (juspay/odu#18).
   const verdictCode = (state: PipelineState): number => exitCode(state);
 
   // The human verdict summary — foreground completion only, never mid-linger

@@ -531,10 +531,12 @@ describe("render helpers", () => {
     expect(summary.failedOverall).toBe(true);
   });
 
-  it("exitCode is 0 iff the settled run is clean — teardown is not an input", () => {
-    // juspay/odu#18: a green run's process exit is this projection, not
-    // whatever the lane pipe does as it closes. An errored/failed/cancelled
-    // node is the only way this returns 1.
+  it("exitCode is 0 iff the settled run is clean", () => {
+    // `clean` is done && !red && cancelled === 0. Dropping the cancelled
+    // clause (`s.done && s.failedOverall ? 1 : 0`) still passes red→1 and
+    // all-ok→0; dropping the `done` gate (`!s.clean ? 1 : 0`) still passes
+    // both of those too. The cancelled-only and unsettled arms are what
+    // make the iff real (juspay/odu#68).
     expect(exitCode(state)).toBe(1);
     const allOk: PipelineState = {
       ...state,
@@ -546,6 +548,82 @@ describe("render helpers", () => {
     };
     expect(summarize(allOk).clean).toBe(true);
     expect(exitCode(allOk)).toBe(0);
+
+    const cancelledOnly: PipelineState = {
+      ...state,
+      nodes: {
+        a: mkNode("a", "ok", 9_000),
+        b: mkNode("b", "cancelled", 61_000),
+        c: mkNode("c", "skipped", null),
+      },
+    };
+    expect(summarize(cancelledOnly).failedOverall).toBe(false);
+    expect(summarize(cancelledOnly).clean).toBe(false);
+    expect(exitCode(cancelledOnly)).toBe(1);
+
+    const unsettled: PipelineState = {
+      ...state,
+      nodes: {
+        a: mkNode("a", "ok", 9_000),
+        b: mkNode("b", "running", null),
+        c: mkNode("c", "pending", null),
+      },
+    };
+    expect(summarize(unsettled).done).toBe(false);
+    expect(exitCode(unsettled)).toBe(0);
+  });
+
+  it("an ok node is immune to a post-verdict lane-death overlay", () => {
+    // `onDead` → `terminalizePlatformNodes` (run.ts): running → errored,
+    // pending → skipped, everything already terminal (ok included) is
+    // left alone. Teardown DOES write node statuses — that is why a
+    // still-running node at kill time correctly picks exit 1. What saves
+    // a green run is the `else { continue }` on ok, not "teardown is not
+    // an input" (juspay/odu#18).
+    const overlayNode = (
+      node: PipelineState["nodes"][string],
+    ): PipelineState["nodes"][string] => {
+      if (node.status === "running") return { ...node, status: "errored" };
+      if (node.status === "pending") return { ...node, status: "skipped" };
+      return node;
+    };
+    const overlay = (s: PipelineState): PipelineState => ({
+      ...s,
+      nodes: Object.fromEntries(
+        s.order.flatMap((id) => {
+          const node = s.nodes[id];
+          return node === undefined ? [] : [[id, overlayNode(node)]];
+        }),
+      ),
+    });
+
+    const allOk: PipelineState = {
+      ...state,
+      nodes: {
+        a: mkNode("a", "ok", 9_000),
+        b: mkNode("b", "ok", 61_000),
+        c: mkNode("c", "ok", 1_000),
+      },
+    };
+    const afterGreen = overlay(allOk);
+    expect(afterGreen.nodes.a?.status).toBe("ok");
+    expect(afterGreen.nodes.b?.status).toBe("ok");
+    expect(afterGreen.nodes.c?.status).toBe("ok");
+    expect(exitCode(afterGreen)).toBe(0);
+
+    const stillRunning: PipelineState = {
+      ...state,
+      nodes: {
+        a: mkNode("a", "ok", 9_000),
+        b: mkNode("b", "running", null),
+        c: mkNode("c", "pending", null),
+      },
+    };
+    const afterMid = overlay(stillRunning);
+    expect(afterMid.nodes.a?.status).toBe("ok");
+    expect(afterMid.nodes.b?.status).toBe("errored");
+    expect(afterMid.nodes.c?.status).toBe("skipped");
+    expect(exitCode(afterMid)).toBe(1);
   });
 
   it("verdictLine names the outcome, the counts and the red nodes", () => {
