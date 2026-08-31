@@ -203,4 +203,79 @@ describe("odu lane transport death (black-box)", () => {
     },
     900_000,
   );
+
+  it(
+    "killing the runner after every node succeeded still exits 0",
+    async () => {
+      // Dual of the test above, and the shape juspay/odu#18 named: the
+      // verdict is already green, THEN the lane pipe dies. `--linger` keeps
+      // the runner attached past settle so the kill is not a race with
+      // natural `lane.close()`; idle-reap then exits via `verdictCode`,
+      // which must stay 0. A post-verdict transport death that errored an
+      // already-ok node, or crashed on EPIPE / a sealed-log throw, would
+      // pick a non-zero code here.
+      const dir = makeFixture("pass");
+      created.push(dir);
+      const lingerEnv: NodeJS.ProcessEnv = {
+        ...env,
+        ODU_LINGER_IDLE_MS: "3000",
+      };
+
+      const child = spawn(
+        oduBin,
+        ["run", "--no-strict", "--linger", "--progress", "json"],
+        {
+          cwd: dir,
+          stdio: ["ignore", "pipe", "pipe"],
+          env: lingerEnv,
+        },
+      );
+      live.push(child);
+      const oduPid = child.pid;
+      if (oduPid === undefined) throw new Error("odu spawn produced no pid");
+
+      let stdout = "";
+      let stderr = "";
+      child.stdout?.setEncoding("utf-8");
+      child.stderr?.setEncoding("utf-8");
+      child.stdout?.on("data", (c: string) => {
+        stdout += c;
+      });
+      child.stderr?.on("data", (c: string) => {
+        stderr += c;
+      });
+      const exited = new Promise<number>((resolve) => {
+        child.on("exit", (code) => resolve(code ?? -1));
+        child.on("error", () => resolve(-1));
+      });
+
+      const recipes = ["_ci-setup", "alpha", "beta"];
+      await waitUntil(
+        () =>
+          recipes.every((r) =>
+            jsonEvents(stdout).some(
+              (e) => e.recipe === r && e.status === "success",
+            ),
+          ),
+        600_000,
+        "every recipe to succeed",
+      );
+
+      const runnerPid = findRunnerPid(oduPid);
+      const recipeTree = descendants(runnerPid);
+      killIfAlive(runnerPid);
+
+      const code = await exited;
+      for (const p of recipeTree) killIfAlive(p.pid);
+      killIfAlive(runnerPid);
+
+      expect(code).toBe(0);
+      expect(stderr).not.toContain("write EPIPE");
+      expect(stderr).not.toContain("after its log ended");
+      expect(
+        jsonEvents(stdout).some((e) => e.status === "errored"),
+      ).toBe(false);
+    },
+    900_000,
+  );
 });

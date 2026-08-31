@@ -531,6 +531,23 @@ describe("render helpers", () => {
     expect(summary.failedOverall).toBe(true);
   });
 
+  it("exitCode is 0 iff the settled run is clean — teardown is not an input", () => {
+    // juspay/odu#18: a green run's process exit is this projection, not
+    // whatever the lane pipe does as it closes. An errored/failed/cancelled
+    // node is the only way this returns 1.
+    expect(exitCode(state)).toBe(1);
+    const allOk: PipelineState = {
+      ...state,
+      nodes: {
+        a: mkNode("a", "ok", 9_000),
+        b: mkNode("b", "ok", 61_000),
+        c: mkNode("c", "ok", 1_000),
+      },
+    };
+    expect(summarize(allOk).clean).toBe(true);
+    expect(exitCode(allOk)).toBe(0);
+  });
+
   it("verdictLine names the outcome, the counts and the red nodes", () => {
     // Pure in the state: the host prints it once its viewport is gone, so
     // there is no "call stop() first" ordering to get wrong.
