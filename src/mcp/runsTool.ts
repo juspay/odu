@@ -17,10 +17,9 @@
 
 import type { BespokeTool } from "@kolu/surface-mcp";
 import { Effect, Schema } from "effect";
-import { gitTopLevel } from "../common/git";
 import type { RunRecord } from "../common/runRecord";
 import { readLedger } from "../coordinator/ledger";
-import { checkoutField } from "./checkout";
+import { checkoutField, checkoutOf } from "./checkout";
 
 export const runsInput = Schema.Struct({
   checkout: checkoutField,
@@ -42,23 +41,26 @@ const DEFAULT_LIMIT = 20;
 
 export interface RunsOptions {
   limit?: number;
-  /** Named checkout whose ledger to read (the tool's `checkout` argument).
-   *  Used as-is — it IS the checkout root by contract; absent falls back to
-   *  the process's git probe (below). */
+  /** Named checkout whose ledger to read (the tool's `checkout` argument — a
+   *  validated root). Absent: the process's cwd, via `checkoutOf` — the same
+   *  default every other bespoke tool uses. */
   checkout?: string;
   /** Injected for tests; defaults to reading the ledger of the target
-   *  checkout. Returns `[]` outside a checkout, mirroring a no-history read. */
+   *  checkout. Returns `[]` where no ledger exists, mirroring a no-history
+   *  read. */
   loadLedger?: () => RunRecord[];
 }
 
 function defaultLoadLedger(checkout?: string): RunRecord[] {
-  // A NAMED checkout is the root by contract — read it directly. The
-  // un-named default resolves the process's own checkout via `gitTopLevel`
-  // (what `odu runs` uses) rather than assuming cwd == top-level; note the
-  // read needs no readable HEAD, which is why it isn't `gitRunContext`
-  // (which would return null on an unborn HEAD).
-  const repoRoot = checkout ?? gitTopLevel();
-  return repoRoot === null ? [] : readLedger(repoRoot);
+  // The default is the server's cwd — `checkoutOf`, the one rule the other
+  // eight tools already follow (and this tool's own description already
+  // claims). The prior `gitTopLevel` probe was CLI-shaped rescue: it made
+  // `runs()` from a subdirectory-spawned server read the toplevel ledger that
+  // `run`/`wait`/`cancel` in that same broken arrangement address as
+  // `<cwd>/.ci` — "helpfully correct" here, divergent everywhere. A NAMED
+  // checkout is a validated root (./checkout.ts), so both directions of the
+  // fold now read a root's `.ci` or loudly nothing else's.
+  return readLedger(checkoutOf({ checkout }));
 }
 
 /** The newest `limit` run records (the ledger is already newest-first). Pure
