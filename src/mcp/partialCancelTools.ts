@@ -22,9 +22,7 @@
 import type { BespokeTool } from "@kolu/surface-mcp";
 import { Effect, Schema } from "effect";
 import { NodeIdSchema } from "@odu/run-client/nodeId";
-import { runSocketPath } from "@odu/run-client/dial";
-import { dialAFor, redialingAClient } from "./agentSurface";
-import { checkoutField } from "./checkout";
+import { checkoutField, clientForCheckout } from "./checkout";
 
 export const nodeCancelInput = Schema.Struct({
   checkout: checkoutField,
@@ -39,8 +37,8 @@ export const laneCancelInput = Schema.Struct({
 export type LaneCancelInput = typeof laneCancelInput.Type;
 
 /** The two A-side verbs these tools forward: the narrow face slice the
- *  handler is permitted to see over the injected client — the `any` the
- *  bespoke slot hands in stops at this boundary. */
+ *  handlers are permitted to see. The `any` the bespoke slot hands in stops
+ *  at `clientForCheckout` (./checkout.ts) — this slice is what it narrows to. */
 interface DriveClient {
   surface: {
     node: { cancel: (input: { id: string }) => Effect.Effect<{ ok: boolean }> };
@@ -64,12 +62,9 @@ export const nodeCancelTool: BespokeTool = {
   mutates: true,
   handler: (args, client) => {
     const a = args as NodeCancelInput;
-    if (a.checkout === undefined) {
-      return (client as DriveClient).surface.node.cancel(a);
-    }
-    return redialingAClient(
-      dialAFor(runSocketPath(a.checkout)),
-    ).surface.node.cancel({ id: a.id });
+    return clientForCheckout<DriveClient>(a.checkout, client).surface.node.cancel({
+      id: a.id,
+    });
   },
 };
 
@@ -86,11 +81,8 @@ export const laneCancelTool: BespokeTool = {
   mutates: true,
   handler: (args, client) => {
     const a = args as LaneCancelInput;
-    if (a.checkout === undefined) {
-      return (client as DriveClient).surface.lane.cancel(a);
-    }
-    return redialingAClient(
-      dialAFor(runSocketPath(a.checkout)),
-    ).surface.lane.cancel({ platform: a.platform });
+    return clientForCheckout<DriveClient>(a.checkout, client).surface.lane.cancel({
+      platform: a.platform,
+    });
   },
 };

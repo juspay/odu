@@ -33,6 +33,8 @@
  */
 
 import { Schema } from "effect";
+import { runSocketPath } from "@odu/run-client/dial";
+import { dialAFor, redialingAClient } from "./agentSurface";
 
 /** The one annotated field every bespoke tool's input struct carries. The
  *  `.annotate` description — not a JSDoc — is what a host shows an agent
@@ -53,4 +55,29 @@ export const checkoutField = Schema.optionalKey(
  *  back-compat rule stated once. */
 export function checkoutOf(input: { readonly checkout?: string }): string {
   return input.checkout ?? process.cwd();
+}
+
+/** The client a bespoke handler drives for a call, said ONCE for every
+ *  dial-the-surface verb. Omitted `checkout`: the server-wired client (the
+ *  HOME checkout's projection, bound at boot — see `mcp.ts`). Named
+ *  `checkout`: a fresh re-dialing client bound to THAT checkout's socket —
+ *  the same `redialingAClient(dialAFor(...))` pair the face itself is wired
+ *  with, whose re-dial already happens per call; only the path becomes a
+ *  function of the input.
+ *
+ *  `Face` is the handler's own narrow slice of the surface client (the few
+ *  members it calls — `RerunClient`, `DriveClient`). Both casts live here so
+ *  the `any` the bespoke slot hands the handler stops at this one boundary:
+ *  the injected client is the face it was declared to be (the handler named
+ *  it), and the per-call client is the full surface client, from which any
+ *  such slice narrows. */
+export function clientForCheckout<Face>(
+  checkout: string | undefined,
+  injected: unknown,
+): Face {
+  return (
+    checkout === undefined
+      ? injected
+      : redialingAClient(dialAFor(runSocketPath(checkout)))
+  ) as Face;
 }

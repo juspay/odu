@@ -29,9 +29,7 @@
 
 import type { BespokeTool } from "@kolu/surface-mcp";
 import { Effect, Schema } from "effect";
-import { runSocketPath } from "@odu/run-client/dial";
-import { dialAFor, redialingAClient } from "./agentSurface";
-import { checkoutField } from "./checkout";
+import { checkoutField, clientForCheckout } from "./checkout";
 
 export const rerunInput = Schema.Struct({
   checkout: checkoutField,
@@ -79,23 +77,16 @@ export const rerunTool: BespokeTool = {
     "working directory.",
   input: rerunInput,
   mutates: true,
-  // The default path is just the upstream call through the face's projected
-  // client — both sides are Effects, so there is no lift and no
+  // Just the upstream call. Both sides are Effects, so there is no lift and no
   // `Effect.promise` (which over an already-Effect value would succeed with the
   // Effect object rather than the result). Interruption reaches the call
   // through the face's own request scope, so the `signal` parameter is ignored.
-  //
-  // A named `checkout` dials THAT checkout per call instead (./checkout.ts) —
-  // the same `redialingAClient` the face is wired with, whose re-dial already
-  // happens per call; only the path becomes a function of the input. The
-  // A-side procedure takes `{ id }` exactly — the call is narrowed, the whole
-  // input struct is never forwarded.
+  // Which checkout the call dials is `./checkout.ts`'s `clientForCheckout` —
+  // and the A-side procedure takes `{ id }` exactly: the call is narrowed in
+  // BOTH directions, the whole input struct is never forwarded.
   handler: (args, client) => {
     const a = args as RerunInput;
-    if (a.checkout === undefined) {
-      return (client as RerunClient).surface.node.rerun(a);
-    }
-    return redialingAClient(dialAFor(runSocketPath(a.checkout))).surface.node.rerun({
+    return clientForCheckout<RerunClient>(a.checkout, client).surface.node.rerun({
       id: a.id,
     });
   },
