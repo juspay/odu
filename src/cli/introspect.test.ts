@@ -7,11 +7,19 @@
  * `run`'s glyph + ProgressStatus wording.
  */
 
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
+import { Effect } from "effect";
 import { pendingNode, type PipelineState } from "@odu/run-client/surface";
+import { firstFrame } from "../common/effectEdge";
 import { capturingStderr, capturingStdout } from "../common/scaffoldForTest";
 import { dialRunOrExit } from "../coordinator/socket";
+import type { SettleVerdict } from "../coordinator/waitForSettle";
+import { agentReaderForSocket } from "../mcp/agentSurface";
 import { serveTestSurface, type TestSurface } from "../mcp/serveForTest";
+import { makeWaitTool } from "../mcp/waitTool";
 import {
   attachStream,
   headerSnapshot,
@@ -266,6 +274,125 @@ describe("waitCommand", () => {
       settled: true,
       passed: false,
       fail_fast_tripped: false,
+      failed: ["ci::e2e@x86_64-linux"],
+    });
+    expect(result).toBe(1);
+  });
+
+  it("blocks until the run actually settles, then exits 0", async () => {
+    // The plain `--settle` contract, and it had no test: every case here served
+    // a pipeline that was ALREADY terminal, so nothing pinned that the command
+    // waits at all.
+    const surface = await served(
+      doneState([
+        ["ci::unit@x86_64-linux", "running"],
+        ["ci::nix@x86_64-linux", "running"],
+      ]),
+    );
+    setTimeout(() => {
+      surface.setState(
+        doneState([
+          ["ci::unit@x86_64-linux", "ok", 0],
+          ["ci::nix@x86_64-linux", "ok", 0],
+        ]),
+      );
+    }, 60);
+    const { out, result } = await capturingStdout(() =>
+      waitCommand({ settle: true, socketPath: surface.socketPath, timeoutMs: 5_000 }),
+    );
+    expect(JSON.parse(out.trim())).toMatchObject({
+      settled: true,
+      passed: true,
+      timed_out: false,
+    });
+    expect(result).toBe(0);
+  });
+
+  it("reaches a run through a reader that DIALS, not one link it captured", async () => {
+    // The shape of the bug, pinned where it lived. `odu wait` used to dial once
+    // at command entry and hand the settle core that one link; when the link
+    // died — the wire's keep-alive makes 5–10s of coordinator silence fatal —
+    // the wait had nothing left to wait on and answered `{settled:false}` about
+    // a run that was still going.
+    //
+    // A reader that DIALS has a property a captured link cannot fake: it can be
+    // built when there is no socket at all, and each subscription reaches
+    // whatever is serving THEN. Two runs in turn at one path prove both halves —
+    // and `waitCommand` gets its reader from exactly this call.
+    const dir = mkdtempSync(join(tmpdir(), "odu-wait-reader-"));
+    const socketPath = join(dir, "odu.sock");
+    try {
+      // Built against a checkout with no run in it: nothing is dialed here.
+      const reader = agentReaderForSocket(socketPath);
+
+      const first = await serveTestSurface(
+        doneState([["ci::unit@x86_64-linux", "running"]]),
+        undefined,
+        socketPath,
+      );
+      const before = await firstFrame(reader.surface.nodes.get(undefined));
+      expect(before).toMatchObject({ run: true, pipeline: "ci::default" });
+      first.close();
+
+      // A second run binds the same `.ci/odu.sock`. The SAME reader value must
+      // see it — a captured link would still be pointed at the first one's
+      // corpse.
+      const second = await serveTestSurface(
+        { ...doneState([["ci::e2e@aarch64-darwin", "running"]]), name: "ci::two" },
+        undefined,
+        socketPath,
+      );
+      const after = await firstFrame(reader.surface.nodes.get(undefined));
+      expect(after).toMatchObject({ run: true, pipeline: "ci::two" });
+      second.close();
+
+      // And with nobody serving it answers the no-run frame rather than failing
+      // — which is what turns into `odu wait`'s loud refusal.
+      expect(await firstFrame(reader.surface.nodes.get(undefined))).toMatchObject(
+        { run: false },
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("agrees with the MCP `wait_for_settle` verdict on one run", async () => {
+    // The two faces, the same live run, one verdict. They share the settle core
+    // AND (since the reader moved) the way they reach the coordinator, so this
+    // is a pin on that sharing rather than a coincidence of two code paths.
+    const surface = await served(
+      doneState([
+        ["ci::unit@x86_64-linux", "running"],
+        ["ci::e2e@x86_64-linux", "running"],
+      ]),
+    );
+    const cli = capturingStdout(() =>
+      waitCommand({ settle: true, socketPath: surface.socketPath, timeoutMs: 5_000 }),
+    );
+    const mcp = Effect.runPromise(
+      makeWaitTool(() => null).handler(
+        { fail_fast: false, timeout_ms: 5_000 },
+        agentReaderForSocket(surface.socketPath) as never,
+        undefined,
+      ),
+    ) as Promise<SettleVerdict>;
+    setTimeout(() => {
+      surface.setState(
+        doneState([
+          ["ci::unit@x86_64-linux", "ok", 0],
+          ["ci::e2e@x86_64-linux", "failed", 1],
+        ]),
+      );
+    }, 60);
+    const [{ out, result }, tool] = await Promise.all([cli, mcp]);
+    const verdict = JSON.parse(out.trim()) as SettleVerdict;
+    // `duration_ms` is the one field that legitimately differs (two clocks).
+    const { duration_ms: _cliMs, ...cliRest } = verdict;
+    const { duration_ms: _mcpMs, ...mcpRest } = tool;
+    expect(cliRest).toEqual(mcpRest);
+    expect(verdict).toMatchObject({
+      settled: true,
+      passed: false,
       failed: ["ci::e2e@x86_64-linux"],
     });
     expect(result).toBe(1);

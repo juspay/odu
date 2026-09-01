@@ -44,7 +44,7 @@
  * reason, and its W2 reports ask three times for a `./run-stream` subpath.
  */
 
-import { Effect, Option, Stream } from "effect";
+import { Cause, Effect, Option, Stream } from "effect";
 
 /**
  * Dispatch a UNARY member call and hand back a Promise.
@@ -107,12 +107,36 @@ export async function firstFrame<T>(
  * distinguish "we tore this down" from "the feed died" by reading the signal,
  * exactly as they did when it was a call option. Omit it for a one-shot read
  * bounded by the stream itself.
+ *
+ * "An interruption is not a failure" holds for an interruption from EITHER
+ * direction — ours through `signal`, or one arriving from below — and the body
+ * says why the second half had to be spelled out.
  */
 export function subscribe<T>(
   stream: Stream.Stream<T, unknown>,
   signal?: AbortSignal,
 ): AsyncIterableIterator<T> {
-  const iterator = Stream.toAsyncIterable(stream)[Symbol.asyncIterator]();
+  // AN INTERRUPTION IS AN END, WHEREVER IT CAME FROM — this function's contract
+  // (see its doc), honored for interruptions arriving from BELOW as well as for
+  // our own abort. A `Stream` whose fiber is interrupted rejects out of
+  // `toAsyncIterable` with what `Cause.squash` makes of an interrupt-only cause:
+  // a bare `Error` reading `All fibers interrupted without error`, carrying no
+  // `_tag`, no `cause`, and nothing else to branch on. Every consumer of this
+  // module therefore had one failure it could only recognise by matching that
+  // prose, which this repo refuses to do — so it recognised none of them and the
+  // shapeless error escaped as an uncaught. It is REACHABLE: a surface client
+  // whose peer closes the socket while the subscription's dial is in flight ends
+  // this way rather than with the tagged `SurfaceStdioTransportClosed`
+  // (measured against a coordinator exiting under `wait_for_settle`).
+  //
+  // The `Cause` is the only place the fact is legible, and it is still legible
+  // HERE, one layer above where the squash happens. So classify here, once,
+  // rather than leaving every caller a string comparison.
+  const iterator = Stream.toAsyncIterable(
+    Stream.catchCause(stream, (cause) =>
+      Cause.hasInterruptsOnly(cause) ? Stream.empty : Stream.failCause(cause),
+    ),
+  )[Symbol.asyncIterator]();
   const unsubscribe = (): void => {
     void Promise.resolve(iterator.return?.()).catch(() => {});
   };

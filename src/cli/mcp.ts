@@ -12,13 +12,20 @@
  * coordinator's job (pool lease / hosts.json).
  *
  * Default-deny `expose`: only the `nodes` cell + `logs` collection (as
- * resources) and `node.rerun` / `node.cancel` / `lane.cancel` (as tools) reach
- * the host; the coordinator's `header` cell and the lane-only `run.configure`
- * are unreachable by construction. Bespoke tools: `run`, `wait_for_settle`,
+ * resources) and `node.cancel` / `lane.cancel` (as tools) reach the host; the
+ * coordinator's `header` cell and the lane-only `run.configure` are unreachable
+ * by construction. Bespoke tools: `run`, `node_rerun`, `wait_for_settle`,
  * `cancel`, `runs`, plus agent-held venue `lease` / `release` (cross-run hold).
  * (`run.cancel` is the surface mutation full-run `cancel` drives; it's not
  * exposed directly — the tool also confirms teardown. Per-node cancel is
  * `node_cancel`; per-platform is `lane_cancel`.)
+ *
+ * `node_rerun` is bespoke rather than `expose`d for one reason: a
+ * procedure-exposed tool cannot carry a DESCRIPTION (`ToolExposure` has no
+ * field for one), and `node_rerun` — the cheap, non-destructive way to retry a
+ * single lane — shipped with none at all while `run`'s described `supersede`
+ * read like the way to have another go. src/mcp/rerunTool.ts carries the whole
+ * account.
  */
 
 import { readFileSync } from "node:fs";
@@ -31,11 +38,16 @@ import {
   type SurfaceClientCallable,
 } from "@kolu/surface-mcp";
 import { oduSurface } from "@odu/run-client/surface";
-import { dialRun, SOCKET_PATH } from "@odu/run-client/dial";
-import { buildAgentProjection, redialingAClient } from "../mcp/agentSurface";
+import { SOCKET_PATH } from "@odu/run-client/dial";
+import {
+  buildAgentProjection,
+  dialAFor,
+  redialingAClient,
+} from "../mcp/agentSurface";
 import { cancelTool } from "../mcp/cancelTool";
 import { leaseTool, releaseTool } from "../mcp/leaseTool";
 import { killRuns, runTool } from "../mcp/runTool";
+import { rerunTool } from "../mcp/rerunTool";
 import { runsTool } from "../mcp/runsTool";
 import { makeWaitTool } from "../mcp/waitTool";
 import { gitRunContext } from "../common/git";
@@ -64,17 +76,17 @@ export async function mcpCommand(socketPath: string = SOCKET_PATH): Promise<numb
   // run that starts (or restarts on the same path) after the server booted is
   // observed by the next read/subscribe — without relying on the adapter's
   // memoized connection to re-dial. Each `nodes` read and log follow re-subscribe
-  // (re-dial) afresh; `wait_for_settle` holds ONE subscription dialed at call
-  // time, so it observes the coordinator live when it subscribes, not one that
-  // starts later — the run → wait_for_settle agent loop is safe because `run`
-  // blocks until the socket is live before returning. No socket → the A-client
+  // (re-dial) afresh; `wait_for_settle` dials at call time, so it observes the
+  // coordinator live when it subscribes, not one that starts later — the run →
+  // wait_for_settle agent loop is safe because `run` blocks until the socket is
+  // live before returning — and re-dials if that link dies under a run still
+  // going (see `waitForSettle`'s read loop). `odu wait` builds the same reader
+  // over the same `dialAFor`, which is why the two faces cannot disagree about
+  // a run. No socket → the A-client
   // yields the no-run value, so `nodes`/`wait_for_settle` read `{ run: false }`,
   // `logs` reads the durable file, and `run` (which ignores the client) spawns a
   // coordinator.
-  const aClient = redialingAClient(async () => {
-    const dialed = await dialRun(socketPath);
-    return dialed === null ? null : { client: dialed.client, close: dialed.close };
-  });
+  const aClient = redialingAClient(dialAFor(socketPath));
   // `directDispatch` over the served handlers is the in-process transport: a
   // tag-keyed dispatcher that invokes each handler effect directly, with zero
   // serialization and no wire at all. `buildSurfaceFace` re-nests those flat
@@ -100,12 +112,14 @@ export async function mcpCommand(socketPath: string = SOCKET_PATH): Promise<numb
     expose: {
       nodes: "resource",
       logs: "resource",
-      "node.rerun": { tool: { mutates: true } },
+      // `node.rerun` is NOT here — it ships as the bespoke `node_rerun` below,
+      // which is the only door that carries a description (see rerunTool.ts).
       "node.cancel": { tool: { mutates: true } },
       "lane.cancel": { tool: { mutates: true } },
     },
     tools: {
       run: runTool,
+      node_rerun: rerunTool,
       wait_for_settle: makeWaitTool(gitRunContext),
       cancel: cancelTool,
       runs: runsTool,

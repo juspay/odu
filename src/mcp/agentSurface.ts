@@ -53,6 +53,7 @@ import { deriveStream, projectSurface } from "@kolu/surface/project";
 import type { SurfaceHandlers } from "@kolu/surface/server";
 import { Effect, Schema, Stream } from "effect";
 import type { Rpc, RpcGroup } from "effect/unstable/rpc";
+import { dialRun } from "@odu/run-client/dial";
 import { NodeIdSchema, splitFanId } from "@odu/run-client/nodeId";
 import {
   clampLog,
@@ -181,9 +182,19 @@ export function toAgentNodes(state: PipelineState): AgentNodes {
       };
 }
 
-/** Wrap a live A-client (`PipelineState` cell) as the `AgentNodesReader`
- *  `waitForSettle` expects — map every frame with `toAgentNodes`. One
- *  subscription held for the wait, same as the MCP tool's single dial.
+/** Wrap an A-client (`PipelineState` cell) as the `AgentNodesReader`
+ *  `waitForSettle` expects — map every frame with `toAgentNodes`.
+ *
+ *  WHAT IT IS HANDED DECIDES WHAT THE WAIT CAN SURVIVE, so hand it a
+ *  {@link redialingAClient} and not one live link. This mapping is honest
+ *  either way — but a client built over a single already-dialed link makes
+ *  every subscription it mints a subscription to THAT link, so once the link
+ *  dies the reader is a corpse and the wait has nothing to re-subscribe to. It
+ *  then answers `{settled:false, passed:false}` about a run that is still
+ *  going, which is the bug `odu wait --settle` shipped. `redialingAClient`
+ *  makes the dial a scoped acquire of the stream, so re-subscribing re-dials;
+ *  {@link agentReaderForSocket} is that pairing, spelled once, and is what both
+ *  faces use.
  *
  *  A `Stream` maps with `Stream.map`, so there is no hand-rolled async
  *  generator here and no `{ signal }` to thread: the wait's cancellation
@@ -450,12 +461,42 @@ function makeLogsStore(
 // ── The re-dialing A-client ──────────────────────────────────────────────────
 
 /** Dial the coordinator socket, or `null` when no run is live. Injectable so
- *  the tests drive a controllable surface; defaults to the real unix-socket
- *  dial in `mcp.ts`. */
+ *  the tests drive a controllable surface; {@link dialAFor} is the real
+ *  unix-socket dial both faces pass. */
 export type DialA = () => Promise<{
   client: OduSurfaceClient;
   close: () => Promise<void>;
 } | null>;
+
+/** The real dial, at a checkout's socket path: `@odu/run-client`'s `dialRun`
+ *  in the shape {@link redialingAClient} takes. `null` (nobody serving) travels
+ *  through as `null` — that is the package's contract and the no-run value
+ *  every face above turns into its own refusal.
+ *
+ *  Spelled ONCE because both faces pass it: `mcp.ts` for the projection's
+ *  upstream, and {@link agentReaderForSocket} for the settle wait. */
+export function dialAFor(socketPath: string): DialA {
+  return async () => {
+    const dialed = await dialRun(socketPath);
+    return dialed === null
+      ? null
+      : { client: dialed.client, close: dialed.close };
+  };
+}
+
+/** The `nodes` reader `waitForSettle` takes, for the run live at `socketPath` —
+ *  the ONE construction both faces hand it (`odu wait` directly; `odu mcp`
+ *  through the projection over the same {@link redialingAClient}).
+ *
+ *  It is a pairing, and both halves are load-bearing: {@link redialingAClient}
+ *  so the dial is a scoped acquire of the stream (re-subscribing re-DIALS, which
+ *  is what lets the wait ride out a link that dies under a run still running),
+ *  and {@link agentReaderFromA} so the rows are the agent rows, derived by the
+ *  same mapping the MCP projection applies. Nothing is dialed here: the reader
+ *  is a lazy description, and the socket is reached when the wait pulls. */
+export function agentReaderForSocket(socketPath: string): AgentNodesReader {
+  return agentReaderFromA(redialingAClient(dialAFor(socketPath)));
+}
 
 /**
  * An A-client that dials a *fresh* coordinator socket for every streaming call

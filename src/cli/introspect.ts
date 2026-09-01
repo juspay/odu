@@ -33,7 +33,7 @@ import { createDisplay, progressEvent } from "../coordinator/display";
 import { dialRunOrExit, noRunInProgressMessage } from "../coordinator/socket";
 import { postingWarning } from "../coordinator/statuses";
 import { NoLiveRunError, waitForSettle } from "../coordinator/waitForSettle";
-import { agentReaderFromA } from "../mcp/agentSurface";
+import { agentReaderForSocket } from "../mcp/agentSurface";
 import { yellow } from "./ansi";
 import {
   claimingText,
@@ -444,17 +444,30 @@ export interface WaitCommandOpts {
 /** `odu wait [--settle] [--timeout-ms N] [--expected-sha SHA]` — block on the
  *  live run's `nodes` stream and print one JSON verdict line. Default is
  *  fail-fast; `--settle` waits for the whole run. Exit 0 only on a fully-settled
- *  all-green run. Shares `waitForSettle` with the MCP `wait_for_settle` tool. */
+ *  all-green run. Shares `waitForSettle` with the MCP `wait_for_settle` tool.
+ *
+ *  THE READER IS THE SAME ONE THE MCP FACE USES, and that is the whole of it.
+ *  This command used to dial `.ci/odu.sock` HERE and hand the wait one
+ *  already-opened link — a private, one-shot copy of what `mcp.ts` builds with
+ *  `redialingAClient`, whose dial is a scoped acquire of the stream instead. The
+ *  copy looked equivalent and was not: when that single link died (the wire's
+ *  keep-alive makes 5–10s of coordinator silence fatal, and a coordinator
+ *  claiming a venue goes quiet for that long), the wait had nothing left to
+ *  wait ON, so it answered `{settled:false, passed:false}` about a run that was
+ *  still going — the bug this command shipped for a release. A reader that
+ *  re-dials lets the settle core re-subscribe and carry on, and `waitForSettle`
+ *  now does exactly that. The two faces cannot drift on it because there is one
+ *  reader.
+ *
+ *  Dialing moves INTO the wait as a consequence, and the no-run refusal moves
+ *  with it: the reader answers its `{ run: false }` frame, the core raises
+ *  `NoLiveRunError`, and the catch below prints the same one line to stderr and
+ *  exits 1 that the eager dial did. */
 export async function waitCommand(opts: WaitCommandOpts): Promise<number> {
   const socketPath = opts.socketPath ?? SOCKET_PATH;
-  const dialed = await dialRun(socketPath);
-  if (dialed === null) {
-    noRunInProgress(socketPath);
-    return 1;
-  }
   try {
     const verdict = await waitForSettle({
-      client: agentReaderFromA(dialed.client),
+      client: agentReaderForSocket(socketPath),
       // CLI default = fail-fast; `--settle` opts out (failFast: false).
       failFast: !opts.settle,
       timeoutMs: opts.timeoutMs,
@@ -471,11 +484,6 @@ export async function waitCommand(opts: WaitCommandOpts): Promise<number> {
       return 1;
     }
     throw err;
-  } finally {
-    // `await` — the Effect link teardown is async now (it was a sync `close()`
-    // under oRPC), so a bare call would let the CLI return before the socket
-    // is actually released.
-    await dialed.close();
   }
 }
 

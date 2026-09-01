@@ -32,7 +32,7 @@ import {
   waitFor,
 } from "../common/scaffoldForTest";
 import { subscribe } from "../common/effectEdge";
-import { agentReaderFromA, toAgentNodes } from "../mcp/agentSurface";
+import { agentReaderForSocket, toAgentNodes } from "../mcp/agentSurface";
 import { dialRunOrExit } from "../coordinator/socket";
 import { waitForSettle } from "../coordinator/waitForSettle";
 import { serveTestSurface, type TestSurface } from "../mcp/serveForTest";
@@ -277,53 +277,45 @@ describe("the agent face during provisioning", () => {
       provisioningHeader(),
     );
     open.push(surface);
-    const dialed = await dialRunOrExit(surface.socketPath);
-    try {
-      const verdict = await waitForSettle({
-        client: agentReaderFromA(dialed.client),
-        timeoutMs: 150,
-        socketPath: surface.socketPath,
-      });
-      // Timed out waiting — the run is live and unfinished. Before the socket
-      // moved ahead of the claim this call raised `no run in progress`.
-      expect(verdict.timed_out).toBe(true);
-      expect(verdict.settled).toBe(false);
-      expect(verdict.sha7).toBe("062c12d");
-    } finally {
-      await dialed.close();
-    }
+    const verdict = await waitForSettle({
+      // The reader `odu wait` itself builds — no dial bookkeeping here, and no
+      // captured link, which is the shape the settle wait cannot recover from.
+      client: agentReaderForSocket(surface.socketPath),
+      timeoutMs: 150,
+      socketPath: surface.socketPath,
+    });
+    // Timed out waiting — the run is live and unfinished. Before the socket
+    // moved ahead of the claim this call raised `no run in progress`.
+    expect(verdict.timed_out).toBe(true);
+    expect(verdict.settled).toBe(false);
+    expect(verdict.sha7).toBe("062c12d");
   });
 
   it("settles once provisioning fails the setup node", async () => {
     const state = provisioningState();
     const surface = await serveTestSurface(state, provisioningHeader());
     open.push(surface);
-    const dialed = await dialRunOrExit(surface.socketPath);
-    try {
-      const pending = waitForSettle({
-        client: agentReaderFromA(dialed.client),
-        timeoutMs: 5_000,
-        failFast: false,
-        socketPath: surface.socketPath,
-      });
-      // What `orchestrate` publishes when the claim throws: the setup bracket
-      // goes red and everything downstream is skipped, so a failure to get a
-      // machine reaches the agent as a verdict rather than as a vanished socket.
-      surface.setState({
-        ...state,
-        nodes: {
-          ...state.nodes,
-          [SETUP]: { ...state.nodes[SETUP]!, status: "errored" },
-          [FMT]: { ...state.nodes[FMT]!, status: "skipped" },
-        },
-      });
-      const verdict = await pending;
-      expect(verdict.settled).toBe(true);
-      expect(verdict.passed).toBe(false);
-      expect(verdict.errored).toEqual([SETUP]);
-    } finally {
-      await dialed.close();
-    }
+    const pending = waitForSettle({
+      client: agentReaderForSocket(surface.socketPath),
+      timeoutMs: 5_000,
+      failFast: false,
+      socketPath: surface.socketPath,
+    });
+    // What `orchestrate` publishes when the claim throws: the setup bracket
+    // goes red and everything downstream is skipped, so a failure to get a
+    // machine reaches the agent as a verdict rather than as a vanished socket.
+    surface.setState({
+      ...state,
+      nodes: {
+        ...state.nodes,
+        [SETUP]: { ...state.nodes[SETUP]!, status: "errored" },
+        [FMT]: { ...state.nodes[FMT]!, status: "skipped" },
+      },
+    });
+    const verdict = await pending;
+    expect(verdict.settled).toBe(true);
+    expect(verdict.passed).toBe(false);
+    expect(verdict.errored).toEqual([SETUP]);
   });
 });
 

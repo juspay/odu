@@ -8,6 +8,7 @@
  * live outside this module and call `waitForSettle`.
  */
 
+import { STREAM_RETRY_DELAY_MS } from "@kolu/surface/client";
 import { isDeadTransportError } from "@kolu/surface/errors";
 import type { OwedStatus } from "@odu/run-client/surface";
 import { SOCKET_PATH } from "@odu/run-client/dial";
@@ -178,6 +179,22 @@ function debtOf(snap: AgentNodes | undefined): readonly OwedStatus[] {
   return (snap ?? EMPTY_NODES).unposted ?? [];
 }
 
+/** Sleep `ms`, or return the moment `signal` aborts — so a timeout or a caller
+ *  cancellation during the wait's inter-attempt pause is answered promptly
+ *  instead of a second after it happened. */
+function pause(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const done = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    if (signal.aborted) done();
+    else signal.addEventListener("abort", done, { once: true });
+  });
+}
+
 /** Does the live run's `observed` sha7 satisfy the caller's `expected` sha? A
  *  prefix match either way, case-insensitive, so a 7-char sha7 and a full
  *  40-char sha both match. An empty side never matches (a no-sha frame must not
@@ -223,7 +240,17 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
     else opts.signal.addEventListener("abort", onCallerAbort, { once: true });
   }
 
-  let last: AgentNodes | undefined;
+  /** The last frame that described a LIVE run — never a no-run frame.
+   *
+   *  A run once observed is not un-observed by a later `{ run: false }`, and
+   *  that frame is exactly what a FRESH subscription yields once the
+   *  coordinator's socket is gone (`redialingAClient`'s no-run arm). Since a
+   *  transport-loss end now re-subscribes rather than answering (see the read
+   *  loop), the no-run frame is on the ordinary path, and the ledger fallback
+   *  below still has to know WHICH run it is answering about. So identity,
+   *  posting debt and the fail-closed snapshot all read the last LIVE frame
+   *  rather than whatever arrived last. */
+  let lastLive: AgentNodes | undefined;
   // The abort verdict (timeout vs caller-cancel), reused whether the read loop
   // throws on abort or ends cleanly — B's projected `nodes` stream (over A's
   // `nodes` cell) swallows the abort and ends the iterable rather than
@@ -236,7 +263,7 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
   };
   const abortedVerdict = (): SettleVerdict => {
     const cancelled = opts.signal?.aborted === true;
-    const red = last !== undefined ? agentSummary(last) : emptyRed;
+    const red = lastLive !== undefined ? agentSummary(lastLive) : emptyRed;
     return {
       settled: false,
       passed: false,
@@ -247,8 +274,8 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
       timed_out: !cancelled,
       cancelled,
       duration_ms: now() - started,
-      ...identityOf(last),
-      unposted: debtOf(last),
+      ...identityOf(lastLive),
+      unposted: debtOf(lastLive),
     };
   };
 
@@ -265,7 +292,7 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
     // LIVE run, there is none in this checkout — refuse LOUD, mirroring the
     // CLI (`odu status`), rather than an instant empty verdict a caller can't
     // tell apart from a real one (juspay/odu#49 ask 1).
-    if (last === undefined || !last.run) {
+    if (lastLive === undefined) {
       // Strip the `odu: ` prefix + trailing newline — CLI wait re-adds `odu: `,
       // MCP surfaces the body as the tool error message.
       throw new NoLiveRunError(
@@ -282,7 +309,11 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
     // passing run as unsettled. `recordVerdict` decides whether the record
     // may answer at all (a terminal outcome — nothing else).
     const fromRecord = recordVerdict(
-      ledgerRecord(opts.resolveRunContext ?? gitRunContext, last.sha7, last.seq),
+      ledgerRecord(
+        opts.resolveRunContext ?? gitRunContext,
+        lastLive.sha7,
+        lastLive.seq,
+      ),
     );
     if (fromRecord !== null) {
       // One authority supplies every field it knows — pass/fail, the red
@@ -298,14 +329,14 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
         timed_out: false,
         cancelled: false,
         duration_ms: now() - started,
-        ...identityOf(last),
+        ...identityOf(lastLive),
         unposted: fromRecord.unposted,
       };
     }
     // No usable record: fall back to the last snapshot, fail-closed. `settled`
     // only if it was already terminal, and `passed` requires that — a green
     // verdict never comes from a half-observed run.
-    const red = agentSummary(last);
+    const red = agentSummary(lastLive);
     return {
       settled: red.done,
       passed:
@@ -319,92 +350,156 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
       timed_out: false,
       cancelled: false,
       duration_ms: now() - started,
-      ...identityOf(last),
-      unposted: debtOf(last),
+      ...identityOf(lastLive),
+      unposted: debtOf(lastLive),
     };
   };
 
   try {
-    // The subscription is the WAIT: a `Stream` registers nothing until it is
-    // pulled, so the settle watcher is armed by this loop's first `next()`, not
-    // by the call that produced the stream value. `subscribe` wires the
-    // controller's abort to closing the subscription (fiber interruption), which
-    // is what the `{ signal }` call option used to do — there is no signal on a
-    // surface call any more (kolu PLAN D10/#18).
-    for await (const snap of subscribe(
-      opts.client.surface.nodes.get(undefined),
-      controller.signal,
-    )) {
-      last = snap;
-      // The pre-run / no-run snapshot (`run: false`, empty rows) is not a
-      // settled verdict — keep waiting for a real run's frames.
-      if (!snap.run) continue;
-      // A live run whose commit doesn't match what the caller dispatched is
-      // refused LOUD, not silently waited on (juspay/odu#49 ask 3).
-      if (
-        opts.expectedSha !== undefined &&
-        !shaMatches(snap.sha7, opts.expectedSha)
-      ) {
-        throw new NoLiveRunError(
-          `no live run matching ${opts.expectedSha} (this checkout is running ${formatRef(snap.sha7, snap.seq)})`,
-        );
-      }
-      const { done, failed, errored, cancelled: cancelledNodes } =
-        agentSummary(snap);
-      if (failFast && failed.length + errored.length > 0) {
-        return {
-          settled: done,
-          passed: false,
-          failed,
-          errored,
-          cancelled_nodes: cancelledNodes,
-          fail_fast_tripped: !done,
-          timed_out: false,
-          cancelled: false,
-          duration_ms: now() - started,
-          ...identityOf(snap),
-          unposted: debtOf(snap),
-        };
-      }
-      if (done) {
-        return {
-          settled: true,
-          passed:
-            failed.length + errored.length === 0 && cancelledNodes.length === 0,
-          failed,
-          errored,
-          cancelled_nodes: cancelledNodes,
-          fail_fast_tripped: false,
-          timed_out: false,
-          cancelled: false,
-          duration_ms: now() - started,
-          ...identityOf(snap),
-          unposted: debtOf(snap),
-        };
+    // ONE PASS OF THIS LOOP IS ONE SUBSCRIPTION, and the loop is what makes the
+    // wait survive a link that dies under a run that is still going.
+    //
+    // A dropped link is NOT a settled run, and the two used to be answered the
+    // same way. A link's own keep-alive makes 5–10s of PEER silence fatal to it
+    // (`@kolu/surface`'s `openWireLink`: the client writes a ping every 5s and
+    // ends the socket run the tick one goes unanswered — a deadline it records
+    // as unmovable), and a coordinator busy claiming a venue or copying a
+    // runner closure goes quiet for that long routinely.
+    // The subscription then failed with `SurfaceStdioTransportClosed`, the
+    // catch below read it as end-of-stream, and `odu wait --settle` printed
+    // `{settled:false, passed:false}` with every reason flag false — no
+    // fail-fast, no timeout, no cancellation — about fifteen seconds into a run
+    // whose lanes were still leased and whose phases were still running. That
+    // is the nothing-verdict juspay/odu#49 exists to kill, arriving through the
+    // one door it was never fitted to.
+    //
+    // So a transport-loss end re-subscribes instead of answering. The
+    // framework's own guidance for a raw-client consumer says exactly this
+    // (`isSurfaceStdioTransportClosed`: "recognise a transport-loss end and
+    // re-subscribe across a reconnect window") — and re-subscribe, never retry
+    // the corpse: `shouldRetryStreamError` deliberately refuses to retry these
+    // tags because a retry loop over one dead link is a reconnect storm. The
+    // re-subscribe is a re-DIAL, which is a property of the READER, not of this
+    // loop: both faces hand in a reader whose dial is a scoped acquire of the
+    // stream (`redialingAClient`), so pulling again reaches the run that is
+    // live NOW.
+    //
+    // The re-subscribe is also the PROBE that answers whether the run died with
+    // the link, and it cannot lie in either direction:
+    //
+    //   - the run is still up — the fresh subscription leads with the `nodes`
+    //     cell's current snapshot (nothing observed is lost, a node that went
+    //     red in the gap is red in it) and the wait carries on;
+    //   - the coordinator is gone — the dial finds no socket, the reader yields
+    //     its one `{ run: false }` frame and ENDS CLEANLY, which is the
+    //     end-of-stream path below: the finalized ledger record answers, exactly
+    //     as it did before, and at once (there is no pause on this path).
+    //
+    // Nothing here is bounded by a count of attempts, because a count is the
+    // wrong bound: the question "is this run still going" has an answer, and it
+    // is the socket's. `timeoutMs` bounds every pass together, so there is no
+    // second deadline — a wait that cannot get an answer times out and SAYS
+    // `timed_out`, which is a verdict a caller can act on, unlike the silent
+    // `{settled:false}` this loop replaced.
+    for (;;) {
+      // Frames THIS subscription delivered — the only thing the pause below
+      // needs. An attempt that dies having delivered NOTHING made no progress,
+      // so the next one waits out the framework's own inter-attempt delay
+      // rather than spinning; an attempt that was streaming re-dials at once,
+      // because that is the coordinator-exited path and the ledger is waiting.
+      let frames = 0;
+      try {
+        // The subscription is the WAIT: a `Stream` registers nothing until it is
+        // pulled, so the settle watcher is armed by this loop's first `next()`, not
+        // by the call that produced the stream value. `subscribe` wires the
+        // controller's abort to closing the subscription (fiber interruption), which
+        // is what the `{ signal }` call option used to do — there is no signal on a
+        // surface call any more (kolu PLAN D10/#18).
+        for await (const snap of subscribe(
+          opts.client.surface.nodes.get(undefined),
+          controller.signal,
+        )) {
+          frames += 1;
+          // The pre-run / no-run snapshot (`run: false`, empty rows) is not a
+          // settled verdict — keep waiting for a real run's frames. It is also not
+          // an ERASURE of a run already seen, which is why only a live frame is
+          // recorded (see `lastLive`).
+          if (!snap.run) continue;
+          lastLive = snap;
+          // A live run whose commit doesn't match what the caller dispatched is
+          // refused LOUD, not silently waited on (juspay/odu#49 ask 3).
+          if (
+            opts.expectedSha !== undefined &&
+            !shaMatches(snap.sha7, opts.expectedSha)
+          ) {
+            throw new NoLiveRunError(
+              `no live run matching ${opts.expectedSha} (this checkout is running ${formatRef(snap.sha7, snap.seq)})`,
+            );
+          }
+          const { done, failed, errored, cancelled: cancelledNodes } =
+            agentSummary(snap);
+          if (failFast && failed.length + errored.length > 0) {
+            return {
+              settled: done,
+              passed: false,
+              failed,
+              errored,
+              cancelled_nodes: cancelledNodes,
+              fail_fast_tripped: !done,
+              timed_out: false,
+              cancelled: false,
+              duration_ms: now() - started,
+              ...identityOf(snap),
+              unposted: debtOf(snap),
+            };
+          }
+          if (done) {
+            return {
+              settled: true,
+              passed:
+                failed.length + errored.length === 0 && cancelledNodes.length === 0,
+              failed,
+              errored,
+              cancelled_nodes: cancelledNodes,
+              fail_fast_tripped: false,
+              timed_out: false,
+              cancelled: false,
+              duration_ms: now() - started,
+              ...identityOf(snap),
+              unposted: debtOf(snap),
+            };
+          }
+        }
+        return streamEndedVerdict();
+      } catch (err) {
+        // A deliberate loud refusal ALWAYS propagates — never downgrade it to an
+        // abort verdict, and never re-subscribe past it. The
+        // `expected_sha`-mismatch throw happens inside the read loop, whose
+        // unwinding awaits the async iterator's cleanup; if the timeout fires in
+        // that window `controller.signal.aborted` is already true, and without
+        // this guard the refusal would be swallowed into a generic `timed_out`
+        // verdict — reintroducing the nothing-verdict juspay/odu#49 exists to
+        // kill.
+        if (err instanceof NoLiveRunError) throw err;
+        // An abort that surfaces as a rejection (rather than a clean end) is the
+        // same timeout/cancel verdict.
+        if (controller.signal.aborted) return abortedVerdict();
+        // Peer process/socket death used to end the async iterator cleanly; the
+        // surface fails it instead. The discriminant is the error's `_tag`
+        // (`SurfaceStdioTransportClosed` / `SurfaceTransportRetired`), read
+        // through the shared predicate rather than compared against a magic code
+        // string — which also survives a second `effect` module instance, where
+        // an `instanceof` would silently stop recognising it.
+        if (!isDeadTransportError(err)) throw err;
+        // The LINK died. Whether the RUN did is the next subscription's answer
+        // (see the loop's own note). A frameless attempt pauses first — see
+        // `frames`.
+        if (frames === 0) {
+          await pause(STREAM_RETRY_DELAY_MS, controller.signal);
+          if (controller.signal.aborted) return abortedVerdict();
+        }
       }
     }
-    return streamEndedVerdict();
-  } catch (err) {
-    // A deliberate loud refusal ALWAYS propagates — never downgrade it to an
-    // abort verdict. The `expected_sha`-mismatch throw happens inside the read
-    // loop, whose unwinding awaits the async iterator's cleanup; if the timeout
-    // fires in that window `controller.signal.aborted` is already true, and
-    // without this guard the refusal would be swallowed into a generic
-    // `timed_out` verdict — reintroducing the nothing-verdict juspay/odu#49
-    // exists to kill.
-    if (err instanceof NoLiveRunError) throw err;
-    // An abort that surfaces as a rejection (rather than a clean end) is the
-    // same timeout/cancel verdict.
-    if (controller.signal.aborted) return abortedVerdict();
-    // Peer process/socket death used to end the async iterator cleanly; the
-    // surface fails it instead. The discriminant is now the error's `_tag`
-    // (`SurfaceStdioTransportClosed` / `SurfaceTransportRetired`), read through
-    // the shared predicate rather than compared against a magic code string —
-    // which also survives a second `effect` module instance, where an
-    // `instanceof` would silently stop recognising it. Same verdict as before:
-    // end-of-stream, never a false green and never an uncaught.
-    if (isDeadTransportError(err)) return streamEndedVerdict();
-    throw err;
   } finally {
     clearTimeout(timer);
     opts.signal?.removeEventListener("abort", onCallerAbort);

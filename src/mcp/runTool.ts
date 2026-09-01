@@ -40,11 +40,34 @@ export const runInput = Schema.Struct({
   no_snapshot: Schema.optionalKey(Schema.Boolean),
   no_post: Schema.optionalKey(Schema.Boolean),
   /** Cancel a run already live in this checkout and start fresh, instead of
-   *  refusing — the "stop this, run the fixed commit" move after a fail-fast. */
-  supersede: Schema.optionalKey(Schema.Boolean),
+   *  refusing — the "stop this, run the fixed commit" move after a fail-fast.
+   *
+   *  `.annotate`, not this JSDoc, is what a host shows an agent about the
+   *  argument — and the missing sentence is the one that matters: this
+   *  DESTROYS the live run, every lane of it. An agent reading the tool surface
+   *  found `supersede` described and `node_rerun` blank, and concluded it had
+   *  to throw away a running darwin lane to retry a flaky linux one. */
+  supersede: Schema.optionalKey(
+    Schema.Boolean.annotate({
+      description:
+        "Cancel the run already live in this checkout and start a new one. It " +
+        "kills the WHOLE run — every platform lane, including the ones still " +
+        "green and running — so use it to replace a run with a different " +
+        "commit, never to retry a lane. To retry ONE failed or flaky lane on " +
+        "the run that is still going, cancelling nothing, use `node_rerun`.",
+    }),
+  ),
   /** Keep the coordinator alive after the run drains so a node can be rerun
    *  post-settle; call `cancel` (or `run` with supersede) when done. */
-  linger: Schema.optionalKey(Schema.Boolean),
+  linger: Schema.optionalKey(
+    Schema.Boolean.annotate({
+      description:
+        "Keep the coordinator serving after the run drains, so `node_rerun` " +
+        "still has a live run to rerun a node on once everything has settled " +
+        "(retry a flake without re-running the pipeline). It self-reaps after " +
+        "an idle period, or on `cancel`.",
+    }),
+  ),
   /** Fail immediately when every host in a platform's pool is busy, instead of
    *  waiting in line (mirrors `odu run --no-wait`). */
   no_wait: Schema.optionalKey(Schema.Boolean),
@@ -390,7 +413,12 @@ export const runTool: BespokeTool = {
     "Start a CI run the agent can then watch and drive. Spawns a background " +
     "`odu run` (its own coordinator) and returns once the run is live. Strict " +
     "by default (refuses a dirty tree); pass no_strict for a dev-iteration run " +
-    "against the working tree. One run per checkout.",
+    "against the working tree. One run per checkout — so with a run already " +
+    "live this refuses unless you pass `supersede`, which CANCELS that run and " +
+    "every lane of it. Retrying one failed or flaky lane is NOT that: use " +
+    "`node_rerun`, which re-runs a single node on the still-live run alongside " +
+    "its siblings and cancels nothing. Supersede is for replacing a run with a " +
+    "different commit.",
   input: runInput,
   mutates: true,
   handler: (args) => Effect.promise(() => startRun(args as RunInput)),
