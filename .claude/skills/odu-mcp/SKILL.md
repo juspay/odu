@@ -8,10 +8,20 @@ user-invocable: false
 
 The agent face of [odu](https://github.com/juspay/odu) — an MCP stdio server
 that re-exposes a live CI run as agent tools (`run`, `node_rerun`,
-`node_cancel`, `lane_cancel`, `wait_for_settle`, `cancel`, `lease`, `release`) and subscribable resources
+`node_cancel`, `lane_cancel`, `wait_for_settle`, `cancel`, `runs`, `lease`, `release`) and subscribable resources
 (`surface://streams/nodes`, `surface://collections/logs/{id}`), so Claude Code /
 Codex / opencode / Gemini CLI drive CI with structured calls instead of
 scraping terminal output.
+
+Every tool takes an optional `checkout` — the absolute path of another
+checkout's root; default is the server's own cwd — so one `odu mcp` serves
+many trees at once. `run` spawns its coordinator DETACHED and the server never
+reaps on exit: an agent-harness restart kills no run (stop one with `cancel`
+while the server lives, or `odu cancel` from anywhere). Resources stay bound
+to the home checkout; another checkout's run-state arrives on the verbs, and a
+node's log file is addressed off disk via `@odu/run-client`'s `logPathFor`
+(`.ci/<sha7>/<platform>/<namepath>.log` — the one spelling; never re-splice it
+by hand).
 
 `lease` / `release` are the agent-held venue layer: hold a free box across
 discrete tool calls without re-queuing between `run`s. `lease` returns
@@ -60,7 +70,10 @@ succeeds arrives as a red `_ci-setup@<platform>` verdict rather than as a
 closes before it publishes a terminal frame, the verdict comes from the run's
 finalized record on disk — never green for a run torn down mid-flight. The
 `nodes` resource carries the same `unposted`. MCP `run` tees coordinator
-stdout/stderr to `.ci/<sha7>/runs/<seq>.log`.
+stdout/stderr to `.ci/<sha7>/runs/<seq>.log` — but that tee is the MCP
+server's own capture and truncates if the server exits mid-run (a harness
+restart); the coordinator-written per-node logs (`logPathFor`) are the
+durable record.
 
 A settled node's `surface://collections/logs/{id}` is the last 64KB of its output
 and now reliably ENDS at the recipe's final line: a run that settles on its own

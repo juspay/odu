@@ -8,17 +8,18 @@
 
 import type { BespokeTool } from "@kolu/surface-mcp";
 import { Effect, Schema } from "effect";
-import { gitRunContext } from "../common/git";
-import {
-  waitForSettle,
-  type WaitOptions,
-} from "../coordinator/waitForSettle";
+import { runSocketPath } from "@odu/run-client/dial";
+import { gitRunContext, gitRunContextFor } from "../common/git";
+import { waitForSettle } from "../coordinator/waitForSettle";
 import {
   type AgentNodesReader,
+  agentReaderForSocket,
   type ResolveRunContext,
 } from "./agentSurface";
+import { checkoutField } from "./checkout";
 
 export const waitInput = Schema.Struct({
+  checkout: checkoutField,
   /** `Schema.Int`, not `Schema.Number`: a millisecond bound is an integer, and
    *  `Number`'s JSON Schema offers a host the string `"NaN"` (PLAN D8). The
    *  bounds are the same ones `waitForSettle` re-checks face-neutrally: a
@@ -100,15 +101,44 @@ export function makeWaitTool(
         catch: (e) => e,
         try: () => {
           const a = args as WaitInput;
-          const opts: WaitOptions = {
-            client: client as AgentNodesReader,
+          // A named `checkout` switches the wait from the server-wired client
+          // (the HOME checkout's projection) to a per-call reader that dials
+          // and reads THAT checkout (./checkout.ts): its socket for the live
+          // stream, its `.ci` for the durable-file fallback and the refusal's
+          // path text. The settle core and its policies are untouched — only
+          // the addressing (client, socket path, run context) bends, so the
+          // shared policy tail is built once and both forks spread it.
+          //
+          // The two wirings are NOT interchangeable, and that is deliberate:
+          // the named fork's reader (`agentReaderForSocket`) is CLI `odu
+          // wait`'s own and keeps the upstream stream failure, while the
+          // default fork's is the projection's B-client, whose `deriveStream`
+          // `orDie`s a transport death into a defect — different error
+          // channel, classified by the core's `isDeadTransportError` either
+          // way (this asymmetry is agentSurface.ts's documented pairing).
+          // `clientForCheckout` is NOT used here so the home path keeps its
+          // established wiring: a future "unify on clientForCheckout" would
+          // silently swap that defect handling — decide it, don't sed it.
+          const policy = {
             timeoutMs: a.timeout_ms,
             failFast: a.fail_fast,
             expectedSha: a.expected_sha,
             signal,
-            resolveRunContext,
           };
-          return waitForSettle(opts);
+          if (a.checkout !== undefined) {
+            const socketPath = runSocketPath(a.checkout);
+            return waitForSettle({
+              ...policy,
+              client: agentReaderForSocket(socketPath),
+              socketPath,
+              resolveRunContext: gitRunContextFor(a.checkout),
+            });
+          }
+          return waitForSettle({
+            ...policy,
+            client: client as AgentNodesReader,
+            resolveRunContext,
+          });
         },
       }),
   };

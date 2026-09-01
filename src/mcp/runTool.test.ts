@@ -5,10 +5,11 @@
  * dial, so it's served via `serveTestSurface`.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, jest } from "bun:test";
+import { runSocketPath } from "@odu/run-client/dial";
 import type { CancelResult } from "../coordinator/cancel";
 import { tryAcquireRunLock } from "../coordinator/checkoutLock";
 import { serveTestSurface, type TestSurface } from "./serveForTest";
@@ -51,11 +52,12 @@ async function serveLive(): Promise<TestSurface> {
   return s;
 }
 
-/** A spawn stub that records the argv it was handed and reports a clean start. */
+/** A spawn stub that records the argv + checkout it was handed and reports a
+ *  clean start. */
 function captureSpawn() {
-  const calls: string[][] = [];
-  const spawnRun = (args: string[]) => {
-    calls.push(args);
+  const calls: { args: string[]; checkout: string }[] = [];
+  const spawnRun = (args: string[], checkout: string) => {
+    calls.push({ args, checkout });
     return { stderr: "", onExit: new Promise<number>(() => {}) };
   };
   return { calls, spawnRun };
@@ -142,7 +144,7 @@ describe("startRun — linger / no_wait flag plumbing", () => {
       { socketPath: "/no/such/odu.sock", spawnRun, waitForSocket: socketUp },
     );
     expect(r).toMatchObject({ ok: true, started: true });
-    expect(calls[0]).toContain("--linger");
+    expect(calls[0]?.args).toContain("--linger");
   });
 
   it("omits --linger by default", async () => {
@@ -151,7 +153,7 @@ describe("startRun — linger / no_wait flag plumbing", () => {
       {},
       { socketPath: "/no/such/odu.sock", spawnRun, waitForSocket: socketUp },
     );
-    expect(calls[0]).not.toContain("--linger");
+    expect(calls[0]?.args).not.toContain("--linger");
   });
 
   it("passes --no-wait through to the spawned run", async () => {
@@ -161,7 +163,82 @@ describe("startRun — linger / no_wait flag plumbing", () => {
       { socketPath: "/no/such/odu.sock", spawnRun, waitForSocket: socketUp },
     );
     expect(r).toMatchObject({ ok: true, started: true });
-    expect(calls[0]).toContain("--no-wait");
+    expect(calls[0]?.args).toContain("--no-wait");
+  });
+});
+
+describe("startRun — checkout targeting", () => {
+  it("spawns with cwd = checkout and polls runSocketPath(checkout)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "odu-mcp-checkout-"));
+    try {
+      const { calls, spawnRun } = captureSpawn();
+      const polled: string[] = [];
+      const r = await startRun(
+        { checkout: dir },
+        {
+          spawnRun,
+          waitForSocket: async (socketPath) => {
+            polled.push(socketPath);
+            return true;
+          },
+        },
+      );
+      expect(r).toMatchObject({ ok: true, started: true });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.checkout).toBe(dir);
+      expect(polled[0]).toBe(runSocketPath(dir));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("defaults to the server's own cwd (the back-compat rule)", async () => {
+    const { calls, spawnRun } = captureSpawn();
+    const polled: string[] = [];
+    await startRun(
+      {},
+      {
+        spawnRun,
+        waitForSocket: async (socketPath) => {
+          polled.push(socketPath);
+          return true;
+        },
+      },
+    );
+    expect(calls[0]?.checkout).toBe(process.cwd());
+    expect(polled[0]).toBe(runSocketPath(process.cwd()));
+  });
+
+  it("one-run-per-checkout is enforced per checkout, not globally", async () => {
+    // A run live in checkout A (its run-lock held) must not refuse a run in
+    // checkout B — that collision-scope rule is the whole reason the MCP
+    // server can serve many worktrees at once.
+    const dirA = mkdtempSync(join(tmpdir(), "odu-mcp-a-"));
+    const dirB = mkdtempSync(join(tmpdir(), "odu-mcp-b-"));
+    mkdirSync(join(dirA, ".ci"), { recursive: true });
+    mkdirSync(join(dirB, ".ci"), { recursive: true });
+    const held = tryAcquireRunLock(join(dirA, ".ci", "odu.run.lock"));
+    expect(held).not.toBeNull();
+    try {
+      const { calls, spawnRun } = captureSpawn();
+      const inA = await startRun(
+        { checkout: dirA },
+        { spawnRun, waitForSocket: socketUp },
+      );
+      expect(inA.ok).toBe(false);
+      expect(inA.error).toMatch(/already in progress/);
+      const inB = await startRun(
+        { checkout: dirB },
+        { spawnRun, waitForSocket: socketUp },
+      );
+      expect(inB).toMatchObject({ ok: true, started: true });
+      expect(calls).toHaveLength(1); // B spawned; A never did
+      expect(calls[0]?.checkout).toBe(dirB);
+    } finally {
+      held!.release();
+      rmSync(dirA, { recursive: true, force: true });
+      rmSync(dirB, { recursive: true, force: true });
+    }
   });
 });
 

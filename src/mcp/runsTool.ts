@@ -17,11 +17,12 @@
 
 import type { BespokeTool } from "@kolu/surface-mcp";
 import { Effect, Schema } from "effect";
-import { gitTopLevel } from "../common/git";
 import type { RunRecord } from "../common/runRecord";
 import { readLedger } from "../coordinator/ledger";
+import { checkoutField, checkoutOf } from "./checkout";
 
 export const runsInput = Schema.Struct({
+  checkout: checkoutField,
   /** Cap the number of (newest-first) runs returned; default `DEFAULT_LIMIT`
    *  so a long-lived checkout.s ledger never floods the agent.s context.
    *
@@ -40,24 +41,33 @@ const DEFAULT_LIMIT = 20;
 
 export interface RunsOptions {
   limit?: number;
-  /** Injected for tests; defaults to reading the ledger from the process's git
-   *  checkout. Returns `[]` outside a checkout, mirroring a no-history read. */
+  /** Named checkout whose ledger to read (the tool's `checkout` argument — a
+   *  validated root). Absent: the process's cwd, via `checkoutOf` — the same
+   *  default every other bespoke tool uses. */
+  checkout?: string;
+  /** Injected for tests; defaults to reading the ledger of the target
+   *  checkout. Returns `[]` where no ledger exists, mirroring a no-history
+   *  read. */
   loadLedger?: () => RunRecord[];
 }
 
-function defaultLoadLedger(): RunRecord[] {
-  // The ledger read needs only the checkout root — not a readable HEAD — so
-  // resolve via `gitTopLevel` (what `odu runs` uses), not `gitRunContext`
-  // (which also derives the current sha and would return null on an unborn HEAD).
-  const repoRoot = gitTopLevel();
-  return repoRoot === null ? [] : readLedger(repoRoot);
+function defaultLoadLedger(checkout?: string): RunRecord[] {
+  // The default is the server's cwd — `checkoutOf`, the one rule the other
+  // eight tools already follow (and this tool's own description already
+  // claims). The prior `gitTopLevel` probe was CLI-shaped rescue: it made
+  // `runs()` from a subdirectory-spawned server read the toplevel ledger that
+  // `run`/`wait`/`cancel` in that same broken arrangement address as
+  // `<cwd>/.ci` — "helpfully correct" here, divergent everywhere. A NAMED
+  // checkout is a validated root (./checkout.ts), so both directions of the
+  // fold now read a root's `.ci` or loudly nothing else's.
+  return readLedger(checkoutOf({ checkout }));
 }
 
 /** The newest `limit` run records (the ledger is already newest-first). Pure
  *  over its injected loader so the slice/limit logic is testable without a
  *  real `.ci`. */
 export function listRuns(opts: RunsOptions = {}): RunsResult {
-  const load = opts.loadLedger ?? defaultLoadLedger;
+  const load = opts.loadLedger ?? (() => defaultLoadLedger(opts.checkout));
   const limit = opts.limit ?? DEFAULT_LIMIT;
   return { runs: load().slice(0, limit) };
 }
@@ -70,15 +80,19 @@ export function listRuns(opts: RunsOptions = {}): RunsResult {
  *  its `readOnlyHint: true`. */
 export const runsTool: BespokeTool = {
   description:
-    "List this checkout's durable run history — each recorded run's identity " +
+    "List a checkout's durable run history — each recorded run's identity " +
     "(sha#seq), outcome (passed/failed/incomplete), timing, lanes, and " +
     "per-node results — newest first. Works with no run live: it reads the " +
     "on-disk ledger, so it answers 'what happened on the last run?' after the " +
-    "coordinator has exited. Optional `limit` (default 20).",
+    "coordinator has exited. Targets `checkout`, defaulting to this server's " +
+    "own working directory. Optional `limit` (default 20).",
   input: runsInput,
   mutates: false,
   // Synchronous work (a disk read), so `Effect.sync` — the handler is a
   // description either way, and surface-mcp runs it at its one edge.
   handler: (args) =>
-    Effect.sync(() => listRuns({ limit: (args as RunsInput).limit })),
+    Effect.sync(() => {
+      const a = args as RunsInput;
+      return listRuns({ limit: a.limit, checkout: a.checkout });
+    }),
 };

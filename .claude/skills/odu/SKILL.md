@@ -82,7 +82,10 @@ process-compose, no separately-versioned socket client.
 > "read the log" step is `ReadMcpResourceTool` on that node's
 > `surface://collections/logs/{id}` — subscribe for push updates, or just re-read
 > to poll. (`surface://streams/nodes` is the pipeline snapshot resource alongside
-> it.)
+> it.) These URIs resolve in the MCP server's HOME checkout only: for a run you
+> targeted with a named `checkout` argument, read the log off THAT disk instead —
+> `join(checkout, logPathFor(sha7, id))` from `@odu/run-client`, never the home
+> URI (which shows another tree's run, or "missing").
 
 ## Invoking
 

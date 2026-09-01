@@ -10,8 +10,10 @@ import { Effect, Schema } from "effect";
 import type { BespokeTool } from "@kolu/surface-mcp";
 import { leaseCommand, releaseCommand } from "../cli/leaseCmd";
 import type { HolderInfo } from "../coordinator/lease";
+import { checkoutField } from "./checkout";
 
 export const leaseInput = Schema.Struct({
+  checkout: checkoutField,
   platforms: Schema.optionalKey(Schema.Array(Schema.String)),
   no_wait: Schema.optionalKey(Schema.Boolean),
 });
@@ -34,7 +36,8 @@ export const leaseTool: BespokeTool = {
     "Hold a free venue machine per platform across discrete tool calls " +
     "(agent layer). Returns immediately: held {host} or waiting {behind}. " +
     "Re-call or use hosts to observe the queue. odu run reuses held hosts " +
-    "without re-claiming. Call release when done.",
+    "without re-claiming. Call release when done. The hold lives under the " +
+    "TARGET `checkout`'s `.ci` (default: this server's working directory).",
   input: leaseInput,
   mutates: true,
   handler: (input) =>
@@ -44,6 +47,9 @@ export const leaseTool: BespokeTool = {
       platforms: args.platforms ?? [],
       noWait: args.no_wait ?? false,
       nonBlocking: true,
+      // The lease record + holder live under the TARGET checkout's `.ci`
+      // (`repoRoot` defaults to cwd when the argument is absent).
+      repoRoot: args.checkout,
     });
     return {
       ok: r.results.every(
@@ -62,6 +68,7 @@ export const leaseTool: BespokeTool = {
 };
 
 export const releaseInput = Schema.Struct({
+  checkout: checkoutField,
   platforms: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 export type ReleaseInput = typeof releaseInput.Type;
@@ -74,7 +81,8 @@ export interface ReleaseToolResult {
 export const releaseTool: BespokeTool = {
   description:
     "Drop agent-held venue lease(s) from odu lease (SIGTERM holder process). " +
-    "Omit platforms to release all agent-held leases in this checkout.",
+    "Omit platforms to release all agent-held leases in the target `checkout` " +
+    "(default: this server's working directory).",
   input: releaseInput,
   mutates: true,
   // `Effect.promise` over `releaseCommand`, which is SYNCHRONOUS (it SIGTERMs
@@ -83,7 +91,10 @@ export const releaseTool: BespokeTool = {
   handler: (input) =>
     Effect.promise(async (): Promise<ReleaseToolResult> => {
       const args = input as ReleaseInput;
-      const code = releaseCommand({ platforms: args.platforms ?? [] });
+      const code = releaseCommand({
+        platforms: args.platforms ?? [],
+        repoRoot: args.checkout,
+      });
       return { ok: code === 0, code };
     }),
 };

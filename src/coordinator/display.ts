@@ -35,7 +35,7 @@ import {
 /** Re-exported from `cli/render`, where the cross-face projections live. */
 export { commitLabel };
 import { formatGoDuration } from "../common/duration";
-import { splitFanId } from "@odu/run-client/nodeId";
+import { logPathFor, splitFanId } from "@odu/run-client/nodeId";
 import {
   EMPTY_HEADER,
   type NodeState,
@@ -45,7 +45,6 @@ import {
   runPhase,
   STATUS_META,
 } from "@odu/run-client/surface";
-import { logPathFor } from "./statuses";
 
 /** The live face's host seam, declared beside the view that consumes it — one
  *  declaration, so a member added to it cannot reach only half the seam. */

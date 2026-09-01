@@ -322,6 +322,10 @@ The interface projects odu's [@kolu/surface](https://kolu.dev/surface/) through 
 | `lease` | Agent-held venue: spawn a detached holder and return immediately with `held {host}` or `waiting {behind…}`. Re-call to observe the queue. |
 | `release` | Drop agent-held venue lease(s). |
 
+Every tool takes an optional `checkout` argument — the absolute path of the checkout root the call targets. Default is the server's own working directory, so a single-checkout agent never sends it; a server serving many conversations addresses another tree by naming it (`run({checkout: "/path/to/wt"})` spawns its coordinator there, waits on `<checkout>/.ci/odu.sock`, and the read/drive verbs dial that checkout per call). The `nodes`/`logs` resources stay bound to the server's home checkout — they are subscribable streams, not calls, so per-checkout reads arrive on the verbs; a node's log file is addressed off disk via `@odu/run-client`'s `logPathFor`, the exported spelling of `.ci/<sha7>/<platform>/<namepath>.log`.
+
+A `run`-spawned coordinator is detached and is never reaped when the MCP server exits, so restarting (or losing) the MCP process kills no run: the run settles, posts statuses, and finalizes its ledger regardless. Cancel via the `cancel` tool while the server lives, or `odu cancel` from any shell.
+
 Pipeline state and logs are subscribable resources rather than tools:
 
 - `surface://streams/nodes` — `{ run, pipeline, sha7, seq, nodes[], unposted[] }`: run identity, every node's status/exit/duration/red verdict, and full owed GitHub status rows not yet confirmed.

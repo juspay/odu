@@ -40,6 +40,7 @@ import { isLocalHost } from "@kolu/surface-remote";
 import {
   fanId,
   isSetupNode,
+  logPathFor,
   onPlatform,
   SETUP_NAMEPATH,
   splitFanId,
@@ -103,7 +104,6 @@ import {
 import {
   fetchUrlFor,
   interruptStatus,
-  logPathFor,
   parseGithubRemote,
   repoSlug,
   postingEqual,
