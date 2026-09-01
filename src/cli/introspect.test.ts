@@ -11,7 +11,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
-import { Effect } from "effect";
+import { Effect, Stream } from "effect";
 import { pendingNode, type PipelineState } from "@odu/run-client/surface";
 import { firstFrame } from "../common/effectEdge";
 import { capturingStderr, capturingStdout } from "../common/scaffoldForTest";
@@ -22,6 +22,7 @@ import { serveTestSurface, type TestSurface } from "../mcp/serveForTest";
 import { makeWaitTool } from "../mcp/waitTool";
 import {
   attachStream,
+  logStream,
   headerSnapshot,
   minimalRerunRoots,
   rerunCommand,
@@ -152,6 +153,90 @@ describe("attachStream — plain", () => {
       false,
     );
     expect(out).toMatch(/✔ success\s+ci::install@x86_64-linux/);
+  });
+});
+
+// A subscription ENDING and the thing it was waiting for ARRIVING are two
+// different events that reach a `for await` as the same `done: true`. Every
+// face here reads end-of-stream, and each has its own terminal frame; running
+// off the end of the loop instead means the feed died under it. These pin that
+// none of them reports that as success — the `wait --settle` defect, in the
+// faces next door.
+describe("a feed that drops before the face's own terminal frame", () => {
+  /** A client whose `nodes` stream hands over `frames` and then ENDS — a feed
+   *  that stops without the run settling. (A link that dies raises the tagged
+   *  transport error and is loud already; a clean end is the silent one, and
+   *  the one an interrupt from below now produces.) */
+  function endingAfter(frames: PipelineState[]): Parameters<typeof attachStream>[0] {
+    return {
+      surface: { nodes: { get: () => Stream.fromIterable(frames) } },
+    } as unknown as Parameters<typeof attachStream>[0];
+  }
+
+  const running = doneState([
+    ["ci::unit@x86_64-linux", "ok", 0],
+    ["ci::e2e@x86_64-linux", "running"],
+  ]);
+
+  it("attach does not exit 0 on a run that never settled", async () => {
+    // `exitCode(state)` is 0 for a run that has not settled, so falling into
+    // the success path handed a piped `attach` — whose contract is `run`'s —
+    // a green exit for a run still going.
+    const { err, result } = await capturingStderr(() =>
+      capturingStdout(() => attachStream(endingAfter([running]), async () => {}, true)),
+    );
+    expect(result.result).toBe(1);
+    expect(err).toMatch(/lost the connection to the run before the run settled/);
+  });
+
+  it("attach still reports the run's own verdict when it did settle", async () => {
+    const settled = doneState([["ci::e2e@x86_64-linux", "failed", 1]]);
+    const { out, result } = await capturingStdout(() =>
+      attachStream(endingAfter([settled]), async () => {}, true),
+    );
+    // The red verdict, from the run — not the dropped-feed 1.
+    expect(result).toBe(1);
+    expect(out).toContain("ci::e2e@x86_64-linux");
+  });
+
+  it("logs -f does not report an incomplete log as complete", async () => {
+    // #88/#89's invariant: either the log is complete, or it says it isn't.
+    const client = {
+      surface: {
+        nodeLog: {
+          get: () =>
+            Stream.fromIterable([
+              { kind: "snapshot" as const, text: "half a line" },
+            ]),
+        },
+      },
+    } as unknown as Parameters<typeof logStream>[0];
+    const { err, result } = await capturingStderr(() =>
+      capturingStdout(() => logStream(client, "ci::e2e@x86_64-linux", true)),
+    );
+    expect(result.result).toBe(1);
+    expect(err).toMatch(/lost the connection to the run before .*log ended/);
+    // The bytes it DID get are still delivered — a dropped feed is not a
+    // reason to withhold what arrived.
+    expect(result.out).toBe("half a line");
+  });
+
+  it("logs without -f is complete at the snapshot, as it always was", async () => {
+    const client = {
+      surface: {
+        nodeLog: {
+          get: () =>
+            Stream.fromIterable([
+              { kind: "snapshot" as const, text: "the whole buffered tail" },
+            ]),
+        },
+      },
+    } as unknown as Parameters<typeof logStream>[0];
+    const { out, result } = await capturingStdout(() =>
+      logStream(client, "ci::e2e@x86_64-linux", false),
+    );
+    expect(result).toBe(0);
+    expect(out).toBe("the whole buffered tail");
   });
 });
 

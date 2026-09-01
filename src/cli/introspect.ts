@@ -30,7 +30,11 @@ import { formatGoDuration } from "../common/duration";
 import { parseAtPlatform, transitiveDependents } from "../common/nodeId";
 import { cancelNodeOrPlatform, cancelRun } from "../coordinator/cancel";
 import { createDisplay, progressEvent } from "../coordinator/display";
-import { dialRunOrExit, noRunInProgressMessage } from "../coordinator/socket";
+import {
+  dialRunOrExit,
+  feedDroppedMessage,
+  noRunInProgressMessage,
+} from "../coordinator/socket";
 import { postingWarning } from "../coordinator/statuses";
 import { NoLiveRunError, waitForSettle } from "../coordinator/waitForSettle";
 import { agentReaderForSocket } from "../mcp/agentSurface";
@@ -218,21 +222,54 @@ export async function statusCommand(
 export async function logsCommand(
   token: string,
   follow: boolean,
+  socketPath?: string,
 ): Promise<number> {
-  const { client, close } = await dialRunOrExit();
+  const { client, close } = await dialRunOrExit(socketPath);
   const state = await firstSnapshot(client);
   const id = resolveNodeId(state, token);
+  const code = await logStream(client, id, follow);
+  await close();
+  return code;
+}
+
+/** One node's output onto stdout — the dial-free half of `logsCommand`, split
+ *  out for the same reason `attachStream` is split out of `attachCommand`: the
+ *  loop is what has a contract, and a contract wants a test that can end the
+ *  feed on purpose.
+ *
+ *  Returns 0 only when the command got the WHOLE answer it promises — the log's
+ *  `end` frame under `-f`, the buffered snapshot without it. */
+export async function logStream(
+  client: Pick<OduClient, "surface">,
+  id: string,
+  follow: boolean,
+): Promise<number> {
+  // Falling out of the loop any other way is the feed dying, and returning 0
+  // there would hand back a log that stops mid-line as a complete one. That is
+  // the single forbidden outcome this repo already spent #88/#89 on ("either
+  // the log is complete, or it says it isn't"), and it was reachable here by
+  // dropping a link.
+  let whole = false;
   for await (const frame of subscribe(client.surface.nodeLog.get({ id }))) {
     // `end` means this node produced all the output it ever will, so `-f` has
     // nothing left to follow — stop, rather than holding the terminal open
     // until the whole run exits. Without it a `logs -f` on a finished node
     // never returns, which is precisely the wait an agent cannot afford.
-    if (frame.kind === "end") break;
+    if (frame.kind === "end") {
+      whole = true;
+      break;
+    }
     process.stdout.write(frame.text);
-    if (!follow && frame.kind === "snapshot") break;
+    if (!follow && frame.kind === "snapshot") {
+      whole = true;
+      break;
+    }
   }
-  await close();
-  return 0;
+  if (whole) return 0;
+  process.stderr.write(
+    feedDroppedMessage(follow ? `${id}'s log ended` : `${id}'s log arrived`),
+  );
+  return 1;
 }
 
 export async function attachCommand(json: boolean): Promise<number> {
@@ -262,6 +299,15 @@ export async function attachStream(
   const seen = new Map<string, NodeState["status"]>();
   let last: PipelineState | undefined;
   let started = false;
+  // THIS face's terminal condition, stated so that falling out of the loop any
+  // other way is legible as what it is: the feed died. Ending the subscription
+  // and the run ENDING are two different events that arrive as the same
+  // `done: true`, and reading the first as the second is how a piped `attach`
+  // came to exit 0 — `exitCode(state)` is 0 for a run that has not settled —
+  // on a link that dropped mid-run. Same shape as the `wait --settle` defect,
+  // in the face next door. `lane.ts`'s pump already stated it this way
+  // ("lane state stream ended" → `die`).
+  let settled = false;
   for await (const state of subscribe(client.surface.nodes.get(undefined))) {
     last = state;
     if (!started) {
@@ -281,10 +327,17 @@ export async function attachStream(
       const event = progressEvent(state.sha7, id, node);
       if (event !== null) display.transition(event, node);
     }
-    if (summarize(state).done) break;
+    if (summarize(state).done) {
+      settled = true;
+      break;
+    }
   }
   display.stop(last);
   await close();
+  if (!settled) {
+    process.stderr.write(feedDroppedMessage("the run settled"));
+    return 1;
+  }
   return exitCode(last);
 }
 
@@ -348,6 +401,8 @@ async function attachDashboard(
   });
 
   let first = true;
+  // Same terminal condition, same reason as `attachStream` — see its note.
+  let settled = false;
   for await (const state of subscribe(client.surface.nodes.get(undefined))) {
     last = state;
     if (first) {
@@ -356,7 +411,10 @@ async function attachDashboard(
     } else {
       view.update(state);
     }
-    if (summarize(state).done) break;
+    if (summarize(state).done) {
+      settled = true;
+      break;
+    }
   }
   view.stop(last);
   // The viewport is gone; say how the run ended. `run` has its own verdict —
@@ -366,6 +424,12 @@ async function attachDashboard(
   // The subscription is torn down with the link, so this settles rather than
   // stranding a live `for await` past the function that opened it.
   await headerLoop;
+  if (!settled) {
+    // After `view.stop` — the terminal is back, so the operator reads this
+    // rather than watching a frozen matrix and drawing their own conclusion.
+    process.stderr.write(feedDroppedMessage("the run settled"));
+    return 1;
+  }
   return exitCode(last);
 }
 

@@ -185,22 +185,28 @@ export function toAgentNodes(state: PipelineState): AgentNodes {
 /** Wrap an A-client (`PipelineState` cell) as the `AgentNodesReader`
  *  `waitForSettle` expects — map every frame with `toAgentNodes`.
  *
- *  WHAT IT IS HANDED DECIDES WHAT THE WAIT CAN SURVIVE, so hand it a
- *  {@link redialingAClient} and not one live link. This mapping is honest
- *  either way — but a client built over a single already-dialed link makes
- *  every subscription it mints a subscription to THAT link, so once the link
- *  dies the reader is a corpse and the wait has nothing to re-subscribe to. It
- *  then answers `{settled:false, passed:false}` about a run that is still
- *  going, which is the bug `odu wait --settle` shipped. `redialingAClient`
- *  makes the dial a scoped acquire of the stream, so re-subscribing re-dials;
- *  {@link agentReaderForSocket} is that pairing, spelled once, and is what both
- *  faces use.
+ *  DELIBERATELY NOT EXPORTED, which is the whole safety property of this file's
+ *  reader half. What this is HANDED decides what a wait built on it can
+ *  survive: a client over a single already-dialed link makes every subscription
+ *  it mints a subscription to THAT link, so once the link dies the reader is a
+ *  corpse and the wait has nothing left to re-subscribe to — it then answers
+ *  `{settled:false, passed:false}` about a run that is still going, which is
+ *  the bug `odu wait --settle` shipped. The fix was not to audit callers for
+ *  the mistake; it was to stop the mistake being expressible. The only exported
+ *  way to build a reader over a live checkout is {@link agentReaderForSocket},
+ *  which pairs this mapping with {@link redialingAClient} — and a re-dialing
+ *  client is the one shape whose subscriptions outlive their own link.
+ *
+ *  (A TEST still injects whatever `AgentNodesReader` it likes: the interface is
+ *  structural, and a stub that fails on purpose is exactly how the recovery is
+ *  measured. What is closed off is the plausible-looking WRONG construction
+ *  over a real socket, not the ability to fake one.)
  *
  *  A `Stream` maps with `Stream.map`, so there is no hand-rolled async
  *  generator here and no `{ signal }` to thread: the wait's cancellation
  *  travels as fiber interruption when `subscribe` closes the subscription
  *  (kolu PLAN D10/#18), not as a per-call option. */
-export function agentReaderFromA(client: {
+function agentReaderFromA(client: {
   surface: Pick<OduClient["surface"], "nodes">;
 }): AgentNodesReader {
   return {
@@ -485,15 +491,18 @@ export function dialAFor(socketPath: string): DialA {
 }
 
 /** The `nodes` reader `waitForSettle` takes, for the run live at `socketPath` —
- *  the ONE construction both faces hand it (`odu wait` directly; `odu mcp`
- *  through the projection over the same {@link redialingAClient}).
+ *  and the ONLY exported way to build one over a live checkout, which is the
+ *  point. Both faces hand it in (`odu wait` directly; `odu mcp` through the
+ *  projection over the same {@link redialingAClient}), so the two cannot
+ *  disagree about a run, and neither can reintroduce the captured-link reader
+ *  by writing a plausible line of its own.
  *
  *  It is a pairing, and both halves are load-bearing: {@link redialingAClient}
  *  so the dial is a scoped acquire of the stream (re-subscribing re-DIALS, which
  *  is what lets the wait ride out a link that dies under a run still running),
- *  and {@link agentReaderFromA} so the rows are the agent rows, derived by the
- *  same mapping the MCP projection applies. Nothing is dialed here: the reader
- *  is a lazy description, and the socket is reached when the wait pulls. */
+ *  and `agentReaderFromA` so the rows are the agent rows, derived by the same
+ *  mapping the MCP projection applies. Nothing is dialed here: the reader is a
+ *  lazy description, and the socket is reached when the wait pulls. */
 export function agentReaderForSocket(socketPath: string): AgentNodesReader {
   return agentReaderFromA(redialingAClient(dialAFor(socketPath)));
 }
