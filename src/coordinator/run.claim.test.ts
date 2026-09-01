@@ -34,7 +34,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { dialRun } from "@odu/run-client/dial";
 import { runUnary, subscribe } from "../common/effectEdge";
 import { waitFor } from "../common/scaffoldForTest";
-import { agentReaderFromA } from "../mcp/agentSurface";
+import { agentReaderForSocket } from "../mcp/agentSurface";
 import { waitForSettle } from "./waitForSettle";
 import type { ClaimOutcome } from "./runEnv";
 import { runCommand } from "./run";
@@ -173,7 +173,10 @@ describe.if(hasJust)("a cancel that lands mid-claim", () => {
       // checkout lock and is still inside the claim. A verdict here must time
       // out, not report a settled/cancelled run.
       const verdict = await waitForSettle({
-        client: agentReaderFromA(dialed.client),
+        // The reader both faces ship (`agentReaderForSocket`), not a link this
+        // test happened to be holding — the wait is only honest over a reader
+        // that can re-dial, so a harness must not hand it another shape.
+        client: agentReaderForSocket(socketPath),
         timeoutMs: 750,
         failFast: false,
         socketPath,

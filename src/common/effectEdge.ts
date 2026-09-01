@@ -44,7 +44,7 @@
  * reason, and its W2 reports ask three times for a `./run-stream` subpath.
  */
 
-import { Effect, Option, Stream } from "effect";
+import { Cause, Effect, Option, Stream } from "effect";
 
 /**
  * Dispatch a UNARY member call and hand back a Promise.
@@ -77,6 +77,41 @@ export async function runUnary<T>(
 }
 
 /**
+ * AN INTERRUPTION IS AN END — this module's rule about the one failure shape
+ * that crosses the Effect/Promise boundary illegibly, applied at the ONE place
+ * the `Cause` is still readable.
+ *
+ * A `Stream` whose fiber is interrupted rejects out of `Effect.runPromise` with
+ * what `Cause.squash` makes of an interrupt-only cause: a bare `Error` reading
+ * `All fibers interrupted without error`, carrying no `_tag`, no `cause`, and
+ * nothing else to branch on. Every consumer of this module therefore had one
+ * failure it could only recognise by matching that prose, which this repo
+ * refuses to do — so none of them recognised it, and the shapeless error
+ * escaped as an uncaught. It is REACHABLE: a surface client whose peer closes
+ * the socket while the subscription's dial is in flight ends this way rather
+ * than with the tagged `SurfaceStdioTransportClosed` (measured against a
+ * coordinator exiting under `wait_for_settle`).
+ *
+ * The `Cause` is legible HERE, one layer above where the squash happens, and
+ * nowhere above it. So classify here, once — and for every reading member, not
+ * whichever one was fixed first: the reader that ends this way is a property of
+ * the TRANSPORT, and both members ride the same transports.
+ *
+ * (`runUnary` deliberately does not use this. A unary call must settle with a
+ * value or a rejection, and there is no honest value for "the call was
+ * interrupted" — a caller that swallowed one would proceed as though it had an
+ * answer. The rejection stays; it is only ever a shapeless one on a path that
+ * is already failing.)
+ */
+function endOnInterrupt<T>(
+  stream: Stream.Stream<T, unknown>,
+): Stream.Stream<T, unknown> {
+  return Stream.catchCause(stream, (cause) =>
+    Cause.hasInterruptsOnly(cause) ? Stream.empty : Stream.failCause(cause),
+  );
+}
+
+/**
  * The first frame of `stream`, or `undefined` when it ends without emitting.
  *
  * Taking the head ENDS the stream, which releases the subscription through its
@@ -88,11 +123,22 @@ export async function runUnary<T>(
  * treats as a protocol failure and reports as one. A stream that FAILS rejects
  * here rather than collapsing to `undefined`: a dropped link must never read as
  * "the run has no state".
+ *
+ * An INTERRUPTION is neither, and it ends the stream for the same reason and by
+ * the same rule as in {@link subscribe} — this module's contract, applied to
+ * both of its reading members rather than to whichever one was fixed first.
+ * A one-shot read is where the interruption in question actually happens (a
+ * peer closing while the subscription's dial is in flight), so the member that
+ * left it unclassified was handing `firstSnapshot` and `headerSnapshot` a bare
+ * `All fibers interrupted without error` in place of the odu-worded protocol
+ * failure they raise for exactly this case.
  */
 export async function firstFrame<T>(
   stream: Stream.Stream<T, unknown>,
 ): Promise<T | undefined> {
-  return Option.getOrUndefined(await Effect.runPromise(Stream.runHead(stream)));
+  return Option.getOrUndefined(
+    await Effect.runPromise(Stream.runHead(endOnInterrupt(stream))),
+  );
 }
 
 /**
@@ -107,12 +153,21 @@ export async function firstFrame<T>(
  * distinguish "we tore this down" from "the feed died" by reading the signal,
  * exactly as they did when it was a call option. Omit it for a one-shot read
  * bounded by the stream itself.
+ *
+ * "An interruption is not a failure" holds for an interruption from EITHER
+ * direction — ours through `signal`, or one arriving from below — and the body
+ * says why the second half had to be spelled out.
  */
 export function subscribe<T>(
   stream: Stream.Stream<T, unknown>,
   signal?: AbortSignal,
 ): AsyncIterableIterator<T> {
-  const iterator = Stream.toAsyncIterable(stream)[Symbol.asyncIterator]();
+  // An interruption from BELOW ends the iteration, exactly as our own abort
+  // does — see {@link endOnInterrupt}, which is where that rule and its
+  // evidence live for both reading members.
+  const iterator = Stream.toAsyncIterable(endOnInterrupt(stream))[
+    Symbol.asyncIterator
+  ]();
   const unsubscribe = (): void => {
     void Promise.resolve(iterator.return?.()).catch(() => {});
   };

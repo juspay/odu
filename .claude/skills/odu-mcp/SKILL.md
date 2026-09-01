@@ -18,6 +18,18 @@ discrete tool calls without re-queuing between `run`s. `lease` returns
 immediately (`held` or `waiting`); re-call or inventory to observe the line.
 `run` reuses held hosts and does not release them on exit.
 
+**`node_rerun` is how you retry ONE lane, and it costs nothing.** It re-runs a
+single node (`<recipe>@<platform>`, e.g. `ci::e2e@x86_64-linux`) and its
+transitive dependents on the run that is still LIVE — alongside the sibling
+lanes, cancelling nothing: the other platforms keep running and the run keeps
+its coordinator, its venue leases and its GitHub statuses. That is the move
+after a fail-fast: read the red node's log, fix the source, `node_rerun` that
+node, `wait_for_settle` again. `run`'s `supersede` is **not** that — it cancels
+the whole live run, every lane of it, and exists for replacing a run with a
+different commit; using it to retry a flaky lane throws away every other lane's
+work. If the run has already settled, `run({linger: true})` is what keeps the
+coordinator alive so `node_rerun` still has a run to act on.
+
 `wait_for_settle` defaults to fail-fast: it returns the instant the first node
 goes red (`fail_fast_tripped: true`, `settled: false`), so the agent drills into
 the failure without blocking on the slow lanes — its `failed[]` is only what's
@@ -29,6 +41,12 @@ that saw no frame, or the rare case the coordinator couldn't reserve one);
 and `unposted[]` carries full owed GitHub status rows
 (`{context, lastError, attempts}`) not yet confirmed (reporting debt never
 blocks settle — the test verdict stays the truth).
+A wait also rides out a dropped LINK: if the connection to the coordinator dies
+while the run is still going (a busy coordinator can go quiet long enough for
+the transport's keep-alive to give up), it re-dials and keeps waiting rather
+than reporting a healthy run as unsettled. The plain-CLI `odu wait` uses the
+same settle core over a reader built the same way (both dial through the same
+re-dialing client), so the two faces answer a run alike.
 Called with **no run live**
 it fails loud (an error mirroring `odu status`, not an empty `settled: false`),
 and an optional `expected_sha` (prefix-matched against the run's `sha7`) refuses
@@ -57,7 +75,8 @@ complete one.
 one node (`ci::fmt@plat`) and `lane_cancel` drops a whole platform while the rest
 of the run settles (status `cancelled`, not `errored`/`failed`). `run`'s `supersede`
 cancels a run already live here before starting (the "stop this, run the fixed
-commit" move), `linger` keeps the coordinator serving past settle so a node can
+commit" move — the WHOLE run, so see `node_rerun` above for retrying one lane),
+`linger` keeps the coordinator serving past settle so a node can
 be rerun afterwards, and `no_wait` fails immediately when every host in a venue
 pool is busy (default: wait in line). Together they let the agent loop call off
 or replace a run instead of stranding it or hitting "a run is already in

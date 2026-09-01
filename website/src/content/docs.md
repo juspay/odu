@@ -312,8 +312,8 @@ The interface projects odu's [@kolu/surface](https://kolu.dev/surface/) through 
 
 | Tool | Purpose |
 | --- | --- |
-| `run` | Start a background coordinator. Supports `supersede`, `linger`, and `no_wait`. Reuses agent-held venues without re-claiming. |
-| `node_rerun` | Reset one node and its transitive dependents. |
+| `run` | Start a background coordinator. Supports `supersede`, `linger`, and `no_wait`. Reuses agent-held venues without re-claiming. `supersede` cancels the **whole** live run — every lane of it — so it is for replacing a run with a different commit, never for retrying a lane. |
+| `node_rerun` | Re-run **one** node (and its transitive dependents) on the run that is still live — the way to retry a single failed or flaky lane. It works mid-run, alongside the sibling lanes, and **cancels nothing**: the other platforms keep going and the run keeps its coordinator, its venue leases and its GitHub statuses. Ids are `<recipe>@<platform>`. |
 | `node_cancel` | Cancel one node (`ci::fmt@plat`); leaves the rest of the run settling. Marks `cancelled` (not red). |
 | `lane_cancel` | Drop one platform lane (`platform: aarch64-darwin`); frees a run-owned venue lease. |
 | `wait_for_settle` | Return on settlement or immediately when a node goes red. Carries `sha7`, the reserved `seq`, and `unposted[]` full owed rows (`{context, lastError, attempts}` — reporting debt does not block settle). If the coordinator's socket closes before the terminal frame, the verdict comes from the run's finalized record on disk. Fails loud with no live run or an `expected_sha` mismatch. |
@@ -339,7 +339,17 @@ lease → run → wait_for_settle → fix → run → … → release
 run → wait_for_settle → read red node log → fix → node_rerun
 ```
 
+`node_rerun` is the retry, and it is the cheap one: the run stays up, the other
+lanes keep running, and nothing is cancelled. Reaching for `run({supersede})`
+instead throws away every lane that was still going — a green darwin lane
+discarded to have another go at a flaky linux one. Supersede is for a *different
+commit*. If the run has already settled and you want a node back, that is what
+`run({linger: true})` was for: the coordinator outlives settle, so `node_rerun`
+still has a run to act on.
+
 An early `wait_for_settle` response with `fail_fast_tripped: true` is not a final tally. Only `passed: true` on a fully settled run proves green.
+
+A wait rides out a dropped *link*. If the connection to the coordinator dies while the run is still going — a coordinator busy claiming a venue or copying a runner closure can go quiet long enough for the transport's keep-alive to give up — the wait re-dials and carries on rather than reporting a live run as unsettled. The plain-CLI `odu wait` runs the same settle core over a reader built the same way — both dial through the same re-dialing client — so the two faces answer a run alike.
 
 Every observed verdict identifies its run with `sha7` and, when the coordinator reserved one, `seq`—the durable `sha7#seq` identity. Pass `expected_sha` as a full SHA or `sha7` prefix to make identity a hard check. `seq` is null only when no ordinal could be reserved. With no live run, `wait_for_settle` raises the same “no run in progress” error as `odu status`; it never returns an ambiguous empty verdict. When a run *was* observed and the coordinator's socket then closed before the terminal frame, the verdict is read from that run's finalized record — never green for a run torn down mid-flight.
 

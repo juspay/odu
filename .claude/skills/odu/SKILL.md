@@ -51,6 +51,16 @@ process-compose, no separately-versioned socket client.
 > `run({supersede})` when the fix is a new commit. Don't pad `timeout_ms` and
 > wait: the loop is fail-fast → fix → re-wait, not one long block.
 >
+> **Retrying one lane is `node_rerun`, never `supersede`.** `node_rerun` re-runs
+> a single node (`<recipe>@<platform>`) and its dependents on the run that is
+> still live, alongside the sibling lanes, cancelling nothing — the other
+> platforms keep going and the run keeps its coordinator, venue leases and
+> GitHub statuses. `run({supersede})` cancels the WHOLE run, every lane of it,
+> and is for replacing a run with a *different commit*. Superseding to retry a
+> flaky linux lane throws away the darwin lane that was still running and
+> green — the expensive operation for a job the cheap one does. Same rule on the
+> CLI: `odu rerun <selector>`, not `odu run --supersede`.
+>
 > **A verdict names its run; no run fails loud.** A verdict about an observed
 > run carries that run's identity — `sha7` always, and `seq` (`sha7#seq`)
 > whenever the coordinator reserved an ordinal — so you match it to the run you
@@ -232,11 +242,24 @@ addressed by commit, not by run, re-running the same SHA REPLACES
 `.ci/<sha>/<plat>/<recipe>.log` — you are never reading two runs concatenated.
 
 **Wait / rerun (plain-CLI agent loop).** `odu wait` is the CLI twin of MCP
-`wait_for_settle`: default fail-fast (return the instant a node goes red),
-`--settle` for the full run; prints one JSON verdict line; exit 0 only on a
-fully-settled all-green run. `odu rerun <selector>` is the headless face of
+`wait_for_settle` — the same settle core, over a reader built the same way, so
+the two faces answer a run alike: default fail-fast (return the instant a node goes
+red), `--settle` for the full run; prints one JSON verdict line; exit 0 only on
+a fully-settled all-green run. A wait rides out a dropped LINK: if the
+connection to the coordinator dies while the run is still going (a busy
+coordinator can go quiet long enough for the keep-alive to give up), the wait
+re-dials and keeps waiting rather than reporting a live run as unsettled. It
+returns when the run settles, a node goes red, `timeout_ms` elapses (and says
+`timed_out`), or the coordinator is genuinely gone — in which case the verdict
+comes from that run's finalized record on disk. `odu rerun <selector>` is the headless face of
 surface `node.rerun` (and of the attach TUI's `r` key) — restart node(s) on
 the still-live run by fan-in id, `@platform`, or bare recipe name.
+
+`odu rerun` and MCP `node_rerun` are the SAME operation, and they are the answer
+to "one lane failed": the run stays up, the sibling lanes keep running, and
+nothing is cancelled. `odu run --supersede` / `run({supersede})` is the other
+thing — it kills the whole live run, every lane — so it belongs to "test the
+fixed commit", not to "retry that lane".
 
 **Cancel / supersede / linger.** Bare `odu cancel` drives the live run's teardown
 from a second process (finalize posted statuses, close lanes, drop the socket)

@@ -24,11 +24,10 @@ import {
   serveSurfaceAsMcp,
   type SurfaceClientCallable,
 } from "@kolu/surface-mcp";
-import { Effect, Stream } from "effect";
+import { Cause, Effect, Stream } from "effect";
+import { SurfaceStdioTransportClosed } from "@kolu/surface/errors";
 import { afterEach, describe, expect, it } from "bun:test";
-import { dialRun } from "@odu/run-client/dial";
 import {
-  oduClientOver,
   oduSurface,
   pendingNode,
   type PipelineState,
@@ -41,11 +40,15 @@ import {
   type AgentNodesReader,
   buildAgentProjection,
   type DialA,
+  dialAFor,
   type ResolveRunContext,
+  toAgentNodes,
   durableLog,
   redialingAClient,
 } from "./agentSurface";
 import { cancelTool } from "./cancelTool";
+import { rerunTool } from "./rerunTool";
+import { runTool } from "./runTool";
 import { serveTestSurface, type TestSurface } from "./serveForTest";
 import {
   type SettleVerdict,
@@ -131,7 +134,8 @@ async function connectWith(
     expose: {
       nodes: "resource",
       logs: "resource",
-      "node.rerun": { tool: { mutates: true } },
+      // `node.rerun` is bespoke (`node_rerun` in `tools`), exactly as `mcp.ts`
+      // ships it — a procedure exposure cannot carry a description.
       "node.cancel": { tool: { mutates: true } },
       "lane.cancel": { tool: { mutates: true } },
     },
@@ -151,22 +155,19 @@ async function connectWith(
  *  the same path is observed). `socketPath` defaults to the served surface's. */
 async function connect(s: TestSurface, socketPath: string = s.socketPath) {
   return connectWith(
-    async () => {
-      const dialed = await dialRun(socketPath);
-      return dialed === null ? null : { client: dialed.client, close: dialed.close };
-    },
+    dialAFor(socketPath),
     {
-      run: {
-        description: "stub",
-        // No real spawn in the smoke test — assert tools/list only.
-        handler: () => Effect.succeed({ ok: false, started: false }),
-        mutates: true,
-      },
+      // The REAL `run` tool, not a stub: its description and its `supersede` /
+      // `linger` argument annotations are part of what this file asserts, and a
+      // stub would assert the stub. Never CALLED here (the no-run describe
+      // below has its own handler stub), so nothing spawns.
+      run: runTool,
       wait_for_settle: {
         description: "stub",
         handler: () => Effect.succeed({ settled: false }),
       },
       cancel: cancelTool,
+      node_rerun: rerunTool,
     },
   );
 }
@@ -186,6 +187,52 @@ describe("odu agent MCP — end to end over the in-memory transport", () => {
       "run",
       "wait_for_settle",
     ]);
+  });
+
+  it("node_rerun tells an agent what it is for, and that it cancels nothing", async () => {
+    // It shipped with NO description at all — a bare `id` and nothing else —
+    // because a procedure exposure has no field for one, and this is the verb
+    // that could least afford it: an agent that cannot see the cheap
+    // single-lane retry reasons its way to `run({supersede})` instead and
+    // throws away every other lane. The tool now comes through the bespoke
+    // door, so the words reach the host. Facts, not phrasing: what it does,
+    // that it works mid-run, that nothing else is cancelled, and where to look
+    // instead of superseding.
+    const s = await serve([["ci::e2e@x86_64-linux", "running"]]);
+    const { mcp } = await connect(s);
+    const { tools } = await mcp.listTools();
+    const rerun = tools.find((t) => t.name === "node_rerun");
+    const description = rerun?.description ?? "";
+    expect(description.length).toBeGreaterThan(0);
+    expect(description).toMatch(/still live|live run/i);
+    expect(description).toMatch(/cancels nothing/i);
+    expect(description).toMatch(/supersede/);
+    // The `id` argument says what an id LOOKS like — it was a bare string.
+    const idSchema = (rerun?.inputSchema.properties as Record<string, { description?: string }>)?.id;
+    expect(idSchema?.description ?? "").toMatch(/@/);
+    // Still advertised as mutating (it puts work back on a lane).
+    expect(rerun?.annotations?.readOnlyHint).toBe(false);
+  });
+
+  it("run points at node_rerun instead of leaving supersede the documented retry", async () => {
+    // The other half of the same misreading: `supersede` was described and
+    // `node_rerun` was not, so the destructive whole-run restart was the only
+    // legible way to have another go. Both the tool's own words and the
+    // `supersede` ARGUMENT (a `.annotate`, which is what a host actually shows
+    // — a JSDoc above the field is not) have to name the cheap one.
+    const s = await serve([["ci::e2e@x86_64-linux", "running"]]);
+    const { mcp } = await connect(s);
+    const { tools } = await mcp.listTools();
+    const run = tools.find((t) => t.name === "run");
+    expect(run?.description ?? "").toContain("node_rerun");
+    const props = run?.inputSchema.properties as
+      | Record<string, { description?: string }>
+      | undefined;
+    const supersede = props?.supersede?.description ?? "";
+    expect(supersede).toMatch(/whole run|every platform lane/i);
+    expect(supersede).toContain("node_rerun");
+    // `linger` exists so a node can be rerun after settle — say whose.
+    expect(props?.linger?.description ?? "").toContain("node_rerun");
   });
 
   it("resources/list contains the nodes cell; templates contain the logs item", async () => {
@@ -490,17 +537,19 @@ describe("durableLog — guards (ported)", () => {
 });
 
 describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", () => {
-  /** A live B (agent) client over a test surface, for the verdict unit. */
-  async function agentWaitClient(s: TestSurface): Promise<AgentNodesReader> {
-    const { unixSocketLink } = await import("@kolu/surface/links/unix-socket");
+  /** A live B (agent) client over a test surface, for the verdict unit — wired
+   *  exactly as `mcpCommand` wires it: the projection over a RE-DIALING
+   *  A-client (`dialAFor` at the harness's socket path).
+   *
+   *  It used to hold one `unixSocketLink` dialed here and hand the projection
+   *  that. Production has never done this — `mcp.ts` has always passed
+   *  `redialingAClient` — and the difference is not cosmetic: a captured link
+   *  is a corpse once it dies, so every test below that closes the surface was
+   *  measuring a client shape odu does not ship. The settle wait now re-dials
+   *  across a transport-loss end, and what a re-dial FINDS is the whole
+   *  question, so the harness has to be able to make one. */
+  function agentWaitClient(s: TestSurface): AgentNodesReader {
     const projection = buildAgentProjection(oduSurface, gitRunContext);
-    const link = await unixSocketLink({
-      group: oduSurface.group,
-      socketPath: s.socketPath,
-    });
-    closers.push(() => {
-      void link.dispose();
-    });
     // `as unknown as`: `buildSurfaceFace` returns the deliberately STRUCTURAL
     // `SurfaceFace` (per-member precision lives one layer up — kolu PLAN D2), so
     // it does not structurally overlap the narrower `AgentNodesReader`. The
@@ -508,16 +557,316 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     // tag walk, so the narrowing is sound.
     return buildSurfaceFace(
       projection.surface,
-      directDispatch(projection.implement(oduClientOver(link.dispatch))),
+      directDispatch(projection.implement(redialingAClient(dialAFor(s.socketPath)))),
     ) as unknown as AgentNodesReader;
   }
+
+  /** `reader`, but its FIRST subscription dies after `afterFrames` frames with
+   *  the error the wire raises when a link's keep-alive goes unanswered — the
+   *  exact failure `openWireLink` mints (`SurfaceStdioTransportClosed` with
+   *  `death: "keepAliveUnanswered"`) when a coordinator goes quiet for 5–10s,
+   *  which a coordinator claiming a venue or copying a runner closure does
+   *  routinely.
+   *
+   *  Only the MOMENT of death is staged. The surface underneath stays up, the
+   *  reader is the shipping one, and its next subscription is a real re-dial to
+   *  the real socket — which is the whole thing under test. Staging it beats a
+   *  20-second `SIGSTOP` on a child coordinator for a unit suite, and pins the
+   *  same fact: the wait must not answer a dropped LINK as a settled RUN. */
+  function dyingOnce(
+    reader: AgentNodesReader,
+    afterFrames: number,
+    /** Run AT the death, before anything can re-subscribe — the only way to put
+     *  a publish deterministically inside the gap the dead link leaves. */
+    onDeath: () => void = () => {},
+  ): AgentNodesReader {
+    let armed = true;
+    return {
+      surface: {
+        nodes: {
+          get: (input: void) => {
+            const upstream = reader.surface.nodes.get(input);
+            if (!armed) return upstream;
+            armed = false;
+            return Stream.concat(
+              Stream.take(upstream, afterFrames),
+              Stream.suspend(() => {
+                onDeath();
+                return Stream.fail(
+                  new SurfaceStdioTransportClosed({
+                    death: "keepAliveUnanswered",
+                    reason:
+                      "test: the peer stopped answering the keep-alive ping",
+                  }),
+                );
+              }),
+            );
+          },
+        },
+      },
+    };
+  }
+
+  it("rides out a link death through the SHIPPING B-client, defect and all", async () => {
+    // The third path, and the one neither the CLI test nor the units traverse.
+    // `odu mcp` does not hand the handler `agentReaderForSocket`; it hands it
+    // the adapter's projected B-client (`buildSurfaceFace ∘ directDispatch ∘
+    // deriveStream`, src/cli/mcp.ts). The two faces therefore share the settle
+    // core and the row mapping but NOT the error channel: `deriveStream`
+    // `Stream.orDie`s an upstream failure (`@kolu/surface` project.ts), so the
+    // tagged transport death crosses as a DEFECT rather than a failure.
+    //
+    // Whether `isDeadTransportError` still recognises it on the far side of
+    // that squash is the load-bearing question for the MCP half of this change,
+    // and it was answered by reading. Answer it by measuring: build the real
+    // projection over an A-client whose `nodes` dies once, and drive the core
+    // through the B-client the adapter would have been given.
+    let pass = 0;
+    const aClient = {
+      surface: {
+        nodes: {
+          get: () => {
+            pass += 1;
+            return pass === 1
+              ? Stream.concat(
+                  Stream.make(state([["ci::e2e@x86_64-linux", "running"]])),
+                  Stream.fail(
+                    new SurfaceStdioTransportClosed({
+                      death: "keepAliveUnanswered",
+                      reason: "test: the peer stopped answering",
+                    }),
+                  ),
+                )
+              : Stream.make(state([["ci::e2e@x86_64-linux", "ok"]]));
+          },
+        },
+        nodeLog: { get: () => Stream.empty },
+        node: { rerun: () => Effect.succeed({ ok: true }), cancel: () => Effect.succeed({ ok: true }) },
+        lane: { cancel: () => Effect.succeed({ ok: true }) },
+      },
+    };
+    const projection = buildAgentProjection(oduSurface, () => null);
+    const bClient = buildSurfaceFace(
+      projection.surface,
+      directDispatch(
+        projection.implement(aClient as unknown as Parameters<typeof projection.implement>[0]),
+      ),
+    ) as unknown as AgentNodesReader;
+
+    const v = await waitForSettle({
+      client: bClient,
+      failFast: false,
+      timeoutMs: 10_000,
+      resolveRunContext: () => null,
+    });
+    expect(v).toMatchObject({ settled: true, passed: true, timed_out: false });
+    expect(pass).toBe(2);
+  });
+
+  it("never answers a probe that got nothing as a finished run", async () => {
+    // THE SEQUENCE, and it is one real scenario rather than two stitched
+    // together: a live frame, the wire's keep-alive death, and then the re-dial
+    // landing exactly as the peer closes — an interrupt-only `Cause`, which
+    // `endOnInterrupt` converts to a CLEAN end carrying no frames.
+    //
+    // Before the clean-end arm learned to ask `delivered`, that sequence walked
+    // straight into `streamEndedVerdict()` with `lastLive` already set and no
+    // finalized record to answer, and returned `{settled:false, passed:false}`
+    // with every reason flag false — the exact shape of the bug this whole
+    // change exists to kill, re-entering through the arm the change added.
+    // Measured on that code: 2 passes, 6ms, that verdict.
+    let pass = 0;
+    const reader: AgentNodesReader = {
+      surface: {
+        nodes: {
+          get: () => {
+            pass += 1;
+            if (pass === 1) {
+              return Stream.concat(
+                Stream.make(toAgentNodes(state([["ci::e2e@x86_64-linux", "running"]]))),
+                Stream.fail(
+                  new SurfaceStdioTransportClosed({
+                    death: "keepAliveUnanswered",
+                    reason: "test: the peer stopped answering the keep-alive ping",
+                  }),
+                ),
+              );
+            }
+            if (pass === 2) {
+              // The dial that lands as the peer closes. No `_tag`, no frames.
+              return Stream.failCause(
+                Cause.interrupt(1 as never),
+              ) as unknown as Stream.Stream<AgentNodes>;
+            }
+            // The coordinator is back, and the run it was running settled.
+            return Stream.make(
+              toAgentNodes(state([["ci::e2e@x86_64-linux", "ok"]])),
+            );
+          },
+        },
+      },
+    };
+    const v = await waitForSettle({
+      client: reader,
+      failFast: false,
+      timeoutMs: 10_000,
+      // No ledger record can answer, so a wrong verdict has nowhere to hide.
+      resolveRunContext: () => null,
+    });
+    expect(v).toMatchObject({ settled: true, passed: true, timed_out: false });
+    expect(pass).toBe(3);
+  });
+
+  it("times out — paced — when the reader goes corpse under a run it had seen", async () => {
+    // TWO things at once, both of them holes a reviewer named.
+    //
+    // (1) THE READER HALF OF THE DIAGNOSIS — and the sequence matters, which
+    // is why the corpse FOLLOWS a live frame. A reader built over one captured
+    // link is not born dead: it works, delivers the run's frames, and becomes a
+    // corpse the moment that one link dies — after which every subscription it
+    // mints goes to the same dead socket and delivers nothing. Staging it as
+    // dead-from-the-start would go through a different door entirely: with no
+    // frame ever delivered `lastLive` is never set, so a loop that wrongly
+    // ANSWERED here would raise `NoLiveRunError` ("no run in progress") rather
+    // than return the nothing-shape — which is the failure this is supposed to
+    // discriminate. With a live frame first, `lastLive` IS set, the fail-closed
+    // snapshot IS reachable, and the assertion below is a real refutation:
+    // never a green verdict, and never `{settled:false, passed:false}` with
+    // `timed_out: false`. `agentReaderFromA` is unexported so this shape cannot
+    // be built against a real checkout any more, but a future caller could
+    // reintroduce it, and this is what must happen when they do.
+    //
+    // (2) THE PAUSE. `delivered`-gated backpressure is the only thing between a
+    // pathological instant-death dial loop and a reconnect storm, and it was
+    // the one branch in the loop pinned by nothing but reading. Every attempt
+    // after the first fails INSTANTLY, so an unpaced loop would spin as fast as
+    // the event loop allows; at one `STREAM_RETRY_DELAY_MS` (1s) per frameless
+    // attempt, a 2.5s budget admits only a handful.
+    let attempts = 0;
+    const goesCorpse: AgentNodesReader = {
+      surface: {
+        nodes: {
+          get: () => {
+            attempts += 1;
+            const dead = Stream.fail(
+              new SurfaceStdioTransportClosed({
+                death: "streamEnded",
+                reason: "test: the link this reader captured is gone",
+              }),
+            ) as unknown as Stream.Stream<AgentNodes>;
+            // The link worked once. Everything after it is the same corpse.
+            return attempts === 1
+              ? Stream.concat(
+                  Stream.make(
+                    toAgentNodes(state([["ci::e2e@x86_64-linux", "running"]])),
+                  ),
+                  dead,
+                )
+              : dead;
+          },
+        },
+      },
+    };
+    const v = await waitForSettle({
+      client: goesCorpse,
+      failFast: false,
+      timeoutMs: 2_500,
+      // No ledger record can answer, so a wrong verdict has nowhere to hide.
+      resolveRunContext: () => null,
+    });
+    expect(v).toMatchObject({
+      settled: false,
+      passed: false,
+      timed_out: true,
+      cancelled: false,
+    });
+    // It knows WHICH run it gave up on — the frame it did see is not forgotten.
+    expect(v.sha7).toBe("abc1234");
+    // Paced, not spun: without the pause this is thousands.
+    expect(attempts).toBeLessThanOrEqual(6);
+    // The floor is a TIMING assertion, and the one thing here that could flake:
+    // it needs attempt 1 (which delivers, so it re-dials with no pause) and
+    // attempt 2 to both land inside the 2.5s budget. That is two synchronous
+    // passes with no sleep between them, so a stalled event loop on a loaded
+    // runner would have to eat the whole budget to reach 1 — and the failure
+    // mode if it ever did is a flaky test, never a masked verdict: the
+    // assertions above are what say the wait told the truth.
+    expect(attempts).toBeGreaterThanOrEqual(2);
+  }, 20_000);
+
+  it("rides out a link that dies under a run still running", async () => {
+    // THE BUG (juspay/odu: `wait --settle` returns before the run settles).
+    // The link died; the RUN did not. This used to answer `{settled:false,
+    // passed:false}` with every reason flag false — no fail-fast, no timeout,
+    // no cancellation — which is the nothing-verdict odu#49 exists to kill,
+    // arriving through the one door it was never fitted to. The wait must
+    // re-subscribe (a re-DIAL, through the shipping reader) and go on waiting.
+    const s = await serve([
+      ["ci::unit@x86_64-linux", "running"],
+      ["ci::nix@x86_64-linux", "running"],
+    ]);
+    const client = dyingOnce(agentWaitClient(s), 1);
+    setTimeout(() => {
+      s.setState(
+        state([
+          ["ci::unit@x86_64-linux", "ok"],
+          ["ci::nix@x86_64-linux", "ok"],
+        ]),
+      );
+    }, 120);
+    const v = await waitForSettle({
+      client,
+      failFast: false,
+      timeoutMs: 5_000,
+      // The verdict must come from the RUN, not from this checkout's real
+      // ledger — no run context, so the record path can answer nothing.
+      resolveRunContext: () => null,
+    });
+    expect(v).toMatchObject({
+      settled: true,
+      passed: true,
+      timed_out: false,
+      cancelled: false,
+      fail_fast_tripped: false,
+      sha7: "abc1234",
+    });
+  });
+
+  it("does not lose a red node to the gap a dead link left", async () => {
+    // The re-subscribe leads with the `nodes` cell's CURRENT snapshot, so a
+    // node that went red while nothing was subscribed is red in it. The
+    // alternative — resuming from deltas — would drop exactly the transition
+    // the caller is waiting for.
+    const s = await serve([
+      ["ci::unit@x86_64-linux", "running"],
+      ["ci::e2e@x86_64-linux", "running"],
+    ]);
+    // Published DURING the gap: at the staged death itself, so the red
+    // transition provably happens while nothing is subscribed.
+    const client = dyingOnce(agentWaitClient(s), 1, () => {
+      s.setState(
+        state([
+          ["ci::unit@x86_64-linux", "ok"],
+          ["ci::e2e@x86_64-linux", "failed"],
+        ]),
+      );
+    });
+    const v = await waitForSettle({
+      client,
+      failFast: true,
+      timeoutMs: 5_000,
+      resolveRunContext: () => null,
+    });
+    expect(v.passed).toBe(false);
+    expect(v.failed).toContain("ci::e2e@x86_64-linux");
+  });
 
   it("returns the verdict the instant a node goes red (fail-fast)", async () => {
     const s = await serve([
       ["ci::nix@x86_64-linux", "running"],
       ["ci::e2e@x86_64-linux", "running"],
     ]);
-    const client = await agentWaitClient(s);
+    const client = agentWaitClient(s);
     setTimeout(() => {
       s.setState(
         state([
@@ -538,14 +887,14 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
       ["ci::unit@x86_64-linux", "ok"],
       ["ci::nix@x86_64-linux", "ok"],
     ]);
-    const client = await agentWaitClient(s);
+    const client = agentWaitClient(s);
     const v = await waitForSettle({ client, failFast: false, timeoutMs: 2000 });
     expect(v).toMatchObject({ settled: true, passed: true, timed_out: false });
   });
 
   it("times out on a run that never settles", async () => {
     const s = await serve([["ci::nix@x86_64-linux", "running"]]);
-    const client = await agentWaitClient(s);
+    const client = agentWaitClient(s);
     const v = await waitForSettle({ client, failFast: false, timeoutMs: 80 });
     expect(v.timed_out).toBe(true);
     expect(v.settled).toBe(false);
@@ -557,7 +906,7 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     // points at an EMPTY throwaway checkout, so the verdict rests on the
     // stream alone and the test never reads this checkout's real ledger.
     const s = await serve([["ci::nix@x86_64-linux", "running"]]);
-    const client = await agentWaitClient(s);
+    const client = agentWaitClient(s);
     setTimeout(() => s.close(), 30);
     const v = await waitForSettle({
       client,
@@ -618,7 +967,7 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     // a green run unreadable to an agent — the record is the authority once the
     // socket is gone.
     const s = await serve([["ci::nix@x86_64-linux", "running"]]);
-    const client = await agentWaitClient(s);
+    const client = agentWaitClient(s);
     setTimeout(() => s.close(), 30);
     const v = await waitForSettle({
       client,
@@ -635,7 +984,7 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     // one. This drives the tool `mcp.ts` builds, through its own handler, so
     // production and the tests traverse the same path.
     const s = await serve([["ci::nix@x86_64-linux", "running"]]);
-    const client = await agentWaitClient(s);
+    const client = agentWaitClient(s);
     setTimeout(() => s.close(), 30);
     const tool = makeWaitTool(ledgerWith(record("passed")));
     // RUN the handler.s Effect — do not `await` it. A bespoke handler returns a
@@ -655,7 +1004,7 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
 
   it("settles red from the finalized record, naming the failed node", async () => {
     const s = await serve([["ci::e2e@x86_64-linux", "running"]]);
-    const client = await agentWaitClient(s);
+    const client = agentWaitClient(s);
     setTimeout(() => s.close(), 30);
     const failedNodes = state([["ci::e2e@x86_64-linux", "failed"]]).nodes;
     const v = await waitForSettle({
@@ -680,7 +1029,7 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     // resumes (run.ts `updateNode`), so such a record says `incomplete` itself
     // — the reader needs one rule, not two.
     const s = await serve([["ci::nix@x86_64-linux", "running"]]);
-    const client = await agentWaitClient(s);
+    const client = agentWaitClient(s);
     setTimeout(() => s.close(), 30);
     const v = await waitForSettle({
       client,
@@ -698,7 +1047,7 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     // self-contradicting record is not an authority, so it settles nothing —
     // the reader states that rather than trusting a promise from another module.
     const s = await serve([["ci::e2e@x86_64-linux", "running"]]);
-    const client = await agentWaitClient(s);
+    const client = agentWaitClient(s);
     setTimeout(() => s.close(), 30);
     const redNodes = state([["ci::e2e@x86_64-linux", "failed"]]).nodes;
     const v = await waitForSettle({
@@ -722,7 +1071,7 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
       // `passed` beside a red one — the schema admits both, so the reader
       // re-derives the whole invariant instead of half of it.
       const s = await serve([["ci::e2e@x86_64-linux", "running"]]);
-      const client = await agentWaitClient(s);
+      const client = agentWaitClient(s);
       // Give the first live frame time to land before closing (darwin flakes
       // with a 30ms close: streamEnded saw no last.run and threw NoLiveRun).
       setTimeout(() => s.close(), 80);
@@ -742,7 +1091,7 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     // The mirror of the passed+red case: an outcome its own node list cannot
     // justify. Reporting it would name no failing node for a red verdict.
     const s = await serve([["ci::nix@x86_64-linux", "running"]]);
-    const client = await agentWaitClient(s);
+    const client = agentWaitClient(s);
     setTimeout(() => s.close(), 30);
     const greenNodes = state([["ci::nix@x86_64-linux", "ok"]]).nodes;
     const v = await waitForSettle({
@@ -758,7 +1107,7 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     // One authority per verdict: if the record answers pass/fail, it also
     // answers what statuses it still owed at finalize (juspay/odu#61).
     const s = await serve([["ci::nix@x86_64-linux", "running"]]);
-    const client = await agentWaitClient(s);
+    const client = agentWaitClient(s);
     setTimeout(() => s.close(), 30);
     const owed = {
       ...record("passed"),
@@ -778,7 +1127,7 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
 
   it("returns cancelled when the caller aborts the wait", async () => {
     const s = await serve([["ci::nix@x86_64-linux", "running"]]);
-    const client = await agentWaitClient(s);
+    const client = agentWaitClient(s);
     const ac = new AbortController();
     setTimeout(() => ac.abort(), 30);
     const v = await waitForSettle({
@@ -821,7 +1170,7 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
       ["ci::unit@x86_64-linux", "ok"],
       ["ci::nix@x86_64-linux", "ok"],
     ]);
-    const client = await agentWaitClient(s);
+    const client = agentWaitClient(s);
     const v = await waitForSettle({ client, failFast: false, timeoutMs: 2000 });
     expect(v).toMatchObject({
       settled: true,
@@ -846,7 +1195,7 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
         ],
       },
     });
-    const client = await agentWaitClient(s);
+    const client = agentWaitClient(s);
     const v = await waitForSettle({ client, failFast: false, timeoutMs: 2000 });
     expect(v.settled).toBe(true);
     expect(v.passed).toBe(true);
@@ -871,7 +1220,7 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     const { seq: _dropped, ...noSeq } = state([["ci::unit@x86_64-linux", "ok"]]);
     const s = await serveTestSurface(noSeq);
     open.push(s);
-    const client = await agentWaitClient(s);
+    const client = agentWaitClient(s);
     const v = await waitForSettle({ client, failFast: false, timeoutMs: 2000 });
     expect(v).toMatchObject({ settled: true, passed: true, sha7: "abc1234" });
     expect(v.seq).toBeNull();
@@ -882,7 +1231,7 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
       ["ci::nix@x86_64-linux", "running"],
       ["ci::e2e@x86_64-linux", "running"],
     ]);
-    const client = await agentWaitClient(s);
+    const client = agentWaitClient(s);
     setTimeout(() => {
       s.setState(
         state([
@@ -898,7 +1247,7 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
 
   it("ask 3: refuses LOUD when the live run's sha does not match expected_sha", async () => {
     const s = await serve([["ci::nix@x86_64-linux", "running"]]);
-    const client = await agentWaitClient(s);
+    const client = agentWaitClient(s);
     await expect(
       waitForSettle({
         client,
@@ -914,7 +1263,7 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
       ["ci::unit@x86_64-linux", "ok"],
       ["ci::nix@x86_64-linux", "ok"],
     ]);
-    const client = await agentWaitClient(s);
+    const client = agentWaitClient(s);
     // "abc1234" is the served run's sha7; a prefix of it matches.
     const v = await waitForSettle({
       client,

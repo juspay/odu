@@ -149,6 +149,30 @@ export function noRunInProgressMessage(path: string): string {
   return `odu: no run in progress in this checkout (no live socket at ${path})\n`;
 }
 
+/** The sibling refusal, for the other way a face can end up with nothing to
+ *  say: it WAS attached, and the feed went away before the thing it was
+ *  waiting for arrived.
+ *
+ *  A dropped link is not a finished run, and telling the two apart is not the
+ *  reader's job — it is the FACE's, because only the face knows what it was
+ *  waiting FOR. `attach` waits for the pipeline to settle, `logs -f` for one
+ *  node's log to end; each breaks out of its own loop on its own terminal
+ *  frame, so falling out of the loop any other way means the feed died. What
+ *  every one of them must NOT do is what they all used to: run off the end of
+ *  the loop into the success path and report a partial observation as a
+ *  verdict — `attach` exiting 0 on a run still running, `logs -f` returning
+ *  success on a log that stops mid-line. (The settle wait had the same defect
+ *  and answers it differently, by re-dialing: it is the one face whose whole
+ *  job is to outlive a transient drop.)
+ *
+ *  `awaited` names what never came, in the face's own words — and names it
+ *  without repeating "the run", which this sentence has already said: the
+ *  stutter ("…the connection to the run before the run settled") landed in the
+ *  operator-facing line of a face that had just lost their terminal. */
+export function feedDroppedMessage(awaited: string): string {
+  return `odu: lost the connection to the run before ${awaited} — it may still be going (check \`odu status\`)\n`;
+}
+
 /** {@link dialRun}, for a face that has nothing to say without a run: exits
  *  with the justci-parity message instead of handing back `null`.
  *

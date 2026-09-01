@@ -13,6 +13,7 @@
  */
 
 import {
+  type NodeLogFrame,
   type NodeState,
   type OduClient,
   type PipelineState,
@@ -30,10 +31,15 @@ import { formatGoDuration } from "../common/duration";
 import { parseAtPlatform, transitiveDependents } from "../common/nodeId";
 import { cancelNodeOrPlatform, cancelRun } from "../coordinator/cancel";
 import { createDisplay, progressEvent } from "../coordinator/display";
-import { dialRunOrExit, noRunInProgressMessage } from "../coordinator/socket";
+import {
+  dialRunOrExit,
+  feedDroppedMessage,
+  noRunInProgressMessage,
+} from "../coordinator/socket";
 import { postingWarning } from "../coordinator/statuses";
+import { isDeadTransportError } from "@kolu/surface/errors";
 import { NoLiveRunError, waitForSettle } from "../coordinator/waitForSettle";
-import { agentReaderFromA } from "../mcp/agentSurface";
+import { agentReaderForSocket } from "../mcp/agentSurface";
 import { yellow } from "./ansi";
 import {
   claimingText,
@@ -218,21 +224,58 @@ export async function statusCommand(
 export async function logsCommand(
   token: string,
   follow: boolean,
+  socketPath?: string,
 ): Promise<number> {
-  const { client, close } = await dialRunOrExit();
+  const { client, close } = await dialRunOrExit(socketPath);
   const state = await firstSnapshot(client);
   const id = resolveNodeId(state, token);
-  for await (const frame of subscribe(client.surface.nodeLog.get({ id }))) {
-    // `end` means this node produced all the output it ever will, so `-f` has
-    // nothing left to follow — stop, rather than holding the terminal open
-    // until the whole run exits. Without it a `logs -f` on a finished node
-    // never returns, which is precisely the wait an agent cannot afford.
-    if (frame.kind === "end") break;
-    process.stdout.write(frame.text);
-    if (!follow && frame.kind === "snapshot") break;
-  }
+  const code = await logStream(client, id, follow);
   await close();
-  return 0;
+  return code;
+}
+
+/** One node's output onto stdout — the dial-free half of `logsCommand`, split
+ *  out for the same reason `attachStream` is split out of `attachCommand`: the
+ *  loop is what has a contract, and a contract wants a test that can end the
+ *  feed on purpose.
+ *
+ *  Returns 0 only when the command got the WHOLE answer it promises — the log's
+ *  `end` frame under `-f`, the buffered snapshot without it. */
+export async function logStream(
+  client: Pick<OduClient, "surface">,
+  id: string,
+  follow: boolean,
+): Promise<number> {
+  /** The frame that means this command has the whole answer — named ONCE, and
+   *  used both to stop the loop and to judge how the loop stopped, so the two
+   *  cannot drift apart when one is edited.
+   *
+   *  `end` means the node produced all the output it ever will, so `-f` has
+   *  nothing left to follow — stop, rather than holding the terminal open until
+   *  the whole run exits. Without it a `logs -f` on a finished node never
+   *  returns, which is precisely the wait an agent cannot afford. Without `-f`
+   *  the buffered snapshot IS the whole answer. */
+  const isWholeAnswer = (frame: NodeLogFrame): boolean =>
+    frame.kind === "end" || (!follow && frame.kind === "snapshot");
+
+  let last: NodeLogFrame | undefined;
+  await untilFeedDropped(async () => {
+    for await (const frame of subscribe(client.surface.nodeLog.get({ id }))) {
+      last = frame;
+      // `end` carries no bytes.
+      if (frame.kind !== "end") process.stdout.write(frame.text);
+      if (isWholeAnswer(frame)) break;
+    }
+  });
+  // Ending any OTHER way is the feed dying, and returning 0 there would hand
+  // back a log that stops mid-line as a complete one — the single forbidden
+  // outcome this repo already spent #88/#89 on ("either the log is complete, or
+  // it says it isn't"), and it was reachable here by dropping a link.
+  if (last !== undefined && isWholeAnswer(last)) return 0;
+  process.stderr.write(
+    feedDroppedMessage(follow ? `${id}'s log ended` : `${id}'s log arrived`),
+  );
+  return 1;
 }
 
 export async function attachCommand(json: boolean): Promise<number> {
@@ -248,13 +291,65 @@ export async function attachCommand(json: boolean): Promise<number> {
   return attachDashboard(client, close);
 }
 
+/** Run `pump` and swallow a dropped LINK — the two ways a watching face's feed
+ *  can go away, brought onto one path.
+ *
+ *  A transport that dies mid-subscription arrives one of two shapes, and the
+ *  faces used to treat them as different kinds of event: an interrupt-only
+ *  `Cause` ends the iteration cleanly (`effectEdge`'s `endOnInterrupt`), while a
+ *  tagged `SurfaceStdioTransportClosed` — the keep-alive death this whole change
+ *  is about — REJECTED out of the `for await` and crashed the command with a
+ *  framework sentence about stdio transports. So `odu attach` answered the
+ *  polite death with `feedDroppedMessage` and the common one with a stack.
+ *
+ *  Swallowing it here is not losing the error: the caller's own terminal check
+ *  runs next and finds it never got what it was waiting for, so the same
+ *  dropped-feed line and the same exit code follow either way. Anything that is
+ *  NOT a dead transport still propagates — this is a classifier, not a
+ *  catch-all.
+ *
+ *  (`waitForSettle` deliberately does the opposite with the same error: it
+ *  re-dials. Outliving a drop is its whole job; reporting one is theirs.) */
+async function untilFeedDropped(pump: () => Promise<void>): Promise<void> {
+  try {
+    await pump();
+  } catch (err) {
+    if (!isDeadTransportError(err)) throw err;
+  }
+}
+
+/** The exit code an attach face reports for the run it was WATCHING, and the
+ *  one place either of them decides it.
+ *
+ *  Both faces end their loop two ways — the run settled, or the feed died under
+ *  them — and both arrive as the same `done: true`. Reading the second as the
+ *  first is how a piped `attach` came to exit 0 on a run still going:
+ *  `exitCode` is 0 for anything that has not settled. Which one happened is
+ *  ASKED OF THE STATE rather than remembered in a flag beside the loop —
+ *  `summarize(last).done` IS each loop's break condition, so the question and
+ *  the answer cannot drift apart when one is edited. (`lane.ts`'s pump states
+ *  the same rule its own way: "lane state stream ended" → `die`.)
+ *
+ *  One function because it is one decision. Two copies of it is how the two
+ *  faces would come to disagree about what a dropped feed means — which is the
+ *  drift `odu wait` and `wait_for_settle` had, one layer over. */
+function watchedRunExit(last: PipelineState | undefined): number {
+  if (last !== undefined && summarize(last).done) return exitCode(last);
+  process.stderr.write(feedDroppedMessage("this run settled"));
+  return 1;
+}
+
 /** Non-tty / `-o json`: one line per node transition — the attach analogue
  *  of `--progress json`. Routes through `run`'s own `createDisplay`, building
  *  each event with the shared `progressEvent`, so the json shape (with
  *  `recipe`/`platform`/`log`), the plain line format, and the 60s heartbeat
  *  are byte-identical to `run` rather than a drifted re-implementation. */
 export async function attachStream(
-  client: OduClient,
+  // The `surface` slice only, exactly as `logStream` takes it: an attach face
+  // reads members, it never needs the link handle beside them — and a narrow
+  // parameter is what lets a test hand over a stub stream without pretending to
+  // be a whole client.
+  client: Pick<OduClient, "surface">,
   close: () => Promise<void>,
   json: boolean,
 ): Promise<number> {
@@ -262,30 +357,32 @@ export async function attachStream(
   const seen = new Map<string, NodeState["status"]>();
   let last: PipelineState | undefined;
   let started = false;
-  for await (const state of subscribe(client.surface.nodes.get(undefined))) {
-    last = state;
-    if (!started) {
-      started = true;
-      // Commit identity (pipeline name + sha) comes from the snapshot's state;
-      // an observer has no run-env (no leased hosts, no forge origin, no own
-      // start clock), so it never calls `setHeader` and the banner collapses to
-      // `odu · <pipeline> @ <sha>`. The matrix dashboard follows the surface
-      // `header` cell instead (see `attachDashboard`).
-      display.start(state);
+  await untilFeedDropped(async () => {
+    for await (const state of subscribe(client.surface.nodes.get(undefined))) {
+      last = state;
+      if (!started) {
+        started = true;
+        // Commit identity (pipeline name + sha) comes from the snapshot's state;
+        // an observer has no run-env (no leased hosts, no forge origin, no own
+        // start clock), so it never calls `setHeader` and the banner collapses
+        // to `odu · <pipeline> @ <sha>`. The matrix dashboard follows the
+        // surface `header` cell instead (see `attachDashboard`).
+        display.start(state);
+      }
+      display.update(state); // drives the plain heartbeat
+      for (const id of state.order) {
+        const node = state.nodes[id];
+        if (node === undefined || seen.get(id) === node.status) continue;
+        seen.set(id, node.status);
+        const event = progressEvent(state.sha7, id, node);
+        if (event !== null) display.transition(event, node);
+      }
+      if (summarize(state).done) break;
     }
-    display.update(state); // drives the plain heartbeat
-    for (const id of state.order) {
-      const node = state.nodes[id];
-      if (node === undefined || seen.get(id) === node.status) continue;
-      seen.set(id, node.status);
-      const event = progressEvent(state.sha7, id, node);
-      if (event !== null) display.transition(event, node);
-    }
-    if (summarize(state).done) break;
-  }
+  });
   display.stop(last);
   await close();
-  return exitCode(last);
+  return watchedRunExit(last);
 }
 
 /** Interactive view — the ONE shared live view (`createDisplay("live", …)`),
@@ -348,16 +445,18 @@ async function attachDashboard(
   });
 
   let first = true;
-  for await (const state of subscribe(client.surface.nodes.get(undefined))) {
-    last = state;
-    if (first) {
-      first = false;
-      view.start(state);
-    } else {
-      view.update(state);
+  await untilFeedDropped(async () => {
+    for await (const state of subscribe(client.surface.nodes.get(undefined))) {
+      last = state;
+      if (first) {
+        first = false;
+        view.start(state);
+      } else {
+        view.update(state);
+      }
+      if (summarize(state).done) break;
     }
-    if (summarize(state).done) break;
-  }
+  });
   view.stop(last);
   // The viewport is gone; say how the run ended. `run` has its own verdict —
   // an observer would otherwise be left with only an exit code.
@@ -366,7 +465,9 @@ async function attachDashboard(
   // The subscription is torn down with the link, so this settles rather than
   // stranding a live `for await` past the function that opened it.
   await headerLoop;
-  return exitCode(last);
+  // After `view.stop`, so a dropped-feed line reaches an operator whose
+  // terminal is back rather than one watching a frozen matrix.
+  return watchedRunExit(last);
 }
 
 /** `odu cancel` — tell the live run in this checkout to stop, and wait until
@@ -444,17 +545,45 @@ export interface WaitCommandOpts {
 /** `odu wait [--settle] [--timeout-ms N] [--expected-sha SHA]` — block on the
  *  live run's `nodes` stream and print one JSON verdict line. Default is
  *  fail-fast; `--settle` waits for the whole run. Exit 0 only on a fully-settled
- *  all-green run. Shares `waitForSettle` with the MCP `wait_for_settle` tool. */
+ *  all-green run. Shares `waitForSettle` with the MCP `wait_for_settle` tool.
+ *
+ *  WHAT WENT WRONG, IN THE RIGHT ORDER — because the first version of this note
+ *  had it backwards, and a wrong first-order cause is what the next debugger of
+ *  this class would have started from.
+ *
+ *  The lie was the CORE's, and it belonged to both faces. `waitForSettle`
+ *  answered a dead link as a finished run: one subscription, and a
+ *  `SurfaceStdioTransportClosed` went straight to the end-of-stream verdict. A
+ *  link dies under a perfectly healthy run all the time — the wire's keep-alive
+ *  makes 5–10s of peer silence fatal, and a coordinator claiming a venue goes
+ *  quiet for that long — so `{settled:false, passed:false}` came back about a
+ *  run that was still going. MCP `wait_for_settle` calls that same function and
+ *  would have said the same thing; the field observation of the two faces
+ *  disagreeing is not evidence that they differed here.
+ *
+ *  What THIS command's reader added was not the lie but a trap. It dialled
+ *  `.ci/odu.sock` here and handed the wait one already-opened link — a private,
+ *  one-shot copy of what `mcp.ts` builds with `redialingAClient`, whose dial is
+ *  a scoped acquire of the stream instead. So the fix the core needed
+ *  (re-subscribe instead of answering) would have been silently INERT on the
+ *  CLI: a fresh subscription to a captured link reaches the same corpse. Both
+ *  changes are needed, and only one of them is the bug.
+ *
+ *  Hence `agentReaderForSocket` — the only exported way to build a reader over
+ *  a live checkout, so the shape that disarms the repair cannot be written
+ *  again. Not "one reader for both faces": `odu mcp` hands its handler the
+ *  adapter's projected B-client, and what the two genuinely share is set out in
+ *  that function's own doc.
+ *
+ *  Dialing moves INTO the wait as a consequence, and the no-run refusal moves
+ *  with it: the reader answers its `{ run: false }` frame, the core raises
+ *  `NoLiveRunError`, and the catch below prints the same one line to stderr and
+ *  exits 1 that the eager dial did. */
 export async function waitCommand(opts: WaitCommandOpts): Promise<number> {
   const socketPath = opts.socketPath ?? SOCKET_PATH;
-  const dialed = await dialRun(socketPath);
-  if (dialed === null) {
-    noRunInProgress(socketPath);
-    return 1;
-  }
   try {
     const verdict = await waitForSettle({
-      client: agentReaderFromA(dialed.client),
+      client: agentReaderForSocket(socketPath),
       // CLI default = fail-fast; `--settle` opts out (failFast: false).
       failFast: !opts.settle,
       timeoutMs: opts.timeoutMs,
@@ -471,11 +600,6 @@ export async function waitCommand(opts: WaitCommandOpts): Promise<number> {
       return 1;
     }
     throw err;
-  } finally {
-    // `await` — the Effect link teardown is async now (it was a sync `close()`
-    // under oRPC), so a bare call would let the CLI return before the socket
-    // is actually released.
-    await dialed.close();
   }
 }
 

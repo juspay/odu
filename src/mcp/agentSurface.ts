@@ -53,6 +53,7 @@ import { deriveStream, projectSurface } from "@kolu/surface/project";
 import type { SurfaceHandlers } from "@kolu/surface/server";
 import { Effect, Schema, Stream } from "effect";
 import type { Rpc, RpcGroup } from "effect/unstable/rpc";
+import { dialRun } from "@odu/run-client/dial";
 import { NodeIdSchema, splitFanId } from "@odu/run-client/nodeId";
 import {
   clampLog,
@@ -181,15 +182,37 @@ export function toAgentNodes(state: PipelineState): AgentNodes {
       };
 }
 
-/** Wrap a live A-client (`PipelineState` cell) as the `AgentNodesReader`
- *  `waitForSettle` expects — map every frame with `toAgentNodes`. One
- *  subscription held for the wait, same as the MCP tool's single dial.
+/** Wrap an A-client (`PipelineState` cell) as the `AgentNodesReader`
+ *  `waitForSettle` expects — map every frame with `toAgentNodes`.
+ *
+ *  DELIBERATELY NOT EXPORTED, which is the whole safety property of this file's
+ *  reader half. What this is HANDED decides what a wait built on it can
+ *  survive: a client over a single already-dialed link makes every subscription
+ *  it mints a subscription to THAT link, so once the link dies the reader is a
+ *  corpse and there is nothing left to re-subscribe TO.
+ *
+ *  Say that precisely, because it is easy to say backwards. Handing this a
+ *  captured link was never what made `odu wait --settle` lie — the lie was the
+ *  settle core answering a dead link as a finished run, and it belonged to both
+ *  faces equally. What a captured link does is DISARM the repair: the core now
+ *  re-subscribes on a transport-loss end, and a re-subscribe over a captured
+ *  link reaches the same corpse, so the fix would have been silently inert on
+ *  the face that had one. That is why the shape is closed off rather than
+ *  merely audited for. The only exported way to build a reader over a live
+ *  checkout is {@link agentReaderForSocket}, which pairs this mapping with
+ *  {@link redialingAClient} — the one shape whose subscriptions outlive their
+ *  own link.
+ *
+ *  (A TEST still injects whatever `AgentNodesReader` it likes: the interface is
+ *  structural, and a stub that fails on purpose is exactly how the recovery is
+ *  measured. What is closed off is the plausible-looking WRONG construction
+ *  over a real socket, not the ability to fake one.)
  *
  *  A `Stream` maps with `Stream.map`, so there is no hand-rolled async
  *  generator here and no `{ signal }` to thread: the wait's cancellation
  *  travels as fiber interruption when `subscribe` closes the subscription
  *  (kolu PLAN D10/#18), not as a per-call option. */
-export function agentReaderFromA(client: {
+function agentReaderFromA(client: {
   surface: Pick<OduClient["surface"], "nodes">;
 }): AgentNodesReader {
   return {
@@ -450,12 +473,56 @@ function makeLogsStore(
 // ── The re-dialing A-client ──────────────────────────────────────────────────
 
 /** Dial the coordinator socket, or `null` when no run is live. Injectable so
- *  the tests drive a controllable surface; defaults to the real unix-socket
- *  dial in `mcp.ts`. */
+ *  the tests drive a controllable surface; {@link dialAFor} is the real
+ *  unix-socket dial both faces pass. */
 export type DialA = () => Promise<{
   client: OduSurfaceClient;
   close: () => Promise<void>;
 } | null>;
+
+/** The real dial, at a checkout's socket path: `@odu/run-client`'s `dialRun`
+ *  in the shape {@link redialingAClient} takes. `null` (nobody serving) travels
+ *  through as `null` — that is the package's contract and the no-run value
+ *  every face above turns into its own refusal.
+ *
+ *  Spelled ONCE because both faces pass it: `mcp.ts` for the projection's
+ *  upstream, and {@link agentReaderForSocket} for the settle wait. */
+export function dialAFor(socketPath: string): DialA {
+  return async () => {
+    const dialed = await dialRun(socketPath);
+    return dialed === null
+      ? null
+      : { client: dialed.client, close: dialed.close };
+  };
+}
+
+/** The `nodes` reader `waitForSettle` takes, for the run live at `socketPath` —
+ *  and the ONLY exported way to build one over a live checkout, so no caller
+ *  can reintroduce the captured-link reader by writing a plausible line of its
+ *  own.
+ *
+ *  WHAT THE TWO FACES ACTUALLY SHARE, stated once here because it is easy to
+ *  round up to "one reader" and that is not true. `odu wait` hands this in.
+ *  `odu mcp` does NOT: `mcpCommand` hands the tool handler the adapter's
+ *  projected B-client (`buildSurfaceFace ∘ directDispatch` over the
+ *  projection). So the shared parts are the ones that decide a verdict — the
+ *  settle core, the `toAgentNodes` row mapping, and the SAME
+ *  {@link redialingAClient} over the same {@link dialAFor}, which is what lets
+ *  either face ride out a link that dies under a run still running. The part
+ *  that differs is the error channel: this reader maps with `Stream.map` and
+ *  keeps the upstream failure, while the projection's `deriveStream` `orDie`s
+ *  it, so a transport death reaches the core as a defect on that side.
+ *  `isDeadTransportError` recognises it either way — measured in
+ *  `server.test.ts`, not assumed.
+ *
+ *  It is a pairing, and both halves are load-bearing: {@link redialingAClient}
+ *  so the dial is a scoped acquire of the stream (re-subscribing re-DIALS), and
+ *  `agentReaderFromA` so the rows are the agent rows, by the same mapping the
+ *  projection applies. Nothing is dialed here: the reader is a lazy
+ *  description, and the socket is reached when the wait pulls. */
+export function agentReaderForSocket(socketPath: string): AgentNodesReader {
+  return agentReaderFromA(redialingAClient(dialAFor(socketPath)));
+}
 
 /**
  * An A-client that dials a *fresh* coordinator socket for every streaming call
@@ -489,10 +556,14 @@ export function redialingAClient(dial: DialA): OduSurfaceClient {
    * This is the shape that got honest under Effect. The old version was an
    * async generator whose `finally { dialed.close() }` ran only if the consumer
    * resumed it, and whose `close()` was synchronous and could not have been
-   * awaited from there anyway. `Stream.unwrapScoped` over an `acquireRelease`
-   * makes the DIAL a scoped resource of the stream: the release is part of the
+   * awaited from there anyway. `Stream.unwrap` over an `acquireRelease` makes
+   * the DIAL a scoped resource of the stream: the release is part of the
    * stream's own teardown, an interruption runs it, and it is an `Effect` so
    * the now-async `close()` is genuinely awaited before the scope closes.
+   * (`unwrap`, not the `unwrapScoped` this said for a while — Effect 4 exports
+   * no such function, and `Stream.unwrap`'s `R` already `Exclude`s `Scope`. A
+   * stale name beside the load-bearing acquire is the one comment here that
+   * could send a reader looking for machinery that does not exist.)
    *
    * The laziness is load-bearing and is the reason the re-dial-per-call
    * contract still holds: nothing is dialled when the stream VALUE is made,
