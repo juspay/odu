@@ -47,8 +47,11 @@ import {
   redialingAClient,
 } from "./agentSurface";
 import { cancelTool } from "./cancelTool";
+import { leaseTool, releaseTool } from "./leaseTool";
+import { laneCancelTool, nodeCancelTool } from "./partialCancelTools";
 import { rerunTool } from "./rerunTool";
 import { runTool } from "./runTool";
+import { runsTool } from "./runsTool";
 import { serveTestSurface, type TestSurface } from "./serveForTest";
 import {
   type SettleVerdict,
@@ -134,10 +137,9 @@ async function connectWith(
     expose: {
       nodes: "resource",
       logs: "resource",
-      // `node.rerun` is bespoke (`node_rerun` in `tools`), exactly as `mcp.ts`
-      // ships it — a procedure exposure cannot carry a description.
-      "node.cancel": { tool: { mutates: true } },
-      "lane.cancel": { tool: { mutates: true } },
+      // No procedure entries — exactly as `mcp.ts` ships it: every `node.*` /
+      // `lane.*` verb is bespoke (the only door carrying a description AND a
+      // per-call `checkout`).
     },
     tools,
     serverInfo: { name: "odu", version: "0.0.0" },
@@ -168,6 +170,8 @@ async function connect(s: TestSurface, socketPath: string = s.socketPath) {
       },
       cancel: cancelTool,
       node_rerun: rerunTool,
+      node_cancel: nodeCancelTool,
+      lane_cancel: laneCancelTool,
     },
   );
 }
@@ -261,6 +265,55 @@ describe("odu agent MCP — end to end over the in-memory transport", () => {
     const uris = resources.map((r) => r.uri);
     // The coordinator's `header` cell is not mapped onto the agent surface.
     expect(uris).not.toContain("surface://cells/header");
+  });
+
+  it("every bespoke tool advertises the optional `checkout` argument, exactly as mcp.ts registers the kit", async () => {
+    // The multi-checkout contract is a HOST-VISIBLE fact, so it is pinned
+    // where a host sees it: the advertised input schemas of the WHOLE tool
+    // map `mcp.ts` registers (not a curated subset). Each tool carries the
+    // argument, it is never required, and it never arrives undescribed —
+    // the `.annotate` text is what an agent reads to discover the default.
+    const s = await serve([["ci::e2e@x86_64-linux", "running"]]);
+    const { mcp } = await connectWith(dialAFor(s.socketPath), {
+      run: runTool,
+      node_rerun: rerunTool,
+      wait_for_settle: makeWaitTool(),
+      cancel: cancelTool,
+      runs: runsTool,
+      node_cancel: nodeCancelTool,
+      lane_cancel: laneCancelTool,
+      lease: leaseTool,
+      release: releaseTool,
+    });
+
+    const { tools } = await mcp.listTools();
+    const names = tools.map((t) => t.name).sort();
+    expect(names).toEqual([
+      "cancel",
+      "lane_cancel",
+      "lease",
+      "node_cancel",
+      "node_rerun",
+      "release",
+      "run",
+      "runs",
+      "wait_for_settle",
+    ]);
+    for (const tool of tools) {
+      const schema = tool.inputSchema;
+      const checkout = (
+        schema?.properties as Record<string, { description?: string }> | undefined
+      )?.checkout;
+      expect(checkout, `${tool.name} carries checkout`).toBeDefined();
+      expect(
+        checkout?.description ?? "",
+        `${tool.name}.checkout is described`,
+      ).toMatch(/checkout/i);
+      expect(
+        (schema?.required as string[] | undefined) ?? [],
+        `${tool.name}.checkout is optional`,
+      ).not.toContain("checkout");
+    }
   });
 
   it("a single read of the nodes stream returns the live snapshot (no poll)", async () => {

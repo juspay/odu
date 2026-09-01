@@ -8,6 +8,13 @@
  * `PipelineState.nodes`, and is the input of `nodeLog` / `node.rerun` /
  * `node.cancel`.
  *
+ * The on-disk log path is part of that same naming contract: a run's durable
+ * per-node log is `.ci/<sha7>/<platform>/<namepath>.log`, and {@link logPathFor}
+ * is the ONE spelling of it. odu's coordinator WRITES through it, and a
+ * consumer pointing at a run's logs on disk derives the path through it — the
+ * alternative is every client re-splicing the id by hand and quietly drifting
+ * the day the layout moves.
+ *
  * Invariant: the namepath never leads with `@`, so `lastIndexOf("@")` with an
  * `at > 0` guard splits unambiguously. A lane-local id (no `@`) is the
  * asymmetric edge case — it defaults platform to "unknown".
@@ -40,6 +47,17 @@ export function splitFanId(id: string): { namepath: string; platform: string } {
     return { namepath: id.slice(0, at), platform: id.slice(at + 1) };
   }
   return { namepath: id, platform: "unknown" };
+}
+
+/** The node id → durable log path fold: `ci::e2e@x86_64-linux` of run
+ *  `338eb01` → `.ci/338eb01/x86_64-linux/ci::e2e.log`. RELATIVE to the
+ *  checkout root, exactly as odu lays it on disk (justci's layout) — the
+ *  caller joins it to the checkout it is talking about. Pure path algebra
+ *  over the id split, like {@link runSocketPath} is over the checkout root;
+ *  whether the file exists is a question for the filesystem. */
+export function logPathFor(sha7: string, nodeId: string): string {
+  const { namepath, platform } = splitFanId(nodeId);
+  return `.ci/${sha7}/${platform}/${namepath}.log`;
 }
 
 export function onPlatform(id: string, platform: string): boolean {

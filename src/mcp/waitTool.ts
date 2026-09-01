@@ -8,17 +8,21 @@
 
 import type { BespokeTool } from "@kolu/surface-mcp";
 import { Effect, Schema } from "effect";
-import { gitRunContext } from "../common/git";
+import { runSocketPath } from "@odu/run-client/dial";
+import { gitRunContext, gitRunContextFor } from "../common/git";
 import {
   waitForSettle,
   type WaitOptions,
 } from "../coordinator/waitForSettle";
 import {
   type AgentNodesReader,
+  agentReaderForSocket,
   type ResolveRunContext,
 } from "./agentSurface";
+import { checkoutField } from "./checkout";
 
 export const waitInput = Schema.Struct({
+  checkout: checkoutField,
   /** `Schema.Int`, not `Schema.Number`: a millisecond bound is an integer, and
    *  `Number`'s JSON Schema offers a host the string `"NaN"` (PLAN D8). The
    *  bounds are the same ones `waitForSettle` re-checks face-neutrally: a
@@ -100,6 +104,25 @@ export function makeWaitTool(
         catch: (e) => e,
         try: () => {
           const a = args as WaitInput;
+          // A named `checkout` switches the wait from the server-wired client
+          // (the HOME checkout's projection) to a per-call reader that dials
+          // and reads THAT checkout (./checkout.ts): its socket for the live
+          // stream, its `.ci` for the durable-file fallback and the refusal's
+          // path text. The settle core and its policies are untouched — only
+          // the addressing bends.
+          if (a.checkout !== undefined) {
+            const socketPath = runSocketPath(a.checkout);
+            const opts: WaitOptions = {
+              client: agentReaderForSocket(socketPath),
+              timeoutMs: a.timeout_ms,
+              failFast: a.fail_fast,
+              expectedSha: a.expected_sha,
+              signal,
+              socketPath,
+              resolveRunContext: gitRunContextFor(a.checkout),
+            };
+            return waitForSettle(opts);
+          }
           const opts: WaitOptions = {
             client: client as AgentNodesReader,
             timeoutMs: a.timeout_ms,

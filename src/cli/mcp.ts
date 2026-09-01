@@ -12,20 +12,31 @@
  * coordinator's job (pool lease / hosts.json).
  *
  * Default-deny `expose`: only the `nodes` cell + `logs` collection (as
- * resources) and `node.cancel` / `lane.cancel` (as tools) reach the host; the
- * coordinator's `header` cell and the lane-only `run.configure` are unreachable
- * by construction. Bespoke tools: `run`, `node_rerun`, `wait_for_settle`,
- * `cancel`, `runs`, plus agent-held venue `lease` / `release` (cross-run hold).
+ * resources) reach the host; the coordinator's `header` cell and the lane-only
+ * `run.configure` are unreachable by construction. Bespoke tools: `run`,
+ * `node_rerun`, `wait_for_settle`, `cancel`, `runs`, `node_cancel`,
+ * `lane_cancel`, plus agent-held venue `lease` / `release` (cross-run hold).
  * (`run.cancel` is the surface mutation full-run `cancel` drives; it's not
- * exposed directly — the tool also confirms teardown. Per-node cancel is
- * `node_cancel`; per-platform is `lane_cancel`.)
+ * exposed directly — the tool also confirms teardown.)
  *
- * `node_rerun` is bespoke rather than `expose`d for one reason: a
- * procedure-exposed tool cannot carry a DESCRIPTION (`ToolExposure` has no
- * field for one), and `node_rerun` — the cheap, non-destructive way to retry a
- * single lane — shipped with none at all while `run`'s described `supersede`
- * read like the way to have another go. src/mcp/rerunTool.ts carries the whole
- * account.
+ * Every bespoke tool takes an optional `checkout` argument (absolute path of
+ * the target checkout's root; default this server's own cwd — see
+ * src/mcp/checkout.ts), so one server drives runs across MANY checkouts. Two
+ * more consequences ride with that design:
+ *
+ *   - resources are server-published streams and stay bound to the HOME
+ *     checkout; per-checkout reads arrive on the verbs (and log files via
+ *     `@odu/run-client`'s exported `logPathFor` spelling).
+ *   - `run` spawns its coordinator DETACHED and this server reaps nothing on
+ *     close: a run outlives the MCP process that launched it, so a harness
+ *     restart kills no run. (It once called `killRuns()` here — the exact
+ *     property the consumer needed removed.)
+ *
+ * `node_rerun` / `node_cancel` / `lane_cancel` are bespoke rather than
+ * `expose`d: a procedure-exposed tool cannot carry a DESCRIPTION
+ * (`ToolExposure` has no field for one) and cannot take a per-call `checkout`
+ * (an exposed input is the A-side wire shape). src/mcp/rerunTool.ts carries
+ * the whole account for the verb that could least afford a blank description.
  */
 
 import { readFileSync } from "node:fs";
@@ -46,7 +57,8 @@ import {
 } from "../mcp/agentSurface";
 import { cancelTool } from "../mcp/cancelTool";
 import { leaseTool, releaseTool } from "../mcp/leaseTool";
-import { killRuns, runTool } from "../mcp/runTool";
+import { laneCancelTool, nodeCancelTool } from "../mcp/partialCancelTools";
+import { runTool } from "../mcp/runTool";
 import { rerunTool } from "../mcp/rerunTool";
 import { runsTool } from "../mcp/runsTool";
 import { makeWaitTool } from "../mcp/waitTool";
@@ -114,10 +126,9 @@ export async function mcpCommand(socketPath: string = SOCKET_PATH): Promise<numb
     expose: {
       nodes: "resource",
       logs: "resource",
-      // `node.rerun` is NOT here — it ships as the bespoke `node_rerun` below,
-      // which is the only door that carries a description (see rerunTool.ts).
-      "node.cancel": { tool: { mutates: true } },
-      "lane.cancel": { tool: { mutates: true } },
+      // No procedures are exposed: each `node.*` / `lane.*` verb ships as a
+      // bespoke tool below — the only door that carries a description AND a
+      // per-call `checkout` (see rerunTool.ts / partialCancelTools.ts).
     },
     tools: {
       run: runTool,
@@ -125,6 +136,8 @@ export async function mcpCommand(socketPath: string = SOCKET_PATH): Promise<numb
       wait_for_settle: makeWaitTool(gitRunContext),
       cancel: cancelTool,
       runs: runsTool,
+      node_cancel: nodeCancelTool,
+      lane_cancel: laneCancelTool,
       lease: leaseTool,
       release: releaseTool,
     },
@@ -133,7 +146,11 @@ export async function mcpCommand(socketPath: string = SOCKET_PATH): Promise<numb
 
   // Serve until the client disconnects (the StdioServerTransport closes on
   // stdin EOF) or a signal. The server owns stdin/stdout; we just await the
-  // close, reaping any background runs the `run` tool spawned.
+  // close. Background runs the `run` tool spawned are NOT reaped: a
+  // coordinator outlives this server by design (detached spawn — see
+  // `coordinatorSpawnSpec` and `spawnSurvival.test.ts`), so a harness restart
+  // kills no run. Stopping one is the `cancel` tool while this server lives,
+  // or `odu cancel` anytime.
   await new Promise<void>((resolve) => {
     const shutdown = (): void => resolve();
     server.onclose = shutdown;
@@ -141,7 +158,6 @@ export async function mcpCommand(socketPath: string = SOCKET_PATH): Promise<numb
     process.once("SIGTERM", shutdown);
   });
 
-  killRuns();
   await close();
   return 0;
 }

@@ -41,3 +41,18 @@ export function gitRunContext(): { repoRoot: string; sha7: string } | null {
   if (repoRoot === null || sha7 === null) return null;
   return { repoRoot, sha7 };
 }
+
+/** A run-context resolver pinned to one NAMED checkout (an absolute repo
+ *  root — the `mcp/agentSurface.ResolveRunContext` shape) rather than the
+ *  process's cwd: the per-call form `wait_for_settle`'s `checkout` argument
+ *  needs. The root is taken as given (the tool's contract is "the checkout
+ *  root"); only the SHA is probed, and an unreadable HEAD still resolves to
+ *  `null`, same as the cwd probe. */
+export function gitRunContextFor(
+  repoRoot: string,
+): () => { repoRoot: string; sha7: string } | null {
+  return () => {
+    const sha7 = headSha7(repoRoot);
+    return sha7 === null ? null : { repoRoot, sha7 };
+  };
+}

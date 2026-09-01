@@ -3,7 +3,6 @@ import { EMPTY_POSTING } from "@odu/run-client/surface";
 import {
   fetchUrlFor,
   interruptStatus,
-  logPathFor,
   parseGithubRemote,
   postingEqual,
   postingWarning,
@@ -29,21 +28,8 @@ async function advanceTimersByTimeAsync(ms: number): Promise<void> {
 
 // The context/description/log-path formats are byte-compatible with what
 // justci posted (verified against live statuses on merged kolu PRs) — these
-// strings are what branch protection matches on.
-describe("logPathFor", () => {
-  it("keeps the ci:: prefix in the filename, platform as the directory", () => {
-    expect(logPathFor("338eb01", "ci::e2e@x86_64-linux")).toBe(
-      ".ci/338eb01/x86_64-linux/ci::e2e.log",
-    );
-  });
-
-  it("handles the unprefixed _ci-setup bookkeeping node", () => {
-    expect(logPathFor("338eb01", "_ci-setup@aarch64-darwin")).toBe(
-      ".ci/338eb01/aarch64-darwin/_ci-setup.log",
-    );
-  });
-});
-
+// strings are what branch protection matches on. The log-path rule itself is
+// `@odu/run-client/nodeId`'s; its own suite pins the spelling there.
 describe("statusFor", () => {
   const id = "ci::unit@x86_64-linux";
   const log = ".ci/abc1234/x86_64-linux/ci::unit.log";

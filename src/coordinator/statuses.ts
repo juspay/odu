@@ -25,7 +25,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { splitFanId } from "@odu/run-client/nodeId";
+import { logPathFor } from "@odu/run-client/nodeId";
 import {
   type GithubState,
   type NodeStatus,
@@ -58,12 +58,6 @@ export const DEFAULT_GH_TIMEOUT_MS = 30_000;
 /** First backoff after a failed send; doubles per attempt, capped. */
 export const DEFAULT_BACKOFF_BASE_MS = 5_000;
 export const DEFAULT_BACKOFF_CAP_MS = 60_000;
-
-/** `ci::e2e@x86_64-linux` → `.ci/<sha7>/x86_64-linux/ci::e2e.log` */
-export function logPathFor(sha7: string, nodeId: string): string {
-  const { namepath, platform } = splitFanId(nodeId);
-  return `.ci/${sha7}/${platform}/${namepath}.log`;
-}
 
 export interface StatusPayload {
   state: GithubState;

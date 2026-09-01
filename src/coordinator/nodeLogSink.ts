@@ -5,19 +5,20 @@
  * raw — and durability is the coordinator's addition on top of it.
  *
  * A module rather than a cluster of closures inside `orchestrate` because it
- * encapsulates ONE axis of change with a name: **how a node's output is made
- * durable, and which run owns the file.** Per-commit addressing vs per-run,
- * truncate vs rotate vs a seam marker, `appendFileSync` vs a buffered writer —
- * every one of those edits lands here and nowhere else, and the file address
- * (`logPathFor`) now sits next to the ownership rule that changes with it. The
- * run keeps the policy that is genuinely its own: which frame routes where, and
- * when a node's log has had the run's last word.
+ * encapsulates ONE axis of change with a name: **which run owns the file.** The
+ * file ADDRESS is not an axis here — `.ci/<sha7>/<platform>/<node>.log` is
+ * `@odu/run-client`'s `logPathFor`, the one spelling every writer and reader
+ * shares. What this module owns is the claim policy: per-commit addressing,
+ * truncate-on-first-touch per run, `appendFileSync` over a buffered writer —
+ * every one of those edits lands here and nowhere else. The run keeps the
+ * policy that is genuinely its own: which frame routes where, and when a
+ * node's log has had the run's last word.
  */
 
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { logPathFor } from "@odu/run-client/nodeId";
 import { createLogTail, type CreateLogTailResult } from "../common/logTail";
-import { logPathFor } from "./statuses";
 
 export interface NodeLogSink {
   /** Append to the tail and to the durable file. */

@@ -22,15 +22,19 @@
  * So `node_rerun` comes through the door that carries words. The name, the
  * input (`{ id }`) and the behaviour are unchanged — this is the same
  * `node.rerun` call an agent was already making, with the sentence it needed
- * attached. `node_cancel` / `lane_cancel` stay procedure-exposed: they are not
- * mistakable for a whole-run operation, and moving them would be inventing
- * shells for tools nobody misread.
+ * attached. `node_cancel` / `lane_cancel` went bespoke later, for a different
+ * axis: an exposed procedure's input is the A-side wire shape, so it can
+ * never carry a per-call `checkout` — see partialCancelTools.ts.
  */
 
 import type { BespokeTool } from "@kolu/surface-mcp";
 import { Effect, Schema } from "effect";
+import { runSocketPath } from "@odu/run-client/dial";
+import { dialAFor, redialingAClient } from "./agentSurface";
+import { checkoutField } from "./checkout";
 
 export const rerunInput = Schema.Struct({
+  checkout: checkoutField,
   // `.describe` on the FIELD is an annotation, which is what a host shows an
   // agent about an argument — the JSDoc above a field is not (see `waitInput`'s
   // `expected_sha`). This is the one that was blank.
@@ -48,7 +52,9 @@ export type RerunInput = typeof rerunInput.Type;
  *  consumer's own client as `any`, and naming the one member it calls is what
  *  keeps that `any` from spreading past this line. */
 interface RerunClient {
-  surface: { node: { rerun: (input: RerunInput) => Effect.Effect<{ ok: boolean }> } };
+  surface: {
+    node: { rerun: (input: { id: string }) => Effect.Effect<{ ok: boolean }> };
+  };
 }
 
 /** Restart one node on the live run. Mutating: it resets node state and puts
@@ -69,13 +75,28 @@ export const rerunTool: BespokeTool = {
     "as the `nodes` resource spells them. Returns `{ok}`: false means there " +
     "was no live run to rerun on — start one with `run`, or use `run({linger: " +
     "true})` next time so the coordinator outlives settle and a node can be " +
-    "rerun afterwards.",
+    "rerun afterwards. Targets `checkout`, defaulting to this server's own " +
+    "working directory.",
   input: rerunInput,
   mutates: true,
-  // Just the upstream call. Both sides are Effects, so there is no lift and no
+  // The default path is just the upstream call through the face's projected
+  // client — both sides are Effects, so there is no lift and no
   // `Effect.promise` (which over an already-Effect value would succeed with the
   // Effect object rather than the result). Interruption reaches the call
   // through the face's own request scope, so the `signal` parameter is ignored.
-  handler: (args, client) =>
-    (client as RerunClient).surface.node.rerun(args as RerunInput),
+  //
+  // A named `checkout` dials THAT checkout per call instead (./checkout.ts) —
+  // the same `redialingAClient` the face is wired with, whose re-dial already
+  // happens per call; only the path becomes a function of the input. The
+  // A-side procedure takes `{ id }` exactly — the call is narrowed, the whole
+  // input struct is never forwarded.
+  handler: (args, client) => {
+    const a = args as RerunInput;
+    if (a.checkout === undefined) {
+      return (client as RerunClient).surface.node.rerun(a);
+    }
+    return redialingAClient(dialAFor(runSocketPath(a.checkout))).surface.node.rerun({
+      id: a.id,
+    });
+  },
 };

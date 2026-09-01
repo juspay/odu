@@ -54,7 +54,7 @@ import type { SurfaceHandlers } from "@kolu/surface/server";
 import { Effect, Schema, Stream } from "effect";
 import type { Rpc, RpcGroup } from "effect/unstable/rpc";
 import { dialRun } from "@odu/run-client/dial";
-import { NodeIdSchema, splitFanId } from "@odu/run-client/nodeId";
+import { logPathFor, NodeIdSchema, splitFanId } from "@odu/run-client/nodeId";
 import {
   clampLog,
   EMPTY_STATE,
@@ -68,7 +68,6 @@ import {
 } from "@odu/run-client/surface";
 import { subscribe } from "../common/effectEdge";
 import { rowsOf } from "../cli/render";
-import { logPathFor } from "../coordinator/statuses";
 
 /**
  * The slice of the live A-client (`oduSurface`) this projection consumes.

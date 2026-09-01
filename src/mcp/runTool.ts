@@ -8,7 +8,21 @@
  * `input`, a `handler`, and the `mutates` flag, sharing the package's
  * result-framing + signal spine.
  *
- * The spawn machinery (startup polling, child reaping) is migrated wholesale
+ * Two ownership rules make the spawn's whole contract:
+ *
+ *   - WHERE: the run is a function of its `checkout` — spawn cwd, socket,
+ *     run-lock, durable logs all hang off the target checkout, and one live
+ *     run per checkout is enforced per checkout (see ./checkout.ts).
+ *   - WHO REAPS: nobody. The coordinator is spawned detached and never
+ *     killed by this server (`mcpCommand` reaps nothing), so a run survives
+ *     the MCP process that launched it — a harness restart is not a CI
+ *     cancel. The one hazard that creates is a dead reader on the child's
+ *     output pipes, and bun — the runtime every coordinator ships on —
+ *     already swallows EPIPE on stdio writes (pinned by
+ *     `src/mcp/spawnSurvival.test.ts`, so a runtime bump that changed it
+ *     turns this sentence red).
+ *
+ * The spawn machinery (startup polling, detached spawn) is migrated wholesale
  * from the old hand-built `src/mcp/tools.ts`.
  */
 
@@ -22,15 +36,17 @@ import { dirname, join } from "node:path";
 import { firstFrame } from "../common/effectEdge";
 import { Effect, Schema } from "effect";
 import type { BespokeTool } from "@kolu/surface-mcp";
-import { dialRun, SOCKET_PATH } from "@odu/run-client/dial";
+import { dialRun, runSocketPath } from "@odu/run-client/dial";
 import { type CancelResult, cancelRun } from "../coordinator/cancel";
 import {
   liveRunLockPid,
   signalRunLockHolder,
   waitForRunLockFree,
 } from "../coordinator/checkoutLock";
+import { checkoutField, checkoutOf } from "./checkout";
 
 export const runInput = Schema.Struct({
+  checkout: checkoutField,
   selectors: Schema.optionalKey(Schema.Array(Schema.String)),
   platforms: Schema.optionalKey(Schema.Array(Schema.String)),
   /** `PLATFORM=ADDR` host pins, one per platform (mirrors `odu run --host`). */
@@ -112,22 +128,25 @@ function runArgsFrom(input: RunInput): string[] {
   return args;
 }
 
-/** Children spawned by `run`, so the server can reap them on shutdown and so
- *  V8 doesn't collect the handle mid-run. */
+/** Children spawned by `run`, kept referenced so V8 doesn't collect the
+ *  handle mid-run (unref'd handles still fire their `exit` in this process).
+ *  Deliberately NEVER reaped by the server: a spawned coordinator outlives
+ *  `odu mcp` by design — an agent harness restarts its MCP server freely, and
+ *  a restart must not kill a run. The once-existing `killRuns()` reaping on
+ *  server close is what prevented exactly that survival. */
 const liveRuns = new Set<ReturnType<typeof spawn>>();
-
-export function killRuns(): void {
-  for (const child of liveRuns) child.kill("SIGTERM");
-  liveRuns.clear();
-}
 
 export interface SpawnDeps {
   socketPath?: string;
   /** Injected for tests; defaults to `cancelRun`. Used to supersede a run
    *  already live in this checkout (cancel it + confirm its socket is gone). */
   cancelExisting?: (socketPath: string) => Promise<CancelResult>;
-  /** Injected for tests; defaults to spawning the real odu CLI. */
-  spawnRun?: (args: string[]) => { stderr: string; onExit: Promise<number> };
+  /** Injected for tests; defaults to spawning the real odu CLI. Receives the
+   *  effective checkout so the spawn's `cwd` is asserted, not assumed. */
+  spawnRun?: (
+    args: string[],
+    checkout: string,
+  ) => { stderr: string; onExit: Promise<number> };
   /** Poll the socket until it answers (or `exited` resolves); injected for
    *  tests. The default stops early the instant the child dies so a failed run
    *  is reported at once, not after the whole poll window. */
@@ -135,6 +154,22 @@ export interface SpawnDeps {
     socketPath: string,
     exited: Promise<unknown>,
   ) => Promise<boolean>;
+}
+
+/** The spawn options that make a coordinator outlive its launcher: its own
+ *  process group (`detached`) so no signal addressed to the server ever
+ *  reaches it by group, and pipes for stdout/stderr so this server tees the
+ *  durable run log while it lives — pipes whose death the bun runtime
+ *  tolerates natively (EPIPE on stdio never becomes an uncaughtException;
+ *  `spawnSurvival.test.ts` pins the whole property). The caller `unref()`s
+ *  the handle so the server can exit without waiting. */
+export function coordinatorSpawnSpec(checkout: string): {
+  cwd: string;
+  stdio: ["ignore", "pipe", "pipe"];
+  env: NodeJS.ProcessEnv;
+  detached: boolean;
+} {
+  return { cwd: checkout, stdio: ["ignore", "pipe", "pipe"], env: process.env, detached: true };
 }
 
 /**
@@ -222,7 +257,11 @@ export async function startRun(
   input: RunInput,
   deps: SpawnDeps = {},
 ): Promise<RunResult> {
-  const socketPath = deps.socketPath ?? SOCKET_PATH;
+  const checkout = checkoutOf(input);
+  // The run's rendezvous is a function of the TARGET checkout: one live run
+  // (socket or run-lock) per checkout so concurrent runs in DIFFERENT
+  // checkouts never collide.
+  const socketPath = deps.socketPath ?? runSocketPath(checkout);
   // Sibling of the socket (`.ci/odu.run.lock`); absolute when socketPath is.
   const lockPath = join(dirname(socketPath), "odu.run.lock");
 
@@ -263,7 +302,7 @@ export async function startRun(
   const waitForSocket = deps.waitForSocket ?? defaultWaitForSocket;
 
   if (deps.spawnRun !== undefined) {
-    const { stderr, onExit } = deps.spawnRun(args);
+    const { stderr, onExit } = deps.spawnRun(args, checkout);
     const r = await awaitStartup(waitForSocket, socketPath, onExit);
     if (r.up) return { ok: true, started: true };
     return {
@@ -279,11 +318,8 @@ export async function startRun(
   }
   // Tee stdout+stderr to the durable run log once the coordinator publishes
   // sha7/seq (juspay/odu#61); keep an in-memory tail for startup-error reporting.
-  const child = spawn(cmd, [...prefix, ...args], {
-    cwd: process.cwd(),
-    stdio: ["ignore", "pipe", "pipe"],
-    env: process.env,
-  });
+  const child = spawn(cmd, [...prefix, ...args], coordinatorSpawnSpec(checkout));
+  child.unref();
   liveRuns.add(child);
   // Cap the in-memory startup tail and the pre-open tee buffer so a verbose
   // child (or a failed openRunLog) can't grow this unboundedly.
@@ -411,7 +447,10 @@ function startupError(stderr: string, code: number | null): string {
 export const runTool: BespokeTool = {
   description:
     "Start a CI run the agent can then watch and drive. Spawns a background " +
-    "`odu run` (its own coordinator) and returns once the run is live. Strict " +
+    "`odu run` (its own coordinator DETACHED — the run keeps going even if " +
+    "this MCP server exits or is restarted) and returns once the run is live. " +
+    "Targets `checkout` — another tree's run is started by naming it; default " +
+    "is this server's own working directory. Strict " +
     "by default (refuses a dirty tree); pass no_strict for a dev-iteration run " +
     "against the working tree. One run per checkout — so with a run already " +
     "live this refuses unless you pass `supersede`, which CANCELS that run and " +
