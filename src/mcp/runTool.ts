@@ -21,6 +21,13 @@
  *     already swallows EPIPE on stdio writes (pinned by
  *     `src/mcp/spawnSurvival.test.ts`, so a runtime bump that changed it
  *     turns this sentence red).
+ *   - WHAT'S DURABLE: the coordinator's own writes — the per-node logs
+ *     (`.ci/<sha7>/<platform>/<node>.log`, the `logPathFor` spelling) and
+ *     the ledger. NOT this server's convenience tee of coordinator
+ *     stdout/stderr to `.ci/<sha7>/runs/<seq>.log` (`openRunLog` below):
+ *     built from this process's pipe readers, it ends where the server
+ *     ends, so a mid-run harness restart TRUNCATES it. Read it as what it
+ *     is — MCP-session output capture, not the run's persistent log.
  *
  * The spawn machinery (startup polling, detached spawn) is migrated wholesale
  * from the old hand-built `src/mcp/tools.ts`.
@@ -316,8 +323,10 @@ export async function startRun(
   if (cmd === undefined) {
     return { ok: false, started: false, error: "cannot locate the odu binary" };
   }
-  // Tee stdout+stderr to the durable run log once the coordinator publishes
-  // sha7/seq (juspay/odu#61); keep an in-memory tail for startup-error reporting.
+  // Tee stdout+stderr to the run log once the coordinator publishes sha7/seq
+  // (juspay/odu#61) — THIS server's capture, truncated when it exits (see the
+  // header's WHAT'S DURABLE); the coordinator's per-node logs are the ones
+  // that persist. Keep an in-memory tail for startup-error reporting.
   const child = spawn(cmd, [...prefix, ...args], coordinatorSpawnSpec(checkout));
   child.unref();
   liveRuns.add(child);
@@ -402,8 +411,10 @@ export function appendPreOpen(
   return maxBytes;
 }
 
-/** Dial the live coordinator for sha7/seq and open the durable run log path.
- *  Best-effort: null when identity is missing or dial fails. */
+/** Dial the live coordinator for sha7/seq and open the run log path
+ *  (`.ci/<sha7>/runs/<seq>.log`) — the MCP server's stdout/stderr tee, not a
+ *  coordinator artifact: it ends where the server ends. Best-effort: null
+ *  when identity is missing or dial fails. */
 export async function openRunLog(
   socketPath: string,
 ): Promise<WriteStream | null> {

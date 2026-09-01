@@ -70,7 +70,10 @@ succeeds arrives as a red `_ci-setup@<platform>` verdict rather than as a
 closes before it publishes a terminal frame, the verdict comes from the run's
 finalized record on disk — never green for a run torn down mid-flight. The
 `nodes` resource carries the same `unposted`. MCP `run` tees coordinator
-stdout/stderr to `.ci/<sha7>/runs/<seq>.log`.
+stdout/stderr to `.ci/<sha7>/runs/<seq>.log` — but that tee is the MCP
+server's own capture and truncates if the server exits mid-run (a harness
+restart); the coordinator-written per-node logs (`logPathFor`) are the
+durable record.
 
 A settled node's `surface://collections/logs/{id}` is the last 64KB of its output
 and now reliably ENDS at the recipe's final line: a run that settles on its own
