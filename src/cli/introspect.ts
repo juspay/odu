@@ -288,13 +288,38 @@ export async function attachCommand(json: boolean): Promise<number> {
   return attachDashboard(client, close);
 }
 
+/** The exit code an attach face reports for the run it was WATCHING, and the
+ *  one place either of them decides it.
+ *
+ *  Both faces end their loop two ways — the run settled, or the feed died under
+ *  them — and both arrive as the same `done: true`. Reading the second as the
+ *  first is how a piped `attach` came to exit 0 on a run still going:
+ *  `exitCode` is 0 for anything that has not settled. Which one happened is
+ *  ASKED OF THE STATE rather than remembered in a flag beside the loop —
+ *  `summarize(last).done` IS each loop's break condition, so the question and
+ *  the answer cannot drift apart when one is edited. (`lane.ts`'s pump states
+ *  the same rule its own way: "lane state stream ended" → `die`.)
+ *
+ *  One function because it is one decision. Two copies of it is how the two
+ *  faces would come to disagree about what a dropped feed means — which is the
+ *  drift `odu wait` and `wait_for_settle` had, one layer over. */
+function watchedRunExit(last: PipelineState | undefined): number {
+  if (last !== undefined && summarize(last).done) return exitCode(last);
+  process.stderr.write(feedDroppedMessage("the run settled"));
+  return 1;
+}
+
 /** Non-tty / `-o json`: one line per node transition — the attach analogue
  *  of `--progress json`. Routes through `run`'s own `createDisplay`, building
  *  each event with the shared `progressEvent`, so the json shape (with
  *  `recipe`/`platform`/`log`), the plain line format, and the 60s heartbeat
  *  are byte-identical to `run` rather than a drifted re-implementation. */
 export async function attachStream(
-  client: OduClient,
+  // The `surface` slice only, exactly as `logStream` takes it: an attach face
+  // reads members, it never needs the link handle beside them — and a narrow
+  // parameter is what lets a test hand over a stub stream without pretending to
+  // be a whole client.
+  client: Pick<OduClient, "surface">,
   close: () => Promise<void>,
   json: boolean,
 ): Promise<number> {
@@ -325,19 +350,7 @@ export async function attachStream(
   }
   display.stop(last);
   await close();
-  // The loop ends two ways — the run settled, or the feed died under it — and
-  // both arrive as the same `done: true`. Reading the second as the first is
-  // how a piped `attach` came to exit 0 on a run still going: `exitCode` is 0
-  // for anything that has not settled. Which one happened is ASKED OF THE
-  // STATE, not remembered in a flag beside the loop: `summarize(last).done` IS
-  // the break condition, so the two cannot drift apart when one is edited.
-  // (`lane.ts`'s pump states the same rule its own way — "lane state stream
-  // ended" → `die`.)
-  if (last === undefined || !summarize(last).done) {
-    process.stderr.write(feedDroppedMessage("the run settled"));
-    return 1;
-  }
-  return exitCode(last);
+  return watchedRunExit(last);
 }
 
 /** Interactive view — the ONE shared live view (`createDisplay("live", …)`),
@@ -418,14 +431,9 @@ async function attachDashboard(
   // The subscription is torn down with the link, so this settles rather than
   // stranding a live `for await` past the function that opened it.
   await headerLoop;
-  // Same question, same answer, same reason as `attachStream` — asked of the
-  // state. After `view.stop`, so the terminal is back and the operator reads
-  // this rather than watching a frozen matrix and drawing their own conclusion.
-  if (last === undefined || !summarize(last).done) {
-    process.stderr.write(feedDroppedMessage("the run settled"));
-    return 1;
-  }
-  return exitCode(last);
+  // After `view.stop`, so a dropped-feed line reaches an operator whose
+  // terminal is back rather than one watching a frozen matrix.
+  return watchedRunExit(last);
 }
 
 /** `odu cancel` — tell the live run in this checkout to stop, and wait until

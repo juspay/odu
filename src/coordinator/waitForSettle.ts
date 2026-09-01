@@ -402,12 +402,14 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
     // `timed_out`, which is a verdict a caller can act on, unlike the silent
     // `{settled:false}` this loop replaced.
     for (;;) {
-      // Frames THIS subscription delivered — the only thing the pause below
-      // needs. An attempt that dies having delivered NOTHING made no progress,
-      // so the next one waits out the framework's own inter-attempt delay
-      // rather than spinning; an attempt that was streaming re-dials at once,
-      // because that is the coordinator-exited path and the ledger is waiting.
-      let frames = 0;
+      // Did THIS subscription deliver anything? A count would be a number
+      // nothing reads as one — the pause below is the only consumer and it asks
+      // exactly this. An attempt that dies having delivered NOTHING made no
+      // progress, so the next one waits out the framework's own inter-attempt
+      // delay rather than spinning; an attempt that was streaming re-dials at
+      // once, because that is the coordinator-exited path and the ledger is
+      // waiting.
+      let delivered = false;
       try {
         // The subscription is the WAIT: a `Stream` registers nothing until it is
         // pulled, so the settle watcher is armed by this loop's first `next()`, not
@@ -419,7 +421,7 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
           opts.client.surface.nodes.get(undefined),
           controller.signal,
         )) {
-          frames += 1;
+          delivered = true;
           // The pre-run / no-run snapshot (`run: false`, empty rows) is not a
           // settled verdict — keep waiting for a real run's frames. It is also not
           // an ERASURE of a run already seen, which is why only a live frame is
@@ -492,9 +494,9 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
         // an `instanceof` would silently stop recognising it.
         if (!isDeadTransportError(err)) throw err;
         // The LINK died. Whether the RUN did is the next subscription's answer
-        // (see the loop's own note). A frameless attempt pauses first — see
-        // `frames`.
-        if (frames === 0) {
+        // (see the loop's own note). An attempt that delivered nothing pauses
+        // first — see `delivered`.
+        if (!delivered) {
           await pause(STREAM_RETRY_DELAY_MS, controller.signal);
           if (controller.signal.aborted) return abortedVerdict();
         }

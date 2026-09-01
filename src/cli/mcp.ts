@@ -82,10 +82,9 @@ export async function mcpCommand(socketPath: string = SOCKET_PATH): Promise<numb
   // live before returning — and re-dials if that link dies under a run still
   // going (see `waitForSettle`'s read loop). `odu wait` builds the same reader
   // over the same `dialAFor`, which is why the two faces cannot disagree about
-  // a run. No socket → the A-client
-  // yields the no-run value, so `nodes`/`wait_for_settle` read `{ run: false }`,
-  // `logs` reads the durable file, and `run` (which ignores the client) spawns a
-  // coordinator.
+  // a run. No socket → the A-client yields the no-run value, so
+  // `nodes`/`wait_for_settle` read `{ run: false }`, `logs` reads the durable
+  // file, and `run` (which ignores the client) spawns a coordinator.
   const aClient = redialingAClient(dialAFor(socketPath));
   // `directDispatch` over the served handlers is the in-process transport: a
   // tag-keyed dispatcher that invokes each handler effect directly, with zero

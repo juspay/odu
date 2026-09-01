@@ -173,6 +173,15 @@ describe("a feed that drops before the face's own terminal frame", () => {
     } as unknown as Parameters<typeof attachStream>[0];
   }
 
+  /** The same, for one node's log frames. */
+  function logFramesOf(
+    frames: { kind: "snapshot" | "append" | "end"; text: string }[],
+  ): Parameters<typeof logStream>[0] {
+    return {
+      surface: { nodeLog: { get: () => Stream.fromIterable(frames) } },
+    } as unknown as Parameters<typeof logStream>[0];
+  }
+
   const running = doneState([
     ["ci::unit@x86_64-linux", "ok", 0],
     ["ci::e2e@x86_64-linux", "running"],
@@ -201,16 +210,7 @@ describe("a feed that drops before the face's own terminal frame", () => {
 
   it("logs -f does not report an incomplete log as complete", async () => {
     // #88/#89's invariant: either the log is complete, or it says it isn't.
-    const client = {
-      surface: {
-        nodeLog: {
-          get: () =>
-            Stream.fromIterable([
-              { kind: "snapshot" as const, text: "half a line" },
-            ]),
-        },
-      },
-    } as unknown as Parameters<typeof logStream>[0];
+    const client = logFramesOf([{ kind: "snapshot", text: "half a line" }]);
     const { err, result } = await capturingStderr(() =>
       capturingStdout(() => logStream(client, "ci::e2e@x86_64-linux", true)),
     );
@@ -222,16 +222,9 @@ describe("a feed that drops before the face's own terminal frame", () => {
   });
 
   it("logs without -f is complete at the snapshot, as it always was", async () => {
-    const client = {
-      surface: {
-        nodeLog: {
-          get: () =>
-            Stream.fromIterable([
-              { kind: "snapshot" as const, text: "the whole buffered tail" },
-            ]),
-        },
-      },
-    } as unknown as Parameters<typeof logStream>[0];
+    const client = logFramesOf([
+      { kind: "snapshot", text: "the whole buffered tail" },
+    ]);
     const { out, result } = await capturingStdout(() =>
       logStream(client, "ci::e2e@x86_64-linux", false),
     );
