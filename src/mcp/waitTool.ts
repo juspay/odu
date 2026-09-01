@@ -108,6 +108,17 @@ export function makeWaitTool(
           // path text. The settle core and its policies are untouched — only
           // the addressing (client, socket path, run context) bends, so the
           // shared policy tail is built once and both forks spread it.
+          //
+          // The two wirings are NOT interchangeable, and that is deliberate:
+          // the named fork's reader (`agentReaderForSocket`) is CLI `odu
+          // wait`'s own and keeps the upstream stream failure, while the
+          // default fork's is the projection's B-client, whose `deriveStream`
+          // `orDie`s a transport death into a defect — different error
+          // channel, classified by the core's `isDeadTransportError` either
+          // way (this asymmetry is agentSurface.ts's documented pairing).
+          // `clientForCheckout` is NOT used here so the home path keeps its
+          // established wiring: a future "unify on clientForCheckout" would
+          // silently swap that defect handling — decide it, don't sed it.
           const policy = {
             timeoutMs: a.timeout_ms,
             failFast: a.fail_fast,
