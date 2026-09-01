@@ -382,7 +382,9 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
     // re-subscribe is a re-DIAL, which is a property of the READER, not of this
     // loop: both faces hand in a reader whose dial is a scoped acquire of the
     // stream (`redialingAClient`), so pulling again reaches the run that is
-    // live NOW.
+    // live NOW. That dependency runs one way and is worth stating that way —
+    // THIS arm is where the lie lived, on both faces; a reader that cannot
+    // re-dial would merely make the repair inert on the face holding it.
     //
     // The re-subscribe is also the PROBE that answers whether the run died with
     // the link, and it cannot lie in either direction:
@@ -402,13 +404,12 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
     // `timed_out`, which is a verdict a caller can act on, unlike the silent
     // `{settled:false}` this loop replaced.
     for (;;) {
-      // Did THIS subscription deliver anything? A count would be a number
-      // nothing reads as one — the pause below is the only consumer and it asks
-      // exactly this. An attempt that dies having delivered NOTHING made no
-      // progress, so the next one waits out the framework's own inter-attempt
-      // delay rather than spinning; an attempt that was streaming re-dials at
-      // once, because that is the coordinator-exited path and the ledger is
-      // waiting.
+      // DID THIS SUBSCRIPTION SPEAK AT ALL? The load-bearing bit of the loop,
+      // and it answers two questions with one fact: whether a clean end is the
+      // run ANSWERING or a probe that got nothing (see the clean-end arm), and
+      // whether the next attempt should pause before re-dialing (see the foot
+      // of the loop). A count would be a number nothing reads as one — both
+      // consumers ask only this.
       let delivered = false;
       try {
         // The subscription is the WAIT: a `Stream` registers nothing until it is
@@ -472,7 +473,37 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
             };
           }
         }
-        return streamEndedVerdict();
+        // A CLEAN end — and only an ANSWER if this subscription actually
+        // delivered something.
+        //
+        // THE READER ALWAYS SPEAKS AT LEAST ONCE. A live coordinator leads with
+        // the `nodes` cell's current snapshot; a checkout with no coordinator
+        // gets `redialingAClient`'s single `{ run: false }` frame. So a clean
+        // end that delivered ONE frame or more is the run (or its absence)
+        // answering, and `streamEndedVerdict` is right to speak for it — while
+        // a clean end that delivered NOTHING is not an answer at all. It is a
+        // probe that got nothing, and calling it a finished run is the same lie
+        // this loop exists to stop telling.
+        //
+        // That case is REACHABLE, and by this PR's own hand. An interrupt-only
+        // `Cause` — a peer closing while the subscription's dial is in flight —
+        // is converted to a clean end by `endOnInterrupt`, which is right for
+        // the shapeless `Error` it replaces and wrong the moment the verdict
+        // arm treats the result as the producer speaking. After a keep-alive
+        // death the NEXT PASS IS THAT DIAL, so the sequence is one real
+        // scenario: live frames → tagged death → re-dial interrupted → zero
+        // frames → `{settled:false, passed:false}` with every reason flag
+        // false, the exact shape of the bug. Measured, not reasoned: 2 passes,
+        // 6ms, that verdict. Repairing tagged deaths and routing a second
+        // transport-loss class into the arm that still lies is not a fix.
+        //
+        // The discriminator was already sitting in the loop. Use it.
+        if (delivered) return streamEndedVerdict();
+        // Our own teardown also ends the iteration without frames — that is a
+        // timeout or a cancel, and it is a verdict, not a probe to retry.
+        if (controller.signal.aborted) return abortedVerdict();
+        // Otherwise: fall through to the re-subscribe below, exactly as a
+        // tagged death does. The two transport-loss classes now take one path.
       } catch (err) {
         // A deliberate loud refusal ALWAYS propagates — never downgrade it to an
         // abort verdict, and never re-subscribe past it. The
@@ -494,12 +525,15 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
         // an `instanceof` would silently stop recognising it.
         if (!isDeadTransportError(err)) throw err;
         // The LINK died. Whether the RUN did is the next subscription's answer
-        // (see the loop's own note). An attempt that delivered nothing pauses
-        // first — see `delivered`.
-        if (!delivered) {
-          await pause(STREAM_RETRY_DELAY_MS, controller.signal);
-          if (controller.signal.aborted) return abortedVerdict();
-        }
+        // (see the loop's own note).
+      }
+      // Re-subscribe. An attempt that delivered NOTHING made no progress, so it
+      // waits out the framework's own inter-attempt delay rather than spinning;
+      // an attempt that was streaming re-dials at once, because that is the
+      // coordinator-exited path and the ledger is waiting.
+      if (!delivered) {
+        await pause(STREAM_RETRY_DELAY_MS, controller.signal);
+        if (controller.signal.aborted) return abortedVerdict();
       }
     }
   } finally {

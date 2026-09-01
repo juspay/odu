@@ -242,8 +242,8 @@ addressed by commit, not by run, re-running the same SHA REPLACES
 `.ci/<sha>/<plat>/<recipe>.log` — you are never reading two runs concatenated.
 
 **Wait / rerun (plain-CLI agent loop).** `odu wait` is the CLI twin of MCP
-`wait_for_settle` — the same core, over the same reader, so the two faces
-cannot disagree about a run: default fail-fast (return the instant a node goes
+`wait_for_settle` — the same settle core, over a reader built the same way, so
+the two faces answer a run alike: default fail-fast (return the instant a node goes
 red), `--settle` for the full run; prints one JSON verdict line; exit 0 only on
 a fully-settled all-green run. A wait rides out a dropped LINK: if the
 connection to the coordinator dies while the run is still going (a busy

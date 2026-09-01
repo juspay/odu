@@ -189,13 +189,19 @@ export function toAgentNodes(state: PipelineState): AgentNodes {
  *  reader half. What this is HANDED decides what a wait built on it can
  *  survive: a client over a single already-dialed link makes every subscription
  *  it mints a subscription to THAT link, so once the link dies the reader is a
- *  corpse and the wait has nothing left to re-subscribe to — it then answers
- *  `{settled:false, passed:false}` about a run that is still going, which is
- *  the bug `odu wait --settle` shipped. The fix was not to audit callers for
- *  the mistake; it was to stop the mistake being expressible. The only exported
- *  way to build a reader over a live checkout is {@link agentReaderForSocket},
- *  which pairs this mapping with {@link redialingAClient} — and a re-dialing
- *  client is the one shape whose subscriptions outlive their own link.
+ *  corpse and there is nothing left to re-subscribe TO.
+ *
+ *  Say that precisely, because it is easy to say backwards. Handing this a
+ *  captured link was never what made `odu wait --settle` lie — the lie was the
+ *  settle core answering a dead link as a finished run, and it belonged to both
+ *  faces equally. What a captured link does is DISARM the repair: the core now
+ *  re-subscribes on a transport-loss end, and a re-subscribe over a captured
+ *  link reaches the same corpse, so the fix would have been silently inert on
+ *  the face that had one. That is why the shape is closed off rather than
+ *  merely audited for. The only exported way to build a reader over a live
+ *  checkout is {@link agentReaderForSocket}, which pairs this mapping with
+ *  {@link redialingAClient} — the one shape whose subscriptions outlive their
+ *  own link.
  *
  *  (A TEST still injects whatever `AgentNodesReader` it likes: the interface is
  *  structural, and a stub that fails on purpose is exactly how the recovery is
@@ -539,10 +545,14 @@ export function redialingAClient(dial: DialA): OduSurfaceClient {
    * This is the shape that got honest under Effect. The old version was an
    * async generator whose `finally { dialed.close() }` ran only if the consumer
    * resumed it, and whose `close()` was synchronous and could not have been
-   * awaited from there anyway. `Stream.unwrapScoped` over an `acquireRelease`
-   * makes the DIAL a scoped resource of the stream: the release is part of the
+   * awaited from there anyway. `Stream.unwrap` over an `acquireRelease` makes
+   * the DIAL a scoped resource of the stream: the release is part of the
    * stream's own teardown, an interruption runs it, and it is an `Effect` so
    * the now-async `close()` is genuinely awaited before the scope closes.
+   * (`unwrap`, not the `unwrapScoped` this said for a while — Effect 4 exports
+   * no such function, and `Stream.unwrap`'s `R` already `Exclude`s `Scope`. A
+   * stale name beside the load-bearing acquire is the one comment here that
+   * could send a reader looking for machinery that does not exist.)
    *
    * The laziness is load-bearing and is the reason the re-dial-per-call
    * contract still holds: nothing is dialled when the stream VALUE is made,

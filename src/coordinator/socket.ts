@@ -165,9 +165,12 @@ export function noRunInProgressMessage(path: string): string {
  *  and answers it differently, by re-dialing: it is the one face whose whole
  *  job is to outlive a transient drop.)
  *
- *  `awaited` names what never came, in the face's own words. */
+ *  `awaited` names what never came, in the face's own words — and names it
+ *  without repeating "the run", which this sentence has already said: the
+ *  stutter ("…the connection to the run before the run settled") landed in the
+ *  operator-facing line of a face that had just lost their terminal. */
 export function feedDroppedMessage(awaited: string): string {
-  return `odu: lost the connection to the run before ${awaited} — the run may still be going (check \`odu status\`)\n`;
+  return `odu: lost the connection to the run before ${awaited} — it may still be going (check \`odu status\`)\n`;
 }
 
 /** {@link dialRun}, for a face that has nothing to say without a run: exits

@@ -37,6 +37,7 @@ import {
   noRunInProgressMessage,
 } from "../coordinator/socket";
 import { postingWarning } from "../coordinator/statuses";
+import { isDeadTransportError } from "@kolu/surface/errors";
 import { NoLiveRunError, waitForSettle } from "../coordinator/waitForSettle";
 import { agentReaderForSocket } from "../mcp/agentSurface";
 import { yellow } from "./ansi";
@@ -258,12 +259,14 @@ export async function logStream(
     frame.kind === "end" || (!follow && frame.kind === "snapshot");
 
   let last: NodeLogFrame | undefined;
-  for await (const frame of subscribe(client.surface.nodeLog.get({ id }))) {
-    last = frame;
-    // `end` carries no bytes.
-    if (frame.kind !== "end") process.stdout.write(frame.text);
-    if (isWholeAnswer(frame)) break;
-  }
+  await untilFeedDropped(async () => {
+    for await (const frame of subscribe(client.surface.nodeLog.get({ id }))) {
+      last = frame;
+      // `end` carries no bytes.
+      if (frame.kind !== "end") process.stdout.write(frame.text);
+      if (isWholeAnswer(frame)) break;
+    }
+  });
   // Ending any OTHER way is the feed dying, and returning 0 there would hand
   // back a log that stops mid-line as a complete one — the single forbidden
   // outcome this repo already spent #88/#89 on ("either the log is complete, or
@@ -288,6 +291,33 @@ export async function attachCommand(json: boolean): Promise<number> {
   return attachDashboard(client, close);
 }
 
+/** Run `pump` and swallow a dropped LINK — the two ways a watching face's feed
+ *  can go away, brought onto one path.
+ *
+ *  A transport that dies mid-subscription arrives one of two shapes, and the
+ *  faces used to treat them as different kinds of event: an interrupt-only
+ *  `Cause` ends the iteration cleanly (`effectEdge`'s `endOnInterrupt`), while a
+ *  tagged `SurfaceStdioTransportClosed` — the keep-alive death this whole change
+ *  is about — REJECTED out of the `for await` and crashed the command with a
+ *  framework sentence about stdio transports. So `odu attach` answered the
+ *  polite death with `feedDroppedMessage` and the common one with a stack.
+ *
+ *  Swallowing it here is not losing the error: the caller's own terminal check
+ *  runs next and finds it never got what it was waiting for, so the same
+ *  dropped-feed line and the same exit code follow either way. Anything that is
+ *  NOT a dead transport still propagates — this is a classifier, not a
+ *  catch-all.
+ *
+ *  (`waitForSettle` deliberately does the opposite with the same error: it
+ *  re-dials. Outliving a drop is its whole job; reporting one is theirs.) */
+async function untilFeedDropped(pump: () => Promise<void>): Promise<void> {
+  try {
+    await pump();
+  } catch (err) {
+    if (!isDeadTransportError(err)) throw err;
+  }
+}
+
 /** The exit code an attach face reports for the run it was WATCHING, and the
  *  one place either of them decides it.
  *
@@ -305,7 +335,7 @@ export async function attachCommand(json: boolean): Promise<number> {
  *  drift `odu wait` and `wait_for_settle` had, one layer over. */
 function watchedRunExit(last: PipelineState | undefined): number {
   if (last !== undefined && summarize(last).done) return exitCode(last);
-  process.stderr.write(feedDroppedMessage("the run settled"));
+  process.stderr.write(feedDroppedMessage("this run settled"));
   return 1;
 }
 
@@ -327,27 +357,29 @@ export async function attachStream(
   const seen = new Map<string, NodeState["status"]>();
   let last: PipelineState | undefined;
   let started = false;
-  for await (const state of subscribe(client.surface.nodes.get(undefined))) {
-    last = state;
-    if (!started) {
-      started = true;
-      // Commit identity (pipeline name + sha) comes from the snapshot's state;
-      // an observer has no run-env (no leased hosts, no forge origin, no own
-      // start clock), so it never calls `setHeader` and the banner collapses to
-      // `odu · <pipeline> @ <sha>`. The matrix dashboard follows the surface
-      // `header` cell instead (see `attachDashboard`).
-      display.start(state);
+  await untilFeedDropped(async () => {
+    for await (const state of subscribe(client.surface.nodes.get(undefined))) {
+      last = state;
+      if (!started) {
+        started = true;
+        // Commit identity (pipeline name + sha) comes from the snapshot's state;
+        // an observer has no run-env (no leased hosts, no forge origin, no own
+        // start clock), so it never calls `setHeader` and the banner collapses
+        // to `odu · <pipeline> @ <sha>`. The matrix dashboard follows the
+        // surface `header` cell instead (see `attachDashboard`).
+        display.start(state);
+      }
+      display.update(state); // drives the plain heartbeat
+      for (const id of state.order) {
+        const node = state.nodes[id];
+        if (node === undefined || seen.get(id) === node.status) continue;
+        seen.set(id, node.status);
+        const event = progressEvent(state.sha7, id, node);
+        if (event !== null) display.transition(event, node);
+      }
+      if (summarize(state).done) break;
     }
-    display.update(state); // drives the plain heartbeat
-    for (const id of state.order) {
-      const node = state.nodes[id];
-      if (node === undefined || seen.get(id) === node.status) continue;
-      seen.set(id, node.status);
-      const event = progressEvent(state.sha7, id, node);
-      if (event !== null) display.transition(event, node);
-    }
-    if (summarize(state).done) break;
-  }
+  });
   display.stop(last);
   await close();
   return watchedRunExit(last);
@@ -413,16 +445,18 @@ async function attachDashboard(
   });
 
   let first = true;
-  for await (const state of subscribe(client.surface.nodes.get(undefined))) {
-    last = state;
-    if (first) {
-      first = false;
-      view.start(state);
-    } else {
-      view.update(state);
+  await untilFeedDropped(async () => {
+    for await (const state of subscribe(client.surface.nodes.get(undefined))) {
+      last = state;
+      if (first) {
+        first = false;
+        view.start(state);
+      } else {
+        view.update(state);
+      }
+      if (summarize(state).done) break;
     }
-    if (summarize(state).done) break;
-  }
+  });
   view.stop(last);
   // The viewport is gone; say how the run ended. `run` has its own verdict —
   // an observer would otherwise be left with only an exit code.
@@ -513,18 +547,30 @@ export interface WaitCommandOpts {
  *  fail-fast; `--settle` waits for the whole run. Exit 0 only on a fully-settled
  *  all-green run. Shares `waitForSettle` with the MCP `wait_for_settle` tool.
  *
- *  THE READER IS THE SAME ONE THE MCP FACE USES, and that is the whole of it.
- *  This command used to dial `.ci/odu.sock` HERE and hand the wait one
- *  already-opened link — a private, one-shot copy of what `mcp.ts` builds with
- *  `redialingAClient`, whose dial is a scoped acquire of the stream instead. The
- *  copy looked equivalent and was not: when that single link died (the wire's
- *  keep-alive makes 5–10s of coordinator silence fatal, and a coordinator
- *  claiming a venue goes quiet for that long), the wait had nothing left to
- *  wait ON, so it answered `{settled:false, passed:false}` about a run that was
- *  still going — the bug this command shipped for a release. A reader that
- *  re-dials lets the settle core re-subscribe and carry on, and `waitForSettle`
- *  now does exactly that. The two faces cannot drift on it because there is one
- *  reader.
+ *  WHAT WENT WRONG, IN THE RIGHT ORDER — because the first version of this note
+ *  had it backwards, and a wrong first-order cause is what the next debugger of
+ *  this class would have started from.
+ *
+ *  The lie was the CORE's, and it belonged to both faces. `waitForSettle`
+ *  answered a dead link as a finished run: one subscription, and a
+ *  `SurfaceStdioTransportClosed` went straight to the end-of-stream verdict. A
+ *  link dies under a perfectly healthy run all the time — the wire's keep-alive
+ *  makes 5–10s of peer silence fatal, and a coordinator claiming a venue goes
+ *  quiet for that long — so `{settled:false, passed:false}` came back about a
+ *  run that was still going. MCP `wait_for_settle` calls that same function and
+ *  would have said the same thing; the field observation of the two faces
+ *  disagreeing is not evidence that they differed here.
+ *
+ *  What THIS command's reader added was not the lie but a trap. It dialled
+ *  `.ci/odu.sock` here and handed the wait one already-opened link — a private,
+ *  one-shot copy of what `mcp.ts` builds with `redialingAClient`, whose dial is
+ *  a scoped acquire of the stream instead. So the fix the core needed
+ *  (re-subscribe instead of answering) would have been silently INERT on the
+ *  CLI: a fresh subscription to a captured link reaches the same corpse. Both
+ *  changes are needed, and only one of them is the bug.
+ *
+ *  Hence one reader, `agentReaderForSocket`, for both faces — and the two
+ *  cannot drift on it, because there is only one.
  *
  *  Dialing moves INTO the wait as a consequence, and the no-run refusal moves
  *  with it: the reader answers its `{ run: false }` frame, the core raises

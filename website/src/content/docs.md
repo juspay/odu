@@ -349,7 +349,7 @@ still has a run to act on.
 
 An early `wait_for_settle` response with `fail_fast_tripped: true` is not a final tally. Only `passed: true` on a fully settled run proves green.
 
-A wait rides out a dropped *link*. If the connection to the coordinator dies while the run is still going — a coordinator busy claiming a venue or copying a runner closure can go quiet long enough for the transport's keep-alive to give up — the wait re-dials and carries on rather than reporting a live run as unsettled. The plain-CLI `odu wait` is the same core over the same reader, so the two faces cannot disagree about a run.
+A wait rides out a dropped *link*. If the connection to the coordinator dies while the run is still going — a coordinator busy claiming a venue or copying a runner closure can go quiet long enough for the transport's keep-alive to give up — the wait re-dials and carries on rather than reporting a live run as unsettled. The plain-CLI `odu wait` runs the same settle core over a reader built the same way — both dial through the same re-dialing client — so the two faces answer a run alike.
 
 Every observed verdict identifies its run with `sha7` and, when the coordinator reserved one, `seq`—the durable `sha7#seq` identity. Pass `expected_sha` as a full SHA or `sha7` prefix to make identity a hard check. `seq` is null only when no ordinal could be reserved. With no live run, `wait_for_settle` raises the same “no run in progress” error as `odu status`; it never returns an ambiguous empty verdict. When a run *was* observed and the coordinator's socket then closed before the terminal frame, the verdict is read from that run's finalized record — never green for a run torn down mid-flight.
 

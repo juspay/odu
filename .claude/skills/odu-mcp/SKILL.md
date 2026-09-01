@@ -45,7 +45,8 @@ A wait also rides out a dropped LINK: if the connection to the coordinator dies
 while the run is still going (a busy coordinator can go quiet long enough for
 the transport's keep-alive to give up), it re-dials and keeps waiting rather
 than reporting a healthy run as unsettled. The plain-CLI `odu wait` uses the
-same core over the same reader, so the two faces cannot disagree about a run.
+same settle core over a reader built the same way (both dial through the same
+re-dialing client), so the two faces answer a run alike.
 Called with **no run live**
 it fails loud (an error mirroring `odu status`, not an empty `settled: false`),
 and an optional `expected_sha` (prefix-matched against the run's `sha7`) refuses

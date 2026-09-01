@@ -24,7 +24,7 @@ import {
   serveSurfaceAsMcp,
   type SurfaceClientCallable,
 } from "@kolu/surface-mcp";
-import { Effect, Stream } from "effect";
+import { Cause, Effect, Stream } from "effect";
 import { SurfaceStdioTransportClosed } from "@kolu/surface/errors";
 import { afterEach, describe, expect, it } from "bun:test";
 import {
@@ -42,6 +42,7 @@ import {
   type DialA,
   dialAFor,
   type ResolveRunContext,
+  toAgentNodes,
   durableLog,
   redialingAClient,
 } from "./agentSurface";
@@ -605,6 +606,166 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
       },
     };
   }
+
+  it("rides out a link death through the SHIPPING B-client, defect and all", async () => {
+    // The third path, and the one neither the CLI test nor the units traverse.
+    // `odu mcp` does not hand the handler `agentReaderForSocket`; it hands it
+    // the adapter's projected B-client (`buildSurfaceFace ∘ directDispatch ∘
+    // deriveStream`, src/cli/mcp.ts). The two faces therefore share the settle
+    // core and the row mapping but NOT the error channel: `deriveStream`
+    // `Stream.orDie`s an upstream failure (`@kolu/surface` project.ts), so the
+    // tagged transport death crosses as a DEFECT rather than a failure.
+    //
+    // Whether `isDeadTransportError` still recognises it on the far side of
+    // that squash is the load-bearing question for the MCP half of this change,
+    // and it was answered by reading. Answer it by measuring: build the real
+    // projection over an A-client whose `nodes` dies once, and drive the core
+    // through the B-client the adapter would have been given.
+    let pass = 0;
+    const aClient = {
+      surface: {
+        nodes: {
+          get: () => {
+            pass += 1;
+            return pass === 1
+              ? Stream.concat(
+                  Stream.make(state([["ci::e2e@x86_64-linux", "running"]])),
+                  Stream.fail(
+                    new SurfaceStdioTransportClosed({
+                      death: "keepAliveUnanswered",
+                      reason: "test: the peer stopped answering",
+                    }),
+                  ),
+                )
+              : Stream.make(state([["ci::e2e@x86_64-linux", "ok"]]));
+          },
+        },
+        nodeLog: { get: () => Stream.empty },
+        node: { rerun: () => Effect.succeed({ ok: true }), cancel: () => Effect.succeed({ ok: true }) },
+        lane: { cancel: () => Effect.succeed({ ok: true }) },
+      },
+    };
+    const projection = buildAgentProjection(oduSurface, () => null);
+    const bClient = buildSurfaceFace(
+      projection.surface,
+      directDispatch(
+        projection.implement(aClient as unknown as Parameters<typeof projection.implement>[0]),
+      ),
+    ) as unknown as AgentNodesReader;
+
+    const v = await waitForSettle({
+      client: bClient,
+      failFast: false,
+      timeoutMs: 10_000,
+      resolveRunContext: () => null,
+    });
+    expect(v).toMatchObject({ settled: true, passed: true, timed_out: false });
+    expect(pass).toBe(2);
+  });
+
+  it("never answers a probe that got nothing as a finished run", async () => {
+    // THE SEQUENCE, and it is one real scenario rather than two stitched
+    // together: a live frame, the wire's keep-alive death, and then the re-dial
+    // landing exactly as the peer closes — an interrupt-only `Cause`, which
+    // `endOnInterrupt` converts to a CLEAN end carrying no frames.
+    //
+    // Before the clean-end arm learned to ask `delivered`, that sequence walked
+    // straight into `streamEndedVerdict()` with `lastLive` already set and no
+    // finalized record to answer, and returned `{settled:false, passed:false}`
+    // with every reason flag false — the exact shape of the bug this whole
+    // change exists to kill, re-entering through the arm the change added.
+    // Measured on that code: 2 passes, 6ms, that verdict.
+    let pass = 0;
+    const reader: AgentNodesReader = {
+      surface: {
+        nodes: {
+          get: () => {
+            pass += 1;
+            if (pass === 1) {
+              return Stream.concat(
+                Stream.make(toAgentNodes(state([["ci::e2e@x86_64-linux", "running"]]))),
+                Stream.fail(
+                  new SurfaceStdioTransportClosed({
+                    death: "keepAliveUnanswered",
+                    reason: "test: the peer stopped answering the keep-alive ping",
+                  }),
+                ),
+              );
+            }
+            if (pass === 2) {
+              // The dial that lands as the peer closes. No `_tag`, no frames.
+              return Stream.failCause(
+                Cause.interrupt(1 as never),
+              ) as unknown as Stream.Stream<AgentNodes>;
+            }
+            // The coordinator is back, and the run it was running settled.
+            return Stream.make(
+              toAgentNodes(state([["ci::e2e@x86_64-linux", "ok"]])),
+            );
+          },
+        },
+      },
+    };
+    const v = await waitForSettle({
+      client: reader,
+      failFast: false,
+      timeoutMs: 10_000,
+      // No ledger record can answer, so a wrong verdict has nowhere to hide.
+      resolveRunContext: () => null,
+    });
+    expect(v).toMatchObject({ settled: true, passed: true, timed_out: false });
+    expect(pass).toBe(3);
+  });
+
+  it("times out — paced — against a reader that can never reach the run", async () => {
+    // TWO things at once, both of them holes a reviewer named.
+    //
+    // (1) THE READER HALF OF THE DIAGNOSIS. A reader built over one captured
+    // link is a corpse after that link dies: every subscription it mints goes
+    // to the same dead socket and delivers nothing. `agentReaderFromA` is
+    // unexported so this shape cannot be built against a real checkout any
+    // more, but a future caller could reintroduce it, and what must happen then
+    // is what happens here — the wait TIMES OUT and says so. Never a green
+    // verdict, never the nothing-shape with `timed_out: false`.
+    //
+    // (2) THE PAUSE. `delivered`-gated backpressure is the only thing between a
+    // pathological instant-death dial loop and a reconnect storm, and it was
+    // the one branch in the loop pinned by nothing but reading. This reader
+    // fails INSTANTLY every time, so an unpaced loop would spin as fast as the
+    // event loop allows; at one `STREAM_RETRY_DELAY_MS` (1s) per frameless
+    // attempt, a 2.5s budget admits only a handful.
+    let attempts = 0;
+    const corpse: AgentNodesReader = {
+      surface: {
+        nodes: {
+          get: () => {
+            attempts += 1;
+            return Stream.fail(
+              new SurfaceStdioTransportClosed({
+                death: "streamEnded",
+                reason: "test: the link this reader captured is gone",
+              }),
+            ) as unknown as Stream.Stream<AgentNodes>;
+          },
+        },
+      },
+    };
+    const v = await waitForSettle({
+      client: corpse,
+      failFast: false,
+      timeoutMs: 2_500,
+      resolveRunContext: () => null,
+    });
+    expect(v).toMatchObject({
+      settled: false,
+      passed: false,
+      timed_out: true,
+      cancelled: false,
+    });
+    // Paced, not spun: without the pause this is thousands.
+    expect(attempts).toBeLessThanOrEqual(5);
+    expect(attempts).toBeGreaterThanOrEqual(2);
+  }, 20_000);
 
   it("rides out a link that dies under a run still running", async () => {
     // THE BUG (juspay/odu: `wait --settle` returns before the run settles).

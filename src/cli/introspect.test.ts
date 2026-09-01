@@ -12,12 +12,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
 import { Effect, Stream } from "effect";
+import { SurfaceStdioTransportClosed } from "@kolu/surface/errors";
 import { pendingNode, type PipelineState } from "@odu/run-client/surface";
 import { firstFrame } from "../common/effectEdge";
 import { capturingStderr, capturingStdout } from "../common/scaffoldForTest";
 import { dialRunOrExit } from "../coordinator/socket";
 import type { SettleVerdict } from "../coordinator/waitForSettle";
-import { agentReaderForSocket } from "../mcp/agentSurface";
+import { buildSurfaceFace } from "@kolu/surface/client";
+import { directDispatch } from "@kolu/surface/links/direct";
+import { oduSurface } from "@odu/run-client/surface";
+import {
+  agentReaderForSocket,
+  buildAgentProjection,
+  dialAFor,
+  redialingAClient,
+} from "../mcp/agentSurface";
 import { serveTestSurface, type TestSurface } from "../mcp/serveForTest";
 import { makeWaitTool } from "../mcp/waitTool";
 import {
@@ -195,7 +204,7 @@ describe("a feed that drops before the face's own terminal frame", () => {
       capturingStdout(() => attachStream(endingAfter([running]), async () => {}, true)),
     );
     expect(result.result).toBe(1);
-    expect(err).toMatch(/lost the connection to the run before the run settled/);
+    expect(err).toMatch(/lost the connection to the run before this run settled/);
   });
 
   it("attach still reports the run's own verdict when it did settle", async () => {
@@ -219,6 +228,75 @@ describe("a feed that drops before the face's own terminal frame", () => {
     // The bytes it DID get are still delivered — a dropped feed is not a
     // reason to withhold what arrived.
     expect(result.out).toBe("half a line");
+  });
+
+  /** The wire's keep-alive death — the event this whole change is about, and
+   *  the shape these faces used to CRASH on rather than report. */
+  const keepAliveDeath = () =>
+    new SurfaceStdioTransportClosed({
+      death: "keepAliveUnanswered",
+      reason: "test: the peer stopped answering the keep-alive ping",
+    });
+
+  it("attach answers a TAGGED link death the same way as a clean one", async () => {
+    // The two deaths used to be different kinds of event to these faces: the
+    // interrupt-only one ended the loop politely and got `feedDroppedMessage`,
+    // while the tagged one — the common one, the venue-claim freeze — rejected
+    // out of the `for await` and crashed the command with a framework sentence
+    // about stdio transports. One death, one answer.
+    const dying = {
+      surface: {
+        nodes: {
+          get: () =>
+            Stream.concat(Stream.make(running), Stream.fail(keepAliveDeath())),
+        },
+      },
+    } as unknown as Parameters<typeof attachStream>[0];
+    const { err, result } = await capturingStderr(() =>
+      capturingStdout(() => attachStream(dying, async () => {}, true)),
+    );
+    expect(result.result).toBe(1);
+    expect(err).toMatch(/lost the connection to the run before this run settled/);
+    expect(err).not.toMatch(/stdio transport/);
+  });
+
+  it("logs -f answers a TAGGED link death the same way too", async () => {
+    const dying = {
+      surface: {
+        nodeLog: {
+          get: () =>
+            Stream.concat(
+              Stream.make({ kind: "snapshot" as const, text: "half a line" }),
+              Stream.fail(keepAliveDeath()),
+            ),
+        },
+      },
+    } as unknown as Parameters<typeof logStream>[0];
+    const { err, result } = await capturingStderr(() =>
+      capturingStdout(() => logStream(dying, "ci::e2e@x86_64-linux", true)),
+    );
+    expect(result.result).toBe(1);
+    expect(err).toMatch(/lost the connection to the run before .*log ended/);
+    expect(result.out).toBe("half a line");
+  });
+
+  it("still propagates a failure that is NOT a dead transport", async () => {
+    // `untilFeedDropped` is a classifier, not a catch-all: a bug in the render
+    // path must not be laundered into "the feed dropped".
+    const broken = {
+      surface: {
+        nodes: {
+          get: () =>
+            Stream.fail(new Error("not a transport problem")) as Stream.Stream<
+              PipelineState,
+              Error
+            >,
+        },
+      },
+    } as unknown as Parameters<typeof attachStream>[0];
+    await expect(attachStream(broken, async () => {}, true)).rejects.toThrow(
+      "not a transport problem",
+    );
   });
 
   it("logs without -f is complete at the snapshot, as it always was", async () => {
@@ -435,14 +513,34 @@ describe("waitCommand", () => {
   });
 
   it("agrees with the MCP `wait_for_settle` verdict on one run", async () => {
-    // The two faces, the same live run, one verdict. They share the settle core
-    // AND (since the reader moved) the way they reach the coordinator, so this
-    // is a pin on that sharing rather than a coincidence of two code paths.
+    // The two faces, the same live run, one verdict — and each reaching that
+    // run the way IT ships, which is the part this test used to fake. It handed
+    // both sides `agentReaderForSocket` and called that a pin on two code
+    // paths; it was two calls on one reader. `odu mcp` hands the handler the
+    // adapter's projected B-client, so that is what the MCP side gets here:
+    // `buildSurfaceFace ∘ directDispatch ∘ deriveStream` over the same
+    // re-dialing A-client `mcpCommand` builds, against the same socket.
+    //
+    // What that buys is the thing worth pinning: the two faces share the settle
+    // core and the row mapping but NOT the error channel (`deriveStream`
+    // `orDie`s, so a transport death crosses as a defect on the MCP side), and
+    // a verdict that came out equal field-for-field through both is a verdict
+    // neither channel bent. (The ride-out case through that same B-client is
+    // pinned next door, in server.test.ts.)
     const surface = await served(
       doneState([
         ["ci::unit@x86_64-linux", "running"],
         ["ci::e2e@x86_64-linux", "running"],
       ]),
+    );
+    const projection = buildAgentProjection(oduSurface, () => null);
+    const bClient = buildSurfaceFace(
+      projection.surface,
+      directDispatch(
+        projection.implement(
+          redialingAClient(dialAFor(surface.socketPath)) as never,
+        ),
+      ),
     );
     const cli = capturingStdout(() =>
       waitCommand({ settle: true, socketPath: surface.socketPath, timeoutMs: 5_000 }),
@@ -450,7 +548,7 @@ describe("waitCommand", () => {
     const mcp = Effect.runPromise(
       makeWaitTool(() => null).handler(
         { fail_fast: false, timeout_ms: 5_000 },
-        agentReaderForSocket(surface.socketPath) as never,
+        bClient as never,
         undefined,
       ),
     ) as Promise<SettleVerdict>;
