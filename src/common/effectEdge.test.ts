@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from "bun:test";
 import { Cause, Stream } from "effect";
-import { subscribe } from "./effectEdge";
+import { firstFrame, subscribe } from "./effectEdge";
 
 async function drain<T>(stream: Stream.Stream<T, unknown>): Promise<T[]> {
   const seen: T[] = [];
@@ -38,5 +38,27 @@ describe("subscribe", () => {
       Stream.fail(boom) as Stream.Stream<number, Error>,
     );
     await expect(drain(stream)).rejects.toThrow("the feed died");
+  });
+});
+
+describe("firstFrame", () => {
+  it("reads an interruption the same way `subscribe` does", async () => {
+    // The rule is the MODULE's, not one member's. A one-shot read is where this
+    // interruption actually happens (a peer closing while the dial is in
+    // flight), and leaving it unclassified handed `firstSnapshot` /
+    // `headerSnapshot` the shapeless `All fibers interrupted without error`
+    // instead of the odu-worded protocol failure they raise for exactly this.
+    const interrupted = Stream.failCause(
+      Cause.interrupt(1 as never),
+    ) as Stream.Stream<number>;
+    expect(await firstFrame(interrupted)).toBeUndefined();
+  });
+
+  it("still rejects on a real failure, so a dropped link is not 'no state'", async () => {
+    const stream = Stream.fail(new Error("the feed died")) as Stream.Stream<
+      number,
+      Error
+    >;
+    await expect(firstFrame(stream)).rejects.toThrow("the feed died");
   });
 });

@@ -13,6 +13,7 @@
  */
 
 import {
+  type NodeLogFrame,
   type NodeState,
   type OduClient,
   type PipelineState,
@@ -244,28 +245,30 @@ export async function logStream(
   id: string,
   follow: boolean,
 ): Promise<number> {
-  // Falling out of the loop any other way is the feed dying, and returning 0
-  // there would hand back a log that stops mid-line as a complete one. That is
-  // the single forbidden outcome this repo already spent #88/#89 on ("either
-  // the log is complete, or it says it isn't"), and it was reachable here by
-  // dropping a link.
-  let whole = false;
+  /** The frame that means this command has the whole answer — named ONCE, and
+   *  used both to stop the loop and to judge how the loop stopped, so the two
+   *  cannot drift apart when one is edited.
+   *
+   *  `end` means the node produced all the output it ever will, so `-f` has
+   *  nothing left to follow — stop, rather than holding the terminal open until
+   *  the whole run exits. Without it a `logs -f` on a finished node never
+   *  returns, which is precisely the wait an agent cannot afford. Without `-f`
+   *  the buffered snapshot IS the whole answer. */
+  const isWholeAnswer = (frame: NodeLogFrame): boolean =>
+    frame.kind === "end" || (!follow && frame.kind === "snapshot");
+
+  let last: NodeLogFrame | undefined;
   for await (const frame of subscribe(client.surface.nodeLog.get({ id }))) {
-    // `end` means this node produced all the output it ever will, so `-f` has
-    // nothing left to follow — stop, rather than holding the terminal open
-    // until the whole run exits. Without it a `logs -f` on a finished node
-    // never returns, which is precisely the wait an agent cannot afford.
-    if (frame.kind === "end") {
-      whole = true;
-      break;
-    }
-    process.stdout.write(frame.text);
-    if (!follow && frame.kind === "snapshot") {
-      whole = true;
-      break;
-    }
+    last = frame;
+    // `end` carries no bytes.
+    if (frame.kind !== "end") process.stdout.write(frame.text);
+    if (isWholeAnswer(frame)) break;
   }
-  if (whole) return 0;
+  // Ending any OTHER way is the feed dying, and returning 0 there would hand
+  // back a log that stops mid-line as a complete one — the single forbidden
+  // outcome this repo already spent #88/#89 on ("either the log is complete, or
+  // it says it isn't"), and it was reachable here by dropping a link.
+  if (last !== undefined && isWholeAnswer(last)) return 0;
   process.stderr.write(
     feedDroppedMessage(follow ? `${id}'s log ended` : `${id}'s log arrived`),
   );
@@ -299,15 +302,6 @@ export async function attachStream(
   const seen = new Map<string, NodeState["status"]>();
   let last: PipelineState | undefined;
   let started = false;
-  // THIS face's terminal condition, stated so that falling out of the loop any
-  // other way is legible as what it is: the feed died. Ending the subscription
-  // and the run ENDING are two different events that arrive as the same
-  // `done: true`, and reading the first as the second is how a piped `attach`
-  // came to exit 0 — `exitCode(state)` is 0 for a run that has not settled —
-  // on a link that dropped mid-run. Same shape as the `wait --settle` defect,
-  // in the face next door. `lane.ts`'s pump already stated it this way
-  // ("lane state stream ended" → `die`).
-  let settled = false;
   for await (const state of subscribe(client.surface.nodes.get(undefined))) {
     last = state;
     if (!started) {
@@ -327,14 +321,19 @@ export async function attachStream(
       const event = progressEvent(state.sha7, id, node);
       if (event !== null) display.transition(event, node);
     }
-    if (summarize(state).done) {
-      settled = true;
-      break;
-    }
+    if (summarize(state).done) break;
   }
   display.stop(last);
   await close();
-  if (!settled) {
+  // The loop ends two ways — the run settled, or the feed died under it — and
+  // both arrive as the same `done: true`. Reading the second as the first is
+  // how a piped `attach` came to exit 0 on a run still going: `exitCode` is 0
+  // for anything that has not settled. Which one happened is ASKED OF THE
+  // STATE, not remembered in a flag beside the loop: `summarize(last).done` IS
+  // the break condition, so the two cannot drift apart when one is edited.
+  // (`lane.ts`'s pump states the same rule its own way — "lane state stream
+  // ended" → `die`.)
+  if (last === undefined || !summarize(last).done) {
     process.stderr.write(feedDroppedMessage("the run settled"));
     return 1;
   }
@@ -401,8 +400,6 @@ async function attachDashboard(
   });
 
   let first = true;
-  // Same terminal condition, same reason as `attachStream` — see its note.
-  let settled = false;
   for await (const state of subscribe(client.surface.nodes.get(undefined))) {
     last = state;
     if (first) {
@@ -411,10 +408,7 @@ async function attachDashboard(
     } else {
       view.update(state);
     }
-    if (summarize(state).done) {
-      settled = true;
-      break;
-    }
+    if (summarize(state).done) break;
   }
   view.stop(last);
   // The viewport is gone; say how the run ended. `run` has its own verdict —
@@ -424,9 +418,10 @@ async function attachDashboard(
   // The subscription is torn down with the link, so this settles rather than
   // stranding a live `for await` past the function that opened it.
   await headerLoop;
-  if (!settled) {
-    // After `view.stop` — the terminal is back, so the operator reads this
-    // rather than watching a frozen matrix and drawing their own conclusion.
+  // Same question, same answer, same reason as `attachStream` — asked of the
+  // state. After `view.stop`, so the terminal is back and the operator reads
+  // this rather than watching a frozen matrix and drawing their own conclusion.
+  if (last === undefined || !summarize(last).done) {
     process.stderr.write(feedDroppedMessage("the run settled"));
     return 1;
   }
