@@ -497,18 +497,29 @@ export function dialAFor(socketPath: string): DialA {
 }
 
 /** The `nodes` reader `waitForSettle` takes, for the run live at `socketPath` —
- *  and the ONLY exported way to build one over a live checkout, which is the
- *  point. Both faces hand it in (`odu wait` directly; `odu mcp` through the
- *  projection over the same {@link redialingAClient}), so the two cannot
- *  disagree about a run, and neither can reintroduce the captured-link reader
- *  by writing a plausible line of its own.
+ *  and the ONLY exported way to build one over a live checkout, so no caller
+ *  can reintroduce the captured-link reader by writing a plausible line of its
+ *  own.
+ *
+ *  WHAT THE TWO FACES ACTUALLY SHARE, stated once here because it is easy to
+ *  round up to "one reader" and that is not true. `odu wait` hands this in.
+ *  `odu mcp` does NOT: `mcpCommand` hands the tool handler the adapter's
+ *  projected B-client (`buildSurfaceFace ∘ directDispatch` over the
+ *  projection). So the shared parts are the ones that decide a verdict — the
+ *  settle core, the `toAgentNodes` row mapping, and the SAME
+ *  {@link redialingAClient} over the same {@link dialAFor}, which is what lets
+ *  either face ride out a link that dies under a run still running. The part
+ *  that differs is the error channel: this reader maps with `Stream.map` and
+ *  keeps the upstream failure, while the projection's `deriveStream` `orDie`s
+ *  it, so a transport death reaches the core as a defect on that side.
+ *  `isDeadTransportError` recognises it either way — measured in
+ *  `server.test.ts`, not assumed.
  *
  *  It is a pairing, and both halves are load-bearing: {@link redialingAClient}
- *  so the dial is a scoped acquire of the stream (re-subscribing re-DIALS, which
- *  is what lets the wait ride out a link that dies under a run still running),
- *  and `agentReaderFromA` so the rows are the agent rows, derived by the same
- *  mapping the MCP projection applies. Nothing is dialed here: the reader is a
- *  lazy description, and the socket is reached when the wait pulls. */
+ *  so the dial is a scoped acquire of the stream (re-subscribing re-DIALS), and
+ *  `agentReaderFromA` so the rows are the agent rows, by the same mapping the
+ *  projection applies. Nothing is dialed here: the reader is a lazy
+ *  description, and the socket is reached when the wait pulls. */
 export function agentReaderForSocket(socketPath: string): AgentNodesReader {
   return agentReaderFromA(redialingAClient(dialAFor(socketPath)));
 }

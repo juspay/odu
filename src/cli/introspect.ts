@@ -569,8 +569,11 @@ export interface WaitCommandOpts {
  *  CLI: a fresh subscription to a captured link reaches the same corpse. Both
  *  changes are needed, and only one of them is the bug.
  *
- *  Hence one reader, `agentReaderForSocket`, for both faces — and the two
- *  cannot drift on it, because there is only one.
+ *  Hence `agentReaderForSocket` — the only exported way to build a reader over
+ *  a live checkout, so the shape that disarms the repair cannot be written
+ *  again. Not "one reader for both faces": `odu mcp` hands its handler the
+ *  adapter's projected B-client, and what the two genuinely share is set out in
+ *  that function's own doc.
  *
  *  Dialing moves INTO the wait as a consequence, and the no-run refusal moves
  *  with it: the reader answers its `{ run: false }` frame, the core raises

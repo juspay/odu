@@ -80,9 +80,12 @@ export async function mcpCommand(socketPath: string = SOCKET_PATH): Promise<numb
   // coordinator live when it subscribes, not one that starts later — the run →
   // wait_for_settle agent loop is safe because `run` blocks until the socket is
   // live before returning — and re-dials if that link dies under a run still
-  // going (see `waitForSettle`'s read loop). `odu wait` builds the same reader
-  // over the same `dialAFor`, which is why the two faces cannot disagree about
-  // a run. No socket → the A-client yields the no-run value, so
+  // going (see `waitForSettle`'s read loop). What the handler gets is the
+  // B-client built below — NOT `agentReaderForSocket`, which is `odu wait`'s;
+  // the two faces share this `redialingAClient` (and so the re-dial), the row
+  // mapping and the settle core, but not the error channel, and
+  // `agentReaderForSocket`'s doc is where that is set out. No socket → the
+  // A-client yields the no-run value, so
   // `nodes`/`wait_for_settle` read `{ run: false }`, `logs` reads the durable
   // file, and `run` (which ignores the client) spawns a coordinator.
   const aClient = redialingAClient(dialAFor(socketPath));

@@ -717,43 +717,61 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     expect(pass).toBe(3);
   });
 
-  it("times out — paced — against a reader that can never reach the run", async () => {
+  it("times out — paced — when the reader goes corpse under a run it had seen", async () => {
     // TWO things at once, both of them holes a reviewer named.
     //
-    // (1) THE READER HALF OF THE DIAGNOSIS. A reader built over one captured
-    // link is a corpse after that link dies: every subscription it mints goes
-    // to the same dead socket and delivers nothing. `agentReaderFromA` is
-    // unexported so this shape cannot be built against a real checkout any
-    // more, but a future caller could reintroduce it, and what must happen then
-    // is what happens here — the wait TIMES OUT and says so. Never a green
-    // verdict, never the nothing-shape with `timed_out: false`.
+    // (1) THE READER HALF OF THE DIAGNOSIS — and the sequence matters, which
+    // is why the corpse FOLLOWS a live frame. A reader built over one captured
+    // link is not born dead: it works, delivers the run's frames, and becomes a
+    // corpse the moment that one link dies — after which every subscription it
+    // mints goes to the same dead socket and delivers nothing. Staging it as
+    // dead-from-the-start would go through a different door entirely: with no
+    // frame ever delivered `lastLive` is never set, so a loop that wrongly
+    // ANSWERED here would raise `NoLiveRunError` ("no run in progress") rather
+    // than return the nothing-shape — which is the failure this is supposed to
+    // discriminate. With a live frame first, `lastLive` IS set, the fail-closed
+    // snapshot IS reachable, and the assertion below is a real refutation:
+    // never a green verdict, and never `{settled:false, passed:false}` with
+    // `timed_out: false`. `agentReaderFromA` is unexported so this shape cannot
+    // be built against a real checkout any more, but a future caller could
+    // reintroduce it, and this is what must happen when they do.
     //
     // (2) THE PAUSE. `delivered`-gated backpressure is the only thing between a
     // pathological instant-death dial loop and a reconnect storm, and it was
-    // the one branch in the loop pinned by nothing but reading. This reader
-    // fails INSTANTLY every time, so an unpaced loop would spin as fast as the
-    // event loop allows; at one `STREAM_RETRY_DELAY_MS` (1s) per frameless
+    // the one branch in the loop pinned by nothing but reading. Every attempt
+    // after the first fails INSTANTLY, so an unpaced loop would spin as fast as
+    // the event loop allows; at one `STREAM_RETRY_DELAY_MS` (1s) per frameless
     // attempt, a 2.5s budget admits only a handful.
     let attempts = 0;
-    const corpse: AgentNodesReader = {
+    const goesCorpse: AgentNodesReader = {
       surface: {
         nodes: {
           get: () => {
             attempts += 1;
-            return Stream.fail(
+            const dead = Stream.fail(
               new SurfaceStdioTransportClosed({
                 death: "streamEnded",
                 reason: "test: the link this reader captured is gone",
               }),
             ) as unknown as Stream.Stream<AgentNodes>;
+            // The link worked once. Everything after it is the same corpse.
+            return attempts === 1
+              ? Stream.concat(
+                  Stream.make(
+                    toAgentNodes(state([["ci::e2e@x86_64-linux", "running"]])),
+                  ),
+                  dead,
+                )
+              : dead;
           },
         },
       },
     };
     const v = await waitForSettle({
-      client: corpse,
+      client: goesCorpse,
       failFast: false,
       timeoutMs: 2_500,
+      // No ledger record can answer, so a wrong verdict has nowhere to hide.
       resolveRunContext: () => null,
     });
     expect(v).toMatchObject({
@@ -762,8 +780,17 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
       timed_out: true,
       cancelled: false,
     });
+    // It knows WHICH run it gave up on — the frame it did see is not forgotten.
+    expect(v.sha7).toBe("abc1234");
     // Paced, not spun: without the pause this is thousands.
-    expect(attempts).toBeLessThanOrEqual(5);
+    expect(attempts).toBeLessThanOrEqual(6);
+    // The floor is a TIMING assertion, and the one thing here that could flake:
+    // it needs attempt 1 (which delivers, so it re-dials with no pause) and
+    // attempt 2 to both land inside the 2.5s budget. That is two synchronous
+    // passes with no sleep between them, so a stalled event loop on a loaded
+    // runner would have to eat the whole budget to reach 1 — and the failure
+    // mode if it ever did is a flaky test, never a masked verdict: the
+    // assertions above are what say the wait told the truth.
     expect(attempts).toBeGreaterThanOrEqual(2);
   }, 20_000);
 
