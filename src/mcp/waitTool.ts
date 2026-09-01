@@ -10,10 +10,7 @@ import type { BespokeTool } from "@kolu/surface-mcp";
 import { Effect, Schema } from "effect";
 import { runSocketPath } from "@odu/run-client/dial";
 import { gitRunContext, gitRunContextFor } from "../common/git";
-import {
-  waitForSettle,
-  type WaitOptions,
-} from "../coordinator/waitForSettle";
+import { waitForSettle } from "../coordinator/waitForSettle";
 import {
   type AgentNodesReader,
   agentReaderForSocket,
@@ -109,29 +106,28 @@ export function makeWaitTool(
           // and reads THAT checkout (./checkout.ts): its socket for the live
           // stream, its `.ci` for the durable-file fallback and the refusal's
           // path text. The settle core and its policies are untouched — only
-          // the addressing bends.
-          if (a.checkout !== undefined) {
-            const socketPath = runSocketPath(a.checkout);
-            const opts: WaitOptions = {
-              client: agentReaderForSocket(socketPath),
-              timeoutMs: a.timeout_ms,
-              failFast: a.fail_fast,
-              expectedSha: a.expected_sha,
-              signal,
-              socketPath,
-              resolveRunContext: gitRunContextFor(a.checkout),
-            };
-            return waitForSettle(opts);
-          }
-          const opts: WaitOptions = {
-            client: client as AgentNodesReader,
+          // the addressing (client, socket path, run context) bends, so the
+          // shared policy tail is built once and both forks spread it.
+          const policy = {
             timeoutMs: a.timeout_ms,
             failFast: a.fail_fast,
             expectedSha: a.expected_sha,
             signal,
-            resolveRunContext,
           };
-          return waitForSettle(opts);
+          if (a.checkout !== undefined) {
+            const socketPath = runSocketPath(a.checkout);
+            return waitForSettle({
+              ...policy,
+              client: agentReaderForSocket(socketPath),
+              socketPath,
+              resolveRunContext: gitRunContextFor(a.checkout),
+            });
+          }
+          return waitForSettle({
+            ...policy,
+            client: client as AgentNodesReader,
+            resolveRunContext,
+          });
         },
       }),
   };
