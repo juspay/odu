@@ -29,7 +29,8 @@
 
 import type { BespokeTool } from "@kolu/surface-mcp";
 import { Effect, Schema } from "effect";
-import { checkoutField, clientForCheckout } from "./checkout";
+import { deadRun, describeDeadRun } from "@odu/run-client/deadRun";
+import { checkoutField, checkoutOf, clientForCheckout } from "./checkout";
 
 export const rerunInput = Schema.Struct({
   checkout: checkoutField,
@@ -73,7 +74,10 @@ export const rerunTool: BespokeTool = {
     "as the `nodes` resource spells them. Returns `{ok}`: false means there " +
     "was no live run to rerun on — start one with `run`, or use `run({linger: " +
     "true})` next time so the coordinator outlives settle and a node can be " +
-    "rerun afterwards. Targets `checkout`, defaulting to this server's own " +
+    "rerun afterwards. When the previous run DIED with its host (its `.ci` " +
+    "tombstone: stale lock/socket, an unfinalized reservation), this call " +
+    "fails LOUD naming the dead run instead of answering bare `{ok: false}`. " +
+    "Targets `checkout`, defaulting to this server's own " +
     "working directory.",
   input: rerunInput,
   mutates: true,
@@ -84,10 +88,32 @@ export const rerunTool: BespokeTool = {
   // Which checkout the call dials is `./checkout.ts`'s `clientForCheckout` —
   // and the A-side procedure takes `{ id }` exactly: the call is narrowed in
   // BOTH directions, the whole input struct is never forwarded.
+  //
+  // The ONE elaboration: `{ok: false}` has two very different authors. A LIVE
+  // run answered it (bad id / not rerunnable) — pass it through. NOBODY is
+  // serving and the residue says the run was KILLED — answering a bare
+  // `{ok: false}` is how the incident hid it, so the corpse is NAMED, loudly,
+  // instead. Note the order: deadRun answers null while ANY coordinator is
+  // live, so a bad-id `false` never collides with the death answer.
   handler: (args, client) => {
     const a = args as RerunInput;
-    return clientForCheckout<RerunClient>(a.checkout, client).surface.node.rerun({
-      id: a.id,
+    return Effect.gen(function* () {
+      const r = yield* clientForCheckout<RerunClient>(
+        a.checkout,
+        client,
+      ).surface.node.rerun({ id: a.id });
+      if (r.ok) return r;
+      const dead = yield* Effect.promise(() => deadRun(checkoutOf(a)));
+      if (dead !== null) {
+        return yield* Effect.fail(
+          new Error(
+            `${describeDeadRun(dead)} There is no live run to rerun on — ` +
+              "start a new one with `run` (starting over the residue works " +
+              "without `supersede`).",
+          ),
+        );
+      }
+      return r;
     });
   },
 };

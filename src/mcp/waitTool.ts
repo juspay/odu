@@ -78,7 +78,11 @@ export function makeWaitTool(
       "run is live in this checkout, or when the live run's commit doesn't " +
       "prefix-match `expected_sha`. If the coordinator's socket closes before " +
       "it publishes a terminal frame, the verdict comes from the run's " +
-      "finalized record on disk (never green for a run torn down mid-flight).",
+      "finalized record on disk (never green for a run torn down mid-flight). " +
+      "And when the residue in `.ci` says the run DIED with its host — stale " +
+      "lock/socket, a reservation never finalized — the error names that " +
+      "death (`<sha7>#<seq>` and the last sign of life) instead of the bare " +
+      "'no run in progress'; a killed run is never a silent wait.",
     input: waitInput,
     mutates: false,
     // `waitForSettle` stays Promise-shaped and keeps its OWN `AbortSignal`:

@@ -29,8 +29,11 @@
  *     `@odu/run-client`'s exported `logPathFor` spelling).
  *   - `run` spawns its coordinator DETACHED and this server reaps nothing on
  *     close: a run outlives the MCP process that launched it, so a harness
- *     restart kills no run. (It once called `killRuns()` here — the exact
- *     property the consumer needed removed.)
+ *     restart of `odu mcp` kills no run. (It once called `killRuns()` here —
+ *     the exact property the consumer needed removed.) Outliving the HOST is
+ *     NOT promised — the coordinator lives and dies with the process that
+ *     started it (a service stop kills the whole cgroup), and the corpse is
+ *     reported, never hidden: see `@odu/run-client`'s `deadRun`.
  *
  * `node_rerun` / `node_cancel` / `lane_cancel` are bespoke rather than
  * `expose`d: a procedure-exposed tool cannot carry a DESCRIPTION
@@ -147,9 +150,12 @@ export async function mcpCommand(socketPath: string = SOCKET_PATH): Promise<numb
   // Serve until the client disconnects (the StdioServerTransport closes on
   // stdin EOF) or a signal. The server owns stdin/stdout; we just await the
   // close. Background runs the `run` tool spawned are NOT reaped: a
-  // coordinator outlives this server by design (detached spawn — see
-  // `coordinatorSpawnSpec` and `spawnSurvival.test.ts`), so a harness restart
-  // kills no run. Stopping one is the `cancel` tool while this server lives,
+  // coordinator outlives this server's own EXIT by design (detached spawn —
+  // see `coordinatorSpawnSpec` and `spawnSurvival.test.ts`), so a harness
+  // restart of `odu mcp` kills no run — but a restart of the host that runs
+  // this server kills the run with it (the cgroup answer no spawn flag
+  // shields; the corpse is reported via `@odu/run-client`'s `deadRun`).
+  // Stopping one is the `cancel` tool while this server lives,
   // or `odu cancel` anytime.
   await new Promise<void>((resolve) => {
     const shutdown = (): void => resolve();

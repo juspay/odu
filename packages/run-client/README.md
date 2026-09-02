@@ -100,6 +100,7 @@ promise it does not keep.
 | `./surface` | `oduSurface` — the Effect Schema contract for the fan-in socket, its typed face (`OduClient`, `oduClientOver`), and the whole state vocabulary it speaks: `PipelineState` / `NodeState` / `NodeStatus` and the `STATUS_META` table that says what a status MEANS (glyph, hue, GitHub state, verdict redness), `RunHeader` and its lane roster with the `runPhase` / `leasedLanes` / `claimingLanes` folds over it, `NodeLogMessage` and the `clampLog` bound its snapshots obey, and posting health. Also the two shared blocks (`nodePrimitives`, `nodeProcedures`) odu's lane surface is built from | ✅ |
 | `./nodeId` | how a node is NAMED — `NodeIdSchema`, and the `<namepath>@<platform>` format with the folds a reader performs on it (`splitFanId`, `onPlatform`, `isSetupNode`, `SETUP_NAMEPATH`). Also `logPathFor`: the id → on-disk log fold (`.ci/<sha7>/<platform>/<namepath>.log`), the ONE spelling of odu's durable log layout, so a consumer pointing at a run's logs derives the path rather than re-spelling it. Separate from `./surface` because a face that groups the matrix by platform needs the split and nothing else | ✅ |
 | `./dial` | `dialRun` — dial the socket, hand back the typed face and its teardown, or `null` when no run is live — plus the path algebra to find it (`runSocketPath`, `SOCKET_PATH`) | ❌ `node:net` |
+| `./deadRun` | the answer to "dial → `null`": did a run DIE here (stale lock / socket / unfinalized reservation in `.ci`, no live coordinator) or is absence the steady state? `deadRun` + `describeDeadRun`, so a watcher whose dial finds nothing can say "this run died at `<sha7>#<seq>`" instead of going quiet | ❌ `node:fs` |
 | `./asyncConnectError` | the Bun compat shim that restores Node's async-connect-error contract. `./dial` imports it, so a dialer never has to know it exists; it is published for the other caller — a program that SERVES an odu socket and so reaches `probeSocket` without going through a dial. It is the reason `sideEffects` in the manifest is a list and not `false`: a bundler that dropped the shim would turn the ENOENT dial `dialRun` answers `null` for into a throw | ❌ `node:net` |
 
 ## What stayed in odu
@@ -122,7 +123,11 @@ than a reader's:
   manifest, and how the live `owed` rows project into it. A different wire: a
   file read by path, not a socket contract, and the layout under it is the
   ledger's. It moves the day a consumer wants a settled run's verdict without
-  odu's ledger — on the same terms as everything below.
+  odu's ledger — on the same terms as everything below. (One narrow piece DID
+  move: the *reservation sentinel*, the `{reserved: true}` a mid-flight kill
+  leaves behind — a dead run serves no socket, so the only way a client can
+  ever learn it died is by reading the file: `./deadRun`. The verdict record
+  itself still never crosses.)
 - **`dialRunOrExit`** (`src/coordinator/socket.ts`) — dial, or print justci's
   refusal and exit. The exiting variant is a CLI's decision, and a library that
   made it for a dashboard would be wrong. The serving half is there too, for the

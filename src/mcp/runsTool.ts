@@ -8,15 +8,23 @@
  * ledger.ts); this tool gives the agent face the same reach.
  *
  * It rides the bespoke-tool slot alongside `run` / `wait_for_settle` rather
- * than an exposed surface resource because the ledger is an *off-disk* concern,
+ * than an exposed surface procedure because the ledger is an *off-disk* concern,
  * not a projection of the live client — it is consulted precisely when no
  * coordinator is live, so it reads the trail directly (via `gitRunContext`),
  * exactly as the `logs` collection's durable fallback does. Read-only: it
  * observes history, it changes nothing.
+ *
+ * One more thing it owes the agent: a run whose coordinator was KILLED (its
+ * host restarted — the cgroup answer, never a clean exit) finalizes no record,
+ * so the ledger alone answers as if it never ran. The answer then carries
+ * `dead_run` — the corpse's name (sha7#seq), its last sign of life, and the
+ * sentence (`deadRun` in `@odu/run-client`) — rather than answering an empty
+ * ledger over the residue.
  */
 
 import type { BespokeTool } from "@kolu/surface-mcp";
 import { Effect, Schema } from "effect";
+import { type DeadRun, deadRun, describeDeadRun } from "@odu/run-client/deadRun";
 import type { RunRecord } from "../common/runRecord";
 import { readLedger } from "../coordinator/ledger";
 import { checkoutField, checkoutOf } from "./checkout";
@@ -35,6 +43,10 @@ export type RunsInput = typeof runsInput.Type;
 
 export interface RunsResult {
   runs: RunRecord[];
+  /** A run killed mid-flight with its host — never finalized, so the ledger
+   *  alone would swear it never ran. `null` in the steady state: either a
+   *  run is live, or nothing died here. */
+  dead_run: (DeadRun & { message: string }) | null;
 }
 
 const DEFAULT_LIMIT = 20;
@@ -49,6 +61,9 @@ export interface RunsOptions {
    *  checkout. Returns `[]` where no ledger exists, mirroring a no-history
    *  read. */
   loadLedger?: () => RunRecord[];
+  /** Injected for tests; defaults to the real corpse read of the same
+   *  checkout. Answer `null` for the steady state. */
+  detectDead?: () => Promise<DeadRun | null>;
 }
 
 function defaultLoadLedger(checkout?: string): RunRecord[] {
@@ -63,13 +78,20 @@ function defaultLoadLedger(checkout?: string): RunRecord[] {
   return readLedger(checkoutOf({ checkout }));
 }
 
-/** The newest `limit` run records (the ledger is already newest-first). Pure
- *  over its injected loader so the slice/limit logic is testable without a
- *  real `.ci`. */
-export function listRuns(opts: RunsOptions = {}): RunsResult {
+/** The newest `limit` run records (the ledger is already newest-first), plus
+ *  the corpse the ledger is blind to (a run killed with its host answers
+ *  through no record it ever wrote). Pure over its injected answers so the
+ *  fold is testable without a real `.ci`. */
+export async function listRuns(opts: RunsOptions = {}): Promise<RunsResult> {
+  const root = checkoutOf({ checkout: opts.checkout });
   const load = opts.loadLedger ?? (() => defaultLoadLedger(opts.checkout));
+  const detect = opts.detectDead ?? ((): Promise<DeadRun | null> => deadRun(root));
   const limit = opts.limit ?? DEFAULT_LIMIT;
-  return { runs: load().slice(0, limit) };
+  const dead = await detect();
+  return {
+    runs: load().slice(0, limit),
+    dead_run: dead === null ? null : { ...dead, message: describeDeadRun(dead) },
+  };
 }
 
 /** The `runs` bespoke tool. Read-only (`mutates: false`): it reads the durable
@@ -84,14 +106,17 @@ export const runsTool: BespokeTool = {
     "(sha#seq), outcome (passed/failed/incomplete), timing, lanes, and " +
     "per-node results — newest first. Works with no run live: it reads the " +
     "on-disk ledger, so it answers 'what happened on the last run?' after the " +
-    "coordinator has exited. Targets `checkout`, defaulting to this server's " +
-    "own working directory. Optional `limit` (default 20).",
+    "coordinator has exited. A run whose coordinator was KILLED with its " +
+    "host finalized no record — the answer names it separately as " +
+    "`dead_run` (sha#seq, last sign of life) instead of answering an empty " +
+    "ledger over its residue; `dead_run` is null in the steady state. " +
+    "Targets `checkout`, defaulting to this server's own working directory. " +
+    "Optional `limit` (default 20).",
   input: runsInput,
   mutates: false,
-  // Synchronous work (a disk read), so `Effect.sync` — the handler is a
-  // description either way, and surface-mcp runs it at its one edge.
+  // Async: the ledger read is sync, the corpse answer dials once.
   handler: (args) =>
-    Effect.sync(() => {
+    Effect.promise(() => {
       const a = args as RunsInput;
       return listRuns({ limit: a.limit, checkout: a.checkout });
     }),

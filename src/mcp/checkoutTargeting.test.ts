@@ -171,7 +171,7 @@ describe("wait_for_settle({checkout})", () => {
 });
 
 describe("runs({checkout}) — ledgers are per-checkout", () => {
-  it("reads the named checkout's ledger, not another's", () => {
+  it("reads the named checkout's ledger, not another's", async () => {
     const dirA = checkout();
     const dirB = checkout();
     const record: RunRecord = {
@@ -197,10 +197,11 @@ describe("runs({checkout}) — ledgers are per-checkout", () => {
     };
     writeRunRecord(dirA, "abc1234", record);
 
-    const a = listRuns({ checkout: dirA });
+    const noCorpse = async () => null;
+    const a = await listRuns({ checkout: dirA, detectDead: noCorpse });
     expect(a.runs).toHaveLength(1);
     expect(a.runs[0]?.sha).toBe(record.sha);
-    const b = listRuns({ checkout: dirB });
+    const b = await listRuns({ checkout: dirB, detectDead: noCorpse });
     expect(b.runs).toEqual([]);
   });
 });

@@ -15,6 +15,7 @@
     "./surface": "./src/surface.ts",
     "./nodeId": "./src/nodeId.ts",
     "./dial": "./src/dial.ts",
+    "./deadRun": "./src/deadRun.ts",
     "./asyncConnectError": "./src/asyncConnectError.ts"
   },
   "dependencies": {

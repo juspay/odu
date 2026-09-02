@@ -9,6 +9,7 @@
  * the default is a compact table, newest first.
  */
 
+import { deadRun, describeDeadRun } from "@odu/run-client/deadRun";
 import { gitTopLevel, shortSha } from "../common/git";
 import { formatRunRef, type RunRecord } from "../common/runRecord";
 import { readLedger } from "../coordinator/ledger";
@@ -75,10 +76,24 @@ export async function runsCommand(json: boolean): Promise<number> {
   // checkout so an explicit `.ci` there is still readable.
   const repoRoot = gitTopLevel() ?? process.cwd();
   const records = readLedger(repoRoot);
+  // A run killed with its host never finalized a record: the ledger alone
+  // would swear it never ran — the same lie `renderRuns`'s empty answer
+  // ("(.ci is empty)") would tell straight over the residue. Name the death
+  // on stderr (the table goes above stdout; the JSON stream stays raw
+  // records for the service face that consumes it) — the MCP `runs` tool
+  // answers the same sentence from the same detector.
+  const dead = await deadRun(repoRoot);
+  if (dead !== null) {
+    (json ? process.stderr : process.stdout).write(
+      `${describeDeadRun(dead)}\n`,
+    );
+  }
   process.stdout.write(
     json
       ? `${JSON.stringify(records, null, 2)}\n`
-      : renderRuns(records, Date.now()),
+      : dead !== null && records.length === 0
+        ? "no runs recorded in this checkout\n"
+        : renderRuns(records, Date.now()),
   );
   return 0;
 }
