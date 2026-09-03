@@ -9,6 +9,7 @@ import {
   formatHeldFor,
   formatHolder,
   isMixedPool,
+  LEASE_LIVENESS,
   leaseBurstSlots,
   leaseLanes,
   parseHolderBody,
@@ -18,6 +19,13 @@ import {
 } from "./lease";
 
 const id: LeaseIdentity = { holder: "me@desk", run: "abc1234#1" };
+
+it("keeps quiet lease sessions active inside Effect's five-second ping cadence", () => {
+  expect(LEASE_LIVENESS.intervalMs).toBeLessThan(5_000);
+  expect(LEASE_LIVENESS.timeoutMs).toBeGreaterThan(
+    LEASE_LIVENESS.intervalMs,
+  );
+});
 
 function held(host: string): ClaimResult {
   return {

@@ -116,6 +116,20 @@ const BURST_HANDOFF_TIMEOUT_MS = envNumber(
  *  two failures are never confused for one another. */
 const PIN_CEILING_MS = envNumber("ODU_LEASE_PIN_CEILING_MS", 45 * 60_000, 1);
 
+/**
+ * A held venue is an intentionally quiet RPC client. Effect's socket protocol
+ * drops an established stdio link after one unanswered 5-second ping cadence,
+ * before surface-remote's ordinary 15-second liveness probe would produce any
+ * application traffic. Under simultaneous lane startup that made an otherwise
+ * healthy idle lease agent look dead and, worse, force-cycling the link really
+ * did drop its flock. Probe held sessions inside that lower cadence. The
+ * session still owns the verdict and fails closed on a genuinely dead link.
+ */
+export const LEASE_LIVENESS = {
+  intervalMs: 2_000,
+  timeoutMs: 8_000,
+} as const;
+
 export interface LeaseIdentity {
   holder: string;
   run: string | null;
@@ -438,6 +452,7 @@ export async function tryClaim(
       localEnv: localhostSpawnEnv(),
     }),
     initialConnection: "probing",
+    liveness: LEASE_LIVENESS,
     label: `lease:${shortHost(host)}`,
     // makeSession takes a structured Logger (kolu#1876+); adapt the line sink.
     log: sink.log,

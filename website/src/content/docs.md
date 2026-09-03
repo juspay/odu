@@ -98,6 +98,11 @@ the complete suite. `ODU_SHARD_INDEX` is zero-based. The recipe translates
 those framework-neutral variables to Cucumber, Playwright, pytest, or its own
 sharder.
 
+Lease agents are deliberately quiet control connections while their execution
+lanes start. Odu pulses those sessions inside the RPC transport's keep-alive
+cadence; a real SSH/agent death still loses the flock and fails closed, while
+startup work cannot make an idle control connection reap itself.
+
 Shard instances appear as adjacent live/log nodes such as
 `e2e[1-of-4]@x86_64-linux`. They do not create GitHub contexts. Odu aggregates
 them into the stable logical `e2e@x86_64-linux` status, so `odu protect` and
