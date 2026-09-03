@@ -1664,7 +1664,7 @@ async function orchestrate(
     const statuses = nodes.map((node) => node!.status);
     const status = shardAggregateStatus(statuses);
     const startedAt = logical.startedAt ?? Date.now();
-    const durationMs = shardAggregateDuration(nodes);
+    const durationMs = shardAggregateDuration(nodes.map((node) => node!));
     appendLocal(
       logicalId,
       `[odu] shards settled: ${statuses.join(", ")}\n`,
