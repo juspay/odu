@@ -88,6 +88,17 @@ const WAIT_POLL_MS = envNumber("ODU_LEASE_WAIT_POLL_MS", 5_000, 1);
  *  `nix build`'s evaluation phase, which narrates plenty but copies nothing. */
 const CLAIM_TIMEOUT_MS = envNumber("ODU_LEASE_CLAIM_TIMEOUT_MS", 180_000, 1);
 
+/** A burst lease has finished every potentially slow operation before this
+ * check: the runner exists, the RPC face is pinned, and the remote flock is
+ * held. This short bound therefore classifies only a broken handoff, never a
+ * cold Nix bootstrap. It closes the gap where a lease could die while the
+ * batch waited for another cold candidate and still be counted in TOTAL. */
+const BURST_HANDOFF_TIMEOUT_MS = envNumber(
+  "ODU_BURST_HANDOFF_TIMEOUT_MS",
+  10_000,
+  1,
+);
+
 /** Absolute ceiling on ONE pin, beside the idle bound above.
  *
  *  The idle bound alone has a hole: `forceCycle` narrates through
@@ -121,6 +132,10 @@ export interface LeaseHandle {
    * exclusivity. Optional so test fakes can omit it.
    */
   readonly lost?: Promise<void>;
+  /** Confirm that the already-acquired remote flock still answers immediately.
+   * Burst acquisition calls this only after all cold provisioning has
+   * completed, immediately before committing a fixed shard total. */
+  readonly verifyHeld?: () => Promise<boolean>;
 }
 
 /** Outcome of one non-blocking claim attempt against a *remote* host. */
@@ -454,6 +469,18 @@ export async function tryClaim(
       lease: {
         host,
         slot: opts.slot?.slot ?? 0,
+        verifyHeld: async () => {
+          try {
+            const probe = await withTimeout(
+              runUnary(client.surface.lease.probe(lockPathKey(lockPath))),
+              BURST_HANDOFF_TIMEOUT_MS,
+              `burst lease handoff ${shortHost(host)}`,
+            );
+            return probe.state === "busy";
+          } catch {
+            return false;
+          }
+        },
         release: () => {
           intentionalRelease = true;
           void runUnary(client.surface.lease.release({})).catch(() => {
@@ -915,7 +942,30 @@ export async function leaseBurstSlots(
         result: await claim(slot.host, opts.identity, slot),
       })),
     );
-    for (const { slot, result } of results) {
+    // One final, concurrent handshake after the slowest candidate in this
+    // batch has finished provisioning. An early candidate can otherwise die
+    // while Promise.all is still waiting for a legitimately cold peer and be
+    // counted into the immutable TOTAL even though no shard was configured.
+    const verified = await Promise.all(
+      results.map(async ({ slot, result }) => {
+        if (result.kind !== "held" || result.lease.verifyHeld === undefined) {
+          return { slot, result };
+        }
+        if (await result.lease.verifyHeld()) return { slot, result };
+        result.lease.release();
+        opts.onLine?.(
+          `${opts.platform}: skipped broken burst slot ${shortHost(slot.host)}#${slot.slot + 1} during handoff`,
+        );
+        return {
+          slot,
+          result: {
+            kind: "unreachable" as const,
+            error: "burst lease stopped answering during handoff",
+          },
+        };
+      }),
+    );
+    for (const { slot, result } of verified) {
       if (result.kind !== "held") continue;
       leases.push(result.lease);
       occupied.add(slot.host.trim().toLowerCase());

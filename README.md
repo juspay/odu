@@ -38,7 +38,8 @@ e2e: install
 A bare `odu run` opportunistically uses up to four free execution slots, runs
 the complete suite with the total it obtained, and posts one aggregate
 `e2e@<platform>` GitHub status. Cold slots may bootstrap through Nix normally;
-a slot whose connection fails is skipped instead of entering the retry cycle.
+a slot whose connection fails is skipped instead of entering the retry cycle,
+and every acquired burst lease is re-verified before Odu fixes the shard total.
 Configure shared host capacity with
 `{"host":"ci-1","slots":2}`; legacy host strings remain one slot.
 The aggregate duration is the slowest slice's execution time, not staggered

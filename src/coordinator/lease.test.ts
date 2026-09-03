@@ -286,6 +286,37 @@ describe("leaseBurstSlots", () => {
     ]);
     expect(releases).toHaveLength(2);
   });
+
+  it("drops a broken handoff before fixing TOTAL and continues to another slot", async () => {
+    const calls: string[] = [];
+    const brokenRelease = jest.fn();
+    const lines: string[] = [];
+    const leases = await leaseBurstSlots({
+      platform: "x86_64-linux",
+      pool: ["ci-broken", "ci-good-1", "ci-good-2"],
+      identity: id,
+      limit: 2,
+      onLine: (line) => lines.push(line),
+      claim: async (host) => {
+        calls.push(host);
+        return {
+          kind: "held" as const,
+          lease: {
+            host,
+            release: host === "ci-broken" ? brokenRelease : jest.fn(),
+            verifyHeld: async () => host !== "ci-broken",
+          },
+        };
+      },
+    });
+
+    expect(calls).toEqual(["ci-broken", "ci-good-1", "ci-good-2"]);
+    expect(leases.map((lease) => lease.host)).toEqual(["ci-good-1", "ci-good-2"]);
+    expect(brokenRelease).toHaveBeenCalledTimes(1);
+    expect(lines).toContain(
+      "x86_64-linux: skipped broken burst slot ci-broken#1 during handoff",
+    );
+  });
 });
 
 describe("leaseLanes", () => {
