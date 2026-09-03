@@ -15,9 +15,16 @@ scraping terminal output.
 
 Every tool takes an optional `checkout` — the absolute path of another
 checkout's root; default is the server's own cwd — so one `odu mcp` serves
-many trees at once. `run` spawns its coordinator DETACHED and the server never
-reaps on exit: an agent-harness restart kills no run (stop one with `cancel`
-while the server lives, or `odu cancel` from anywhere). Resources stay bound
+many trees at once. A `run`-spawned coordinator is DETACHED and the server
+never reaps on exit — an agent-harness restart of `odu mcp` alone kills no
+run. But the coordinator lives and dies with the process that started it — a
+restart of that host kills the run: a service stop kills the whole cgroup,
+`detached` or not, and there is deliberately no supervisor escaping that. The
+corpse (stale lock, socket, unfinalized reservation in `.ci`) is reported by
+name: `runs` / `wait_for_settle` / `node_rerun` answer "this run died at
+<sha#seq>" via `@odu/run-client`'s `deadRun`, and starting a new run over the
+residue works without `supersede`. (Stop a live one with `cancel` while the
+server lives, or `odu cancel` from anywhere.) Resources stay bound
 to the home checkout; another checkout's run-state arrives on the verbs, and a
 node's log file is addressed off disk via `@odu/run-client`'s `logPathFor`
 (`.ci/<sha7>/<platform>/<namepath>.log` — the one spelling; never re-splice it

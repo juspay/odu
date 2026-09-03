@@ -8,10 +8,12 @@
  * live outside this module and call `waitForSettle`.
  */
 
+import { dirname } from "node:path";
 import { STREAM_RETRY_DELAY_MS } from "@kolu/surface/client";
 import { isDeadTransportError } from "@kolu/surface/errors";
 import type { OwedStatus } from "@odu/run-client/surface";
 import { SOCKET_PATH } from "@odu/run-client/dial";
+import { deadRun, describeDeadRun } from "@odu/run-client/deadRun";
 import { agentSummary, NON_TERMINAL_STATUSES } from "../cli/render";
 import { subscribe } from "../common/effectEdge";
 import { gitRunContext } from "../common/git";
@@ -283,20 +285,33 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
    *  run that was observed, then the coordinator socket closed. Shared by the
    *  for-await clean exit and the transport-death catch so both paths refuse a
    *  false green the same way. */
-  const streamEndedVerdict = (): SettleVerdict => {
+  const streamEndedVerdict = async (): Promise<SettleVerdict> => {
     // Loop ended. If our controller is aborted, the stream ended *because* of
     // the timeout/cancel (the projected `nodes` stream swallows abort) — that's
     // an abort verdict, never a settled one.
     if (controller.signal.aborted) return abortedVerdict();
+    // The socket this wait dialed — passed through to `deadRun` in both
+    // death-check arms below so the detector reads this path, never a
+    // re-derived one.
+    const sock = opts.socketPath ?? SOCKET_PATH;
     // The stream ended with no settle and no abort. If we never observed a
     // LIVE run, there is none in this checkout — refuse LOUD, mirroring the
     // CLI (`odu status`), rather than an instant empty verdict a caller can't
     // tell apart from a real one (juspay/odu#49 ask 1).
     if (lastLive === undefined) {
+      // …UNLESS the residue says a run DIED here: the lock/socket residue
+      // of a kill (what a clean exit removes) with nobody serving, and
+      // answering plain "no run in progress" over that corpse is how a dead
+      // run was hidden. Name the death instead — the detector keys on the
+      // socket's own `.ci`, never on git, so a subdir-served wait answers
+      // about the checkout it DIALED; the socket path is passed through so
+      // the detector reads the path THIS wait dialed, not a re-derived one.
+      const dead = await deadRun(dirname(dirname(sock)), { socketPath: sock });
+      if (dead !== null) throw new NoLiveRunError(describeDeadRun(dead));
       // Strip the `odu: ` prefix + trailing newline — CLI wait re-adds `odu: `,
       // MCP surfaces the body as the tool error message.
       throw new NoLiveRunError(
-        noRunInProgressMessage(opts.socketPath ?? SOCKET_PATH)
+        noRunInProgressMessage(sock)
           .replace(/^odu: /, "")
           .trimEnd(),
       );
@@ -333,7 +348,14 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
         unposted: fromRecord.unposted,
       };
     }
-    // No usable record: fall back to the last snapshot, fail-closed. `settled`
+    // No usable record: is the coordinator DEAD, in the way the on-disk
+    // residue answers cleanly? A kill mid-flight leaves the lock/socket
+    // residue it never got to remove — then the honest answer is the death,
+    // named, not a half-observed snapshot verdict a caller can't tell from a
+    // slow one. Same `sock` pass-through as the no-run arm above.
+    const dead = await deadRun(dirname(dirname(sock)), { socketPath: sock });
+    if (dead !== null) throw new NoLiveRunError(describeDeadRun(dead));
+    // Fall back to the last snapshot, fail-closed. `settled`
     // only if it was already terminal, and `passed` requires that — a green
     // verdict never comes from a half-observed run.
     const red = agentSummary(lastLive);
@@ -498,7 +520,7 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
         // transport-loss class into the arm that still lies is not a fix.
         //
         // The discriminator was already sitting in the loop. Use it.
-        if (delivered) return streamEndedVerdict();
+        if (delivered) return await streamEndedVerdict();
         // Our own teardown also ends the iteration without frames — that is a
         // timeout or a cancel, and it is a verdict, not a probe to retry.
         if (controller.signal.aborted) return abortedVerdict();

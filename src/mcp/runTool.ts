@@ -13,14 +13,21 @@
  *   - WHERE: the run is a function of its `checkout` — spawn cwd, socket,
  *     run-lock, durable logs all hang off the target checkout, and one live
  *     run per checkout is enforced per checkout (see ./checkout.ts).
- *   - WHO REAPS: nobody. The coordinator is spawned detached and never
- *     killed by this server (`mcpCommand` reaps nothing), so a run survives
- *     the MCP process that launched it — a harness restart is not a CI
- *     cancel. The one hazard that creates is a dead reader on the child's
- *     output pipes, and bun — the runtime every coordinator ships on —
- *     already swallows EPIPE on stdio writes (pinned by
- *     `src/mcp/spawnSurvival.test.ts`, so a runtime bump that changed it
- *     turns this sentence red).
+ *   - WHO REAPS: nobody — within the lifetime of the host that ran it, and
+ *     ONLY within it. A plain EXIT of this server (an agent harness replacing
+ *     its `odu mcp`) reaps nothing: the spawn is detached, so the run is
+ *     reparented and carries on. But the coordinator lives and dies with the
+ *     process that started it — a restart of that host kills the run: the
+ *     child sits in the host SERVICE's cgroup, and a service stop kills the
+ *     cgroup, `detached` flag or not. There is deliberately no supervisor
+ *     escaping that (no `systemd-run --scope`, no double-fork — the human's
+ *     ruling, 2026-09-02): the limit is ADMITTED, and the corpse is reported
+ *     (`@odu/run-client`'s `deadRun` — `runs` / `wait_for_settle` /
+ *     `node_rerun` answer from it). The one hazard the survival half creates
+ *     is a dead reader on the child's output pipes, and bun — the runtime
+ *     every coordinator ships on — already swallows EPIPE on stdio writes
+ *     (pinned by `src/mcp/spawnSurvival.test.ts`, so a runtime bump that
+ *     changed it turns this sentence red).
  *   - WHAT'S DURABLE: the coordinator's own writes — the per-node logs
  *     (`.ci/<sha7>/<platform>/<node>.log`, the `logPathFor` spelling) and
  *     the ledger. NOT this server's convenience tee of coordinator
@@ -44,6 +51,7 @@ import { firstFrame } from "../common/effectEdge";
 import { Effect, Schema } from "effect";
 import type { BespokeTool } from "@kolu/surface-mcp";
 import { dialRun, runSocketPath } from "@odu/run-client/dial";
+import { type DeadRun, deadRun, describeDeadRun } from "@odu/run-client/deadRun";
 import { type CancelResult, cancelRun } from "../coordinator/cancel";
 import {
   liveRunLockPid,
@@ -102,6 +110,35 @@ export interface RunResult {
   started: boolean;
   pid?: number;
   error?: string;
+  /** Present on a started run: the host-coupling the description states — the
+   *  answer says it too, because "the run is live now" is exactly the moment
+   *  an agent most needs to know the run dies if its host does. */
+  coordinator_lifetime?: string;
+  /** Present when this start replaced the corpse of a run that died with its
+   *  host — says what of it this start cleared (and therefore why no
+   *  `supersede` was asked for). */
+  cleared?: string;
+}
+
+/** The admitted limit, once: the sentence the description, this module's
+ *  header, the docs and every started run's answer all carry. */
+export const COORDINATOR_LIFETIME =
+  "The coordinator lives and dies with the process that started it — a " +
+  "restart of that host kills the run.";
+
+/** What a start OVER a corpse answers with — the death, and which parts of
+ *  it the incoming coordinator reclaims (the dead run's reservation sentinel
+ *  stays: it is the death's tombstone, and `runs` names the run by it). */
+function clearedSentence(dead: DeadRun): string {
+  const ref =
+    dead.sha7 === ""
+      ? "the previous run"
+      : `the run ${dead.sha7}${dead.seq === null ? "" : `#${dead.seq}`}`;
+  return (
+    `started over ${ref}, which died with its host (${describeDeadRun(dead)}) ` +
+    "— the incoming coordinator reclaims the stale run lock and socket; no " +
+    "`supersede` was needed, a corpse holds nothing."
+  );
 }
 
 /** The argv prefix that re-invokes the odu CLI. The nix wrapper bakes
@@ -137,10 +174,12 @@ function runArgsFrom(input: RunInput): string[] {
 
 /** Children spawned by `run`, kept referenced so V8 doesn't collect the
  *  handle mid-run (unref'd handles still fire their `exit` in this process).
- *  Deliberately NEVER reaped by the server: a spawned coordinator outlives
- *  `odu mcp` by design — an agent harness restarts its MCP server freely, and
- *  a restart must not kill a run. The once-existing `killRuns()` reaping on
- *  server close is what prevented exactly that survival. */
+ *  Deliberately NEVER reaped by the server: a spawned coordinator outlives a
+ *  plain EXIT of `odu mcp` by design — an agent harness restarts its MCP
+ *  server freely, and that must not kill a run. (Outliving the HOST is NOT
+ *  promised — the coordinator lives and dies with the process that started
+ *  it; see the header's WHO REAPS.) The once-existing `killRuns()` reaping
+ *  on server close is what prevented exactly the exit-survival. */
 const liveRuns = new Set<ReturnType<typeof spawn>>();
 
 export interface SpawnDeps {
@@ -163,13 +202,16 @@ export interface SpawnDeps {
   ) => Promise<boolean>;
 }
 
-/** The spawn options that make a coordinator outlive its launcher: its own
- *  process group (`detached`) so no signal addressed to the server ever
- *  reaches it by group, and pipes for stdout/stderr so this server tees the
- *  durable run log while it lives — pipes whose death the bun runtime
- *  tolerates natively (EPIPE on stdio never becomes an uncaughtException;
- *  `spawnSurvival.test.ts` pins the whole property). The caller `unref()`s
- *  the handle so the server can exit without waiting. */
+/** The spawn options that make a coordinator outlive its LAUNCHER'S plain
+ *  exit: its own process group (`detached`) so no signal addressed to the
+ *  server ever reaches it by group, and pipes for stdout/stderr so this
+ *  server tees the durable run log while it lives — pipes whose death the
+ *  bun runtime tolerates natively (EPIPE on stdio never becomes an
+ *  uncaughtException; `spawnSurvival.test.ts` pins the whole property). The
+ *  caller `unref()`s the handle so the server can exit without waiting.
+ *  "Launcher's plain exit" is the whole promise: a service stop kills the
+ *  host's whole cgroup, and no spawn flag shields against that — the limit
+ *  is the header's WHO REAPS. */
 export function coordinatorSpawnSpec(checkout: string): {
   cwd: string;
   stdio: ["ignore", "pipe", "pipe"];
@@ -306,12 +348,27 @@ export async function startRun(
 
   const args = runArgsFrom(input);
 
+  // Not busy — but is the checkout's `.ci` the CORPSE of a run that died
+  // with its host? Starting over it works BECAUSE a corpse holds nothing
+  // (the child reclaims the stale socket, the lock's dead PID frees it) —
+  // no `supersede` asked for; the answer then says what it cleared, instead
+  // of letting the agent believe it started on clean ground.
+  const dead = await deadRun(checkout, { socketPath, lockPath });
+  const cleared = dead === null ? undefined : clearedSentence(dead);
+
   const waitForSocket = deps.waitForSocket ?? defaultWaitForSocket;
 
   if (deps.spawnRun !== undefined) {
     const { stderr, onExit } = deps.spawnRun(args, checkout);
     const r = await awaitStartup(waitForSocket, socketPath, onExit);
-    if (r.up) return { ok: true, started: true };
+    if (r.up) {
+      return {
+        ok: true,
+        started: true,
+        coordinator_lifetime: COORDINATOR_LIFETIME,
+        ...(cleared === undefined ? {} : { cleared }),
+      };
+    }
     return {
       ok: false,
       started: false,
@@ -382,7 +439,13 @@ export async function startRun(
       preOpenBytes = 0;
       logStream = stream;
     });
-    return { ok: true, started: true, pid: child.pid };
+    return {
+      ok: true,
+      started: true,
+      pid: child.pid,
+      coordinator_lifetime: COORDINATOR_LIFETIME,
+      ...(cleared === undefined ? {} : { cleared }),
+    };
   }
   // Wait is exit-bounded under `defaultWaitForSocket`. If a custom wait gives
   // up while the child still lives (or exit races), do NOT SIGTERM — a healthy
@@ -458,8 +521,16 @@ function startupError(stderr: string, code: number | null): string {
 export const runTool: BespokeTool = {
   description:
     "Start a CI run the agent can then watch and drive. Spawns a background " +
-    "`odu run` (its own coordinator DETACHED — the run keeps going even if " +
-    "this MCP server exits or is restarted) and returns once the run is live. " +
+    "`odu run` with its own coordinator and returns once the run is live. " +
+    "The coordinator lives and dies with the process that started it — a " +
+    "restart of that host kills the run: the spawn is detached, so a plain " +
+    "EXIT of this MCP server (an agent harness restarting it) reaps nothing, " +
+    "but there is no supervisor — a service stop kills the host's whole " +
+    "cgroup and the run dies with it, mid-flight, leaving its stale lock, " +
+    "socket and unfinalized reservation in `.ci` (" +
+    "`runs` / `wait_for_settle` / `node_rerun` then NAME the death rather " +
+    "than answering as if it never ran, and starting a new run over the " +
+    "residue works without `supersede`). " +
     "Targets `checkout` — another tree's run is started by naming it; default " +
     "is this server's own working directory. Strict " +
     "by default (refuses a dirty tree); pass no_strict for a dev-iteration run " +

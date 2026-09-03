@@ -7,7 +7,7 @@
  * `run`'s glyph + ProgressStatus wording.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
@@ -653,6 +653,26 @@ describe("rerunCommand", () => {
     );
     expect(result).toBe(1);
     expect(err).toMatch(/no run in progress/);
+  });
+
+  it("names the corpse when the residue says the run was killed", async () => {
+    // The MCP `node_rerun` twin already throws the death (rerunTool); the
+    // CLI face answers the same sentence instead of a bare "no run in
+    // progress". Residue: a stale run lock with a dead pid.
+    const root = mkdtempSync(join(tmpdir(), "odu-cli-rerun-dead-"));
+    try {
+      mkdirSync(join(root, ".ci"), { recursive: true });
+      writeFileSync(join(root, ".ci", "odu.run.lock"), "2147483646\n");
+      const sock = join(root, ".ci", "odu.sock");
+      const { err, result } = await capturingStderr(() =>
+        rerunCommand("ci::unit@x86_64-linux", sock),
+      );
+      expect(result).toBe(1);
+      expect(err).toMatch(/died with the process that started it/);
+      expect(err).toMatch(/no live run to rerun on/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("reruns one node by fan-in id", async () => {

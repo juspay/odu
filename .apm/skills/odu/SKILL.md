@@ -69,10 +69,16 @@ process-compose, no separately-versioned socket client.
 > none was reserved — a wait that saw no frame, or the rare case the coordinator
 > couldn't reserve one; the run then claims `sha7` but no unique `sha7#seq`.)*
 > And `wait_for_settle` **never** returns an empty
-> nothing-verdict: called with no live run in the checkout it fails loud (an
-> error mirroring `odu status`'s "no run in progress"), not an instant
-> `settled: false`. So a loud error means *start or find a run* (or read history
-> with `runs`) — never hand-roll a process-liveness poll as a workaround.
+> nothing-verdict: called with no live run in the checkout it fails loud, not
+> an instant `settled: false` — and WHICH loud it is answers the incident,
+> not just the absence: a killed run leaves residue a clean exit removes (the
+> run lock, the socket, the unfinished reservation), so when that residue is
+> there the error *names the death* — "the run died with the process that
+> started it", from the one `deadRun` read in `@odu/run-client` that `runs`
+> (`dead_run` field), `node_rerun`, `run`, and the CLI twins all answer — and
+> otherwise it mirrors `odu status`'s "no run in progress". So a loud error
+> means *start or find a run* (or read history with `runs`) — never hand-roll
+> a process-liveness poll as a workaround.
 >
 > **Logs are a resource, not a tool.** Don't look for a log-tail tool — there
 > isn't one. A node's output is the MCP **resource** `surface://collections/logs/{id}`
