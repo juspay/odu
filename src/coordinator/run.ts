@@ -83,6 +83,7 @@ import {
   leaseBurstSlots,
   type LeaseHandle,
   localHolderId,
+  settleShardLeaseHandoff,
 } from "./lease";
 import { claimVenues } from "./runEnv";
 import { liveHeldPlatforms } from "./leaseRecord";
@@ -1904,27 +1905,45 @@ async function orchestrate(
   // measuring something else. It opens at its own lane start instead.
   for (const platform of platformsToClaim) startSetup(platform);
 
-  const outcome = await claim;
+  let outcome = await claim;
   if (outcome.ok) {
     Object.assign(lanesByPlatform, outcome.lanes);
-    for (const lease of outcome.leases) {
-      acquiredLeases.push(lease);
-      watchLease(lease);
-    }
+
+    type PendingPlainLease = {
+      platform: string;
+      primary: LeaseHandle;
+    };
+    type PendingShardLease = {
+      platform: string;
+      task: TaskSpec;
+      tasks: TaskSpec[];
+      primary: LeaseHandle | undefined;
+      extras: LeaseHandle[];
+    };
+    const pendingPlain: PendingPlainLease[] = [];
+    const pendingShards: PendingShardLease[] = [];
 
     // Primary capacity is mandatory and keeps the established wait policy.
     // Shard capacity is deliberately opportunistic: take at most the recipe's
     // ceiling, never wait for it, and recompute TOTAL from what was obtained so
-    // the suite remains complete under contention.
+    // the suite remains complete under contention. Do not arm lease-loss
+    // shutdown until EVERY cold optional claim has returned: the final handoff
+    // below can still promote a healthy burst slot when the earlier primary
+    // died during that wait, before any recipe started or TOTAL was fixed.
     for (const platform of activePlatforms) {
       const tasks = tasksByPlatform.get(platform) ?? [];
       const task = tasks.find((candidate) => candidate.shards !== undefined);
-      if (task?.shards === undefined) continue;
       const primaryHost = lanesByPlatform[platform];
       if (primaryHost === undefined) continue;
       const primaryLease = outcome.leases.find(
         (lease) => lease.host === primaryHost,
       );
+      if (task?.shards === undefined) {
+        if (primaryLease !== undefined) {
+          pendingPlain.push({ platform, primary: primaryLease });
+        }
+        continue;
+      }
       const exclude = new Set<string>([
         hostSlotKey(primaryHost, primaryLease?.slot ?? 0),
       ]);
@@ -1938,21 +1957,95 @@ async function orchestrate(
         onLine: (line) => setupLine(line, platform),
         resolveDrvPath: runnerDrvResolver(runnerFlake, platform),
       });
-      for (const lease of extras) {
+      pendingShards.push({
+        platform,
+        task,
+        tasks: dependencyClosure(tasks, task.id),
+        primary: primaryLease,
+        extras,
+      });
+    }
+
+    // Final handoff is concurrent across every claimed platform. In
+    // particular, a primary claimed first is re-probed only AFTER the slowest
+    // legitimate cold burst provision has completed. That is the last point at
+    // which the mutable candidate set can be repaired without violating a
+    // framework sharder whose TOTAL cannot change after configure.
+    const [plainHandoffs, shardHandoffs] = await Promise.all([
+      Promise.all(
+        pendingPlain.map(async (entry) => ({
+          entry,
+          handoff: await settleShardLeaseHandoff(entry.primary, []),
+        })),
+      ),
+      Promise.all(
+        pendingShards.map(async (entry) => ({
+          entry,
+          handoff:
+            entry.primary === undefined
+              ? undefined
+              : await settleShardLeaseHandoff(entry.primary, entry.extras),
+        })),
+      ),
+    ]);
+    const lostPlatform =
+      plainHandoffs.find(({ handoff }) => handoff === null)?.entry.platform ??
+      shardHandoffs.find(({ handoff }) => handoff === null)?.entry.platform;
+
+    if (lostPlatform !== undefined) {
+      // No valid lane remains for a mandatory platform. This is still a claim
+      // failure (no recipe was configured), not a mid-run exclusivity loss.
+      // Return through the ordinary red `_ci-setup` path below.
+      const allCandidates = new Set<LeaseHandle>([
+        ...outcome.leases,
+        ...pendingShards.flatMap(({ extras }) => extras),
+      ]);
+      for (const lease of allCandidates) lease.release();
+      for (const platform of platformsToClaim) delete lanesByPlatform[platform];
+      outcome = {
+        ok: false,
+        error: new Error(
+          `venue lease stopped answering during final handoff for ${lostPlatform}`,
+        ),
+      };
+    } else {
+      const committed = new Set<LeaseHandle>();
+      for (const { handoff } of plainHandoffs) {
+        // `lostPlatform` above proves no handoff in this collection is null.
+        committed.add(handoff!.primary);
+      }
+      for (const { entry, handoff } of shardHandoffs) {
+        let primaryHost = lanesByPlatform[entry.platform];
+        let extras = entry.extras;
+        if (handoff !== undefined) {
+          if (primaryHost !== handoff!.primary.host) {
+            setupLine(
+              `${entry.platform}: primary ${shortHost(primaryHost ?? "unknown")} stopped answering during handoff; promoted ${shortHost(handoff!.primary.host)}`,
+              entry.platform,
+            );
+          }
+          primaryHost = handoff!.primary.host;
+          extras = handoff!.extras;
+          lanesByPlatform[entry.platform] = primaryHost;
+          committed.add(handoff!.primary);
+        }
+        for (const lease of extras) committed.add(lease);
+        const plan = {
+          task: entry.task,
+          tasks: entry.tasks,
+          total: 1 + extras.length,
+          leases: extras,
+        };
+        shardPlans.set(entry.platform, plan);
+        installShardNodes(entry.platform, plan);
+        info(
+          `${entry.platform}: ${entry.task.id} using ${plan.total}/${entry.task.shards ?? plan.total} shard slots`,
+        );
+      }
+      for (const lease of committed) {
         acquiredLeases.push(lease);
         watchLease(lease);
       }
-      const plan = {
-        task,
-        tasks: dependencyClosure(tasks, task.id),
-        total: 1 + extras.length,
-        leases: extras,
-      };
-      shardPlans.set(platform, plan);
-      installShardNodes(platform, plan);
-      info(
-        `${platform}: ${task.id} using ${plan.total}/${task.shards} shard slots`,
-      );
     }
   }
   // The claim is no longer in flight, so settle may be judged again — a cancel

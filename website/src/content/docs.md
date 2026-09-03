@@ -89,9 +89,10 @@ slots. A cold candidate may finish normal Nix download/build progress—the firs
 bootstrap cost is real and amortized. A candidate whose connection or
 provisioner actually disconnects is skipped immediately instead of entering the
 session retry cycle. After every potentially slow bootstrap finishes, Odu
-re-verifies the acquired burst holds concurrently before fixing the shard total;
-a transport that died during that handoff is dropped while an unused candidate
-can take its place. The number is a ceiling, not a fleet reservation: if two
+re-verifies the primary and all acquired burst holds concurrently before fixing
+the shard total. A dead burst transport is dropped; if the earlier primary died
+during that wait, the first surviving burst slot is promoted instead of
+aborting a run that still owns valid capacity. The number is a ceiling, not a fleet reservation: if two
 slots are available, both shards receive `ODU_SHARD_TOTAL=2` and together run
 the complete suite. `ODU_SHARD_INDEX` is zero-based. The recipe translates
 those framework-neutral variables to Cucumber, Playwright, pytest, or its own

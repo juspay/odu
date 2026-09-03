@@ -138,6 +138,46 @@ export interface LeaseHandle {
   readonly verifyHeld?: () => Promise<boolean>;
 }
 
+export interface ShardLeaseHandoff {
+  /** The lane that owns shard zero after the final handoff check. */
+  primary: LeaseHandle;
+  /** Remaining lanes, in their original stable order. */
+  extras: LeaseHandle[];
+}
+
+/**
+ * Recheck every held slot together immediately before a sharded run fixes its
+ * immutable TOTAL. The primary was acquired before the optional slots, so it
+ * can disappear while a legitimately cold peer is still provisioning just as
+ * readily as an early burst slot can. A surviving burst lease is equivalent
+ * capacity: promote the first one rather than aborting a run which still owns
+ * a valid lane, and reduce TOTAL by the slots which stopped answering.
+ */
+export async function settleShardLeaseHandoff(
+  primary: LeaseHandle,
+  extras: readonly LeaseHandle[],
+): Promise<ShardLeaseHandoff | null> {
+  const candidates = [primary, ...extras];
+  const alive = await Promise.all(
+    candidates.map(async (lease) => {
+      if (lease.verifyHeld === undefined) return true;
+      try {
+        return await lease.verifyHeld();
+      } catch {
+        return false;
+      }
+    }),
+  );
+  const held: LeaseHandle[] = [];
+  for (const [index, lease] of candidates.entries()) {
+    if (alive[index]) held.push(lease);
+    else lease.release();
+  }
+  const nextPrimary = held[0];
+  if (nextPrimary === undefined) return null;
+  return { primary: nextPrimary, extras: held.slice(1) };
+}
+
 /** Outcome of one non-blocking claim attempt against a *remote* host. */
 export type ClaimResult =
   | { kind: "held"; lease: LeaseHandle }

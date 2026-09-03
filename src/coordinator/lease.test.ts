@@ -12,6 +12,7 @@ import {
   leaseBurstSlots,
   leaseLanes,
   parseHolderBody,
+  settleShardLeaseHandoff,
   type ClaimResult,
   type LeaseIdentity,
 } from "./lease";
@@ -316,6 +317,51 @@ describe("leaseBurstSlots", () => {
     expect(lines).toContain(
       "x86_64-linux: skipped broken burst slot ci-broken#1 during handoff",
     );
+  });
+});
+
+describe("settleShardLeaseHandoff", () => {
+  it("promotes a surviving burst lease when the primary dies during cold provisioning", async () => {
+    const brokenRelease = jest.fn();
+    const promotedRelease = jest.fn();
+    const otherRelease = jest.fn();
+    const handoff = await settleShardLeaseHandoff(
+      {
+        host: "primary-broke",
+        release: brokenRelease,
+        verifyHeld: async () => false,
+      },
+      [
+        {
+          host: "burst-1",
+          release: promotedRelease,
+          verifyHeld: async () => true,
+        },
+        {
+          host: "burst-2",
+          release: otherRelease,
+          verifyHeld: async () => true,
+        },
+      ],
+    );
+
+    expect(handoff?.primary.host).toBe("burst-1");
+    expect(handoff?.extras.map((lease) => lease.host)).toEqual(["burst-2"]);
+    expect(brokenRelease).toHaveBeenCalledTimes(1);
+    expect(promotedRelease).not.toHaveBeenCalled();
+    expect(otherRelease).not.toHaveBeenCalled();
+  });
+
+  it("returns null when no claimed lane survives the handoff", async () => {
+    const release = jest.fn();
+    const handoff = await settleShardLeaseHandoff({
+      host: "only-broken-lane",
+      release,
+      verifyHeld: async () => false,
+    }, []);
+
+    expect(handoff).toBeNull();
+    expect(release).toHaveBeenCalledTimes(1);
   });
 });
 
