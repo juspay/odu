@@ -8,6 +8,7 @@ import {
   formatHeldFor,
   formatHolder,
   isMixedPool,
+  leaseBurstSlots,
   leaseLanes,
   parseHolderBody,
   type ClaimResult,
@@ -208,6 +209,44 @@ describe("acquireFromPool", () => {
         claim: jest.fn(),
       }),
     ).rejects.toThrow(/empty host pool/);
+  });
+});
+
+describe("leaseBurstSlots", () => {
+  it("takes bounded free capacity without waiting and preserves spread order", async () => {
+    const calls: string[] = [];
+    const releases: Array<ReturnType<typeof jest.fn>> = [];
+    const leases = await leaseBurstSlots({
+      platform: "x86_64-linux",
+      pool: [
+        { host: "ci-1", slot: 0, slots: 2 },
+        { host: "ci-2", slot: 0, slots: 2 },
+        { host: "ci-1", slot: 1, slots: 2 },
+        { host: "ci-2", slot: 1, slots: 2 },
+      ],
+      identity: id,
+      limit: 2,
+      exclude: new Set(["ci-1#0"]),
+      occupiedHosts: new Set(["ci-1"]),
+      claim: async (host, _identity, slot) => {
+        calls.push(`${host}#${slot?.slot}`);
+        if (host === "ci-2" && slot?.slot === 0) {
+          return { kind: "busy", heldBy: null };
+        }
+        const release = jest.fn();
+        releases.push(release);
+        return {
+          kind: "held",
+          lease: { host, slot: slot?.slot, release },
+        };
+      },
+    });
+    expect(calls).toEqual(["ci-2#0", "ci-1#1", "ci-2#1"]);
+    expect(leases.map((lease) => `${lease.host}#${lease.slot}`)).toEqual([
+      "ci-1#1",
+      "ci-2#1",
+    ]);
+    expect(releases).toHaveLength(2);
   });
 });
 

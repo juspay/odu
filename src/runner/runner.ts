@@ -434,6 +434,10 @@ export function createLaneRunner(): LaneRunner {
         cwd: workspace,
         stdio: ["ignore", "pipe", "pipe"],
         detached: true,
+        env: {
+          ...process.env,
+          ...(config?.tasks.find((task) => task.id === node.id)?.env ?? {}),
+        },
       },
     );
     inv.child = child;

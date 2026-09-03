@@ -1,5 +1,5 @@
 /**
- * Venue lease — one run per machine, lock held for the run lifetime.
+ * Venue lease — one run per declared host slot, lock held for the run lifetime.
  *
  * The lock lives ON THE TARGET MACHINE (`flock` on a file there), but the
  * coordinator never runs flock over raw ssh. It dials **odu-runner** via
@@ -31,7 +31,13 @@ import {
   laneSurface,
   type LeaseHolder,
 } from "../common/laneSurface";
-import { type HostPool, type ResolvedPools, shortHost } from "./hosts";
+import {
+  asHostSlot,
+  type HostPool,
+  type HostSlot,
+  type ResolvedPools,
+  shortHost,
+} from "./hosts";
 import type { ResolveRunnerDrv } from "./runnerFlake";
 import { type TimeoutOpts, withTimeout } from "../common/withTimeout";
 import { runUnary } from "../common/effectEdge";
@@ -106,6 +112,7 @@ export interface LeaseIdentity {
 
 export interface LeaseHandle {
   readonly host: string;
+  readonly slot?: number;
   /** Drop the hold — release RPC + destroy the agent session. */
   release(): void;
   /**
@@ -122,11 +129,19 @@ export type ClaimResult =
   | { kind: "busy"; heldBy: HolderInfo | null }
   | { kind: "unreachable"; error: string };
 
-export type ProbeResult =
-  | { host: string; state: "free"; heldBy: null }
-  | { host: string; state: "busy"; heldBy: HolderInfo | null }
-  | { host: string; state: "local"; heldBy: null }
-  | { host: string; state: "unreachable"; heldBy: null; error: string };
+interface ProbeVenue {
+  host: string;
+  slot: number;
+  slots: number;
+}
+
+export type ProbeResult = ProbeVenue &
+  (
+    | { state: "free"; heldBy: null }
+    | { state: "busy"; heldBy: HolderInfo | null }
+    | { state: "local"; heldBy: null }
+    | { state: "unreachable"; heldBy: null; error: string }
+  );
 
 /** Who *this* process is for holder identity — `user@short-hostname`. */
 export function localHolderId(): string {
@@ -190,6 +205,13 @@ export interface AgentDialOpts {
   timeoutMs?: number;
   /** Optional lock path override (tests / multi-tenant). */
   lockPath?: string;
+  /** Capacity slot being claimed. Multi-slot hosts use a distinct lock path;
+   *  single-slot/legacy hosts retain the historical lock path byte-for-byte. */
+  slot?: HostSlot;
+}
+
+export function slotLockPath(base: string, slot: HostSlot): string {
+  return slot.slots === 1 ? base : `${base}.${slot.slot}`;
 }
 
 /** `/nix/store/<hash>-git-2.55.0-doc` → `git-2.55.0-doc`; anything else
@@ -355,12 +377,16 @@ export async function tryClaim(
       sink.pin,
     ).finally(sink.done);
 
+    const lockPath =
+      opts.slot === undefined
+        ? opts.lockPath
+        : slotLockPath(opts.lockPath ?? leaseLockPath(), opts.slot);
     const result = await withTimeout(
       runUnary(
         client.surface.lease.claim({
           holder: identity.holder,
           run: identity.run,
-          ...lockPathKey(opts.lockPath),
+          ...lockPathKey(lockPath),
         }),
       ),
       timeoutMs,
@@ -392,6 +418,7 @@ export async function tryClaim(
       kind: "held",
       lease: {
         host,
+        slot: opts.slot?.slot ?? 0,
         release: () => {
           intentionalRelease = true;
           void runUnary(client.surface.lease.release({})).catch(() => {
@@ -417,8 +444,9 @@ export async function probeHost(
   host: string,
   opts: AgentDialOpts,
 ): Promise<ProbeResult> {
+  const venue = opts.slot ?? { host, slot: 0, slots: 1 };
   if (isLocalHost(host)) {
-    return { host, state: "local", heldBy: null };
+    return { ...venue, state: "local", heldBy: null };
   }
 
   const timeoutMs = opts.timeoutMs ?? CLAIM_TIMEOUT_MS;
@@ -447,20 +475,24 @@ export async function probeHost(
       sink.pin,
     ).finally(sink.done);
     session.markConnected();
+    const lockPath =
+      opts.slot === undefined
+        ? opts.lockPath
+        : slotLockPath(opts.lockPath ?? leaseLockPath(), opts.slot);
     const result = await withTimeout(
-      runUnary(client.surface.lease.probe(lockPathKey(opts.lockPath))),
+      runUnary(client.surface.lease.probe(lockPathKey(lockPath))),
       timeoutMs,
       `lease probe ${shortHost(host)}`,
     );
     session.destroy();
     if (result.state === "free") {
-      return { host, state: "free", heldBy: null };
+      return { ...venue, state: "free", heldBy: null };
     }
     if (result.state === "busy") {
-      return { host, state: "busy", heldBy: result.heldBy };
+      return { ...venue, state: "busy", heldBy: result.heldBy };
     }
     return {
-      host,
+      ...venue,
       state: "unreachable",
       heldBy: null,
       error: result.error,
@@ -468,7 +500,7 @@ export async function probeHost(
   } catch (e) {
     session.destroy();
     return {
-      host,
+      ...venue,
       state: "unreachable",
       heldBy: null,
       error: e instanceof Error ? e.message : String(e),
@@ -491,6 +523,7 @@ export interface AcquireFromPoolOpts {
   claim?: (
     host: string,
     identity: LeaseIdentity,
+    slot?: HostSlot,
   ) => Promise<ClaimResult>;
   /** Production: resolve odu-runner drv for this platform (passed to tryClaim). */
   resolveDrvPath?: ResolveRunnerDrv;
@@ -504,7 +537,7 @@ export interface AcquiredLane {
   lease: LeaseHandle | null;
 }
 
-function rotatePool(pool: HostPool, by: number): string[] {
+function rotatePool(pool: HostPool, by: number): (string | HostSlot)[] {
   if (pool.length === 0) return [];
   const offset = ((by % pool.length) + pool.length) % pool.length;
   return [...pool.slice(offset), ...pool.slice(0, offset)];
@@ -534,7 +567,7 @@ function defaultSleep(ms: number): Promise<void> {
 }
 
 type ScanOnce =
-  | { status: "ok"; host: string; lease: LeaseHandle | null }
+  | { status: "ok"; venue: HostSlot; lease: LeaseHandle | null }
   | {
       status: "busy";
       busy: { host: string; heldBy: HolderInfo | null }[];
@@ -614,6 +647,7 @@ async function scanPoolOnce(opts: {
   claim: (
     host: string,
     identity: LeaseIdentity,
+    slot?: HostSlot,
   ) => Promise<ClaimResult>;
   rotateBy: number;
 }): Promise<ScanOnce> {
@@ -625,22 +659,25 @@ async function scanPoolOnce(opts: {
   // it at the lease entry), so this is the only shape in which localhost is
   // ever picked: an explicit whole-pool decision, never an implicit fallback
   // (juspay/odu#46, #54).
-  if (pool.every((h) => isLocalHost(h))) {
-    const host = pool[0]!;
+  if (pool.every((h) => isLocalHost(asHostSlot(h).host))) {
+    const venue = asHostSlot(pool[0]!);
+    const host = venue.host;
     onLine?.(`${platform}: picked ${shortHost(host)} (localhost)`);
-    return { status: "ok", host, lease: null };
+    return { status: "ok", venue, lease: null };
   }
 
   const order = rotatePool(pool, rotateBy);
   const busy: { host: string; heldBy: HolderInfo | null }[] = [];
   const unreachable: { host: string; error: string }[] = [];
 
-  for (const host of order) {
+  for (const entry of order) {
+    const venue = asHostSlot(entry);
+    const host = venue.host;
     // Every member here is remote: a mixed pool was refused above, and a
     // pure-local one returned above. Localhost as a lease-exempt entry beside
     // busy remotes was the always-free overflow of juspay/odu#54 — it is now
     // unrepresentable at this point rather than special-cased.
-    const result = await claim(host, identity);
+    const result = await claim(host, identity, venue);
     if (result.kind === "held") {
       const busyNote =
         busy.length > 0
@@ -649,7 +686,7 @@ async function scanPoolOnce(opts: {
       onLine?.(
         `${platform}: picked ${shortHost(host)}${busyNote}`,
       );
-      return { status: "ok", host, lease: result.lease };
+      return { status: "ok", venue, lease: result.lease };
     }
     if (result.kind === "busy") {
       busy.push({ host, heldBy: result.heldBy });
@@ -683,7 +720,7 @@ export async function acquireFromPool(
 
   const claim =
     opts.claim ??
-    ((h, id) => {
+    ((h, id, slot) => {
       if (opts.resolveDrvPath === undefined) {
         return Promise.reject(
           new Error(
@@ -694,6 +731,7 @@ export async function acquireFromPool(
       return tryClaim(h, id, {
         resolveDrvPath: opts.resolveDrvPath,
         onLog: onLine,
+        slot,
       });
     });
 
@@ -711,7 +749,10 @@ export async function acquireFromPool(
       rotateBy,
     });
     if (scan.status === "ok") {
-      return { host: scan.host, lease: scan.lease };
+      return {
+        host: scan.venue.host,
+        lease: scan.lease,
+      };
     }
     if (scan.status === "unreachable") {
       throw unreachableError(platform, scan.unreachable);
@@ -758,6 +799,98 @@ export interface LeasedLanes {
   leases: LeaseHandle[];
 }
 
+export interface BurstLeaseOpts {
+  platform: string;
+  pool: HostPool;
+  identity: LeaseIdentity;
+  /** Additional slots only; the primary lane is claimed separately. */
+  limit: number;
+  /** Slot keys already owned by this run (`host#slot`). */
+  exclude?: ReadonlySet<string>;
+  /** Physical hosts already used by the run. Candidates on other machines are
+   *  tried first; stacking begins only after every host is represented. */
+  occupiedHosts?: ReadonlySet<string>;
+  onLine?: (msg: string) => void;
+  claim?: AcquireFromPoolOpts["claim"];
+  resolveDrvPath?: ResolveRunnerDrv;
+}
+
+export function hostSlotKey(host: string, slot: number): string {
+  return `${host.trim().toLowerCase()}#${slot}`;
+}
+
+/** Opportunistically claim bounded burst capacity. Busy and unreachable
+ *  slots reduce the shard total instead of blocking the whole CI run; every
+ *  returned handle is a real lease and therefore participates in fail-closed
+ *  lease-loss handling. Pool order is already physical-host-first. */
+export async function leaseBurstSlots(
+  opts: BurstLeaseOpts,
+): Promise<LeaseHandle[]> {
+  if (opts.limit <= 0 || opts.pool.length === 0) return [];
+  assertPoolsScannable(
+    { [opts.platform]: opts.pool },
+    [opts.platform],
+    null,
+  );
+  if (opts.pool.some((entry) => isLocalHost(asHostSlot(entry).host))) return [];
+  const claim =
+    opts.claim ??
+    ((host: string, identity: LeaseIdentity, slot?: HostSlot) => {
+      if (opts.resolveDrvPath === undefined) {
+        return Promise.resolve<ClaimResult>({
+          kind: "unreachable",
+          error: "odu: leaseBurstSlots needs resolveDrvPath or injected claim",
+        });
+      }
+      return tryClaim(host, identity, {
+        resolveDrvPath: opts.resolveDrvPath,
+        onLog: opts.onLine,
+        slot,
+      });
+    });
+  const excluded = opts.exclude ?? new Set<string>();
+  const occupied = new Set(
+    [...(opts.occupiedHosts ?? [])].map((host) => host.trim().toLowerCase()),
+  );
+  const leases: LeaseHandle[] = [];
+  const candidates = opts.pool
+    .map(asHostSlot)
+    .filter((slot) => !excluded.has(hostSlotKey(slot.host, slot.slot)));
+  // Stable host-spread order: the first slot from each not-yet-used machine,
+  // then remaining capacity. This is also the concurrency order below.
+  const spread: HostSlot[] = [];
+  const stacked: HostSlot[] = [];
+  const seenHosts = new Set(occupied);
+  for (const slot of candidates) {
+    const host = slot.host.trim().toLowerCase();
+    if (!seenHosts.has(host)) {
+      spread.push(slot);
+      seenHosts.add(host);
+    } else {
+      stacked.push(slot);
+    }
+  }
+  const remaining = [...spread, ...stacked];
+  while (leases.length < opts.limit && remaining.length > 0) {
+    const batch = remaining.splice(0, opts.limit - leases.length);
+    const results = await Promise.all(
+      batch.map(async (slot) => ({
+        slot,
+        result: await claim(slot.host, opts.identity, slot),
+      })),
+    );
+    for (const { slot, result } of results) {
+      if (result.kind !== "held") continue;
+      leases.push(result.lease);
+      occupied.add(slot.host.trim().toLowerCase());
+      opts.onLine?.(
+        `${opts.platform}: burst slot ${shortHost(slot.host)}#${slot.slot + 1}`,
+      );
+    }
+  }
+  return leases;
+}
+
 function venueHostKey(host: string): string {
   return shortHost(host.trim()).toLowerCase();
 }
@@ -768,7 +901,8 @@ function assertNoSharedRemoteHosts(
 ): void {
   const owner = new Map<string, string>();
   for (const platform of platforms) {
-    for (const host of pools[platform] ?? []) {
+    for (const entry of pools[platform] ?? []) {
+      const host = asHostSlot(entry).host;
       if (isLocalHost(host)) continue;
       const key = venueHostKey(host);
       if (key === "") continue;
@@ -791,8 +925,11 @@ function assertNoSharedRemoteHosts(
  *  juspay/odu#66 wearing an inventory hat. But the operator should learn it
  *  from the command whose whole job is showing the inventory, rather than from
  *  the first run that tries to claim that platform. */
-export function isMixedPool(pool: readonly string[]): boolean {
-  return pool.some((h) => isLocalHost(h)) && pool.some((h) => !isLocalHost(h));
+export function isMixedPool(pool: HostPool): boolean {
+  return (
+    pool.some((h) => isLocalHost(asHostSlot(h).host)) &&
+    pool.some((h) => !isLocalHost(asHostSlot(h).host))
+  );
 }
 
 /**
@@ -812,7 +949,7 @@ export function isMixedPool(pool: readonly string[]): boolean {
 function assertPoolLocality(
   source: string | null,
   platform: string,
-  pool: readonly string[],
+  pool: HostPool,
 ): void {
   if (!isMixedPool(pool)) return;
   // A `--host` pin is a pool of one — pure by construction — so a mixed pool
@@ -860,7 +997,7 @@ function assertPoolsScannable(
 }
 
 /**
- * Lease one host per platform that participates in the run.
+ * Lease one host slot per platform that participates in the run.
  * Multi-platform is all-or-nothing (release partial holds while waiting).
  */
 export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
@@ -881,7 +1018,11 @@ export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
 
   const claimFor = (
     platform: string,
-  ): ((host: string, identity: LeaseIdentity) => Promise<ClaimResult>) => {
+  ): ((
+    host: string,
+    identity: LeaseIdentity,
+    slot?: HostSlot,
+  ) => Promise<ClaimResult>) => {
     if (opts.claim !== undefined) return opts.claim;
     const resolve = opts.resolveDrvPath?.(platform);
     if (resolve === undefined) {
@@ -891,10 +1032,11 @@ export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
           "odu: leaseLanes needs resolveDrvPath(platform) or an injected claim",
       });
     }
-    return (h, id) =>
+    return (h, id, slot) =>
       tryClaim(h, id, {
         resolveDrvPath: resolve,
         onLog: lineFor(platform),
+        slot,
       });
   };
 
@@ -925,7 +1067,7 @@ export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
           rotateBy,
         });
         if (scan.status === "ok") {
-          lanes[platform] = scan.host;
+          lanes[platform] = scan.venue.host;
           if (scan.lease !== null) leases.push(scan.lease);
           continue;
         }
@@ -988,10 +1130,12 @@ export async function probeAllHosts(
   const platforms = Object.keys(pools).sort();
   await Promise.all(
     platforms.flatMap((platform) =>
-      (pools[platform] ?? []).map(async (host) => {
-        const probe = await probeHost(host, {
+      (pools[platform] ?? []).map(async (entry) => {
+        const slot = asHostSlot(entry);
+        const probe = await probeHost(slot.host, {
           resolveDrvPath: opts.resolveDrvPath(platform),
           onLog: opts.onLog,
+          slot,
         });
         out.push({ platform, probe });
       }),
@@ -999,7 +1143,10 @@ export async function probeAllHosts(
   );
   out.sort((a, b) => {
     if (a.platform !== b.platform) return a.platform.localeCompare(b.platform);
-    return a.probe.host.localeCompare(b.probe.host);
+    if (a.probe.host !== b.probe.host) {
+      return a.probe.host.localeCompare(b.probe.host);
+    }
+    return a.probe.slot - b.probe.slot;
   });
   return out;
 }

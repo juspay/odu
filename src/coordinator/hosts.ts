@@ -24,10 +24,28 @@ import { isIP } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-/** One platform's declared inventory — always a list (a bare string in the
- *  file normalizes to a one-element pool). Never empty after `loadHosts`: an
- *  empty array in the file is refused at parse time. */
-export type HostPool = readonly string[];
+/** One independently leasable execution slot on a host. `slot` is zero-based
+ *  and becomes part of the remote flock path; `slots` is retained for display
+ *  so `odu hosts` can show the declared capacity without re-grouping config. */
+export interface HostSlot {
+  host: string;
+  slot: number;
+  slots: number;
+}
+
+/** One platform's declared execution capacity. A legacy string contributes
+ *  one slot. `{ "host": "ci-1", "slots": 4 }` contributes four slots, ordered
+ *  breadth-first across physical hosts so a burst spreads before it stacks. */
+export type HostPool = readonly (string | HostSlot)[];
+
+/** Normalize programmatic/test pools that still use the pre-capacity string
+ *  shape. Files are normalized eagerly, but accepting strings here keeps the
+ *  public coordinator seam source-compatible. */
+export function asHostSlot(entry: string | HostSlot): HostSlot {
+  return typeof entry === "string"
+    ? { host: entry, slot: 0, slots: 1 }
+    : entry;
+}
 
 export interface HostsConfig {
   hosts: Record<string, HostPool>;
@@ -64,40 +82,64 @@ function hostsCandidates(): HostsCandidate[] {
   ];
 }
 
-/** Parse one platform's value: a string, or a non-empty array of strings. */
+interface HostCapacity {
+  host: string;
+  slots: number;
+}
+
+function parseHostCapacity(
+  path: string,
+  platform: string,
+  value: unknown,
+): HostCapacity {
+  if (typeof value === "string" && value !== "") {
+    return { host: value, slots: 1 };
+  }
+  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+    const raw = value as Record<string, unknown>;
+    if (
+      typeof raw.host === "string" &&
+      raw.host !== "" &&
+      Number.isInteger(raw.slots) &&
+      (raw.slots as number) >= 1
+    ) {
+      return { host: raw.host, slots: raw.slots as number };
+    }
+  }
+  throw new Error(
+    `odu: ${path}: host pool for "${platform}" must contain non-empty strings or {"host": string, "slots": positive integer}`,
+  );
+}
+
+/** Parse one platform's value: a host entry, or a non-empty array of entries. */
 function parsePool(
   path: string,
   platform: string,
   value: unknown,
-): string[] {
-  if (typeof value === "string") {
-    if (value === "") {
-      throw new Error(
-        `odu: ${path}: host for "${platform}" must be a non-empty string`,
-      );
-    }
-    return [value];
+): HostPool {
+  const entries = Array.isArray(value) ? value : [value];
+  if (entries.length === 0) {
+    throw new Error(
+      `odu: ${path}: host pool for "${platform}" must not be empty`,
+    );
   }
-  if (Array.isArray(value)) {
-    if (value.length === 0) {
-      throw new Error(
-        `odu: ${path}: host pool for "${platform}" must not be empty`,
-      );
-    }
-    const pool: string[] = [];
-    for (const entry of value) {
-      if (typeof entry !== "string" || entry === "") {
-        throw new Error(
-          `odu: ${path}: host pool for "${platform}" must be an array of non-empty strings`,
-        );
-      }
-      pool.push(entry);
-    }
-    return pool;
+  if (entries.every((entry) => typeof entry === "string" && entry !== "")) {
+    return entries as string[];
   }
-  throw new Error(
-    `odu: ${path}: host for "${platform}" must be a string or an array of strings`,
+  const capacities = entries.map((entry) =>
+    parseHostCapacity(path, platform, entry),
   );
+  const maxSlots = Math.max(...capacities.map((entry) => entry.slots));
+  const pool: HostSlot[] = [];
+  // Breadth-first by slot index: ci-1/0, ci-2/0, ci-1/1, ci-2/1.
+  for (let slot = 0; slot < maxSlots; slot += 1) {
+    for (const entry of capacities) {
+      if (slot < entry.slots) {
+        pool.push({ host: entry.host, slot, slots: entry.slots });
+      }
+    }
+  }
+  return pool;
 }
 
 export function loadHosts(): HostsConfig {

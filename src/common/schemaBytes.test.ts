@@ -159,6 +159,13 @@ describe("TaskSpec / ConfigureInput — the run.configure payload", () => {
     expect(roundTrip(TaskSpecSchema, bytes)).toBe(bytes);
   });
 
+  it("a sharded task carries its ceiling and injected environment", () => {
+    const bytes =
+      '{"id":"ci::e2e","command":"just --no-deps ci::e2e","needs":[],' +
+      '"shards":4,"env":{"ODU_SHARD_INDEX":"2","ODU_SHARD_TOTAL":"4"}}';
+    expect(roundTrip(TaskSpecSchema, bytes)).toBe(bytes);
+  });
+
   it("a present-but-undefined needs is REJECTED (stricter than zod, on purpose)", () => {
     // zod's `.default([])` substituted for an explicit `undefined`;
     // `withDecodingDefaultKey` does not. Every in-process producer must omit

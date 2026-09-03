@@ -182,7 +182,30 @@ describe("loadHosts — string | list values", () => {
 
   it("refuses a non-string pool entry", () => {
     writeHosts({ "x86_64-linux": [1, 2] });
-    expect(() => loadHosts()).toThrow(/array of non-empty strings/);
+    expect(() => loadHosts()).toThrow(/non-empty strings or.*slots/);
+  });
+
+  it("expands declared capacity breadth-first across physical hosts", () => {
+    writeHosts({
+      "x86_64-linux": [
+        { host: "ci-1", slots: 3 },
+        { host: "ci-2", slots: 2 },
+      ],
+    });
+    expect(loadHosts().hosts["x86_64-linux"]).toEqual([
+      { host: "ci-1", slot: 0, slots: 3 },
+      { host: "ci-2", slot: 0, slots: 2 },
+      { host: "ci-1", slot: 1, slots: 3 },
+      { host: "ci-2", slot: 1, slots: 2 },
+      { host: "ci-1", slot: 2, slots: 3 },
+    ]);
+  });
+
+  it("refuses zero, fractional, and malformed slot counts", () => {
+    for (const slots of [0, 1.5, "2"]) {
+      writeHosts({ "x86_64-linux": { host: "ci-1", slots } });
+      expect(() => loadHosts()).toThrow(/positive integer/);
+    }
   });
 
   it("parses a mixed pool — locality is judged per run, not per file (juspay/odu#66)", () => {

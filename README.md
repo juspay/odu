@@ -26,4 +26,18 @@ dependants. Tag one recipe with `[metadata("ci")]` — that dependency closure
 *is* the pipeline. Hosts are always explicit (localhost or ssh); nothing is
 guessed.
 
+Long terminal checks can opt into bounded fleet sharding without changing the
+command:
+
+```just
+[metadata("odu:shard=4")]
+e2e: install
+    CUCUMBER_SHARD="$((ODU_SHARD_INDEX + 1))/$ODU_SHARD_TOTAL" just test-e2e
+```
+
+A bare `odu run` opportunistically uses up to four free execution slots, runs
+the complete suite with the total it obtained, and posts one aggregate
+`e2e@<platform>` GitHub status. Configure shared host capacity with
+`{"host":"ci-1","slots":2}`; legacy host strings remain one slot.
+
 AGPL-3.0-or-later

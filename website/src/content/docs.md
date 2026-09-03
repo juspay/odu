@@ -73,6 +73,37 @@ Exactly one [`just`](https://just.systems) recipe carries `[metadata("ci")]`. It
 default: build test lint
 ```
 
+### Shard a long terminal check
+
+Mark one leaf recipe per platform with a shard ceiling. The command stays a
+single bare `odu run`:
+
+```just
+[metadata("odu:shard=4")]
+e2e: install
+    CUCUMBER_SHARD="$((ODU_SHARD_INDEX + 1))/$ODU_SHARD_TOTAL" just test-e2e
+```
+
+Odu first obtains the normal platform lane, then non-blockingly leases up to
+three additional free slots. The number is a ceiling, not a fleet reservation:
+if two slots are available, both shards receive `ODU_SHARD_TOTAL=2` and together
+run the complete suite. `ODU_SHARD_INDEX` is zero-based. The recipe translates
+those framework-neutral variables to Cucumber, Playwright, pytest, or its own
+sharder.
+
+Shard instances appear as adjacent live/log nodes such as
+`e2e[1-of-4]@x86_64-linux`. They do not create GitHub contexts. Odu aggregates
+them into the stable logical `e2e@x86_64-linux` status, so `odu protect` and
+existing branch rules do not change. A lost shard lane fails that aggregate.
+Burst leases are released as each shard settles; the primary platform lease
+continues to cover the rest of CI.
+
+The initial implementation deliberately permits a sharded recipe only when it
+is a leaf, permits one sharded recipe per platform, and rejects `--linger` for a
+sharded run. Those constraints avoid allowing downstream work or a rerun after
+only one shard has passed; lifting them requires an explicit aggregate barrier
+on the runner wire.
+
 ### Choose hosts explicitly
 
 **A host is a decision.** odu resolves hosts from the first source that exists:
@@ -108,7 +139,7 @@ Define platform lanes in `~/.config/odu/hosts.json`, or point `$ODU_HOSTS` at an
 
 Keys are Nix system tuples. Values are anything ssh can dial, or `localhost`. A bare `odu run` fans out to every configured platform. Platforms absent from an existing hosts file are intentionally omitted: a partial configuration is still a decision. Use `--platform P` to select a subset or `--host P=ADDR` to pin or add a lane for one run.
 
-### Venue pools (one free machine per platform)
+### Venue pools and execution slots
 
 A platform can list several hosts. odu picks a free machine, locks it for the run, and releases when the run ends (or the holder dies):
 
@@ -119,15 +150,32 @@ A platform can list several hosts. odu picks a free machine, locks it for the ru
 }
 ```
 
+By default each host contributes one exclusive execution slot. Declare safe
+parallel capacity on a larger builder explicitly:
+
+```json
+{
+  "x86_64-linux": [
+    { "host": "nix@ci-1", "slots": 2 },
+    { "host": "nix@ci-2", "slots": 2 },
+    "nix@ci-3"
+  ]
+}
+```
+
+Lease exclusivity is per slot, not per physical host. Odu scans slot zero on
+each machine before stacking onto slot one, so a sharded check spreads across
+hosts first. String entries and `--host` pins remain one-slot declarations.
+
 Rules:
 
-- **One run per machine.** The lock is an `flock` **on the builder**, held by the **odu-runner agent** the coordinator dials over surface-remote (`lease.claim`). `flock` comes from odu-runner's Nix closure (util-linux on its PATH)—builders need ssh + Nix, not a system-installed flock.
+- **One run per declared slot.** The lock is an `flock` **on the builder**, held by the **odu-runner agent** the coordinator dials over surface-remote (`lease.claim`). Multi-slot entries use `/tmp/odu.lease.<zero-based-slot>`; one-slot entries retain `/tmp/odu.lease`. `flock` comes from odu-runner's Nix closure (util-linux on its PATH)—builders need ssh + Nix, not a system-installed flock.
 - **Busy pool → wait in line** (and say who you're waiting for). `--no-wait` fails immediately instead.
 - **`--host P=ADDR`** pins a specific machine for that run (waits if busy).
-- **`localhost` is never an implicit fallback** (see [juspay/odu#46](https://github.com/juspay/odu/issues/46)). It participates only when you name it—for one run with `--host`, as the only entry, or as an **explicit** member of a mixed pool (e.g. `["ci-1", "localhost"]`) so it can be picked when remotes are busy.
+- **`localhost` is never an implicit fallback** (see [juspay/odu#46](https://github.com/juspay/odu/issues/46)). It participates only when you name it as the sole, pure-local pool; mixing it with remotes is refused.
 - Multi-platform claim is **all-or-nothing**: partial holds are released while waiting for the full set.
 
-`odu hosts` probes free / busy / held-by without acquiring (same agent, `lease.probe`). Lock file default: `/tmp/odu.lease` (`ODU_LEASE_LOCK` to override).
+`odu hosts` probes every declared slot as free / busy / held-by without acquiring (same agent, `lease.probe`). Lock base default: `/tmp/odu.lease` (`ODU_LEASE_LOCK` to override).
 
 #### Watching a run provision
 

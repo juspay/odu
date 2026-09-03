@@ -76,9 +76,14 @@ import { createVerdictGate } from "./verdictGate";
 import type { TaskSpec } from "../common/spec";
 import { commitLabel, createDisplay, progressEvent } from "./display";
 import { laneTasks, loadJustPipeline, parseSelector } from "../just/ingest";
-import { fanoutPools, loadHosts, shortHost } from "./hosts";
+import { asHostSlot, fanoutPools, loadHosts, shortHost } from "./hosts";
 import { type Lane, startLane } from "./lane";
-import { type LeaseHandle, localHolderId } from "./lease";
+import {
+  hostSlotKey,
+  leaseBurstSlots,
+  type LeaseHandle,
+  localHolderId,
+} from "./lease";
 import { claimVenues } from "./runEnv";
 import { liveHeldPlatforms } from "./leaseRecord";
 import { resolveRunnerFlake, runnerDrvResolver } from "./runnerFlake";
@@ -125,6 +130,51 @@ const VERDICT_BUCKETS = [
 ] as const;
 
 const SETUP = SETUP_NAMEPATH;
+
+function shardNamepath(namepath: string, index: number, total: number): string {
+  return `${namepath}[${index + 1}-of-${total}]`;
+}
+
+function withShardEnv(task: TaskSpec, index: number, total: number): TaskSpec {
+  return {
+    ...task,
+    env: {
+      ...(task.env ?? {}),
+      ODU_SHARD_INDEX: String(index),
+      ODU_SHARD_TOTAL: String(total),
+    },
+  };
+}
+
+function dependencyClosure(
+  tasks: readonly TaskSpec[],
+  root: string,
+): TaskSpec[] {
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+  const wanted = new Set<string>();
+  const queue = [root];
+  while (queue.length > 0) {
+    const id = queue.shift();
+    if (id === undefined || wanted.has(id)) continue;
+    wanted.add(id);
+    for (const dep of byId.get(id)?.needs ?? []) queue.push(dep);
+  }
+  return tasks.filter((task) => wanted.has(task.id));
+}
+
+export function shardAggregateStatus(
+  statuses: readonly NodeStatus[],
+): NodeStatus {
+  if (statuses.some((value) => value === "pending" || value === "running")) {
+    return statuses.some((value) => value !== "pending") ? "running" : "pending";
+  }
+  if (statuses.includes("errored")) return "errored";
+  if (statuses.some((value) => value === "failed" || value === "skipped")) {
+    return "failed";
+  }
+  if (statuses.includes("cancelled")) return "cancelled";
+  return "ok";
+}
 
 export interface RunArgs {
   selectors: string[];
@@ -300,6 +350,7 @@ function tryGit(repo: string, args: string[]): string | null {
  *  hold open. Same shape as `ensureCheckoutFree`'s `deps`. */
 export interface RunDeps {
   claimVenues?: typeof claimVenues;
+  leaseBurstSlots?: typeof leaseBurstSlots;
 }
 
 /** Status overlay `terminalizePlatformNodes` applies when a lane dies or is
@@ -531,7 +582,18 @@ async function orchestrate(
   const tasksByPlatform = new Map<string, TaskSpec[]>();
   for (const platform of platforms) {
     const tasks = laneTasks(spec, platform, selectors, args.noDeps);
-    if (tasks.length > 0) tasksByPlatform.set(platform, tasks);
+    if (tasks.length > 0) {
+      const sharded = tasks.filter((task) => task.shards !== undefined);
+      if (sharded.length > 1) {
+        throw new Error(
+          `odu: ${platform} has more than one sharded recipe (${sharded.map((task) => task.id).join(", ")}); shard one terminal recipe per platform`,
+        );
+      }
+      if (args.linger && sharded.length > 0) {
+        throw new Error("odu: --linger is not yet supported with sharded recipes");
+      }
+      tasksByPlatform.set(platform, tasks);
+    }
   }
   if (tasksByPlatform.size === 0) {
     throw new Error("odu: nothing to run (no lane has a matching recipe)");
@@ -551,7 +613,9 @@ async function orchestrate(
   // remote candidate (it might lease that box and silently test committed HEAD).
   for (const platform of tasksByPlatform.keys()) {
     const pool = poolsByPlatform[platform] ?? [];
-    const remotes = pool.filter((h) => !isLocalHost(h));
+    const remotes = pool
+      .map((entry) => asHostSlot(entry).host)
+      .filter((host) => !isLocalHost(host));
     if (remotes.length === pool.length && originUrl === null) {
       throw new Error(
         `odu: remote lane ${platform}=[${remotes.join(", ")}] needs an origin remote to fetch from`,
@@ -706,6 +770,15 @@ async function orchestrate(
     nodes,
     posting: EMPTY_POSTING,
   });
+  /** Shard instances are first-class live/log nodes but implementation detail
+   *  commit contexts: GitHub receives only their logical recipe aggregate. */
+  const shardNodeIds = new Set<string>();
+  interface ShardPlan {
+    task: TaskSpec;
+    total: number;
+    leases: LeaseHandle[];
+  }
+  const shardPlans = new Map<string, ShardPlan>();
   /** The lane roster for `platforms`, in platform order, from the one source of
    *  truth (`lanesByPlatform`): a platform with a host is `leased`; one without
    *  is `claiming` from its candidate pool while the claim is in flight, and
@@ -728,7 +801,9 @@ async function orchestrate(
             {
               state: "claiming",
               platform,
-              pool: [...(poolsByPlatform[platform] ?? [])],
+              pool: (poolsByPlatform[platform] ?? []).map(
+                (entry) => asHostSlot(entry).host,
+              ),
             },
           ]
         : [];
@@ -925,6 +1000,13 @@ async function orchestrate(
     const idx = acquiredLeases.findIndex((l) => l.host === host);
     if (idx < 0) return;
     acquiredLeases[idx]?.release();
+    acquiredLeases.splice(idx, 1);
+  };
+
+  const releaseLeaseForHandle = (lease: LeaseHandle): void => {
+    const idx = acquiredLeases.indexOf(lease);
+    if (idx < 0) return;
+    lease.release();
     acquiredLeases.splice(idx, 1);
   };
 
@@ -1395,10 +1477,82 @@ async function orchestrate(
         finalizeRunRecord(store.get(), poster.unposted());
       }
       emitProgress(id, next);
-      const payload = statusFor(id, next.status, next.durationMs, sha7);
+      const payload = shardNodeIds.has(id)
+        ? null
+        : statusFor(id, next.status, next.durationMs, sha7);
       if (payload !== null) poster.post(payload);
       checkSettled();
     }
+  };
+
+  const installShardNodes = (platform: string, plan: ShardPlan): void => {
+    if (plan.total <= 1) return;
+    const cur = store.get();
+    const logicalId = fanId(plan.task.id, platform);
+    const at = cur.order.indexOf(logicalId);
+    const children: string[] = [];
+    const nextNodes = { ...cur.nodes };
+    for (let index = 0; index < plan.total; index += 1) {
+      const id = fanId(shardNamepath(plan.task.id, index, plan.total), platform);
+      children.push(id);
+      shardNodeIds.add(id);
+      nextNodes[id] = pendingNode({
+        id,
+        name: id,
+        command:
+          `ODU_SHARD_INDEX=${index} ODU_SHARD_TOTAL=${plan.total} ` +
+          plan.task.command,
+        needs: plan.task.needs.map((dep) => fanId(dep, platform)),
+      });
+    }
+    const nextOrder = [...cur.order];
+    nextOrder.splice(at < 0 ? nextOrder.length : at + 1, 0, ...children);
+    runtime.ctx.cells.nodes.set({ ...cur, order: nextOrder, nodes: nextNodes });
+    display.update(store.get());
+  };
+
+  const refreshShardAggregate = (platform: string, plan: ShardPlan): void => {
+    if (plan.total <= 1) return;
+    const logicalId = fanId(plan.task.id, platform);
+    const state = store.get();
+    const children = Array.from({ length: plan.total }, (_, index) =>
+      fanId(shardNamepath(plan.task.id, index, plan.total), platform),
+    );
+    const nodes = children.map((id) => state.nodes[id]).filter(Boolean);
+    if (nodes.length !== plan.total) return;
+    const logical = state.nodes[logicalId];
+    if (logical === undefined) return;
+    const nonTerminal = nodes.some(
+      (node) => node!.status === "pending" || node!.status === "running",
+    );
+    if (nonTerminal) {
+      if (
+        logical.status === "pending" &&
+        nodes.some((node) => node!.status !== "pending")
+      ) {
+        appendLocal(
+          logicalId,
+          `[odu] ${plan.total} shards started; details are adjacent nodes\n`,
+        );
+        updateNode(logicalId, { status: "running", startedAt: Date.now() });
+      }
+      return;
+    }
+    if (logical.status !== "pending" && logical.status !== "running") return;
+    const statuses = nodes.map((node) => node!.status);
+    const status = shardAggregateStatus(statuses);
+    const startedAt = logical.startedAt ?? Date.now();
+    appendLocal(
+      logicalId,
+      `[odu] shards settled: ${statuses.join(", ")}\n`,
+    );
+    endLocal(logicalId);
+    updateNode(logicalId, {
+      status,
+      exitCode: status === "ok" ? 0 : 1,
+      startedAt,
+      durationMs: Date.now() - startedAt,
+    });
   };
 
   /** Provisioning has begun for this lane. `_ci-setup@<platform>` is the run's
@@ -1634,6 +1788,44 @@ async function orchestrate(
       acquiredLeases.push(lease);
       watchLease(lease);
     }
+
+    // Primary capacity is mandatory and keeps the established wait policy.
+    // Shard capacity is deliberately opportunistic: take at most the recipe's
+    // ceiling, never wait for it, and recompute TOTAL from what was obtained so
+    // the suite remains complete under contention.
+    for (const platform of activePlatforms) {
+      const tasks = tasksByPlatform.get(platform) ?? [];
+      const task = tasks.find((candidate) => candidate.shards !== undefined);
+      if (task?.shards === undefined) continue;
+      const primaryHost = lanesByPlatform[platform];
+      if (primaryHost === undefined) continue;
+      const primaryLease = outcome.leases.find(
+        (lease) => lease.host === primaryHost,
+      );
+      const exclude = new Set<string>([
+        hostSlotKey(primaryHost, primaryLease?.slot ?? 0),
+      ]);
+      const extras = await (deps.leaseBurstSlots ?? leaseBurstSlots)({
+        platform,
+        pool: poolsByPlatform[platform] ?? [],
+        identity: { holder: localHolderId(), run: `${runLabel}:${task.id}` },
+        limit: task.shards - 1,
+        exclude,
+        occupiedHosts: new Set([primaryHost]),
+        onLine: (line) => setupLine(line, platform),
+        resolveDrvPath: runnerDrvResolver(runnerFlake, platform),
+      });
+      for (const lease of extras) {
+        acquiredLeases.push(lease);
+        watchLease(lease);
+      }
+      const plan = { task, total: 1 + extras.length, leases: extras };
+      shardPlans.set(platform, plan);
+      installShardNodes(platform, plan);
+      info(
+        `${platform}: ${task.id} using ${plan.total}/${task.shards} shard slots`,
+      );
+    }
   }
   // The claim is no longer in flight, so settle may be judged again — a cancel
   // that arrived mid-claim deliberately did not resolve it (see
@@ -1766,8 +1958,21 @@ async function orchestrate(
     // The provisioning bracket for a lane that claimed nothing opens here, at
     // its own start, rather than at a claim it was never part of.
     startSetup(platform);
-    const tasks = tasksByPlatform.get(platform) ?? [];
+    const baseTasks = tasksByPlatform.get(platform) ?? [];
+    const plan = shardPlans.get(platform);
+    const tasks =
+      plan === undefined
+        ? baseTasks
+        : baseTasks.map((task) =>
+            task.id === plan.task.id
+              ? withShardEnv(task, 0, plan.total)
+              : task,
+          );
     const setupId = fanId(SETUP, platform);
+    const publicMainId = (laneId: string): string =>
+      plan !== undefined && plan.total > 1 && laneId === plan.task.id
+        ? fanId(shardNamepath(laneId, 0, plan.total), platform)
+        : fanId(laneId, platform);
 
     const local = isLocalHost(host);
     const lane = startLane({
@@ -1796,16 +2001,20 @@ async function orchestrate(
             }
             continue;
           }
-          verdicts.offer(fanId(laneId, platform), {
+          const id = publicMainId(laneId);
+          verdicts.offer(id, {
             status: laneNode.status,
             exitCode: laneNode.exitCode,
             startedAt: laneNode.startedAt,
             durationMs: laneNode.durationMs,
           });
+          if (plan !== undefined && laneId === plan.task.id) {
+            refreshShardAggregate(platform, plan);
+          }
         }
       },
       onLogFrame: (laneId, frame) => {
-        const id = fanId(laneId, platform);
+        const id = publicMainId(laneId);
         if (frame.kind === "append") {
           // Sealed-log skip lives on `appendLocal` (`appendIfOpen`) — one
           // producer, so a tap frame, a lane-death line, and a setup narration
@@ -1825,6 +2034,9 @@ async function orchestrate(
             // node is done, go read its log" — true at the moment it is made.
             endLocal(id);
             verdicts.release(id);
+            if (plan !== undefined && laneId === plan.task.id) {
+              refreshShardAggregate(platform, plan);
+            }
           }
         } else if (laneId === SETUP) {
           // Never reset _ci-setup: the coordinator's provision lines precede
@@ -1857,6 +2069,93 @@ async function orchestrate(
     // every already-built lane reachable for teardown.
     createdLanes.add(lane);
     laneEntries.set(platform, { phase: "live", handle: lane });
+
+    if (plan !== undefined && plan.total > 1) {
+      const privateTasks = dependencyClosure(baseTasks, plan.task.id);
+      for (let index = 1; index < plan.total; index += 1) {
+        const lease = plan.leases[index - 1];
+        if (lease === undefined) continue;
+        const shardId = fanId(
+          shardNamepath(plan.task.id, index, plan.total),
+          platform,
+        );
+        let burstLane: Lane | undefined;
+        let finished = false;
+        const finishBurst = (): void => {
+          if (finished) return;
+          const status = store.get().nodes[shardId]?.status;
+          if (
+            status === "pending" ||
+            status === "running" ||
+            status === undefined
+          ) {
+            return;
+          }
+          finished = true;
+          burstLane?.close();
+          releaseLeaseForHandle(lease);
+        };
+        const burstLocal = isLocalHost(lease.host);
+        burstLane = startLane({
+          platform,
+          host: lease.host,
+          tasks: privateTasks.map((task) =>
+            task.id === plan.task.id
+              ? withShardEnv(task, index, plan.total)
+              : task,
+          ),
+          pipelineName: `${spec.name}:${plan.task.id}:${index + 1}/${plan.total}`,
+          origin:
+            burstLocal || originUrl === null ? null : fetchUrlFor(originUrl),
+          sha: burstLocal ? null : sha,
+          workspace: burstLocal ? specSource : null,
+          resolveDrvPath: runnerDrvResolver(runnerFlake, platform),
+          onSetupLine: (line) =>
+            appendLocal(shardId, `[setup ${shortHost(lease.host)}] ${line}\n`),
+          onNodes: (laneState) => {
+            if (!laneAccepting(platform)) return;
+            for (const laneId of laneState.order) {
+              const laneNode = laneState.nodes[laneId];
+              if (laneNode === undefined || laneId !== plan.task.id) continue;
+              verdicts.offer(shardId, {
+                status: laneNode.status,
+                exitCode: laneNode.exitCode,
+                startedAt: laneNode.startedAt,
+                durationMs: laneNode.durationMs,
+              });
+              refreshShardAggregate(platform, plan);
+            }
+          },
+          onLogFrame: (laneId, frame) => {
+            if (!laneAccepting(platform)) return;
+            if (laneId !== plan.task.id) {
+              if (frame.kind === "append" && frame.text !== "") {
+                appendLocal(shardId, `[prerequisite ${laneId}] ${frame.text}`);
+              }
+              return;
+            }
+            if (frame.kind === "append") appendLocal(shardId, frame.text);
+            else if (frame.kind === "snapshot" && frame.text !== "") {
+              resetLocal(shardId, frame.text);
+            } else if (frame.kind === "end") {
+              endLocal(shardId);
+              verdicts.release(shardId);
+              refreshShardAggregate(platform, plan);
+              finishBurst();
+            }
+          },
+          onDead: (error) => {
+            if (!laneAccepting(platform)) return;
+            appendLocal(shardId, `\n[odu] shard lane died: ${error}\n`);
+            endLocal(shardId);
+            updateNode(shardId, { status: "errored", exitCode: 1 });
+            refreshShardAggregate(platform, plan);
+            finishBurst();
+          },
+        });
+        createdLanes.add(burstLane);
+      }
+    }
   }
 
   // ── verdict artifacts ──
