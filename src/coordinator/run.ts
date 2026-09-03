@@ -1263,6 +1263,37 @@ async function orchestrate(
     await tick();
   };
 
+  // The per-node timing sidecar report.sh scrapes — durations odu owns in its
+  // state cell, written directly rather than re-parsed from logs. This MUST be
+  // a hoisted declaration above shutdown: the socket and signal handlers are
+  // live while the venue claim is still pending, so an early cancel can reach
+  // shutdown before execution reaches the verdict-artifact section below.
+  // Best-effort: a missing sidecar only degrades the metrics comment.
+  function writeTimingSidecar(state: PipelineState): void {
+    try {
+      // Derive the node field set from the one shared projection; the sidecar
+      // adds only its own axes — recipe/platform (splitFanId) and the node's
+      // `startedAt` (not on RunNode) — so a per-node field change lands once.
+      const timingLines = projectNodes(state).map((node) => {
+        const { namepath, platform } = splitFanId(node.id);
+        return JSON.stringify({
+          node: node.id,
+          recipe: namepath,
+          platform,
+          status: node.status,
+          startedAt: state.nodes[node.id]?.startedAt ?? null,
+          durationMs: node.durationMs,
+          exitCode: node.exitCode,
+        });
+      });
+      const timingsFile = join(repoRoot, ".ci", sha7, "timings.jsonl");
+      mkdirSync(dirname(timingsFile), { recursive: true });
+      writeFileSync(timingsFile, `${timingLines.join("\n")}\n`);
+    } catch {
+      // best-effort: a missing sidecar only degrades the metrics comment
+    }
+  }
+
   // The single shutdown every interrupt source shares: SIGTERM/SIGINT, the live
   // view's `q` (via `onQuit`), the `run.cancel` surface mutation a second
   // process drives (`odu cancel`, the MCP `cancel` tool, a `--supersede` start),
@@ -2159,36 +2190,6 @@ async function orchestrate(
   }
 
   // ── verdict artifacts ──
-  // The per-node timing sidecar report.sh scrapes — durations odu owns in its
-  // state cell, written directly rather than re-parsed from logs. Refreshed on
-  // every settle in linger mode (a post-rerun drain updates it); written once on
-  // a normal run's completion. Best-effort: a missing sidecar only degrades the
-  // metrics comment.
-  const writeTimingSidecar = (state: PipelineState): void => {
-    try {
-      // Derive the node field set from the one shared projection; the sidecar
-      // adds only its own axes — recipe/platform (splitFanId) and the node's
-      // `startedAt` (not on RunNode) — so a per-node field change lands once.
-      const timingLines = projectNodes(state).map((node) => {
-        const { namepath, platform } = splitFanId(node.id);
-        return JSON.stringify({
-          node: node.id,
-          recipe: namepath,
-          platform,
-          status: node.status,
-          startedAt: state.nodes[node.id]?.startedAt ?? null,
-          durationMs: node.durationMs,
-          exitCode: node.exitCode,
-        });
-      });
-      const timingsFile = join(repoRoot, ".ci", sha7, "timings.jsonl");
-      mkdirSync(dirname(timingsFile), { recursive: true });
-      writeFileSync(timingsFile, `${timingLines.join("\n")}\n`);
-    } catch {
-      // best-effort: a missing sidecar only degrades the metrics comment
-    }
-  };
-
   // One rule with attach/status: settled and not clean → non-zero (juspay/odu#68).
   // A node that already reached `ok` is never re-terminalized by `onDead`
   // (see `terminalizePlatformNodes`), so a lane pipe dying after a green
