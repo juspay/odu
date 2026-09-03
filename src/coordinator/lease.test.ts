@@ -9,7 +9,8 @@ import {
   formatHeldFor,
   formatHolder,
   isMixedPool,
-  LEASE_LIVENESS,
+  leaseProbeIsOurs,
+  LEASE_PULSE_MS,
   leaseBurstSlots,
   leaseLanes,
   parseHolderBody,
@@ -20,11 +21,25 @@ import {
 
 const id: LeaseIdentity = { holder: "me@desk", run: "abc1234#1" };
 
-it("keeps quiet lease sessions active inside Effect's five-second ping cadence", () => {
-  expect(LEASE_LIVENESS.intervalMs).toBeLessThan(5_000);
-  expect(LEASE_LIVENESS.timeoutMs).toBeGreaterThan(
-    LEASE_LIVENESS.intervalMs,
-  );
+it("pulses quiet lease sessions inside Effect's five-second ping cadence", () => {
+  expect(LEASE_PULSE_MS).toBeLessThan(5_000);
+});
+
+it("verifies the lock belongs to this run, not merely that it is busy", () => {
+  expect(
+    leaseProbeIsOurs({ state: "busy", heldBy: { ...id, sinceMs: 1 } }, id),
+  ).toBe(true);
+  expect(
+    leaseProbeIsOurs(
+      {
+        state: "busy",
+        heldBy: { holder: "other@desk", run: "def#1", sinceMs: 1 },
+      },
+      id,
+    ),
+  ).toBe(false);
+  expect(leaseProbeIsOurs({ state: "busy", heldBy: null }, id)).toBe(false);
+  expect(leaseProbeIsOurs({ state: "free" }, id)).toBe(false);
 });
 
 function held(host: string): ClaimResult {

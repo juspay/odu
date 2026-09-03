@@ -99,9 +99,9 @@ those framework-neutral variables to Cucumber, Playwright, pytest, or its own
 sharder.
 
 Lease agents are deliberately quiet control connections while their execution
-lanes start. Odu pulses those sessions inside the RPC transport's keep-alive
-cadence; a real SSH/agent death still loses the flock and fails closed, while
-startup work cannot make an idle control connection reap itself.
+lanes start. Odu probes ownership inside the RPC transport's keep-alive cadence;
+the response both keeps the connection active and proves the lock's holder still
+names this run. A real SSH/agent death still loses the flock and fails closed.
 
 Shard instances appear as adjacent live/log nodes such as
 `e2e[1-of-4]@x86_64-linux`. They do not create GitHub contexts. Odu aggregates

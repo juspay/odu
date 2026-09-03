@@ -116,19 +116,9 @@ const BURST_HANDOFF_TIMEOUT_MS = envNumber(
  *  two failures are never confused for one another. */
 const PIN_CEILING_MS = envNumber("ODU_LEASE_PIN_CEILING_MS", 45 * 60_000, 1);
 
-/**
- * A held venue is an intentionally quiet RPC client. Effect's socket protocol
- * drops an established stdio link after one unanswered 5-second ping cadence,
- * before surface-remote's ordinary 15-second liveness probe would produce any
- * application traffic. Under simultaneous lane startup that made an otherwise
- * healthy idle lease agent look dead and, worse, force-cycling the link really
- * did drop its flock. Probe held sessions inside that lower cadence. The
- * session still owns the verdict and fails closed on a genuinely dead link.
- */
-export const LEASE_LIVENESS = {
-  intervalMs: 2_000,
-  timeoutMs: 8_000,
-} as const;
+/** Keep a held, otherwise quiet lease RPC active inside Effect's fixed
+ * five-second transport-ping cadence. */
+export const LEASE_PULSE_MS = 2_000;
 
 export interface LeaseIdentity {
   holder: string;
@@ -157,6 +147,23 @@ export interface ShardLeaseHandoff {
   primary: LeaseHandle;
   /** Remaining lanes, in their original stable order. */
   extras: LeaseHandle[];
+}
+
+/** A busy lock proves OUR lease only when its durable holder identity agrees.
+ * Merely seeing `busy` can mistake a different run that won a release race for
+ * the hold this coordinator thought it still owned. */
+export function leaseProbeIsOurs(
+  probe:
+    | { state: "free" }
+    | { state: "busy"; heldBy: LeaseHolder | null }
+    | { state: "error" },
+  identity: LeaseIdentity,
+): boolean {
+  return (
+    probe.state === "busy" &&
+    probe.heldBy?.holder === identity.holder &&
+    probe.heldBy.run === identity.run
+  );
 }
 
 /**
@@ -452,7 +459,6 @@ export async function tryClaim(
       localEnv: localhostSpawnEnv(),
     }),
     initialConnection: "probing",
-    liveness: LEASE_LIVENESS,
     label: `lease:${shortHost(host)}`,
     // makeSession takes a structured Logger (kolu#1876+); adapt the line sink.
     log: sink.log,
@@ -510,14 +516,49 @@ export async function tryClaim(
     // Held — keep session; mark connected so the connect watchdog stands down.
     session.markConnected();
 
-    const lost = new Promise<void>((resolveLost) => {
-      session.onState((state: SessionState<SshProv>) => {
-        if (intentionalRelease) return;
-        if (state.phase === "disconnected" || state.phase === "failed") {
-          resolveLost();
-        }
-      });
+    let pulse: ReturnType<typeof setInterval> | undefined;
+    let pulseInFlight = false;
+    let lostResolved = false;
+    let resolveLost: () => void = () => {};
+    const lost = new Promise<void>((resolve) => {
+      resolveLost = resolve;
     });
+    const markLost = (): void => {
+      if (intentionalRelease || lostResolved) return;
+      lostResolved = true;
+      if (pulse !== undefined) clearInterval(pulse);
+      resolveLost();
+    };
+    session.onState((state: SessionState<SshProv>) => {
+      if (state.phase === "disconnected" || state.phase === "failed") {
+        markLost();
+      }
+    });
+
+    const probeOurs = async (): Promise<boolean> => {
+      const probe = await withTimeout(
+        runUnary(client.surface.lease.probe(lockPathKey(lockPath))),
+        BURST_HANDOFF_TIMEOUT_MS,
+        `lease pulse ${shortHost(host)}`,
+      );
+      return leaseProbeIsOurs(probe, identity);
+    };
+    pulse = setInterval(() => {
+      if (intentionalRelease || lostResolved || pulseInFlight) return;
+      pulseInFlight = true;
+      void probeOurs()
+        .then((ours) => {
+          if (!ours) markLost();
+        })
+        .catch(() => {
+          // The session state owns transport failure and supplies the useful
+          // diagnosis. Its disconnect transition calls markLost above.
+        })
+        .finally(() => {
+          pulseInFlight = false;
+        });
+    }, LEASE_PULSE_MS);
+    pulse.unref?.();
 
     return {
       kind: "held",
@@ -526,18 +567,14 @@ export async function tryClaim(
         slot: opts.slot?.slot ?? 0,
         verifyHeld: async () => {
           try {
-            const probe = await withTimeout(
-              runUnary(client.surface.lease.probe(lockPathKey(lockPath))),
-              BURST_HANDOFF_TIMEOUT_MS,
-              `burst lease handoff ${shortHost(host)}`,
-            );
-            return probe.state === "busy";
+            return await probeOurs();
           } catch {
             return false;
           }
         },
         release: () => {
           intentionalRelease = true;
+          if (pulse !== undefined) clearInterval(pulse);
           void runUnary(client.surface.lease.release({})).catch(() => {
             /* session may already be dead */
           });
