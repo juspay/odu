@@ -135,6 +135,20 @@ function shardNamepath(namepath: string, index: number, total: number): string {
   return `${namepath}[${index + 1}-of-${total}]`;
 }
 
+/** Public name for one node in a burst shard's private dependency closure.
+ * The shard recipe itself keeps the compact adjacent spelling; its duplicated
+ * prerequisites live beneath that spelling so the UI and logs show where a
+ * late shard spent its time without creating ambiguous copies of `install`. */
+export function shardLaneNamepath(
+  root: string,
+  index: number,
+  total: number,
+  laneNode: string,
+): string {
+  const shard = shardNamepath(root, index, total);
+  return laneNode === root ? shard : `${shard}::${laneNode}`;
+}
+
 function withShardEnv(task: TaskSpec, index: number, total: number): TaskSpec {
   return {
     ...task,
@@ -174,6 +188,19 @@ export function shardAggregateStatus(
   }
   if (statuses.includes("cancelled")) return "cancelled";
   return "ok";
+}
+
+/** A sharded logical recipe is parallel work, so its completed duration is the
+ * critical child execution rather than the wall interval between the first
+ * and last child. The latter silently charges staggered, lane-local
+ * prerequisites (checkout, install, build) to the recipe even though those are
+ * separate DAG nodes. Individual shard nodes retain their own measured times;
+ * the logical node answers the same question an unsharded recipe does: how
+ * long did this recipe's execution take? */
+export function shardAggregateDuration(
+  nodes: readonly Pick<NodeState, "durationMs">[],
+): number {
+  return Math.max(0, ...nodes.map((node) => node.durationMs ?? 0));
 }
 
 export interface RunArgs {
@@ -775,6 +802,7 @@ async function orchestrate(
   const shardNodeIds = new Set<string>();
   interface ShardPlan {
     task: TaskSpec;
+    tasks: TaskSpec[];
     total: number;
     leases: LeaseHandle[];
   }
@@ -1524,16 +1552,79 @@ async function orchestrate(
     const children: string[] = [];
     const nextNodes = { ...cur.nodes };
     for (let index = 0; index < plan.total; index += 1) {
-      const id = fanId(shardNamepath(plan.task.id, index, plan.total), platform);
+      // The primary lane's prerequisite nodes are already the ordinary public
+      // DAG. Every extra lane has its OWN checkout and dependency closure;
+      // project those executions as private children instead of hiding their
+      // status and time inside the shard recipe's log.
+      if (index > 0) {
+        const setupName = shardLaneNamepath(
+          plan.task.id,
+          index,
+          plan.total,
+          SETUP,
+        );
+        const setupId = fanId(setupName, platform);
+        children.push(setupId);
+        shardNodeIds.add(setupId);
+        nextNodes[setupId] = pendingNode({
+          id: setupId,
+          name: setupName,
+          command: "(prepare burst workspace)",
+          needs: [],
+        });
+        for (const task of plan.tasks) {
+          if (task.id === plan.task.id) continue;
+          const name = shardLaneNamepath(
+            plan.task.id,
+            index,
+            plan.total,
+            task.id,
+          );
+          const id = fanId(name, platform);
+          children.push(id);
+          shardNodeIds.add(id);
+          nextNodes[id] = pendingNode({
+            id,
+            name,
+            command: task.command,
+            needs: [...task.needs, SETUP].map((dep) =>
+              fanId(
+                shardLaneNamepath(
+                  plan.task.id,
+                  index,
+                  plan.total,
+                  dep,
+                ),
+                platform,
+              ),
+            ),
+          });
+        }
+      }
+      const name = shardNamepath(plan.task.id, index, plan.total);
+      const id = fanId(name, platform);
       children.push(id);
       shardNodeIds.add(id);
       nextNodes[id] = pendingNode({
         id,
-        name: id,
+        name,
         command:
           `ODU_SHARD_INDEX=${index} ODU_SHARD_TOTAL=${plan.total} ` +
           plan.task.command,
-        needs: plan.task.needs.map((dep) => fanId(dep, platform)),
+        needs:
+          index === 0
+            ? [...plan.task.needs, SETUP].map((dep) => fanId(dep, platform))
+            : [...plan.task.needs, SETUP].map((dep) =>
+                fanId(
+                  shardLaneNamepath(
+                    plan.task.id,
+                    index,
+                    plan.total,
+                    dep,
+                  ),
+                  platform,
+                ),
+              ),
       });
     }
     const nextOrder = [...cur.order];
@@ -1573,6 +1664,7 @@ async function orchestrate(
     const statuses = nodes.map((node) => node!.status);
     const status = shardAggregateStatus(statuses);
     const startedAt = logical.startedAt ?? Date.now();
+    const durationMs = shardAggregateDuration(nodes);
     appendLocal(
       logicalId,
       `[odu] shards settled: ${statuses.join(", ")}\n`,
@@ -1582,7 +1674,7 @@ async function orchestrate(
       status,
       exitCode: status === "ok" ? 0 : 1,
       startedAt,
-      durationMs: Date.now() - startedAt,
+      durationMs,
     });
   };
 
@@ -1850,7 +1942,12 @@ async function orchestrate(
         acquiredLeases.push(lease);
         watchLease(lease);
       }
-      const plan = { task, total: 1 + extras.length, leases: extras };
+      const plan = {
+        task,
+        tasks: dependencyClosure(tasks, task.id),
+        total: 1 + extras.length,
+        leases: extras,
+      };
       shardPlans.set(platform, plan);
       installShardNodes(platform, plan);
       info(
@@ -2102,27 +2199,38 @@ async function orchestrate(
     laneEntries.set(platform, { phase: "live", handle: lane });
 
     if (plan !== undefined && plan.total > 1) {
-      const privateTasks = dependencyClosure(baseTasks, plan.task.id);
       for (let index = 1; index < plan.total; index += 1) {
         const lease = plan.leases[index - 1];
         if (lease === undefined) continue;
-        const shardId = fanId(
-          shardNamepath(plan.task.id, index, plan.total),
-          platform,
+        const publicIdFor = (laneId: string): string =>
+          fanId(
+            shardLaneNamepath(plan.task.id, index, plan.total, laneId),
+            platform,
+          );
+        const shardId = publicIdFor(plan.task.id);
+        const setupId = publicIdFor(SETUP);
+        const publicLaneIds = [SETUP, ...plan.tasks.map((task) => task.id)].map(
+          publicIdFor,
         );
         let burstLane: Lane | undefined;
         let finished = false;
         const finishBurst = (): void => {
           if (finished) return;
-          const status = store.get().nodes[shardId]?.status;
+          const state = store.get();
           if (
-            status === "pending" ||
-            status === "running" ||
-            status === undefined
+            publicLaneIds.some((id) => {
+              const status = state.nodes[id]?.status;
+              return (
+                status === "pending" ||
+                status === "running" ||
+                status === undefined
+              );
+            })
           ) {
             return;
           }
           finished = true;
+          endLocal(setupId);
           burstLane?.close();
           releaseLeaseForHandle(lease);
         };
@@ -2130,7 +2238,7 @@ async function orchestrate(
         burstLane = startLane({
           platform,
           host: lease.host,
-          tasks: privateTasks.map((task) =>
+          tasks: plan.tasks.map((task) =>
             task.id === plan.task.id
               ? withShardEnv(task, index, plan.total)
               : task,
@@ -2142,44 +2250,70 @@ async function orchestrate(
           workspace: burstLocal ? specSource : null,
           resolveDrvPath: runnerDrvResolver(runnerFlake, platform),
           onSetupLine: (line) =>
-            appendLocal(shardId, `[setup ${shortHost(lease.host)}] ${line}\n`),
+            appendLocal(setupId, `[host ${shortHost(lease.host)}] ${line}\n`),
           onNodes: (laneState) => {
             if (!laneAccepting(platform)) return;
             for (const laneId of laneState.order) {
               const laneNode = laneState.nodes[laneId];
-              if (laneNode === undefined || laneId !== plan.task.id) continue;
-              verdicts.offer(shardId, {
+              if (laneNode === undefined) continue;
+              const publicId = publicIdFor(laneId);
+              const patch = {
                 status: laneNode.status,
                 exitCode: laneNode.exitCode,
                 startedAt: laneNode.startedAt,
                 durationMs: laneNode.durationMs,
-              });
-              refreshShardAggregate(platform, plan);
+              };
+              // Like the primary `_ci-setup`, this log has a coordinator half
+              // (`onSetupLine`) in addition to the runner stream. Its state is
+              // therefore mirrored directly and its log is sealed only when
+              // the whole burst lane settles.
+              if (laneId === SETUP) updateNode(publicId, patch);
+              else verdicts.offer(publicId, patch);
+              if (laneId === plan.task.id) {
+                refreshShardAggregate(platform, plan);
+              }
             }
           },
           onLogFrame: (laneId, frame) => {
             if (!laneAccepting(platform)) return;
-            if (laneId !== plan.task.id) {
-              if (frame.kind === "append" && frame.text !== "") {
-                appendLocal(shardId, `[prerequisite ${laneId}] ${frame.text}`);
+            const publicId = publicIdFor(laneId);
+            if (frame.kind === "append") appendLocal(publicId, frame.text);
+            else if (frame.kind === "snapshot") {
+              if (laneId === SETUP) {
+                if (frame.text !== "") appendLocal(publicId, frame.text);
+              } else if (!logs.isNoopReset(publicId, frame.text)) {
+                resetLocal(publicId, frame.text);
               }
-              return;
-            }
-            if (frame.kind === "append") appendLocal(shardId, frame.text);
-            else if (frame.kind === "snapshot" && frame.text !== "") {
-              resetLocal(shardId, frame.text);
             } else if (frame.kind === "end") {
-              endLocal(shardId);
-              verdicts.release(shardId);
-              refreshShardAggregate(platform, plan);
+              // `_ci-setup` still has a coordinator-side producer; finishBurst
+              // seals it after the recipe root settles. Every recipe node uses
+              // the ordinary verdict/log join.
+              if (laneId !== SETUP) {
+                endLocal(publicId);
+                verdicts.release(publicId);
+              }
+              if (laneId === plan.task.id) {
+                refreshShardAggregate(platform, plan);
+              }
               finishBurst();
             }
           },
           onDead: (error) => {
             if (!laneAccepting(platform)) return;
-            appendLocal(shardId, `\n[odu] shard lane died: ${error}\n`);
-            endLocal(shardId);
-            updateNode(shardId, { status: "errored", exitCode: 1 });
+            for (const id of publicLaneIds) {
+              const status = store.get().nodes[id]?.status;
+              if (status === "pending" || status === "running") {
+                appendLocal(id, `\n[odu] shard lane died: ${error}\n`);
+                endLocal(id);
+                verdicts.release(id);
+                updateNode(id, {
+                  status: status === "running" ? "errored" : "skipped",
+                  exitCode: 1,
+                });
+              } else {
+                endLocal(id);
+              }
+            }
             refreshShardAggregate(platform, plan);
             finishBurst();
           },

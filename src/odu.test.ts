@@ -33,7 +33,12 @@ import {
 } from "./common/laneSurface";
 import { firstFrame, runUnary, subscribe } from "./common/effectEdge";
 import { createLaneRunner, SETUP_NODE_ID } from "./runner/runner";
-import { overlayOnLaneStop, shardAggregateStatus } from "./coordinator/run";
+import {
+  overlayOnLaneStop,
+  shardAggregateDuration,
+  shardAggregateStatus,
+  shardLaneNamepath,
+} from "./coordinator/run";
 
 interface Harness {
   client: LaneClient;
@@ -454,6 +459,27 @@ describe("shard aggregation", () => {
     expect(shardAggregateStatus(["ok", "skipped"])).toBe("failed");
     expect(shardAggregateStatus(["ok", "failed"])).toBe("failed");
     expect(shardAggregateStatus(["failed", "errored"])).toBe("errored");
+  });
+
+  it("reports critical shard execution rather than staggered prerequisite wall time", () => {
+    expect(
+      shardAggregateDuration([
+        { durationMs: 65_000 },
+        { durationMs: 97_000 },
+        { durationMs: 83_000 },
+      ]),
+    ).toBe(97_000);
+    expect(shardAggregateDuration([{ durationMs: null }])).toBe(0);
+  });
+
+  it("gives a burst lane's private prerequisites unambiguous public names", () => {
+    expect(shardLaneNamepath("e2e", 1, 5, "e2e")).toBe("e2e[2-of-5]");
+    expect(shardLaneNamepath("e2e", 1, 5, "install")).toBe(
+      "e2e[2-of-5]::install",
+    );
+    expect(shardLaneNamepath("ci::e2e", 2, 4, "ci::install")).toBe(
+      "ci::e2e[3-of-4]::ci::install",
+    );
   });
 });
 

@@ -41,5 +41,9 @@ the complete suite with the total it obtained, and posts one aggregate
 a slot whose connection fails is skipped instead of entering the retry cycle.
 Configure shared host capacity with
 `{"host":"ci-1","slots":2}`; legacy host strings remain one slot.
+The aggregate duration is the slowest slice's execution time, not staggered
+checkout/install/build time. Each burst lane dispatches that private dependency
+closure immediately and exposes nodes such as `e2e[2-of-4]::install` in the UI,
+logs, timing sidecar, and run record without creating extra GitHub contexts.
 
 AGPL-3.0-or-later

@@ -101,6 +101,14 @@ existing branch rules do not change. A lost shard lane fails that aggregate.
 Burst leases are released as each shard settles; the primary platform lease
 continues to cover the rest of CI.
 
+The logical recipe's completed duration is the slowest slice's execution time,
+the critical path for the parallel recipe itself. Staggered checkout, install,
+or build prerequisites on burst lanes are not misattributed to `e2e`. Each
+leased burst lane dispatches its private dependency closure immediately and in
+parallel with the other lanes. Those executions are first-class UI, log,
+timing, and run-record nodes such as `e2e[2-of-4]::install`; they remain
+implementation-detail GitHub contexts, like the slice nodes themselves.
+
 The initial implementation deliberately permits a sharded recipe only when it
 is a leaf, permits one sharded recipe per platform, and rejects `--linger` for a
 sharded run. Those constraints avoid allowing downstream work or a rerun after
