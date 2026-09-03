@@ -203,6 +203,9 @@ export interface AgentDialOpts {
   onLog?: (line: string) => void;
   /** Bound for session pin + claim/probe RPC (default CLAIM_TIMEOUT_MS). */
   timeoutMs?: number;
+  /** Optional capacity has alternatives: on the first real disconnect, give
+   *  this candidate up instead of waiting through the session retry cycle. */
+  failFastDisconnect?: boolean;
   /** Optional lock path override (tests / multi-tenant). */
   lockPath?: string;
   /** Capacity slot being claimed. Multi-slot hosts use a distinct lock path;
@@ -336,6 +339,26 @@ function provisionSink(onLog?: (line: string) => void): {
  * Dial odu-runner on `host` via surface-remote, claim the venue lock, keep
  * the agent session for the hold lifetime.
  */
+export function failFastOptionalDisconnect<T>(
+  pin: Promise<T>,
+  observePhase: (listener: (phase: string) => void) => void,
+  host: string,
+): Promise<T> {
+  return Promise.race([
+    pin,
+    new Promise<never>((_, reject) => {
+      observePhase((phase) => {
+        if (phase !== "disconnected" && phase !== "failed") return;
+        reject(
+          new Error(
+            `odu: optional burst connection to ${shortHost(host)} ${phase} before its lease was ready`,
+          ),
+        );
+      });
+    }),
+  ]);
+}
+
 export async function tryClaim(
   host: string,
   identity: LeaseIdentity,
@@ -370,8 +393,20 @@ export async function tryClaim(
   try {
     // `.finally` and not a post-await line: the pin's diagnosis must be
     // released on the throw path too, and this session's log outlives it.
+    const pin = pinLaneFace(session);
+    const ready = opts.failFastDisconnect
+      ? failFastOptionalDisconnect(
+          pin,
+          (listener) => {
+            session.onState((state: SessionState<SshProv>) =>
+              listener(state.phase),
+            );
+          },
+          host,
+        )
+      : pin;
     const client = await withTimeout(
-      pinLaneFace(session),
+      ready,
       timeoutMs,
       `lease pin ${shortHost(host)}`,
       sink.pin,
@@ -845,6 +880,7 @@ export async function leaseBurstSlots(
       return tryClaim(host, identity, {
         resolveDrvPath: opts.resolveDrvPath,
         onLog: opts.onLine,
+        failFastDisconnect: true,
         slot,
       });
     });

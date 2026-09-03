@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it, jest } from "bun:test";
 import {
   acquireFromPool,
+  failFastOptionalDisconnect,
   formatHeldFor,
   formatHolder,
   isMixedPool,
@@ -23,6 +24,43 @@ function held(host: string): ClaimResult {
     lease: { host, release: jest.fn() },
   };
 }
+
+describe("optional burst connection policy", () => {
+  it("allows a cold pin to keep making non-terminal progress", async () => {
+    let observe: (phase: string) => void = () => {};
+    let resolvePin: (value: string) => void = () => {};
+    const pin = new Promise<string>((resolve) => {
+      resolvePin = resolve;
+    });
+    const ready = failFastOptionalDisconnect(
+      pin,
+      (listener) => {
+        observe = listener;
+      },
+      "cold-ci",
+    );
+
+    observe("provisioning");
+    resolvePin("ready");
+    await expect(ready).resolves.toBe("ready");
+  });
+
+  it("rejects the first actual disconnect instead of entering retry", async () => {
+    let observe: (phase: string) => void = () => {};
+    const ready = failFastOptionalDisconnect(
+      new Promise<string>(() => {}),
+      (listener) => {
+        observe = listener;
+      },
+      "broken-ci.example.com",
+    );
+
+    observe("disconnected");
+    await expect(ready).rejects.toThrow(
+      /optional burst connection to broken-ci disconnected/,
+    );
+  });
+});
 
 describe("parseHolderBody / formatHolder", () => {
   it("round-trips the pipe-encoded holder line", () => {

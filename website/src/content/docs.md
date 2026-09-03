@@ -84,10 +84,13 @@ e2e: install
     CUCUMBER_SHARD="$((ODU_SHARD_INDEX + 1))/$ODU_SHARD_TOTAL" just test-e2e
 ```
 
-Odu first obtains the normal platform lane, then non-blockingly leases up to
-three additional free slots. The number is a ceiling, not a fleet reservation:
-if two slots are available, both shards receive `ODU_SHARD_TOTAL=2` and together
-run the complete suite. `ODU_SHARD_INDEX` is zero-based. The recipe translates
+Odu first obtains the normal platform lane, then leases up to three additional
+slots. A cold candidate may finish normal Nix download/build progress—the first
+bootstrap cost is real and amortized. A candidate whose connection or
+provisioner actually disconnects is skipped immediately instead of entering the
+session retry cycle. The number is a ceiling, not a fleet reservation: if two
+slots are available, both shards receive `ODU_SHARD_TOTAL=2` and together run
+the complete suite. `ODU_SHARD_INDEX` is zero-based. The recipe translates
 those framework-neutral variables to Cucumber, Playwright, pytest, or its own
 sharder.
 
