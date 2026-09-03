@@ -209,7 +209,7 @@ export interface SpawnDeps {
  *  bun runtime tolerates natively (EPIPE on stdio never becomes an
  *  uncaughtException; `spawnSurvival.test.ts` pins the whole property). The
  *  caller `unref()`s the handle so the server can exit without waiting.
- *  "Laudcher's plain exit" is the whole promise: a service stop kills the
+ *  "Launcher's plain exit" is the whole promise: a service stop kills the
  *  host's whole cgroup, and no spawn flag shields against that — the limit
  *  is the header's WHO REAPS. */
 export function coordinatorSpawnSpec(checkout: string): {

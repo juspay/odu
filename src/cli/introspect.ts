@@ -25,7 +25,9 @@ import {
   STATUS_META,
 } from "@odu/run-client/surface";
 import { isSetupNode, onPlatform, splitFanId } from "@odu/run-client/nodeId";
+import { dirname } from "node:path";
 import { dialRun, SOCKET_PATH } from "@odu/run-client/dial";
+import { deadRun, describeDeadRun } from "@odu/run-client/deadRun";
 import { firstFrame, runUnary, subscribe } from "../common/effectEdge";
 import { formatGoDuration } from "../common/duration";
 import { parseAtPlatform, transitiveDependents } from "../common/nodeId";
@@ -697,6 +699,21 @@ export async function rerunCommand(
   }
   const dialed = await dialRun(socketPath);
   if (dialed === null) {
+    // A bare "no run in progress" over a killed run's residue is how the
+    // incident hid it — the MCP `node_rerun` names the corpse; the CLI twin
+    // answers the same sentence. (deadRun answers null while ANY coordinator
+    // is live, so this never collides with a plain no-run refusal.)
+    const dead = await deadRun(
+      dirname(dirname(socketPath)),
+      socketPath === SOCKET_PATH ? {} : { socketPath },
+    );
+    if (dead !== null) {
+      process.stderr.write(
+        `odu: ${describeDeadRun(dead)} There is no live run to rerun on — ` +
+          "start a new one (starting over the residue works without `supersede`).\n",
+      );
+      return 1;
+    }
     noRunInProgress(socketPath);
     return 1;
   }

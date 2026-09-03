@@ -28,6 +28,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
+import { utimesSync } from "node:fs";
 import { deadRun, describeDeadRun } from "./deadRun";
 
 const dirs: string[] = [];
@@ -68,15 +69,45 @@ describe("deadRun", () => {
     expect(await deadRun(root)).toBeNull();
   });
 
-  it("names the run an unfinalized reservation belongs to", async () => {
+  it("names the run an unfinalized reservation belongs to — the reservation NAMES the corpse, it never proves one", async () => {
     const root = tmpCheckout();
     reserveSentinel(root, "abc1234", 1);
+    // …by itself, a leftover sentinel is the STEADY STATE after a
+    // replacement run reclaimed the residue (see the next test) — the
+    // incident residue is a lock and/or socket with nobody live.
+    expect(await deadRun(root)).toBeNull();
+    // …with the kill's actual residue present, the sentinel names the answer:
+    writeFileSync(join(root, ".ci", "odu.run.lock"), "2147483646\n");
     const dead = await deadRun(root);
     expect(dead).not.toBeNull();
     expect(dead!.sha7).toBe("abc1234");
     expect(dead!.seq).toBe(1);
     expect(dead!.evidence.reservation).toBe(true);
     expect(dead!.lastActivityAt).not.toBeNull();
+  });
+
+  it("a recovered checkout is the steady state: the tombstone stays, the corpse answer does not", async () => {
+    const root = tmpCheckout();
+    // The kill: residue of seq 1 with nobody answering.
+    reserveSentinel(root, "abc1234", 1);
+    writeFileSync(join(root, ".ci", "odu.run.lock"), "2147483646\n");
+    writeFileSync(join(root, ".ci", "odu.sock"), "");
+    // The recovery this PR ships: a replacement run reclaims lock + socket
+    // (no supersede), reserves the NEXT ordinal, settles, finalizes it — and
+    // a clean exit takes BOTH files away again (the lock's release(), the
+    // serving side's close()).
+    rmSync(join(root, ".ci", "odu.run.lock"), { force: true });
+    rmSync(join(root, ".ci", "odu.sock"), { force: true });
+    const runsDir = join(root, ".ci", "abc1234", "runs");
+    writeFileSync(
+      join(runsDir, "2.json"),
+      JSON.stringify({ seq: 2, outcome: "passed" }),
+    );
+    // Seq 1's tombstone sentinel is STILL on disk — by design. It must
+    // never again read as a current corpse: wait/rerun/runs facing THIS
+    // state would otherwise answer "the run is not coming back" forever
+    // about a checkout whose current run already settled.
+    expect(await deadRun(root)).toBeNull();
   });
 
   it("answers null while a run is LIVE: a serving lock-holder is not a corpse", async () => {
@@ -117,26 +148,70 @@ describe("deadRun", () => {
     expect(dead!.evidence.socket).toBe(true);
   });
 
-  it("last sign of life comes from the run directory's own writes", async () => {
+  it("last sign of life is the dead run's OWN artifacts — never the shared `.ci/<sha7>` tree's later writes", async () => {
     const root = tmpCheckout();
+    const past = Date.now() - 60_000;
     reserveSentinel(root, "abc1234", 1);
-    // A node log the dead lane was mid-write on: newer than the sentinel.
+    writeFileSync(join(root, ".ci", "odu.run.lock"), "2147483646\n");
+    // Pin the residue to a known clock: the sentinel, the lock, and seq 1's
+    // MCP-server tee (`.ci/<sha7>/runs/1.log` — per-run, unlike the
+    // commit-addressed node logs).
+    for (const p of [
+      join(root, ".ci", "abc1234", "runs", "1.json"),
+      join(root, ".ci", "odu.run.lock"),
+    ]) {
+      utimesSync(p, new Date(past), new Date(past));
+    }
+    // …and now the LATER writes: a dirty-tree re-run of the SAME commit is
+    // seq 2 — its finalized record and its node logs land in the SAME
+    // `.ci/abc1234/` tree, with NOW's mtimes. The corpse is still named
+    // (the lock is still dead) — the answer must NOT timestamp seq 1's
+    // death with seq 2's life.
     const logDir = join(root, ".ci", "abc1234", "x86_64-linux");
     mkdirSync(logDir, { recursive: true });
+    writeFileSync(join(logDir, "ci::e2e.log"), "the re-run's fresher output\n");
+    writeFileSync(
+      join(root, ".ci", "abc1234", "runs", "2.json"),
+      JSON.stringify({ seq: 2, outcome: "passed" }),
+    );
+    const dead = await deadRun(root);
+    expect(dead).not.toBeNull();
+    expect(Math.floor(dead!.lastActivityAt!)).toBe(past);
+  });
+
+  it("last sign of life includes the run's own per-seq tee (runs/<seq>.log), when the launcher kept one", async () => {
+    const root = tmpCheckout();
     const past = Date.now() - 60_000;
-    const log = join(logDir, "ci::e2e.log");
-    writeFileSync(log, "half a line of output\n");
-    // Pin a known clock reading: utimes BOTH writes to the same past instant,
-    // so the answer is exactly that instant and nothing clock-drifted.
-    const { utimesSync } = await import("node:fs");
+    reserveSentinel(root, "abc1234", 1);
+    writeFileSync(join(root, ".ci", "odu.run.lock"), "2147483646\n");
+    // The answer is the residue's newest stamp — here, the tee's. (The LOCK
+    // is pinned older too, or its just-written mtime would win instead.)
+    writeFileSync(join(root, ".ci", "abc1234", "runs", "1.log"), "tee\n");
     utimesSync(
-      join(root, ".ci", "abc1234", "runs", "1.json"),
+      join(root, ".ci", "abc1234", "runs", "1.log"),
       new Date(past),
       new Date(past),
     );
-    utimesSync(log, new Date(past), new Date(past));
+    for (const p of [
+      join(root, ".ci", "abc1234", "runs", "1.json"),
+      join(root, ".ci", "odu.run.lock"),
+    ]) {
+      utimesSync(p, new Date(past - 10_000), new Date(past - 10_000));
+    }
     const dead = await deadRun(root);
+    expect(dead).not.toBeNull();
     expect(Math.floor(dead!.lastActivityAt!)).toBe(past);
+  });
+
+  it("a foreign process at the lock's PID vetoes the death — EPERM means a process EXISTS, never that the holder died", async () => {
+    const root = tmpCheckout();
+    const ci = join(root, ".ci");
+    mkdirSync(ci, { recursive: true });
+    // PID 1 is init/launchd: ESRCH on no OS, EPERM for any test runner that
+    // is not root, LIVE if it somehow is root — every one of those must veto
+    // a death; none may answer a corpse.
+    writeFileSync(join(ci, "odu.run.lock"), "1\n");
+    expect(await deadRun(root)).toBeNull();
   });
 });
 
@@ -144,6 +219,7 @@ describe("describeDeadRun", () => {
   it("names the run and the admission", async () => {
     const root = tmpCheckout();
     reserveSentinel(root, "abc1234", 1);
+    writeFileSync(join(root, ".ci", "odu.run.lock"), "2147483646\n");
     const dead = (await deadRun(root))!;
     const msg = describeDeadRun(dead);
     expect(msg).toContain("abc1234#1");

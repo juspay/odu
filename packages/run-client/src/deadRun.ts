@@ -16,23 +16,37 @@
  * checks, in order:
  *
  *   1. SOMETHING LIVE WINS. A socket that answers, or a run lock whose PID
- *      still answers signal-0, means a coordinator owns this checkout —
- *      answer `null`. (Same signal-0 semantics as the lock's own stale
- *      treatment: a dead-or-foreign PID is not a live coordinator.)
- *   2. RESIDUE IS NEWS. A lock file or socket file nobody serves, or a
- *      `.ci/<sha7>/runs/<seq>.json` still carrying the `reserved` sentinel —
- *      the tombstone a mid-flight kill leaves (odu's ledger documents it as
- *      the reservation a SIGKILL intentionally leaves behind) — means a run
- *      died here. The sentinel names the run (its directory the commit, its
- *      file the seq); the lock and socket can't.
+ *      answers signal-0 — including with EPERM: a process EXISTS at that
+ *      pid, and a live coordinator this face is not allowed to signal must
+ *      never be read as a corpse (acquiring a lock may treat EPERM as
+ *      "free"; declaring a death may not) — means a coordinator owns this
+ *      checkout, so answer `null`.
+ *   2. RESIDUE IS NEWS — and the residue of a kill is a LOCK FILE and/or a
+ *      SOCKET FILE nobody serves (a clean exit takes both). That, and only
+ *      that, is the corpse. A `.ci/<sha7>/runs/<seq>.json` still carrying
+ *      the `reserved` sentinel NAMES the dead run (its directory the commit,
+ *      its file the seq) — but never proves one: after the recovery this
+ *      read exists to serve (a replacement run reclaims lock + socket
+ *      without `supersede`, and a clean settle removes them again), the
+ *      tombstone sentinel stays on disk as history while lock and socket
+ *      are gone — and reading THAT as a current corpse would make a
+ *      recovered checkout answer "the run is not coming back" forever.
  *
- * What it CANNOT say is honored as ruthlessly as what it can: the death
- * itself is never timestamped (a kill writes nothing), so `lastActivityAt`
- * is the newest mtime among the residue — the last sign of life, not the
- * moment of death. A run killed before it stamped `.ci/<sha7>` left a lock
- * and nothing to name it by: `sha7` is then `""` and no commit is claimed.
- * And a corpse beside LATER healthy history still answers — the death is
- * part of this checkout's story until someone clears the residue.
+ * What it CANNOT say is honored as ruthlessly as what it can:
+ *
+ *   - the death itself is never timestamped (a kill writes nothing), so
+ *     `lastActivityAt` is the newest mtime among the DEAD RUN'S OWN residue —
+ *     the lock, the socket, the sentinel, and the per-seq tee the launcher
+ *     wrote (`.ci/<sha7>/runs/<seq>.log`). The commit-addressed node logs
+ *     are deliberately NOT consulted: a later run of the same commit (a
+ *     dirty-tree re-run) writes those very paths, and timestamping seq N's
+ *     death with seq N+1's life is a dead-run reading that lies;
+ *   - a run killed before it stamped `.ci/<sha7>` left a lock and nothing
+ *     to name it by: `sha7` is then `""` and no commit is claimed;
+ *   - both probes are THIS HOST'S facts (a local unix connect and
+ *     `kill(pid, 0)`): a coordinator live on ANOTHER machine whose `.ci` is
+ *     a network mount reads exactly like the incident here — say so; a
+ *     cross-host corpse is not this read's to name.
  *
  * This is the one read of the death; every face (odu's own `runs` /
  * `wait_for_settle` / `node_rerun` / `run`, and a remote watcher's
@@ -96,55 +110,33 @@ function mtimeOf(path: string): number | null {
   }
 }
 
-/** PID of a live process holding `lockPath`, or `null` if the file is
- *  missing, unreadable, or names a dead/foreign process — odu's
- *  `liveRunLockPid` rule (signal-0; ESRCH and EPERM both read as "not a
- *  live coordinator"). */
-function liveLockPid(lockPath: string): number | null {
+/** The lock file's answer, for THIS question. The lock module's own probe
+ *  folds ESRCH and EPERM together as "not live" — the right default for
+ *  ACQUIRING a lock (never block the checkout forever), a false one for
+ *  DECLARING a death: EPERM means a process at that pid EXISTS and we may
+ *  not signal it — the one answer that must veto a corpse reading, or a
+ *  live-but-foreign coordinator is mistaken for a dead one.
+ *
+ * `stale`: the file is here but no live process is proven — ESRCH, or
+ *  contents no pid parses out of. Either way the file itself is the
+ *  residue: only an exit path unlinks it. */
+function lockHolder(lockPath: string): "live" | "foreign" | "stale" | "absent" {
   let pid: number | null = null;
   try {
     const parsed = Number.parseInt(readFileSync(lockPath, "utf8").trim(), 10);
     pid = Number.isFinite(parsed) && parsed > 0 ? parsed : null;
   } catch {
-    return null;
+    return "absent";
   }
-  if (pid === null) return null;
+  if (pid === null) return "stale";
   try {
     process.kill(pid, 0);
-    return pid;
-  } catch {
-    return null;
+    return "live";
+  } catch (err) {
+    // EPERM: the pid is alive under another uid — never declare its death.
+    if ((err as NodeJS.ErrnoException).code === "EPERM") return "foreign";
+    return "stale";
   }
-}
-
-/** The newest mtime in `dir`'s whole subtree — the last write a now-dead
- *  lane made. Missing pieces stat to null and drop out. */
-function lastWriteUnder(dir: string): number | null {
-  let best: number | null = null;
-  const note = (t: number | null): void => {
-    if (t !== null && (best === null || t > best)) best = t;
-  };
-  const walk = (path: string): void => {
-    let entries: string[];
-    try {
-      entries = readdirSync(path);
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      const child = join(path, entry);
-      let isDir = false;
-      try {
-        isDir = statSync(child).isDirectory();
-      } catch {
-        continue;
-      }
-      if (isDir) walk(child);
-      else note(mtimeOf(child));
-    }
-  };
-  walk(dir);
-  return best;
 }
 
 /** The newest reservation sentinel across `.ci/<sha7>/runs/` — an unfinished
@@ -220,8 +212,10 @@ export async function deadRun(
   const ciDir = dirname(socketPath);
   const lockPath = paths.lockPath ?? join(ciDir, RUN_LOCK_NAME);
 
-  // 1. Something live wins. A serving socket first; then a live lock-holder
-  //    (a run in its startup window serves no socket yet).
+  // 1. Something live — or unanswerable — wins. A serving socket first; then
+  //    a lock whose pid the host still answers FOR (alive, or alive-but-not-
+  //    ours: EPERM vetoes, see `lockHolder`). A run in its startup window
+  //    serves no socket yet — the lock is what makes that not-a-corpse.
   //
   //    A dial that THROWS (dialRun's non-absence failures — e.g. ENOTSOCK on
   //    a junk file the kill left at the socket path) is NOT "a live run
@@ -232,27 +226,34 @@ export async function deadRun(
     await dialed.close();
     return null;
   }
-  if (liveLockPid(lockPath) !== null) return null;
+  const holder = lockHolder(lockPath);
+  if (holder === "live" || holder === "foreign") return null;
 
-  // 2. Residue is news.
-  const lock = existsSync(lockPath);
+  // 2. The corpse trigger is the lock and/or the socket — what a clean exit
+  //    takes and a kill cannot. The sentinel NAMES the corpse when one
+  //    exists; it is never the trigger.
+  const lock = holder === "stale";
   const socket = existsSync(socketPath);
+  if (!lock && !socket) return null;
   const reservation = newestReservation(ciDir);
-  if (!lock && !socket && reservation === null) return null;
 
-  const lastActivityAt = [mtimeOf(lockPath), mtimeOf(socketPath)].reduce<
-    number | null
-  >(
-    (best, t) => (t !== null && (best === null || t > best) ? t : best),
+  // Last sign of life: the dead run's OWN residue — the lock, the socket,
+  // the sentinel, the per-seq tee `.ci/<sha7>/runs/<seq>.log`. Never the
+  // commit's whole tree: the `<sha7>/<platform>/<node>.log` paths are
+  // addressed by COMMIT, so a later run of the same sha writes them, and a
+  // dead seq must never be timestamped with a live seq's writes.
+  const perSeq: Array<number | null> =
     reservation === null
-      ? null
-      : [reservation.mtime, lastWriteUnder(join(ciDir, reservation.sha7))]
-          .reduce<number | null>(
-            (best, t) =>
-              t !== null && (best === null || t > best) ? t : best,
-            null,
-          ),
-  );
+      ? []
+      : [
+          reservation.mtime,
+          mtimeOf(join(ciDir, reservation.sha7, "runs", `${reservation.seq}.log`)),
+        ];
+  const lastActivityAt = [mtimeOf(lockPath), mtimeOf(socketPath), ...perSeq]
+    .reduce<number | null>(
+      (best, t) => (t !== null && (best === null || t > best) ? t : best),
+      null,
+    );
 
   return {
     sha7: reservation?.sha7 ?? "",

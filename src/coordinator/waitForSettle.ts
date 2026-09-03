@@ -290,25 +290,28 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
     // the timeout/cancel (the projected `nodes` stream swallows abort) — that's
     // an abort verdict, never a settled one.
     if (controller.signal.aborted) return abortedVerdict();
+    // The socket this wait dialed — passed through to `deadRun` in both
+    // death-check arms below so the detector reads this path, never a
+    // re-derived one.
+    const sock = opts.socketPath ?? SOCKET_PATH;
     // The stream ended with no settle and no abort. If we never observed a
     // LIVE run, there is none in this checkout — refuse LOUD, mirroring the
     // CLI (`odu status`), rather than an instant empty verdict a caller can't
     // tell apart from a real one (juspay/odu#49 ask 1).
     if (lastLive === undefined) {
-      // …UNLESS the residue says a run DIED here: a stale lock/socket or an
-      // unfinished reservation with nobody serving is a kill (the host died
-      // with the run), and answering plain "no run in progress" over that
-      // corpse is how a dead run was hidden. Name the death instead — the
-      // detector keys on the socket's own `.ci` (dirname×2), never on git,
-      // so a subdir-served wait answers about the checkout it DIALED.
-      const dead = await deadRun(
-        dirname(dirname(opts.socketPath ?? SOCKET_PATH)),
-      );
+      // …UNLESS the residue says a run DIED here: the lock/socket residue
+      // of a kill (what a clean exit removes) with nobody serving, and
+      // answering plain "no run in progress" over that corpse is how a dead
+      // run was hidden. Name the death instead — the detector keys on the
+      // socket's own `.ci`, never on git, so a subdir-served wait answers
+      // about the checkout it DIALED; the socket path is passed through so
+      // the detector reads the path THIS wait dialed, not a re-derived one.
+      const dead = await deadRun(dirname(dirname(sock)), { socketPath: sock });
       if (dead !== null) throw new NoLiveRunError(describeDeadRun(dead));
       // Strip the `odu: ` prefix + trailing newline — CLI wait re-adds `odu: `,
       // MCP surfaces the body as the tool error message.
       throw new NoLiveRunError(
-        noRunInProgressMessage(opts.socketPath ?? SOCKET_PATH)
+        noRunInProgressMessage(sock)
           .replace(/^odu: /, "")
           .trimEnd(),
       );
@@ -346,11 +349,11 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
       };
     }
     // No usable record: is the coordinator DEAD, in the way the on-disk
-    // residue answers cleanly? A kill mid-flight leaves the tombstone the
-    // record never replaced — then the honest answer is the death, named,
-    // not a half-observed snapshot verdict a caller can't tell from a slow
-    // one.
-    const dead = await deadRun(dirname(dirname(opts.socketPath ?? SOCKET_PATH)));
+    // residue answers cleanly? A kill mid-flight leaves the lock/socket
+    // residue it never got to remove — then the honest answer is the death,
+    // named, not a half-observed snapshot verdict a caller can't tell from a
+    // slow one. Same `sock` pass-through as the no-run arm above.
+    const dead = await deadRun(dirname(dirname(sock)), { socketPath: sock });
     if (dead !== null) throw new NoLiveRunError(describeDeadRun(dead));
     // Fall back to the last snapshot, fail-closed. `settled`
     // only if it was already terminal, and `passed` requires that — a green
