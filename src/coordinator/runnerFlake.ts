@@ -19,7 +19,7 @@
  * failure this indirection exists to remove. So we refuse loudly.
  */
 
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import {
   type AgentBinaryCache,
   agentBinaryCache,
@@ -31,6 +31,31 @@ import type { SurfaceSpec } from "@kolu/surface/define";
 
 export type ResolveRunnerDrv =
   SshConnectorOptions<SurfaceSpec>["resolveDrvPath"];
+
+const PROCESS_OUTPUT_LIMIT = 16 * 1024 * 1024;
+
+/** Run a coordinator-side helper without blocking Effect/OpenTUI's event loop.
+ * Setup progress, socket RPC and the live spinner all share that thread; a
+ * `spawnSync("nix", …)` here made every cold-host resolver pause all three. */
+export function captureProcess(
+  file: string,
+  args: readonly string[],
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      file,
+      [...args],
+      { encoding: "utf-8", maxBuffer: PROCESS_OUTPUT_LIMIT },
+      (error, stdout, stderr) => {
+        if (error !== null) {
+          reject(Object.assign(error, { stdout, stderr }));
+          return;
+        }
+        resolve({ stdout, stderr });
+      },
+    );
+  });
+}
 
 export function resolveRunnerFlake(env: NodeJS.ProcessEnv): string {
   const flake = env.ODU_RUNNER_FLAKE;
@@ -116,27 +141,35 @@ export function missingRunnerError(
  * Evaluate `packages.<platform>.odu-runner.drvPath` from the runner flake.
  * Shared by venue lease (claim/probe) and lane start — one agent, one drv.
  */
-export function evalOduRunnerDrv(
+export async function evalOduRunnerDrv(
   runnerFlake: string,
   platform: string,
   binaryCache: AgentBinaryCache = resolveAgentBinaryCache(process.env),
-): AgentDerivation {
+): Promise<AgentDerivation> {
   const attr = `${runnerFlake}#packages.${platform}.odu-runner.drvPath`;
-  const result = spawnSync(
-    "nix",
-    ["eval", "--raw", "--accept-flake-config", attr],
-    { encoding: "utf-8", maxBuffer: 16 * 1024 * 1024 },
-  );
-  if (result.status !== 0) {
+  try {
+    const result = await captureProcess("nix", [
+      "eval",
+      "--raw",
+      "--accept-flake-config",
+      attr,
+    ]);
+    return directAgentDerivation(result.stdout.trim(), binaryCache);
+  } catch (error) {
+    const stderr =
+      typeof (error as { stderr?: unknown }).stderr === "string"
+        ? (error as { stderr: string }).stderr
+        : error instanceof Error
+          ? error.message
+          : String(error);
     const directed = missingRunnerError(
       runnerFlake,
       platform,
-      result.stderr,
+      stderr,
     );
     if (directed !== null) throw new Error(directed);
-    throw new Error(`nix eval odu-runner drv failed:\n${result.stderr}`);
+    throw new Error(`nix eval odu-runner drv failed:\n${stderr}`);
   }
-  return directAgentDerivation(result.stdout.trim(), binaryCache);
 }
 
 /** Bind one platform's runner evaluation to surface-remote's dial contract.
@@ -148,5 +181,9 @@ export function runnerDrvResolver(
   platform: string,
 ): ResolveRunnerDrv {
   const binaryCache = resolveAgentBinaryCache(process.env);
-  return async () => evalOduRunnerDrv(runnerFlake, platform, binaryCache);
+  let resolved: Promise<AgentDerivation> | undefined;
+  return () => {
+    resolved ??= evalOduRunnerDrv(runnerFlake, platform, binaryCache);
+    return resolved;
+  };
 }

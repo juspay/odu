@@ -1,9 +1,29 @@
 import { describe, expect, it } from "bun:test";
 import {
+  captureProcess,
   missingRunnerError,
   resolveAgentBinaryCache,
   resolveRunnerFlake,
 } from "./runnerFlake";
+
+describe("captureProcess", () => {
+  it("keeps the coordinator event loop live while a child is running", async () => {
+    let ticks = 0;
+    const timer = setInterval(() => {
+      ticks += 1;
+    }, 5);
+    try {
+      const result = await captureProcess(process.execPath, [
+        "-e",
+        "setTimeout(() => process.stdout.write('ready'), 75)",
+      ]);
+      expect(result.stdout).toBe("ready");
+      expect(ticks).toBeGreaterThan(2);
+    } finally {
+      clearInterval(timer);
+    }
+  });
+});
 
 describe("resolveRunnerFlake", () => {
   it("uses the wrapper-baked ODU_RUNNER_FLAKE — the single source", () => {

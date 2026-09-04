@@ -497,6 +497,21 @@ async function orchestrate(
   deps: RunDeps,
 ): Promise<number> {
   const { repoRoot, specSource, runnerFlake, sha, sha7 } = ctx;
+  // One asynchronous Nix evaluation per platform for the whole run. Claims,
+  // optional capacity and execution lanes all ask for the same runner; making
+  // separate resolvers repeated setup work and, before runnerFlake's async
+  // fix, repeatedly froze the live renderer.
+  const runnerResolvers = new Map<
+    string,
+    ReturnType<typeof runnerDrvResolver>
+  >();
+  const runnerResolverFor = (platform: string) => {
+    const existing = runnerResolvers.get(platform);
+    if (existing !== undefined) return existing;
+    const resolver = runnerDrvResolver(runnerFlake, platform);
+    runnerResolvers.set(platform, resolver);
+    return resolver;
+  };
   // Where stdout points picks the face: NDJSON for the /do contract, an
   // in-place live matrix on a TTY, transition lines + heartbeats for a pipe.
   // The live face is the shared interactive view (same one `attach` paints):
@@ -810,6 +825,9 @@ async function orchestrate(
   //    stays here is the run's own policy: which frame routes where, and when a
   //    node's log has had this run's last word. ──
   const logs = createNodeLogSink(repoRoot, sha7);
+  // Bound below beside `setupLine`; declared here because interrupt teardown
+  // must flush the last coalesced provisioning burst before sealing logs.
+  let flushSetupLines: () => void = () => {};
   const appendLocal = (id: string, text: string): void =>
     appendIfOpen(logs, id, text);
   const resetLocal = logs.reset;
@@ -1299,6 +1317,7 @@ async function orchestrate(
       // lands here with a just-finished node's summary still on the wire.
       // Stamping is a synchronous append, so unlike draining it costs this path
       // nothing it is trying to protect.
+      flushSetupLines();
       stampUnfinishedLogs();
       endRunLogs();
       // Free venue leases so the remote flock drops immediately rather than
@@ -1551,13 +1570,30 @@ async function orchestrate(
     updateNode(id, { status: "running", startedAt: Date.now() });
   };
 
+  /** Provisioning can emit thousands of lines in one transport callback. The
+   * durable sink intentionally uses synchronous writes, so forwarding each
+   * line separately starved the same event loop that drives Effect RPC and the
+   * OpenTUI spinner. Coalesce each platform's burst to one append per turn:
+   * all bytes remain durable, while timers/input/render get a scheduling edge. */
+  const pendingSetupLines = new Map<string, string[]>();
+  let setupFlush: ReturnType<typeof setImmediate> | undefined;
+  flushSetupLines = (): void => {
+    if (setupFlush !== undefined) clearImmediate(setupFlush);
+    setupFlush = undefined;
+    for (const [platform, lines] of pendingSetupLines) {
+      appendLocal(fanId(SETUP, platform), lines.join(""));
+    }
+    pendingSetupLines.clear();
+  };
+
   /** Narrate one provisioning line into the lane's `_ci-setup` log as well as
-   *  the operator feed. The claim's ssh session emits the `copying path …`
-   *  progress this run is otherwise silent about; filed here it reaches
-   *  `odu logs -f _ci-setup@<platform>` and the attach log pane. */
+   * the operator feed. */
   const setupLine = (msg: string, platform: string): void => {
     info(msg);
-    appendLocal(fanId(SETUP, platform), `${msg}\n`);
+    const lines = pendingSetupLines.get(platform) ?? [];
+    lines.push(`${msg}\n`);
+    pendingSetupLines.set(platform, lines);
+    setupFlush ??= setImmediate(flushSetupLines);
   };
 
   // The _ci-setup node's lifecycle is coordinator-owned, not lane-mirrored:
@@ -1744,7 +1780,7 @@ async function orchestrate(
       origin: local || originUrl === null ? null : fetchUrlFor(originUrl),
       sha: local ? null : sha,
       workspace: local ? specSource : null,
-      resolveDrvPath: runnerDrvResolver(runnerFlake, platform),
+      resolveDrvPath: runnerResolverFor(platform),
       onSetupLine: (line) => appendLocal(setupId, `${line}\n`),
       onNodes: (laneState) => {
         if (!laneAccepting(platform)) return;
@@ -1884,8 +1920,7 @@ async function orchestrate(
         noWait: args.noWait,
         runLabel,
         onLine: setupLine,
-        resolveDrvPath: (candidate) =>
-          runnerDrvResolver(runnerFlake, candidate),
+        resolveDrvPath: runnerResolverFor,
       });
       await seeded;
       if (!shuttingDown) startSetup(platform);
@@ -1977,8 +2012,7 @@ async function orchestrate(
         pools: resolvedPools,
         identity: { holder: localHolderId(), run: runLabel },
         onLine: setupLine,
-        resolveDrvPath: (platform) =>
-          runnerDrvResolver(runnerFlake, platform),
+        resolveDrvPath: runnerResolverFor,
         ...(deps.leaseBurstSlots === undefined
           ? {}
           : { leaseBurst: deps.leaseBurstSlots }),
@@ -2245,7 +2279,7 @@ async function orchestrate(
             burstLocal || originUrl === null ? null : fetchUrlFor(originUrl),
           sha: burstLocal ? null : sha,
           workspace: burstLocal ? specSource : null,
-          resolveDrvPath: runnerDrvResolver(runnerFlake, platform),
+          resolveDrvPath: runnerResolverFor(platform),
           onSetupLine: (line) =>
             appendLocal(setupId, `[host ${shortHost(lease.host)}] ${line}\n`),
           onNodes: (laneState) => {
@@ -2418,6 +2452,7 @@ async function orchestrate(
   for (const lane of createdLanes) lane.close();
   // Lanes are shut: nothing can append to any node's log after this line, so
   // this is where the run says its last word about every one of them.
+  flushSetupLines();
   endRunLogs();
   // Venue locks drop with the run — free them as soon as lanes are done so the
   // next waiter can claim the box while we still finalize statuses/records.
