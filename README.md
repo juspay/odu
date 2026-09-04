@@ -39,16 +39,18 @@ A bare `odu run` opportunistically uses up to four free execution slots, runs
 the complete suite with the total it obtained, and posts one aggregate
 `e2e@<platform>` GitHub status. Cold slots may bootstrap through Nix normally;
 a slot whose connection fails is skipped instead of entering the retry cycle.
-After cold provisioning finishes, Odu re-verifies the primary and every burst
-lease before fixing the shard total; if the earlier primary died, a surviving
-burst slot is promoted and the total shrinks without aborting pre-flight.
+The primary lane starts its ordinary CI work while cold burst slots bootstrap;
+only the sharded root waits. After provisioning, Odu re-verifies every lease,
+fixes the shard total, and appends the root with its immutable index/total to
+the already-running primary lane. Dead optional slots simply shrink the total.
 Odu continuously verifies that held locks still name this run. Ownership loss
 fails closed, including while execution lanes are still starting.
 Configure shared host capacity with
 `{"host":"ci-1","slots":2}`; legacy host strings remain one slot.
 The aggregate duration is the slowest slice's execution time, not staggered
 checkout/install/build time. Each burst lane dispatches that private dependency
-closure immediately and exposes nodes such as `e2e[2-of-4]::install` in the UI,
-logs, timing sidecar, and run record without creating extra GitHub contexts.
+closure in parallel; the primary reuses prerequisites it ran during capacity
+discovery. Both expose nodes such as `e2e[2-of-4]::install` in the UI, logs,
+timing sidecar, and run record without creating extra GitHub contexts.
 
 AGPL-3.0-or-later

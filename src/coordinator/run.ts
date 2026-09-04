@@ -1978,7 +1978,8 @@ async function orchestrate(
       );
     }
     for (const [platform, venue] of outcome.venues) {
-      for (const lease of venue.bursts) {
+      for (const lease of venue.leases) {
+        if (acquiredLeases.includes(lease)) continue;
         if (!executions.addLease(platform, lease)) {
           lease.release();
           continue;

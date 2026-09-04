@@ -88,11 +88,14 @@ Odu first obtains the normal platform lane, then leases up to three additional
 slots. A cold candidate may finish normal Nix download/build progress—the first
 bootstrap cost is real and amortized. A candidate whose connection or
 provisioner actually disconnects is skipped immediately instead of entering the
-session retry cycle. After every potentially slow bootstrap finishes, Odu
-re-verifies the primary and all acquired burst holds concurrently before fixing
-the shard total. A dead burst transport is dropped; if the earlier primary died
-during that wait, the first surviving burst slot is promoted instead of
-aborting a run that still owns valid capacity. The number is a ceiling, not a fleet reservation: if two
+session retry cycle. The primary lane does not wait behind that work: it starts
+workspace setup, unrelated checks, and the sharded root's prerequisites while
+optional slots are still bootstrapping. Only the root waits for the immutable
+shard count. After every potentially slow bootstrap finishes, Odu re-verifies
+the holds concurrently, fixes the total, and extends the same primary runner
+with its indexed root. A dead optional transport is dropped; losing a primary
+that has begun executing fails closed rather than pretending another machine
+has its state. The number is a ceiling, not a fleet reservation: if two
 slots are available, both shards receive `ODU_SHARD_TOTAL=2` and together run
 the complete suite. `ODU_SHARD_INDEX` is zero-based. The recipe translates
 those framework-neutral variables to Cucumber, Playwright, pytest, or its own
@@ -111,16 +114,17 @@ continues to cover the rest of CI.
 The logical recipe's completed duration is the slowest slice's execution time,
 the critical path for the parallel recipe itself. Staggered checkout, install,
 or build prerequisites on burst lanes are not misattributed to `e2e`. Each
-leased burst lane dispatches its private dependency closure immediately and in
-parallel with the other lanes. Those executions are first-class UI, log,
+leased burst lane dispatches its private dependency closure in parallel with
+the other lanes; the primary reuses the prerequisites it completed while
+capacity was being discovered. Those executions are first-class UI, log,
 timing, and run-record nodes such as `e2e[2-of-4]::install`; they remain
 implementation-detail GitHub contexts, like the slice nodes themselves.
 
 The initial implementation deliberately permits a sharded recipe only when it
 is a leaf, permits one sharded recipe per platform, and rejects `--linger` for a
 sharded run. Those constraints avoid allowing downstream work or a rerun after
-only one shard has passed; lifting them requires an explicit aggregate barrier
-on the runner wire.
+only one shard has passed; lifting them requires a downstream aggregate
+barrier.
 
 ### Choose hosts explicitly
 
