@@ -67,6 +67,19 @@ describe.skipIf(!flockAvailable)("claimLocal / probeLocal", () => {
     expect(c.status).toBe("held");
     if (c.status !== "held") return;
 
+    expect(c.hold.lockPath).toBe(lock);
+    expect(c.hold.heldBy).toEqual({
+      holder: "t@h",
+      run: "abc#1",
+      sinceMs: 1_000,
+    });
+    expect(c.hold.isHeld()).toBe(true);
+    expect(c.hold.probe(lock)).toEqual({
+      state: "busy",
+      heldBy: { holder: "t@h", run: "abc#1", sinceMs: 1_000 },
+    });
+    expect(c.hold.probe(`${lock}-different`)).toBeNull();
+
     const p = probeLocal(lock);
     expect(p.state).toBe("busy");
     if (p.state === "busy") {
@@ -75,6 +88,8 @@ describe.skipIf(!flockAvailable)("claimLocal / probeLocal", () => {
     }
 
     c.hold.release();
+    expect(c.hold.isHeld()).toBe(false);
+    expect(c.hold.probe(lock)).toBeNull();
     await new Promise((r) => setTimeout(r, 200));
     expect(probeLocal(lock).state).toBe("free");
   });

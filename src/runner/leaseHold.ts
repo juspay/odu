@@ -12,10 +12,10 @@
  *
  * Box-side dead-man (juspay/odu#54): half-open TCP never EOFs the agent, so
  * the flock would stick until remote sshd times out (~2h). While holding we
- * treat any inbound stdio activity (including framework `system.live` probes
- * every ~15s) as a pulse; ~45s without a pulse releases the flock and exits.
+ * treat any inbound stdio activity (including ownership probes) as a pulse;
+ * ~45s without a pulse releases the flock and exits.
  * Max-hold (default 1h, `ODU_LEASE_MAX_HOLD_MS`) self-releases forgotten holds.
- * No `lease.beat` — `system.live` is the pulse.
+ * No separate `lease.beat` — normal RPC traffic and ownership probes pulse it.
  */
 
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
@@ -104,6 +104,19 @@ export function probeLocal(
 }
 
 export interface LocalHold {
+  /** The one lock this child actually owns. */
+  readonly lockPath: string;
+  /** Stable identity written beside the lock when it was acquired. */
+  readonly heldBy: LeaseHolder;
+  /** False after explicit release, self-release, or unexpected child exit. */
+  isHeld: () => boolean;
+  /**
+   * Answer an ownership probe for this hold without forking `flock`.
+   * `null` means this hold cannot answer (different path or no longer held).
+   */
+  probe: (
+    lockPath: string,
+  ) => { state: "busy"; heldBy: LeaseHolder } | null;
   release: () => void;
   /** Mark inbound activity (RPC / stdio pulse) for the dead-man timer. */
   noteActivity: () => void;
@@ -120,7 +133,7 @@ export interface ClaimLocalOpts {
   deadManMs?: number;
   maxHoldMs?: number;
   /** Called when dead-man or max-hold fires (after release). */
-  onSelfRelease?: (reason: "dead-man" | "max-hold") => void;
+  onSelfRelease?: (reason: "dead-man" | "max-hold" | "hold-exit") => void;
 }
 
 /**
@@ -172,6 +185,11 @@ export async function claimLocal(
     let released = false;
     let lastActivity = now();
     const heldSince = now();
+    const heldBy: LeaseHolder = {
+      holder: identity.holder,
+      run: identity.run,
+      sinceMs: nowMs,
+    };
 
     const doRelease = (): void => {
       if (released) return;
@@ -207,9 +225,33 @@ export async function claimLocal(
     }, Math.min(5_000, deadMs, maxMs > 0 ? maxMs : deadMs));
     watch.unref?.();
 
+    // A direct child failure is ownership loss even though the runner itself
+    // is still alive. Surface that through the same teardown path as the two
+    // timers; otherwise an in-process self probe could report a dead hold as
+    // healthy until an external flock probe happened to run.
+    child.once("close", () => {
+      if (released) return;
+      released = true;
+      clearInt(watch);
+      try {
+        unlinkSync(holderFile);
+      } catch {
+        /* child may have removed it */
+      }
+      opts.onSelfRelease?.("hold-exit");
+    });
+
     return {
       status: "held",
       hold: {
+        lockPath,
+        heldBy,
+        isHeld: () => !released,
+        probe: (requestedPath) => {
+          if (released || requestedPath !== lockPath) return null;
+          lastActivity = now();
+          return { state: "busy", heldBy };
+        },
         release: doRelease,
         noteActivity: () => {
           lastActivity = now();

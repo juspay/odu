@@ -161,8 +161,14 @@ export function createLaneRunner(): LaneRunner {
           }),
         probe: ({ input }) =>
           Effect.sync(() => {
-            venueHold?.noteActivity();
             const lockPath = agentLeaseLockPath(input.lockPath);
+            // The coordinator probes its own hold every two seconds. Answering
+            // that question by spawnSync-ing flock blocks this runner's event
+            // loop, which can starve the transport keep-alive under load and
+            // turn a healthy lease into a false link death. The hold child is
+            // already the authority for this exact lock and identity.
+            const own = venueHold?.probe(lockPath);
+            if (own != null) return own;
             return probeLocal(lockPath);
           }),
         release: () =>
