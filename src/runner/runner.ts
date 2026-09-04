@@ -115,6 +115,11 @@ export function createLaneRunner(): LaneRunner {
             venueHold?.noteActivity();
             return configure(input);
           }),
+        extend: ({ input }) =>
+          Effect.sync(() => {
+            venueHold?.noteActivity();
+            return extend(input.tasks);
+          }),
       },
       lease: {
         claim: ({ input }) =>
@@ -161,8 +166,14 @@ export function createLaneRunner(): LaneRunner {
           }),
         probe: ({ input }) =>
           Effect.sync(() => {
-            venueHold?.noteActivity();
             const lockPath = agentLeaseLockPath(input.lockPath);
+            // The coordinator probes its own hold every two seconds. Answering
+            // that question by spawnSync-ing flock blocks this runner's event
+            // loop, which can starve the transport keep-alive under load and
+            // turn a healthy lease into a false link death. The hold child is
+            // already the authority for this exact lock and identity.
+            const own = venueHold?.probe(lockPath);
+            if (own != null) return own;
             return probeLocal(lockPath);
           }),
         release: () =>
@@ -305,6 +316,43 @@ export function createLaneRunner(): LaneRunner {
     return { ok: true, error: null };
   };
 
+  /** Add tasks after configure without replacing any state already earned.
+   * The combined DAG is validated as one value before it is published. */
+  const extend = (tasks: ConfigureInput["tasks"]): ConfigureOutput => {
+    if (disposed) return { ok: false, error: "runner is disposed" };
+    const current = config;
+    if (current === undefined) {
+      return { ok: false, error: "runner is not configured" };
+    }
+    const combined = [...current.tasks, ...tasks];
+    try {
+      validatePipeline({ name: current.name, tasks: combined });
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+    const state = getState();
+    if (tasks.some((task) => state.nodes[task.id] !== undefined)) {
+      return { ok: false, error: "extended task id already exists" };
+    }
+    const nodes = { ...state.nodes };
+    for (const task of tasks) {
+      nodes[task.id] = pendingNode({
+        id: task.id,
+        name: task.name ?? task.id,
+        command: task.command,
+        needs: [...task.needs, SETUP_NODE_ID],
+      });
+    }
+    config = { ...current, tasks: combined };
+    ctx.cells.nodes.set({
+      ...state,
+      order: [...state.order, ...tasks.map((task) => task.id)],
+      nodes,
+    });
+    tick();
+    return { ok: true, error: null };
+  };
+
   // ── scheduling (mini-ci semantics: fixed-point pass, skip cascade) ──
   const runnable = (node: NodeState): boolean =>
     node.status === "pending" &&
@@ -434,6 +482,10 @@ export function createLaneRunner(): LaneRunner {
         cwd: workspace,
         stdio: ["ignore", "pipe", "pipe"],
         detached: true,
+        env: {
+          ...process.env,
+          ...(config?.tasks.find((task) => task.id === node.id)?.env ?? {}),
+        },
       },
     );
     inv.child = child;

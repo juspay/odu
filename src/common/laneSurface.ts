@@ -56,6 +56,15 @@ export const ConfigureOutputSchema = Schema.Struct({
 });
 export type ConfigureOutput = typeof ConfigureOutputSchema.Type;
 
+/** Add a later phase of tasks to an already configured lane. This is how a
+ * shard lane can prepare its workspace and prerequisites while the
+ * coordinator is still discovering the final shard count, then receive the
+ * root with its immutable INDEX/TOTAL environment. */
+export const ExtendInputSchema = Schema.Struct({
+  tasks: Schema.Array(TaskSpecSchema).check(Schema.isMinLength(1)),
+});
+export type ExtendInput = typeof ExtendInputSchema.Type;
+
 /** Who holds a venue lock (`holder|run|sinceMs` on the agent). Shared by the
  *  lane's `lease.*` procedures and the coordinator's `odu hosts` rendering. */
 export const LeaseHolderSchema = Schema.Struct({
@@ -133,6 +142,10 @@ export const laneSurface = defineSurface({
     run: {
       configure: {
         input: ConfigureInputSchema,
+        output: ConfigureOutputSchema,
+      },
+      extend: {
+        input: ExtendInputSchema,
         output: ConfigureOutputSchema,
       },
     },

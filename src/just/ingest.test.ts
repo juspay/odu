@@ -97,6 +97,31 @@ describe("pipelineFromDump", () => {
     expect(ids.indexOf("ci::install")).toBeLessThan(ids.indexOf("ci::unit"));
   });
 
+  it("reads a bounded shard ceiling from just metadata", () => {
+    const fixture = dump() as any;
+    fixture.modules.ci.recipes.e2e.attributes = [
+      { metadata: ["odu:shard=4"] },
+    ];
+    expect(
+      pipelineFromDump(fixture).tasks.find((task) => task.id === "ci::e2e")
+        ?.shards,
+    ).toBe(4);
+  });
+
+  it("refuses invalid shard metadata and a sharded non-leaf", () => {
+    const invalid = dump() as any;
+    invalid.modules.ci.recipes.e2e.attributes = [
+      { metadata: ["odu:shard=all"] },
+    ];
+    expect(() => pipelineFromDump(invalid)).toThrow(/integer N >= 2/);
+
+    const nonLeaf = dump() as any;
+    nonLeaf.modules.ci.recipes.install.attributes = [
+      { metadata: ["odu:shard=2"] },
+    ];
+    expect(() => pipelineFromDump(nonLeaf)).toThrow(/must be a leaf/);
+  });
+
   it("includes a --root override's own body-bearing recipe as a node", () => {
     const spec = pipelineFromDump(dump(), { root: "ci::e2e" });
     expect(spec.tasks.map((t) => t.id).sort()).toEqual([

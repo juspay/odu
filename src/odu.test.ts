@@ -33,7 +33,14 @@ import {
 } from "./common/laneSurface";
 import { firstFrame, runUnary, subscribe } from "./common/effectEdge";
 import { createLaneRunner, SETUP_NODE_ID } from "./runner/runner";
-import { overlayOnLaneStop } from "./coordinator/run";
+import {
+  overlayOnLaneStop,
+} from "./coordinator/run";
+import {
+  shardAggregateDuration,
+  shardAggregateStatus,
+  shardLaneNamepath,
+} from "./coordinator/shards";
 
 interface Harness {
   client: LaneClient;
@@ -42,6 +49,10 @@ interface Harness {
     tasks: TaskSpec[],
     workspace?: string,
   ) => Promise<{
+    ok: boolean;
+    error: string | null;
+  }>;
+  extend: (tasks: TaskSpec[]) => Promise<{
     ok: boolean;
     error: string | null;
   }>;
@@ -121,6 +132,7 @@ async function harness(): Promise<Harness> {
           tasks,
         }),
       ),
+    extend: (tasks) => runUnary(client.surface.run.extend({ tasks })),
     dispose,
   };
 }
@@ -201,6 +213,44 @@ describe("odu lane runner over stdio (loopback)", () => {
         }
       }
     }
+  });
+
+  it("injects coordinator task environment into only that recipe", async () => {
+    const h = await harness();
+    await h.configure([
+      {
+        id: "shard",
+        command: 'test "$ODU_SHARD_INDEX/$ODU_SHARD_TOTAL" = "1/3"',
+        needs: [],
+        env: { ODU_SHARD_INDEX: "1", ODU_SHARD_TOTAL: "3" },
+      },
+    ]);
+    await settledWith(h, 2);
+    expect(last(h).nodes.shard?.status).toBe("ok");
+  });
+
+  it("extends a settled prerequisite lane with a shard root", async () => {
+    const h = await harness();
+    expect(
+      (await h.configure([
+        { id: "install", command: "echo installed", needs: [] },
+      ])).ok,
+    ).toBe(true);
+    await settledWith(h, 2);
+
+    const ack = await h.extend([
+      {
+        id: "e2e",
+        command: 'test "$ODU_SHARD_INDEX/$ODU_SHARD_TOTAL" = "0/4"',
+        needs: ["install"],
+        env: { ODU_SHARD_INDEX: "0", ODU_SHARD_TOTAL: "4" },
+      },
+    ]);
+    expect(ack).toEqual({ ok: true, error: null });
+    await settledWith(h, 3);
+    expect(last(h).order).toEqual([SETUP_NODE_ID, "install", "e2e"]);
+    expect(last(h).nodes.install?.status).toBe("ok");
+    expect(last(h).nodes.e2e?.status).toBe("ok");
   });
 
   it("rejects a second configure (one run per lane process)", async () => {
@@ -426,6 +476,41 @@ describe("odu lane runner over stdio (loopback)", () => {
       false,
     );
     expect((await runUnary(h.client.surface.node.cancel({ id: "ok" }))).ok).toBe(false);
+  });
+});
+
+describe("shard aggregation", () => {
+  it("stays pending/running until every shard settles", () => {
+    expect(shardAggregateStatus(["pending", "pending"])).toBe("pending");
+    expect(shardAggregateStatus(["ok", "running", "pending"])).toBe("running");
+  });
+
+  it("fails closed across shard terminal states", () => {
+    expect(shardAggregateStatus(["ok", "ok"])).toBe("ok");
+    expect(shardAggregateStatus(["ok", "skipped"])).toBe("failed");
+    expect(shardAggregateStatus(["ok", "failed"])).toBe("failed");
+    expect(shardAggregateStatus(["failed", "errored"])).toBe("errored");
+  });
+
+  it("reports critical shard execution rather than staggered prerequisite wall time", () => {
+    expect(
+      shardAggregateDuration([
+        { durationMs: 65_000 },
+        { durationMs: 97_000 },
+        { durationMs: 83_000 },
+      ]),
+    ).toBe(97_000);
+    expect(shardAggregateDuration([{ durationMs: null }])).toBe(0);
+  });
+
+  it("gives a burst lane's private prerequisites unambiguous public names", () => {
+    expect(shardLaneNamepath("e2e", 1, 5, "e2e")).toBe("e2e[2-of-5]");
+    expect(shardLaneNamepath("e2e", 1, 5, "install")).toBe(
+      "e2e[2-of-5]::install",
+    );
+    expect(shardLaneNamepath("ci::e2e", 2, 4, "ci::install")).toBe(
+      "ci::e2e[3-of-4]::ci::install",
+    );
   });
 });
 

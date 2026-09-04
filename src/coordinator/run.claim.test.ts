@@ -20,7 +20,7 @@
  * progress" from its next `run()`.
  */
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   mkdirSync,
   mkdtempSync,
@@ -105,6 +105,13 @@ function fixture(): string {
   return dir;
 }
 
+function sha7Of(dir: string): string {
+  return spawnSync("git", ["rev-parse", "--short=7", "HEAD"], {
+    cwd: dir,
+    encoding: "utf-8",
+  }).stdout.trim();
+}
+
 /** Poll the checkout socket until the coordinator answers. */
 async function dialUntilServing(
   socketPath: string,
@@ -120,6 +127,80 @@ async function dialUntilServing(
 }
 
 describe.if(hasJust)("a cancel that lands mid-claim", () => {
+  it("finalizes an early whole-run cancel without an initialization crash", async () => {
+    const dir = fixture();
+    const socketPath = join(dir, ".ci", "odu.sock");
+    const runModule = join(import.meta.dir, "run.ts");
+    const childDir = mkdtempSync(join(tmpdir(), "odu-early-cancel-"));
+    const childFile = join(childDir, "early-cancel.ts");
+    // A separate process is essential: production shutdown ends in
+    // process.exit(130), and replacing that exit would let the already-cancelled
+    // coordinator resume into a second terminal owner. Hold its injected venue
+    // claim forever so cancel lands in the exact pre-claim-completion window.
+    writeFileSync(
+      childFile,
+      [
+        `import { runCommand } from ${JSON.stringify(runModule)};`,
+        "void runCommand({",
+        "  selectors: [], platforms: [], hostPins: [], noDeps: false,",
+        "  noStrict: true, noSnapshot: true, noPost: true,",
+        "  progressJson: false, supersede: false, linger: false, noWait: false,",
+        "}, { claimVenues: () => new Promise(() => {}) }).catch((err) => {",
+        "  console.error(err);",
+        "  process.exit(1);",
+        "});",
+        "",
+      ].join("\n"),
+    );
+
+    const child = spawn(process.execPath, [childFile], {
+      cwd: dir,
+      env: process.env,
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.setEncoding("utf-8");
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    const exited = new Promise<number>((resolve) => {
+      child.on("exit", (code) => resolve(code ?? -1));
+      child.on("error", () => resolve(-1));
+    });
+
+    const dialed = await Promise.race([
+      dialUntilServing(socketPath),
+      exited.then((code) => {
+        throw new Error(
+          `early-cancel helper exited ${code} before serving:\n${stderr}`,
+        );
+      }),
+    ]);
+    try {
+      const ack = await runUnary(dialed.client.surface.run.cancel({}));
+      expect(ack.ok).toBe(true);
+      const code = await Promise.race([
+        exited,
+        new Promise<"timeout">((resolve) =>
+          setTimeout(() => resolve("timeout"), 10_000),
+        ),
+      ]);
+      expect(code).toBe(130);
+      expect(stderr).not.toContain("ReferenceError");
+      expect(stderr).not.toContain("before initialization");
+      // Shutdown reached the durable-artifact step which used to throw.
+      const timings = readFileSync(
+        join(dir, ".ci", sha7Of(dir), "timings.jsonl"),
+        "utf-8",
+      );
+      expect(timings).toContain(`unit@${PLATFORM}`);
+    } finally {
+      child.kill("SIGKILL");
+      await dialed.close().catch(() => {});
+      rmSync(childDir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
   it("does not let wait_for_settle call the run over while the claim holds a box", async () => {
     const dir = fixture();
     const socketPath = join(dir, ".ci", "odu.sock");

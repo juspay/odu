@@ -73,6 +73,59 @@ Exactly one [`just`](https://just.systems) recipe carries `[metadata("ci")]`. It
 default: build test lint
 ```
 
+### Shard a long terminal check
+
+Mark one leaf recipe per platform with a shard ceiling. The command stays a
+single bare `odu run`:
+
+```just
+[metadata("odu:shard=4")]
+e2e: install
+    CUCUMBER_SHARD="$((ODU_SHARD_INDEX + 1))/$ODU_SHARD_TOTAL" just test-e2e
+```
+
+Odu first obtains the normal platform lane, then leases up to three additional
+slots. A cold candidate may finish normal Nix download/build progress—the first
+bootstrap cost is real and amortized. A candidate whose connection or
+provisioner actually disconnects is skipped immediately instead of entering the
+session retry cycle. The primary lane does not wait behind that work: it starts
+workspace setup, unrelated checks, and the sharded root's prerequisites while
+optional slots are still bootstrapping. Only the root waits for the immutable
+shard count. After every potentially slow bootstrap finishes, Odu re-verifies
+the holds concurrently, fixes the total, and extends the same primary runner
+with its indexed root. A dead optional transport is dropped; losing a primary
+that has begun executing fails closed rather than pretending another machine
+has its state. The number is a ceiling, not a fleet reservation: if two
+slots are available, both shards receive `ODU_SHARD_TOTAL=2` and together run
+the complete suite. `ODU_SHARD_INDEX` is zero-based. The recipe translates
+those framework-neutral variables to Cucumber, Playwright, pytest, or its own
+sharder.
+
+Odu continuously verifies that held locks still name this run. Ownership loss
+fails closed, including while execution lanes are still starting.
+
+Shard instances appear as adjacent live/log nodes such as
+`e2e[1-of-4]@x86_64-linux`. They do not create GitHub contexts. Odu aggregates
+them into the stable logical `e2e@x86_64-linux` status, so `odu protect` and
+existing branch rules do not change. A lost shard lane fails that aggregate.
+Burst leases are released as each shard settles; the primary platform lease
+continues to cover the rest of CI.
+
+The logical recipe's completed duration is the slowest slice's execution time,
+the critical path for the parallel recipe itself. Staggered checkout, install,
+or build prerequisites on burst lanes are not misattributed to `e2e`. Each
+leased burst lane dispatches its private dependency closure in parallel with
+the other lanes; the primary reuses the prerequisites it completed while
+capacity was being discovered. Those executions are first-class UI, log,
+timing, and run-record nodes such as `e2e[2-of-4]::install`; they remain
+implementation-detail GitHub contexts, like the slice nodes themselves.
+
+The initial implementation deliberately permits a sharded recipe only when it
+is a leaf, permits one sharded recipe per platform, and rejects `--linger` for a
+sharded run. Those constraints avoid allowing downstream work or a rerun after
+only one shard has passed; lifting them requires a downstream aggregate
+barrier.
+
 ### Choose hosts explicitly
 
 **A host is a decision.** odu resolves hosts from the first source that exists:
@@ -108,7 +161,7 @@ Define platform lanes in `~/.config/odu/hosts.json`, or point `$ODU_HOSTS` at an
 
 Keys are Nix system tuples. Values are anything ssh can dial, or `localhost`. A bare `odu run` fans out to every configured platform. Platforms absent from an existing hosts file are intentionally omitted: a partial configuration is still a decision. Use `--platform P` to select a subset or `--host P=ADDR` to pin or add a lane for one run.
 
-### Venue pools (one free machine per platform)
+### Venue pools and execution slots
 
 A platform can list several hosts. odu picks a free machine, locks it for the run, and releases when the run ends (or the holder dies):
 
@@ -119,15 +172,32 @@ A platform can list several hosts. odu picks a free machine, locks it for the ru
 }
 ```
 
+By default each host contributes one exclusive execution slot. Declare safe
+parallel capacity on a larger builder explicitly:
+
+```json
+{
+  "x86_64-linux": [
+    { "host": "nix@ci-1", "slots": 2 },
+    { "host": "nix@ci-2", "slots": 2 },
+    "nix@ci-3"
+  ]
+}
+```
+
+Lease exclusivity is per slot, not per physical host. Odu scans slot zero on
+each machine before stacking onto slot one, so a sharded check spreads across
+hosts first. String entries and `--host` pins remain one-slot declarations.
+
 Rules:
 
-- **One run per machine.** The lock is an `flock` **on the builder**, held by the **odu-runner agent** the coordinator dials over surface-remote (`lease.claim`). `flock` comes from odu-runner's Nix closure (util-linux on its PATH)—builders need ssh + Nix, not a system-installed flock.
+- **One run per declared slot.** The lock is an `flock` **on the builder**, held by the **odu-runner agent** the coordinator dials over surface-remote (`lease.claim`). Slot zero always uses the historical `/tmp/odu.lease`; additional slots use `/tmp/odu.lease.<zero-based-slot>`. A capacity edit therefore never changes an existing slot's identity. `flock` comes from odu-runner's Nix closure (util-linux on its PATH)—builders need ssh + Nix, not a system-installed flock.
 - **Busy pool → wait in line** (and say who you're waiting for). `--no-wait` fails immediately instead.
 - **`--host P=ADDR`** pins a specific machine for that run (waits if busy).
-- **`localhost` is never an implicit fallback** (see [juspay/odu#46](https://github.com/juspay/odu/issues/46)). It participates only when you name it—for one run with `--host`, as the only entry, or as an **explicit** member of a mixed pool (e.g. `["ci-1", "localhost"]`) so it can be picked when remotes are busy.
-- Multi-platform claim is **all-or-nothing**: partial holds are released while waiting for the full set.
+- **`localhost` is never an implicit fallback** (see [juspay/odu#46](https://github.com/juspay/odu/issues/46)). It participates only when you name it as the sole, pure-local pool; mixing it with remotes is refused.
+- Multi-platform claims are independent: each ready platform starts immediately while the others keep claiming. The complete pool set is still validated up front, so one remote host cannot be assigned to two platform lanes.
 
-`odu hosts` probes free / busy / held-by without acquiring (same agent, `lease.probe`). Lock file default: `/tmp/odu.lease` (`ODU_LEASE_LOCK` to override).
+`odu hosts` probes every declared slot as free / busy / held-by without acquiring (same agent, `lease.probe`). Lock base default: `/tmp/odu.lease` (`ODU_LEASE_LOCK` to override).
 
 #### Watching a run provision
 
@@ -140,6 +210,7 @@ phase you can watch rather than a silence
 - `odu status` prints `provisioning <elapsed>` and the pool each lane is claiming from — `-o json` carries it as `run: {phase, elapsed_ms, lanes}`, one roster entry per platform tagged `state: "claiming" | "leased"`.
 - `odu attach` draws the matrix, with the lane line showing `x86_64-linux ▸ claiming ci-1, ci-2` until a host is picked.
 - `_ci-setup@<platform>` is `running` from the claim, and the copy narrates itself into that node's log: `odu logs -f _ci-setup@x86_64-linux`.
+- A ready platform leaves setup and begins its ordinary DAG without waiting for a sibling platform's cold claim or optional shard bootstrap.
 - `odu wait` blocks on the run instead of reporting there is nothing to wait for.
 
 The pin carries **two** bounds, and the timeout message names which one fired:
@@ -300,7 +371,7 @@ and the counts row is tinted per bucket so a run's shape reads at a glance.
 
 `.ci/odu.sock` identifies the live run in a checkout. Bare `odu cancel` asks the coordinator to finalize statuses, close lanes, remove the socket, and then waits for teardown.
 
-`odu cancel <node>` (e.g. `ci::fmt@aarch64-darwin`) or `odu cancel @<platform>` cancels only that node or whole platform lane — running work is stopped and marked `cancelled` (not `errored`/`failed`), pending work on the lane is cancelled, and a run-owned venue lease for that platform is released. The rest of the run settles normally. MCP twins: `node_cancel` / `lane_cancel` (CLI `@plat` sugar maps to `lane.cancel`).
+`odu cancel <node>` (e.g. `ci::fmt@aarch64-darwin`) or `odu cancel @<platform>` cancels only that node or the whole platform execution — all primary and shard lanes are stopped and marked `cancelled` (not `errored`/`failed`), and every run-owned venue lease for that platform is released. The rest of the run settles normally. MCP twins: `node_cancel` / `lane_cancel` (CLI `@plat` sugar maps to `lane.cancel`).
 
 `odu run --supersede` combines full-run cancel and start for the common “stop this run and test the fix” move. Runs normally exit as soon as they settle; `--linger` keeps the coordinator available so a node can be retried later, then reaps it after an idle period or explicit cancellation.
 

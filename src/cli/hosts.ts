@@ -27,6 +27,11 @@ function heldByColumn(probe: ProbeResult, nowMs: number): string {
   return probe.state === "unreachable" ? probe.error : "";
 }
 
+function venueLabel(probe: ProbeResult): string {
+  const host = shortHost(probe.host);
+  return probe.slots > 1 ? `${host}#${probe.slot + 1}/${probe.slots}` : host;
+}
+
 export async function hostsCommand(): Promise<number> {
   const config = loadHosts();
   const platforms = Object.keys(config.hosts).sort();
@@ -66,7 +71,7 @@ export async function hostsCommand(): Promise<number> {
   // Column widths from content.
   const hostW = Math.max(
     4,
-    ...rows.map((r) => shortHost(r.probe.host).length),
+    ...rows.map((r) => venueLabel(r.probe).length),
   );
   const platW = Math.max(8, ...rows.map((r) => r.platform.length));
   const stateW = 5; // free/busy/local/down
@@ -76,7 +81,7 @@ export async function hostsCommand(): Promise<number> {
   process.stdout.write(`${header}\n`);
 
   for (const { platform, probe } of rows) {
-    const host = shortHost(probe.host).padEnd(hostW);
+    const host = venueLabel(probe).padEnd(hostW);
     const plat = platform.padEnd(platW);
     const state = stateLabel(probe).padEnd(stateW);
     const held = heldByColumn(probe, nowMs);

@@ -36,6 +36,7 @@ import { RunRecordSchema, UnpostedEntrySchema } from "./runRecord";
 import { TaskSpecSchema } from "./spec";
 import {
   ConfigureInputSchema,
+  ExtendInputSchema,
   LeaseClaimOutputSchema,
   LeaseProbeOutputSchema,
 } from "./laneSurface";
@@ -159,6 +160,13 @@ describe("TaskSpec / ConfigureInput — the run.configure payload", () => {
     expect(roundTrip(TaskSpecSchema, bytes)).toBe(bytes);
   });
 
+  it("a sharded task carries its ceiling and injected environment", () => {
+    const bytes =
+      '{"id":"ci::e2e","command":"just --no-deps ci::e2e","needs":[],' +
+      '"shards":4,"env":{"ODU_SHARD_INDEX":"2","ODU_SHARD_TOTAL":"4"}}';
+    expect(roundTrip(TaskSpecSchema, bytes)).toBe(bytes);
+  });
+
   it("a present-but-undefined needs is REJECTED (stricter than zod, on purpose)", () => {
     // zod's `.default([])` substituted for an explicit `undefined`;
     // `withDecodingDefaultKey` does not. Every in-process producer must omit
@@ -189,6 +197,13 @@ describe("TaskSpec / ConfigureInput — the run.configure payload", () => {
         tasks: [],
       }),
     ).toBe(false);
+  });
+
+  it("ExtendInput carries only the later task phase", () => {
+    const bytes =
+      '{"tasks":[{"id":"ci::e2e","command":"just ci::e2e",' +
+      '"needs":["ci::install"],"env":{"ODU_SHARD_INDEX":"0","ODU_SHARD_TOTAL":"4"}}]}';
+    expect(roundTrip(ExtendInputSchema, bytes)).toBe(bytes);
   });
 });
 

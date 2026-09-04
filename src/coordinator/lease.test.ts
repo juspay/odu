@@ -5,16 +5,55 @@ import { join } from "node:path";
 import { describe, expect, it, jest } from "bun:test";
 import {
   acquireFromPool,
+  failFastOptionalDisconnect,
   formatHeldFor,
   formatHolder,
   isMixedPool,
+  leaseProbeIsOurs,
+  LEASE_PULSE_MS,
+  leaseBurstSlots,
   leaseLanes,
   parseHolderBody,
+  settleLeaseHandoff,
+  slotLockPath,
   type ClaimResult,
   type LeaseIdentity,
 } from "./lease";
 
 const id: LeaseIdentity = { holder: "me@desk", run: "abc1234#1" };
+
+it("keeps slot zero's lock identity stable when declared capacity changes", () => {
+  expect(slotLockPath("/tmp/odu.lock", { host: "ci", slot: 0, slots: 1 })).toBe(
+    "/tmp/odu.lock",
+  );
+  expect(slotLockPath("/tmp/odu.lock", { host: "ci", slot: 0, slots: 4 })).toBe(
+    "/tmp/odu.lock",
+  );
+  expect(slotLockPath("/tmp/odu.lock", { host: "ci", slot: 2, slots: 4 })).toBe(
+    "/tmp/odu.lock.2",
+  );
+});
+
+it("pulses quiet lease sessions inside Effect's five-second ping cadence", () => {
+  expect(LEASE_PULSE_MS).toBeLessThan(5_000);
+});
+
+it("verifies the lock belongs to this run, not merely that it is busy", () => {
+  expect(
+    leaseProbeIsOurs({ state: "busy", heldBy: { ...id, sinceMs: 1 } }, id),
+  ).toBe(true);
+  expect(
+    leaseProbeIsOurs(
+      {
+        state: "busy",
+        heldBy: { holder: "other@desk", run: "def#1", sinceMs: 1 },
+      },
+      id,
+    ),
+  ).toBe(false);
+  expect(leaseProbeIsOurs({ state: "busy", heldBy: null }, id)).toBe(false);
+  expect(leaseProbeIsOurs({ state: "free" }, id)).toBe(false);
+});
 
 function held(host: string): ClaimResult {
   return {
@@ -22,6 +61,43 @@ function held(host: string): ClaimResult {
     lease: { host, release: jest.fn() },
   };
 }
+
+describe("optional burst connection policy", () => {
+  it("allows a cold pin to keep making non-terminal progress", async () => {
+    let observe: (phase: string) => void = () => {};
+    let resolvePin: (value: string) => void = () => {};
+    const pin = new Promise<string>((resolve) => {
+      resolvePin = resolve;
+    });
+    const ready = failFastOptionalDisconnect(
+      pin,
+      (listener) => {
+        observe = listener;
+      },
+      "cold-ci",
+    );
+
+    observe("provisioning");
+    resolvePin("ready");
+    await expect(ready).resolves.toBe("ready");
+  });
+
+  it("rejects the first actual disconnect instead of entering retry", async () => {
+    let observe: (phase: string) => void = () => {};
+    const ready = failFastOptionalDisconnect(
+      new Promise<string>(() => {}),
+      (listener) => {
+        observe = listener;
+      },
+      "broken-ci.example.com",
+    );
+
+    observe("disconnected");
+    await expect(ready).rejects.toThrow(
+      /optional burst connection to broken-ci disconnected/,
+    );
+  });
+});
 
 describe("parseHolderBody / formatHolder", () => {
   it("round-trips the pipe-encoded holder line", () => {
@@ -208,6 +284,140 @@ describe("acquireFromPool", () => {
         claim: jest.fn(),
       }),
     ).rejects.toThrow(/empty host pool/);
+  });
+});
+
+describe("leaseBurstSlots", () => {
+  it("takes bounded free capacity without waiting and preserves spread order", async () => {
+    const calls: string[] = [];
+    const releases: Array<ReturnType<typeof jest.fn>> = [];
+    const leases = await leaseBurstSlots({
+      platform: "x86_64-linux",
+      pool: [
+        { host: "ci-1", slot: 0, slots: 2 },
+        { host: "ci-2", slot: 0, slots: 2 },
+        { host: "ci-1", slot: 1, slots: 2 },
+        { host: "ci-2", slot: 1, slots: 2 },
+      ],
+      identity: id,
+      limit: 2,
+      exclude: new Set(["ci-1#0"]),
+      occupiedHosts: new Set(["ci-1"]),
+      claim: async (host, _identity, slot) => {
+        calls.push(`${host}#${slot?.slot}`);
+        if (host === "ci-2" && slot?.slot === 0) {
+          return { kind: "busy", heldBy: null };
+        }
+        const release = jest.fn();
+        releases.push(release);
+        return {
+          kind: "held",
+          lease: { host, slot: slot?.slot, release },
+        };
+      },
+    });
+    expect(calls).toEqual(["ci-2#0", "ci-1#1", "ci-2#1"]);
+    expect(leases.map((lease) => `${lease.host}#${lease.slot}`)).toEqual([
+      "ci-1#1",
+      "ci-2#1",
+    ]);
+    expect(releases).toHaveLength(2);
+  });
+
+  it("drops a broken handoff before fixing TOTAL and continues to another slot", async () => {
+    const calls: string[] = [];
+    const brokenRelease = jest.fn();
+    const lines: string[] = [];
+    const leases = await leaseBurstSlots({
+      platform: "x86_64-linux",
+      pool: ["ci-broken", "ci-good-1", "ci-good-2"],
+      identity: id,
+      limit: 2,
+      onLine: (line) => lines.push(line),
+      claim: async (host) => {
+        calls.push(host);
+        return {
+          kind: "held" as const,
+          lease: {
+            host,
+            release: host === "ci-broken" ? brokenRelease : jest.fn(),
+            verifyHeld: async () => host !== "ci-broken",
+          },
+        };
+      },
+    });
+
+    expect(calls).toEqual(["ci-broken", "ci-good-1", "ci-good-2"]);
+    expect(leases.map((lease) => lease.host)).toEqual(["ci-good-1", "ci-good-2"]);
+    expect(brokenRelease).toHaveBeenCalledTimes(1);
+    expect(lines).toContain(
+      "x86_64-linux: skipped broken burst slot ci-broken#1 during handoff",
+    );
+  });
+
+  it("treats a rejected optional claim as one broken slot, not a leaked batch", async () => {
+    const release = jest.fn();
+    const leases = await leaseBurstSlots({
+      platform: "x86_64-linux",
+      pool: ["ci-good", "ci-throws"],
+      identity: id,
+      limit: 2,
+      claim: async (host) => {
+        if (host === "ci-throws") throw new Error("ssh exploded");
+        return {
+          kind: "held" as const,
+          lease: { host, release, verifyHeld: async () => true },
+        };
+      },
+    });
+
+    expect(leases.map(({ host }) => host)).toEqual(["ci-good"]);
+    expect(release).not.toHaveBeenCalled();
+  });
+});
+
+describe("settleLeaseHandoff", () => {
+  it("promotes a surviving burst lease when the primary dies during cold provisioning", async () => {
+    const brokenRelease = jest.fn();
+    const promotedRelease = jest.fn();
+    const otherRelease = jest.fn();
+    const handoff = await settleLeaseHandoff(
+      {
+        host: "primary-broke",
+        release: brokenRelease,
+        verifyHeld: async () => false,
+      },
+      [
+        {
+          host: "burst-1",
+          release: promotedRelease,
+          verifyHeld: async () => true,
+        },
+        {
+          host: "burst-2",
+          release: otherRelease,
+          verifyHeld: async () => true,
+        },
+      ],
+    );
+
+    expect(handoff?.primary.host).toBe("burst-1");
+    expect(handoff?.extras.map((lease) => lease.host)).toEqual(["burst-2"]);
+    expect(brokenRelease).toHaveBeenCalledTimes(1);
+    expect(promotedRelease).not.toHaveBeenCalled();
+    expect(otherRelease).not.toHaveBeenCalled();
+  });
+
+  it("returns null when no claimed lane survives the handoff", async () => {
+    const release = jest.fn();
+    const handoff = await settleLeaseHandoff({
+      host: "only-broken-lane",
+      release,
+      verifyHeld: async () => false,
+    }, []);
+
+    expect(handoff).toBeNull();
+    expect(release).toHaveBeenCalledTimes(1);
   });
 });
 

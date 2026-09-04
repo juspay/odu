@@ -19,20 +19,87 @@
 
 import type { ResolvedPools } from "./hosts";
 import {
+  assertLeasePools,
+  hostSlotKey,
+  leaseBurstSlots,
   type LeaseHandle,
   type LeaseIdentity,
   leaseLanes,
   type LeaseLanesOpts,
+  settleLeaseHandoff,
 } from "./lease";
 import { removePlatformLease, upsertPlatformLease } from "./leaseRecord";
 import type { ResolveRunnerDrv } from "./runnerFlake";
+import { shortHost } from "./hosts";
 
-/** What a claim produced. All-or-nothing, exactly as `leaseLanes` decides it:
- *  on failure it has already released whatever it partially held, so there is
- *  no half-claimed state for a caller to reconcile. */
+/** What one claim produced. `orchestrate` invokes this once per platform so a
+ * ready lane can run while sibling platforms keep claiming. */
 export type ClaimOutcome =
   | { ok: true; lanes: Record<string, string>; leases: LeaseHandle[] }
   | { ok: false; error: Error };
+
+export type PreparedVenues =
+  | {
+      ok: true;
+      venues: ReadonlyMap<string, PreparedVenue>;
+    }
+  | { ok: false; error: Error };
+
+export interface PreparedVenue {
+  host: string;
+  /** Every run-owned lease for this platform, primary first when present. */
+  leases: LeaseHandle[];
+  /** Optional lane leases only, after the ownership handoff. */
+  bursts: LeaseHandle[];
+}
+
+export interface BurstRequest {
+  platform: string;
+  /** Used only to distinguish the lease holder in `odu hosts`. */
+  label: string;
+  /** Additional slots; mandatory primary capacity was already claimed. */
+  limit: number;
+}
+
+export interface PlatformClaimResult {
+  platform: string;
+  outcome: ClaimOutcome;
+}
+
+/** Start every platform claim eagerly and publish each success before the
+ * complete set settles. `Promise.all` belongs outside the per-platform
+ * continuation: putting the callback after it recreates the setup barrier this
+ * helper exists to remove. */
+export async function claimPlatformsIndependently(
+  platforms: readonly string[],
+  claim: (platform: string) => Promise<ClaimOutcome>,
+  onReady: (
+    platform: string,
+    outcome: Extract<ClaimOutcome, { ok: true }>,
+  ) => void,
+): Promise<PlatformClaimResult[]> {
+  return await Promise.all(
+    platforms.map(async (platform) => {
+      const outcome = await claim(platform);
+      if (outcome.ok) onReady(platform, outcome);
+      return { platform, outcome };
+    }),
+  );
+}
+
+export interface PrepareVenuesOpts {
+  claimed: Extract<ClaimOutcome, { ok: true }>;
+  /** Agent-held lanes already assigned before this run's pool claim. */
+  existingLanes: Readonly<Record<string, string>>;
+  platforms: readonly string[];
+  bursts: readonly BurstRequest[];
+  pools: ResolvedPools;
+  identity: LeaseIdentity;
+  onLine: (msg: string, platform: string) => void;
+  resolveDrvPath: (platform: string) => ResolveRunnerDrv;
+  /** Injectable because optional capacity otherwise dials ssh. */
+  leaseBurst?: typeof leaseBurstSlots;
+}
 
 export interface ClaimVenuesOpts {
   repoRoot: string;
@@ -41,6 +108,10 @@ export interface ClaimVenuesOpts {
    *  agent-held lane already has its host and is not part of this claim, which
    *  is also the scope its failure may be reported over. */
   platforms: readonly string[];
+  /** Optional wider preflight set. The coordinator claims one platform at a
+   * time so a ready lane can start immediately, but shared-host legality is a
+   * property of the complete run and must be checked before either claim. */
+  validatePlatforms?: readonly string[];
   identity: LeaseIdentity;
   noWait: boolean;
   runLabel: string;
@@ -137,6 +208,7 @@ export async function claimVenues(
   // is a run-level fact, not one platform's, so it carries no platform.
   const warn: Warn = (msg) => opts.onLine?.(msg, opts.platforms[0] ?? "");
   try {
+    assertLeasePools(opts.pools, opts.validatePlatforms ?? opts.platforms);
     return await withWaitingRecords(
       opts.repoRoot,
       opts.platforms,
@@ -167,4 +239,143 @@ export async function claimVenues(
     // past. It gets a value it can terminalize, like every other failure.
     return { ok: false, error: asError(err) };
   }
+}
+
+/**
+ * Turn the mandatory platform claim into the final capacity value that lanes
+ * may consume.
+ *
+ * Optional shard slots are allowed to bootstrap in parallel across platforms.
+ * Only after every bootstrap has finished do we recheck all mandatory leases:
+ * that is the ownership handoff where a framework may safely freeze TOTAL.
+ * This function owns only the optional candidates it acquires. Mandatory
+ * leases remain the caller's throughout, so their primary lanes may execute
+ * while cold optional capacity is still bootstrapping.
+ */
+export async function prepareVenues(
+  opts: PrepareVenuesOpts,
+): Promise<PreparedVenues> {
+  const lanes = { ...opts.existingLanes, ...opts.claimed.lanes };
+  const burst = opts.leaseBurst ?? leaseBurstSlots;
+  const requests = new Map(opts.bursts.map((request) => [request.platform, request]));
+
+  const attempts = await Promise.allSettled(
+    opts.platforms.map(async (platform) => {
+      const request = requests.get(platform);
+      const primaryHost = lanes[platform];
+      const primary = opts.claimed.leases.find(
+        (lease) => lease.host === primaryHost,
+      );
+      if (request === undefined || primaryHost === undefined) {
+        return { platform, primary, extras: [] };
+      }
+      const extras = await burst({
+        platform,
+        pool: opts.pools.hosts[platform] ?? [],
+        identity: {
+          holder: opts.identity.holder,
+          run: `${opts.identity.run ?? "run"}:${request.label}`,
+        },
+        limit: request.limit,
+        ...(primary === undefined
+          ? {}
+          : { exclude: new Set([hostSlotKey(primaryHost, primary.slot ?? 0)]) }),
+        occupiedHosts: new Set([primaryHost]),
+        onLine: (line) => opts.onLine(line, platform),
+        resolveDrvPath: opts.resolveDrvPath(platform),
+      });
+      return {
+        platform,
+        primary,
+        extras,
+      };
+    }),
+  );
+
+  const candidates = attempts.flatMap((attempt) =>
+    attempt.status === "fulfilled" ? [attempt.value] : [],
+  );
+  const failed = attempts.find(
+    (attempt): attempt is PromiseRejectedResult => attempt.status === "rejected",
+  );
+  if (failed !== undefined) {
+    const all = new Set<LeaseHandle>(
+      candidates.flatMap(({ extras }) => extras),
+    );
+    for (const lease of all) lease.release();
+    return {
+      ok: false,
+      error:
+        failed.reason instanceof Error
+          ? failed.reason
+          : new Error(String(failed.reason)),
+    };
+  }
+
+  const handoffs = await Promise.all(
+    candidates.map(async (candidate) => {
+      if (candidate.primary !== undefined) {
+        return {
+          candidate,
+          kind: "primary" as const,
+          handoff: await settleLeaseHandoff(
+            candidate.primary,
+            candidate.extras,
+          ),
+        };
+      }
+      const first = candidate.extras[0];
+      return first === undefined
+        ? { candidate, kind: "none" as const, handoff: undefined }
+        : {
+            candidate,
+            kind: "optional" as const,
+            handoff: await settleLeaseHandoff(first, candidate.extras.slice(1)),
+          };
+    }),
+  );
+  const lost = handoffs.find(
+    ({ kind, handoff }) => kind === "primary" && handoff === null,
+  )?.candidate;
+  if (lost !== undefined) {
+    const all = new Set<LeaseHandle>(
+      candidates.flatMap(({ extras }) => extras),
+    );
+    for (const lease of all) lease.release();
+    return {
+      ok: false,
+      error: new Error(
+        `venue lease stopped answering during final handoff for ${lost.platform}`,
+      ),
+    };
+  }
+
+  const venues = new Map<string, PreparedVenue>();
+  for (const { candidate, kind, handoff } of handoffs) {
+    let extras = candidate.extras;
+    const leases: LeaseHandle[] = [];
+    if (kind === "primary" && handoff !== null) {
+      const previous = lanes[candidate.platform];
+      if (previous !== handoff.primary.host) {
+        opts.onLine(
+          `${candidate.platform}: primary ${shortHost(previous ?? "unknown")} stopped answering during handoff; promoted ${shortHost(handoff.primary.host)}`,
+          candidate.platform,
+        );
+      }
+      lanes[candidate.platform] = handoff.primary.host;
+      extras = handoff.extras;
+      leases.push(handoff.primary);
+    } else if (kind === "optional") {
+      extras =
+        handoff === null ? [] : [handoff.primary, ...handoff.extras];
+    }
+    for (const lease of extras) leases.push(lease);
+    venues.set(candidate.platform, {
+      host: lanes[candidate.platform]!,
+      leases,
+      bursts: requests.has(candidate.platform) ? extras : [],
+    });
+  }
+
+  return { ok: true, venues };
 }

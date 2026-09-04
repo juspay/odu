@@ -88,6 +88,31 @@ function hasCiMetadata(recipe: DumpRecipe): boolean {
   );
 }
 
+function shardCount(recipe: DumpRecipe): number | undefined {
+  const values = recipe.attributes.flatMap((attr): string[] => {
+    if (typeof attr !== "object" || attr === null) return [];
+    const metadata = (attr as Record<string, unknown>).metadata;
+    return Array.isArray(metadata)
+      ? metadata.filter((value): value is string => typeof value === "string")
+      : [];
+  });
+  const shardMetadata = values.filter((value) => value.startsWith("odu:shard="));
+  if (shardMetadata.length === 0) return undefined;
+  if (shardMetadata.length > 1) {
+    throw new Error(
+      `odu: recipe "${recipe.namepath}" declares odu:shard more than once`,
+    );
+  }
+  const raw = shardMetadata[0]!.slice("odu:shard=".length);
+  const count = Number(raw);
+  if (!Number.isInteger(count) || count < 2) {
+    throw new Error(
+      `odu: recipe "${recipe.namepath}" metadata must be odu:shard=N with integer N >= 2`,
+    );
+  }
+  return count;
+}
+
 /**
  * `just`'s OS-family enabling attributes — emitted as bare strings in the dump
  * (`[linux]` → `"linux"`) — each a predicate over a Nix system tuple's OS
@@ -217,20 +242,39 @@ export function pipelineFromDump(
   if (includeRoot) reachable.set(root.recipe.namepath, root);
 
   const tasks: TaskSpec[] = [...reachable.values()].map(
-    ({ recipe, module }) => ({
-      id: recipe.namepath,
-      name: recipe.namepath,
-      command: `just --no-deps ${recipe.namepath}`,
-      needs: recipe.dependencies
-        .map((dep) => resolveDep(module, dep.recipe)?.recipe.namepath)
-        .filter((np): np is string => np !== undefined && reachable.has(np)),
-      os: osAttributes(recipe),
-    }),
+    ({ recipe, module }) => {
+      const shards = shardCount(recipe);
+      return {
+        id: recipe.namepath,
+        name: recipe.namepath,
+        command: `just --no-deps ${recipe.namepath}`,
+        needs: recipe.dependencies
+          .map((dep) => resolveDep(module, dep.recipe)?.recipe.namepath)
+          .filter((np): np is string => np !== undefined && reachable.has(np)),
+        os: osAttributes(recipe),
+        ...(shards === undefined ? {} : { shards }),
+      };
+    },
   );
   // Deterministic order: dependencies first (stable topo by repeated passes),
   // alphabetical within a rank — so dashboards and dumps are reproducible.
   tasks.sort((a, b) => a.id.localeCompare(b.id));
   const ranked = topoOrder(tasks);
+
+  // Phase one deliberately shards terminal checks: a dependent must not start
+  // after only one shard succeeds. Keeping this refusal beside ingestion makes
+  // the limitation explicit until the runner wire grows an aggregate barrier.
+  for (const task of ranked) {
+    if (task.shards === undefined) continue;
+    const dependent = ranked.find((candidate) =>
+      candidate.needs.includes(task.id),
+    );
+    if (dependent !== undefined) {
+      throw new Error(
+        `odu: sharded recipe "${task.id}" must be a leaf (used by "${dependent.id}")`,
+      );
+    }
+  }
 
   return validatePipeline({
     name: root.recipe.namepath,

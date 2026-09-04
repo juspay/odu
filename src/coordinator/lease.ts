@@ -1,5 +1,5 @@
 /**
- * Venue lease — one run per machine, lock held for the run lifetime.
+ * Venue lease — one run per declared host slot, lock held for the run lifetime.
  *
  * The lock lives ON THE TARGET MACHINE (`flock` on a file there), but the
  * coordinator never runs flock over raw ssh. It dials **odu-runner** via
@@ -31,7 +31,13 @@ import {
   laneSurface,
   type LeaseHolder,
 } from "../common/laneSurface";
-import { type HostPool, type ResolvedPools, shortHost } from "./hosts";
+import {
+  asHostSlot,
+  type HostPool,
+  type HostSlot,
+  type ResolvedPools,
+  shortHost,
+} from "./hosts";
 import type { ResolveRunnerDrv } from "./runnerFlake";
 import { type TimeoutOpts, withTimeout } from "../common/withTimeout";
 import { runUnary } from "../common/effectEdge";
@@ -82,6 +88,25 @@ const WAIT_POLL_MS = envNumber("ODU_LEASE_WAIT_POLL_MS", 5_000, 1);
  *  `nix build`'s evaluation phase, which narrates plenty but copies nothing. */
 const CLAIM_TIMEOUT_MS = envNumber("ODU_LEASE_CLAIM_TIMEOUT_MS", 180_000, 1);
 
+/** A burst lease has finished every potentially slow operation before this
+ * check: the runner exists, the RPC face is pinned, and the remote flock is
+ * held. This short bound therefore classifies only a broken handoff, never a
+ * cold Nix bootstrap. It closes the gap where a lease could die while the
+ * batch waited for another cold candidate and still be counted in TOTAL. */
+const LEASE_HANDOFF_TIMEOUT_MS = envNumber(
+  "ODU_LEASE_HANDOFF_TIMEOUT_MS",
+  10_000,
+  1,
+);
+
+/** Steady-state ownership checks are transport liveness, not capacity
+ * selection. Keep their tuning independent of the one-shot handoff barrier. */
+const LEASE_PULSE_TIMEOUT_MS = envNumber(
+  "ODU_LEASE_PULSE_TIMEOUT_MS",
+  10_000,
+  1,
+);
+
 /** Absolute ceiling on ONE pin, beside the idle bound above.
  *
  *  The idle bound alone has a hole: `forceCycle` narrates through
@@ -99,6 +124,10 @@ const CLAIM_TIMEOUT_MS = envNumber("ODU_LEASE_CLAIM_TIMEOUT_MS", 180_000, 1);
  *  two failures are never confused for one another. */
 const PIN_CEILING_MS = envNumber("ODU_LEASE_PIN_CEILING_MS", 45 * 60_000, 1);
 
+/** Keep a held, otherwise quiet lease RPC active inside Effect's fixed
+ * five-second transport-ping cadence. */
+export const LEASE_PULSE_MS = 2_000;
+
 export interface LeaseIdentity {
   holder: string;
   run: string | null;
@@ -106,6 +135,7 @@ export interface LeaseIdentity {
 
 export interface LeaseHandle {
   readonly host: string;
+  readonly slot?: number;
   /** Drop the hold — release RPC + destroy the agent session. */
   release(): void;
   /**
@@ -114,6 +144,65 @@ export interface LeaseHandle {
    * exclusivity. Optional so test fakes can omit it.
    */
   readonly lost?: Promise<void>;
+  /** Confirm that the already-acquired remote flock still answers immediately.
+   * Burst acquisition calls this only after all cold provisioning has
+   * completed, immediately before committing a fixed shard total. */
+  readonly verifyHeld?: () => Promise<boolean>;
+}
+
+export interface LeaseHandoff {
+  /** The first surviving lane after the final ownership check. */
+  primary: LeaseHandle;
+  /** Remaining lanes, in their original stable order. */
+  extras: LeaseHandle[];
+}
+
+/** A busy lock proves OUR lease only when its durable holder identity agrees.
+ * Merely seeing `busy` can mistake a different run that won a release race for
+ * the hold this coordinator thought it still owned. */
+export function leaseProbeIsOurs(
+  probe:
+    | { state: "free" }
+    | { state: "busy"; heldBy: LeaseHolder | null }
+    | { state: "error" },
+  identity: LeaseIdentity,
+): boolean {
+  return (
+    probe.state === "busy" &&
+    probe.heldBy?.holder === identity.holder &&
+    probe.heldBy.run === identity.run
+  );
+}
+
+/**
+ * Recheck a group of held slots together at an ownership handoff. A primary
+ * acquired before its peers can disappear while a legitimately cold peer is
+ * still provisioning. The first survivor becomes primary; failed handles are
+ * released and omitted from the returned capacity.
+ */
+export async function settleLeaseHandoff(
+  primary: LeaseHandle,
+  extras: readonly LeaseHandle[],
+): Promise<LeaseHandoff | null> {
+  const candidates = [primary, ...extras];
+  const alive = await Promise.all(
+    candidates.map(async (lease) => {
+      if (lease.verifyHeld === undefined) return true;
+      try {
+        return await lease.verifyHeld();
+      } catch {
+        return false;
+      }
+    }),
+  );
+  const held: LeaseHandle[] = [];
+  for (const [index, lease] of candidates.entries()) {
+    if (alive[index]) held.push(lease);
+    else lease.release();
+  }
+  const nextPrimary = held[0];
+  if (nextPrimary === undefined) return null;
+  return { primary: nextPrimary, extras: held.slice(1) };
 }
 
 /** Outcome of one non-blocking claim attempt against a *remote* host. */
@@ -122,11 +211,19 @@ export type ClaimResult =
   | { kind: "busy"; heldBy: HolderInfo | null }
   | { kind: "unreachable"; error: string };
 
-export type ProbeResult =
-  | { host: string; state: "free"; heldBy: null }
-  | { host: string; state: "busy"; heldBy: HolderInfo | null }
-  | { host: string; state: "local"; heldBy: null }
-  | { host: string; state: "unreachable"; heldBy: null; error: string };
+interface ProbeVenue {
+  host: string;
+  slot: number;
+  slots: number;
+}
+
+export type ProbeResult = ProbeVenue &
+  (
+    | { state: "free"; heldBy: null }
+    | { state: "busy"; heldBy: HolderInfo | null }
+    | { state: "local"; heldBy: null }
+    | { state: "unreachable"; heldBy: null; error: string }
+  );
 
 /** Who *this* process is for holder identity — `user@short-hostname`. */
 export function localHolderId(): string {
@@ -188,8 +285,20 @@ export interface AgentDialOpts {
   onLog?: (line: string) => void;
   /** Bound for session pin + claim/probe RPC (default CLAIM_TIMEOUT_MS). */
   timeoutMs?: number;
+  /** Optional capacity has alternatives: on the first real disconnect, give
+   *  this candidate up instead of waiting through the session retry cycle. */
+  failFastDisconnect?: boolean;
   /** Optional lock path override (tests / multi-tenant). */
   lockPath?: string;
+  /** Capacity slot being claimed. Multi-slot hosts use a distinct lock path;
+   *  single-slot/legacy hosts retain the historical lock path byte-for-byte. */
+  slot?: HostSlot;
+}
+
+export function slotLockPath(base: string, slot: HostSlot): string {
+  // Slot zero is the historic single-capacity venue. Its identity must not
+  // change when an operator raises or lowers the declared capacity.
+  return slot.slot === 0 ? base : `${base}.${slot.slot}`;
 }
 
 /** `/nix/store/<hash>-git-2.55.0-doc` → `git-2.55.0-doc`; anything else
@@ -314,6 +423,26 @@ function provisionSink(onLog?: (line: string) => void): {
  * Dial odu-runner on `host` via surface-remote, claim the venue lock, keep
  * the agent session for the hold lifetime.
  */
+export function failFastOptionalDisconnect<T>(
+  pin: Promise<T>,
+  observePhase: (listener: (phase: string) => void) => void,
+  host: string,
+): Promise<T> {
+  return Promise.race([
+    pin,
+    new Promise<never>((_, reject) => {
+      observePhase((phase) => {
+        if (phase !== "disconnected" && phase !== "failed") return;
+        reject(
+          new Error(
+            `odu: optional burst connection to ${shortHost(host)} ${phase} before its lease was ready`,
+          ),
+        );
+      });
+    }),
+  ]);
+}
+
 export async function tryClaim(
   host: string,
   identity: LeaseIdentity,
@@ -348,19 +477,35 @@ export async function tryClaim(
   try {
     // `.finally` and not a post-await line: the pin's diagnosis must be
     // released on the throw path too, and this session's log outlives it.
+    const pin = pinLaneFace(session);
+    const ready = opts.failFastDisconnect
+      ? failFastOptionalDisconnect(
+          pin,
+          (listener) => {
+            session.onState((state: SessionState<SshProv>) =>
+              listener(state.phase),
+            );
+          },
+          host,
+        )
+      : pin;
     const client = await withTimeout(
-      pinLaneFace(session),
+      ready,
       timeoutMs,
       `lease pin ${shortHost(host)}`,
       sink.pin,
     ).finally(sink.done);
 
+    const lockPath =
+      opts.slot === undefined
+        ? opts.lockPath
+        : slotLockPath(opts.lockPath ?? leaseLockPath(), opts.slot);
     const result = await withTimeout(
       runUnary(
         client.surface.lease.claim({
           holder: identity.holder,
           run: identity.run,
-          ...lockPathKey(opts.lockPath),
+          ...lockPathKey(lockPath),
         }),
       ),
       timeoutMs,
@@ -379,21 +524,71 @@ export async function tryClaim(
     // Held — keep session; mark connected so the connect watchdog stands down.
     session.markConnected();
 
-    const lost = new Promise<void>((resolveLost) => {
-      session.onState((state: SessionState<SshProv>) => {
-        if (intentionalRelease) return;
-        if (state.phase === "disconnected" || state.phase === "failed") {
-          resolveLost();
-        }
-      });
+    let pulse: ReturnType<typeof setInterval> | undefined;
+    let pulseInFlight = false;
+    let lostResolved = false;
+    let resolveLost: () => void = () => {};
+    const lost = new Promise<void>((resolve) => {
+      resolveLost = resolve;
     });
+    const markLost = (): void => {
+      if (intentionalRelease || lostResolved) return;
+      lostResolved = true;
+      if (pulse !== undefined) clearInterval(pulse);
+      resolveLost();
+    };
+    session.onState((state: SessionState<SshProv>) => {
+      if (state.phase === "disconnected" || state.phase === "failed") {
+        markLost();
+      }
+    });
+
+    const probeOurs = async (
+      timeoutMs: number,
+      operation: string,
+    ): Promise<boolean> => {
+      const probe = await withTimeout(
+        runUnary(client.surface.lease.probe(lockPathKey(lockPath))),
+        timeoutMs,
+        `${operation} ${shortHost(host)}`,
+      );
+      return leaseProbeIsOurs(probe, identity);
+    };
+    pulse = setInterval(() => {
+      if (intentionalRelease || lostResolved || pulseInFlight) return;
+      pulseInFlight = true;
+      void probeOurs(LEASE_PULSE_TIMEOUT_MS, "lease pulse")
+        .then((ours) => {
+          if (!ours) markLost();
+        })
+        .catch(() => {
+          // The session state owns transport failure and supplies the useful
+          // diagnosis. Its disconnect transition calls markLost above.
+        })
+        .finally(() => {
+          pulseInFlight = false;
+        });
+    }, LEASE_PULSE_MS);
+    pulse.unref?.();
 
     return {
       kind: "held",
       lease: {
         host,
+        slot: opts.slot?.slot ?? 0,
+        verifyHeld: async () => {
+          try {
+            return await probeOurs(
+              LEASE_HANDOFF_TIMEOUT_MS,
+              "lease handoff",
+            );
+          } catch {
+            return false;
+          }
+        },
         release: () => {
           intentionalRelease = true;
+          if (pulse !== undefined) clearInterval(pulse);
           void runUnary(client.surface.lease.release({})).catch(() => {
             /* session may already be dead */
           });
@@ -417,8 +612,9 @@ export async function probeHost(
   host: string,
   opts: AgentDialOpts,
 ): Promise<ProbeResult> {
+  const venue = opts.slot ?? { host, slot: 0, slots: 1 };
   if (isLocalHost(host)) {
-    return { host, state: "local", heldBy: null };
+    return { ...venue, state: "local", heldBy: null };
   }
 
   const timeoutMs = opts.timeoutMs ?? CLAIM_TIMEOUT_MS;
@@ -447,20 +643,24 @@ export async function probeHost(
       sink.pin,
     ).finally(sink.done);
     session.markConnected();
+    const lockPath =
+      opts.slot === undefined
+        ? opts.lockPath
+        : slotLockPath(opts.lockPath ?? leaseLockPath(), opts.slot);
     const result = await withTimeout(
-      runUnary(client.surface.lease.probe(lockPathKey(opts.lockPath))),
+      runUnary(client.surface.lease.probe(lockPathKey(lockPath))),
       timeoutMs,
       `lease probe ${shortHost(host)}`,
     );
     session.destroy();
     if (result.state === "free") {
-      return { host, state: "free", heldBy: null };
+      return { ...venue, state: "free", heldBy: null };
     }
     if (result.state === "busy") {
-      return { host, state: "busy", heldBy: result.heldBy };
+      return { ...venue, state: "busy", heldBy: result.heldBy };
     }
     return {
-      host,
+      ...venue,
       state: "unreachable",
       heldBy: null,
       error: result.error,
@@ -468,7 +668,7 @@ export async function probeHost(
   } catch (e) {
     session.destroy();
     return {
-      host,
+      ...venue,
       state: "unreachable",
       heldBy: null,
       error: e instanceof Error ? e.message : String(e),
@@ -491,6 +691,7 @@ export interface AcquireFromPoolOpts {
   claim?: (
     host: string,
     identity: LeaseIdentity,
+    slot?: HostSlot,
   ) => Promise<ClaimResult>;
   /** Production: resolve odu-runner drv for this platform (passed to tryClaim). */
   resolveDrvPath?: ResolveRunnerDrv;
@@ -504,7 +705,7 @@ export interface AcquiredLane {
   lease: LeaseHandle | null;
 }
 
-function rotatePool(pool: HostPool, by: number): string[] {
+function rotatePool(pool: HostPool, by: number): (string | HostSlot)[] {
   if (pool.length === 0) return [];
   const offset = ((by % pool.length) + pool.length) % pool.length;
   return [...pool.slice(offset), ...pool.slice(0, offset)];
@@ -534,7 +735,7 @@ function defaultSleep(ms: number): Promise<void> {
 }
 
 type ScanOnce =
-  | { status: "ok"; host: string; lease: LeaseHandle | null }
+  | { status: "ok"; venue: HostSlot; lease: LeaseHandle | null }
   | {
       status: "busy";
       busy: { host: string; heldBy: HolderInfo | null }[];
@@ -614,6 +815,7 @@ async function scanPoolOnce(opts: {
   claim: (
     host: string,
     identity: LeaseIdentity,
+    slot?: HostSlot,
   ) => Promise<ClaimResult>;
   rotateBy: number;
 }): Promise<ScanOnce> {
@@ -625,22 +827,25 @@ async function scanPoolOnce(opts: {
   // it at the lease entry), so this is the only shape in which localhost is
   // ever picked: an explicit whole-pool decision, never an implicit fallback
   // (juspay/odu#46, #54).
-  if (pool.every((h) => isLocalHost(h))) {
-    const host = pool[0]!;
+  if (pool.every((h) => isLocalHost(asHostSlot(h).host))) {
+    const venue = asHostSlot(pool[0]!);
+    const host = venue.host;
     onLine?.(`${platform}: picked ${shortHost(host)} (localhost)`);
-    return { status: "ok", host, lease: null };
+    return { status: "ok", venue, lease: null };
   }
 
   const order = rotatePool(pool, rotateBy);
   const busy: { host: string; heldBy: HolderInfo | null }[] = [];
   const unreachable: { host: string; error: string }[] = [];
 
-  for (const host of order) {
+  for (const entry of order) {
+    const venue = asHostSlot(entry);
+    const host = venue.host;
     // Every member here is remote: a mixed pool was refused above, and a
     // pure-local one returned above. Localhost as a lease-exempt entry beside
     // busy remotes was the always-free overflow of juspay/odu#54 — it is now
     // unrepresentable at this point rather than special-cased.
-    const result = await claim(host, identity);
+    const result = await claim(host, identity, venue);
     if (result.kind === "held") {
       const busyNote =
         busy.length > 0
@@ -649,7 +854,7 @@ async function scanPoolOnce(opts: {
       onLine?.(
         `${platform}: picked ${shortHost(host)}${busyNote}`,
       );
-      return { status: "ok", host, lease: result.lease };
+      return { status: "ok", venue, lease: result.lease };
     }
     if (result.kind === "busy") {
       busy.push({ host, heldBy: result.heldBy });
@@ -683,7 +888,7 @@ export async function acquireFromPool(
 
   const claim =
     opts.claim ??
-    ((h, id) => {
+    ((h, id, slot) => {
       if (opts.resolveDrvPath === undefined) {
         return Promise.reject(
           new Error(
@@ -694,6 +899,7 @@ export async function acquireFromPool(
       return tryClaim(h, id, {
         resolveDrvPath: opts.resolveDrvPath,
         onLog: onLine,
+        slot,
       });
     });
 
@@ -711,7 +917,10 @@ export async function acquireFromPool(
       rotateBy,
     });
     if (scan.status === "ok") {
-      return { host: scan.host, lease: scan.lease };
+      return {
+        host: scan.venue.host,
+        lease: scan.lease,
+      };
     }
     if (scan.status === "unreachable") {
       throw unreachableError(platform, scan.unreachable);
@@ -758,6 +967,143 @@ export interface LeasedLanes {
   leases: LeaseHandle[];
 }
 
+export interface BurstLeaseOpts {
+  platform: string;
+  pool: HostPool;
+  identity: LeaseIdentity;
+  /** Additional slots only; the primary lane is claimed separately. */
+  limit: number;
+  /** Slot keys already owned by this run (`host#slot`). */
+  exclude?: ReadonlySet<string>;
+  /** Physical hosts already used by the run. Candidates on other machines are
+   *  tried first; stacking begins only after every host is represented. */
+  occupiedHosts?: ReadonlySet<string>;
+  onLine?: (msg: string) => void;
+  claim?: AcquireFromPoolOpts["claim"];
+  resolveDrvPath?: ResolveRunnerDrv;
+}
+
+export function hostSlotKey(host: string, slot: number): string {
+  return `${host.trim().toLowerCase()}#${slot}`;
+}
+
+/** Opportunistically claim bounded burst capacity. Busy and unreachable
+ *  slots reduce the shard total instead of blocking the whole CI run; every
+ *  returned handle is a real lease and therefore participates in fail-closed
+ *  lease-loss handling. Pool order is already physical-host-first. */
+export async function leaseBurstSlots(
+  opts: BurstLeaseOpts,
+): Promise<LeaseHandle[]> {
+  if (opts.limit <= 0 || opts.pool.length === 0) return [];
+  assertPoolsScannable(
+    { [opts.platform]: opts.pool },
+    [opts.platform],
+    null,
+  );
+  if (opts.pool.some((entry) => isLocalHost(asHostSlot(entry).host))) return [];
+  const claim =
+    opts.claim ??
+    ((host: string, identity: LeaseIdentity, slot?: HostSlot) => {
+      if (opts.resolveDrvPath === undefined) {
+        return Promise.resolve<ClaimResult>({
+          kind: "unreachable",
+          error: "odu: leaseBurstSlots needs resolveDrvPath or injected claim",
+        });
+      }
+      return tryClaim(host, identity, {
+        resolveDrvPath: opts.resolveDrvPath,
+        onLog: opts.onLine,
+        failFastDisconnect: true,
+        slot,
+      });
+    });
+  const excluded = opts.exclude ?? new Set<string>();
+  const occupied = new Set(
+    [...(opts.occupiedHosts ?? [])].map((host) => host.trim().toLowerCase()),
+  );
+  const leases: LeaseHandle[] = [];
+  const candidates = opts.pool
+    .map(asHostSlot)
+    .filter((slot) => !excluded.has(hostSlotKey(slot.host, slot.slot)));
+  // Stable host-spread order: the first slot from each not-yet-used machine,
+  // then remaining capacity. This is also the concurrency order below.
+  const spread: HostSlot[] = [];
+  const stacked: HostSlot[] = [];
+  const seenHosts = new Set(occupied);
+  for (const slot of candidates) {
+    const host = slot.host.trim().toLowerCase();
+    if (!seenHosts.has(host)) {
+      spread.push(slot);
+      seenHosts.add(host);
+    } else {
+      stacked.push(slot);
+    }
+  }
+  const remaining = [...spread, ...stacked];
+  try {
+    while (leases.length < opts.limit && remaining.length > 0) {
+      const batch = remaining.splice(0, opts.limit - leases.length);
+      const results = await Promise.all(
+        batch.map(async (slot) => {
+          try {
+            return {
+              slot,
+              result: await claim(slot.host, opts.identity, slot),
+            };
+          } catch (error) {
+            return {
+              slot,
+              result: {
+                kind: "unreachable" as const,
+                error: error instanceof Error ? error.message : String(error),
+              },
+            };
+          }
+        }),
+      );
+      // Recheck after the slowest candidate in this batch. An early candidate
+      // may die while a legitimately cold peer is still provisioning.
+      const verified = await Promise.all(
+        results.map(async ({ slot, result }) => {
+          if (result.kind !== "held" || result.lease.verifyHeld === undefined) {
+            return { slot, result };
+          }
+          let held = false;
+          try {
+            held = await result.lease.verifyHeld();
+          } catch {
+            // A rejected ownership check is a broken optional slot.
+          }
+          if (held) return { slot, result };
+          result.lease.release();
+          opts.onLine?.(
+            `${opts.platform}: skipped broken burst slot ${shortHost(slot.host)}#${slot.slot + 1} during handoff`,
+          );
+          return {
+            slot,
+            result: {
+              kind: "unreachable" as const,
+              error: "burst lease stopped answering during handoff",
+            },
+          };
+        }),
+      );
+      for (const { slot, result } of verified) {
+        if (result.kind !== "held") continue;
+        leases.push(result.lease);
+        occupied.add(slot.host.trim().toLowerCase());
+        opts.onLine?.(
+          `${opts.platform}: burst slot ${shortHost(slot.host)}#${slot.slot + 1}`,
+        );
+      }
+    }
+    return leases;
+  } catch (error) {
+    releaseAll(leases);
+    throw error;
+  }
+}
+
 function venueHostKey(host: string): string {
   return shortHost(host.trim()).toLowerCase();
 }
@@ -768,7 +1114,8 @@ function assertNoSharedRemoteHosts(
 ): void {
   const owner = new Map<string, string>();
   for (const platform of platforms) {
-    for (const host of pools[platform] ?? []) {
+    for (const entry of pools[platform] ?? []) {
+      const host = asHostSlot(entry).host;
       if (isLocalHost(host)) continue;
       const key = venueHostKey(host);
       if (key === "") continue;
@@ -791,8 +1138,11 @@ function assertNoSharedRemoteHosts(
  *  juspay/odu#66 wearing an inventory hat. But the operator should learn it
  *  from the command whose whole job is showing the inventory, rather than from
  *  the first run that tries to claim that platform. */
-export function isMixedPool(pool: readonly string[]): boolean {
-  return pool.some((h) => isLocalHost(h)) && pool.some((h) => !isLocalHost(h));
+export function isMixedPool(pool: HostPool): boolean {
+  return (
+    pool.some((h) => isLocalHost(asHostSlot(h).host)) &&
+    pool.some((h) => !isLocalHost(asHostSlot(h).host))
+  );
 }
 
 /**
@@ -812,7 +1162,7 @@ export function isMixedPool(pool: readonly string[]): boolean {
 function assertPoolLocality(
   source: string | null,
   platform: string,
-  pool: readonly string[],
+  pool: HostPool,
 ): void {
   if (!isMixedPool(pool)) return;
   // A `--host` pin is a pool of one — pure by construction — so a mixed pool
@@ -843,7 +1193,7 @@ function assertPoolLocality(
  * refuses runs that never touch the offending pool, which is the defect #66
  * fixed.
  */
-function assertPoolsScannable(
+export function assertPoolsScannable(
   pools: Record<string, HostPool>,
   platforms: readonly string[],
   source: string | null,
@@ -859,14 +1209,27 @@ function assertPoolsScannable(
   }
 }
 
+/** Validate the whole set before independent platform claims begin.
+ *
+ * A caller that starts platforms as soon as each becomes ready must still
+ * reject a remote host listed under two platforms before either side takes
+ * its lock. Keeping this preflight at the lease seam preserves that invariant
+ * without forcing ready platforms through the old all-platform wait barrier. */
+export function assertLeasePools(
+  pools: ResolvedPools,
+  platforms: readonly string[],
+): void {
+  assertNoSharedRemoteHosts(pools.hosts, platforms);
+  assertPoolsScannable(pools.hosts, platforms, pools.source);
+}
+
 /**
- * Lease one host per platform that participates in the run.
+ * Lease one host slot per platform that participates in the run.
  * Multi-platform is all-or-nothing (release partial holds while waiting).
  */
 export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
   const platforms = [...opts.platforms].sort();
-  assertNoSharedRemoteHosts(opts.pools.hosts, platforms);
-  assertPoolsScannable(opts.pools.hosts, platforms, opts.pools.source);
+  assertLeasePools(opts.pools, platforms);
   const sleep = opts.sleep ?? defaultSleep;
   const now = opts.now ?? Date.now;
   const rotateBy = now();
@@ -881,7 +1244,11 @@ export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
 
   const claimFor = (
     platform: string,
-  ): ((host: string, identity: LeaseIdentity) => Promise<ClaimResult>) => {
+  ): ((
+    host: string,
+    identity: LeaseIdentity,
+    slot?: HostSlot,
+  ) => Promise<ClaimResult>) => {
     if (opts.claim !== undefined) return opts.claim;
     const resolve = opts.resolveDrvPath?.(platform);
     if (resolve === undefined) {
@@ -891,10 +1258,11 @@ export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
           "odu: leaseLanes needs resolveDrvPath(platform) or an injected claim",
       });
     }
-    return (h, id) =>
+    return (h, id, slot) =>
       tryClaim(h, id, {
         resolveDrvPath: resolve,
         onLog: lineFor(platform),
+        slot,
       });
   };
 
@@ -925,7 +1293,7 @@ export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
           rotateBy,
         });
         if (scan.status === "ok") {
-          lanes[platform] = scan.host;
+          lanes[platform] = scan.venue.host;
           if (scan.lease !== null) leases.push(scan.lease);
           continue;
         }
@@ -988,10 +1356,12 @@ export async function probeAllHosts(
   const platforms = Object.keys(pools).sort();
   await Promise.all(
     platforms.flatMap((platform) =>
-      (pools[platform] ?? []).map(async (host) => {
-        const probe = await probeHost(host, {
+      (pools[platform] ?? []).map(async (entry) => {
+        const slot = asHostSlot(entry);
+        const probe = await probeHost(slot.host, {
           resolveDrvPath: opts.resolveDrvPath(platform),
           onLog: opts.onLog,
+          slot,
         });
         out.push({ platform, probe });
       }),
@@ -999,7 +1369,10 @@ export async function probeAllHosts(
   );
   out.sort((a, b) => {
     if (a.platform !== b.platform) return a.platform.localeCompare(b.platform);
-    return a.probe.host.localeCompare(b.probe.host);
+    if (a.probe.host !== b.probe.host) {
+      return a.probe.host.localeCompare(b.probe.host);
+    }
+    return a.probe.slot - b.probe.slot;
   });
   return out;
 }
