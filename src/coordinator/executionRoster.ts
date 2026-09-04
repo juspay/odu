@@ -77,6 +77,23 @@ export class ExecutionRoster {
     });
   }
 
+  /** Add routes after a lane receives its deferred task phase. */
+  extendLane(
+    platform: string,
+    handle: Lane,
+    localIds: readonly string[],
+    publicId: (localId: string) => string,
+  ): boolean {
+    const execution = this.#platforms.get(platform);
+    if (execution === undefined || execution.cancelled) return false;
+    const lane = execution.lanes.find((entry) => entry.handle === handle);
+    if (lane === undefined) return false;
+    for (const localId of localIds) {
+      lane.routes.set(publicId(localId), localId);
+    }
+    return true;
+  }
+
   route(
     platform: string,
     publicId: string,

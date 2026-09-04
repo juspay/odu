@@ -89,7 +89,9 @@ import {
 } from "./lease";
 import {
   claimVenues,
+  type ClaimOutcome,
   prepareVenues,
+  type PreparedVenues,
 } from "./runEnv";
 import { liveHeldPlatforms } from "./leaseRecord";
 import { resolveRunnerFlake, runnerDrvResolver } from "./runnerFlake";
@@ -1033,8 +1035,14 @@ async function orchestrate(
     // Terminalizing is DEFERRED while a claim is outstanding — see
     // `claimInFlight` for why, and `cancelledDuringClaim` for where the claim's
     // return picks these lanes back up.
-    if (claimInFlight) return true;
-    terminalizePlatformNodes(platform, CANCELLED_BY_OPERATOR);
+    if (claimInFlight) {
+      deferredPlatformStops.set(platform, CANCELLED_BY_OPERATOR);
+      return true;
+    }
+    terminalizePlatformNodes(
+      platform,
+      deferredPlatformStops.get(platform) ?? CANCELLED_BY_OPERATOR,
+    );
     checkSettled();
     return true;
   };
@@ -1363,6 +1371,14 @@ async function orchestrate(
    *  latch, terminalizes the lanes tombstoned meanwhile, and re-judges settle
    *  once. */
   let claimInFlight = false;
+  const deferredPlatformStops = new Map<
+    string,
+    {
+      running: "cancelled" | "errored";
+      pending: "cancelled" | "skipped";
+      log: string;
+    }
+  >();
 
   // ── the log join: a node's verdict waits for its output ──
   //
@@ -1698,6 +1714,108 @@ async function orchestrate(
    *  behaviour the post-lane one always had. */
   const parkForShutdown = (): Promise<never> => new Promise<never>(() => {});
 
+  // Primary lanes may start before optional shard capacity has settled. A
+  // sharded root is the only task withheld: all of its ordinary prerequisites
+  // (and every unrelated CI leg) can earn their result while cold workers are
+  // still provisioning. Once TOTAL is fixed, `lane.extend` adds that root with
+  // its immutable shard environment to the same runner and workspace.
+  const primaryLanes = new Map<string, Lane>();
+  const startPrimaryLane = (
+    platform: string,
+    host: string,
+    tasks: TaskSpec[],
+  ): Lane => {
+    executions.ensure(platform);
+    startSetup(platform);
+    const setupId = fanId(SETUP, platform);
+    const publicMainId = (laneId: string): string => {
+      const plan = shardPlans.get(platform);
+      return plan !== undefined && plan.total > 1 && laneId === plan.rootId
+        ? fanId(shardNamepath(laneId, 0, plan.total), platform)
+        : fanId(laneId, platform);
+    };
+    const local = isLocalHost(host);
+    const lane = startLane({
+      platform,
+      host,
+      tasks,
+      pipelineName: spec.name,
+      origin: local || originUrl === null ? null : fetchUrlFor(originUrl),
+      sha: local ? null : sha,
+      workspace: local ? specSource : null,
+      resolveDrvPath: runnerDrvResolver(runnerFlake, platform),
+      onSetupLine: (line) => appendLocal(setupId, `${line}\n`),
+      onNodes: (laneState) => {
+        if (!laneAccepting(platform)) return;
+        for (const laneId of laneState.order) {
+          const laneNode = laneState.nodes[laneId];
+          if (laneNode === undefined) continue;
+          if (laneId === SETUP) {
+            const terminal =
+              laneNode.status !== "pending" && laneNode.status !== "running";
+            if (terminal) {
+              finishSetup(platform, laneNode.status, laneNode.exitCode);
+            }
+            continue;
+          }
+          const id = publicMainId(laneId);
+          verdicts.offer(id, {
+            status: laneNode.status,
+            exitCode: laneNode.exitCode,
+            startedAt: laneNode.startedAt,
+            durationMs: laneNode.durationMs,
+          });
+          const plan = shardPlans.get(platform);
+          if (plan !== undefined && laneId === plan.rootId) {
+            refreshShardAggregate(platform, plan);
+          }
+        }
+      },
+      onLogFrame: (laneId, frame) => {
+        const id = publicMainId(laneId);
+        if (frame.kind === "append") {
+          appendLocal(id, frame.text);
+        } else if (frame.kind === "end") {
+          if (laneId !== SETUP) {
+            endLocal(id);
+            verdicts.release(id);
+            const plan = shardPlans.get(platform);
+            if (plan !== undefined && laneId === plan.rootId) {
+              refreshShardAggregate(platform, plan);
+            }
+          }
+        } else if (laneId === SETUP) {
+          if (frame.text !== "") appendLocal(id, frame.text);
+        } else if (!logs.isNoopReset(id, frame.text)) {
+          resetLocal(id, frame.text);
+        }
+      },
+      onDead: (error) => {
+        if (!laneAccepting(platform)) return;
+        const strategy = {
+          running: "errored" as const,
+          pending: "skipped" as const,
+          log: `\n[odu] lane died: ${error}\n`,
+        };
+        executions.cancel(platform);
+        if (claimInFlight) {
+          deferredPlatformStops.set(platform, strategy);
+        } else {
+          terminalizePlatformNodes(platform, strategy);
+        }
+      },
+    });
+    createdLanes.add(lane);
+    executions.addLane(
+      platform,
+      lane,
+      [SETUP, ...tasks.map((task) => task.id)],
+      publicMainId,
+    );
+    primaryLanes.set(platform, lane);
+    return lane;
+  };
+
   // ── venue claim: one free machine per platform, lock held for the run ──
   //
   // Read-before-write ahead of the first post: contexts GitHub already shows in
@@ -1754,8 +1872,40 @@ async function orchestrate(
       ? []
       : [{ platform, label: root.id, limit: root.shards - 1 }];
   });
-  const outcome = claimedOutcome.ok
-    ? await prepareVenues({
+
+  // Claim every original public log before any early primary lane can emit a
+  // frame. Shard-private logs are claimed when their topology is installed.
+  for (const id of store.get().order) logs.claim(id);
+
+  let outcome: PreparedVenues | Extract<ClaimOutcome, { ok: false }>;
+  if (claimedOutcome.ok) {
+    Object.assign(lanesByPlatform, claimedOutcome.lanes);
+    for (const lease of claimedOutcome.leases) {
+      const platform = activePlatforms.find(
+        (candidate) => claimedOutcome.lanes[candidate] === lease.host,
+      );
+      if (platform === undefined || !executions.addLease(platform, lease)) {
+        lease.release();
+        continue;
+      }
+      acquiredLeases.push(lease);
+      watchLease(lease);
+    }
+
+    // The public roster can name the primary as soon as mandatory acquisition
+    // has finished; optional workers do not change this platform→host fact.
+    publishHeader({
+      ...runtime.ctx.cells.header.get(),
+      lanes: rosterFrom(
+        activePlatforms.filter((platform) => !executions.isCancelled(platform)),
+        false,
+      ),
+    });
+
+    // Start optional acquisition first (the async function runs up to its
+    // first await immediately), then primary execution in the same turn.
+    claimInFlight = burstRequests.length > 0;
+    const preparing = prepareVenues({
         claimed: claimedOutcome,
         existingLanes: lanesByPlatform,
         platforms: activePlatforms,
@@ -1768,8 +1918,45 @@ async function orchestrate(
         ...(deps.leaseBurstSlots === undefined
           ? {}
           : { leaseBurst: deps.leaseBurstSlots }),
-      })
-    : claimedOutcome;
+      });
+
+    for (const platform of activePlatforms) {
+      if (executions.isCancelled(platform)) continue;
+      const host = lanesByPlatform[platform];
+      if (host === undefined) continue;
+      const tasks = tasksByPlatform.get(platform) ?? [];
+      const root = tasks.find((task) => task.shards !== undefined);
+      const earlyTasks =
+        root === undefined ? tasks : tasks.filter((task) => task.id !== root.id);
+      // A root-only shard has no useful phase to run early and configure
+      // requires at least one task; it follows the ordinary post-capacity path.
+      if (earlyTasks.length > 0) startPrimaryLane(platform, host, earlyTasks);
+    }
+
+    outcome = await preparing;
+    if (outcome.ok) {
+      const moved = [...outcome.venues].find(
+        ([platform, venue]) =>
+          primaryLanes.has(platform) &&
+          lanesByPlatform[platform] !== venue.host,
+      );
+      if (moved !== undefined) {
+        for (const venue of outcome.venues.values()) {
+          for (const lease of venue.leases) {
+            if (!acquiredLeases.includes(lease)) lease.release();
+          }
+        }
+        outcome = {
+          ok: false,
+          error: new Error(
+            `primary venue changed during live capacity preparation for ${moved[0]}`,
+          ),
+        };
+      }
+    }
+  } else {
+    outcome = claimedOutcome;
+  }
   if (outcome.ok) {
     for (const [platform, venue] of outcome.venues) {
       lanesByPlatform[platform] = venue.host;
@@ -1791,7 +1978,7 @@ async function orchestrate(
       );
     }
     for (const [platform, venue] of outcome.venues) {
-      for (const lease of venue.leases) {
+      for (const lease of venue.bursts) {
         if (!executions.addLease(platform, lease)) {
           lease.release();
           continue;
@@ -1855,7 +2042,10 @@ async function orchestrate(
     // this lane's nodes had to keep saying "not over", because they are what
     // every out-of-process reader judges settle by. The claim has returned, so
     // the cancel is now the whole truth about this lane.
-    terminalizePlatformNodes(platform, CANCELLED_BY_OPERATOR);
+    terminalizePlatformNodes(
+      platform,
+      deferredPlatformStops.get(platform) ?? CANCELLED_BY_OPERATOR,
+    );
     delete lanesByPlatform[platform];
   }
   const survivors = activePlatforms.filter(
@@ -1891,6 +2081,7 @@ async function orchestrate(
     // an abort, not as this failure.
     const claimedPlatforms = new Set(platformsToClaim);
     for (const platform of activePlatforms) {
+      executions.cancel(platform);
       terminalizePlatformNodes(
         platform,
         claimedPlatforms.has(platform)
@@ -1925,123 +2116,43 @@ async function orchestrate(
     // dropped from the map above. `continue` is the honest answer if it isn't.
     const host = lanesByPlatform[platform];
     if (host === undefined) continue;
-    executions.ensure(platform);
-    // The provisioning bracket for a lane that claimed nothing opens here, at
-    // its own start, rather than at a claim it was never part of.
-    startSetup(platform);
     const baseTasks = tasksByPlatform.get(platform) ?? [];
     const plan = shardPlans.get(platform);
-    const tasks =
-      plan === undefined
-        ? baseTasks
-        : tasksForShard(baseTasks, plan.rootId, 0, plan.total);
-    const setupId = fanId(SETUP, platform);
-    const publicMainId = (laneId: string): string =>
-      plan !== undefined && plan.total > 1 && laneId === plan.rootId
-        ? fanId(shardNamepath(laneId, 0, plan.total), platform)
-        : fanId(laneId, platform);
-
-    const local = isLocalHost(host);
-    const lane = startLane({
-      platform,
-      host,
-      tasks,
-      pipelineName: spec.name,
-      origin: local || originUrl === null ? null : fetchUrlFor(originUrl),
-      sha: local ? null : sha,
-      workspace: local ? specSource : null,
-      resolveDrvPath: runnerDrvResolver(runnerFlake, platform),
-      onSetupLine: (line) => appendLocal(setupId, `${line}\n`),
-      onNodes: (laneState) => {
-        if (!laneAccepting(platform)) return;
-        for (const laneId of laneState.order) {
-          const laneNode = laneState.nodes[laneId];
-          if (laneNode === undefined) continue;
-          if (laneId === SETUP) {
-            // The coordinator owns _ci-setup's timing (finishSetup); from the
-            // lane we mirror only its terminal verdict, leaving the
-            // coordinator-stamped `running` start untouched until then.
-            const terminal =
-              laneNode.status !== "pending" && laneNode.status !== "running";
-            if (terminal) {
-              finishSetup(platform, laneNode.status, laneNode.exitCode);
-            }
-            continue;
-          }
-          const id = publicMainId(laneId);
-          verdicts.offer(id, {
-            status: laneNode.status,
-            exitCode: laneNode.exitCode,
-            startedAt: laneNode.startedAt,
-            durationMs: laneNode.durationMs,
-          });
-          if (plan !== undefined && laneId === plan.rootId) {
-            refreshShardAggregate(platform, plan);
-          }
-        }
-      },
-      onLogFrame: (laneId, frame) => {
-        const id = publicMainId(laneId);
-        if (frame.kind === "append") {
-          // Sealed-log skip lives on `appendLocal` (`appendIfOpen`) — one
-          // producer, so a tap frame, a lane-death line, and a setup narration
-          // cannot disagree about whether a sealed log is writable.
-          appendLocal(id, frame.text);
-        } else if (frame.kind === "end") {
-          // Pass the log's terminal on to the fan-in's own readers — except for
-          // _ci-setup, for the same reason its snapshot is dropped below: the
-          // coordinator keeps writing to that node's log after the lane is done
-          // with it (lane death, operator cancel), so it is not complete just
-          // because the lane's half is. `endRunLogs` ends it when the RUN is.
-          if (laneId !== SETUP) {
-            // Seal FIRST, release second: the file is whole the instant this
-            // frame is handled (its appends came ahead of it on the same
-            // stream, and the sink writes them synchronously), and sealing
-            // before publishing is what makes the verdict's promise — "this
-            // node is done, go read its log" — true at the moment it is made.
-            endLocal(id);
-            verdicts.release(id);
-            if (plan !== undefined && laneId === plan.rootId) {
-              refreshShardAggregate(platform, plan);
-            }
-          }
-        } else if (laneId === SETUP) {
-          // Never reset _ci-setup: the coordinator's provision lines precede
-          // the lane stream and must survive the lane's snapshot frame.
-          if (frame.text !== "") appendLocal(id, frame.text);
-        } else if (!logs.isNoopReset(id, frame.text)) {
-          // One question — "would this snapshot change anything a reader can
-          // observe?" — asked of the tail, which is where every observable a
-          // log has lives. Asked here as a hand-built disjunct it grew a clause
-          // per defect found (the last one: a rerun of a node that produced
-          // nothing sends an empty snapshot over an empty buffer, and swallowing
-          // it left the `ended` latch set, so `logs -f` on the rerunning node
-          // exited at once insisting the log was complete).
-          resetLocal(id, frame.text);
-        }
-      },
-      onDead: (error) => {
-        // One mandatory lane dying ends the platform execution atomically:
-        // reject racing shard frames, stop every worker, and free its leases
-        // before publishing terminal state.
-        if (!laneAccepting(platform)) return;
+    let lane = primaryLanes.get(platform);
+    if (lane === undefined) {
+      const tasks =
+        plan === undefined
+          ? baseTasks
+          : tasksForShard(baseTasks, plan.rootId, 0, plan.total);
+      lane = startPrimaryLane(platform, host, tasks);
+    } else if (plan !== undefined) {
+      const root = baseTasks.find((task) => task.id === plan.rootId);
+      if (root === undefined) {
+        throw new Error(`odu: shard root ${plan.rootId} disappeared`);
+      }
+      const publicMainId = (laneId: string): string =>
+        plan.total > 1 && laneId === plan.rootId
+          ? fanId(shardNamepath(laneId, 0, plan.total), platform)
+          : fanId(laneId, platform);
+      const routed = executions.extendLane(
+        platform,
+        lane,
+        [root.id],
+        publicMainId,
+      );
+      const extended =
+        routed &&
+        (await lane.extend(tasksForShard([root], plan.rootId, 0, plan.total)));
+      if (!extended && laneAccepting(platform)) {
         executions.cancel(platform);
         terminalizePlatformNodes(platform, {
           running: "errored",
           pending: "skipped",
-          log: `\n[odu] lane died: ${error}\n`,
+          log: "\n[odu] primary lane rejected its deferred shard root\n",
         });
-      },
-    });
-    // Register the session for the runCommand `finally` sweep the instant it
-    // exists, then add its exact public-node routes to the platform execution.
-    createdLanes.add(lane);
-    executions.addLane(
-      platform,
-      lane,
-      [SETUP, ...tasks.map((task) => task.id)],
-      publicMainId,
-    );
+        continue;
+      }
+    }
 
     if (plan !== undefined && plan.total > 1) {
       for (let index = 1; index < plan.total; index += 1) {

@@ -236,7 +236,7 @@ describe("prepareVenues", () => {
     });
   });
 
-  it("releases every acquired handle when one parallel platform preparation rejects", async () => {
+  it("releases optional handles, leaving caller-owned primaries alone", async () => {
     const released: string[] = [];
     const primary = (host: string) => ({
       host,
@@ -283,8 +283,6 @@ describe("prepareVenues", () => {
     });
 
     expect(outcome.ok).toBe(false);
-    expect(released.sort()).toEqual(
-      [darwin.host, linux.host, extra.host].sort(),
-    );
+    expect(released).toEqual([extra.host]);
   });
 });

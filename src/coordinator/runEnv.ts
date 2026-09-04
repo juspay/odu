@@ -217,8 +217,9 @@ export async function claimVenues(
  * Optional shard slots are allowed to bootstrap in parallel across platforms.
  * Only after every bootstrap has finished do we recheck all mandatory leases:
  * that is the ownership handoff where a framework may safely freeze TOTAL.
- * This function owns every candidate until it returns, releasing all of them
- * on failure so callers never reconcile a half-prepared set.
+ * This function owns only the optional candidates it acquires. Mandatory
+ * leases remain the caller's throughout, so their primary lanes may execute
+ * while cold optional capacity is still bootstrapping.
  */
 export async function prepareVenues(
   opts: PrepareVenuesOpts,
@@ -267,10 +268,9 @@ export async function prepareVenues(
     (attempt): attempt is PromiseRejectedResult => attempt.status === "rejected",
   );
   if (failed !== undefined) {
-    const all = new Set<LeaseHandle>([
-      ...opts.claimed.leases,
-      ...candidates.flatMap(({ extras }) => extras),
-    ]);
+    const all = new Set<LeaseHandle>(
+      candidates.flatMap(({ extras }) => extras),
+    );
     for (const lease of all) lease.release();
     return {
       ok: false,
@@ -307,10 +307,9 @@ export async function prepareVenues(
     ({ kind, handoff }) => kind === "primary" && handoff === null,
   )?.candidate;
   if (lost !== undefined) {
-    const all = new Set<LeaseHandle>([
-      ...opts.claimed.leases,
-      ...candidates.flatMap(({ extras }) => extras),
-    ]);
+    const all = new Set<LeaseHandle>(
+      candidates.flatMap(({ extras }) => extras),
+    );
     for (const lease of all) lease.release();
     return {
       ok: false,

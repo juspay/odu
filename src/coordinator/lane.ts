@@ -358,7 +358,7 @@ export function startLane(opts: LaneOptions): Lane {
   const logComplete = new Set<string>();
 
   const attachLog = (client: LaneClient, id: string): void => {
-      void (async () => {
+    void (async () => {
         // Pull and handler are separate tries: a sealed-log throw from
         // `onLogFrame` must not be recast as feed death, and a handler bug
         // must not be recast as lane death. `for await` would put both in
@@ -403,7 +403,7 @@ export function startLane(opts: LaneOptions): Lane {
           }
           wakeDrains();
         }
-      })();
+    })();
   };
 
   const attachLogs = (client: LaneClient): void => {

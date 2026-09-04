@@ -6,6 +6,7 @@ import { ExecutionRoster } from "./executionRoster";
 function lane(platform: string): Lane {
   return {
     platform,
+    extend: jest.fn(async () => true),
     rerun: jest.fn(async () => true),
     cancel: jest.fn(async () => true),
     drain: jest.fn(async () => ({ reason: "complete" as const })),
@@ -45,6 +46,27 @@ describe("ExecutionRoster", () => {
         "e2e[2-of-2]::install@x86_64-linux",
       ),
     ).toEqual({ lane: burst, localId: "install" });
+  });
+
+  it("routes a deferred task phase onto its existing lane", () => {
+    const roster = new ExecutionRoster(() => {});
+    const primary = lane("x86_64-linux");
+    roster.addLane(
+      "x86_64-linux",
+      primary,
+      ["install"],
+      (id) => `${id}@x86_64-linux`,
+    );
+    expect(
+      roster.extendLane(
+        "x86_64-linux",
+        primary,
+        ["e2e"],
+        (id) => `e2e[1-of-4]::${id}@x86_64-linux`,
+      ),
+    ).toBe(true);
+    expect(roster.route("x86_64-linux", "e2e[1-of-4]::e2e@x86_64-linux"))
+      .toEqual({ lane: primary, localId: "e2e" });
   });
 
   it("cancels every lane and releases every lease in one platform execution", () => {
