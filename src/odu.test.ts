@@ -52,6 +52,10 @@ interface Harness {
     ok: boolean;
     error: string | null;
   }>;
+  extend: (tasks: TaskSpec[]) => Promise<{
+    ok: boolean;
+    error: string | null;
+  }>;
   dispose: () => void;
 }
 
@@ -128,6 +132,7 @@ async function harness(): Promise<Harness> {
           tasks,
         }),
       ),
+    extend: (tasks) => runUnary(client.surface.run.extend({ tasks })),
     dispose,
   };
 }
@@ -222,6 +227,30 @@ describe("odu lane runner over stdio (loopback)", () => {
     ]);
     await settledWith(h, 2);
     expect(last(h).nodes.shard?.status).toBe("ok");
+  });
+
+  it("extends a settled prerequisite lane with a shard root", async () => {
+    const h = await harness();
+    expect(
+      (await h.configure([
+        { id: "install", command: "echo installed", needs: [] },
+      ])).ok,
+    ).toBe(true);
+    await settledWith(h, 2);
+
+    const ack = await h.extend([
+      {
+        id: "e2e",
+        command: 'test "$ODU_SHARD_INDEX/$ODU_SHARD_TOTAL" = "0/4"',
+        needs: ["install"],
+        env: { ODU_SHARD_INDEX: "0", ODU_SHARD_TOTAL: "4" },
+      },
+    ]);
+    expect(ack).toEqual({ ok: true, error: null });
+    await settledWith(h, 3);
+    expect(last(h).order).toEqual([SETUP_NODE_ID, "install", "e2e"]);
+    expect(last(h).nodes.install?.status).toBe("ok");
+    expect(last(h).nodes.e2e?.status).toBe("ok");
   });
 
   it("rejects a second configure (one run per lane process)", async () => {

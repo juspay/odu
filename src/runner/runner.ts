@@ -115,6 +115,11 @@ export function createLaneRunner(): LaneRunner {
             venueHold?.noteActivity();
             return configure(input);
           }),
+        extend: ({ input }) =>
+          Effect.sync(() => {
+            venueHold?.noteActivity();
+            return extend(input.tasks);
+          }),
       },
       lease: {
         claim: ({ input }) =>
@@ -305,6 +310,43 @@ export function createLaneRunner(): LaneRunner {
       sha7: input.sha?.slice(0, 7) ?? "",
       dirty: false,
       order: [SETUP_NODE_ID, ...input.tasks.map((t) => t.id)],
+      nodes,
+    });
+    tick();
+    return { ok: true, error: null };
+  };
+
+  /** Add tasks after configure without replacing any state already earned.
+   * The combined DAG is validated as one value before it is published. */
+  const extend = (tasks: ConfigureInput["tasks"]): ConfigureOutput => {
+    if (disposed) return { ok: false, error: "runner is disposed" };
+    const current = config;
+    if (current === undefined) {
+      return { ok: false, error: "runner is not configured" };
+    }
+    const combined = [...current.tasks, ...tasks];
+    try {
+      validatePipeline({ name: current.name, tasks: combined });
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+    const state = getState();
+    if (tasks.some((task) => state.nodes[task.id] !== undefined)) {
+      return { ok: false, error: "extended task id already exists" };
+    }
+    const nodes = { ...state.nodes };
+    for (const task of tasks) {
+      nodes[task.id] = pendingNode({
+        id: task.id,
+        name: task.name ?? task.id,
+        command: task.command,
+        needs: [...task.needs, SETUP_NODE_ID],
+      });
+    }
+    config = { ...current, tasks: combined };
+    ctx.cells.nodes.set({
+      ...state,
+      order: [...state.order, ...tasks.map((task) => task.id)],
       nodes,
     });
     tick();

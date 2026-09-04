@@ -105,6 +105,8 @@ export type LaneDrain =
 
 export interface Lane {
   readonly platform: string;
+  /** Add tasks to a configured lane, preserving completed prerequisites. */
+  extend(tasks: TaskSpec[]): Promise<boolean>;
   rerun(nodeId: string): Promise<boolean>;
   /** Cancel one lane-local node (pending/running → cancelled). */
   cancel(nodeId: string): Promise<boolean>;
@@ -207,6 +209,15 @@ export function startLane(opts: LaneOptions): Lane {
    *  this used to keep has nothing left to distinguish: teardown wants them all
    *  gone at once, and that is exactly one abort. */
   const lifetime = new AbortController();
+  let readyResolve: ((client: LaneClient) => void) | undefined;
+  let readyReject: ((error: Error) => void) | undefined;
+  const ready = new Promise<LaneClient>((resolve, reject) => {
+    readyResolve = resolve;
+    readyReject = reject;
+  });
+  // A lane may never be extended. Its readiness promise is a control handle,
+  // not background work whose rejection should become unhandled.
+  void ready.catch(() => {});
 
   const session = makeSession<AgentClient, SshProv>({
     // The ssh connector opens at its first provisioning phase: the arch/warm
@@ -243,6 +254,7 @@ export function startLane(opts: LaneOptions): Lane {
   const die = (error: string): void => {
     if (dead || closed) return;
     dead = true;
+    readyReject?.(new Error(error));
     runLaneDeath(
       () =>
         opts.onSetupLine(`[odu] lane ${opts.platform} died: ${error}`),
@@ -331,6 +343,7 @@ export function startLane(opts: LaneOptions): Lane {
           return;
         }
         attachLogs(client);
+        readyResolve?.(client);
         continue; // the pre-configure EMPTY_STATE frame carries nothing
       }
       opts.onNodes(state);
@@ -340,12 +353,11 @@ export function startLane(opts: LaneOptions): Lane {
 
   /** Every node this lane taps a log for — the runner prepends `_ci-setup`
    *  itself, and ends the log of every node it owns, skipped ones included. */
-  const loggedIds = [SETUP_NAMEPATH, ...opts.tasks.map((t) => t.id)];
+  const loggedIds = new Set([SETUP_NAMEPATH, ...opts.tasks.map((t) => t.id)]);
   /** Nodes whose log stream has delivered its terminal `end` frame. */
   const logComplete = new Set<string>();
 
-  const attachLogs = (client: LaneClient): void => {
-    for (const id of loggedIds) {
+  const attachLog = (client: LaneClient, id: string): void => {
       void (async () => {
         // Pull and handler are separate tries: a sealed-log throw from
         // `onLogFrame` must not be recast as feed death, and a handler bug
@@ -392,6 +404,30 @@ export function startLane(opts: LaneOptions): Lane {
           wakeDrains();
         }
       })();
+  };
+
+  const attachLogs = (client: LaneClient): void => {
+    for (const id of loggedIds) {
+      attachLog(client, id);
+    }
+  };
+
+  const extend = async (tasks: TaskSpec[]): Promise<boolean> => {
+    if (closed || dead || tasks.length === 0) return false;
+    try {
+      const client = await ready;
+      const ack = await runUnary(client.surface.run.extend({ tasks }));
+      if (!ack.ok) {
+        die(`extend rejected: ${ack.error ?? "unknown"}`);
+        return false;
+      }
+      for (const task of tasks) {
+        loggedIds.add(task.id);
+        attachLog(client, task.id);
+      }
+      return true;
+    } catch {
+      return false;
     }
   };
 
@@ -418,7 +454,8 @@ export function startLane(opts: LaneOptions): Lane {
   };
 
   /** Nodes still owing output — the drain's remaining work, and its answer. */
-  const undrained = (): string[] => loggedIds.filter((id) => !logComplete.has(id));
+  const undrained = (): string[] =>
+    [...loggedIds].filter((id) => !logComplete.has(id));
 
   /** The drain's answer, built from what the lane actually still owes rather
    *  than from the branch that noticed: a lane that went quiet having
@@ -489,6 +526,7 @@ export function startLane(opts: LaneOptions): Lane {
 
   return {
     platform: opts.platform,
+    extend,
     rerun: (nodeId) => nodeCall("rerun", nodeId),
     cancel: (nodeId) => nodeCall("cancel", nodeId),
     drain,

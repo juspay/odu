@@ -36,6 +36,7 @@ import { RunRecordSchema, UnpostedEntrySchema } from "./runRecord";
 import { TaskSpecSchema } from "./spec";
 import {
   ConfigureInputSchema,
+  ExtendInputSchema,
   LeaseClaimOutputSchema,
   LeaseProbeOutputSchema,
 } from "./laneSurface";
@@ -196,6 +197,13 @@ describe("TaskSpec / ConfigureInput — the run.configure payload", () => {
         tasks: [],
       }),
     ).toBe(false);
+  });
+
+  it("ExtendInput carries only the later task phase", () => {
+    const bytes =
+      '{"tasks":[{"id":"ci::e2e","command":"just ci::e2e",' +
+      '"needs":["ci::install"],"env":{"ODU_SHARD_INDEX":"0","ODU_SHARD_TOTAL":"4"}}]}';
+    expect(roundTrip(ExtendInputSchema, bytes)).toBe(bytes);
   });
 });
 
