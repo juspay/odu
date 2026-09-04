@@ -24,6 +24,31 @@ export interface ShardTopology {
   total: number;
 }
 
+export interface ShardCapacityRequest {
+  rootId: string;
+  /** Optional workers only; every root also uses the primary lane. */
+  limit: number;
+}
+
+/**
+ * Let independent shard roots reuse a platform's optional workers.
+ *
+ * The lease belongs to the run, not to one recipe. Each root therefore takes a
+ * prefix up to its own ceiling; one worker may appear in several roots and its
+ * lease stays held until every lane using it settles.
+ */
+export function shareShardCapacity<T>(
+  requests: readonly ShardCapacityRequest[],
+  workers: readonly T[],
+): ReadonlyMap<string, T[]> {
+  return new Map(
+    requests.map(({ rootId, limit }) => [
+      rootId,
+      workers.slice(0, Math.max(0, limit)),
+    ]),
+  );
+}
+
 export function shardNamepath(
   namepath: string,
   index: number,

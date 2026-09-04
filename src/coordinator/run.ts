@@ -128,6 +128,7 @@ import {
 import {
   dependencyClosure,
   installShardTopology,
+  shareShardCapacity,
   shardAggregateDuration,
   shardAggregateStatus,
   shardLaneProjection,
@@ -571,11 +572,6 @@ async function orchestrate(
     const tasks = laneTasks(spec, platform, selectors, args.noDeps);
     if (tasks.length > 0) {
       const sharded = tasks.filter((task) => task.shards !== undefined);
-      if (sharded.length > 1) {
-        throw new Error(
-          `odu: ${platform} has more than one sharded recipe (${sharded.map((task) => task.id).join(", ")}); shard one terminal recipe per platform`,
-        );
-      }
       if (args.linger && sharded.length > 0) {
         throw new Error("odu: --linger is not yet supported with sharded recipes");
       }
@@ -763,7 +759,12 @@ async function orchestrate(
   interface ShardPlan extends ShardTopology {
     leases: LeaseHandle[];
   }
-  const shardPlans = new Map<string, ShardPlan>();
+  const shardPlans = new Map<string, ShardPlan[]>();
+  const burstLeaseUsers = new Map<LeaseHandle, number>();
+  const plansFor = (platform: string): readonly ShardPlan[] =>
+    shardPlans.get(platform) ?? [];
+  const planFor = (platform: string, rootId: string): ShardPlan | undefined =>
+    plansFor(platform).find((plan) => plan.rootId === rootId);
   /** The lane roster for `platforms`, in platform order, from the one source of
    *  truth (`lanesByPlatform`): a platform with a host is `leased`; one without
    *  is `claiming` from its candidate pool while the claim is in flight, and
@@ -982,6 +983,15 @@ async function orchestrate(
 
   const releaseLease = (platform: string, lease: LeaseHandle): void =>
     executions.releaseLease(platform, lease);
+  const releaseBurstLease = (platform: string, lease: LeaseHandle): void => {
+    const remaining = (burstLeaseUsers.get(lease) ?? 1) - 1;
+    if (remaining > 0) {
+      burstLeaseUsers.set(lease, remaining);
+      return;
+    }
+    burstLeaseUsers.delete(lease);
+    releaseLease(platform, lease);
+  };
 
   /** Mark unfinished nodes on a platform terminal — shared by operator lane
    *  cancel and infrastructure `onDead` (status/log strategy as data). */
@@ -1084,8 +1094,10 @@ async function orchestrate(
     if (platform === "unknown" || namepath === "") return false;
     const route = executions.route(platform, id);
     if (route === undefined) {
-      const plan = shardPlans.get(platform);
-      if (plan !== undefined && id === fanId(plan.rootId, platform)) {
+      const plan = plansFor(platform).find(
+        (candidate) => id === fanId(candidate.rootId, platform),
+      );
+      if (plan !== undefined) {
         const results = await Promise.all(
           shardRootIds(platform, plan).map(async (rootId) => {
             const shard = executions.route(platform, rootId);
@@ -1752,10 +1764,10 @@ async function orchestrate(
   const parkForShutdown = (): Promise<never> => new Promise<never>(() => {});
 
   // Primary lanes may start before optional shard capacity has settled. A
-  // sharded root is the only task withheld: all of its ordinary prerequisites
-  // (and every unrelated CI leg) can earn their result while cold workers are
-  // still provisioning. Once TOTAL is fixed, `lane.extend` adds that root with
-  // its immutable shard environment to the same runner and workspace.
+  // sharded root is withheld: all ordinary prerequisites (and every unrelated
+  // CI leg) can earn their result while cold workers are still provisioning.
+  // Once each TOTAL is fixed, `lane.extend` adds all roots with their immutable
+  // shard environments to the same runner and workspace.
   const primaryLanes = new Map<string, Lane>();
   const startPrimaryLane = (
     platform: string,
@@ -1766,8 +1778,8 @@ async function orchestrate(
     startSetup(platform);
     const setupId = fanId(SETUP, platform);
     const publicMainId = (laneId: string): string => {
-      const plan = shardPlans.get(platform);
-      return plan !== undefined && plan.total > 1 && laneId === plan.rootId
+      const plan = planFor(platform, laneId);
+      return plan !== undefined && plan.total > 1
         ? fanId(shardNamepath(laneId, 0, plan.total), platform)
         : fanId(laneId, platform);
     };
@@ -1802,8 +1814,8 @@ async function orchestrate(
             startedAt: laneNode.startedAt,
             durationMs: laneNode.durationMs,
           });
-          const plan = shardPlans.get(platform);
-          if (plan !== undefined && laneId === plan.rootId) {
+          const plan = planFor(platform, laneId);
+          if (plan !== undefined) {
             refreshShardAggregate(platform, plan);
           }
         }
@@ -1816,8 +1828,8 @@ async function orchestrate(
           if (laneId !== SETUP) {
             endLocal(id);
             verdicts.release(id);
-            const plan = shardPlans.get(platform);
-            if (plan !== undefined && laneId === plan.rootId) {
+            const plan = planFor(platform, laneId);
+            if (plan !== undefined) {
               refreshShardAggregate(platform, plan);
             }
           }
@@ -1882,9 +1894,7 @@ async function orchestrate(
     const host = lanesByPlatform[platform];
     if (host === undefined) return;
     const tasks = tasksByPlatform.get(platform) ?? [];
-    const root = tasks.find((task) => task.shards !== undefined);
-    const earlyTasks =
-      root === undefined ? tasks : tasks.filter((task) => task.id !== root.id);
+    const earlyTasks = tasks.filter((task) => task.shards === undefined);
     if (earlyTasks.length > 0) startPrimaryLane(platform, host, earlyTasks);
   };
 
@@ -1957,9 +1967,7 @@ async function orchestrate(
     const host = lanesByPlatform[platform];
     if (host === undefined || executions.isCancelled(platform)) continue;
     const tasks = tasksByPlatform.get(platform) ?? [];
-    const root = tasks.find((task) => task.shards !== undefined);
-    const earlyTasks =
-      root === undefined ? tasks : tasks.filter((task) => task.id !== root.id);
+    const earlyTasks = tasks.filter((task) => task.shards === undefined);
     if (earlyTasks.length > 0) startPrimaryLane(platform, host, earlyTasks);
   }
 
@@ -1981,12 +1989,17 @@ async function orchestrate(
           ),
         };
   const burstRequests = activePlatforms.flatMap((platform) => {
-    const root = (tasksByPlatform.get(platform) ?? []).find(
+    const roots = (tasksByPlatform.get(platform) ?? []).filter(
       (task) => task.shards !== undefined,
     );
-    return root?.shards === undefined
+    const limit = roots.reduce(
+      (largest, root) =>
+        Math.max(largest, Math.max(0, (root.shards ?? 1) - 1)),
+      0,
+    );
+    return limit === 0
       ? []
-      : [{ platform, label: root.id, limit: root.shards - 1 }];
+      : [{ platform, label: roots.map((root) => root.id).join("+"), limit }];
   });
 
   let outcome: PreparedVenues | Extract<ClaimOutcome, { ok: false }>;
@@ -2048,19 +2061,34 @@ async function orchestrate(
     }
     for (const [platform, venue] of outcome.venues) {
       const tasks = tasksByPlatform.get(platform) ?? [];
-      const root = tasks.find((task) => task.shards !== undefined);
-      if (root?.shards === undefined) continue;
-      const plan: ShardPlan = {
-        rootId: root.id,
-        tasks: dependencyClosure(tasks, root.id),
-        total: 1 + venue.bursts.length,
-        leases: venue.bursts,
-      };
-      shardPlans.set(platform, plan);
-      installShardNodes(platform, plan);
-      info(
-        `${platform}: ${root.id} using ${plan.total}/${root.shards} shard slots`,
+      const roots = tasks.filter((task) => task.shards !== undefined);
+      const shared = shareShardCapacity(
+        roots.map((root) => ({
+          rootId: root.id,
+          limit: Math.max(0, (root.shards ?? 1) - 1),
+        })),
+        venue.bursts,
       );
+      const plans = roots.map((root): ShardPlan => {
+        const leases = shared.get(root.id) ?? [];
+        for (const lease of leases) {
+          burstLeaseUsers.set(lease, (burstLeaseUsers.get(lease) ?? 0) + 1);
+        }
+        return {
+          rootId: root.id,
+          tasks: dependencyClosure(tasks, root.id),
+          total: 1 + leases.length,
+          leases,
+        };
+      });
+      shardPlans.set(platform, plans);
+      for (const plan of plans) {
+        installShardNodes(platform, plan);
+        const ceiling = roots.find((root) => root.id === plan.rootId)?.shards;
+        info(
+          `${platform}: ${plan.rootId} using ${plan.total}/${ceiling ?? plan.total} shard slots`,
+        );
+      }
     }
     for (const [platform, venue] of outcome.venues) {
       for (const lease of venue.leases) {
@@ -2202,44 +2230,51 @@ async function orchestrate(
     const host = lanesByPlatform[platform];
     if (host === undefined) continue;
     const baseTasks = tasksByPlatform.get(platform) ?? [];
-    const plan = shardPlans.get(platform);
+    const plans = plansFor(platform);
+    const withPrimaryShardEnv = (tasks: readonly TaskSpec[]): TaskSpec[] =>
+      plans.reduce(
+        (configured, plan) =>
+          tasksForShard(configured, plan.rootId, 0, plan.total),
+        [...tasks],
+      );
     let lane = primaryLanes.get(platform);
     if (lane === undefined) {
-      const tasks =
-        plan === undefined
-          ? baseTasks
-          : tasksForShard(baseTasks, plan.rootId, 0, plan.total);
-      lane = startPrimaryLane(platform, host, tasks);
-    } else if (plan !== undefined) {
-      const root = baseTasks.find((task) => task.id === plan.rootId);
-      if (root === undefined) {
-        throw new Error(`odu: shard root ${plan.rootId} disappeared`);
-      }
-      const publicMainId = (laneId: string): string =>
-        plan.total > 1 && laneId === plan.rootId
+      lane = startPrimaryLane(platform, host, withPrimaryShardEnv(baseTasks));
+    } else if (plans.length > 0) {
+      const roots = plans.map((plan) => {
+        const root = baseTasks.find((task) => task.id === plan.rootId);
+        if (root === undefined) {
+          throw new Error(`odu: shard root ${plan.rootId} disappeared`);
+        }
+        return tasksForShard([root], plan.rootId, 0, plan.total)[0]!;
+      });
+      const rootIds = new Set(roots.map((root) => root.id));
+      const publicMainId = (laneId: string): string => {
+        const plan = planFor(platform, laneId);
+        return plan !== undefined && plan.total > 1
           ? fanId(shardNamepath(laneId, 0, plan.total), platform)
           : fanId(laneId, platform);
+      };
       const routed = executions.extendLane(
         platform,
         lane,
-        [root.id],
+        [...rootIds],
         publicMainId,
       );
-      const extended =
-        routed &&
-        (await lane.extend(tasksForShard([root], plan.rootId, 0, plan.total)));
+      const extended = routed && (await lane.extend(roots));
       if (!extended && laneAccepting(platform)) {
         executions.cancel(platform);
         terminalizePlatformNodes(platform, {
           running: "errored",
           pending: "skipped",
-          log: "\n[odu] primary lane rejected its deferred shard root\n",
+          log: "\n[odu] primary lane rejected its deferred shard roots\n",
         });
         continue;
       }
     }
 
-    if (plan !== undefined && plan.total > 1) {
+    for (const plan of plans) {
+      if (plan.total <= 1) continue;
       for (let index = 1; index < plan.total; index += 1) {
         const lease = plan.leases[index - 1];
         if (lease === undefined) continue;
@@ -2267,7 +2302,7 @@ async function orchestrate(
           finished = true;
           endLocal(setupId);
           burstLane?.close();
-          releaseLease(platform, lease);
+          releaseBurstLease(platform, lease);
         };
         const burstLocal = isLocalHost(lease.host);
         burstLane = startLane({

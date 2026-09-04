@@ -73,27 +73,34 @@ Exactly one [`just`](https://just.systems) recipe carries `[metadata("ci")]`. It
 default: build test lint
 ```
 
-### Shard a long terminal check
+### Shard long terminal checks
 
-Mark one leaf recipe per platform with a shard ceiling. The command stays a
-single bare `odu run`:
+Mark independent leaf recipes with shard ceilings. The command stays a single
+bare `odu run`:
 
 ```just
 [metadata("odu:shard=4")]
 e2e: install
     CUCUMBER_SHARD="$((ODU_SHARD_INDEX + 1))/$ODU_SHARD_TOTAL" just test-e2e
+
+[metadata("odu:shard=2")]
+test: install
+    just test-shard "$ODU_SHARD_INDEX" "$ODU_SHARD_TOTAL"
 ```
 
-Odu first obtains the normal platform lane, then leases up to three additional
-slots. A cold candidate may finish normal Nix download/build progress—the first
+Odu first obtains the normal platform lane, then leases optional capacity up to
+the largest additional ceiling. Every sharded leaf can use the same workers up
+to its own ceiling: a lease belongs to this run rather than one recipe, and is
+held until every lane using it settles. Each leaf receives its own immutable
+shard total. A cold candidate may finish normal Nix download/build progress—the first
 bootstrap cost is real and amortized. A candidate whose connection or
 provisioner actually disconnects is skipped immediately instead of entering the
 session retry cycle. The primary lane does not wait behind that work: it starts
 workspace setup, unrelated checks, and the sharded root's prerequisites while
-optional slots are still bootstrapping. Only the root waits for the immutable
-shard count. After every potentially slow bootstrap finishes, Odu re-verifies
-the holds concurrently, fixes the total, and extends the same primary runner
-with its indexed root. A dead optional transport is dropped; losing a primary
+optional slots are still bootstrapping. Only the roots wait for their immutable
+shard counts. After every potentially slow bootstrap finishes, Odu re-verifies
+the holds concurrently, fixes the totals, and extends the same primary runner
+with its indexed roots. A dead optional transport is dropped; losing a primary
 that has begun executing fails closed rather than pretending another machine
 has its state. The number is a ceiling, not a fleet reservation: if two
 slots are available, both shards receive `ODU_SHARD_TOTAL=2` and together run
@@ -108,8 +115,8 @@ Shard instances appear as adjacent live/log nodes such as
 `e2e[1-of-4]@x86_64-linux`. They do not create GitHub contexts. Odu aggregates
 them into the stable logical `e2e@x86_64-linux` status, so `odu protect` and
 existing branch rules do not change. A lost shard lane fails that aggregate.
-Burst leases are released as each shard settles; the primary platform lease
-continues to cover the rest of CI.
+Each burst lease is released after every shard lane using that worker settles;
+the primary platform lease continues to cover the rest of CI.
 
 The logical recipe's completed duration is the slowest slice's execution time,
 the critical path for the parallel recipe itself. Staggered checkout, install,
@@ -120,11 +127,9 @@ capacity was being discovered. Those executions are first-class UI, log,
 timing, and run-record nodes such as `e2e[2-of-4]::install`; they remain
 implementation-detail GitHub contexts, like the slice nodes themselves.
 
-The initial implementation deliberately permits a sharded recipe only when it
-is a leaf, permits one sharded recipe per platform, and rejects `--linger` for a
-sharded run. Those constraints avoid allowing downstream work or a rerun after
-only one shard has passed; lifting them requires a downstream aggregate
-barrier.
+A sharded recipe must be a leaf, and `--linger` remains unavailable for a
+sharded run. The leaf constraint avoids allowing downstream work after only one
+shard has passed; lifting it requires a downstream aggregate barrier.
 
 ### Choose hosts explicitly
 
