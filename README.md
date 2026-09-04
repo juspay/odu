@@ -42,10 +42,8 @@ a slot whose connection fails is skipped instead of entering the retry cycle.
 After cold provisioning finishes, Odu re-verifies the primary and every burst
 lease before fixing the shard total; if the earlier primary died, a surviving
 burst slot is promoted and the total shrinks without aborting pre-flight.
-Held lease agents receive a short ownership probe even while their corresponding
-execution lanes are busy starting. It both keeps the quiet RPC control
-connection active and proves the lock still names this run, rather than merely
-that someone holds it.
+Odu continuously verifies that held locks still name this run. Ownership loss
+fails closed, including while execution lanes are still starting.
 Configure shared host capacity with
 `{"host":"ci-1","slots":2}`; legacy host strings remain one slot.
 The aggregate duration is the slowest slice's execution time, not staggered

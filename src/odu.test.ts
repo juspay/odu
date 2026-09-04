@@ -35,10 +35,12 @@ import { firstFrame, runUnary, subscribe } from "./common/effectEdge";
 import { createLaneRunner, SETUP_NODE_ID } from "./runner/runner";
 import {
   overlayOnLaneStop,
+} from "./coordinator/run";
+import {
   shardAggregateDuration,
   shardAggregateStatus,
   shardLaneNamepath,
-} from "./coordinator/run";
+} from "./coordinator/shards";
 
 interface Harness {
   client: LaneClient;

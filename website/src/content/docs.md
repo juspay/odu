@@ -98,10 +98,8 @@ the complete suite. `ODU_SHARD_INDEX` is zero-based. The recipe translates
 those framework-neutral variables to Cucumber, Playwright, pytest, or its own
 sharder.
 
-Lease agents are deliberately quiet control connections while their execution
-lanes start. Odu probes ownership inside the RPC transport's keep-alive cadence;
-the response both keeps the connection active and proves the lock's holder still
-names this run. A real SSH/agent death still loses the flock and fails closed.
+Odu continuously verifies that held locks still name this run. Ownership loss
+fails closed, including while execution lanes are still starting.
 
 Shard instances appear as adjacent live/log nodes such as
 `e2e[1-of-4]@x86_64-linux`. They do not create GitHub contexts. Odu aggregates
@@ -189,7 +187,7 @@ hosts first. String entries and `--host` pins remain one-slot declarations.
 
 Rules:
 
-- **One run per declared slot.** The lock is an `flock` **on the builder**, held by the **odu-runner agent** the coordinator dials over surface-remote (`lease.claim`). Multi-slot entries use `/tmp/odu.lease.<zero-based-slot>`; one-slot entries retain `/tmp/odu.lease`. `flock` comes from odu-runner's Nix closure (util-linux on its PATH)—builders need ssh + Nix, not a system-installed flock.
+- **One run per declared slot.** The lock is an `flock` **on the builder**, held by the **odu-runner agent** the coordinator dials over surface-remote (`lease.claim`). Slot zero always uses the historical `/tmp/odu.lease`; additional slots use `/tmp/odu.lease.<zero-based-slot>`. A capacity edit therefore never changes an existing slot's identity. `flock` comes from odu-runner's Nix closure (util-linux on its PATH)—builders need ssh + Nix, not a system-installed flock.
 - **Busy pool → wait in line** (and say who you're waiting for). `--no-wait` fails immediately instead.
 - **`--host P=ADDR`** pins a specific machine for that run (waits if busy).
 - **`localhost` is never an implicit fallback** (see [juspay/odu#46](https://github.com/juspay/odu/issues/46)). It participates only when you name it as the sole, pure-local pool; mixing it with remotes is refused.
@@ -368,7 +366,7 @@ and the counts row is tinted per bucket so a run's shape reads at a glance.
 
 `.ci/odu.sock` identifies the live run in a checkout. Bare `odu cancel` asks the coordinator to finalize statuses, close lanes, remove the socket, and then waits for teardown.
 
-`odu cancel <node>` (e.g. `ci::fmt@aarch64-darwin`) or `odu cancel @<platform>` cancels only that node or whole platform lane — running work is stopped and marked `cancelled` (not `errored`/`failed`), pending work on the lane is cancelled, and a run-owned venue lease for that platform is released. The rest of the run settles normally. MCP twins: `node_cancel` / `lane_cancel` (CLI `@plat` sugar maps to `lane.cancel`).
+`odu cancel <node>` (e.g. `ci::fmt@aarch64-darwin`) or `odu cancel @<platform>` cancels only that node or the whole platform execution — all primary and shard lanes are stopped and marked `cancelled` (not `errored`/`failed`), and every run-owned venue lease for that platform is released. The rest of the run settles normally. MCP twins: `node_cancel` / `lane_cancel` (CLI `@plat` sugar maps to `lane.cancel`).
 
 `odu run --supersede` combines full-run cancel and start for the common “stop this run and test the fix” move. Runs normally exit as soon as they settle; `--linger` keeps the coordinator available so a node can be retried later, then reaps it after an idle period or explicit cancellation.
 

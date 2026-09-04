@@ -14,12 +14,25 @@ import {
   leaseBurstSlots,
   leaseLanes,
   parseHolderBody,
-  settleShardLeaseHandoff,
+  settleLeaseHandoff,
+  slotLockPath,
   type ClaimResult,
   type LeaseIdentity,
 } from "./lease";
 
 const id: LeaseIdentity = { holder: "me@desk", run: "abc1234#1" };
+
+it("keeps slot zero's lock identity stable when declared capacity changes", () => {
+  expect(slotLockPath("/tmp/odu.lock", { host: "ci", slot: 0, slots: 1 })).toBe(
+    "/tmp/odu.lock",
+  );
+  expect(slotLockPath("/tmp/odu.lock", { host: "ci", slot: 0, slots: 4 })).toBe(
+    "/tmp/odu.lock",
+  );
+  expect(slotLockPath("/tmp/odu.lock", { host: "ci", slot: 2, slots: 4 })).toBe(
+    "/tmp/odu.lock.2",
+  );
+});
 
 it("pulses quiet lease sessions inside Effect's five-second ping cadence", () => {
   expect(LEASE_PULSE_MS).toBeLessThan(5_000);
@@ -341,14 +354,34 @@ describe("leaseBurstSlots", () => {
       "x86_64-linux: skipped broken burst slot ci-broken#1 during handoff",
     );
   });
+
+  it("treats a rejected optional claim as one broken slot, not a leaked batch", async () => {
+    const release = jest.fn();
+    const leases = await leaseBurstSlots({
+      platform: "x86_64-linux",
+      pool: ["ci-good", "ci-throws"],
+      identity: id,
+      limit: 2,
+      claim: async (host) => {
+        if (host === "ci-throws") throw new Error("ssh exploded");
+        return {
+          kind: "held" as const,
+          lease: { host, release, verifyHeld: async () => true },
+        };
+      },
+    });
+
+    expect(leases.map(({ host }) => host)).toEqual(["ci-good"]);
+    expect(release).not.toHaveBeenCalled();
+  });
 });
 
-describe("settleShardLeaseHandoff", () => {
+describe("settleLeaseHandoff", () => {
   it("promotes a surviving burst lease when the primary dies during cold provisioning", async () => {
     const brokenRelease = jest.fn();
     const promotedRelease = jest.fn();
     const otherRelease = jest.fn();
-    const handoff = await settleShardLeaseHandoff(
+    const handoff = await settleLeaseHandoff(
       {
         host: "primary-broke",
         release: brokenRelease,
@@ -377,7 +410,7 @@ describe("settleShardLeaseHandoff", () => {
 
   it("returns null when no claimed lane survives the handoff", async () => {
     const release = jest.fn();
-    const handoff = await settleShardLeaseHandoff({
+    const handoff = await settleLeaseHandoff({
       host: "only-broken-lane",
       release,
       verifyHeld: async () => false,

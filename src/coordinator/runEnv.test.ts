@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ClaimResult } from "./lease";
 import { readLeaseRecord } from "./leaseRecord";
-import { claimVenues } from "./runEnv";
+import { claimVenues, prepareVenues } from "./runEnv";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -145,5 +145,146 @@ describe("claimVenues", () => {
     expect(outcome.ok).toBe(false);
     if (outcome.ok) return;
     expect(outcome.error.message).toContain("nobody planned for");
+  });
+});
+
+describe("prepareVenues", () => {
+  it("promotes surviving capacity and returns ownership grouped by platform", async () => {
+    const brokenRelease = () => {};
+    const broken = {
+      host: "ci-primary",
+      slot: 0,
+      release: brokenRelease,
+      verifyHeld: async () => false,
+    };
+    const promoted = {
+      host: "ci-burst",
+      slot: 0,
+      release: () => {},
+      verifyHeld: async () => true,
+    };
+    const lines: string[] = [];
+    const outcome = await prepareVenues({
+      claimed: {
+        ok: true,
+        lanes: { "x86_64-linux": broken.host },
+        leases: [broken],
+      },
+      existingLanes: {},
+      platforms: ["x86_64-linux"],
+      bursts: [{ platform: "x86_64-linux", label: "e2e", limit: 1 }],
+      pools: {
+        hosts: { "x86_64-linux": [broken.host, promoted.host] },
+        source: null,
+      },
+      identity: { holder: "me@box", run: "abc1234#1" },
+      onLine: (line) => lines.push(line),
+      resolveDrvPath: () => (): never => {
+        throw new Error("injected burst acquisition must be used");
+      },
+      leaseBurst: async () => [promoted],
+    });
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.venues.get("x86_64-linux")).toEqual({
+      host: "ci-burst",
+      leases: [promoted],
+      bursts: [],
+    });
+    expect(lines.join("\n")).toContain("promoted ci-burst");
+  });
+
+  it("rechecks optional leases on an agent-held primary after cold peers finish", async () => {
+    const brokenRelease = () => {};
+    const broken = {
+      host: "ci-broken",
+      release: brokenRelease,
+      verifyHeld: async () => false,
+    };
+    const healthy = {
+      host: "ci-healthy",
+      release: () => {},
+      verifyHeld: async () => true,
+    };
+    const outcome = await prepareVenues({
+      claimed: { ok: true, lanes: {}, leases: [] },
+      existingLanes: { "x86_64-linux": "agent-held" },
+      platforms: ["x86_64-linux"],
+      bursts: [{ platform: "x86_64-linux", label: "e2e", limit: 2 }],
+      pools: {
+        hosts: { "x86_64-linux": ["agent-held", broken.host, healthy.host] },
+        source: null,
+      },
+      identity: { holder: "me@box", run: "abc1234#1" },
+      onLine: () => {},
+      resolveDrvPath: () => (): never => {
+        throw new Error("injected burst acquisition must be used");
+      },
+      leaseBurst: async (opts) => {
+        expect(opts.exclude).toBeUndefined();
+        return [broken, healthy];
+      },
+    });
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.venues.get("x86_64-linux")).toEqual({
+      host: "agent-held",
+      leases: [healthy],
+      bursts: [healthy],
+    });
+  });
+
+  it("releases every acquired handle when one parallel platform preparation rejects", async () => {
+    const released: string[] = [];
+    const primary = (host: string) => ({
+      host,
+      release: () => released.push(host),
+      verifyHeld: async () => true,
+    });
+    const linux = primary("linux-primary");
+    const darwin = primary("darwin-primary");
+    const extra = primary("linux-extra");
+    const outcome = await prepareVenues({
+      claimed: {
+        ok: true,
+        lanes: {
+          "aarch64-darwin": darwin.host,
+          "x86_64-linux": linux.host,
+        },
+        leases: [darwin, linux],
+      },
+      existingLanes: {},
+      platforms: ["aarch64-darwin", "x86_64-linux"],
+      bursts: [
+        { platform: "aarch64-darwin", label: "e2e", limit: 1 },
+        { platform: "x86_64-linux", label: "e2e", limit: 1 },
+      ],
+      pools: {
+        hosts: {
+          "aarch64-darwin": [darwin.host],
+          "x86_64-linux": [linux.host],
+        },
+        source: null,
+      },
+      identity: { holder: "me@box", run: "abc1234#1" },
+      onLine: () => {},
+      resolveDrvPath: () => (): never => {
+        throw new Error("injected burst acquisition must be used");
+      },
+      leaseBurst: async ({ platform }) => {
+        if (platform === "aarch64-darwin") {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          throw new Error("darwin preparation exploded");
+        }
+        return [extra];
+      },
+    });
+
+    expect(outcome.ok).toBe(false);
+    expect(released.sort()).toEqual(
+      [darwin.host, linux.host, extra.host].sort(),
+    );
   });
 });

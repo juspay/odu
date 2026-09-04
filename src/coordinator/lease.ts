@@ -93,8 +93,16 @@ const CLAIM_TIMEOUT_MS = envNumber("ODU_LEASE_CLAIM_TIMEOUT_MS", 180_000, 1);
  * held. This short bound therefore classifies only a broken handoff, never a
  * cold Nix bootstrap. It closes the gap where a lease could die while the
  * batch waited for another cold candidate and still be counted in TOTAL. */
-const BURST_HANDOFF_TIMEOUT_MS = envNumber(
-  "ODU_BURST_HANDOFF_TIMEOUT_MS",
+const LEASE_HANDOFF_TIMEOUT_MS = envNumber(
+  "ODU_LEASE_HANDOFF_TIMEOUT_MS",
+  10_000,
+  1,
+);
+
+/** Steady-state ownership checks are transport liveness, not capacity
+ * selection. Keep their tuning independent of the one-shot handoff barrier. */
+const LEASE_PULSE_TIMEOUT_MS = envNumber(
+  "ODU_LEASE_PULSE_TIMEOUT_MS",
   10_000,
   1,
 );
@@ -142,8 +150,8 @@ export interface LeaseHandle {
   readonly verifyHeld?: () => Promise<boolean>;
 }
 
-export interface ShardLeaseHandoff {
-  /** The lane that owns shard zero after the final handoff check. */
+export interface LeaseHandoff {
+  /** The first surviving lane after the final ownership check. */
   primary: LeaseHandle;
   /** Remaining lanes, in their original stable order. */
   extras: LeaseHandle[];
@@ -167,17 +175,15 @@ export function leaseProbeIsOurs(
 }
 
 /**
- * Recheck every held slot together immediately before a sharded run fixes its
- * immutable TOTAL. The primary was acquired before the optional slots, so it
- * can disappear while a legitimately cold peer is still provisioning just as
- * readily as an early burst slot can. A surviving burst lease is equivalent
- * capacity: promote the first one rather than aborting a run which still owns
- * a valid lane, and reduce TOTAL by the slots which stopped answering.
+ * Recheck a group of held slots together at an ownership handoff. A primary
+ * acquired before its peers can disappear while a legitimately cold peer is
+ * still provisioning. The first survivor becomes primary; failed handles are
+ * released and omitted from the returned capacity.
  */
-export async function settleShardLeaseHandoff(
+export async function settleLeaseHandoff(
   primary: LeaseHandle,
   extras: readonly LeaseHandle[],
-): Promise<ShardLeaseHandoff | null> {
+): Promise<LeaseHandoff | null> {
   const candidates = [primary, ...extras];
   const alive = await Promise.all(
     candidates.map(async (lease) => {
@@ -290,7 +296,9 @@ export interface AgentDialOpts {
 }
 
 export function slotLockPath(base: string, slot: HostSlot): string {
-  return slot.slots === 1 ? base : `${base}.${slot.slot}`;
+  // Slot zero is the historic single-capacity venue. Its identity must not
+  // change when an operator raises or lowers the declared capacity.
+  return slot.slot === 0 ? base : `${base}.${slot.slot}`;
 }
 
 /** `/nix/store/<hash>-git-2.55.0-doc` → `git-2.55.0-doc`; anything else
@@ -535,18 +543,21 @@ export async function tryClaim(
       }
     });
 
-    const probeOurs = async (): Promise<boolean> => {
+    const probeOurs = async (
+      timeoutMs: number,
+      operation: string,
+    ): Promise<boolean> => {
       const probe = await withTimeout(
         runUnary(client.surface.lease.probe(lockPathKey(lockPath))),
-        BURST_HANDOFF_TIMEOUT_MS,
-        `lease pulse ${shortHost(host)}`,
+        timeoutMs,
+        `${operation} ${shortHost(host)}`,
       );
       return leaseProbeIsOurs(probe, identity);
     };
     pulse = setInterval(() => {
       if (intentionalRelease || lostResolved || pulseInFlight) return;
       pulseInFlight = true;
-      void probeOurs()
+      void probeOurs(LEASE_PULSE_TIMEOUT_MS, "lease pulse")
         .then((ours) => {
           if (!ours) markLost();
         })
@@ -567,7 +578,10 @@ export async function tryClaim(
         slot: opts.slot?.slot ?? 0,
         verifyHeld: async () => {
           try {
-            return await probeOurs();
+            return await probeOurs(
+              LEASE_HANDOFF_TIMEOUT_MS,
+              "lease handoff",
+            );
           } catch {
             return false;
           }
@@ -1026,47 +1040,68 @@ export async function leaseBurstSlots(
     }
   }
   const remaining = [...spread, ...stacked];
-  while (leases.length < opts.limit && remaining.length > 0) {
-    const batch = remaining.splice(0, opts.limit - leases.length);
-    const results = await Promise.all(
-      batch.map(async (slot) => ({
-        slot,
-        result: await claim(slot.host, opts.identity, slot),
-      })),
-    );
-    // One final, concurrent handshake after the slowest candidate in this
-    // batch has finished provisioning. An early candidate can otherwise die
-    // while Promise.all is still waiting for a legitimately cold peer and be
-    // counted into the immutable TOTAL even though no shard was configured.
-    const verified = await Promise.all(
-      results.map(async ({ slot, result }) => {
-        if (result.kind !== "held" || result.lease.verifyHeld === undefined) {
-          return { slot, result };
-        }
-        if (await result.lease.verifyHeld()) return { slot, result };
-        result.lease.release();
-        opts.onLine?.(
-          `${opts.platform}: skipped broken burst slot ${shortHost(slot.host)}#${slot.slot + 1} during handoff`,
-        );
-        return {
-          slot,
-          result: {
-            kind: "unreachable" as const,
-            error: "burst lease stopped answering during handoff",
-          },
-        };
-      }),
-    );
-    for (const { slot, result } of verified) {
-      if (result.kind !== "held") continue;
-      leases.push(result.lease);
-      occupied.add(slot.host.trim().toLowerCase());
-      opts.onLine?.(
-        `${opts.platform}: burst slot ${shortHost(slot.host)}#${slot.slot + 1}`,
+  try {
+    while (leases.length < opts.limit && remaining.length > 0) {
+      const batch = remaining.splice(0, opts.limit - leases.length);
+      const results = await Promise.all(
+        batch.map(async (slot) => {
+          try {
+            return {
+              slot,
+              result: await claim(slot.host, opts.identity, slot),
+            };
+          } catch (error) {
+            return {
+              slot,
+              result: {
+                kind: "unreachable" as const,
+                error: error instanceof Error ? error.message : String(error),
+              },
+            };
+          }
+        }),
       );
+      // Recheck after the slowest candidate in this batch. An early candidate
+      // may die while a legitimately cold peer is still provisioning.
+      const verified = await Promise.all(
+        results.map(async ({ slot, result }) => {
+          if (result.kind !== "held" || result.lease.verifyHeld === undefined) {
+            return { slot, result };
+          }
+          let held = false;
+          try {
+            held = await result.lease.verifyHeld();
+          } catch {
+            // A rejected ownership check is a broken optional slot.
+          }
+          if (held) return { slot, result };
+          result.lease.release();
+          opts.onLine?.(
+            `${opts.platform}: skipped broken burst slot ${shortHost(slot.host)}#${slot.slot + 1} during handoff`,
+          );
+          return {
+            slot,
+            result: {
+              kind: "unreachable" as const,
+              error: "burst lease stopped answering during handoff",
+            },
+          };
+        }),
+      );
+      for (const { slot, result } of verified) {
+        if (result.kind !== "held") continue;
+        leases.push(result.lease);
+        occupied.add(slot.host.trim().toLowerCase());
+        opts.onLine?.(
+          `${opts.platform}: burst slot ${shortHost(slot.host)}#${slot.slot + 1}`,
+        );
+      }
     }
+    return leases;
+  } catch (error) {
+    releaseAll(leases);
+    throw error;
   }
-  return leases;
 }
 
 function venueHostKey(host: string): string {
