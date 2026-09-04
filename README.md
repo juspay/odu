@@ -27,22 +27,28 @@ dependants. Tag one recipe with `[metadata("ci")]` — that dependency closure
 guessed.
 
 Long terminal checks can opt into bounded fleet sharding without changing the
-command:
+command. Independent leaf checks share the leased workers:
 
 ```just
 [metadata("odu:shard=4")]
 e2e: install
     CUCUMBER_SHARD="$((ODU_SHARD_INDEX + 1))/$ODU_SHARD_TOTAL" just test-e2e
+
+[metadata("odu:shard=2")]
+test: install
+    just test-shard "$ODU_SHARD_INDEX" "$ODU_SHARD_TOTAL"
 ```
 
-A bare `odu run` opportunistically uses up to four free execution slots, runs
-the complete suite with the total it obtained, and posts one aggregate
-`e2e@<platform>` GitHub status. Cold slots may bootstrap through Nix normally;
+A bare `odu run` opportunistically uses available execution slots up to the
+largest ceiling. Every sharded leaf can use those same workers up to its own
+ceiling: the lease belongs to this run, not to one recipe, and stays held until
+all lanes on that worker settle. Odu posts one aggregate GitHub status per
+logical recipe. Cold slots may bootstrap through Nix normally;
 a slot whose connection fails is skipped instead of entering the retry cycle.
 The primary lane starts its ordinary CI work while cold burst slots bootstrap;
-only the sharded root waits. After provisioning, Odu re-verifies every lease,
-fixes the shard total, and appends the root with its immutable index/total to
-the already-running primary lane. Dead optional slots simply shrink the total.
+only the sharded roots wait. After provisioning, Odu re-verifies every lease,
+fixes each shard total, and appends the roots with their immutable index/totals
+to the already-running primary lane. Dead optional slots simply shrink the totals.
 In a multi-platform run, each platform starts as soon as its own mandatory
 venue is ready; a cold Linux claim does not hold a ready Darwin lane in setup.
 Odu continuously verifies that held locks still name this run. Ownership loss

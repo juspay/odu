@@ -40,6 +40,7 @@ import {
   shardAggregateDuration,
   shardAggregateStatus,
   shardLaneNamepath,
+  shareShardCapacity,
 } from "./coordinator/shards";
 
 interface Harness {
@@ -480,6 +481,32 @@ describe("odu lane runner over stdio (loopback)", () => {
 });
 
 describe("shard aggregation", () => {
+  it("shares workers between roots without exceeding either ceiling", () => {
+    const shared = shareShardCapacity(
+      [
+        { rootId: "e2e", limit: 5 },
+        { rootId: "test", limit: 1 },
+      ],
+      ["a", "b", "c", "d", "e", "f", "unused"],
+    );
+    expect(shared.get("e2e")).toEqual(["a", "b", "c", "d", "e"]);
+    expect(shared.get("test")).toEqual(["a"]);
+  });
+
+  it("lets every root use all available workers up to its own ceiling", () => {
+    const shared = shareShardCapacity(
+      [
+        { rootId: "e2e", limit: 5 },
+        { rootId: "test", limit: 2 },
+        { rootId: "docs", limit: 1 },
+      ],
+      [1, 2, 3, 4],
+    );
+    expect(shared.get("e2e")).toEqual([1, 2, 3, 4]);
+    expect(shared.get("test")).toEqual([1, 2]);
+    expect(shared.get("docs")).toEqual([1]);
+  });
+
   it("stays pending/running until every shard settles", () => {
     expect(shardAggregateStatus(["pending", "pending"])).toBe("pending");
     expect(shardAggregateStatus(["ok", "running", "pending"])).toBe("running");
