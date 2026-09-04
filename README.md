@@ -43,6 +43,8 @@ The primary lane starts its ordinary CI work while cold burst slots bootstrap;
 only the sharded root waits. After provisioning, Odu re-verifies every lease,
 fixes the shard total, and appends the root with its immutable index/total to
 the already-running primary lane. Dead optional slots simply shrink the total.
+In a multi-platform run, each platform starts as soon as its own mandatory
+venue is ready; a cold Linux claim does not hold a ready Darwin lane in setup.
 Odu continuously verifies that held locks still name this run. Ownership loss
 fails closed, including while execution lanes are still starting.
 Configure shared host capacity with

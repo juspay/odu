@@ -19,6 +19,7 @@
 
 import type { ResolvedPools } from "./hosts";
 import {
+  assertLeasePools,
   hostSlotKey,
   leaseBurstSlots,
   type LeaseHandle,
@@ -31,9 +32,8 @@ import { removePlatformLease, upsertPlatformLease } from "./leaseRecord";
 import type { ResolveRunnerDrv } from "./runnerFlake";
 import { shortHost } from "./hosts";
 
-/** What a claim produced. All-or-nothing, exactly as `leaseLanes` decides it:
- *  on failure it has already released whatever it partially held, so there is
- *  no half-claimed state for a caller to reconcile. */
+/** What one claim produced. `orchestrate` invokes this once per platform so a
+ * ready lane can run while sibling platforms keep claiming. */
 export type ClaimOutcome =
   | { ok: true; lanes: Record<string, string>; leases: LeaseHandle[] }
   | { ok: false; error: Error };
@@ -61,6 +61,32 @@ export interface BurstRequest {
   limit: number;
 }
 
+export interface PlatformClaimResult {
+  platform: string;
+  outcome: ClaimOutcome;
+}
+
+/** Start every platform claim eagerly and publish each success before the
+ * complete set settles. `Promise.all` belongs outside the per-platform
+ * continuation: putting the callback after it recreates the setup barrier this
+ * helper exists to remove. */
+export async function claimPlatformsIndependently(
+  platforms: readonly string[],
+  claim: (platform: string) => Promise<ClaimOutcome>,
+  onReady: (
+    platform: string,
+    outcome: Extract<ClaimOutcome, { ok: true }>,
+  ) => void,
+): Promise<PlatformClaimResult[]> {
+  return await Promise.all(
+    platforms.map(async (platform) => {
+      const outcome = await claim(platform);
+      if (outcome.ok) onReady(platform, outcome);
+      return { platform, outcome };
+    }),
+  );
+}
+
 export interface PrepareVenuesOpts {
   claimed: Extract<ClaimOutcome, { ok: true }>;
   /** Agent-held lanes already assigned before this run's pool claim. */
@@ -82,6 +108,10 @@ export interface ClaimVenuesOpts {
    *  agent-held lane already has its host and is not part of this claim, which
    *  is also the scope its failure may be reported over. */
   platforms: readonly string[];
+  /** Optional wider preflight set. The coordinator claims one platform at a
+   * time so a ready lane can start immediately, but shared-host legality is a
+   * property of the complete run and must be checked before either claim. */
+  validatePlatforms?: readonly string[];
   identity: LeaseIdentity;
   noWait: boolean;
   runLabel: string;
@@ -178,6 +208,7 @@ export async function claimVenues(
   // is a run-level fact, not one platform's, so it carries no platform.
   const warn: Warn = (msg) => opts.onLine?.(msg, opts.platforms[0] ?? "");
   try {
+    assertLeasePools(opts.pools, opts.validatePlatforms ?? opts.platforms);
     return await withWaitingRecords(
       opts.repoRoot,
       opts.platforms,

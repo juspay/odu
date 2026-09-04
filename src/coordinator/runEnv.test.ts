@@ -6,13 +6,18 @@
  * `leaseLanes`'s injected `claim` is the only thing standing in for one.
  */
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, mock } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ClaimResult } from "./lease";
 import { readLeaseRecord } from "./leaseRecord";
-import { claimVenues, prepareVenues } from "./runEnv";
+import {
+  claimPlatformsIndependently,
+  claimVenues,
+  prepareVenues,
+  type ClaimOutcome,
+} from "./runEnv";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -44,6 +49,30 @@ const base = (repoRoot: string) => ({
 });
 
 describe("claimVenues", () => {
+  it("preflights the complete run before a per-platform claim", async () => {
+    const repoRoot = repo();
+    const claim = mock(async (host: string): Promise<ClaimResult> => ({
+      kind: "held",
+      lease: { host, release: () => {} },
+    }));
+    const outcome = await claimVenues({
+      ...base(repoRoot),
+      pools: {
+        hosts: {
+          "x86_64-linux": ["shared-builder"],
+          "aarch64-linux": ["shared-builder"],
+        },
+        source: null,
+      },
+      platforms: ["x86_64-linux"],
+      validatePlatforms: ["x86_64-linux", "aarch64-linux"],
+      claim,
+    });
+
+    expect(outcome.ok).toBe(false);
+    expect(claim).not.toHaveBeenCalled();
+  });
+
   it("returns the lanes and leases it got, instead of mutating them into scope", async () => {
     const repoRoot = repo();
     const outcome = await claimVenues({
@@ -145,6 +174,35 @@ describe("claimVenues", () => {
     expect(outcome.ok).toBe(false);
     if (outcome.ok) return;
     expect(outcome.error.message).toContain("nobody planned for");
+  });
+});
+
+describe("claimPlatformsIndependently", () => {
+  it("publishes a ready platform before a sibling claim settles", async () => {
+    let finishLinux: (outcome: ClaimOutcome) => void = () => {};
+    const linux = new Promise<ClaimOutcome>((resolve) => {
+      finishLinux = resolve;
+    });
+    const ready: string[] = [];
+    const claims = claimPlatformsIndependently(
+      ["aarch64-darwin", "x86_64-linux"],
+      async (platform) =>
+        platform === "aarch64-darwin"
+          ? { ok: true, lanes: { [platform]: "mac" }, leases: [] }
+          : await linux,
+      (platform) => ready.push(platform),
+    );
+
+    await Promise.resolve();
+    expect(ready).toEqual(["aarch64-darwin"]);
+
+    finishLinux({
+      ok: true,
+      lanes: { "x86_64-linux": "linux" },
+      leases: [],
+    });
+    await claims;
+    expect(ready).toEqual(["aarch64-darwin", "x86_64-linux"]);
   });
 });
 

@@ -1193,7 +1193,7 @@ function assertPoolLocality(
  * refuses runs that never touch the offending pool, which is the defect #66
  * fixed.
  */
-function assertPoolsScannable(
+export function assertPoolsScannable(
   pools: Record<string, HostPool>,
   platforms: readonly string[],
   source: string | null,
@@ -1209,14 +1209,27 @@ function assertPoolsScannable(
   }
 }
 
+/** Validate the whole set before independent platform claims begin.
+ *
+ * A caller that starts platforms as soon as each becomes ready must still
+ * reject a remote host listed under two platforms before either side takes
+ * its lock. Keeping this preflight at the lease seam preserves that invariant
+ * without forcing ready platforms through the old all-platform wait barrier. */
+export function assertLeasePools(
+  pools: ResolvedPools,
+  platforms: readonly string[],
+): void {
+  assertNoSharedRemoteHosts(pools.hosts, platforms);
+  assertPoolsScannable(pools.hosts, platforms, pools.source);
+}
+
 /**
  * Lease one host slot per platform that participates in the run.
  * Multi-platform is all-or-nothing (release partial holds while waiting).
  */
 export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
   const platforms = [...opts.platforms].sort();
-  assertNoSharedRemoteHosts(opts.pools.hosts, platforms);
-  assertPoolsScannable(opts.pools.hosts, platforms, opts.pools.source);
+  assertLeasePools(opts.pools, platforms);
   const sleep = opts.sleep ?? defaultSleep;
   const now = opts.now ?? Date.now;
   const rotateBy = now();

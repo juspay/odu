@@ -88,6 +88,7 @@ import {
   localHolderId,
 } from "./lease";
 import {
+  claimPlatformsIndependently,
   claimVenues,
   type ClaimOutcome,
   prepareVenues,
@@ -1816,6 +1817,41 @@ async function orchestrate(
     return lane;
   };
 
+  /** Accept one ready platform immediately. The roster keeps unresolved peers
+   * in `claiming`, while this platform's ordinary CI starts. A sharded root is
+   * still deferred until optional capacity fixes TOTAL. */
+  const acceptClaim = (
+    platform: string,
+    claimed: Extract<ClaimOutcome, { ok: true }>,
+  ): void => {
+    Object.assign(lanesByPlatform, claimed.lanes);
+    for (const lease of claimed.leases) {
+      if (!executions.addLease(platform, lease)) {
+        lease.release();
+        continue;
+      }
+      acquiredLeases.push(lease);
+      watchLease(lease);
+    }
+    publishHeader({
+      ...runtime.ctx.cells.header.get(),
+      lanes: rosterFrom(
+        activePlatforms.filter((candidate) =>
+          !executions.isCancelled(candidate),
+        ),
+        true,
+      ),
+    });
+    if (executions.isCancelled(platform)) return;
+    const host = lanesByPlatform[platform];
+    if (host === undefined) return;
+    const tasks = tasksByPlatform.get(platform) ?? [];
+    const root = tasks.find((task) => task.shards !== undefined);
+    const earlyTasks =
+      root === undefined ? tasks : tasks.filter((task) => task.id !== root.id);
+    if (earlyTasks.length > 0) startPrimaryLane(platform, host, earlyTasks);
+  };
+
   // ── venue claim: one free machine per platform, lock held for the run ──
   //
   // Read-before-write ahead of the first post: contexts GitHub already shows in
@@ -1826,32 +1862,48 @@ async function orchestrate(
   // `startSetup`'s `running` transition, so that is where the join is.
   const seeded =
     ctx.posting && github !== null ? poster.seed() : Promise.resolve();
+  // Claim every original public log before any independently ready primary
+  // can emit a frame. Shard-private logs are claimed with their later topology.
+  for (const id of store.get().order) logs.claim(id);
   // Latched before the claim starts: a cancel arriving mid-claim may terminalize
   // every node, but the run is not over until the claim that holds the box is.
   claimInFlight = platformsToClaim.length > 0;
-  const claim = (deps.claimVenues ?? claimVenues)({
-    repoRoot,
-    pools: resolvedPools,
-    platforms: platformsToClaim,
-    identity: { holder: localHolderId(), run: runLabel },
-    noWait: args.noWait,
-    runLabel,
-    onLine: setupLine,
-    resolveDrvPath: (platform) => runnerDrvResolver(runnerFlake, platform),
-  });
+  const claimOne = deps.claimVenues ?? claimVenues;
+  const claims = claimPlatformsIndependently(
+    platformsToClaim,
+    async (platform) => {
+      // Start every platform claim now. Its result is consumed independently
+      // below, after the reporter seed, so a ready Darwin lane does not wait
+      // for a cold Linux pool (or vice versa) before doing useful work.
+      const pending = claimOne({
+        repoRoot,
+        pools: resolvedPools,
+        platforms: [platform],
+        validatePlatforms: platformsToClaim,
+        identity: { holder: localHolderId(), run: runLabel },
+        noWait: args.noWait,
+        runLabel,
+        onLine: setupLine,
+        resolveDrvPath: (candidate) =>
+          runnerDrvResolver(runnerFlake, candidate),
+      });
+      await seeded;
+      if (!shuttingDown) startSetup(platform);
+      return await pending;
+    },
+    (platform, outcome) => {
+      if (!shuttingDown) acceptClaim(platform, outcome);
+      else for (const lease of outcome.leases) lease.release();
+    },
+  );
   await seeded;
   // A cancel during that round trip must not go on to stamp `_ci-setup` running
   // (posting `pending` to GitHub *after* the interrupt statuses) on a
   // coordinator that is already exiting.
   if (shuttingDown) {
-    // The claim is outstanding and nothing downstream will merge its handles
-    // into `acquiredLeases`, so hand them straight back rather than leaving a
-    // remote flock held by a coordinator on its way out. Best-effort: `shutdown`
-    // may well `process.exit` first, which frees the same locks by dropping the
-    // ssh connections.
-    void claim.then((o) => {
-      if (o.ok) for (const lease of o.leases) lease.release();
-    });
+    // Each outstanding claim's own continuation releases a handle that arrives
+    // after shutdown. Handles accepted before it began already belong to the
+    // execution roster, which `shutdown` closes.
     return await parkForShutdown();
   }
 
@@ -1863,7 +1915,36 @@ async function orchestrate(
   // measuring something else. It opens at its own lane start instead.
   for (const platform of platformsToClaim) startSetup(platform);
 
-  const claimedOutcome = await claim;
+  // Agent-held lanes claim nothing and therefore have no reason to wait for a
+  // remote platform. Start their ordinary work at the same early boundary.
+  for (const platform of activePlatforms) {
+    if (platformsToClaim.includes(platform)) continue;
+    const host = lanesByPlatform[platform];
+    if (host === undefined || executions.isCancelled(platform)) continue;
+    const tasks = tasksByPlatform.get(platform) ?? [];
+    const root = tasks.find((task) => task.shards !== undefined);
+    const earlyTasks =
+      root === undefined ? tasks : tasks.filter((task) => task.id !== root.id);
+    if (earlyTasks.length > 0) startPrimaryLane(platform, host, earlyTasks);
+  }
+
+  const claimResults = await claims;
+  const failedClaim = claimResults.find(({ outcome }) => !outcome.ok);
+  const claimedOutcome: ClaimOutcome =
+    failedClaim !== undefined && !failedClaim.outcome.ok
+      ? failedClaim.outcome
+      : {
+          ok: true,
+          lanes: Object.assign(
+            {},
+            ...claimResults.flatMap(({ outcome }) =>
+              outcome.ok ? [outcome.lanes] : [],
+            ),
+          ),
+          leases: claimResults.flatMap(({ outcome }) =>
+            outcome.ok ? outcome.leases : [],
+          ),
+        };
   const burstRequests = activePlatforms.flatMap((platform) => {
     const root = (tasksByPlatform.get(platform) ?? []).find(
       (task) => task.shards !== undefined,
@@ -1873,25 +1954,8 @@ async function orchestrate(
       : [{ platform, label: root.id, limit: root.shards - 1 }];
   });
 
-  // Claim every original public log before any early primary lane can emit a
-  // frame. Shard-private logs are claimed when their topology is installed.
-  for (const id of store.get().order) logs.claim(id);
-
   let outcome: PreparedVenues | Extract<ClaimOutcome, { ok: false }>;
   if (claimedOutcome.ok) {
-    Object.assign(lanesByPlatform, claimedOutcome.lanes);
-    for (const lease of claimedOutcome.leases) {
-      const platform = activePlatforms.find(
-        (candidate) => claimedOutcome.lanes[candidate] === lease.host,
-      );
-      if (platform === undefined || !executions.addLease(platform, lease)) {
-        lease.release();
-        continue;
-      }
-      acquiredLeases.push(lease);
-      watchLease(lease);
-    }
-
     // The public roster can name the primary as soon as mandatory acquisition
     // has finished; optional workers do not change this platform→host fact.
     publishHeader({
@@ -1919,19 +1983,6 @@ async function orchestrate(
           ? {}
           : { leaseBurst: deps.leaseBurstSlots }),
       });
-
-    for (const platform of activePlatforms) {
-      if (executions.isCancelled(platform)) continue;
-      const host = lanesByPlatform[platform];
-      if (host === undefined) continue;
-      const tasks = tasksByPlatform.get(platform) ?? [];
-      const root = tasks.find((task) => task.shards !== undefined);
-      const earlyTasks =
-        root === undefined ? tasks : tasks.filter((task) => task.id !== root.id);
-      // A root-only shard has no useful phase to run early and configure
-      // requires at least one task; it follows the ordinary post-capacity path.
-      if (earlyTasks.length > 0) startPrimaryLane(platform, host, earlyTasks);
-    }
 
     outcome = await preparing;
     if (outcome.ok) {
@@ -2074,8 +2125,7 @@ async function orchestrate(
     // header is published BEFORE this so no observer sees a terminal node set
     // beside a claiming header.
     //
-    // Scoped by what the claim actually covered. `leaseLanes` owns the
-    // all-or-nothing policy over `platformsToClaim`; an agent-held lane has a
+    // Scoped by what the failed set actually covered. An agent-held lane has a
     // real host from `odu lease` and touched no pool, so reporting it as
     // `errored` with a message about a pool it never saw publishes a node that
     // lies about itself. It is still stopped — the run is fail-closed — but as

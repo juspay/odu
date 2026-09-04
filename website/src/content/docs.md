@@ -195,7 +195,7 @@ Rules:
 - **Busy pool → wait in line** (and say who you're waiting for). `--no-wait` fails immediately instead.
 - **`--host P=ADDR`** pins a specific machine for that run (waits if busy).
 - **`localhost` is never an implicit fallback** (see [juspay/odu#46](https://github.com/juspay/odu/issues/46)). It participates only when you name it as the sole, pure-local pool; mixing it with remotes is refused.
-- Multi-platform claim is **all-or-nothing**: partial holds are released while waiting for the full set.
+- Multi-platform claims are independent: each ready platform starts immediately while the others keep claiming. The complete pool set is still validated up front, so one remote host cannot be assigned to two platform lanes.
 
 `odu hosts` probes every declared slot as free / busy / held-by without acquiring (same agent, `lease.probe`). Lock base default: `/tmp/odu.lease` (`ODU_LEASE_LOCK` to override).
 
@@ -210,6 +210,7 @@ phase you can watch rather than a silence
 - `odu status` prints `provisioning <elapsed>` and the pool each lane is claiming from — `-o json` carries it as `run: {phase, elapsed_ms, lanes}`, one roster entry per platform tagged `state: "claiming" | "leased"`.
 - `odu attach` draws the matrix, with the lane line showing `x86_64-linux ▸ claiming ci-1, ci-2` until a host is picked.
 - `_ci-setup@<platform>` is `running` from the claim, and the copy narrates itself into that node's log: `odu logs -f _ci-setup@x86_64-linux`.
+- A ready platform leaves setup and begins its ordinary DAG without waiting for a sibling platform's cold claim or optional shard bootstrap.
 - `odu wait` blocks on the run instead of reporting there is nothing to wait for.
 
 The pin carries **two** bounds, and the timeout message names which one fired:
