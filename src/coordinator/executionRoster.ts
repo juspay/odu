@@ -4,7 +4,7 @@ import type { LeaseHandle } from "./lease";
 export interface ExecutionLane {
   handle: Lane;
   publicId(localId: string): string;
-  routes: ReadonlyMap<string, string>;
+  routes: Map<string, string>;
 }
 
 interface PlatformExecution {
