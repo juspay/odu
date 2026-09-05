@@ -59,10 +59,16 @@ export class ExecutionRoster {
     this.#release(lease);
   }
 
-  /** Every lease this platform currently owns, as a snapshot safe to iterate
-   *  while releasing. */
-  leasesFor(platform: string): LeaseHandle[] {
-    return [...(this.#platforms.get(platform)?.leases ?? [])];
+  /** Give every box this platform holds back. The lane may be gone (a
+   *  resurrection) or the whole platform may be (a cancel) — both want the same
+   *  thing, so both ask for it here rather than writing the loop again. */
+  releaseLeases(platform: string): void {
+    const execution = this.#platforms.get(platform);
+    if (execution === undefined) return;
+    for (const lease of [...execution.leases]) {
+      execution.leases.delete(lease);
+      this.#release(lease);
+    }
   }
 
   addLane(
@@ -134,10 +140,7 @@ export class ExecutionRoster {
     if (execution === undefined) return false;
     execution.cancelled = true;
     for (const lane of execution.lanes) lane.handle.close();
-    for (const lease of [...execution.leases]) {
-      execution.leases.delete(lease);
-      this.#release(lease);
-    }
+    this.releaseLeases(platform);
     return true;
   }
 

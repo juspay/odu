@@ -786,6 +786,20 @@ async function orchestrate(
     shardPlans.get(platform) ?? [];
   const planFor = (platform: string, rootId: string): ShardPlan | undefined =>
     plansFor(platform).find((plan) => plan.rootId === rootId);
+  /** The tasks a platform's primary lane runs before any shard topology
+   *  exists. */
+  const earlyTasksFor = (platform: string): TaskSpec[] =>
+    (tasksByPlatform.get(platform) ?? []).filter(
+      (task) => task.shards === undefined,
+    );
+  /** The platform's sharded recipe roots — from the RECIPES, so the answer
+   *  exists before `plansFor` has a topology to report. A rule that read the
+   *  topology instead would call a platform unsharded for the whole window
+   *  between its lane starting and its shard plans being installed. */
+  const shardRootsFor = (platform: string): TaskSpec[] =>
+    (tasksByPlatform.get(platform) ?? []).filter(
+      (task) => task.shards !== undefined,
+    );
   /** The lane roster for `platforms`, in platform order, from the one source of
    *  truth (`lanesByPlatform`): a platform with a host is `leased`; one without
    *  is `claiming` from its candidate pool while the claim is in flight, and
@@ -1002,6 +1016,31 @@ async function orchestrate(
     log: "\n[odu] cancelled by operator (lane)\n",
   } as const;
 
+  /** A node whose previous invocation no longer exists.
+   *  `startedAt`/`durationMs`/`exitCode` describe a run that is gone — a stale
+   *  `startedAt` would have the next attempt's duration measure the dead lane's
+   *  wall clock. Named so a future field that also describes an invocation is
+   *  added in one place rather than remembered in two. */
+  const REOPENED = {
+    status: "pending",
+    startedAt: null,
+    durationMs: null,
+    exitCode: null,
+  } as const satisfies Partial<NodeState>;
+
+  /** What a lane DEATH does to a lane's unfinished nodes, for the same reason
+   *  `CANCELLED_BY_OPERATOR` is named: the overlay is the policy and the
+   *  sentence is the story, and this notice is a contract — the e2e suite greps
+   *  for its `[odu] ` prefix. One producer, four callers, one wording of the
+   *  frame around whatever each of them has to say. */
+  const laneDeath = (
+    detail: string,
+  ): { running: "errored"; pending: "skipped"; log: string } => ({
+    running: "errored",
+    pending: "skipped",
+    log: `\n[odu] ${detail}\n`,
+  });
+
   const releaseLease = (platform: string, lease: LeaseHandle): void =>
     executions.releaseLease(platform, lease);
   const releaseBurstLease = (platform: string, lease: LeaseHandle): void => {
@@ -1085,7 +1124,7 @@ async function orchestrate(
     // Terminalizing is DEFERRED while a claim is outstanding — see
     // `claimInFlight` for why, and `cancelledDuringClaim` for where the claim's
     // return picks these lanes back up.
-    if (claimInFlight()) {
+    if (claimInFlight(platform)) {
       deferredPlatformStops.set(platform, CANCELLED_BY_OPERATOR);
       return true;
     }
@@ -1460,11 +1499,19 @@ async function orchestrate(
    *  startup phase's window for that same platform is still open and close long
    *  after. A single latch would have each of them clearing the other's; a
    *  plain set would have the startup phase's tidy-up close a window the
-   *  resurrection is still standing in. Every reader still asks the same
-   *  whole-run question (`claimInFlight()`), because "is any box still being
-   *  acquired" is what settle and cancel actually turn on. */
+   *  resurrection is still standing in.
+   *
+   *  Both questions are askable, because both are asked. `checkSettled` wants
+   *  the whole-run one — a settle is a statement about the run. A platform stop
+   *  wants its OWN platform's: deferring darwin's terminalize behind a cold
+   *  linux claim can make `odu cancel @darwin` look like it did nothing for
+   *  minutes, and nothing about linux's box has any bearing on darwin's
+   *  verdict. */
   const claimsInFlight = new Map<string, number>();
-  const claimInFlight = (): boolean => claimsInFlight.size > 0;
+  const claimInFlight = (platform?: string): boolean =>
+    platform === undefined
+      ? claimsInFlight.size > 0
+      : claimsInFlight.has(platform);
   const beginClaim = (platform: string): void => {
     claimsInFlight.set(platform, (claimsInFlight.get(platform) ?? 0) + 1);
   };
@@ -1913,12 +1960,6 @@ async function orchestrate(
    * cannot answer either: a resurrection empties it for the whole duration of
    * the re-claim, which is exactly the window a lease watcher asks in.
    *
-   * Sharding is judged from the RECIPES, not from `plansFor` — a lane can die
-   * before its shard plans are installed, and a rule that reads a topology
-   * which does not exist yet would resurrect exactly the platform it means to
-   * exclude, then find a second set of lanes arriving on the box it just gave
-   * back.
-   *
    * Deliberately says nothing about the node STATUSES: whether there is any
    * work left is a question that can only be asked honestly once the verdict
    * gate has published what it is holding, which is a side effect and belongs
@@ -1927,9 +1968,7 @@ async function orchestrate(
   const isResurrectable = (platform: string): boolean =>
     claimablePlatforms.has(platform) &&
     remotePlatforms.has(platform) &&
-    !(tasksByPlatform.get(platform) ?? []).some(
-      (task) => task.shards !== undefined,
-    );
+    shardRootsFor(platform).length === 0;
 
   /**
    * The tasks a fresh lane for this platform would have to run: every node the
@@ -1948,17 +1987,23 @@ async function orchestrate(
    * finished `ok` with its log still in flight reads `running` here, and
    * retrying it would re-run finished work and throw its output away.
    */
-  const unfinishedTasksFor = (platform: string): TaskSpec[] => {
+  const unfinishedTasksFor = (
+    platform: string,
+    state: PipelineState,
+  ): TaskSpec[] => {
     const all = tasksByPlatform.get(platform) ?? [];
-    const state = store.get();
     const statusOf = (localId: string): NodeStatus | undefined =>
       state.nodes[fanId(localId, platform)]?.status;
+    // Every task in `tasksByPlatform` was given a node at startup, so a missing
+    // status is unreachable — stated rather than defaulted, so a reader does
+    // not have to work out whether "a node the run never heard of is done" is a
+    // rule or a typo.
+    const unfinished = (task: TaskSpec): boolean => {
+      const status = statusOf(task.id);
+      return status !== undefined && NON_TERMINAL_STATUSES.has(status);
+    };
     const retry = new Map(
-      all
-        .filter((task) =>
-          NON_TERMINAL_STATUSES.has(statusOf(task.id) ?? "ok"),
-        )
-        .map((task) => [task.id, task] as const),
+      all.filter(unfinished).map((task) => [task.id, task] as const),
     );
     // A dependency that is neither `ok` nor itself being retried is a verdict
     // this lane already reached; its dependents come off the retry with it.
@@ -2005,11 +2050,16 @@ async function orchestrate(
         // is answerable — and a node whose `ok` was merely in flight is not
         // about to be dragged back to `pending`.
         verdicts.releaseAll((id) => onPlatform(id, platform));
-        const unfinished = unfinishedTasksFor(platform);
+        // ONE snapshot, threaded as a value: "what was unfinished when the lane
+        // died" and "which nodes were cut off mid-recipe" are two halves of one
+        // decision, and reading the store twice would leave them agreeing only
+        // because nothing happens to await in between.
+        const state = store.get();
+        const unfinished = unfinishedTasksFor(platform, state);
         if (unfinished.length > 0) {
           // `resurrectLane` opens a window of its own for the claim it starts,
           // so the count never reaches zero across the handover.
-          resurrectLane(platform, episode, reason, unfinished);
+          resurrectLane(platform, episode, reason, unfinished, state);
           return;
         }
       } finally {
@@ -2030,11 +2080,7 @@ async function orchestrate(
       spent >= MAX_LANE_RESURRECTIONS
         ? ` (gave up after ${MAX_LANE_RESURRECTIONS} lane resurrections)`
         : "";
-    const strategy = {
-      running: "errored" as const,
-      pending: "skipped" as const,
-      log: `\n[odu] lane died: ${reason}${exhausted}\n`,
-    };
+    const strategy = laneDeath(`lane died: ${reason}${exhausted}`);
     // The lane narration too, and for the same reason the retries are narrated
     // there: `_ci-setup`'s log is the one place this platform's whole venue
     // story is told in order, and a story that stops mid-retry is the one shape
@@ -2044,7 +2090,7 @@ async function orchestrate(
       setupLine(`[odu] lane died: ${reason}${exhausted}`, platform);
     }
     executions.cancel(platform);
-    if (claimInFlight()) deferredPlatformStops.set(platform, strategy);
+    if (claimInFlight(platform)) deferredPlatformStops.set(platform, strategy);
     else terminalizePlatformNodes(platform, strategy);
     checkSettled();
   };
@@ -2081,6 +2127,9 @@ async function orchestrate(
     episode: number,
     reason: string,
     retryTasks: TaskSpec[],
+    /** The one snapshot `laneDied` decided from — not re-read here, so both
+     *  halves of that decision describe the same instant by construction. */
+    state: PipelineState,
   ): void => {
     const attempt = episode + 1;
     laneEpisode.set(platform, attempt);
@@ -2092,7 +2141,6 @@ async function orchestrate(
       platform,
     );
     const retryIds = new Set(retryTasks.map((task) => fanId(task.id, platform)));
-    const state = store.get();
     const cutOff = state.order.filter(
       (id) => onPlatform(id, platform) && state.nodes[id]?.status === "running",
     );
@@ -2110,21 +2158,13 @@ async function orchestrate(
     // Release on a lost lease is a tolerated no-op; on a lease that merely
     // outlived its lane it is the whole point — the box must be free before we
     // queue for one, or a single-host pool waits on itself.
-    for (const lease of executions.leasesFor(platform)) {
-      releaseLease(platform, lease);
-    }
+    executions.releaseLeases(platform);
 
     // Re-open the provisioning bracket so the new claim narrates into it and
     // the new runner's setup verdict has somewhere to land (`finishSetup`
     // refuses a node that is already terminal, exactly as `startSetup` refuses
     // one that is already running).
-    const setupId = fanId(SETUP, platform);
-    updateNode(setupId, {
-      status: "pending",
-      startedAt: null,
-      durationMs: null,
-      exitCode: null,
-    });
+    updateNode(fanId(SETUP, platform), REOPENED);
     startSetup(platform);
 
     // The roster says `claiming` again while it is true, from the same builder
@@ -2174,27 +2214,19 @@ async function orchestrate(
         // No second machine for the retry: the run is out of options for this
         // platform and says so through the same path a dead lane takes.
         executions.cancel(platform);
-        terminalizePlatformNodes(platform, {
-          running: "errored",
-          pending: "skipped",
-          log: `\n[odu] lane died: ${reason}\n[odu] ${outcome.error.message}\n`,
-        });
+        terminalizePlatformNodes(
+          platform,
+          laneDeath(`lane died: ${reason}\n[odu] ${outcome.error.message}`),
+        );
         checkSettled();
         return;
       }
-      // The venue is in hand, so the retried nodes may finally move. Back to
-      // `pending`: `startedAt`/`durationMs`/`exitCode` describe an invocation
-      // that no longer exists, and a stale `startedAt` would have the retry's
-      // duration measure the dead lane's wall clock. Terminal nodes are
-      // untouched — `ok` keeps its verdict AND its log, and a `skipped` node
-      // that is coming back is already in `retryIds` as `pending`.
+      // The venue is in hand, so the retried nodes may finally move. Terminal
+      // nodes are untouched — `ok` keeps its verdict AND its log, and a
+      // `skipped` node that is coming back is already in `retryIds` as
+      // `pending`.
       for (const id of retryIds) {
-        updateNode(id, {
-          status: "pending",
-          startedAt: null,
-          durationMs: null,
-          exitCode: null,
-        });
+        updateNode(id, REOPENED);
         // And so does the log: what is in it belongs to an invocation that no
         // longer exists. Reset HERE, where the decision to re-run is made,
         // rather than leaving it to the successor lane's opening `snapshot`
@@ -2303,11 +2335,11 @@ async function orchestrate(
   const acceptClaim = (
     platform: string,
     claimed: Extract<ClaimOutcome, { ok: true }>,
-    /** The exact tasks the new lane must run, when the caller has already
-     *  decided them — a resurrection hands over only what the dead lane left
-     *  unfinished. Absent means the platform's full early task set, which is
-     *  what a first claim wants. */
-    retryTasks?: TaskSpec[],
+    /** The exact tasks the new lane must run. Always the caller's decision: a
+     *  first claim wants the platform's early set, a resurrection wants only
+     *  what the dead lane left unfinished, and which of those is meant is not
+     *  something this function should have to read out of an absent argument. */
+    tasks: TaskSpec[],
   ): void => {
     Object.assign(lanesByPlatform, claimed.lanes);
     for (const lease of claimed.leases) {
@@ -2322,12 +2354,7 @@ async function orchestrate(
     if (executions.isCancelled(platform)) return;
     const host = lanesByPlatform[platform];
     if (host === undefined) return;
-    const earlyTasks =
-      retryTasks ??
-      (tasksByPlatform.get(platform) ?? []).filter(
-        (task) => task.shards === undefined,
-      );
-    if (earlyTasks.length > 0) startPrimaryLane(platform, host, earlyTasks);
+    if (tasks.length > 0) startPrimaryLane(platform, host, tasks);
   };
 
   // ── venue claim: one free machine per platform, lock held for the run ──
@@ -2382,7 +2409,7 @@ async function orchestrate(
       return await pending;
     },
     (platform, outcome) => {
-      if (!shuttingDown) acceptClaim(platform, outcome);
+      if (!shuttingDown) acceptClaim(platform, outcome, earlyTasksFor(platform));
       else for (const lease of outcome.leases) lease.release();
     },
   );
@@ -2411,8 +2438,7 @@ async function orchestrate(
     if (platformsToClaim.includes(platform)) continue;
     const host = lanesByPlatform[platform];
     if (host === undefined || executions.isCancelled(platform)) continue;
-    const tasks = tasksByPlatform.get(platform) ?? [];
-    const earlyTasks = tasks.filter((task) => task.shards === undefined);
+    const earlyTasks = earlyTasksFor(platform);
     if (earlyTasks.length > 0) startPrimaryLane(platform, host, earlyTasks);
   }
 
@@ -2443,9 +2469,7 @@ async function orchestrate(
           ),
         };
   const burstRequests = activePlatforms.flatMap((platform) => {
-    const roots = (tasksByPlatform.get(platform) ?? []).filter(
-      (task) => task.shards !== undefined,
-    );
+    const roots = shardRootsFor(platform);
     const limit = roots.reduce(
       (largest, root) =>
         Math.max(largest, Math.max(0, (root.shards ?? 1) - 1)),
@@ -2522,7 +2546,7 @@ async function orchestrate(
     for (const [platform, venue] of outcome.venues) {
       if (venueSuperseded(platform)) continue;
       const tasks = tasksByPlatform.get(platform) ?? [];
-      const roots = tasks.filter((task) => task.shards !== undefined);
+      const roots = shardRootsFor(platform);
       const shared = shareShardCapacity(
         roots.map((root) => ({
           rootId: root.id,
@@ -2660,11 +2684,7 @@ async function orchestrate(
       terminalizePlatformNodes(
         platform,
         claimedPlatforms.has(platform)
-          ? {
-              running: "errored",
-              pending: "skipped",
-              log: `\n[odu] ${outcome.error.message}\n`,
-            }
+          ? laneDeath(outcome.error.message)
           : {
               running: "cancelled",
               pending: "skipped",
@@ -2726,11 +2746,10 @@ async function orchestrate(
       const extended = routed && (await lane.extend(roots));
       if (!extended && laneAccepting(platform)) {
         executions.cancel(platform);
-        terminalizePlatformNodes(platform, {
-          running: "errored",
-          pending: "skipped",
-          log: "\n[odu] primary lane rejected its deferred shard roots\n",
-        });
+        terminalizePlatformNodes(
+          platform,
+          laneDeath("primary lane rejected its deferred shard roots"),
+        );
         continue;
       }
     }
