@@ -65,20 +65,6 @@ export class ExecutionRoster {
     return [...(this.#platforms.get(platform)?.leases ?? [])];
   }
 
-  /** Which platform owns this lease — the reverse of {@link addLease}.
-   *
-   *  A lease's `lost` promise names a HOST, and a host is not a decision: what
-   *  the run has to decide when exclusivity drops is what happens to the work
-   *  that was running under it, and that is a per-platform question. The roster
-   *  already holds the mapping, so it answers rather than making every watcher
-   *  keep a parallel copy. */
-  platformOfLease(lease: LeaseHandle): string | undefined {
-    for (const [platform, execution] of this.#platforms) {
-      if (execution.leases.has(lease)) return platform;
-    }
-    return undefined;
-  }
-
   addLane(
     platform: string,
     handle: Lane,

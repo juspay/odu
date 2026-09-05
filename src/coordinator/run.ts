@@ -1201,24 +1201,22 @@ async function orchestrate(
    *     a lease the roster no longer knows — still fails the run closed, which
    *     is what this watch has always done.
    *
-   *  The platform is resolved HERE rather than in the callback: the lease was
-   *  handed to the roster on the line before, and by the time `lost` fires the
-   *  roster may already have released it. */
-  const watchLease = (lease: LeaseHandle): void => {
-    const platform = executions.platformOfLease(lease);
-    const episode = platform === undefined ? -1 : episodeOf(platform);
+   *  The platform is a PARAMETER: every caller registers a lease inside a loop
+   *  that already names the platform it belongs to, so asking the roster to
+   *  scan for it back would buy an "unknown platform" case that cannot occur —
+   *  and pay for it with a sentinel episode and a nested conditional. */
+  const watchLease = (platform: string, lease: LeaseHandle): void => {
+    const episode = episodeOf(platform);
     void lease.lost?.then(() => {
       const reason = `venue lease lost on ${shortHost(lease.host)}`;
-      if (platform !== undefined) {
-        // A lease from a superseded episode has already been accounted for —
-        // the run replaced the lane it belonged to and gave this box back. Its
-        // loss is news about a machine nobody is using, and taking the run down
-        // over it would undo the very resurrection that let it go.
-        if (episode !== episodeOf(platform)) return;
-        if (!burstLeaseUsers.has(lease) && isResurrectable(platform)) {
-          laneDied(platform, episode, reason);
-          return;
-        }
+      // A lease from a superseded episode has already been accounted for — the
+      // run replaced the lane it belonged to and gave this box back. Its loss
+      // is news about a machine nobody is using, and taking the run down over
+      // it would undo the very resurrection that let it go.
+      if (episode !== episodeOf(platform)) return;
+      if (!burstLeaseUsers.has(lease) && isResurrectable(platform)) {
+        laneDied(platform, episode, reason);
+        return;
       }
       shutdown(1, reason, { exclusivityLost: true });
     });
@@ -2311,7 +2309,7 @@ async function orchestrate(
         continue;
       }
       acquiredLeases.push(lease);
-      watchLease(lease);
+      watchLease(platform, lease);
     }
     publishRoster(true);
     if (executions.isCancelled(platform)) return;
@@ -2554,7 +2552,7 @@ async function orchestrate(
           continue;
         }
         acquiredLeases.push(lease);
-        watchLease(lease);
+        watchLease(platform, lease);
       }
     }
   } else if (claimedOutcome.ok) {
