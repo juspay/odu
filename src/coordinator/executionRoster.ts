@@ -59,6 +59,18 @@ export class ExecutionRoster {
     this.#release(lease);
   }
 
+  /** Give every box this platform holds back. The lane may be gone (a
+   *  resurrection) or the whole platform may be (a cancel) — both want the same
+   *  thing, so both ask for it here rather than writing the loop again. */
+  releaseLeases(platform: string): void {
+    const execution = this.#platforms.get(platform);
+    if (execution === undefined) return;
+    for (const lease of [...execution.leases]) {
+      execution.leases.delete(lease);
+      this.#release(lease);
+    }
+  }
+
   addLane(
     platform: string,
     handle: Lane,
@@ -75,6 +87,21 @@ export class ExecutionRoster {
       publicId,
       routes: new Map(localIds.map((localId) => [publicId(localId), localId])),
     });
+  }
+
+  /** Forget one lane and every route it owned. For a lane being REPLACED — a
+   *  dead primary whose successor is about to be registered for the same
+   *  nodes: leaving the corpse in would keep it first in `route`'s scan (so a
+   *  rerun would be dispatched to a closed session) and would keep it in
+   *  `lanes()`, where the log drain would stamp truncation notices on nodes
+   *  the run is about to run again. Does NOT close the lane — the caller
+   *  decides how it dies. */
+  dropLane(platform: string, handle: Lane): void {
+    const execution = this.#platforms.get(platform);
+    if (execution === undefined) return;
+    const index = execution.lanes.findIndex((entry) => entry.handle === handle);
+    if (index < 0) return;
+    execution.lanes.splice(index, 1);
   }
 
   /** Add routes after a lane receives its deferred task phase. */
@@ -113,10 +140,7 @@ export class ExecutionRoster {
     if (execution === undefined) return false;
     execution.cancelled = true;
     for (const lane of execution.lanes) lane.handle.close();
-    for (const lease of [...execution.leases]) {
-      execution.leases.delete(lease);
-      this.#release(lease);
-    }
+    this.releaseLeases(platform);
     return true;
   }
 
