@@ -2,11 +2,13 @@
  * Lane resurrection: what a run does when a remote lane's link dies under it.
  *
  * A CI run that has spent four minutes on a builder should not be thrown away
- * because a laptop changed wifi networks. The runner is deliberately ephemeral
- * — it dies with the pipe, and that death is what frees the venue flock and
- * reaps the recipe process trees — so surviving a blip cannot be a matter of
- * the runner hanging on. It is the coordinator's job: claim another venue and
- * start a new lane over the nodes the dead one had not finished.
+ * because a laptop changed wifi networks. Holding the link open through it is
+ * not available: Effect RPC's pinger ends the socket after 5–10s of silence and
+ * exposes no cadence knob (`@kolu/surface`'s `src/links/wire.ts`), and the
+ * runner is ephemeral by design — it dies with the pipe, and that death is what
+ * frees the venue flock and reaps the recipe process trees. So survival is the
+ * coordinator's job, after the fact: claim another venue and start a new lane
+ * over the nodes the dead one had not finished.
  *
  * These drive the REAL `runCommand` against a throwaway repo with both ssh-
  * shaped collaborators injected (`claimVenues` and `startLane`), because every

@@ -13,8 +13,7 @@
  * Box-side dead-man (juspay/odu#54): half-open TCP never EOFs the agent, so
  * the flock would stick until remote sshd times out (~2h). While holding we
  * treat any inbound stdio activity (including ownership probes) as a pulse;
- * `deadManMs` without a pulse releases the flock and exits. That default is
- * COUPLED to the coordinator's link tolerance — see the constant.
+ * ~45s without a pulse releases the flock and exits.
  * Max-hold (default 1h, `ODU_LEASE_MAX_HOLD_MS`) self-releases forgotten holds.
  * No separate `lease.beat` — normal RPC traffic and ownership probes pulse it.
  */
@@ -24,24 +23,9 @@ import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { shellQuoteArg } from "@kolu/shell-quote";
 import { DEFAULT_LEASE_LOCK, type LeaseHolder } from "../common/laneSurface";
 
-/** Idle without inbound activity before the hold self-releases (ms).
- *
- *  MUST be at least the coordinator's worst-case silence tolerance
- *  (`CI_LINK_WORST_CASE_SILENCE_MS` in `src/coordinator/linkTolerance.ts`).
- *  This timer is the box's opinion of "the coordinator is gone"; that constant
- *  is the coordinator's opinion of "the link is gone". If the box gives up
- *  first it hands the venue to whoever is queueing while the run that owns it
- *  is still riding out a blip it was configured to survive — and the run comes
- *  back to a box it no longer holds. Ten minutes, so the box is the patient
- *  one: a coordinator that really died releases the flock the instant its ssh
- *  channel EOFs anyway, and this dead-man exists only for the half-open case
- *  that never EOFs at all.
- *
- *  A CODE default, not something the coordinator passes: the runner reads this
- *  env on the box, and the whole point is that it holds when nobody is talking
- *  to it. `ODU_LEASE_DEAD_MAN_MS` overrides it for tests and experiments. */
+/** Idle without inbound activity before the hold self-releases (ms). */
 export function deadManMs(): number {
-  return envNumber("ODU_LEASE_DEAD_MAN_MS", 600_000, 1_000);
+  return envNumber("ODU_LEASE_DEAD_MAN_MS", 45_000, 1_000);
 }
 
 /** Absolute hold ceiling (ms). Default 1h; `0` = unlimited. */

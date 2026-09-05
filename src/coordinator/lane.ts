@@ -19,9 +19,13 @@
  * Which is why this module gained no retry loop: the death is reported here,
  * and what a run makes of it belongs to the run.
  *
- * The link this lane opens is deliberately patient (see `linkTolerance.ts`):
- * resurrection is the answer to a link that really died, not to one that went
- * quiet for twenty seconds.
+ * Nothing here rides a blip out at the transport, and nothing can: Effect
+ * RPC's own pinger writes every 5s and ends the socket the moment a tick finds
+ * the previous ping unanswered, so 5–10s of silence kills any link on this
+ * stack — see the canonical account in `@kolu/surface`'s
+ * `src/links/wire.ts` ("never gets a vote"). The lane really is dead within
+ * seconds; resurrection is what makes the RUN survive that, at the cost of
+ * re-running whichever node was in flight.
  */
 
 import {
@@ -37,7 +41,6 @@ import { absorbSealedLogAppend } from "../common/logTail";
 import type { TaskSpec } from "../common/spec";
 import { runUnary, subscribe } from "../common/effectEdge";
 import { type LaneClient, laneSurface } from "../common/laneSurface";
-import { CI_LINK_LIVENESS } from "./linkTolerance";
 import type { ResolveRunnerDrv } from "./runnerFlake";
 import { withTimeout } from "../common/withTimeout";
 import { localhostSpawnEnv, pinLaneFace } from "./surfaceRemoteOpts";
@@ -250,10 +253,6 @@ export function startLane(opts: LaneOptions): Lane {
       localEnv: localhostSpawnEnv(),
     }),
     label: `host:${opts.host}`,
-    // A CI link is worth more patience than an interactive one: a heartbeat
-    // timeout force-cycles the link, and the runner dies with it, so the
-    // default 15s/10s turns a wifi stall into a lost lane. See linkTolerance.
-    liveness: CI_LINK_LIVENESS,
   });
 
   /** Every in-flight drain's progress listener. A SET, not a slot: two drains

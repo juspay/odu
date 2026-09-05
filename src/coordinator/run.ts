@@ -337,9 +337,9 @@ export interface RunDeps {
  * Two, i.e. three lanes in total. A budget rather than an unbounded retry
  * because a lane that dies on attach every time is a broken host, not a flaky
  * network, and re-claiming forever would spend a CI run's whole wall clock
- * discovering that. Two is enough to ride out the failure this exists for — a
- * blip, and then the unlucky second blip — while a genuinely sick box reaches
- * a red verdict in minutes.
+ * discovering that. Two is enough to recover from the failure this exists for
+ * — a dropped link, and then the unlucky second one — while a genuinely sick
+ * box reaches a red verdict in minutes.
  */
 export const MAX_LANE_RESURRECTIONS = 2;
 
