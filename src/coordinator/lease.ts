@@ -38,6 +38,7 @@ import {
   type ResolvedPools,
   shortHost,
 } from "./hosts";
+import { CI_LINK_LIVENESS } from "./linkTolerance";
 import type { ResolveRunnerDrv } from "./runnerFlake";
 import { type TimeoutOpts, withTimeout } from "../common/withTimeout";
 import { runUnary } from "../common/effectEdge";
@@ -470,6 +471,10 @@ export async function tryClaim(
     label: `lease:${shortHost(host)}`,
     // makeSession takes a structured Logger (kolu#1876+); adapt the line sink.
     log: sink.log,
+    // This session HOLDS the venue for the whole run — its death is what fires
+    // `lost` and takes the flock with it — so it gets the same patience as the
+    // lane's link, and for the same reason. See linkTolerance.
+    liveness: CI_LINK_LIVENESS,
   });
 
   let intentionalRelease = false;
@@ -633,6 +638,10 @@ export async function probeHost(
     initialConnection: "probing",
     label: `lease-probe:${shortHost(host)}`,
     log: sink.log,
+    // Framework defaults on purpose, unlike `tryClaim` above. This session
+    // holds nothing: it dials, asks one question and is destroyed, so nobody's
+    // work is thrown away when it is cut short — and `odu hosts` answering
+    // "unreachable" quickly is the useful behaviour for an inventory read.
   });
 
   try {

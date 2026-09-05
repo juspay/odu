@@ -26,6 +26,7 @@ import { absorbSealedLogAppend } from "../common/logTail";
 import type { TaskSpec } from "../common/spec";
 import { runUnary, subscribe } from "../common/effectEdge";
 import { type LaneClient, laneSurface } from "../common/laneSurface";
+import { CI_LINK_LIVENESS } from "./linkTolerance";
 import type { ResolveRunnerDrv } from "./runnerFlake";
 import { withTimeout } from "../common/withTimeout";
 import { localhostSpawnEnv, pinLaneFace } from "./surfaceRemoteOpts";
@@ -238,6 +239,10 @@ export function startLane(opts: LaneOptions): Lane {
       localEnv: localhostSpawnEnv(),
     }),
     label: `host:${opts.host}`,
+    // A CI link is worth more patience than an interactive one: a heartbeat
+    // timeout force-cycles the link, and the runner dies with it, so the
+    // default 15s/10s turns a wifi stall into a lost lane. See linkTolerance.
+    liveness: CI_LINK_LIVENESS,
   });
 
   /** Every in-flight drain's progress listener. A SET, not a slot: two drains
