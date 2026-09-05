@@ -73,6 +73,7 @@ import { formatGoDuration } from "../common/duration";
 import { gitTopLevel } from "../common/git";
 import { appendIfOpen, createNodeLogSink } from "./nodeLogSink";
 import { createVerdictGate } from "./verdictGate";
+import { maxLaneResurrections } from "./laneResurrection";
 import type { TaskSpec } from "../common/spec";
 import { commitLabel, createDisplay, progressEvent } from "./display";
 import { laneTasks, loadJustPipeline, parseSelector } from "../just/ingest";
@@ -333,19 +334,6 @@ export interface RunDeps {
   leaseBurstSlots?: typeof leaseBurstSlots;
   startLane?: typeof startLane;
 }
-
-/**
- * How many times a REMOTE primary lane may be rebuilt on a freshly claimed
- * venue after its link dies, before the platform is called errored.
- *
- * Two, i.e. three lanes in total. A budget rather than an unbounded retry
- * because a lane that dies on attach every time is a broken host, not a flaky
- * network, and re-claiming forever would spend a CI run's whole wall clock
- * discovering that. Two is enough to recover from the failure this exists for
- * — a dropped link, and then the unlucky second one — while a genuinely sick
- * box reaches a red verdict in minutes.
- */
-export const MAX_LANE_RESURRECTIONS = 2;
 
 /** Status overlay `terminalizePlatformNodes` applies when a lane dies or is
  *  cancelled. `undefined` means leave the node — already terminal, `ok`
@@ -1936,6 +1924,11 @@ async function orchestrate(
    *  place. */
   const laneEpisode = new Map<string, number>();
   const episodeOf = (platform: string): number => laneEpisode.get(platform) ?? 0;
+  /** The retry budget, read ONCE per run: an operator editing
+   *  `ODU_MAX_LANE_RESURRECTIONS` mid-run must not have one death judged
+   *  against a different budget than the next, or narrated with a different
+   *  "of N" than the attempt before it. */
+  const maxResurrections = maxLaneResurrections();
   /** Platforms whose primary lane actually started OFF-box. Recorded once, at
    *  the lane start that decides it, because it must stay answerable while a
    *  resurrection has emptied `lanesByPlatform`. */
@@ -2038,7 +2031,7 @@ async function orchestrate(
     // The episode IS the retry count (see `laneEpisode`), and `episode` is the
     // current one — the guard above just said so.
     const spent = episode;
-    if (spent < MAX_LANE_RESURRECTIONS && isResurrectable(platform)) {
+    if (spent < maxResurrections && isResurrectable(platform)) {
       // The claim window opens BEFORE the gate is drained, not after: publishing
       // held verdicts can make every node on a single-platform run terminal for
       // an instant, and a `wait_for_settle` looking in that instant would call
@@ -2077,8 +2070,8 @@ async function orchestrate(
     // not have to count `_ci-setup` entries to learn that odu had already
     // moved this work twice.
     const exhausted =
-      spent >= MAX_LANE_RESURRECTIONS
-        ? ` (gave up after ${MAX_LANE_RESURRECTIONS} lane resurrections)`
+      spent >= maxResurrections
+        ? ` (gave up after ${maxResurrections} lane resurrections)`
         : "";
     const strategy = laneDeath(`lane died: ${reason}${exhausted}`);
     // The lane narration too, and for the same reason the retries are narrated
@@ -2137,7 +2130,7 @@ async function orchestrate(
 
     setupLine(
       `[odu] lane died: ${reason} — reclaiming a venue and retrying unfinished` +
-        ` nodes (attempt ${attempt} of ${MAX_LANE_RESURRECTIONS})`,
+        ` nodes (attempt ${attempt} of ${maxResurrections})`,
       platform,
     );
     const retryIds = new Set(retryTasks.map((task) => fanId(task.id, platform)));

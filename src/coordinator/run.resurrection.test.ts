@@ -42,10 +42,15 @@ import { waitFor } from "../common/scaffoldForTest";
 import type { Lane, LaneOptions } from "./lane";
 import type { LeaseHandle } from "./lease";
 import type { ClaimOutcome } from "./runEnv";
-import { MAX_LANE_RESURRECTIONS, type RunArgs, runCommand } from "./run";
+import { maxLaneResurrections } from "./laneResurrection";
+import { type RunArgs, runCommand } from "./run";
 
 const hasJust =
   spawnSync("just", ["--version"], { encoding: "utf-8" }).status === 0;
+
+/** The budget these runs are judged against — the default, since the fixture
+ *  does not set `ODU_MAX_LANE_RESURRECTIONS`. */
+const MAX_RESURRECTIONS = maxLaneResurrections();
 
 const PLATFORM =
   process.platform === "darwin" ? "aarch64-darwin" : "x86_64-linux";
@@ -505,8 +510,8 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
     const nodes = await watchNodes(socketPath);
 
     try {
-      // Three lanes in total: the original plus MAX_LANE_RESURRECTIONS retries.
-      for (let attempt = 0; attempt <= MAX_LANE_RESURRECTIONS; attempt += 1) {
+      // Three lanes in total: the original plus MAX_RESURRECTIONS retries.
+      for (let attempt = 0; attempt <= MAX_RESURRECTIONS; attempt += 1) {
         await waitForLive(outcome, () => lanes.length === attempt + 1);
         const lane = lanes[attempt]!;
         lane.opts.onNodes(
@@ -524,7 +529,7 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
       // No fourth lane: the run stops asking for boxes and says so.
       const code = await outcome;
       expect(code).not.toBe(0);
-      expect(lanes.length).toBe(MAX_LANE_RESURRECTIONS + 1);
+      expect(lanes.length).toBe(MAX_RESURRECTIONS + 1);
 
       const sha7 = sha7Of(dir);
       const timings = readFileSync(
@@ -545,7 +550,7 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
         "utf-8",
       );
       expect(setupLog).toContain(
-        `gave up after ${MAX_LANE_RESURRECTIONS} lane resurrections`,
+        `gave up after ${MAX_RESURRECTIONS} lane resurrections`,
       );
       expect(
         readFileSync(join(dir, ".ci", sha7, PLATFORM, "alpha.log"), "utf-8"),
