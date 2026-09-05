@@ -59,6 +59,26 @@ export class ExecutionRoster {
     this.#release(lease);
   }
 
+  /** Every lease this platform currently owns, as a snapshot safe to iterate
+   *  while releasing. */
+  leasesFor(platform: string): LeaseHandle[] {
+    return [...(this.#platforms.get(platform)?.leases ?? [])];
+  }
+
+  /** Which platform owns this lease — the reverse of {@link addLease}.
+   *
+   *  A lease's `lost` promise names a HOST, and a host is not a decision: what
+   *  the run has to decide when exclusivity drops is what happens to the work
+   *  that was running under it, and that is a per-platform question. The roster
+   *  already holds the mapping, so it answers rather than making every watcher
+   *  keep a parallel copy. */
+  platformOfLease(lease: LeaseHandle): string | undefined {
+    for (const [platform, execution] of this.#platforms) {
+      if (execution.leases.has(lease)) return platform;
+    }
+    return undefined;
+  }
+
   addLane(
     platform: string,
     handle: Lane,
@@ -75,6 +95,22 @@ export class ExecutionRoster {
       publicId,
       routes: new Map(localIds.map((localId) => [publicId(localId), localId])),
     });
+  }
+
+  /** Forget one lane and every route it owned. For a lane being REPLACED — a
+   *  dead primary whose successor is about to be registered for the same
+   *  nodes: leaving the corpse in would keep it first in `route`'s scan (so a
+   *  rerun would be dispatched to a closed session) and would keep it in
+   *  `lanes()`, where the log drain would stamp truncation notices on nodes
+   *  the run is about to run again. Does NOT close the lane — the caller
+   *  decides how it dies. */
+  dropLane(platform: string, handle: Lane): boolean {
+    const execution = this.#platforms.get(platform);
+    if (execution === undefined) return false;
+    const index = execution.lanes.findIndex((entry) => entry.handle === handle);
+    if (index < 0) return false;
+    execution.lanes.splice(index, 1);
+    return true;
   }
 
   /** Add routes after a lane receives its deferred task phase. */

@@ -3,14 +3,25 @@
  * host (the ssh session: warm probe → remote-store provisioning → spawn over
  * ssh), configure the run over the surface, and pump node state + logs back.
  *
- * Lanes are **one-shot** (design review): the first link death after attach
- * is terminal — the runner process died with the pipe, taking live state
- * with it, and Phase 1 explicitly defers runner-restart survival. The lane
- * reports `onDead` and the coordinator marks unfinished nodes `errored`
- * rather than letting the session's reconnect loop respawn a fresh idle
- * runner that would silently re-run completed work. Pre-attach, a bounded
- * number of connect attempts (a down host fails fast instead of retrying
- * forever on ssh's exit 255).
+ * A lane itself is still **one-shot**: the first link death after attach ends
+ * IT. The runner process died with the pipe, taking live state with it, so the
+ * lane reports `onDead` rather than letting the session's reconnect loop
+ * respawn a fresh idle runner that would silently re-run completed work.
+ * Pre-attach, a bounded number of connect attempts (a down host fails fast
+ * instead of retrying forever on ssh's exit 255).
+ *
+ * What is no longer one-shot is the PLATFORM. A lane is a lane, and rebuilding
+ * one on a new box is not something a dead session can do for itself — so the
+ * coordinator does it: `run.ts` answers `onDead` on a remote primary lane by
+ * claiming a fresh venue and starting a new lane over the unfinished nodes,
+ * up to `MAX_LANE_RESURRECTIONS` times. Sharded lanes, localhost lanes and an
+ * exhausted budget still take the old road and mark unfinished nodes `errored`.
+ * Which is why this module gained no retry loop: the death is reported here,
+ * and what a run makes of it belongs to the run.
+ *
+ * The link this lane opens is deliberately patient (see `linkTolerance.ts`):
+ * resurrection is the answer to a link that really died, not to one that went
+ * quiet for twenty seconds.
  */
 
 import {
