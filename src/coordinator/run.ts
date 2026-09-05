@@ -1872,21 +1872,18 @@ async function orchestrate(
    *  the episode it belongs to, and a trigger from a superseded episode is
    *  dropped. Cheaper than trying to correlate the two signals, and it also
    *  covers the late straggler (a `lost` that resolves seconds after the lane
-   *  it belonged to was already replaced). */
+   *  it belonged to was already replaced).
+   *
+   *  It is also the count of resurrections SPENT: the episode only ever moves
+   *  in `resurrectLane`, one step per rebuild, so "which episode" and "how many
+   *  retries has this platform had" are the same number and are kept in one
+   *  place. */
   const laneEpisode = new Map<string, number>();
   const episodeOf = (platform: string): number => laneEpisode.get(platform) ?? 0;
-  /** Resurrections already spent, per platform. */
-  const resurrections = new Map<string, number>();
   /** Platforms whose primary lane actually started OFF-box. Recorded once, at
    *  the lane start that decides it, because it must stay answerable while a
    *  resurrection has emptied `lanesByPlatform`. */
   const remotePlatforms = new Set<string>();
-
-  /** Has this platform's venue been replaced since the startup claim handed one
-   *  over? Then the host and the leases that claim produced describe a box the
-   *  run has already given back, and the post-claim publication below must not
-   *  reinstate either of them. */
-  const venueSuperseded = (platform: string): boolean => episodeOf(platform) > 0;
 
   /**
    * May this platform be rebuilt on a fresh venue at all?
@@ -1984,7 +1981,9 @@ async function orchestrate(
   const laneDied = (platform: string, episode: number, reason: string): void => {
     if (!laneAccepting(platform)) return;
     if (episode !== episodeOf(platform)) return;
-    const spent = resurrections.get(platform) ?? 0;
+    // The episode IS the retry count (see `laneEpisode`), and `episode` is the
+    // current one — the guard above just said so.
+    const spent = episode;
     if (spent < MAX_LANE_RESURRECTIONS && isResurrectable(platform)) {
       // The claim window opens BEFORE the gate is drained, not after: publishing
       // held verdicts can make every node on a single-platform run terminal for
@@ -2074,9 +2073,8 @@ async function orchestrate(
     reason: string,
     retryTasks: TaskSpec[],
   ): void => {
-    const attempt = (resurrections.get(platform) ?? 0) + 1;
-    resurrections.set(platform, attempt);
-    laneEpisode.set(platform, episode + 1);
+    const attempt = episode + 1;
+    laneEpisode.set(platform, attempt);
     beginClaim(platform);
 
     setupLine(
@@ -2343,6 +2341,20 @@ async function orchestrate(
   // Latched before the claim starts: a cancel arriving mid-claim may terminalize
   // every node, but the run is not over until the claim that holds the box is.
   for (const platform of platformsToClaim) beginClaim(platform);
+  /** The episode each startup claim belongs to, so its epilogue can tell its own
+   *  venue from one a resurrection has since replaced — the SAME latch the death
+   *  triggers carry, rather than a second meaning read off the counter. A
+   *  superseded claim's host and leases describe a box the run has already given
+   *  back, and the post-claim publication must reinstate neither.
+   *
+   *  `episodeOf(p) > 0` said this once, and only coincidentally: it is true of
+   *  "has this platform EVER been resurrected", which is a different question
+   *  that happens to agree while episodes start at 0. */
+  const claimEpisode = new Map(
+    platformsToClaim.map((platform) => [platform, episodeOf(platform)] as const),
+  );
+  const venueSuperseded = (platform: string): boolean =>
+    episodeOf(platform) !== (claimEpisode.get(platform) ?? 0);
   const claims = claimPlatformsIndependently(
     platformsToClaim,
     async (platform) => {
