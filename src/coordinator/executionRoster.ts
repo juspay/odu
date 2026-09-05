@@ -90,13 +90,12 @@ export class ExecutionRoster {
    *  `lanes()`, where the log drain would stamp truncation notices on nodes
    *  the run is about to run again. Does NOT close the lane — the caller
    *  decides how it dies. */
-  dropLane(platform: string, handle: Lane): boolean {
+  dropLane(platform: string, handle: Lane): void {
     const execution = this.#platforms.get(platform);
-    if (execution === undefined) return false;
+    if (execution === undefined) return;
     const index = execution.lanes.findIndex((entry) => entry.handle === handle);
-    if (index < 0) return false;
+    if (index < 0) return;
     execution.lanes.splice(index, 1);
-    return true;
   }
 
   /** Add routes after a lane receives its deferred task phase. */

@@ -1856,6 +1856,17 @@ async function orchestrate(
   // Once each TOTAL is fixed, `lane.extend` adds all roots with their immutable
   // shard environments to the same runner and workspace.
   const primaryLanes = new Map<string, Lane>();
+  /** Retire one lane: close it, forget its routes, and forget it exists. Every
+   *  registry this run keeps a lane in, updated in ONE place — a corpse left in
+   *  any one of them is a rerun dispatched to a closed session, a truncation
+   *  notice stamped on a node about to run again, or a `close()` on the teardown
+   *  sweep for an object nothing else references. */
+  const retireLane = (platform: string, lane: Lane): void => {
+    lane.close();
+    executions.dropLane(platform, lane);
+    primaryLanes.delete(platform);
+    createdLanes.delete(lane);
+  };
   const buildLane = deps.startLane ?? startLane;
   /** The venue claim, resolved once: the startup claim and every resurrection
    *  re-claim go through the same call, with the same identity and the same
@@ -2095,11 +2106,7 @@ async function orchestrate(
     }
 
     const dead = primaryLanes.get(platform);
-    if (dead !== undefined) {
-      dead.close();
-      executions.dropLane(platform, dead);
-      primaryLanes.delete(platform);
-    }
+    if (dead !== undefined) retireLane(platform, dead);
     // Release on a lost lease is a tolerated no-op; on a lease that merely
     // outlived its lane it is the whole point — the box must be free before we
     // queue for one, or a single-host pool waits on itself.
