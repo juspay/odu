@@ -2206,6 +2206,16 @@ async function orchestrate(
       if (!outcome.ok) {
         // No second machine for the retry: the run is out of options for this
         // platform and says so through the same path a dead lane takes.
+        //
+        // And it does NOT spend a resurrection retrying the claim itself,
+        // deliberately: `claimOne` has already waited in line for a free box
+        // (that is what `noWait: false` means, and its own idle/ceiling bounds
+        // govern how long), so a failure here is not "the pool was momentarily
+        // full" — it is the pool answering that this platform has no venue.
+        // Looping the budget over that answer would re-ask a question already
+        // asked patiently, and turn a fast honest red into minutes of silence.
+        // The budget counts LANE deaths, which is a different failure with a
+        // different cure.
         executions.cancel(platform);
         terminalizePlatformNodes(
           platform,
