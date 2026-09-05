@@ -318,12 +318,16 @@ function tryGit(repo: string, args: string[]): string | null {
   return result.status === 0 ? result.stdout.trim() : null;
 }
 
-/** Injectable machine-acquisition collaborators. Each spends minutes in
- * ssh/Nix bootstrap, so tests substitute controllable promises and fakes at
- * this one environment boundary. `startLane` is here for the same reason the
- * claims are: it dials ssh, and the coordinator's reaction to a lane DYING is
+/** The collaborators that dial ssh, injectable. Each spends minutes in ssh/Nix
+ * bootstrap, so tests substitute controllable promises and fakes at this one
+ * environment boundary — including the coordinator's reaction to a lane DYING,
  * a rule worth being able to falsify without a builder (see
- * `run.resurrection.test.ts`). */
+ * `run.resurrection.test.ts`).
+ *
+ * A `startLane` fake owes the coordinator the lane FRAME PROTOCOL, not just the
+ * method signatures: a real lane opens each node's log subscription with a
+ * `snapshot` frame, and a fake that skips it hides every bug in what the
+ * coordinator does with one. */
 export interface RunDeps {
   claimVenues?: typeof claimVenues;
   leaseBurstSlots?: typeof leaseBurstSlots;
@@ -1714,6 +1718,9 @@ async function orchestrate(
   const platformsToClaim = claimingLanes(runtime.ctx.cells.header.get()).map(
     (l) => l.platform,
   );
+  /** The same set, as a membership test. Fixed before the run starts — unlike
+   *  `lanesByPlatform`, which a resurrection empties and refills. */
+  const claimablePlatforms = new Set(platformsToClaim);
 
   /** Publish a new header to the surface and to `run`'s own live view, so an
    *  attached face and the foreground matrix repaint the same lane map. The
@@ -1732,6 +1739,20 @@ async function orchestrate(
   const publishHeader = (next: RunHeader): void => {
     runtime.ctx.cells.header.set(next);
     display.setHeader(next);
+  };
+
+  /** Republish the lane roster: ONE producer, so `rosterFrom`'s invariant —
+   *  "'claiming' cannot survive the claim on any exit path" — stays a property
+   *  of how the roster is built rather than a call every branch has to
+   *  remember to spell. `beforeClaim` is the only thing a caller decides. */
+  const publishRoster = (beforeClaim: boolean): void => {
+    publishHeader({
+      ...runtime.ctx.cells.header.get(),
+      lanes: rosterFrom(
+        activePlatforms.filter((platform) => !executions.isCancelled(platform)),
+        beforeClaim,
+      ),
+    });
   };
   // Stamp the reserved seq onto the fan-in state so every face — the agent
   // `wait_for_settle` verdict especially — reads the run's full identity
@@ -1856,6 +1877,10 @@ async function orchestrate(
   const episodeOf = (platform: string): number => laneEpisode.get(platform) ?? 0;
   /** Resurrections already spent, per platform. */
   const resurrections = new Map<string, number>();
+  /** Platforms whose primary lane actually started OFF-box. Recorded once, at
+   *  the lane start that decides it, because it must stay answerable while a
+   *  resurrection has emptied `lanesByPlatform`. */
+  const remotePlatforms = new Set<string>();
 
   /** Has this platform's venue been replaced since the startup claim handed one
    *  over? Then the host and the leases that claim produced describe a box the
@@ -1867,11 +1892,20 @@ async function orchestrate(
    * May this platform be rebuilt on a fresh venue at all?
    *
    * Deliberately narrow, and the same shape `--linger` refuses sharding with:
-   * a REMOTE primary lane, on a platform with no sharded recipe. A localhost
-   * lane's "link" is a pipe to a child of this process — if it died,
-   * re-claiming localhost changes nothing about why. A sharded platform has
-   * several lanes and several leases holding one immutable TOTAL between them;
-   * rebuilding one of them is a different feature, not this one.
+   * a REMOTE primary lane this run CLAIMED, on a platform with no sharded
+   * recipe. A localhost lane's "link" is a pipe to a child of this process — if
+   * it died, re-claiming localhost changes nothing about why. A sharded
+   * platform has several lanes and several leases holding one immutable TOTAL
+   * between them; rebuilding one of them is a different feature, not this one.
+   * An agent-held platform (`odu lease`) is excluded by the same rule that
+   * keeps it out of `platformsToClaim`: its box is the operator's pin, held
+   * outside this run's roster, and claiming a DIFFERENT one for it would move
+   * the work off the machine they are iterating on and strand their lease.
+   *
+   * Both facts are read from sets fixed before they could move — the claim
+   * split, and the host the primary lane actually started on. `lanesByPlatform`
+   * cannot answer either: a resurrection empties it for the whole duration of
+   * the re-claim, which is exactly the window a lease watcher asks in.
    *
    * Sharding is judged from the RECIPES, not from `plansFor` — a lane can die
    * before its shard plans are installed, and a rule that reads a topology
@@ -1884,13 +1918,12 @@ async function orchestrate(
    * gate has published what it is holding, which is a side effect and belongs
    * to the caller that is committing to a retry.
    */
-  const isResurrectable = (platform: string): boolean => {
-    const host = lanesByPlatform[platform];
-    if (host === undefined || isLocalHost(host)) return false;
-    return !(tasksByPlatform.get(platform) ?? []).some(
+  const isResurrectable = (platform: string): boolean =>
+    claimablePlatforms.has(platform) &&
+    remotePlatforms.has(platform) &&
+    !(tasksByPlatform.get(platform) ?? []).some(
       (task) => task.shards !== undefined,
     );
-  };
 
   /**
    * The tasks a fresh lane for this platform would have to run: every node the
@@ -1959,19 +1992,23 @@ async function orchestrate(
       // a run over that is about to claim another box. Closed again below if
       // this turns out not to be a retry after all.
       beginClaim(platform);
-      // Now the statuses tell the truth about what finished, so what is left is
-      // answerable — and a node whose `ok` was merely in flight is not about to
-      // be dragged back to `pending`.
-      verdicts.releaseAll((id) => onPlatform(id, platform));
-      const unfinished = unfinishedTasksFor(platform);
-      if (unfinished.length > 0) {
-        // `resurrectLane` opens a window of its own for the claim it starts,
-        // so the count never reaches zero across the handover.
-        resurrectLane(platform, episode, reason, unfinished);
+      try {
+        // Now the statuses tell the truth about what finished, so what is left
+        // is answerable — and a node whose `ok` was merely in flight is not
+        // about to be dragged back to `pending`.
+        verdicts.releaseAll((id) => onPlatform(id, platform));
+        const unfinished = unfinishedTasksFor(platform);
+        if (unfinished.length > 0) {
+          // `resurrectLane` opens a window of its own for the claim it starts,
+          // so the count never reaches zero across the handover.
+          resurrectLane(platform, episode, reason, unfinished);
+          return;
+        }
+      } finally {
+        // ONE exit, whichever way the branch above goes: an unpaired
+        // `beginClaim` suppresses every future settle and hangs the run.
         endClaim(platform);
-        return;
       }
-      endClaim(platform);
       // Nothing was left to retry: the lane died owing this platform nothing,
       // and the terminalize below is a no-op over an all-terminal node set —
       // reached only so the settle the held window suppressed is re-judged.
@@ -2015,13 +2052,21 @@ async function orchestrate(
    *   1. Take the episode forward FIRST, so the other trigger for this same ssh
    *      drop — the lane's `onDead` if the lease got here first, or vice versa
    *      — is dropped rather than spending a second resurrection.
-   *   2. Narrate, in the two places an operator looks: the lane's own
-   *      `_ci-setup` log, and the log of each node cut off mid-recipe. Before
-   *      the statuses move, so the log reads in the order it happened.
+   *   2. Narrate into `_ci-setup`, which is the ONE log this platform's whole
+   *      venue story is told in — including which nodes were cut off
+   *      mid-recipe. Not into those nodes' own logs: a node's log is addressed
+   *      by commit, and the successor lane opens its subscription with a
+   *      `snapshot` frame that RESETS the file (`nodeLogSink.reset` is a
+   *      truncating write), so a notice written there is erased by the very
+   *      retry it announces.
    *   3. Only then close the corpse, give its lease back, and re-open the
-   *      nodes. The old lane is closed WITHOUT `onDead` — `close()` latches the
-   *      lane quiet, so its own death cannot come back around as a second
-   *      trigger for the episode we are already handling.
+   *      provisioning bracket. The old lane is closed WITHOUT `onDead` —
+   *      `close()` latches the lane quiet, so its own death cannot come back
+   *      around as a second trigger for the episode we are already handling.
+   *   4. The retried nodes move LAST, once a venue is actually in hand. A reset
+   *      to `pending` before the claim resolves would have a claim FAILURE
+   *      overlay `pending` → `skipped` on the node that really died
+   *      mid-recipe — reporting a red platform as merely incomplete.
    */
   const resurrectLane = (
     platform: string,
@@ -2041,12 +2086,15 @@ async function orchestrate(
     );
     const retryIds = new Set(retryTasks.map((task) => fanId(task.id, platform)));
     const state = store.get();
-    for (const id of state.order) {
-      if (!onPlatform(id, platform)) continue;
-      if (state.nodes[id]?.status !== "running") continue;
-      appendLocal(
-        id,
-        `\n[odu] lane died mid-node: ${reason} — will retry on a fresh lane\n`,
+    const cutOff = state.order.filter(
+      (id) => onPlatform(id, platform) && state.nodes[id]?.status === "running",
+    );
+    if (cutOff.length > 0) {
+      setupLine(
+        `[odu] cut off mid-recipe, re-running from the start: ${cutOff
+          .map((id) => splitFanId(id).namepath)
+          .join(", ")}`,
+        platform,
       );
     }
 
@@ -2063,20 +2111,6 @@ async function orchestrate(
       releaseLease(platform, lease);
     }
 
-    // Back to `pending`: `startedAt`/`durationMs`/`exitCode` describe an
-    // invocation that no longer exists, and a stale `startedAt` would have the
-    // retry's duration measure the dead lane's wall clock. Terminal nodes are
-    // untouched — `ok` keeps its verdict AND its log, and a `skipped` node that
-    // is coming back is already in `retryIds` as `pending`.
-    for (const id of state.order) {
-      if (!retryIds.has(id)) continue;
-      updateNode(id, {
-        status: "pending",
-        startedAt: null,
-        durationMs: null,
-        exitCode: null,
-      });
-    }
     // Re-open the provisioning bracket so the new claim narrates into it and
     // the new runner's setup verdict has somewhere to land (`finishSetup`
     // refuses a node that is already terminal, exactly as `startSetup` refuses
@@ -2093,13 +2127,7 @@ async function orchestrate(
     // The roster says `claiming` again while it is true, from the same builder
     // the startup claim publishes through.
     delete lanesByPlatform[platform];
-    publishHeader({
-      ...runtime.ctx.cells.header.get(),
-      lanes: rosterFrom(
-        activePlatforms.filter((candidate) => !executions.isCancelled(candidate)),
-        true,
-      ),
-    });
+    publishRoster(true);
 
     void (async () => {
       const outcome = await claimOne({
@@ -2113,6 +2141,13 @@ async function orchestrate(
         resolveDrvPath: runnerResolverFor,
       });
       endClaim(platform);
+      // `claiming` does not survive this claim on ANY exit below — the same
+      // property `rosterFrom` gives the startup claim, restored here rather
+      // than left to three branches to remember. Without it a failed re-claim
+      // leaves the platform advertised as provisioning forever, and
+      // `finalizeRunRecord` (which builds its `lanes` from `leasedLanes`) drops
+      // it from the durable record entirely.
+      publishRoster(false);
       // A whole-run teardown owns every terminal decision from the moment it
       // starts; hand the box back and say nothing else (the startup claim's
       // continuation does exactly this).
@@ -2144,6 +2179,26 @@ async function orchestrate(
         checkSettled();
         return;
       }
+      // The venue is in hand, so the retried nodes may finally move. Back to
+      // `pending`: `startedAt`/`durationMs`/`exitCode` describe an invocation
+      // that no longer exists, and a stale `startedAt` would have the retry's
+      // duration measure the dead lane's wall clock. Terminal nodes are
+      // untouched — `ok` keeps its verdict AND its log, and a `skipped` node
+      // that is coming back is already in `retryIds` as `pending`.
+      for (const id of retryIds) {
+        updateNode(id, {
+          status: "pending",
+          startedAt: null,
+          durationMs: null,
+          exitCode: null,
+        });
+        // And so does the log: what is in it belongs to an invocation that no
+        // longer exists. Reset HERE, where the decision to re-run is made,
+        // rather than leaving it to the successor lane's opening `snapshot`
+        // frame — a party that does not know a resurrection happened deciding
+        // what this file contains.
+        resetLocal(id, "");
+      }
       acceptClaim(platform, outcome, retryTasks);
       checkSettled();
     })();
@@ -2164,6 +2219,7 @@ async function orchestrate(
         : fanId(laneId, platform);
     };
     const local = isLocalHost(host);
+    if (!local) remotePlatforms.add(platform);
     // Which episode this lane IS. Read now, so the death of a lane that has
     // already been replaced cannot be mistaken for the death of its successor.
     const episode = episodeOf(platform);
@@ -2259,15 +2315,7 @@ async function orchestrate(
       acquiredLeases.push(lease);
       watchLease(lease);
     }
-    publishHeader({
-      ...runtime.ctx.cells.header.get(),
-      lanes: rosterFrom(
-        activePlatforms.filter((candidate) =>
-          !executions.isCancelled(candidate),
-        ),
-        true,
-      ),
-    });
+    publishRoster(true);
     if (executions.isCancelled(platform)) return;
     const host = lanesByPlatform[platform];
     if (host === undefined) return;
@@ -2352,6 +2400,15 @@ async function orchestrate(
   }
 
   const claimResults = await claims;
+  // The startup claims are no longer in flight — ONE close for the window
+  // opened before them, here where the fact becomes true, on the failing path
+  // as well as the succeeding one. Closing it a second time further down used
+  // to look free (an underflow just deletes the key) and is not: with a
+  // resurrection claim outstanding for the same platform, the stray decrement
+  // deletes ITS window, and `claimInFlight()` then answers "no box is being
+  // acquired" while one is — the exact miss the per-platform count exists to
+  // prevent. Only what THIS phase put in the set is taken out of it.
+  for (const platform of platformsToClaim) endClaim(platform);
   const failedClaim = claimResults.find(({ outcome }) => !outcome.ok);
   const claimedOutcome: ClaimOutcome =
     failedClaim !== undefined && !failedClaim.outcome.ok
@@ -2386,20 +2443,12 @@ async function orchestrate(
   if (claimedOutcome.ok) {
     // The public roster can name the primary as soon as mandatory acquisition
     // has finished; optional workers do not change this platform→host fact.
-    publishHeader({
-      ...runtime.ctx.cells.header.get(),
-      lanes: rosterFrom(
-        activePlatforms.filter((platform) => !executions.isCancelled(platform)),
-        false,
-      ),
-    });
+    publishRoster(false);
 
     // Start optional acquisition first (the async function runs up to its
     // first await immediately), then primary execution in the same turn. The
-    // mandatory claims have all returned by here (`await claims` above), so
-    // this hands the window over from them to the burst requests — one
-    // platform at a time, leaving any resurrection claim's own window alone.
-    for (const platform of platformsToClaim) endClaim(platform);
+    // window is held for the burst requests alone from here — one platform at
+    // a time, leaving any resurrection claim's own window alone.
     for (const request of burstRequests) beginClaim(request.platform);
     const preparing = prepareVenues({
         claimed: claimedOutcome,
@@ -2416,6 +2465,9 @@ async function orchestrate(
       });
 
     outcome = await preparing;
+    // Paired with the `beginClaim` above, at the instant the bursts stop being
+    // in flight, so no other phase's tidy-up has to know they existed.
+    for (const request of burstRequests) endClaim(request.platform);
     if (outcome.ok) {
       const moved = [...outcome.venues].find(
         ([platform, venue]) =>
@@ -2499,15 +2551,12 @@ async function orchestrate(
       delete lanesByPlatform[platform];
     }
   }
-  // The startup claims are no longer in flight, so settle may be judged again
-  // — a cancel that arrived mid-claim deliberately did not resolve it (see
-  // `claimsInFlight`), and the re-judgement happens once, below, after this
-  // block has published what the claim actually left behind. Only what THIS
-  // phase put in the set is taken out of it: a lane that died and re-claimed
-  // while its siblings were still provisioning owns a window of its own, and
-  // clearing the set wholesale would announce a settle over an outstanding box.
-  for (const platform of platformsToClaim) endClaim(platform);
-  for (const request of burstRequests) endClaim(request.platform);
+  // Neither the startup claims nor the bursts are in flight any more — each was
+  // closed at the await that ended it, above — so settle may be judged again. A
+  // cancel that arrived mid-claim deliberately did not resolve it (see
+  // `claimsInFlight`); the re-judgement happens once, below, after this block
+  // has published what the claim actually left behind.
+  //
   // A teardown that began during the claim owns the run from here. Terminalizing
   // a failed claim past this point would write a SECOND durable record — from a
   // post-terminalize snapshot, contradicting the pre-terminalize one `shutdown`
@@ -2570,10 +2619,7 @@ async function orchestrate(
   // the claim has resolved (see `rosterFrom`), so a settled run can never be
   // reported as "provisioning" for the rest of the coordinator's life — and
   // there is no second branch that has to remember to say so.
-  publishHeader({
-    ...runtime.ctx.cells.header.get(),
-    lanes: rosterFrom(survivors, false),
-  });
+  publishRoster(false);
 
   if (!outcome.ok) {
     // Provisioning failed — the run has no lanes and never will. Terminalize

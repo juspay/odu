@@ -223,6 +223,14 @@ function harness(opts: { hold?: () => Promise<void> } = {}) {
   const startLane = (laneOpts: LaneOptions): Lane => {
     const entry: FakeLane = { opts: laneOpts, closed: false };
     lanes.push(entry);
+    // What a REAL lane does the moment it attaches: `nodeLog.get({ id })` opens
+    // with a `snapshot` frame for every node it owns, and a fresh runner's
+    // buffer is empty. Without it a fake hides what the coordinator does with a
+    // snapshot — `resetLocal`, a truncating write — which is exactly where a
+    // notice written into a retried node's log used to go to die.
+    for (const id of ["_ci-setup", ...laneOpts.tasks.map((t) => t.id)]) {
+      laneOpts.onLogFrame(id, { kind: "snapshot", text: "" });
+    }
     return {
       platform: laneOpts.platform,
       extend: async () => true,
@@ -394,13 +402,19 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
       const logOf = (node: string): string =>
         readFileSync(join(dir, ".ci", sha7, PLATFORM, `${node}.log`), "utf-8");
       expect(logOf("alpha")).toContain("ALPHA OUTPUT");
-      expect(logOf("beta")).toContain("[odu] lane died mid-node: ssh pipe died");
-      expect(logOf("beta")).toContain("will retry on a fresh lane");
+      // The interruption is narrated where it SURVIVES. A node's log is
+      // addressed by commit and the successor lane opens it with a `snapshot`
+      // that resets the file, so `_ci-setup` — coordinator-owned, never reset
+      // by a lane — is the one place this platform's venue story is told.
       await waitFor(
         () => logOf("_ci-setup").includes("reclaiming a venue"),
         20_000,
       );
       expect(logOf("_ci-setup")).toContain("(attempt 1 of 2)");
+      expect(logOf("_ci-setup")).toContain(
+        "[odu] cut off mid-recipe, re-running from the start: beta",
+      );
+      expect(logOf("beta")).toBe("");
 
       // The retry lane finishes the run.
       second.opts.onNodes(
