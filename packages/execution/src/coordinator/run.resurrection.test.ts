@@ -336,6 +336,25 @@ async function settleOrGiveUp(outcome: Promise<unknown>): Promise<void> {
   if (backstop !== undefined) clearTimeout(backstop);
 }
 
+/**
+ * Read a file the RUN writes, once it exists.
+ *
+ * Every assertion in this file drives the run through an in-process seam and
+ * then reads a `.ci` artifact — but the status a test awaited and the bytes it
+ * then reads travel on different paths, so the await does not imply the file.
+ * On a fast machine it always does; on a slow, contended one (the macOS runner,
+ * three separate times, three different assertions) it sometimes does not, and
+ * the failure is an ENOENT that looks nothing like the property under test.
+ *
+ * Waiting weakens no assertion here: the content checks that follow still have
+ * to hold, and a file that never appears fails on the deadline with its own
+ * path named.
+ */
+async function readWhenWritten(path: string): Promise<string> {
+  await waitFor(() => existsSync(path), 20_000);
+  return readFileSync(path, "utf-8");
+}
+
 describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
   it("re-claims a venue and retries only the unfinished nodes", async () => {
     const dir = fixture();
@@ -412,9 +431,17 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
       await waitFor(() => nodes.statusOf("alpha") === "ok", 20_000);
       await waitFor(() => nodes.statusOf("beta") === "pending", 20_000);
       const sha7 = sha7Of(dir);
-      const logOf = (node: string): string =>
-        readFileSync(join(dir, ".ci", sha7, PLATFORM, `${node}.log`), "utf-8");
-      expect(logOf("alpha")).toContain("ALPHA OUTPUT");
+      // Sync, because two assertions below poll it inside a `waitFor`. A log
+      // the run has not written YET reads as empty rather than throwing, which
+      // is what makes it safe to poll: an ENOENT from inside a predicate is an
+      // exception, not a `false`, so it ends the wait instead of continuing it.
+      const logOf = (node: string): string => {
+        const path = join(dir, ".ci", sha7, PLATFORM, `${node}.log`);
+        return existsSync(path) ? readFileSync(path, "utf-8") : "";
+      };
+      expect(
+        await readWhenWritten(join(dir, ".ci", sha7, PLATFORM, "alpha.log")),
+      ).toContain("ALPHA OUTPUT");
       // The interruption is narrated where it SURVIVES. A node's log is
       // addressed by commit and the successor lane opens it with a `snapshot`
       // that resets the file, so `_ci-setup` — coordinator-owned, never reset
@@ -500,10 +527,7 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
       await waitFor(() => nodes.statusOf("alpha") === "ok", 20_000);
       expect(lanes[1]!.opts.tasks.map((t) => t.id)).toEqual(["beta", "gamma"]);
       expect(
-        readFileSync(
-          join(dir, ".ci", sha7Of(dir), PLATFORM, "alpha.log"),
-          "utf-8",
-        ),
+        await readWhenWritten(join(dir, ".ci", sha7Of(dir), PLATFORM, "alpha.log")),
       ).toContain("ALPHA OUTPUT");
 
       lanes[1]!.opts.onNodes(
@@ -556,9 +580,7 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
       // (it lost on macOS CI, never locally). Wait for the artifact rather than
       // assuming the exit implies it, which is the same discipline the rest of
       // this file's assertions already use.
-      const timingsPath = join(dir, ".ci", sha7, "timings.jsonl");
-      await waitFor(() => existsSync(timingsPath), 20_000);
-      const timings = readFileSync(timingsPath, "utf-8")
+      const timings = (await readWhenWritten(join(dir, ".ci", sha7, "timings.jsonl")))
         .trim()
         .split("\n")
         .map((line) => JSON.parse(line) as { node: string; status: string });
@@ -568,15 +590,14 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
       expect(statusOf("beta")).toBe("skipped");
       expect(statusOf("gamma")).toBe("skipped");
 
-      const setupLog = readFileSync(
+      const setupLog = await readWhenWritten(
         join(dir, ".ci", sha7, PLATFORM, "_ci-setup.log"),
-        "utf-8",
       );
       expect(setupLog).toContain(
         `gave up after ${MAX_RESURRECTIONS} lane resurrections`,
       );
       expect(
-        readFileSync(join(dir, ".ci", sha7, PLATFORM, "alpha.log"), "utf-8"),
+        await readWhenWritten(join(dir, ".ci", sha7, PLATFORM, "alpha.log")),
       ).toContain("[odu] lane died: link died #3");
     } finally {
       await nodes.close();
@@ -686,9 +707,7 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
       // (it lost on macOS CI, never locally). Wait for the artifact rather than
       // assuming the exit implies it, which is the same discipline the rest of
       // this file's assertions already use.
-      const timingsPath = join(dir, ".ci", sha7, "timings.jsonl");
-      await waitFor(() => existsSync(timingsPath), 20_000);
-      const timings = readFileSync(timingsPath, "utf-8")
+      const timings = (await readWhenWritten(join(dir, ".ci", sha7, "timings.jsonl")))
         .trim()
         .split("\n")
         .map((line) => JSON.parse(line) as { node: string; status: string });
