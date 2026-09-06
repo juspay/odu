@@ -26,8 +26,8 @@
  */
 
 import { parseArgs } from "node:util";
-import { runCommand } from "../coordinator/run";
-import { loadJustPipeline, mermaidGraph } from "../just/ingest";
+import { runCommand } from "./coordinator/run";
+import { loadJustPipeline, mermaidGraph } from "./just/ingest";
 import {
   attachCommand,
   cancelCommand,
@@ -35,13 +35,13 @@ import {
   rerunCommand,
   statusCommand,
   waitCommand,
-} from "./introspect";
-import { hostsCommand } from "./hosts";
+} from "./cli/introspect";
+import { hostsCommand } from "./cli/hosts";
 import {
   leaseCommand,
   leaseHoldCommand,
   releaseCommand,
-} from "./leaseCmd";
+} from "./cli/leaseCmd";
 import {
   durableLogsCommand,
   durableWaitCommand,
@@ -50,10 +50,11 @@ import {
   historyPruneCommand,
   historyShowCommand,
   retryCommand,
-} from "./history";
-import { mcpCommand } from "./mcp";
-import { protectCommand } from "./protect";
-import { runsCommand } from "./runs";
+} from "./cli/history";
+import { cliRunFace, faceEnv } from "./cli/runFace";
+import { mcpCommand } from "./cli/mcp";
+import { protectCommand } from "./cli/protect";
+import { runsCommand } from "./cli/runs";
 
 const USAGE = `usage: odu <run|status|logs|attach|wait|rerun|cancel|runs|history|hosts|lease|release|dump|graph|protect|mcp> [args]
 
@@ -245,6 +246,10 @@ async function dispatch(argv: string[]): Promise<number> {
       if (values.progress !== undefined && values.progress !== "json") {
         throw new Error(`odu: unknown --progress format "${values.progress}"`);
       }
+      // THE FACE IS SUPPLIED HERE, and only here. The coordinator's default is
+      // silence — see `RunDeps.face` — so a terminal matrix, an NDJSON stream
+      // and a piped transition log are all this command's decision, not the
+      // engine's.
       return runCommand({
         selectors: positionals,
         platforms: values.platform ?? [],
@@ -254,7 +259,6 @@ async function dispatch(argv: string[]): Promise<number> {
         noStrict: values["no-strict"] ?? false,
         noSnapshot: values["no-snapshot"] ?? false,
         noPost: values["no-post"] ?? false,
-        progressJson: values.progress === "json",
         supersede: values.supersede ?? false,
         linger: values.linger ?? false,
         noWait: values["no-wait"] ?? false,
@@ -268,6 +272,11 @@ async function dispatch(argv: string[]): Promise<number> {
         ...(values["request-id"] === undefined
           ? {}
           : { requestId: values["request-id"] }),
+      }, {
+        face: cliRunFace({
+          ...faceEnv(),
+          progressJson: values.progress === "json",
+        }),
       });
     }
     case "status": {

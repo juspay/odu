@@ -14,7 +14,7 @@
  * pool claim/probe and lane CI share this resolution path.
  *
  * There is deliberately NO fallback either: a coordinator that carries no baked
- * flake is misbuilt (a raw `bun src/cli/main.ts`, or a non-flake `nix-build`),
+ * flake is misbuilt (a raw `bun src/main.ts`, or a non-flake `nix-build`),
  * and resolving the runner from the consumer's flake is exactly the silent
  * failure this indirection exists to remove. So we refuse loudly.
  */
@@ -63,7 +63,7 @@ export function resolveRunnerFlake(env: NodeJS.ProcessEnv): string {
     throw new Error(
       "odu: ODU_RUNNER_FLAKE is unset — the coordinator resolves the lane " +
         "runner from odu's own flake, baked onto the `odu` wrapper at build " +
-        "time. This binary carries none (a raw `bun src/cli/main.ts`, or a " +
+        "time. This binary carries none (a raw `bun src/main.ts`, or a " +
         "non-flake `nix-build`). Set ODU_RUNNER_FLAKE to an odu flake " +
         "(`github:juspay/odu`, or `git+file://$PWD` in an odu checkout).",
     );
@@ -100,7 +100,7 @@ export function resolveAgentBinaryCache(
         "— the coordinator prefetches the lane runner's closure from odu's own " +
         "binary cache, baked onto the `odu` wrapper at build time from " +
         "nix/binary-cache.nix. This binary carries none (a raw " +
-        "`bun src/cli/main.ts`, or a non-flake `nix-build`), and provisioning " +
+        "`bun src/main.ts`, or a non-flake `nix-build`), and provisioning " +
         "refuses to run cache-blind.",
     );
   }

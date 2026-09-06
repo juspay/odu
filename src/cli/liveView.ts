@@ -57,19 +57,21 @@ import { formatGoDuration } from "../common/duration";
 import {
   commitLabel,
   cellAt,
-  countsLine,
-  countsParts,
   operatorLine,
   defaultAttachId,
   matrixShape,
   OUTCOME_CELL,
   OUTCOME_MARK,
-  outcomeOf,
   recipeLabel,
   STATUS_CELL,
   stepFocus,
-  summarize,
 } from "./render";
+import {
+  countsLine,
+  countsParts,
+  outcomeOf,
+  summarize,
+} from "../common/verdict";
 import { stripAnsi } from "./ansi";
 import { LogView } from "./logView";
 

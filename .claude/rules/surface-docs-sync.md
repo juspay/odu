@@ -1,6 +1,6 @@
 ---
 paths:
-  - "src/cli/main.ts"
+  - "src/main.ts"
   - "src/cli/mcp.ts"
   - "packages/run-client/src/surface.ts"
   - "src/common/laneSurface.ts"
@@ -13,7 +13,7 @@ paths:
 odu's user-facing surface is documented in three places that drift silently if
 a code change forgets them. When you add or change any of:
 
-- a **CLI command or flag** (`src/cli/main.ts`),
+- a **CLI command or flag** (`src/main.ts`),
 - an **MCP tool or its inputs** (`src/mcp/*Tool.ts`, registered in `src/cli/mcp.ts`),
 - the **typed surface** procedures/cells/streams (`packages/run-client/src/surface.ts`
   for the fan-in a client dials, `src/common/laneSurface.ts` for the lane wire),

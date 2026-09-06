@@ -12,7 +12,7 @@
 
 import { parseArgs } from "node:util";
 import { serveOverStdio } from "@kolu/surface/peer-server";
-import { createLaneRunner } from "./runner";
+import { createLaneRunner } from "./runner/runner";
 
 const log = (msg: string): void => {
   process.stderr.write(`${msg}\n`);

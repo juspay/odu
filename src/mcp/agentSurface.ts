@@ -67,7 +67,7 @@ import {
   postingOf,
 } from "@odu/run-client/surface";
 import { subscribe } from "../common/effectEdge";
-import { rowsOf } from "../cli/render";
+import { rowsOf } from "../common/verdict";
 
 /**
  * The slice of the live A-client (`oduSurface`) this projection consumes.

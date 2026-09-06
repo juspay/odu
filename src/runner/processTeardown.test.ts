@@ -5,7 +5,7 @@
  * Without a signal handler the runner died by default disposition, its
  * `dispose()` never ran, and every `detached` recipe group reparented to
  * init — the production orphans (a 16h-old test fork worker at ppid 1 on
- * the coordinator box). This drives the real `main.ts --stdio` entrypoint
+ * the coordinator box). This drives the real `runner-main.ts --stdio` entrypoint
  * over real stdio framing and asserts the recipe tree dies with the runner.
  */
 
@@ -20,17 +20,17 @@ import { runUnary } from "../common/effectEdge";
 import { laneClientOver, laneSurface } from "../common/laneSurface";
 
 // The child is spawned with the very same Bun that runs this suite — no
-// launcher shim in node_modules/.bin to find, `bun src/runner/main.ts` is
+// launcher shim in node_modules/.bin to find, `bun src/runner-main.ts` is
 // the entrypoint.
 const BUN = process.execPath;
-const MAIN = join(process.cwd(), "src", "runner", "main.ts");
+const MAIN = join(process.cwd(), "src", "runner-main.ts");
 
 /** How long this LOCAL child may take to put its readiness banner on stdout.
  *
  * Deliberately NOT the ssh leg's 180s: that budget is the sum of a remote
  * daemon's convergence ceilings (cross-epoch takeover, socket rebind, probe
  * silence) plus network round-trips, and none of those exist here. This wait is
- * one Bun start, one module graph, one `createLaneRunner()` — and `main.ts`
+ * one Bun start, one module graph, one `createLaneRunner()` — and `runner-main.ts`
  * hands `serveOverStdio` no explicit transport, so the PROCESS is the agent and
  * the framework writes the banner before the first frame.
  *

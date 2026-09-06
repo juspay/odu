@@ -725,7 +725,7 @@ describe("the wait poll holds the process open", () => {
 
   /**
    * Run `body` as a standalone Bun process and report what it managed to say.
-   * The child is shaped like `src/cli/main.ts` — the work hangs off a promise
+   * The child is shaped like `src/main.ts` — the work hangs off a promise
    * chain, never a top-level await, because a pending top-level await is by
    * itself a reason for Bun to stay alive and would mask exactly the defect
    * under test.

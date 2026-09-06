@@ -59,24 +59,20 @@ import {
   runPhase,
 } from "@odu/run-client/surface";
 import { dialRun } from "@odu/run-client/dial";
-import { bold, dim, link } from "../cli/ansi";
 import {
-  countsLine,
   exitCode,
   NON_TERMINAL_STATUSES,
-  OUTCOME_COLOR,
-  OUTCOME_LABEL,
-  outcomeOf,
-  statusGlyph,
-  summarize,
-} from "../cli/render";
-import { formatGoDuration } from "../common/duration";
+} from "../common/verdict";
+import {
+  type MakeRunFace,
+  progressEvent,
+  SILENT_FACE,
+} from "../common/presentation";
 import { gitTopLevel } from "../common/git";
 import { appendIfOpen, createNodeLogSink } from "./nodeLogSink";
 import { createVerdictGate } from "./verdictGate";
 import { maxLaneResurrections } from "./laneResurrection";
 import type { TaskSpec } from "../common/spec";
-import { commitLabel, createDisplay, progressEvent } from "./display";
 import { laneTasks, loadJustPipeline, parseSelector } from "../just/ingest";
 import { asHostSlot, fanoutPools, loadHosts, shortHost } from "./hosts";
 import { type Lane, startLane } from "./lane";
@@ -143,18 +139,6 @@ import {
   type ShardTopology,
 } from "./shards";
 
-/** The bucket list and order `odu run`'s final summary has always printed.
- *  Kept explicit and zero-inclusive: the live faces drop empty buckets (a
- *  status bar has no room for `0 errored`), but this line is the run's durable
- *  verdict and is the kind of output people grep. */
-const VERDICT_BUCKETS = [
-  "ok",
-  "failed",
-  "errored",
-  "skipped",
-  "cancelled",
-] as const;
-
 const SETUP = SETUP_NAMEPATH;
 
 export interface RunArgs {
@@ -166,7 +150,6 @@ export interface RunArgs {
   noStrict: boolean;
   noSnapshot: boolean;
   noPost: boolean;
-  progressJson: boolean;
   /** Cancel a run already live in this checkout before starting, instead of
    *  refusing on the one-run lock — "stop this, run the fixed commit". */
   supersede: boolean;
@@ -366,6 +349,11 @@ export interface RunDeps {
   claimVenues?: typeof claimVenues;
   leaseBurstSlots?: typeof leaseBurstSlots;
   startLane?: typeof startLane;
+  /** How this run is watched. Absent is SILENCE, not "the terminal one": a
+   *  coordinator that has to reach for a renderer to run is a coordinator no
+   *  service can host. `src/main.ts` supplies the terminal face; a test
+   *  supplies nothing and reads the exit code. */
+  face?: MakeRunFace;
 }
 
 /** Status overlay `terminalizePlatformNodes` applies when a lane dies or is
@@ -569,25 +557,18 @@ async function orchestrate(
     runnerResolvers.set(platform, resolver);
     return resolver;
   };
-  // Where stdout points picks the face: NDJSON for the /do contract, an
-  // in-place live matrix on a TTY, transition lines + heartbeats for a pipe.
-  // The live face is the shared interactive view (same one `attach` paints):
-  // it pulls the focused node's log from this run's in-memory `tail`, and its
-  // keys drive `rerunNode` and `shutdown` — the source-agnostic seam. Keys are
-  // only live when stdin is a TTY (an output-only `run` keeps the matrix, no
-  // raw mode). `json`/`plain` ignore the live opts and keep the byte contract
-  // `/do` and kolu CI depend on — untouched.
-  const display = args.progressJson
-    ? createDisplay("json")
-    : process.stdout.isTTY === true
-      ? createDisplay("live", {
-          interactive: process.stdin.isTTY === true,
-          hookStderr: true,
-          openLog: (id) => logs.streamSource({ id }),
-          rerun: (id) => void rerunNode(id),
-          onQuit: () => shutdown(130),
-        })
-      : createDisplay("plain");
+  // The FACE, built by whoever started this run — see `common/presentation`.
+  // The engine hands over the seam an interactive face needs (the focused
+  // node's log, the rerun verb, what quitting costs) and learns nothing about
+  // what the face does with it: a terminal paints a matrix, a pipe emits
+  // NDJSON, a service face paints nothing. The default is silence, so a caller
+  // that wants only an exit code gets one without wiring a renderer.
+  const face = (deps.face ?? SILENT_FACE)({
+    openLog: (id) => logs.streamSource({ id }),
+    rerun: (id) => void rerunNode(id),
+    onQuit: () => shutdown(130),
+  });
+  const display = face.display;
   const info = (msg: string): void => {
     display.info(msg);
   };
@@ -3094,47 +3075,24 @@ async function orchestrate(
   // verdict cannot move this projection (juspay/odu#18).
   const verdictCode = (state: PipelineState): number => exitCode(state);
 
-  // The human verdict summary — foreground completion only, never mid-linger
-  // where the live display still owns the screen. Returns the exit code.
-  const printVerdict = (
+  /** Say how the run ended, and answer with its code.
+   *
+   *  The CODE is the engine's — `verdictCode` derives it from the same state
+   *  the face is handed — so a face cannot make a red run exit zero by
+   *  rendering it wrongly. What the face decides is only whether anything is
+   *  printed, and in what medium. */
+  const reportVerdict = (
     state: PipelineState,
     unposted: ReadonlyArray<UnpostedEntry> = [],
   ): number => {
-    const counts = summarize(state);
-    const shaLabel = commitLabel({ sha7, dirty: ctx.dirty });
-    const lines: string[] = [
-      dim(
-        `── ci run summary @ ${
-          commitUrl !== null ? link(shaLabel, commitUrl) : shaLabel
-        } ──`,
-      ),
-    ];
-    for (const id of state.order) {
-      const node = state.nodes[id];
-      if (node === undefined) continue;
-      const glyph = statusGlyph(node.status);
-      const dur =
-        node.durationMs !== null
-          ? ` ${dim(formatGoDuration(node.durationMs))}`
-          : "";
-      const logRef =
-        node.status === "failed" || node.status === "errored"
-          ? dim(`  ${logPathFor(sha7, id)}`)
-          : "";
-      lines.push(`  ${glyph} ${id.padEnd(44)} ${node.status}${dur}${logRef}`);
-    }
-    const code = verdictCode(state);
-    const debt = unpostedNote(unposted.length);
-    // The outcome taxonomy and the counts line both come from `render.ts` —
-    // this summary, the live header and the live status bar were three
-    // hand-rolled versions, and only this one knew about INCOMPLETE.
-    const outcome = outcomeOf(counts);
-    const label = bold(OUTCOME_COLOR[outcome](OUTCOME_LABEL[outcome]));
-    lines.push(
-      `${countsLine(counts, VERDICT_BUCKETS, true)} — ${label}${debt !== "" ? dim(debt) : ""}`,
-    );
-    process.stderr.write(`${lines.join("\n")}\n`);
-    return code;
+    face.verdict({
+      state,
+      sha7,
+      dirty: ctx.dirty,
+      commitUrl,
+      unpostedCount: unposted.length,
+    });
+    return verdictCode(state);
   };
 
   if (args.linger) {
@@ -3210,7 +3168,7 @@ async function orchestrate(
   if (!outcome.ok) {
     process.stderr.write(`${outcome.error.message}\n`);
   }
-  return printVerdict(finalState, unposted);
+  return reportVerdict(finalState, unposted);
 }
 
 /** Idle backstop for a `--linger` run: after the run drains, the coordinator

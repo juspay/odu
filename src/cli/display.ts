@@ -24,63 +24,43 @@
  * `printVerdict`, `attach` prints `verdictLine(state)` from `cli/render`.
  */
 
-import type { LiveOpts, LiveView } from "../cli/liveView";
+import type { LiveOpts, LiveView } from "./liveView";
 import {
   claimingText,
   commitLabel,
   laneText,
   operatorLine,
-} from "../cli/render";
+} from "./render";
 
-/** Re-exported from `cli/render`, where the cross-face projections live. */
+/** Re-exported from `./render`, where the cross-face projections live. */
 export { commitLabel };
 import { formatGoDuration } from "../common/duration";
-import { logPathFor, splitFanId } from "@odu/run-client/nodeId";
+import type {
+  Display,
+  ProgressEvent,
+} from "../common/presentation";
+import { progressEvent } from "../common/presentation";
 import {
   EMPTY_HEADER,
   type NodeState,
   type PipelineState,
-  type ProgressStatus,
   type RunHeader,
   runPhase,
   STATUS_META,
 } from "@odu/run-client/surface";
+
+/** The port this file implements, and the event it emits, both re-exported so
+ *  a face's consumers keep naming one module. What they ARE lives in
+ *  `src/common/presentation.ts` — the engine speaks that vocabulary and must
+ *  not reach in here to learn it. */
+export type { Display, ProgressEvent };
+export { progressEvent };
 
 /** The live face's host seam, declared beside the view that consumes it — one
  *  declaration, so a member added to it cannot reach only half the seam. */
 export type { LiveOpts };
 
 export type DisplayMode = "json" | "plain" | "live";
-
-export interface ProgressEvent {
-  node: string;
-  recipe: string;
-  platform: string;
-  status: ProgressStatus;
-  exit_code?: number;
-  log: string;
-}
-
-
-export interface Display {
-  /** Commit identity comes from `state`. The run-env does NOT: it arrives only
-   *  through {@link Display.setHeader}, before or after this call. */
-  start(state: PipelineState): void;
-  /** The run environment, at any time. The ONE way a header reaches a face —
-   *  the run header is published twice (once while the venue claim is in
-   *  flight, once with the resolved lane→host map, juspay/odu#84), so a second
-   *  entry point would only force each implementation to arbitrate between two
-   *  headers and get "which one is newer" right by hand. */
-  setHeader(header: RunHeader): void;
-  /** Latest fan-in state — live repaints from it, plain heartbeats off it. */
-  update(state: PipelineState): void;
-  /** A node crossed a status boundary (the diff-driven event feed). */
-  transition(event: ProgressEvent, node: NodeState): void;
-  /** Operator-facing message (post failures, signals, …). */
-  info(msg: string): void;
-  /** Stop timers, restore the terminal, paint the final frame. */
-  stop(state?: PipelineState): void;
-}
 
 export function createDisplay(mode: DisplayMode, live?: LiveOpts): Display {
   if (mode === "json") return new JsonDisplay();
@@ -91,30 +71,6 @@ export function createDisplay(mode: DisplayMode, live?: LiveOpts): Display {
   return new LiveDisplay(live);
 }
 
-/** Project a node's state into the `ProgressEvent` the json/plain faces emit.
- *  `run` (its own run `sha7`) and `attach` (the surface's `sha7`) both build
- *  events through this one function, so the two faces emit a single
- *  byte-identical `--progress json` / plain contract instead of each
- *  hand-rolling the projection and drifting (the bug in juspay/odu#4).
- *  `null` for a status that emits nothing (`pending`, whose `progress` mapping
- *  is `null`) — the caller skips it. */
-export function progressEvent(
-  sha7: string,
-  id: string,
-  node: NodeState,
-): ProgressEvent | null {
-  const status = STATUS_META[node.status].progress;
-  if (status === null) return null;
-  const { namepath, platform } = splitFanId(id);
-  return {
-    node: id,
-    recipe: namepath,
-    platform,
-    status,
-    ...(node.exitCode !== null ? { exit_code: node.exitCode } : {}),
-    log: logPathFor(sha7, id),
-  };
-}
 // ── json ────────────────────────────────────────────────────────────────────
 
 class JsonDisplay implements Display {

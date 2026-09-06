@@ -65,7 +65,6 @@ const runArgs = (): RunArgs => ({
   noStrict: true,
   noSnapshot: true,
   noPost: true,
-  progressJson: false,
   supersede: false,
   linger: false,
   noWait: false,

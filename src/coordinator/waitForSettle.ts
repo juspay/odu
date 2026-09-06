@@ -14,7 +14,7 @@ import { isDeadTransportError } from "@kolu/surface/errors";
 import type { OwedStatus } from "@odu/run-client/surface";
 import { SOCKET_PATH } from "@odu/run-client/dial";
 import { deadRun, describeDeadRun } from "@odu/run-client/deadRun";
-import { agentSummary, NON_TERMINAL_STATUSES } from "../cli/render";
+import { agentSummary, NON_TERMINAL_STATUSES } from "../common/verdict";
 import { subscribe } from "../common/effectEdge";
 import { gitRunContext } from "../common/git";
 import {

@@ -18,13 +18,15 @@ import {
   type PipelineState,
 } from "@odu/run-client/surface";
 import {
-  countsLine,
-  exitCode,
   OUTCOME_MARK,
-  outcomeOf,
-  summarize,
   verdictLine,
 } from "./cli/render";
+import {
+  countsLine,
+  exitCode,
+  outcomeOf,
+  summarize,
+} from "./common/verdict";
 import type { TaskSpec } from "./common/spec";
 import {
   type LaneClient,

@@ -38,7 +38,8 @@ import {
   transitiveDependents,
 } from "../common/nodeId";
 import { cancelNodeOrPlatform, cancelRun } from "../coordinator/cancel";
-import { createDisplay, progressEvent } from "../coordinator/display";
+import { createDisplay } from "./display";
+import { progressEvent } from "../common/presentation";
 import {
   dialRunOrExit,
   feedDroppedMessage,
@@ -51,13 +52,15 @@ import { agentReaderForSocket } from "../mcp/agentSurface";
 import { yellow } from "./ansi";
 import {
   claimingText,
-  exitCode,
   laneText,
-  nodeRow,
   statusGlyph,
-  summarize,
   verdictLine,
 } from "./render";
+import {
+  exitCode,
+  nodeRow,
+  summarize,
+} from "../common/verdict";
 
 export async function firstSnapshot(client: OduClient): Promise<PipelineState> {
   const state = await firstFrame(client.surface.nodes.get(undefined));

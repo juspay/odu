@@ -119,7 +119,7 @@ let
     } ''
     mkdir -p $out/bin
     makeWrapper ${pkgs.bun}/bin/bun $out/bin/odu-runner \
-      --add-flags "${base}/src/runner/main.ts" \
+      --add-flags "${base}/src/runner-main.ts" \
       --prefix PATH : ${pkgs.lib.makeBinPath [
         pkgs.bun
         pkgs.git
@@ -142,7 +142,7 @@ let
     # being a hard pin, so a test pointing $ODU_GH_BIN at a stand-in got the
     # real `gh` — and the real GitHub — without a word.
     makeWrapper ${pkgs.bun}/bin/bun $out/bin/odu \
-      --add-flags "${base}/src/cli/main.ts" \
+      --add-flags "${base}/src/main.ts" \
       --set-default ODU_GH_BIN "${pkgs.gh}/bin/gh" \
       --set ODU_SELF "$out/bin/odu" \
       --set ODU_AGENT_SUBSTITUTERS "${pkgs.lib.concatStringsSep " " binaryCache.substituters}" \
