@@ -96,7 +96,10 @@ let
             ${pkgs.kolu-surface-remote} @kolu/surface-remote \
             ${pkgs.kolu-shell-quote} @kolu/shell-quote \
             ${pkgs.kolu-surface-map} @kolu/surface-map \
-            ${pkgs.kolu-log} @kolu/log
+            ${pkgs.kolu-log} @kolu/log \
+            ${pkgs.kolu-surface-daemon-supervisor} @kolu/surface-daemon-supervisor \
+            ${pkgs.kolu-surface-daemon} @kolu/surface-daemon \
+            ${pkgs.osfacts-client} osfacts-client
         '';
 
         installPhase = ''

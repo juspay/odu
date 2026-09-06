@@ -188,3 +188,29 @@ export function subscribe<T>(
     },
   };
 }
+
+/**
+ * Run an effect that is issued for its SIDE EFFECT and awaited by nobody.
+ *
+ * The one shape the other three do not cover, and it arrived with kolu's
+ * `survivableSpawnDriver`: a spawn is a description until it is run, the fork
+ * it performs is synchronous, and what a caller wants back is the child — which
+ * it already captured at the spawn seam — not a promise. `runFork` rather than
+ * `runSync` because the effect settles on the child's `spawn`/`error` event,
+ * which node emits on the next tick; `runSync` would throw on the suspension.
+ *
+ * It is here rather than at the call site for the reason the whole module
+ * exists: a second `Effect.run*` in the tree is a second boundary, and
+ * `effectEdges.test.ts` enumerates them precisely so that stays a decision
+ * somebody made rather than one that accumulated. It caught this one.
+ *
+ * Failures are NOT swallowed — they land on the fiber, and the driver's own
+ * contract is that a launch failure (ENOENT, EACCES, a fork that could not) is
+ * reported there rather than thrown into this process. A caller that needs to
+ * know a coordinator failed to start learns it from the socket that never
+ * appears, which is the same fact by the only route that also covers a child
+ * that started and then died.
+ */
+export function runDetached(effect: Effect.Effect<void, Error>): void {
+  Effect.runFork(effect);
+}

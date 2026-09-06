@@ -34,43 +34,41 @@
  * its documented behaviour; this escape is offered to the launcher and is
  * opt-outable, so the two are not silently merged.
  *
- * WHY THIS IS NOT `@kolu/surface-daemon-supervisor`. Kolu ships this exact
- * mechanism — `survivableSpawnDriver` in that package's `driver.ts`, whose own
- * header names "the odu CLI / odu-web next" as its second tenant. Every
- * decision below is taken FROM it rather than re-derived: the `INVOCATION_ID`
- * gate between the two branches, per-spawn unique `--unit` names because a
- * dead unit lingers loaded and refuses a reused one, `--collect` to GC it, an
- * absolute binary path because a transient unit's PATH is minimal, `--setenv`
- * per forwarded var because a transient unit starts from systemd's
- * environment rather than ours, a file for a detaching child's stderr because
- * nobody holds it, and — the one that cost the most to learn here — the split
- * between a launch being ACCEPTED and a service being READY.
+ * THE MECHANISM IS KOLU'S, NOT ODU'S. The `systemd-run` incantation below is
+ * `survivableSpawnDriver` from `@kolu/surface-daemon-supervisor`, whose own
+ * header names "the odu CLI / odu-web next" as its second tenant. odu no longer
+ * assembles that argv: the `INVOCATION_ID` gate, per-spawn unique `--unit`
+ * names (a dead unit lingers loaded and refuses a reused one), `--collect`,
+ * `--setenv` per forwarded var, `detached` + `unref` — all of it lives upstream,
+ * and `spawn.test.ts` asserts odu's properties by running the real driver over
+ * odu's real config with the fork captured.
  *
- * It is not IMPORTED for two reasons, and only the first is temporary:
+ * Getting there was packaging work, and it is worth saying what it was, because
+ * an earlier revision of this file claimed the driver had "no supported export"
+ * and that was simply wrong — it is re-exported from the package's `.` entry.
+ * The real obstacle was the dependency closure: hydration is per-PACKAGE, so
+ * the supervisor's manifest brings `@kolu/surface-daemon` and `osfacts-client`
+ * whether or not odu's code touches them, and `osfacts-client` is GITIGNORED in
+ * kolu — grafted at build time from a separate upstream (juspay/osfacts), so no
+ * revision of juspay/kolu contains it and no pin bump could have supplied it.
+ * odu now performs the same graft, which is why `npins/sources.json` carries a
+ * second pin. Measured before and after: importing the entry point failed with
+ * 15 unresolved imports across those two packages, and resolves cleanly now.
  *
- *   - Hydration is per-package, and that package's manifest declares
- *     `osfacts-client: workspace:*`, which is absent from odu's pinned kolu
- *     revision (f3ba639). The directory cannot be satisfied as-is. `driver.ts`
- *     alone imports nothing but `node:*` and `effect`, but it is not on the
- *     export map, so there is no supported way to take only it.
- *   - The `.` entry is a daemon-ENDPOINT state machine — a rendezvous socket a
- *     per-host daemon is expected to be holding, with squatter recovery, gate
- *     identity, and contract-skew handling for the case where somebody else
- *     already listens there. An odu coordinator is not that. It is per-RUN, its
- *     socket is absent for most of any checkout's life (`@odu/run-client`'s
- *     README states that as the design), and a second process on the same
- *     socket is prevented by the ownership fence in `@odu/run-history`, not by
- *     probing who holds it. Adopting the endpoint would mean answering
- *     questions this lifecycle does not ask.
+ * WHAT ODU STILL OWNS, and why it is not duplication:
  *
- * The first reason dissolves when the pin carries `osfacts-client`; the second
- * dissolves for `odu web`/`odu serve`, which IS a long-lived daemon behind a
- * rendezvous socket and is the tenant kolu's header actually names. So PR 2
- * inherits a decision, not a fork: when it stands that daemon up, it should
- * hydrate the supervisor and drive it, and this module's systemd branch should
- * become a call into `survivableSpawnDriver` rather than a second copy of its
- * argv. What is here is deliberately the smaller thing — one plan function and
- * one spawn — so that replacement is a deletion.
+ *   - **The DECISION.** {@link survivableSpawnPlan} is richer than the driver's
+ *     `INVOCATION_ID` check — the `ODU_NO_SYSTEMD_RUN` opt-out, and the
+ *     session-bus probe that lets a launcher say out loud that the run WILL die
+ *     with its unit. The driver is TOLD the answer (via `fromSource`) rather
+ *     than left to re-derive it, so there is one decision, not two that agree
+ *     by luck.
+ *   - **A working directory, and stdout.** A run is a function of its checkout
+ *     and a coordinator NARRATES; a surface daemon does neither, so the driver
+ *     offers no `cwd` and captures only stderr. Both are supplied at the
+ *     `spawnProcess` seam the driver publishes — see {@link oduSpawn}.
+ *   - **Readiness.** The driver's contract ends at launch ACCEPTANCE, which is
+ *     exactly the split this file needs; waiting for the socket is odu's.
  *
  * HONEST ABOUT WHAT IS MEASURED. The detached branch is exercised by
  * `packages/cli/src/mcp/spawnSurvival.test.ts` against the real runtime and the real spawn
@@ -83,9 +81,15 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { closeSync, mkdirSync, openSync } from "node:fs";
+import {
+  type DaemonSpawnConfig,
+  type SpawnDriverDeps,
+  survivableSpawnDriver,
+} from "@kolu/surface-daemon-supervisor";
 import { readFileSlice } from "@odu/run-history/store";
 import { dirname } from "node:path";
 import { dialRun } from "@odu/run-client/dial";
+import { runDetached } from "../common/effectEdge";
 
 /** The argv prefix that re-invokes the odu CLI. The nix wrapper bakes
  *  `ODU_SELF` to its own store path; in a dev checkout we re-exec the entry
@@ -131,8 +135,6 @@ export function coordinatorSpawnSpec(checkout: string): {
 export interface SpawnPlan {
   mechanism: "systemd-run" | "detached";
   reason: string;
-  /** The argv to actually execute, given the odu argv. */
-  argv: (oduArgv: readonly string[]) => string[];
   /**
    * Does the spawned process EXITING mean the coordinator died?
    *
@@ -194,7 +196,6 @@ export function survivableSpawnPlan(
   const detached = (reason: string): SpawnPlan => ({
     mechanism: "detached",
     reason,
-    argv: (oduArgv) => [...oduArgv],
     exitIsDeath: true,
     describeExit: (code) => `the coordinator exited ${code} before serving a socket`,
   });
@@ -230,25 +231,6 @@ export function survivableSpawnPlan(
   return {
     mechanism: "systemd-run",
     reason: `running under a systemd unit; starting the coordinator as the transient user service ${unitName}`,
-    argv: (oduArgv) => [
-      "systemd-run",
-      "--user",
-      // Reap the unit's own bookkeeping when it exits, so a machine that runs
-      // a hundred CI runs does not accumulate a hundred failed unit stubs.
-      "--collect",
-      // Inherit the launcher's cwd — the run is a function of its checkout.
-      "--same-dir",
-      `--unit=${unitName}`,
-      "--quiet",
-      // CARRY THE ENVIRONMENT ACROSS. A transient unit starts from the user
-      // manager's environment, not from ours, so everything that tells odu
-      // where to look — the hosts file, the state root, the flake the lane
-      // runner comes from — is simply absent unless it is named. A coordinator
-      // that starts with none of them is not a coordinator that started.
-      ...forwardedEnv(env).flatMap((pair) => ["--setenv", pair]),
-      "--",
-      ...oduArgv,
-    ],
     // The submitter's exit is not the run's. See `exitIsDeath`.
     exitIsDeath: false,
     describeExit: (code) =>
@@ -372,6 +354,115 @@ export async function waitForReadiness(
   return pollUntilSocketOrExit(() => socketAnswers(socketPath), give);
 }
 
+/**
+ * The four values odu supplies to kolu's mechanism — `{binPath, args, env,
+ * unitPrefix}` — plus the launch-mode gate.
+ *
+ * Exported because this is the whole of odu's contribution to how a coordinator
+ * is started, and it is what the suite can pin on a machine with no systemd:
+ * hand it to `survivableSpawnDriver` with a capturing `spawnProcess` and the
+ * argv that would have been executed is observable without a user manager.
+ *
+ * `fromSource` is the launch-mode gate, and passing it is how one decision
+ * stays one decision. odu's own gates are richer than the driver's
+ * `INVOCATION_ID` check — the `ODU_NO_SYSTEMD_RUN` opt-out, and the session-bus
+ * probe that lets a launcher say out loud that the run WILL die with its unit —
+ * so {@link survivableSpawnPlan} decides, and the driver is TOLD rather than
+ * left to re-derive and hoped to agree. `inheritParentEnv` is true because an
+ * odu coordinator is launched from a developer's shell or a CI container and
+ * genuinely needs that environment; a surface daemon is the opposite case, and
+ * must not inherit an orchestrator's ambient identity.
+ */
+export function coordinatorSpawnConfig(
+  oduArgv: readonly string[],
+  env: SpawnEnv,
+  plan: SpawnPlan,
+  unitName: string,
+): DaemonSpawnConfig {
+  const [binPath, ...args] = oduArgv;
+  if (binPath === undefined) throw new Error("odu: empty coordinator argv");
+  return {
+    binPath,
+    args,
+    // On the systemd branch this is the `--setenv` overlay, which is what it
+    // must be: a transient unit starts from the user manager's environment, so
+    // everything telling odu where to look — the hosts file, the state root,
+    // the lane runner's flake — is absent unless it is named. The detached
+    // branch never reads it (`inheritParentEnv` carries the real environment).
+    env: Object.fromEntries(
+      forwardedEnv(env).map((pair) => {
+        const eq = pair.indexOf("=");
+        return [pair.slice(0, eq), pair.slice(eq + 1)];
+      }),
+    ),
+    unitPrefix: unitName,
+    ...(plan.mechanism === "detached"
+      ? { fromSource: { inheritParentEnv: true } as const }
+      : {}),
+  };
+}
+
+/**
+ * The spawn seam odu hands kolu's driver, and the three things it supplies that
+ * a surface daemon does not need.
+ *
+ * The driver owns the MECHANISM — which branch this host takes, the
+ * `systemd-run` argv, unique `--unit` names, `--collect`, `--setenv` per
+ * forwarded var, `detached` + `unref`. odu owns none of that any more. What it
+ * still owns is what makes a CI coordinator different from a daemon:
+ *
+ *   - **A working directory.** A run is a function of its checkout, so the
+ *     coordinator must start there. A daemon has no such tie and the driver
+ *     therefore takes no `cwd`, so the detached branch gets one here and the
+ *     systemd branch gets `--same-dir` inserted into the argv the driver built.
+ *   - **Stdout, not only stderr.** The driver wires a crash-catcher for stderr
+ *     because that is where a daemon's death appears. A coordinator NARRATES —
+ *     the venue claim, each lane's provisioning, every node transition — on
+ *     stdout, and that narration is `runs/<runId>/coordinator.log`, the durable
+ *     artifact a startup failure is read from. Both streams go to the one fd.
+ *   - **The child handle.** The driver's contract ends at launch acceptance and
+ *     hands back no process. odu's readiness wait needs the exit (see
+ *     `SpawnPlan.exitIsDeath`), and its refusal message needs the log tail.
+ *
+ * `--same-dir` is INSERTED rather than re-spelled, and the position is
+ * asserted: if a future driver stops leading with `--user`, this throws instead
+ * of silently starting a coordinator in the wrong directory — which would fail
+ * far away, as a run that cannot find its own justfile.
+ */
+function oduSpawn(
+  checkout: string,
+  logFd: number,
+  plan: SpawnPlan,
+  keep: (child: ChildProcess) => void,
+): NonNullable<SpawnDriverDeps["spawnProcess"]> {
+  return (command, args, options) => {
+    const amended =
+      plan.mechanism === "systemd-run" ? withSameDir(command, args) : args;
+    const child = spawn(command, amended, {
+      ...options,
+      cwd: checkout,
+      // Both streams, always — overriding the driver's stderr-only shape.
+      stdio: ["ignore", logFd, logFd],
+    });
+    keep(child);
+    return child;
+  };
+}
+
+/** Insert `--same-dir` into a `systemd-run` argv the driver assembled, right
+ *  after the `--user` it always leads with. Exported so the shape assertion is
+ *  a test rather than a comment: this is the one place odu depends on the
+ *  INTERNAL layout of an argv it did not build. */
+export function withSameDir(command: string, args: readonly string[]): string[] {
+  if (command !== "systemd-run" || args[0] !== "--user") {
+    throw new Error(
+      `odu: kolu's systemd branch changed shape (${command} ${args[0]}) — ` +
+        "the coordinator's working directory is no longer being set",
+    );
+  }
+  return ["--user", "--same-dir", ...args.slice(1)];
+}
+
 /** Spawned coordinators, kept referenced so V8 does not collect the handle
  *  mid-run (unref'd handles still fire their `exit` in this process).
  *  Deliberately never reaped: a coordinator outlives a plain exit of whatever
@@ -421,39 +512,43 @@ export function spawnCoordinator(
   platform: NodeJS.Platform = process.platform,
 ): SpawnedCoordinator {
   const plan = survivableSpawnPlan(env, platform, unitName);
-  const argv = plan.argv(oduArgv);
-  const [cmd, ...rest] = argv;
-  if (cmd === undefined) throw new Error("odu: empty coordinator argv");
   mkdirSync(dirname(logPath), { recursive: true });
   // Append: a takeover re-launching into the same run id adds to the account
   // rather than erasing the one that explains why it had to.
   const fd = openSync(logPath, "a");
-  let child: ChildProcess;
+  let child: ChildProcess | undefined;
   try {
-    child = spawn(cmd, rest, {
-      cwd: checkout,
-      stdio: ["ignore", fd, fd],
-      env: process.env,
-      detached: true,
-    });
+    runDetached(
+      survivableSpawnDriver(coordinatorSpawnConfig(oduArgv, env, plan, unitName), {
+        env,
+        // The seam the driver publishes, used for the three things odu needs
+        // that a daemon does not. See {@link oduSpawn}.
+        spawnProcess: oduSpawn(checkout, fd, plan, (spawned) => {
+          child = spawned;
+        }),
+      }).spawn,
+    );
   } finally {
     // The child holds its own duplicate; keeping ours open would pin the file
     // in this process for as long as the launcher lives.
     closeSync(fd);
   }
-  child.unref();
-  liveRuns.add(child);
+  const spawned: ChildProcess | undefined = child;
+  if (spawned === undefined) {
+    throw new Error("odu: coordinator spawn produced no child");
+  }
+  liveRuns.add(spawned);
   const onExit = new Promise<number>((resolve) => {
-    child.on("exit", (code) => {
-      liveRuns.delete(child);
+    spawned.on("exit", (code) => {
+      liveRuns.delete(spawned);
       resolve(code ?? -1);
     });
-    child.on("error", () => {
-      liveRuns.delete(child);
+    spawned.on("error", () => {
+      liveRuns.delete(spawned);
       resolve(-1);
     });
   });
-  return { child, plan, onExit, stderrTail: () => tailOf(logPath) };
+  return { child: spawned, plan, onExit, stderrTail: () => tailOf(logPath) };
 }
 
 /**

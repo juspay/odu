@@ -38,6 +38,12 @@ const HYDRATED = new Set<string>([
   "@kolu/shell-quote",
   "@kolu/surface",
   "@kolu/surface-remote",
+  // The survivable-spawn spine (`coordinator/spawn.ts`). Its own manifest
+  // drags `@kolu/surface-daemon` and `osfacts-client` along, and the second is
+  // grafted from a SEPARATE upstream (juspay/osfacts) because kolu gitignores
+  // it — see nix/overlay.nix. Neither is imported by odu; both are hydrated
+  // because hydration is per-package.
+  "@kolu/surface-daemon-supervisor",
 ]);
 
 /** Test-only imports — the harness, not the shipped closure. */
