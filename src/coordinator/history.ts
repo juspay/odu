@@ -88,6 +88,9 @@ export interface RunHistoryInit {
   parentRunId?: string | null;
   /** The caller's idempotency key, when the launch carried one. */
   requestId?: string | null;
+  /** The id this run must publish under, when a launcher pre-minted one.
+   *  Absent means mint — see `./launcher` on why a launcher does not. */
+  runId?: string;
   /** Injected for tests; production reads the real catalog root. */
   catalogRoot?: string;
   now?: () => number;
@@ -192,7 +195,7 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
   try {
     const registered = registerRun(
       {
-        runId: mintRunId(now()),
+        runId: init.runId ?? mintRunId(now()),
         repo: init.repo,
         sha: init.sha,
         seq: init.seq,

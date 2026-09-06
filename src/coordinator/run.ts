@@ -176,6 +176,23 @@ export interface RunArgs {
   /** When every host in a platform's pool is busy, fail immediately instead
    *  of waiting in line for a free machine (juspay/odu#54). */
   noWait: boolean;
+  /** The commit this run claims to be about.
+   *
+   *  A LAUNCHER's guard, and the whole of "never substitute current HEAD". A
+   *  replay is started from a recorded run's inputs, and between the record
+   *  and the launch the checkout may have moved — so the child is TOLD what it
+   *  is supposed to be running and refuses if it is not. Absent for a run
+   *  somebody typed: HEAD is then, by definition, what they meant. */
+  expectedSha?: string;
+  /** The catalog id this run must publish under, minted by whoever launched
+   *  it. Absent means mint one — the ordinary path. See `./launcher` on why a
+   *  launcher pre-mints. */
+  runId?: string;
+  /** The run this one replays, for a recovery launch. */
+  parentRunId?: string;
+  /** The launcher's idempotency key, recorded on the manifest so a receipt and
+   *  a run can be matched up after the fact. */
+  requestId?: string;
 }
 
 /**
@@ -310,6 +327,18 @@ export function applyInterruptStopWork(
   if (phase === "after-settle" || exclusivityLost) stop();
 }
 
+/** Do two commit spellings name the same commit? A prefix match either way,
+ *  case-insensitive, so a 7-char short sha and a full 40-char one both
+ *  satisfy an expectation — the same rule `wait_for_settle`'s `expected_sha`
+ *  already uses, so a caller does not learn two. An empty side never matches:
+ *  a missing sha must not silently satisfy an expectation. */
+export function sameCommit(observed: string, expected: string): boolean {
+  if (observed === "" || expected === "") return false;
+  const o = observed.toLowerCase();
+  const e = expected.toLowerCase();
+  return o.startsWith(e) || e.startsWith(o);
+}
+
 function git(repo: string, args: string[]): string {
   const result = spawnSync("git", args, { cwd: repo, encoding: "utf-8" });
   if (result.status !== 0) {
@@ -386,6 +415,20 @@ export async function runCommand(
 
   const sha = git(repoRoot, ["rev-parse", "HEAD"]);
   const sha7 = sha.slice(0, 7);
+
+  // A launcher told us which commit this run is supposed to be about. REFUSE
+  // rather than run the one that is here: a replay of a recorded run that
+  // quietly ran a different commit would be the single most misleading thing
+  // this program could do — the verdict would be about work nobody asked for,
+  // under a run id somebody is already holding.
+  if (args.expectedSha !== undefined && !sameCommit(sha, args.expectedSha)) {
+    process.stderr.write(
+      `odu: this checkout is at ${sha7}, not ${args.expectedSha.slice(0, 7)} — ` +
+        "refusing to run a different commit than the one asked for.\n" +
+        `Check out ${args.expectedSha.slice(0, 7)} in ${repoRoot} and try again.\n`,
+    );
+    return 1;
+  }
 
   // ── HEAD pin: the run sees the commit, never the live tree ──
   let snapshotDir: string | null = null;
@@ -714,6 +757,9 @@ async function orchestrate(
     runnerFlake,
     oduVersion: ODU_VERSION,
     endpoint: socketPath,
+    ...(args.runId === undefined ? {} : { runId: args.runId }),
+    ...(args.parentRunId === undefined ? {} : { parentRunId: args.parentRunId }),
+    ...(args.requestId === undefined ? {} : { requestId: args.requestId }),
   });
   // On stderr (every face's `info` writes there), so the NDJSON stdout contract
   // `--progress json` promises is untouched. This one line is how an operator

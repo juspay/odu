@@ -30,7 +30,13 @@ import { dialRun, SOCKET_PATH } from "@odu/run-client/dial";
 import { deadRun, describeDeadRun } from "@odu/run-client/deadRun";
 import { firstFrame, runUnary, subscribe } from "../common/effectEdge";
 import { formatGoDuration } from "../common/duration";
-import { parseAtPlatform, transitiveDependents } from "../common/nodeId";
+import {
+  matchNodeIds,
+  minimalRerunRoots,
+  resolveNodeId,
+  resolveRerunTargets,
+  transitiveDependents,
+} from "../common/nodeId";
 import { cancelNodeOrPlatform, cancelRun } from "../coordinator/cancel";
 import { createDisplay, progressEvent } from "../coordinator/display";
 import {
@@ -78,30 +84,6 @@ export async function headerSnapshot(client: OduClient): Promise<RunHeader> {
     throw new Error("odu: coordinator closed before sending header");
   }
   return header;
-}
-
-/** All live node ids matching a CLI token: exact id, `::token` / `::token@`
- *  suffix-ish forms, or full namepath. Shared by unique resolve (`logs`) and
- *  multi-match expand (`rerun` recipe-wide). */
-export function matchNodeIds(state: PipelineState, token: string): string[] {
-  if (state.nodes[token] !== undefined) return [token];
-  return state.order.filter((id) => {
-    if (id === token) return true;
-    if (id.endsWith(`::${token}`) || id.includes(`::${token}@`)) return true;
-    return splitFanId(id).namepath === token;
-  });
-}
-
-/** Resolve a node argument against the live state: exact id, or unique
- *  suffix-ish match (`e2e@x86_64-linux` ≡ `ci::e2e@x86_64-linux`). */
-export function resolveNodeId(state: PipelineState, token: string): string {
-  const matches = matchNodeIds(state, token);
-  if (matches.length === 1 && matches[0] !== undefined) return matches[0];
-  throw new Error(
-    matches.length === 0
-      ? `odu: no node matches "${token}" (try: ${state.order.join(", ")})`
-      : `odu: "${token}" is ambiguous (${matches.join(", ")})`,
-  );
 }
 
 /** When this run started provisioning: the earliest `_ci-setup@<platform>` that
@@ -603,68 +585,6 @@ export async function waitCommand(opts: WaitCommandOpts): Promise<number> {
     }
     throw err;
   }
-}
-
-/** Expand a rerun selector against live state into fan-in node ids:
- *  - `ci::unit@plat` — one node (exact id, or the unique `resolveNodeId` match)
- *  - `@plat` — recipe nodes on that platform lane (not `_ci-setup`)
- *  - `unit` / `ci::unit` — that recipe on every lane (multi-match is the point)
- *
- *  Mirrors `odu cancel`'s node / `@platform` sugar and adds the bare-recipe
- *  form cancel doesn't need (cancel has `lane.cancel`; rerun is only per-node). */
-export function resolveRerunTargets(
-  state: PipelineState,
-  selector: string,
-): string[] {
-  const platform = parseAtPlatform(selector);
-  if (platform !== null) {
-    // Recipe nodes on the lane only — not `_ci-setup@plat` (see isSetupNode).
-    const ids = state.order.filter(
-      (id) => onPlatform(id, platform) && !isSetupNode(id),
-    );
-    if (ids.length === 0) {
-      throw new Error(`odu: no nodes on platform "${platform}"`);
-    }
-    return ids;
-  }
-  if (selector.startsWith("@")) {
-    throw new Error(
-      `odu: not a node id, @platform, or recipe: ${selector}`,
-    );
-  }
-
-  // Multi-match is intentional for recipe-wide rerun — not an ambiguity error.
-  const matches = matchNodeIds(state, selector);
-  if (matches.length === 0) {
-    throw new Error(
-      `odu: no node matches "${selector}" (try: ${state.order.join(", ")})`,
-    );
-  }
-  return matches;
-}
-
-/** Collapse multi-target rerun to dependency-minimal roots so a dependent that
- *  is already in another selected root's transitive `needs` closure is not
- *  issued its own `node.rerun` (each call resets id + dependents via the same
- *  `transitiveDependents` rule the runner uses). Closures are computed once
- *  per target. */
-export function minimalRerunRoots(
-  state: PipelineState,
-  targets: string[],
-): string[] {
-  const needsOf = (id: string): readonly string[] =>
-    state.nodes[id]?.needs ?? [];
-  const coveredBy = new Map<string, Set<string>>();
-  for (const t of targets) {
-    coveredBy.set(t, transitiveDependents(state.order, needsOf, t));
-  }
-  return targets.filter((id) => {
-    for (const other of targets) {
-      if (other === id) continue;
-      if (coveredBy.get(other)?.has(id) === true) return false;
-    }
-    return true;
-  });
 }
 
 /** Format `odu: reran …` including dependents the runner will also reset. */

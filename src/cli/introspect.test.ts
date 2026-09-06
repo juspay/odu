@@ -33,12 +33,14 @@ import {
   attachStream,
   logStream,
   headerSnapshot,
-  minimalRerunRoots,
   rerunCommand,
-  resolveRerunTargets,
   statusCommand,
   waitCommand,
 } from "./introspect";
+// The selector folds moved down to the domain (`src/common/nodeId.ts`) when
+// the retry policy started asking the same question the CLI does; the cases
+// below are about the folds, so they follow them rather than the face.
+import { minimalRerunRoots, resolveRerunTargets } from "../common/nodeId";
 
 type Row = [
   id: string,

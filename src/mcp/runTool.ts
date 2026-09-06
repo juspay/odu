@@ -59,6 +59,23 @@ import {
   waitForRunLockFree,
 } from "../coordinator/checkoutLock";
 import { checkoutField, checkoutOf } from "./checkout";
+import {
+  coordinatorSpawnSpec,
+  defaultWaitForSocket,
+  oduSelfArgv,
+  pollUntilSocketOrExit,
+} from "../coordinator/spawn";
+
+// The spawn primitives live with the coordinator now (`../coordinator/spawn`),
+// because the native launcher a finalized retry goes through needs the same
+// ones and the arrow must not run from the engine into this MCP face.
+// Re-exported here so the suites that pin this tool's spawn contract keep
+// naming the module whose behaviour they are about.
+export {
+  coordinatorSpawnSpec,
+  oduSelfArgv,
+  pollUntilSocketOrExit,
+};
 
 export const runInput = Schema.Struct({
   checkout: checkoutField,
@@ -141,20 +158,6 @@ function clearedSentence(dead: DeadRun): string {
   );
 }
 
-/** The argv prefix that re-invokes the odu CLI. The nix wrapper bakes
- *  `ODU_SELF` to its own store path; in a dev checkout we re-exec the entry
- *  through the very bun that is running us (`process.execPath`), so the child
- *  gets this exact runtime rather than whatever a bare `bun` on its PATH
- *  resolves to. */
-export function oduSelfArgv(): string[] {
-  const self = process.env.ODU_SELF;
-  if (self !== undefined && self !== "") return [self];
-  const entry = process.argv[1];
-  return entry !== undefined
-    ? [process.execPath, entry]
-    : [process.execPath];
-}
-
 function runArgsFrom(input: RunInput): string[] {
   const args = ["run", ...(input.selectors ?? [])];
   for (const p of input.platforms ?? []) args.push("--platform", p);
@@ -200,76 +203,6 @@ export interface SpawnDeps {
     socketPath: string,
     exited: Promise<unknown>,
   ) => Promise<boolean>;
-}
-
-/** The spawn options that make a coordinator outlive its LAUNCHER'S plain
- *  exit: its own process group (`detached`) so no signal addressed to the
- *  server ever reaches it by group, and pipes for stdout/stderr so this
- *  server tees the durable run log while it lives — pipes whose death the
- *  bun runtime tolerates natively (EPIPE on stdio never becomes an
- *  uncaughtException; `spawnSurvival.test.ts` pins the whole property). The
- *  caller `unref()`s the handle so the server can exit without waiting.
- *  "Launcher's plain exit" is the whole promise: a service stop kills the
- *  host's whole cgroup, and no spawn flag shields against that — the limit
- *  is the header's WHO REAPS. */
-export function coordinatorSpawnSpec(checkout: string): {
-  cwd: string;
-  stdio: ["ignore", "pipe", "pipe"];
-  env: NodeJS.ProcessEnv;
-  detached: boolean;
-} {
-  return { cwd: checkout, stdio: ["ignore", "pipe", "pipe"], env: process.env, detached: true };
-}
-
-/**
- * Poll until the coordinator socket answers or the child exits.
- *
- * No fixed startup window. The socket now comes up before the venue claim
- * (juspay/odu#84), so the poll is normally short — but the startup ahead of it
- * (strict gate, `just` DAG ingest, seq reservation) is still unbounded work on a
- * loaded machine, and bounding the poll to SIGTERM a healthy child was a
- * regression once before (juspay/odu#54's lease wait). Child exit is the only
- * failure bound — a dirty-tree refusal / bad justfile dies immediately.
- *
- * A run that returns here is live but may still be PROVISIONING: `wait_for_settle`
- * blocks on it correctly (its nodes are seeded pending), and a claim that fails
- * lands as a red `_ci-setup@<platform>` rather than as this call's error.
- *
- * Exported for unit tests of the exit-bounded policy.
- */
-export async function pollUntilSocketOrExit(
-  ready: () => Promise<boolean>,
-  exited: Promise<unknown>,
-  intervalMs = 250,
-): Promise<boolean> {
-  // A flag the exit promise flips; the loop does one final probe after it so a
-  // detached coordinator that came up as the launcher exited still counts.
-  let done = false;
-  void exited.then(() => {
-    done = true;
-  });
-  for (;;) {
-    if (await ready()) return true;
-    if (done) {
-      // Child has exited — one last probe, then give up rather than poll on.
-      return ready();
-    }
-    await new Promise((r) => setTimeout(r, intervalMs));
-  }
-}
-
-async function defaultWaitForSocket(
-  socketPath: string,
-  exited: Promise<unknown>,
-): Promise<boolean> {
-  // Probe the socket and release the probe connection at once — we only want
-  // to know it answers, not to hold it open.
-  const serving = async (): Promise<boolean> => {
-    const d = await dialRun(socketPath);
-    await d?.close();
-    return d !== null;
-  };
-  return pollUntilSocketOrExit(serving, exited);
 }
 
 /** Bring the run up. The wait stops the instant the child dies (a dirty-tree

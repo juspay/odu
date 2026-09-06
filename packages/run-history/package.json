@@ -16,6 +16,7 @@
     "./store": "./src/store.ts",
     "./owner": "./src/owner.ts",
     "./query": "./src/query.ts",
+    "./receipts": "./src/receipts.ts",
     "./retention": "./src/retention.ts",
     "./import": "./src/import.ts",
     "./legacy/record": "./src/legacy/record.ts",

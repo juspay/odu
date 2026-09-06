@@ -49,6 +49,7 @@ import {
   historyListCommand,
   historyPruneCommand,
   historyShowCommand,
+  retryCommand,
 } from "./history";
 import { mcpCommand } from "./mcp";
 import { protectCommand } from "./protect";
@@ -70,6 +71,9 @@ wait --run R [--after CURSOR] [--deadline-ms N] [--settle] [-o json]
                               # bounded, resumable; exits 0 pass · 1 fail
                               # 2 still-running · 3 owner-lost · 4 no-such-run
 rerun <node|@platform|recipe> # restart node(s) on the still-live run
+rerun --run R [--request-id ID] [--expect-attempt N] [-o json] <selector>
+                              # retry a RECORDED run: a new attempt if its
+                              # coordinator is still up, else a new linked run
 cancel [node|@platform]       # bare = whole run; node or @plat = partial
 runs [-o json]
 history <list|show|import|prune>
@@ -222,6 +226,16 @@ async function dispatch(argv: string[]): Promise<number> {
           supersede: { type: "boolean" },
           linger: { type: "boolean" },
           "no-wait": { type: "boolean" },
+          // Launcher-only, and deliberately absent from USAGE: a person types
+          // `odu run`, a LAUNCHER (`src/coordinator/launcher.ts`) types these.
+          // They are argv rather than an env-var side channel because a
+          // recovery has to be showable — "here is exactly what would run" is
+          // a list a person can read and re-issue, and never a string anything
+          // evals.
+          "expected-sha": { type: "string" },
+          "run-id": { type: "string" },
+          "parent-run": { type: "string" },
+          "request-id": { type: "string" },
         },
       });
       if (values.progress !== undefined && values.progress !== "json") {
@@ -240,6 +254,16 @@ async function dispatch(argv: string[]): Promise<number> {
         supersede: values.supersede ?? false,
         linger: values.linger ?? false,
         noWait: values["no-wait"] ?? false,
+        ...(values["expected-sha"] === undefined
+          ? {}
+          : { expectedSha: values["expected-sha"] }),
+        ...(values["run-id"] === undefined ? {} : { runId: values["run-id"] }),
+        ...(values["parent-run"] === undefined
+          ? {}
+          : { parentRunId: values["parent-run"] }),
+        ...(values["request-id"] === undefined
+          ? {}
+          : { requestId: values["request-id"] }),
       });
     }
     case "status": {
@@ -380,17 +404,50 @@ async function dispatch(argv: string[]): Promise<number> {
       });
     }
     case "rerun": {
-      const { positionals } = parseArgs({
+      const { values, positionals } = parseArgs({
         args: rest,
         allowPositionals: true,
-        options: {},
+        options: {
+          run: { type: "string" },
+          "request-id": { type: "string" },
+          "expect-attempt": { type: "string" },
+          output: { type: "string", short: "o" },
+        },
       });
       if (positionals.length !== 1 || positionals[0] === undefined) {
         throw new Error(
           "odu: rerun needs exactly one argument (node id, @platform, or recipe)",
         );
       }
-      return rerunCommand(positionals[0]);
+      // Bare `rerun` still means "on the run live in this checkout" and is
+      // untouched. `--run` addresses a RECORDED run, and then odu — not the
+      // caller — decides whether that means a new attempt on a coordinator
+      // still going or a fresh linked run: which one applies is a fact about
+      // the run, and making a caller choose is how it gets chosen wrongly.
+      if (values.run === undefined) {
+        if (values["request-id"] !== undefined || values["expect-attempt"] !== undefined) {
+          throw new Error(
+            "odu: --request-id and --expect-attempt address a recorded run — pass --run too",
+          );
+        }
+        return rerunCommand(positionals[0]);
+      }
+      return retryCommand({
+        run: values.run,
+        selector: positionals[0],
+        ...(values["request-id"] === undefined
+          ? {}
+          : { requestId: values["request-id"] }),
+        ...(values["expect-attempt"] === undefined
+          ? {}
+          : {
+              expectAttempt: positiveInt(
+                "--expect-attempt",
+                values["expect-attempt"],
+              ),
+            }),
+        json: values.output === "json",
+      });
     }
     case "cancel": {
       const { positionals } = parseArgs({

@@ -51,6 +51,8 @@ import {
 } from "@odu/run-history/store";
 import { shortSha } from "@odu/run-history/ids";
 import { formatRef } from "@odu/run-history/legacy/record";
+import { packagedLauncher, type RunLauncher } from "../coordinator/launcher";
+import { type RetryReceipt, retryRun } from "../coordinator/recovery";
 import { gitTopLevel } from "../common/git";
 import { formatAgo } from "./runs";
 
@@ -336,6 +338,104 @@ export function renderAttention(a: Attention): string {
     lines.push(`  (${a.unreadable_events} journal events this build could not read)`);
   }
   lines.push(`  cursor ${a.cursor}${a.has_more ? ` (+${a.remaining} more)` : ""}`);
+  return `${lines.join("\n")}\n`;
+}
+
+// ── odu rerun --run ─────────────────────────────────────────────────────────
+
+export interface RetryCommandOpts {
+  run: string;
+  selector: string;
+  requestId?: string;
+  /** Refuse unless the selector's node is on exactly this attempt. */
+  expectAttempt?: number;
+  json: boolean;
+  catalogRoot?: string;
+  /** Injected by tests; production binds the packaged coordinator launcher. */
+  launcher?: RunLauncher;
+}
+
+/**
+ * `odu rerun --run R SELECTOR` — retry against a recorded run.
+ *
+ * The face is thin on purpose: the policy is `src/coordinator/recovery.ts`,
+ * because PR 2's service must reach the same decision and a policy that lived
+ * in a CLI would have to be reimplemented there. What belongs here is the
+ * argument grammar, the two output modes, and the exit.
+ */
+export async function retryCommand(opts: RetryCommandOpts): Promise<number> {
+  const catalog = opts.catalogRoot === undefined ? {} : { root: opts.catalogRoot };
+  const found = resolveRun(opts.run, { ...catalog, repoRoot: checkoutRoot() });
+  if (!found.ok) {
+    process.stderr.write(`${found.message}\n`);
+    return WAIT_EXITS.unknownRun;
+  }
+  const outcome = await retryRun({
+    runId: found.handle.runId,
+    selector: opts.selector,
+    ...(opts.requestId === undefined ? {} : { requestId: opts.requestId }),
+    ...(opts.expectAttempt === undefined
+      ? {}
+      : {
+          expectAttempt: {
+            node: opts.selector,
+            attempt: opts.expectAttempt,
+          },
+        }),
+    catalog,
+    launcher: opts.launcher ?? packagedLauncher(),
+  });
+  if (!outcome.ok) {
+    if (opts.json) {
+      emitJson({
+        error: "retry_refused",
+        message: outcome.message,
+        ...(outcome.suggestion === undefined ? {} : { suggestion: outcome.suggestion }),
+      });
+    } else {
+      process.stderr.write(`${outcome.message}\n`);
+      if (outcome.suggestion !== undefined) {
+        // ARGV, one token per element — a person can read it and re-issue it,
+        // and nothing anywhere is invited to hand it to a shell.
+        process.stderr.write(`  try: ${outcome.suggestion.join(" ")}\n`);
+      }
+    }
+    return 1;
+  }
+  if (opts.json) {
+    emitJson({ ...outcome.receipt, replayed: outcome.replayed });
+    return 0;
+  }
+  process.stdout.write(renderRetry(outcome.receipt, outcome.replayed));
+  return 0;
+}
+
+/** The human rendering of a retry receipt. Says which of the two things
+ *  happened, because "a new attempt on the run you named" and "a whole new run
+ *  linked to it" are different enough that guessing is expensive. */
+export function renderRetry(receipt: RetryReceipt, replayed: boolean): string {
+  const lines: string[] = [];
+  const what =
+    receipt.mode === "live"
+      ? `reran ${receipt.roots.join(", ")} on ${receipt.effective_run}`
+      : `started ${receipt.effective_run} — a new run replaying ${receipt.parent_run ?? "?"}`;
+  lines.push(`odu: ${what}${replayed ? " (already done; replayed)" : ""}`);
+  if (receipt.reset_dependants.length > 0) {
+    lines.push(`  resets ${receipt.reset_dependants.join(", ")}`);
+  }
+  for (const a of receipt.attempts) {
+    lines.push(`  ${a.node} is now on attempt ${a.attempt}`);
+  }
+  if (receipt.mode === "relaunched") {
+    // The honest scope, stated where somebody will read it: this run covers a
+    // selection, and its verdict is not the pipeline's.
+    lines.push(
+      `  scope: ${receipt.scope.selectors.join(", ")} at ${receipt.sha.slice(0, 7)} ` +
+        "(a selection — its verdict does not speak for the whole pipeline)",
+    );
+  }
+  if (receipt.lifetime !== undefined) lines.push(`  ${receipt.lifetime}`);
+  lines.push(`  watch it: odu wait --run ${receipt.effective_run} --after ${receipt.cursor}`);
   return `${lines.join("\n")}\n`;
 }
 
