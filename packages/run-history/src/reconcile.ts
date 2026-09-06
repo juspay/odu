@@ -18,7 +18,9 @@
  * it is entitled to conclude.
  */
 
+import { hostname } from "node:os";
 import { formatCursor } from "./ids";
+import { pidAlive } from "./owner";
 import type { ReceiptRecord } from "./receipts";
 import type { RunScope } from "./schema";
 import {
@@ -92,10 +94,14 @@ export function reconcile(
   handle: RunHandle,
   catalog: CatalogOptions,
   now: number,
+  /** This host and its pid probe — injected so a suite can state a world
+   *  rather than mutate the process's. The defaults are the real ones. */
+  host: string | undefined = hostname(),
+  isAlive: ((pid: number) => boolean) | undefined = pidAlive,
 ): Reconciled {
   const relaunched = reconcileRelaunch(requestId, receipt.plannedRunId, catalog);
   if (relaunched !== null) return { kind: "replay", receipt: relaunched };
-  const live = reconcileLive(requestId, handle);
+  const live = reconcileLive(requestId, receipt, handle);
   if (live !== null) return live;
 
   // Neither effect is visible. Whether that means "nothing happened" depends
@@ -119,14 +125,20 @@ export function reconcile(
         "build, or one that died before writing one",
     };
   }
-  // NOT YET DISPATCHED IS NOT THE SAME AS NEVER WILL BE. The claimant may be
-  // alive and one instruction short of dispatching: a repeat that arrives
-  // while a launcher is still starting a coordinator sees exactly this state,
-  // and telling it "nothing happened, use a fresh id" is how one request
-  // becomes two runs. So an undispatched claim is only read as a no-op once it
-  // is old enough that a claimant which had not dispatched by now is not going
-  // to — the same shape as the ownership fence next door, and for the same
-  // reason: disappearance is not proof, and neither is a single instant.
+  // NOT YET DISPATCHED IS NOT THE SAME AS NEVER WILL BE, and AGE IS NOT
+  // EVIDENCE. This once concluded "nothing happened" from elapsed time alone,
+  // which fences nothing: a claimant paused in a dial is still perfectly
+  // capable of mutating a moment after the grace expires, so the second caller
+  // was told re-issuing was safe while the first was about to act. A longer
+  // grace only moves that race.
+  //
+  // So the question is the one the ownership fence next door asks, with the
+  // same answer shape: is the process that holds this claim GONE? A pid on a
+  // host is evidence; a clock is not. The grace survives as a FLOOR — below it
+  // nobody is even asked about, because a pid observed dead moments after a
+  // claim is more likely a pid not yet observed alive — but past it the answer
+  // turns on liveness, and a claimant that is still running keeps the outcome
+  // unknown for as long as it runs.
   if (now - receipt.acceptedAt < RETRY_DISPATCH_GRACE_MS) {
     return {
       kind: "unresolved",
@@ -136,6 +148,36 @@ export function reconcile(
         "acting on one id is the duplicate this receipt exists to prevent",
     };
   }
+  const claimant = receipt.claimant;
+  if (claimant === undefined) {
+    return {
+      kind: "unresolved",
+      reason:
+        "the receipt does not name the process that claimed it (an older " +
+        "build wrote it), so whether that caller can still dispatch is not a " +
+        "question this can answer",
+    };
+  }
+  if (claimant.host !== host) {
+    return {
+      kind: "unresolved",
+      reason:
+        `it was claimed by pid ${claimant.pid} on ${claimant.host}, and this ` +
+        "host cannot see whether that process is still running — across hosts " +
+        "there is no liveness to check, so the outcome stays unknown",
+    };
+  }
+  if (isAlive(claimant.pid)) {
+    return {
+      kind: "unresolved",
+      reason:
+        `the caller that claimed it (pid ${claimant.pid}) is STILL RUNNING — ` +
+        "it has not dispatched yet, but it can, and telling a second caller to " +
+        "re-issue while the first is alive is how one request becomes two",
+    };
+  }
+  // The claimant is gone on this host and never marked a dispatch. That is
+  // evidence, not a timeout.
   return { kind: "nothing_happened" };
 }
 
@@ -151,15 +193,19 @@ export function reconcile(
  * with a fresh id".
  */
 /**
- * How long an accepted-but-undispatched claim is treated as possibly still in
- * flight.
+ * The floor below which an undispatched claim is not even asked about.
  *
- * Generous on purpose. The window it has to cover is a claimant between
- * `claimReceipt` and its first mutation, and on the relaunch path that includes
- * starting a coordinator and waiting for its socket — seconds, not
- * milliseconds. Being too generous costs a caller a refusal it could have
- * avoided; being too mean costs a duplicate run, which is the failure this
- * whole mechanism exists to prevent. The asymmetry decides the number.
+ * NOT the decision, and it used to be — which was the bug. A claim was read as
+ * abandoned once it was merely this old, so a claimant paused in a dial was
+ * declared harmless while it was still perfectly able to mutate, and the
+ * caller that asked second was told re-issuing was safe. Elapsed time fences
+ * nothing; a longer number would only have moved the race.
+ *
+ * What decides now is whether the claiming PROCESS is gone, the same evidence
+ * the ownership fence requires. This survives only as a cheap guard in front of
+ * that question: a pid observed dead moments after a claim is more likely a pid
+ * that was not yet observed alive, and the cost of waiting two minutes before
+ * asking is a refusal that would have been a refusal anyway.
  */
 export const RETRY_DISPATCH_GRACE_MS = 120_000;
 
@@ -221,7 +267,11 @@ function reconcileRelaunch(
  * from the recorded acceptance rather than from whatever the run's latest
  * attempt happens to be now.
  */
-function reconcileLive(requestId: string, handle: RunHandle): Reconciled | null {
+function reconcileLive(
+  requestId: string,
+  receipt: ReceiptRecord,
+  handle: RunHandle,
+): Reconciled | null {
   const journal = readJournal(handle);
   const manifest = readManifest(handle);
   if (manifest === null) return null;
@@ -240,19 +290,33 @@ function reconcileLive(requestId: string, handle: RunHandle): Reconciled | null 
     }
   }
   if (asked.length === 0) return null;
-  const unresolved = asked.filter((node) => !resolved.has(node));
+  // THE INTENT, not the acceptances written so far. The coordinator records one
+  // acceptance per root and `tryLive` dispatches them one at a time, so between
+  // two roots the journal shows a PREFIX of the request. Reading the intent
+  // from that prefix made a repeat arriving in the window believe the first
+  // root was the whole request — and `completeReceipt` then froze that short
+  // answer forever, so even the third ask, long after every root had landed,
+  // replayed a success naming one of two.
+  //
+  // The receipt's `roots` were written before any root was dispatched, so they
+  // are the whole request by construction. An older receipt has none, and then
+  // the accepted set is the only thing there is — the old behaviour, kept only
+  // where nothing better exists.
+  const intended = receipt.roots === undefined ? asked : [...receipt.roots];
+  const unresolved = intended.filter((node) => !resolved.has(node));
   if (unresolved.length > 0) {
     return {
       kind: "unresolved",
       reason:
-        `this run's coordinator recorded accepting it (${asked.join(", ")}) but never ` +
-        `recorded what became of ${unresolved.join(", ")} — it died between accepting ` +
-        "the retry and performing it, so whether the reset happened is not knowable " +
-        "from here",
+        `this request names ${intended.join(", ")}, and nothing has recorded what ` +
+        `became of ${unresolved.join(", ")} — either it is still being dispatched ` +
+        "root by root, or the coordinator died between accepting a reset and " +
+        "performing it. Either way the request is not finished, so its outcome is " +
+        "not knowable yet",
     };
   }
-  const applied = asked.filter((node) => resolved.get(node) === true);
-  const declined = asked.filter((node) => resolved.get(node) !== true);
+  const applied = intended.filter((node) => resolved.get(node) === true);
+  const declined = intended.filter((node) => resolved.get(node) !== true);
   if (applied.length === 0) {
     return {
       kind: "refused",

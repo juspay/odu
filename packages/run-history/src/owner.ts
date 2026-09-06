@@ -75,7 +75,10 @@ const encodeOwner = (owner: Owner): string =>
 /** Is `pid` a live process on THIS machine? Signal 0 performs the permission
  *  and existence checks without delivering anything. `EPERM` means the process
  *  exists and belongs to somebody else — alive, for our purposes. */
-function pidAlive(pid: number): boolean {
+/** Is this pid alive on THIS host? Exported because the retry receipt asks
+ *  the same question of a claimant that the ownership fence asks of an
+ *  incumbent — one probe, one set of EPERM/ESRCH semantics. */
+export function pidAlive(pid: number): boolean {
   if (!Number.isSafeInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);

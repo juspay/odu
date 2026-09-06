@@ -105,6 +105,11 @@ export interface RetryInput {
   launcher: RunLauncher;
   /** Injected for tests; defaults to the real unix-socket dial. */
   dial?: typeof dialRun;
+  /** This host and its pid probe. Reconciliation asks whether the process that
+   *  CLAIMED a request id is still capable of dispatching it, so a suite has to
+   *  be able to state a world where it is, or is not, without forking. */
+  host?: string;
+  isAlive?: (pid: number) => boolean;
   /** Where a degraded-but-successful retry says so. Not an error channel: the
    *  one caller is the coordinator that could not record this request's id, so
    *  the mutation happened and only a future REPEAT of it is impaired. */
@@ -187,6 +192,10 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
         handle,
         catalog,
         now(),
+        // `undefined` selects the real host and the real pid probe — a default
+        // parameter fires on it, so the seam costs no branch here.
+        input.host,
+        input.isAlive,
       );
       if (reconciled.kind === "replay") {
         const outcome: RetryOutcome = {
@@ -241,7 +250,7 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
   const markDispatch =
     requestId === undefined
       ? undefined
-      : () => markDispatched(handle, requestId, now());
+      : (roots: readonly string[]) => markDispatched(handle, requestId, roots, now());
   const live = await tryLive(handle, manifest, input, digest, markDispatch, (message) =>
     input.warn?.(message),
   );
@@ -334,7 +343,7 @@ async function tryLive(
   manifest: RunManifest,
   input: RetryInput,
   digest: string,
-  onDispatch?: () => void,
+  onDispatch?: (roots: readonly string[]) => void,
   warn?: (message: string) => void,
 ): Promise<RetryReceipt | null> {
   const owner = currentOwner(handle.dir);
@@ -363,7 +372,10 @@ async function tryLive(
     // dispatch was attempted BEFORE one is — see `reconcile`, which reads this
     // to keep an unresolved acceptance unresolved instead of calling it a
     // no-op.
-    onDispatch?.();
+    // The WHOLE root set, before the first one goes out. A reconciler that
+    // learned the request's extent from the acceptances written so far would
+    // see a prefix while this loop is still running.
+    onDispatch?.(roots);
     const accepted: string[] = [];
     let recorded = true;
     for (const id of roots) {
@@ -470,7 +482,7 @@ async function relaunch(
   input: RetryInput,
   runId: string,
   catalog: CatalogOptions,
-  onDispatch?: () => void,
+  onDispatch?: (roots: readonly string[]) => void,
 ): Promise<{ ok: true; receipt: RetryReceipt } | { ok: false; message: string; suggestion?: string[] }> {
   if (!manifest.snapshot.retryable) {
     return {
@@ -531,7 +543,9 @@ async function relaunch(
   // still running has not published a manifest yet, and reading that absence as
   // proof of no spawn is what let a repeat be told to use a fresh id while the
   // original launch was in flight — two coordinators for one request.
-  onDispatch?.();
+  // A relaunch acts on the run as a whole rather than on roots, so the
+  // intended set is the selection it was asked for.
+  onDispatch?.([...scope.selectors]);
   const receiptOfLaunch = await input.launcher(request);
   if (!receiptOfLaunch.ok) {
     return {

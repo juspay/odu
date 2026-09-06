@@ -74,6 +74,8 @@ const UNIT = `ci::unit@${PLATFORM}`;
 const E2E = `ci::e2e@${PLATFORM}`;
 const LINT = `ci::lint@${PLATFORM}`;
 const PLACEMENT = { platform: PLATFORM, host: "builder-1" };
+/** The host a hand-made claim is stamped with, so liveness is askable. */
+const CLAIM_HOST = "claimant-box.invalid";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -745,9 +747,10 @@ describe("a reply that was lost mid-flight", () => {
       kind: "retry",
       digest: digestOf([PARENT_RUN, "unit", "", 0]),
       plannedRunId,
-      // The journal height a first attempt would have recorded. Zero here, so
-      // ANY later attempt on the selector counts as the effect it is looking
-      // for — which is what these cases are about.
+      // A claimant on THIS host, so reconciliation can ask about it. Whether it
+      // is alive is the test's business — `repeat` injects the probe — and the
+      // default below is "gone", which is what the lost-reply cases are about.
+      claimant: { pid: 31337, host: CLAIM_HOST },
       now: T0 + 5,
     });
     if (outcome?.kind !== "claimed") {
@@ -912,6 +915,9 @@ describe("a reply that was lost mid-flight", () => {
     root: string,
     launcher: LauncherStub,
     at: number,
+    /** Is the process that claimed this id still running? The question the
+     *  whole post-grace branch turns on, so every test states it. */
+    claimantAlive = false,
   ): Promise<RetryOutcome> {
     return retryRun({
       runId: PARENT_RUN,
@@ -919,6 +925,8 @@ describe("a reply that was lost mid-flight", () => {
       requestId: REQUEST,
       catalog: { root },
       launcher: launcher.launcher,
+      host: CLAIM_HOST,
+      isAlive: () => claimantAlive,
       now: () => at,
     });
   }
@@ -1142,7 +1150,7 @@ describe("a reply that was lost mid-flight", () => {
     const out = refused(await repeat(root, launcher));
 
     expect(out.message).toContain("outcome is UNKNOWN");
-    expect(out.message).toContain("never recorded what became of");
+    expect(out.message).toContain("nothing has recorded what became of");
     expect(out.message).toContain("Do not repeat it with a fresh id");
     expect(launcher.calls).toEqual([]);
   });
@@ -1211,6 +1219,163 @@ describe("a reply that was lost mid-flight", () => {
     expect(out.message).toContain(LINT);
   });
 
+  it("stays UNKNOWN past the grace while the claimant is STILL RUNNING", async () => {
+    // The hole a 120-second grace left. Age is not evidence: a caller paused in
+    // a dial is perfectly capable of mutating a moment after the grace expires,
+    // so concluding "nothing happened" from elapsed time told the second caller
+    // re-issuing was safe while the first was about to act. A longer grace only
+    // moves that race.
+    //
+    // The question is the one the ownership fence asks — is the process that
+    // holds this claim GONE? — and here it is not.
+    const root = tmpCatalog();
+    const handle = aFinishedRun(root);
+    claimByHand(handle, "0000000b-0002");
+    const launcher = stubLauncher();
+
+    const out = refused(
+      await repeatAt(root, launcher, T0 + RETRY_DISPATCH_GRACE_MS * 10, true),
+    );
+
+    expect(out.message).toContain("outcome is UNKNOWN");
+    expect(out.message).toContain("STILL RUNNING");
+    expect(out.message).toContain("Do not repeat it with a fresh id");
+    expect(launcher.calls).toEqual([]);
+  });
+
+  it("stays UNKNOWN when the claim was made on ANOTHER host", async () => {
+    // No liveness to check across hosts, which the ownership fence says out
+    // loud rather than implying. Same answer here, for the same reason.
+    const root = tmpCatalog();
+    const handle = aFinishedRun(root);
+    claimByHand(handle, "0000000b-0002");
+
+    const out = refused(
+      await retryRun({
+        runId: PARENT_RUN,
+        selector: "unit",
+        requestId: REQUEST,
+        catalog: { root },
+        launcher: stubLauncher().launcher,
+        host: "a-different-box.invalid",
+        isAlive: () => false,
+        now: () => T0 + RETRY_DISPATCH_GRACE_MS * 10,
+      }),
+    );
+
+    expect(out.message).toContain("outcome is UNKNOWN");
+    expect(out.message).toContain("cannot see whether that process is still running");
+  });
+
+  it("does NOT complete a multi-root request from the roots dispatched so far", async () => {
+    // `tryLive` dispatches roots one at a time and the coordinator records an
+    // acceptance per root, so between two roots the journal holds a PREFIX of
+    // the request. Reading the request's extent from that prefix let a repeat
+    // arriving in the window believe the first root was the whole thing — and
+    // `completeReceipt` then froze that short answer, so even a third ask long
+    // after every root had landed replayed a success naming one of two.
+    const root = tmpCatalog();
+    const handle = aRun(root, ENDPOINT);
+    claimByHand(handle, "0000000b-0002");
+    // The intent, recorded before any root goes out — two roots.
+    markDispatched(handle, REQUEST, [UNIT, LINT], T0 + 6);
+    const owner = takeOverForEvidence(handle);
+    // Only the FIRST root has been accepted and applied so far.
+    appendEvent(
+      handle,
+      owner,
+      {
+        kind: "retry_accepted",
+        requestId: REQUEST,
+        effectiveRunId: handle.runId,
+        roots: [UNIT],
+        resetDependants: [],
+        inputDigest: "",
+      },
+      T0 + OWNERSHIP_GRACE_MS + 2,
+    );
+    appendEvent(
+      handle,
+      owner,
+      { kind: "retry_applied", requestId: REQUEST, node: UNIT, applied: true },
+      T0 + OWNERSHIP_GRACE_MS + 3,
+    );
+
+    const out = refused(await repeat(root, stubLauncher()));
+
+    // NOT a success naming only `unit`.
+    expect(out.message).toContain("outcome is UNKNOWN");
+    expect(out.message).toContain(LINT);
+    expect(out.message).toContain("not finished");
+
+    // And the receipt is NOT completed, so the answer is not frozen: once the
+    // second root lands, the next ask gets the whole request.
+    appendEvent(
+      handle,
+      owner,
+      {
+        kind: "retry_accepted",
+        requestId: REQUEST,
+        effectiveRunId: handle.runId,
+        roots: [LINT],
+        resetDependants: [],
+        inputDigest: "",
+      },
+      T0 + OWNERSHIP_GRACE_MS + 4,
+    );
+    appendEvent(
+      handle,
+      owner,
+      { kind: "retry_applied", requestId: REQUEST, node: LINT, applied: true },
+      T0 + OWNERSHIP_GRACE_MS + 5,
+    );
+
+    const after = accepted(await repeat(root, stubLauncher()));
+    expect(after.receipt.roots).toEqual([UNIT, LINT]);
+  });
+
+  it("reports a partial outcome only once EVERY intended root is resolved", async () => {
+    // The same window, with the second root declined rather than applied. The
+    // partial answer is only reachable when nothing is still outstanding.
+    const root = tmpCatalog();
+    const handle = aRun(root, ENDPOINT);
+    claimByHand(handle, "0000000b-0002");
+    markDispatched(handle, REQUEST, [UNIT, LINT], T0 + 6);
+    const owner = takeOverForEvidence(handle);
+    for (const [i, [node, applied]] of (
+      [
+        [UNIT, true],
+        [LINT, false],
+      ] as const
+    ).entries()) {
+      appendEvent(
+        handle,
+        owner,
+        {
+          kind: "retry_accepted",
+          requestId: REQUEST,
+          effectiveRunId: handle.runId,
+          roots: [node],
+          resetDependants: [],
+          inputDigest: "",
+        },
+        T0 + OWNERSHIP_GRACE_MS + 2 + i * 2,
+      );
+      appendEvent(
+        handle,
+        owner,
+        { kind: "retry_applied", requestId: REQUEST, node, applied },
+        T0 + OWNERSHIP_GRACE_MS + 3 + i * 2,
+      );
+    }
+
+    const out = refused(await repeat(root, stubLauncher()));
+
+    expect(out.message).toContain("applied in part");
+    expect(out.message).toContain(UNIT);
+    expect(out.message).toContain(LINT);
+  });
+
   it("refuses a CONCURRENT repeat while the first claimant may still dispatch", async () => {
     // Absence of a dispatch marker at one instant is not proof that the caller
     // holding this id will never dispatch. A repeat arriving while the original
@@ -1264,7 +1429,7 @@ describe("a reply that was lost mid-flight", () => {
     const root = tmpCatalog();
     const handle = aFinishedRun(root);
     claimByHand(handle, "0000000b-0002");
-    markDispatched(handle, REQUEST, T0 + 5);
+    markDispatched(handle, REQUEST, [UNIT], T0 + 5);
     const launcher = stubLauncher();
 
     const out = refused(await repeat(root, launcher));
@@ -1283,7 +1448,7 @@ describe("a reply that was lost mid-flight", () => {
     const root = tmpCatalog();
     const handle = aFinishedRun(root);
     claimByHand(handle, "0000000b-0002");
-    markDispatched(handle, REQUEST, T0 + 5);
+    markDispatched(handle, REQUEST, [UNIT], T0 + 5);
     const launcher = stubLauncher();
 
     const out = refused(await repeat(root, launcher));

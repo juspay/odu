@@ -34,6 +34,7 @@
  */
 
 import { readdirSync, readFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { Result, Schema } from "effect";
 import { createExclusive, writeAtomic } from "./atomic";
@@ -106,6 +107,38 @@ export const ReceiptSchema = Schema.Struct({
    * old code assumed for every receipt.
    */
   dispatchedAt: Schema.optionalKey(Schema.Number),
+  /**
+   * WHICH PROCESS holds this claim, so a repeat can ask whether it is still
+   * capable of dispatching instead of guessing from a clock.
+   *
+   * The whole point. An undispatched claim used to be read as a no-op once it
+   * was merely OLD, which fences nothing: elapsed time is not evidence, the
+   * claimant may be paused in a dial and about to mutate, and a longer grace
+   * only moves the race. A pid on a host is evidence — the same evidence the
+   * ownership fence next door requires, applied the same way: a claim is
+   * abandoned when its process is GONE on THIS host, never merely when it is
+   * quiet, and never at all when it was claimed somewhere else.
+   *
+   * `optionalKey`, so receipts written before this field decode unchanged.
+   * Their absence means the question cannot be asked, which reads as UNKNOWN —
+   * the safe direction.
+   */
+  claimant: Schema.optionalKey(
+    Schema.Struct({ pid: Schema.Int, host: Schema.String }),
+  ),
+  /**
+   * Every root this request intends to act on, written BEFORE the first one is
+   * dispatched.
+   *
+   * A retry can name several roots and they go out one at a time, so the
+   * coordinator's per-root records are a growing set while the request is in
+   * flight. Reading the intent from those records made a repeat that arrived
+   * between two roots believe the first was the whole request — and complete
+   * the receipt with a permanently short answer. The intended set is fixed
+   * before any of it happens, so "is this request finished" is a question with
+   * an answer instead of a race.
+   */
+  roots: Schema.optionalKey(Schema.Array(Schema.String)),
   /** The receipt's payload once completed — the addressed answer the caller
    *  gets, replayed verbatim on a repeat so two asks cannot get two different
    *  descriptions of one action. */
@@ -166,6 +199,8 @@ export function claimReceipt(
     kind: ReceiptRecord["kind"];
     digest: string;
     plannedRunId: string;
+    /** Injected by tests; production stamps this process. */
+    claimant?: { pid: number; host: string };
     now?: number;
   },
 ): ClaimOutcome | null {
@@ -179,6 +214,8 @@ export function claimReceipt(
     acceptedAt: input.now ?? Date.now(),
     completedAt: null,
     plannedRunId: input.plannedRunId,
+    // Stamped at the claim, because that is the moment the claimant exists.
+    claimant: input.claimant ?? { pid: process.pid, host: hostname() },
     result: null,
   };
   const path = receiptPath(handle, input.requestId);
@@ -216,6 +253,12 @@ export function claimReceipt(
 export function markDispatched(
   handle: RunHandle,
   requestId: string,
+  /** The complete set of roots this request will act on — see
+   *  {@link ReceiptSchema}'s `roots`. Recorded in the SAME write as the
+   *  dispatch marker, because a request whose intent is known but whose
+   *  dispatch is not, and one whose dispatch is known but whose intent is not,
+   *  are both states a reconciler would have to guess about. */
+  roots: readonly string[],
   now: number = Date.now(),
 ): void {
   const existing = readReceipt(handle, requestId);
@@ -223,7 +266,7 @@ export function markDispatched(
   if (existing.dispatchedAt !== undefined) return;
   writeAtomic(
     receiptPath(handle, requestId),
-    `${JSON.stringify({ ...existing, dispatchedAt: now }, null, 2)}\n`,
+    `${JSON.stringify({ ...existing, dispatchedAt: now, roots: [...roots] }, null, 2)}\n`,
   );
 }
 
