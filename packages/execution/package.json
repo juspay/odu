@@ -1,0 +1,19 @@
+{
+  "name": "@odu/execution",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "//": "THE ENGINE — see README.md. Everything that DOES a run: the coordinator, the lane worker, the just DAG, venue leases, shards, the verdict gate and GitHub posting. It knows nothing about how a run is watched: `common/presentation.ts` is the port a face implements, and `RunDeps.face` defaults to silence. src/closure.test.ts walks the import graph so the arrow to the faces cannot come back.",
+  "//exports": "A subpath PATTERN rather than a curated map, unlike @odu/run-client and @odu/run-history. Those two are hydrated by consumers outside this repo, so their surface is a promise and every entry is a decision. This one is consumed by `packages/cli` and by the composition roots in `src/`, all of which ship together from this tree — a curated map here would be forty entries that say nothing a reader could not see from the directory.",
+  "//dependencies": "What this package IMPORTS. The @kolu/* sources it also imports are deliberately absent: they are hydrated as raw TypeScript from a Nix pin (see bunfig.toml at the root), so naming one here would send bun to the registry for a package that is not there — src/closure.test.ts pins the hydrated set instead. Their own transitive npm dependencies resolve by walking up to the ROOT node_modules, which is why the root manifest still declares packages this one does not.",
+  "sideEffects": false,
+  "exports": {
+    "./*": "./src/*.ts"
+  },
+  "dependencies": {
+    "@odu/run-client": "workspace:*",
+    "@odu/run-history": "workspace:*",
+    "effect": "4.0.0-rc.112"
+  }
+}

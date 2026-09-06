@@ -20,30 +20,30 @@ import {
 import {
   OUTCOME_MARK,
   verdictLine,
-} from "./cli/render";
+} from "@odu/cli/render";
 import {
   countsLine,
   exitCode,
   outcomeOf,
   summarize,
-} from "./common/verdict";
-import type { TaskSpec } from "./common/spec";
+} from "@odu/execution/common/verdict";
+import type { TaskSpec } from "@odu/execution/common/spec";
 import {
   type LaneClient,
   laneClientOver,
   laneSurface,
-} from "./common/laneSurface";
-import { firstFrame, runUnary, subscribe } from "./common/effectEdge";
-import { createLaneRunner, SETUP_NODE_ID } from "./runner/runner";
+} from "@odu/execution/common/laneSurface";
+import { firstFrame, runUnary, subscribe } from "@odu/execution/common/effectEdge";
+import { createLaneRunner, SETUP_NODE_ID } from "@odu/execution/runner/runner";
 import {
   overlayOnLaneStop,
-} from "./coordinator/run";
+} from "@odu/execution/coordinator/run";
 import {
   shardAggregateDuration,
   shardAggregateStatus,
   shardLaneNamepath,
   shareShardCapacity,
-} from "./coordinator/shards";
+} from "@odu/execution/coordinator/shards";
 
 interface Harness {
   client: LaneClient;

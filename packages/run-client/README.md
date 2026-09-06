@@ -110,7 +110,7 @@ of code on the reading side stayed behind. A module stays with odu when it is
 odu's own decision rather than the wire's, or when it is a face's business rather
 than a reader's:
 
-- **`laneSurface`** (`src/common/laneSurface.ts`) — the coordinator's protocol
+- **`laneSurface`** (`packages/execution/src/common/laneSurface.ts`) — the coordinator's protocol
   with `odu-runner --stdio`, and the biggest thing that could have come and
   didn't. It shares this package's `nodePrimitives`, so no shape is defined
   twice; what it adds (`run.configure`, `lease.*`) has exactly one reader, and
@@ -133,28 +133,28 @@ than a reader's:
   socket, so the only way a client can ever learn it died is by reading the
   files: `./deadRun`. The sentinel there NAMES the corpse; the stale lock and
   socket are what PROVE one. The verdict record itself still never crosses.)
-- **`dialRunOrExit`** (`src/coordinator/socket.ts`) — dial, or print justci's
+- **`dialRunOrExit`** (`packages/execution/src/coordinator/socket.ts`) — dial, or print justci's
   refusal and exit. The exiting variant is a CLI's decision, and a library that
   made it for a dashboard would be wrong. The serving half is there too, for the
   reason the whole package exists: a client may be a different build from the
   coordinator it dials; a server *is* the build it is.
-- **`transitiveDependents` / `parseAtPlatform`** (`src/common/nodeId.ts`) — the
+- **`transitiveDependents` / `parseAtPlatform`** (`packages/execution/src/common/nodeId.ts`) — the
   DAG walk a rerun does and the `@platform` argv sugar a CLI parses. One is what
   a WRITER computes before it mutates; the other is a command line.
-- **`formatGoDuration`** (`src/common/duration.ts`) — justci-byte-compatible
+- **`formatGoDuration`** (`packages/execution/src/common/duration.ts`) — justci-byte-compatible
   duration strings. Free to move (it imports nothing) and it has simply never
   been asked for: rendering a duration is a face's own business, and an entry
   nobody asked for is an entry to un-publish later. It moves the day someone
   asks, as `@kolu/padi-client`'s `terminalId` and `screenTail` did.
-- **`effectEdge`** (`src/common/effectEdge.ts`) — odu's single sanctioned
-  `Effect.run*` boundary, enumerated by `src/common/effectEdges.test.ts`. Moving
+- **`effectEdge`** (`packages/execution/src/common/effectEdge.ts`) — odu's single sanctioned
+  `Effect.run*` boundary, enumerated by `packages/execution/src/common/effectEdges.test.ts`. Moving
   it would move that law out of the repo that enforces it. A consumer already in
   Effect composes the `Stream` this package hands it; one that is not runs it at
   its own edge, in one line.
 
 The behaviour of the vocabulary here is tested from odu's suite (`runPhase` in
-`src/common/runPhase.test.ts`, the frozen bytes in
-`src/common/schemaBytes.test.ts`), because those tests want odu's shared
+`packages/execution/src/common/runPhase.test.ts`, the frozen bytes in
+`packages/execution/src/common/schemaBytes.test.ts`), because those tests want odu's shared
 fixtures. What is tested *here* is the thing only this directory can state: its
 own closure.
 

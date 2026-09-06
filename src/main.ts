@@ -26,8 +26,8 @@
  */
 
 import { parseArgs } from "node:util";
-import { runCommand } from "./coordinator/run";
-import { loadJustPipeline, mermaidGraph } from "./just/ingest";
+import { runCommand } from "@odu/execution/coordinator/run";
+import { loadJustPipeline, mermaidGraph } from "@odu/execution/just/ingest";
 import {
   attachCommand,
   cancelCommand,
@@ -35,13 +35,13 @@ import {
   rerunCommand,
   statusCommand,
   waitCommand,
-} from "./cli/introspect";
-import { hostsCommand } from "./cli/hosts";
+} from "@odu/cli/introspect";
+import { hostsCommand } from "@odu/cli/hosts";
 import {
   leaseCommand,
   leaseHoldCommand,
   releaseCommand,
-} from "./cli/leaseCmd";
+} from "@odu/cli/leaseCmd";
 import {
   durableLogsCommand,
   durableWaitCommand,
@@ -50,11 +50,11 @@ import {
   historyPruneCommand,
   historyShowCommand,
   retryCommand,
-} from "./cli/history";
-import { cliRunFace, faceEnv } from "./cli/runFace";
-import { mcpCommand } from "./cli/mcp";
-import { protectCommand } from "./cli/protect";
-import { runsCommand } from "./cli/runs";
+} from "@odu/cli/history";
+import { cliRunFace, faceEnv } from "@odu/cli/runFace";
+import { mcpCommand } from "@odu/cli/mcp";
+import { protectCommand } from "@odu/cli/protect";
+import { runsCommand } from "@odu/cli/runs";
 
 const USAGE = `usage: odu <run|status|logs|attach|wait|rerun|cancel|runs|history|hosts|lease|release|dump|graph|protect|mcp> [args]
 
@@ -232,7 +232,7 @@ async function dispatch(argv: string[]): Promise<number> {
           linger: { type: "boolean" },
           "no-wait": { type: "boolean" },
           // Launcher-only, and deliberately absent from USAGE: a person types
-          // `odu run`, a LAUNCHER (`src/coordinator/launcher.ts`) types these.
+          // `odu run`, a LAUNCHER (`packages/execution/src/coordinator/launcher.ts`) types these.
           // They are argv rather than an env-var side channel because a
           // recovery has to be showable — "here is exactly what would run" is
           // a list a person can read and re-issue, and never a string anything

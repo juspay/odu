@@ -15,7 +15,7 @@
  * runs more than once (a rerun after an infra flake is a *new run*, not a
  * mutation of the old one's history). The record carries the verdict, the
  * timing, the lane→host map, and a terminal snapshot of every node — enough
- * to repaint the matrix a face showed live. The ledger (src/coordinator/
+ * to repaint the matrix a face showed live. The ledger (packages/execution/src/coordinator/
  * ledger.ts) is the append-only collection of these; `odu runs` lists it, and
  * it is the row source a service face (odu-web) reads for run pages and the
  * `target_url` a commit status points at.

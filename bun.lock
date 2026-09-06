@@ -7,6 +7,8 @@
       "dependencies": {
         "@effect/platform-node": "4.0.0-rc.112",
         "@modelcontextprotocol/sdk": "^1.29.0",
+        "@odu/cli": "workspace:*",
+        "@odu/execution": "workspace:*",
         "@odu/run-client": "workspace:*",
         "@odu/run-history": "workspace:*",
         "@opentui/core": "^0.4.5",
@@ -26,6 +28,28 @@
         "@types/node": "^22.0.0",
         "@types/split2": "^4.2.3",
         "typescript": "^5.8.0",
+      },
+    },
+    "packages/cli": {
+      "name": "@odu/cli",
+      "version": "0.1.0",
+      "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.29.0",
+        "@odu/execution": "workspace:*",
+        "@odu/run-client": "workspace:*",
+        "@odu/run-history": "workspace:*",
+        "@opentui/core": "^0.4.5",
+        "@xterm/headless": "^6.0.0",
+        "effect": "4.0.0-rc.112",
+      },
+    },
+    "packages/execution": {
+      "name": "@odu/execution",
+      "version": "0.1.0",
+      "dependencies": {
+        "@odu/run-client": "workspace:*",
+        "@odu/run-history": "workspace:*",
+        "effect": "4.0.0-rc.112",
       },
     },
     "packages/run-client": {
@@ -68,6 +92,10 @@
     "@msgpackr-extract/msgpackr-extract-linux-x64": ["@msgpackr-extract/msgpackr-extract-linux-x64@3.0.4", "", { "os": "linux", "cpu": "x64" }, "sha512-8TNXMEjJc3QEy7R/x1INhgiU+XakDAFUzBhaz7+Rbrs8NH5UQeHQxxmzsSBJGyV6I1jW79undiQm8tOI+D+8FQ=="],
 
     "@msgpackr-extract/msgpackr-extract-win32-x64": ["@msgpackr-extract/msgpackr-extract-win32-x64@3.0.4", "", { "os": "win32", "cpu": "x64" }, "sha512-CmCXPQrkbwExx3j946/PtHWHbYJiCRBRDl4BlkRQcJB/YOwQxJRTpoo7aTsortjgoJ1x7opzTSxn7C+ASSLVjQ=="],
+
+    "@odu/cli": ["@odu/cli@workspace:packages/cli"],
+
+    "@odu/execution": ["@odu/execution@workspace:packages/execution"],
 
     "@odu/run-client": ["@odu/run-client@workspace:packages/run-client"],
 

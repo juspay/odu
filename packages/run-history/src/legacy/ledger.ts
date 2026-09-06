@@ -1,6 +1,6 @@
 /**
  * The run ledger — the on-disk home of the durable run records
- * (src/common/runRecord.ts), and the append-only history every face reads
+ * (packages/execution/src/common/runRecord.ts), and the append-only history every face reads
  * when no coordinator socket is live.
  *
  * Layout sits beside the per-SHA logs the coordinator already writes:
