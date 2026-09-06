@@ -43,6 +43,7 @@ import {
   readVerdict,
   type RunHandle,
 } from "@odu/run-history/store";
+import { readAttention } from "@odu/run-history/query";
 import {
   openRunHistory,
   type RunHistory,
@@ -556,6 +557,122 @@ describe("the log barrier", () => {
     expect(record?.endedAt).toBe(T0);
     // And no second ordinal was invented to hold the correction.
     expect(attemptsFor(handle, SETUP)).toEqual([1]);
+  });
+});
+
+describe("recording who asked for a retry", () => {
+  it("writes the request id against the run, and says it did", () => {
+    // The coordinator's half of idempotency. A reconciler that lost its reply
+    // reads THIS line; without it, the only evidence is an attempt that
+    // started, which names no requester and so proves nothing about whose
+    // retry it was.
+    const { history, handle } = started();
+
+    expect(
+      history.retryAccepted({
+        requestId: "agent.fix-1",
+        inputDigest: "abc1234",
+        roots: [NODE],
+        resetDependants: [],
+      }),
+    ).toBe(true);
+
+    const recorded = readJournal(handle).entries.at(-1)?.event;
+    expect(recorded).toEqual({
+      kind: "retry_accepted",
+      requestId: "agent.fix-1",
+      effectiveRunId: handle.runId,
+      roots: [NODE],
+      resetDependants: [],
+      inputDigest: "abc1234",
+    });
+  });
+
+  it("reports FALSE once fenced, so no caller promises a line that was refused", () => {
+    // A fenced adapter writes nothing, and a caller that assumed otherwise
+    // would answer its own client `recorded: true` about a journal entry that
+    // does not exist — turning "unknown" into a false "reconstructable".
+    const { history, handle } = started();
+    takeOver(handle);
+
+    expect(
+      history.retryAccepted({
+        requestId: "agent.fix-2",
+        inputDigest: "abc1234",
+        roots: [NODE],
+        resetDependants: [],
+      }),
+    ).toBe(false);
+    expect(kinds(handle)).not.toContain("retry_accepted");
+  });
+});
+
+describe("settle → retry → settle, through the real writer and the real reader", () => {
+  // The mismatch a fold test cannot see. `resumed` is cleared by a `finalized`
+  // line and by nothing else, so the reader's correctness depends entirely on
+  // the writer emitting one per EXECUTION GENERATION. It emitted one per RUN.
+  //
+  // Each half was defensible alone — "a journal is a history, not a stack of
+  // terminals" on one side, "a resumed run is not settled" on the other — and
+  // together they made every retried run permanently unsettled: a caller
+  // waiting on the retry it had just asked for could never observe it finish.
+  // So this drives the ACTUAL adapter and reads back through the ACTUAL
+  // attention query, because supplying the second `finalized` by hand is
+  // precisely the assumption under test.
+  it("a run that finished, resumed, and finished again is settled again", () => {
+    const { history, handle } = started();
+
+    // Generation 1: it fails and settles.
+    history.roster([NODE]);
+    history.nodeStatus(NODE, "running", running);
+    history.log(NODE, "boom\n");
+    history.logFinalized(NODE, true, null);
+    history.nodeStatus(NODE, "failed", { exitCode: 1, durationMs: 3, host: "builder-1" });
+    history.finalize(verdict({ outcome: "failed", failed: [NODE] }));
+
+    const settled = readAttention(handle, {}, T0);
+    expect(settled.settled).toBe(true);
+    expect(settled.outcome).toBe("failed");
+
+    // The retry lands: the node restarts on a new ordinal.
+    history.resetNode(NODE, "rerun requested");
+    history.nodeStatus(NODE, "running", running);
+
+    // Mid-generation the run is NOT settled — the property the previous fix
+    // established, and which must survive this one.
+    const during = readAttention(handle, {}, T0 + 1);
+    expect(during.settled).toBe(false);
+    expect(during.outcome).toBeNull();
+
+    // Generation 2: it passes and settles again.
+    history.log(NODE, "ok\n");
+    history.logFinalized(NODE, true, null);
+    history.nodeStatus(NODE, "ok", { exitCode: 0, durationMs: 4, host: "builder-1" });
+    history.finalize(verdict({ outcome: "passed" }));
+
+    const again = readAttention(handle, {}, T0 + 2);
+    expect(again.settled).toBe(true);
+    expect(again.outcome).toBe("passed");
+
+    // Two generations, two terminals — and the last word is the last one.
+    expect(kinds(handle).filter((kind) => kind === "finalized")).toHaveLength(2);
+    expect(kinds(handle).at(-1)).toBe("finalized");
+  });
+
+  it("re-finalizing without any work in between still appends nothing", () => {
+    // The other half of the same rule, and the reason it is a rule about
+    // generations rather than a licence to append: a `--linger` run drains
+    // repeatedly, and a terminal per drain would be many claims about one
+    // ending.
+    const { history, handle } = started();
+
+    history.nodeStatus(NODE, "failed", { exitCode: 1, durationMs: 3, host: "builder-1" });
+    history.finalize(verdict({ outcome: "failed", failed: [NODE] }));
+    history.finalize(verdict({ outcome: "failed", failed: [NODE] }));
+    history.finalize(verdict({ outcome: "failed", failed: [NODE] }));
+
+    expect(kinds(handle).filter((kind) => kind === "finalized")).toHaveLength(1);
+    expect(readAttention(handle, {}, T0).settled).toBe(true);
   });
 });
 

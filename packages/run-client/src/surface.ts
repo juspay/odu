@@ -444,6 +444,51 @@ export const nodeProcedures = {
   },
 } as const;
 
+/**
+ * The FAN-IN's node group: {@link nodeProcedures}, with `rerun` widened by the
+ * identity of the request that asked for it.
+ *
+ * **Why the caller's id has to cross the wire.** A retry whose reply is lost is
+ * the case the whole receipt machinery exists for, and reconciling it means
+ * answering "did my mutation happen?" after the answer went missing. That
+ * question can only be answered where the mutation happened. Without an id on
+ * the call, the coordinator records a reset that names no requester, and a
+ * reconciler is left inferring causality from timing — "an attempt on a node my
+ * selector names began after I was accepted, so it must have been mine". It
+ * need not have been: ordinary scheduling starts attempts, and so does somebody
+ * else's retry. That inference reported retries that never happened.
+ *
+ * So the id travels, the coordinator writes `retry_accepted` against it BEFORE
+ * it mutates anything, and reconciliation reads that exact line instead of
+ * guessing. `inputDigest` rides along so the durable record is self-contained —
+ * a reconciler can tell one request from another wearing the same id without
+ * trusting the claimant's own receipt file.
+ *
+ * Both are OPTIONAL, and `recorded` on the way back is what says the far end
+ * understood them: a coordinator from an older build ignores unknown input keys
+ * and answers without it, which is a caller's cue that a lost reply will not be
+ * reconstructable from that run's journal. Lane-side `node.rerun`
+ * ({@link nodeProcedures}) is deliberately NOT widened — a lane reruns what it
+ * is told to and keeps no receipts.
+ */
+const fanInNodeProcedures = {
+  ...nodeProcedures,
+  rerun: {
+    input: Schema.Struct({
+      id: NodeIdSchema,
+      requestId: Schema.optionalKey(Schema.String),
+      inputDigest: Schema.optionalKey(Schema.String),
+    }),
+    output: Schema.Struct({
+      ok: Schema.Boolean,
+      /** Present and `true` when this acceptance was written to the run's
+       *  journal against `requestId`. Absent means the far end did not record
+       *  one — an older coordinator, or a call that carried no id. */
+      recorded: Schema.optionalKey(Schema.Boolean),
+    }),
+  },
+} as const;
+
 /** Fan-in-only: drop one platform lane mid-run without tearing down the
  *  coordinator. Distinct from `node.cancel` (one unit of work) and `run.cancel`
  *  (whole-run teardown). */
@@ -486,7 +531,7 @@ export const oduSurface = defineSurface({
     },
   },
   procedures: {
-    node: nodeProcedures,
+    node: fanInNodeProcedures,
     run: cancelProcedure,
     lane: laneCancelProcedure,
   },

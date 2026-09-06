@@ -43,6 +43,7 @@ import { mintRunId } from "@odu/run-history/ids";
 import {
   claimReceipt,
   completeReceipt,
+  markDispatched,
   digestOf,
   isRequestId,
   readReceipt,
@@ -63,7 +64,6 @@ import { formatCursor } from "@odu/run-history/ids";
 import { readJournal } from "@odu/run-history/store";
 import { firstFrame, runUnary } from "../common/effectEdge";
 import {
-  matchNodeIds,
   minimalRerunRoots,
   resolveRerunTargets,
   transitiveDependents,
@@ -125,6 +125,10 @@ export interface RetryInput {
   launcher: RunLauncher;
   /** Injected for tests; defaults to the real unix-socket dial. */
   dial?: typeof dialRun;
+  /** Where a degraded-but-successful retry says so. Not an error channel: the
+   *  one caller is the coordinator that could not record this request's id, so
+   *  the mutation happened and only a future REPEAT of it is impaired. */
+  warn?: (message: string) => void;
   now?: () => number;
 }
 
@@ -198,35 +202,54 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
       return replayOf(claim.receipt.result);
     }
     if (claim.kind === "in_flight") {
-      const reconciled = reconcile(
-        input.requestId,
-        claim.receipt,
-        handle,
-        input.selector,
-        catalog,
-      );
-      if (reconciled !== null) {
+      const reconciled = reconcile(input.requestId, claim.receipt, handle, catalog);
+      if (reconciled.kind === "replay") {
         const outcome: RetryOutcome = {
           ok: true,
-          receipt: reconciled,
+          receipt: reconciled.receipt,
           replayed: true,
         };
         completeReceipt(handle, input.requestId, outcome, now());
         return outcome;
       }
+      if (reconciled.kind === "unresolved") {
+        // NOT "retry with a fresh id". A fresh id is a licence to perform the
+        // mutation a second time, and this is precisely the case where nobody
+        // can say whether the first one landed. The caller is told what is
+        // unknown and pointed at the evidence to settle it by hand.
+        return {
+          ok: false,
+          message:
+            `odu: request "${input.requestId}" was accepted and its outcome is UNKNOWN — ` +
+            `${reconciled.reason}. Do not repeat it with a fresh id until you have ` +
+            "checked whether it took effect: a second retry would be a second mutation.",
+          suggestion: ["odu", "history", "show", "--run", input.runId],
+        };
+      }
       return {
         ok: false,
         message:
           `odu: request "${input.requestId}" was accepted and its outcome is not recorded. ` +
-          "No run was started under it and no attempt began on this run since, so " +
-          "nothing it asked for happened — retry with a fresh id.",
+          "No run was started under it, this run's coordinator recorded no acceptance " +
+          "for it, and it was never put on the wire — so nothing it asked for happened. " +
+          "Retry with a fresh id.",
         suggestion: ["odu", "history", "show", "--run", input.runId],
       };
     }
     claimedRunId = claim.receipt.plannedRunId;
   }
 
-  const live = await tryLive(handle, manifest, input);
+  const requestId = input.requestId;
+  const live = await tryLive(
+    handle,
+    manifest,
+    input,
+    digest,
+    requestId === undefined
+      ? undefined
+      : () => markDispatched(handle, requestId, now()),
+    (message) => input.warn?.(message),
+  );
   if (live !== null) {
     return finish(handle, input, { ok: true, receipt: live, replayed: false }, now);
   }
@@ -314,13 +337,51 @@ function reconcile(
   requestId: string,
   receipt: ReceiptRecord,
   handle: RunHandle,
-  selector: string,
   catalog: CatalogOptions,
-): RetryReceipt | null {
+): Reconciled {
   const relaunched = reconcileRelaunch(requestId, receipt.plannedRunId, catalog);
-  if (relaunched !== null) return relaunched;
-  return reconcileLive(requestId, receipt, handle, selector);
+  if (relaunched !== null) return { kind: "replay", receipt: relaunched };
+  const live = reconcileLive(requestId, handle);
+  if (live !== null) return { kind: "replay", receipt: live };
+
+  // Neither effect is visible. Whether that means "nothing happened" depends
+  // entirely on whether the evidence that WOULD have shown it could exist and
+  // could be read — so the two unreadable cases are separated out rather than
+  // folded into the safe one.
+  if (readJournal(handle).unreadable > 0) {
+    return {
+      kind: "unresolved",
+      reason:
+        "this run's journal has lines this build cannot read, so the absence " +
+        "of a record for it is not evidence that nothing happened",
+    };
+  }
+  if (receipt.dispatchedAt !== undefined) {
+    return {
+      kind: "unresolved",
+      reason:
+        "it had already been put on the wire when its outcome was lost, and " +
+        "the coordinator it was sent to recorded no acceptance — an older " +
+        "build, or one that died before writing one",
+    };
+  }
+  return { kind: "nothing_happened" };
 }
+
+/**
+ * What a repeat of an in-flight request can be told.
+ *
+ * Three answers, because the missing third is what made the old advice unsafe.
+ * `nothing_happened` is a claim about the world and licences re-issuing; it may
+ * only be returned when the evidence that would have shown otherwise could
+ * exist AND could be read. When it could not, the honest answer is that nobody
+ * knows — which is not the same as no, and must never be answered with "retry
+ * with a fresh id".
+ */
+type Reconciled =
+  | { kind: "replay"; receipt: RetryReceipt }
+  | { kind: "nothing_happened" }
+  | { kind: "unresolved"; reason: string };
 
 /** The relaunch half: a run exists under the id this request planned. */
 function reconcileRelaunch(
@@ -350,42 +411,43 @@ function reconcileRelaunch(
 }
 
 /**
- * The live half: a node the selector names started a new attempt after this
- * request was accepted.
+ * The live half: the coordinator wrote down that it accepted THIS request.
  *
- * The roster the selector is matched against comes from the journal, not from
- * a live dial — the run may well have finished since. `matchNodeIds` needs
- * only the id list, so a state carrying the roster and no node bodies answers
- * the same question the live path asked.
+ * **Why nothing weaker will do.** This used to ask a question about timing —
+ * did a node the selector names start an attempt after my receipt was claimed?
+ * — and treat `yes` as proof that the mutation was this caller's. It is not
+ * proof of anything. Ordinary scheduling starts attempts; so does a rerun
+ * somebody else asked for; so does the run's own first pass over a node that
+ * had not run yet. A caller that claimed an id and then crashed BEFORE
+ * dispatching anything would be told, on its next identical ask, that its
+ * retry had succeeded — with an attempt number belonging to work it never
+ * caused. Correlation cannot be reconstructed from a clock.
+ *
+ * So the coordinator records the request id at acceptance and this reads that
+ * exact line. The `seq > journalAtAccept` bound stays, but as a cheap guard
+ * rather than the evidence: a `retry_accepted` for this id could only have been
+ * written after the id was claimed anyway.
+ *
+ * The roster the roots are matched against still comes from the journal rather
+ * than a live dial — the run may well have finished since.
  */
 function reconcileLive(
   requestId: string,
-  receipt: ReceiptRecord,
   handle: RunHandle,
-  selector: string,
 ): RetryReceipt | null {
   const journal = readJournal(handle);
   const manifest = readManifest(handle);
   if (manifest === null) return null;
-  const roster = journal.entries.reduce<string[]>(
-    (order, e) => (e.event.kind === "roster" ? [...e.event.order] : order),
-    [],
-  );
-  const named = new Set(matchNodeIds({ order: roster, nodes: {} }, selector));
-  const started = journal.entries.filter(
-    (e) =>
-      e.seq > receipt.journalAtAccept &&
-      e.event.kind === "attempt_started" &&
-      named.has(e.event.node),
-  );
-  if (started.length === 0) return null;
   const roots = [
     ...new Set(
-      started.flatMap((e) =>
-        e.event.kind === "attempt_started" ? [e.event.node] : [],
+      journal.entries.flatMap((e) =>
+        e.event.kind === "retry_accepted" && e.event.requestId === requestId
+          ? [...e.event.roots]
+          : [],
       ),
     ),
   ];
+  if (roots.length === 0) return null;
   return {
     request_id: requestId,
     mode: "live",
@@ -434,6 +496,9 @@ async function tryLive(
   handle: RunHandle,
   manifest: RunManifest,
   input: RetryInput,
+  digest: string,
+  onDispatch?: () => void,
+  warn?: (message: string) => void,
 ): Promise<RetryReceipt | null> {
   const owner = currentOwner(handle.dir);
   if (owner === null || owner.endpoint === null) return null;
@@ -455,12 +520,42 @@ async function tryLive(
     }
     const roots = minimalRerunRoots(state, targets);
     if (roots.length === 0) return null;
+    // The point of no return. Everything above is a question; the next line is
+    // a mutation, and from here on "my reply went missing" and "nothing
+    // happened" stop being the same thing. So the receipt learns that a
+    // dispatch was attempted BEFORE one is — see `reconcile`, which reads this
+    // to keep an unresolved acceptance unresolved instead of calling it a
+    // no-op.
+    onDispatch?.();
     const accepted: string[] = [];
+    let recorded = true;
     for (const id of roots) {
-      const result = await runUnary(dialed.client.surface.node.rerun({ id }));
-      if (result.ok) accepted.push(id);
+      const result = await runUnary(
+        dialed.client.surface.node.rerun({
+          id,
+          ...(input.requestId === undefined
+            ? {}
+            : { requestId: input.requestId, inputDigest: digest }),
+        }),
+      );
+      if (result.ok) {
+        accepted.push(id);
+        // An older coordinator drops the id it does not know and answers
+        // without `recorded`. It still performed the reset, so this is not a
+        // failure — but nothing was written against the request, so a lost
+        // reply for THIS call is not reconstructable from the journal.
+        if (result.recorded !== true) recorded = false;
+      }
     }
     if (accepted.length === 0) return null;
+    if (input.requestId !== undefined && !recorded) {
+      // Say it where an operator will see it. The retry itself succeeded; what
+      // is degraded is only what a REPEAT of this id could be told.
+      warn?.(
+        `odu: this run's coordinator did not record request "${input.requestId}" — ` +
+          "a repeat of it can only report that its outcome is unknown",
+      );
+    }
     return {
       request_id: input.requestId ?? null,
       mode: "live",

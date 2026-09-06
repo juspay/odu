@@ -224,7 +224,7 @@ export function redialingAClient(dial: DialA): OduSurfaceClient {
 
   /** The no-run answer for every forwarded mutation: there is no live run to
    *  rerun or cancel, which is a `false` ack, not a failure. */
-  const NO_RUN_ACK = { ok: false } as const;
+  const NO_RUN_ACK: { ok: boolean; recorded?: boolean } = { ok: false };
 
   return {
     surface: {

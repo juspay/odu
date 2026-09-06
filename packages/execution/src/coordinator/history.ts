@@ -49,6 +49,7 @@ import {
   releaseOwnership,
   type OwnershipToken,
 } from "@odu/run-history/owner";
+import { isResumptionEvent } from "@odu/run-history/schema";
 import type { Placement, RunEvent, RunScope } from "@odu/run-history/schema";
 import {
   appendAttemptLog,
@@ -138,9 +139,34 @@ export interface RunHistory {
   postingDebt: (
     rows: readonly { context: string; lastError: string; attempts: number }[],
   ) => void;
+  /**
+   * Record that a retry carrying `requestId` was ACCEPTED against this run,
+   * before the reset it asked for is performed.
+   *
+   * This is the coordinator's half of idempotency, and it is written here
+   * rather than inferred by the caller because only this process knows the
+   * request was accepted. A reconciler that has lost its reply reads this line
+   * and replays it; one that does not find it, on a journal it could read
+   * whole, has PROOF that nothing was accepted rather than an absence of
+   * evidence.
+   *
+   * BEFORE the mutation, deliberately. The two orderings fail differently and
+   * only one of them fails safe: recording after would let a crash in between
+   * hide a reset that really happened, and a caller told "nothing happened"
+   * repeats it. Recording first can at worst claim an acceptance whose reset
+   * did not follow — which costs a caller one redundant retry and never a
+   * silent double mutation.
+   */
+  retryAccepted: (accepted: {
+    requestId: string;
+    inputDigest: string;
+    roots: readonly string[];
+    resetDependants: readonly string[];
+  }) => boolean;
   /** Publish the terminal outcome. Safe to call more than once (a `--linger`
-   *  run re-finalizes on every drain); only the first appends the journal's
-   *  `finalized` line, so the history does not accrete terminals. */
+   *  run re-finalizes on every drain); it appends a `finalized` line once per
+   *  EXECUTION GENERATION — again after a rerun resumed the run, never twice
+   *  for one settle. */
   finalize: (verdict: {
     outcome: "passed" | "failed" | "incomplete";
     startedAt: number;
@@ -169,6 +195,10 @@ export const NO_HISTORY: RunHistory = {
   replaceLog: () => {},
   resetNode: () => {},
   postingDebt: () => {},
+  // `false`, not `true`: no history means no durable record, and a caller must
+  // be able to tell its reply "the acceptance was not written down" rather
+  // than promise a line that will never exist.
+  retryAccepted: () => false,
   finalize: () => {},
   close: () => {},
 };
@@ -240,6 +270,9 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
   const journal: JournalWriter = openJournal(handle, token);
   let fenced = false;
   let finalized = false;
+  /** Has work resumed since the last terminal line? The writer's half of the
+   *  generation rule — see {@link emit}. */
+  let resumedSinceFinalized = false;
   const open = new Map<string, OpenAttempt>();
   /** The highest ordinal handed out per node — the allocator. In memory
    *  because this process owns the run for its whole life; a successor
@@ -267,6 +300,12 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
    *  place and `fenced` cannot be true for some writers and false for others. */
   const emit = (event: RunEvent): void => {
     if (fenced) return;
+    // Work happening after this run was called finished OPENS A NEW
+    // GENERATION, and the writer owes that generation its own terminal line.
+    // The rule is `isResumptionEvent`, in run-history beside the event union,
+    // because the reader draws the other half of this conclusion from exactly
+    // the same events — see {@link RunHistory.finalize}.
+    if (finalized && isResumptionEvent(event)) resumedSinceFinalized = true;
     try {
       if (journal.append(event, now()) === null) fenced = true;
     } catch {
@@ -471,6 +510,25 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
         });
       }
     },
+    retryAccepted: ({ requestId, inputDigest, roots, resetDependants }) => {
+      if (fenced) return false;
+      emit({
+        kind: "retry_accepted",
+        requestId,
+        // A live retry acts on THIS run — it resets a node on a coordinator
+        // already going, and starts nothing new. The finalized path, which
+        // does start a new run, never reaches this method: it has no
+        // coordinator to ask.
+        effectiveRunId: handle.runId,
+        roots: [...roots],
+        resetDependants: [...resetDependants],
+        inputDigest,
+      });
+      // `emit` sets `fenced` when the append is refused, so this reports what
+      // actually reached the journal rather than what was attempted — which is
+      // the whole value of the flag to the caller reconciling later.
+      return !fenced;
+    },
     finalize: (verdict) => {
       if (fenced) return;
       // Seal anything still open BEFORE the verdict, so a reader that trusts
@@ -496,12 +554,22 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
       } catch {
         // Best-effort, like every other write here.
       }
-      // The journal's terminal is written ONCE. A `--linger` run refreshes its
-      // verdict file on every drain — that file is a projection and may be
-      // rewritten — but a journal is a history, and two `finalized` lines
-      // would be two claims about how the run ended.
-      if (!finalized) {
+      // ONE terminal line PER GENERATION, not one per run.
+      //
+      // A `--linger` run calls this on every drain, and repeating the same
+      // terminal line each time would be two claims about how one execution
+      // ended — so a drain that follows no new work is silent. But a run that
+      // FINISHED, took a rerun, and finished again really did end twice, and
+      // those are two facts, not a contradiction. Suppressing the second was
+      // the inverse of the premature-settlement bug: `resumed` is cleared by a
+      // `finalized` line, so a writer that never emitted one left every
+      // retried run permanently unsettled, and a caller waiting on the retry
+      // could not observe it finish.
+      //
+      // The condition is the writer's half of the shared rule in `emit`.
+      if (!finalized || resumedSinceFinalized) {
         finalized = true;
+        resumedSinceFinalized = false;
         emit({ kind: "finalized", outcome: verdict.outcome });
       }
     },

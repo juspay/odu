@@ -35,7 +35,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
 import { Effect, Stream } from "effect";
 import { pendingNode, type PipelineState } from "@odu/run-client/surface";
-import { claimReceipt, digestOf } from "@odu/run-history/receipts";
+import { claimReceipt, digestOf, markDispatched } from "@odu/run-history/receipts";
 import type { RunManifest } from "@odu/run-history/schema";
 import { claimOwnership, OWNERSHIP_GRACE_MS } from "@odu/run-history/owner";
 import {
@@ -185,6 +185,9 @@ interface DialStub {
   dial: Dial;
   /** Every node the policy asked the live coordinator to re-run, in order. */
   asked: string[];
+  /** Every rerun call WHOLE, so a test can assert what correlation crossed the
+   *  wire rather than only which node did. */
+  calls: { id: string; requestId?: string; inputDigest?: string }[];
   closes: number;
 }
 
@@ -195,16 +198,26 @@ interface DialStub {
 function stubDial(
   state: PipelineState,
   accepts: (id: string) => boolean = () => true,
+  /** Does this stand-in coordinator write the request down? `true` is a build
+   *  that records; `false` is an older one that drops the id it does not
+   *  know. */
+  records = true,
 ): DialStub {
-  const stub: DialStub = { asked: [], closes: 0, dial: async () => null };
+  const stub: DialStub = { asked: [], calls: [], closes: 0, dial: async () => null };
   stub.dial = (async () => ({
     client: {
       surface: {
         nodes: { get: () => Stream.make(state) },
         node: {
-          rerun: ({ id }: { id: string }) => {
-            stub.asked.push(id);
-            return Effect.succeed({ ok: accepts(id) });
+          rerun: (input: { id: string; requestId?: string; inputDigest?: string }) => {
+            stub.asked.push(input.id);
+            stub.calls.push(input);
+            const ok = accepts(input.id);
+            return Effect.succeed(
+              records && ok && input.requestId !== undefined
+                ? { ok, recorded: true }
+                : { ok },
+            );
           },
         },
       },
@@ -750,6 +763,24 @@ describe("a reply that was lost mid-flight", () => {
       isAlive: () => false,
     });
     if (!owner.ok) throw new Error(`could not take the run over: ${owner.refusal.kind}`);
+    // What the COORDINATOR writes when it accepts a retry: the request's own
+    // id, recorded before it performs the reset. This is the evidence
+    // reconciliation reads. The `attempt_started` that follows is the reset
+    // itself becoming visible — deliberately included, because it is what an
+    // observer sees and what the old code MISTOOK for evidence.
+    appendEvent(
+      handle,
+      owner.token,
+      {
+        kind: "retry_accepted",
+        requestId: REQUEST,
+        effectiveRunId: handle.runId,
+        roots: [UNIT],
+        resetDependants: [],
+        inputDigest: "",
+      },
+      T0 + OWNERSHIP_GRACE_MS + 2,
+    );
     appendEvent(
       handle,
       owner.token,
@@ -759,9 +790,30 @@ describe("a reply that was lost mid-flight", () => {
         attempt: 3,
         placement: PLACEMENT,
       },
-      T0 + OWNERSHIP_GRACE_MS + 2,
+      T0 + OWNERSHIP_GRACE_MS + 3,
     );
     void root;
+  }
+
+  /** The same run, with the reset VISIBLE but no record of who asked for it —
+   *  ordinary scheduling, or somebody else's retry. */
+  function appendUncorrelatedAttempt(handle: RunHandle): void {
+    const owner = claimOwnership({
+      runId: handle.runId,
+      dir: handle.dir,
+      endpoint: ENDPOINT,
+      now: T0 + OWNERSHIP_GRACE_MS + 1,
+      pid: 4242,
+      host: "some-other-box.invalid",
+      isAlive: () => false,
+    });
+    if (!owner.ok) throw new Error(`could not take the run over: ${owner.refusal.kind}`);
+    appendEvent(
+      handle,
+      owner.token,
+      { kind: "attempt_started", node: UNIT, attempt: 3, placement: PLACEMENT },
+      T0 + OWNERSHIP_GRACE_MS + 2,
+    );
   }
 
   function repeat(root: string, launcher: LauncherStub): Promise<RetryOutcome> {
@@ -774,6 +826,107 @@ describe("a reply that was lost mid-flight", () => {
       now: () => T0 + 10,
     });
   }
+
+  it("sends the request's identity with the mutation", async () => {
+    // Correlation has to reach the process that performs the mutation, because
+    // that is the only process that can record it. An id that stays on the
+    // caller's side leaves the coordinator writing a reset that names nobody.
+    const root = tmpCatalog();
+    aRun(root, ENDPOINT);
+    const dial = stubDial(liveState());
+    const launcher = stubLauncher();
+
+    const out = accepted(
+      await retryRun({
+        runId: PARENT_RUN,
+        selector: "unit",
+        requestId: REQUEST,
+        catalog: { root },
+        launcher: launcher.launcher,
+        dial: dial.dial,
+        now: () => T0 + 10,
+      }),
+    );
+
+    expect(out.receipt.mode).toBe("live");
+    expect(dial.calls).toHaveLength(1);
+    expect(dial.calls[0]?.id).toBe(UNIT);
+    expect(dial.calls[0]?.requestId).toBe(REQUEST);
+    // The digest rides along so the coordinator's record can tell one request
+    // from another wearing the same id, without trusting the caller's file.
+    expect(dial.calls[0]?.inputDigest).toBeTruthy();
+  });
+
+  it("carries no identity when the caller asked for none", async () => {
+    // A retry without an id accepts that a repeat repeats, and must not have
+    // one invented for it — an id the caller never chose is one it cannot use
+    // to reconcile, while still costing a journal line on every rerun.
+    const root = tmpCatalog();
+    aRun(root, ENDPOINT);
+    const dial = stubDial(liveState());
+
+    await retryRun({
+      runId: PARENT_RUN,
+      selector: "unit",
+      catalog: { root },
+      launcher: stubLauncher().launcher,
+      dial: dial.dial,
+      now: () => T0 + 10,
+    });
+
+    expect(dial.calls[0]?.requestId).toBeUndefined();
+    expect(dial.calls[0]?.inputDigest).toBeUndefined();
+  });
+
+  it("warns when the coordinator did not record the request", async () => {
+    // An older coordinator performs the reset and drops the id. The retry
+    // SUCCEEDED — refusing it would be worse — but a future repeat of this id
+    // can only be told its outcome is unknown, and the operator should hear
+    // that now rather than discover it during an incident.
+    const root = tmpCatalog();
+    aRun(root, ENDPOINT);
+    const dial = stubDial(liveState(), () => true, false);
+    const warnings: string[] = [];
+
+    const out = accepted(
+      await retryRun({
+        runId: PARENT_RUN,
+        selector: "unit",
+        requestId: REQUEST,
+        catalog: { root },
+        launcher: stubLauncher().launcher,
+        dial: dial.dial,
+        warn: (m) => warnings.push(m),
+        now: () => T0 + 10,
+      }),
+    );
+
+    expect(out.receipt.mode).toBe("live");
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("did not record request");
+    expect(warnings[0]).toContain(REQUEST);
+  });
+
+  it("says nothing when the coordinator did record it", async () => {
+    const root = tmpCatalog();
+    aRun(root, ENDPOINT);
+    const warnings: string[] = [];
+
+    accepted(
+      await retryRun({
+        runId: PARENT_RUN,
+        selector: "unit",
+        requestId: REQUEST,
+        catalog: { root },
+        launcher: stubLauncher().launcher,
+        dial: stubDial(liveState()).dial,
+        warn: (m) => warnings.push(m),
+        now: () => T0 + 10,
+      }),
+    );
+
+    expect(warnings).toEqual([]);
+  });
 
   it("reconciles by identity when the pre-minted run is in the catalog", async () => {
     // The spawn happened; only the answer was lost. So the question is a
@@ -805,16 +958,15 @@ describe("a reply that was lost mid-flight", () => {
     expect(launcher.calls).toEqual([]);
   });
 
-  it("reconciles a LIVE mutation from the run's own journal", async () => {
+  it("reconciles a LIVE mutation from the coordinator's own record of it", async () => {
     // The half a run-id lookup cannot see. A live retry resets a node on a
     // coordinator that is already going and publishes no run of its own, so
     // "does the planned run exist?" answers `no` about a mutation that
     // certainly happened — and the caller was told to retry with a fresh id,
     // which performs it a second time.
     //
-    // What DID happen is in the run's journal: the coordinator appends
-    // `attempt_started` for the node it reset. Here that line lands after the
-    // request was accepted, exactly as it would have before the reply was lost.
+    // What DID happen is written by the coordinator that did it, against the
+    // request's own id, before it performed the reset.
     const root = tmpCatalog();
     const handle = aRun(root, ENDPOINT);
     claimByHand(handle, "0000000b-0002");
@@ -849,8 +1001,49 @@ describe("a reply that was lost mid-flight", () => {
 
     expect(out.message).toContain("its outcome is not recorded");
     expect(out.message).toContain("No run was started under it");
-    expect(out.message).toContain("no attempt began on this run since");
+    expect(out.message).toContain("recorded no acceptance for it");
+    expect(out.message).toContain("never put on the wire");
     expect(out.suggestion).toEqual(["odu", "history", "show", "--run", PARENT_RUN]);
+    expect(launcher.calls).toEqual([]);
+  });
+
+  it("does NOT claim a retry that never happened when unrelated work starts", async () => {
+    // The misattribution this correlation exists to end. Claim an id, dispatch
+    // NOTHING, and then let ordinary execution begin an attempt on a node the
+    // selector happens to name. The attempt is real and it is after the claim,
+    // and under a timing-based reconciliation that was enough to report the
+    // retry as a success — with an attempt number belonging to work this
+    // request never caused. Nobody recorded the request, so nobody may claim it.
+    const root = tmpCatalog();
+    const handle = aRun(root, ENDPOINT);
+    claimByHand(handle, "0000000b-0002");
+    appendUncorrelatedAttempt(handle);
+    const launcher = stubLauncher();
+
+    const out = refused(await repeat(root, launcher));
+
+    expect(out.message).toContain("recorded no acceptance for it");
+    expect(out.message).not.toContain("UNKNOWN");
+    expect(launcher.calls).toEqual([]);
+  });
+
+  it("keeps an unresolved acceptance UNRESOLVED once it reached the wire", async () => {
+    // The case a fresh id must never be offered for. The request got as far as
+    // dispatching, and then its answer vanished; the coordinator recorded no
+    // acceptance, so whether the mutation landed is genuinely unknown — an
+    // older coordinator that ignored the id, or one that died before writing.
+    // "Nothing happened" would be a guess, and acting on it mutates twice.
+    const root = tmpCatalog();
+    const handle = aFinishedRun(root);
+    claimByHand(handle, "0000000b-0002");
+    markDispatched(handle, REQUEST, T0 + 5);
+    const launcher = stubLauncher();
+
+    const out = refused(await repeat(root, launcher));
+
+    expect(out.message).toContain("outcome is UNKNOWN");
+    expect(out.message).toContain("Do not repeat it with a fresh id");
+    expect(out.message).not.toContain("nothing it asked for happened");
     expect(launcher.calls).toEqual([]);
   });
 

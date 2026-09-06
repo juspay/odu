@@ -91,6 +91,27 @@ export const ReceiptSchema = Schema.Struct({
    * whether the journal grew a matching attempt past it.
    */
   journalAtAccept: Schema.Int,
+  /**
+   * When this request actually put a mutation on the wire, if it got that far.
+   *
+   * The line between "I claimed an id" and "I asked somebody to change
+   * something". Before it, a missing outcome means nothing happened and
+   * re-issuing is safe; after it, a missing outcome means the answer was lost
+   * and the mutation may well have landed — a distinction the claim alone
+   * cannot make, because claiming happens whether or not the dispatch that
+   * follows ever leaves the process.
+   *
+   * The coordinator's own `retry_accepted` line is the better evidence and is
+   * consulted first; this is what remains when that evidence CANNOT exist —
+   * a coordinator from a build that did not record request ids, or a journal
+   * with lines this build cannot read. Fail-closed: unresolved stays
+   * unresolved rather than becoming permission to mutate a second time.
+   *
+   * `optionalKey`, so receipts written before this field decode unchanged.
+   * Their absence reads as "never dispatched", which is the same answer the
+   * old code assumed for every receipt.
+   */
+  dispatchedAt: Schema.optionalKey(Schema.Number),
   /** The receipt's payload once completed — the addressed answer the caller
    *  gets, replayed verbatim on a repeat so two asks cannot get two different
    *  descriptions of one action. */
@@ -190,6 +211,29 @@ export function claimReceipt(
   return existing.state === "completed"
     ? { kind: "replay", receipt: existing }
     : { kind: "in_flight", receipt: existing };
+}
+
+/**
+ * Note that this request is about to mutate something — see
+ * {@link ReceiptSchema}'s `dispatchedAt`.
+ *
+ * Called BEFORE the dispatch it describes, which is the only ordering that
+ * helps: a marker written afterwards is missing in exactly the case it exists
+ * for. Best-effort — a receipt that cannot be re-read is left alone, and the
+ * caller's reconciliation treats an absent marker conservatively anyway.
+ */
+export function markDispatched(
+  handle: RunHandle,
+  requestId: string,
+  now: number = Date.now(),
+): void {
+  const existing = readReceipt(handle, requestId);
+  if (existing === null || existing.state === "completed") return;
+  if (existing.dispatchedAt !== undefined) return;
+  writeAtomic(
+    receiptPath(handle, requestId),
+    `${JSON.stringify({ ...existing, dispatchedAt: now }, null, 2)}\n`,
+  );
 }
 
 /** Record what a claimed request actually did. Idempotent: completing an

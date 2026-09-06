@@ -407,6 +407,12 @@ export async function retryCommand(opts: RetryCommandOpts): Promise<number> {
         }),
     catalog,
     launcher: opts.launcher ?? packagedLauncher(),
+    // Stderr even under `-o json`: the retry SUCCEEDED, so this must not enter
+    // the document a caller parses as the result, and a machine reader that
+    // ignores stderr is no worse off than before. What it reports is that a
+    // repeat of this id could not be reconciled — an operator's problem, not a
+    // field.
+    warn: (message) => process.stderr.write(`${message}\n`),
   });
   if (!outcome.ok) {
     if (opts.json) {

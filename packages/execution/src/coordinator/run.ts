@@ -1096,11 +1096,36 @@ async function orchestrate(
   // carries no platform: splitFanId reports it as the "unknown" sentinel, which
   // has no lane, so the request is unroutable — `false`, same as a missing
   // lane. The surface's `node.rerun` and the live view's `r` key both call this.
-  const rerunNode = async (id: string): Promise<boolean> => {
+  const rerunNode = async (
+    id: string,
+    /** The retry this reset belongs to, when the caller named one. Recorded
+     *  durably at ACCEPTANCE — after routing proves the request can be
+     *  honoured, before the lane is told to do it — so a caller whose reply
+     *  goes missing can read what happened instead of inferring it from
+     *  whatever attempt started next. See `RunHistory.retryAccepted`. */
+    request?: { requestId: string; inputDigest: string },
+  ): Promise<{ ok: boolean; recorded?: boolean }> => {
     const { platform } = splitFanId(id);
-    if (platform === "unknown") return false;
+    if (platform === "unknown") return { ok: false };
     const route = executions.route(platform, id);
-    return route === undefined ? false : route.lane.rerun(route.localId);
+    if (route === undefined) return { ok: false };
+    // A refused request is not an accepted one, so nothing is written for the
+    // two `false` returns above: the journal records acceptances, and a line
+    // for a reset that was never routed would be a receipt for nothing.
+    const recorded =
+      request === undefined
+        ? undefined
+        : history.retryAccepted({
+            requestId: request.requestId,
+            inputDigest: request.inputDigest,
+            roots: [id],
+            // The dependants this reset also clears are the live DAG's, and the
+            // lane computes them as it goes. Left empty rather than guessed,
+            // which is the same answer a reconciled receipt has always given.
+            resetDependants: [],
+          });
+    const ok = await route.lane.rerun(route.localId);
+    return recorded === undefined ? { ok } : { ok, recorded };
   };
 
   /** What an operator lane-drop does to a lane's unfinished nodes. Named once
@@ -1371,7 +1396,17 @@ async function orchestrate(
     procedures: {
       node: {
         rerun: ({ input }) =>
-          Effect.promise(async () => ({ ok: await rerunNode(input.id) })),
+          Effect.promise(async () =>
+            rerunNode(
+              input.id,
+              input.requestId === undefined
+                ? undefined
+                : {
+                    requestId: input.requestId,
+                    inputDigest: input.inputDigest ?? "",
+                  },
+            ),
+          ),
         cancel: ({ input }) =>
           Effect.promise(async () => ({ ok: await cancelNode(input.id) })),
       },

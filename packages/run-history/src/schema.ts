@@ -297,6 +297,33 @@ export const RunEventSchema = Schema.Union([
 ]);
 export type RunEvent = typeof RunEventSchema.Type;
 
+/**
+ * Does this event mean WORK IS HAPPENING?
+ *
+ * The one rule the journal's writer and its readers must agree on, so it is
+ * written once. After a `finalized` line, an event that satisfies this is the
+ * run RESUMING — a new execution generation — and the two sides draw opposite
+ * halves of the same conclusion from it: the reader stops calling the run
+ * settled, and the writer knows it now owes a SECOND `finalized` when this
+ * generation ends.
+ *
+ * They were not always the same rule, and the asymmetry was a bug in both
+ * directions at once. The reader treated a resumed run as unsettled forever
+ * because the writer emitted `finalized` once per run and never again; a
+ * caller waiting on a retry could therefore never observe it finish. Neither
+ * half is wrong on its own — which is why the rule cannot live in either.
+ *
+ * `pending`/`running` and not merely `attempt_started`, because a lane
+ * publishes `pending` before it starts an attempt: keying on the attempt alone
+ * leaves a window in which resumed work still reads as settled.
+ */
+export function isResumptionEvent(event: RunEvent): boolean {
+  if (event.kind === "attempt_started") return true;
+  if (event.kind === "node_status")
+    return event.status === "pending" || event.status === "running";
+  return false;
+}
+
 /** A journal line: the payload plus its ordinal and wall clock. `seq` is dense
  *  and 1-based within a run — a cursor is a `seq`, so a gap would be a hole a
  *  caller could not tell from a delivery it missed. */

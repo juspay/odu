@@ -38,6 +38,7 @@
 import type { NodeStatus } from "@odu/run-client/surface";
 import { signalFromExit } from "./exit";
 import { formatCursor, type Cursor } from "./ids";
+import { isResumptionEvent } from "./schema";
 import type {
   Expiry,
   JournalEntry,
@@ -311,8 +312,9 @@ export function foldJournal(journal: readonly JournalEntry[]): {
         roster = [...e.order];
         break;
       case "attempt_started": {
-        // A new attempt after a terminal line is work resuming.
-        if (finalized !== null) resumed = true;
+        // A new attempt after a terminal line is work resuming — see
+        // `isResumptionEvent`, which is the rule the WRITER reads too.
+        if (finalized !== null && isResumptionEvent(e)) resumed = true;
         const state: AttemptState = {
           node: e.node,
           attempt: e.attempt,
@@ -344,12 +346,8 @@ export function foldJournal(journal: readonly JournalEntry[]): {
           logBytes: 0,
           logReason: null,
         };
-        // Same for a node going back to pending/running: the runner publishes
-        // `pending` before `running`, so keying only on `attempt_started`
-        // would leave a window where a resumed run still reads as settled.
-        if (finalized !== null && (e.status === "pending" || e.status === "running")) {
-          resumed = true;
-        }
+        // Same for a node going back to pending/running — the same shared rule.
+        if (finalized !== null && isResumptionEvent(e)) resumed = true;
         state.status = e.status;
         state.exitCode = e.exitCode;
         state.durationMs = e.durationMs;
