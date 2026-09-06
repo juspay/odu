@@ -621,6 +621,42 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     ) as unknown as AgentNodesReader;
   }
 
+  /**
+   * `reader`, but the server is closed once the wait has actually SEEN a live
+   * frame.
+   *
+   * The cases below are about a close that beat the TERMINAL frame — the last
+   * snapshot still says running, the run finished, and the record is the
+   * authority. Staging that with `setTimeout(() => s.close(), 30)` stages
+   * something else: on a loaded machine the close lands before the wait's first
+   * subscription delivers anything, so the wait never observes a live run at
+   * all and spends its whole timeout re-dialling a socket nobody serves. That
+   * is a different scenario, and it fails.
+   *
+   * Ordering it on the frame rather than on a clock makes the intended sequence
+   * the only one that can happen.
+   */
+  function closeAfterFirstFrame(
+    s: TestSurface,
+    reader: AgentNodesReader,
+  ): AgentNodesReader {
+    let closed = false;
+    return {
+      surface: {
+        nodes: {
+          get: (input: void) =>
+            Stream.tap(reader.surface.nodes.get(input), (frame) =>
+              Effect.sync(() => {
+                if (closed || !frame.run) return;
+                closed = true;
+                s.close();
+              }),
+            ),
+        },
+      },
+    };
+  }
+
   /** `reader`, but its FIRST subscription dies after `afterFrames` frames with
    *  the error the wire raises when a link's keep-alive goes unanswered — the
    *  exact failure `openWireLink` mints (`SurfaceStdioTransportClosed` with
@@ -966,12 +1002,11 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     // points at an EMPTY throwaway checkout, so the verdict rests on the
     // stream alone and the test never reads this checkout's real ledger.
     const s = await serve([["ci::nix@x86_64-linux", "running"]]);
-    const client = agentWaitClient(s);
-    setTimeout(() => s.close(), 30);
+    const client = closeAfterFirstFrame(s, agentWaitClient(s));
     const v = await waitForSettle({
       client,
       failFast: false,
-      timeoutMs: 300,
+      timeoutMs: 10_000,
       resolveRunContext: ledgerWith(null),
     });
     expect(v.passed).toBe(false);
@@ -1027,12 +1062,11 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     // a green run unreadable to an agent — the record is the authority once the
     // socket is gone.
     const s = await serve([["ci::nix@x86_64-linux", "running"]]);
-    const client = agentWaitClient(s);
-    setTimeout(() => s.close(), 30);
+    const client = closeAfterFirstFrame(s, agentWaitClient(s));
     const v = await waitForSettle({
       client,
       failFast: false,
-      timeoutMs: 300,
+      timeoutMs: 10_000,
       resolveRunContext: ledgerWith(record("passed")),
     });
     expect(v).toMatchObject({ settled: true, passed: true, timed_out: false });
@@ -1044,8 +1078,7 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     // one. This drives the tool `mcp.ts` builds, through its own handler, so
     // production and the tests traverse the same path.
     const s = await serve([["ci::nix@x86_64-linux", "running"]]);
-    const client = agentWaitClient(s);
-    setTimeout(() => s.close(), 30);
+    const client = closeAfterFirstFrame(s, agentWaitClient(s));
     const tool = makeWaitTool(ledgerWith(record("passed")));
     // RUN the handler.s Effect — do not `await` it. A bespoke handler returns a
     // description now, and awaiting one resolves to the Effect object without
@@ -1054,7 +1087,7 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     // (and odu.s, in effectEdges.test.ts) exists to ban.
     const v = (await Effect.runPromise(
       tool.handler(
-        { fail_fast: false, timeout_ms: 300 },
+        { fail_fast: false, timeout_ms: 10_000 },
         client as never,
         undefined,
       ),
@@ -1064,13 +1097,12 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
 
   it("settles red from the finalized record, naming the failed node", async () => {
     const s = await serve([["ci::e2e@x86_64-linux", "running"]]);
-    const client = agentWaitClient(s);
-    setTimeout(() => s.close(), 30);
+    const client = closeAfterFirstFrame(s, agentWaitClient(s));
     const failedNodes = state([["ci::e2e@x86_64-linux", "failed"]]).nodes;
     const v = await waitForSettle({
       client,
       failFast: false,
-      timeoutMs: 300,
+      timeoutMs: 10_000,
       resolveRunContext: ledgerWith(record("failed", failedNodes)),
     });
     expect(v.settled).toBe(true);
@@ -1089,12 +1121,11 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     // resumes (run.ts `updateNode`), so such a record says `incomplete` itself
     // — the reader needs one rule, not two.
     const s = await serve([["ci::nix@x86_64-linux", "running"]]);
-    const client = agentWaitClient(s);
-    setTimeout(() => s.close(), 30);
+    const client = closeAfterFirstFrame(s, agentWaitClient(s));
     const v = await waitForSettle({
       client,
       failFast: false,
-      timeoutMs: 300,
+      timeoutMs: 10_000,
       resolveRunContext: ledgerWith(record("incomplete")),
     });
     expect(v.passed).toBe(false);
@@ -1107,13 +1138,12 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     // self-contradicting record is not an authority, so it settles nothing —
     // the reader states that rather than trusting a promise from another module.
     const s = await serve([["ci::e2e@x86_64-linux", "running"]]);
-    const client = agentWaitClient(s);
-    setTimeout(() => s.close(), 30);
+    const client = closeAfterFirstFrame(s, agentWaitClient(s));
     const redNodes = state([["ci::e2e@x86_64-linux", "failed"]]).nodes;
     const v = await waitForSettle({
       client,
       failFast: false,
-      timeoutMs: 300,
+      timeoutMs: 10_000,
       resolveRunContext: ledgerWith(record("passed", redNodes)),
     });
     expect(v.passed).toBe(false);
@@ -1151,13 +1181,12 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     // The mirror of the passed+red case: an outcome its own node list cannot
     // justify. Reporting it would name no failing node for a red verdict.
     const s = await serve([["ci::nix@x86_64-linux", "running"]]);
-    const client = agentWaitClient(s);
-    setTimeout(() => s.close(), 30);
+    const client = closeAfterFirstFrame(s, agentWaitClient(s));
     const greenNodes = state([["ci::nix@x86_64-linux", "ok"]]).nodes;
     const v = await waitForSettle({
       client,
       failFast: false,
-      timeoutMs: 300,
+      timeoutMs: 10_000,
       resolveRunContext: ledgerWith(record("failed", greenNodes)),
     });
     expect(v.settled).toBe(false);
@@ -1167,8 +1196,7 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     // One authority per verdict: if the record answers pass/fail, it also
     // answers what statuses it still owed at finalize (juspay/odu#61).
     const s = await serve([["ci::nix@x86_64-linux", "running"]]);
-    const client = agentWaitClient(s);
-    setTimeout(() => s.close(), 30);
+    const client = closeAfterFirstFrame(s, agentWaitClient(s));
     const owed = {
       ...record("passed"),
       unposted: [{ context: "odu / unit", lastError: "gh: 502" }],
@@ -1176,7 +1204,7 @@ describe("wait_for_settle — fail-fast / settle / timeout / cancel (ported)", (
     const v = await waitForSettle({
       client,
       failFast: false,
-      timeoutMs: 300,
+      timeoutMs: 10_000,
       resolveRunContext: ledgerWith(owed),
     });
     expect(v.passed).toBe(true);

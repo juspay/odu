@@ -155,7 +155,7 @@ function importOne(
       retryable: false,
     },
     build: { oduVersion: "imported", self: null, runnerFlake: null },
-    owner: {
+    registeredBy: {
       epoch: 1,
       pid: 0,
       host: "",

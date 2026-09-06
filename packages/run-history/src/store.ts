@@ -69,6 +69,7 @@ import {
   currentOwner,
   OWNERSHIP_GRACE_MS,
   type OwnershipToken,
+  ownershipProvablyLost,
   stillOwner,
 } from "./owner";
 import {
@@ -154,7 +155,7 @@ export type RegisterResult =
  * look would be entitled to write to it.
  */
 export function registerRun(
-  manifest: Omit<RunManifest, "version" | "owner">,
+  manifest: Omit<RunManifest, "version" | "registeredBy">,
   opts: CatalogOptions & { endpoint: string | null; now?: number } ,
 ): RegisterResult {
   const handle = handleFor(manifest.runId, opts);
@@ -169,7 +170,7 @@ export function registerRun(
   const full: RunManifest = {
     ...manifest,
     version: RUN_RECORD_FORMAT,
-    owner: claim.owner,
+    registeredBy: claim.owner,
   };
   writeAtomic(
     join(handle.dir, RUN_FILES.manifest),
@@ -180,23 +181,6 @@ export function registerRun(
     scope: manifest.scope,
   }, opts.now);
   return { ok: true, handle, token: claim.token, manifest: full };
-}
-
-/** Republish a manifest with a changed mutable half (the owner record, after a
- *  takeover). Fenced like every other write. */
-export function updateManifest(
-  handle: RunHandle,
-  token: OwnershipToken,
-  update: (manifest: RunManifest) => RunManifest,
-): boolean {
-  if (!stillOwner(token)) return false;
-  const manifest = readManifest(handle);
-  if (manifest === null) return false;
-  writeAtomic(
-    join(handle.dir, RUN_FILES.manifest),
-    `${JSON.stringify(update(manifest), null, 2)}\n`,
-  );
-  return true;
 }
 
 export function readManifest(handle: RunHandle): RunManifest | null {
@@ -717,7 +701,25 @@ export interface CatalogRow {
   manifest: RunManifest | null;
   verdict: RunVerdict | null;
   expiry: Expiry | null;
-  /** Is a live owner serving this run right now? */
+  /**
+   * Whether anything is writing this run, from the OWNER RECORD rather than
+   * from the manifest.
+   *
+   * The manifest's `registeredBy` is stamped once, at registration, and no
+   * write path ever updates it — so a coordinator that is killed before it
+   * finalizes leaves an endpoint there forever, and a listing that trusted it
+   * would report that run as "running" for the rest of the catalog's life.
+   * That is precisely the "a killed coordinator is indistinguishable from a
+   * slow one" failure this package exists to remove, and it was removed for
+   * `odu wait --run` (which folds the owner record) while surviving here.
+   *
+   * `owner.json` is the live copy: `heartbeat` refreshes it and
+   * `releaseOwnership` clears the endpoint. So the listing asks it, and gets
+   * the same three-state answer the attention query gives.
+   */
+  liveness: "owned" | "owner_lost" | "no_owner";
+  /** Where a live owner serves, when one does. Null for every other state, so
+   *  a reader cannot mistake a stale address for a reachable one. */
   endpoint: string | null;
 }
 
@@ -731,8 +733,9 @@ export interface CatalogRow {
  * scrambling the list.
  */
 export function listRuns(
-  opts: CatalogOptions & { limit?: number; repoRoot?: string } = {},
+  opts: CatalogOptions & { limit?: number; repoRoot?: string; now?: number } = {},
 ): CatalogRow[] {
+  const now = opts.now ?? Date.now();
   const catalog = catalogPath(opts);
   let entries: string[];
   try {
@@ -748,12 +751,16 @@ export function listRuns(
     if (opts.repoRoot !== undefined && manifest?.repoRoot !== opts.repoRoot) {
       continue;
     }
+    const owner = currentOwner(handle.dir);
+    const alive = owner !== null && !ownershipProvablyLost(owner, now).lost;
     rows.push({
       runId,
       manifest,
       verdict: readVerdict(handle),
       expiry: readExpiry(handle),
-      endpoint: manifest?.owner.endpoint ?? null,
+      liveness:
+        owner === null ? "no_owner" : alive ? "owned" : "owner_lost",
+      endpoint: alive ? owner.endpoint : null,
     });
     if (opts.limit !== undefined && rows.length >= opts.limit) break;
   }

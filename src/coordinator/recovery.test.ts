@@ -37,6 +37,7 @@ import { Effect, Stream } from "effect";
 import { pendingNode, type PipelineState } from "@odu/run-client/surface";
 import { claimReceipt, digestOf } from "@odu/run-history/receipts";
 import type { RunManifest } from "@odu/run-history/schema";
+import { claimOwnership, OWNERSHIP_GRACE_MS } from "@odu/run-history/owner";
 import {
   appendEvent,
   readJournal,
@@ -76,7 +77,7 @@ function tmpCatalog(): string {
   return dir;
 }
 
-type ManifestInput = Omit<RunManifest, "version" | "owner">;
+type ManifestInput = Omit<RunManifest, "version" | "registeredBy">;
 
 function manifest(over: Partial<ManifestInput> = {}): ManifestInput {
   return {
@@ -154,13 +155,19 @@ function aFinishedRun(root: string, over: Partial<ManifestInput> = {}): RunHandl
 
 /** The live run a dial would answer with: `e2e` needs `unit`, `lint` is
  *  independent. Enough of a DAG that "dependency-minimal roots" and "transitive
- *  dependants" are different sets. */
-function liveState(): PipelineState {
+ *  dependants" are different sets.
+ *
+ *  It carries the run's IDENTITY (`sha7` + `seq`), because a checkout socket
+ *  serves one run after another and the policy refuses to mutate a run it
+ *  cannot prove is the one it was asked about. `over` is how a test says "a
+ *  DIFFERENT run is serving this socket now". */
+function liveState(over: Partial<PipelineState> = {}): PipelineState {
   const seed = (id: string, needs: string[]) =>
     pendingNode({ id, name: id, command: "just x", needs });
   return {
     name: "ci::default",
     sha7: SHA.slice(0, 7),
+    seq: 3,
     dirty: false,
     order: [UNIT, E2E, LINT],
     nodes: {
@@ -168,6 +175,7 @@ function liveState(): PipelineState {
       [E2E]: seed(E2E, [UNIT]),
       [LINT]: { ...seed(LINT, []), status: "failed", exitCode: 1 },
     },
+    ...over,
   };
 }
 
@@ -401,6 +409,56 @@ describe("the live path is attempted, never predicted", () => {
     expect(out.message).toContain("could not start the replay run");
     expect(out.message).toContain("the coordinator exited before serving a socket");
     expect(out.suggestion).toEqual(["odu", "run", "unit"]);
+  });
+});
+
+describe("the socket is not the run", () => {
+  it("refuses to mutate a DIFFERENT run that took over the checkout's socket", async () => {
+    // Run A finishes; run B starts in the same checkout and binds the same
+    // `.ci/odu.sock`. Retrying A must not reset a node on B — and the receipt
+    // that came back would have carried A's id and A's commit, so nothing
+    // downstream could have caught it.
+    const root = tmpCatalog();
+    aRun(root, ENDPOINT);
+    const somebodyElse = stubDial(liveState({ seq: 9 }));
+    const launcher = stubLauncher();
+
+    const out = accepted(
+      await retryRun({
+        runId: PARENT_RUN,
+        selector: "unit",
+        catalog: { root },
+        launcher: launcher.launcher,
+        dial: somebodyElse.dial,
+      }),
+    );
+
+    // Nothing was asked of the run on the wire…
+    expect(somebodyElse.asked).toEqual([]);
+    // …and the retry became a fresh run rather than a silent mutation.
+    expect(out.receipt.mode).toBe("relaunched");
+    expect(launcher.calls).toHaveLength(1);
+  });
+
+  it("refuses the live path for a run that reserved no ordinal", async () => {
+    // `sha7` alone is shared by every run of a commit — including a rerun of
+    // the very run being retried — so a run with no `<sha7>#<seq>` cannot
+    // prove it is the one addressed. Fail closed.
+    const root = tmpCatalog();
+    aRun(root, ENDPOINT, { seq: null });
+    const live = stubDial(liveState({ seq: undefined }));
+    const launcher = stubLauncher();
+
+    await retryRun({
+      runId: PARENT_RUN,
+      selector: "unit",
+      catalog: { root },
+      launcher: launcher.launcher,
+      dial: live.dial,
+    });
+
+    expect(live.asked).toEqual([]);
+    expect(launcher.calls).toHaveLength(1);
   });
 });
 
@@ -664,11 +722,46 @@ describe("a reply that was lost mid-flight", () => {
       kind: "retry",
       digest: digestOf([PARENT_RUN, "unit", "", 0]),
       plannedRunId,
+      // The journal height a first attempt would have recorded. Zero here, so
+      // ANY later attempt on the selector counts as the effect it is looking
+      // for — which is what these cases are about.
+      journalAtAccept: 0,
       now: T0 + 5,
     });
     if (outcome?.kind !== "claimed") {
       throw new Error(`could not claim by hand: ${outcome?.kind ?? "null"}`);
     }
+  }
+
+  /** The trace a live retry leaves: the coordinator that accepted it appends a
+   *  fresh `attempt_started` for the node it reset. Written with the run's own
+   *  ownership token, the way the coordinator would have. */
+  function appendLiveRetryEvidence(root: string, handle: RunHandle): void {
+    const owner = claimOwnership({
+      runId: handle.runId,
+      dir: handle.dir,
+      endpoint: ENDPOINT,
+      // Past the grace, from another host: the documented cross-host takeover,
+      // and the only honest way for a test to hold this run's token while our
+      // own pid is very much alive.
+      now: T0 + OWNERSHIP_GRACE_MS + 1,
+      pid: 4242,
+      host: "some-other-box.invalid",
+      isAlive: () => false,
+    });
+    if (!owner.ok) throw new Error(`could not take the run over: ${owner.refusal.kind}`);
+    appendEvent(
+      handle,
+      owner.token,
+      {
+        kind: "attempt_started",
+        node: UNIT,
+        attempt: 3,
+        placement: PLACEMENT,
+      },
+      T0 + OWNERSHIP_GRACE_MS + 2,
+    );
+    void root;
   }
 
   function repeat(root: string, launcher: LauncherStub): Promise<RetryOutcome> {
@@ -712,7 +805,38 @@ describe("a reply that was lost mid-flight", () => {
     expect(launcher.calls).toEqual([]);
   });
 
-  it("refuses rather than silently redoing the work when no run was started", async () => {
+  it("reconciles a LIVE mutation from the run's own journal", async () => {
+    // The half a run-id lookup cannot see. A live retry resets a node on a
+    // coordinator that is already going and publishes no run of its own, so
+    // "does the planned run exist?" answers `no` about a mutation that
+    // certainly happened — and the caller was told to retry with a fresh id,
+    // which performs it a second time.
+    //
+    // What DID happen is in the run's journal: the coordinator appends
+    // `attempt_started` for the node it reset. Here that line lands after the
+    // request was accepted, exactly as it would have before the reply was lost.
+    const root = tmpCatalog();
+    const handle = aRun(root, ENDPOINT);
+    claimByHand(handle, "0000000b-0002");
+    appendLiveRetryEvidence(root, handle);
+    const launcher = stubLauncher();
+
+    const out = accepted(await repeat(root, launcher));
+
+    expect(out.replayed).toBe(true);
+    expect(out.receipt.mode).toBe("live");
+    expect(out.receipt.effective_run).toBe(PARENT_RUN);
+    expect(out.receipt.roots).toEqual([UNIT]);
+    // Nothing was started, and nothing was re-issued.
+    expect(launcher.calls).toEqual([]);
+
+    // A third ask replays the completed receipt verbatim.
+    const third = accepted(await repeat(root, launcher));
+    expect(third.receipt).toEqual(out.receipt);
+    expect(launcher.calls).toEqual([]);
+  });
+
+  it("refuses rather than silently redoing the work when nothing happened", async () => {
     // Nothing exists under the pre-minted id. That is not the same as "nothing
     // happened" — a LIVE retry leaves no run of its own — so the caller is told
     // exactly what is and is not known instead of being handed a guess.
@@ -724,7 +848,8 @@ describe("a reply that was lost mid-flight", () => {
     const out = refused(await repeat(root, launcher));
 
     expect(out.message).toContain("its outcome is not recorded");
-    expect(out.message).toContain("no run was started under it");
+    expect(out.message).toContain("No run was started under it");
+    expect(out.message).toContain("no attempt began on this run since");
     expect(out.suggestion).toEqual(["odu", "history", "show", "--run", PARENT_RUN]);
     expect(launcher.calls).toEqual([]);
   });
@@ -739,7 +864,7 @@ describe("a reply that was lost mid-flight", () => {
     const launcher = stubLauncher();
 
     const out = refused(await repeat(root, launcher));
-    expect(out.message).toContain("no run was started under it");
+    expect(out.message).toContain("No run was started under it");
     expect(launcher.calls).toEqual([]);
   });
 });

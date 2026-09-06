@@ -50,7 +50,7 @@ const SHA = "26d2c2dabcdef0123456789012345678901234ab";
 const RUN_ID = "0000000a-0001";
 const PLANNED = "0000000b-0002";
 
-type ManifestInput = Omit<RunManifest, "version" | "owner">;
+type ManifestInput = Omit<RunManifest, "version" | "registeredBy">;
 
 /** A registered run of our own, in a catalog of our own. Receipts live beside
  *  a run's journal, so a receipt needs a run before it needs anything else. */
@@ -86,6 +86,7 @@ function claim(
     kind: "retry",
     digest: digestOf([RUN_ID, "unit"]),
     plannedRunId: PLANNED,
+    journalAtAccept: 0,
     now: T0,
     ...over,
   });

@@ -271,6 +271,26 @@ export async function waitForAttention(
   }
 }
 
+/**
+ * Is this worth returning, or should the wait keep looking?
+ *
+ * THE CURSOR CHANGES THE QUESTION, and that is the whole of this function.
+ *
+ * A caller with NO cursor is asking "tell me when something is wrong", so a
+ * failure that is already on the record answers it immediately — that is the
+ * fast red the whole command exists for.
+ *
+ * A caller WITH a cursor has already been shown that failure. Waking it again
+ * on the same red returns in about a millisecond with zero events and the
+ * cursor it came in with, which is not a wait at all: it is the polling loop
+ * this release set out to remove, wearing a blocking call's clothes. So a
+ * resumed wait wakes for what it has NOT seen — new events, settlement, an
+ * owner that went away — and otherwise holds until its deadline.
+ *
+ * The failure stays in every answer either way. Suppressing a repeat delivery
+ * is not resolving anything, and `unresolved_failures` is recomputed in full
+ * on every read precisely so the two cannot be confused.
+ */
 function isAnswer(attention: Attention, opts: WaitOptions): boolean {
   if (attention.state === "expired" || attention.state === "unknown_run") {
     return true;
@@ -278,11 +298,8 @@ function isAnswer(attention: Attention, opts: WaitOptions): boolean {
   if (attention.state === "owner_lost") return true;
   if (attention.settled) return true;
   if (opts.settle === true) return false;
-  if (attention.actionable) return true;
-  // A caller resuming from a cursor is asking "what did I miss", and anything
-  // it missed is an answer. A caller with no cursor is asking "tell me when
-  // something is wrong", and progress is not that.
-  return opts.after != null && attention.events.length > 0;
+  if (opts.after != null) return attention.events.length > 0;
+  return attention.actionable;
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {

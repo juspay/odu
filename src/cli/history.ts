@@ -497,18 +497,32 @@ export function historyListCommand(opts: HistoryListOpts): number {
   return 0;
 }
 
+/**
+ * What a listed run ENDED AS, or why it has no ending.
+ *
+ * A run with no verdict has two very different explanations, and telling them
+ * apart is the whole reason `liveness` is a three-state value rather than an
+ * endpoint string. `owner lost` is a coordinator that was killed before it
+ * could finalize — the case this release exists to make visible — and it used
+ * to render as `running`, permanently, because the only signal the listing had
+ * was an endpoint the manifest stamped once at registration and nothing ever
+ * cleared. A crashed run therefore claimed to be executing for the life of the
+ * catalog, in exactly the listing an operator scans to find out what is still
+ * going.
+ */
+export function catalogOutcome(row: CatalogRow): string {
+  if (row.expiry !== null) return `expired (${row.expiry.outcome})`;
+  if (row.verdict !== null) return row.verdict.outcome;
+  if (row.liveness === "owned") return "running";
+  if (row.liveness === "owner_lost") return "owner lost";
+  return "unfinished";
+}
+
 /** The catalog table: run id · ref · outcome · where · age. Pure over `now`. */
 export function renderCatalog(rows: readonly CatalogRow[], now: number): string {
   const cells = rows.map((row) => {
     const m = row.manifest;
-    const outcome =
-      row.expiry !== null
-        ? `expired (${row.expiry.outcome})`
-        : row.verdict === null
-          ? row.endpoint !== null
-            ? "running"
-            : "unfinished"
-          : row.verdict.outcome;
+    const outcome = catalogOutcome(row);
     return {
       id: row.runId,
       ref: m === null ? "?" : formatRef(shortSha(m.sha), m.seq),

@@ -14,13 +14,14 @@
 
 import { describe, expect, it } from "bun:test";
 import {
+  ATTENTION_BUDGET_BYTES,
   type AttentionSources,
   attentionFor,
   clampTailBytes,
   foldJournal,
   signalFromExit,
 } from "./attention";
-import { formatCursor } from "./ids";
+import { formatCursor, parseCursor } from "./ids";
 import type { JournalEntry, Placement, RunVerdict } from "./schema";
 
 const RUN = "lz4k9x0m-7t2ab019";
@@ -458,7 +459,11 @@ describe("the byte budget", () => {
     expect(rest.events).toHaveLength(src.journal.length - answer.events.length);
   });
 
-  it("shrinks the excerpt only when there are no events left to shed", () => {
+  it("sheds events down to ONE, never to none, and then shrinks the excerpt", () => {
+    // One event is RESERVED from every reduction, and that reservation is the
+    // difference between a payload that can be drained and one that cannot: a
+    // page whose cursor did not move returns the same oversized answer next
+    // time, forever.
     const src = bigRun(0, "x".repeat(20_000));
     const withEmpty = bytesOf(
       attentionFor(
@@ -470,12 +475,70 @@ describe("the byte budget", () => {
       budgetBytes: withEmpty + 2_000,
       excerptBytes: 64_000,
     });
-    expect(answer.events).toEqual([]);
+    expect(answer.events).toHaveLength(1);
     expect(bytesOf(answer)).toBeLessThanOrEqual(withEmpty + 2_000);
     // The failure is still reported, and says its evidence was cut.
     expect(answer.unresolved_failures).toHaveLength(1);
     expect(answer.unresolved_failures[0]?.excerpt_truncated).toBe(true);
     expect(answer.unresolved_failures[0]?.excerpt.length).toBeLessThan(20_000);
+  });
+
+  it("keeps a run with many failures inside the budget, and says how many it dropped", () => {
+    // The reported shape: sixty red nodes produced a 21,776-byte answer against
+    // a 16 KiB budget, with zero events, `has_more: true` and an unchanged
+    // cursor — an answer that was both too big and impossible to page past.
+    const nodes = Array.from({ length: 60 }, (_, i) => `ci::n${i}@x86_64-linux`);
+    const src = sources({
+      journal: journal(
+        { kind: "roster", order: nodes },
+        ...nodes.flatMap((n) => redNode(n)),
+      ),
+      readExcerpt: () => ({ text: "z".repeat(4_000), totalBytes: 4_000 }),
+    });
+    const answer = attentionFor(src, { budgetBytes: ATTENTION_BUDGET_BYTES });
+
+    expect(bytesOf(answer)).toBeLessThanOrEqual(ATTENTION_BUDGET_BYTES);
+    // A prefix, and it SAYS it is a prefix — a caller shown three of sixty
+    // must not read that as three.
+    expect(answer.unresolved_failures_total).toBe(60);
+    expect(answer.failures_omitted).toBe(
+      60 - answer.unresolved_failures.length,
+    );
+    expect(answer.failures_omitted).toBeGreaterThan(0);
+  });
+
+  it("advances the cursor even when nothing else fits, so a backlog can drain", () => {
+    // The drain property, stated as a loop: page until `has_more` goes false.
+    // Under the old rule this never terminated.
+    const nodes = Array.from({ length: 40 }, (_, i) => `ci::n${i}@x86_64-linux`);
+    const src = sources({
+      journal: journal(
+        { kind: "roster", order: nodes },
+        ...nodes.flatMap((n) => redNode(n)),
+      ),
+      readExcerpt: () => ({ text: "q".repeat(4_000), totalBytes: 4_000 }),
+    });
+
+    let cursor = parseCursor(
+      attentionFor(src, { budgetBytes: ATTENTION_BUDGET_BYTES }).cursor,
+    );
+    let rounds = 0;
+    for (;;) {
+      const page = attentionFor(src, {
+        budgetBytes: ATTENTION_BUDGET_BYTES,
+        ...(cursor === null ? {} : { after: cursor }),
+      });
+      if (!page.has_more) break;
+      const next = parseCursor(page.cursor);
+      expect(next).not.toBeNull();
+      // Strictly forward, every round — the guarantee that makes this finite.
+      expect(next!.seq).toBeGreaterThan(cursor?.seq ?? 0);
+      cursor = next;
+      rounds += 1;
+      expect(rounds, "the backlog must drain in a bounded number of pages").toBeLessThan(
+        500,
+      );
+    }
   });
 
   it("clamps each excerpt to the per-failure ceiling before the payload budget", () => {

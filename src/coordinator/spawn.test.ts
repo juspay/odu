@@ -177,3 +177,84 @@ describe("coordinatorSpawnSpec", () => {
     expect(spec.stdio).toEqual(["ignore", "pipe", "pipe"]);
   });
 });
+
+describe("what a spawned process EXITING means", () => {
+  // The distinction a false refusal turns on. `systemd-run --user` is a
+  // SUBMITTER: it asks the user manager to start a transient unit and exits as
+  // soon as the job is accepted, normally while the service is still starting.
+  // A readiness wait that treated that exit as the coordinator's would give up
+  // on a run that is coming up perfectly well, report a failure, and leave the
+  // run executing with nobody watching it.
+  it("is death for a detached spawn — that process IS the coordinator", () => {
+    const plan = survivableSpawnPlan({}, "linux", "odu-run-x");
+    expect(plan.mechanism).toBe("detached");
+    expect(plan.exitIsDeath).toBe(true);
+    expect(plan.describeExit(1)).toContain("coordinator exited 1");
+  });
+
+  it("is NOT death for systemd-run — it only submitted the unit", () => {
+    const plan = survivableSpawnPlan(
+      { INVOCATION_ID: "abc", DBUS_SESSION_BUS_ADDRESS: "unix:/run/bus" },
+      "linux",
+      "odu-run-x",
+    );
+    expect(plan.mechanism).toBe("systemd-run");
+    expect(plan.exitIsDeath).toBe(false);
+    // Zero says the job was accepted and nothing about the service…
+    expect(plan.describeExit(0)).toContain("accepted the unit");
+    // …non-zero says the manager refused it, which IS a failure.
+    expect(plan.describeExit(1)).toContain("refused");
+  });
+});
+
+describe("a transient unit is told where odu keeps its things", () => {
+  // A transient unit starts from the user manager's environment, not from the
+  // launcher's. Everything that tells odu where to look is simply ABSENT
+  // unless it is named — and a coordinator that starts with no hosts file and
+  // no state root is not a coordinator that started.
+  it("forwards the variables odu itself reads", () => {
+    const argv = survivableSpawnPlan(
+      {
+        INVOCATION_ID: "abc",
+        XDG_RUNTIME_DIR: "/run/user/1000",
+        ODU_HOSTS: "/etc/odu/hosts.json",
+        ODU_STATE_DIR: "/state/odu",
+        ODU_RUNNER_FLAKE: "git+file:///src/odu",
+      },
+      "linux",
+      "odu-run-7",
+    ).argv(["odu", "run"]);
+
+    expect(argv).toContain("--setenv");
+    expect(argv).toContain("ODU_HOSTS=/etc/odu/hosts.json");
+    expect(argv).toContain("ODU_STATE_DIR=/state/odu");
+    expect(argv).toContain("ODU_RUNNER_FLAKE=git+file:///src/odu");
+    // The runtime dir decides where a socket may live, so it travels too.
+    expect(argv).toContain("XDG_RUNTIME_DIR=/run/user/1000");
+    // Every `--setenv` precedes the `--` that ends systemd-run's own options.
+    const sep = argv.indexOf("--");
+    expect(sep).toBeGreaterThan(0);
+    expect(argv.lastIndexOf("--setenv")).toBeLessThan(sep);
+    expect(argv.slice(sep + 1)).toEqual(["odu", "run"]);
+  });
+
+  it("names only what it means to, and skips what is unset", () => {
+    // An allowlist, not the whole environment: forwarding a launcher's entire
+    // environment into a service is how an orchestrator's ambient identity
+    // variables end up inside every recipe the run executes.
+    const argv = survivableSpawnPlan(
+      {
+        INVOCATION_ID: "abc",
+        XDG_RUNTIME_DIR: "/run/user/1000",
+        ODU_HOSTS: "",
+        CLAUDE_CODE_CHILD_SESSION: "leak-me",
+      },
+      "linux",
+      "odu-run-7",
+    ).argv(["odu", "run"]);
+
+    expect(argv.join(" ")).not.toContain("CLAUDE_CODE_CHILD_SESSION");
+    // An empty value is unset, not an empty assignment.
+    expect(argv.join(" ")).not.toContain("ODU_HOSTS=");
+  });
+});

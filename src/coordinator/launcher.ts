@@ -23,10 +23,10 @@ import { runSocketPath } from "@odu/run-client/dial";
 import { handleFor } from "@odu/run-history/store";
 import type { RunScope } from "@odu/run-history/schema";
 import {
-  defaultWaitForSocket,
   oduSelfArgv,
   type SpawnPlan,
   spawnCoordinator,
+  waitForReadiness,
 } from "./spawn";
 
 /** What a face asks for. Every field is decided before anything is started, so
@@ -141,7 +141,20 @@ export function packagedLauncher(): RunLauncher {
       unitNameFor(request.runId),
       coordinatorLogPath(request.runId),
     );
-    const up = await defaultWaitForSocket(endpoint, spawned.onExit);
+    // Remembered rather than awaited on the failure path: under `systemd-run`
+    // the readiness wait can end on its own ceiling while the submitter is
+    // still around, and `await`ing an exit that has not happened would hang the
+    // very call that is trying to report a failure.
+    let exitCode: number | null = null;
+    void spawned.onExit.then((code) => {
+      exitCode = code;
+    });
+    // Readiness, not "did the process we forked exit". Under `systemd-run`
+    // the process we forked is a SUBMITTER that exits while the service is
+    // still starting, so reading its exit as the coordinator's would refuse a
+    // run that is coming up — and leave it running with nobody watching.
+    // `waitForReadiness` asks the PLAN which of those it just started.
+    const up = await waitForReadiness(spawned.plan, endpoint, spawned.onExit);
     if (!up) {
       const tail = spawned.stderrTail().trim();
       return {
@@ -151,7 +164,9 @@ export function packagedLauncher(): RunLauncher {
         error:
           tail !== ""
             ? tail
-            : "the coordinator exited before serving a socket",
+            : exitCode === null
+              ? "the coordinator did not serve a socket in time"
+              : spawned.plan.describeExit(exitCode),
       };
     }
     return {

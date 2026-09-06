@@ -192,10 +192,11 @@ describe("registering a run", () => {
     expect(manifest?.parentRunId).toBeNull();
     expect(manifest?.requestId).toBeNull();
 
-    // Ownership is claimed as part of registering, and the endpoint is how a
-    // catalog reader finds the live run behind the record.
-    expect(manifest?.owner.epoch).toBe(1);
-    expect(manifest?.owner.endpoint).toBe("/checkouts/odu/.ci/odu.sock");
+    // Ownership is claimed as part of registering. `registeredBy` is
+    // PROVENANCE — stamped once, never refreshed — so a reader asking "is this
+    // run live" asks `owner.json` instead; see `CatalogRow.liveness`.
+    expect(manifest?.registeredBy.epoch).toBe(1);
+    expect(manifest?.registeredBy.endpoint).toBe("/checkouts/odu/.ci/odu.sock");
 
     // REGISTER BEFORE EXECUTE: the run is addressable before it does anything.
     const journal = readJournal(handle);

@@ -151,7 +151,18 @@ export const RunManifestSchema = Schema.Struct({
   scope: RunScopeSchema,
   snapshot: RunSnapshotSchema,
   build: RunBuildSchema,
-  owner: OwnerSchema,
+  /**
+   * Who registered this run — PROVENANCE, stamped once and never updated.
+   *
+   * Named `registeredBy` rather than `owner` because it is not the owner: the
+   * live ownership record is `owner.json`, which `heartbeat` refreshes and
+   * `releaseOwnership` clears. Two copies of one fact with no sync path is how
+   * a killed coordinator came to be listed as "running" forever; the fix was
+   * to stop reading this one as liveness, and the rename is what stops the
+   * next reader trying. Its `endpoint` records where the run WAS served, which
+   * is a fact about registration and stays true.
+   */
+  registeredBy: OwnerSchema,
   /** The run this one was derived from, for a finalized retry — so a face can
    *  say "this is a replay of that" instead of showing two unrelated runs of
    *  one commit. Null for a run started from a command line. */

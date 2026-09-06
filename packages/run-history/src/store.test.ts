@@ -81,7 +81,7 @@ const NODE = "ci::e2e@x86_64-linux";
 
 /** The half of a manifest a caller supplies — the store stamps `version` and
  *  `owner` itself, which is why `registerRun` takes exactly this shape. */
-type ManifestInput = Omit<RunManifest, "version" | "owner">;
+type ManifestInput = Omit<RunManifest, "version" | "registeredBy">;
 
 function manifest(over: Partial<ManifestInput> = {}): ManifestInput {
   return {
@@ -143,9 +143,9 @@ describe("registerRun", () => {
 
     expect(result.token.epoch).toBe(1);
     expect(result.manifest.version).toBe(RUN_RECORD_FORMAT);
-    expect(result.manifest.owner.epoch).toBe(1);
-    expect(result.manifest.owner.endpoint).toBe("/run/odu.sock");
-    expect(result.manifest.owner.claimedAt).toBe(T0);
+    expect(result.manifest.registeredBy.epoch).toBe(1);
+    expect(result.manifest.registeredBy.endpoint).toBe("/run/odu.sock");
+    expect(result.manifest.registeredBy.claimedAt).toBe(T0);
 
     // Round-trip: what a later, differently-built reader gets back is what was
     // written — including the mutable owner half.
@@ -178,7 +178,7 @@ describe("registerRun", () => {
     if (second.ok) throw new Error("a live run was registered over");
     expect(second.refusal.kind).toBe("held");
     // And the first owner's manifest is untouched — no half-registration.
-    expect(readManifest(first.handle)?.owner.epoch).toBe(1);
+    expect(readManifest(first.handle)?.registeredBy.epoch).toBe(1);
   });
 });
 
@@ -481,6 +481,29 @@ describe("discovery", () => {
     // The endpoint is projected onto the row so a lister can tell a live run
     // from a finished one without opening it.
     expect(listRuns({ root })[0]?.endpoint).toBe("/run/odu.sock");
+    expect(listRuns({ root })[0]?.liveness).toBe("owned");
+  });
+
+  it("reports a coordinator that died without finalizing as owner_lost, not running", () => {
+    // The listing's own three-state answer, and the reason it cannot be
+    // `endpoint !== null`. The manifest's `registeredBy.endpoint` is stamped
+    // once at registration and no write path clears it, so a run whose
+    // coordinator was killed keeps that address forever — and a lister that
+    // trusted it would report the run as executing for the life of the
+    // catalog, in the one view an operator scans to find what is still going.
+    const root = tmpCatalog();
+    const registered = register(root, { runId: "0000000d-0001" });
+    // Move ownership to a machine that is not this one and let its heartbeat
+    // go stale — the honest way to have a dead owner in a test, since our own
+    // pid is very much alive (see `fence`).
+    fence(registered.handle);
+
+    const rows = listRuns({ root, now: T0 + OWNERSHIP_GRACE_MS * 4 });
+    const row = rows.find((r) => r.runId === "0000000d-0001");
+    expect(row?.verdict).toBeNull();
+    expect(row?.liveness).toBe("owner_lost");
+    // And no address is offered for a socket nobody is serving.
+    expect(row?.endpoint).toBeNull();
   });
 
   it("filters by repoRoot — the catalog is per-user, the checkout is a field", () => {

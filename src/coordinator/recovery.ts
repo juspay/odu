@@ -46,8 +46,10 @@ import {
   digestOf,
   isRequestId,
   readReceipt,
+  type ReceiptRecord,
 } from "@odu/run-history/receipts";
 import type { RunManifest, RunScope } from "@odu/run-history/schema";
+import { currentOwner } from "@odu/run-history/owner";
 import {
   attemptsFor,
   type CatalogOptions,
@@ -61,6 +63,7 @@ import { formatCursor } from "@odu/run-history/ids";
 import { readJournal } from "@odu/run-history/store";
 import { firstFrame, runUnary } from "../common/effectEdge";
 import {
+  matchNodeIds,
   minimalRerunRoots,
   resolveRerunTargets,
   transitiveDependents,
@@ -174,6 +177,7 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
       kind: "retry",
       digest,
       plannedRunId,
+      journalAtAccept: readJournal(handle).highestSeq,
     });
     if (claim === null) {
       return { ok: false, message: `odu: could not record request ${input.requestId}` };
@@ -196,7 +200,9 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
     if (claim.kind === "in_flight") {
       const reconciled = reconcile(
         input.requestId,
-        claim.receipt.plannedRunId,
+        claim.receipt,
+        handle,
+        input.selector,
         catalog,
       );
       if (reconciled !== null) {
@@ -211,8 +217,9 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
       return {
         ok: false,
         message:
-          `odu: request "${input.requestId}" was accepted and its outcome is not recorded; ` +
-          "no run was started under it, so nothing was done — retry with a fresh id",
+          `odu: request "${input.requestId}" was accepted and its outcome is not recorded. ` +
+          "No run was started under it and no attempt began on this run since, so " +
+          "nothing it asked for happened — retry with a fresh id.",
         suggestion: ["odu", "history", "show", "--run", input.runId],
       };
     }
@@ -281,16 +288,42 @@ function finish(
 }
 
 /**
- * Did the pre-minted run actually get started?
+ * Did this request already do its work?
  *
- * The reconciliation, and the reason a lost reply is not a lost mutation: if a
- * run exists in the catalog under the id the receipt planned, the spawn
- * happened and the answer can be reconstructed from the run itself. If it does
- * not, nothing was started under that id — which is not the same as "nothing
- * happened", because a LIVE retry leaves no run of its own, so the caller is
- * told exactly that rather than being handed a guess.
+ * A retry has TWO possible effects and reconciliation has to be able to see
+ * either, because which one it took is not something the caller can know when
+ * its reply goes missing.
+ *
+ * - A RELAUNCH publishes a new run under the id minted at accept time, so the
+ *   question is a directory lookup.
+ * - A LIVE retry publishes no run at all. It resets a node on a coordinator
+ *   that is already going, and the only trace is in that run's own journal —
+ *   the `attempt_started` the coordinator appends for the node it reset. So
+ *   the journal's height at accept time is recorded on the receipt, and this
+ *   asks whether a matching attempt appeared past it.
+ *
+ * Looking only for the child run is what made a successful live mutation
+ * report "nothing was done — retry with a fresh id", advice that invites a
+ * caller to do it a second time. Absence of a child manifest is not absence of
+ * an effect.
+ *
+ * `null` means neither effect is visible, which is the one case where
+ * re-issuing is safe.
  */
 function reconcile(
+  requestId: string,
+  receipt: ReceiptRecord,
+  handle: RunHandle,
+  selector: string,
+  catalog: CatalogOptions,
+): RetryReceipt | null {
+  const relaunched = reconcileRelaunch(requestId, receipt.plannedRunId, catalog);
+  if (relaunched !== null) return relaunched;
+  return reconcileLive(requestId, receipt, handle, selector);
+}
+
+/** The relaunch half: a run exists under the id this request planned. */
+function reconcileRelaunch(
   requestId: string,
   plannedRunId: string,
   catalog: CatalogOptions,
@@ -317,28 +350,100 @@ function reconcile(
 }
 
 /**
- * Try the live path. `null` means the run is not live, or would not take the
- * mutation — which is the SIGNAL that selects the finalized path, not an error.
+ * The live half: a node the selector names started a new attempt after this
+ * request was accepted.
  *
- * Every refusal from the live coordinator lands here as `null` on purpose. An
- * `ok: false` from `node.rerun` means "I will not do that" — the node is
- * unknown to me, or its lane is gone, or I am shutting down — and every one of
- * those is a reason to fall through to a fresh run rather than a reason to
- * fail the caller's request.
+ * The roster the selector is matched against comes from the journal, not from
+ * a live dial — the run may well have finished since. `matchNodeIds` needs
+ * only the id list, so a state carrying the roster and no node bodies answers
+ * the same question the live path asked.
+ */
+function reconcileLive(
+  requestId: string,
+  receipt: ReceiptRecord,
+  handle: RunHandle,
+  selector: string,
+): RetryReceipt | null {
+  const journal = readJournal(handle);
+  const manifest = readManifest(handle);
+  if (manifest === null) return null;
+  const roster = journal.entries.reduce<string[]>(
+    (order, e) => (e.event.kind === "roster" ? [...e.event.order] : order),
+    [],
+  );
+  const named = new Set(matchNodeIds({ order: roster, nodes: {} }, selector));
+  const started = journal.entries.filter(
+    (e) =>
+      e.seq > receipt.journalAtAccept &&
+      e.event.kind === "attempt_started" &&
+      named.has(e.event.node),
+  );
+  if (started.length === 0) return null;
+  const roots = [
+    ...new Set(
+      started.flatMap((e) =>
+        e.event.kind === "attempt_started" ? [e.event.node] : [],
+      ),
+    ),
+  ];
+  return {
+    request_id: requestId,
+    mode: "live",
+    effective_run: handle.runId,
+    parent_run: null,
+    roots,
+    // Not recorded at the time and not reconstructable now: the dependants a
+    // reset cleared are a property of the live DAG, which may have moved on.
+    // Empty rather than guessed.
+    reset_dependants: [],
+    attempts: roots.map((node) => ({
+      node,
+      attempt: attemptsFor(handle, node).at(-1) ?? 1,
+    })),
+    scope: manifest.scope,
+    sha: manifest.sha,
+    cursor: formatCursor({ runId: handle.runId, seq: journal.highestSeq }),
+  };
+}
+
+/**
+ * Try the live path. `null` means the run is not live, is not the run we were
+ * asked about, or would not take the mutation — each of which SELECTS the
+ * finalized path rather than failing the caller's request.
+ *
+ * **THE SOCKET IS NOT THE RUN.** `.ci/odu.sock` is scoped to a CHECKOUT, and a
+ * checkout serves one run after another: run A finishes, run B starts, and the
+ * path is identical. Dialing the endpoint a finished run recorded and issuing
+ * `node.rerun` therefore mutates whatever is serving that path NOW — so a
+ * retry of A would reset a node on B while handing back a receipt carrying A's
+ * id and A's commit. Nothing downstream could detect it: the receipt is
+ * internally consistent and describes a run that did not change.
+ *
+ * So the identity is CHECKED against the durable record before any mutation.
+ * `<sha7>#<seq>` is the identity the fan-in publishes and the catalog stores,
+ * and a run with no ordinal cannot prove it is the one being addressed — so
+ * that case is refused rather than guessed, and falls through to a fresh run.
+ * Fail-closed: the cost of the wrong answer is mutating a stranger's run.
+ *
+ * The endpoint is read from `currentOwner`, not from the manifest. The
+ * manifest's `registeredBy` is stamped once and never cleared, so it names a
+ * socket that stopped existing when the run ended; `owner.json` is the copy a
+ * heartbeat refreshes and a clean exit clears.
  */
 async function tryLive(
   handle: RunHandle,
   manifest: RunManifest,
   input: RetryInput,
 ): Promise<RetryReceipt | null> {
-  const endpoint = manifest.owner.endpoint;
-  if (endpoint === null) return null;
+  const owner = currentOwner(handle.dir);
+  if (owner === null || owner.endpoint === null) return null;
   const dial = input.dial ?? dialRun;
-  const dialed = await dial(endpoint);
+  const dialed = await dial(owner.endpoint);
   if (dialed === null) return null;
   try {
     const state = await firstFrame(dialed.client.surface.nodes.get(undefined));
     if (state === undefined || state.order.length === 0) return null;
+    if (!isSameRun(manifest, state)) return null;
     let targets: string[];
     try {
       targets = resolveRerunTargets(state, input.selector);
@@ -379,6 +484,26 @@ async function tryLive(
   } finally {
     await dialed.close();
   }
+}
+
+/**
+ * Is the run serving this socket the run the manifest describes?
+ *
+ * `<sha7>#<seq>` is the identity every face already prints and the catalog
+ * already stores, so it is what the two sides are compared on. A run that
+ * reserved no ordinal has no unique identity to compare — `sha7` alone is
+ * shared by every run of a commit, including a rerun of the very run being
+ * retried — so it cannot answer yes, and this returns false rather than
+ * assuming.
+ */
+export function isSameRun(
+  manifest: Pick<RunManifest, "sha" | "seq">,
+  live: Pick<PipelineState, "sha7" | "seq">,
+): boolean {
+  if (manifest.seq === null || live.seq === undefined) return false;
+  if (manifest.seq !== live.seq) return false;
+  if (live.sha7 === "") return false;
+  return manifest.sha.toLowerCase().startsWith(live.sha7.toLowerCase());
 }
 
 function dependantsOf(state: PipelineState, roots: readonly string[]): string[] {

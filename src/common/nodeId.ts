@@ -60,7 +60,14 @@ export function parseAtPlatform(selector: string): string | null {
 /** All live node ids matching a CLI token: exact id, `::token` / `::token@`
  *  suffix-ish forms, or full namepath. Shared by unique resolve (`logs`) and
  *  multi-match expand (`rerun` recipe-wide). */
-export function matchNodeIds(state: PipelineState, token: string): string[] {
+export function matchNodeIds(
+  // The NARROW shape it actually reads, not the whole pipeline. A caller that
+  // has only a roster — the retry policy reconciling against a journal, where
+  // no live state exists to consult — can answer the same question without
+  // fabricating node bodies to satisfy a type.
+  state: Pick<PipelineState, "order" | "nodes">,
+  token: string,
+): string[] {
   if (state.nodes[token] !== undefined) return [token];
   return state.order.filter((id) => {
     if (id === token) return true;

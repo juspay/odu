@@ -264,6 +264,10 @@ function attention(over: Partial<Attention> = {}): Attention {
     remaining: 0,
     unreadable_events: 0,
     unresolved_failures: [],
+    unresolved_failures_total: 0,
+    failures_omitted: 0,
+    debt_omitted: 0,
+    over_budget: false,
     reporting_debt: [],
     endpoint: null,
     ...over,
@@ -430,7 +434,7 @@ describe("renderCatalog", () => {
       scope: { selectors: [], platforms: [], noDeps: false },
       snapshot: { mode: "strict", expectedSha: SHA, dirty: false, retryable: true },
       build: { oduVersion: "test", self: null, runnerFlake: null },
-      owner: {
+      registeredBy: {
         epoch: 1,
         pid: 1,
         host: "builder-1",
@@ -450,6 +454,7 @@ describe("renderCatalog", () => {
       manifest: manifest(),
       verdict: null,
       expiry: null,
+      liveness: "no_owner",
       endpoint: null,
       ...over,
     };
@@ -481,10 +486,24 @@ describe("renderCatalog", () => {
     expect(rendered).toContain("expired (failed)");
   });
 
-  it("distinguishes a run something is still serving from one nobody is", () => {
-    const live = renderCatalog([row({ endpoint: "/checkouts/odu/.ci/odu.sock" })], NOW);
+  it("tells a run that is being written from one whose coordinator died", () => {
+    // THREE states, not two. A verdict-less run used to render `running`
+    // whenever the manifest carried an endpoint — and the manifest's endpoint
+    // is stamped once at registration and never cleared, so a coordinator
+    // killed before it finalized claimed to be executing for the life of the
+    // catalog. In the listing an operator reads to find out what is still
+    // going.
+    const live = renderCatalog(
+      [row({ liveness: "owned", endpoint: "/checkouts/odu/.ci/odu.sock" })],
+      NOW,
+    );
     expect(live).toContain("running");
-    const orphan = renderCatalog([row()], NOW);
+
+    const dead = renderCatalog([row({ liveness: "owner_lost" })], NOW);
+    expect(dead).toContain("owner lost");
+    expect(dead).not.toContain("running");
+
+    const orphan = renderCatalog([row({ liveness: "no_owner" })], NOW);
     expect(orphan).toContain("unfinished");
     expect(orphan).not.toContain("running");
   });

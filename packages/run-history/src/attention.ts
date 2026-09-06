@@ -160,6 +160,24 @@ export interface Attention {
    *  "I could not read what happened" stay different answers. */
   unreadable_events: number;
   unresolved_failures: AttentionFailure[];
+  /** How many unresolved failures the run HAS, whether or not they all fit.
+   *  A caller reading `unresolved_failures.length` alone would under-count a
+   *  run with sixty red nodes and think it had seen them all. */
+  unresolved_failures_total: number;
+  /** Failures the budget could not carry. Non-zero means `unresolved_failures`
+   *  is a prefix, not the set. */
+  failures_omitted: number;
+  /** Reporting-debt rows the budget could not carry. */
+  debt_omitted: number;
+  /** This payload is LARGER than the budget it was asked for.
+   *
+   *  Reachable in exactly one way, and it is deliberate: a caller must always
+   *  be able to drain a journal, so one event is carried even when nothing
+   *  else fits. A single event can be arbitrarily large (a roster of a
+   *  thousand nodes is one event), so the alternative to exceeding the budget
+   *  is a cursor that can never advance — a caller stuck asking the same
+   *  question forever. Reported rather than hidden. */
+  over_budget: boolean;
   /** Commit statuses this run owes GitHub. Debt, kept apart from the verdict:
    *  a run whose statuses did not land still passed or failed on its own. */
   reporting_debt: { context: string; last_error: string; attempts: number }[];
@@ -254,12 +272,27 @@ export function foldJournal(journal: readonly JournalEntry[]): {
   /** The newest attempt recorded per node. */
   latest: Map<string, AttemptState>;
   finalized: RunVerdict["outcome"] | null;
+  /**
+   * Work STARTED AGAIN after the run published a terminal outcome.
+   *
+   * A `--linger` coordinator keeps serving past settlement so a node can be
+   * retried, and a retry is not a new run: the same journal gains a fresh
+   * `attempt_started` after its own `finalized` line. Reading "has this run
+   * ever finalized" as "is this run settled" then reports a run that is
+   * actively executing as finished — and a wait keyed on settlement returns
+   * immediately, in the middle of the retry it was asked to watch.
+   *
+   * So settlement is a fact about the CURRENT execution, and this is the bit
+   * that distinguishes them.
+   */
+  resumed: boolean;
   debt: Map<string, { context: string; lastError: string; attempts: number }>;
   scope: RunScope | null;
 } {
   let roster: string[] = [];
   let scope: RunScope | null = null;
   let finalized: RunVerdict["outcome"] | null = null;
+  let resumed = false;
   const latest = new Map<string, AttemptState>();
   const debt = new Map<
     string,
@@ -278,6 +311,8 @@ export function foldJournal(journal: readonly JournalEntry[]): {
         roster = [...e.order];
         break;
       case "attempt_started": {
+        // A new attempt after a terminal line is work resuming.
+        if (finalized !== null) resumed = true;
         const state: AttemptState = {
           node: e.node,
           attempt: e.attempt,
@@ -309,6 +344,12 @@ export function foldJournal(journal: readonly JournalEntry[]): {
           logBytes: 0,
           logReason: null,
         };
+        // Same for a node going back to pending/running: the runner publishes
+        // `pending` before `running`, so keying only on `attempt_started`
+        // would leave a window where a resumed run still reads as settled.
+        if (finalized !== null && (e.status === "pending" || e.status === "running")) {
+          resumed = true;
+        }
         state.status = e.status;
         state.exitCode = e.exitCode;
         state.durationMs = e.durationMs;
@@ -339,12 +380,15 @@ export function foldJournal(journal: readonly JournalEntry[]): {
         break;
       case "finalized":
         finalized = e.outcome;
+        // A run that resumed and then finalized AGAIN is settled once more —
+        // the flag describes the tail of the journal, not its history.
+        resumed = false;
         break;
       default:
         break;
     }
   }
-  return { roster, latest, finalized, debt, scope };
+  return { roster, latest, finalized, resumed, debt, scope };
 }
 
 const RED = new Set(["failed", "errored"]);
@@ -361,8 +405,14 @@ export function attentionFor(
   const fold = foldJournal(sources.journal);
 
   const state = classify(sources, fold);
-  const verdictOutcome = sources.verdict?.outcome ?? fold.finalized;
   const settled = state === "settled";
+  // The terminal word of the CURRENT execution. A run that resumed after
+  // finalizing has none — its previous outcome describes an execution that is
+  // over, and reporting it beside `state: still_running` would invite a reader
+  // to act on a verdict about work that is being redone right now.
+  const verdictOutcome = fold.resumed
+    ? null
+    : (sources.verdict?.outcome ?? fold.finalized);
   const passed = settled && verdictOutcome === "passed";
 
   const failures: AttentionFailure[] = [];
@@ -403,9 +453,25 @@ export function attentionFor(
   // quietly override it.
   const afterSeq = (query.after ?? sources.after)?.seq ?? 0;
   const pending = sources.journal.filter((e) => e.seq > afterSeq);
+  const debtRows = [...fold.debt.values()].map((d) => ({
+    context: d.context,
+    last_error: d.lastError,
+    attempts: d.attempts,
+  }));
 
-  let included = pending.slice(0, limit);
-  const base: Attention = {
+  const identity: Omit<
+    Attention,
+    | "events"
+    | "cursor"
+    | "has_more"
+    | "remaining"
+    | "unresolved_failures"
+    | "unresolved_failures_total"
+    | "failures_omitted"
+    | "debt_omitted"
+    | "over_budget"
+    | "reporting_debt"
+  > = {
     run: {
       id: sources.runId,
       sha: manifest?.sha ?? null,
@@ -422,92 +488,94 @@ export function attentionFor(
     passed,
     outcome: verdictOutcome ?? null,
     actionable,
-    cursor: formatCursor({ runId: sources.runId, seq: afterSeq }),
-    events: [],
-    has_more: false,
-    remaining: 0,
     unreadable_events: sources.unreadableEvents,
-    unresolved_failures: failures,
-    reporting_debt: [...fold.debt.values()].map((d) => ({
-      context: d.context,
-      last_error: d.lastError,
-      attempts: d.attempts,
-    })),
     endpoint: sources.endpoint,
   };
 
-  // Fit the payload. Events go first because they are REPLAYABLE — the cursor
-  // stays where the trim stopped, so a caller that asks again gets exactly
-  // what was dropped. Excerpts shrink only after there are no events left to
-  // shed, because an excerpt is the reason the caller was woken up and a
-  // second call does not make it appear.
-  for (;;) {
-    const candidate = withPage(base, included, pending.length, sources.runId, afterSeq);
-    if (encodedBytes(candidate) <= budget || included.length === 0) {
-      if (encodedBytes(candidate) <= budget) return candidate;
-      break;
-    }
-    included = included.slice(0, Math.max(0, Math.floor(included.length / 2)));
-  }
+  const build = (
+    events: readonly JournalEntry[],
+    fails: readonly AttentionFailure[],
+    debt: readonly Attention["reporting_debt"][number][],
+    overBudget: boolean,
+  ): Attention => ({
+    ...identity,
+    events: events.map((e) => ({ seq: e.seq, at: e.at, event: e.event })),
+    // Through INCLUDED events only. A cursor past what was delivered is a
+    // silent drop, and this is the one line that decides it.
+    cursor: formatCursor({ runId: sources.runId, seq: events.at(-1)?.seq ?? afterSeq }),
+    has_more: events.length < pending.length,
+    remaining: pending.length - events.length,
+    unresolved_failures: [...fails],
+    unresolved_failures_total: failures.length,
+    failures_omitted: failures.length - fails.length,
+    reporting_debt: [...debt],
+    debt_omitted: debtRows.length - debt.length,
+    over_budget: overBudget,
+  });
 
-  // No events left and still over budget: the failures themselves are too big.
-  // Halve every excerpt until they fit, then give up gracefully — a payload
-  // that reports the failure with no excerpt is still an answer, and a truncated
-  // excerpt says so.
-  let shrunk = base.unresolved_failures;
-  for (let i = 0; i < 12; i += 1) {
-    const candidate = withPage(
-      { ...base, unresolved_failures: shrunk },
-      [],
-      pending.length,
-      sources.runId,
-      afterSeq,
-    );
-    if (encodedBytes(candidate) <= budget) return candidate;
-    shrunk = shrunk.map((f) => {
-      const half = clampTailBytes(
-        f.excerpt,
-        Math.floor(new TextEncoder().encode(f.excerpt).length / 2),
-      );
+  /**
+   * Shed until it fits, in the order that costs a caller least.
+   *
+   * PROGRESS IS RESERVED FIRST, and that is the ordering decision that matters.
+   * Shedding events down to zero and then dropping failures leaves a payload
+   * whose cursor did not move — so the next call returns the same oversized
+   * answer, and a caller with sixty red nodes can never drain its backlog. One
+   * event is held back from every reduction below, so the cursor always
+   * advances and the loop always terminates.
+   *
+   * After that the order is by REPLAYABILITY: events beyond the first are
+   * re-served on the next call with the returned cursor, so they go first;
+   * excerpts shrink next (the reason survives, shorter); failure and debt rows
+   * go last and are COUNTED when they do, because a caller that is shown three
+   * of sixty failures must not read that as three.
+   */
+  const fits = (a: Attention): boolean => encodedBytes(a) <= budget;
+  const keep = pending.length > 0 ? 1 : 0;
+  let events = pending.slice(0, limit);
+  let fails: AttentionFailure[] = [...failures];
+  let debt = debtRows;
+
+  while (events.length > keep && !fits(build(events, fails, debt, false))) {
+    events = events.slice(0, Math.max(keep, Math.floor(events.length / 2)));
+  }
+  for (
+    let cap = excerptBudget;
+    cap > 0 && !fits(build(events, fails, debt, false));
+    cap = Math.floor(cap / 2)
+  ) {
+    fails = fails.map((f) => {
+      const cut = clampTailBytes(f.excerpt, cap);
       return {
         ...f,
-        excerpt: half.text,
-        excerpt_truncated: f.excerpt_truncated || half.truncated,
+        excerpt: cut.text,
+        excerpt_truncated: f.excerpt_truncated || cut.truncated,
       };
     });
   }
-  return withPage(
-    { ...base, unresolved_failures: shrunk },
-    [],
-    pending.length,
-    sources.runId,
-    afterSeq,
-  );
-}
-
-function withPage(
-  base: Attention,
-  included: readonly JournalEntry[],
-  pendingCount: number,
-  runId: string,
-  afterSeq: number,
-): Attention {
-  const last = included.at(-1);
-  return {
-    ...base,
-    events: included.map((e) => ({ seq: e.seq, at: e.at, event: e.event })),
-    // Through INCLUDED events only. A cursor past what was delivered is a
-    // silent drop, and this is the one line that decides it.
-    cursor: formatCursor({ runId, seq: last?.seq ?? afterSeq }),
-    has_more: included.length < pendingCount,
-    remaining: pendingCount - included.length,
-  };
+  while (fails.length > 0 && !fits(build(events, fails, debt, false))) {
+    fails = fails.slice(0, fails.length - 1);
+  }
+  while (debt.length > 0 && !fits(build(events, fails, debt, false))) {
+    debt = debt.slice(0, debt.length - 1);
+  }
+  return build(events, fails, debt, !fits(build(events, fails, debt, false)));
 }
 
 function encodedBytes(value: unknown): number {
   return new TextEncoder().encode(JSON.stringify(value)).length;
 }
 
+/**
+ * Where the run stands NOW.
+ *
+ * "Has it ever finalized" is not the question. A `--linger` run that settles,
+ * takes a retry, and starts executing again has a `finalized` line in its
+ * journal AND a node running right now; answering `settled` there ends a wait
+ * in the middle of the very retry it was watching, and reports the previous
+ * verdict as this execution's. `fold.resumed` is the journal's own answer to
+ * "did work start again after that line", and it is what makes the state
+ * describe the present tense.
+ */
 function classify(
   sources: AttentionSources,
   fold: ReturnType<typeof foldJournal>,
@@ -516,7 +584,8 @@ function classify(
   if (sources.manifest === null && sources.journal.length === 0) {
     return "unknown_run";
   }
-  if (sources.verdict !== null || fold.finalized !== null) return "settled";
+  const hasTerminal = sources.verdict !== null || fold.finalized !== null;
+  if (hasTerminal && !fold.resumed) return "settled";
   if (sources.ownerAlive === false) return "owner_lost";
   return "still_running";
 }

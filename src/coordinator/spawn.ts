@@ -100,6 +100,28 @@ export interface SpawnPlan {
   reason: string;
   /** The argv to actually execute, given the odu argv. */
   argv: (oduArgv: readonly string[]) => string[];
+  /**
+   * Does the spawned process EXITING mean the coordinator died?
+   *
+   * True for a detached spawn: the process we forked IS the coordinator, so
+   * its exit is its death and a readiness wait should stop at once rather than
+   * poll a socket that will never appear.
+   *
+   * FALSE for `systemd-run`, and getting this wrong is a false refusal on the
+   * happy path. `systemd-run --user` is a SUBMITTER: it asks the user manager
+   * to start a transient unit and exits as soon as the manager has accepted
+   * the job — normally while the service is still starting. Treating that exit
+   * as the coordinator's would abandon a run that is coming up perfectly well,
+   * report a failure to the caller, and leave the run executing anyway with
+   * nobody watching it. So launch ACCEPTANCE and service READINESS are two
+   * facts here, and only the first is what this process's exit reports.
+   */
+  exitIsDeath: boolean;
+  /** How the launched process's exit code should be read. For a submitter, a
+   *  non-zero exit means the job was REFUSED (no manager, a bad unit name) and
+   *  is a genuine failure; zero means accepted and says nothing about the
+   *  service. */
+  describeExit: (code: number) => string;
 }
 
 /** The environment facts the plan turns on, named so a test states a world
@@ -140,6 +162,8 @@ export function survivableSpawnPlan(
     mechanism: "detached",
     reason,
     argv: (oduArgv) => [...oduArgv],
+    exitIsDeath: true,
+    describeExit: (code) => `the coordinator exited ${code} before serving a socket`,
   });
   if (platform !== "linux") {
     return detached(
@@ -183,10 +207,51 @@ export function survivableSpawnPlan(
       "--same-dir",
       `--unit=${unitName}`,
       "--quiet",
+      // CARRY THE ENVIRONMENT ACROSS. A transient unit starts from the user
+      // manager's environment, not from ours, so everything that tells odu
+      // where to look — the hosts file, the state root, the flake the lane
+      // runner comes from — is simply absent unless it is named. A coordinator
+      // that starts with none of them is not a coordinator that started.
+      ...forwardedEnv(env).flatMap((pair) => ["--setenv", pair]),
       "--",
       ...oduArgv,
     ],
+    // The submitter's exit is not the run's. See `exitIsDeath`.
+    exitIsDeath: false,
+    describeExit: (code) =>
+      code === 0
+        ? "systemd-run accepted the unit but its socket never appeared"
+        : `systemd-run refused to start the unit (exit ${code})`,
   };
+}
+
+/** The variables a transient unit must be told about, as `KEY=VALUE`.
+ *
+ *  An allowlist, not the whole environment: a unit inherits the manager's
+ *  `PATH`/`HOME` already, and forwarding a launcher's entire environment into
+ *  a service is how an orchestrator's ambient identity variables end up inside
+ *  every recipe the run executes. What is named here is what odu itself reads
+ *  and what the platform needs to find its own runtime directory. */
+export function forwardedEnv(env: SpawnEnv): string[] {
+  const KEYS = [
+    "ODU_HOSTS",
+    "ODU_STATE_DIR",
+    "ODU_RUNNER_FLAKE",
+    "ODU_SELF",
+    "ODU_GH_BIN",
+    "ODU_AGENT_SUBSTITUTERS",
+    "ODU_AGENT_TRUSTED_PUBLIC_KEYS",
+    "ODU_LINGER_IDLE_MS",
+    "XDG_RUNTIME_DIR",
+    "XDG_STATE_HOME",
+    "NIX_PATH",
+    "PATH",
+    "HOME",
+  ];
+  return KEYS.flatMap((k) => {
+    const v = env[k];
+    return v === undefined || v === "" ? [] : [`${k}=${v}`];
+  });
 }
 
 /**
@@ -233,6 +298,45 @@ export async function defaultWaitForSocket(
   exited: Promise<unknown>,
 ): Promise<boolean> {
   return pollUntilSocketOrExit(() => socketAnswers(socketPath), exited);
+}
+
+/** How long to keep polling for a socket after the launch was ACCEPTED but the
+ *  process we forked has gone (the `systemd-run` case). Generous, because what
+ *  happens between acceptance and a bound socket is odu's whole startup — the
+ *  strict gate, the `just` DAG ingest, the seq reservation — on a machine that
+ *  may be loaded. Bounded, because a caller must eventually be answered. */
+export const READINESS_CEILING_MS = 120_000;
+
+/**
+ * Wait until the coordinator is serving, given what this plan's process exit
+ * actually means.
+ *
+ * Two different waits behind one call, because the launch mechanisms report
+ * two different things. A DETACHED spawn forked the coordinator itself, so its
+ * exit is the run's death and the poll should stop there. `systemd-run` merely
+ * SUBMITTED the unit and exits while the service is still starting, so its
+ * exit bounds nothing — a non-zero code means the job was refused, and a zero
+ * code means the wait carries on against its own deadline.
+ */
+export async function waitForReadiness(
+  plan: SpawnPlan,
+  socketPath: string,
+  onExit: Promise<number>,
+  ceilingMs: number = READINESS_CEILING_MS,
+): Promise<boolean> {
+  if (plan.exitIsDeath) return defaultWaitForSocket(socketPath, onExit);
+  const refused = onExit.then((code) => code !== 0);
+  const deadline = new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ceilingMs);
+    timer.unref?.();
+  });
+  // Stop when the submitter REFUSED the job, or when the ceiling is reached —
+  // never merely because it returned.
+  const give = Promise.race([
+    refused.then((no) => (no ? undefined : new Promise<void>(() => {}))),
+    deadline,
+  ]);
+  return pollUntilSocketOrExit(() => socketAnswers(socketPath), give);
 }
 
 /** Spawned coordinators, kept referenced so V8 does not collect the handle
