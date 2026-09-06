@@ -53,7 +53,7 @@
  * this file mirrors.
  */
 
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { describe, expect, it } from "bun:test";
 
@@ -237,7 +237,12 @@ function tsFilesUnder(dir: string): string[] {
   return out;
 }
 
-const repoRoot = join(import.meta.dirname, "..", "..");
+/** The REPO root, not this package's — the law is repo-wide, and every path in
+ *  {@link SANCTIONED} is spelled from here. Four hops because this file lives
+ *  at `packages/execution/src/common/`; the suite would happily pass while
+ *  scanning a fraction of the tree if this were short, so
+ *  `scannedSources` asserts the roots it was given actually exist. */
+const repoRoot = join(import.meta.dirname, "..", "..", "..", "..");
 
 interface Scanned {
   /** Repo-relative path, POSIX separators. */
@@ -252,8 +257,18 @@ interface Scanned {
 /** Every scanned file, sorted, already blanked both ways. */
 function scannedSources(): Scanned[] {
   const files: string[] = [];
-  for (const root of ["src", "tests", "packages"])
-    files.push(...tsFilesUnder(join(repoRoot, root)));
+  for (const root of ["src", "tests", "packages"]) {
+    const dir = join(repoRoot, root);
+    // A root that is not there means `repoRoot` is wrong — which is exactly
+    // what a package move does to it. Silence here would be the worst answer:
+    // the law would go on passing over whatever fraction of the tree it could
+    // still see. Say which root, and where it looked.
+    if (!existsSync(dir))
+      throw new Error(
+        `effect-edge scan root is missing: ${dir} — repoRoot resolved to ${repoRoot}`,
+      );
+    files.push(...tsFilesUnder(dir));
+  }
   return files
     .map((full) => relative(repoRoot, full).split(sep).join("/"))
     .sort()
@@ -271,11 +286,17 @@ const isTestFile = (rel: string): boolean =>
   rel.endsWith(".test.ts") || rel.endsWith(".test-d.ts");
 
 describe("Effect.run* edge discipline", () => {
-  const sources = scannedSources();
+  // Scanned on FIRST USE, not in the describe body. A throw out here — which
+  // is what a missing scan root is — is reported by bun as an "unhandled error
+  // between tests" and leaves the tally at `0 fail`, so the suite reads as
+  // green while contributing nothing. Inside an `it`, the same throw is a
+  // failure with a name. This is how the package move shipped a dead law.
+  let scanned: Scanned[] | undefined;
+  const sources = (): Scanned[] => (scanned ??= scannedSources());
 
   it("runs effects only at the sanctioned boundaries", () => {
     const offenders: string[] = [];
-    for (const { rel, code } of sources) {
+    for (const { rel, code } of sources()) {
       // Test files are their own edge: a test IS a Promise-shaped harness, and
       // pinning where a suite runs an effect would pin the suite's mechanism
       // rather than the source's boundary.
@@ -301,7 +322,7 @@ describe("Effect.run* edge discipline", () => {
     // hang an allowance on. Test files are in scope here — the exemption above
     // is a licence to RUN an effect, not to hide where the run happens.
     const offenders: string[] = [];
-    for (const { rel, code, codeWithStrings } of sources) {
+    for (const { rel, code, codeWithStrings } of sources()) {
       for (const pattern of [UNCALLED_RUN, DESTRUCTURED_RUN])
         for (const match of code.matchAll(pattern))
           offenders.push(cite(rel, code, match.index, match[0]));
@@ -351,7 +372,7 @@ describe("Effect.run* edge discipline", () => {
     // composed is perfectly legitimate — and a rule that was merely loud would
     // be switched off just as fast as one that was wrong.
     const offenders: string[] = [];
-    for (const { rel, code } of sources) {
+    for (const { rel, code } of sources()) {
       for (const match of code.matchAll(AWAITED_FACE_CALL))
         offenders.push(cite(rel, code, match.index, match[0]));
 
@@ -396,7 +417,7 @@ describe("Effect.run* edge discipline", () => {
     // The other direction, and the one that rots silently: an entry left behind
     // after its call site moved reads as a boundary that no longer exists, and
     // would quietly re-admit one later.
-    const byPath = new Map(sources.map(({ rel, code }) => [rel, code]));
+    const byPath = new Map(sources().map(({ rel, code }) => [rel, code]));
     const stale: string[] = [];
     for (const rel of SANCTIONED.keys()) {
       const code = byPath.get(rel);
