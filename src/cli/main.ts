@@ -63,13 +63,17 @@ run [recipe[@platform]…] [--platform P]… [--host P=ADDR]… [--root NAMEPATH
 status [-o json]              # json shape: { nodes, posting }
 logs [-f] <node>              # the LIVE run's log (replay + follow)
 logs --run R [--attempt N] [--offset B] [--limit B] [-o json] <node>
-                              # one RECORDED attempt, after the run is gone
+                              # one RECORDED attempt, after the run is gone.
+                              # --offset counts from the start; a NEGATIVE one
+                              # is a tail and must be joined: --offset=-4096
 attach [-o json]
 wait [--settle] [--timeout-ms N] [--expected-sha SHA]
                               # fail-fast verdict JSON; --settle = full settle
 wait --run R [--after CURSOR] [--deadline-ms N] [--settle] [-o json]
-                              # bounded, resumable; exits 0 pass · 1 fail
-                              # 2 still-running · 3 owner-lost · 4 no-such-run
+                              # bounded, resumable. Returns on the first red
+                              # you can act on, not on settle. Exits: 0 passed
+                              # 1 a failure to act on · 2 still going, nothing
+                              # red · 3 owner lost · 4 no such run · 5 refused
 rerun <node|@platform|recipe> # restart node(s) on the still-live run
 rerun --run R [--request-id ID] [--expect-attempt N] [-o json] <selector>
                               # retry a RECORDED run: a new attempt if its
@@ -558,10 +562,38 @@ async function dispatch(argv: string[]): Promise<number> {
   }
 }
 
+/**
+ * Exit, but not before what we printed has actually left the process.
+ *
+ * `process.exit` does not flush a pipe. Writing to a TERMINAL is synchronous,
+ * so this never mattered while every command's output was a few lines and a
+ * developer was watching it — but `odu logs --run` hands back a whole node's
+ * log, and a recipe that emits fourteen megabytes hands back fourteen
+ * megabytes. Piped to a file or read by an agent, that write is asynchronous
+ * and queued, and exiting on the next tick truncates it: the reader gets a
+ * prefix, mid-line, with nothing to say it is a prefix. Measured, not
+ * theorised — the e2e suite caught it as `JSON Parse error: Unterminated
+ * string` on the noisy fixture's log.
+ *
+ * The loop is the drain protocol: `write("")` is false while the buffer is
+ * still above the high-water mark, and `drain` fires as it comes back under —
+ * which for a large backlog can take several rounds. Bounded, because an exit
+ * that never happens is worse than an output that is short, and a stdout that
+ * cannot drain at all (a reader that went away) is exactly the case where
+ * waiting forever is wrong.
+ */
+async function exitAfterFlush(code: number): Promise<never> {
+  for (let round = 0; round < 1024; round += 1) {
+    if (process.stdout.write("")) break;
+    await new Promise<void>((resolve) => process.stdout.once("drain", resolve));
+  }
+  process.exit(code);
+}
+
 dispatch(process.argv.slice(2)).then(
-  (code) => process.exit(code),
+  (code) => exitAfterFlush(code),
   (err: unknown) => {
     process.stderr.write(`${(err as Error).message}\n`);
-    process.exit(1);
+    return exitAfterFlush(1);
   },
 );

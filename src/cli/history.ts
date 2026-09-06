@@ -66,15 +66,22 @@ import { formatAgo } from "./runs";
  * | exit | meaning | what to do next |
  * | --- | --- | --- |
  * | 0 | settled, and it passed | nothing |
- * | 1 | settled, and it did not | read `unresolved_failures`, fix, retry |
- * | 2 | still running at the deadline | ask again with the returned cursor |
+ * | 1 | there is a failure to act on | read `unresolved_failures`, fix, retry |
+ * | 2 | still going, nothing red yet | ask again with the returned cursor |
  * | 3 | its coordinator is gone and it never finalized | start a new run |
  * | 4 | no such run, or its evidence expired | check `odu runs` |
  * | 5 | the request itself was refused (a cursor for another run, say) | resync |
  *
- * 2 is the one that earns the table. Collapsing "not yet" into the failure
- * exit is how a bounded wait turns into a loop that treats a slow lane as a
- * red one, which is the behaviour this whole release is against.
+ * 1 DOES NOT MEAN SETTLED, and that is the row that carries the whole point of
+ * the command. A unit lane that goes red at eight seconds alongside a lane
+ * that has ninety to go is a run with a failure you can act on NOW; making the
+ * caller wait for settlement to be told so is the behaviour this release
+ * exists to remove, and giving it the same exit as "nothing has happened yet"
+ * would remove the behaviour and keep the confusion.
+ *
+ * 2 is the mirror of that: still going, and nothing red. Collapsing it into
+ * the failure exit is how a bounded wait turns into a loop that treats a slow
+ * lane as a broken one.
  */
 export const WAIT_EXITS = {
   passed: 0,
@@ -85,11 +92,12 @@ export const WAIT_EXITS = {
   refused: 5,
 } as const;
 
-/** The exit for a run that has NOT settled, total over the states that can
- *  reach here — so a new `AttentionState` is a compile error rather than a
- *  wait that silently exits 1. `settled` is in the table for totality and is
- *  never read: {@link waitExitFor} answers a settled run from its verdict,
- *  which is the only thing that can distinguish 0 from 1. */
+/** The exit for a run that has not settled AND has nothing red to act on —
+ *  total over `AttentionState` so a new state is a compile error rather than a
+ *  wait that silently exits 1. Two entries are unreachable by construction and
+ *  present for that totality: `settled` is answered from the verdict, and a
+ *  red run is answered before this table is consulted. See
+ *  {@link waitExitFor}, which owns both. */
 const EXIT_FOR: Record<AttentionState, number> = {
   settled: WAIT_EXITS.failed,
   still_running: WAIT_EXITS.stillRunning,
@@ -104,6 +112,11 @@ export function waitExitFor(attention: Attention): number {
   if (attention.settled) {
     return attention.passed ? WAIT_EXITS.passed : WAIT_EXITS.failed;
   }
+  // A red node is a failure whether or not the slow lanes have finished — the
+  // run cannot pass from here. Reporting it as "still running" would be true
+  // and useless: the caller has something to act on, and the exit is how it
+  // finds that out without parsing the payload.
+  if (attention.unresolved_failures.length > 0) return WAIT_EXITS.failed;
   return EXIT_FOR[attention.state];
 }
 
@@ -148,7 +161,10 @@ export function durableLogsCommand(opts: DurableLogsOpts): number {
   const found = resolveRun(opts.run, { ...catalog, repoRoot: checkoutRoot() });
   if (!found.ok) {
     process.stderr.write(`${found.message}\n`);
-    return 1;
+    // The SAME code the wait uses for the same condition. A caller scripting
+    // "read the log, and if the run is gone say so" should not have to learn
+    // that `logs` and `wait` disagree about what "no such run" is worth.
+    return WAIT_EXITS.unknownRun;
   }
   const handle = found.handle;
   const expiry = readExpiry(handle);
@@ -158,7 +174,7 @@ export function durableLogsCommand(opts: DurableLogsOpts): number {
         `${new Date(expiry.expiredAt).toISOString()} (it ended ${expiry.outcome}); ` +
         "logs are pruned after the retention window — see `odu history prune --help`\n",
     );
-    return 1;
+    return WAIT_EXITS.unknownRun;
   }
   const attempts = attemptsFor(handle, opts.node);
   if (attempts.length === 0) {
@@ -199,6 +215,12 @@ export function durableLogsCommand(opts: DurableLogsOpts): number {
       signal: record?.signal ?? null,
       placement: record?.placement ?? null,
       offset: slice.offset,
+      bytes_read: slice.bytesRead,
+      // Where to continue. A consumer must NOT recompute this from `text`: the
+      // decode is non-fatal, so a range that split a multibyte character has
+      // more bytes in the string than were read off the file, and resuming
+      // from that number skips real log content.
+      next_offset: slice.offset + slice.bytesRead,
       size: slice.size,
       // Two different facts, and a reader needs both: `eof` says this SLICE
       // reached the end of the file, `complete` says the file is everything
@@ -218,9 +240,10 @@ export function durableLogsCommand(opts: DurableLogsOpts): number {
     );
   }
   if (!slice.eof) {
+    const next = slice.offset + slice.bytesRead;
     process.stderr.write(
-      `odu: showing bytes ${slice.offset}–${slice.offset + Buffer.byteLength(slice.text)} of ${slice.size}; ` +
-        `continue with --offset ${slice.offset + Buffer.byteLength(slice.text)}\n`,
+      `odu: showing bytes ${slice.offset}–${next} of ${slice.size}; ` +
+        `continue with --offset ${next}\n`,
     );
   }
   return 0;

@@ -240,6 +240,23 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
    *  because this process owns the run for its whole life; a successor
    *  re-derives it from the journal when it takes over. */
   const highest = new Map<string, number>();
+  /**
+   * What each attempt's producer SAID about its log, keyed `<node>#<attempt>`
+   * and kept ACROSS the seal.
+   *
+   * On `open` alone this would not survive the moment it matters. Where a
+   * node's status leads its output — `_ci-setup@<platform>`, whose log the
+   * coordinator keeps narrating into long after the lane is done — a
+   * truncation stamp seals the attempt immediately, and the end-of-run sweep's
+   * `logFinalized(…, true, null)` then arrives at an attempt that is no longer
+   * open. Consulting only the open record there would let the sweep dress a
+   * stamped-short log in a completion frame, which is the exact outcome this
+   * file's header forbids. So first-word-wins is remembered here, where the
+   * seal cannot erase it.
+   */
+  const said = new Map<string, { complete: boolean; reason: string | null }>();
+  const attemptKey = (node: string, attempt: number): string =>
+    `${node}#${attempt}`;
 
   /** Every journal write goes through here, so the fence is checked in ONE
    *  place and `fenced` cannot be true for some writers and false for others. */
@@ -320,10 +337,12 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
   };
 
   /** A late `logFinalized` — the log's last word arriving after the attempt was
-   *  already sealed. Rewrite the sidecar's completeness in place, keeping the
-   *  outcome it recorded. The record file is a projection; correcting it costs
-   *  nothing, and leaving it saying "nobody said" when somebody did would be a
-   *  standing lie about complete evidence. */
+   *  already sealed, from a producer that had not spoken when it was.
+   *
+   *  Correcting a record that says "nobody said this log was finished" when
+   *  somebody since has costs nothing and removes a standing understatement.
+   *  Correcting one that says the log is SHORT would be the opposite, so this
+   *  is reached only when `said` has no earlier word — see its note. */
   const amendSealedLog = (
     node: string,
     attempt: number,
@@ -406,16 +425,23 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
       const current = open.get(node);
       const attempt = current?.attempt ?? highest.get(node);
       if (attempt === undefined) return;
+      // FIRST WORD WINS, and the check is against `said` rather than against
+      // the open record — so it holds whether or not the attempt has been
+      // sealed since. A truncation stamp and the end-of-run sweep both reach
+      // here for one attempt and disagree by design: the stamp is written
+      // precisely because the sweep's `end` never came.
+      const key = attemptKey(node, attempt);
+      if (said.has(key)) return;
+      said.set(key, { complete, reason });
+      emit({ kind: "log_finalized", node, attempt, bytes: 0, complete, reason });
       if (current === undefined) {
-        // The attempt was sealed before its log's last word arrived. Only
-        // reachable for a node whose status leads its output; correct the
-        // sidecar rather than dropping the fact.
+        // The attempt was sealed before any producer spoke — reachable for a
+        // node whose status leads its output. Correct the sidecar rather than
+        // dropping the fact.
         amendSealedLog(node, attempt, complete, reason);
         return;
       }
-      if (current.log !== undefined) return; // first word wins
       current.log = { complete, reason };
-      emit({ kind: "log_finalized", node, attempt, bytes: 0, complete, reason });
       sealIfComplete(node);
     },
     resetNode: (node, reason) => {

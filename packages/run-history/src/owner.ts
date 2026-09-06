@@ -262,13 +262,26 @@ export function claimOwnership(input: ClaimInput): ClaimResult {
   };
 }
 
-/** Does this token still hold the fence? Every durable write asks first.
+/**
+ * Does this token still hold the fence? Every durable write asks first, so
+ * this is the hottest read in the package and its cost is part of its design.
  *
- *  A read failure answers `false`: a writer that cannot confirm it still owns
- *  the run must not write to it. Fail-closed is the only safe disposition for
- *  a question whose wrong answer is two writers. */
+ * It reads the PUBLISHED record only — not the claim-file scan `currentOwner`
+ * does — and that is a correctness argument rather than a shortcut. A
+ * successor becomes the writer when it PUBLISHES; a claimant that won an epoch
+ * and died before publishing has not taken over, and the incumbent appending
+ * one more line in that window is harmless, because the successor re-derives
+ * its sequence floor from the file when it opens its journal. The scan exists
+ * for the opposite question — "what is the next free epoch" — where a corpse's
+ * claim file must be counted, and that question is asked once per takeover
+ * rather than once per event.
+ *
+ * A read failure answers `false`: a writer that cannot confirm it still owns
+ * the run must not write to it. Fail-closed is the only safe disposition for a
+ * question whose wrong answer is two writers.
+ */
 export function stillOwner(token: OwnershipToken): boolean {
-  const owner = currentOwner(token.dir);
+  const owner = readOwnerFile(join(token.dir, RUN_FILES.owner));
   return owner !== null && owner.epoch === token.epoch;
 }
 

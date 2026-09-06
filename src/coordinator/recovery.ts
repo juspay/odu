@@ -36,6 +36,7 @@
  * and nothing here lets a passing selection be read as a passing pipeline.
  */
 
+import { existsSync } from "node:fs";
 import { dialRun } from "@odu/run-client/dial";
 import type { PipelineState } from "@odu/run-client/surface";
 import { mintRunId } from "@odu/run-history/ids";
@@ -186,26 +187,26 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
       };
     }
     if (claim.kind === "replay") {
-      return {
-        ok: true,
-        replayed: true,
-        receipt: claim.receipt.result as RetryReceipt,
-      };
+      // The recorded outcome, WHOLE — a refusal included. A request that was
+      // refused has a recorded outcome just as much as one that succeeded, and
+      // replaying only the successes would answer the second identical ask
+      // with a different (and untrue) story about what happened to the first.
+      return replayOf(claim.receipt.result);
     }
     if (claim.kind === "in_flight") {
-      const reconciled = reconcile(handle, claim.receipt.plannedRunId, catalog);
+      const reconciled = reconcile(
+        input.requestId,
+        claim.receipt.plannedRunId,
+        catalog,
+      );
       if (reconciled !== null) {
-        const completed = completeReceipt(
-          handle,
-          input.requestId,
-          reconciled,
-          now(),
-        );
-        return {
+        const outcome: RetryOutcome = {
           ok: true,
+          receipt: reconciled,
           replayed: true,
-          receipt: (completed?.result as RetryReceipt) ?? reconciled,
         };
+        completeReceipt(handle, input.requestId, outcome, now());
+        return outcome;
       }
       return {
         ok: false,
@@ -220,7 +221,7 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
 
   const live = await tryLive(handle, manifest, input);
   if (live !== null) {
-    return finish(handle, input, live, now);
+    return finish(handle, input, { ok: true, receipt: live, replayed: false }, now);
   }
   const relaunched = await relaunch(
     handle,
@@ -229,23 +230,54 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
     claimedRunId,
     catalog,
   );
-  if (!relaunched.ok) return relaunched;
-  return finish(handle, input, relaunched.receipt, now);
+  return finish(
+    handle,
+    input,
+    relaunched.ok
+      ? { ok: true, receipt: relaunched.receipt, replayed: false }
+      : relaunched,
+    now,
+  );
 }
 
-/** Record the answer against the request id, when there is one, and hand it
- *  back. One place, so a receipt cannot be written on one path and forgotten
- *  on the other. */
+/** Rebuild an outcome from a recorded receipt. A stored value this build
+ *  cannot recognise is refused rather than cast: the alternative is handing a
+ *  caller an object shaped like a receipt with nothing in it. */
+function replayOf(stored: unknown): RetryOutcome {
+  const value = stored as Partial<RetryOutcome> | null;
+  if (value !== null && value !== undefined && "ok" in value) {
+    return value.ok === true
+      ? { ok: true, receipt: (value as { receipt: RetryReceipt }).receipt, replayed: true }
+      : (value as { ok: false; message: string; suggestion?: string[] });
+  }
+  return {
+    ok: false,
+    message:
+      "odu: that request id was used before, but this build cannot read what it recorded",
+  };
+}
+
+/**
+ * Record the answer against the request id, when there is one, and hand it
+ * back.
+ *
+ * EVERY answer, including a refusal. A claimed id whose outcome is never
+ * recorded stays `accepted` forever, and the next identical ask — which is
+ * exactly what idempotency invites a caller to make — is told the request "was
+ * accepted and its outcome is not recorded", which is false: the outcome was
+ * a refusal, and it is knowable. One function, so no path can take the claim
+ * and skip the record.
+ */
 function finish(
   handle: RunHandle,
   input: RetryInput,
-  receipt: RetryReceipt,
+  outcome: RetryOutcome,
   now: () => number,
 ): RetryOutcome {
   if (input.requestId !== undefined) {
-    completeReceipt(handle, input.requestId, receipt, now());
+    completeReceipt(handle, input.requestId, outcome, now());
   }
-  return { ok: true, receipt, replayed: false };
+  return outcome;
 }
 
 /**
@@ -259,7 +291,7 @@ function finish(
  * told exactly that rather than being handed a guess.
  */
 function reconcile(
-  _handle: RunHandle,
+  requestId: string,
   plannedRunId: string,
   catalog: CatalogOptions,
 ): RetryReceipt | null {
@@ -268,7 +300,10 @@ function reconcile(
   const manifest = readManifest(planned);
   if (manifest === null) return null;
   return {
-    request_id: null,
+    // The id it was asked under: a reconciled receipt is answering the SAME
+    // request, and a caller correlating on this field must not find it empty
+    // for the one call where it had to reconcile.
+    request_id: requestId,
     mode: "relaunched",
     effective_run: plannedRunId,
     parent_run: manifest.parentRunId,
@@ -388,6 +423,15 @@ async function relaunch(
         "whose inputs were never committed. Its logs are still readable; start a " +
         "new run against a commit instead.",
       suggestion: ["odu", "run", ...manifest.scope.selectors],
+    };
+  }
+  if (!existsSync(manifest.repoRoot)) {
+    return {
+      ok: false,
+      message:
+        `odu: run ${handle.runId} was started in ${manifest.repoRoot}, which is gone — ` +
+        "a replay has to run where the run ran. Its logs are still readable.",
+      suggestion: ["odu", "logs", "--run", handle.runId, input.selector],
     };
   }
   // The SELECTION the new run covers: the nodes asked for, with their

@@ -221,16 +221,31 @@ export function listReceipts(handle: RunHandle): ReceiptRecord[] {
 }
 
 /**
+ * The field separator inside a digest's canonical spelling.
+ *
+ * NUL, because it is the one byte that cannot appear in any of the parts —
+ * they are node ids, selectors and numbers — so `["a b", "c"]` and
+ * `["a", "b c"]` cannot canonicalise to the same string. A space would let
+ * exactly that collision through, and the collision is silent: two different
+ * requests would share a digest and the second would be replayed as the first.
+ *
+ * Named rather than written inline, and built with `fromCharCode` rather than
+ * embedded: a literal NUL in the source is invisible in an editor and makes
+ * every `grep` treat this file as binary and return nothing.
+ */
+const DIGEST_SEP = String.fromCharCode(0);
+
+/**
  * A stable digest of a request's meaningful input.
  *
  * FNV-1a over a canonical spelling: the point is to notice that two requests
  * wearing one id are different, not to resist an adversary — a caller that
  * wanted to forge a collision could simply use a different id. Canonical
- * because the digest must not depend on key order or on how a caller happened
- * to spell an empty list.
+ * because the digest must not depend on how a caller happened to spell a
+ * part.
  */
 export function digestOf(parts: readonly (string | number | boolean)[]): string {
-  const canonical = parts.map((p) => String(p)).join(" ");
+  const canonical = parts.map((p) => String(p)).join(DIGEST_SEP);
   let hash = 0x811c9dc5;
   for (let i = 0; i < canonical.length; i += 1) {
     hash ^= canonical.charCodeAt(i);

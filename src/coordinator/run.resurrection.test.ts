@@ -401,8 +401,17 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
 
       // The finished node keeps its verdict AND its output; the interrupted one
       // goes back to pending with the interruption written into its log.
-      expect(nodes.statusOf("alpha")).toBe("ok");
-      expect(nodes.statusOf("beta")).toBe("pending");
+      //
+      // WAITED FOR, not sampled. `lanes[1]` existing is an in-process fact,
+      // while `nodes` is a real socket subscriber whose frames arrive a tick
+      // or two behind — so sampling here is a coin flip weighted by how busy
+      // the coordinator's event loop happens to be, and it lands tails often
+      // enough to be seen on an unmodified tree. Waiting does not weaken the
+      // assertion: a `beta` that was wrongly left `running` (or a re-run
+      // `alpha`) never reaches these values, so the wait fails rather than
+      // passing late.
+      await waitFor(() => nodes.statusOf("alpha") === "ok", 20_000);
+      await waitFor(() => nodes.statusOf("beta") === "pending", 20_000);
       const sha7 = sha7Of(dir);
       const logOf = (node: string): string =>
         readFileSync(join(dir, ".ci", sha7, PLATFORM, `${node}.log`), "utf-8");
@@ -479,7 +488,17 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
       first.opts.onDead("ssh pipe died");
       await waitForLive(outcome, () => lanes.length === 2);
 
-      expect(nodes.statusOf("alpha")).toBe("ok");
+      // WAIT for it, do not sample it. `lanes.length === 2` is an in-process
+      // fact; `nodes` is a real socket subscriber, so the published verdict
+      // arrives a tick or two behind it and how far behind depends on how busy
+      // the coordinator's event loop is. Sampling here passed while the
+      // coordinator did little else per transition and became a coin flip once
+      // it also wrote a durable record.
+      //
+      // This does not weaken the assertion: if the resurrection had wrongly
+      // re-run `alpha`, its status would go back to pending/running and stay
+      // there, so the wait fails instead of passing late.
+      await waitFor(() => nodes.statusOf("alpha") === "ok", 20_000);
       expect(lanes[1]!.opts.tasks.map((t) => t.id)).toEqual(["beta", "gamma"]);
       expect(
         readFileSync(

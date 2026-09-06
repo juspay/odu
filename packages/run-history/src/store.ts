@@ -532,6 +532,17 @@ export interface LogSlice {
   text: string;
   /** Where this slice started, in bytes. */
   offset: number;
+  /**
+   * How many BYTES this slice consumed — which is not `text`'s byte length.
+   *
+   * The decode is non-fatal (see below), so a range whose boundary lands
+   * inside a multibyte character yields U+FFFD where one or two real bytes
+   * were: measuring the decoded string would then report MORE bytes than were
+   * read, and a caller resuming from that number would skip real log content.
+   * The offset to continue from is `offset + bytesRead`, and it is a fact
+   * about the read rather than one a consumer can recover from the text.
+   */
+  bytesRead: number;
   /** Total size of the log at read time. */
   size: number;
   /** Did this slice reach the end of the file? Distinct from `logComplete` on
@@ -587,6 +598,7 @@ export function readAttemptLog(
     return {
       text: buf.subarray(0, read).toString("utf-8"),
       offset: start,
+      bytesRead: read,
       size,
       eof: start + read >= size,
     };
