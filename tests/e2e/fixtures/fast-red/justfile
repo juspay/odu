@@ -1,0 +1,23 @@
+# The shape the whole bounded-wait promise is about: one lane that fails
+# almost immediately, beside one that will not finish for two minutes.
+#
+# Before the durable wait, learning about `quick` meant waiting for `slow` —
+# `odu wait --settle` blocks on the run, and fail-fast only helped a caller
+# that was already attached to the socket. A run started in one terminal and
+# asked about from another had no way to be told "this went red four minutes
+# ago" at all.
+#
+# The sleep is far longer than any test's patience on purpose: if an assertion
+# about "returned before the sibling settled" ever passes because the sibling
+# happened to finish, the fixture has stopped testing anything.
+
+[parallel]
+[metadata("ci")]
+default: quick slow
+
+quick:
+    echo "BOOM: the quick lane failed"
+    exit 1
+
+slow:
+    sleep 120

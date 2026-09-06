@@ -256,7 +256,7 @@ describe("odu cancel / supersede / linger (black-box)", () => {
  * sit in the `provisioning` phase — what the shipped binary proves here is the
  * contract's other half: the `run` key exists, and a run that reached its lanes
  * reports them and keeps the output it always had. The provisioning phase itself
- * is covered over the socket in `src/cli/introspect.provisioning.test.ts`,
+ * is covered over the socket in `packages/cli/src/introspect.provisioning.test.ts`,
  * which does not need an ssh host to reach it.
  */
 describe("odu status reports the run environment (black-box)", () => {

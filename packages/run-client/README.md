@@ -110,7 +110,7 @@ of code on the reading side stayed behind. A module stays with odu when it is
 odu's own decision rather than the wire's, or when it is a face's business rather
 than a reader's:
 
-- **`laneSurface`** (`src/common/laneSurface.ts`) — the coordinator's protocol
+- **`laneSurface`** (`packages/execution/src/common/laneSurface.ts`) — the coordinator's protocol
   with `odu-runner --stdio`, and the biggest thing that could have come and
   didn't. It shares this package's `nodePrimitives`, so no shape is defined
   twice; what it adds (`run.configure`, `lease.*`) has exactly one reader, and
@@ -119,38 +119,42 @@ than a reader's:
 - **`logTail`** — the *server* side of `nodeLog`: the buffer, the channel, the
   `end`-after-`end` refusal. `clampLog` and `MAX_LOG_CHARS` came across because
   they are the bound the wire promises; the pub/sub under them is not a contract.
-- **The durable run record** (`src/common/runRecord.ts`) — a run's on-disk
-  manifest, and how the live `owed` rows project into it. A different wire: a
-  file read by path, not a socket contract, and the layout under it is the
-  ledger's. It moves the day a consumer wants a settled run's verdict without
-  odu's ledger — on the same terms as everything below. (One narrow piece DID
-  move: the *reservation sentinel*, the `{reserved: true}` a mid-flight kill
-  leaves behind — a dead run serves no socket, so the only way a client can
-  ever learn it died is by reading the files: `./deadRun`. The sentinel there
-  NAMES the corpse; the stale lock and socket are what PROVE one. The verdict
-  record itself still never crosses.)
-- **`dialRunOrExit`** (`src/coordinator/socket.ts`) — dial, or print justci's
+- **The durable run record** — a run's on-disk manifest, and how the live
+  `owed` rows project into it. A different wire: a file read by path, not a
+  socket contract. It did not come here; it went the other way, into
+  [`@odu/run-history`](../run-history), which is now the package that owns
+  *everything that outlives a coordinator* — the per-user catalog, the ordered
+  journal, per-attempt evidence, and this checkout-scoped ledger as its legacy
+  half. A consumer that wants a settled run's verdict hydrates that package;
+  one that only dials a live run still pays nothing for it, and
+  `src/closure.test.ts` there asserts the arrow never comes back this way.
+  (One narrow piece stayed HERE: the *reservation sentinel*, the
+  `{reserved: true}` a mid-flight kill leaves behind — a dead run serves no
+  socket, so the only way a client can ever learn it died is by reading the
+  files: `./deadRun`. The sentinel there NAMES the corpse; the stale lock and
+  socket are what PROVE one. The verdict record itself still never crosses.)
+- **`dialRunOrExit`** (`packages/execution/src/coordinator/socket.ts`) — dial, or print justci's
   refusal and exit. The exiting variant is a CLI's decision, and a library that
   made it for a dashboard would be wrong. The serving half is there too, for the
   reason the whole package exists: a client may be a different build from the
   coordinator it dials; a server *is* the build it is.
-- **`transitiveDependents` / `parseAtPlatform`** (`src/common/nodeId.ts`) — the
+- **`transitiveDependents` / `parseAtPlatform`** (`packages/execution/src/common/nodeId.ts`) — the
   DAG walk a rerun does and the `@platform` argv sugar a CLI parses. One is what
   a WRITER computes before it mutates; the other is a command line.
-- **`formatGoDuration`** (`src/common/duration.ts`) — justci-byte-compatible
+- **`formatGoDuration`** (`packages/execution/src/common/duration.ts`) — justci-byte-compatible
   duration strings. Free to move (it imports nothing) and it has simply never
   been asked for: rendering a duration is a face's own business, and an entry
   nobody asked for is an entry to un-publish later. It moves the day someone
   asks, as `@kolu/padi-client`'s `terminalId` and `screenTail` did.
-- **`effectEdge`** (`src/common/effectEdge.ts`) — odu's single sanctioned
-  `Effect.run*` boundary, enumerated by `src/common/effectEdges.test.ts`. Moving
+- **`effectEdge`** (`packages/execution/src/common/effectEdge.ts`) — odu's single sanctioned
+  `Effect.run*` boundary, enumerated by `packages/execution/src/common/effectEdges.test.ts`. Moving
   it would move that law out of the repo that enforces it. A consumer already in
   Effect composes the `Stream` this package hands it; one that is not runs it at
   its own edge, in one line.
 
 The behaviour of the vocabulary here is tested from odu's suite (`runPhase` in
-`src/common/runPhase.test.ts`, the frozen bytes in
-`src/common/schemaBytes.test.ts`), because those tests want odu's shared
+`packages/execution/src/common/runPhase.test.ts`, the frozen bytes in
+`packages/execution/src/common/schemaBytes.test.ts`), because those tests want odu's shared
 fixtures. What is tested *here* is the thing only this directory can state: its
 own closure.
 

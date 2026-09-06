@@ -102,6 +102,19 @@ pool is busy (default: wait in line). Together they let the agent loop call off
 or replace a run instead of stranding it or hitting "a run is already in
 progress".
 
+**Every tool above is unchanged, and the resources are bound to a LIVE run.**
+When the `nodes` resource reports no live run — the coordinator exited, or died
+with the process that started it — an agent with shell access has durable,
+addressed equivalents on the native CLI, reading a per-user run catalog rather
+than the socket: `odu logs --run R [--attempt N] <node>` for one recorded
+attempt, `odu wait --run R [--after CURSOR] [--deadline-ms N]` for a bounded,
+resumable verdict whose exits separate "still going, nothing red" (2) and "owner
+lost" (3) from "there is a failure to act on" (1), and `odu rerun --run R
+<selector>` to retry a recorded run.
+`R` is a run id, a unique prefix, `<sha7>#<seq>`, or `latest`; `odu history list`
+enumerates them. No MCP tool exposes these — reach for the CLI, or `runs` /
+`dead_run` for the checkout-scoped answer this server already gives.
+
 `bin/serve` is self-contained — it resolves odu via `nix run` and serves over
 stdio in the consumer's repo (dialing `.ci/odu.sock`). Set `ODU_FLAKE` to
 override the odu flake-ref (default `github:juspay/odu`); a repo that

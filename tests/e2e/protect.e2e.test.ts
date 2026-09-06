@@ -9,7 +9,7 @@
  * required contexts.
  *
  * The second suite drives the write path against a stand-in `gh`. Everything
- * `protect` decides is unit-tested (src/cli/rulesets.test.ts); what only a
+ * `protect` decides is unit-tested (packages/cli/src/rulesets.test.ts); what only a
  * black-box run can catch is which GitHub endpoint it decides *at* — the
  * `Branch not protected (HTTP 404)` bug was a correct context list PATCHed to
  * classic branch protection on a repo that has none.

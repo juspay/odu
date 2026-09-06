@@ -214,7 +214,8 @@ nix run github:juspay/odu -- rerun unit                    # that recipe on ever
 nix run github:juspay/odu -- cancel          # stop the live run, cleanly
 nix run github:juspay/odu -- cancel @aarch64-darwin   # drop one platform lane
 nix run github:juspay/odu -- cancel ci::fmt@x86_64-linux  # cancel one node
-nix run github:juspay/odu -- runs            # durable history (flags unposted statuses)
+nix run github:juspay/odu -- runs            # this CHECKOUT's history (flags unposted
+                                             # statuses); per-user view: `history list`
 ```
 
 No run in progress ⇒ exit non-zero with `no run in progress in this
@@ -280,6 +281,63 @@ here first, then starts ("stop this, run the fixed commit"). By default a run
 exits the instant it drains; `odu run --linger` keeps it serving past settle so a
 node can be rerun later (retry a flake), self-reaping after an idle period or on
 `cancel`.
+
+## Durable introspection (after the coordinator is gone)
+
+Every run is also written to a **per-user catalog** — `ODU_STATE_DIR`, else
+`$XDG_STATE_HOME/odu/runs` (`~/.local/state/odu/runs`) on Linux,
+`~/Library/Application Support/odu/runs` on macOS. It survives the checkout, so
+these answer after the coordinator exited, from another terminal, and after a
+`git worktree remove`. Nothing was retired: `.ci` is still written, `odu runs` is
+still the CHECKOUT view, and every live command above is unchanged.
+
+`--run R` is `R` = a run id, a unique prefix of one, `<sha7>#<seq>`, or `latest`.
+
+```sh
+nix run github:juspay/odu -- history list [--all] [--limit N] [-o json]
+                                             # the catalog, newest first (--all = every checkout)
+nix run github:juspay/odu -- history show --run R [--after CURSOR] [-o json]
+                                             # one run's attention payload, without waiting
+nix run github:juspay/odu -- history import [--dry-run] [-o json]
+                                             # bring this checkout's .ci records in
+nix run github:juspay/odu -- history prune [--days N] [--dry-run] [-o json]
+                                             # expire finished runs past the window (30d default)
+nix run github:juspay/odu -- logs --run R [--attempt N] [--offset B] [--limit B] [-o json] <node>
+                                             # ONE recorded attempt; byte offsets, not lines
+nix run github:juspay/odu -- wait --run R [--after CURSOR] [--deadline-ms N] [--settle] [-o json]
+                                             # bounded, resumable; exits below
+nix run github:juspay/odu -- rerun --run R [--request-id ID] [--expect-attempt N] [-o json] <selector>
+                                             # retry a RECORDED run
+```
+
+**The loop: start → bounded wait → diagnose → retry → resume.** `odu wait --run`
+returns on the first ACTIONABLE red (a failure whose log has had its last word),
+not on settle — a fast lane's failure is reported without waiting out the slow
+ones; `--settle` waits for the whole run. Its exits are the contract, because
+"there is something to fix", "nothing has happened yet" and "its coordinator
+died" need different next moves: **0** passed · **1** a failure to act on —
+which does NOT mean settled, a red lane beside a still-running one already
+counts · **2** still going, nothing red at the deadline (ask again with the
+returned cursor) · **3** owner lost — provably gone without finalizing, start a
+fresh run · **4** no such run, or expired · **5** request refused (e.g. a cursor
+belonging to another run; the refusal carries a resync command). The bare
+`odu wait` above is UNCHANGED at 0/1.
+`--after CURSOR` resumes without showing you the same events twice, and the
+cursor advances only through events actually delivered.
+
+Evidence is per ATTEMPT and old attempts are immutable — a retry adds `N+1` and
+never overwrites the log you are reading (the `.ci` file, addressed by commit,
+still does). `odu logs --run` reports `complete` as a FIELD, so a truncated log
+says so rather than reading as a quiet recipe. `odu rerun --run` retries a
+recorded run and odu picks what that means: a new attempt if its coordinator is
+still up, else a NEW run linked to it, replayed from recorded inputs with the
+commit pinned (and not posting — a selection's verdict is not the pipeline's). A
+dirty live-tree run cannot be replayed and is refused. `--request-id` makes a
+repeat safe: same id, same input replays the recorded answer instead of starting
+a second run. `--expect-attempt N` refuses if the node has moved on since you
+read it — checked by the coordinator as it accepts the reset, so the node
+cannot advance between the check and the mutation it guards. Expiry leaves a tombstone, so an old run id answers "it existed, it
+failed, its evidence aged out" rather than "no such run".
 
 ## Hosts config
 

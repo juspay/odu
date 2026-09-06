@@ -16,4 +16,26 @@ in
   kolu-shell-quote = mkKoluPackage "shell-quote";
   kolu-surface-map = mkKoluPackage "surface-map";
   kolu-log = mkKoluPackage "log";
+  # The survivable-spawn spine. `surface-daemon-supervisor` owns the mechanism a
+  # coordinator is launched with; its `.` entry reaches the daemon-endpoint half
+  # (`@kolu/surface-daemon`) and the OS-facts reader behind that. Both come along
+  # because hydration is per-PACKAGE: what a consumer pays is the closure of the
+  # manifests, not of the modules its own code happens to touch.
+  kolu-surface-daemon-supervisor = mkKoluPackage "surface-daemon-supervisor";
+  kolu-surface-daemon = mkKoluPackage "surface-daemon";
+  # `osfacts-client` is the odd one out, and deliberately so: it is NOT a kolu
+  # workspace directory. kolu gitignores it and grafts it at build time from its
+  # own `osfacts` pin, so no revision of juspay/kolu contains it and no pin bump
+  # could supply it. odu performs the same graft from the same upstream, which is
+  # why there is a second pin in npins/sources.json at all.
+  osfacts-client = final.runCommand "osfacts-client"
+    {
+      meta = {
+        description = "osfacts-client source extracted from juspay/osfacts";
+        homepage = "https://github.com/juspay/osfacts";
+      };
+    }
+    ''
+      cp -r ${(import ../npins).osfacts}/client-ts $out
+    '';
 }

@@ -4,7 +4,7 @@
  * juspay/odu#49 — the exact tool the field trap was hit through.
  *
  * Black-box like the rest of tests/e2e: no import from `src/`. The regressions
- * this pins are the ones the in-process unit suite (src/mcp/server.test.ts)
+ * this pins are the ones the in-process unit suite (packages/cli/src/mcp/server.test.ts)
  * proves against an injected surface — here they run against the REAL binary,
  * the real coordinator, and a real `allocateSeq`, so the coordinator's seq
  * stamp is verified end to end (a unit test can only inject the seq).

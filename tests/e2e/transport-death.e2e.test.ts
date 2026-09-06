@@ -83,7 +83,14 @@ function descendants(root: number): Proc[] {
 }
 
 function isRunner(args: string): boolean {
-  return args.includes("runner/main.ts") || /(^|[/\s])odu-runner(\s|$)/.test(args);
+  // Two spellings, because the lane agent is reached two ways: the packaged
+  // `odu-runner` wrapper, and a raw `bun …/src/runner-main.ts` when a dev
+  // shell runs the entrypoint directly. Matched on the FILE rather than on a
+  // directory, since the worker's composition root sits beside `packages/execution/src/runner/`
+  // rather than inside it.
+  return (
+    args.includes("runner-main.ts") || /(^|[/\s])odu-runner(\s|$)/.test(args)
+  );
 }
 
 function findRunnerPid(oduPid: number): number {

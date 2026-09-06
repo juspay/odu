@@ -73,7 +73,7 @@ export const repoRoot = execFileSync(
 
 /**
  * One line of `odu run --progress json` output. Deliberately mirrors — and is
- * NOT imported from — `ProgressEvent` in src/coordinator/display.ts: this is
+ * NOT imported from — `ProgressEvent` in packages/execution/src/coordinator/display.ts: this is
  * the wire schema the test deserializes, so the assertions verify the binary's
  * real output (black-box). Sharing the type would make the test white-box and
  * hide exactly the wire-format regressions this suite exists to catch.

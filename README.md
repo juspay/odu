@@ -16,6 +16,7 @@ nix run github:juspay/odu -- run --host x86_64-linux=localhost
 ```sh
 odu attach          # live matrix + logs from another terminal
 odu wait            # fail-fast JSON verdict (or `wait --settle`)
+odu wait --run latest   # the same question, after the coordinator is gone
 odu rerun unit      # restart a recipe on the still-live run
 odu mcp             # same run, agent face (MCP over stdio)
 ```
@@ -60,5 +61,118 @@ checkout/install/build time. Each burst lane dispatches that private dependency
 closure in parallel; the primary reuses prerequisites it ran during capacity
 discovery. Both expose nodes such as `e2e[2-of-4]::install` in the UI, logs,
 timing sidecar, and run record without creating extra GitHub contexts.
+
+## CLI
+
+```text
+odu run [recipe[@platform]…] [--platform P]… [--host P=ADDR]… [--root NAMEPATH]
+    [--no-deps] [--no-strict] [--no-snapshot] [--no-post] [--progress json]
+    [--supersede] [--linger] [--no-wait]
+odu status [-o json]              # json shape: { nodes, posting }
+odu logs [-f] <node>              # the LIVE run's log (replay + follow)
+odu logs --run R [--attempt N] [--offset B] [--limit B] [-o json] <node>
+                                  # one RECORDED attempt, after the run is gone
+odu attach [-o json]
+odu wait [--settle] [--timeout-ms N] [--expected-sha SHA]
+                                  # fail-fast verdict JSON; --settle = full settle
+odu wait --run R [--after CURSOR] [--deadline-ms N] [--settle] [-o json]
+                                  # bounded, resumable. Returns on the first red
+                                  # you can act on, not on settle. Exits: 0 passed
+                                  # 1 a failure to act on · 2 still going, nothing
+                                  # red · 3 owner lost · 4 no such run · 5 refused
+odu rerun <node|@platform|recipe> # restart node(s) on the still-live run
+odu rerun --run R [--request-id ID] [--expect-attempt N] [-o json] <selector>
+                                  # retry a RECORDED run: a new attempt if its
+                                  # coordinator is still up, else a new linked run
+odu cancel [node|@platform]       # bare = whole run; node or @plat = partial
+odu runs [-o json]                # this checkout's run history
+odu history list [--all] [--limit N] [-o json]
+                                  # the per-user catalog, newest first
+odu history show --run R [--after CURSOR] [-o json]
+                                  # one run's attention payload, without waiting
+odu history import [--dry-run] [-o json]
+                                  # bring this checkout's .ci records in
+odu history prune [--days N] [--dry-run] [-o json]
+                                  # expire finished runs past the window (30d)
+odu hosts                         # venue inventory (free / busy / held by)
+odu lease [PLAT…] [--no-wait]     # hold a free venue across runs (agent layer)
+odu release [PLAT…]               # drop agent-held lease(s)
+odu dump [--root NAMEPATH]        # resolved pipeline as JSON
+odu graph [--root NAMEPATH]       # dependency graph (Mermaid)
+odu protect [--dry-run] [--branch B] [--platform P]… [--create]
+                                  # --create: make the branch's ruleset if absent
+odu mcp                           # serve the agent face (MCP, stdio)
+```
+
+## The run catalog, and the loop it makes possible
+
+Evidence used to live in the checkout that produced it — a record at
+`.ci/<sha7>/runs/<seq>.json`, one log per *(commit, node)*. Three things follow
+from that address, and all three are things people hit. `git worktree remove`
+deletes the logs of the run you are debugging. A rerun of the same commit
+overwrites the failure you were half-way through reading. And once the
+coordinator exits nothing can be asked at all, so a bounded wait that came back
+empty could not distinguish *not yet* from *it failed* — which is how a slow
+lane gets reported as a red one.
+
+So every run is now also written to a per-user catalog: `$XDG_STATE_HOME/odu/runs`
+(`~/.local/state/odu/runs`) on Linux, `~/Library/Application Support/odu/runs` on
+macOS, `ODU_STATE_DIR` overriding both. Nothing was retired. The `.ci` ledger is
+still written and `odu runs` still answers about *this checkout*; `odu history
+list` is the per-user view across all of them, and every live command and every
+MCP tool behaves exactly as before. What is new is that a run can be **addressed**
+after nobody is serving it: `--run R` on `logs`, `wait` and `rerun`, where `R` is
+a run id, a unique prefix of one, the `<sha7>#<seq>` ref the faces already print,
+or the word `latest`.
+
+That is enough for an agent loop that survives its own subject: start → bounded
+wait → diagnose → retry → resume.
+
+```sh
+odu run                                              # elsewhere, or via MCP `run`
+odu wait --run latest --deadline-ms 30000 -o json    # → exit 2: still going, nothing red
+odu wait --run latest --after "$cursor" -o json      # → exit 1, and here is what is red
+odu logs --run latest --attempt 2 ci::unit@x86_64-linux
+odu rerun --run latest --request-id fix-1 ci::unit   # → the run it started, and a cursor
+odu wait --run "$effective_run" --after "$cursor" -o json
+```
+
+The exits are the contract, because *there is something to fix*, *nothing has
+happened yet* and *its coordinator died* need three different next moves:
+**0** it passed · **1** there is a failure to act on — which does **not** mean
+the run has settled, since a red unit lane beside a lane with ninety seconds to
+go is already actionable · **2** still going and nothing red at the deadline
+(ask again with the returned cursor) · **3** owner lost — the coordinator is
+provably gone and never finalized, so start a fresh run · **4** no such run, or
+its evidence expired · **5** the request itself was refused, e.g. a cursor
+belonging to another run, and the refusal carries the resync command. The bare
+`odu wait`, with no `--run`, is unchanged and still exits 0 or 1.
+
+`odu wait --run` returns on the first **actionable** red — a failure whose log
+has had its last word — rather than on settle, so a unit failure is reported at
+eight seconds instead of after the e2e lane finishes. `--settle` asks for the
+whole run instead. `--after CURSOR` resumes: you are not shown the same events
+twice, and the cursor advances only through events actually delivered, so a
+trimmed payload cannot swallow what a reconnecting caller came back for. It
+suppresses repeats and resolves nothing — a red node you already acknowledged is
+still listed, because it is still red.
+
+Evidence is per **attempt** and old attempts are immutable, so a retry adds
+`N+1` and never overwrites the log you are reading; `odu logs --run` reports
+`complete` as a field, so a truncated log says it is truncated instead of looking
+like a quiet recipe. `odu rerun --run` retries a *recorded* run, and odu decides
+what that means rather than the caller: a new attempt if its coordinator is still
+up, otherwise a new run linked to it, replayed from the recorded inputs with the
+commit pinned. A run of a dirty live tree cannot be replayed — its inputs were
+never committed — and is refused rather than substituted with today's tree.
+`--request-id` makes a repeat safe: the same id with the same input replays the
+recorded answer instead of starting a second run. Finished runs are kept 30 days
+by default (`odu history prune`), and expiry leaves a tombstone, so a month-old
+run id gets "it existed, it failed, its evidence aged out" rather than the answer
+a typo gets.
+
+The catalog's own design — the ownership fence, the journal, the attention fold,
+the export map — is documented in
+[`packages/run-history/README.md`](packages/run-history/README.md).
 
 AGPL-3.0-or-later

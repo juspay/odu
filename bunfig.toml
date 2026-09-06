@@ -23,3 +23,12 @@
 # package its exact dependency set, so no version loses and nothing nests.
 [install]
 linker = "isolated"
+
+# The run catalog is PER USER (`@odu/run-history`), so a suite that drives the
+# real coordinator would otherwise write fixture runs into the developer's own
+# history. The preload redirects it to a temp directory for the whole test
+# process — including the e2e suite's real `odu` subprocesses, which inherit
+# the variable. See the script for why this is a preload and not a hook every
+# suite has to remember.
+[test]
+preload = ["./scripts/test-state-dir.ts"]

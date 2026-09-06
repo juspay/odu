@@ -4,19 +4,22 @@
   "private": true,
   "license": "AGPL-3.0-or-later",
   "type": "module",
-  "//workspaces": "odu has ONE workspace member: packages/run-client, the half of odu a client of a live run holds (see its README, which argues the cut). A workspace rather than a folder of relative imports because the wall has to be real — a package cannot depend back on odu — and its src/closure.test.ts walks the import graph to prove it. The member is also listed in `dependencies` below: the isolated linker symlinks only the root package DIRECT dependencies into the root node_modules, so without that entry `@odu/run-client` would not resolve from src/.",
+  "//workspaces": "Each member is a WALL, not a folder, and the walls run ONE WAY: cli \u2192 execution \u2192 run-history \u2192 run-client. run-client is the half of odu a client of a LIVE run holds; run-history is everything that OUTLIVES a coordinator (the per-user catalog, the journal, per-attempt evidence, and the checkout-scoped ledger as its legacy half); execution is everything that DOES a run; cli is the two ways of WATCHING one (the native CLI/TUI and the MCP surface). What is left in src/ is the composition roots \u2014 main.ts and runner-main.ts \u2014 the only place the faces and the engine are wired to each other. Each member's src/closure.test.ts walks its own import graph, so the direction is physics rather than discipline. Every member is also listed in `dependencies` below: the isolated linker symlinks only the root package's DIRECT dependencies into the root node_modules, so without those entries `@odu/*` would not resolve from src/.",
   "workspaces": [
     "packages/*"
   ],
   "scripts": {
-    "start": "bun src/cli/main.ts",
-    "start:runner": "bun src/runner/main.ts --stdio",
+    "start": "bun src/main.ts",
+    "start:runner": "bun src/runner-main.ts --stdio",
     "typecheck": "tsc --noEmit",
     "test:unit": "bun test ./src ./packages",
     "test:e2e": "bun test ./tests/e2e"
   },
   "dependencies": {
+    "@odu/cli": "workspace:*",
+    "@odu/execution": "workspace:*",
     "@odu/run-client": "workspace:*",
+    "@odu/run-history": "workspace:*",
     "@effect/platform-node": "4.0.0-rc.112",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@opentui/core": "^0.4.5",

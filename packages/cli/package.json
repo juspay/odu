@@ -1,0 +1,23 @@
+{
+  "name": "@odu/cli",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "//": "THE FACES — see README.md. The native CLI and its TUI, and the MCP agent surface. Both are ways of WATCHING a run and asking things of one; neither is how a run happens. The arrow runs cli → execution and never back, which is what lets a service face be built over the engine in PR 2 without a terminal emulator in its closure.",
+  "//exports": "A subpath pattern, for the reason `@odu/execution` gives: this package ships from this tree with its only consumer (`src/main.ts`), so a curated surface here would be a list nobody reads rather than a promise somebody depends on.",
+  "//dependencies": "The renderer and terminal packages are REAL installs and the reason this package exists as a separate wall: `@opentui/core` and `@xterm/headless` are a renderer and a terminal emulator, and an engine that carried them in its closure could not be served from anything but a terminal. The @kolu/* sources are hydrated from a Nix pin and so are absent here by design — see the note in @odu/execution's manifest, and src/closure.test.ts, which pins the hydrated set.",
+  "sideEffects": false,
+  "exports": {
+    "./*": "./src/*.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@odu/execution": "workspace:*",
+    "@odu/run-client": "workspace:*",
+    "@odu/run-history": "workspace:*",
+    "@opentui/core": "^0.4.5",
+    "@xterm/headless": "^6.0.0",
+    "effect": "4.0.0-rc.112"
+  }
+}

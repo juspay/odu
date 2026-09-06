@@ -35,7 +35,13 @@ jobs:
           # Check out the PR HEAD, not the synthetic merge ref, so the run
           # tests the sha the PR is actually about.
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - uses: nixbuild/nix-quick-install-action@v31
+      # Pinned to the commit a tag pointed at, not to the tag. A tag on a
+      # third-party action is mutable: whoever owns it can move it, and every
+      # run of this workflow would then execute code nobody here reviewed —
+      # with the repo checked out and the store credentials on hand. The
+      # readable version stays in the comment so a bump is still a decision
+      # somebody can make on purpose.
+      - uses: nixbuild/nix-quick-install-action@889f3180bb5f064ee9e3201428d04ae9e41d54ad # v31
       - name: odu runs odu
         run: |
           nix run --accept-flake-config .#odu -- run \

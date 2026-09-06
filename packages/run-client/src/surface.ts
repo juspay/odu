@@ -444,6 +444,75 @@ export const nodeProcedures = {
   },
 } as const;
 
+/**
+ * The FAN-IN's node group: {@link nodeProcedures}, with `rerun` widened by the
+ * identity of the request that asked for it.
+ *
+ * **Why the caller's id has to cross the wire.** A retry whose reply is lost is
+ * the case the whole receipt machinery exists for, and reconciling it means
+ * answering "did my mutation happen?" after the answer went missing. That
+ * question can only be answered where the mutation happened. Without an id on
+ * the call, the coordinator records a reset that names no requester, and a
+ * reconciler is left inferring causality from timing — "an attempt on a node my
+ * selector names began after I was accepted, so it must have been mine". It
+ * need not have been: ordinary scheduling starts attempts, and so does somebody
+ * else's retry. That inference reported retries that never happened.
+ *
+ * So the id travels, the coordinator writes `retry_accepted` against it BEFORE
+ * it mutates anything, and reconciliation reads that exact line instead of
+ * guessing. `inputDigest` rides along so the durable record is self-contained —
+ * a reconciler can tell one request from another wearing the same id without
+ * trusting the claimant's own receipt file.
+ *
+ * Both are OPTIONAL, and `recorded` on the way back is what says the far end
+ * understood them: a coordinator from an older build ignores unknown input keys
+ * and answers without it, which is a caller's cue that a lost reply will not be
+ * reconstructable from that run's journal. Lane-side `node.rerun`
+ * ({@link nodeProcedures}) is deliberately NOT widened — a lane reruns what it
+ * is told to and keeps no receipts.
+ */
+const fanInNodeProcedures = {
+  ...nodeProcedures,
+  rerun: {
+    input: Schema.Struct({
+      id: NodeIdSchema,
+      requestId: Schema.optionalKey(Schema.String),
+      inputDigest: Schema.optionalKey(Schema.String),
+      /**
+       * Refuse unless this node is on exactly this attempt.
+       *
+       * The caller's optimistic-concurrency guard, carried to the process that
+       * can actually enforce it. A caller checks the attempt it read, then
+       * dials, then dispatches — and between the check and the reset the node
+       * can advance, so a guard evaluated only at the caller is a preflight
+       * that reports a state it has already stopped speaking for. Here it is
+       * validated by the coordinator against its own allocator, in the same
+       * step that accepts the reset, so there is no window between the test and
+       * the mutation it guards.
+       */
+      expectAttempt: Schema.optionalKey(Schema.Int),
+    }),
+    output: Schema.Struct({
+      ok: Schema.Boolean,
+      /** Present and `true` when this acceptance was written to the run's
+       *  journal against `requestId`. Absent means the far end did not record
+       *  one — an older coordinator, or a call that carried no id. */
+      recorded: Schema.optionalKey(Schema.Boolean),
+      /**
+       * Why a `false` was a REFUSAL rather than an unroutable id.
+       *
+       * `stale_attempt` — the node had moved past `expectAttempt`. It matters
+       * that a caller can tell this from "no such node here": one means the
+       * request was answered and must not be retried as a new run, the other is
+       * the ordinary fall-through to the finalized path.
+       */
+      refusal: Schema.optionalKey(Schema.Literals(["stale_attempt"])),
+      /** What the node is actually on, when `stale_attempt` says it moved. */
+      attempt: Schema.optionalKey(Schema.Int),
+    }),
+  },
+} as const;
+
 /** Fan-in-only: drop one platform lane mid-run without tearing down the
  *  coordinator. Distinct from `node.cancel` (one unit of work) and `run.cancel`
  *  (whole-run teardown). */
@@ -486,7 +555,7 @@ export const oduSurface = defineSurface({
     },
   },
   procedures: {
-    node: nodeProcedures,
+    node: fanInNodeProcedures,
     run: cancelProcedure,
     lane: laneCancelProcedure,
   },

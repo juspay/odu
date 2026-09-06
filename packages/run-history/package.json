@@ -1,0 +1,30 @@
+{
+  "name": "@odu/run-history",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "//": "THE DURABLE RUN CATALOG \u2014 see README.md, which argues the boundary. This package owns what outlives a coordinator: the per-user catalog, the ordered journal, immutable per-attempt evidence, the ownership fence, and the one attention query every face asks. It depends on @odu/run-client (the wire vocabulary a run speaks) and on nothing else of odu, so `execution` and `cli` can both read history without either importing the other.",
+  "//dependencies": "`@odu/run-client` is a workspace sibling, and the arrow runs one way: run-history \u2192 run-client, never back. `effect` must stay at the version the rest of the tree resolves (the root `overrides` pins it) \u2014 two copies give Effect's _tag-based narrowing two class realms to disagree about, and the symptom is a decode failure on a well-formed record. src/closure.test.ts walks the import graph to keep both facts true.",
+  "sideEffects": false,
+  "exports": {
+    "./ids": "./src/ids.ts",
+    "./schema": "./src/schema.ts",
+    "./exit": "./src/exit.ts",
+    "./paths": "./src/paths.ts",
+    "./attention": "./src/attention.ts",
+    "./store": "./src/store.ts",
+    "./owner": "./src/owner.ts",
+    "./query": "./src/query.ts",
+    "./receipts": "./src/receipts.ts",
+    "./reconcile": "./src/reconcile.ts",
+    "./retention": "./src/retention.ts",
+    "./import": "./src/import.ts",
+    "./legacy/record": "./src/legacy/record.ts",
+    "./legacy/ledger": "./src/legacy/ledger.ts"
+  },
+  "dependencies": {
+    "@odu/run-client": "workspace:*",
+    "effect": "4.0.0-rc.112"
+  }
+}

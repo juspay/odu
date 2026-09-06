@@ -19,7 +19,10 @@ install:
       "$ODU_KOLU_SURFACE_REMOTE" @kolu/surface-remote \
       "$ODU_KOLU_SHELL_QUOTE" @kolu/shell-quote \
       "$ODU_KOLU_SURFACE_MAP" @kolu/surface-map \
-      "$ODU_KOLU_LOG" @kolu/log'
+      "$ODU_KOLU_LOG" @kolu/log \
+      "$ODU_KOLU_SURFACE_DAEMON_SUPERVISOR" @kolu/surface-daemon-supervisor \
+      "$ODU_KOLU_SURFACE_DAEMON" @kolu/surface-daemon \
+      "$ODU_OSFACTS_CLIENT" osfacts-client'
 
 typecheck: install
     {{ nix_shell }} bun run typecheck

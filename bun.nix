@@ -52,7 +52,10 @@
     url = "https://registry.npmjs.org/@msgpackr-extract/msgpackr-extract-win32-x64/-/msgpackr-extract-win32-x64-3.0.4.tgz";
     hash = "sha512-CmCXPQrkbwExx3j946/PtHWHbYJiCRBRDl4BlkRQcJB/YOwQxJRTpoo7aTsortjgoJ1x7opzTSxn7C+ASSLVjQ==";
   };
+  "@odu/cli" = copyPathToStore ./packages/cli;
+  "@odu/execution" = copyPathToStore ./packages/execution;
   "@odu/run-client" = copyPathToStore ./packages/run-client;
+  "@odu/run-history" = copyPathToStore ./packages/run-history;
   "@opentui/core-darwin-arm64@0.4.5" = fetchurl {
     url = "https://registry.npmjs.org/@opentui/core-darwin-arm64/-/core-darwin-arm64-0.4.5.tgz";
     hash = "sha512-8KUG0oRidnR+oW1RSZJ72/PhZLl+qRRMk5U/mieF4c0SJ5V3tYACpBZAKzQfHNd1f7QzD8FHZct1lPpQgtmkWg==";

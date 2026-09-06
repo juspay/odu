@@ -64,12 +64,12 @@ import { dirname, join } from "node:path";
 import { dialRun, runSocketPath } from "./dial";
 
 /** The lock file's name within `.ci` — the writer is odu's
- *  `src/coordinator/checkoutLock.ts`; the spelling is the layout contract
+ *  `packages/execution/src/coordinator/checkoutLock.ts`; the spelling is the layout contract
  *  between it and every reader, the way `SOCKET_PATH` is for the socket. */
 export const RUN_LOCK_NAME = "odu.run.lock";
 
 /** The reservation sentinel's marker — the named contract odu's ledger
- *  (`src/coordinator/ledger.ts`) writes and reads: a run that reserved a seq
+ *  (`packages/execution/src/coordinator/ledger.ts`) writes and reads: a run that reserved a seq
  *  but never finalized its record. Read here by marker alone, never parsed
  *  into a record — the durable RUN RECORD itself stays odu's. */
 const RESERVED_MARKER = "reserved";

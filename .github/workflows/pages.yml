@@ -24,7 +24,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
       - name: Build and upload website
-        uses: withastro/action@v6
+        # Pinned to a commit rather than a mutable tag — see the note in
+        # ci.yml; this job builds and publishes the public site.
+        uses: withastro/action@e84f40bd8d2caa9e768ec82ad30dd81f0b280853 # v6
         with:
           path: website
           node-version: 24

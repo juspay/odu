@@ -9,4 +9,7 @@
   ODU_KOLU_SHELL_QUOTE = pkgs.kolu-shell-quote;
   ODU_KOLU_SURFACE_MAP = pkgs.kolu-surface-map;
   ODU_KOLU_LOG = pkgs.kolu-log;
+  ODU_KOLU_SURFACE_DAEMON_SUPERVISOR = pkgs.kolu-surface-daemon-supervisor;
+  ODU_KOLU_SURFACE_DAEMON = pkgs.kolu-surface-daemon;
+  ODU_OSFACTS_CLIENT = pkgs.osfacts-client;
 }
