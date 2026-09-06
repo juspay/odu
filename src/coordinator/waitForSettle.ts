@@ -21,8 +21,8 @@ import {
   formatRef,
   liftUnposted,
   type RunRecord,
-} from "../common/runRecord";
-import { readRunRecord } from "../coordinator/ledger";
+} from "@odu/run-history/legacy/record";
+import { readRunRecord } from "@odu/run-history/legacy/ledger";
 import { noRunInProgressMessage } from "../coordinator/socket";
 import {
   type AgentNodes,

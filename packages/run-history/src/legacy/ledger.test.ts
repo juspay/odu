@@ -2,8 +2,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
-import type { RunRecord } from "../common/runRecord";
-import { RUN_RECORD_VERSION } from "../common/runRecord";
+import type { RunRecord } from "./record";
+import { RUN_RECORD_VERSION } from "./record";
 import {
   allocateSeq,
   readLedger,

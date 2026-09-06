@@ -25,8 +25,8 @@
 import type { BespokeTool } from "@kolu/surface-mcp";
 import { Effect, Schema } from "effect";
 import { type DeadRun, deadRun, describeDeadRun } from "@odu/run-client/deadRun";
-import type { RunRecord } from "../common/runRecord";
-import { readLedger } from "../coordinator/ledger";
+import type { RunRecord } from "@odu/run-history/legacy/record";
+import { readLedger } from "@odu/run-history/legacy/ledger";
 import { checkoutField, checkoutOf } from "./checkout";
 
 export const runsInput = Schema.Struct({

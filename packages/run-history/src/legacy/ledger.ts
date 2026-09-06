@@ -28,7 +28,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { Result, Schema } from "effect";
-import { type RunRecord, RunRecordSchema } from "../common/runRecord";
+import { type RunRecord, RunRecordSchema } from "./record";
 
 const RUNS_SUBDIR = "runs";
 

@@ -1,7 +1,7 @@
 /**
  * `odu runs` — the run history. Unlike `status` / `logs` / `attach`, which
  * dial a live coordinator, this reads the durable ledger
- * (src/coordinator/ledger.ts) straight off disk, so it answers "what runs
+ * (packages/run-history/src/legacy/ledger.ts) straight off disk, so it answers "what runs
  * happened here?" with *no* run in progress — the first odu command that
  * works against an idle checkout.
  *
@@ -11,8 +11,8 @@
 
 import { deadRun, describeDeadRun } from "@odu/run-client/deadRun";
 import { gitTopLevel, shortSha } from "../common/git";
-import { formatRunRef, type RunRecord } from "../common/runRecord";
-import { readLedger } from "../coordinator/ledger";
+import { formatRunRef, type RunRecord } from "@odu/run-history/legacy/record";
+import { readLedger } from "@odu/run-history/legacy/ledger";
 import { unpostedNote } from "../coordinator/statuses";
 
 /** A coarse "2h ago" / "3d ago" stamp — the ledger is browsed at human

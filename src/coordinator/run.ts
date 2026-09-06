@@ -56,6 +56,7 @@ import {
   type PipelineState,
   type RunHeader,
   type RunLane,
+  runPhase,
 } from "@odu/run-client/surface";
 import { dialRun } from "@odu/run-client/dial";
 import { bold, dim, link } from "../cli/ansi";
@@ -105,12 +106,15 @@ import {
   waitForRunLockFree,
   type RunLockHandle,
 } from "./checkoutLock";
-import { releaseReservation, reserveNextSeq, writeRunRecord } from "./ledger";
+import { releaseReservation, reserveNextSeq, writeRunRecord } from "@odu/run-history/legacy/ledger";
+import { openRunHistory } from "./history";
+import { ODU_VERSION } from "../common/version";
 import {
   buildRunRecord,
+  outcomeOfNodes,
   projectNodes,
   type UnpostedEntry,
-} from "../common/runRecord";
+} from "@odu/run-history/legacy/record";
 import {
   checkoutPaths,
   serveSocket,
@@ -682,6 +686,44 @@ async function orchestrate(
     reservation.current = { status: "reserved", seq, published: false };
   }
 
+  // ── the durable catalog: REGISTER BEFORE EXECUTING ──
+  // Before the venue claim, before a lane, before the socket serves — so a
+  // coordinator that dies in its first second still leaves a run somebody can
+  // address, and so PR 2's service can discover runs from one place instead of
+  // scanning arbitrary checkouts. The checkout ledger above is untouched: this
+  // is a second, per-user record, and the two are written side by side for the
+  // whole of this release.
+  //
+  // Never a gate. `openRunHistory` answers a no-op writer when it cannot open a
+  // record (no writable state root, a live owner on the same id), and the run
+  // proceeds exactly as every odu before this one did — see `./history`.
+  const history = openRunHistory({
+    repoRoot,
+    repo,
+    sha,
+    seq,
+    pipeline: spec.name,
+    scope: {
+      selectors: [...args.selectors],
+      platforms: [...args.platforms],
+      ...(args.root === undefined ? {} : { root: args.root }),
+      noDeps: args.noDeps,
+    },
+    snapshotMode: ctx.snapshotMode ? "strict" : "live",
+    dirty: ctx.dirty,
+    runnerFlake,
+    oduVersion: ODU_VERSION,
+    endpoint: socketPath,
+  });
+  // On stderr (every face's `info` writes there), so the NDJSON stdout contract
+  // `--progress json` promises is untouched. This one line is how an operator
+  // or an agent learns the token that addresses this run's evidence after the
+  // coordinator is gone — without it the catalog is discoverable only by
+  // listing, which is a poor answer to "the one I just started".
+  if (history.runId !== null) {
+    info(`odu · run ${history.runId} — evidence: odu logs --run ${history.runId} <node>`);
+  }
+
   // ── lane assignment: which machine each platform will run on ──
   // Two layers (juspay/odu#54 CR1):
   //   1) Agent-held: `odu lease` / MCP lease left a live holder in
@@ -852,10 +894,40 @@ async function orchestrate(
   // Bound below beside `setupLine`; declared here because interrupt teardown
   // must flush the last coalesced provisioning burst before sealing logs.
   let flushSetupLines: () => void = () => {};
-  const appendLocal = (id: string, text: string): void =>
-    appendIfOpen(logs, id, text);
-  const resetLocal = logs.reset;
-  const endLocal = logs.end;
+  /** THE THREE LOG VERBS, and the seam where evidence forks.
+   *
+   *  Every byte of a node's output already funnels through exactly these three
+   *  in this function, which is what makes them the right place to mirror into
+   *  the durable catalog's per-attempt log. The checkout file
+   *  (`.ci/<sha7>/<plat>/<node>.log`) keeps its old meaning — one file per
+   *  (commit, node), overwritten by a rerun — while the catalog gets one file
+   *  per ATTEMPT, sealed and read-only when the attempt ends. Both are written
+   *  from the same call, so they cannot describe different output.
+   *
+   *  `resetLocal` is the interesting one. A reset means "what is in this log
+   *  belongs to an invocation that no longer exists" — a resurrection's wipe,
+   *  or a lane re-sending its snapshot — and for the catalog that is precisely
+   *  an ATTEMPT BOUNDARY: the open attempt is abandoned (marked incomplete,
+   *  with the reason) and the bytes that follow start a new ordinal. Without
+   *  it, a rerun's output would be appended onto the failure somebody was in
+   *  the middle of reading. */
+  const appendLocal = (id: string, text: string): void => {
+    if (logs.isEnded(id)) return;
+    logs.append(id, text);
+    history.log(id, text);
+  };
+  const resetLocal = (id: string, text: string): void => {
+    logs.reset(id, text);
+    history.resetNode(
+      id,
+      "this node was re-run; the attempt's output was superseded",
+    );
+    if (text !== "") history.log(id, text);
+  };
+  const endLocal = (id: string): void => {
+    logs.end(id);
+    history.logFinalized(id, true, null);
+  };
   /** The run's last word on every node's log. `end` is a promise to a reader
    *  that nothing more is coming, and only the party still able to write can
    *  make it: for a recipe node that is its lane, but for `_ci-setup@<plat>` it
@@ -896,6 +968,12 @@ async function orchestrate(
       `\n[odu] log truncated: ${cause} with this node's output still owed` +
         " — what follows the last line was never received\n",
     );
+    // And say it in the RECORD, not only in the bytes. A face reading the
+    // catalog asks a field, not a sentence: `log_complete: false` with this
+    // cause is what stops an agent from treating a short log as the whole
+    // story. First word wins, so the `endRunLogs` sweep that follows cannot
+    // upgrade this node's log back to "complete".
+    history.logFinalized(id, false, cause);
   };
 
   /** Say what a torn-down run's logs lost, before `endRunLogs` says they ended.
@@ -1450,6 +1528,13 @@ async function orchestrate(
       // moment the socket is gone. Same turn owed, same reason.
       await flushToReaders();
       closeSocket();
+      // The catalog's endpoint goes with the socket. Ownership is NOT handed
+      // back — the epoch stays, so nothing may claim this run without a real
+      // takeover — but the record stops advertising a surface that is gone.
+      // After `closeSocket` for the same reason it is after it: the two say
+      // the same thing to two different readers, and saying it early would
+      // point a reader at a socket still accepting dials.
+      history.close();
       display.stop(interruptedState);
       process.exit(code);
     });
@@ -1616,6 +1701,17 @@ async function orchestrate(
         finalizeRunRecord(store.get(), poster.unposted());
       }
       emitProgress(id, next);
+      // The same transition, into the durable journal. Beside `emitProgress`
+      // rather than folded into it: `--progress json` is a FEED a face renders
+      // and forgets, this is a RECORD somebody reads a week later, and the two
+      // have different budgets for what they may leave out. `host` is read off
+      // the lane roster the run published, so a node's placement in the record
+      // is the same one the surface showed.
+      history.nodeStatus(id, next.status, {
+        exitCode: next.exitCode,
+        durationMs: next.durationMs,
+        host: lanesByPlatform[splitFanId(id).platform] ?? null,
+      });
       const payload = postableNodeIds.has(id)
         ? statusFor(id, next.status, next.durationMs, sha7)
         : null;
@@ -1627,6 +1723,10 @@ async function orchestrate(
   const installShardNodes = (platform: string, plan: ShardPlan): void => {
     runtime.ctx.cells.nodes.set(installShardTopology(store.get(), platform, plan));
     display.update(store.get());
+    // The roster CHANGED — a sharded recipe's children are real nodes now, and
+    // a reader that cannot see them cannot tell a settled run from one whose
+    // slowest shard never started.
+    history.roster(store.get().order);
   };
 
   const refreshShardAggregate = (platform: string, plan: ShardPlan): void => {
@@ -1779,13 +1879,30 @@ async function orchestrate(
    *  of how the roster is built rather than a call every branch has to
    *  remember to spell. `beforeClaim` is the only thing a caller decides. */
   const publishRoster = (beforeClaim: boolean): void => {
-    publishHeader({
-      ...runtime.ctx.cells.header.get(),
-      lanes: rosterFrom(
-        activePlatforms.filter((platform) => !executions.isCancelled(platform)),
-        beforeClaim,
-      ),
-    });
+    const lanes = rosterFrom(
+      activePlatforms.filter((platform) => !executions.isCancelled(platform)),
+      beforeClaim,
+    );
+    publishHeader({ ...runtime.ctx.cells.header.get(), lanes });
+    // The same roster into the journal, so a face reading the catalog after
+    // teardown can say WHICH machine each lane landed on — the fact a failure
+    // report is half as useful without. Derived from the published header
+    // rather than from `lanesByPlatform` directly, so the record and the
+    // surface cannot describe two different run environments.
+    for (const lane of lanes) {
+      history.lane(
+        lane.platform,
+        lane.state,
+        lane.state === "leased" ? lane.host : null,
+      );
+    }
+    // `unstarted` is unreachable here — this run published its header before
+    // the socket served — but it is a value the type carries, and the journal
+    // has no arm for it: a REGISTERED run is by definition started. Skipping
+    // it rather than mapping it keeps the record from asserting a phase the
+    // catalog says cannot exist.
+    const phase = runPhase({ ...runtime.ctx.cells.header.get(), lanes });
+    if (phase !== "unstarted") history.phase(phase);
   };
   // Stamp the reserved seq onto the fan-in state so every face — the agent
   // `wait_for_settle` verdict especially — reads the run's full identity
@@ -1804,35 +1921,80 @@ async function orchestrate(
     ...store.get(),
     ...(seq === null ? {} : { seq }),
   });
-  if (seq !== null) {
-    finalizeRunRecord = (state, unposted): void => {
-      try {
-        writeRunRecord(
-          repoRoot,
-          sha7,
-          buildRunRecord({
-            repo,
-            sha,
-            seq,
-            dirty: ctx.dirty,
-            startedAt: runtime.ctx.cells.header.get().startedAt,
-            finishedAt: Date.now(),
-            // The record describes machines the run actually had; a lane still
-            // claiming one has nothing to record. Read off the store every
-            // face reads, so the record cannot describe a different run
-            // environment from the one the surface published.
-            lanes: leasedLanes(runtime.ctx.cells.header.get()),
-            state,
-            unposted: unposted ?? poster.unposted(),
-          }),
-        );
-        recordWritten = true;
-      } catch {
-        // best-effort: the run history is a convenience, never a gate — a failed
-        // record write must not fail the run or mask its verdict.
-      }
-    };
-  }
+  // The node roster into the journal, so a catalog reader can tell a settled
+  // run from one whose slowest lane never started — the journal says which
+  // nodes reached a status, and only this says which ones were expected to.
+  history.roster(store.get().order);
+  // ONE finalize, TWO durable homes. The checkout ledger keeps the record it
+  // has always kept (`.ci/<sha7>/runs/<seq>.json`, still what `odu runs` and
+  // `wait_for_settle` read), and the per-user catalog gets the same verdict
+  // addressed by run id. Written from one function so the two can never
+  // disagree about how a run ended — which is the failure a second history
+  // would otherwise be worth less than nothing for.
+  //
+  // The catalog half runs even when no `seq` could be reserved: the ordinal is
+  // a CHECKOUT's bookkeeping, and a run with no ordinal still has a run id, an
+  // outcome, and evidence somebody may need.
+  finalizeRunRecord = (state, unposted): void => {
+    const owed = unposted ?? poster.unposted();
+    const startedAt = runtime.ctx.cells.header.get().startedAt;
+    const finishedAt = Date.now();
+    const nodes = projectNodes(state);
+    const withStatus = (want: NodeStatus): string[] =>
+      nodes.filter((n) => n.status === want).map((n) => n.id);
+    // Debt into the JOURNAL as well as onto the verdict: the attention query
+    // folds the journal, and a reader that only ever saw the verdict would
+    // learn about unposted statuses exactly once, at the end. Emitted only
+    // when there is any — a healthy run writes no debt lines at all.
+    if (owed.length > 0) {
+      history.postingDebt(
+        owed.map((o) => ({
+          context: o.context,
+          lastError: o.lastError,
+          attempts: o.attempts ?? 0,
+        })),
+      );
+    }
+    history.finalize({
+      outcome: outcomeOfNodes(nodes),
+      startedAt,
+      finishedAt,
+      failed: withStatus("failed"),
+      errored: withStatus("errored"),
+      cancelled: withStatus("cancelled"),
+      unposted: owed.map((o) => ({
+        context: o.context,
+        lastError: o.lastError,
+        attempts: o.attempts ?? 0,
+      })),
+    });
+    if (seq === null) return;
+    try {
+      writeRunRecord(
+        repoRoot,
+        sha7,
+        buildRunRecord({
+          repo,
+          sha,
+          seq,
+          dirty: ctx.dirty,
+          startedAt,
+          finishedAt,
+          // The record describes machines the run actually had; a lane still
+          // claiming one has nothing to record. Read off the store every
+          // face reads, so the record cannot describe a different run
+          // environment from the one the surface published.
+          lanes: leasedLanes(runtime.ctx.cells.header.get()),
+          state,
+          unposted: owed,
+        }),
+      );
+      recordWritten = true;
+    } catch {
+      // best-effort: the run history is a convenience, never a gate — a failed
+      // record write must not fail the run or mask its verdict.
+    }
+  };
 
   // The header cell already holds the provisioning header — it is the store's
   // initial value — so an `attach` connecting in the first instant reads the
@@ -2986,6 +3148,9 @@ async function orchestrate(
   finalizeRunRecord(finalState, unposted);
   await flushToReaders();
   closeSocket();
+  // The catalog record stops advertising a surface that is gone; the ownership
+  // epoch stays, so nothing may write to this run without a real takeover.
+  history.close();
 
   display.stop(finalState);
   // A run that never got a machine says WHY on the real stderr, once the live

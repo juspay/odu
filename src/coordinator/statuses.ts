@@ -35,7 +35,7 @@ import {
   STATUS_META,
 } from "@odu/run-client/surface";
 import { formatGoDuration } from "../common/duration";
-import { projectUnposted, type UnpostedEntry } from "../common/runRecord";
+import { projectUnposted, type UnpostedEntry } from "@odu/run-history/legacy/record";
 
 export type { GithubState, OwedStatus, PostingHealth, UnpostedEntry };
 

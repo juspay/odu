@@ -4,7 +4,7 @@
   "private": true,
   "license": "AGPL-3.0-or-later",
   "type": "module",
-  "//workspaces": "odu has ONE workspace member: packages/run-client, the half of odu a client of a live run holds (see its README, which argues the cut). A workspace rather than a folder of relative imports because the wall has to be real — a package cannot depend back on odu — and its src/closure.test.ts walks the import graph to prove it. The member is also listed in `dependencies` below: the isolated linker symlinks only the root package DIRECT dependencies into the root node_modules, so without that entry `@odu/run-client` would not resolve from src/.",
+  "//workspaces": "Each member is a WALL, not a folder: a package cannot depend back on odu, and each one's src/closure.test.ts walks the import graph to prove it. packages/run-client is the half of odu a client of a LIVE run holds; packages/run-history is everything that OUTLIVES a coordinator (the per-user run catalog, the journal, per-attempt evidence, and the checkout-scoped ledger as its legacy half), and it depends on run-client one way only. Every member is also listed in `dependencies` below: the isolated linker symlinks only the root package's DIRECT dependencies into the root node_modules, so without those entries `@odu/*` would not resolve from src/.",
   "workspaces": [
     "packages/*"
   ],
@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@odu/run-client": "workspace:*",
+    "@odu/run-history": "workspace:*",
     "@effect/platform-node": "4.0.0-rc.112",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@opentui/core": "^0.4.5",

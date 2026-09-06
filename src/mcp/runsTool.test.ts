@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { RUN_RECORD_VERSION, type RunRecord } from "../common/runRecord";
+import { RUN_RECORD_VERSION, type RunRecord } from "@odu/run-history/legacy/record";
 import { listRuns } from "./runsTool";
 
 function record(over: Partial<RunRecord> = {}): RunRecord {

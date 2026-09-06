@@ -17,8 +17,8 @@ import { Effect } from "effect";
 import { runSocketPath } from "@odu/run-client/dial";
 import type { PipelineState } from "@odu/run-client/surface";
 import { pendingNode } from "@odu/run-client/surface";
-import type { RunRecord } from "../common/runRecord";
-import { writeRunRecord } from "../coordinator/ledger";
+import type { RunRecord } from "@odu/run-history/legacy/record";
+import { writeRunRecord } from "@odu/run-history/legacy/ledger";
 import {
   readLeaseRecord,
   upsertPlatformLease,

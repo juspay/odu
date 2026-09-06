@@ -33,7 +33,7 @@ import {
   type PipelineState,
   STATUS_META,
 } from "@odu/run-client/surface";
-import { shortSha } from "./git";
+import { shortSha } from "../ids";
 
 /** Final unconfirmed posting debt, stamped into the durable record: a live
  *  `OwedStatus` (the fan-in surface's shape) with `lastError` REQUIRED at
@@ -189,6 +189,26 @@ export function projectNodes(state: PipelineState): RunNode[] {
   return nodes;
 }
 
+/**
+ * A run's tri-state outcome, from its terminal node projection.
+ *
+ * `incomplete` unless every node is terminal, then `incomplete` again if any
+ * was operator-cancelled (a gate that did not finish did not pass —
+ * juspay/odu#68), then `failed` if any is red, else `passed`.
+ *
+ * Extracted from {@link buildRunRecord} because the catalog needs the same
+ * answer for a run that has no checkout ordinal to write a record under. One
+ * rule, two writers: the alternative is a run whose per-user verdict and whose
+ * checkout record disagree about whether it passed, which is the kind of
+ * contradiction nobody finds until they are already relying on one of them.
+ */
+export function outcomeOfNodes(nodes: readonly RunNode[]): RunOutcome {
+  const complete = nodes.every((n) => isTerminal(n.status));
+  const red = nodes.some((n) => STATUS_META[n.status].isRed);
+  const cancelled = nodes.some((n) => n.status === "cancelled");
+  return !complete || cancelled ? "incomplete" : red ? "failed" : "passed";
+}
+
 /** Build the durable record for a run from its final `PipelineState` plus the
  *  run environment the state cell doesn't carry (identity, lanes, timing).
  *
@@ -214,11 +234,6 @@ export function buildRunRecord(input: {
 }): RunRecord {
   const { state } = input;
   const nodes = projectNodes(state);
-  const complete = nodes.every((n) => isTerminal(n.status));
-  const red = nodes.some((n) => STATUS_META[n.status].isRed);
-  // A gate the operator cancelled did not finish — never `passed` (juspay/odu#68).
-  // Distinct from red: cancel is intentional, not a test/infra failure.
-  const cancelled = nodes.some((n) => n.status === "cancelled");
   const unposted =
     input.unposted !== undefined && input.unposted.length > 0
       ? [...input.unposted]
@@ -230,7 +245,7 @@ export function buildRunRecord(input: {
     seq: input.seq,
     dirty: input.dirty,
     pipeline: state.name,
-    outcome: !complete || cancelled ? "incomplete" : red ? "failed" : "passed",
+    outcome: outcomeOfNodes(nodes),
     startedAt: input.startedAt,
     finishedAt: input.finishedAt,
     lanes: input.lanes.map((l) => ({ platform: l.platform, host: l.host })),

@@ -11,7 +11,7 @@ import {
   formatRunRef,
   RUN_RECORD_VERSION,
   RunRecordSchema,
-} from "./runRecord";
+} from "./record";
 
 const decodesAsRecord = (value: unknown): boolean =>
   Result.isSuccess(Schema.decodeUnknownResult(RunRecordSchema)(value));

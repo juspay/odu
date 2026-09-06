@@ -215,7 +215,7 @@ export function rulesetId(raw: string): number | null {
 }
 
 /** Built once at module scope, as everywhere else a schema meets a decoder in
- *  this repo (src/coordinator/ledger.ts) — the decoder is derived from the
+ *  this repo (packages/run-history/src/legacy/ledger.ts) — the decoder is derived from the
  *  schema, not from the value. */
 const decodeRuleset = Schema.decodeUnknownResult(RulesetSchema);
 

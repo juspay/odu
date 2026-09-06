@@ -33,8 +33,8 @@ import {
   type PipelineState,
 } from "@odu/run-client/surface";
 import { gitRunContext } from "../common/git";
-import type { RunOutcome, RunRecord } from "../common/runRecord";
-import { writeRunRecord } from "../coordinator/ledger";
+import type { RunOutcome, RunRecord } from "@odu/run-history/legacy/record";
+import { writeRunRecord } from "@odu/run-history/legacy/ledger";
 import {
   type AgentNodes,
   type AgentNodesReader,

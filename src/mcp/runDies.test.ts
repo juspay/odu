@@ -69,13 +69,20 @@ async function killACoordinator(dir: string): Promise<{
   const socketPath = join(dir, ".ci", "odu.sock");
   const lockPath = join(dir, ".ci", "odu.run.lock");
   const srcDir = new URL("../", import.meta.url).pathname;
+  // The seq reservation lives in the durable-history package now; the corpse
+  // still imports the REAL writer, so the residue it leaves is what a real
+  // coordinator leaves.
+  const ledger = new URL(
+    "../../packages/run-history/src/legacy/ledger.ts",
+    import.meta.url,
+  ).pathname;
   writeFileSync(
     join(dir, "corpse.ts"),
     [
       `import { createServer } from "node:net";`,
       `import { mkdirSync, writeFileSync } from "node:fs";`,
       `import { tryAcquireRunLock } from ${JSON.stringify(join(srcDir, "coordinator/checkoutLock.ts"))};`,
-      `import { reserveNextSeq } from ${JSON.stringify(join(srcDir, "coordinator/ledger.ts"))};`,
+      `import { reserveNextSeq } from ${JSON.stringify(ledger)};`,
       `const held = tryAcquireRunLock(${JSON.stringify(lockPath)});`,
       `if (held === null) { console.error("the run lock was not free"); process.exit(1); }`,
       // The reservation the coordinator stamps once it owns the run's

@@ -119,16 +119,20 @@ than a reader's:
 - **`logTail`** — the *server* side of `nodeLog`: the buffer, the channel, the
   `end`-after-`end` refusal. `clampLog` and `MAX_LOG_CHARS` came across because
   they are the bound the wire promises; the pub/sub under them is not a contract.
-- **The durable run record** (`src/common/runRecord.ts`) — a run's on-disk
-  manifest, and how the live `owed` rows project into it. A different wire: a
-  file read by path, not a socket contract, and the layout under it is the
-  ledger's. It moves the day a consumer wants a settled run's verdict without
-  odu's ledger — on the same terms as everything below. (One narrow piece DID
-  move: the *reservation sentinel*, the `{reserved: true}` a mid-flight kill
-  leaves behind — a dead run serves no socket, so the only way a client can
-  ever learn it died is by reading the files: `./deadRun`. The sentinel there
-  NAMES the corpse; the stale lock and socket are what PROVE one. The verdict
-  record itself still never crosses.)
+- **The durable run record** — a run's on-disk manifest, and how the live
+  `owed` rows project into it. A different wire: a file read by path, not a
+  socket contract. It did not come here; it went the other way, into
+  [`@odu/run-history`](../run-history), which is now the package that owns
+  *everything that outlives a coordinator* — the per-user catalog, the ordered
+  journal, per-attempt evidence, and this checkout-scoped ledger as its legacy
+  half. A consumer that wants a settled run's verdict hydrates that package;
+  one that only dials a live run still pays nothing for it, and
+  `src/closure.test.ts` there asserts the arrow never comes back this way.
+  (One narrow piece stayed HERE: the *reservation sentinel*, the
+  `{reserved: true}` a mid-flight kill leaves behind — a dead run serves no
+  socket, so the only way a client can ever learn it died is by reading the
+  files: `./deadRun`. The sentinel there NAMES the corpse; the stale lock and
+  socket are what PROVE one. The verdict record itself still never crosses.)
 - **`dialRunOrExit`** (`src/coordinator/socket.ts`) — dial, or print justci's
   refusal and exit. The exiting variant is a CLI's decision, and a library that
   made it for a dashboard would be wrong. The serving half is there too, for the

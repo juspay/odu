@@ -32,7 +32,7 @@ import {
   NodeLogMessageSchema,
   PipelineStateSchema,
 } from "@odu/run-client/surface";
-import { RunRecordSchema, UnpostedEntrySchema } from "./runRecord";
+import { RunRecordSchema, UnpostedEntrySchema } from "@odu/run-history/legacy/record";
 import { TaskSpecSchema } from "./spec";
 import {
   ConfigureInputSchema,
