@@ -556,7 +556,11 @@ export function attentionFor(
   while (debt.length > 0 && !fits(build(events, fails, debt, false))) {
     debt = debt.slice(0, debt.length - 1);
   }
-  return build(events, fails, debt, !fits(build(events, fails, debt, false)));
+  // Built ONCE and measured, rather than built twice more to decide a boolean
+  // about itself: `over_budget` is a fact about the payload that is about to be
+  // returned, so the payload is the thing to ask.
+  const fitted = build(events, fails, debt, false);
+  return fits(fitted) ? fitted : build(events, fails, debt, true);
 }
 
 function encodedBytes(value: unknown): number {

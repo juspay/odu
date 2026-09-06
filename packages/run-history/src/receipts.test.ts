@@ -86,7 +86,6 @@ function claim(
     kind: "retry",
     digest: digestOf([RUN_ID, "unit"]),
     plannedRunId: PLANNED,
-    journalAtAccept: 0,
     now: T0,
     ...over,
   });

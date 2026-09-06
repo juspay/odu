@@ -518,6 +518,12 @@ export function historyListCommand(opts: HistoryListOpts): number {
  */
 export function catalogOutcome(row: CatalogRow): string {
   if (row.expiry !== null) return `expired (${row.expiry.outcome})`;
+  // A VERDICT IS NOT NECESSARILY THE CURRENT WORD. It is written at finalize
+  // and never invalidated, so a `--linger` run that settled and then took a
+  // rerun still has the previous generation's outcome on disk while its journal
+  // has moved on. Showing that is the stale-field misreport this catalog exists
+  // to remove — an actively re-running run listed as "passed".
+  if (row.resumed) return row.liveness === "owned" ? "running" : "unfinished";
   if (row.verdict !== null) return row.verdict.outcome;
   if (row.liveness === "owned") return "running";
   if (row.liveness === "owner_lost") return "owner lost";

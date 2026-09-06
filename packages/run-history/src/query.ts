@@ -30,7 +30,7 @@ import {
   parseCursor,
   parseRunSelector,
 } from "./ids";
-import { currentOwner, ownershipProvablyLost } from "./owner";
+import { currentOwner, ownerProvablyAlive } from "./owner";
 import { RUN_FILES } from "./paths";
 import {
   type CatalogOptions,
@@ -172,14 +172,11 @@ export function resolveCursor(
 
 // ── the attention read ──────────────────────────────────────────────────────
 
-/** Is this run's owner alive, as far as the fence can prove? `null` when there
- *  is no owner record at all (an imported run, say) — a question that was
- *  never asked reads better than a `false` that implies a death. */
-export function ownerAliveFor(handle: RunHandle, now = Date.now()): boolean | null {
-  const owner = currentOwner(handle.dir);
-  if (owner === null) return null;
-  return !ownershipProvablyLost(owner, now).lost;
-}
+/** The owner's liveness, as {@link ownerProvablyAlive} defines it. Kept as a
+ *  name here because this module's readers speak of "the owner behind THIS
+ *  handle"; the predicate itself lives beside the fence it applies. */
+export const ownerAliveFor = (handle: RunHandle, now: number): boolean | null =>
+  ownerProvablyAlive(handle.dir, now);
 
 /** One attention answer over the run's real files. */
 export function readAttention(

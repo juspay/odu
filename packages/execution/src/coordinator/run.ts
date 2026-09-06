@@ -1130,7 +1130,7 @@ async function orchestrate(
     // declined, both leave an acceptance that never became a retry — so a
     // reconciler reads the pair, never the acceptance alone.
     if (request !== undefined) {
-      history.retryApplied({ requestId: request.requestId, applied: ok });
+      history.retryApplied({ requestId: request.requestId, node: id, applied: ok });
     }
     return recorded === undefined ? { ok } : { ok, recorded };
   };

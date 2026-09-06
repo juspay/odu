@@ -335,3 +335,23 @@ export function releaseOwnership(
     encodeOwner({ ...owner, endpoint: null, heartbeatAt: now }),
   );
 }
+
+/**
+ * Is this run's owner still, as far as anyone here can tell, alive?
+ *
+ * `null` means there is no owner record at all — a run that never claimed one,
+ * or one whose owner released cleanly. That is a THIRD answer, not a `false`:
+ * "nobody is writing this" and "the writer is provably gone" are different
+ * facts, and a face that collapses them tells an operator a finished run died.
+ *
+ * Beside {@link beingWritten} because they are the same question at two
+ * strengths — that one asks only whether a heartbeat is fresh, this one applies
+ * the full successor test. The cheap one was already factored here and reused;
+ * this one had been written out three times (the catalog listing, retention,
+ * and the attention query) and could have drifted in any of them.
+ */
+export function ownerProvablyAlive(dir: string, now: number): boolean | null {
+  const owner = currentOwner(dir);
+  if (owner === null) return null;
+  return !ownershipProvablyLost(owner, now).lost;
+}

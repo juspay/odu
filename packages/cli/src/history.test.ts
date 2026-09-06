@@ -55,6 +55,7 @@ import {
 import type { RetryReceipt } from "@odu/execution/coordinator/recovery";
 import { gitTopLevel } from "@odu/execution/common/git";
 import {
+  catalogOutcome,
   durableLogsCommand,
   durableWaitCommand,
   historyImportCommand,
@@ -455,6 +456,7 @@ describe("renderCatalog", () => {
       verdict: null,
       expiry: null,
       liveness: "no_owner",
+      resumed: false,
       endpoint: null,
       ...over,
     };
@@ -1123,3 +1125,49 @@ describe("historyPruneCommand", () => {
 function registeredIn(root: string): string[] {
   return readdirSync(root).filter(isRunId);
 }
+
+describe("a resumed run is not its old verdict", () => {
+  // `verdict.json` is written at finalize and never invalidated, so a run that
+  // settled, took a rerun, and is mid-retry still has last generation's outcome
+  // on disk. Reading it alone showed an actively re-running run as "passed" —
+  // the stale-field misreport this catalog exists to remove, at one of its own
+  // read paths.
+  function resumedRow(over: Partial<CatalogRow> = {}): CatalogRow {
+    return {
+      runId: RUN,
+      manifest: null,
+      verdict: {
+        version: 1,
+        runId: RUN,
+        outcome: "passed",
+        startedAt: 0,
+        finishedAt: 1,
+        failed: [],
+        errored: [],
+        cancelled: [],
+        unposted: [],
+      },
+      expiry: null,
+      liveness: "owned",
+      resumed: true,
+      endpoint: "/checkout/.ci/odu.sock",
+      ...over,
+    };
+  }
+
+  it("shows a live retry as running, not as the outcome it has left behind", () => {
+    expect(catalogOutcome(resumedRow())).toBe("running");
+  });
+
+  it("shows a resumed run whose coordinator then died as unfinished", () => {
+    expect(
+      catalogOutcome(resumedRow({ liveness: "owner_lost", endpoint: null })),
+    ).toBe("unfinished");
+  });
+
+  it("still shows a settled run's verdict when nothing resumed", () => {
+    expect(catalogOutcome(resumedRow({ resumed: false, liveness: "no_owner" }))).toBe(
+      "passed",
+    );
+  });
+});

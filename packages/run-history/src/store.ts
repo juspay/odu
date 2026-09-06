@@ -87,6 +87,7 @@ import {
   type RunVerdict,
   RunVerdictSchema,
 } from "./schema";
+import { isResumptionEvent } from "./schema";
 
 const decodeManifest = Schema.decodeUnknownResult(RunManifestSchema);
 const decodeEntry = Schema.decodeUnknownResult(JournalEntrySchema);
@@ -740,6 +741,22 @@ export interface CatalogRow {
    * the same three-state answer the attention query gives.
    */
   liveness: "owned" | "owner_lost" | "no_owner";
+  /**
+   * Work has restarted since this run published `verdict`.
+   *
+   * `verdict.json` is a PROJECTION of the journal, and it is refreshed only at
+   * `finalize`. A `--linger` run that settles, takes a rerun, and is mid-retry
+   * therefore still has last generation's verdict on disk while its journal has
+   * already moved on — so a listing that read the verdict alone showed an
+   * actively re-running run as "passed". That is the same "a stale field
+   * misreports a run" failure this catalog exists to remove, reappearing at one
+   * of its own read paths.
+   *
+   * The journal is the authority, so this asks it: is there a resumption event
+   * after the last `finalized` line? See `isResumptionEvent`, the rule the
+   * attention fold and the coordinator's writer both use.
+   */
+  resumed: boolean;
   /** Where a live owner serves, when one does. Null for every other state, so
    *  a reader cannot mistake a stale address for a reachable one. */
   endpoint: string | null;
@@ -775,13 +792,18 @@ export function listRuns(
     }
     const owner = currentOwner(handle.dir);
     const alive = owner !== null && !ownershipProvablyLost(owner, now).lost;
+    const verdict = readVerdict(handle);
     rows.push({
       runId,
       manifest,
-      verdict: readVerdict(handle),
+      verdict,
       expiry: readExpiry(handle),
       liveness:
         owner === null ? "no_owner" : alive ? "owned" : "owner_lost",
+      // Only asked when there is a verdict that could be stale. A run with no
+      // verdict has nothing for a resumption to contradict, and this listing
+      // deliberately avoids reading a journal it does not need.
+      resumed: verdict !== null && resumedSinceFinal(handle),
       endpoint: alive ? owner.endpoint : null,
     });
     if (opts.limit !== undefined && rows.length >= opts.limit) break;
@@ -857,4 +879,26 @@ export function runsStartedBefore(
     const started = runIdStartedAt(entry);
     return started !== null && started < before;
   });
+}
+
+/**
+ * Has work restarted since the run's last terminal line?
+ *
+ * The journal is the authority on this; `verdict.json` cannot answer it,
+ * because it is written at `finalize` and never invalidated by the resumption
+ * that follows. Reads only the event kinds, so it stays cheap enough for a
+ * listing: no attempt records, no logs, no excerpts.
+ */
+export function resumedSinceFinal(handle: RunHandle): boolean {
+  let seenFinal = false;
+  let resumed = false;
+  for (const { event } of readJournal(handle).entries) {
+    if (event.kind === "finalized") {
+      seenFinal = true;
+      resumed = false;
+      continue;
+    }
+    if (seenFinal && isResumptionEvent(event)) resumed = true;
+  }
+  return resumed;
 }

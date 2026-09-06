@@ -247,7 +247,7 @@ export function survivableSpawnPlan(
  *  a service is how an orchestrator's ambient identity variables end up inside
  *  every recipe the run executes. What is named here is what odu itself reads
  *  and what the platform needs to find its own runtime directory. */
-export function forwardedEnv(env: SpawnEnv): string[] {
+export function forwardedEnv(env: SpawnEnv): Record<string, string> {
   const KEYS = [
     "ODU_HOSTS",
     "ODU_STATE_DIR",
@@ -263,10 +263,17 @@ export function forwardedEnv(env: SpawnEnv): string[] {
     "PATH",
     "HOME",
   ];
-  return KEYS.flatMap((k) => {
+  // A MAP, not `KEY=VALUE` strings. The `--setenv` spelling belongs to whoever
+  // builds the argv — which is kolu's driver now — and returning it from here
+  // meant the one caller parsed it straight back apart on `indexOf("=")`.
+  const out: Record<string, string> = {};
+  for (const k of KEYS) {
     const v = env[k];
-    return v === undefined || v === "" ? [] : [`${k}=${v}`];
-  });
+    // An empty value is UNSET, not an empty assignment: forwarding `ODU_HOSTS=`
+    // into a unit is not the same as leaving it absent.
+    if (v !== undefined && v !== "") out[k] = v;
+  }
+  return out;
 }
 
 /**
@@ -389,12 +396,7 @@ export function coordinatorSpawnConfig(
     // everything telling odu where to look — the hosts file, the state root,
     // the lane runner's flake — is absent unless it is named. The detached
     // branch never reads it (`inheritParentEnv` carries the real environment).
-    env: Object.fromEntries(
-      forwardedEnv(env).map((pair) => {
-        const eq = pair.indexOf("=");
-        return [pair.slice(0, eq), pair.slice(eq + 1)];
-      }),
-    ),
+    env: forwardedEnv(env),
     unitPrefix: unitName,
     ...(plan.mechanism === "detached"
       ? { fromSource: { inheritParentEnv: true } as const }

@@ -21,7 +21,7 @@
 import { join } from "node:path";
 import { runSocketPath } from "@odu/run-client/dial";
 import { RUN_FILES } from "@odu/run-history/paths";
-import { handleFor } from "@odu/run-history/store";
+import { type CatalogOptions, handleFor } from "@odu/run-history/store";
 import type { RunScope } from "@odu/run-history/schema";
 import {
   oduSelfArgv,
@@ -35,6 +35,10 @@ import {
  *  existing. */
 export interface LaunchRequest {
   readonly checkout: string;
+  /** Which catalog the launched run publishes into. Absent means the ambient
+   *  one; a test (or a caller with its own root) passes its own, and the
+   *  coordinator's log has to land in the SAME catalog as the run it narrates. */
+  readonly catalog?: CatalogOptions;
   /** The id the new run will publish under — minted by the caller. */
   readonly runId: string;
   /** The run this one replays, when it is a recovery. */
@@ -140,7 +144,7 @@ export function packagedLauncher(): RunLauncher {
       argv,
       request.checkout,
       unitNameFor(request.runId),
-      coordinatorLogPath(request.runId),
+      coordinatorLogPath(request.runId, request.catalog ?? {}),
     );
     // Remembered rather than awaited on the failure path: under `systemd-run`
     // the readiness wait can end on its own ceiling while the submitter is
@@ -190,9 +194,17 @@ export function checkoutLockPath(checkout: string): string {
  *  `runs/<runId>/coordinator.log` in the catalog. Addressed by RUN, so it is
  *  still findable when the checkout is not, and durable, so a startup failure
  *  survives the launcher that observed it. */
-export function coordinatorLogPath(runId: string): string {
+export function coordinatorLogPath(
+  runId: string,
+  /** WHICH catalog. Omitted means the ambient one, which is right in
+   *  production and wrong under an injected root — a relaunch would write the
+   *  child's log into the developer's real catalog while the run itself lived
+   *  in a temp one, where retention could never see it. The same options every
+   *  other reader of this catalog already threads. */
+  catalog: CatalogOptions = {},
+): string {
   // The NAME comes from the package that owns the layout, so retention's
   // evidence partition can see this file. Spelling it here is how it came to
   // survive expiry forever.
-  return join(handleFor(runId).dir, RUN_FILES.coordinatorLog);
+  return join(handleFor(runId, catalog).dir, RUN_FILES.coordinatorLog);
 }

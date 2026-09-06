@@ -304,6 +304,12 @@ export const RunEventSchema = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("retry_applied"),
     requestId: Schema.String,
+    /** WHICH root this resolves. One request can name several roots and they
+     *  are dispatched one at a time, so a resolution that named only the
+     *  request would be overwritten by the next root's — and a retry where one
+     *  root was reset and another declined would read as wholly one or the
+     *  other. Per-node, so partial application is representable. */
+    node: Schema.String,
     /** Did the lane actually take the reset? */
     applied: Schema.Boolean,
   }),

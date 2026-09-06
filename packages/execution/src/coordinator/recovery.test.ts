@@ -748,7 +748,6 @@ describe("a reply that was lost mid-flight", () => {
       // The journal height a first attempt would have recorded. Zero here, so
       // ANY later attempt on the selector counts as the effect it is looking
       // for — which is what these cases are about.
-      journalAtAccept: 0,
       now: T0 + 5,
     });
     if (outcome?.kind !== "claimed") {
@@ -794,7 +793,7 @@ describe("a reply that was lost mid-flight", () => {
     appendEvent(
       handle,
       owner.token,
-      { kind: "retry_applied", requestId: REQUEST, applied: true },
+      { kind: "retry_applied", requestId: REQUEST, node: UNIT, applied: true },
       T0 + OWNERSHIP_GRACE_MS + 3,
     );
     appendEvent(
@@ -811,9 +810,10 @@ describe("a reply that was lost mid-flight", () => {
     void root;
   }
 
-  /** Accepted and then NOTHING — the coordinator died between writing the
-   *  intent and performing the reset. */
-  function appendAcceptedButUnresolved(handle: RunHandle): void {
+  /** Hold this run's write token the way a successor does — a heartbeat past
+   *  the grace and an incumbent that is gone. (The incumbent is US, and our pid
+   *  is alive, so the liveness probe is injected.) */
+  function takeOverForEvidence(handle: RunHandle) {
     const owner = claimOwnership({
       runId: handle.runId,
       dir: handle.dir,
@@ -824,9 +824,16 @@ describe("a reply that was lost mid-flight", () => {
       isAlive: () => false,
     });
     if (!owner.ok) throw new Error(`could not take the run over: ${owner.refusal.kind}`);
+    return owner.token;
+  }
+
+  /** Accepted and then NOTHING — the coordinator died between writing the
+   *  intent and performing the reset. */
+  function appendAcceptedButUnresolved(handle: RunHandle): void {
+    const token = takeOverForEvidence(handle);
     appendEvent(
       handle,
-      owner.token,
+      token,
       {
         kind: "retry_accepted",
         requestId: REQUEST,
@@ -867,7 +874,7 @@ describe("a reply that was lost mid-flight", () => {
     appendEvent(
       handle,
       owner.token,
-      { kind: "retry_applied", requestId: REQUEST, applied: false },
+      { kind: "retry_applied", requestId: REQUEST, node: UNIT, applied: false },
       T0 + OWNERSHIP_GRACE_MS + 3,
     );
   }
@@ -1135,7 +1142,7 @@ describe("a reply that was lost mid-flight", () => {
     const out = refused(await repeat(root, launcher));
 
     expect(out.message).toContain("outcome is UNKNOWN");
-    expect(out.message).toContain("never recorded what became of it");
+    expect(out.message).toContain("never recorded what became of");
     expect(out.message).toContain("Do not repeat it with a fresh id");
     expect(launcher.calls).toEqual([]);
   });
@@ -1159,6 +1166,49 @@ describe("a reply that was lost mid-flight", () => {
     const third = refused(await repeat(root, launcher));
     expect(third.message).toBe(out.message);
     expect(launcher.calls).toEqual([]);
+  });
+
+  it("reports a PARTIALLY applied retry as partial, not as wholly one thing", async () => {
+    // One request dispatches one `node.rerun` per root, so the answers can
+    // differ. Folding them into a single boolean made the LAST one win: root A
+    // reset and root B declined reported as "nothing was re-run" (false about
+    // A), and the reverse order reported success listing B, whose reset never
+    // happened. Both directions are lies; partial has to be representable.
+    const root = tmpCatalog();
+    const handle = aRun(root, ENDPOINT);
+    claimByHand(handle, "0000000b-0002");
+    const owner = takeOverForEvidence(handle);
+    appendEvent(
+      handle,
+      owner,
+      {
+        kind: "retry_accepted",
+        requestId: REQUEST,
+        effectiveRunId: handle.runId,
+        roots: [UNIT, LINT],
+        resetDependants: [],
+        inputDigest: "",
+      },
+      T0 + OWNERSHIP_GRACE_MS + 2,
+    );
+    appendEvent(
+      handle,
+      owner,
+      { kind: "retry_applied", requestId: REQUEST, node: UNIT, applied: true },
+      T0 + OWNERSHIP_GRACE_MS + 3,
+    );
+    appendEvent(
+      handle,
+      owner,
+      { kind: "retry_applied", requestId: REQUEST, node: LINT, applied: false },
+      T0 + OWNERSHIP_GRACE_MS + 4,
+    );
+
+    const out = refused(await repeat(root, stubLauncher()));
+
+    expect(out.message).toContain("applied in part");
+    expect(out.message).toContain(UNIT);
+    expect(out.message).toContain(LINT);
   });
 
   it("refuses a CONCURRENT repeat while the first claimant may still dispatch", async () => {

@@ -50,6 +50,18 @@ import {
   type ReceiptRecord,
 } from "@odu/run-history/receipts";
 import type { RunManifest, RunScope } from "@odu/run-history/schema";
+// The reconciliation FOLD moved to `@odu/run-history/reconcile` — it reads a
+// receipt and a journal and returns a fact, which is the catalog's business,
+// not the policy's. What stays here is everything that ACTS. Re-exported
+// because `RetryReceipt` is this policy's published answer shape and callers
+// should not have to learn where the fold lives to name it.
+export {
+  RETRY_DISPATCH_GRACE_MS,
+  type Reconciled,
+  reconcile,
+  type RetryReceipt,
+} from "@odu/run-history/reconcile";
+import { reconcile, type RetryReceipt } from "@odu/run-history/reconcile";
 import { currentOwner } from "@odu/run-history/owner";
 import {
   attemptsFor,
@@ -69,38 +81,6 @@ import {
   transitiveDependents,
 } from "../common/nodeId";
 import type { LaunchRequest, RunLauncher } from "./launcher";
-
-/** The addressed answer a retry returns — everything a caller needs to act
- *  without asking a second question, and the exact shape a receipt replays. */
-export interface RetryReceipt {
-  request_id: string | null;
-  /** `live` — a new attempt on the run that was already going.
-   *  `relaunched` — a new run, linked to the one that was retried. */
-  mode: "live" | "relaunched";
-  /** The run the retry ACTS ON. For `live` that is the run retried; for
-   *  `relaunched`, the new one. */
-  effective_run: string;
-  /** The run that was retried, when the effective run is a different one. */
-  parent_run: string | null;
-  /** The dependency-minimal nodes the retry re-runs. */
-  roots: string[];
-  /** Dependants the reset also clears — named because a caller that reads
-   *  "reran unit" and finds `e2e` pending has to know which happened. */
-  reset_dependants: string[];
-  /** The attempt ordinal each root is now on, where that is known. Empty for a
-   *  relaunch: the new run has not started its attempts yet. */
-  attempts: { node: string; attempt: number }[];
-  /** What the effective run covers. A SELECTION, and the field is here so no
-   *  face can present its verdict as the pipeline's. */
-  scope: RunScope;
-  /** The commit. A relaunch pins it; nothing here substitutes today's HEAD. */
-  sha: string;
-  /** Where to resume reading the effective run's journal. */
-  cursor: string;
-  /** How independent the new coordinator is, when one was started. */
-  lifetime?: string;
-}
-
 export type RetryOutcome =
   | { ok: true; receipt: RetryReceipt; replayed: boolean }
   | {
@@ -181,7 +161,6 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
       kind: "retry",
       digest,
       plannedRunId,
-      journalAtAccept: readJournal(handle).highestSeq,
     });
     if (claim === null) {
       return { ok: false, message: `odu: could not record request ${input.requestId}` };
@@ -326,221 +305,6 @@ function finish(
   }
   return outcome;
 }
-
-/**
- * Did this request already do its work?
- *
- * A retry has TWO possible effects and reconciliation has to be able to see
- * either, because which one it took is not something the caller can know when
- * its reply goes missing.
- *
- * - A RELAUNCH publishes a new run under the id minted at accept time, so the
- *   question is a directory lookup.
- * - A LIVE retry publishes no run at all. It resets a node on a coordinator
- *   that is already going, and the only trace is in that run's own journal —
- *   the `attempt_started` the coordinator appends for the node it reset. So
- *   the journal's height at accept time is recorded on the receipt, and this
- *   asks whether a matching attempt appeared past it.
- *
- * Looking only for the child run is what made a successful live mutation
- * report "nothing was done — retry with a fresh id", advice that invites a
- * caller to do it a second time. Absence of a child manifest is not absence of
- * an effect.
- *
- * `null` means neither effect is visible, which is the one case where
- * re-issuing is safe.
- */
-function reconcile(
-  requestId: string,
-  receipt: ReceiptRecord,
-  handle: RunHandle,
-  catalog: CatalogOptions,
-  now: number,
-): Reconciled {
-  const relaunched = reconcileRelaunch(requestId, receipt.plannedRunId, catalog);
-  if (relaunched !== null) return { kind: "replay", receipt: relaunched };
-  const live = reconcileLive(requestId, handle);
-  if (live !== null) return live;
-
-  // Neither effect is visible. Whether that means "nothing happened" depends
-  // entirely on whether the evidence that WOULD have shown it could exist and
-  // could be read — so the two unreadable cases are separated out rather than
-  // folded into the safe one.
-  if (readJournal(handle).unreadable > 0) {
-    return {
-      kind: "unresolved",
-      reason:
-        "this run's journal has lines this build cannot read, so the absence " +
-        "of a record for it is not evidence that nothing happened",
-    };
-  }
-  if (receipt.dispatchedAt !== undefined) {
-    return {
-      kind: "unresolved",
-      reason:
-        "it had already been put on the wire when its outcome was lost, and " +
-        "the coordinator it was sent to recorded no acceptance — an older " +
-        "build, or one that died before writing one",
-    };
-  }
-  // NOT YET DISPATCHED IS NOT THE SAME AS NEVER WILL BE. The claimant may be
-  // alive and one instruction short of dispatching: a repeat that arrives
-  // while a launcher is still starting a coordinator sees exactly this state,
-  // and telling it "nothing happened, use a fresh id" is how one request
-  // becomes two runs. So an undispatched claim is only read as a no-op once it
-  // is old enough that a claimant which had not dispatched by now is not going
-  // to — the same shape as the ownership fence next door, and for the same
-  // reason: disappearance is not proof, and neither is a single instant.
-  if (now - receipt.acceptedAt < RETRY_DISPATCH_GRACE_MS) {
-    return {
-      kind: "unresolved",
-      reason:
-        "it was accepted moments ago and has not reached the wire yet — the " +
-        "caller that claimed it may still be dispatching it, and two callers " +
-        "acting on one id is the duplicate this receipt exists to prevent",
-    };
-  }
-  return { kind: "nothing_happened" };
-}
-
-/**
- * What a repeat of an in-flight request can be told.
- *
- * Three answers, because the missing third is what made the old advice unsafe.
- * `nothing_happened` is a claim about the world and licences re-issuing; it may
- * only be returned when the evidence that would have shown otherwise could
- * exist AND could be read. When it could not, the honest answer is that nobody
- * knows — which is not the same as no, and must never be answered with "retry
- * with a fresh id".
- */
-/**
- * How long an accepted-but-undispatched claim is treated as possibly still in
- * flight.
- *
- * Generous on purpose. The window it has to cover is a claimant between
- * `claimReceipt` and its first mutation, and on the relaunch path that includes
- * starting a coordinator and waiting for its socket — seconds, not
- * milliseconds. Being too generous costs a caller a refusal it could have
- * avoided; being too mean costs a duplicate run, which is the failure this
- * whole mechanism exists to prevent. The asymmetry decides the number.
- */
-export const RETRY_DISPATCH_GRACE_MS = 120_000;
-
-type Reconciled =
-  | { kind: "replay"; receipt: RetryReceipt }
-  | { kind: "nothing_happened" }
-  /** The coordinator answered, and the answer was no. A recorded refusal is an
-   *  OUTCOME — replaying it tells a repeat what happened, where `unresolved`
-   *  would say nobody knows. */
-  | { kind: "refused"; message: string }
-  | { kind: "unresolved"; reason: string };
-
-/** The relaunch half: a run exists under the id this request planned. */
-function reconcileRelaunch(
-  requestId: string,
-  plannedRunId: string,
-  catalog: CatalogOptions,
-): RetryReceipt | null {
-  if (plannedRunId === "") return null;
-  const planned = handleFor(plannedRunId, catalog);
-  const manifest = readManifest(planned);
-  if (manifest === null) return null;
-  return {
-    // The id it was asked under: a reconciled receipt is answering the SAME
-    // request, and a caller correlating on this field must not find it empty
-    // for the one call where it had to reconcile.
-    request_id: requestId,
-    mode: "relaunched",
-    effective_run: plannedRunId,
-    parent_run: manifest.parentRunId,
-    roots: [...manifest.scope.selectors],
-    reset_dependants: [],
-    attempts: [],
-    scope: manifest.scope,
-    sha: manifest.sha,
-    cursor: formatCursor({ runId: plannedRunId, seq: 0 }),
-  };
-}
-
-/**
- * The live half: what the coordinator wrote down about THIS request.
- *
- * **Why nothing weaker will do.** This once asked a question about timing — did
- * a node the selector names start an attempt after my receipt was claimed? —
- * and treated `yes` as proof that the mutation was this caller's. It is not
- * proof of anything. Ordinary scheduling starts attempts; so does a rerun
- * somebody else asked for; so does the run's own first pass over a node that
- * had not run yet. Correlation cannot be reconstructed from a clock.
- *
- * **And acceptance alone is not application.** The coordinator records
- * `retry_accepted` BEFORE performing the reset, because the other ordering lets
- * a crash hide a mutation that happened. The price is that the acceptance, read
- * alone, proves only that the reset was asked for: the coordinator can die in
- * between, and the lane can decline. So this reads the PAIR. An acceptance whose
- * `retry_applied` never arrived is a pending intent, and pending is reported as
- * unknown — never as a receipt describing a retry that may not have run.
- *
- * Three answers, and the roots come from the recorded acceptance rather than
- * from whatever the run's latest attempt happens to be now.
- */
-function reconcileLive(requestId: string, handle: RunHandle): Reconciled | null {
-  const journal = readJournal(handle);
-  const manifest = readManifest(handle);
-  if (manifest === null) return null;
-  let roots: string[] = [];
-  let applied: boolean | undefined;
-  for (const { event } of journal.entries) {
-    if (event.kind === "retry_accepted" && event.requestId === requestId) {
-      roots = [...new Set([...roots, ...event.roots])];
-    }
-    if (event.kind === "retry_applied" && event.requestId === requestId) {
-      applied = event.applied;
-    }
-  }
-  if (roots.length === 0) return null;
-  if (applied === undefined) {
-    return {
-      kind: "unresolved",
-      reason:
-        `this run's coordinator recorded accepting it (${roots.join(", ")}) but never ` +
-        "recorded what became of it — it died between accepting the retry and " +
-        "performing it, so whether the reset happened is not knowable from here",
-    };
-  }
-  if (!applied) {
-    return {
-      kind: "refused",
-      message:
-        `odu: request "${requestId}" was accepted by this run's coordinator and the ` +
-        `lane declined the reset (${roots.join(", ")}). Nothing was re-run.`,
-    };
-  }
-  return {
-    kind: "replay",
-    receipt: {
-      request_id: requestId,
-      mode: "live",
-      effective_run: handle.runId,
-      parent_run: null,
-      roots,
-      // Not recorded at the time and not reconstructable now: the dependants a
-      // reset cleared are a property of the live DAG, which may have moved on.
-      // Empty rather than guessed.
-      reset_dependants: [],
-      // EMPTY, and this is the point rather than an omission. The ordinal a
-      // retry produced is not known at the moment the reset is applied — the
-      // lane allocates it when it republishes — so it was never recorded, and
-      // reading "the latest attempt now" would hand back a number belonging to
-      // whatever has happened since, including the very failure being retried.
-      // A relaunch reports the same emptiness for the same reason.
-      attempts: [],
-      scope: manifest.scope,
-      sha: manifest.sha,
-      cursor: formatCursor({ runId: handle.runId, seq: journal.highestSeq }),
-    },
-  };
-}
-
 /**
  * Try the live path. `null` means the run is not live, is not the run we were
  * asked about, or would not take the mutation — each of which SELECTS the
@@ -742,6 +506,10 @@ async function relaunch(
   };
   const request: LaunchRequest = {
     checkout: manifest.repoRoot,
+    // The child publishes into the SAME catalog as its parent — otherwise a
+    // relaunch under an injected root writes its coordinator log into the
+    // ambient one, where the run it belongs to does not exist.
+    catalog,
     runId,
     parentRunId: handle.runId,
     requestId: input.requestId ?? null,
@@ -796,12 +564,6 @@ async function relaunch(
   };
 }
 
-/** Has this run finalized? Read by faces that want to explain which path a
- *  retry would take BEFORE asking for one — never by the policy itself, which
- *  attempts rather than predicts (see the header). */
-export function isFinalized(handle: RunHandle): boolean {
-  return readVerdict(handle) !== null || readExpiry(handle) !== null;
-}
 
 /** Re-exported so a caller can read a recorded receipt without learning a
  *  second import path for the one concept. */

@@ -172,7 +172,11 @@ export interface RunHistory {
    * resolution reports the outcome as unknown rather than as success. Both
    * outcomes are recorded, because a refusal is an answer.
    */
-  retryApplied: (resolved: { requestId: string; applied: boolean }) => void;
+  retryApplied: (resolved: {
+    requestId: string;
+    node: string;
+    applied: boolean;
+  }) => void;
   /** Publish the terminal outcome. Safe to call more than once (a `--linger`
    *  run re-finalizes on every drain); it appends a `finalized` line once per
    *  EXECUTION GENERATION — again after a rerun resumed the run, never twice
@@ -540,9 +544,9 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
       // the whole value of the flag to the caller reconciling later.
       return !fenced;
     },
-    retryApplied: ({ requestId, applied }) => {
+    retryApplied: ({ requestId, node, applied }) => {
       if (fenced) return;
-      emit({ kind: "retry_applied", requestId, applied });
+      emit({ kind: "retry_applied", requestId, node, applied });
     },
     finalize: (verdict) => {
       if (fenced) return;

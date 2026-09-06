@@ -55,7 +55,14 @@ export function isRequestId(value: string): boolean {
 export const ReceiptSchema = Schema.Struct({
   version: Schema.Literal(RUN_RECORD_FORMAT),
   requestId: Schema.String,
-  /** What kind of mutation this receipt is for. */
+  /** What kind of mutation this receipt is for.
+   *
+   *  One value today. Kept as a discriminant rather than dropped because it is
+   *  a REQUIRED field: removing it now and needing it later is a format bump,
+   *  while carrying it costs a literal. The next one is already visible —
+   *  `cancel` is the other mutation an agent asks for twice when its reply goes
+   *  missing, and it wants exactly this machinery. If that has not arrived by
+   *  the time anything else here changes shape, drop this with the bump. */
   kind: Schema.Literals(["retry"]),
   /** A hash of the request's meaningful input. A repeat with the same id and a
    *  different digest is a conflict, not a replay. */
@@ -78,19 +85,6 @@ export const ReceiptSchema = Schema.Struct({
    * to find out. The run actually acted on is in `result`, once there is one.
    */
   plannedRunId: Schema.String,
-  /**
-   * The run's journal height when this request was accepted.
-   *
-   * The second half of reconciliation, and the half a run-id lookup cannot
-   * supply. A LIVE retry creates no new run — it resets a node on one that is
-   * already going — so "does the planned run exist?" answers `no` for a live
-   * mutation that certainly happened, and a caller repeating its request would
-   * be told nothing was done. What DID happen is written in the run's own
-   * journal: the coordinator appends `attempt_started` for the node it reset.
-   * So the height at accept time is recorded here, and reconciliation asks
-   * whether the journal grew a matching attempt past it.
-   */
-  journalAtAccept: Schema.Int,
   /**
    * When this request actually put a mutation on the wire, if it got that far.
    *
@@ -172,8 +166,6 @@ export function claimReceipt(
     kind: ReceiptRecord["kind"];
     digest: string;
     plannedRunId: string;
-    /** The run's journal height at accept time — see the field's note. */
-    journalAtAccept: number;
     now?: number;
   },
 ): ClaimOutcome | null {
@@ -187,7 +179,6 @@ export function claimReceipt(
     acceptedAt: input.now ?? Date.now(),
     completedAt: null,
     plannedRunId: input.plannedRunId,
-    journalAtAccept: input.journalAtAccept,
     result: null,
   };
   const path = receiptPath(handle, input.requestId);
@@ -202,7 +193,7 @@ export function claimReceipt(
     // caller's own refusal names the id.
     return {
       kind: "in_flight",
-      receipt: { ...receipt, plannedRunId: "", journalAtAccept: 0 },
+      receipt: { ...receipt, plannedRunId: "" },
     };
   }
   if (existing.digest !== input.digest) {
