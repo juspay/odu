@@ -123,18 +123,26 @@ export async function mcpCommand(socketPath: string = SOCKET_PATH): Promise<numb
   ) as unknown as SurfaceClientCallable;
 
   const { server, close } = await serveSurfaceAsMcp({
-    surface: projection.surface,
+    // THE CORE of a rooted bundle. Upstream composes over `{ core?, surfaces? }`
+    // now — a bundle may carry siblings, each keyed by the segment its names
+    // take — and odu serves one unprefixed root, so it is all core and no
+    // siblings.
+    core: {
+      surface: projection.surface,
+      expose: {
+        nodes: "resource",
+        logs: "resource",
+        // No procedures are exposed: each `node.*` / `lane.*` verb ships as a
+        // bespoke tool below — the only door that carries a description AND a
+        // per-call `checkout` (see rerunTool.ts / partialCancelTools.ts).
+      },
+    },
     // The adapter memoizes one connection for reads/tools; the freshness lives
     // a layer down, in the re-dialing A-client, so this can be the bare,
-    // already-built B-client (nothing per-call to dispose here).
-    client: () => bClient,
-    expose: {
-      nodes: "resource",
-      logs: "resource",
-      // No procedures are exposed: each `node.*` / `lane.*` verb ships as a
-      // bespoke tool below — the only door that carries a description AND a
-      // per-call `checkout` (see rerunTool.ts / partialCancelTools.ts).
-    },
+    // already-built B-client (nothing per-call to dispose here). A ROOTED
+    // BUNDLE rather than a bare client, for the reason above: odu's whole
+    // bundle is its core.
+    client: () => ({ core: bClient }),
     tools: {
       run: runTool,
       node_rerun: rerunTool,

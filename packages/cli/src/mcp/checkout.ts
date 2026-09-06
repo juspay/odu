@@ -118,7 +118,29 @@ export function clientForCheckout<Face>(
 ): Face {
   return (
     checkout === undefined
-      ? injected
+      ? coreOf(injected)
       : redialingAClient(dialAFor(runSocketPath(checkout)))
   ) as Face;
+}
+
+/**
+ * The unprefixed root's client out of whatever the adapter handed this tool.
+ *
+ * A bespoke tool declared at the bundle root is ABOUT THE BUNDLE, so
+ * `@kolu/surface-mcp` hands it the rooted bundle — `{ core?, clients? }` — not
+ * a single surface's client. odu serves one unprefixed root and every tool here
+ * is written against it, so the core is the whole answer; the sibling map is
+ * empty by construction and a tool that reached for it would be asking about a
+ * roster odu does not have.
+ *
+ * Written as a fold rather than an unconditional `.core` so the two shapes are
+ * both accepted: the bundle is what the adapter passes, and a bare client is
+ * what odu's own suites inject directly when they exercise a tool without an
+ * adapter in the picture.
+ */
+export function coreOf(injected: unknown): unknown {
+  if (injected !== null && typeof injected === "object" && "core" in injected) {
+    return (injected as { core: unknown }).core;
+  }
+  return injected;
 }

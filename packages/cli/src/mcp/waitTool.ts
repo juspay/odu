@@ -18,7 +18,7 @@ import {
 import {
   agentReaderForSocket,
 } from "@odu/execution/coordinator/agentReader";
-import { checkoutField } from "./checkout";
+import { checkoutField, coreOf } from "./checkout";
 
 export const waitInput = Schema.Struct({
   checkout: checkoutField,
@@ -142,7 +142,12 @@ export function makeWaitTool(
           }
           return waitForSettle({
             ...policy,
-            client: client as AgentNodesReader,
+            // `coreOf`, because a bundle-root tool is handed the ROOTED BUNDLE
+            // rather than one surface's client. This tool keeps its own wiring
+            // (see the note above) instead of going through
+            // `clientForCheckout`, so it has to unwrap the core itself — which
+            // is exactly the sort of thing that second spelling costs.
+            client: coreOf(client) as AgentNodesReader,
             resolveRunContext,
           });
         },

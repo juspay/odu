@@ -134,15 +134,18 @@ async function connectWith(
     directDispatch(projection.implement(aClient)),
   ) as unknown as SurfaceClientCallable;
   const served = await serveSurfaceAsMcp({
-    surface: projection.surface,
-    client: () => bClient,
-    expose: {
-      nodes: "resource",
-      logs: "resource",
-      // No procedure entries — exactly as `mcp.ts` ships it: every `node.*` /
-      // `lane.*` verb is bespoke (the only door carrying a description AND a
-      // per-call `checkout`).
+    // THE CORE of a rooted bundle — the same shape `mcp.ts` ships.
+    core: {
+      surface: projection.surface,
+      expose: {
+        nodes: "resource",
+        logs: "resource",
+        // No procedure entries — exactly as `mcp.ts` ships it: every `node.*` /
+        // `lane.*` verb is bespoke (the only door carrying a description AND a
+        // per-call `checkout`).
+      },
     },
+    client: () => ({ core: bClient }),
     tools,
     serverInfo: { name: "odu", version: "0.0.0" },
     transport: serverTransport,
