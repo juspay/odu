@@ -134,18 +134,38 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
         "(letters, digits, dot, dash and underscore; 128 chars)",
     };
   }
-  if (input.expectAttempt !== undefined) {
+  /**
+   * The optimistic-concurrency guard — refuse unless the named node is on
+   * exactly the attempt the caller read.
+   *
+   * Checked AFTER the receipt is resolved, not before, and the ordering is the
+   * whole point. A guarded retry that SUCCEEDS moves the node to the next
+   * attempt, so an identical repeat of that same request id — which is exactly
+   * what an idempotency key invites, and what a lost reply forces — arrives to
+   * find the precondition it already satisfied now false, and was refused
+   * against its own effect. The recorded answer is the right one there; the
+   * guard is for work not yet accepted. It still binds the request's identity,
+   * because `expectAttempt` is in the digest: a repeat naming a DIFFERENT
+   * attempt is a different request and is refused as a conflict.
+   */
+  const guardRefusal = (): RetryOutcome | null => {
+    if (input.expectAttempt === undefined) return null;
     const recorded = attemptsFor(handle, input.expectAttempt.node);
     const latest = recorded[recorded.length - 1] ?? 0;
-    if (latest !== input.expectAttempt.attempt) {
-      return {
-        ok: false,
-        message:
-          `odu: ${input.expectAttempt.node} is on attempt ${latest}, not ` +
-          `${input.expectAttempt.attempt} — this run has moved on since you read it`,
-        suggestion: ["odu", "history", "show", "--run", input.runId],
-      };
-    }
+    if (latest === input.expectAttempt.attempt) return null;
+    return {
+      ok: false,
+      message:
+        `odu: ${input.expectAttempt.node} is on attempt ${latest}, not ` +
+        `${input.expectAttempt.attempt} — this run has moved on since you read it`,
+      suggestion: ["odu", "history", "show", "--run", input.runId],
+    };
+  };
+  // No request id means no receipt to replay, so the guard is all there is and
+  // it applies at once.
+  if (input.requestId === undefined) {
+    const refused = guardRefusal();
+    if (refused !== null) return refused;
   }
 
   // The run id a RELAUNCH would publish under, minted before anything is
@@ -241,6 +261,12 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
         suggestion: ["odu", "history", "show", "--run", input.runId],
       };
     }
+    // Freshly claimed: this is NEW work, so the precondition applies to it.
+    // Recorded through `finish`, like every other refusal, so the next
+    // identical ask replays it rather than re-deriving it against a run that
+    // has moved further still.
+    const refused = guardRefusal();
+    if (refused !== null) return finish(handle, input, refused, now);
     claimedRunId = claim.receipt.plannedRunId;
   }
 
@@ -254,6 +280,18 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
   const live = await tryLive(handle, manifest, input, digest, markDispatch, (message) =>
     input.warn?.(message),
   );
+  if (live !== null && "partial" in live) {
+    return finish(
+      handle,
+      input,
+      {
+        ok: false,
+        message: live.partial,
+        suggestion: ["odu", "history", "show", "--run", input.runId],
+      },
+      now,
+    );
+  }
   if (live !== null) {
     return finish(handle, input, { ok: true, receipt: live, replayed: false }, now);
   }
@@ -345,7 +383,11 @@ async function tryLive(
   digest: string,
   onDispatch?: (roots: readonly string[]) => void,
   warn?: (message: string) => void,
-): Promise<RetryReceipt | null> {
+  // `null` — the live path declined entirely, so the finalized path is
+  // selected. `{ partial }` — it acted, but not on everything it was asked
+  // for, which is an ANSWER and must not fall through to a second attempt at
+  // the same work.
+): Promise<RetryReceipt | { partial: string } | null> {
   const owner = currentOwner(handle.dir);
   if (owner === null || owner.endpoint === null) return null;
   const dial = input.dial ?? dialRun;
@@ -397,6 +439,26 @@ async function tryLive(
       }
     }
     if (accepted.length === 0) return null;
+    const declined = roots.filter((id) => !accepted.includes(id));
+    if (declined.length > 0) {
+      // ONE RULE FOR THE WHOLE REQUEST, whichever path answers it. The
+      // reconciliation fold already reports a part-applied retry as partial;
+      // this path used to collect the roots that succeeded and say nothing
+      // about the rest, so the very same lane replies meant "success" when the
+      // first reply arrived and "partial" when it was lost and reconstructed.
+      // A domain answer that depends on whether a reply was delivered is not a
+      // domain answer.
+      //
+      // A refusal rather than a qualified success, for the reason the fold
+      // gives: the request did not do what it was asked, and a caller reading
+      // `ok: true` acts as if it did.
+      return {
+        partial:
+          `odu: request applied in part — ${accepted.join(", ")} was re-run, ` +
+          `${declined.join(", ")} was declined by its lane. The retry did not do ` +
+          "everything it was asked for.",
+      };
+    }
     if (input.requestId !== undefined && !recorded) {
       // Say it where an operator will see it. The retry itself succeeded; what
       // is degraded is only what a REPEAT of this id could be told.

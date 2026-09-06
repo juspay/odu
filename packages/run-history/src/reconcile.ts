@@ -21,7 +21,7 @@
 import { hostname } from "node:os";
 import { formatCursor } from "./ids";
 import { pidAlive } from "./owner";
-import type { ReceiptRecord } from "./receipts";
+import { readReceipt, type ReceiptRecord } from "./receipts";
 import type { RunScope } from "./schema";
 import {
   type CatalogOptions,
@@ -99,32 +99,8 @@ export function reconcile(
   host: string | undefined = hostname(),
   isAlive: ((pid: number) => boolean) | undefined = pidAlive,
 ): Reconciled {
-  const relaunched = reconcileRelaunch(requestId, receipt.plannedRunId, catalog);
-  if (relaunched !== null) return { kind: "replay", receipt: relaunched };
-  const live = reconcileLive(requestId, receipt, handle);
-  if (live !== null) return live;
-
-  // Neither effect is visible. Whether that means "nothing happened" depends
-  // entirely on whether the evidence that WOULD have shown it could exist and
-  // could be read — so the two unreadable cases are separated out rather than
-  // folded into the safe one.
-  if (readJournal(handle).unreadable > 0) {
-    return {
-      kind: "unresolved",
-      reason:
-        "this run's journal has lines this build cannot read, so the absence " +
-        "of a record for it is not evidence that nothing happened",
-    };
-  }
-  if (receipt.dispatchedAt !== undefined) {
-    return {
-      kind: "unresolved",
-      reason:
-        "it had already been put on the wire when its outcome was lost, and " +
-        "the coordinator it was sent to recorded no acceptance — an older " +
-        "build, or one that died before writing one",
-    };
-  }
+  const seen = evidenceFor(requestId, receipt, handle, catalog);
+  if (seen !== null) return seen;
   // NOT YET DISPATCHED IS NOT THE SAME AS NEVER WILL BE, and AGE IS NOT
   // EVIDENCE. This once concluded "nothing happened" from elapsed time alone,
   // which fences nothing: a claimant paused in a dial is still perfectly
@@ -176,9 +152,63 @@ export function reconcile(
         "re-issue while the first is alive is how one request becomes two",
     };
   }
-  // The claimant is gone on this host and never marked a dispatch. That is
-  // evidence, not a timeout.
+  // THE CLAIMANT IS GONE — and the evidence read at the top of this function
+  // was read BEFORE that was established. In between, the very process now
+  // observed dead could have marked its dispatch, sent it, and exited: the
+  // probe answers about the instant it runs, and every read older than it is a
+  // snapshot from before the question was asked.
+  //
+  // So the authoritative records are read AGAIN, now that nothing can add to
+  // them. A dispatch that landed in the window is found here; only a second
+  // look that still shows nothing licenses re-issuing.
+  const fresh = readReceipt(handle, requestId) ?? receipt;
+  const late = evidenceFor(requestId, fresh, handle, catalog);
+  if (late !== null) return late;
   return { kind: "nothing_happened" };
+}
+
+/**
+ * Everything the durable records say about this request, or `null` when they
+ * say nothing.
+ *
+ * One function because it is asked TWICE — once before the claimant's liveness
+ * is probed, and once after the probe says it is gone. The second ask is what
+ * closes the window between those two reads, and it can only close it by being
+ * the same question.
+ */
+function evidenceFor(
+  requestId: string,
+  receipt: ReceiptRecord,
+  handle: RunHandle,
+  catalog: CatalogOptions,
+): Reconciled | null {
+  const relaunched = reconcileRelaunch(requestId, receipt.plannedRunId, catalog);
+  if (relaunched !== null) return { kind: "replay", receipt: relaunched };
+  const live = reconcileLive(requestId, receipt, handle);
+  if (live !== null) return live;
+
+  // Neither effect is visible. Whether that means "nothing happened" depends
+  // entirely on whether the evidence that WOULD have shown it could exist and
+  // could be read — so the two unreadable cases are separated out rather than
+  // folded into the safe one.
+  if (readJournal(handle).unreadable > 0) {
+    return {
+      kind: "unresolved",
+      reason:
+        "this run's journal has lines this build cannot read, so the absence " +
+        "of a record for it is not evidence that nothing happened",
+    };
+  }
+  if (receipt.dispatchedAt !== undefined) {
+    return {
+      kind: "unresolved",
+      reason:
+        "it had already been put on the wire when its outcome was lost, and " +
+        "the coordinator it was sent to recorded no acceptance — an older " +
+        "build, or one that died before writing one",
+    };
+  }
+  return null;
 }
 
 /**

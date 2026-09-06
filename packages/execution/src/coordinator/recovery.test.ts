@@ -1219,6 +1219,124 @@ describe("a reply that was lost mid-flight", () => {
     expect(out.message).toContain(LINT);
   });
 
+  it("reports a partial LIVE retry as partial on the FIRST call, not only on replay", async () => {
+    // One rule for the whole request, whichever path answers it. The
+    // reconciliation fold reports a part-applied retry as partial; the live
+    // path used to collect the roots that succeeded and say nothing about the
+    // rest — so identical lane replies meant "success" when the first reply
+    // arrived and "partial" when it was lost and reconstructed. A domain answer
+    // that depends on whether a reply was delivered is not a domain answer.
+    const root = tmpCatalog();
+    aRun(root, ENDPOINT);
+    // `unit` takes the reset; `lint` (independent of it) declines.
+    const dial = stubDial(liveState(), (id) => id === UNIT);
+
+    const out = refused(
+      await retryRun({
+        runId: PARENT_RUN,
+        selector: `@${PLATFORM}`,
+        requestId: REQUEST,
+        catalog: { root },
+        launcher: stubLauncher().launcher,
+        dial: dial.dial,
+        now: () => T0 + 10,
+      }),
+    );
+
+    expect(out.message).toContain("applied in part");
+    expect(out.message).toContain(UNIT);
+    expect(out.message).toContain(LINT);
+
+    // And the RECORDED answer is that same partial, so a repeat — the SAME
+    // request, or the digest would make it a conflict — is told the truth
+    // rather than handed a cached unqualified success.
+    const again = refused(
+      await retryRun({
+        runId: PARENT_RUN,
+        selector: `@${PLATFORM}`,
+        requestId: REQUEST,
+        catalog: { root },
+        launcher: stubLauncher().launcher,
+        dial: stubDial(liveState()).dial,
+        now: () => T0 + 20,
+      }),
+    );
+    expect(again.message).toContain("applied in part");
+  });
+
+  it("re-reads the receipt after observing the claimant dead", async () => {
+    // The window between the two reads. The evidence is gathered BEFORE the
+    // pid probe runs, so the process the probe then reports dead could have
+    // marked its dispatch, sent it and exited in between — and an answer built
+    // from the earlier snapshot would licence a second mutation.
+    //
+    // The interleaving is driven from inside the probe itself: the dispatch
+    // marker lands at the exact moment liveness is observed false.
+    const root = tmpCatalog();
+    const handle = aFinishedRun(root);
+    claimByHand(handle, "0000000b-0002");
+    const launcher = stubLauncher();
+
+    const out = refused(
+      await retryRun({
+        runId: PARENT_RUN,
+        selector: "unit",
+        requestId: REQUEST,
+        catalog: { root },
+        launcher: launcher.launcher,
+        host: CLAIM_HOST,
+        isAlive: () => {
+          // A, still alive a moment ago, dispatches and exits right here.
+          markDispatched(handle, REQUEST, [UNIT], T0 + 50);
+          return false;
+        },
+        now: () => T0 + RETRY_DISPATCH_GRACE_MS + 10,
+      }),
+    );
+
+    // NOT "nothing happened, retry with a fresh id".
+    expect(out.message).toContain("outcome is UNKNOWN");
+    expect(out.message).toContain("already been put on the wire");
+    expect(launcher.calls).toEqual([]);
+  });
+
+  it("replays a completed guarded retry even after its own attempt landed", async () => {
+    // A guarded retry that SUCCEEDS moves the node to the next attempt, so an
+    // identical repeat — which is exactly what an idempotency key invites, and
+    // what a lost reply forces — arrived to find the precondition it had
+    // already satisfied now false, and was refused against its own effect. The
+    // recorded answer is the right one; the guard is for work not yet accepted.
+    const root = tmpCatalog();
+    const handle = aRun(root, ENDPOINT);
+    const guarded = (): Promise<RetryOutcome> =>
+      retryRun({
+        runId: PARENT_RUN,
+        selector: "unit",
+        requestId: REQUEST,
+        // `unit` is recorded at attempt 2 by `aRun`.
+        expectAttempt: { node: UNIT, attempt: 2 },
+        catalog: { root },
+        launcher: stubLauncher().launcher,
+        dial: stubDial(liveState()).dial,
+        now: () => T0 + 10,
+      });
+
+    const first = accepted(await guarded());
+    expect(first.receipt.mode).toBe("live");
+
+    // The retry's own effect: a third attempt on the node it just re-ran.
+    startAttempt(handle, takeOverForEvidence(handle), {
+      node: UNIT,
+      attempt: 3,
+      placement: PLACEMENT,
+      startedAt: T0 + 20,
+    });
+
+    const again = accepted(await guarded());
+    expect(again.replayed).toBe(true);
+    expect(again.receipt).toEqual(first.receipt);
+  });
+
   it("stays UNKNOWN past the grace while the claimant is STILL RUNNING", async () => {
     // The hole a 120-second grace left. Age is not evidence: a caller paused in
     // a dial is perfectly capable of mutating a moment after the grace expires,
