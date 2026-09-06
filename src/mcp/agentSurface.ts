@@ -47,8 +47,8 @@
  * so a silently-closed-and-rebound socket can't pin a previous run's snapshot.)
  */
 
-import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
+import { readFileSlice } from "@odu/run-history/store";
 import { deriveStream, projectSurface } from "@kolu/surface/project";
 import type { SurfaceHandlers } from "@kolu/surface/server";
 import { Effect, Schema, Stream } from "effect";
@@ -313,28 +313,6 @@ function durableLogPath(
   return file;
 }
 
-/** Read at most the last `maxBytes` bytes of a file, matching the cap the live
- *  in-memory tail enforces — a durable CI log can be arbitrarily large, and
- *  returning it whole would block the server and blow up the MCP payload. */
-function tailFile(path: string, maxBytes: number): string {
-  const fd = openSync(path, "r");
-  try {
-    const size = fstatSync(fd).size;
-    const start = size > maxBytes ? size - maxBytes : 0;
-    const length = size - start;
-    const buf = Buffer.allocUnsafe(length);
-    let read = 0;
-    while (read < length) {
-      const n = readSync(fd, buf, read, length - read, start + read);
-      if (n === 0) break;
-      read += n;
-    }
-    return buf.subarray(0, read).toString("utf-8");
-  } finally {
-    closeSync(fd);
-  }
-}
-
 /** The durable-file fallback for a node id when no live frame is cached: read
  *  `.ci/<sha7>/<platform>/<node>.log`, bounded to `MAX_LOG_CHARS`, with the
  *  path-traversal guard. The `repoRoot`/`sha7` identity arrives as arguments —
@@ -344,11 +322,15 @@ function tailFile(path: string, maxBytes: number): string {
 export function durableLog(token: string, repoRoot: string, sha7: string): LogEntry {
   const file = durableLogPath(repoRoot, sha7, token);
   if (file === null) return { node: token, source: "missing", text: "" };
-  try {
-    return { node: token, source: "file", text: tailFile(file, MAX_LOG_CHARS) };
-  } catch {
-    return { node: token, source: "missing", text: "" };
-  }
+  // The catalog's own bounded, race-free read, with a negative offset for the
+  // tail: one descriptor, `fstat`ed through the handle rather than the path,
+  // with the partial-read retry. This used to be a private copy of that loop —
+  // the third in the tree — and the copies had already drifted on where the
+  // missing-file answer is decided. It is decided HERE now, because "there is
+  // no such log" is this face's word (`missing`), not the reader's.
+  const slice = readFileSlice(file, { offset: -MAX_LOG_CHARS });
+  if (slice === null) return { node: token, source: "missing", text: "" };
+  return { node: token, source: "file", text: slice.text };
 }
 
 /** Where am I checked out and at what SHA — the durable-log identity, resolved

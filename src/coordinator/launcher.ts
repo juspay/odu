@@ -20,6 +20,7 @@
 
 import { join } from "node:path";
 import { runSocketPath } from "@odu/run-client/dial";
+import { RUN_FILES } from "@odu/run-history/paths";
 import { handleFor } from "@odu/run-history/store";
 import type { RunScope } from "@odu/run-history/schema";
 import {
@@ -190,5 +191,8 @@ export function checkoutLockPath(checkout: string): string {
  *  still findable when the checkout is not, and durable, so a startup failure
  *  survives the launcher that observed it. */
 export function coordinatorLogPath(runId: string): string {
-  return join(handleFor(runId).dir, "coordinator.log");
+  // The NAME comes from the package that owns the layout, so retention's
+  // evidence partition can see this file. Spelling it here is how it came to
+  // survive expiry forever.
+  return join(handleFor(runId).dir, RUN_FILES.coordinatorLog);
 }

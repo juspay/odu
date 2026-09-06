@@ -33,7 +33,7 @@ import {
   type PipelineState,
   STATUS_META,
 } from "@odu/run-client/surface";
-import { shortSha } from "../ids";
+import { shortSha } from "@odu/run-client/nodeId";
 
 /** Final unconfirmed posting debt, stamped into the durable record: a live
  *  `OwedStatus` (the fan-in surface's shape) with `lastError` REQUIRED at

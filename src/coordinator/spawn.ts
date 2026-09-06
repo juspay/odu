@@ -44,13 +44,8 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import {
-  closeSync,
-  fstatSync,
-  mkdirSync,
-  openSync,
-  readSync,
-} from "node:fs";
+import { closeSync, mkdirSync, openSync } from "node:fs";
+import { readFileSlice } from "@odu/run-history/store";
 import { dirname } from "node:path";
 import { dialRun } from "@odu/run-client/dial";
 
@@ -425,45 +420,14 @@ export function spawnCoordinator(
 
 /**
  * The last 64 KiB of the coordinator's log — what a launcher quotes when the
- * socket never came up. Bounded because a coordinator that failed after doing
- * a lot of work has a lot of log, and the reason is at the end.
+ * socket never came up.
  *
- * ONE DESCRIPTOR, and the size is asked of IT rather than of the path. The
- * obvious spelling — `statSync(path)` to learn the size, then
- * `readFileSync(path)` to get the bytes — asks the filesystem about a NAME
- * twice, and a name is not a file: between the two calls the log is still
- * being written to (that is what a coordinator does), so the size the slice is
- * computed from is not the size of the bytes it slices. Here the file is
- * opened once and `fstat`ed through the open handle, so both facts are about
- * the same inode at the same instant.
- *
- * It also stops reading a whole log to throw most of it away: a run that
- * emitted fourteen megabytes and then failed would otherwise be loaded in full
- * to quote its last page.
+ * A negative offset over `readFileSlice`, which is the run catalog's own
+ * bounded, race-free read. It was a hand-rolled open/fstat/read loop here, and
+ * a third copy of the same twelve lines: the technique — one descriptor, a
+ * non-fatal decode at the slice boundary, a partial-read retry — is one thing,
+ * and which file it is applied to is the only part that differs.
  */
 function tailOf(path: string): string {
-  const MAX = 64 * 1024;
-  let fd: number;
-  try {
-    fd = openSync(path, "r");
-  } catch {
-    return "";
-  }
-  try {
-    const size = fstatSync(fd).size;
-    const start = size > MAX ? size - MAX : 0;
-    const length = size - start;
-    const buf = Buffer.allocUnsafe(length);
-    let read = 0;
-    while (read < length) {
-      const n = readSync(fd, buf, read, length - read, start + read);
-      if (n === 0) break;
-      read += n;
-    }
-    return buf.subarray(0, read).toString("utf-8");
-  } catch {
-    return "";
-  } finally {
-    closeSync(fd);
-  }
+  return readFileSlice(path, { offset: -64 * 1024 })?.text ?? "";
 }

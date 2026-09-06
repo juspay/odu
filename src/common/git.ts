@@ -6,16 +6,15 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { shortSha } from "@odu/run-history/ids";
+import { shortSha } from "@odu/run-client/nodeId";
 
 function git(args: string[]): string | null {
   const result = spawnSync("git", args, { encoding: "utf-8" });
   return result.status === 0 ? result.stdout.trim() : null;
 }
 
-/** Re-exported, not re-defined: the prefix rule lives with the other identity
- *  spellings in `@odu/run-history/ids`, because `<sha7>#<seq>` is a run's
- *  display ref and the two halves of it must not fork per consumer. Kept
+/** Re-exported, not re-defined: the prefix rule lives beside `logPathFor` in
+ *  `@odu/run-client/nodeId`, which already spells `.ci/<sha7>/…`. Kept
  *  reachable from here so the many call sites that already ask this module for
  *  git facts do not each learn a second import path. */
 export { shortSha };

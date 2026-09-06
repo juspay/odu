@@ -83,15 +83,6 @@ export function runIdStartedAt(runId: string): number | null {
   return Number.isSafeInteger(ms) ? ms : null;
 }
 
-/** The 7-char short form of a commit sha — the one place the prefix rule
- *  lives, so every reader derives the short sha mechanically rather than
- *  trusting a stored copy. It sits with the other identity spellings because
- *  that is what it is: `<sha7>#<seq>` is a run's display ref, and the rule
- *  that makes the left half must not fork per consumer. */
-export function shortSha(sha: string): string {
-  return sha.slice(0, 7);
-}
-
 // ── node keys ───────────────────────────────────────────────────────────────
 
 /** The characters that survive encoding unescaped — the portable filename set,

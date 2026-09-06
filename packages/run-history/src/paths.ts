@@ -95,7 +95,42 @@ export const RUN_FILES = {
   verdict: "verdict.json",
   expiry: "expired.json",
   attempts: "attempts",
+  /** Idempotency receipts, one file per request id. */
+  receipts: "receipts",
+  /** What the coordinator itself said, when a launcher started it — the
+   *  account of a run that failed on the strict gate, or died before its
+   *  per-node logs said anything. */
+  coordinatorLog: "coordinator.log",
 } as const;
+
+/**
+ * What expiry throws away, and what it keeps.
+ *
+ * A PARTITION rather than a list at the call site, because the two halves
+ * answer different questions and a new file has to land in one of them on
+ * purpose. EVIDENCE is what a run produced and what retention exists to bound;
+ * IDENTITY is what makes an expired run still answerable — "it existed, it
+ * failed, its evidence aged out" rather than the answer a typo gets.
+ *
+ * The list used to be two names spelled inside `expireRun`, and `receipts/`
+ * and `coordinator.log` were added afterwards without either being considered.
+ * Both survived expiry forever, and the coordinator log — the record of a
+ * coordinator that died on the strict gate, the case this release exists for —
+ * was the one file the janitor could not see.
+ */
+export const RUN_EVIDENCE = [
+  RUN_FILES.attempts,
+  RUN_FILES.events,
+  RUN_FILES.receipts,
+  RUN_FILES.coordinatorLog,
+] as const;
+
+export const RUN_IDENTITY = [
+  RUN_FILES.manifest,
+  RUN_FILES.owner,
+  RUN_FILES.verdict,
+  RUN_FILES.expiry,
+] as const;
 
 /** One attempt's directory: `attempts/<ENCODED_NODE_KEY>/<N>/`. The encoding
  *  is what makes the node id a single safe segment — see `./ids`. */

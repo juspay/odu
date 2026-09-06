@@ -59,15 +59,16 @@ import {
   ATTEMPT_FILES,
   attemptDir,
   catalogRoot,
+  RUN_EVIDENCE,
   RUN_FILES,
   runDir,
   type StateEnv,
 } from "./paths";
 import {
+  beingWritten,
   claimOwnership,
   type ClaimRefusal,
   currentOwner,
-  OWNERSHIP_GRACE_MS,
   type OwnershipToken,
   ownershipProvablyLost,
   stillOwner,
@@ -565,28 +566,34 @@ export interface LogSlice {
 }
 
 /**
- * Read a byte range of an attempt's log.
+ * Read a byte range of a file, race-free.
  *
- * Byte offsets rather than lines, because the caller that matters is resuming:
- * "give me from where I stopped" has a cheap exact answer in bytes and an
- * expensive approximate one in lines. A negative `offset` counts back from the
- * end, which is how a face asks for a tail without first stat-ing the file.
+ * ONE DESCRIPTOR. `statSync(path)` followed by `readFileSync(path)` asks the
+ * filesystem about a NAME twice, and a name is not a file: between the two
+ * calls the writer is still writing (that is what a coordinator, a lane and a
+ * recipe all do), so the size the read is planned from is not the size of what
+ * it reads. Opening once and `fstat`ing the handle makes both facts about the
+ * same inode at the same instant.
+ *
+ * BYTE OFFSETS, not lines, because the caller that matters is resuming: "give
+ * me from where I stopped" has a cheap exact answer in bytes and an expensive
+ * approximate one in lines. A negative `offset` counts back from the end,
+ * which is how a face asks for a tail without first stat-ing the file.
  *
  * UTF-8 is decoded NON-fatally on purpose: a slice boundary can land inside a
  * multibyte character, and refusing to render a log because a range cut a
  * character in half would be a worse answer than a replacement character at
- * the seam.
+ * the seam. That is exactly why {@link LogSlice.bytesRead} exists — the
+ * decoded string's byte length is NOT what was read, so a caller resuming from
+ * it would skip content.
+ *
+ * The primitive, not the policy: what to do about a file that is not there is
+ * the caller's (`null`), and so is what the file MEANS.
  */
-export function readAttemptLog(
-  handle: RunHandle,
-  node: string,
-  attempt: number,
+export function readFileSlice(
+  path: string,
   range: { offset?: number; limit?: number } = {},
 ): LogSlice | null {
-  const path = join(
-    attemptDir(handle.dir, encodeNodeKey(node), attempt),
-    ATTEMPT_FILES.log,
-  );
   let fd: number;
   try {
     fd = openSync(path, "r");
@@ -617,6 +624,24 @@ export function readAttemptLog(
   } finally {
     closeSync(fd);
   }
+}
+
+/** One attempt's log, by address. Path resolution over {@link readFileSlice} —
+ *  the technique is the primitive's, and which file it is is this function's
+ *  entire contribution. */
+export function readAttemptLog(
+  handle: RunHandle,
+  node: string,
+  attempt: number,
+  range: { offset?: number; limit?: number } = {},
+): LogSlice | null {
+  return readFileSlice(
+    join(
+      attemptDir(handle.dir, encodeNodeKey(node), attempt),
+      ATTEMPT_FILES.log,
+    ),
+    range,
+  );
 }
 
 // ── verdict and expiry ──────────────────────────────────────────────────────
@@ -667,10 +692,7 @@ export function readExpiry(handle: RunHandle): Expiry | null {
  * disk.
  */
 export function expireRun(handle: RunHandle, now: number = Date.now()): boolean {
-  const owner = currentOwner(handle.dir);
-  if (owner !== null && now - owner.heartbeatAt < OWNERSHIP_GRACE_MS) {
-    return false;
-  }
+  if (beingWritten(currentOwner(handle.dir), now)) return false;
   const verdict = readVerdict(handle);
   const expiry: Expiry = {
     version: RUN_RECORD_FORMAT,
@@ -678,7 +700,7 @@ export function expireRun(handle: RunHandle, now: number = Date.now()): boolean 
     expiredAt: now,
     outcome: verdict?.outcome ?? "unknown",
   };
-  for (const name of [RUN_FILES.attempts, RUN_FILES.events]) {
+  for (const name of RUN_EVIDENCE) {
     try {
       rmSync(join(handle.dir, name), { recursive: true, force: true });
     } catch {

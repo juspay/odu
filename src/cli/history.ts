@@ -49,7 +49,7 @@ import {
   readVerdict,
   type RunHandle,
 } from "@odu/run-history/store";
-import { shortSha } from "@odu/run-history/ids";
+import { shortSha } from "@odu/run-client/nodeId";
 import { formatRef } from "@odu/run-history/legacy/record";
 import { packagedLauncher, type RunLauncher } from "../coordinator/launcher";
 import { type RetryReceipt, retryRun } from "../coordinator/recovery";

@@ -29,11 +29,7 @@ import {
   readVerdict,
   runsStartedBefore,
 } from "./store";
-import {
-  currentOwner,
-  OWNERSHIP_GRACE_MS,
-  ownershipProvablyLost,
-} from "./owner";
+import { beingWritten, currentOwner, ownershipProvablyLost } from "./owner";
 
 /** The default keep-window for finished runs. */
 export const DEFAULT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -90,8 +86,7 @@ export function pruneCatalog(opts: PruneOptions = {}): PruneReport {
     // in BOTH modes, before the dry-run branch: a `--dry-run` whose whole
     // promise is "this is what a real pass would do" must not report a
     // deletion that a real pass would then refuse.
-    const owner = currentOwner(handle.dir);
-    if (owner !== null && now - owner.heartbeatAt < OWNERSHIP_GRACE_MS) {
+    if (beingWritten(currentOwner(handle.dir), now)) {
       report.kept.push({ runId, reason: "still owned by a live coordinator" });
       continue;
     }

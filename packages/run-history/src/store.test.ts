@@ -27,16 +27,23 @@
 import {
   appendFileSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
 import { encodeNodeKey } from "./ids";
 import { claimOwnership, OWNERSHIP_GRACE_MS } from "./owner";
-import { ATTEMPT_FILES, attemptDir, RUN_FILES } from "./paths";
+import {
+  ATTEMPT_FILES,
+  attemptDir,
+  RUN_EVIDENCE,
+  RUN_FILES,
+} from "./paths";
 import { RUN_RECORD_FORMAT, type RunManifest } from "./schema";
 import {
   appendAttemptLog,
@@ -513,6 +520,38 @@ describe("discovery", () => {
       "0000000b-0001",
     ]);
     expect(listRuns({ root, repoRoot: "/checkouts/nowhere" })).toEqual([]);
+  });
+
+  it("expires every kind of evidence, including the ones added after it was written", () => {
+    // The partition, not a list at the call site. `receipts/` and
+    // `coordinator.log` were both added to a run directory after `expireRun`
+    // named its two deletions inline, and both then survived expiry forever —
+    // the coordinator log being the record of a run that died before its
+    // per-node logs said anything, which is the case this release exists for.
+    const root = tmpCatalog();
+    const { handle, token } = register(root, { runId: "0000000e-0001" });
+    appendEvent(handle, token, { kind: "roster", order: [NODE] });
+    startAttempt(handle, token, {
+      node: NODE,
+      attempt: 1,
+      placement: { platform: "x86_64-linux", host: "builder-1" },
+      startedAt: T0,
+    });
+    writeFileSync(join(handle.dir, RUN_FILES.coordinatorLog), "it died here\n");
+    mkdirSync(join(handle.dir, RUN_FILES.receipts), { recursive: true });
+    writeFileSync(join(handle.dir, RUN_FILES.receipts, "r1.json"), "{}");
+    fence(handle);
+
+    expect(expireRun(handle, T0 + OWNERSHIP_GRACE_MS * 4)).toBe(true);
+
+    for (const gone of RUN_EVIDENCE) {
+      expect(existsSync(join(handle.dir, gone)), `${gone} should be gone`).toBe(
+        false,
+      );
+    }
+    // And what makes an expired run still answerable stays.
+    expect(existsSync(join(handle.dir, RUN_FILES.manifest))).toBe(true);
+    expect(readExpiry(handle)).not.toBeNull();
   });
 
   it("is empty for a catalog that does not exist yet", () => {

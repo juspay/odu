@@ -37,11 +37,10 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Result, Schema } from "effect";
 import { createExclusive, writeAtomic } from "./atomic";
+import { RUN_FILES } from "./paths";
 import { RUN_RECORD_FORMAT } from "./schema";
 import { type RunHandle } from "./store";
 
-/** Where a run's receipts live, beside its journal. */
-const RECEIPTS_DIR = "receipts";
 
 /** A request id is a caller's string and becomes a filename, so it is
  *  constrained rather than escaped: a caller that can name a file is a caller
@@ -102,7 +101,7 @@ export type ReceiptRecord = typeof ReceiptSchema.Type;
 const decodeReceipt = Schema.decodeUnknownResult(ReceiptSchema);
 
 function receiptPath(handle: RunHandle, requestId: string): string {
-  return join(handle.dir, RECEIPTS_DIR, `${requestId}.json`);
+  return join(handle.dir, RUN_FILES.receipts, `${requestId}.json`);
 }
 
 export function readReceipt(
@@ -223,7 +222,7 @@ export function completeReceipt(
 export function listReceipts(handle: RunHandle): ReceiptRecord[] {
   let entries: string[];
   try {
-    entries = readdirSync(join(handle.dir, RECEIPTS_DIR));
+    entries = readdirSync(join(handle.dir, RUN_FILES.receipts));
   } catch {
     return [];
   }

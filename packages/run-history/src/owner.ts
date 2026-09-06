@@ -193,6 +193,26 @@ export function ownershipProvablyLost(
   return { lost: true };
 }
 
+/**
+ * Is somebody WRITING this run right now?
+ *
+ * Deliberately not {@link ownershipProvablyLost}, and the difference is the
+ * whole reason both exist. A SUCCESSOR asks "may I take over", and must not
+ * displace a live writer, so it also checks whether the recorded pid is alive.
+ * A JANITOR asks "is anything writing", holds no epoch, and must not ask about
+ * the pid at all: a finished coordinator's record keeps naming a pid the OS is
+ * free to hand to somebody else, so a janitor that checked it would refuse to
+ * clean up a run that ended a month ago.
+ *
+ * "Somebody stamped this within the grace" is the question that actually means
+ * *being written*. It was inlined identically in the store's expiry and in
+ * retention's report — two copies of a rule, in exactly the two places where a
+ * partial edit is invisible.
+ */
+export function beingWritten(owner: Owner | null, now: number): boolean {
+  return owner !== null && now - owner.heartbeatAt < OWNERSHIP_GRACE_MS;
+}
+
 export interface ClaimInput {
   runId: string;
   dir: string;

@@ -49,6 +49,19 @@ export function splitFanId(id: string): { namepath: string; platform: string } {
   return { namepath: id, platform: "unknown" };
 }
 
+/** The 7-char short form of a commit sha — the ONE place the prefix rule
+ *  lives, so every reader derives the short sha mechanically rather than
+ *  trusting a stored copy.
+ *
+ *  Here, beside {@link logPathFor}, because `sha7` is already this module's
+ *  vocabulary: the durable log path is `.ci/<sha7>/…`, and `<sha7>#<seq>` is
+ *  the ref every face prints. It briefly lived in the run-catalog package,
+ *  which made a caller wanting seven characters of a commit depend on the
+ *  whole durable history to get them. */
+export function shortSha(sha: string): string {
+  return sha.slice(0, 7);
+}
+
 /** The node id → durable log path fold: `ci::e2e@x86_64-linux` of run
  *  `338eb01` → `.ci/338eb01/x86_64-linux/ci::e2e.log`. RELATIVE to the
  *  checkout root, exactly as odu lays it on disk (justci's layout) — the
