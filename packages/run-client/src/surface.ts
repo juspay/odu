@@ -478,6 +478,19 @@ const fanInNodeProcedures = {
       id: NodeIdSchema,
       requestId: Schema.optionalKey(Schema.String),
       inputDigest: Schema.optionalKey(Schema.String),
+      /**
+       * Refuse unless this node is on exactly this attempt.
+       *
+       * The caller's optimistic-concurrency guard, carried to the process that
+       * can actually enforce it. A caller checks the attempt it read, then
+       * dials, then dispatches — and between the check and the reset the node
+       * can advance, so a guard evaluated only at the caller is a preflight
+       * that reports a state it has already stopped speaking for. Here it is
+       * validated by the coordinator against its own allocator, in the same
+       * step that accepts the reset, so there is no window between the test and
+       * the mutation it guards.
+       */
+      expectAttempt: Schema.optionalKey(Schema.Int),
     }),
     output: Schema.Struct({
       ok: Schema.Boolean,
@@ -485,6 +498,17 @@ const fanInNodeProcedures = {
        *  journal against `requestId`. Absent means the far end did not record
        *  one — an older coordinator, or a call that carried no id. */
       recorded: Schema.optionalKey(Schema.Boolean),
+      /**
+       * Why a `false` was a REFUSAL rather than an unroutable id.
+       *
+       * `stale_attempt` — the node had moved past `expectAttempt`. It matters
+       * that a caller can tell this from "no such node here": one means the
+       * request was answered and must not be retried as a new run, the other is
+       * the ordinary fall-through to the finalized path.
+       */
+      refusal: Schema.optionalKey(Schema.Literals(["stale_attempt"])),
+      /** What the node is actually on, when `stale_attempt` says it moved. */
+      attempt: Schema.optionalKey(Schema.Int),
     }),
   },
 } as const;

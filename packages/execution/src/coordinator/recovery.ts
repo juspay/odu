@@ -427,8 +427,24 @@ async function tryLive(
           ...(input.requestId === undefined
             ? {}
             : { requestId: input.requestId, inputDigest: digest }),
+          // The guard travels with the root it guards. A caller names ONE node
+          // and an attempt; only the call for that node carries it, because the
+          // coordinator checks it against that node's allocator.
+          ...(input.expectAttempt !== undefined && input.expectAttempt.node === id
+            ? { expectAttempt: input.expectAttempt.attempt }
+            : {}),
         }),
       );
+      if (result.refusal === "stale_attempt") {
+        // ANSWERED. The node moved past the attempt the caller authorized, so
+        // the request is over — it must not fall through to starting a whole
+        // new run, which is the one thing the guard exists to prevent.
+        return {
+          partial:
+            `odu: ${id} is on attempt ${result.attempt ?? "another"}, not ` +
+            `${input.expectAttempt?.attempt} — this run has moved on since you read it`,
+        };
+      }
       if (result.ok) {
         accepted.push(id);
         // An older coordinator drops the id it does not know and answers

@@ -335,7 +335,8 @@ commit pinned (and not posting — a selection's verdict is not the pipeline's).
 dirty live-tree run cannot be replayed and is refused. `--request-id` makes a
 repeat safe: same id, same input replays the recorded answer instead of starting
 a second run. `--expect-attempt N` refuses if the node has moved on since you
-read it. Expiry leaves a tombstone, so an old run id answers "it existed, it
+read it — checked by the coordinator as it accepts the reset, so the node
+cannot advance between the check and the mutation it guards. Expiry leaves a tombstone, so an old run id answers "it existed, it
 failed, its evidence aged out" rather than "no such run".
 
 ## Hosts config

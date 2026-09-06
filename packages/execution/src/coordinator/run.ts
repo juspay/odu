@@ -1104,11 +1104,29 @@ async function orchestrate(
      *  goes missing can read what happened instead of inferring it from
      *  whatever attempt started next. See `RunHistory.retryAccepted`. */
     request?: { requestId: string; inputDigest: string },
-  ): Promise<{ ok: boolean; recorded?: boolean }> => {
+    /** Refuse unless this node is on exactly this attempt — the caller's guard,
+     *  enforced HERE because this is the process that can check it and act on
+     *  it without a window in between. */
+    expectAttempt?: number,
+  ): Promise<{
+    ok: boolean;
+    recorded?: boolean;
+    refusal?: "stale_attempt";
+    attempt?: number;
+  }> => {
     const { platform } = splitFanId(id);
     if (platform === "unknown") return { ok: false };
     const route = executions.route(platform, id);
     if (route === undefined) return { ok: false };
+    if (expectAttempt !== undefined) {
+      const attempt = history.currentAttempt(id);
+      if (attempt !== expectAttempt) {
+        // ANSWERED, not unroutable. The caller must be able to tell this from
+        // "no such node here": one means its guard failed and the request is
+        // over, the other is the ordinary fall-through to a fresh run.
+        return { ok: false, refusal: "stale_attempt", attempt };
+      }
+    }
     // A refused request is not an accepted one, so nothing is written for the
     // two `false` returns above: the journal records acceptances, and a line
     // for a reset that was never routed would be a receipt for nothing.
@@ -1412,6 +1430,7 @@ async function orchestrate(
                     requestId: input.requestId,
                     inputDigest: input.inputDigest ?? "",
                   },
+              input.expectAttempt,
             ),
           ),
         cancel: ({ input }) =>

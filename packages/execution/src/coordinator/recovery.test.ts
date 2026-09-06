@@ -199,7 +199,12 @@ interface DialStub {
   asked: string[];
   /** Every rerun call WHOLE, so a test can assert what correlation crossed the
    *  wire rather than only which node did. */
-  calls: { id: string; requestId?: string; inputDigest?: string }[];
+  calls: {
+    id: string;
+    requestId?: string;
+    inputDigest?: string;
+    expectAttempt?: number;
+  }[];
   closes: number;
 }
 
@@ -214,6 +219,10 @@ function stubDial(
    *  that records; `false` is an older one that drops the id it does not
    *  know. */
   records = true,
+  /** What the COORDINATOR says this node is on, when a call carries a guard.
+   *  `undefined` means it agrees with whatever the caller asked for — the
+   *  ordinary case; a number is how a test says the node moved underneath. */
+  attemptNow?: number,
 ): DialStub {
   const stub: DialStub = { asked: [], calls: [], closes: 0, dial: async () => null };
   stub.dial = (async () => ({
@@ -221,9 +230,25 @@ function stubDial(
       surface: {
         nodes: { get: () => Stream.make(state) },
         node: {
-          rerun: (input: { id: string; requestId?: string; inputDigest?: string }) => {
+          rerun: (input: {
+            id: string;
+            requestId?: string;
+            inputDigest?: string;
+            expectAttempt?: number;
+          }) => {
             stub.asked.push(input.id);
             stub.calls.push(input);
+            if (
+              input.expectAttempt !== undefined &&
+              attemptNow !== undefined &&
+              attemptNow !== input.expectAttempt
+            ) {
+              return Effect.succeed({
+                ok: false,
+                refusal: "stale_attempt" as const,
+                attempt: attemptNow,
+              });
+            }
             const ok = accepts(input.id);
             return Effect.succeed(
               records && ok && input.requestId !== undefined
@@ -1155,9 +1180,14 @@ describe("a reply that was lost mid-flight", () => {
     expect(launcher.calls).toEqual([]);
   });
 
-  it("replays a lane's REFUSAL as the answer it is", async () => {
-    // Accepted, then declined. That is an outcome, not an unknown: a repeat
-    // learns its retry was refused instead of being told nobody knows.
+  it("keeps an ALL-DECLINED live reset PENDING, because a relaunch follows it", async () => {
+    // Where the live attempt ends and the request does not. A wholly-declined
+    // live reset is exactly what selects a replacement RUN, so these same
+    // records mean "the live path is over" to the policy and used to mean "the
+    // request is over" to the fold. A repeat arriving while the original caller
+    // was inside its launcher persisted a refusal, and `completeReceipt` then
+    // hid the child that really started — permanently, since the first result
+    // wins.
     const root = tmpCatalog();
     const handle = aRun(root, ENDPOINT);
     claimByHand(handle, "0000000b-0002");
@@ -1166,16 +1196,27 @@ describe("a reply that was lost mid-flight", () => {
 
     const out = refused(await repeat(root, launcher));
 
-    expect(out.message).toContain("the lane declined the reset");
-    expect(out.message).not.toContain("UNKNOWN");
+    expect(out.message).toContain("outcome is UNKNOWN");
+    expect(out.message).toContain("selects a replacement RUN");
+    // NOT re-issued, and NOT recorded as a final answer.
     expect(launcher.calls).toEqual([]);
+    expect(readReceipt(handle, REQUEST)?.state).toBe("accepted");
 
-    // Recorded, so a third ask is a plain replay rather than more reconciling.
-    const third = refused(await repeat(root, launcher));
-    expect(third.message).toBe(out.message);
+    // And once the fallback's child exists, the repeat replays THAT — the
+    // outcome the request actually had.
+    registerRun(
+      manifest({
+        runId: "0000000b-0002",
+        parentRunId: PARENT_RUN,
+        requestId: REQUEST,
+      }),
+      { root, endpoint: null, now: T0 + 6 },
+    );
+    const after = accepted(await repeat(root, launcher));
+    expect(after.receipt.mode).toBe("relaunched");
+    expect(after.receipt.effective_run).toBe("0000000b-0002");
     expect(launcher.calls).toEqual([]);
   });
-
   it("reports a PARTIALLY applied retry as partial, not as wholly one thing", async () => {
     // One request dispatches one `node.rerun` per root, so the answers can
     // differ. Folding them into a single boolean made the LAST one win: root A
@@ -1298,6 +1339,59 @@ describe("a reply that was lost mid-flight", () => {
     expect(out.message).toContain("outcome is UNKNOWN");
     expect(out.message).toContain("already been put on the wire");
     expect(launcher.calls).toEqual([]);
+  });
+
+  it("REFUSES when the node advances between the preflight and the coordinator", async () => {
+    // The other half of the guard. A caller checks the attempt it read, then
+    // dials, then dispatches — and the node can advance in between, so a guard
+    // evaluated only at the caller is a preflight reporting a state it has
+    // already stopped speaking for. Here the coordinator says the node is on 3
+    // while the caller authorized 2, and the reset must not happen.
+    const root = tmpCatalog();
+    aRun(root, ENDPOINT);
+    const dial = stubDial(liveState(), () => true, true, 3);
+    const launcher = stubLauncher();
+
+    const out = refused(
+      await retryRun({
+        runId: PARENT_RUN,
+        selector: "unit",
+        expectAttempt: { node: UNIT, attempt: 2 },
+        catalog: { root },
+        launcher: launcher.launcher,
+        dial: dial.dial,
+        now: () => T0 + 10,
+      }),
+    );
+
+    expect(out.message).toContain("is on attempt 3, not 2");
+    // The guard carried to the authority, and its refusal is TERMINAL: it must
+    // not fall through to starting a whole new run, which is the one thing the
+    // guard exists to prevent.
+    expect(dial.calls[0]?.expectAttempt).toBe(2);
+    expect(launcher.calls).toEqual([]);
+  });
+
+  it("carries the guard only on the root it names", async () => {
+    // A caller names ONE node and an attempt, and the coordinator checks it
+    // against that node's allocator — so sending it with a sibling's reset
+    // would refuse work the guard says nothing about.
+    const root = tmpCatalog();
+    aRun(root, ENDPOINT);
+    const dial = stubDial(liveState());
+
+    await retryRun({
+      runId: PARENT_RUN,
+      selector: `@${PLATFORM}`,
+      expectAttempt: { node: UNIT, attempt: 2 },
+      catalog: { root },
+      launcher: stubLauncher().launcher,
+      dial: dial.dial,
+      now: () => T0 + 10,
+    });
+
+    expect(dial.calls.find((c) => c.id === UNIT)?.expectAttempt).toBe(2);
+    expect(dial.calls.find((c) => c.id === LINT)?.expectAttempt).toBeUndefined();
   });
 
   it("replays a completed guarded retry even after its own attempt landed", async () => {

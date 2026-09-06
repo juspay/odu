@@ -157,6 +157,11 @@ export interface RunHistory {
    * did not follow — which costs a caller one redundant retry and never a
    * silent double mutation.
    */
+  /** Which attempt this node is on, by the ALLOCATOR that hands ordinals out.
+   *  The authority a caller's `expectAttempt` is checked against: a directory
+   *  listing can be inflated by a half-written retry, and the journal is what
+   *  the schema says decides. `0` for a node that has not started one. */
+  currentAttempt: (node: string) => number;
   retryAccepted: (accepted: {
     requestId: string;
     inputDigest: string;
@@ -212,6 +217,7 @@ export const NO_HISTORY: RunHistory = {
   // `false`, not `true`: no history means no durable record, and a caller must
   // be able to tell its reply "the acceptance was not written down" rather
   // than promise a line that will never exist.
+  currentAttempt: () => 0,
   retryAccepted: () => false,
   retryApplied: () => {},
   finalize: () => {},
@@ -525,6 +531,7 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
         });
       }
     },
+    currentAttempt: (node) => highest.get(node) ?? 0,
     retryAccepted: ({ requestId, inputDigest, roots, resetDependants }) => {
       if (fenced) return false;
       emit({

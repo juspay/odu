@@ -348,11 +348,25 @@ function reconcileLive(
   const applied = intended.filter((node) => resolved.get(node) === true);
   const declined = intended.filter((node) => resolved.get(node) !== true);
   if (applied.length === 0) {
+    // EVERY root declined — which is where the live attempt ENDS and the
+    // request does not. The policy treats a wholly-declined live reset as the
+    // signal to start a replacement run, so these same records mean "the live
+    // path is over" to one side and used to mean "the request is over" to this
+    // one. A repeat arriving while the original caller was inside its launcher
+    // therefore persisted a refusal, and `completeReceipt` then hid the child
+    // that really started — permanently, since the first result wins.
+    //
+    // A per-lane refusal cannot finalize a request that can still launch a
+    // child. A request whose fallback DID finish has a completed receipt and is
+    // replayed long before this is reached, so reaching here at all means the
+    // original caller is still working.
     return {
-      kind: "refused",
-      message:
-        `odu: request "${requestId}" was accepted by this run's coordinator and the ` +
-        `lane declined the reset (${declined.join(", ")}). Nothing was re-run.`,
+      kind: "unresolved",
+      reason:
+        `this run's coordinator declined every root it was asked to reset ` +
+        `(${declined.join(", ")}), which is what selects a replacement RUN rather ` +
+        "than the end of the request — so the caller that claimed it is very " +
+        "likely inside that launch now, and its outcome is not settled here",
     };
   }
   if (declined.length > 0) {
