@@ -66,13 +66,23 @@ describe("an MCP-spawned run outlives its MCP server", () => {
     // The grandchild: a bun process writing to stdout (the dead-to-be pipe)
     // AND stamping a file, so liveness is observable from the test after the
     // pipe is gone.
-    writeChildAndParent(dir, aliveFile, pidFile);
+    writeChildAndParent(dir);
 
     // Spawn the PARENT (the stand-in for the exiting `odu mcp`): it spawns
-    // the child with the real spawn spec, unrefs, and exits.
-    const parent = spawn(process.execPath, [join(dir, "parent.ts")], {
-      stdio: "inherit",
-    });
+    // the child with the real spawn spec, unrefs, and exits. Every path it
+    // needs arrives as ARGV — see `writeChildAndParent`.
+    const parent = spawn(
+      process.execPath,
+      [
+        join(dir, "parent.ts"),
+        new URL("./runTool.ts", import.meta.url).pathname,
+        join(dir, "child.ts"),
+        dir,
+        pidFile,
+        aliveFile,
+      ],
+      { stdio: "inherit" },
+    );
     const parentExit = new Promise<number>((resolve) => {
       parent.on("exit", (code) => resolve(code ?? -1));
     });
@@ -96,32 +106,49 @@ describe("an MCP-spawned run outlives its MCP server", () => {
   }, 20_000);
 });
 
-function writeChildAndParent(
-  dir: string,
-  aliveFile: string,
-  pidFile: string,
-): void {
-  const specModule = new URL("./runTool.ts", import.meta.url).pathname;
+/**
+ * Write the two scripts this test drives, WITHOUT interpolating a single value
+ * into either of them.
+ *
+ * Both used to be assembled by splicing `JSON.stringify(path)` into source
+ * text. That is code construction from data, and `JSON.stringify` is not an
+ * escape for it: it leaves U+2028/U+2029 raw, which are line terminators to a
+ * JavaScript parser but not to JSON. A test fixture under a temp path will
+ * never carry one — and a guard that holds only because of what the input
+ * happens to be is not a guard, which is why the tooling flags the shape
+ * rather than the instance.
+ *
+ * So the scripts became CONSTANT text and every path arrives on `process.argv`.
+ * There is nothing left to escape, and the two files are now readable as the
+ * programs they are.
+ */
+function writeChildAndParent(dir: string): void {
   writeFileSync(
     join(dir, "child.ts"),
     [
       `const fs = require("node:fs");`,
+      `const aliveFile = process.argv[2];`,
       `let n = 0;`,
       // The write that would be fatal if the runtime routed a dead-reader
       // EPIPE to uncaughtException (Node does; bun swallows it — THAT is the
       // contract this suite pins).
       `setInterval(() => console.log("tick " + (++n)), 80);`,
-      `setInterval(() => fs.appendFileSync(${JSON.stringify(aliveFile)}, "x"), 80);`,
+      `setInterval(() => fs.appendFileSync(aliveFile, "x"), 80);`,
     ].join("\n"),
   );
   writeFileSync(
     join(dir, "parent.ts"),
     [
       `import { spawn } from "node:child_process";`,
-      `import { coordinatorSpawnSpec } from ${JSON.stringify(specModule)};`,
-      `const child = spawn(process.execPath, [${JSON.stringify(join(dir, "child.ts"))}], coordinatorSpawnSpec(${JSON.stringify(dir)}));`,
+      `import { writeFileSync } from "node:fs";`,
+      `const [specModule, childPath, cwd, pidFile, aliveFile] = process.argv.slice(2);`,
+      // The REAL spawn spec, imported from the module that ships it — a
+      // dynamic import because the path is data now, and the point of the
+      // test is that these options are odu's own and not a copy.
+      `const { coordinatorSpawnSpec } = await import(specModule);`,
+      `const child = spawn(process.execPath, [childPath, aliveFile], coordinatorSpawnSpec(cwd));`,
       `child.unref();`,
-      `require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(child.pid));`,
+      `writeFileSync(pidFile, String(child.pid));`,
       `process.exit(0); // the harness restarting its MCP server`,
     ].join("\n"),
   );

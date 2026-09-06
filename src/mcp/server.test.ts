@@ -542,7 +542,14 @@ describe("durableLog — guards (ported)", () => {
     const ctx = gitRunContext();
     expect(ctx).not.toBeNull();
     const { repoRoot, sha7 } = ctx as { repoRoot: string; sha7: string };
-    const secret = join(tmpdir(), `odu-traversal-${process.pid}.log`);
+    // A directory of our own, not a NAME in the shared one. `tmpdir()` is
+    // world-writable and a pid is guessable, so a fixture at a predictable
+    // path there can be pre-created — as a symlink to somewhere else, say — by
+    // anything else on the machine before this line runs. `mkdtempSync` gets
+    // a private directory whose name nobody could have predicted, which is
+    // the point in a test whose whole subject is a path-traversal guard.
+    const secretDir = mkdtempSync(join(tmpdir(), "odu-traversal-"));
+    const secret = join(secretDir, "secret.log");
     writeFileSync(secret, "SECRET CONTENTS\n");
     try {
       const climb = relative(
@@ -554,7 +561,7 @@ describe("durableLog — guards (ported)", () => {
       expect(result.source).toBe("missing");
       expect(result.text).toBe("");
     } finally {
-      rmSync(secret, { force: true });
+      rmSync(secretDir, { recursive: true, force: true });
     }
   });
 

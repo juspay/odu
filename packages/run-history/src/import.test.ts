@@ -14,13 +14,15 @@
  */
 
 import {
+  closeSync,
   type Dirent,
+  fstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -119,9 +121,19 @@ function fingerprint(repoRoot: string): Record<string, string> {
         walk(path);
         continue;
       }
-      const stat = statSync(path);
-      out[relative(repoRoot, path)] =
-        `${stat.size}:${stat.mtimeMs}:${readFileSync(path, "utf-8")}`;
+      // ONE descriptor: the size and mtime are asked of the OPEN FILE, not of
+      // the name a moment before reading it. A stat-then-read pair is two
+      // questions about a path, and a fingerprint whose parts came from two
+      // instants cannot witness "nothing changed" — which is the only thing
+      // this helper exists to say.
+      const fd = openSync(path, "r");
+      try {
+        const stat = fstatSync(fd);
+        out[relative(repoRoot, path)] =
+          `${stat.size}:${stat.mtimeMs}:${readFileSync(fd, "utf-8")}`;
+      } finally {
+        closeSync(fd);
+      }
     }
   };
   walk(join(repoRoot, ".ci"));
