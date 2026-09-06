@@ -20,6 +20,7 @@
 
 import { join } from "node:path";
 import { runSocketPath } from "@odu/run-client/dial";
+import { handleFor } from "@odu/run-history/store";
 import type { RunScope } from "@odu/run-history/schema";
 import {
   defaultWaitForSocket,
@@ -129,10 +130,16 @@ export function packagedLauncher(): RunLauncher {
   return async (request) => {
     const endpoint = runSocketPath(request.checkout);
     const argv = [...oduSelfArgv(), ...launchArgv(request)];
+    // The coordinator's own narration goes into its catalog directory, beside
+    // the evidence it is about to produce. The run id is pre-minted, so the
+    // path exists to be named before the process does — and a launcher that
+    // exits (as this one does, the moment the socket answers) must not leave
+    // the child writing into a pipe nobody is reading. See `spawnCoordinator`.
     const spawned = spawnCoordinator(
       argv,
       request.checkout,
       unitNameFor(request.runId),
+      coordinatorLogPath(request.runId),
     );
     const up = await defaultWaitForSocket(endpoint, spawned.onExit);
     if (!up) {
@@ -161,4 +168,12 @@ export function packagedLauncher(): RunLauncher {
  *  because the launcher's refusals cite it. */
 export function checkoutLockPath(checkout: string): string {
   return join(checkout, ".ci", "odu.run.lock");
+}
+
+/** Where a launched coordinator writes its own account of the run —
+ *  `runs/<runId>/coordinator.log` in the catalog. Addressed by RUN, so it is
+ *  still findable when the checkout is not, and durable, so a startup failure
+ *  survives the launcher that observed it. */
+export function coordinatorLogPath(runId: string): string {
+  return join(handleFor(runId).dir, "coordinator.log");
 }

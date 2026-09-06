@@ -44,6 +44,14 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
+import {
+  closeSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  statSync,
+} from "node:fs";
+import { dirname } from "node:path";
 import { dialRun } from "@odu/run-client/dial";
 
 /** The argv prefix that re-invokes the odu CLI. The nix wrapper bakes
@@ -61,10 +69,14 @@ export function oduSelfArgv(env: NodeJS.ProcessEnv = process.env): string[] {
 /** The spawn options that make a coordinator outlive its LAUNCHER'S plain
  *  exit: its own process group (`detached`) so no signal addressed to the
  *  launcher ever reaches it by group, and pipes for stdout/stderr so a caller
- *  can tee the child's early output — pipes whose death the bun runtime
- *  tolerates natively (EPIPE on stdio never becomes an uncaughtException;
- *  `src/mcp/spawnSurvival.test.ts` pins the whole property). The caller
- *  `unref()`s the handle so the launcher can exit without waiting. */
+ *  can tee the child's early output. The caller `unref()`s the handle so the
+ *  launcher can exit without waiting.
+ *
+ *  PIPES ARE ONLY SAFE WHILE SOMEBODY IS READING THEM — see
+ *  {@link spawnCoordinator}, which does not use this shape for exactly that
+ *  reason. This variant is for a launcher that OUTLIVES the run it started
+ *  (the MCP server, which tees the child's output for the life of the
+ *  session). */
 export function coordinatorSpawnSpec(checkout: string): {
   cwd: string;
   stdio: ["ignore", "pipe", "pipe"];
@@ -235,17 +247,39 @@ export interface SpawnedCoordinator {
    *  say what the run's lifetime really is. */
   plan: SpawnPlan;
   onExit: Promise<number>;
-  /** A bounded tail of the child's early output, for reporting a startup
-   *  failure. */
+  /** A bounded tail of the coordinator's own log, for reporting a startup
+   *  failure. Read from the file at the moment it is asked for, so it carries
+   *  everything the child wrote — not only what arrived before the launcher
+   *  stopped listening. */
   stderrTail: () => string;
 }
 
-/** Start a coordinator with the strongest independence this environment
- *  offers. The caller owns waiting for its socket. */
+/**
+ * Start a coordinator with the strongest independence this environment offers,
+ * writing its own narration to `logPath`. The caller owns waiting for its
+ * socket.
+ *
+ * A FILE, NOT A PIPE, and this is the load-bearing difference between this
+ * function and {@link coordinatorSpawnSpec}. A launcher that exits as soon as
+ * the socket answers — which is what a launcher should do — leaves the read
+ * end of every pipe it gave the child closed, and the child is at that moment
+ * about to narrate a venue claim, a lane's provisioning, and every node
+ * transition into it. MEASURED, not reasoned: a coordinator spawned with pipes
+ * whose launcher exits at socket-up dies part-way through provisioning, with
+ * its journal ending at the lane lease and no verdict anywhere. A file has no
+ * reader to lose.
+ *
+ * It is also strictly more useful. The output stops being a convenience the
+ * launcher happened to be holding and becomes a durable artifact addressed by
+ * run: a startup failure is readable after the fact, and so is the
+ * coordinator's own account of a run that went wrong in a way its per-node
+ * logs do not show.
+ */
 export function spawnCoordinator(
   oduArgv: readonly string[],
   checkout: string,
   unitName: string,
+  logPath: string,
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
 ): SpawnedCoordinator {
@@ -253,16 +287,25 @@ export function spawnCoordinator(
   const argv = plan.argv(oduArgv);
   const [cmd, ...rest] = argv;
   if (cmd === undefined) throw new Error("odu: empty coordinator argv");
-  const child = spawn(cmd, rest, coordinatorSpawnSpec(checkout));
+  mkdirSync(dirname(logPath), { recursive: true });
+  // Append: a takeover re-launching into the same run id adds to the account
+  // rather than erasing the one that explains why it had to.
+  const fd = openSync(logPath, "a");
+  let child: ChildProcess;
+  try {
+    child = spawn(cmd, rest, {
+      cwd: checkout,
+      stdio: ["ignore", fd, fd],
+      env: process.env,
+      detached: true,
+    });
+  } finally {
+    // The child holds its own duplicate; keeping ours open would pin the file
+    // in this process for as long as the launcher lives.
+    closeSync(fd);
+  }
   child.unref();
   liveRuns.add(child);
-  const MAX_STDERR = 64 * 1024;
-  let stderrTail = "";
-  const onChunk = (c: Buffer): void => {
-    stderrTail = (stderrTail + c.toString("utf-8")).slice(-MAX_STDERR);
-  };
-  child.stdout?.on("data", onChunk);
-  child.stderr?.on("data", onChunk);
   const onExit = new Promise<number>((resolve) => {
     child.on("exit", (code) => {
       liveRuns.delete(child);
@@ -273,5 +316,19 @@ export function spawnCoordinator(
       resolve(-1);
     });
   });
-  return { child, plan, onExit, stderrTail: () => stderrTail };
+  return { child, plan, onExit, stderrTail: () => tailOf(logPath) };
+}
+
+/** The last 64 KiB of the coordinator's log — what a launcher quotes when the
+ *  socket never came up. Bounded because a coordinator that failed after doing
+ *  a lot of work has a lot of log, and the reason is at the end. */
+function tailOf(path: string): string {
+  const MAX = 64 * 1024;
+  try {
+    const size = statSync(path).size;
+    const text = readFileSync(path, "utf-8");
+    return size > MAX ? text.slice(-MAX) : text;
+  } catch {
+    return "";
+  }
 }

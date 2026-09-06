@@ -312,14 +312,32 @@ describe("allocating attempts", () => {
     ]);
   });
 
-  it("seals the open attempt on a reset, so the next bytes land on a NEW ordinal", () => {
+  it("replaces a RE-SYNC in place rather than allocating a ghost attempt", () => {
+    // The distinction between a lane re-sending its buffered tail and a node
+    // actually being re-run. Both arrive as a `snapshot` frame, and treating
+    // them alike is not a cosmetic error: every node whose first output landed
+    // after its `running` frame got an empty attempt 1 and did its real work
+    // in attempt 2, so the ordinal a failure reported was off by one and the
+    // log at the ordinal below it was zero bytes. Seen in a real run before it
+    // was fixed.
+    const { history, handle } = started();
+
+    history.nodeStatus(NODE, "running", running);
+    history.replaceLog(NODE, "the tail, re-sent\n");
+    history.log(NODE, " and then more\n");
+
+    expect(attemptsFor(handle, NODE)).toEqual([1]);
+    expect(logText(handle, NODE, 1)).toBe("the tail, re-sent\n and then more\n");
+  });
+
+  it("seals the open attempt on a RESTART, so the next bytes land on a NEW ordinal", () => {
     // The property the whole allocator exists for: a retry cannot write over
     // the failure somebody is reading.
     const { history, handle } = started();
 
     history.nodeStatus(NODE, "running", running);
     history.log(NODE, "first go\n");
-    history.resetNode(NODE, "the lane re-sent its snapshot");
+    history.resetNode(NODE, "the lane running this node died");
     history.log(NODE, "second go\n");
 
     expect(attemptsFor(handle, NODE)).toEqual([1, 2]);
@@ -332,7 +350,7 @@ describe("allocating attempts", () => {
     // A reset is not a completion, and it says so.
     expect(readAttemptRecord(handle, NODE, 1)?.logComplete).toBe(false);
     expect(readAttemptRecord(handle, NODE, 1)?.logTruncationReason).toBe(
-      "the lane re-sent its snapshot",
+      "the lane running this node died",
     );
     // Attempt 2 is still open — a reset supplies neither half of the barrier.
     expect(readAttemptRecord(handle, NODE, 2)?.endedAt).toBeNull();

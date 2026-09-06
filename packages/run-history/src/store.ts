@@ -443,6 +443,34 @@ export function startAttempt(
   return true;
 }
 
+/**
+ * REPLACE an attempt's log with `text`.
+ *
+ * For the one frame that is a re-sync rather than new output: a lane
+ * re-sending a node's buffered tail. That is not a retry — the attempt is the
+ * same attempt — so the bytes are replaced in place rather than rotated onto a
+ * new ordinal, which would leave an empty ghost attempt behind and make
+ * "attempt 2" mean nothing.
+ */
+export function writeAttemptLog(
+  handle: RunHandle,
+  node: string,
+  attempt: number,
+  text: string,
+): void {
+  try {
+    writeAtomic(
+      join(
+        attemptDir(handle.dir, encodeNodeKey(node), attempt),
+        ATTEMPT_FILES.log,
+      ),
+      text,
+    );
+  } catch {
+    // Best-effort, like every other evidence write — see `appendAttemptLog`.
+  }
+}
+
 /** Append raw bytes to an attempt's log. Hot path — called per output chunk —
  *  so it does NOT re-check the fence on every call: the fence is checked when
  *  the attempt starts and when it is sealed, and a fenced writer appending to

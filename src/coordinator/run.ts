@@ -945,11 +945,14 @@ async function orchestrate(
   };
   const resetLocal = (id: string, text: string): void => {
     logs.reset(id, text);
-    history.resetNode(
-      id,
-      "this node was re-run; the attempt's output was superseded",
-    );
-    if (text !== "") history.log(id, text);
+    // A RE-SYNC, not a retry. The `snapshot` frame a lane opens a node's log
+    // with re-sends whatever it has buffered, and the checkout file takes it
+    // as a replacement — but the ATTEMPT is unchanged, so its bytes are
+    // replaced in place. Rotating here (which this did at first) allocated an
+    // empty ghost attempt for every node whose first output arrived after its
+    // `running` frame, and then "attempt 2" meant nothing. The genuine restart
+    // is `history.resetNode`, called where a node is actually re-run.
+    history.replaceLog(id, text);
   };
   const endLocal = (id: string): void => {
     logs.end(id);
@@ -2419,6 +2422,13 @@ async function orchestrate(
       // `pending`.
       for (const id of retryIds) {
         updateNode(id, REOPENED);
+        // A genuine restart: this node was RUNNING when its lane died, so its
+        // attempt is still open and the successor lane's output must not land
+        // on top of what the dead one produced. Seal it and rotate.
+        history.resetNode(
+          id,
+          "the lane running this node died; it was re-run on another venue",
+        );
         // And so does the log: what is in it belongs to an invocation that no
         // longer exists. Reset HERE, where the decision to re-run is made,
         // rather than leaving it to the successor lane's opening `snapshot`

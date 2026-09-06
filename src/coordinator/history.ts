@@ -59,6 +59,7 @@ import {
   registerRun,
   sealAttempt,
   startAttempt,
+  writeAttemptLog,
   writeVerdict,
 } from "@odu/run-history/store";
 
@@ -126,10 +127,13 @@ export interface RunHistory {
    *  both arrive for one attempt and they disagree by design, since the notice
    *  is written precisely because the `end` never came. */
   logFinalized: (node: string, complete: boolean, reason: string | null) => void;
-  /** This node's output starts over — a resurrection's wipe, or a lane
-   *  re-sending its snapshot. Seals the open attempt as superseded so the bytes
-   *  that follow land on a NEW ordinal, never on top of the failure somebody is
-   *  reading. */
+  /** A lane re-sent this node's buffered tail. NOT a retry: the attempt is the
+   *  same attempt, so its bytes are replaced in place. */
+  replaceLog: (node: string, text: string) => void;
+  /** This node's work is starting over on a new invocation — a resurrection
+   *  re-running an interrupted node. Seals the open attempt as superseded so
+   *  the bytes that follow land on a NEW ordinal, never on top of the failure
+   *  somebody is reading. */
   resetNode: (node: string, reason: string) => void;
   postingDebt: (
     rows: readonly { context: string; lastError: string; attempts: number }[],
@@ -162,6 +166,7 @@ export const NO_HISTORY: RunHistory = {
   nodeStatus: () => {},
   log: () => {},
   logFinalized: () => {},
+  replaceLog: () => {},
   resetNode: () => {},
   postingDebt: () => {},
   finalize: () => {},
@@ -443,6 +448,13 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
       }
       current.log = { complete, reason };
       sealIfComplete(node);
+    },
+    replaceLog: (node, text) => {
+      if (fenced) return;
+      if (!open.has(node)) beginAttempt(node, null);
+      const attempt = open.get(node)?.attempt;
+      if (attempt === undefined) return;
+      writeAttemptLog(handle, node, attempt, text);
     },
     resetNode: (node, reason) => {
       const current = open.get(node);
