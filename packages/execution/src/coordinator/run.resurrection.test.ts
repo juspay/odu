@@ -26,7 +26,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
@@ -550,10 +550,15 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
       expect(lanes.length).toBe(MAX_RESURRECTIONS + 1);
 
       const sha7 = sha7Of(dir);
-      const timings = readFileSync(
-        join(dir, ".ci", sha7, "timings.jsonl"),
-        "utf-8",
-      )
+      // The timings file is written as the run tears its lanes down, and the
+      // exit code we just awaited is published from a different path — so a
+      // bare read here is a race that only loses on a slow, contended machine
+      // (it lost on macOS CI, never locally). Wait for the artifact rather than
+      // assuming the exit implies it, which is the same discipline the rest of
+      // this file's assertions already use.
+      const timingsPath = join(dir, ".ci", sha7, "timings.jsonl");
+      await waitFor(() => existsSync(timingsPath), 20_000);
+      const timings = readFileSync(timingsPath, "utf-8")
         .trim()
         .split("\n")
         .map((line) => JSON.parse(line) as { node: string; status: string });
@@ -675,10 +680,15 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
       expect(leases[1]!.released).toBe(true);
 
       const sha7 = sha7Of(dir);
-      const timings = readFileSync(
-        join(dir, ".ci", sha7, "timings.jsonl"),
-        "utf-8",
-      )
+      // The timings file is written as the run tears its lanes down, and the
+      // exit code we just awaited is published from a different path — so a
+      // bare read here is a race that only loses on a slow, contended machine
+      // (it lost on macOS CI, never locally). Wait for the artifact rather than
+      // assuming the exit implies it, which is the same discipline the rest of
+      // this file's assertions already use.
+      const timingsPath = join(dir, ".ci", sha7, "timings.jsonl");
+      await waitFor(() => existsSync(timingsPath), 20_000);
+      const timings = readFileSync(timingsPath, "utf-8")
         .trim()
         .split("\n")
         .map((line) => JSON.parse(line) as { node: string; status: string });
