@@ -34,6 +34,44 @@
  * its documented behaviour; this escape is offered to the launcher and is
  * opt-outable, so the two are not silently merged.
  *
+ * WHY THIS IS NOT `@kolu/surface-daemon-supervisor`. Kolu ships this exact
+ * mechanism — `survivableSpawnDriver` in that package's `driver.ts`, whose own
+ * header names "the odu CLI / odu-web next" as its second tenant. Every
+ * decision below is taken FROM it rather than re-derived: the `INVOCATION_ID`
+ * gate between the two branches, per-spawn unique `--unit` names because a
+ * dead unit lingers loaded and refuses a reused one, `--collect` to GC it, an
+ * absolute binary path because a transient unit's PATH is minimal, `--setenv`
+ * per forwarded var because a transient unit starts from systemd's
+ * environment rather than ours, a file for a detaching child's stderr because
+ * nobody holds it, and — the one that cost the most to learn here — the split
+ * between a launch being ACCEPTED and a service being READY.
+ *
+ * It is not IMPORTED for two reasons, and only the first is temporary:
+ *
+ *   - Hydration is per-package, and that package's manifest declares
+ *     `osfacts-client: workspace:*`, which is absent from odu's pinned kolu
+ *     revision (f3ba639). The directory cannot be satisfied as-is. `driver.ts`
+ *     alone imports nothing but `node:*` and `effect`, but it is not on the
+ *     export map, so there is no supported way to take only it.
+ *   - The `.` entry is a daemon-ENDPOINT state machine — a rendezvous socket a
+ *     per-host daemon is expected to be holding, with squatter recovery, gate
+ *     identity, and contract-skew handling for the case where somebody else
+ *     already listens there. An odu coordinator is not that. It is per-RUN, its
+ *     socket is absent for most of any checkout's life (`@odu/run-client`'s
+ *     README states that as the design), and a second process on the same
+ *     socket is prevented by the ownership fence in `@odu/run-history`, not by
+ *     probing who holds it. Adopting the endpoint would mean answering
+ *     questions this lifecycle does not ask.
+ *
+ * The first reason dissolves when the pin carries `osfacts-client`; the second
+ * dissolves for `odu web`/`odu serve`, which IS a long-lived daemon behind a
+ * rendezvous socket and is the tenant kolu's header actually names. So PR 2
+ * inherits a decision, not a fork: when it stands that daemon up, it should
+ * hydrate the supervisor and drive it, and this module's systemd branch should
+ * become a call into `survivableSpawnDriver` rather than a second copy of its
+ * argv. What is here is deliberately the smaller thing — one plan function and
+ * one spawn — so that replacement is a deletion.
+ *
  * HONEST ABOUT WHAT IS MEASURED. The detached branch is exercised by
  * `packages/cli/src/mcp/spawnSurvival.test.ts` against the real runtime and the real spawn
  * options. The systemd branch is NOT covered by odu's suite: it needs a user
