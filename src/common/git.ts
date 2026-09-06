@@ -6,18 +6,19 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { shortSha } from "@odu/run-history/ids";
 
 function git(args: string[]): string | null {
   const result = spawnSync("git", args, { encoding: "utf-8" });
   return result.status === 0 ? result.stdout.trim() : null;
 }
 
-/** The 7-char short form of a commit sha — the one place the prefix rule
- *  lives, so every reader derives the short sha mechanically rather than
- *  trusting a stored copy. */
-export function shortSha(sha: string): string {
-  return sha.slice(0, 7);
-}
+/** Re-exported, not re-defined: the prefix rule lives with the other identity
+ *  spellings in `@odu/run-history/ids`, because `<sha7>#<seq>` is a run's
+ *  display ref and the two halves of it must not fork per consumer. Kept
+ *  reachable from here so the many call sites that already ask this module for
+ *  git facts do not each learn a second import path. */
+export { shortSha };
 
 export function gitTopLevel(): string | null {
   return git(["rev-parse", "--show-toplevel"]);

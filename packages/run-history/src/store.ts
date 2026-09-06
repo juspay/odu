@@ -224,13 +224,44 @@ function nextSeq(handle: RunHandle): number {
 }
 
 /**
- * Append one event. Returns the entry written, or `null` when this writer no
- * longer owns the run (fenced) or the append itself failed.
+ * A run's journal, held open by its owner.
  *
- * Best-effort by disposition — a failed history write must never fail a run,
- * which is the rule the checkout ledger already follows — but NOT silent about
- * the one case that matters: a `null` return means the caller has been fenced,
- * and the coordinator uses that to stop rather than to retry.
+ * The ordinal lives IN MEMORY here, and that is the whole reason this type
+ * exists rather than a free function. Deriving the next sequence from disk on
+ * every append means reading and decoding the entire journal per line: the
+ * hundredth event of a run re-reads ninety-nine, which is quadratic in the
+ * length of a run and lands squarely on the coordinator's event loop — the one
+ * that is also serving `.ci/odu.sock`. Holding the counter is safe precisely
+ * because ownership is exclusive: one epoch, one writer, one counter. A
+ * successor opens its own writer and re-derives the floor from disk, which is
+ * the one moment the file is the authority.
+ */
+export interface JournalWriter {
+  append: (event: RunEvent, now?: number) => JournalEntry | null;
+}
+
+
+/** Open the journal for a run this token owns. The floor is read once. */
+export function openJournal(
+  handle: RunHandle,
+  token: OwnershipToken,
+): JournalWriter {
+  let next = nextSeq(handle);
+  return {
+    append: (event, now) => {
+      const entry = appendAt(handle, token, next, event, now ?? Date.now());
+      if (entry !== null) next += 1;
+      return entry;
+    },
+  };
+}
+
+/**
+ * Append one event, deriving its ordinal from disk.
+ *
+ * The one-shot form, for a caller that appends once and does not hold a
+ * journal open — registration, and tests. A writer that appends repeatedly
+ * wants {@link openJournal}; see its note on why.
  */
 export function appendEvent(
   handle: RunHandle,
@@ -238,8 +269,27 @@ export function appendEvent(
   event: RunEvent,
   now: number = Date.now(),
 ): JournalEntry | null {
+  return appendAt(handle, token, nextSeq(handle), event, now);
+}
+
+/**
+ * The append itself. Returns the entry written, or `null` when this writer no
+ * longer owns the run (fenced) or the append failed.
+ *
+ * Best-effort by disposition — a failed history write must never fail a run,
+ * which is the rule the checkout ledger already follows — but NOT silent about
+ * the one case that matters: a `null` return means the caller has been fenced,
+ * and the coordinator uses that to stop rather than to retry.
+ */
+function appendAt(
+  handle: RunHandle,
+  token: OwnershipToken,
+  seq: number,
+  event: RunEvent,
+  now: number,
+): JournalEntry | null {
   if (!stillOwner(token)) return null;
-  const entry: JournalEntry = { seq: nextSeq(handle), at: now, event };
+  const entry: JournalEntry = { seq, at: now, event };
   try {
     // ONE `appendFileSync` of a complete line. `O_APPEND` makes a write under
     // PIPE_BUF atomic against other appenders, and a crash mid-write can only

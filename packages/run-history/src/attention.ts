@@ -138,6 +138,14 @@ export interface Attention {
   /** Settled with no red and no cancelled node. Never true for a run that is
    *  not settled — there is no such thing as "passing so far". */
   passed: boolean;
+  /** The run's own terminal word, or null while it has none.
+   *
+   *  Carried BESIDE `passed` rather than derived from it, because `passed:
+   *  false` covers two genuinely different endings: a run with a red node, and
+   *  one that was cancelled or torn down before every node finished. Reporting
+   *  the second as "failed" tells an operator to go looking for a test that
+   *  broke, which is a wrong instruction rather than a vague one. */
+  outcome: "passed" | "failed" | "incomplete" | null;
   /** There is a red node whose evidence is ready to read. The bit a bounded
    *  wait returns on, before the slow lanes finish. */
   actionable: boolean;
@@ -412,6 +420,7 @@ export function attentionFor(
     state,
     settled,
     passed,
+    outcome: verdictOutcome ?? null,
     actionable,
     cursor: formatCursor({ runId: sources.runId, seq: afterSeq }),
     events: [],

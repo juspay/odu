@@ -49,10 +49,11 @@ import {
   releaseOwnership,
   type OwnershipToken,
 } from "@odu/run-history/owner";
-import type { Placement, RunScope } from "@odu/run-history/schema";
+import type { Placement, RunEvent, RunScope } from "@odu/run-history/schema";
 import {
   appendAttemptLog,
-  appendEvent,
+  type JournalWriter,
+  openJournal,
   type RunHandle,
   readAttemptRecord,
   registerRun,
@@ -225,6 +226,10 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
     return NO_HISTORY;
   }
 
+  // One journal, held open for the run: the ordinal lives in the writer, so a
+  // long run does not re-read its own history once per event. See
+  // `openJournal`.
+  const journal: JournalWriter = openJournal(handle, token);
   let fenced = false;
   let finalized = false;
   const open = new Map<string, OpenAttempt>();
@@ -235,10 +240,10 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
 
   /** Every journal write goes through here, so the fence is checked in ONE
    *  place and `fenced` cannot be true for some writers and false for others. */
-  const emit = (event: Parameters<typeof appendEvent>[2]): void => {
+  const emit = (event: RunEvent): void => {
     if (fenced) return;
     try {
-      if (appendEvent(handle, token, event, now()) === null) fenced = true;
+      if (journal.append(event, now()) === null) fenced = true;
     } catch {
       // Best-effort: a write that throws is a disk problem, not a fence.
     }

@@ -8,7 +8,8 @@
  *   odu wait [--settle]                    block for fail-fast / settle verdict
  *   odu rerun <node|@plat|recipe>          restart node(s) on the live run
  *   odu cancel [node|@platform]            stop the live run, or one node/lane
- *   odu runs [-o json]                     the durable run history (no live run)
+ *   odu runs [-o json]                     this checkout's run history
+ *   odu history <list|show|import|prune>   the per-user run catalog
  *   odu hosts                              venue inventory (free / busy / held by)
  *   odu lease [PLAT…] [--no-wait]          agent-held venue lease (cross-run)
  *   odu release [PLAT…]                    drop agent-held lease(s)
@@ -41,23 +42,38 @@ import {
   leaseHoldCommand,
   releaseCommand,
 } from "./leaseCmd";
+import {
+  durableLogsCommand,
+  durableWaitCommand,
+  historyImportCommand,
+  historyListCommand,
+  historyPruneCommand,
+  historyShowCommand,
+} from "./history";
 import { mcpCommand } from "./mcp";
 import { protectCommand } from "./protect";
 import { runsCommand } from "./runs";
 
-const USAGE = `usage: odu <run|status|logs|attach|wait|rerun|cancel|runs|hosts|lease|release|dump|graph|protect|mcp> [args]
+const USAGE = `usage: odu <run|status|logs|attach|wait|rerun|cancel|runs|history|hosts|lease|release|dump|graph|protect|mcp> [args]
 
 run [recipe[@platform]…] [--platform P]… [--host P=ADDR]… [--root NAMEPATH]
     [--no-deps] [--no-strict] [--no-snapshot] [--no-post] [--progress json]
     [--supersede] [--linger] [--no-wait]
 status [-o json]              # json shape: { nodes, posting }
-logs [-f] <node>
+logs [-f] <node>              # the LIVE run's log (replay + follow)
+logs --run R [--attempt N] [--offset B] [--limit B] [-o json] <node>
+                              # one RECORDED attempt, after the run is gone
 attach [-o json]
 wait [--settle] [--timeout-ms N] [--expected-sha SHA]
                               # fail-fast verdict JSON; --settle = full settle
+wait --run R [--after CURSOR] [--deadline-ms N] [--settle] [-o json]
+                              # bounded, resumable; exits 0 pass · 1 fail
+                              # 2 still-running · 3 owner-lost · 4 no-such-run
 rerun <node|@platform|recipe> # restart node(s) on the still-live run
 cancel [node|@platform]       # bare = whole run; node or @plat = partial
 runs [-o json]
+history <list|show|import|prune>
+                              # the per-user run catalog (odu history --help)
 hosts
 lease [PLAT…] [--no-wait]     hold a free venue across runs (agent layer)
 release [PLAT…]               drop agent-held lease(s)
@@ -67,6 +83,125 @@ protect [--dry-run] [--branch B] [--platform P]… [--create]
                               # --create: make the branch's ruleset if absent
 mcp
 `;
+
+/** A flag's integer value, or a usage error naming the flag.
+ *
+ *  `Number("")` is 0 and `Number(" 5 ")` is 5, so a bare `Number` would read a
+ *  truncated `--offset=` as "from the beginning" and a typo as a value. A
+ *  digits-only parse refuses what the flag cannot have meant. */
+function integer(flag: string, raw: string): number {
+  const trimmed = raw.trim();
+  if (!/^-?\d+$/.test(trimmed)) {
+    throw new Error(`odu: ${flag} needs a whole number (got "${raw}")`);
+  }
+  const value = Number(trimmed);
+  if (!Number.isSafeInteger(value)) {
+    throw new Error(`odu: ${flag} is out of range (got "${raw}")`);
+  }
+  return value;
+}
+
+function positiveInt(flag: string, raw: string): number {
+  const value = integer(flag, raw);
+  if (value <= 0) {
+    throw new Error(`odu: ${flag} needs a positive number (got "${raw}")`);
+  }
+  return value;
+}
+
+const HISTORY_USAGE = `usage: odu history <list|show|import|prune> [args]
+
+list [--all] [--limit N] [-o json]   runs in the per-user catalog, newest first
+show --run R [--after CURSOR] [-o json]
+                                     one run's attention payload, without waiting
+import [--dry-run] [-o json]         bring this checkout's .ci records in
+prune [--days N] [--dry-run] [-o json]
+                                     expire finished runs past the window (30d)
+`;
+
+/** `odu history` — the per-user catalog's own commands. A sub-command group
+ *  rather than five top-level verbs: these are all about the CATALOG, and the
+ *  top level is about a RUN. */
+function historyCommand(sub: string | undefined, rest: string[]): number {
+  switch (sub) {
+    case "list": {
+      const { values } = parseArgs({
+        args: rest,
+        options: {
+          all: { type: "boolean" },
+          limit: { type: "string" },
+          output: { type: "string", short: "o" },
+        },
+      });
+      return historyListCommand({
+        json: values.output === "json",
+        all: values.all ?? false,
+        ...(values.limit === undefined
+          ? {}
+          : { limit: positiveInt("--limit", values.limit) }),
+      });
+    }
+    case "show": {
+      const { values } = parseArgs({
+        args: rest,
+        options: {
+          run: { type: "string" },
+          after: { type: "string" },
+          output: { type: "string", short: "o" },
+        },
+      });
+      if (values.run === undefined) {
+        throw new Error("odu: history show needs --run (a run id, <sha7>#<seq>, or `latest`)");
+      }
+      return historyShowCommand({
+        run: values.run,
+        ...(values.after === undefined ? {} : { after: values.after }),
+        json: values.output === "json",
+      });
+    }
+    case "import": {
+      const { values } = parseArgs({
+        args: rest,
+        options: {
+          "dry-run": { type: "boolean" },
+          output: { type: "string", short: "o" },
+        },
+      });
+      return historyImportCommand({
+        json: values.output === "json",
+        dryRun: values["dry-run"] ?? false,
+      });
+    }
+    case "prune": {
+      const { values } = parseArgs({
+        args: rest,
+        options: {
+          days: { type: "string" },
+          "dry-run": { type: "boolean" },
+          output: { type: "string", short: "o" },
+        },
+      });
+      return historyPruneCommand({
+        json: values.output === "json",
+        dryRun: values["dry-run"] ?? false,
+        ...(values.days === undefined
+          ? {}
+          : { retentionDays: positiveInt("--days", values.days) }),
+      });
+    }
+    case undefined:
+    case "help":
+    case "--help":
+    case "-h":
+      process.stdout.write(HISTORY_USAGE);
+      return sub === undefined ? 1 : 0;
+    default:
+      process.stderr.write(
+        `odu: unknown history sub-command "${sub}"\n${HISTORY_USAGE}`,
+      );
+      return 1;
+  }
+}
 
 async function dispatch(argv: string[]): Promise<number> {
   const [command, ...rest] = argv;
@@ -118,11 +253,53 @@ async function dispatch(argv: string[]): Promise<number> {
       const { values, positionals } = parseArgs({
         args: rest,
         allowPositionals: true,
-        options: { follow: { type: "boolean", short: "f" } },
+        options: {
+          follow: { type: "boolean", short: "f" },
+          run: { type: "string" },
+          attempt: { type: "string" },
+          offset: { type: "string" },
+          limit: { type: "string" },
+          output: { type: "string", short: "o" },
+        },
       });
       const node = positionals[0];
       if (node === undefined) throw new Error("odu: logs needs a node id");
-      return logsCommand(node, values.follow ?? false);
+      // `--run` switches the SOURCE, not the command: without it this is the
+      // live socket's log stream exactly as it always was (including `-f`),
+      // with it this is one recorded attempt out of the durable catalog. They
+      // are one command because "show me this node's output" is one question,
+      // and the difference is only which run you mean.
+      if (values.run === undefined) {
+        if (values.attempt !== undefined) {
+          throw new Error(
+            "odu: --attempt addresses a recorded run — pass --run too (a live run's log has no attempt to choose)",
+          );
+        }
+        return logsCommand(node, values.follow ?? false);
+      }
+      if (values.follow === true) {
+        throw new Error(
+          "odu: -f follows a LIVE node's log; a recorded attempt is already complete (drop -f, or drop --run)",
+        );
+      }
+      return durableLogsCommand({
+        run: values.run,
+        node,
+        ...(values.attempt === undefined
+          ? {}
+          : { attempt: positiveInt("--attempt", values.attempt) }),
+        ...(values.offset === undefined
+          ? {}
+          : { offset: integer("--offset", values.offset) }),
+        ...(values.limit === undefined
+          ? {}
+          : { limit: positiveInt("--limit", values.limit) }),
+        json: values.output === "json",
+      });
+    }
+    case "history": {
+      const [sub, ...subRest] = rest;
+      return historyCommand(sub, subRest);
     }
     case "attach": {
       const { values } = parseArgs({
@@ -139,12 +316,42 @@ async function dispatch(argv: string[]): Promise<number> {
           settle: { type: "boolean" },
           "timeout-ms": { type: "string" },
           "expected-sha": { type: "string" },
+          run: { type: "string" },
+          after: { type: "string" },
+          "deadline-ms": { type: "string" },
+          output: { type: "string", short: "o" },
         },
       });
       if (positionals.length > 0) {
         throw new Error(
           "odu: wait takes no positional arguments (use --settle / --timeout-ms / --expected-sha)",
         );
+      }
+      // The ADDRESSED wait: a named run out of the durable catalog, resumable
+      // across disconnects with `--after`, and with its own documented exits
+      // (see WAIT_EXITS) because "not yet" and "it failed" are different
+      // answers. The bare `odu wait` below is unchanged — it blocks on THIS
+      // checkout's live socket and still exits 0 or 1.
+      if (values.run !== undefined) {
+        if (values["expected-sha"] !== undefined) {
+          throw new Error(
+            "odu: --expected-sha guards a LIVE run's identity; --run already names one exactly",
+          );
+        }
+        if (values["timeout-ms"] !== undefined) {
+          throw new Error(
+            "odu: use --deadline-ms with --run (reaching it means still_running, not a timeout failure)",
+          );
+        }
+        return durableWaitCommand({
+          run: values.run,
+          ...(values.after === undefined ? {} : { after: values.after }),
+          ...(values["deadline-ms"] === undefined
+            ? {}
+            : { deadlineMs: positiveInt("--deadline-ms", values["deadline-ms"]) }),
+          settle: values.settle ?? false,
+          json: values.output === "json",
+        });
       }
       let timeoutMs: number | undefined;
       if (values["timeout-ms"] !== undefined) {

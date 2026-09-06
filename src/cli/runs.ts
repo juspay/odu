@@ -1,12 +1,25 @@
 /**
- * `odu runs` — the run history. Unlike `status` / `logs` / `attach`, which
- * dial a live coordinator, this reads the durable ledger
- * (packages/run-history/src/legacy/ledger.ts) straight off disk, so it answers "what runs
- * happened here?" with *no* run in progress — the first odu command that
- * works against an idle checkout.
+ * `odu runs` — THIS CHECKOUT's run history. Unlike `status` / `logs` /
+ * `attach`, which dial a live coordinator, this reads the durable ledger
+ * (packages/run-history/src/legacy/ledger.ts) straight off disk, so it answers
+ * "what runs happened here?" with *no* run in progress — the first odu command
+ * that worked against an idle checkout.
  *
  * `-o json` emits the raw records (the row source a service face consumes);
  * the default is a compact table, newest first.
+ *
+ * THE SPLIT WITH `odu history list`, because there are now two histories and a
+ * reader should know which one it is looking at. This one is CHECKOUT-scoped
+ * and answers in `<sha7>#<seq>` — the ordinal a commit status links to, and the
+ * shape every existing consumer of `-o json` already parses. `odu history list`
+ * is the PER-USER catalog: it is addressed by run id, it survives the checkout
+ * being deleted, it holds per-attempt evidence, and it is what PR 2's service
+ * discovers runs from. The coordinator writes both on every run, so a run
+ * started here appears in both; what only the catalog has is a run whose
+ * checkout is gone, one imported from an old `.ci`, or one started somewhere
+ * else. Neither is a projection of the other, and this file deliberately does
+ * not merge them — a joined table would have to invent a shared identity for
+ * records that genuinely have two.
  */
 
 import { deadRun, describeDeadRun } from "@odu/run-client/deadRun";
@@ -95,5 +108,15 @@ export async function runsCommand(json: boolean): Promise<number> {
         ? "no runs recorded in this checkout\n"
         : renderRuns(records, Date.now()),
   );
+  // An empty checkout ledger is not the same as no history: the per-user
+  // catalog may hold runs from a checkout that has since been deleted, or an
+  // import of an older `.ci`. Say where else to look — on stderr, and only
+  // when there is nothing to show, so no existing consumer of this command's
+  // stdout sees a byte it did not before.
+  if (!json && records.length === 0) {
+    process.stderr.write(
+      "odu: the per-user catalog may still have runs — try `odu history list --all`\n",
+    );
+  }
   return 0;
 }
