@@ -288,6 +288,25 @@ export const RunEventSchema = Schema.Union([
      *  DIFFERENT input is refused rather than answered with this receipt. */
     inputDigest: Schema.String,
   }),
+  /**
+   * What became of an accepted retry — the OTHER half of the protocol.
+   *
+   * `retry_accepted` is written before the reset is performed, which is the
+   * ordering that keeps a lost reply from hiding a mutation. The cost of that
+   * ordering is that acceptance alone proves only INTENT: between the two
+   * lines the coordinator can die, and the lane can refuse. So the intent stays
+   * pending until this line resolves it, and a reconciler that finds only the
+   * acceptance reports UNKNOWN rather than success.
+   *
+   * Both outcomes are recorded. A refusal is an answer — replaying it is how a
+   * repeat learns its retry was declined instead of being told nothing is known.
+   */
+  Schema.Struct({
+    kind: Schema.Literal("retry_applied"),
+    requestId: Schema.String,
+    /** Did the lane actually take the reset? */
+    applied: Schema.Boolean,
+  }),
   /** The run reached a terminal outcome. Sequence-wise the last line any
    *  writer appends. */
   Schema.Struct({

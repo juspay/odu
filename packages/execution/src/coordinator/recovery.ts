@@ -202,12 +202,29 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
       return replayOf(claim.receipt.result);
     }
     if (claim.kind === "in_flight") {
-      const reconciled = reconcile(input.requestId, claim.receipt, handle, catalog);
+      const reconciled = reconcile(
+        input.requestId,
+        claim.receipt,
+        handle,
+        catalog,
+        now(),
+      );
       if (reconciled.kind === "replay") {
         const outcome: RetryOutcome = {
           ok: true,
           receipt: reconciled.receipt,
           replayed: true,
+        };
+        completeReceipt(handle, input.requestId, outcome, now());
+        return outcome;
+      }
+      if (reconciled.kind === "refused") {
+        // A recorded NO. Completed like any other outcome, so the third ask is
+        // a plain replay rather than a third round of reconciliation.
+        const outcome: RetryOutcome = {
+          ok: false,
+          message: reconciled.message,
+          suggestion: ["odu", "history", "show", "--run", input.runId],
         };
         completeReceipt(handle, input.requestId, outcome, now());
         return outcome;
@@ -240,15 +257,14 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
   }
 
   const requestId = input.requestId;
-  const live = await tryLive(
-    handle,
-    manifest,
-    input,
-    digest,
+  /** One marker for both paths — a live rerun and a relaunch are both the
+   *  moment this request stops being reversible. */
+  const markDispatch =
     requestId === undefined
       ? undefined
-      : () => markDispatched(handle, requestId, now()),
-    (message) => input.warn?.(message),
+      : () => markDispatched(handle, requestId, now());
+  const live = await tryLive(handle, manifest, input, digest, markDispatch, (message) =>
+    input.warn?.(message),
   );
   if (live !== null) {
     return finish(handle, input, { ok: true, receipt: live, replayed: false }, now);
@@ -259,6 +275,7 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
     input,
     claimedRunId,
     catalog,
+    markDispatch,
   );
   return finish(
     handle,
@@ -338,11 +355,12 @@ function reconcile(
   receipt: ReceiptRecord,
   handle: RunHandle,
   catalog: CatalogOptions,
+  now: number,
 ): Reconciled {
   const relaunched = reconcileRelaunch(requestId, receipt.plannedRunId, catalog);
   if (relaunched !== null) return { kind: "replay", receipt: relaunched };
   const live = reconcileLive(requestId, handle);
-  if (live !== null) return { kind: "replay", receipt: live };
+  if (live !== null) return live;
 
   // Neither effect is visible. Whether that means "nothing happened" depends
   // entirely on whether the evidence that WOULD have shown it could exist and
@@ -365,6 +383,23 @@ function reconcile(
         "build, or one that died before writing one",
     };
   }
+  // NOT YET DISPATCHED IS NOT THE SAME AS NEVER WILL BE. The claimant may be
+  // alive and one instruction short of dispatching: a repeat that arrives
+  // while a launcher is still starting a coordinator sees exactly this state,
+  // and telling it "nothing happened, use a fresh id" is how one request
+  // becomes two runs. So an undispatched claim is only read as a no-op once it
+  // is old enough that a claimant which had not dispatched by now is not going
+  // to — the same shape as the ownership fence next door, and for the same
+  // reason: disappearance is not proof, and neither is a single instant.
+  if (now - receipt.acceptedAt < RETRY_DISPATCH_GRACE_MS) {
+    return {
+      kind: "unresolved",
+      reason:
+        "it was accepted moments ago and has not reached the wire yet — the " +
+        "caller that claimed it may still be dispatching it, and two callers " +
+        "acting on one id is the duplicate this receipt exists to prevent",
+    };
+  }
   return { kind: "nothing_happened" };
 }
 
@@ -378,9 +413,26 @@ function reconcile(
  * knows — which is not the same as no, and must never be answered with "retry
  * with a fresh id".
  */
+/**
+ * How long an accepted-but-undispatched claim is treated as possibly still in
+ * flight.
+ *
+ * Generous on purpose. The window it has to cover is a claimant between
+ * `claimReceipt` and its first mutation, and on the relaunch path that includes
+ * starting a coordinator and waiting for its socket — seconds, not
+ * milliseconds. Being too generous costs a caller a refusal it could have
+ * avoided; being too mean costs a duplicate run, which is the failure this
+ * whole mechanism exists to prevent. The asymmetry decides the number.
+ */
+export const RETRY_DISPATCH_GRACE_MS = 120_000;
+
 type Reconciled =
   | { kind: "replay"; receipt: RetryReceipt }
   | { kind: "nothing_happened" }
+  /** The coordinator answered, and the answer was no. A recorded refusal is an
+   *  OUTCOME — replaying it tells a repeat what happened, where `unresolved`
+   *  would say nobody knows. */
+  | { kind: "refused"; message: string }
   | { kind: "unresolved"; reason: string };
 
 /** The relaunch half: a run exists under the id this request planned. */
@@ -411,60 +463,81 @@ function reconcileRelaunch(
 }
 
 /**
- * The live half: the coordinator wrote down that it accepted THIS request.
+ * The live half: what the coordinator wrote down about THIS request.
  *
- * **Why nothing weaker will do.** This used to ask a question about timing —
- * did a node the selector names start an attempt after my receipt was claimed?
- * — and treat `yes` as proof that the mutation was this caller's. It is not
+ * **Why nothing weaker will do.** This once asked a question about timing — did
+ * a node the selector names start an attempt after my receipt was claimed? —
+ * and treated `yes` as proof that the mutation was this caller's. It is not
  * proof of anything. Ordinary scheduling starts attempts; so does a rerun
  * somebody else asked for; so does the run's own first pass over a node that
- * had not run yet. A caller that claimed an id and then crashed BEFORE
- * dispatching anything would be told, on its next identical ask, that its
- * retry had succeeded — with an attempt number belonging to work it never
- * caused. Correlation cannot be reconstructed from a clock.
+ * had not run yet. Correlation cannot be reconstructed from a clock.
  *
- * So the coordinator records the request id at acceptance and this reads that
- * exact line. The `seq > journalAtAccept` bound stays, but as a cheap guard
- * rather than the evidence: a `retry_accepted` for this id could only have been
- * written after the id was claimed anyway.
+ * **And acceptance alone is not application.** The coordinator records
+ * `retry_accepted` BEFORE performing the reset, because the other ordering lets
+ * a crash hide a mutation that happened. The price is that the acceptance, read
+ * alone, proves only that the reset was asked for: the coordinator can die in
+ * between, and the lane can decline. So this reads the PAIR. An acceptance whose
+ * `retry_applied` never arrived is a pending intent, and pending is reported as
+ * unknown — never as a receipt describing a retry that may not have run.
  *
- * The roster the roots are matched against still comes from the journal rather
- * than a live dial — the run may well have finished since.
+ * Three answers, and the roots come from the recorded acceptance rather than
+ * from whatever the run's latest attempt happens to be now.
  */
-function reconcileLive(
-  requestId: string,
-  handle: RunHandle,
-): RetryReceipt | null {
+function reconcileLive(requestId: string, handle: RunHandle): Reconciled | null {
   const journal = readJournal(handle);
   const manifest = readManifest(handle);
   if (manifest === null) return null;
-  const roots = [
-    ...new Set(
-      journal.entries.flatMap((e) =>
-        e.event.kind === "retry_accepted" && e.event.requestId === requestId
-          ? [...e.event.roots]
-          : [],
-      ),
-    ),
-  ];
+  let roots: string[] = [];
+  let applied: boolean | undefined;
+  for (const { event } of journal.entries) {
+    if (event.kind === "retry_accepted" && event.requestId === requestId) {
+      roots = [...new Set([...roots, ...event.roots])];
+    }
+    if (event.kind === "retry_applied" && event.requestId === requestId) {
+      applied = event.applied;
+    }
+  }
   if (roots.length === 0) return null;
+  if (applied === undefined) {
+    return {
+      kind: "unresolved",
+      reason:
+        `this run's coordinator recorded accepting it (${roots.join(", ")}) but never ` +
+        "recorded what became of it — it died between accepting the retry and " +
+        "performing it, so whether the reset happened is not knowable from here",
+    };
+  }
+  if (!applied) {
+    return {
+      kind: "refused",
+      message:
+        `odu: request "${requestId}" was accepted by this run's coordinator and the ` +
+        `lane declined the reset (${roots.join(", ")}). Nothing was re-run.`,
+    };
+  }
   return {
-    request_id: requestId,
-    mode: "live",
-    effective_run: handle.runId,
-    parent_run: null,
-    roots,
-    // Not recorded at the time and not reconstructable now: the dependants a
-    // reset cleared are a property of the live DAG, which may have moved on.
-    // Empty rather than guessed.
-    reset_dependants: [],
-    attempts: roots.map((node) => ({
-      node,
-      attempt: attemptsFor(handle, node).at(-1) ?? 1,
-    })),
-    scope: manifest.scope,
-    sha: manifest.sha,
-    cursor: formatCursor({ runId: handle.runId, seq: journal.highestSeq }),
+    kind: "replay",
+    receipt: {
+      request_id: requestId,
+      mode: "live",
+      effective_run: handle.runId,
+      parent_run: null,
+      roots,
+      // Not recorded at the time and not reconstructable now: the dependants a
+      // reset cleared are a property of the live DAG, which may have moved on.
+      // Empty rather than guessed.
+      reset_dependants: [],
+      // EMPTY, and this is the point rather than an omission. The ordinal a
+      // retry produced is not known at the moment the reset is applied — the
+      // lane allocates it when it republishes — so it was never recorded, and
+      // reading "the latest attempt now" would hand back a number belonging to
+      // whatever has happened since, including the very failure being retried.
+      // A relaunch reports the same emptiness for the same reason.
+      attempts: [],
+      scope: manifest.scope,
+      sha: manifest.sha,
+      cursor: formatCursor({ runId: handle.runId, seq: journal.highestSeq }),
+    },
   };
 }
 
@@ -633,6 +706,7 @@ async function relaunch(
   input: RetryInput,
   runId: string,
   catalog: CatalogOptions,
+  onDispatch?: () => void,
 ): Promise<{ ok: true; receipt: RetryReceipt } | { ok: false; message: string; suggestion?: string[] }> {
   if (!manifest.snapshot.retryable) {
     return {
@@ -683,6 +757,13 @@ async function relaunch(
     noPost: true,
     hostPins: [],
   };
+  // A LAUNCH IS A DISPATCH. Marked before the launcher is entered, for the same
+  // reason the live path marks before its rerun call: from here on, a lost
+  // answer and "nothing happened" stop being the same thing. A launcher that is
+  // still running has not published a manifest yet, and reading that absence as
+  // proof of no spawn is what let a repeat be told to use a fresh id while the
+  // original launch was in flight — two coordinators for one request.
+  onDispatch?.();
   const receiptOfLaunch = await input.launcher(request);
   if (!receiptOfLaunch.ok) {
     return {

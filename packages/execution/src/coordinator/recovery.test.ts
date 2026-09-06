@@ -35,7 +35,12 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
 import { Effect, Stream } from "effect";
 import { pendingNode, type PipelineState } from "@odu/run-client/surface";
-import { claimReceipt, digestOf, markDispatched } from "@odu/run-history/receipts";
+import {
+  claimReceipt,
+  digestOf,
+  markDispatched,
+  readReceipt,
+} from "@odu/run-history/receipts";
 import type { RunManifest } from "@odu/run-history/schema";
 import { claimOwnership, OWNERSHIP_GRACE_MS } from "@odu/run-history/owner";
 import {
@@ -47,7 +52,12 @@ import {
   writeVerdict,
 } from "@odu/run-history/store";
 import type { LaunchRequest, RunLauncher } from "./launcher";
-import { retryRun, type RetryInput, type RetryOutcome } from "./recovery";
+import {
+  RETRY_DISPATCH_GRACE_MS,
+  retryRun,
+  type RetryInput,
+  type RetryOutcome,
+} from "./recovery";
 
 const T0 = 1_700_000_000_000;
 const SHA = "26d2c2dabcdef0123456789012345678901234ab";
@@ -784,15 +794,82 @@ describe("a reply that was lost mid-flight", () => {
     appendEvent(
       handle,
       owner.token,
+      { kind: "retry_applied", requestId: REQUEST, applied: true },
+      T0 + OWNERSHIP_GRACE_MS + 3,
+    );
+    appendEvent(
+      handle,
+      owner.token,
       {
         kind: "attempt_started",
         node: UNIT,
         attempt: 3,
         placement: PLACEMENT,
       },
-      T0 + OWNERSHIP_GRACE_MS + 3,
+      T0 + OWNERSHIP_GRACE_MS + 4,
     );
     void root;
+  }
+
+  /** Accepted and then NOTHING — the coordinator died between writing the
+   *  intent and performing the reset. */
+  function appendAcceptedButUnresolved(handle: RunHandle): void {
+    const owner = claimOwnership({
+      runId: handle.runId,
+      dir: handle.dir,
+      endpoint: ENDPOINT,
+      now: T0 + OWNERSHIP_GRACE_MS + 1,
+      pid: 4242,
+      host: "some-other-box.invalid",
+      isAlive: () => false,
+    });
+    if (!owner.ok) throw new Error(`could not take the run over: ${owner.refusal.kind}`);
+    appendEvent(
+      handle,
+      owner.token,
+      {
+        kind: "retry_accepted",
+        requestId: REQUEST,
+        effectiveRunId: handle.runId,
+        roots: [UNIT],
+        resetDependants: [],
+        inputDigest: "",
+      },
+      T0 + OWNERSHIP_GRACE_MS + 2,
+    );
+  }
+
+  /** Accepted, and the lane said no. */
+  function appendRefusedRetry(handle: RunHandle): void {
+    const owner = claimOwnership({
+      runId: handle.runId,
+      dir: handle.dir,
+      endpoint: ENDPOINT,
+      now: T0 + OWNERSHIP_GRACE_MS + 1,
+      pid: 4242,
+      host: "some-other-box.invalid",
+      isAlive: () => false,
+    });
+    if (!owner.ok) throw new Error(`could not take the run over: ${owner.refusal.kind}`);
+    appendEvent(
+      handle,
+      owner.token,
+      {
+        kind: "retry_accepted",
+        requestId: REQUEST,
+        effectiveRunId: handle.runId,
+        roots: [UNIT],
+        resetDependants: [],
+        inputDigest: "",
+      },
+      T0 + OWNERSHIP_GRACE_MS + 2,
+    );
+    appendEvent(
+      handle,
+      owner.token,
+      { kind: "retry_applied", requestId: REQUEST, applied: false },
+      T0 + OWNERSHIP_GRACE_MS + 3,
+    );
   }
 
   /** The same run, with the reset VISIBLE but no record of who asked for it —
@@ -816,14 +893,26 @@ describe("a reply that was lost mid-flight", () => {
     );
   }
 
+  /** A repeat LONG after the first ask, which is what a lost reply actually
+   *  looks like: a caller times out and asks again. Past
+   *  `RETRY_DISPATCH_GRACE_MS`, so the answer is about recorded evidence rather
+   *  than about a claimant that might still be mid-dispatch. */
   function repeat(root: string, launcher: LauncherStub): Promise<RetryOutcome> {
+    return repeatAt(root, launcher, T0 + RETRY_DISPATCH_GRACE_MS + 10);
+  }
+
+  function repeatAt(
+    root: string,
+    launcher: LauncherStub,
+    at: number,
+  ): Promise<RetryOutcome> {
     return retryRun({
       runId: PARENT_RUN,
       selector: "unit",
       requestId: REQUEST,
       catalog: { root },
       launcher: launcher.launcher,
-      now: () => T0 + 10,
+      now: () => at,
     });
   }
 
@@ -979,6 +1068,10 @@ describe("a reply that was lost mid-flight", () => {
     expect(out.receipt.mode).toBe("live");
     expect(out.receipt.effective_run).toBe(PARENT_RUN);
     expect(out.receipt.roots).toEqual([UNIT]);
+    // EMPTY, deliberately: the ordinal a retry produced was never recorded, and
+    // reading "the latest attempt now" would hand back a number belonging to
+    // whatever has happened since — including the failure being retried.
+    expect(out.receipt.attempts).toEqual([]);
     // Nothing was started, and nothing was re-issued.
     expect(launcher.calls).toEqual([]);
 
@@ -1024,6 +1117,110 @@ describe("a reply that was lost mid-flight", () => {
 
     expect(out.message).toContain("recorded no acceptance for it");
     expect(out.message).not.toContain("UNKNOWN");
+    expect(launcher.calls).toEqual([]);
+  });
+
+  it("does NOT replay an ACCEPTED-but-unresolved intent as a completed retry", async () => {
+    // The coordinator records acceptance BEFORE it performs the reset, because
+    // the other ordering lets a crash hide a mutation. The price is that the
+    // acceptance alone proves only that the reset was ASKED FOR — the
+    // coordinator can die in between. Replaying that as a success reports a
+    // retry that may never have run.
+    const root = tmpCatalog();
+    const handle = aRun(root, ENDPOINT);
+    claimByHand(handle, "0000000b-0002");
+    appendAcceptedButUnresolved(handle);
+    const launcher = stubLauncher();
+
+    const out = refused(await repeat(root, launcher));
+
+    expect(out.message).toContain("outcome is UNKNOWN");
+    expect(out.message).toContain("never recorded what became of it");
+    expect(out.message).toContain("Do not repeat it with a fresh id");
+    expect(launcher.calls).toEqual([]);
+  });
+
+  it("replays a lane's REFUSAL as the answer it is", async () => {
+    // Accepted, then declined. That is an outcome, not an unknown: a repeat
+    // learns its retry was refused instead of being told nobody knows.
+    const root = tmpCatalog();
+    const handle = aRun(root, ENDPOINT);
+    claimByHand(handle, "0000000b-0002");
+    appendRefusedRetry(handle);
+    const launcher = stubLauncher();
+
+    const out = refused(await repeat(root, launcher));
+
+    expect(out.message).toContain("the lane declined the reset");
+    expect(out.message).not.toContain("UNKNOWN");
+    expect(launcher.calls).toEqual([]);
+
+    // Recorded, so a third ask is a plain replay rather than more reconciling.
+    const third = refused(await repeat(root, launcher));
+    expect(third.message).toBe(out.message);
+    expect(launcher.calls).toEqual([]);
+  });
+
+  it("refuses a CONCURRENT repeat while the first claimant may still dispatch", async () => {
+    // Absence of a dispatch marker at one instant is not proof that the caller
+    // holding this id will never dispatch. A repeat arriving while the original
+    // is between its claim and its first mutation — which on the relaunch path
+    // includes starting a coordinator — must not be told "nothing happened, use
+    // a fresh id": that is how one request becomes two runs.
+    const root = tmpCatalog();
+    const handle = aFinishedRun(root);
+    claimByHand(handle, "0000000b-0002");
+    const launcher = stubLauncher();
+
+    const out = refused(await repeatAt(root, launcher, T0 + 50));
+
+    expect(out.message).toContain("outcome is UNKNOWN");
+    expect(out.message).toContain("may still be dispatching");
+    expect(launcher.calls).toEqual([]);
+  });
+
+  it("marks a RELAUNCH as dispatched before the launcher is entered", async () => {
+    // The gap the live path had closed and this one had not. A launcher that is
+    // still starting a coordinator has published no manifest, and reading that
+    // absence as proof of no spawn told a repeat to use a fresh id while the
+    // original launch was in flight.
+    const root = tmpCatalog();
+    const handle = aFinishedRun(root);
+    let dispatchedWhenLauncherRan: number | undefined;
+    const launcher = stubLauncher({
+      onLaunch: () => {
+        dispatchedWhenLauncherRan = readReceipt(handle, REQUEST)?.dispatchedAt;
+      },
+    });
+
+    await retryRun({
+      runId: PARENT_RUN,
+      selector: "unit",
+      requestId: REQUEST,
+      catalog: { root },
+      launcher: launcher.launcher,
+      now: () => T0 + 10,
+    });
+
+    expect(launcher.calls).toHaveLength(1);
+    // Marked BEFORE, not after: the marker exists at the moment the launcher is
+    // running, which is the only moment at which it helps.
+    expect(dispatchedWhenLauncherRan).toBe(T0 + 10);
+  });
+
+  it("keeps a launched-but-unpublished request UNRESOLVED, not a no-op", async () => {
+    // Spawn → crash → the catalog entry never appears. The dispatch marker is
+    // what stops that from reading as "nothing happened".
+    const root = tmpCatalog();
+    const handle = aFinishedRun(root);
+    claimByHand(handle, "0000000b-0002");
+    markDispatched(handle, REQUEST, T0 + 5);
+    const launcher = stubLauncher();
+
+    const out = refused(await repeat(root, launcher));
+
+    expect(out.message).toContain("outcome is UNKNOWN");
+    expect(out.message).toContain("already been put on the wire");
     expect(launcher.calls).toEqual([]);
   });
 

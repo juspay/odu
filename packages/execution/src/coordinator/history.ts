@@ -163,6 +163,16 @@ export interface RunHistory {
     roots: readonly string[];
     resetDependants: readonly string[];
   }) => boolean;
+  /**
+   * Resolve an accepted retry: the lane took the reset, or refused it.
+   *
+   * The half that makes {@link RunHistory.retryAccepted} safe to write early.
+   * Acceptance is INTENT — the coordinator can die before the reset, and the
+   * lane can decline it — so a reconciler that finds an acceptance with no
+   * resolution reports the outcome as unknown rather than as success. Both
+   * outcomes are recorded, because a refusal is an answer.
+   */
+  retryApplied: (resolved: { requestId: string; applied: boolean }) => void;
   /** Publish the terminal outcome. Safe to call more than once (a `--linger`
    *  run re-finalizes on every drain); it appends a `finalized` line once per
    *  EXECUTION GENERATION — again after a rerun resumed the run, never twice
@@ -199,6 +209,7 @@ export const NO_HISTORY: RunHistory = {
   // be able to tell its reply "the acceptance was not written down" rather
   // than promise a line that will never exist.
   retryAccepted: () => false,
+  retryApplied: () => {},
   finalize: () => {},
   close: () => {},
 };
@@ -528,6 +539,10 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
       // actually reached the journal rather than what was attempted — which is
       // the whole value of the flag to the caller reconciling later.
       return !fenced;
+    },
+    retryApplied: ({ requestId, applied }) => {
+      if (fenced) return;
+      emit({ kind: "retry_applied", requestId, applied });
     },
     finalize: (verdict) => {
       if (fenced) return;

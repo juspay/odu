@@ -1125,6 +1125,13 @@ async function orchestrate(
             resetDependants: [],
           });
     const ok = await route.lane.rerun(route.localId);
+    // Resolve the intent. Until this line exists, `retry_accepted` says only
+    // that the reset was ASKED FOR — a crash in between, or a lane that
+    // declined, both leave an acceptance that never became a retry — so a
+    // reconciler reads the pair, never the acceptance alone.
+    if (request !== undefined) {
+      history.retryApplied({ requestId: request.requestId, applied: ok });
+    }
     return recorded === undefined ? { ok } : { ok, recorded };
   };
 
