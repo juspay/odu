@@ -27,7 +27,7 @@ import {
   retryRun as retryRecordedRun,
 } from "@odu/execution/coordinator/recovery";
 import { gitBranch } from "@odu/execution/common/git";
-import { listRuns } from "@odu/run-history/store";
+import { type CatalogOptions, listRuns } from "@odu/run-history/store";
 import type {
   CancelOutcome,
   CancelRequest,
@@ -43,8 +43,20 @@ import type {
  * ownership record is the copy a heartbeat refreshes and a clean exit clears.
  * Asking the catalog also means the answer is a run ID a caller can address,
  * rather than "something is listening over there".
+ *
+ * **The catalog is asked with GIT'S OWN NAME for the checkout**, not with the
+ * path the caller typed. A run records `repoRoot` from the coordinator's
+ * `--show-toplevel`, which is resolved; a caller's path need not be. On macOS
+ * `/tmp` is a symlink to `/private/tmp`, so the two are routinely different
+ * strings for one directory — and comparing them as given made a busy checkout
+ * look free. The service then launched, the coordinator refused the checkout it
+ * could see was busy, and the caller got `launch_failed` where the answer was
+ * "that run is already there".
  */
-export function probeCheckout(checkout: string): CheckoutFacts {
+export function probeCheckout(
+  checkout: string,
+  catalog: CatalogOptions = {},
+): CheckoutFacts {
   if (!existsSync(checkout)) {
     return { isRepo: false, head: null, branch: null, liveRunId: null };
   }
@@ -59,7 +71,7 @@ export function probeCheckout(checkout: string): CheckoutFacts {
     cwd: checkout,
     encoding: "utf-8",
   });
-  const live = listRuns({ repoRoot: checkout }).find(
+  const live = listRuns({ ...catalog, repoRoot: top.stdout.trim() }).find(
     (row) => row.liveness === "owned" && row.endpoint !== null,
   );
   return {

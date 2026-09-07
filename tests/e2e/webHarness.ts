@@ -30,6 +30,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -324,9 +325,18 @@ export async function mcp(
   return (await response.json()) as Record<string, unknown>;
 }
 
-/** A throwaway git repo with a `justfile`, committed — the subject of a run. */
+/**
+ * A throwaway git repo with a `justfile`, committed — the subject of a run.
+ *
+ * The path is RESOLVED before it is returned. `tmpdir()` is `/var/folders/...`
+ * on macOS and `/private/var/folders/...` once anything resolves it, and a run
+ * records the second (git's `--show-toplevel`) while a test holding the first
+ * would compare two spellings of one directory and find them different. That is
+ * not a macOS quirk worth working around per assertion; it is the fixture's
+ * identity, so it is settled once, here.
+ */
 export function makeWebFixture(justfile: string): string {
-  const dir = mkdtempSync(join(tmpdir(), "odu-e2e-webrepo-"));
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "odu-e2e-webrepo-")));
   // `.ci/` is ignored so a SECOND run in the same checkout still sees a clean
   // tree: odu writes its per-checkout ledger there, and strict mode refuses a
   // dirty one — which is correct, and would otherwise make every fixture
