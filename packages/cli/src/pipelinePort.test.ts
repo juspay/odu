@@ -33,11 +33,23 @@ function checkout(justfile?: string): string {
   return dir;
 }
 
+/**
+ * A fixture that parses on EVERY platform this suite runs on.
+ *
+ * `alpha` carries both OS attributes, and that is not decoration: `just`
+ * EXCLUDES a recipe whose attributes do not match the host, so a bare
+ * `[linux]` here made `alpha` vanish on macOS and took `beta: alpha` down with
+ * it — "recipe `beta` has unknown dependency `alpha`", four failures, on the
+ * darwin lane only. The test's subject is the `os` field, so it does need a
+ * recipe that HAS one; naming both is what lets it have one without the
+ * fixture becoming a fact about where the suite happens to be running.
+ */
 const GOOD = `[parallel]
 [metadata("ci")]
 default: alpha beta
 
 [linux]
+[macos]
 alpha:
     echo alpha
 
@@ -77,7 +89,7 @@ describe("readPipeline", () => {
     expect(alpha?.shards).toBeNull();
     // `[linux]` is knowledge; no attribute at all is knowledge too — "runs
     // everywhere" — so it is `[]` and never null.
-    expect(alpha?.os).toEqual(["linux"]);
+    expect([...(alpha?.os ?? [])].sort()).toEqual(["linux", "macos"]);
     expect(beta?.os).toEqual([]);
   });
 
