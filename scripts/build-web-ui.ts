@@ -100,6 +100,17 @@ const report = await buildSurfaceClient({
       build: () => readFile(join(clientDir, "styles.css")),
       htmlPlaceholder: 'href="./styles.css"',
     },
+    {
+      name: "logo",
+      ext: "svg",
+      // The REPO's logo, read from the root rather than copied in beside the
+      // bundle. `website/public/logo.svg` is already a second copy of that file
+      // and they are byte-identical today; a third would be a third thing to
+      // keep true, in the one asset whose whole job is to look the same
+      // everywhere odu appears.
+      build: () => readFile(join(repoRoot, "logo.svg")),
+      htmlPlaceholder: 'href="./logo.svg"',
+    },
   ],
   // Read from the env the Nix wrapper bakes, so the commit the shell reports
   // and the commit the service reports are one value. Falls back to

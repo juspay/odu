@@ -32,6 +32,11 @@ let
       ./bunfig.toml
       ./bun.nix
       ./tsconfig.json
+      # The favicon the browser bundle serves. `scripts/build-web-ui.ts` reads
+      # it from the repo root rather than from a copy beside the bundle, so it
+      # has to be in the source the derivation sees — without this the build
+      # fails inside the sandbox on a file that is right there in the checkout.
+      ./logo.svg
       ./src
       # Every workspace member EXCEPT the acceptance suite's scenarios. That
       # suite drives this very package, so leaving its features and steps in the
