@@ -291,40 +291,97 @@ export function survivableSpawnPlan(
   };
 }
 
-/** The variables a transient unit must be told about, as `KEY=VALUE`.
+/**
+ * EVERYTHING AN ODU CHILD NEEDS FROM ITS PARENT'S ENVIRONMENT — one list.
  *
- *  An allowlist, not the whole environment: a unit inherits the manager's
- *  `PATH`/`HOME` already, and forwarding a launcher's entire environment into
- *  a service is how an orchestrator's ambient identity variables end up inside
- *  every recipe the run executes. What is named here is what odu itself reads
- *  and what the platform needs to find its own runtime directory. */
-export function forwardedEnv(env: SpawnEnv): Record<string, string> {
-  const KEYS = [
-    "ODU_HOSTS",
-    "ODU_STATE_DIR",
-    "ODU_RUNNER_FLAKE",
-    "ODU_SELF",
-    "ODU_GH_BIN",
-    "ODU_AGENT_SUBSTITUTERS",
-    "ODU_AGENT_TRUSTED_PUBLIC_KEYS",
-    "ODU_LINGER_IDLE_MS",
-    "XDG_RUNTIME_DIR",
-    "XDG_STATE_HOME",
-    "NIX_PATH",
-    "PATH",
-    "HOME",
-  ];
-  // A MAP, not `KEY=VALUE` strings. The `--setenv` spelling belongs to whoever
-  // builds the argv — which is kolu's driver now — and returning it from here
-  // meant the one caller parsed it straight back apart on `indexOf("=")`.
+ * There were two, and the split is what let a real bug through: the daemon's
+ * copy named `NIX_PATH` and not `NIX_CONF_DIR`, so a web daemon started where
+ * nix keeps its configuration in the user's home spawned coordinators that
+ * could not evaluate a flake at all. The failure appeared four layers away, as
+ * a run that would not provision, and nothing connected it to a list somebody
+ * had written out twice.
+ *
+ * The volatility is one thing — "what odu and the toolchain it shells out to
+ * read from the environment" — so it is written once. Three groups, because a
+ * reader deciding whether to add a variable needs to know which question it
+ * answers:
+ *
+ *   - what the PLATFORM needs to be itself (a home, a PATH, a locale);
+ *   - what NIX needs to find its store, its config and its certificates —
+ *     odu's whole job is shelling out to it, and a child that has these wrong
+ *     fails in ways that look like odu bugs;
+ *   - what ODU itself reads.
+ *
+ * It is an allowlist and not the whole environment, because forwarding a
+ * launcher's entire environment is how an orchestrator's ambient identity ends
+ * up inside every recipe a run executes.
+ */
+export const ODU_CHILD_ENV_KEYS: readonly string[] = [
+  // The platform.
+  "HOME",
+  "PATH",
+  "SHELL",
+  "USER",
+  "LOGNAME",
+  "LANG",
+  "LC_ALL",
+  "TERM",
+  "TZ",
+  "TMPDIR",
+  "XDG_RUNTIME_DIR",
+  "XDG_STATE_HOME",
+  "XDG_CACHE_HOME",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  // Nix. `NIX_CONF_DIR` / `NIX_USER_CONF_FILES` are where `experimental-features`
+  // lives on a single-user install, which is what a CI runner is; `NIX_PROFILES`
+  // and `NIX_USER_PROFILE_DIR` are how such an install finds itself at all.
+  "NIX_PATH",
+  "NIX_REMOTE",
+  "NIX_CONFIG",
+  "NIX_CONF_DIR",
+  "NIX_USER_CONF_FILES",
+  "NIX_PROFILES",
+  "NIX_USER_PROFILE_DIR",
+  "NIX_STORE_DIR",
+  "NIX_STATE_DIR",
+  "NIX_SSL_CERT_FILE",
+  "SSL_CERT_FILE",
+  "LOCALE_ARCHIVE",
+  // odu's own locators.
+  "ODU_HOSTS",
+  "ODU_STATE_DIR",
+  "ODU_RUNNER_FLAKE",
+  "ODU_SELF",
+  "ODU_GH_BIN",
+  "ODU_AGENT_SUBSTITUTERS",
+  "ODU_AGENT_TRUSTED_PUBLIC_KEYS",
+  "ODU_LINGER_IDLE_MS",
+  "ODU_NO_SYSTEMD_RUN",
+];
+
+/** Pick the named variables out of an environment. An empty value is UNSET,
+ *  not an empty assignment: forwarding `ODU_HOSTS=` into a unit is not the same
+ *  as leaving it absent. */
+export function pickEnv(
+  env: Record<string, string | undefined>,
+  keys: readonly string[],
+): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const k of KEYS) {
+  for (const k of keys) {
     const v = env[k];
-    // An empty value is UNSET, not an empty assignment: forwarding `ODU_HOSTS=`
-    // into a unit is not the same as leaving it absent.
     if (v !== undefined && v !== "") out[k] = v;
   }
   return out;
+}
+
+/** The variables a transient unit must be told about.
+ *
+ *  A MAP, not `KEY=VALUE` strings. The `--setenv` spelling belongs to whoever
+ *  builds the argv — which is kolu's driver now — and returning it from here
+ *  meant the one caller parsed it straight back apart on `indexOf("=")`. */
+export function forwardedEnv(env: SpawnEnv): Record<string, string> {
+  return pickEnv(env, ODU_CHILD_ENV_KEYS);
 }
 
 /**
@@ -381,8 +438,8 @@ export async function defaultWaitForSocket(
 export const READINESS_CEILING_MS = 120_000;
 
 /**
- * Wait until the coordinator is serving, given what this plan's process exit
- * actually means.
+ * Wait until `ready` says so, given what this plan's process exit actually
+ * means.
  *
  * Two different waits behind one call, because the launch mechanisms report
  * two different things. A DETACHED spawn forked the coordinator itself, so its
@@ -390,14 +447,23 @@ export const READINESS_CEILING_MS = 120_000;
  * SUBMITTED the unit and exits while the service is still starting, so its
  * exit bounds nothing — a non-zero code means the job was refused, and a zero
  * code means the wait carries on against its own deadline.
+ *
+ * **What `ready` asks is the CALLER's business, and it matters which question.**
+ * This function used to take a socket path and probe it, which reads as
+ * "readiness is a socket that answers" — and that is a fact about a CHECKOUT,
+ * not about a run. A checkout serves one run after another on one path, so the
+ * incumbent's socket answers the moment a replacement is asked for, and a
+ * launcher believing it would report a run that never started as started. The
+ * question a launcher wants is about the run it minted an id for; see
+ * `./launcher`.
  */
 export async function waitForReadiness(
   plan: SpawnPlan,
-  socketPath: string,
+  ready: () => Promise<boolean>,
   onExit: Promise<number>,
   ceilingMs: number = READINESS_CEILING_MS,
 ): Promise<boolean> {
-  if (plan.exitIsDeath) return defaultWaitForSocket(socketPath, onExit);
+  if (plan.exitIsDeath) return pollUntilSocketOrExit(ready, onExit);
   const refused = onExit.then((code) => code !== 0);
   const deadline = new Promise<void>((resolve) => {
     const timer = setTimeout(resolve, ceilingMs);
@@ -409,7 +475,7 @@ export async function waitForReadiness(
     refused.then((no) => (no ? undefined : new Promise<void>(() => {}))),
     deadline,
   ]);
-  return pollUntilSocketOrExit(() => socketAnswers(socketPath), give);
+  return pollUntilSocketOrExit(ready, give);
 }
 
 /**

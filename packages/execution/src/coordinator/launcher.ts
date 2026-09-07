@@ -21,7 +21,11 @@
 import { join } from "node:path";
 import { runSocketPath } from "@odu/run-client/dial";
 import { RUN_FILES } from "@odu/run-history/paths";
-import { type CatalogOptions, handleFor } from "@odu/run-history/store";
+import {
+  type CatalogOptions,
+  handleFor,
+  readManifest,
+} from "@odu/run-history/store";
 import type { RunScope } from "@odu/run-history/schema";
 import {
   oduSelfArgv,
@@ -153,6 +157,30 @@ export function mayRelaunchDetached(
   return plan.mechanism === "systemd-run" && exitCode !== null && exitCode !== 0;
 }
 
+/**
+ * HAS THE RUN THIS REQUEST ASKED FOR COME INTO EXISTENCE?
+ *
+ * The manifest, addressed by the id the caller minted before the spawn — which
+ * is the only fact about the launch that no other run can satisfy.
+ *
+ * A socket cannot answer this, and believing it could was a bug with no error
+ * in it. `.ci/odu.sock` belongs to a CHECKOUT: when a start supersedes the run
+ * already there, the incumbent's socket answers immediately, so a launcher
+ * waiting on the path returned `ok: true` for a replacement that had not
+ * reached its strict gate — and `run.start` then wrote an accepted receipt for
+ * a run that never registered. The same mistake in the other direction refused
+ * a run that started, finished and closed its socket faster than the poll.
+ *
+ * The manifest is written before the venue claim and before the socket is
+ * served (`./history`'s "called BEFORE the run executes"), so this is also the
+ * EARLIER signal, not a slower one bought for correctness.
+ */
+function runIsRegistered(request: LaunchRequest): boolean {
+  return (
+    readManifest(handleFor(request.runId, request.catalog ?? {})) !== null
+  );
+}
+
 /** What one launch attempt came to. `managerRefused` is the one outcome a
  *  SECOND attempt is allowed to follow — see {@link mayRelaunchDetached}. */
 interface Attempt {
@@ -170,8 +198,8 @@ async function attemptLaunch(
   // The coordinator's own narration goes into its catalog directory, beside
   // the evidence it is about to produce. The run id is pre-minted, so the
   // path exists to be named before the process does — and a launcher that
-  // exits (as this one does, the moment the socket answers) must not leave
-  // the child writing into a pipe nobody is reading. See `spawnCoordinator`.
+  // exits (as this one does, the moment the run registers) must not leave the
+  // child writing into a pipe nobody is reading. See `spawnCoordinator`.
   const spawned = spawnCoordinator(
     argv,
     request.checkout,
@@ -193,7 +221,11 @@ async function attemptLaunch(
   // still starting, so reading its exit as the coordinator's would refuse a
   // run that is coming up — and leave it running with nobody watching.
   // `waitForReadiness` asks the PLAN which of those it just started.
-  const up = await waitForReadiness(spawned.plan, endpoint, spawned.onExit);
+  const up = await waitForReadiness(
+    spawned.plan,
+    () => Promise.resolve(runIsRegistered(request)),
+    spawned.onExit,
+  );
   if (up) {
     return {
       managerRefused: false,
@@ -217,20 +249,22 @@ async function attemptLaunch(
         tail !== ""
           ? tail
           : exitCode === null
-            ? "the coordinator did not serve a socket in time"
+            ? `the coordinator never registered run ${request.runId}`
             : spawned.plan.describeExit(exitCode),
     },
   };
 }
 
 /**
- * The packaged launcher: start `odu run` for this request and return once its
- * socket answers.
+ * The packaged launcher: start `odu run` for this request and return once the
+ * run it asked for is IN THE CATALOG.
  *
- * Waiting for the socket is what makes the receipt worth anything. A launcher
- * that returned as soon as `spawn` succeeded would hand back a run id that may
+ * Waiting for that is what makes the receipt worth anything. A launcher that
+ * returned as soon as `spawn` succeeded would hand back a run id that may
  * belong to a process which died on the strict gate a millisecond later, and
- * the caller would then wait thirty seconds on a run that never existed.
+ * the caller would then wait thirty seconds on a run that never existed. It
+ * waits on the RUN and not on the checkout's socket, for the reason
+ * {@link runIsRegistered} gives.
  *
  * **A user manager that refuses the unit is not a failed run.** The plan probes
  * for a session bus before it chooses `systemd-run`, but a socket that exists is

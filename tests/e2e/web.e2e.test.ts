@@ -13,6 +13,8 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { buildOduBinary, cleanup } from "./harness";
 import {
   chromePath,
@@ -548,6 +550,96 @@ describe("cancelling, and outliving the caller", () => {
     expect(settled.outcome).toBe("incomplete");
   }, 900_000);
 
+  it("takes a busy checkout when asked, and refuses a replacement that never starts", async () => {
+    // THE FALSE-READINESS CASE, end to end against the packaged binary.
+    //
+    // `.ci/odu.sock` belongs to the CHECKOUT, so while a run is live there the
+    // path answers immediately. A launcher that waited on the path therefore
+    // reported a replacement as started before it had reached its own DAG
+    // ingest — and `run.start` wrote an accepted receipt for a run that never
+    // registered. Both halves are here: a replacement that dies, and one that
+    // works.
+    const dir = fixture(SLOW);
+    const { runId } = startOrExplain(world, {
+      checkout: dir,
+      expectedSha: headOf(dir),
+      requestId: "sup-live",
+      noPost: true,
+    });
+    const running = (id: string): string | null => {
+      const row = surfaceCall(world, ["get", "runs", id]);
+      if (row.status !== 0) return null;
+      return (JSON.parse(row.stdout) as { state: string }).state;
+    };
+    await until(
+      `run ${runId} to be running`,
+      () => (running(runId) === "running" ? true : null),
+      300_000,
+    );
+
+    // A justfile odu cannot read. The coordinator dies at ingest, which is
+    // BEFORE it would claim the checkout — so nothing is superseded and nothing
+    // registers, while the incumbent's socket goes on answering.
+    writeFileSync(join(dir, "justfile"), "not : a : justfile {{{\n");
+    const broken = verb(world, "run_start", {
+      checkout: dir,
+      expectedSha: headOf(dir),
+      requestId: "sup-broken",
+      supersede: true,
+      noStrict: true,
+      noSnapshot: true,
+      noPost: true,
+    });
+    expect(broken.status).toBe(1);
+    const refusal = broken.json as { code: string; runId?: string };
+    expect(refusal.code).toBe("launch_failed");
+    // The run it minted an id for does not exist, and the service says so
+    // rather than handing out a receipt for it.
+    if (refusal.runId !== undefined) {
+      const missing = verb(world, "run_wait", { runId: refusal.runId });
+      expect(missing.status).toBe(1);
+      expect((missing.json as { code: string }).code).toBe("unknown_run");
+    }
+    // And the run that WAS there is untouched.
+    expect(running(runId)).toBe("running");
+
+    // Now a replacement that can actually start.
+    writeFileSync(join(dir, "justfile"), SLOW);
+    const taken = verb(world, "run_start", {
+      checkout: dir,
+      expectedSha: headOf(dir),
+      requestId: "sup-take",
+      supersede: true,
+      noStrict: true,
+      noSnapshot: true,
+      noPost: true,
+    });
+    expect(taken.status).toBe(0);
+    const replacement = taken.json as { runId: string; accepted: boolean };
+    expect(replacement.accepted).toBe(true);
+    expect(replacement.runId).not.toBe(runId);
+    // The one it replaced stopped, and stopped as INCOMPLETE rather than
+    // failed: nothing about it broke.
+    const settled = await until(
+      `run ${runId} to be superseded`,
+      () => {
+        const waited = verb(world, "run_wait", { runId, deadlineMs: 10_000 });
+        if (waited.status !== 0) return null;
+        const value = waited.json as { settled: boolean; outcome: string };
+        return value.settled ? value : null;
+      },
+      300_000,
+      0,
+    );
+    expect(settled.outcome).toBe("incomplete");
+
+    verb(world, "run_cancel", {
+      runId: replacement.runId,
+      scope: { kind: "run" },
+      requestId: "sup-cleanup",
+    });
+  }, 900_000);
+
   it("discovers a native run started with `odu run`, from the catalog alone", async () => {
     // No filesystem scan and nothing told the service: `odu run` registers in
     // the per-user catalog, and the board is a projection of that.
@@ -571,6 +663,36 @@ describe("cancelling, and outliving the caller", () => {
     );
     expect(found.repoRoot).toBe(dir);
   }, 900_000);
+});
+
+describe("the websocket door", () => {
+  it("serves NOTHING on a websocket claiming somebody else's Host", async () => {
+    // The rebinding shape, on the real listener: a page from `untrusted.example`
+    // whose DNS points at loopback sends an Origin and a Host that MATCH — so
+    // the framework's same-origin gate says yes, and the connection used to be
+    // served. It reaches the same surface `/mcp` does.
+    //
+    // The upgrade belongs to `serveSurfaceApp` and takes no hook, so the
+    // handshake completes; what must not happen is a serving stack behind it.
+    // The daemon says so on its own log, which is what this reads.
+    const port = new URL(world.origin).port;
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/rpc/ws`, {
+      headers: {
+        host: `untrusted.example:${port}`,
+        origin: `http://untrusted.example:${port}`,
+      },
+    } as unknown as string[]);
+    const messages: unknown[] = [];
+    socket.addEventListener("message", (event) => messages.push(event.data));
+    await until(
+      "the service to refuse the hostile websocket",
+      () => (daemonLog(world).includes("refused a websocket") ? true : null),
+      30_000,
+    );
+    // And it answered nothing at all on the way.
+    expect(messages).toEqual([]);
+    socket.close();
+  }, 60_000);
 });
 
 /**

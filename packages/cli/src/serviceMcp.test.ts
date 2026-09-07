@@ -16,11 +16,8 @@
 
 import { describe, expect, it } from "bun:test";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
-import {
-  allowedHostsFor,
-  gateMcpRequest,
-  RouteTransport,
-} from "./serviceMcp";
+import { gateMcpRequest, RouteTransport } from "./serviceMcp";
+import { allowedHostsFor } from "./webAuthority";
 
 const ORIGIN = "http://127.0.0.1:18440";
 const HOSTS = allowedHostsFor(ORIGIN);

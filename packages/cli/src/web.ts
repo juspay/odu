@@ -12,11 +12,12 @@
  * ## The singleton, exactly
  *
  * One per-user home (`~/.local/state/odu-web/`), one gate file in it, and one
- * fixed origin. Concurrent launchers converge through the framework's own pid
- * gate: every one of them writes a per-pid temp file and races a single atomic
- * `link(2)`, exactly one wins, and every loser reads the gate, proves the
- * holder is alive, and yields. Not a lock — a claim that a dead holder cannot
- * keep.
+ * fixed origin — and the home is derived FROM the origin, so moving the service
+ * with `ODU_WEB_ORIGIN` moves its gate too (see {@link webAppNamespace}).
+ * Concurrent launchers converge through the framework's own pid gate: every one
+ * of them writes a per-pid temp file and races a single atomic `link(2)`,
+ * exactly one wins, and every loser reads the gate, proves the holder is alive,
+ * and yields. Not a lock — a claim that a dead holder cannot keep.
  *
  * **The gate is claimed BEFORE the port is bound**, and the ordering is the one
  * thing this file must not get wrong. `daemonMain` claims the gate itself, but
@@ -44,6 +45,7 @@
 import { existsSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
   claimPidGate,
@@ -64,11 +66,16 @@ import {
   isSameRun,
   retryRun as retryRecordedRun,
 } from "@odu/execution/coordinator/recovery";
-import { survivableSpawnPlan } from "@odu/execution/coordinator/spawn";
+import {
+  ODU_CHILD_ENV_KEYS,
+  pickEnv,
+  survivableSpawnPlan,
+} from "@odu/execution/coordinator/spawn";
 import { gitBranch, gitTopLevel } from "@odu/execution/common/git";
 import { ODU_VERSION } from "@odu/execution/common/version";
 import { listRuns } from "@odu/run-history/store";
 import {
+  DEFAULT_SERVICE_ORIGIN,
   SERVICE_APP,
   serviceBind,
   serviceMcpUrl,
@@ -86,22 +93,49 @@ import { Effect, Exit, Layer, Scope } from "effect";
 import { HttpRouter } from "effect/unstable/http";
 import { readProcessIdentity, selfProcessIdentity } from "./processIdentity";
 import {
-  allowedHostsFor,
   mcpGetRoute,
   mcpRoute,
   RouteTransport,
   serveServiceMcpInProcess,
 } from "./serviceMcp";
 import { ensureService, type EnsureOutcome } from "./webLauncher";
+import {
+  allowedHostsFor,
+  authorityAllowed,
+  type WebAuthority,
+} from "./webAuthority";
 
 /** Where the browser bundle lives. Baked by the Nix wrapper; absent in a source
  *  run, where the service still serves its wire and simply has no page. */
 const DIST_ENV = "ODU_WEB_DIST";
 
+/**
+ * ONE GATE PER ADDRESS.
+ *
+ * `ODU_WEB_ORIGIN` is documented as moving the whole service, so a developer
+ * can run a second odu against a scratch catalog. It moved the address and not
+ * the gate: both services computed `~/.local/state/odu-web/`, so the second one
+ * read a live holder there and yielded — to a daemon serving a different port
+ * and a different catalog. A singleton is per-address or it is not a singleton,
+ * and the two spellings of "which service am I" have to be one.
+ *
+ * The default origin keeps the plain namespace, so nothing about an ordinary
+ * install moves. Any other origin gets its own, named by a digest of the origin
+ * rather than by the port alone — `http://127.0.0.1:9000` and
+ * `http://[::1]:9000` are two addresses.
+ */
+export function webAppNamespace(origin: string): string {
+  if (origin === DEFAULT_SERVICE_ORIGIN) return SERVICE_APP;
+  const digest = createHash("sha256").update(origin).digest("hex").slice(0, 12);
+  return `${SERVICE_APP}-${digest}`;
+}
+
 /** The daemon's own home — the same call the launcher makes, so the two cannot
  *  disagree about where the gate and the control socket are. */
-export function webHome(): ReturnType<typeof daemonHome> {
-  return daemonHome({ app: SERVICE_APP, placement: "state" });
+export function webHome(
+  origin: string = serviceOrigin(),
+): ReturnType<typeof daemonHome> {
+  return daemonHome({ app: webAppNamespace(origin), placement: "state" });
 }
 
 /**
@@ -348,14 +382,21 @@ async function dispatchCancel({
  * lingering-daemon class.
  */
 export async function webDaemonCommand(): Promise<number> {
-  const home = webHome();
+  // The origin FIRST, because the home is derived from it: one address, one
+  // gate, and never two readings of `ODU_WEB_ORIGIN` that could disagree.
   const origin = serviceOrigin();
+  const home = webHome(origin);
   const { host, port } = serviceBind(origin);
   const log = stderrLogger();
   const controller = new AbortController();
-  // Read once and used by BOTH doors — the websocket upgrade and `/mcp`. Two
-  // reads of one env var is how two doors end up with two policies.
+  // ONE policy, read once, applied at both doors — the websocket and `/mcp`.
+  // Two reads of one env var is how two doors end up with two answers to the
+  // same question.
   const allowedOrigins = parseAllowedOrigins(process.env.ODU_WEB_ALLOWED_ORIGINS);
+  const authority: WebAuthority = {
+    allowedOrigins,
+    allowedHosts: allowedHostsFor(origin, allowedOrigins),
+  };
 
   // Claimed FIRST, so a launcher that lost the race never binds the port. The
   // framework's own gate: one atomic link, a liveness-proved holder, and a
@@ -422,25 +463,44 @@ export async function webDaemonCommand(): Promise<number> {
         manifest: { name: "odu", themeColor: "#1f6feb", icons: [] },
         host,
         port,
-        // Same-origin is always allowed; anything else must be named. The gate
+        // Same-origin is always allowed; anything else must be named. This gate
         // runs on the RAW pre-upgrade socket, so a hostile page never gets a
-        // connection to argue about — which is what stands between a web page
-        // somebody visited and `run_start` on an arbitrary checkout.
+        // connection to argue about — but it compares Origin against the Host
+        // the request CLAIMS, which is why `services` below adds the half it
+        // cannot see.
         allowedOrigins,
+        // Both headers the authority decision reads, off the upgrade. A literal
+        // array so the keys are a union and `connection.headers` typechecks.
+        upgradeHeaders: ["host", "origin"] as const,
+        // THE OTHER DOOR'S HALF OF THE SAME LOCK. `isAllowedWsOrigin` says yes
+        // to a page whose Origin matches the Host it sent — and under DNS
+        // rebinding both are the attacker's, so they match. The listener's own
+        // authorities are the missing half, and this is the earliest point odu
+        // can apply them: `serveSurfaceApp` owns the upgrade and takes no hook,
+        // so the handshake completes and then this connection gets NO serving
+        // stack — it reads no frame and can call nothing.
+        services: (connection) =>
+          authorityAllowed(
+            {
+              host: connection.headers.host,
+              origin: connection.headers.origin,
+            },
+            authority,
+          )
+            ? Layer.empty
+            : Layer.effectDiscard(
+                Effect.die(
+                  new Error(
+                    `odu: refused a websocket claiming Host ` +
+                      `"${connection.headers.host ?? "(absent)"}" — this ` +
+                      `service answers to ${authority.allowedHosts.join(", ")}`,
+                  ),
+                ),
+              ),
         // Two layers merged into one, because `routes` takes one. Merged and
         // not ordered: `HttpRouter` ranks by specificity, so both literal `/mcp`
         // routes beat the shell's `GET /*` catch-all either way round.
-        //
-        // `/mcp` carries the SAME policy: `serveSurfaceApp`'s origin gate runs
-        // at the websocket upgrade and nowhere else, so an HTTP route added
-        // beside it is a second door and has to be locked with the same key.
-        routes: Layer.merge(
-          mcpRoute(transport, {
-            allowedOrigins,
-            allowedHosts: allowedHostsFor(origin, allowedOrigins),
-          }),
-          mcpGetRoute(),
-        ),
+        routes: Layer.merge(mcpRoute(transport, authority), mcpGetRoute()),
         onEvent: reportSurfaceAppEvent,
       }).pipe(Scope.provide(scope)),
     );
@@ -492,9 +552,10 @@ export async function webCommand(opts: {
   upgrade: boolean;
   json: boolean;
 }): Promise<number> {
+  const origin = serviceOrigin();
   const outcome = await ensureService({
-    origin: serviceOrigin(),
-    home: webHome(),
+    origin,
+    home: webHome(origin),
     baked: bakedBuild(),
     upgrade: opts.upgrade,
     spawn: spawnWebDaemon,
@@ -603,69 +664,37 @@ export function webDaemonSpawnConfig(
 }
 
 /**
- * The env a daemon needs, named rather than inherited wholesale.
+ * What only the WEB daemon needs, on top of what every odu child needs.
  *
- * Long on purpose. This is the COMPLETE environment of a detached daemon, and
- * that daemon's job includes starting coordinators that shell out to `nix` and
- * `git` — so anything those need to work has to be named here or the failure
- * appears much later, as a run that cannot provision, in a process nobody was
- * watching. The rule for what belongs: a variable odu reads, a variable the
- * platform needs to find its own directories, or a variable the toolchain a run
- * depends on reads. Not an orchestrator's ambient identity, which is the whole
- * reason this is a list and not `process.env`.
+ * Four locators for the service itself and the pair that names this build. A
+ * coordinator has no use for any of them, which is why they are here and not in
+ * `ODU_CHILD_ENV_KEYS`.
+ */
+const WEB_DAEMON_ENV_KEYS = [
+  "ODU_WEB_ORIGIN",
+  "ODU_WEB_DIST",
+  "ODU_WEB_ALLOWED_ORIGINS",
+  "ODU_WEB_MCP_TOKEN",
+  "ODU_COMMIT_HASH",
+  "ODU_BUILD_ID",
+] as const;
+
+/**
+ * The env a daemon runs with, named rather than inherited wholesale.
+ *
+ * On the detached branch this is the COMPLETE environment, and this daemon's
+ * job includes starting coordinators that shell out to `nix` and `git` — so
+ * anything they need has to be named or the failure appears four layers away,
+ * as a run that will not provision, in a process nobody is watching. That is
+ * not hypothetical: it is what happened, and it happened because this list and
+ * the coordinator's were two lists. There is one now
+ * ({@link ODU_CHILD_ENV_KEYS}), and this adds only what is genuinely the web
+ * face's.
  */
 export function daemonEnv(
   source: NodeJS.ProcessEnv = process.env,
 ): Record<string, string> {
-  const keep = [
-    "HOME",
-    "PATH",
-    "SHELL",
-    "LANG",
-    "LC_ALL",
-    "USER",
-    "LOGNAME",
-    "TERM",
-    "TZ",
-    "TMPDIR",
-    "XDG_RUNTIME_DIR",
-    "XDG_STATE_HOME",
-    "XDG_CACHE_HOME",
-    "XDG_CONFIG_HOME",
-    "XDG_DATA_HOME",
-    // What a coordinator this daemon starts needs to reach the store, the
-    // caches and the certificates. A daemon with none of these looks fine until
-    // the first run tries to provision a lane.
-    "NIX_PATH",
-    "NIX_REMOTE",
-    "NIX_CONFIG",
-    "NIX_SSL_CERT_FILE",
-    "SSL_CERT_FILE",
-    "LOCALE_ARCHIVE",
-    // odu's own locators — where the catalog is, which odu this is, which flake
-    // the lane runner comes from, and where the browser bundle lives.
-    "ODU_STATE_DIR",
-    "ODU_SELF",
-    "ODU_RUNNER_FLAKE",
-    "ODU_GH_BIN",
-    "ODU_HOSTS",
-    "ODU_AGENT_SUBSTITUTERS",
-    "ODU_AGENT_TRUSTED_PUBLIC_KEYS",
-    "ODU_NO_SYSTEMD_RUN",
-    "ODU_LINGER_IDLE_MS",
-    "ODU_WEB_ORIGIN",
-    "ODU_WEB_DIST",
-    "ODU_WEB_ALLOWED_ORIGINS",
-    "ODU_WEB_MCP_TOKEN",
-    "ODU_COMMIT_HASH",
-    "ODU_BUILD_ID",
-  ];
-  const env: Record<string, string> = {};
-  for (const key of keep) {
-    const value = source[key];
-    if (value !== undefined) env[key] = value;
-  }
-  return env;
+  return pickEnv(source, [...ODU_CHILD_ENV_KEYS, ...WEB_DAEMON_ENV_KEYS]);
 }
 
 /** Re-exported so a caller that wants the gate's current holder does not learn

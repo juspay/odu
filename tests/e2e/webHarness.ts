@@ -8,11 +8,20 @@
  * the browser is a headless Chrome when the machine has one. Nothing imports
  * `src/` — the contract under test is what a person and an agent actually meet.
  *
- * **The world is a private one.** `HOME` and `ODU_STATE_DIR` point into a temp
- * directory, so the daemon home, the pid gate, the catalog and the service's
- * request receipts are all this suite's — a developer's own running `odu web`
- * is untouched, and two runs of this suite on one machine do not fight. The
- * port is likewise picked per-suite rather than shared, for the same reason.
+ * **The world is a private one, and privacy stops where odu stops.** The port
+ * is picked per suite and `ODU_STATE_DIR` points into a temp directory, so the
+ * catalog, the receipts, the daemon home and its pid gate are all this suite's
+ * — a developer's own running `odu web` is untouched and two runs of this suite
+ * on one machine do not fight.
+ *
+ * What is NOT redirected is `HOME`, and that is a correction rather than an
+ * omission: it used to be, and a synthetic home takes `~/.config/nix/nix.conf`
+ * with it. On a single-user Nix install — which is what a CI runner is — that
+ * file is where `experimental-features = nix-command flakes` lives, so every
+ * coordinator this suite started could not evaluate a flake and every run
+ * refused. It passed locally, on a machine with a system-wide nix.conf, and
+ * failed on CI for a reason that had nothing to do with the code under test. A
+ * host where odu needs a faked home is a host odu does not work on.
  */
 
 import { type ChildProcess, execFileSync, spawn, spawnSync } from "node:child_process";
@@ -95,18 +104,29 @@ export async function until<T>(
   }
 }
 
-/** A private world for one service: its own HOME, daemon home, catalog, hosts
- *  file and port. Two suites on one machine do not fight, and a developer's own
- *  `odu web` is untouched. */
+/**
+ * A private world for one service: its own daemon home, catalog, hosts file and
+ * port. Two suites on one machine do not fight, and a developer's own `odu web`
+ * is untouched.
+ *
+ * **`HOME` is deliberately NOT redirected.** It was, and that is what made this
+ * suite fail on CI in a way no local run could reproduce: a single-user Nix
+ * install — which is what a GitHub runner has — keeps
+ * `experimental-features = nix-command flakes` in `$HOME/.config/nix/nix.conf`,
+ * so a coordinator started inside a world with a synthetic home could not
+ * evaluate a flake and every run refused with `launch_failed`. A machine on
+ * which `HOME` has to be faked for isolation is a machine odu would not work on
+ * either, so the isolation is done with the two variables that actually name
+ * what odu owns — the daemon home and the catalog — and everything the
+ * toolchain reads out of the real home is left alone.
+ */
 function privateWorld(port: number): {
   root: string;
   origin: string;
   env: NodeJS.ProcessEnv;
 } {
   const root = mkdtempSync(join(tmpdir(), "odu-e2e-web-"));
-  const home = join(root, "home");
   const state = join(root, "state");
-  mkdirSync(home, { recursive: true });
   mkdirSync(state, { recursive: true });
   const origin = `http://127.0.0.1:${port}`;
   return {
@@ -114,12 +134,11 @@ function privateWorld(port: number): {
     origin,
     env: {
       ...process.env,
-      HOME: home,
-      // The daemon home (gate + control socket) is derived from XDG_STATE_HOME
-      // when it is set and from HOME otherwise — so a developer who exports the
-      // former would have this suite's daemon claim their own gate. Named
-      // rather than left to the environment.
+      // The daemon home — the gate and the control socket. Derived from
+      // XDG_STATE_HOME when it is set and from HOME otherwise, so naming it is
+      // what keeps this suite's daemon out of a developer's own gate.
       XDG_STATE_HOME: join(root, "xdg-state"),
+      // The catalog.
       ODU_STATE_DIR: state,
       ODU_HOSTS: hostsFile(root),
       ODU_WEB_ORIGIN: origin,
@@ -168,18 +187,25 @@ export async function startWebService(oduBin: string): Promise<WebWorld> {
 
   // READINESS IS ASKED FOR, never slept on: the service publishes its own state
   // and this reads it.
-  await until("the web service to say it is ready", () => {
-    const answer = surfaceCall(world, ["get", "service"]);
-    if (answer.status !== 0) return null;
-    try {
-      const cell = JSON.parse(answer.stdout) as {
-        readiness: { state: string };
-      };
-      return cell.readiness.state === "ready" ? cell : null;
-    } catch {
-      return null;
-    }
-  });
+  try {
+    await until("the web service to say it is ready", () => {
+      const answer = surfaceCall(world, ["get", "service"]);
+      if (answer.status !== 0) return null;
+      try {
+        const cell = JSON.parse(answer.stdout) as {
+          readiness: { state: string };
+        };
+        return cell.readiness.state === "ready" ? cell : null;
+      } catch {
+        return null;
+      }
+    });
+  } catch (err) {
+    // A daemon that never answered has usually SAID why, and a bare "did not
+    // happen within 120000ms" throws that away — which on a CI runner is the
+    // whole of what a failure gets to say.
+    throw new Error(`${String(err)}\n--- daemon log ---\n${daemonLog(world)}`);
+  }
   return world;
 }
 
@@ -198,9 +224,9 @@ export async function startWebService(oduBin: string): Promise<WebWorld> {
 export async function startWebServiceViaCommand(
   oduBin: string,
 ): Promise<WebWorld> {
-  // A different port from the forked-daemon world, so the two coexist.
+  // A different port from the forked-daemon world, so the two coexist — which
+  // they can only do because the gate is derived from the origin.
   const { root, origin, env } = privateWorld(suitePort() + 1);
-  const logPath = join(root, "xdg-state", "odu-web", "web-daemon.stderr.log");
   const started = spawnSync(oduBin, ["web"], { env, encoding: "utf-8" });
   if (started.status !== 0) {
     throw new Error(
@@ -216,7 +242,7 @@ export async function startWebServiceViaCommand(
     if (answer.status !== 0) return null;
     try {
       const value = JSON.parse(answer.stdout) as {
-        identity: { pid: number };
+        identity: { pid: number; home: string };
         readiness: { state: string };
       };
       return value.readiness.state === "ready" ? value : null;
@@ -229,7 +255,10 @@ export async function startWebServiceViaCommand(
     origin,
     env,
     daemon: null,
-    logPath,
+    // Where the daemon says its own home is, rather than a path this file
+    // re-derives — the crash-catcher lives in it, and a second derivation is a
+    // second thing that can be wrong about where the daemon put its reasons.
+    logPath: join(cell.identity.home, "web-daemon.stderr.log"),
     root,
     dispose: () => {
       // Its GROUP first — the daemon is a session leader on either branch — and
