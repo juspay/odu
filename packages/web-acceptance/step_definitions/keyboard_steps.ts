@@ -154,7 +154,7 @@ When("I press Tab and type the fixture HEAD", async function (this: OduWorld) {
  *
  * Two claims in one, and the second is the one a snapshot cannot make. First:
  * nothing carries an inline click handler outside a button. Second — and this is
- * the structural rule `packages/web-ui`'s `dom.ts` exists to keep — everything
+ * the structural rule `packages/web-ui`'s `dom.tsx` exists to keep — everything
  * that LOOKS like a control (a run row, a `.btn`, a node opener) actually IS a
  * button element, so it is focusable, fires on Enter and Space, is announced as
  * a control, and carries a disabled state the browser enforces.

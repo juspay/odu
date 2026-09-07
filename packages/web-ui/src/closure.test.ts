@@ -44,6 +44,9 @@ const HYDRATED = new Set<string>([
 /** Test-only imports — the harness, not the shipped closure. */
 const TEST_ONLY = new Set(["bun:test", "typescript"]);
 
+/** Every source this package ships, `.tsx` INCLUDED — the views are Solid JSX,
+ *  and a walker that only knew about `.ts` would have quietly stopped policing
+ *  five of the seven modules the browser actually runs. */
 function tsFilesUnder(dir: string): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(dir)) {
@@ -53,7 +56,7 @@ function tsFilesUnder(dir: string): string[] {
       out.push(...tsFilesUnder(path));
       continue;
     }
-    if (entry.endsWith(".ts")) out.push(path);
+    if (entry.endsWith(".ts") || entry.endsWith(".tsx")) out.push(path);
   }
   return out;
 }
@@ -67,7 +70,12 @@ function specifiersIn(source: string, fileName: string): string[] {
     source,
     ts.ScriptTarget.Latest,
     /* setParentNodes */ false,
-    ts.ScriptKind.TS,
+    // TSX or TS by extension. TypeScript's parser resolves `<T>(x) => x` one way
+    // in a `.ts` and another in a `.tsx`, so a JSX file parsed as TS does not
+    // fail loudly — it produces a tree with the imports still in it and the
+    // markup mangled, which is a policing test that keeps passing while seeing
+    // less than it thinks.
+    fileName.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
   );
   const out: string[] = [];
   const literal = (node: ts.Node | undefined): void => {

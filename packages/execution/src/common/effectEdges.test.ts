@@ -88,7 +88,7 @@ const SANCTIONED = new Map<string, string>([
       "one that may open and close the listener's scope.",
   ],
   [
-    "packages/web-ui/src/app.ts",
+    "packages/web-ui/src/app.tsx",
     "The BROWSER's UI edge. A surface procedure is an `Effect` — a description — " +
       "and a click is the moment one becomes execution, so this file's `run` " +
       "helper is where that crossing happens for every control on the page. ONE " +

@@ -18,8 +18,7 @@ import { reloadForUpdate } from "@kolu/surface-app/lifecycle";
 import { connectSurface } from "@kolu/surface-app/solid";
 import { oduServiceSurface } from "@odu/service-client/surface";
 import { render } from "solid-js/web";
-import { app } from "./app";
-import { el } from "./dom";
+import { App } from "./app";
 
 const root = document.getElementById("odu");
 if (root === null) {
@@ -32,15 +31,18 @@ const connection = await connectSurface({
 });
 
 render(
-  () =>
-    el(
-      "div",
-      { class: "root" },
-      app({
-        client: connection.client,
-        readout: connection.readout,
-        onReload: reloadForUpdate,
-      }),
-    ) as never,
+  () => (
+    <div class="root">
+      <App
+        client={connection.client}
+        // The framework's readout is an accessor; read HERE, inside the render
+        // root, so the compiler makes it a getter on `App`'s props and the
+        // indicator keeps moving. Reading it into a `const` would freeze the
+        // page on whatever the connection happened to be at boot.
+        readout={connection.readout()}
+        onReload={reloadForUpdate}
+      />
+    </div>
+  ),
   root,
 );

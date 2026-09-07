@@ -11,23 +11,33 @@ addressed state through every face* a property rather than a promise.
 `src/closure.test.ts` enforces it: importing `@odu/service`, `@odu/execution` or
 `@odu/run-history` is a test failure, not a review comment.
 
-## No JSX, and that is a build decision
+## Solid JSX, compiled by Solid's own compiler
 
-Solid's fine-grained JSX needs a compiler plugin, which needs a bundler plugin,
-which needs a bundler config, which needs two more dependencies in a tree whose
-whole build is `Bun.build` over raw TypeScript. `solid-js/h` is Solid's own
-supported no-build mode: the same reactive runtime, the same fine-grained
-updates, one import.
+The views are conventional Solid JSX — `<Show>`, `<For>`, `<Index>`, components
+with typed props. They used to be Solid's hyperscript (`solid-js/h`), and the
+argument for that was a build argument: JSX needs a compiler, which needs a
+bundler plugin, which needs dependencies, in a tree whose whole build was
+`Bun.build` over raw TypeScript. That is a real cost and it was the wrong trade.
+A UI is read far more often than it is built.
 
-The cost is one rule, and it is a rule a reviewer can check by eye:
+**Solid's JSX is not React's, and the difference is the whole build.**
+`babel-preset-solid` compiles each element to a cloned `<template>` plus one
+effect per *dynamic* binding: a component function runs once, and only the
+bindings that read a changed signal re-run. Bun's own built-in JSX transform
+would consume the same files happily and emit `jsx(Component, props)` calls
+instead — a React-shaped render where whole components re-run and every
+`createSignal` inside them is re-created. It typechecks, it bundles, it
+screenshots correctly, and it loses the caret in a field, the focus ring on a
+button, and the scroll position of a log pane somebody was reading. So the
+compiler is pinned exactly (root manifest), wired in `scripts/build-web-ui.ts`,
+built into the Nix derivation, and *asserted* by `src/compile.test.ts` — which
+compiles every view in this package and checks what came out.
 
-> **A dynamic value is a FUNCTION.** `el("span", {}, count())` reads the signal
-> once, at construction, and never again. `el("span", {}, () => count())` is
-> reactive.
+The one rule the compiler cannot keep for you:
 
-That is not a quirk of this package — it is how hyperscript distinguishes a
-value from a computation, and it is the same distinction JSX's compiler makes
-invisibly.
+> **Never destructure props.** `props` is an object of getters, so
+> `function Row({ run })` reads every one of them once and freezes the row.
+> Write `props.run`.
 
 ## Built by one call
 
@@ -54,7 +64,7 @@ adopting a daemon somebody else started.
 ## Two properties that are acceptance gates, not polish
 
 **Keyboard access is not a mode.** Every control is a real `<button>` (see
-`./src/dom.ts`, where that decision is made once): reachable by Tab, firing on
+`./src/dom.tsx`, where that decision is made once): reachable by Tab, firing on
 Enter and Space, announced as a control, with a disabled state the browser
 enforces. The focus ring is styled up, never off. A filter's *pressed* state
 rides `aria-pressed` rather than only a colour.

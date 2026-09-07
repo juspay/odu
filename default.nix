@@ -55,8 +55,16 @@ let
   # `@kolu/*` sources — by the one call `@kolu/surface-app/bun` publishes, so
   # the dist satisfies the freshness contract its own server half is built to
   # serve: content-hashed assets, the commit on the `no-store` shell, module
-  # preloads, and precompressed siblings. No bundler config and no plugin,
-  # because `packages/web-ui` uses Solid's hyperscript rather than JSX.
+  # preloads, and precompressed siblings.
+  #
+  # SOLID'S COMPILER RUNS HERE, and that is the point of building the bundle in
+  # Nix rather than committing one: `packages/web-ui` is written in Solid JSX,
+  # `scripts/build-web-ui.ts` runs `babel-preset-solid` over it as a `Bun.build`
+  # plugin, and the presets are pinned exactly in the root manifest and fetched
+  # through `bun.nix` like every other dependency. So the page a user gets is
+  # compiled by the same toolchain as the page a developer builds, with no step
+  # that depends on what happens to be installed — Nix stays the only supported
+  # way to run odu, compiler included.
   #
   # A DERIVATION of its own rather than a step inside `base`: the bundle is what
   # a browser downloads and `base` is what a coordinator runs, and a lane host

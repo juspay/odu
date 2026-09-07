@@ -2,12 +2,12 @@
  * THE SHELL — routing, the connection indicator, and the one place a view meets
  * the wire.
  *
- * Everything reactive is bound here and handed to the views as accessors, so a
- * view holds no client and cannot invent a second way to reach the service.
- * That is not tidiness: it is what makes "the browser has no execution or retry
- * logic of its own" a thing you can check by reading one file.
+ * Everything reactive is bound here and handed to the views as ordinary props,
+ * so a view holds no client and cannot invent a second way to reach the
+ * service. That is not tidiness: it is what makes "the browser has no execution
+ * or retry logic of its own" a thing you can check by reading one file.
  *
- * **The connection is drawn, not hidden.** `readout()` is the framework's own
+ * **The connection is drawn, not hidden.** The readout is the framework's own
  * five-state fact — connecting, live, degraded, reconnecting, retired — and
  * each is a state a person can be in and needs to know about. `reconnecting`
  * in particular is the honest one: the page keeps showing the last thing the
@@ -25,11 +25,19 @@ import { formatLogKey, parseLogKey } from "@odu/service-client/logKey";
 import { LOG_TAIL_BYTES } from "@odu/service-client/surface";
 import type { oduServiceSurface } from "@odu/service-client/surface";
 import { Effect } from "effect";
-import { createEffect, createMemo, createSignal, onCleanup } from "solid-js";
-import { board } from "./board";
-import { create, type CreateState, type StartForm } from "./create";
-import { type ControlState, detail, LOG_PAGE_BYTES } from "./detail";
-import { el, type View, when } from "./dom";
+import {
+  createEffect,
+  createMemo,
+  createSignal,
+  Match,
+  onCleanup,
+  Show,
+  Switch,
+  type JSX,
+} from "solid-js";
+import { Board } from "./board";
+import { Create, type CreateState, type StartForm } from "./create";
+import { type ControlState, Detail, LOG_PAGE_BYTES } from "./detail";
 import { CONNECTION } from "./format";
 import type { LogPage, LogTail, NodesFrame, RunNode, RunRow } from "./types";
 
@@ -102,11 +110,19 @@ function refusalText(err: unknown): string {
   return `${message}${suggestion}`;
 }
 
-export function app(opts: {
+/** odu's words for the framework's five states. `degraded` is the one that
+ *  names what stopped, so the sentence can never come out with a hole in it. */
+function wireText(readout: SurfaceReadout): string {
+  return readout.status === "degraded"
+    ? `${CONNECTION.degraded} — nothing is arriving on ${readout.stopped.join(", ")}`
+    : CONNECTION[readout.status];
+}
+
+export function App(props: {
   client: Client;
-  readout: () => SurfaceReadout;
+  readout: SurfaceReadout;
   onReload: () => void;
-}): View {
+}): JSX.Element {
   const [route, setRoute] = createSignal<Route>(
     routeOf(globalThis.location?.hash ?? ""),
   );
@@ -133,7 +149,7 @@ export function app(opts: {
   onCleanup(() => clearInterval(clock));
 
   // ── the board ──
-  const runs = opts.client.collections.runs.use();
+  const runs = props.client.collections.runs.use();
   const rows = createMemo<RunRow[]>(() => {
     const out: RunRow[] = [];
     for (const key of runs.keys()) {
@@ -155,7 +171,7 @@ export function app(opts: {
     const id = runId();
     return id === null ? undefined : runs.byKey(id)?.();
   });
-  const nodesSub = opts.client.streams.nodes.use(() => {
+  const nodesSub = props.client.streams.nodes.use(() => {
     const id = runId();
     return id === null ? null : { runId: id };
   });
@@ -197,7 +213,7 @@ export function app(opts: {
     logKey();
     setPage(null);
   });
-  const tails = opts.client.collections.logTails.use({
+  const tails = props.client.collections.logTails.use({
     keys: () => {
       const key = logKey();
       return key === null ? [] : [key];
@@ -246,7 +262,7 @@ export function app(opts: {
       if (id === null) return;
       run(
         `retrying ${node}`,
-        opts.client.procedures.run.retry({
+        props.client.procedures.run.retry({
           runId: id,
           selector: node,
           requestId: requestId("retry"),
@@ -271,7 +287,7 @@ export function app(opts: {
       if (id === null) return;
       run(
         "cancelling the run",
-        opts.client.procedures.run.cancel({
+        props.client.procedures.run.cancel({
           runId: id,
           scope: { kind: "run" },
           requestId: requestId("cancel"),
@@ -287,7 +303,7 @@ export function app(opts: {
       if (id === null) return;
       run(
         `cancelling ${node}`,
-        opts.client.procedures.run.cancel({
+        props.client.procedures.run.cancel({
           runId: id,
           scope: { kind: "node", node },
           requestId: requestId("cancel-node"),
@@ -303,7 +319,7 @@ export function app(opts: {
       if (id === null) return;
       run(
         `dropping the ${platform} lane`,
-        opts.client.procedures.run.cancel({
+        props.client.procedures.run.cancel({
           runId: id,
           scope: { kind: "lane", platform },
           requestId: requestId("cancel-lane"),
@@ -319,7 +335,7 @@ export function app(opts: {
       if (current === undefined) return;
       run(
         "starting a new run",
-        opts.client.procedures.run.start({
+        props.client.procedures.run.start({
           checkout: current.repoRoot,
           expectedSha: current.sha,
           requestId: requestId("again"),
@@ -387,7 +403,7 @@ export function app(opts: {
         let page: LogPage;
         try {
           page = await Effect.runPromise(
-            opts.client.procedures.log.read({
+            props.client.procedures.log.read({
               key,
               ...(cursor === undefined ? { offset: -LOG_TAIL_BYTES } : { offset: cursor }),
               limit: LOG_PAGE_BYTES,
@@ -429,7 +445,7 @@ export function app(opts: {
       // ALWAYS bounded. The verb will happily return a whole log, and this used
       // to ask for one — a request whose cost is set by whatever the recipe
       // printed, which is not a thing a browser may bet a tab on.
-      opts.client.procedures.log.read({ key, offset, limit: LOG_PAGE_BYTES }),
+      props.client.procedures.log.read({ key, offset, limit: LOG_PAGE_BYTES }),
     ).then(
       (answer) => setPage(answer),
       (err: unknown) => setControl({ kind: "refused", message: refusalText(err) }),
@@ -439,7 +455,7 @@ export function app(opts: {
   const start = (form: StartForm): void => {
     setCreating({ kind: "starting" });
     void Effect.runPromise(
-      opts.client.procedures.run.start({
+      props.client.procedures.run.start({
         checkout: form.checkout,
         expectedSha: form.expectedSha,
         requestId: requestId("start"),
@@ -471,105 +487,89 @@ export function app(opts: {
   };
 
   // ── the shell ──
-  return el(
-    "div",
-    { class: "shell" },
-    el(
-      "div",
-      {
-        class: () => `wire wire-${opts.readout().status}`,
-        role: "status",
-        "aria-live": "polite",
-      },
-      () => {
-        const readout = opts.readout();
-        return readout.status === "degraded"
-          ? `${CONNECTION.degraded} — nothing is arriving on ${readout.stopped.join(", ")}`
-          : CONNECTION[readout.status];
-      },
-      when(
-        () => opts.readout().needsReload,
-        () =>
-          el(
-            "button",
-            { type: "button", class: "btn", onClick: opts.onReload },
-            "Reload",
-          ),
-      ),
-    ),
-    // THE ROUTER, and each branch is BUILT ON ENTRY — see `./dom`'s `when` for
-    // why that is the whole point rather than a detail of spelling.
-    when(
-      () => route().at === "board",
-      () =>
-        board({
-          rows,
-          now,
-          // The framework's own pending fact: `connecting` with nothing yet is a
-          // catalog that has not arrived, which is a different thing from a
-          // catalog with no runs in it.
-          loading: () =>
-            opts.readout().status === "connecting" && rows().length === 0,
-          onOpen: (id) => go({ at: "run", runId: id, log: null }),
-          onCreate: () => go({ at: "new" }),
-        }),
-    ),
-    when(
-      () => route().at === "new",
-      () =>
-        create({
-          state: creating,
-          onStart: start,
-          onOpen: (id) => go({ at: "run", runId: id, log: null }),
-          onBack: () => go({ at: "board" }),
-        }),
-    ),
-    when(
-      () => route().at === "run",
-      () =>
-        detail({
-          run: selectedRun,
-          frame,
-          pending: () => nodesSub.pending(),
-          error: () => nodesSub.error(),
-          selected,
-          onSelect: (node) => {
-            const id = runId();
-            if (id === null) return;
-            go({
-              at: "run",
-              runId: id,
-              log:
-                node === null
-                  ? null
-                  : formatLogKey({ runId: id, node: node.id, attempt: node.attempt }),
-            });
-          },
-          selectedAttempt,
-          // Choosing an attempt moves the ADDRESS, not a signal beside it — the
-          // same rule the node selection keeps. So an earlier attempt is a link
-          // like any other view here, Back walks out of it, and the tail
-          // subscription follows because it is keyed by the log key.
-          onAttempt: (attempt) => {
-            const id = runId();
-            const node = selected();
-            if (id === null || node === null) return;
-            go({
-              at: "run",
-              runId: id,
-              log: formatLogKey({ runId: id, node: node.id, attempt }),
-            });
-          },
-          tail,
-          followed,
-          tailPending,
-          tailError,
-          page,
-          onPage: readLogPage,
-          control,
-          controls,
-          onBack: () => go({ at: "board" }),
-        }),
-    ),
+  return (
+    <div class="shell">
+      <div class={`wire wire-${props.readout.status}`} role="status" aria-live="polite">
+        {wireText(props.readout)}
+        <Show when={props.readout.needsReload}>
+          <button type="button" class="btn" onClick={props.onReload}>
+            Reload
+          </button>
+        </Show>
+      </div>
+      {/* THE ROUTER. `Switch` rather than three independent `Show`s because the
+          three are exclusive, and each branch is BUILT ON ENTRY: the compiler
+          turns a `Match`'s children into a getter, so leaving a run and coming
+          back mints a fresh view rather than re-inserting the one that was
+          disposed on the way out — see `./dom`'s header for the failure that
+          taught us to care. */}
+      <Switch>
+        <Match when={route().at === "board"}>
+          <Board
+            rows={rows()}
+            now={now()}
+            // The framework's own pending fact: `connecting` with nothing yet is
+            // a catalog that has not arrived, which is a different thing from a
+            // catalog with no runs in it.
+            loading={props.readout.status === "connecting" && rows().length === 0}
+            onOpen={(id) => go({ at: "run", runId: id, log: null })}
+            onCreate={() => go({ at: "new" })}
+          />
+        </Match>
+        <Match when={route().at === "new"}>
+          <Create
+            state={creating()}
+            onStart={start}
+            onOpen={(id) => go({ at: "run", runId: id, log: null })}
+            onBack={() => go({ at: "board" })}
+          />
+        </Match>
+        <Match when={route().at === "run"}>
+          <Detail
+            run={selectedRun()}
+            frame={frame()}
+            pending={nodesSub.pending()}
+            error={nodesSub.error()}
+            selected={selected()}
+            onSelect={(node) => {
+              const id = runId();
+              if (id === null) return;
+              go({
+                at: "run",
+                runId: id,
+                log:
+                  node === null
+                    ? null
+                    : formatLogKey({ runId: id, node: node.id, attempt: node.attempt }),
+              });
+            }}
+            selectedAttempt={selectedAttempt()}
+            // Choosing an attempt moves the ADDRESS, not a signal beside it —
+            // the same rule the node selection keeps. So an earlier attempt is a
+            // link like any other view here, Back walks out of it, and the tail
+            // subscription follows because it is keyed by the log key.
+            onAttempt={(attempt) => {
+              const id = runId();
+              const node = selected();
+              if (id === null || node === null) return;
+              go({
+                at: "run",
+                runId: id,
+                log: formatLogKey({ runId: id, node: node.id, attempt }),
+              });
+            }}
+            tail={tail()}
+            followed={followed()}
+            tailPending={tailPending()}
+            tailError={tailError()}
+            page={page()}
+            onPage={readLogPage}
+            control={control()}
+            controls={controls}
+            onBack={() => go({ at: "board" })}
+          />
+        </Match>
+      </Switch>
+    </div>
   );
 }
