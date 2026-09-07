@@ -23,6 +23,7 @@ import {
   makeWebFixture,
   mcp,
   renderPage,
+  renderUntil,
   startWebService,
   startWebServiceViaCommand,
   surfaceCall,
@@ -747,20 +748,27 @@ describe("`odu web` starts a service that can run CI", () => {
 describe("the browser", () => {
   const chrome = chromePath();
 
-  it.skipIf(chrome === null)("renders a live board over the same wire", () => {
-    const dom = renderPage(chrome as string, `${world.origin}/`);
+  it.skipIf(chrome === null)("renders a live board over the same wire", async () => {
+    // Rows, not the empty state: this suite has started several runs. Sampled
+    // until they are there — the wire says `live` a moment before the first
+    // collection frame lands, and one snapshot of a live page is one sample.
+    const dom = await renderUntil(
+      chrome as string,
+      `${world.origin}/`,
+      (page) => page.includes('class="row'),
+      "the runs this suite started",
+    );
     // The wire indicator is the framework's own readout, and `live` is the
     // conjunction of the socket AND every subscription being healthy.
     expect(dom).toContain('class="wire wire-live"');
     expect(dom).toContain("<h1>Runs</h1>");
-    // Rows, not the empty state: this suite has started several runs.
-    expect(dom).toContain('class="row');
   }, 300_000);
 
   it.skipIf(chrome === null)("keeps every control a real, reachable button", () => {
     const dom = renderPage(chrome as string, `${world.origin}/`);
     // Keyboard access is not a mode. A filter's PRESSED state is in the DOM
-    // where assistive tech reads it, not only in a colour.
+    // where assistive tech reads it, not only in a colour. Present on the empty
+    // board too, so this one needs no wait.
     expect(dom).toContain('aria-pressed="true"');
     expect(dom).not.toContain("<div onclick");
   }, 300_000);
@@ -771,10 +779,14 @@ describe("the browser", () => {
     const failures = (answer as unknown as { failures: { node: string; logKey: string }[] })
       .failures;
     const failure = failures[0];
-    const dom = renderPage(chrome as string, `${world.origin}/#/run/${failure?.logKey ?? ""}`);
     // A failing node's output is LINKABLE — the address in the URL bar is the
     // same log key an agent echoes, and it opens on that node's log.
-    expect(dom).toContain("beta is about to fail");
+    const dom = await renderUntil(
+      chrome as string,
+      `${world.origin}/#/run/${failure?.logKey ?? ""}`,
+      (page) => page.includes("beta is about to fail"),
+      "the failing node's own output",
+    );
     expect(dom).toContain(failure?.node ?? "");
     // The node the address named is the one marked current, so the view agrees
     // with the URL rather than merely happening to show the same run.

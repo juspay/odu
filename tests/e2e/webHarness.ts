@@ -390,6 +390,43 @@ export function renderPage(chrome: string, url: string): string {
   return res.stdout;
 }
 
+/**
+ * Render until the page HAS something, or fail saying what it had instead.
+ *
+ * `--dump-dom` is ONE SAMPLE of a live page. The board's wire indicator turns
+ * `live` when the socket is up and its subscriptions are healthy, which is a
+ * moment BEFORE the first collection frame has been applied — so a single
+ * snapshot on a loaded machine can honestly catch an empty board on a service
+ * with a dozen runs. That is not a defect in the page and asserting on one
+ * sample was a flake waiting for a busy runner (it found one).
+ *
+ * So the sample is repeated to a deadline. What is being waited for is a page
+ * state, not a duration, which is the same rule every other wait in this suite
+ * keeps.
+ */
+export async function renderUntil(
+  chrome: string,
+  url: string,
+  wanted: (dom: string) => boolean,
+  what: string,
+  timeoutMs = 60_000,
+): Promise<string> {
+  let last = "";
+  try {
+    return await until(
+      `the page at ${url} to show ${what}`,
+      () => {
+        last = renderPage(chrome, url);
+        return wanted(last) ? last : null;
+      },
+      timeoutMs,
+      0,
+    );
+  } catch (err) {
+    throw new Error(`${String(err)}\n--- last DOM ---\n${last.slice(0, 4000)}`);
+  }
+}
+
 /** Is the run socket for `dir` there yet? */
 export function runSocketExists(dir: string): boolean {
   return existsSync(join(dir, ".ci", "odu.sock"));
