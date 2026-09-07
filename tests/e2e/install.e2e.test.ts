@@ -121,10 +121,40 @@ function makeConsumer(): string {
       "  - claude",
       "dependencies:",
       "  apm:",
-      `    - path: ${repoRoot}`,
+      `    - path: ${publishable()}`,
       "",
     ].join("\n"),
   );
+  return dir;
+}
+
+/** The checkout's TRACKED files, copied out — what a consumer would actually
+ *  get, and the only shape apm can read.
+ *
+ *  apm resolves a `path:` dependency by copying the directory, and a working
+ *  checkout is not copyable: while any run is live it holds `.ci/odu.sock`, a
+ *  unix socket, and the copy dies with `[Errno 6] No such device or address`.
+ *  This gate passes standalone and fails under `odu run` for that reason alone
+ *  — which is to say it fails exactly when CI runs it, and passed every time
+ *  anybody checked it by hand.
+ *
+ *  `git ls-files` is the right filter rather than an `.ci`-shaped exclusion: it
+ *  is the set a consumer receives, it honours `.gitignore` (so `.ci/` and
+ *  `node_modules/` go without being named), and it takes the WORKING TREE's
+ *  contents — so an uncommitted edit to the skill under test is still what gets
+ *  installed. */
+function publishable(): string {
+  const dir = mkdtempSync(join(tmpdir(), "odu-e2e-publishable-"));
+  const copied = spawnSync(
+    "sh",
+    ["-c", `git ls-files -z | tar --null -T - -cf - | tar -xf - -C '${dir}'`],
+    { cwd: repoRoot, encoding: "utf-8", maxBuffer: BIG },
+  );
+  if (copied.status !== 0) {
+    throw new Error(
+      `e2e: could not export the checkout's tracked files: ${copied.stderr}`,
+    );
+  }
   return dir;
 }
 
