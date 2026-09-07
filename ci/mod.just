@@ -40,7 +40,17 @@ unit: install
 # Black-box e2e: builds the odu binary with nix and drives it against a
 # throwaway fixture repo on a localhost lane (tests/e2e/README.md). Needs the
 # dev shell on PATH (nix, git, just, bun) plus the node_modules from `install`.
-e2e: install
+#
+# `nix` IS A PREREQUISITE for the same reason it is one for `web-acceptance`
+# below: this leg builds `.#odu` too, and without the edge the two race. The
+# loser pays for the whole build INSIDE a test's own timeout — which is exactly
+# how `cancel.e2e.test.ts` came to fail with "timed out waiting for the run to
+# serve its socket" after ten minutes on a builder whose store was cold, while
+# `ci::nix` beside it reported success in 24 seconds and `web-acceptance`, which
+# has the edge, finished in 37. The failure reads as a flaky test and is a
+# missing dependency; the log gives it away, being two-fifths substituter noise
+# from a build that should have been a lookup.
+e2e: install nix
     {{ nix_shell }} bun run test:e2e
 
 # Browser acceptance: Cucumber features driven through Playwright against the
