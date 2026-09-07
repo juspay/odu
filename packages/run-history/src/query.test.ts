@@ -27,11 +27,19 @@ import {
   handleFor,
   type RunHandle,
   registerRun,
+  sealAttempt,
   startAttempt,
+  writeAttemptLog,
   writeVerdict,
 } from "./store";
 import type { OwnershipToken } from "./owner";
-import { readAttention, resolveCursor, resolveRun, waitForAttention } from "./query";
+import {
+  readAttention,
+  resolveCursor,
+  resolveRun,
+  waitForAttention,
+  waitForLogGrowth,
+} from "./query";
 
 const SHA = "26d2c2dabcdef0123456789012345678901234ab";
 const NODE = "ci::unit@x86_64-linux";
@@ -308,6 +316,148 @@ describe("readAttention over a real run", () => {
     const answer = readAttention(handleFor(mintRunId(1_700_000_000_000), { root }));
     expect(answer.state).toBe("unknown_run");
     expect(answer.passed).toBe(false);
+  });
+});
+
+describe("waitForLogGrowth", () => {
+  /** An attempt that has STARTED and is still writing — the state a follower
+   *  actually waits on. The record has to exist before it can be sealed, which
+   *  is what makes "complete" and "the writer died" distinguishable at all. */
+  function startNode(run: Registered, text = ""): number {
+    appendEvent(run.handle, run.token, {
+      kind: "attempt_started",
+      node: NODE,
+      attempt: 1,
+      placement: LINUX,
+    });
+    startAttempt(run.handle, run.token, {
+      node: NODE,
+      attempt: 1,
+      placement: LINUX,
+      startedAt: 1_000,
+    });
+    appendAttemptLog(run.handle, NODE, 1, text);
+    return Buffer.byteLength(text);
+  }
+
+  it("says `grew` when bytes land past the caller's offset", async () => {
+    const root = catalog();
+    const run = register(root);
+    const from = startNode(run, "compiling…\n");
+    const later = setTimeout(() => {
+      appendAttemptLog(run.handle, NODE, 1, "boom\n");
+    }, 30);
+
+    const growth = await waitForLogGrowth(run.handle, NODE, 1, {
+      from,
+      deadlineMs: 2_000,
+      pollMs: 10,
+    });
+    clearTimeout(later);
+    expect(growth).toBe("grew");
+  });
+
+  it("says `shrank` when the log was rewritten under the caller's cursor", async () => {
+    // `writeAttemptLog` is a re-sync, not a retry: the same attempt's bytes are
+    // replaced in place. A follower holding an offset past the new end is
+    // holding an address that no longer means what it did.
+    const root = catalog();
+    const run = register(root);
+    startNode(run, "0123456789");
+    writeAttemptLog(run.handle, NODE, 1, "short\n");
+
+    const growth = await waitForLogGrowth(run.handle, NODE, 1, {
+      from: 10,
+      deadlineMs: 2_000,
+      pollMs: 10,
+    });
+    expect(growth).toBe("shrank");
+  });
+
+  it("says `complete` once the producer has said its last word", async () => {
+    const root = catalog();
+    const run = register(root);
+    const from = startNode(run, "all good\n");
+    sealAttempt(run.handle, run.token, NODE, 1, {
+      endedAt: 2_000,
+      status: "ok",
+      exitCode: 0,
+      signal: null,
+      logComplete: true,
+      logTruncationReason: null,
+    });
+
+    const growth = await waitForLogGrowth(run.handle, NODE, 1, {
+      from,
+      deadlineMs: 2_000,
+      pollMs: 10,
+    });
+    expect(growth).toBe("complete");
+  });
+
+  it("says `run_terminal` for the log of a writer that was KILLED", async () => {
+    // The case an inferred answer gets wrong. The attempt was sealed
+    // `logComplete: false` — nobody will ever say its last word — but the run
+    // has a verdict, which proves just as firmly that no byte is coming.
+    const root = catalog();
+    const run = register(root);
+    const from = startNode(run, "cut off mid-");
+    sealAttempt(run.handle, run.token, NODE, 1, {
+      endedAt: 2_000,
+      status: "errored",
+      exitCode: null,
+      signal: "SIGKILL",
+      logComplete: false,
+      logTruncationReason: "writer_died",
+    });
+    writeVerdict(run.handle, run.token, {
+      runId: run.runId,
+      outcome: "incomplete",
+      startedAt: 1_000,
+      finishedAt: 2_000,
+      failed: [],
+      errored: [NODE],
+      cancelled: [],
+      unposted: [],
+    });
+
+    const growth = await waitForLogGrowth(run.handle, NODE, 1, {
+      from,
+      deadlineMs: 2_000,
+      pollMs: 10,
+    });
+    expect(growth).toBe("run_terminal");
+  });
+
+  it("says `deadline` for a log that is simply quiet — a fact, not an error", async () => {
+    const root = catalog();
+    const run = register(root);
+    const from = startNode(run, "still working\n");
+
+    const started = Date.now();
+    const growth = await waitForLogGrowth(run.handle, NODE, 1, {
+      from,
+      deadlineMs: 200,
+      pollMs: 10,
+    });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(150);
+    expect(growth).toBe("deadline");
+  });
+
+  it("returns at once on an aborted signal, without waiting out the deadline", async () => {
+    const root = catalog();
+    const run = register(root);
+    const from = startNode(run, "still working\n");
+
+    const started = Date.now();
+    const growth = await waitForLogGrowth(run.handle, NODE, 1, {
+      from,
+      deadlineMs: 60_000,
+      pollMs: 10,
+      signal: AbortSignal.abort(),
+    });
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(growth).toBe("deadline");
   });
 });
 

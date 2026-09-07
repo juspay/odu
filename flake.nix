@@ -54,8 +54,30 @@
           # regenerates the lockfile-derived nix expression.
           bun2nix = b2n.bun2nix;
         });
-      devShells = eachSystem ({ pkgs, ... }: {
-        default = import ./shell.nix { inherit pkgs; };
-      });
+      # Two shells, and the second IS the first plus browsers. Playwright's
+      # browser set is a large closure every non-browser leg would realise for
+      # nothing, so `just web-acceptance` enters `.#e2e` and everything else
+      # stays in `default`.
+      #
+      # The attrs go at the TOP level rather than inside an `env = { }` block,
+      # because shell.nix is `pkgs.mkShell ({ packages = …; } // oduEnv)` — its
+      # environment already rides as ordinary derivation attrs, and one spelling
+      # for both is one fewer thing to be wrong about.
+      devShells = eachSystem ({ pkgs, ... }:
+        let default = import ./shell.nix { inherit pkgs; };
+        in {
+          inherit default;
+          e2e = default.overrideAttrs (_: {
+            name = "odu-shell-e2e";
+            PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
+            # Exported so the suite can ASSERT the npm pin matches, instead of
+            # discovering it at `chromium.launch()`. The driver refuses a browser
+            # build it was not compiled against, and the way it says so is
+            # `Executable doesn't exist` at a store path that is real but wrong —
+            # minutes into a lane, with nothing naming a version. See
+            # packages/web-acceptance/support/hooks.ts and pins.test.ts.
+            PLAYWRIGHT_DRIVER_VERSION = pkgs.playwright-driver.version;
+          });
+        });
     };
 }

@@ -11,9 +11,14 @@ commit status per `<recipe>@<platform>`, and keeps every run in a per-user
 catalog.
 
 **There is one shared service and one vocabulary.** A per-user singleton
-(`http://127.0.0.1:18440`) owns every run. Three faces project the same five
-verbs — `run_start`, `run_wait`, `run_retry`, `run_cancel`, `log_read` — and
-none of them has a verb of its own:
+(`http://127.0.0.1:18440`) owns every run. Three faces project the same
+thirteen verbs — and none of them has a verb of its own:
+
+```
+run_start · run_wait · run_read · run_retry · run_cancel · log_read
+catalog_import · catalog_prune · pipeline_read
+venue_probe · venue_hold · venue_release · protect_apply
+```
 
 | Face | Spelling | Who uses it |
 | --- | --- | --- |
@@ -186,6 +191,13 @@ odu surface log_read --input '{"key":"'"$LOG_KEY"'","offset":-4096}' --json
   never a pass and never "flaky".
 - Page forward with `nextOffset`; `eof` is about this read, `complete` is about
   the log.
+- **`log_read` also FOLLOWS.** Pass `waitMs` and it holds until the log grows
+  past the end of this page, the attempt finishes, or the deadline passes. Feed
+  `nextOffset` back as `offset` — that is the cursor, and YOU hold it, so a call
+  that dies is re-issued rather than resumed. Stop when `open` is false. A
+  `size` smaller than the offset you asked for means that attempt was re-run and
+  its log rewritten: start again from 0. `odu logs -f` / `--wait-ms` is the same
+  follow from a terminal.
 - Watching a live node instead of reading evidence? Subscribe to the
   `logTails` resource — `surface://collections/logTails/<key>` as MCP, or
   `odu surface get logTails "$KEY" --follow` as ndjson. (`watch` is not mounted
@@ -263,9 +275,42 @@ And say `passed` only from `settled: true`.
 | --- | --- | --- | --- | --- |
 | start | `odu surface run_start --input '{…}' --json` | `run_start` | `checkout`, `expectedSha`, `requestId`, `selectors?`, `platforms?`, `hostPins?`, `root?`, `noDeps?`, `noStrict?`, `noSnapshot?`, `noPost?`, `supersede?` | `accepted`, `runId`, `replayed`, `sha`, `scope`, `endpoint`, `cursor`, `existing?` |
 | wait | `odu surface run_wait --input '{…}' --json` | `run_wait` | `runId`, `after?`, `deadlineMs?` (30s default), `settle?`, `limit?` | `reason`, `settled`, `passed`, `outcome`, `failures[]`, `failuresTotal`, `cursor`, `remaining`, `reportingDebt[]`, `scope`, `sha` |
-| diagnose | `odu surface log_read --input '{…}' --json` | `log_read` | `key`, `offset?` (negative = tail), `limit?` | `text`, `offset`, `size`, `nextOffset`, `eof`, `complete` |
+| diagnose | `odu surface log_read --input '{…}' --json` | `log_read` | `key`, `offset?` (negative = tail), `limit?`, `waitMs?` (follow) | `text`, `offset`, `size`, `nextOffset`, `eof`, `complete`, `open` |
 | retry | `odu surface run_retry --input '{…}' --json` | `run_retry` | `runId`, `selector`, `requestId`, `expectAttempt?` | `mode`, `effectiveRun`, `parentRun`, `roots[]`, `resetDependants[]`, `scope`, `sha`, `cursor` |
 | cancel | `odu surface run_cancel --input '{…}' --json` | `run_cancel` | `runId`, `scope`, `requestId` | `effective`, `detail` |
+| read | `odu surface run_read --input '{…}' --json` | `run_read` | `runId`, `after?`, `limit?` | `run_wait`'s answer, without the waiting |
+
+### Beyond one run
+
+The same vocabulary reaches everything else odu does. These used to be local
+commands that each did their own work in your process — which meant an agent
+and a browser simply could not do them at all.
+
+| Verb | argv | MCP tool | Input | Answers |
+| --- | --- | --- | --- | --- |
+| resolve a pipeline | `odu surface pipeline_read --input '{…}' --json` | `pipeline_read` | `checkout`, `root?` | `checkout`, `name`, `tasks[]`, `mermaid` — the DAG, without running it |
+| list machines | `odu surface venue_probe --input '{}' --json` | `venue_probe` | *(none)* | `source`, `warnings[]`, `rows[]` — the lanes and who holds them |
+| hold a machine | `odu surface venue_hold --input '{…}' --json` | `venue_hold` | `checkout`, `platforms?`, `noWait?`, `requestId` | `results[]` (`held` / `waiting` / `already`), `replayed` |
+| release it | `odu surface venue_release --input '{…}' --json` | `venue_release` | `checkout`, `platforms?`, `requestId` | `released[]` (`effective`: `released` / `nothing`), `replayed` |
+| import old runs | `odu surface catalog_import --input '{…}' --json` | `catalog_import` | `checkout`, `dryRun?`, `requestId` | `imported[]`, `skipped[]`, `catalog` |
+| expire old runs | `odu surface catalog_prune --input '{…}' --json` | `catalog_prune` | `retentionDays?`, `dryRun?`, `requestId` | `expired[]`, `kept[]`, `retentionDays`, `dryRun`, `replayed` |
+| require odu's checks | `odu surface protect_apply --input '{…}' --json` | `protect_apply` | `checkout`, `branch?`, `platforms?`, `dryRun?`, `create?`, `requestId` | `repo`, `branch`, `contexts[]`, `rulesetId`, `applied`, `created`, `derivedFrom`, `detail` |
+
+- **A hold outlives your session.** `venue_hold` records the lease against a
+  *checkout*, and the holder is the service's child rather than yours — so it
+  survives your process ending, and you must `venue_release` it. `noWait` gives
+  you `waiting` instead of a queue.
+- **`protect_apply` writes to GitHub.** Run it with `dryRun: true` first and read
+  `contexts` — that is exactly the set odu will require. `derivedFrom` being
+  non-null means the platform set came from this machine's hosts file rather
+  than from you; a repository's required checks should not depend on whose
+  laptop ran the command, so name `platforms` explicitly when it matters.
+  `create: true` is needed to make a ruleset that does not exist yet, because
+  creating protection nobody asked for is not a recovery. Writing needs a `gh`
+  the serving process can authenticate with; without one you get
+  `no_credential`, which is fixable rather than fatal — `dryRun` still answers.
+- **`catalog_prune` never expires a run with a live owner** — it reports it in
+  `kept` with a reason instead.
 
 Reading state without a verb — the same three resources on both faces:
 
@@ -304,6 +349,9 @@ error. `code` is what you branch on; `message` is for the human; `resync` and
 | `request_unresolved` | Outcome unknown. **Do not re-issue with a new id** — find the run and reconcile. |
 | `stale_attempt` | The node moved past your `expectAttempt`. Re-read, then decide again. |
 | `launch_failed` | The service could not start the coordinator; the message says why. |
+| `pipeline_refused` | The checkout's `justfile` could not be resolved into a DAG; the message says what broke. |
+| `no_venue` | No lane matched — the hosts file configures none for that platform. Read `venue_probe`. |
+| `no_credential` | The serving process has no usable `gh`. Authenticate it, or use `dryRun`. |
 
 ## Exits — two vocabularies, and `1` means opposite things
 
@@ -334,8 +382,8 @@ failing. An agent that conflates them reports a broken test as a broken tool.
 
 ## Wiring the MCP face
 
-The launcher ships beside this skill at `bin/serve`, installed as
-`.agents/skills/odu/bin/serve`. It is one line — unpinned upstream, over stdio:
+The launcher ships beside this skill at `serve`, installed as
+`.agents/skills/odu/serve`. It is one line — unpinned upstream, over stdio:
 
 ```sh
 exec nix run --accept-flake-config github:juspay/odu -- mcp "$@"
@@ -344,23 +392,27 @@ exec nix run --accept-flake-config github:juspay/odu -- mcp "$@"
 `.mcp.json` (Claude Code; the same command for Codex / opencode / Gemini CLI):
 
 ```json
-{ "mcpServers": { "odu": { "type": "stdio", "command": ".claude/skills/odu/bin/serve" } } }
+{ "mcpServers": { "odu": { "type": "stdio", "command": ".claude/skills/odu/serve" } } }
 ```
 
+It is deliberately **not** under a `bin/` directory: apm deploys a skill's whole
+directory tree but skips a top-level `bin/` whenever stdout is not a terminal,
+which is every CI install — so a launcher placed there would be named in your
+`.mcp.json` and never actually written.
+
 The bridge dials the singleton, bootstraps it if nothing is serving, and
-projects the five verbs and three resources. It starts no coordinator and holds
-no run authority, so a harness restarting it kills nothing.
+projects the thirteen verbs and three resources. It starts no coordinator and
+holds no run authority, so a harness restarting it kills nothing.
 
 ## Commands that stay local, deliberately
 
-Three commands do not go through the service, and this is a stated exception,
-not an oversight:
+Two commands do not go through the service, and this is a stated exception, not
+an oversight:
 
 | Command | Why local |
 | --- | --- |
 | `odu dump` | Pure `justfile` read — resolved pipeline as JSON. No execution, no socket, no catalog write. |
 | `odu graph` | Pure `justfile` read — dependency graph as Mermaid. Same. |
-| `odu protect [--dry-run] [--create]` | Mutates GitHub using **the caller's** `gh` credential; the daemon has no credential-delegation story. |
 
 ## Hosts
 
@@ -373,7 +425,8 @@ Lanes need machines. `$ODU_HOSTS` (a file path) → `~/.config/odu/hosts.json`:
 Keys are Nix system tuples; values are anything ssh dials, a list of them (a
 pool), or `localhost`. A run that resolves **zero** lanes is refused, never
 defaulted to `localhost`. `hostPins` (`"P=ADDR"`) pins one box for one run;
-`odu hosts` shows the inventory. A lane host needs ssh + Nix + outbound https,
+`venue_probe` shows the inventory from any face; `odu hosts [platform…]` is its
+terminal spelling. A lane host needs ssh + Nix + outbound https,
 and the source arrives by `git fetch` of the **pushed** SHA — remote lanes
 cannot test unpushed commits, so push first.
 

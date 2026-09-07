@@ -4,8 +4,8 @@
 
 **A CI runner you attach to.** odu (Tamil ஓடு — *run*) runs your
 [`just`](https://just.systems) recipe DAG across machines, posts GitHub commit
-statuses, and holds the run as **live typed state** — for a terminal dashboard
-and for coding agents over MCP.
+statuses, and holds the run as **live typed state** — for a terminal, for a
+browser, and for coding agents over MCP.
 
 [Website](https://juspay.github.io/odu/) · [Docs](https://juspay.github.io/odu/docs/) · [Announcement](https://kolu.dev/blog/odu/)
 
@@ -14,7 +14,7 @@ nix run github:juspay/odu -- run --host x86_64-linux=localhost
 ```
 
 ```sh
-odu attach                    # live matrix + logs from another terminal
+odu attach                    # this checkout's run, followed as it moves
 odu wait --run latest         # fail-fast JSON verdict (or add --settle)
 odu rerun --run latest unit   # retry a recipe: a new attempt, or a linked run
 odu web             # every run, in a browser — one service, all your repos
@@ -95,7 +95,7 @@ odu surface run_wait  --input '{"runId":"'$RUN'","after":"'$CURSOR'"}' --json
 odu surface log_read  --input '{"key":"'$LOG_KEY'","offset":-4096}' --json
 ```
 
-An agent reaches the same five verbs as MCP tools, either over **Streamable
+An agent reaches the same thirteen verbs as MCP tools, either over **Streamable
 HTTP** at `http://127.0.0.1:18440/mcp` or through `odu mcp`, a stdio bridge to
 the singleton that holds no run authority of its own — so a harness restarting
 it kills nothing. There is one agent face, not two. The per-checkout MCP
@@ -147,10 +147,21 @@ nix run . -- run                          # in a checkout; `just run --` is this
 
 **There is one public vocabulary: the shared service contract**
 ([`packages/service-client/src/surface.ts`](packages/service-client/src/surface.ts)).
-Five verbs — `run_start`, `run_wait`, `run_retry`, `run_cancel`, `log_read` —
-plus the `service`, `runs` and `logTails` resources and `get` / `keys` / `watch`
-/ `list`. Every mutation an agent, a browser or a terminal makes crosses that
-wire to the singleton daemon.
+Thirteen verbs — `run_start`, `run_wait`, `run_read`, `run_retry`, `run_cancel`,
+`log_read`, `catalog_import`, `catalog_prune`, `pipeline_read`, `venue_probe`,
+`venue_hold`, `venue_release`, `protect_apply` — plus the `service`, `runs` and
+`logTails` resources and `get` / `keys` / `watch` / `list`. Every mutation an
+agent, a browser or a terminal makes crosses that wire to the singleton daemon.
+
+**It was five, and the growth is the point rather than an addition.** Five was
+never a design; it was how far the move had got. `odu status`, `odu hosts`, `odu
+lease`, `odu history import` and `odu protect` each did their own work in the
+caller's process, so a browser and an agent could not do those things at all,
+and each command that could was its own small authority. The one capability that
+deliberately did *not* become a verb is the follow: `log_read` takes a `waitMs`
+instead, because a stream that requires an input cannot be a static MCP resource
+— so a fourteenth verb would have given the browser and the terminal a follow
+and left an agent with the one-page read.
 
 **Three faces project it, and none has a verb of its own.** The board in a
 browser, `odu surface <verb>` as argv, and `odu mcp` as MCP over stdio (with the
@@ -164,8 +175,10 @@ be exactly the second authority this consolidation exists to remove, reappearing
 where it is least visible.
 
 The per-checkout MCP face is deleted: `run`, `node_rerun`, `wait_for_settle`,
-`cancel`, `runs`, `node_cancel`, `lane_cancel`, `lease` and `release` are gone,
-and bare `odu mcp` is the shared bridge. `--service` is still parsed, ignored
+`cancel`, `runs`, `node_cancel`, `lane_cancel`, `lease` and `release` are gone
+as *names* — every capability they carried is on the shared list above, spelled
+the way the other two faces spell it — and bare `odu mcp` is the shared bridge.
+`--service` is still parsed, ignored
 and warned about on stderr for one release, so argv already sitting in a
 consumer's `.mcp.json` starts instead of crashing. Two other capabilities went
 with the consolidation: **`odu runs` is removed** (use `odu history list`; its
@@ -174,30 +187,41 @@ removed from the public verb** — it only ever meant something to a human
 attached to a coordinator directly, and retrying after settlement is
 `odu rerun --run R`.
 
-### What deliberately stays local, and why
+### Nothing stays local, and the exemptions that looked safest were the worst
 
-Three commands do **not** go through the service, and it is a decision rather
-than an omission:
+`odu dump`, `odu graph` and `odu protect` were described here as decisions
+rather than omissions, on two defences. Both were wrong, in opposite ways.
 
-- **`odu dump` and `odu graph`** are pure `just --dump` reads of the checkout in
-  front of you. No execution, no socket, no catalog write, no venue lease —
-  nothing a cross-run authority would arbitrate. Routing them through a daemon
-  would only mean handing it a working directory so it could read the same
-  files.
-- **`odu protect`** mutates GitHub using the **caller's own** `gh` credential.
-  The daemon has no credential-delegation story: it would have to hold or borrow
-  a token to write a repository's ruleset, and bringing merge-blocking policy
-  into existence is not something to do with an ambient identity nobody chose.
-  So the write stays in the process the person authenticated.
+- **Reading a justfile is not "no authority" — it is a SECOND RESOLVER.** What
+  odu will run for a given checkout is a question the service has to answer
+  anyway, since `run.start` resolves the same DAG through the same engine. A
+  face that answered it locally was a second implementation of the one thing you
+  most need to be able to trust: `odu graph` and the run it is meant to predict
+  could disagree and nothing would notice. It also meant a browser could not
+  draw a pipeline and an agent could not ask what a repository even builds. Both
+  are `pipeline_read` now, and the service renders the Mermaid, so `odu graph`
+  and the board cannot drift apart as two renderers.
+- **"`protect` spends YOUR credential, not the daemon's" described an odu that
+  does not exist.** The coordinator the daemon launches has posted commit
+  statuses with that same `gh` credential all along — `--no-post` is the opt-out
+  — so keeping the ruleset write local preserved nothing and cost the other two
+  faces the capability entirely. It is `protect_apply`, and a service with no
+  credential refuses `no_credential` with the `gh auth login` that fixes it,
+  rather than half-writing a ruleset.
 
-Separately, the in-checkout live commands — `status`, `attach`, `hosts`,
-`lease`, `release` — speak the **run's own** contract on `.ci/odu.sock`, which
-is about one run and exists only while that run does. That is a different
-contract from the service's, not a second copy of it: the service answers "what
-is my CI doing across all my repositories", which is not a question any one
-coordinator can be asked.
+The in-checkout commands went the same way and gained something for it.
+`status`, `attach`, `hosts`, `lease` and `release` used to speak the run's own
+contract on `.ci/odu.sock` — and a face allowed to dial a coordinator is a face
+that can do anything to a run. It turned out not to need the dial at all: the
+coordinator has been writing `lane` and `phase` lines into the durable journal
+since long before this and no reader read them. Folding them out makes "which
+box is this lane claiming, and what does this run still owe GitHub" a catalog
+read, so a run whose coordinator was killed, or that finished last week, can
+still answer both. A socket cannot be asked either question.
 
-A run started by `odu run` in a terminal appears on the board the moment the
+`.ci/odu.sock` is still there and still the run's own wire, about one run and
+alive only while that run is; what changed is that only the service dials it. A
+run started by `odu run` in a terminal appears on the board the moment the
 service reads the catalog, with nothing having told it.
 
 ## CLI
@@ -211,14 +235,17 @@ odu run [recipe[@platform]…] [--platform P]… [--host P=ADDR]… [--root NAME
                                   # OBSERVING; the run keeps going. Explicit
                                   # cancellation is run_cancel.
                                   # --no-wait: start and return, unobserved
-odu status [-o json]              # this checkout's live run
-                                  # json shape: { nodes, posting, run }
-odu logs <log-key> [--offset B] [--limit B] [-o json]
+odu status [-o json]              # this checkout's newest unfinished run: its
+                                  # nodes, its lanes, and what it still owes
+                                  # GitHub. json shape: { nodes, posting, run }
+odu logs <log-key> [-f] [--offset B] [--limit B] [--wait-ms N] [-o json]
                                   # one attempt's bytes, addressed by the
                                   # logKey a failure reported — echo it, do not
                                   # build one. A NEGATIVE offset is a tail and
-                                  # must be joined: --offset=-4096
-odu attach [-o json]
+                                  # must be joined: --offset=-4096.
+                                  # -f follows to the end: exits 0 with the
+                                  # whole log, 1 if it was truncated
+odu attach [-o json]              # the same run, followed until it stops moving
 odu wait --run R [--after CURSOR] [--deadline-ms N] [--settle] [-o json]
                                   # bounded, resumable. Returns on the first red
                                   # you can act on, not on settle. Exits: 0 passed
@@ -237,12 +264,15 @@ odu history import [--dry-run] [-o json]
                                   # bring this checkout's .ci records in
 odu history prune [--days N] [--dry-run] [-o json]
                                   # expire finished runs past the window (30d)
-odu hosts                         # venue inventory (free / busy / held by)
-odu lease [PLAT…] [--no-wait]     # hold a free venue across runs (agent layer)
-odu release [PLAT…]               # drop agent-held lease(s)
-odu dump [--root NAMEPATH]        # resolved pipeline as JSON
-odu graph [--root NAMEPATH]       # dependency graph (Mermaid)
-odu protect [--dry-run] [--branch B] [--platform P]… [--create]
+odu hosts [-o json]               # every configured venue, and who holds it
+odu lease [PLAT…] [--no-wait] [-o json]
+                                  # hold a free venue across runs. The holder is
+                                  # the SERVICE's child, so it outlives this
+                                  # shell — which is what "across runs" meant
+odu release [PLAT…] [-o json]     # drop held lease(s)
+odu dump [--root NAMEPATH]        # the resolved pipeline, as JSON
+odu graph [--root NAMEPATH]       # the same DAG, as Mermaid
+odu protect [--dry-run] [--branch B] [--platform P]… [--create] [-o json]
                                   # --create: make the branch's ruleset if absent
 odu web [--background] [--upgrade] [-o json]
                                   # every run, in a browser. Bare: serves in
@@ -253,16 +283,20 @@ odu web [--background] [--upgrade] [-o json]
                                   # build and starts this one
 odu surface <verb> [--input JSON] [--json]
                                   # every registered run, as argv: run_start,
-                                  # run_wait, run_retry, run_cancel, log_read,
-                                  # plus get/keys/watch/list. Exits: 0 answered
+                                  # run_wait, run_read, run_retry, run_cancel,
+                                  # log_read, catalog_import, catalog_prune,
+                                  # pipeline_read, venue_probe, venue_hold,
+                                  # venue_release, protect_apply, plus
+                                  # get/keys/watch/list. Exits: 0 answered
                                   # (red CI included) · 1 refused · 2 usage ·
                                   # 3 nothing serving · 130 interrupted
-odu mcp                           # the agent face (MCP, stdio): the same five
-                                  # verbs, bridged to the shared service. There
-                                  # is no --service — it is parsed and ignored
-                                  # for one release
+odu mcp                           # the agent face (MCP, stdio): the same
+                                  # thirteen verbs, bridged to the shared
+                                  # service. There is no --service — it is
+                                  # parsed and ignored for one release
 
---origin URL is accepted by every service client; default $ODU_WEB_ORIGIN or
+--origin URL selects which service to dial (run, logs, wait, rerun, cancel);
+every other command above takes the same address from $ODU_WEB_ORIGIN, else
 http://127.0.0.1:18440. A named origin is dialled and only dialled.
 
 Removed: `odu runs` (use `odu history list`; the JSON shape differs) and
@@ -282,8 +316,9 @@ lane gets reported as a red one.
 
 So every run is now also written to a per-user catalog: `$XDG_STATE_HOME/odu/runs`
 (`~/.local/state/odu/runs`) on Linux, `~/Library/Application Support/odu/runs` on
-macOS, `ODU_STATE_DIR` overriding both. The `.ci` ledger is still written, and
-the in-checkout live commands still read it. What did NOT survive is the
+macOS, `ODU_STATE_DIR` overriding both. The `.ci` ledger is still written by the
+coordinator, and `odu history import` is what brings an existing one in; no
+public command reads it directly any more. What did NOT survive is the
 per-checkout listing: `odu runs` is removed, `odu history list` is the
 per-user view across every checkout, and its `-o json` is a catalog row
 (`runId`, `manifest`, `liveness`, `verdict`, `expiry`) rather than the old
@@ -299,10 +334,19 @@ wait → diagnose → retry → resume.
 odu run                                              # or run_start, from any face
 odu wait --run latest --deadline-ms 30000 -o json    # → exit 2: still going, nothing red
 odu wait --run latest --after "$cursor" -o json      # → exit 1, and here is what is red
-odu logs "$log_key" --offset=-4096                   # the logKey that failure reported
+odu logs -f "$log_key" --offset=-4096                # the logKey that failure reported
 odu rerun --run latest --request-id fix-1 ci::unit   # → the run it started, and a cursor
 odu wait --run "$effective_run" --after "$cursor" -o json
 ```
+
+The loop is no longer the whole of what an agent can do, and that is the other
+half of the consolidation. `pipeline_read` asks what a checkout even builds
+before anything runs it; `venue_probe` / `venue_hold` / `venue_release` take a
+machine and keep it held across separate tool calls, parented by the service so
+the hold does not die with a shell nobody has; `catalog_import` and
+`catalog_prune` maintain the catalog; `protect_apply` sets a branch's required
+checks to exactly the contexts odu posts. Every one of those was a
+terminal-only command until the vocabulary grew to hold it.
 
 The exits are the contract, because *there is something to fix*, *nothing has
 happened yet* and *its coordinator died* need three different next moves:
@@ -328,11 +372,32 @@ still listed, because it is still red.
 Evidence is per **attempt** and old attempts are immutable, so a retry adds
 `N+1` and never overwrites the log you are reading; `odu logs` reports
 `complete` as a field, so a truncated log says it is truncated instead of looking
-like a quiet recipe. `odu rerun --run` retries a *recorded* run, and odu decides
-what that means rather than the caller: a new attempt if its coordinator is still
-up, otherwise a new run linked to it, replayed from the recorded inputs with the
-commit pinned. A run of a dirty live tree cannot be replayed — its inputs were
-never committed — and is refused rather than substituted with today's tree.
+like a quiet recipe. `odu logs -f` follows one to its end, and stops on the
+page's `open` going false rather than on anything it could infer: a log whose
+writer was *killed* is at EOF, is not complete, and will never grow again, which
+from those two fields alone is indistinguishable from a slow recipe. `complete`
+then says whether you have the whole log or a truncated one, and the exit says
+the same thing. Each call is bounded by `--wait-ms` and the cursor is
+`nextOffset`, which the **caller** holds — so a follow that dies is re-issued
+from where it stopped rather than resumed from a session a server was keeping.
+A `size` below the offset you hold means that attempt was re-run and its log
+rewritten, and the follow says so and starts again from the beginning.
+
+`odu rerun --run` retries a *recorded* run, and odu decides what that means
+rather than the caller: a new attempt if its coordinator is still up, otherwise
+a new run linked to it, replayed from the recorded inputs with the commit
+pinned — **and from the same placement**. Where a run was allowed to happen is
+part of what it was, so the parent's `--host` pins are replayed verbatim, and a
+retry whose placement today's hosts file can no longer express is refused rather
+than fanned out across whatever that file lists now. A run recorded by an odu
+that predated placement evidence cannot be replayed at all: its record cannot
+tell "no pins were asked for" apart from "the question was not carried", and
+guessing wrong dispatches a run pinned to one named machine onto every machine
+in the pool. The refusal says so, and starting a fresh run with the `--host` you
+want is the fix. A run of a dirty live tree cannot be replayed either — its
+inputs were never committed — and is refused rather than substituted with
+today's tree.
+
 `--request-id` makes a repeat safe: the same id with the same input replays the
 recorded answer instead of starting a second run. Finished runs are kept 30 days
 by default (`odu history prune`), and expiry leaves a tombstone, so a month-old

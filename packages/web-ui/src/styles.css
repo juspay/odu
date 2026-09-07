@@ -159,6 +159,17 @@ body {
 .filters { display: flex; gap: 0.25rem; }
 .filters button { font-size: 0.8125rem; }
 
+/* Which of a group is CHOSEN, drawn. `aria-pressed` was already on the element
+   for assistive tech, but nothing drew it — so a sighted person could not see
+   which board filter or which attempt they were looking at. Styled off the
+   ATTRIBUTE rather than a class so the two can never disagree: there is one
+   fact, and both the screen reader and the eye read it from the same place. */
+.btn[aria-pressed="true"] {
+  background: var(--ink);
+  color: var(--bg);
+  border-color: var(--ink);
+}
+
 .row {
   display: grid;
   grid-template-columns:
@@ -282,6 +293,21 @@ body {
 
 .log-head h3 { margin: 0; font-size: 0.9375rem; font-family: var(--mono); }
 .log-meta { color: var(--dim); font-size: 0.75rem; margin-right: auto; }
+
+/* The attempt picker and the page-window readout. Both are small print beside
+   the node's name, and both are FACTS rather than decoration — which is why the
+   window offsets are monospaced: they are the same byte offsets `odu logs
+   --offset` takes, and a person copying one out of the page needs the digits to
+   line up. */
+.attempts { display: flex; gap: 0.25rem; }
+.attempts .btn { font-size: 0.75rem; }
+.log-head .btn { font-size: 0.75rem; }
+.log-page {
+  color: var(--dim);
+  font-size: 0.75rem;
+  font-family: var(--mono);
+  white-space: nowrap;
+}
 
 .log-text {
   margin: 0.5rem 0 0;

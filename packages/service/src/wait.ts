@@ -1,5 +1,12 @@
 /**
- * `run.wait` — bounded, resumable attention on one run.
+ * `run.read` and `run.wait` — attention on one run, with and without the wait.
+ *
+ * TWO VERBS, ONE ANSWER. "What is this run's state" has a single answer shape,
+ * and the difference between the two is entirely whether the service holds the
+ * call open: they share the resolution (which run, and does this cursor belong
+ * to it), the fold, and the re-shaping below. A second shape for the
+ * non-blocking case would be a second thing to keep true, and it would go wrong
+ * for the caller that alternates between them.
  *
  * The whole answer already exists: PR 1's attention query folds a run's journal
  * into "what is red, is it settled, and where should you resume from", and
@@ -25,25 +32,54 @@
 import { EXCERPT_BUDGET_BYTES } from "@odu/run-history/attention";
 import {
   DEFAULT_ATTENTION_DEADLINE_MS,
+  readAttention,
   resolveCursor,
   waitForAttention,
 } from "@odu/run-history/query";
-import type { Attention } from "@odu/run-history/attention";
-import { type CatalogOptions, handleFor, readManifest, readExpiry } from "@odu/run-history/store";
+import type { Attention, AttentionQuery } from "@odu/run-history/attention";
+import type { Cursor } from "@odu/run-history/ids";
+import {
+  type CatalogOptions,
+  handleFor,
+  readManifest,
+  readExpiry,
+  type RunHandle,
+} from "@odu/run-history/store";
 import { formatLogKey } from "@odu/service-client/logKey";
 import {
   type AttentionAnswer,
+  type ReadInput,
   ServiceRefused,
   type WaitInput,
 } from "@odu/service-client/surface";
 import { Effect } from "effect";
 
-export interface WaitDeps {
+/** What a one-shot read needs: a catalog to look in, and nothing else. There is
+ *  no `signal` here because there is nothing to interrupt — the read is a fold
+ *  over files that are already on disk. */
+export interface ReadDeps {
   catalog?: CatalogOptions;
-  /** A caller's own cancellation — an HTTP disconnect, an MCP cancellation, a
-   *  CLI Ctrl-C. It ends the OBSERVATION and nothing else: the run keeps going,
-   *  because watching a run and running it are different acts and only one of
-   *  them was cancelled. */
+}
+
+export interface WaitDeps extends ReadDeps {
+  /**
+   * A SECOND route out of the poll, for a caller holding one.
+   *
+   * Cancelling ends the OBSERVATION and nothing else: the run keeps going,
+   * because watching a run and running it are different acts and only one of
+   * them was cancelled.
+   *
+   * **In production nothing passes this, and that is correct rather than an
+   * oversight.** A real caller's disconnect — an HTTP client that went away, an
+   * MCP cancellation, a browser tab that closed — arrives as an INTERRUPT of
+   * the fiber this Effect is running on, and the poll's own finalizer turns
+   * that into the abort below. Wiring a signal in as well would be a second
+   * path to the same teardown, and the one that could disagree.
+   *
+   * It stays because a suite has to be able to state "the caller walked away"
+   * at a chosen moment without forking a process to interrupt. That is a TEST
+   * seam, said plainly, rather than a production knob nobody turns.
+   */
   signal?: AbortSignal;
 }
 
@@ -116,48 +152,129 @@ function reasonOf(attention: Attention): AttentionAnswer["reason"] {
   return attention.actionable ? "failure" : "still_running";
 }
 
+/**
+ * THE SHARED CORE of both reads: which run, from where, and can this caller's
+ * cursor be used on it.
+ *
+ * Every refusal `run.read` and `run.wait` can produce is decided here, once.
+ * Two copies of these three checks would be two chances to disagree about
+ * whether a cursor belongs to a run — and the pair they would disagree on is
+ * exactly the pair a caller alternates between: read to see, wait to follow.
+ */
+type Resolution =
+  | { ok: true; handle: RunHandle; cursor: Cursor | null }
+  | { ok: false; refusal: ServiceRefused };
+
+function resolve(
+  runId: string,
+  after: string | undefined,
+  catalog: CatalogOptions,
+): Resolution {
+  const handle = handleFor(runId, catalog);
+  // A run this catalog has never heard of, told apart from one whose evidence
+  // aged out: the first is a typo or a wrong catalog, the second is a real
+  // run that is simply too old, and "start a new one" is right for only one
+  // of them.
+  if (readManifest(handle) === null) {
+    const expiry = readExpiry(handle);
+    return {
+      ok: false,
+      refusal: new ServiceRefused(
+        expiry === null
+          ? {
+              code: "unknown_run",
+              message: `odu: no run ${runId} in the catalog`,
+              runId,
+            }
+          : {
+              code: "expired",
+              message:
+                `odu: run ${runId} existed and its evidence aged out ` +
+                "— its identity is all that is left",
+              runId,
+            },
+      ),
+    };
+  }
+  const cursor = resolveCursor(handle, after);
+  if (!cursor.ok) {
+    return {
+      ok: false,
+      refusal: new ServiceRefused({
+        code: "bad_cursor",
+        message: cursor.message,
+        resync: cursor.resync,
+        runId,
+      }),
+    };
+  }
+  return { ok: true, handle, cursor: cursor.cursor };
+}
+
+/** The query both reads run, built once from the caller's paging. `limit` is
+ *  spread rather than spelled as `undefined`, because the fold reads an absent
+ *  limit as "the default page" and a present one as a request. */
+function queryOf(
+  cursor: Cursor | null,
+  limit: number | undefined,
+): AttentionQuery {
+  return {
+    after: cursor,
+    excerptBytes: EXCERPT_BUDGET_BYTES,
+    ...(limit === undefined ? {} : { limit }),
+  };
+}
+
+/**
+ * `run.read` — the same question as `run.wait`, asked without waiting.
+ *
+ * ONE ANSWER SHAPE, deliberately: this returns the identical
+ * `AttentionAnswer`, because "what is this run's state" has one answer and a
+ * second shape for the non-blocking case would be a second thing to keep true.
+ * The difference between the two verbs is entirely whether the service holds
+ * the call open — the resolution, the fold and the re-shaping are shared, so
+ * a run cannot look one way to a reader and another to a follower.
+ *
+ * This is what `odu history show` is. It used to open the catalog in the
+ * caller's own process, beside a daemon reading the same files.
+ */
+export function readRun(
+  input: ReadInput,
+  deps: ReadDeps = {},
+): Effect.Effect<AttentionAnswer, ServiceRefused> {
+  return Effect.suspend(() => {
+    const resolved = resolve(input.runId, input.after, deps.catalog ?? {});
+    if (!resolved.ok) return Effect.fail(resolved.refusal);
+    // `Effect.sync` rather than `Effect.promise`: this is a fold over files
+    // that are already on disk, so there is nothing to interrupt and nothing
+    // to await.
+    return Effect.sync(() =>
+      answerOf(
+        readAttention(resolved.handle, queryOf(resolved.cursor, input.limit)),
+      ),
+    );
+  });
+}
+
+/**
+ * `run.wait` — the read above, held open until the run has something to say.
+ *
+ * The LOOP itself is `waitForAttention`'s, not a second one written here: it is
+ * the same `readAttention` this module's one-shot calls, re-run behind a size
+ * fingerprint until the answer is worth returning or the deadline lands. A
+ * deadline loop spelled at this layer would be a second policy about what
+ * "worth returning" means, and the two would diverge on the case that matters —
+ * a caller with a cursor, which wakes for new events rather than for the red it
+ * has already been shown.
+ */
 export function waitForRun(
   input: WaitInput,
   deps: WaitDeps = {},
 ): Effect.Effect<AttentionAnswer, ServiceRefused> {
   return Effect.suspend(() => {
-    const catalog = deps.catalog ?? {};
-    const handle = handleFor(input.runId, catalog);
-    // A run this catalog has never heard of, told apart from one whose evidence
-    // aged out: the first is a typo or a wrong catalog, the second is a real
-    // run that is simply too old, and "start a new one" is right for only one
-    // of them.
-    if (readManifest(handle) === null) {
-      const expiry = readExpiry(handle);
-      return Effect.fail(
-        new ServiceRefused(
-          expiry === null
-            ? {
-                code: "unknown_run",
-                message: `odu: no run ${input.runId} in the catalog`,
-                runId: input.runId,
-              }
-            : {
-                code: "expired",
-                message:
-                  `odu: run ${input.runId} existed and its evidence aged out ` +
-                  "— its identity is all that is left",
-                runId: input.runId,
-              },
-        ),
-      );
-    }
-    const cursor = resolveCursor(handle, input.after);
-    if (!cursor.ok) {
-      return Effect.fail(
-        new ServiceRefused({
-          code: "bad_cursor",
-          message: cursor.message,
-          resync: cursor.resync,
-          runId: input.runId,
-        }),
-      );
-    }
+    const resolved = resolve(input.runId, input.after, deps.catalog ?? {});
+    if (!resolved.ok) return Effect.fail(resolved.refusal);
+    const query = queryOf(resolved.cursor, input.limit);
     return Effect.map(
       // `Effect.callback`, not `Effect.promise`: a promise is UNINTERRUPTIBLE,
       // so a caller that walked away — an HTTP client that disconnected, an MCP
@@ -175,12 +292,10 @@ export function waitForRun(
           if (outer.aborted) stop();
           else outer.addEventListener("abort", stop, { once: true });
         }
-        void waitForAttention(handle, {
-          after: cursor.cursor,
+        void waitForAttention(resolved.handle, {
+          ...query,
           deadlineMs: input.deadlineMs ?? DEFAULT_ATTENTION_DEADLINE_MS,
           settle: input.settle ?? false,
-          excerptBytes: EXCERPT_BUDGET_BYTES,
-          ...(input.limit === undefined ? {} : { limit: input.limit }),
           signal: controller.signal,
         }).then(
           (attention) => resume(Effect.succeed(attention)),

@@ -1,5 +1,5 @@
 /**
- * ONE SKILL, ONE LAUNCHER — asserted against the tree a consumer actually gets.
+ * ONE SKILL, ONE LAUNCHER — asserted against this repo's own committed tree.
  *
  * odu's agent face used to be two authored skills: `odu` for the runner and
  * `odu-mcp` for a second MCP face with nine tools of its own. That second face
@@ -8,38 +8,49 @@
  * "two answers to one question" problem the service consolidation exists to
  * remove, moved one layer out into the documentation.
  *
- * ## Why this is a test and not a checklist
+ * ## What this file checks, and what it deliberately does not
  *
- * The wiring has three parts that are edited in three different files by three
- * different mechanisms, and two of them are GENERATED:
+ * These are STATIC checks over the tree a maintainer commits: the authored
+ * skill, the deployed copy `just apm` regenerates, and the `.mcp.json` that
+ * names it. They are cheap and they run everywhere.
  *
- *   - `.apm/skills/odu/bin/serve` is the authored launcher;
- *   - `.claude/skills/odu/bin/serve` is the deployed copy an MCP host executes;
- *   - `.mcp.json` names that second path.
+ * They are not, and were never, an installation gate. That distinction is not
+ * pedantry — it is the exact shape of a defect that shipped. This file used to
+ * assert that `.claude/skills/odu/bin/serve` existed and was executable, and it
+ * passed, because that file was COMMITTED here by hand. Meanwhile a fresh
+ * consumer running `apm install` got a `.mcp.json` naming that path and no file
+ * at it, and odu's agent face failed to spawn for every new adopter. A test
+ * that reads a repository can only ever tell you about that repository.
+ * `tests/e2e/install.e2e.test.ts` performs a real installation, and it is what
+ * actually gates first contact.
  *
- * Nothing checks that those three agree. Worse, apm-cli deploys a skill's
- * `SKILL.md` and NOT the rest of its directory — the previous launcher was
- * placed under `.claude/` by hand and committed, and it appears nowhere in
- * `apm.lock.yaml`'s `deployed_files`. So `just apm` will neither create the new
- * launcher nor prune the old one, and a rename that forgot either half would
- * leave `.mcp.json` pointing at a path that does not exist — discovered by
- * whoever next started an agent, as an MCP server that fails to spawn.
+ * ## The claim this file used to make, which was false
  *
- * This is the reviewer's asked-for installation check: the path MCP
- * configuration references, verified to exist, be executable, and launch the
- * shared-service bridge unpinned from upstream.
+ * It said "apm-cli deploys a skill's `SKILL.md` and NOT the rest of its
+ * directory", and concluded that the launcher therefore had to be hand-copied
+ * and committed. That is not how apm works and it sent the next reader in
+ * exactly the wrong direction. apm deploys a skill's WHOLE directory tree; the
+ * only thing it ever skips is a top-level `bin/`, and only when stdout is not a
+ * tty — which is every CI install and every `apm install` run from a script.
+ * Neither `apm approve` nor `--trust-bin` lifts that for a project's own
+ * skills. The launcher was under `bin/`, so it was the one file apm would not
+ * place. It lives at `.apm/skills/odu/serve` now, apm deploys it with its mode
+ * bit intact, and there is nothing left to copy by hand.
  */
 
 import { accessSync, constants, readFileSync, statSync } from "node:fs";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "bun:test";
+import { SHARED_TOOLS } from "./webHarness";
 
 const repoRoot = join(import.meta.dirname, "..", "..");
 const read = (rel: string): string => readFileSync(join(repoRoot, rel), "utf-8");
 
-const AUTHORED = ".apm/skills/odu/bin/serve";
-const DEPLOYED = ".claude/skills/odu/bin/serve";
+/** The authored launcher, and the copy `just apm` deploys from it. NOT under
+ *  `bin/`, which is the one path segment apm skips non-interactively. */
+const AUTHORED = ".apm/skills/odu/serve";
+const DEPLOYED = ".claude/skills/odu/serve";
 
 describe("the odu skill's MCP wiring", () => {
   it("names one launcher in .mcp.json, and it is the deployed one", () => {
@@ -56,20 +67,32 @@ describe("the odu skill's MCP wiring", () => {
     expect(odu?.args ?? []).toEqual([]);
   });
 
-  it("has that launcher on disk, executable", () => {
+  it("has that launcher on disk, executable, and out of `bin/`", () => {
     const path = join(repoRoot, DEPLOYED);
     expect(existsSync(path), `${DEPLOYED} is missing`).toBe(true);
     // Executable, because `.mcp.json` `exec`s it rather than running it through
-    // a shell. A committed file that lost its mode bit fails at spawn time with
-    // an EACCES an MCP host reports as "server exited".
+    // a shell. A file that lost its mode bit fails at spawn time with an EACCES
+    // an MCP host reports as "server exited".
     expect(() => accessSync(path, constants.X_OK)).not.toThrow();
     expect(statSync(path).size).toBeGreaterThan(0);
+
+    // NEITHER HALF MAY MOVE BACK UNDER `bin/`. Both are asserted because they
+    // fail differently and only one of them is loud: an authored `bin/serve`
+    // silently stops being deployed to consumers, while a deployed `bin/serve`
+    // is the stale hand-copy this repo used to carry.
+    for (const stale of [".apm/skills/odu/bin", ".claude/skills/odu/bin"]) {
+      expect(
+        existsSync(join(repoRoot, stale)),
+        `${stale} exists — apm does not deploy a skill's bin/ when stdout is not a tty`,
+      ).toBe(false);
+    }
   });
 
   it("keeps the deployed copy identical to the authored source", () => {
-    // apm-cli deploys `SKILL.md` and nothing else in a skill directory, so this
-    // copy is maintained by hand — which is exactly why it needs an assertion
-    // rather than a convention.
+    // Both files are committed, and only one of them is edited: `.claude/` is
+    // apm's output and `just apm` regenerates it. A difference here means the
+    // authored launcher changed and the deploy was never re-run, so what a
+    // reviewer read and what an MCP host would execute are two different files.
     expect(read(DEPLOYED)).toBe(read(AUTHORED));
   });
 
@@ -94,15 +117,23 @@ describe("the odu skill's MCP wiring", () => {
     // source entry point would be a second way to run odu.
     expect(script).not.toMatch(/\bbun\b/);
     expect(script).toContain("set -euo pipefail");
+    // The exact argv is EXECUTED in `install.e2e.test.ts`, under a `nix` shim
+    // that records anything else. These patterns are the cheap first line; that
+    // one is the assertion that would catch a rewrite these regexes still like.
   });
 
   it("leaves no odu-mcp skill anywhere", () => {
     // Both halves: the authored source and the deployed copy. The deployed one
-    // is the trap — apm's cleanup refuses to remove a skill directory holding a
-    // file it does not own, and the transitive `juspay/odu` self-dependency
-    // re-deploys the old skill until that published commit moves. So a stray
-    // `.claude/skills/odu-mcp/` after `just apm` is expected locally and must
-    // never be committed: a second skill is a second vocabulary.
+    // was the trap. `juspay/kolu/agents` declares an unpinned `juspay/odu`, so
+    // odu arrived back at depth 2 from published master — which still carries
+    // the deleted `odu-mcp` skill — and `just apm` re-deployed a second
+    // vocabulary into `.claude/skills/` every time it ran. That used to be
+    // documented here as "expected locally, must never be committed", which is
+    // a defect written down rather than fixed: nothing stopped the commit.
+    //
+    // `apm.yml` now declares the `juspay/odu` edge directly and subsets it to
+    // `skills: [odu]`, so the direct edge wins the resolution and the second
+    // skill cannot be deployed at all. Hence an unconditional assertion.
     for (const stale of [
       ".apm/skills/odu-mcp",
       ".claude/skills/odu-mcp",
@@ -115,24 +146,46 @@ describe("the odu skill's MCP wiring", () => {
 
   it("publishes exactly one skill to consumers", () => {
     const manifest = read("apm.yml");
+    // The DECLARATIONS, with the comments stripped. `odu-mcp` is named at
+    // length in a comment — the one explaining why the transitive edge that
+    // re-deployed it had to be beaten — and a check that could not tell a
+    // declaration from an explanation would push the next reader into deleting
+    // the explanation to make the test pass.
+    const declared = manifest
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("#"))
+      .join("\n");
     expect(manifest).toContain(".apm/skills/odu/");
-    expect(manifest).not.toContain("odu-mcp");
-    // The launcher travels INSIDE the skill now, so the consumer-side command
-    // is a path under it. `.agents/` is apm's target-agnostic spelling, which it
-    // rewrites per harness on deploy.
-    expect(manifest).toContain(".agents/skills/odu/bin/serve");
+    expect(declared).not.toContain("odu-mcp");
+    // The launcher travels INSIDE the skill, at the top of it rather than in a
+    // `bin/` apm would skip. `.agents/` is apm's target-agnostic spelling,
+    // which it rewrites per harness on deploy.
+    expect(declared).toContain(".agents/skills/odu/serve");
+    expect(declared).not.toContain(".agents/skills/odu/bin/");
+
+    // THE SUBSET THAT KEEPS `odu-mcp` GONE, asserted so that deleting it fails
+    // here with a sentence instead of silently restoring a second vocabulary on
+    // whoever next runs `just apm`. odu depending on itself is surprising, and
+    // an unexplained deletion of a surprising line is the likeliest way this
+    // regresses.
+    expect(
+      declared,
+      "apm.yml no longer declares the juspay/odu edge — the unpinned transitive one wins again",
+    ).toContain("git: juspay/odu");
+    expect(
+      declared.slice(declared.indexOf("git: juspay/odu")),
+      "the juspay/odu edge is no longer subsetted to `skills: [odu]`",
+    ).toMatch(/skills:\s*\n\s*- odu\b/);
   });
 
   it("teaches one vocabulary in the skill it does publish", () => {
     const skill = read(".apm/skills/odu/SKILL.md");
-    // The five shared verbs, which is the whole public vocabulary.
-    for (const verb of [
-      "run_start",
-      "run_wait",
-      "run_retry",
-      "run_cancel",
-      "log_read",
-    ]) {
+    // THE WHOLE SHARED VOCABULARY, from the same list the MCP faces are
+    // asserted against. A verb that reached the contract without reaching the
+    // skill is a capability an agent has and cannot find, which is the same
+    // failure as not having it — and the list grew from five to thirteen
+    // precisely by people adding to one and not the other.
+    for (const verb of SHARED_TOOLS) {
       expect(skill, `the skill never mentions ${verb}`).toContain(verb);
     }
     // Nothing deleted may still be TAUGHT — but the skill is allowed, and
@@ -166,5 +219,16 @@ describe("the odu skill's MCP wiring", () => {
         named,
       );
     }
+  });
+
+  it("teaches the launcher's real installed path", () => {
+    const skill = read(".apm/skills/odu/SKILL.md");
+    // A skill that documented `bin/serve` would be telling a consumer to wire
+    // an MCP server at a path apm does not create — which is the defect, stated
+    // in prose instead of in a config file.
+    expect(skill).toContain(".claude/skills/odu/serve");
+    expect(skill, "the skill still points at a bin/ launcher").not.toContain(
+      "skills/odu/bin/serve",
+    );
   });
 });

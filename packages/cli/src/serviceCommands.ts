@@ -1,6 +1,6 @@
 /**
- * THE PUBLIC COMMANDS, AS CLIENTS — `odu run`, `wait`, `rerun`, `cancel`,
- * `logs`, `history list`.
+ * THE RUN COMMANDS, AS CLIENTS — `odu run`, `wait`, `rerun`, `cancel`, `logs`,
+ * `history list|show|import|prune`.
  *
  * Every one of these used to hold authority of its own. `odu run` called
  * `runCommand` and WAS the coordinator. `odu rerun --run` bound
@@ -43,222 +43,40 @@
  * different act.
  */
 
-import { spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import type {
   AttentionAnswer,
+  CatalogImportReport,
+  CatalogPruneReport,
   LogPage,
   OduServiceClient,
   RetryReceipt,
   RunRow,
   StartReceipt,
 } from "@odu/service-client/surface";
-import { ServiceRefused } from "@odu/service-client/surface";
 import { serviceOrigin } from "@odu/service-client/endpoint";
-import { buildSurfaceFace } from "@kolu/surface/client";
-import type { SurfaceDispatch } from "@kolu/surface/link";
-import { oduServiceSurface } from "@odu/service-client/surface";
-import { Effect } from "effect";
-import { connectOrStart } from "./webLauncher";
+import {
+  call,
+  checkoutHere,
+  emitJson,
+  firstFrame,
+  formatAgo,
+  git,
+  here,
+  readRows,
+  reportFailure,
+  reportLost,
+  reportRefusal,
+  requestId,
+  WAIT_EXITS,
+  waitExitFor,
+  withConnection,
+  withService,
+} from "./serviceFace";
 
-// ── exits ───────────────────────────────────────────────────────────────────
-
-/**
- * What a command that answers a question about CI exits with.
- *
- * Unchanged from the durable faces these replace, and deliberately so: the
- * table is a published contract that scripts branch on, and re-pointing a
- * command at a different authority is not a reason to renumber what its answer
- * means. `odu surface`'s exits are DIFFERENT and also unchanged — that face
- * answers a question about a CALL, so it spends its codes on the call.
- *
- * | exit | meaning | what to do next |
- * | --- | --- | --- |
- * | 0 | settled, and it passed | nothing |
- * | 1 | there is a failure to act on | read the failures, fix, retry |
- * | 2 | still going, nothing red yet | ask again with the returned cursor |
- * | 3 | its coordinator is gone and it never finalized | start a new run |
- * | 4 | no such run, or its evidence expired | check `odu history list` |
- * | 5 | the request itself was refused | read the refusal; resync if offered |
- */
-export const WAIT_EXITS = {
-  passed: 0,
-  failed: 1,
-  stillRunning: 2,
-  ownerLost: 3,
-  unknownRun: 4,
-  refused: 5,
-} as const;
-
-/** Which exit a refusal earns. `unknown_run` and `expired` are facts about the
- *  RUN and keep the run-shaped exit a caller already branches on; everything
- *  else is a fact about the REQUEST. */
-function refusalExit(code: string): number {
-  return code === "unknown_run" || code === "expired"
-    ? WAIT_EXITS.unknownRun
-    : WAIT_EXITS.refused;
-}
-
-/** The one place an answer about attention becomes an exit, so every face that
- *  reports one reports the same number for the same state. */
-export function waitExitFor(answer: AttentionAnswer): number {
-  if (answer.settled) return answer.passed ? WAIT_EXITS.passed : WAIT_EXITS.failed;
-  // A red node is a failure whether or not the slow lanes have finished — the
-  // run cannot pass from here. Reporting it as "still running" would be true
-  // and useless: the caller has something to act on, and the exit is how it
-  // finds that out without parsing the payload.
-  if (answer.failures.length > 0 || answer.actionable) return WAIT_EXITS.failed;
-  if (answer.reason === "owner_lost") return WAIT_EXITS.ownerLost;
-  return WAIT_EXITS.stillRunning;
-}
-
-// ── the connection ──────────────────────────────────────────────────────────
-
-/** Do one thing with the service and let go.
- *
- *  `dispose` is not bookkeeping: the link holds the dial, ping and response
- *  fibers, and a command that dropped it would be a process that never exits. */
-async function withService<T>(
-  origin: string | undefined,
-  use: (client: OduServiceClient) => Promise<T>,
-): Promise<T> {
-  const connection = await connectOrStart(origin ?? serviceOrigin());
-  try {
-    return await use(connection.client);
-  } finally {
-    await connection.dispose();
-  }
-}
-
-/**
- * Run one procedure, keeping THREE outcomes apart.
- *
- * A procedure's declared error channel is `ServiceRefused`, but the wire adds
- * its own arm: a call can also fail because the link died under it. Those are
- * different facts and a caller must not act on them the same way — a refusal is
- * odu declining, with a code to branch on and often a recovery; a transport
- * failure is the service going away mid-call, which says nothing about the run
- * and leaves the mutation's outcome unknown.
- *
- * Collapsing the second into the first is how "the daemon was upgraded while I
- * was waiting" gets reported as "odu refused your request".
- */
-async function call<A>(
-  effect: Effect.Effect<A, unknown>,
-): Promise<
-  | { ok: true; value: A }
-  | { ok: false; refusal: ServiceRefused }
-  | { ok: false; refusal: null; error: unknown }
-> {
-  const outcome = await Effect.runPromise(Effect.result(effect));
-  if (outcome._tag === "Success") return { ok: true, value: outcome.success };
-  const failure = outcome.failure;
-  return isRefusal(failure)
-    ? { ok: false, refusal: failure }
-    : { ok: false, refusal: null, error: failure };
-}
-
-/** Is this the service declining, or the wire dying? `_tag` is the schema's own
- *  discriminator, checked rather than assumed: anything else on this channel is
- *  a transport failure wearing whatever shape the link gave it. */
-function isRefusal(value: unknown): value is ServiceRefused {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    (value as { _tag?: unknown })._tag === "ServiceRefused"
-  );
-}
-
-/** What a transport failure exits with, and what it says. Exit 3 is the
- *  documented "nothing serving" code and it is the honest one here: whatever
- *  was serving is not serving this call. */
-function reportLost(error: unknown, json: boolean): number {
-  const message =
-    `odu: the service went away mid-call — ${String(
-      (error as { message?: unknown }).message ?? error,
-    )}. Whether it acted is not known; re-issue with the SAME request id to ` +
-    "find out rather than a fresh one.";
-  if (json) emitJson({ error: "transport_lost", message });
-  else process.stderr.write(`${message}\n`);
-  return 3;
-}
-
-/** Report a refusal the way its own shape asks to be reported, and exit. */
-function reportRefusal(refusal: ServiceRefused, json: boolean): number {
-  if (json) {
-    emitJson({
-      error: refusal.code,
-      message: refusal.message,
-      ...(refusal.resync === undefined ? {} : { resync: refusal.resync }),
-      ...(refusal.suggestion === undefined
-        ? {}
-        : { suggestion: refusal.suggestion }),
-      ...(refusal.runId === undefined ? {} : { run: refusal.runId }),
-    });
-  } else {
-    process.stderr.write(`${refusal.message}\n`);
-    // A refusal with a ROUTE. A cursor that cannot be honoured is the one
-    // moment a caller is guaranteed to be confused, and "resync with this exact
-    // command" beats an error it has to interpret.
-    if (refusal.resync !== undefined) {
-      process.stderr.write(`  resync: ${refusal.resync}\n`);
-    }
-    if (refusal.suggestion !== undefined) {
-      process.stderr.write(`  try: ${refusal.suggestion.join(" ")}\n`);
-    }
-  }
-  return refusalExit(refusal.code);
-}
-
-/** One complete JSON value, one write, nothing else on stdout. An agent piping
- *  `-o json` through a shell gets a parseable line without `stdbuf`, and that
- *  is a property of where the bytes go rather than of the terminal. */
-function emitJson(value: unknown): void {
-  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
-}
-
-// ── what the caller meant ───────────────────────────────────────────────────
-
-/** The checkout the caller is standing in, and the commit it is on. A read of
- *  the caller's own cwd through git — see the module header on why this, and
- *  only this, stays on the client's side. */
-export interface Here {
-  checkout: string;
-  sha: string;
-}
-
-function git(args: string[], cwd: string): string | null {
-  const out = spawnSync("git", args, { cwd, encoding: "utf-8" });
-  return out.status === 0 ? out.stdout.trim() : null;
-}
-
-export function here(cwd: string = process.cwd()): Here {
-  const checkout = git(["rev-parse", "--show-toplevel"], cwd);
-  if (checkout === null) {
-    throw new Error(`odu: ${cwd} is not inside a git repository`);
-  }
-  const sha = git(["rev-parse", "HEAD"], checkout);
-  if (sha === null) {
-    throw new Error(
-      `odu: ${checkout} has no commit yet — odu runs a commit, so there has ` +
-        "to be one",
-    );
-  }
-  return { checkout, sha };
-}
-
-/**
- * A request id, when the caller did not bring one.
- *
- * Mandatory on every mutation, because a lost reply must be answerable: repeat
- * the SAME id and the service replays the receipt it already wrote. A caller
- * that lets us mint one gets exactly-once for the call it is making now and
- * nothing more — which is right for a person at a terminal, who will look at
- * the board if a command dies mid-flight. An agent brings its own.
- */
-function requestId(given: string | undefined): string {
-  return given ?? `cli-${randomUUID()}`;
-}
+// Re-exported because they were this module's before the plumbing was shared,
+// and a caller that already names them here should not have to learn which of
+// four sibling faces they moved to.
+export { formatAgo, here, type Here, WAIT_EXITS, waitExitFor } from "./serviceFace";
 
 // ── odu run ─────────────────────────────────────────────────────────────────
 
@@ -561,9 +379,20 @@ export interface LogsOpts {
   key: string;
   offset?: number;
   limit?: number;
+  /** Keep reading until the log can grow no further. */
+  follow?: boolean;
+  /** How long one followed read may wait for growth before answering empty. */
+  waitMs?: number;
   json: boolean;
   origin?: string;
 }
+
+/** The follow's per-call deadline, matching `run.wait`'s. Deliberately not
+ *  longer: a followed read holds an HTTP request open on the `/mcp` door for
+ *  its whole duration, exactly as `run_wait` already does, and a proxy with a
+ *  shorter idle timeout cuts anything that outlasts it. Bounded and re-issued
+ *  beats one long call, which is the same shape the attention loop settled on. */
+export const FOLLOW_WAIT_MS = 30_000;
 
 /**
  * `odu logs <key>` — one attempt's bytes, addressed by the key a failure
@@ -574,6 +403,9 @@ export interface LogsOpts {
  * spelling of an address the service already published.
  */
 export async function logsViaService(opts: LogsOpts): Promise<number> {
+  if (opts.follow === true) {
+    return withService(opts.origin, (client) => followLog(client, opts));
+  }
   return withService(opts.origin, async (client) => {
     const read = await call(
       client.surface.log.read({
@@ -629,8 +461,7 @@ export async function listViaService(opts: ListOpts): Promise<number> {
   const mine = opts.all
     ? null
     : git(["rev-parse", "--show-toplevel"], opts.cwd ?? process.cwd());
-  const connection = await connectOrStart(opts.origin ?? serviceOrigin());
-  try {
+  return withConnection(opts.origin, async (connection) => {
     const all = await readRows(connection.dispatch);
     const rows = all.filter((r) => mine === null || r.repoRoot === mine);
     const sorted = [...rows].sort((a, b) => b.createdAt - a.createdAt);
@@ -641,66 +472,7 @@ export async function listViaService(opts: ListOpts): Promise<number> {
     }
     process.stdout.write(renderRows(shown, Date.now()));
     return 0;
-  } finally {
-    await connection.dispose();
-  }
-}
-
-/**
- * The board, read off the `runs` COLLECTION.
- *
- * Through the structural face rather than the typed one, and that is the
- * framework's own shape rather than a workaround: `SurfaceReadFace` types cells,
- * streams and procedures and deliberately declines to type collection verbs
- * (per-member precision there is a union-budget problem the framework solved by
- * not solving it). `buildSurfaceFace` returns the structural view where the
- * verbs ARE present, and `odu surface keys runs` reaches them the same way —
- * one cast at an adapter seam, which is exactly where the framework says to put
- * it.
- *
- * `keys` then `get`, rather than a bespoke "list the board for me" procedure:
- * the collection IS the board, and asking the service for a pre-filtered list
- * would be asking it to know where the caller is standing.
- */
-async function readRows(dispatch: SurfaceDispatch): Promise<RunRow[]> {
-  const face = buildSurfaceFace(oduServiceSurface, dispatch) as unknown as {
-    surface: {
-      runs: {
-        keys: (input: undefined) => AsyncIterable<readonly string[]>;
-        get: (key: string) => AsyncIterable<RunRow | undefined>;
-      };
-    };
-  };
-  const keys = (await firstFrame(face.surface.runs.keys(undefined))) ?? [];
-  const rows: RunRow[] = [];
-  for (const key of keys) {
-    const row = await firstFrame(face.surface.runs.get(key));
-    if (row !== undefined && row !== null) rows.push(row);
-  }
-  return rows;
-}
-
-/** A collection member always opens with a SNAPSHOT, so the first frame is the
- *  read. An empty stream is a link that answered and said nothing, which is a
- *  different thing from an empty board — reported as `undefined` so the caller
- *  is never handed a plausible-looking zero. */
-async function firstFrame<A>(stream: AsyncIterable<A>): Promise<A | undefined> {
-  for await (const frame of stream) return frame;
-  return undefined;
-}
-
-const AGO = [
-  [86_400_000, "d"],
-  [3_600_000, "h"],
-  [60_000, "m"],
-  [1_000, "s"],
-] as const;
-
-export function formatAgo(deltaMs: number): string {
-  for (const [unit, label] of AGO) {
-    if (deltaMs >= unit) return `${Math.floor(deltaMs / unit)}${label}`;
-  }
-  return "now";
+  });
 }
 
 export function renderRows(rows: readonly RunRow[], now: number): string {
@@ -713,4 +485,233 @@ export function renderRows(rows: readonly RunRow[], now: number): string {
     return `${r.runId}  ${ref}${r.dirty ? "+dirty" : ""}  ${r.branch ?? "-"}  ${verdict}  ${formatAgo(now - r.createdAt)} ago${debt}`;
   });
   return `${lines.join("\n")}\n`;
+}
+
+// ── odu history show ────────────────────────────────────────────────────────
+
+export interface ShowOpts {
+  run: string;
+  after?: string;
+  json: boolean;
+  origin?: string;
+}
+
+/**
+ * `odu history show --run R` — one run's attention payload, without waiting.
+ *
+ * The same answer `odu wait` gives, asked of a run that may have finished last
+ * week. It used to open the catalog in the caller's own process — `resolveRun`,
+ * `resolveCursor`, `readAttention` — which put a second reader beside the
+ * daemon that was reading and writing the same directories, and made "what does
+ * this run's evidence say" a question with two implementations that could
+ * disagree about a run mid-write.
+ *
+ * `run.read` and `run.wait` return the IDENTICAL payload, deliberately: "what
+ * is this run's state" has one answer, and a second shape for the non-blocking
+ * case would be a second thing to keep true. The only difference is whether the
+ * service holds the call open.
+ */
+export async function showViaService(opts: ShowOpts): Promise<number> {
+  return withService(opts.origin, async (client) => {
+    const answered = await call(
+      client.surface.run.read({
+        runId: opts.run,
+        ...(opts.after === undefined ? {} : { after: opts.after }),
+      }),
+    );
+    if (!answered.ok) return reportFailure(answered, opts.json);
+    const answer = answered.value;
+    if (opts.json) emitJson(answer);
+    else process.stdout.write(renderAttention(answer));
+    return waitExitFor(answer);
+  });
+}
+
+// ── odu history import / prune ──────────────────────────────────────────────
+
+export interface ImportOpts {
+  dryRun: boolean;
+  json: boolean;
+  origin?: string;
+  cwd?: string;
+}
+
+/**
+ * `odu history import` — bring this checkout's legacy `.ci` records into the
+ * catalog.
+ *
+ * Through the service because the catalog is the SERVICE's store. Importing
+ * from the caller's process meant two writers on one set of directories, and
+ * the fact that it mostly worked is not the same as it being safe: a record
+ * being written while the daemon walked the same tree is a race with no owner.
+ *
+ * The checkout is resolved here and sent as an absolute path — the same rule
+ * `run.start` keeps, and for the same reason: an agent's cwd is not a fact
+ * about what anybody meant.
+ */
+export async function importViaService(opts: ImportOpts): Promise<number> {
+  const checkout = checkoutHere(opts.cwd);
+  return withService(opts.origin, async (client) => {
+    const done = await call(
+      client.surface.catalog.import({
+        checkout,
+        dryRun: opts.dryRun,
+        requestId: requestId(undefined),
+      }),
+    );
+    if (!done.ok) return reportFailure(done, opts.json);
+    const report: CatalogImportReport = done.value;
+    if (opts.json) {
+      emitJson(report);
+      return 0;
+    }
+    process.stdout.write(renderImport(report));
+    return 0;
+  });
+}
+
+function renderImport(report: CatalogImportReport): string {
+  const lines: string[] = [];
+  for (const row of report.imported) lines.push(`imported  ${row.ref}  ${row.runId}`);
+  // A SKIP IS AN OUTCOME. A record already in the catalog and one that could
+  // not be read are both "not imported", and only the second is a problem —
+  // reporting them together as a count is how the second goes unnoticed.
+  for (const row of report.skipped) {
+    lines.push(`skipped   ${row.ref}  ${row.reason ?? "already in the catalog"}`);
+  }
+  if (lines.length === 0) lines.push("nothing to import");
+  lines.push(
+    report.dryRun
+      ? `(dry run — nothing was written to ${report.catalog})`
+      : `into ${report.catalog}`,
+  );
+  return `${lines.join("\n")}\n`;
+}
+
+export interface PruneOpts {
+  retentionDays?: number;
+  dryRun: boolean;
+  json: boolean;
+  origin?: string;
+}
+
+/** `odu history prune` — expire finished runs past the retention window. */
+export async function pruneViaService(opts: PruneOpts): Promise<number> {
+  return withService(opts.origin, async (client) => {
+    const done = await call(
+      client.surface.catalog.prune({
+        ...(opts.retentionDays === undefined
+          ? {}
+          : { retentionDays: opts.retentionDays }),
+        dryRun: opts.dryRun,
+        requestId: requestId(undefined),
+      }),
+    );
+    if (!done.ok) return reportFailure(done, opts.json);
+    const report: CatalogPruneReport = done.value;
+    if (opts.json) {
+      emitJson(report);
+      return 0;
+    }
+    process.stdout.write(renderPrune(report));
+    return 0;
+  });
+}
+
+function renderPrune(report: CatalogPruneReport): string {
+  const lines = report.expired.map((runId) => `expired  ${runId}`);
+  // Why a run SURVIVED is the useful half of a prune's output: "still inside
+  // the window" and "its coordinator is still running" call for different
+  // reactions, and a bare count of what went says neither.
+  for (const kept of report.kept) lines.push(`kept     ${kept.runId}  ${kept.reason}`);
+  if (lines.length === 0) lines.push("nothing to prune");
+  lines.push(
+    `${report.dryRun ? "(dry run) " : ""}retention: ${report.retentionDays}d`,
+  );
+  return `${lines.join("\n")}\n`;
+}
+
+/**
+ * `odu logs <key> --follow` — every byte, until there can be no more.
+ *
+ * **The cursor is the caller's, and that is the design.** Each call asks for
+ * bytes at an offset and answers with `nextOffset`; nothing on the service side
+ * remembers this follower. So a follow that dies — the daemon restarted, the
+ * laptop slept, the process was killed — is RESUMED by re-issuing with the
+ * offset it reached, rather than by a server-side session that has to be
+ * garbage-collected and can be lost anyway. That is why this is a loop over a
+ * paged read rather than a subscription.
+ *
+ * It stops on `open: false`, which is a fact the page carries rather than one
+ * inferred from `eof` and `complete`. The case that forces it: a writer that
+ * was KILLED leaves a log which is at EOF, not complete, and will never grow —
+ * indistinguishable, from those two fields alone, from a slow recipe. A
+ * follower that guessed would hang on precisely the run somebody is waiting to
+ * hear about.
+ *
+ * Split from the dial so it can be tested with a scripted client: the loop is
+ * what has a contract, and a contract wants a test that can end the feed on
+ * purpose.
+ */
+export async function followLog(
+  client: Pick<OduServiceClient, "surface">,
+  opts: Pick<LogsOpts, "key" | "offset" | "limit" | "waitMs" | "json">,
+): Promise<number> {
+  // Negative only on the FIRST call — `--offset=-4096` means "start from the
+  // last 4 KiB". After that the cursor is an absolute position, because
+  // `nextOffset` always is.
+  let cursor = opts.offset;
+  let resynced = false;
+  for (;;) {
+    const read = await call(
+      client.surface.log.read({
+        key: opts.key,
+        ...(cursor === undefined ? {} : { offset: cursor }),
+        ...(opts.limit === undefined ? {} : { limit: opts.limit }),
+        waitMs: opts.waitMs ?? FOLLOW_WAIT_MS,
+      }),
+    );
+    // A DEAD LINK MID-FOLLOW IS NOT A COMPLETE LOG. Exiting 0 here would hand
+    // back a log that stops mid-line as though it were whole, which is the one
+    // forbidden outcome this repo already spent two issues on.
+    if (!read.ok) return reportFailure(read, opts.json);
+    const page = read.value;
+
+    // THE ATTEMPT WAS RE-RUN UNDER US. A rerun rewrites an attempt's log in
+    // place, so the file can be SHORTER than the cursor we hold; the read
+    // clamps, and `offset < what we asked for` is the only signal of it. Said
+    // out loud exactly once, then restarted from the beginning — silently
+    // resuming would print the tail of a different attempt as a continuation of
+    // this one.
+    if (cursor !== undefined && cursor > 0 && page.offset < cursor) {
+      if (!resynced) {
+        process.stderr.write(
+          `\nodu: this attempt was re-run and its log rewritten (${page.size} ` +
+            `bytes now, you were at ${cursor}) — following from the start\n`,
+        );
+        resynced = true;
+      }
+      cursor = 0;
+      continue;
+    }
+
+    if (opts.json) {
+      // One complete page per line: an agent reads NDJSON and never has to
+      // reassemble a value split across writes.
+      if (page.text !== "" || !page.open) emitJson(page);
+    } else if (page.text !== "") {
+      process.stdout.write(page.text);
+    }
+    cursor = page.nextOffset;
+
+    if (page.open) continue;
+    // Closed. `complete` is what says whether we have the whole thing.
+    if (!page.complete) {
+      process.stderr.write(
+        "\nodu: this log never got its producer's last word — it is truncated\n",
+      );
+      return 1;
+    }
+    return 0;
+  }
 }

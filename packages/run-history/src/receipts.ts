@@ -62,12 +62,19 @@ export const ReceiptSchema = Schema.Struct({
    *  to belong to yet (that being exactly why it needs a receipt) and a cancel
    *  must stay answerable after the run it named has expired.
    *
-   *  A build older than this one meeting a `start` or `cancel` receipt fails to
-   *  decode it, and `readReceipt` answers `null` — which every caller here
-   *  treats as "unreadable, do not assume free". Fail-closed, and only reachable
-   *  for the run-scoped `retry` directory, since the service's own is a
-   *  directory no previous build ever reads. */
-  kind: Schema.Literals(["retry", "start", "cancel"]),
+   *  `catalog` is `catalog.import` and `catalog.prune`: mutations whose subject
+   *  is the STORE rather than any run, so they too are claimed against the
+   *  service's own directory. Spelled rather than folded into `cancel` — the
+   *  semantics happen to coincide (service-scoped, no pre-minted run, inert to
+   *  `reconcileRequests`, which only settles `start`) but the word would be a
+   *  lie, and a receipt directory is exactly the place a lie survives longest.
+   *
+   *  A build older than this one meeting a `start`, `cancel` or `catalog`
+   *  receipt fails to decode it, and `readReceipt` answers `null` — which every
+   *  caller here treats as "unreadable, do not assume free". Fail-closed, and
+   *  only reachable for the run-scoped `retry` directory, since the service's
+   *  own is a directory no previous build ever reads. */
+  kind: Schema.Literals(["retry", "start", "cancel", "catalog"]),
   /** A hash of the request's meaningful input. A repeat with the same id and a
    *  different digest is a conflict, not a replay. */
   digest: Schema.String,

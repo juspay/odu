@@ -17,8 +17,8 @@
  * view sorts, filters and words it.
  */
 
-import { createMemo, createSignal, For, Show } from "solid-js";
-import { button, classes, el, pill, type View } from "./dom";
+import { createMemo, createSignal, For } from "solid-js";
+import { button, classes, el, pill, type View, when } from "./dom";
 import {
   ago,
   BOARD_STATE,
@@ -142,23 +142,19 @@ export function board(opts: {
       el(
         "div",
         { class: "filters", role: "group", "aria-label": "Filter runs" },
-        // Spelled here rather than through `./dom`'s `button`, for the one
-        // thing that helper does not carry: `aria-pressed`. Which filter is
-        // ACTIVE is state, and state a sighted person reads off a highlight has
-        // to be in the DOM for everybody else — so it rides the element rather
-        // than a class name.
+        // Which filter is ACTIVE is state, and state a sighted person reads off
+        // a highlight has to be in the DOM for everybody else — so it rides the
+        // element as `aria-pressed` rather than as a class name. These were
+        // spelled by hand here for exactly as long as `./dom`'s `button` could
+        // not carry that attribute; it can, so they go through the one helper
+        // that makes "every control is a real button" checkable in one file.
         ...FILTERS.map((entry) =>
-          el(
-            "button",
-            {
-              type: "button",
-              class: "btn",
-              title: entry.hint,
-              "aria-pressed": () => String(filter() === entry.id),
-              onClick: () => setFilter(entry.id),
-            },
-            entry.label,
-          ),
+          button({
+            label: entry.label,
+            title: entry.hint,
+            pressed: () => filter() === entry.id,
+            onClick: () => setFilter(entry.id),
+          }),
         ),
       ),
       button({ label: "New run", onClick: opts.onCreate, className: "btn btn-primary" }),
@@ -169,29 +165,30 @@ export function board(opts: {
     el(
       "div",
       { class: "board-body" },
-      el(Show, {
-        when: () => opts.loading(),
-        children: el("p", { class: "empty" }, "Reading the catalog…"),
-      }),
-      el(Show, {
-        when: () => !opts.loading() && opts.rows().length === 0,
-        children: el(
-          "p",
-          { class: "empty" },
-          "No runs in the catalog yet. Start one with ",
-          el("code", {}, "odu run"),
-          " in a checkout, or with the button above.",
-        ),
-      }),
-      el(Show, {
-        when: () =>
-          !opts.loading() && opts.rows().length > 0 && shown().length === 0,
-        children: el(
-          "p",
-          { class: "empty" },
-          "No runs match this filter — every run in the catalog is quiet.",
-        ),
-      }),
+      when(
+        () => opts.loading(),
+        () => el("p", { class: "empty" }, "Reading the catalog…"),
+      ),
+      when(
+        () => !opts.loading() && opts.rows().length === 0,
+        () =>
+          el(
+            "p",
+            { class: "empty" },
+            "No runs in the catalog yet. Start one with ",
+            el("code", {}, "odu run"),
+            " in a checkout, or with the button above.",
+          ),
+      ),
+      when(
+        () => !opts.loading() && opts.rows().length > 0 && shown().length === 0,
+        () =>
+          el(
+            "p",
+            { class: "empty" },
+            "No runs match this filter — every run in the catalog is quiet.",
+          ),
+      ),
       el(For, {
         each: () => shown(),
         children: (run: RunRow) =>

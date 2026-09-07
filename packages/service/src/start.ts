@@ -30,6 +30,7 @@
  * service that re-derived a lane assignment would be a second scheduler.
  */
 
+import { isAbsolute } from "node:path";
 import { mintRunId } from "@odu/run-history/ids";
 import { formatCursor } from "@odu/run-history/ids";
 import type { RunScope } from "@odu/run-history/schema";
@@ -289,6 +290,25 @@ async function start(input: StartInput, deps: StartDeps): Promise<Outcome> {
   }
 
   // ── freshly claimed: this is NEW work, so now the world matters ──
+  //
+  // ABSOLUTE FIRST, and explicitly, rather than leaning on `probeCheckout` to
+  // fail. A relative path resolves against the DAEMON's cwd — which is
+  // wherever the shell that first started it happened to be, possibly months
+  // ago and possibly deleted since. `probeCheckout` would usually answer "not a
+  // repository" and the refusal would be true by accident; the case that
+  // matters is when it is not, and a run starts in a directory the caller has
+  // never seen. The message already tells callers this path is absolute; this
+  // is the check that makes the sentence true.
+  if (!isAbsolute(input.checkout)) {
+    return refuseAndRecord(
+      deps,
+      input.requestId,
+      "checkout_refused",
+      `odu: ${input.checkout} is not an absolute path — run.start takes the ` +
+        "ABSOLUTE path of a repository. A relative one would resolve against " +
+        "the daemon's working directory, which is not yours.",
+    );
+  }
   const facts = deps.probeCheckout(input.checkout);
   if (!facts.isRepo) {
     return refuseAndRecord(

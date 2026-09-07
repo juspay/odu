@@ -366,6 +366,18 @@ export const ODU_CHILD_ENV_KEYS: readonly string[] = [
   "NIX_SSL_CERT_FILE",
   "SSL_CERT_FILE",
   "LOCALE_ARCHIVE",
+  // GitHub. Commit statuses have always been posted by a coordinator this list
+  // launches, so `gh` resolving in a child is not a new capability — but it has
+  // been resolving by luck: `HOME` and `PATH` carry a logged-in `gh` on a
+  // developer's machine and carry nothing on a runner, where the credential is
+  // `GH_TOKEN` and the config lives wherever `GH_CONFIG_DIR` says. `odu protect`
+  // is what made the gap visible: it is served by the daemon now, and a daemon
+  // whose `gh` cannot authenticate refuses `no_credential` for an environment
+  // the operator had set correctly. `GH_HOST` is here for the same reason a
+  // GitHub Enterprise host is not github.com.
+  "GH_TOKEN",
+  "GH_HOST",
+  "GH_CONFIG_DIR",
   // odu's own locators.
   "ODU_HOSTS",
   "ODU_STATE_DIR",

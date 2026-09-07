@@ -44,8 +44,12 @@ browser), `modulepreload` links for the entry's static chunks, and precompressed
 `br`/`zstd`/`gzip` siblings.
 
 Nix builds it as `.#web-ui` and bakes the path onto the `odu` wrapper as
-`ODU_WEB_DIST` — with `--set-default`, so a developer iterating on the browser
-points the daemon at their own dist without rebuilding the wrapper.
+`ODU_WEB_DIST` — with `--set`, unconditionally, so the page a daemon serves is
+always the page its `ODU_BUILD_ID` names. There is no ambient override and no
+dev-server: iterating on the browser is `just run -- web`, which rebuilds. A
+bundle that could be swapped under a fixed build id would make that id true of
+two different applications, and it is the id `ensureService` compares before
+adopting a daemon somebody else started.
 
 ## Two properties that are acceptance gates, not polish
 

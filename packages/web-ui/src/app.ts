@@ -24,13 +24,13 @@ import type { SurfaceReadout } from "@kolu/surface/solid";
 import { formatLogKey, parseLogKey } from "@odu/service-client/logKey";
 import type { oduServiceSurface } from "@odu/service-client/surface";
 import { Effect } from "effect";
-import { createEffect, createMemo, createSignal, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 import { board } from "./board";
 import { create, type CreateState, type StartForm } from "./create";
-import { type ControlState, detail } from "./detail";
-import { el, type View } from "./dom";
+import { type ControlState, detail, LOG_PAGE_BYTES } from "./detail";
+import { el, type View, when } from "./dom";
 import { CONNECTION } from "./format";
-import type { LogTail, NodesFrame, RunNode, RunRow } from "./types";
+import type { LogPage, LogTail, NodesFrame, RunNode, RunRow } from "./types";
 
 type ServiceSpec = (typeof oduServiceSurface)["spec"];
 type Client = SurfaceClient<ServiceSpec>;
@@ -174,11 +174,20 @@ export function app(opts: {
     if (key === null) return null;
     const parsed = parseLogKey(key);
     if (parsed === null) return null;
-    return (
-      frame()?.nodes.find(
-        (node) => node.id === parsed.node && node.attempt === parsed.attempt,
-      ) ?? null
-    );
+    // Matched on the node ID ALONE, and the attempt is carried beside it below.
+    // `RunNode.attempt` is the HIGHEST attempt the run recorded, while the
+    // address may name an older one — which is the whole point of the attempt
+    // picker, and is also what a link pasted before a retry becomes. Matching on
+    // both fields resolved every one of those to `null`, so the panel closed on
+    // exactly the person who had asked to read an earlier failure.
+    return frame()?.nodes.find((node) => node.id === parsed.node) ?? null;
+  });
+  /** WHICH attempt the address names. Derived from the same key rather than
+   *  read off the node, for the reason above: they differ, and the difference
+   *  is the thing the picker exists to express. */
+  const selectedAttempt = createMemo<number | null>(() => {
+    const key = logKey();
+    return key === null ? null : (parseLogKey(key)?.attempt ?? null);
   });
   // The whole-log page is cleared whenever the address moves: a panel left
   // showing the previous node's output under a new heading is the worst kind of
@@ -206,9 +215,12 @@ export function app(opts: {
     return key === null ? undefined : tails.byKey(key)?.error();
   });
 
-  // The whole log, on request. Separate from the tail because they answer
-  // different questions — see `@odu/service`'s `logs.ts`.
-  const [page, setPage] = createSignal<string | null>(null);
+  // A WINDOW of the log, on request. Separate from the tail because they answer
+  // different questions — see `@odu/service`'s `logs.ts` — and held as the
+  // verb's whole answer rather than just its text, because `offset`,
+  // `nextOffset`, `size` and `eof` are what let the panel say where the window
+  // is and whether there is another one.
+  const [page, setPage] = createSignal<LogPage | null>(null);
 
   // ── controls ──
   const [control, setControl] = createSignal<ControlState>({ kind: "idle" });
@@ -313,6 +325,17 @@ export function app(opts: {
           selectors: [...current.scope.selectors],
           platforms: [...current.scope.platforms],
           noDeps: current.scope.noDeps,
+          // A checkout with no GitHub origin cannot post commit statuses, and
+          // the coordinator REFUSES a posting run there rather than quietly
+          // dropping the reporting. That refusal is right for `odu run`, where a
+          // person may simply not have configured a remote yet. It is wrong
+          // HERE: this button repeats a run that already ran in this checkout,
+          // which means it ran with posting off — so asking for it with posting
+          // on is not repeating it, it is asking for something odu will decline
+          // for a reason nobody can act on from this page. `repo` is the row's
+          // own word for "this checkout has a GitHub origin", so the browser
+          // says what it is already holding rather than finding out.
+          ...(current.repo === null ? { noPost: true } : {}),
         }),
         (receipt) =>
           receipt.accepted
@@ -322,11 +345,16 @@ export function app(opts: {
     },
   };
 
-  const readFullLog = (): void => {
+  const readLogPage = (offset: number): void => {
     const key = logKey();
     if (key === null) return;
-    void Effect.runPromise(opts.client.procedures.log.read({ key })).then(
-      (answer) => setPage(answer.text),
+    void Effect.runPromise(
+      // ALWAYS bounded. The verb will happily return a whole log, and this used
+      // to ask for one — a request whose cost is set by whatever the recipe
+      // printed, which is not a thing a browser may bet a tab on.
+      opts.client.procedures.log.read({ key, offset, limit: LOG_PAGE_BYTES }),
+    ).then(
+      (answer) => setPage(answer),
       (err: unknown) => setControl({ kind: "refused", message: refusalText(err) }),
     );
   };
@@ -382,66 +410,88 @@ export function app(opts: {
           ? `${CONNECTION.degraded} — nothing is arriving on ${readout.stopped.join(", ")}`
           : CONNECTION[readout.status];
       },
-      el(Show, {
-        when: () => opts.readout().needsReload,
-        children: el(
-          "button",
-          { type: "button", class: "btn", onClick: opts.onReload },
-          "Reload",
-        ),
-      }),
+      when(
+        () => opts.readout().needsReload,
+        () =>
+          el(
+            "button",
+            { type: "button", class: "btn", onClick: opts.onReload },
+            "Reload",
+          ),
+      ),
     ),
-    el(Show, {
-      when: () => route().at === "board",
-      children: board({
-        rows,
-        now,
-        // The framework's own pending fact: `connecting` with nothing yet is a
-        // catalog that has not arrived, which is a different thing from a
-        // catalog with no runs in it.
-        loading: () => opts.readout().status === "connecting" && rows().length === 0,
-        onOpen: (id) => go({ at: "run", runId: id, log: null }),
-        onCreate: () => go({ at: "new" }),
-      }),
-    }),
-    el(Show, {
-      when: () => route().at === "new",
-      children: create({
-        state: creating,
-        onStart: start,
-        onOpen: (id) => go({ at: "run", runId: id, log: null }),
-        onBack: () => go({ at: "board" }),
-      }),
-    }),
-    el(Show, {
-      when: () => route().at === "run",
-      children: detail({
-        run: selectedRun,
-        frame,
-        pending: () => nodesSub.pending(),
-        error: () => nodesSub.error(),
-        selected,
-        onSelect: (node) => {
-          const id = runId();
-          if (id === null) return;
-          go({
-            at: "run",
-            runId: id,
-            log:
-              node === null
-                ? null
-                : formatLogKey({ runId: id, node: node.id, attempt: node.attempt }),
-          });
-        },
-        tail,
-        tailPending,
-        tailError,
-        page,
-        onFullPage: readFullLog,
-        control,
-        controls,
-        onBack: () => go({ at: "board" }),
-      }),
-    }),
+    // THE ROUTER, and each branch is BUILT ON ENTRY — see `./dom`'s `when` for
+    // why that is the whole point rather than a detail of spelling.
+    when(
+      () => route().at === "board",
+      () =>
+        board({
+          rows,
+          now,
+          // The framework's own pending fact: `connecting` with nothing yet is a
+          // catalog that has not arrived, which is a different thing from a
+          // catalog with no runs in it.
+          loading: () =>
+            opts.readout().status === "connecting" && rows().length === 0,
+          onOpen: (id) => go({ at: "run", runId: id, log: null }),
+          onCreate: () => go({ at: "new" }),
+        }),
+    ),
+    when(
+      () => route().at === "new",
+      () =>
+        create({
+          state: creating,
+          onStart: start,
+          onOpen: (id) => go({ at: "run", runId: id, log: null }),
+          onBack: () => go({ at: "board" }),
+        }),
+    ),
+    when(
+      () => route().at === "run",
+      () =>
+        detail({
+          run: selectedRun,
+          frame,
+          pending: () => nodesSub.pending(),
+          error: () => nodesSub.error(),
+          selected,
+          onSelect: (node) => {
+            const id = runId();
+            if (id === null) return;
+            go({
+              at: "run",
+              runId: id,
+              log:
+                node === null
+                  ? null
+                  : formatLogKey({ runId: id, node: node.id, attempt: node.attempt }),
+            });
+          },
+          selectedAttempt,
+          // Choosing an attempt moves the ADDRESS, not a signal beside it — the
+          // same rule the node selection keeps. So an earlier attempt is a link
+          // like any other view here, Back walks out of it, and the tail
+          // subscription follows because it is keyed by the log key.
+          onAttempt: (attempt) => {
+            const id = runId();
+            const node = selected();
+            if (id === null || node === null) return;
+            go({
+              at: "run",
+              runId: id,
+              log: formatLogKey({ runId: id, node: node.id, attempt }),
+            });
+          },
+          tail,
+          tailPending,
+          tailError,
+          page,
+          onPage: readLogPage,
+          control,
+          controls,
+          onBack: () => go({ at: "board" }),
+        }),
+    ),
   );
 }

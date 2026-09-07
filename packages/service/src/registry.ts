@@ -55,7 +55,10 @@ import {
 import { formatLogKey } from "@odu/service-client/logKey";
 import type {
   RunBoardState,
+  RunEnv,
+  RunLane,
   RunNode,
+  RunPhase,
   RunRow,
 } from "@odu/service-client/surface";
 
@@ -98,6 +101,14 @@ interface Entry {
    *  fold — reading the journal twice would let them disagree about which
    *  attempt a node is on. */
   nodes: RunNode[];
+  /** Where the run's work is placed, from that same fold. Held here for the
+   *  same reason the nodes are: the environment and the node list are two
+   *  readings of one journal, and a caller that got them from two reads could
+   *  hold a lane that has landed beside a node that has not started. */
+  env: RunEnv;
+  /** When the run stopped, or null while it has not. The ANCHOR the elapsed
+   *  clock is re-read against — see `RunRegistry.env`. */
+  finishedAt: number | null;
 }
 
 /**
@@ -179,6 +190,112 @@ function nodesOf(
   return out;
 }
 
+/**
+ * The run's ENVIRONMENT, folded out of the same journal the row came from.
+ *
+ * Every field here used to be answerable only by dialling the checkout's
+ * `.ci/odu.sock`: the coordinator journalled `lane` and `phase` lines all along
+ * and `foldJournal` hit `default: break` on both arms, so the live process was
+ * the only thing that could say which lane was on which box. Read from the
+ * catalog instead, the same answer survives the coordinator — a run that
+ * finished last week, or whose owner was killed, still says where it ran.
+ */
+function envOf(
+  manifest: RunManifest,
+  fold: ReturnType<typeof foldJournal>,
+  /** When the run stopped, from its verdict — or null while it is still going,
+   *  which is what makes `elapsedMs` a live clock rather than a fixed one. */
+  finishedAt: number | null,
+  now: number,
+): RunEnv {
+  return {
+    // A record written before odu journalled phases says nothing about its own
+    // lifecycle, and the fallback is the SAME reading `boardState` makes:
+    // nothing started yet is a provision, anything else means work was placed.
+    // Never `no_lanes` — that is the coordinator's own word for "the selection
+    // matched nothing", and inferring it from silence would invent a reason the
+    // journal never gave.
+    phase: fold.phase ?? fallbackPhase(fold.latest),
+    elapsedMs: elapsedOf(manifest.createdAt, finishedAt, now),
+    lanes: lanesOf(fold.lanes),
+    hostsSource: fold.hostsSource,
+    // `owner/repo` or null — the manifest records the slug the coordinator
+    // parsed from the origin, so a checkout with no GitHub remote has no forge
+    // page and says so rather than assembling a URL that 404s.
+    commitUrl:
+      manifest.repo === null
+        ? null
+        : `https://github.com/${manifest.repo}/commit/${manifest.sha}`,
+    // In the journal's own order — the order the posts were attempted — which
+    // is the order an operator reads them in. The same debt `reportingDebt`
+    // counts: a count says something is wrong, this says which context and why.
+    owed: [...fold.debt.values()].map((row) => ({
+      context: row.context,
+      lastError: row.lastError,
+      attempts: row.attempts,
+    })),
+  };
+}
+
+/**
+ * How long the run has been going, and when that stops.
+ *
+ * STOPS AT THE VERDICT. An elapsed time that kept counting after a run finished
+ * would make every settled row's age a function of when somebody looked at it,
+ * which is the one thing a durable record is supposed to be free of.
+ *
+ * `Math.max` guards the single way this can go backwards: a verdict stamped on
+ * a lane host whose clock is behind the one that registered the run. A negative
+ * duration is not a fact about anything, and zero is the honest floor.
+ */
+function elapsedOf(
+  createdAt: number,
+  finishedAt: number | null,
+  now: number,
+): number {
+  return Math.max(0, (finishedAt ?? now) - createdAt);
+}
+
+/** The phase of a run that never journalled one. One rule, spelled once, and
+ *  the same one `boardState` uses to tell `provisioning` from `running`. */
+function fallbackPhase(latest: ReadonlyMap<string, AttemptState>): RunPhase {
+  return latest.size === 0 ? "provisioning" : "lanes";
+}
+
+/**
+ * The lane map, on the wire's two-arm union.
+ *
+ * Sorted by platform so two reads of one journal paint the same matrix — the
+ * fold's map is in first-seen order, which is the order lanes happened to be
+ * claimed in and is not stable across a resumed run.
+ *
+ * **A `leased` lane with no host is a TORN record** — the state says the lane
+ * landed and the field naming the machine is missing — and it is reported as
+ * `claiming`. That is the weaker of the two claims and the only honest one: the
+ * union's `leased` arm requires a host, and inventing one (or spelling it as
+ * the empty string) would tell a reader the work is on a machine that nothing
+ * in the journal names. Whatever pool the line carried is kept, because that is
+ * still evidence about where the lane may be.
+ */
+function lanesOf(
+  lanes: ReadonlyMap<
+    string,
+    { state: "claiming" | "leased"; host: string | null; pool: readonly string[] }
+  >,
+): RunLane[] {
+  const out: RunLane[] = [];
+  for (const platform of [...lanes.keys()].sort()) {
+    const lane = lanes.get(platform);
+    if (lane === undefined) continue;
+    if (lane.state === "leased" && lane.host !== null) {
+      out.push({ state: "leased", platform, host: lane.host });
+      continue;
+    }
+    out.push({ state: "claiming", platform, pool: [...lane.pool] });
+  }
+  return out;
+}
+
 /** Project one run. Reads the journal ONCE and folds it twice — for the row's
  *  counts and for the node list — which is what keeps the two views of one run
  *  from being two readings of it. */
@@ -193,13 +310,17 @@ function project(
 ): Entry {
   const journal = readJournal(handle);
   const owner = currentOwner(handle.dir);
+  // Read ONCE and shared with the environment below: the row's settlement and
+  // the moment the elapsed clock stops are the same fact, and two reads of the
+  // verdict could straddle the instant it is written.
+  const verdict = readVerdict(handle);
   const attention = attentionFor(
     {
       runId: handle.runId,
       manifest,
       journal: journal.entries,
       unreadableEvents: journal.unreadable,
-      verdict: readVerdict(handle),
+      verdict,
       expiry: readExpiry(handle),
       ownerAlive,
       endpoint: owner?.endpoint ?? null,
@@ -244,6 +365,8 @@ function project(
       cursor: formatCursor({ runId: handle.runId, seq: journal.highestSeq }),
     },
     nodes: nodesOf(handle.runId, fold.roster, fold.latest),
+    env: envOf(manifest, fold, verdict?.finishedAt ?? null, now),
+    finishedAt: verdict?.finishedAt ?? null,
   };
 }
 
@@ -277,6 +400,20 @@ export interface RunRegistry {
   row: (runId: string) => RunRow | undefined;
   /** One run's node list, or undefined for a run this registry has not seen. */
   nodes: (runId: string) => RunNode[] | undefined;
+  /**
+   * Where one run's work is placed, or undefined for a run this registry has
+   * not seen. `undefined` rather than `UNKNOWN_ENV`, so a caller can tell "no
+   * such run here" from "a run whose environment is not established yet" —
+   * those call for opposite next moves.
+   *
+   * Takes the clock the way `refresh` does, and for one reason: `elapsedMs` is
+   * the only field here that moves without any file moving. A run in a cold
+   * host's multi-minute `nix copy` writes NOTHING, so its fingerprint does not
+   * change and it is never re-folded — and an elapsed time captured at the last
+   * fold would sit still for exactly the window a reader is watching it
+   * hardest. So the fold is cached and the clock is not.
+   */
+  env: (runId: string, now?: number) => RunEnv | undefined;
   /** Re-read the catalog and report what moved. */
   refresh: (now?: number) => RegistryDelta;
   /** The catalog directory this registry is a face onto — what an identity
@@ -342,6 +479,14 @@ export function createRegistry(opts: RegistryOptions = {}): RunRegistry {
         .filter((row): row is RunRow => row !== undefined),
     row: (runId) => entries.get(runId)?.row,
     nodes: (runId) => entries.get(runId)?.nodes,
+    env: (runId, now = Date.now()) => {
+      const held = entries.get(runId);
+      if (held === undefined) return undefined;
+      return {
+        ...held.env,
+        elapsedMs: elapsedOf(held.row.createdAt, held.finishedAt, now),
+      };
+    },
     refresh,
     catalog: catalogPath(opts),
   };
@@ -354,15 +499,15 @@ export function projectRun(
   runId: string,
   opts: CatalogOptions = {},
   now: number = Date.now(),
-): { row: RunRow; nodes: RunNode[] } | null {
+): { row: RunRow; nodes: RunNode[]; env: RunEnv } | null {
   const handle = handleFor(runId, opts);
   const manifest = readManifest(handle);
   if (manifest === null) return null;
-  const { row, nodes } = project(
+  const { row, nodes, env } = project(
     handle,
     manifest,
     now,
     ownerProvablyAlive(handle.dir, now),
   );
-  return { row, nodes };
+  return { row, nodes, env };
 }

@@ -738,6 +738,11 @@ async function orchestrate(
       ...(args.root === undefined ? {} : { root: args.root }),
       noDeps: args.noDeps,
     },
+    // The caller's own `--host` pins, unresolved. Not `resolvedPools` and not
+    // the lanes a lease produced: those are what the constraint RESOLVED TO on
+    // this machine at this moment, and replaying a resolution would pin a
+    // retry to a box the user never named.
+    hostPins: [...args.hostPins],
     snapshotMode: ctx.snapshotMode ? "strict" : "live",
     dirty: ctx.dirty,
     runnerFlake,
@@ -1985,11 +1990,17 @@ async function orchestrate(
     // report is half as useful without. Derived from the published header
     // rather than from `lanesByPlatform` directly, so the record and the
     // surface cannot describe two different run environments.
+    const hostsSource = runtime.ctx.cells.header.get().hostsSource;
     for (const lane of lanes) {
       history.lane(
         lane.platform,
         lane.state,
         lane.state === "leased" ? lane.host : null,
+        // The pool is a fact about a lane that has NOT landed. Once it has, the
+        // host is the whole answer, and carrying the candidates it beat would
+        // invite a reader to present them as though the choice were still open.
+        lane.state === "claiming" ? lane.pool : [],
+        hostsSource,
       );
     }
     // `unstarted` is unreachable here — this run published its header before

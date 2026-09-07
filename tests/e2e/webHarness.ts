@@ -4,9 +4,17 @@
  *
  * Everything here is deliberately out-of-process. The daemon is the nix-built
  * binary, started the way `odu web` starts it; the CLI is that same binary in
- * another process; the HTTP MCP face is `curl`-shaped JSON-RPC over a socket;
- * the browser is a headless Chrome when the machine has one. Nothing imports
- * `src/` — the contract under test is what a person and an agent actually meet.
+ * another process; the HTTP MCP face is `curl`-shaped JSON-RPC over a socket.
+ * Nothing imports `src/` — the contract under test is what a person and an agent
+ * actually meet.
+ *
+ * The BROWSER is driven from `packages/web-acceptance` instead, through
+ * Playwright against this same binary. It used to be driven from here with
+ * `chrome --headless --dump-dom`, which is ONE STATIC SNAPSHOT of a live page —
+ * and which skipped itself where no browser was on PATH, so on a CI runner it
+ * graded nothing. Those three helpers are deleted rather than left standing
+ * beside the new suite: an unused, silently-skipping browser path in the tree is
+ * the finding, not a spare.
  *
  * **The world is a private one, and privacy stops where odu stops.** The port
  * is picked per suite and `ODU_STATE_DIR` points into a temp directory, so the
@@ -25,6 +33,7 @@
  */
 
 import { type ChildProcess, execFileSync, spawn, spawnSync } from "node:child_process";
+import { connect as netConnect } from "node:net";
 import {
   existsSync,
   mkdirSync,
@@ -72,6 +81,81 @@ export function suitePort(): number {
   return 18500 + (process.pid % 900);
 }
 
+/**
+ * EVERY PORT THIS SUITE USES, named in one place.
+ *
+ * The offsets were scattered across three files as bare `suitePort() + 1` /
+ * `+ 2` arithmetic, and the cold-bootstrap gate had skipped the scheme entirely
+ * for a hardcoded `18493` — which collided, deterministically, with any second
+ * checkout of this suite running at the same time (there are two dozen odu
+ * worktrees on the author's machine). Each suite killed the other's daemon and
+ * immediately re-bootstrapped, and the failure surfaced as
+ * "the stale cold-port daemon to go away did not happen within 120000ms" in a
+ * test whose subject is "nothing is serving".
+ *
+ * A named slot cannot be silently reused the way a `+ 1` can, and adding one is
+ * the moment you see the ones already taken.
+ */
+export const PORT_SLOT = {
+  /** {@link startWebService} — the forked `web-daemon`. */
+  forkedDaemon: 0,
+  /** {@link startWebServiceViaCommand} — `odu web --background`. */
+  commandDaemon: 1,
+  /** `web.e2e.test.ts`'s foreground `odu web` tenure. */
+  foreground: 2,
+  /** `mcp.e2e.test.ts` — a bridge bootstrapping onto an empty machine. */
+  coldBootstrap: 3,
+  /** `mcp.e2e.test.ts` — four cold faces racing for one daemon. */
+  coldRace: 4,
+  /** `mcp.e2e.test.ts` — a foreign listener, met through `odu mcp`. */
+  occupiedAgent: 5,
+  /** `lifecycle.e2e.test.ts` — a foreign listener, met through `odu web`. */
+  occupiedTerminal: 6,
+  /** `lifecycle.e2e.test.ts` — a daemon killed mid-mutation, then restarted. */
+  crashWindow: 7,
+  /** `lifecycle.e2e.test.ts` — a daemon restarted under live runs. */
+  restartUnderRuns: 8,
+  /** `lifecycle.e2e.test.ts` — clients that walk away mid-wait. */
+  disconnect: 9,
+  /** `install.e2e.test.ts` — the daemon a freshly installed launcher starts. */
+  freshInstall: 10,
+} as const;
+
+/** The port for one named slot in THIS suite's block. */
+export function suitePortFor(slot: keyof typeof PORT_SLOT): number {
+  return suitePort() + PORT_SLOT[slot];
+}
+
+/**
+ * THE WHOLE PUBLIC VOCABULARY, sorted — every verb the shared contract exposes
+ * as a tool, and nothing else.
+ *
+ * Here rather than in each test file because two faces assert it: the bridge
+ * this repo builds (`mcp.e2e.test.ts`) and the launcher a fresh consumer
+ * installs (`install.e2e.test.ts`). Two copies would drift, and the drift would
+ * be invisible — each file would still pass against its own stale list.
+ *
+ * Derived from `packages/service-client/src/verbs.ts`'s `ODU_SERVICE_EXPOSE` by
+ * the framework's own `toolName(ns, verb)` = `<ns>_<verb>`. It is deliberately
+ * NOT imported from there: this suite is black-box, and a list imported from the
+ * code under test would agree with a mistake.
+ */
+export const SHARED_TOOLS = [
+  "catalog_import",
+  "catalog_prune",
+  "log_read",
+  "pipeline_read",
+  "protect_apply",
+  "run_cancel",
+  "run_read",
+  "run_retry",
+  "run_start",
+  "run_wait",
+  "venue_hold",
+  "venue_probe",
+  "venue_release",
+] as const;
+
 /** A hosts file pinning this machine's platform to a localhost lane, so lane
  *  resolution is hermetic wherever the suite runs. */
 function hostsFile(root: string): string {
@@ -88,6 +172,55 @@ export function daemonLog(world: WebWorld): string {
     return readFileSync(world.logPath, "utf-8").slice(-4000);
   } catch {
     return `(no daemon log at ${world.logPath})`;
+  }
+}
+
+/**
+ * IS ANYTHING ACCEPTING AT THIS ORIGIN? A raw TCP connect, and nothing more.
+ *
+ * The only honest way for a test to observe ABSENCE. Every odu face bootstraps
+ * now, so asking odu whether a service is running STARTS one — a poll loop
+ * written that way kills a daemon and immediately spawns its replacement,
+ * forever. That is not a flaw in the bootstrap; it is what "no face reports
+ * nothing-serving without trying to fix it" means, and a test that wants to see
+ * an empty port has to look from outside odu.
+ *
+ * TCP rather than `fetch`: a listener that accepts and then says nothing (which
+ * is exactly the foreign-program case the occupied-port gates set up) leaves a
+ * `fetch` hanging on its own timeout, and answers a connect instantly.
+ */
+export function tcpListening(origin: string, timeoutMs = 1_000): Promise<boolean> {
+  const url = new URL(origin);
+  return new Promise<boolean>((resolve) => {
+    const socket = netConnect({
+      host: url.hostname,
+      port: Number(url.port === "" ? 80 : url.port),
+    });
+    const settle = (answer: boolean): void => {
+      socket.destroy();
+      resolve(answer);
+    };
+    socket.setTimeout(timeoutMs, () => settle(false));
+    socket.once("connect", () => settle(true));
+    socket.once("error", () => settle(false));
+  });
+}
+
+/**
+ * Stop a daemon and everything it leads.
+ *
+ * The GROUP first — a daemon is a session leader on either launch branch, and a
+ * plain kill would leave a coordinator behind — then the pid, for a host where
+ * it is not. Both throws are swallowed: "already gone" is a success here, and a
+ * teardown that failed on it would turn a passing test red.
+ */
+export function killDaemon(pid: number, signal: NodeJS.Signals = "SIGTERM"): void {
+  for (const target of [-pid, pid]) {
+    try {
+      process.kill(target, signal);
+    } catch {
+      // Already gone, or never a group leader.
+    }
   }
 }
 
@@ -125,7 +258,7 @@ export async function until<T>(
  * what odu owns — the daemon home and the catalog — and everything the
  * toolchain reads out of the real home is left alone.
  */
-function privateWorld(port: number): {
+export function privateWorld(port: number): {
   root: string;
   origin: string;
   env: NodeJS.ProcessEnv;
@@ -155,7 +288,7 @@ function privateWorld(port: number): {
 
 /** Start a service in a private world and wait for it to say it is ready. */
 export async function startWebService(oduBin: string): Promise<WebWorld> {
-  const { root, origin, env } = privateWorld(suitePort());
+  const { root, origin, env } = privateWorld(suitePortFor("forkedDaemon"));
   const logPath = join(root, "daemon.log");
   const log = Bun.file(logPath);
   const daemon = spawn(oduBin, ["web-daemon"], {
@@ -237,10 +370,13 @@ export async function startWebService(oduBin: string): Promise<WebWorld> {
  */
 export async function startWebServiceViaCommand(
   oduBin: string,
+  port: number = suitePortFor("commandDaemon"),
 ): Promise<WebWorld> {
   // A different port from the forked-daemon world, so the two coexist — which
-  // they can only do because the gate is derived from the origin.
-  const { root, origin, env } = privateWorld(suitePort() + 1);
+  // they can only do because the gate is derived from the origin. A caller that
+  // needs a world of its very own (the lifecycle gates kill and restart their
+  // daemon, which no other test may be sharing) names its own slot.
+  const { root, origin, env } = privateWorld(port);
   const started = spawnSync(oduBin, ["web", "--background"], {
     env,
     encoding: "utf-8",
@@ -386,74 +522,6 @@ export function headOf(dir: string): string {
     cwd: dir,
     encoding: "utf-8",
   }).trim();
-}
-
-/** A headless Chrome, if this machine has one. The browser gate is SKIPPED
- *  rather than failed where there is none: a CI runner without a browser is a
- *  real environment, and a suite that failed there would be reporting the
- *  environment rather than the code. */
-export function chromePath(): string | null {
-  for (const candidate of ["google-chrome", "chromium", "chromium-browser"]) {
-    const which = spawnSync("sh", ["-c", `command -v ${candidate}`], {
-      encoding: "utf-8",
-    });
-    if (which.status === 0 && which.stdout.trim() !== "") return which.stdout.trim();
-  }
-  return null;
-}
-
-/** The rendered DOM of a page, after its scripts have run. */
-export function renderPage(chrome: string, url: string): string {
-  const res = spawnSync(
-    chrome,
-    [
-      "--headless",
-      "--disable-gpu",
-      "--no-sandbox",
-      "--dump-dom",
-      "--virtual-time-budget=9000",
-      url,
-    ],
-    { encoding: "utf-8", maxBuffer: BIG },
-  );
-  return res.stdout;
-}
-
-/**
- * Render until the page HAS something, or fail saying what it had instead.
- *
- * `--dump-dom` is ONE SAMPLE of a live page. The board's wire indicator turns
- * `live` when the socket is up and its subscriptions are healthy, which is a
- * moment BEFORE the first collection frame has been applied — so a single
- * snapshot on a loaded machine can honestly catch an empty board on a service
- * with a dozen runs. That is not a defect in the page and asserting on one
- * sample was a flake waiting for a busy runner (it found one).
- *
- * So the sample is repeated to a deadline. What is being waited for is a page
- * state, not a duration, which is the same rule every other wait in this suite
- * keeps.
- */
-export async function renderUntil(
-  chrome: string,
-  url: string,
-  wanted: (dom: string) => boolean,
-  what: string,
-  timeoutMs = 60_000,
-): Promise<string> {
-  let last = "";
-  try {
-    return await until(
-      `the page at ${url} to show ${what}`,
-      () => {
-        last = renderPage(chrome, url);
-        return wanted(last) ? last : null;
-      },
-      timeoutMs,
-      0,
-    );
-  } catch (err) {
-    throw new Error(`${String(err)}\n--- last DOM ---\n${last.slice(0, 4000)}`);
-  }
 }
 
 /** Is the run socket for `dir` there yet? */

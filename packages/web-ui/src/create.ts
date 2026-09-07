@@ -19,8 +19,8 @@
  * sentence with a recovery, and the form shows it rather than clearing itself.
  */
 
-import { createSignal, Show } from "solid-js";
-import { button, el, field, type View } from "./dom";
+import { createSignal } from "solid-js";
+import { button, el, field, type View, when } from "./dom";
 
 /** What the caller filled in. Every optional field is left ABSENT rather than
  *  sent empty: the wire's optional keys mean "not said", and an empty array
@@ -180,41 +180,48 @@ export function create(opts: {
           "Take the checkout from a run already live in it (--supersede)",
         ),
       ),
+      // A SUBMIT button, and with no click handler of its own — see `./dom`'s
+      // `ButtonAction`. The form's `onSubmit` above is now the single path a
+      // start takes, whether it was reached by a mouse or by Enter in a field,
+      // so the two ways of asking cannot disagree and one press cannot start
+      // two runs.
       button({
         label: () =>
           opts.state().kind === "starting" ? "Starting…" : "Start run",
-        onClick: submit,
+        type: "submit",
         disabled: () => opts.state().kind === "starting",
         className: "btn btn-primary",
       }),
     ),
-    el(Show, {
-      when: () => opts.state().kind === "refused",
-      children: el("p", { class: "receipt receipt-bad", role: "alert" }, () => {
-        const state = opts.state();
-        return state.kind === "refused" ? state.message : "";
-      }),
-    }),
-    el(Show, {
-      when: () => opts.state().kind === "existing",
-      children: el(
-        "p",
-        { class: "receipt", role: "status" },
-        () => {
+    when(
+      () => opts.state().kind === "refused",
+      () =>
+        el("p", { class: "receipt receipt-bad", role: "alert" }, () => {
           const state = opts.state();
-          return state.kind === "existing"
-            ? `That checkout already has a live run at ${state.sha.slice(0, 7)}. `
-            : "";
-        },
-        button({
-          label: "Open it",
-          onClick: () => {
-            const state = opts.state();
-            if (state.kind === "existing") opts.onOpen(state.runId);
-          },
+          return state.kind === "refused" ? state.message : "";
         }),
-        " — or tick “Take the checkout” above and start again.",
-      ),
-    }),
+    ),
+    when(
+      () => opts.state().kind === "existing",
+      () =>
+        el(
+          "p",
+          { class: "receipt", role: "status" },
+          () => {
+            const state = opts.state();
+            return state.kind === "existing"
+              ? `That checkout already has a live run at ${state.sha.slice(0, 7)}. `
+              : "";
+          },
+          button({
+            label: "Open it",
+            onClick: () => {
+              const state = opts.state();
+              if (state.kind === "existing") opts.onOpen(state.runId);
+            },
+          }),
+          " — or tick “Take the checkout” above and start again.",
+        ),
+    ),
   );
 }

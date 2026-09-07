@@ -29,15 +29,22 @@
  *     A face that dialled it directly would be mutating a run it had not
  *     identified.
  *
- * ## What is deliberately NOT walled off
+ * ## Nothing is deliberately walled out any more
  *
- * Three commands stay local, and they are named here rather than left to look
- * like leaks. `odu dump` and `odu graph` read a `justfile` and touch no run, no
- * socket, no catalog and no venue. `odu protect` writes GitHub ruleset state
- * using the CALLER's `gh` credential, which the daemon has no way to borrow —
- * building a credential-delegation story is a different piece of work, and
- * pretending otherwise by routing it through the service would mean the daemon
- * acting as whoever last started it.
+ * This file used to name three exceptions. `odu dump` and `odu graph` "read a
+ * justfile and touch no run"; `odu protect` "spends the CALLER's gh credential,
+ * which the daemon has no way to borrow". Both defences were wrong.
+ *
+ * Reading a justfile is not the absence of authority, it is a SECOND RESOLVER:
+ * what odu will run for a checkout is a question `run.start` answers through
+ * the same engine, so a face answering it locally could disagree with the run
+ * it was meant to predict, and nothing would notice. And the `protect` defence
+ * described an odu that does not exist — the coordinator the daemon launches
+ * has posted commit statuses with that same credential all along.
+ *
+ * Every public capability is a member on the shared surface now. The set this
+ * walks is DERIVED from `src/main.ts`'s own imports, so a command cannot be
+ * exempted by forgetting to list it.
  *
  * The walk is a PARSE rather than a line scan, and TYPE-ONLY EDGES COUNT: a
  * `import type { RunLauncher }` is how a port gets threaded back in one
@@ -53,25 +60,58 @@ const packageRoot = join(import.meta.dirname, "..");
 const srcRoot = join(packageRoot, "src");
 
 /**
- * The modules a PUBLIC command reaches, and nothing else.
+ * Every `@odu/cli/*` module `src/main.ts` imports — DERIVED, not listed.
  *
- * Listed rather than derived, and the difference matters: deriving the set by
- * walking imports from `src/main.ts` would grow the allowlist automatically the
- * moment somebody imported the engine — the test would follow the edge instead
- * of refusing it. A literal list is a decision somebody has to make on purpose.
+ * This used to be a literal array, on the reasoning that deriving the entry set
+ * would "grow the allowlist automatically". That reasoning had it exactly
+ * backwards, and the review that caught it was right: what a literal list grows
+ * automatically is the set of modules the wall does not look at. A command
+ * added to `main.ts` and forgotten here was simply not policed, and the suite
+ * went on passing — which is how nine commands came to hold local authority
+ * under a green test whose name says they do not.
+ *
+ * Deriving the ENTRY set makes the wall stricter. Deriving the FORBIDDEN set
+ * would make it useless; that stays literal below, and the difference between
+ * the two is the whole design.
  */
-const PUBLIC_CLIENTS = [
-  // The public commands themselves: run, wait, rerun, cancel, logs, history list.
-  "serviceCommands.ts",
-  // The two projected faces.
-  "serviceCli.ts",
-  "serviceMcp.ts",
-  // How any of them converges on the singleton, and how one is started.
-  "webLauncher.ts",
-  "webDaemonLaunch.ts",
-  // The authority decision both doors apply.
-  "webAuthority.ts",
-] as const;
+const mainImports = specifiersIn(
+  readFileSync(join(packageRoot, "..", "..", "src", "main.ts"), "utf-8"),
+  "main.ts",
+);
+
+/** `@odu/cli/foo` → `foo.ts`, which is how a specifier becomes a file in this
+ *  package. Anything else `main.ts` imports is not ours to walk. */
+const reachedFromMain = mainImports
+  .filter((s) => s.startsWith("@odu/cli/"))
+  .map((s) => `${s.slice("@odu/cli/".length)}.ts`)
+  .sort();
+
+/**
+ * The two modules `main.ts` reaches that are NOT clients — with the reason each
+ * is the thing a client talks to rather than a client.
+ *
+ * They are named here so that classifying a module is a decision somebody makes
+ * on purpose, and the totality assertion below is what forces the decision:
+ * a new `@odu/cli/*` import into `main.ts` belongs to one list or the other, and
+ * belonging to neither is a failure rather than a silent exemption.
+ */
+const SERVICE_ROOTS: readonly string[] = [
+  // The daemon itself: it binds the listener, builds the service and BINDS THE
+  // PORTS. Reaching the engine is its entire job — `odu web` is how the
+  // authority comes into existence, not a face onto it.
+  "web.ts",
+  // `run-coordinator` and `lease-hold`: argv entry points a launcher types,
+  // never a person. `run-coordinator` IS the coordinator. See `./internalCli`
+  // on why these moved out of `main.ts` — it was so that this derivation could
+  // start at a root that is itself clean.
+  "internalCli.ts",
+];
+
+/** What the wall polices: everything `main.ts` reaches that is not the service
+ *  itself. */
+const PUBLIC_CLIENTS = reachedFromMain.filter(
+  (f) => !SERVICE_ROOTS.includes(f),
+);
 
 /** Import specifiers a public client may not reach, with the authority each
  *  one is. Prefix-matched, so a submodule cannot slip past the parent. */
@@ -169,6 +209,55 @@ describe("the authority wall", () => {
     // the entry points resolved, and the closure genuinely grew past them.
     expect(closure.size).toBeGreaterThanOrEqual(PUBLIC_CLIENTS.length);
     expect([...closure.keys()]).toContain("serviceCommands.ts");
+    // And the derivation actually found the tree, rather than reading a
+    // `main.ts` that had moved and quietly policing nothing.
+    expect(reachedFromMain.length).toBeGreaterThan(5);
+  });
+
+  it("classifies every module main.ts reaches, on purpose", () => {
+    // THE ASSERTION THAT MAKES FORGETTING IMPOSSIBLE. Every `@odu/cli/*` import
+    // in `main.ts` is either a public client (walled) or a named service root
+    // (exempt, with its reason above). A new one is neither until somebody
+    // decides, and until then this fails — which is the opposite of the old
+    // literal list, where a new one was silently unpoliced.
+    expect(
+      [...PUBLIC_CLIENTS, ...SERVICE_ROOTS.filter((r) => reachedFromMain.includes(r))].sort(),
+      "src/main.ts imports an @odu/cli module this test has not classified. " +
+        "Add it to SERVICE_ROOTS with the reason it is the service rather than " +
+        "a face onto it — or leave it out, and it will be walled as a client.",
+    ).toEqual(reachedFromMain);
+  });
+
+  it("names no service root that main.ts has stopped importing", () => {
+    // A dead exemption is worse than none: it reads as a live decision and
+    // policing has silently moved on without it.
+    for (const root of SERVICE_ROOTS) {
+      expect(
+        reachedFromMain,
+        `SERVICE_ROOTS names ${root}, which src/main.ts no longer imports — ` +
+          "remove the exemption or restore the import.",
+      ).toContain(root);
+    }
+  });
+
+  it("walls every command the usage text advertises", () => {
+    // The inventory, from the other side. `main.ts` is the only place a public
+    // verb exists, so a verb whose dispatch does not reach a walled client is a
+    // verb doing its own work — which is exactly the shape the review found
+    // nine times over.
+    for (const face of [
+      "serviceCommands.ts",
+      "serviceStatus.ts",
+      "serviceVenue.ts",
+      "servicePipeline.ts",
+      "serviceCli.ts",
+      "serviceMcp.ts",
+    ]) {
+      expect(
+        PUBLIC_CLIENTS,
+        `${face} is a public face and must be reachable from src/main.ts`,
+      ).toContain(face);
+    }
   });
 
   it("lets no public client reach execution, the catalog, or a checkout dial", () => {

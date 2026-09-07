@@ -97,14 +97,19 @@ const SANCTIONED = new Map<string, string>([
       "themselves take callbacks and hold no client at all.",
   ],
   [
-    "packages/cli/src/serviceCommands.ts",
-    "The public commands' EDGE, and the reason it is one file rather than six. " +
-      "Every retained public command is now a client of the shared service, so " +
-      "each of them ends with a surface procedure — an `Effect` carrying a " +
-      "declared `ServiceRefused` channel — being turned into bytes on a stream " +
-      "and a number for `process.exit`. `call` is where that happens, once, " +
-      "which is also what keeps a REFUSAL apart from a dead link: both arrive " +
-      "on one error channel and they must not become the same exit.",
+    "packages/cli/src/serviceFace.ts",
+    "The public commands' EDGE, and the reason it is ONE file for all of them. " +
+      "Every public command is a client of the shared service, so each ends " +
+      "with a surface procedure — an `Effect` carrying a declared " +
+      "`ServiceRefused` channel — becoming bytes on a stream and a number for " +
+      "`process.exit`. `call` is where that happens, once, which is also what " +
+      "keeps a REFUSAL apart from a dead link: both arrive on one error " +
+      "channel and they must not become the same exit. The four command " +
+      "modules that import it (`serviceCommands`, `serviceStatus`, " +
+      "`serviceVenue`, `servicePipeline`) are four SUBJECTS, not four edges — " +
+      "which is exactly the property this entry exists to hold, because a " +
+      "second `Effect.runPromise` in any of them would be a second answer to " +
+      "what a refusal means.",
   ],
   [
     "packages/cli/src/webLauncher.ts",

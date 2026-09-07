@@ -301,11 +301,44 @@ export function foldJournal(journal: readonly JournalEntry[]): {
   resumed: boolean;
   debt: Map<string, { context: string; lastError: string; attempts: number }>;
   scope: RunScope | null;
+  /**
+   * WHERE the run's work is placed, folded out of the `lane` and `phase` lines.
+   *
+   * These two arms used to fall through to `default: break` — the journal wrote
+   * them and no reader read them. That absence is what made `odu status` dial
+   * the checkout's socket: the only thing that could answer "which lane is on
+   * which box" was the coordinator, so the one face that asked had to be
+   * allowed to talk to it, and a public command held a run authority of its own
+   * for want of a fold.
+   *
+   * Read from the catalog, the same answer survives the coordinator. A run that
+   * finished last week can still say which machines it landed on.
+   */
+  phase: "provisioning" | "lanes" | "no_lanes" | null;
+  /** Per platform, last write wins — the coordinator republishes a lane's whole
+   *  state on every change, so the newest line is the lane. */
+  lanes: Map<
+    string,
+    {
+      state: "claiming" | "leased";
+      host: string | null;
+      pool: readonly string[];
+    }
+  >;
+  /** The hosts file the lanes were declared in, from the newest lane line that
+   *  carried one. Null for a run written before the field existed. */
+  hostsSource: string | null;
 } {
   let roster: string[] = [];
   let scope: RunScope | null = null;
   let finalized: RunVerdict["outcome"] | null = null;
   let resumed = false;
+  let phase: "provisioning" | "lanes" | "no_lanes" | null = null;
+  let hostsSource: string | null = null;
+  const lanes = new Map<
+    string,
+    { state: "claiming" | "leased"; host: string | null; pool: readonly string[] }
+  >();
   const latest = new Map<string, AttemptState>();
   const debt = new Map<
     string,
@@ -322,6 +355,23 @@ export function foldJournal(journal: readonly JournalEntry[]): {
         break;
       case "roster":
         roster = [...e.order];
+        break;
+      case "phase":
+        phase = e.phase;
+        break;
+      case "lane":
+        lanes.set(e.platform, {
+          state: e.state,
+          host: e.host,
+          // A `leased` lane has landed, so its pool is history — the machine is
+          // the answer. An older record carries no pool at all, and an empty
+          // one reads honestly as "not recorded" everywhere it is rendered.
+          pool: e.pool === undefined ? [] : [...e.pool],
+        });
+        // Kept from the newest line that HAS one, rather than overwritten by a
+        // later line that omits it: a mixed journal (old lines, then new) would
+        // otherwise lose the source it had just learned.
+        if (e.hostsSource !== undefined) hostsSource = e.hostsSource;
         break;
       case "attempt_started": {
         // A new attempt after a terminal line is work resuming — see
@@ -402,7 +452,7 @@ export function foldJournal(journal: readonly JournalEntry[]): {
         break;
     }
   }
-  return { roster, latest, finalized, resumed, debt, scope };
+  return { roster, latest, finalized, resumed, debt, scope, phase, lanes, hostsSource };
 }
 
 const RED = new Set(["failed", "errored"]);

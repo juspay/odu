@@ -33,7 +33,18 @@ let
       ./bun.nix
       ./tsconfig.json
       ./src
-      ./packages
+      # Every workspace member EXCEPT the acceptance suite's scenarios. That
+      # suite drives this very package, so leaving its features and steps in the
+      # fileset would make `.#odu` — a sandboxed `bun install` and hydrate —
+      # rebuild on every edit to a `.feature` file, which is to say on every edit
+      # made while writing one. Its `package.json` and `cucumber.js` stay in,
+      # because `bun install --frozen-lockfile` has to be able to resolve the
+      # member; nothing in the built binary reads the rest.
+      (pkgs.lib.fileset.difference ./packages (pkgs.lib.fileset.unions [
+        ./packages/web-acceptance/features
+        ./packages/web-acceptance/step_definitions
+        ./packages/web-acceptance/support
+      ]))
       ./scripts
     ];
   };
@@ -179,11 +190,26 @@ let
     # being a hard pin, so a test pointing $ODU_GH_BIN at a stand-in got the
     # real `gh` — and the real GitHub — without a word.
     #
-    # ODU_WEB_DIST is --set-default for the same reason: the bundle built with
-    # this binary is the floor, and a developer iterating on the browser points
-    # the daemon at their own dist without rebuilding the whole wrapper. The
-    # commit the shell reports comes from the dist, so a hand-pointed one
-    # reports itself honestly rather than claiming the wrapper's identity.
+    # ODU_WEB_DIST IS NOT. It is --set, and the difference between it and
+    # ODU_GH_BIN is the difference between a tool odu CALLS and a part of what
+    # odu IS.
+    #
+    # `gh` is somebody else's program, invoked at an edge, spending the caller's
+    # own credential; naming a different one changes which external service the
+    # call reaches, not what this package is. The browser bundle is the
+    # application's own front end. Served under this wrapper's ODU_BUILD_ID, an
+    # ambient dist means two people can dial the same daemon, read the same
+    # build id off `service.build`, and be looking at different applications —
+    # and the id is what `ensureService` compares to decide a running daemon is
+    # the same build and may be adopted. An identity that can be true of two
+    # different programs is not an identity.
+    #
+    # It was --set-default for a developer iterating on the browser. That
+    # workflow is `just run`, which rebuilds and runs the package — the same
+    # honest cost the justfile already documents for deleting `bun run start`.
+    # Iterating against a build whose page is not the build's page is exercising
+    # an application no user has, which is the whole thing this wrapper exists
+    # to stop.
     #
     # ODU_BUILD_ID IS THIS DERIVATION, AND IT IS UNCONDITIONAL.
     #
@@ -218,7 +244,7 @@ let
       --add-flags "${base}/src/main.ts" \
       --set-default ODU_GH_BIN "${pkgs.gh}/bin/gh" \
       --set ODU_SELF "$out/bin/odu" \
-      --set-default ODU_WEB_DIST "${web-ui}" \
+      --set ODU_WEB_DIST "${web-ui}" \
       --set ODU_BUILD_ID "$out" \
       --set ODU_OSFACTS_BIN "${pkgs.osfacts}/bin/osfacts" \
       ${pkgs.lib.optionalString (selfRev != null) ''--set ODU_COMMIT_HASH "${selfRev}"''} \

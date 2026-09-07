@@ -163,6 +163,36 @@ export const RunManifestSchema = Schema.Struct({
   repoRoot: Schema.String,
   createdAt: Schema.Number,
   scope: RunScopeSchema,
+  /**
+   * The EXPLICIT placement constraint this run was launched under — the
+   * `PLATFORM=ADDR` pins the caller passed, verbatim.
+   *
+   * **The constraint, never the selection.** A pin is what the CALLER asked
+   * for; `Placement.host` on an attempt is the machine a lease happened to
+   * hand out, which for a multi-host pool is an accident of who was free. A
+   * replay that reproduced the second would freeze an incidental box and call
+   * it the user's intent; one that reproduces neither runs wherever today's
+   * ambient hosts file points, which is how a run pinned to one machine comes
+   * back on a different one after somebody edited a config. So the pins travel
+   * with the run, and a finalized retry replays them.
+   *
+   * Three readings, and the third is why this is `optionalKey` rather than a
+   * defaulted array:
+   *
+   *   - `["x86_64-linux=boxA"]` — pinned. Replay it.
+   *   - `[]` — explicitly unpinned. Replay unpinned.
+   *   - ABSENT — this record was written before odu recorded placement, so
+   *     there is no evidence either way. A finalized retry REFUSES rather than
+   *     guessing: an empty array would be indistinguishable from "the user
+   *     asked for no pins", and silently reading a missing fact as permission
+   *     to place anywhere is exactly the widening this field exists to stop.
+   *
+   * The record format is not bumped for this. `optionalKey` leaves a v1 record
+   * written by an older build decodable, which is what makes the third reading
+   * expressible at all — a required field would make those records unreadable
+   * and turn a retry refusal into a catalog that cannot be opened.
+   */
+  hostPins: Schema.optionalKey(Schema.Array(Schema.String)),
   snapshot: RunSnapshotSchema,
   build: RunBuildSchema,
   /**
@@ -237,11 +267,26 @@ export const RunEventSchema = Schema.Union([
     kind: Schema.Literal("roster"),
     order: Schema.Array(Schema.String),
   }),
+  /** A platform lane changed state. `claiming` is waiting for a venue and has
+   *  no host yet; `leased` has one.
+   *
+   *  `pool` and `hostsSource` are what `odu status` prints during a provision —
+   *  "which boxes is this waiting on, and which file said so" — and they are
+   *  here because that question outlives the coordinator that could once be
+   *  asked it. Both `optionalKey`: the journal reader SKIPS a line it cannot
+   *  parse and counts it (see the union header), so making either required
+   *  would not fail loudly, it would silently erase every lane of every run
+   *  written before this field existed. */
   Schema.Struct({
     kind: Schema.Literal("lane"),
     platform: Schema.String,
     state: Schema.Literals(["claiming", "leased"]),
     host: Schema.NullOr(Schema.String),
+    /** The candidate machines this lane may land on, while it is `claiming`. */
+    pool: Schema.optionalKey(Schema.Array(Schema.String)),
+    /** The hosts file the pool was declared in, so a placement surprise can be
+     *  traced to the file that caused it. */
+    hostsSource: Schema.optionalKey(Schema.NullOr(Schema.String)),
   }),
   /** A node started its Nth attempt. The event that ALLOCATES the ordinal, so
    *  the journal is the authority on how many attempts exist — not a directory

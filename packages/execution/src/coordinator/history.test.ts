@@ -82,6 +82,7 @@ function init(root: string, over: Partial<RunHistoryInit> = {}): RunHistoryInit 
     seq: 7,
     pipeline: "ci",
     scope: { selectors: ["e2e"], platforms: [], noDeps: false },
+    hostPins: [],
     snapshotMode: "strict",
     dirty: false,
     runnerFlake: null,
@@ -269,7 +270,7 @@ describe("registering a run", () => {
     expect(() => {
       history.roster([NODE]);
       history.phase("lanes");
-      history.lane("x86_64-linux", "leased", "builder-1");
+      history.lane("x86_64-linux", "leased", "builder-1", [], "/etc/odu/hosts.json");
       history.nodeStatus(NODE, "running", running);
       history.log(NODE, "bytes nobody will keep\n");
       history.logFinalized(NODE, true, null);
@@ -749,7 +750,7 @@ describe("the ownership fence", () => {
     // nothing further is appended, no attempt is allocated, no bytes are
     // mirrored. Two writers on one journal is the unrecoverable case.
     history.phase("no_lanes");
-    history.lane("x86_64-linux", "leased", "builder-9");
+    history.lane("x86_64-linux", "leased", "builder-9", [], "/etc/odu/hosts.json");
     history.nodeStatus(NODE, "running", running);
     history.log(NODE, "bytes from a coordinator nobody is listening to\n");
     history.logFinalized(NODE, true, null);

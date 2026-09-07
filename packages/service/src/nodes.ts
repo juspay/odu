@@ -19,7 +19,12 @@
  */
 
 import { streamFromAbortableSource } from "@kolu/surface/server";
-import type { NodesFrame, RunNode } from "@odu/service-client/surface";
+import {
+  type NodesFrame,
+  type RunEnv,
+  type RunNode,
+  UNKNOWN_ENV,
+} from "@odu/service-client/surface";
 import type { Stream } from "effect";
 import type { RunRegistry } from "./registry";
 
@@ -63,6 +68,72 @@ function same(a: readonly RunNode[], b: readonly RunNode[]): boolean {
   return true;
 }
 
+/** Two candidate lists, element by element. Not a join-and-compare: a host
+ *  address containing whatever separator was chosen would make two different
+ *  pools compare equal, which is the quiet half of a coalesced frame. */
+function samePool(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/**
+ * Two environments, compared as a subscriber would see them.
+ *
+ * **`elapsedMs` is deliberately NOT compared.** It moves on every tick of the
+ * clock with nothing about the run having changed, so counting it as news would
+ * turn this stream into the four-frames-a-second redraw the whole `same()`
+ * comparison exists to prevent. A consumer that wants a ticking clock has the
+ * frame's `elapsedMs` and its own `Date.now()`; what it cannot derive locally,
+ * and what this therefore treats as news, is a phase changing or a lane landing
+ * on a box.
+ *
+ * That last one is the failure this function is here for: without it, a frame
+ * stream that coalesced a lane transition would leave a browser painting
+ * "claiming" over a lane that has been running for a minute.
+ */
+function sameEnv(a: RunEnv, b: RunEnv): boolean {
+  if (
+    a.phase !== b.phase ||
+    a.hostsSource !== b.hostsSource ||
+    a.commitUrl !== b.commitUrl ||
+    a.lanes.length !== b.lanes.length ||
+    a.owed.length !== b.owed.length
+  ) {
+    return false;
+  }
+  for (let i = 0; i < a.lanes.length; i += 1) {
+    const x = a.lanes[i];
+    const y = b.lanes[i];
+    if (x === undefined || y === undefined) return false;
+    if (x.state !== y.state || x.platform !== y.platform) return false;
+    // The two arms carry different facts, which is why they are two arms — a
+    // pool that gained a candidate and a lane that landed are both moves.
+    if (x.state === "leased" && y.state === "leased" && x.host !== y.host) {
+      return false;
+    }
+    if (x.state === "claiming" && y.state === "claiming" && !samePool(x.pool, y.pool)) {
+      return false;
+    }
+  }
+  for (let i = 0; i < a.owed.length; i += 1) {
+    const x = a.owed[i];
+    const y = b.owed[i];
+    if (x === undefined || y === undefined) return false;
+    // `attempts` too: a debt that is being retried and still failing is a run
+    // getting further from posting its status, and a reader watching the badge
+    // never appear deserves to see the count climb.
+    if (
+      x.context !== y.context ||
+      x.lastError !== y.lastError ||
+      x.attempts !== y.attempts
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 const defaultSleep = (ms: number, signal: AbortSignal): Promise<void> =>
   new Promise((resolve) => {
     const done = (): void => {
@@ -96,7 +167,7 @@ export function nodesSource(
   const sleep = deps.sleep ?? defaultSleep;
   return ({ runId }) =>
     streamFromAbortableSource<NodesFrame>(async function* (signal) {
-      let previous: RunNode[] | null = null;
+      let previous: { nodes: RunNode[]; env: RunEnv } | null = null;
       for (;;) {
         deps.poll();
         const row = deps.registry.row(runId);
@@ -106,22 +177,37 @@ export function nodesSource(
         // waiting for one to appear would be indistinguishable from a run that
         // is merely quiet.
         if (row === undefined) {
-          yield { order: [], nodes: [], state: "expired", done: true };
+          yield {
+            order: [],
+            nodes: [],
+            state: "expired",
+            env: UNKNOWN_ENV,
+            done: true,
+          };
           return;
         }
+        // From the SAME registry entry the nodes came from, so a frame is one
+        // reading of one journal rather than two that can straddle a poll.
+        const env = deps.registry.env(runId) ?? UNKNOWN_ENV;
         const done = terminal(row.state);
         // The first frame always goes out — a subscriber's opening snapshot is
         // not conditional on anything having changed — and after that only a
         // real move, or the terminal, is news.
-        if (previous === null || !same(previous, nodes) || done) {
+        if (
+          previous === null ||
+          !same(previous.nodes, nodes) ||
+          !sameEnv(previous.env, env) ||
+          done
+        ) {
           yield {
             order: nodes.map((node) => node.id),
             nodes,
             state: row.state,
+            env,
             done,
           };
         }
-        previous = nodes;
+        previous = { nodes, env };
         if (done) return;
         if (signal.aborted) return;
         await sleep(pollMs, signal);

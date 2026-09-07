@@ -19,8 +19,8 @@ tests/e2e/
 ├── mcp.e2e.test.ts       # the `odu mcp` agent face over a real MCP client
 ├── logs.e2e.test.ts      # durable node logs: complete to the last line, one run per file
 ├── webHarness.ts         # a real web service in a private world (HOME, state, port)
-├── web.e2e.test.ts       # the CROSS-FACE gate: one run through browser, CLI,
-│                         # HTTP MCP and the singleton
+├── web.e2e.test.ts       # the CROSS-FACE gate: one run through the CLI, the
+│                         # HTTP MCP face and the singleton
 ├── fixtures/
 │   ├── pass/justfile     # a DAG that goes green
 │   ├── fail/justfile     # a DAG whose node fails (exit 1)
@@ -60,13 +60,23 @@ addressed state** whichever door they came through, and the three outcomes
 (answered · refused · nothing serving) stay apart at each one. It cannot be a
 unit test, because every one of those doors is a separate process.
 
-Its world is private on purpose — `HOME`, `ODU_STATE_DIR` and the port are all
-per-suite — so it does not touch a developer's own running `odu web`, and two
-copies of the suite on one machine do not fight over a gate.
+Its world is private on purpose — `ODU_STATE_DIR`, `ODU_WEB_ORIGIN` and the port
+are all per-suite — so it does not touch a developer's own running `odu web`, and
+two copies of the suite on one machine do not fight over a gate. `HOME` is
+deliberately *not* redirected; `webHarness.ts` records the CI-only failure that
+taught us why.
 
-The browser leg is **skipped**, not failed, where the machine has no Chrome. A
-CI runner without a browser is a real environment, and a suite that failed there
-would be reporting the environment rather than the code.
+**The browser is not one of the doors this suite drives.** It used to be: three
+cases shelled out to `chrome --headless --dump-dom` and asserted on substrings of
+one static snapshot — no click, no keystroke, no viewport, no reconnect — and
+skipped themselves where no browser was on PATH, so on a CI runner they graded
+nothing at all.
+
+That coverage now lives in [`packages/web-acceptance`](../../packages/web-acceptance/README.md):
+Gherkin scenarios driven through Playwright, against this same nix-built binary,
+with the browsers supplied by nixpkgs. It is a **required** leg on both platforms
+(`ci/mod.just`'s `web-acceptance`) and it never skips — a machine with no
+browsers fails it with the sentence that gets them.
 
 ## Deliberate tradeoffs
 

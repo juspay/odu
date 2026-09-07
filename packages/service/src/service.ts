@@ -26,6 +26,7 @@
  */
 
 import { hostname } from "node:os";
+import { isAbsolute } from "node:path";
 import {
   controlCoreFragment,
   controlCoreSurface,
@@ -42,12 +43,14 @@ import {
   type ServiceBuild,
   type ServiceCell,
   type ServiceIdentity,
+  ServiceRefused,
   UNKNOWN_SERVICE,
 } from "@odu/service-client/surface";
 import { RUN_RECORD_FORMAT } from "@odu/run-history/schema";
 import type { LogTail, RunRow } from "@odu/service-client/surface";
 import { Effect } from "effect";
 import { cancelRun } from "./cancel";
+import { importCatalog, pruneCatalog } from "./catalog";
 import { readLog, readTail } from "./logs";
 import { nodesSource } from "./nodes";
 import type { ServicePorts } from "./ports";
@@ -56,7 +59,7 @@ import { createRegistry, type RunRegistry } from "./registry";
 import { requestStore } from "./requests";
 import { retryRun } from "./retry";
 import { startRun } from "./start";
-import { waitForRun } from "./wait";
+import { readRun, waitForRun } from "./wait";
 
 /** How often the catalog is re-projected. Fast enough that a board feels live,
  *  slow enough that an idle daemon watching a hundred settled runs costs three
@@ -94,6 +97,42 @@ export interface OduService {
    *  rejection as fatal — a runtime that has faulted answers nothing while the
    *  process stays alive and the socket stays open. */
   done: Promise<void>;
+}
+
+/**
+ * Refuse a checkout that is not an ABSOLUTE path, or `null` to proceed.
+ *
+ * Every verb whose subject is a directory takes it as an absolute path, and
+ * this is what makes that a rule rather than a note. A relative one resolves
+ * against the DAEMON's working directory — wherever the shell that first
+ * started it happened to be, possibly months ago and possibly deleted since —
+ * so it names a directory the caller has never seen.
+ *
+ * That is not a tidiness concern, and the sharp case is `protect.apply`. An
+ * agent whose own cwd is somebody's home directory sends `checkout: "."`; the
+ * daemon resolves it to the repository IT was started from, and writes required
+ * status checks onto that repository's default branch. Nothing in the request
+ * named it and nothing in the answer would say so. `venue.hold` has the same
+ * shape one step quieter — the lease record lands under the daemon's checkout,
+ * invisible to the coordinator that later reads the real one's.
+ *
+ * `run.start` and `catalog.import` already spell this guard inline. It is here
+ * as well because the four verbs below were added without it, and a rule that
+ * has to be remembered per handler is a rule that will be missed again — which
+ * is exactly how it was missed here.
+ */
+export function notAbsolute(
+  verb: string,
+  checkout: string,
+): ServiceRefused | null {
+  if (isAbsolute(checkout)) return null;
+  return new ServiceRefused({
+    code: "checkout_refused",
+    message:
+      `odu: "${checkout}" is not an absolute path — ${verb} takes the ` +
+      "ABSOLUTE path of a checkout, because the service's working directory " +
+      "is not the caller's and never was",
+  });
 }
 
 export function createOduService(opts: ServiceOptions): OduService {
@@ -215,6 +254,11 @@ export function createOduService(opts: ServiceOptions): OduService {
               () => Effect.sync(refresh),
             ),
           wait: ({ input }) => waitForRun(input, { catalog }),
+          // The read half of one question. Same payload as `wait` by
+          // construction — "what is this run's state" has one answer, and a
+          // second shape for the non-blocking case would be a second thing to
+          // keep true.
+          read: ({ input }) => readRun(input, { catalog }),
           retry: ({ input }) =>
             Effect.tap(
               retryRun(input, { retry: opts.ports.retry, catalog }),
@@ -232,6 +276,156 @@ export function createOduService(opts: ServiceOptions): OduService {
             ),
         },
         log: { read: ({ input }) => readLog(input, { catalog }) },
+        // ── everything whose subject is not a run ──────────────────────────
+        //
+        // Each of these was a public command doing its own work in the
+        // caller's process. They are here because the alternative is not "a
+        // simpler service" — it is one authority for runs and a scattering of
+        // little ones for everything else, invisible to the board, unreachable
+        // by a browser or an agent, and free to disagree.
+        catalog: {
+          // Both MUTATE the store the service is reading, which is exactly why
+          // they had to move: an import writing records while the daemon walked
+          // the same tree was two writers with no owner. `refresh` after, so
+          // the board shows what the call just did before the answer leaves.
+          import: ({ input }) =>
+            Effect.tap(
+              importCatalog(input, {
+                probeCheckout: opts.ports.probeCheckout,
+                requests,
+                catalog,
+                now,
+              }),
+              () => Effect.sync(refresh),
+            ),
+          prune: ({ input }) =>
+            Effect.tap(
+              pruneCatalog(input, { requests, catalog, now }),
+              () => Effect.sync(refresh),
+            ),
+        },
+        pipeline: {
+          read: ({ input }) =>
+            Effect.suspend(() => {
+              const bad = notAbsolute("pipeline.read", input.checkout);
+              if (bad !== null) return Effect.fail(bad);
+              const outcome = opts.ports.pipeline({
+                checkout: input.checkout,
+                ...(input.root === undefined ? {} : { root: input.root }),
+              });
+              return outcome.ok
+                ? Effect.succeed({
+                    checkout: input.checkout,
+                    name: outcome.facts.name,
+                    tasks: outcome.facts.tasks,
+                    mermaid: outcome.facts.mermaid,
+                  })
+                : Effect.fail(
+                    new ServiceRefused({
+                      code: "pipeline_refused",
+                      message: outcome.message,
+                    }),
+                  );
+            }),
+        },
+        venue: {
+          probe: ({ input }) =>
+            Effect.flatMap(
+              Effect.promise(() =>
+                opts.ports.probeVenues({ platforms: input.platforms ?? [] }),
+              ),
+              (outcome) =>
+                outcome.ok
+                  ? Effect.succeed({
+                      source: outcome.source,
+                      warnings: outcome.warnings,
+                      rows: outcome.rows,
+                    })
+                  : Effect.fail(
+                      new ServiceRefused({
+                        code: "no_venue",
+                        message: outcome.message,
+                        suggestion: ["odu", "hosts"],
+                      }),
+                    ),
+            ),
+          hold: ({ input }) =>
+            Effect.flatMap(
+              Effect.suspend(() => {
+                const bad = notAbsolute("venue.hold", input.checkout);
+                return bad !== null
+                  ? Effect.fail(bad)
+                  : Effect.promise(() =>
+                      opts.ports.holdVenue({
+                        checkout: input.checkout,
+                        platforms: input.platforms ?? [],
+                        noWait: input.noWait ?? false,
+                      }),
+                    );
+              }),
+              (outcome) =>
+                outcome.ok
+                  ? Effect.succeed({ results: outcome.results, replayed: false })
+                  : Effect.fail(
+                      new ServiceRefused({
+                        code: "no_venue",
+                        message: outcome.message,
+                        suggestion: ["odu", "hosts"],
+                      }),
+                    ),
+            ),
+          release: ({ input }) =>
+            Effect.map(
+              Effect.suspend(() => {
+                const bad = notAbsolute("venue.release", input.checkout);
+                return bad !== null
+                  ? Effect.fail(bad)
+                  : Effect.promise(() =>
+                      opts.ports.releaseVenue({
+                        checkout: input.checkout,
+                        platforms: input.platforms ?? [],
+                      }),
+                    );
+              }),
+              (outcome) => ({ released: outcome.results }),
+            ),
+        },
+        protect: {
+          apply: ({ input }) =>
+            Effect.flatMap(
+              Effect.suspend(() => {
+                const bad = notAbsolute("protect.apply", input.checkout);
+                return bad !== null
+                  ? Effect.fail(bad)
+                  : Effect.promise(() =>
+                      opts.ports.protect({
+                        checkout: input.checkout,
+                        ...(input.branch === undefined
+                          ? {}
+                          : { branch: input.branch }),
+                        platforms: input.platforms ?? [],
+                        dryRun: input.dryRun ?? false,
+                        create: input.create ?? false,
+                      }),
+                    );
+              }),
+              (outcome) =>
+                outcome.ok
+                  ? Effect.succeed({
+                      ...outcome.facts,
+                      dryRun: input.dryRun ?? false,
+                    })
+                  : Effect.fail(
+                      new ServiceRefused({
+                        code: outcome.code,
+                        message: outcome.message,
+                        ...(outcome.suggestion === undefined
+                          ? {}
+                          : { suggestion: outcome.suggestion }),
+                      }),
+                    ),
+            ),
+        },
       },
     },
   );

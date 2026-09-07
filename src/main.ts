@@ -9,26 +9,34 @@
  * different application. `nix run github:juspay/odu -- …`, or `nix run . -- …`
  * in a checkout.
  *
- * Every public command below is a CLIENT of one shared service — the singleton
- * `odu web` daemon, which owns execution, retry policy, the run catalog and
- * every coordinator dial. The commands here contribute argument grammar,
- * rendering and exit codes, and nothing else. They bootstrap the service if
- * none is running, and they never fall back to doing the work locally: a second
- * authority is exactly what this arrangement exists to remove.
+ * EVERY public command below is a CLIENT of one shared service — the singleton
+ * `odu web` daemon, which owns execution, retry policy, the run catalog, the
+ * venue inventory, pipeline resolution and every coordinator dial. The commands
+ * here contribute argument grammar, rendering and exit codes, and nothing else.
+ * They bootstrap the service if none is running, and they never fall back to
+ * doing the work locally: a second authority is exactly what this arrangement
+ * exists to remove.
+ *
+ * "Every" is meant literally, and it is checked. `packages/cli/src/
+ * authority.test.ts` DERIVES the set it polices from this file's own imports,
+ * so a command cannot be exempted by forgetting to list it — which is how nine
+ * of them came to hold local authority under a green test. The three that used
+ * to look like safe exceptions are gone: reading a justfile locally was a
+ * second resolver of what odu will run, and "protect spends YOUR credential,
+ * not the daemon's" described an odu that does not exist, since the coordinator
+ * the daemon launches has posted commit statuses with it all along.
  *
  *   odu run [recipe[@platform]…]           start a run here, then watch it
  *                                          (Ctrl-C stops WATCHING, not the run)
  *   odu wait --run R                       bounded, resumable attention
  *   odu rerun --run R <selector>           retry; odu decides live vs replay
  *   odu cancel --run R [node|@platform]    stop a run, a node, or a lane
- *   odu logs <log-key>                     one attempt's bytes, by its key
+ *   odu logs <log-key> [-f]                one attempt's bytes, by its key
  *   odu history <list|show|import|prune>   the per-user run catalog
- *   odu status / attach                    this checkout's live run, in a TTY
+ *   odu status / attach                    this checkout's newest live run
  *   odu hosts / lease / release            venue inventory and holds
- *   odu dump / graph                       the resolved pipeline (local: these
- *                                          read a justfile and touch no run)
- *   odu protect                            required status checks (local: it
- *                                          spends YOUR gh credential)
+ *   odu dump / graph                       the resolved pipeline
+ *   odu protect                            required status checks
  *   odu web [--background] [--upgrade]     the service itself
  *   odu surface <verb>                     the service, projected as argv
  *   odu mcp                                the service, projected as MCP
@@ -45,34 +53,32 @@
  */
 
 import { parseArgs } from "node:util";
-import { runCommand } from "@odu/execution/coordinator/run";
-import { loadJustPipeline, mermaidGraph } from "@odu/execution/just/ingest";
-import { attachCommand, statusCommand } from "@odu/cli/introspect";
-import { hostsCommand } from "@odu/cli/hosts";
-import {
-  leaseCommand,
-  leaseHoldCommand,
-  releaseCommand,
-} from "@odu/cli/leaseCmd";
-import {
-  historyImportCommand,
-  historyPruneCommand,
-  historyShowCommand,
-} from "@odu/cli/history";
 import {
   cancelViaService,
+  importViaService,
   listViaService,
   logsViaService,
+  pruneViaService,
   retryViaService,
   runViaService,
+  showViaService,
   waitViaService,
 } from "@odu/cli/serviceCommands";
-import { cliRunFace, faceEnv } from "@odu/cli/runFace";
+import { attachViaService, statusViaService } from "@odu/cli/serviceStatus";
+import {
+  hostsViaService,
+  leaseViaService,
+  releaseViaService,
+} from "@odu/cli/serviceVenue";
+import {
+  pipelineViaService,
+  protectViaService,
+} from "@odu/cli/servicePipeline";
+import { internalCommand } from "@odu/cli/internalCli";
 import { serviceMcpCommand } from "@odu/cli/serviceMcp";
 import { ODU_VERSION } from "@odu/execution/common/version";
 import { surfaceCliMain } from "@odu/cli/serviceCli";
 import { webCommand, webDaemonCommand } from "@odu/cli/web";
-import { protectCommand } from "@odu/cli/protect";
 
 const USAGE = `usage: odu <run|wait|rerun|cancel|logs|history|status|attach|hosts|lease|release|dump|graph|protect|web|surface|mcp> [args]
 
@@ -94,23 +100,28 @@ rerun --run R [--request-id ID] [--expect-attempt N] [-o json] <selector>
                               # else a new linked run. odu decides, and says so
 cancel --run R [node|@platform] [--request-id ID] [-o json]
                               # bare = whole run; node or @plat = partial
-logs <log-key> [--offset B] [--limit B] [-o json]
+logs <log-key> [-f] [--offset B] [--limit B] [--wait-ms N] [-o json]
                               # ECHO the logKey a failure reported. --offset
                               # counts from the start; a NEGATIVE one is a tail
-                              # and must be joined: --offset=-4096
+                              # and must be joined: --offset=-4096.
+                              # -f follows to the end: exits 0 with the whole
+                              # log, 1 if it was truncated
 history <list|show|import|prune>
                               # the per-user run catalog (odu history --help)
-status [-o json]              # this checkout's live run ({ nodes, posting })
-attach [-o json]              # live dashboard / transition stream
-hosts
-lease [PLAT…] [--no-wait]     hold a free venue across runs
-release [PLAT…]               drop held lease(s)
-dump [--root NAMEPATH]        # local: reads the justfile, touches no run
-graph [--root NAMEPATH]       # local: reads the justfile, touches no run
-protect [--dry-run] [--branch B] [--platform P]… [--create]
-                              # local: spends YOUR gh credential, so it is not
-                              # the daemon's to make. --create makes the
-                              # branch's ruleset if absent
+status [-o json]              # this checkout's newest unfinished run: its
+                              # nodes, its lanes, and what it still owes GitHub
+attach [-o json]              # the same run, followed until it stops moving
+hosts [PLAT…] [-o json]       # every configured venue, and who holds it.
+                              # Naming platforms skips dialling the rest
+lease [PLAT…] [--no-wait] [-o json]
+                              # hold a venue across runs. The holder is the
+                              # SERVICE's child, so it outlives this shell
+release [PLAT…] [-o json]     drop held lease(s)
+dump [--root NAMEPATH]        # the resolved pipeline, as JSON
+graph [--root NAMEPATH]       # the same DAG, as Mermaid
+protect [--dry-run] [--branch B] [--platform P]… [--create] [-o json]
+                              # require exactly the checks odu posts. --create
+                              # makes the branch's ruleset if absent
 web [--background] [--upgrade] [-o json]
                               # the service. Bare: serves in this terminal
                               # until Ctrl-C (runs you start keep going).
@@ -118,13 +129,15 @@ web [--background] [--upgrade] [-o json]
                               # shell. --upgrade drains a running other build
 surface <verb> [--input JSON] [--json]
                               # the service as argv: run_start, run_wait,
-                              # run_retry, run_cancel, log_read, and
-                              # get/keys/watch/list. odu surface --help lists
-                              # them. Exits: 0 answered (red CI included) · 1
+                              # run_read, run_retry, run_cancel, log_read,
+                              # catalog_*, pipeline_read, venue_*,
+                              # protect_apply, and get/keys/watch/list. odu
+                              # surface --help lists them.
+                              # Exits: 0 answered (red CI included) · 1
                               # refused · 2 usage · 3 nothing serving · 130 interrupted
-mcp                           # the service as MCP over stdio — the same five
-                              # verbs, the same names, no run authority of its
-                              # own. Starts the service if none is running.
+mcp                           # the service as MCP over stdio — the same verbs,
+                              # the same names, no run authority of its own.
+                              # Starts the service if none is running.
 
 --origin URL is accepted by every service client (default $ODU_WEB_ORIGIN or
 http://127.0.0.1:18440). A named origin is dialled and only dialled: odu starts
@@ -180,6 +193,7 @@ async function historyCommand(
         options: {
           all: { type: "boolean" },
           limit: { type: "string" },
+          origin: { type: "string" },
           output: { type: "string", short: "o" },
         },
       });
@@ -190,6 +204,7 @@ async function historyCommand(
       return listViaService({
         json: values.output === "json",
         all: values.all ?? false,
+        ...(values.origin === undefined ? {} : { origin: values.origin }),
         ...(values.limit === undefined
           ? {}
           : { limit: positiveInt("--limit", values.limit) }),
@@ -201,15 +216,17 @@ async function historyCommand(
         options: {
           run: { type: "string" },
           after: { type: "string" },
+          origin: { type: "string" },
           output: { type: "string", short: "o" },
         },
       });
       if (values.run === undefined) {
         throw new Error("odu: history show needs --run (a run id, <sha7>#<seq>, or `latest`)");
       }
-      return historyShowCommand({
+      return showViaService({
         run: values.run,
         ...(values.after === undefined ? {} : { after: values.after }),
+        ...(values.origin === undefined ? {} : { origin: values.origin }),
         json: values.output === "json",
       });
     }
@@ -218,12 +235,14 @@ async function historyCommand(
         args: rest,
         options: {
           "dry-run": { type: "boolean" },
+          origin: { type: "string" },
           output: { type: "string", short: "o" },
         },
       });
-      return historyImportCommand({
+      return importViaService({
         json: values.output === "json",
         dryRun: values["dry-run"] ?? false,
+        ...(values.origin === undefined ? {} : { origin: values.origin }),
       });
     }
     case "prune": {
@@ -232,12 +251,14 @@ async function historyCommand(
         options: {
           days: { type: "string" },
           "dry-run": { type: "boolean" },
+          origin: { type: "string" },
           output: { type: "string", short: "o" },
         },
       });
-      return historyPruneCommand({
+      return pruneViaService({
         json: values.output === "json",
         dryRun: values["dry-run"] ?? false,
+        ...(values.origin === undefined ? {} : { origin: values.origin }),
         ...(values.days === undefined
           ? {}
           : { retentionDays: positiveInt("--days", values.days) }),
@@ -259,6 +280,14 @@ async function historyCommand(
 
 async function dispatch(argv: string[]): Promise<number> {
   const [command, ...rest] = argv;
+  // THE WORKERS FIRST, and out of this file entirely — `run-coordinator` and
+  // `lease-hold` are argv entry points a launcher types, never a person, and
+  // they are the only two things in odu that legitimately reach the engine.
+  // Keeping their dispatch bodies here would put `@odu/execution/coordinator`
+  // in this module's import list, which is the list `./packages/cli/src/
+  // authority.test.ts` derives the public-client set FROM. See `internalCli`.
+  const internal = internalCommand(command, rest);
+  if (internal !== null) return internal;
   switch (command) {
     // THE COORDINATOR ITSELF — internal execution machinery, and the ONLY
     // caller of `runCommand`.
@@ -324,70 +353,18 @@ async function dispatch(argv: string[]): Promise<number> {
         json: values.output === "json",
       });
     }
-    case "run-coordinator": {
-      const { values, positionals } = parseArgs({
-        args: rest,
-        allowPositionals: true,
-        options: {
-          platform: { type: "string", multiple: true },
-          host: { type: "string", multiple: true },
-          root: { type: "string" },
-          "no-deps": { type: "boolean" },
-          "no-strict": { type: "boolean" },
-          "no-snapshot": { type: "boolean" },
-          "no-post": { type: "boolean" },
-          progress: { type: "string" },
-          supersede: { type: "boolean" },
-          linger: { type: "boolean" },
-          "no-wait": { type: "boolean" },
-          "expected-sha": { type: "string" },
-          "run-id": { type: "string" },
-          "parent-run": { type: "string" },
-          "request-id": { type: "string" },
-        },
-      });
-      if (values.progress !== undefined && values.progress !== "json") {
-        throw new Error(`odu: unknown --progress format "${values.progress}"`);
-      }
-      // THE FACE IS SUPPLIED HERE, and only here. The coordinator's default is
-      // silence — see `RunDeps.face` — so a terminal matrix, an NDJSON stream
-      // and a piped transition log are all this command's decision, not the
-      // engine's.
-      return runCommand({
-        selectors: positionals,
-        platforms: values.platform ?? [],
-        hostPins: values.host ?? [],
-        root: values.root,
-        noDeps: values["no-deps"] ?? false,
-        noStrict: values["no-strict"] ?? false,
-        noSnapshot: values["no-snapshot"] ?? false,
-        noPost: values["no-post"] ?? false,
-        supersede: values.supersede ?? false,
-        linger: values.linger ?? false,
-        noWait: values["no-wait"] ?? false,
-        ...(values["expected-sha"] === undefined
-          ? {}
-          : { expectedSha: values["expected-sha"] }),
-        ...(values["run-id"] === undefined ? {} : { runId: values["run-id"] }),
-        ...(values["parent-run"] === undefined
-          ? {}
-          : { parentRunId: values["parent-run"] }),
-        ...(values["request-id"] === undefined
-          ? {}
-          : { requestId: values["request-id"] }),
-      }, {
-        face: cliRunFace({
-          ...faceEnv(),
-          progressJson: values.progress === "json",
-        }),
-      });
-    }
     case "status": {
       const { values } = parseArgs({
         args: rest,
-        options: { output: { type: "string", short: "o" } },
+        options: {
+          origin: { type: "string" },
+          output: { type: "string", short: "o" },
+        },
       });
-      return statusCommand(values.output === "json");
+      return statusViaService({
+        ...(values.origin === undefined ? {} : { origin: values.origin }),
+        json: values.output === "json",
+      });
     }
     /**
      * `odu logs <key>` — one attempt's bytes, addressed by the key a failure
@@ -407,6 +384,8 @@ async function dispatch(argv: string[]): Promise<number> {
         options: {
           offset: { type: "string" },
           limit: { type: "string" },
+          follow: { type: "boolean", short: "f" },
+          "wait-ms": { type: "string" },
           origin: { type: "string" },
           output: { type: "string", short: "o" },
         },
@@ -426,6 +405,10 @@ async function dispatch(argv: string[]): Promise<number> {
         ...(values.limit === undefined
           ? {}
           : { limit: positiveInt("--limit", values.limit) }),
+        ...(values.follow === true ? { follow: true } : {}),
+        ...(values["wait-ms"] === undefined
+          ? {}
+          : { waitMs: positiveInt("--wait-ms", values["wait-ms"]) }),
         ...(values.origin === undefined ? {} : { origin: values.origin }),
         json: values.output === "json",
       });
@@ -437,9 +420,15 @@ async function dispatch(argv: string[]): Promise<number> {
     case "attach": {
       const { values } = parseArgs({
         args: rest,
-        options: { output: { type: "string", short: "o" } },
+        options: {
+          origin: { type: "string" },
+          output: { type: "string", short: "o" },
+        },
       });
-      return attachCommand(values.output === "json");
+      return attachViaService({
+        ...(values.origin === undefined ? {} : { origin: values.origin }),
+        json: values.output === "json",
+      });
     }
     /**
      * `odu wait --run R` — bounded, resumable attention on one run.
@@ -609,61 +598,67 @@ async function dispatch(argv: string[]): Promise<number> {
           "shape differs.\n",
       );
       return 1;
-    case "hosts":
-      return hostsCommand();
+    case "hosts": {
+      const { values, positionals } = parseArgs({
+        args: rest,
+        allowPositionals: true,
+        options: {
+          origin: { type: "string" },
+          output: { type: "string", short: "o" },
+        },
+      });
+      return hostsViaService({
+        platforms: positionals,
+        ...(values.origin === undefined ? {} : { origin: values.origin }),
+        json: values.output === "json",
+      });
+    }
     case "lease": {
       const { values, positionals } = parseArgs({
         args: rest,
         allowPositionals: true,
-        options: { "no-wait": { type: "boolean" } },
-      });
-      const r = await leaseCommand({
-        platforms: positionals,
-        noWait: values["no-wait"] ?? false,
-        nonBlocking: false,
-      });
-      return r.code;
-    }
-    case "release": {
-      const { positionals } = parseArgs({
-        args: rest,
-        allowPositionals: true,
-        options: {},
-      });
-      return releaseCommand({ platforms: positionals });
-    }
-    case "lease-hold": {
-      // Hidden: detached holder process. Not listed in usage.
-      const { values } = parseArgs({
-        args: rest,
         options: {
-          platform: { type: "string" },
-          repo: { type: "string" },
           "no-wait": { type: "boolean" },
+          origin: { type: "string" },
+          output: { type: "string", short: "o" },
         },
       });
-      if (values.platform === undefined || values.platform === "") {
-        throw new Error("odu lease-hold: --platform is required");
-      }
-      return leaseHoldCommand({
-        platform: values.platform,
+      return leaseViaService({
+        platforms: positionals,
         noWait: values["no-wait"] ?? false,
-        repoRoot: values.repo ?? process.cwd(),
+        ...(values.origin === undefined ? {} : { origin: values.origin }),
+        json: values.output === "json",
+      });
+    }
+    case "release": {
+      const { values, positionals } = parseArgs({
+        args: rest,
+        allowPositionals: true,
+        options: {
+          origin: { type: "string" },
+          output: { type: "string", short: "o" },
+        },
+      });
+      return releaseViaService({
+        platforms: positionals,
+        ...(values.origin === undefined ? {} : { origin: values.origin }),
+        json: values.output === "json",
       });
     }
     case "dump":
     case "graph": {
       const { values } = parseArgs({
         args: rest,
-        options: { root: { type: "string" } },
+        options: {
+          root: { type: "string" },
+          origin: { type: "string" },
+        },
       });
-      const spec = loadJustPipeline(process.cwd(), { root: values.root });
-      process.stdout.write(
-        command === "dump"
-          ? `${JSON.stringify(spec, null, 2)}\n`
-          : mermaidGraph(spec),
-      );
-      return 0;
+      return pipelineViaService({
+        as: command,
+        ...(values.root === undefined ? {} : { root: values.root }),
+        ...(values.origin === undefined ? {} : { origin: values.origin }),
+      });
     }
     case "protect": {
       const { values } = parseArgs({
@@ -673,13 +668,17 @@ async function dispatch(argv: string[]): Promise<number> {
           branch: { type: "string" },
           platform: { type: "string", multiple: true },
           create: { type: "boolean" },
+          origin: { type: "string" },
+          output: { type: "string", short: "o" },
         },
       });
-      return protectCommand({
+      return protectViaService({
         dryRun: values["dry-run"] ?? false,
-        branch: values.branch,
+        ...(values.branch === undefined ? {} : { branch: values.branch }),
         platforms: values.platform ?? [],
         create: values.create ?? false,
+        ...(values.origin === undefined ? {} : { origin: values.origin }),
+        json: values.output === "json",
       });
     }
     case "web": {
@@ -712,7 +711,10 @@ async function dispatch(argv: string[]): Promise<number> {
     case "mcp": {
       const { values } = parseArgs({
         args: rest,
-        options: { service: { type: "boolean" } },
+        options: {
+          service: { type: "boolean" },
+          origin: { type: "string" },
+        },
       });
       // ONE SUBJECT: every registered run, through the singleton service. There
       // used to be two faces here — a default that held its own run authority
@@ -733,7 +735,10 @@ async function dispatch(argv: string[]): Promise<number> {
             "(it is accepted for one release and then removed)\n",
         );
       }
-      return serviceMcpCommand({ version: ODU_VERSION });
+      return serviceMcpCommand({
+        version: ODU_VERSION,
+        ...(values.origin === undefined ? {} : { origin: values.origin }),
+      });
     }
     case undefined:
     case "help":

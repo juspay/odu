@@ -51,6 +51,7 @@ const REFUSAL_OF: Record<RetryRefusal, ServiceRefused["code"]> = {
   stale_attempt: "stale_attempt",
   partial: "bad_input",
   launch_failed: "launch_failed",
+  no_venue: "no_venue",
 };
 
 function answerOf(outcome: Extract<RetryOutcome, { ok: true }>): RetryReceipt {

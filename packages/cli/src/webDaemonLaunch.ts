@@ -217,8 +217,23 @@ export function webDaemonSpawnConfig(
     // Nobody holds a detached child's stderr, so a daemon that dies before it
     // can log has nowhere to say why. Under systemd the unit's own journal has
     // it and the driver ignores this.
-    stderrLog: join(homeDir, "web-daemon.stderr.log"),
+    stderrLog: webStderrLog(homeDir),
   };
+}
+
+/**
+ * Where a spawned daemon's crash catcher lives.
+ *
+ * Exported, and named once, because two sides depend on it being the same file:
+ * this module tells the spawn driver where to WRITE, and `./webLauncher` reads
+ * it to explain a daemon that never answered. Those were two string literals
+ * with a comment between them asking that they stay equal — which is a wish
+ * rather than a mechanism, and the failure it invites is the worst-shaped one
+ * available: a launcher reporting silence from a daemon that said exactly why
+ * it died.
+ */
+export function webStderrLog(homeDir: string): string {
+  return join(homeDir, "web-daemon.stderr.log");
 }
 
 /**

@@ -82,6 +82,12 @@ export interface RunHistoryInit {
   seq: number | null;
   pipeline: string;
   scope: RunScope;
+  /** The `PLATFORM=ADDR` pins this run was launched under, verbatim — the
+   *  caller's explicit placement constraint, recorded so a finalized retry can
+   *  replay it instead of widening to whatever the ambient hosts file says
+   *  today. See `RunManifestSchema.hostPins`; an empty array is "explicitly
+   *  unpinned" and is a different fact from the field being absent. */
+  hostPins: readonly string[];
   snapshotMode: "strict" | "live";
   dirty: boolean;
   runnerFlake: string | null;
@@ -109,10 +115,20 @@ export interface RunHistory {
   readonly fenced: boolean;
   roster: (order: readonly string[]) => void;
   phase: (phase: "provisioning" | "lanes" | "no_lanes") => void;
+  /** A lane's whole state, journalled so it outlives the coordinator.
+   *
+   *  `pool` and `hostsSource` are carried because "which boxes is this waiting
+   *  on, and which file said so" is a question about a run and not about a
+   *  process — and while only the live header could answer it, the one face
+   *  that asked (`odu status`) had to be allowed to dial a checkout's socket. */
   lane: (
     platform: string,
     state: "claiming" | "leased",
     host: string | null,
+    /** The candidates a `claiming` lane may land on. Empty for a `leased` one:
+     *  the machine is the answer, and the pool it came from is history. */
+    pool: readonly string[],
+    hostsSource: string | null,
   ) => void;
   /** A node reached a status. A terminal one supplies half the seal. */
   nodeStatus: (
@@ -211,6 +227,7 @@ export const NO_HISTORY: RunHistory = {
   roster: () => {},
   phase: () => {},
   lane: () => {},
+  // (the no-op writer: every arm ignores its arguments)
   nodeStatus: () => {},
   log: () => {},
   logFinalized: () => {},
@@ -268,6 +285,11 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
         repoRoot: init.repoRoot,
         createdAt: now(),
         scope: init.scope,
+        // ALWAYS written, including empty. Absence is reserved for records an
+        // older build wrote, and is the only thing that lets a finalized retry
+        // tell "the caller asked for no pins" from "nobody wrote down what the
+        // caller asked for".
+        hostPins: [...init.hostPins],
         snapshot: {
           mode: init.snapshotMode,
           expectedSha: init.sha,
@@ -462,8 +484,8 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
     },
     roster: (order) => emit({ kind: "roster", order: [...order] }),
     phase: (phase) => emit({ kind: "phase", phase }),
-    lane: (platform, state, host) =>
-      emit({ kind: "lane", platform, state, host }),
+    lane: (platform, state, host, pool, hostsSource) =>
+      emit({ kind: "lane", platform, state, host, pool: [...pool], hostsSource }),
     nodeStatus: (node, status, outcome) => {
       // A node can reach a terminal status without ever having run — `skipped`
       // is the routine case, a lane that died during provisioning the other —

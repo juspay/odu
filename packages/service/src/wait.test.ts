@@ -24,7 +24,7 @@ import {
 } from "./fixture.testlib";
 import { readLog, readTail } from "./logs";
 import { readReceipt, requestStore } from "./requests";
-import { waitForRun } from "./wait";
+import { readRun, waitForRun } from "./wait";
 
 let world: World | null = null;
 const open = (): World => {
@@ -138,6 +138,107 @@ describe("run.wait", () => {
     expect(answer.success.settled).toBe(false);
     expect(answer.success.reason).toBe("failure");
     expect(answer.success.actionable).toBe(true);
+  });
+});
+
+/**
+ * `run.read` — the same question, asked without waiting.
+ *
+ * This is what `odu history show` is. It used to open the catalog in the
+ * caller's own process, beside a daemon reading and writing the same files.
+ */
+describe("run.read", () => {
+  it("gives the IDENTICAL answer a wait would, without waiting for one", async () => {
+    // One answer shape, deliberately: "what is this run's state" has one
+    // answer, and a second shape for the non-blocking case would be a second
+    // thing to keep true — wrong first for the caller who alternates between
+    // them, reading to see and waiting to follow.
+    const w = open();
+    const fixture = registerFixtureRun(w, { repoRoot: "/code/app", sha: SHA });
+    writeRoster(fixture.handle, fixture.token, ["unit@x86_64-linux"]);
+    writeNode(w, fixture.handle, fixture.token, {
+      id: "unit@x86_64-linux",
+      status: "failed",
+      exitCode: 3,
+      log: "assertion failed at line 4\n",
+    });
+    finalizeRun(fixture.handle, fixture.token, "failed", ["unit@x86_64-linux"]);
+
+    const catalog = { root: w.catalogRoot };
+    const read = await run(readRun({ runId: fixture.runId }, { catalog }));
+    const waited = await run(
+      waitForRun({ runId: fixture.runId, deadlineMs: 1000 }, { catalog }),
+    );
+    expect(read._tag).toBe("Success");
+    expect(waited._tag).toBe("Success");
+    if (read._tag !== "Success" || waited._tag !== "Success") return;
+    expect(read.success).toEqual(waited.success);
+    expect(read.success.reason).toBe("settled");
+    expect(read.success.failures[0]?.excerpt).toContain("assertion failed");
+  });
+
+  it("returns at once for a run that is still going, rather than holding", async () => {
+    // The whole difference between the two verbs: this one does not hold the
+    // call open. A read of a live run answers `still_running` immediately —
+    // which is a FACT, on the success channel, not a timeout.
+    const w = open();
+    const fixture = registerFixtureRun(w, { repoRoot: "/code/app", sha: SHA });
+    writeRoster(fixture.handle, fixture.token, ["slow@x86_64-linux"]);
+    const started = Date.now();
+    const answer = await run(
+      readRun({ runId: fixture.runId }, { catalog: { root: w.catalogRoot } }),
+    );
+    expect(answer._tag).toBe("Success");
+    if (answer._tag !== "Success") return;
+    expect(answer.success.reason).toBe("still_running");
+    // A wait with the default deadline would have sat here for thirty seconds.
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it("refuses the same things a wait refuses, from the same resolution", async () => {
+    // The refusals are decided ONCE, in the core both verbs share. Two copies
+    // of "does this cursor belong to this run" would be two chances to answer
+    // it differently.
+    const w = open();
+    const fixture = registerFixtureRun(w, { repoRoot: "/code/app", sha: SHA });
+    const catalog = { root: w.catalogRoot };
+
+    const missing = await run(readRun({ runId: "0aaaaaaaa-aaaaaaaa" }, { catalog }));
+    expect(missing._tag).toBe("Failure");
+    if (missing._tag !== "Failure") return;
+    expect((missing.failure as ServiceRefused).code).toBe("unknown_run");
+
+    const stray = await run(
+      readRun({ runId: fixture.runId, after: "0zzzzzzzz-zzzzzzzz@4" }, { catalog }),
+    );
+    expect(stray._tag).toBe("Failure");
+    if (stray._tag !== "Failure") return;
+    expect((stray.failure as ServiceRefused).code).toBe("bad_cursor");
+    expect((stray.failure as ServiceRefused).resync).toContain(fixture.runId);
+  });
+
+  it("pages from a cursor the way a wait does", async () => {
+    const w = open();
+    const fixture = registerFixtureRun(w, { repoRoot: "/code/app", sha: SHA });
+    writeRoster(fixture.handle, fixture.token, ["unit@x86_64-linux"]);
+    writeNode(w, fixture.handle, fixture.token, { id: "unit@x86_64-linux", status: "ok" });
+    finalizeRun(fixture.handle, fixture.token, "passed");
+    const catalog = { root: w.catalogRoot };
+
+    const first = await run(readRun({ runId: fixture.runId, limit: 1 }, { catalog }));
+    expect(first._tag).toBe("Success");
+    if (first._tag !== "Success") return;
+    expect(first.success.hasMore).toBe(true);
+
+    const next = await run(
+      readRun({ runId: fixture.runId, after: first.success.cursor }, { catalog }),
+    );
+    expect(next._tag).toBe("Success");
+    if (next._tag !== "Success") return;
+    // The run's verdict does not move because a reader paged past it: the
+    // failures are recomputed in full on every read, and the cursor only
+    // decides which EVENTS come back.
+    expect(next.success.settled).toBe(true);
   });
 });
 

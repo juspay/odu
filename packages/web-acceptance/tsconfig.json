@@ -1,0 +1,6 @@
+{
+  "//": "Per-package `tsc --noEmit` anchor. The ROOT tsconfig already includes `packages`, so `just typecheck` reads every file here with no change — this config exists so a person working in this directory can check it alone. `allowJs` is for support/parallelism.js, which has to be JS because cucumber-js reaches it through cucumber.js with its own loader rather than the suite's; `checkJs` is off because its types are JSDoc and the root pass does not read them. `features/` is Gherkin and is compiled by nobody.",
+  "extends": "../../tsconfig.json",
+  "compilerOptions": { "allowJs": true, "checkJs": false },
+  "include": ["*.ts", "support", "step_definitions"]
+}

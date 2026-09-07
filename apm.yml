@@ -4,11 +4,12 @@ type: hybrid
 
 # Gate exactly what odu publishes to consumers (e.g. kolu). `includes` is an
 # allow-list — only these paths ship. odu's agent face is ONE skill: the
-# workflow and the MCP launcher that serves it (`bin/serve`) travel together,
+# workflow and the MCP launcher that serves it (`serve`) travel together,
 # because a terminal and an agent are two faces of one shared service rather
 # than two adoption paths. There were two skills, and the second one existed to
 # explain a second MCP face that no longer exists. Internal dev guidance lives
 # outside `.apm/` and is wired as a devDependency so consumers never pull it.
+#
 # WHICH HARNESS THIS REPO DEPLOYS TO. odu's own tracked `.grok/` directory is a
 # second harness signal, so apm cannot infer one and refuses rather than
 # guessing which of `.claude/` and a grok layout to write. Declared here rather
@@ -27,11 +28,23 @@ dependencies:
   # launcher resolves odu via Nix, unpinned, and runs `odu mcp` — which dials
   # the shared service, starting one if none is running, and addresses every run
   # by id. The directory a host launches it from is not load-bearing.
+  #
+  # THE LAUNCHER IS NOT UNDER `bin/`, AND THAT IS LOAD-BEARING. apm deploys a
+  # skill's whole directory tree and skips exactly one path segment — a
+  # top-level `bin/` — whenever stdout is not a tty, which is every CI install
+  # and every `apm install` run from a script. Neither `apm approve` nor
+  # `--trust-bin` lifts that for a project's own skills. While the launcher
+  # lived at `.apm/skills/odu/bin/serve`, a fresh consumer's `apm install`
+  # deployed `SKILL.md` alone and then wrote this command into their
+  # `.mcp.json` — naming a launcher apm had never placed, so odu's agent face
+  # failed to spawn for every new adopter. Out of `bin/` it deploys with its
+  # mode bit intact. `tests/e2e/install.e2e.test.ts` performs a real
+  # installation and is what keeps this true.
   mcp:
     - name: odu
       registry: false
       transport: stdio
-      command: .agents/skills/odu/bin/serve
+      command: .agents/skills/odu/serve
 
 # Maintainer-only: deployed into odu's own .claude/ for odu developers, but
 # excluded from what consumers receive (and from `apm pack`).
@@ -44,3 +57,16 @@ devDependencies:
     # kolu's authoring workflow (/be and its review lenses), deployed into odu's
     # own .claude/ for maintainers only — excluded from what consumers receive.
     - juspay/kolu/agents#master
+    # ODU DEPENDS ON ITSELF HERE ON PURPOSE, and it is not a tidy thing to read.
+    # `juspay/kolu/agents` declares an unpinned `juspay/odu`, so odu arrives back
+    # at depth 2 from published master — which still carries the deleted
+    # `odu-mcp` skill and re-deploys it into `.claude/skills/`. A second skill is
+    # a second vocabulary: an agent reading it reaches nine tools that no longer
+    # exist. apm has no `exclude`/`override` facility, so the only lever is to
+    # win the resolution with a DIRECT edge and subset it to the one skill odu
+    # actually publishes. Revisit when kolu/agents pins or drops its juspay/odu
+    # dependency; `tests/e2e/skillWiring.e2e.test.ts` fails loudly if the subset
+    # is dropped before then.
+    - git: juspay/odu
+      skills:
+        - odu

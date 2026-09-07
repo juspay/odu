@@ -19,10 +19,23 @@
  * failure this whole release exists to remove.
  */
 
-import { createMemo, createSignal, For, Show } from "solid-js";
-import { button, classes, el, pill, type View } from "./dom";
+import { createMemo, For } from "solid-js";
+import { button, classes, el, pill, type View, when } from "./dom";
 import { bytes, duration, NODE_STATUS, OUTCOME, runRef, scopeLabel } from "./format";
-import type { LogTail, NodesFrame, RunNode, RunRow } from "./types";
+import type { LogPage, LogTail, NodesFrame, RunNode, RunRow } from "./types";
+
+/**
+ * How much of a log one page holds.
+ *
+ * A node's log has no bound a browser can rely on — this repo's own `noisy`
+ * fixture writes 200 000 lines, and a real build log is worse — so "read the
+ * whole thing" is a request that can hand a `<pre>` fourteen megabytes and
+ * leave the tab unresponsive with no way back. 64 KiB is the compromise the
+ * numbers pick out: comfortably more than a screenful, small enough that a page
+ * lands in one frame, and a round power of two so the offsets a person reads in
+ * the window indicator line up with the ones an `odu logs --offset` would take.
+ */
+export const LOG_PAGE_BYTES = 64 * 1024;
 
 /** What a control did, in the user's own view. `pending` is a real state: a
  *  retry that reaches a cold coordinator can take a second, and a button that
@@ -61,11 +74,12 @@ function nodeRow(opts: {
   return el(
     "li",
     {
-      class: classes({
-        node: true,
-        [`node-${node.status}`]: true,
-        "node-selected": false,
-      }),
+      // The status class only. There WAS a third, `"node-selected": false` —
+      // a constant false, so a class that could never be applied, against a
+      // rule no stylesheet here declares. It read as selection state and was
+      // neither; the real one is `node-current` on the button below, which is
+      // reactive and styled.
+      class: classes({ node: true, [`node-${node.status}`]: true }),
     },
     el(
       "button",
@@ -120,60 +134,154 @@ function nodeRow(opts: {
   );
 }
 
-/** The log panel for the selected attempt. */
+/**
+ * The log panel for the selected attempt.
+ *
+ * Two controls beyond "show me the tail", and each answers a question the tail
+ * cannot:
+ *
+ *   - **Which attempt.** `RunNode.attempt` is the HIGHEST attempt recorded, and
+ *     a retried node's earlier attempt holds the evidence of the failure that
+ *     caused the retry — the thing a person came to read. It was reachable only
+ *     by hand-editing the URL, which is not a control.
+ *   - **Which part.** A log is unbounded, so it is read a window at a time and
+ *     the window says where it is. See {@link LOG_PAGE_BYTES}.
+ */
 function logPanel(opts: {
   node: () => RunNode | null;
+  attempt: () => number | null;
+  onAttempt: (attempt: number) => void;
   tail: () => LogTail | undefined;
   pending: () => boolean;
   error: () => Error | undefined;
-  onFullPage: () => void;
-  page: () => string | null;
+  onPage: (offset: number) => void;
+  page: () => LogPage | null;
 }): View {
+  /** Where the shown window starts, or `null` when the tail is what is shown.
+   *  Read once per use rather than re-derived, so the two buttons and the
+   *  indicator cannot disagree about which page is on screen. */
+  const at = (): LogPage | null => opts.page();
   return el(
     "section",
     { class: "log", "aria-label": "Node output" },
-    el(Show, {
-      when: () => opts.node() === null,
-      children: el(
-        "p",
-        { class: "empty" },
-        "Pick a node to read its output. Every attempt keeps its own log, so a retry never overwrites the one you are reading.",
-      ),
-    }),
-    el(Show, {
-      when: () => opts.node() !== null,
-      children: el(
-        "div",
-        { class: "log-body" },
+    when(
+      () => opts.node() === null,
+      () =>
         el(
-          "header",
-          { class: "log-head" },
-          el("h3", {}, () => opts.node()?.id ?? ""),
-          el("span", { class: "log-meta" }, () => {
-            const tail = opts.tail();
-            if (tail === undefined) return "";
-            // TWO facts, never one: `complete` says the log got its producer's
-            // last word. A short log that says nothing about completeness reads
-            // as a quiet recipe when it may be a lane that died mid-sentence.
-            return `${bytes(tail.totalBytes)}${tail.complete ? "" : " · incomplete — the producer never closed this log"}`;
-          }),
-          button({ label: "Read whole log", onClick: opts.onFullPage }),
+          "p",
+          { class: "empty" },
+          "Pick a node to read its output. Every attempt keeps its own log, so a retry never overwrites the one you are reading.",
         ),
-        el(Show, {
-          when: () => opts.error() !== undefined,
-          children: el("p", { class: "fault" }, () => String(opts.error())),
-        }),
-        el(Show, {
-          when: () => opts.pending() && opts.tail() === undefined,
-          children: el("p", { class: "empty" }, "Reading…"),
-        }),
+    ),
+    when(
+      () => opts.node() !== null,
+      () =>
         el(
-          "pre",
-          { class: "log-text", tabindex: "0" },
-          () => opts.page() ?? opts.tail()?.text ?? "",
+          "div",
+          { class: "log-body" },
+          el(
+            "header",
+            { class: "log-head" },
+            el("h3", {}, () => opts.node()?.id ?? ""),
+            // The attempt picker, and only where there is a choice to make: a
+            // node on its first attempt has one log, and a group of one button
+            // announcing itself as a group is noise a screen reader has to read.
+            when(
+              () => (opts.node()?.attempt ?? 0) > 1,
+              () =>
+                el(
+                  "span",
+                  { class: "attempts", role: "group", "aria-label": "Attempt" },
+                  el(For, {
+                    // 1..attempt. The list is minted from the highest attempt
+                    // rather than read off the wire because the wire has no
+                    // list to read: `NodesFrame` carries one row per node.
+                    // Every ordinal below the highest is an attempt that
+                    // HAPPENED — the catalog mints them consecutively — and its
+                    // log is addressed by the same key `formatLogKey` makes for
+                    // the current one.
+                    each: () =>
+                      Array.from(
+                        { length: opts.node()?.attempt ?? 0 },
+                        (_, index) => index + 1,
+                      ),
+                    children: (n: number) =>
+                      button({
+                        label: `attempt ${n}`,
+                        title: `read attempt ${n} of this node`,
+                        pressed: () => opts.attempt() === n,
+                        onClick: () => opts.onAttempt(n),
+                      }),
+                  }),
+                ),
+            ),
+            el("span", { class: "log-meta" }, () => {
+              const tail = opts.tail();
+              if (tail === undefined) return "";
+              // TWO facts, never one: `complete` says the log got its
+              // producer's last word. A short log that says nothing about
+              // completeness reads as a quiet recipe when it may be a lane that
+              // died mid-sentence.
+              return `${bytes(tail.totalBytes)}${tail.complete ? "" : " · incomplete — the producer never closed this log"}`;
+            }),
+            // WHERE the shown window is, in the same byte offsets the verb
+            // takes. Without it "Older" and "Newer" are two buttons that change
+            // the text and say nothing about what changed — and a person paging
+            // through a long log has no way to tell a step that worked from one
+            // that hit an end.
+            when(
+              () => at() !== null,
+              () =>
+                el("span", { class: "log-page" }, () => {
+                  const page = at();
+                  return page === null
+                    ? ""
+                    : `${bytes(page.offset)}–${bytes(page.nextOffset)} of ${bytes(page.size)}`;
+                }),
+            ),
+            // Not "read the whole log": that request can hand a `<pre>` a
+            // fourteen-megabyte string and leave the tab unresponsive, which is
+            // what this button used to do. It reads the FIRST page, and the two
+            // beside it move the window.
+            button({
+              label: "Read from the start",
+              title: "read this log from its first byte, one page at a time",
+              onClick: () => opts.onPage(0),
+            }),
+            button({
+              label: "Older",
+              title: "the page before this one",
+              // No page shown means the tail is on screen, which has no offset
+              // to step back from — the way in is "Read from the start".
+              disabled: () => (at()?.offset ?? 0) <= 0,
+              onClick: () =>
+                opts.onPage(Math.max(0, (at()?.offset ?? 0) - LOG_PAGE_BYTES)),
+            }),
+            button({
+              label: "Newer",
+              title: "the page after this one",
+              // `eof` is the verb's own word for "this page reached the end",
+              // rather than an offset comparison this view would have to keep
+              // true against a log that is still growing.
+              disabled: () => at() === null || at()?.eof === true,
+              onClick: () => opts.onPage(at()?.nextOffset ?? 0),
+            }),
+          ),
+          when(
+            () => opts.error() !== undefined,
+            () => el("p", { class: "fault" }, () => String(opts.error())),
+          ),
+          when(
+            () => opts.pending() && opts.tail() === undefined,
+            () => el("p", { class: "empty" }, "Reading…"),
+          ),
+          el(
+            "pre",
+            { class: "log-text", tabindex: "0" },
+            () => at()?.text ?? opts.tail()?.text ?? "",
+          ),
         ),
-      ),
-    }),
+    ),
   );
 }
 
@@ -184,11 +292,15 @@ export function detail(opts: {
   error: () => Error | undefined;
   selected: () => RunNode | null;
   onSelect: (node: RunNode | null) => void;
+  /** WHICH attempt the address names — not the node's highest. See
+   *  {@link logPanel}. */
+  selectedAttempt: () => number | null;
+  onAttempt: (attempt: number) => void;
   tail: () => LogTail | undefined;
   tailPending: () => boolean;
   tailError: () => Error | undefined;
-  page: () => string | null;
-  onFullPage: () => void;
+  page: () => LogPage | null;
+  onPage: (offset: number) => void;
   control: () => ControlState;
   controls: DetailControls;
   onBack: () => void;
@@ -219,23 +331,24 @@ export function detail(opts: {
         const run = opts.run();
         return run === undefined ? "" : scopeLabel(run.scope);
       }),
-      el(Show, {
-        when: () => opts.run()?.outcome != null,
-        children: () => {
+      when(
+        () => opts.run()?.outcome != null,
+        () => {
           const outcome = opts.run()?.outcome;
           return outcome == null
             ? null
             : pill(OUTCOME[outcome].hue, OUTCOME[outcome].label);
         },
-      }),
-      el(Show, {
-        when: () => opts.run()?.parentRunId != null,
-        children: el(
-          "span",
-          { class: "detail-parent" },
-          () => `replay of ${opts.run()?.parentRunId ?? ""}`,
-        ),
-      }),
+      ),
+      when(
+        () => opts.run()?.parentRunId != null,
+        () =>
+          el(
+            "span",
+            { class: "detail-parent" },
+            () => `replay of ${opts.run()?.parentRunId ?? ""}`,
+          ),
+      ),
     ),
     // The run-wide controls. `Run again` is a NEW run at the same commit and
     // the same selection; `Cancel run` is this one's teardown. They sit apart
@@ -268,55 +381,57 @@ export function detail(opts: {
     ),
     // Every control answers, including a refusal. A control that went quiet on
     // a refusal is the browser's version of the failure this release removes.
-    el(Show, {
-      when: () => opts.control().kind !== "idle",
-      children: el(
-        "p",
-        {
-          class: () =>
-            classes({
-              receipt: true,
-              "receipt-bad": opts.control().kind === "refused",
-            }),
-          role: "status",
-        },
-        () => {
-          const state = opts.control();
-          switch (state.kind) {
-            case "idle":
-              return "";
-            case "pending":
-              return `${state.what}…`;
-            case "ok":
-              return state.message;
-            case "refused":
-              return state.message;
-          }
-        },
-      ),
-    }),
+    when(
+      () => opts.control().kind !== "idle",
+      () =>
+        el(
+          "p",
+          {
+            class: () =>
+              classes({
+                receipt: true,
+                "receipt-bad": opts.control().kind === "refused",
+              }),
+            role: "status",
+          },
+          () => {
+            const state = opts.control();
+            switch (state.kind) {
+              case "idle":
+                return "";
+              case "pending":
+                return `${state.what}…`;
+              case "ok":
+                return state.message;
+              case "refused":
+                return state.message;
+            }
+          },
+        ),
+    ),
     el(
       "div",
       { class: "detail-body" },
       el(
         "section",
         { class: "nodes", "aria-label": "Nodes" },
-        el(Show, {
-          when: () => opts.error() !== undefined,
-          children: el("p", { class: "fault" }, () => String(opts.error())),
-        }),
-        el(Show, {
-          when: () => opts.pending() && opts.frame() === undefined,
-          children: el("p", { class: "empty" }, "Reading this run…"),
-        }),
-        el(Show, {
-          when: () => opts.frame() !== undefined && nodes().length === 0,
-          children: el(
-            "p",
-            { class: "empty" },
-            "This run has published no work yet — it is still claiming a machine.",
-          ),
-        }),
+        when(
+          () => opts.error() !== undefined,
+          () => el("p", { class: "fault" }, () => String(opts.error())),
+        ),
+        when(
+          () => opts.pending() && opts.frame() === undefined,
+          () => el("p", { class: "empty" }, "Reading this run…"),
+        ),
+        when(
+          () => opts.frame() !== undefined && nodes().length === 0,
+          () =>
+            el(
+              "p",
+              { class: "empty" },
+              "This run has published no work yet — it is still claiming a machine.",
+            ),
+        ),
         el(
           "ul",
           { class: "node-list" },
@@ -335,10 +450,12 @@ export function detail(opts: {
       ),
       logPanel({
         node: opts.selected,
+        attempt: opts.selectedAttempt,
+        onAttempt: opts.onAttempt,
         tail: opts.tail,
         pending: opts.tailPending,
         error: opts.tailError,
-        onFullPage: opts.onFullPage,
+        onPage: opts.onPage,
         page: opts.page,
       }),
     ),

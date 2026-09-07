@@ -3,13 +3,21 @@
  *
  * Black-box and out-of-process: a real nix-built binary, a real daemon that
  * outlives its launcher, a real coordinator on a localhost lane, a real
- * websocket, a real JSON-RPC endpoint, and a real browser where the machine has
- * one. Nothing here imports `src/`.
+ * websocket and a real JSON-RPC endpoint. Nothing here imports `src/`.
  *
  * What it is FOR is the property the whole release rests on and that no unit
  * test can reach: a start, a wait, a log read, a retry and a cancel produce the
  * SAME addressed state whichever door they came through — and the three
  * outcomes (answered, refused, nothing serving) stay apart at each one.
+ *
+ * **The BROWSER is not one of the doors this file drives, and used to be.** It
+ * held three cases that shelled out to `chrome --headless --dump-dom` and
+ * asserted on substrings of one static snapshot — no click, no keystroke, no
+ * viewport, no reconnect — and skipped themselves entirely where no browser was
+ * on PATH, which on a CI runner meant they graded nothing at all. That coverage
+ * now lives in `packages/web-acceptance`: Gherkin scenarios driven through
+ * Playwright against this same nix-built binary, where the browser is REQUIRED
+ * and its absence is a hard failure. See that package's README.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
@@ -17,18 +25,16 @@ import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { buildOduBinary, cleanup } from "./harness";
 import {
-  chromePath,
   daemonLog,
   headOf,
   makeWebFixture,
   mcp,
-  renderPage,
-  renderUntil,
   runSocketExists,
   suitePort,
   startWebService,
   startWebServiceViaCommand,
   surfaceCall,
+  tcpListening,
   until,
   verb,
   type WebWorld,
@@ -773,9 +779,17 @@ describe("`odu web` serves in this terminal", () => {
       server.kill("SIGINT");
       await server.exited;
       // The SERVER is gone: nothing answers its address any more.
+      //
+      // **Probed over TCP, never through `odu surface`.** Every service client
+      // bootstraps now, so asking odu whether a service is running STARTS one —
+      // and a poll written that way waits for a daemon to go away while
+      // spawning its replacement on each tick, forever. That is not a flaw in
+      // the bootstrap; it is what "no face reports nothing-serving without
+      // trying to fix it" means. A test that wants to observe ABSENCE has to
+      // observe it from outside odu.
       await until(
         "the foreground server to stop serving",
-        () => (surfaceCall(at, ["get", "service"]).status === 0 ? null : true),
+        async () => ((await tcpListening(at.origin)) ? null : true),
         60_000,
       );
 
@@ -845,57 +859,4 @@ describe("`odu web --background` starts a service that can run CI", () => {
     );
     expect(settled.passed).toBe(false);
   }, 900_000);
-});
-
-describe("the browser", () => {
-  const chrome = chromePath();
-
-  it.skipIf(chrome === null)("renders a live board over the same wire", async () => {
-    // Rows, not the empty state: this suite has started several runs. Sampled
-    // until they are there — the wire says `live` a moment before the first
-    // collection frame lands, and one snapshot of a live page is one sample.
-    const dom = await renderUntil(
-      chrome as string,
-      `${world.origin}/`,
-      (page) => page.includes('class="row'),
-      "the runs this suite started",
-    );
-    // The wire indicator is the framework's own readout, and `live` is the
-    // conjunction of the socket AND every subscription being healthy.
-    expect(dom).toContain('class="wire wire-live"');
-    expect(dom).toContain("<h1>Runs</h1>");
-  }, 300_000);
-
-  it.skipIf(chrome === null)("keeps every control a real, reachable button", () => {
-    const dom = renderPage(chrome as string, `${world.origin}/`);
-    // Keyboard access is not a mode. A filter's PRESSED state is in the DOM
-    // where assistive tech reads it, not only in a colour. Present on the empty
-    // board too, so this one needs no wait.
-    expect(dom).toContain('aria-pressed="true"');
-    expect(dom).not.toContain("<div onclick");
-  }, 300_000);
-
-  it.skipIf(chrome === null)("opens one run's nodes and its output by URL", async () => {
-    const dir = fixture(FAILING);
-    const { answer } = await runToSettle(dir, "gate-browser");
-    const failures = (answer as unknown as { failures: { node: string; logKey: string }[] })
-      .failures;
-    const failure = failures[0];
-    // A failing node's output is LINKABLE — the address in the URL bar is the
-    // same log key an agent echoes, and it opens on that node's log.
-    const dom = await renderUntil(
-      chrome as string,
-      `${world.origin}/#/run/${failure?.logKey ?? ""}`,
-      (page) => page.includes("beta is about to fail"),
-      "the failing node's own output",
-    );
-    expect(dom).toContain(failure?.node ?? "");
-    // The node the address named is the one marked current, so the view agrees
-    // with the URL rather than merely happening to show the same run.
-    expect(dom).toContain("node-current");
-    // The whole run is there beside it — this is the DETAIL view, not a log
-    // panel floating on its own.
-    expect(dom).toContain('class="detail-controls"');
-    expect(dom).toContain("alpha@");
-  }, 600_000);
 });

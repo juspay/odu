@@ -1,10 +1,19 @@
 /**
- * HOW THE WEB FACE REACHES THE ENGINE — the four ports, implemented.
+ * HOW THE WEB FACE REACHES THE ENGINE — the ports, implemented.
  *
  * `@odu/service` owns cross-run authority and cannot import `@odu/execution`;
- * the three things it must CAUSE arrive as function types. This module is what
+ * everything it must CAUSE arrives as a function type. This module is what
  * those types are bound to, and it is the only place on the web face's side of
  * the wall that knows what a coordinator is.
+ *
+ * The set grew from four to nine when the public commands stopped doing their
+ * own work: reading a checkout's pipeline, probing the venues, taking and
+ * dropping a hold, and writing a branch's ruleset are all things `odu dump`,
+ * `odu graph`, `odu hosts`, `odu lease`, `odu release` and `odu protect` used
+ * to do from whatever process the operator typed in. Each of those has an
+ * adapter of its own next door — `./pipelinePort`, `./venuePort`,
+ * `./protectPort` — because each moves when a different piece of the engine
+ * does; this file's job is to be the ONE list of what the service is wired to.
  *
  * It sits apart from `./web` on purpose. That file is a COMPOSITION ROOT and a
  * process lifecycle — claim the gate, bind the listener, serve, tear down — and
@@ -28,6 +37,9 @@ import {
 } from "@odu/execution/coordinator/recovery";
 import { gitBranch } from "@odu/execution/common/git";
 import { type CatalogOptions, listRuns } from "@odu/run-history/store";
+import { readPipeline } from "./pipelinePort";
+import { holdVenue, probeVenues, releaseVenue } from "./venuePort";
+import { protectBranch } from "./protectPort";
 import type {
   CancelOutcome,
   CancelRequest,
@@ -104,6 +116,16 @@ export function webPorts(): ServicePorts {
       }),
     cancel: cancelThroughSocket,
     probeCheckout,
+    // The five that made `odu hosts`, `odu lease`, `odu release`, `odu dump`,
+    // `odu graph` and `odu protect` clients of the shared authority rather than
+    // six programs doing their own work in whatever process the operator typed
+    // in. Bound by reference, not wrapped: a lambda here would be a second
+    // place their contract could drift.
+    pipeline: readPipeline,
+    probeVenues,
+    holdVenue,
+    releaseVenue,
+    protect: protectBranch,
   };
 }
 

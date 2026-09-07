@@ -13,7 +13,10 @@ import {
   makeWorld,
   registerFixtureRun,
   type World,
+  writeDebt,
+  writeLane,
   writeNode,
+  writePhase,
   writeRoster,
 } from "./fixture.testlib";
 import { OWNERSHIP_GRACE_MS } from "@odu/run-history/owner";
@@ -266,5 +269,252 @@ describe("the run registry", () => {
     const later = at + OWNERSHIP_GRACE_MS + 1;
     expect(registry.refresh(later).upserted.map((r) => r.runId)).toEqual([run.runId]);
     expect(registry.row(run.runId)?.state).toBe("owner_lost");
+  });
+});
+
+/**
+ * THE RUN ENVIRONMENT — where the work is placed, read from the catalog.
+ *
+ * The bug this whole section pins is an ABSENCE: the coordinator journalled
+ * `lane` and `phase` lines from the beginning and `foldJournal` fell through to
+ * `default: break` on both, so nothing on disk could answer "which lane is on
+ * which box". That is why `odu status` dialled the checkout's `.ci/odu.sock` —
+ * the live coordinator was the only thing that could be asked, so one public
+ * command had to keep a run authority of its own. Answered from the journal,
+ * the same question outlives the coordinator that once had to be alive for it.
+ */
+describe("the run environment", () => {
+  it("folds the lanes and the phase the journal has always carried", () => {
+    const w = open();
+    const run = registerFixtureRun(w, { repoRoot: "/code/app", sha: "8".repeat(40) });
+    writePhase(run.handle, run.token, "lanes");
+    writeLane(run.handle, run.token, {
+      platform: "x86_64-linux",
+      state: "leased",
+      host: "builder-1",
+      pool: ["builder-1", "builder-2"],
+      hostsSource: "/code/app/.ci/hosts.toml",
+    });
+    writeLane(run.handle, run.token, {
+      platform: "aarch64-darwin",
+      state: "claiming",
+      host: null,
+      pool: ["mac-1"],
+      hostsSource: "/code/app/.ci/hosts.toml",
+    });
+
+    const registry = createRegistry({ root: w.catalogRoot });
+    registry.refresh();
+    const env = registry.env(run.runId);
+    expect(env?.phase).toBe("lanes");
+    // Platform order, so two reads of one journal paint the same matrix.
+    expect(env?.lanes).toEqual([
+      { state: "claiming", platform: "aarch64-darwin", pool: ["mac-1"] },
+      { state: "leased", platform: "x86_64-linux", host: "builder-1" },
+    ]);
+    expect(env?.hostsSource).toBe("/code/app/.ci/hosts.toml");
+  });
+
+  it("republishes a lane's whole state, so the newest line wins", () => {
+    const w = open();
+    const run = registerFixtureRun(w, { repoRoot: "/code/app", sha: "9".repeat(40) });
+    writeLane(run.handle, run.token, {
+      platform: "x86_64-linux",
+      state: "claiming",
+      host: null,
+      pool: ["builder-1", "builder-2"],
+    });
+    writeLane(run.handle, run.token, {
+      platform: "x86_64-linux",
+      state: "leased",
+      host: "builder-2",
+    });
+    const registry = createRegistry({ root: w.catalogRoot });
+    registry.refresh();
+    expect(registry.env(run.runId)?.lanes).toEqual([
+      { state: "leased", platform: "x86_64-linux", host: "builder-2" },
+    ]);
+  });
+
+  it("still folds an OLD lane line that carries no pool or hosts file", () => {
+    // The compatibility case the journal schema's `optionalKey` exists for. The
+    // reader SKIPS a line it cannot parse and counts it, so a required `pool`
+    // would not have failed loudly — it would have silently erased every lane
+    // of every run written before the field existed. An empty pool reads
+    // honestly as "not recorded" and a null source says the same; neither is a
+    // claim that the lane had no candidates.
+    const w = open();
+    const run = registerFixtureRun(w, { repoRoot: "/code/app", sha: "a1".repeat(20) });
+    writeLane(run.handle, run.token, {
+      platform: "x86_64-linux",
+      state: "claiming",
+      host: null,
+    });
+    const registry = createRegistry({ root: w.catalogRoot });
+    registry.refresh();
+    const env = registry.env(run.runId);
+    expect(env?.lanes).toEqual([
+      { state: "claiming", platform: "x86_64-linux", pool: [] },
+    ]);
+    expect(env?.hostsSource).toBeNull();
+  });
+
+  it("keeps the hosts file a newer line omits", () => {
+    // A mixed journal — old lines, then new — must not lose the source it has
+    // just learned to a later line that simply does not carry one.
+    const w = open();
+    const run = registerFixtureRun(w, { repoRoot: "/code/app", sha: "a2".repeat(20) });
+    writeLane(run.handle, run.token, {
+      platform: "x86_64-linux",
+      state: "claiming",
+      host: null,
+      pool: ["builder-1"],
+      hostsSource: "/etc/odu/hosts.toml",
+    });
+    writeLane(run.handle, run.token, {
+      platform: "aarch64-darwin",
+      state: "claiming",
+      host: null,
+    });
+    const registry = createRegistry({ root: w.catalogRoot });
+    registry.refresh();
+    expect(registry.env(run.runId)?.hostsSource).toBe("/etc/odu/hosts.toml");
+  });
+
+  it("reports a leased lane with no host as still claiming", () => {
+    // A TORN record: the state says the lane landed and the field naming the
+    // machine is missing. Reported as the weaker claim, because the alternative
+    // is telling a reader the work is on a machine that nothing in the journal
+    // names.
+    const w = open();
+    const run = registerFixtureRun(w, { repoRoot: "/code/app", sha: "a3".repeat(20) });
+    writeLane(run.handle, run.token, {
+      platform: "x86_64-linux",
+      state: "leased",
+      host: null,
+      pool: ["builder-1"],
+    });
+    const registry = createRegistry({ root: w.catalogRoot });
+    registry.refresh();
+    expect(registry.env(run.runId)?.lanes).toEqual([
+      { state: "claiming", platform: "x86_64-linux", pool: ["builder-1"] },
+    ]);
+  });
+
+  it("calls a run with no journalled phase provisioning until work starts", () => {
+    const w = open();
+    const run = registerFixtureRun(w, { repoRoot: "/code/app", sha: "a4".repeat(20) });
+    const registry = createRegistry({ root: w.catalogRoot });
+    registry.refresh();
+    expect(registry.env(run.runId)?.phase).toBe("provisioning");
+
+    writeRoster(run.handle, run.token, ["unit@x86_64-linux"]);
+    writeNode(w, run.handle, run.token, { id: "unit@x86_64-linux", status: "ok" });
+    registry.refresh();
+    // Never `no_lanes` — that is the coordinator's own word for "the selection
+    // matched nothing", and inferring it from a silent record would invent a
+    // reason the journal never gave.
+    expect(registry.env(run.runId)?.phase).toBe("lanes");
+  });
+
+  it("stops the elapsed clock at the verdict", () => {
+    const w = open();
+    const at = 1_700_000_000_000;
+    const run = registerFixtureRun(w, {
+      repoRoot: "/code/app",
+      sha: "b1".repeat(20),
+      now: at,
+    });
+    const registry = createRegistry({ root: w.catalogRoot });
+
+    // Still going: the clock is the reader's, so it advances between two reads
+    // with nothing on disk having moved.
+    registry.refresh(at + 5_000);
+    expect(registry.env(run.runId, at + 5_000)?.elapsedMs).toBe(5_000);
+    expect(registry.env(run.runId, at + 90_000)?.elapsedMs).toBe(90_000);
+
+    writeRoster(run.handle, run.token, ["unit@x86_64-linux"]);
+    writeNode(w, run.handle, run.token, {
+      id: "unit@x86_64-linux",
+      status: "ok",
+      at: at + 1_000,
+    });
+    finalizeRun(run.handle, run.token, "passed", [], at + 60_000);
+    registry.refresh(at + 90_000);
+
+    // Settled. A settled run's age must not be a function of when somebody
+    // looked at it, so this is the same number a week from now.
+    expect(registry.env(run.runId, at + 90_000)?.elapsedMs).toBe(60_000);
+    expect(registry.env(run.runId, at + 9_000_000)?.elapsedMs).toBe(60_000);
+  });
+
+  it("derives the commit link once, and says null for a local-only checkout", () => {
+    const w = open();
+    const sha = "c1".repeat(20);
+    const linked = registerFixtureRun(w, {
+      repoRoot: "/code/app",
+      sha,
+      repo: "juspay/odu",
+    });
+    const local = registerFixtureRun(w, {
+      repoRoot: "/code/local",
+      sha: "c2".repeat(20),
+    });
+    const registry = createRegistry({ root: w.catalogRoot });
+    registry.refresh();
+    expect(registry.env(linked.runId)?.commitUrl).toBe(
+      `https://github.com/juspay/odu/commit/${sha}`,
+    );
+    // Not an empty string and not a URL that 404s: a checkout with no GitHub
+    // remote has no forge page, and saying so is the answer.
+    expect(registry.env(local.runId)?.commitUrl).toBeNull();
+  });
+
+  it("itemises the reporting debt the row only counts", () => {
+    const w = open();
+    const run = registerFixtureRun(w, { repoRoot: "/code/app", sha: "d1".repeat(20) });
+    writeDebt(run.handle, run.token, {
+      context: "odu/unit",
+      lastError: "403 from api.github.com",
+      attempts: 3,
+    });
+    const registry = createRegistry({ root: w.catalogRoot });
+    registry.refresh();
+    // The count tells an operator something is wrong; this tells them which
+    // context and why.
+    expect(registry.row(run.runId)?.reportingDebt).toBe(1);
+    expect(registry.env(run.runId)?.owed).toEqual([
+      { context: "odu/unit", lastError: "403 from api.github.com", attempts: 3 },
+    ]);
+  });
+
+  it("says nothing at all about a run it has never seen", () => {
+    // `undefined`, not `UNKNOWN_ENV`: "no such run here" and "a run whose
+    // environment is not established yet" call for opposite next moves.
+    const w = open();
+    const registry = createRegistry({ root: w.catalogRoot });
+    registry.refresh();
+    expect(registry.env("0zzzzzzzz-zzzzzzzz")).toBeUndefined();
+  });
+
+  it("gives the read-through projection the same environment", () => {
+    const w = open();
+    const at = 1_700_000_000_000;
+    const run = registerFixtureRun(w, {
+      repoRoot: "/code/app",
+      sha: "e1".repeat(20),
+      repo: "juspay/odu",
+      now: at,
+    });
+    writePhase(run.handle, run.token, "lanes");
+    writeLane(run.handle, run.token, {
+      platform: "x86_64-linux",
+      state: "leased",
+      host: "builder-1",
+    });
+    const registry = createRegistry({ root: w.catalogRoot });
+    registry.refresh(at + 1_000);
+    const direct = projectRun(run.runId, { root: w.catalogRoot }, at + 1_000);
+    expect(direct?.env).toEqual(registry.env(run.runId, at + 1_000));
   });
 });

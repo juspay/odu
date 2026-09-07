@@ -4,7 +4,7 @@
 deleted, the only one.** Everything the singleton web service owns: the
 registry projection every face reads the board from, the durable request
 receipts that make a lost reply reconcilable, and the handlers behind
-`@odu/service-client`'s five verbs — `run_start`, `run_wait`, `run_retry`,
+`@odu/service-client`'s procedures — `run_start`, `run_wait`, `run_read`, `run_retry`,
 `run_cancel`, `log_read`. The browser, `odu surface` and `odu mcp` are three
 projections of that one contract; none of them adds a verb, and every one of
 their mutations lands here.

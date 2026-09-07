@@ -7,9 +7,13 @@ set working-directory := '..'
 
 nix_shell := if env('IN_NIX_SHELL', '') != '' { '' } else { 'nix develop --accept-flake-config -c' }
 
+# See the justfile's copy: PLAYWRIGHT_BROWSERS_PATH, not IN_NIX_SHELL, because
+# the default shell sets the latter and supplies no browsers.
+nix_shell_e2e := if env('PLAYWRIGHT_BROWSERS_PATH', '') != '' { '' } else { 'nix develop .#e2e --accept-flake-config -c' }
+
 [parallel]
 [metadata("ci")]
-default: typecheck unit fmt nix e2e bun-nix-fresh
+default: typecheck unit fmt nix e2e web-acceptance bun-nix-fresh
 
 install:
     {{ nix_shell }} bun install --frozen-lockfile
@@ -38,6 +42,27 @@ unit: install
 # dev shell on PATH (nix, git, just, bun) plus the node_modules from `install`.
 e2e: install
     {{ nix_shell }} bun run test:e2e
+
+# Browser acceptance: Cucumber features driven through Playwright against the
+# nix-built binary, with the browsers supplied by nixpkgs
+# (packages/web-acceptance/README.md).
+#
+# REQUIRED on every platform, deliberately. odu's previous browser coverage
+# skipped itself where no Chrome was on PATH, so on a runner it graded nothing
+# and the one environment where a regression is caught by somebody other than its
+# author was the one environment that never looked. If this leg is too slow for
+# the workflow's `timeout-minutes`, raise that number — a platform-conditional
+# skip would put the silent gap straight back.
+#
+# `nix` is a prerequisite as well as a build here so the binary is an
+# already-realised lookup rather than a second build racing that leg's.
+web-acceptance: install nix
+    #!/usr/bin/env bash
+    set -euo pipefail
+    odu="$(nix build .#odu --no-link --print-out-paths --accept-flake-config)/bin/odu"
+    nix build .#odu-runner --no-link --accept-flake-config
+    cd packages/web-acceptance
+    ODU_BIN="$odu" {{ nix_shell_e2e }} bun run test
 
 fmt:
     {{ nix_shell }} nixpkgs-fmt --check *.nix nix/*.nix nix/packages/*.nix

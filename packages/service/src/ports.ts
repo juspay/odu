@@ -115,7 +115,12 @@ export type RetryRefusal =
   | "request_unresolved"
   | "stale_attempt"
   | "partial"
-  | "launch_failed";
+  | "launch_failed"
+  /** The parent's recorded placement cannot be expressed against today's
+   *  declared inventory. A replay reproduces WHERE a run was allowed to run;
+   *  when it cannot, it refuses rather than placing the work somewhere the
+   *  original never was. */
+  | "no_venue";
 
 export type RetryOutcome =
   | { ok: true; receipt: RetryReceipt; replayed: boolean }
@@ -218,11 +223,171 @@ export interface CheckoutFacts {
  *  wants to state "the checkout moved on" must be able to say without one. */
 export type CheckoutProbe = (checkout: string) => CheckoutFacts;
 
-/** The whole set the composition root binds. One object rather than four
+// ── reading a checkout's pipeline ───────────────────────────────────────────
+
+/** One recipe in a resolved DAG. Structurally `@odu/execution`'s `TaskSpec`,
+ *  spelled here for the reason the header gives. */
+export interface TaskFacts {
+  readonly id: string;
+  readonly name: string | null;
+  readonly command: string;
+  readonly needs: readonly string[];
+  readonly os: readonly string[];
+  readonly shards: number | null;
+}
+
+export interface PipelineFacts {
+  readonly name: string;
+  readonly tasks: readonly TaskFacts[];
+  /** The DAG as Mermaid, rendered by the engine that owns the graph — so
+   *  `odu graph` and a browser cannot be two renderers that drift. */
+  readonly mermaid: string;
+}
+
+export type PipelineOutcome =
+  | { ok: true; facts: PipelineFacts }
+  /** No justfile, or one that could not be read as a pipeline. `message` is the
+   *  engine's own sentence: it knows which recipe was malformed and this layer
+   *  does not. */
+  | { ok: false; message: string };
+
+/** Resolve a checkout's `[metadata("ci")]` DAG. Reads a file and runs nothing. */
+export type PipelineReader = (request: {
+  checkout: string;
+  root?: string;
+}) => PipelineOutcome;
+
+// ── venues: the machines, and the holds on them ─────────────────────────────
+
+export interface VenueHolderFacts {
+  readonly holder: string;
+  readonly run: string | null;
+  readonly sinceMs: number;
+}
+
+export interface VenueRowFacts {
+  readonly platform: string;
+  readonly host: string;
+  readonly slot: number;
+  readonly slots: number;
+  readonly state: "free" | "busy" | "local" | "down";
+  readonly heldBy: VenueHolderFacts | null;
+  readonly error: string | null;
+}
+
+export type VenueProbeOutcome =
+  | {
+      ok: true;
+      source: string | null;
+      warnings: readonly string[];
+      rows: readonly VenueRowFacts[];
+    }
+  /** No hosts are configured at all — the one case that is a refusal rather
+   *  than an empty inventory, because "nothing is configured" and "everything
+   *  is busy" call for opposite actions. */
+  | { ok: false; message: string };
+
+/** Probe configured venues. Dials each machine, and acquires nothing. An empty
+ *  `platforms` means every configured one. */
+export type VenueProber = (request: {
+  platforms: readonly string[];
+}) => Promise<VenueProbeOutcome>;
+
+export interface VenueHoldResult {
+  readonly platform: string;
+  readonly status: "held" | "waiting" | "already";
+  readonly host: string | null;
+  readonly holderPid: number | null;
+  readonly waitingBehind: VenueHolderFacts | null;
+  readonly message: string;
+}
+
+export type VenueHoldOutcome =
+  | { ok: true; results: readonly VenueHoldResult[] }
+  | { ok: false; message: string };
+
+/**
+ * Take a hold on a venue, for a checkout, that outlives the caller.
+ *
+ * **The holder is now the SERVICE's child.** `odu lease` used to fork a
+ * detached `odu lease-hold` from the caller's own shell, which made a hold's
+ * lifetime a property of which terminal took it. Through the service, the
+ * holder is parented by the daemon — which is what "held across runs" was
+ * always supposed to mean, and is the only arrangement under which a browser
+ * or an agent can take one at all.
+ */
+export type VenueHolder = (request: {
+  checkout: string;
+  platforms: readonly string[];
+  noWait: boolean;
+}) => Promise<VenueHoldOutcome>;
+
+export interface VenueReleaseResult {
+  readonly platform: string;
+  readonly effective: "released" | "nothing";
+  readonly host: string | null;
+  readonly detail: string | null;
+}
+
+export type VenueReleaser = (request: {
+  checkout: string;
+  platforms: readonly string[];
+}) => Promise<{ results: readonly VenueReleaseResult[] }>;
+
+// ── branch protection ───────────────────────────────────────────────────────
+
+export interface ProtectFacts {
+  /** Null under `dryRun` — the contexts do not need the forge, so a dry run
+   *  does not consult it. See `ProtectOutputSchema`. */
+  readonly repo: string | null;
+  readonly branch: string | null;
+  readonly contexts: readonly string[];
+  readonly rulesetId: number | null;
+  readonly applied: boolean;
+  readonly created: boolean;
+  readonly derivedFrom: string | null;
+  readonly detail: string | null;
+}
+
+export type ProtectOutcome =
+  | { ok: true; facts: ProtectFacts }
+  | {
+      ok: false;
+      /** `no_credential` when `gh` cannot authenticate — which is a fixable
+       *  situation with an argv-shaped recovery, not a generic failure. */
+      code: "checkout_refused" | "pipeline_refused" | "no_credential" | "bad_input";
+      message: string;
+      suggestion?: readonly string[];
+    };
+
+/**
+ * Set a branch's required status checks to exactly the contexts odu posts.
+ *
+ * This spends the user's `gh` credential, and it is the service that spends it
+ * — which is not a new exposure: the coordinator the daemon launches has always
+ * posted commit statuses with the same credential, and `--no-post` is the
+ * opt-out. A face that kept this local on the grounds that "the daemon must not
+ * spend your credential" would have been asserting something already false, and
+ * would have left the browser and an agent unable to do it at all.
+ */
+export type RulesetWriter = (request: {
+  checkout: string;
+  branch?: string;
+  platforms: readonly string[];
+  dryRun: boolean;
+  create: boolean;
+}) => Promise<ProtectOutcome>;
+
+/** The whole set the composition root binds. One object rather than N
  *  parameters, so adding a port is one edit at the root and one here. */
 export interface ServicePorts {
   launch: RunLauncher;
   retry: RunRetrier;
   cancel: RunCanceller;
   probeCheckout: CheckoutProbe;
+  pipeline: PipelineReader;
+  probeVenues: VenueProber;
+  holdVenue: VenueHolder;
+  releaseVenue: VenueReleaser;
+  protect: RulesetWriter;
 }

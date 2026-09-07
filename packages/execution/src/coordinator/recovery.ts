@@ -72,14 +72,17 @@ import {
   readVerdict,
   type RunHandle,
 } from "@odu/run-history/store";
+import { splitFanId } from "@odu/run-client/nodeId";
 import { formatCursor } from "@odu/run-history/ids";
 import { readJournal } from "@odu/run-history/store";
+import { foldJournal } from "@odu/run-history/attention";
 import { firstFrame, runUnary } from "../common/effectEdge";
 import {
   minimalRerunRoots,
   resolveRerunTargets,
   transitiveDependents,
 } from "../common/nodeId";
+import { fanoutPools, type HostsConfig, loadHosts } from "./hosts";
 import type { LaunchRequest, RunLauncher } from "./launcher";
 /**
  * WHY a retry was refused, as a value.
@@ -103,7 +106,10 @@ export type RetryRefusal =
   | "request_unresolved"
   | "stale_attempt"
   | "partial"
-  | "launch_failed";
+  | "launch_failed"
+  /** The parent's recorded placement cannot be expressed against today's
+   *  declared inventory. See `relaunch`. */
+  | "no_venue";
 
 export type RetryOutcome =
   | { ok: true; receipt: RetryReceipt; replayed: boolean }
@@ -135,6 +141,10 @@ export interface RetryInput {
    *  be able to state a world where it is, or is not, without forking. */
   host?: string;
   isAlive?: (pid: number) => boolean;
+  /** Today's declared host inventory. Injected so a suite can state a hosts
+   *  file that CHANGED since the parent ran — which is the whole scenario a
+   *  replay's placement guarantee exists for — without one on disk. */
+  hosts?: () => HostsConfig;
   /** Where a degraded-but-successful retry says so. Not an error channel: the
    *  one caller is the coordinator that could not record this request's id, so
    *  the mutation happened and only a future REPEAT of it is impaired. */
@@ -595,6 +605,41 @@ function dependantsOf(state: PipelineState, roots: readonly string[]): string[] 
  *   path, because "clone it back to here" is the actual fix and the caller
  *   cannot guess the path from an error that omits it.
  */
+/**
+ * The platforms a replay may use — the parent's, PINNED, even when the parent
+ * never named any.
+ *
+ * `scope.platforms: []` does not mean "no platforms". It means "whatever the
+ * fanout resolves to", and the fanout resolves against today's hosts file — so
+ * a platform added to that file after the parent ran would get the retried
+ * selector dispatched onto it, on a run whose id says it is a replay. That is
+ * the same widening the host pins exist to stop, arriving by a route no pin
+ * covers, and it is reachable without anybody having typed `--host` at all.
+ *
+ * The parent's real platform set IS durable evidence, from two places, and both
+ * are read because neither alone covers every record:
+ *
+ *   - the ROSTER, whose node ids are `<namepath>@<platform>`. Written at
+ *     registration, so it is there for every run that got as far as having a
+ *     shape — including ones recorded before odu journalled lanes at all.
+ *   - the LANE lines, which cover the platform that had a lane but whose nodes
+ *     were all skipped, and so never appeared in a roster id.
+ *
+ * A journal with neither cannot establish the set — a run that died before
+ * publishing anything — and there the empty set is carried through unchanged.
+ * That is the lesser evil on purpose: narrowing to nothing would make the child
+ * fan out over no platforms and refuse, turning "we cannot prove where this
+ * ran" into "this cannot be retried", for a run that very likely used the whole
+ * fanout anyway.
+ */
+function platformsFor(handle: RunHandle, manifest: RunManifest): string[] {
+  if (manifest.scope.platforms.length > 0) return [...manifest.scope.platforms];
+  const fold = foldJournal(readJournal(handle).entries);
+  const platforms = new Set<string>(fold.lanes.keys());
+  for (const id of fold.roster) platforms.add(splitFanId(id).platform);
+  return [...platforms].sort();
+}
+
 async function relaunch(
   handle: RunHandle,
   manifest: RunManifest,
@@ -625,6 +670,33 @@ async function relaunch(
       suggestion: ["odu", "logs", "--run", handle.runId, input.selector],
     };
   }
+  // WHERE the parent was allowed to run, replayed — or refused for want of the
+  // evidence to say.
+  //
+  // A replay reproduces a run, and WHERE a run was allowed to happen is part of
+  // what it was. This used to be `hostPins: []`, which is not "no pins were
+  // asked for" but "do not carry the question", and the difference only shows
+  // when the ambient hosts file has changed since: a parent confined to one box
+  // came back fanned out across whatever the file lists today, silently, under
+  // a run id that says it is a replay of the confined one.
+  //
+  // Absent evidence is REFUSED rather than read as an empty pin set. A record
+  // written before odu recorded placement cannot distinguish the two, and the
+  // failure mode of guessing wrong is unbounded: a retry of a run pinned to one
+  // named machine dispatching work onto every machine in the pool.
+  if (manifest.hostPins === undefined) {
+    return {
+      ok: false,
+      code: "not_replayable",
+      message:
+        `odu: run ${handle.runId} predates placement evidence — its record does ` +
+        "not say which hosts it was allowed to run on, so a replay cannot " +
+        "promise to run where it ran. Start a fresh run, naming the placement " +
+        "you want with --host.",
+      suggestion: ["odu", "run", ...manifest.scope.selectors],
+    };
+  }
+  const hostPins = [...manifest.hostPins];
   // The SELECTION the new run covers: the nodes asked for, with their
   // dependency closure (odu expands dependencies unless told not to). Recorded
   // platforms and root are carried through so the replay lands on the same
@@ -633,10 +705,35 @@ async function relaunch(
   // them for this child either.
   const scope: RunScope = {
     selectors: [input.selector],
-    platforms: [...manifest.scope.platforms],
+    platforms: platformsFor(handle, manifest),
     ...(manifest.scope.root === undefined ? {} : { root: manifest.scope.root }),
     noDeps: false,
   };
+  // CAN the recorded constraint still be stated? Not "is the box up" — that is
+  // a question only an ssh dial answers, and asking it here would make recovery
+  // a second scheduler, which is exactly what the port seam exists to prevent.
+  // This asks the cheaper and more useful question: does today's declared
+  // inventory still admit the placement this run had? A platform the hosts file
+  // no longer configures, or a file that has become unreadable, makes the
+  // parent's placement unstateable — and the honest answer is to refuse rather
+  // than to launch a child that will resolve to somewhere else.
+  //
+  // The result is DISCARDED. The child re-resolves from the same inputs (it
+  // inherits the daemon's environment, so `$ODU_HOSTS` resolves identically on
+  // both sides); what happens here is a check, not a decision. A recovery that
+  // picked the lanes would be the second scheduler by another route.
+  try {
+    fanoutPools((input.hosts ?? loadHosts)(), hostPins, scope.platforms);
+  } catch (err) {
+    return {
+      ok: false,
+      code: "no_venue",
+      message:
+        `odu: run ${handle.runId} cannot be replayed where it ran — ` +
+        `${(err as Error).message}`,
+      suggestion: ["odu", "hosts"],
+    };
+  }
   const request: LaunchRequest = {
     checkout: manifest.repoRoot,
     // The child publishes into the SAME catalog as its parent — otherwise a
@@ -656,7 +753,10 @@ async function relaunch(
     // exactly the "a passing selection implies a passing pipeline" confusion
     // this policy refuses elsewhere.
     noPost: true,
-    hostPins: [],
+    // The parent's own constraint, verbatim. Carried for the same reason
+    // `scope.platforms` is: a replay that resolved placement afresh would be a
+    // different run wearing the same lineage.
+    hostPins,
     // A REPLAY never takes a checkout from whatever is running there now. The
     // run it replays has finalized; the thing occupying that checkout is
     // somebody else's, and the honest answer is the coordinator's ordinary

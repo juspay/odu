@@ -44,6 +44,9 @@
  * it may be finishing a write.
  */
 
+import { readFileSync } from "node:fs";
+import { connect } from "node:net";
+import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   contractIsCompatible,
@@ -66,8 +69,13 @@ import {
 } from "@odu/service-client/surface";
 import { Effect } from "effect";
 import { readProcessIdentity } from "./processIdentity";
-import { bakedBuild, spawnWebDaemon, webHome } from "./webDaemonLaunch";
-import { serviceOrigin } from "@odu/service-client/endpoint";
+import {
+  bakedBuild,
+  spawnWebDaemon,
+  webHome,
+  webStderrLog,
+} from "./webDaemonLaunch";
+import { serviceBind, serviceOrigin } from "@odu/service-client/endpoint";
 
 /** The composed contract a control dial speaks: the frozen fragment under the
  *  sibling key the daemon mounts it at, which is also where the framework's own
@@ -139,6 +147,46 @@ async function drain(home: DaemonHomePaths): Promise<void> {
   } finally {
     await link.dispose();
   }
+}
+
+/**
+ * How long the port probe waits for a TCP accept. Loopback, so a listener
+ * answers in microseconds; the budget exists for the case where the origin is
+ * NOT loopback and a packet has to travel.
+ */
+const PORT_PROBE_MS = 1_000;
+
+/**
+ * IS ANYTHING ACCEPTING ON THIS ADDRESS? A raw TCP connect and nothing more.
+ *
+ * Deliberately below the surface protocol. {@link readService} answers "is
+ * there an odu service here", and it collapses two very different silences into
+ * one `null`: nothing is listening, and something is listening that is not
+ * ours. Those need different answers — the first is "start one", the second is
+ * "the port is taken" — and no amount of surface handshaking can tell them
+ * apart, because a foreign program will not speak the handshake either way.
+ * The only question that separates them is the one the kernel can answer.
+ */
+async function whoeverIsListening(origin: string): Promise<number | null> {
+  let bind: { host: string; port: number };
+  try {
+    bind = serviceBind(origin);
+  } catch {
+    // An origin that is not a URL cannot be probed, and this is not the place
+    // to refuse it: the bind attempt downstream says so properly, and naming
+    // the same defect twice in two wordings is worse than naming it once.
+    return null;
+  }
+  return new Promise<number | null>((resolve) => {
+    const socket = connect({ host: bind.host, port: bind.port });
+    const settle = (answer: number | null): void => {
+      socket.destroy();
+      resolve(answer);
+    };
+    socket.setTimeout(PORT_PROBE_MS, () => settle(null));
+    socket.once("connect", () => settle(bind.port));
+    socket.once("error", () => settle(null));
+  });
 }
 
 /** Is the gate free — either absent, or naming a process that is gone? The
@@ -235,6 +283,34 @@ export async function ensureService(
         `answering on ${opts.origin}. It may be wedged; stop it and try again.`,
     };
   }
+
+  // THE PORT BELONGS TO SOMEBODY ELSE — refused here, in a second, rather than
+  // discovered in sixty.
+  //
+  // Nothing answered as an odu service AND no odu daemon holds the gate, so if
+  // the kernel still accepts a connection at this address, the thing accepting
+  // it is not odu's and never will be. Spawning into that costs the daemon a
+  // failed bind (it says so, correctly, to a stderr log nobody is holding) and
+  // costs the caller the entire readiness deadline followed by a sentence that
+  // names no cause. Through `odu mcp` it was worse than useless: the MCP SDK's
+  // own request timeout fires first, so an agent's only account of an occupied
+  // port was `MCP error -32001: Request timed out`.
+  //
+  // A refusal, never a fallback to another port — for the same reason
+  // `serveWebService` refuses: every face derives ONE address, and a service
+  // that relocated would be a service nobody could find.
+  const occupiedPort = await whoeverIsListening(opts.origin);
+  if (occupiedPort !== null) {
+    return {
+      ok: false,
+      message:
+        `odu: cannot serve ${opts.origin} — another program is already ` +
+        `listening on port ${occupiedPort} and it is not an odu service. ` +
+        "odu's web service has ONE address so every face can find it; it will " +
+        "not move to a random one. Stop that program, or move odu with " +
+        "$ODU_WEB_ORIGIN.",
+    };
+  }
   return spawnAndVerify(opts, sleep, pollMs, readyMs, "spawned");
 }
 
@@ -308,12 +384,22 @@ async function spawnAndVerify(
     sleep,
   );
   if (cell === null) {
+    // THE DAEMON'S OWN WORDS, not a paraphrase of the silence. Nobody holds a
+    // detached daemon's stderr, so it writes it to a file in its home — and
+    // this launcher was pointing at that file rather than reading it, which
+    // left a caller with sixty seconds and a sentence naming no cause. Absent
+    // on the systemd branch, where the journal has it instead and the pointer
+    // below is the right answer.
+    const said = daemonSaid(opts.home.dir);
     return {
       ok: false,
       message:
         `odu: started the web service but it did not answer on ${opts.origin} ` +
-        `within ${Math.round(readyMs / 1000)}s. Its own account of why is in ` +
-        "the journal (`journalctl --user -u odu-web-*`) or on stderr.",
+        `within ${Math.round(readyMs / 1000)}s.` +
+        (said === null
+          ? " Its own account of why is in the journal " +
+            "(`journalctl --user -u odu-web-*`)."
+          : ` It said:\n${said}`),
     };
   }
   return {
@@ -324,6 +410,25 @@ async function spawnAndVerify(
     build: cell.build,
     protocolVersion: cell.identity.protocolVersion,
   };
+}
+
+/** The tail of what a spawned daemon said before it gave up, or `null` when it
+ *  left nothing — which on the systemd branch is normal, because the journal
+ *  has it instead.
+ *
+ *  The path comes from `webStderrLog`, which is the module that TELLS the spawn
+ *  driver where to write it. It used to be a second string literal here with a
+ *  comment asking the two to stay equal; the failure that invites is a launcher
+ *  reporting silence from a daemon that said exactly why it died. */
+function daemonSaid(homeDir: string): string | null {
+  try {
+    const text = readFileSync(webStderrLog(homeDir), "utf-8")
+      .trimEnd()
+      .slice(-2_000);
+    return text === "" ? null : text;
+  } catch {
+    return null;
+  }
 }
 
 /** Poll a predicate to a deadline. */

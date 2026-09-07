@@ -66,6 +66,10 @@ export function registerFixtureRun(
   opts: {
     repoRoot: string;
     sha: string;
+    /** The `owner/repo` slug the coordinator parsed from the origin, or null
+     *  for a checkout with no GitHub remote — which is what makes the run's
+     *  commit link derivable, or honestly absent. */
+    repo?: string | null;
     seq?: number | null;
     branch?: string;
     runId?: string;
@@ -80,7 +84,7 @@ export function registerFixtureRun(
   const registered = registerRun(
     {
       runId,
-      repo: null,
+      repo: opts.repo ?? null,
       sha: opts.sha,
       seq: opts.seq === undefined ? 1 : opts.seq,
       pipeline: "default",
@@ -205,6 +209,61 @@ export function writeNode(
   });
 }
 
+/**
+ * Journal a lane's whole state, the way the coordinator does.
+ *
+ * `pool` and `hostsSource` are OMITTED when not given rather than spelled as
+ * empty, because that is the shape a run written before those fields existed
+ * has on disk — and "an old record still folds" is a property a fixture that
+ * always wrote them could not state.
+ */
+export function writeLane(
+  handle: RunHandle,
+  token: OwnershipToken,
+  lane: {
+    platform: string;
+    state: "claiming" | "leased";
+    host?: string | null;
+    pool?: readonly string[];
+    hostsSource?: string | null;
+  },
+  at: number = Date.now(),
+): void {
+  appendEvent(
+    handle,
+    token,
+    {
+      kind: "lane",
+      platform: lane.platform,
+      state: lane.state,
+      host: lane.host ?? null,
+      ...(lane.pool === undefined ? {} : { pool: [...lane.pool] }),
+      ...(lane.hostsSource === undefined ? {} : { hostsSource: lane.hostsSource }),
+    },
+    at,
+  );
+}
+
+/** Journal where the run is in its lifecycle. */
+export function writePhase(
+  handle: RunHandle,
+  token: OwnershipToken,
+  phase: "provisioning" | "lanes" | "no_lanes",
+  at: number = Date.now(),
+): void {
+  appendEvent(handle, token, { kind: "phase", phase }, at);
+}
+
+/** Journal a GitHub context this run owes — the debt `RunEnv.owed` itemises. */
+export function writeDebt(
+  handle: RunHandle,
+  token: OwnershipToken,
+  debt: { context: string; lastError: string; attempts: number },
+  at: number = Date.now(),
+): void {
+  appendEvent(handle, token, { kind: "posting_debt", ...debt }, at);
+}
+
 /** Publish a roster, which is what makes "is this settled" answerable. */
 export function writeRoster(
   handle: RunHandle,
@@ -306,5 +365,18 @@ export function recordingPorts(opts: {
         branch: "main",
         liveRunId: null,
       },
+    // The four ports below reach a machine, a checkout's justfile, or GitHub —
+    // none of which a unit suite has. They refuse rather than answering a
+    // plausible empty inventory, so a test that reaches one by accident says so
+    // instead of asserting against a fiction.
+    pipeline: () => ({ ok: false, message: "the stub reads no pipeline" }),
+    probeVenues: async () => ({ ok: false, message: "the stub probes nothing" }),
+    holdVenue: async () => ({ ok: false, message: "the stub holds nothing" }),
+    releaseVenue: async () => ({ results: [] }),
+    protect: async () => ({
+      ok: false,
+      code: "checkout_refused",
+      message: "the stub writes no rulesets",
+    }),
   };
 }

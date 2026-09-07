@@ -52,6 +52,7 @@ import {
   writeVerdict,
 } from "@odu/run-history/store";
 import type { LaunchRequest, RunLauncher } from "./launcher";
+import type { HostsConfig } from "./hosts";
 import {
   RETRY_DISPATCH_GRACE_MS,
   retryRun,
@@ -70,6 +71,27 @@ const CHECKOUT = mkdtempSync(join(tmpdir(), "odu-recovery-checkout-"));
 const ENDPOINT = join(CHECKOUT, ".ci", "odu.sock");
 const PARENT_RUN = "0000000a-0001";
 const PLATFORM = "x86_64-linux";
+
+/**
+ * The host inventory these tests run against — THEIRS, never the machine's.
+ *
+ * A replay checks that the parent's recorded placement is still expressible
+ * against today's declared inventory, and `loadHosts()` reads whatever hosts
+ * file the developer happens to have. Left to default, every test below would
+ * pass or fail on a fact about the laptop it ran on, and the one that matters
+ * most — a hosts file that CHANGED since the parent ran — could not be stated
+ * at all.
+ */
+const TEST_HOSTS: HostsConfig = {
+  hosts: { [PLATFORM]: ["builder-1"], "aarch64-darwin": ["mac-1"] },
+  source: "/test/hosts.json",
+};
+
+/** `retryRun` with this suite's inventory injected. Every call goes through it
+ *  so no test can accidentally consult the machine. */
+function retry(input: Omit<RetryInput, "hosts"> & { hosts?: () => HostsConfig }) {
+  return retryRun({ hosts: () => TEST_HOSTS, ...input });
+}
 const UNIT = `ci::unit@${PLATFORM}`;
 const E2E = `ci::e2e@${PLATFORM}`;
 const LINT = `ci::lint@${PLATFORM}`;
@@ -91,7 +113,27 @@ function tmpCatalog(): string {
 
 type ManifestInput = Omit<RunManifest, "version" | "registeredBy">;
 
+/**
+ * A manifest, with one sentinel: passing `hostPins: undefined` OMITS the field
+ * rather than writing an empty one.
+ *
+ * The two are different records and the difference is the whole of the
+ * placement contract — `[]` is a run that asked for no pins, ABSENT is a run
+ * whose record predates odu writing them down at all. `optionalKey` refuses a
+ * present-but-`undefined` key on encode, so "absent" cannot be spelled by
+ * assignment and has to be spelled by deletion.
+ */
 function manifest(over: Partial<ManifestInput> = {}): ManifestInput {
+  // Through a mutable alias, because `RunManifest`'s fields are readonly and
+  // "this key is not in the record" has no spelling in the type — which is the
+  // point: production code cannot write an absent field, only an older build
+  // could leave one, and this is the fixture that stands in for that build.
+  const built = { ...manifestBase(over) } as Record<string, unknown>;
+  if ("hostPins" in over && over.hostPins === undefined) delete built.hostPins;
+  return built as unknown as ManifestInput;
+}
+
+function manifestBase(over: Partial<ManifestInput> = {}): ManifestInput {
   return {
     runId: PARENT_RUN,
     repo: "juspay/odu",
@@ -101,6 +143,11 @@ function manifest(over: Partial<ManifestInput> = {}): ManifestInput {
     repoRoot: CHECKOUT,
     createdAt: T0,
     scope: { selectors: ["unit", "e2e"], platforms: [PLATFORM], noDeps: true },
+    // An ordinary unpinned run: the caller named no `--host`, and the record
+    // SAYS so. Spelled here rather than defaulted away, because the difference
+    // between this and the field being absent is what the placement tests below
+    // are about — every run odu registers today writes it.
+    hostPins: [],
     snapshot: { mode: "strict", expectedSha: SHA, dirty: false, retryable: true },
     build: { oduVersion: "0.1.0", self: "/nix/store/x/bin/odu", runnerFlake: null },
     parentRunId: null,
@@ -322,7 +369,7 @@ describe("a retry on a run that is still live", () => {
     const launcher = stubLauncher();
 
     const out = accepted(
-      await retryRun({
+      await retry({
         runId: PARENT_RUN,
         // The whole lane: three targets, of which only two are roots.
         selector: `@${PLATFORM}`,
@@ -373,7 +420,7 @@ describe("a retry on a run that is still live", () => {
     const launcher = stubLauncher();
 
     const out = accepted(
-      await retryRun({
+      await retry({
         runId: PARENT_RUN,
         selector: "unit",
         catalog: { root },
@@ -396,7 +443,7 @@ describe("the live path is attempted, never predicted", () => {
     dial: Dial | undefined,
     launcher: LauncherStub,
   ): Promise<RetryOutcome> {
-    return retryRun({
+    return retry({
       runId: PARENT_RUN,
       selector: "unit",
       catalog: { root },
@@ -474,7 +521,7 @@ describe("the socket is not the run", () => {
     const launcher = stubLauncher();
 
     const out = accepted(
-      await retryRun({
+      await retry({
         runId: PARENT_RUN,
         selector: "unit",
         catalog: { root },
@@ -499,7 +546,7 @@ describe("the socket is not the run", () => {
     const live = stubDial(liveState({ seq: undefined }));
     const launcher = stubLauncher();
 
-    await retryRun({
+    await retry({
       runId: PARENT_RUN,
       selector: "unit",
       catalog: { root },
@@ -519,7 +566,7 @@ describe("relaunching a finalized run", () => {
     const launcher = stubLauncher();
 
     const out = accepted(
-      await retryRun({
+      await retry({
         runId: PARENT_RUN,
         selector: "unit",
         catalog: { root },
@@ -573,7 +620,7 @@ describe("relaunching a finalized run", () => {
     const launcher = stubLauncher();
 
     accepted(
-      await retryRun({
+      await retry({
         runId: PARENT_RUN,
         selector: "e2e",
         catalog: { root },
@@ -590,6 +637,241 @@ describe("relaunching a finalized run", () => {
   });
 });
 
+/**
+ * WHERE a run was allowed to happen is part of what it was.
+ *
+ * A finalized retry builds its child's `LaunchRequest` from the parent's
+ * durable record, and that request used to carry `hostPins: []` — which is not
+ * "the parent asked for no pins" but "do not carry the question". Nothing in
+ * the child then constrained placement, so it resolved against whatever the
+ * ambient hosts file said at retry time. A parent confined to one named machine
+ * came back fanned out over a pool, under a run id that says it is a replay of
+ * the confined one, with no line anywhere saying it had moved.
+ *
+ * The pins are the CONSTRAINT the caller stated. Deliberately not the
+ * `Placement.host` an attempt recorded: that is the machine a lease handed out,
+ * which for a multi-host pool is an accident of who was free, and freezing it
+ * would answer a question the user never asked.
+ */
+describe("a replay runs where its parent was allowed to run", () => {
+  it("replays the parent's pins, whatever the hosts file says today", async () => {
+    const root = tmpCatalog();
+    // The parent was confined to one box. The ambient hosts file this test's
+    // machine has is irrelevant and is never consulted — which is the point: a
+    // pin overrides the file, so replaying the pin is what makes the retry
+    // independent of a file that has since been edited.
+    aFinishedRun(root, { hostPins: [`${PLATFORM}=builder-7.internal`] });
+    const launcher = stubLauncher();
+
+    accepted(
+      await retry({
+        runId: PARENT_RUN,
+        selector: "unit",
+        catalog: { root },
+        launcher: launcher.launcher,
+      }),
+    );
+
+    const request = launcher.calls[0];
+    if (request === undefined) throw new Error("nothing was launched");
+    expect(request.hostPins).toEqual([`${PLATFORM}=builder-7.internal`]);
+  });
+
+  it("keeps every pin, not just the platform being retried", async () => {
+    // A retry of `unit` still carries the pin for a platform `unit` does not
+    // run on. Dropping it would be a placement decision made by the retry path
+    // on the strength of a selector, and the selector expands to a dependency
+    // closure whose platforms are the child coordinator's to work out.
+    const root = tmpCatalog();
+    const pins = [`${PLATFORM}=builder-7.internal`, "aarch64-darwin=mac-2"];
+    aFinishedRun(root, { hostPins: pins });
+    const launcher = stubLauncher();
+
+    accepted(
+      await retry({
+        runId: PARENT_RUN,
+        selector: "unit",
+        catalog: { root },
+        launcher: launcher.launcher,
+      }),
+    );
+
+    expect(launcher.calls[0]?.hostPins).toEqual(pins);
+  });
+
+  it("does not widen when the hosts file gained machines since the parent ran", async () => {
+    // THE SCENARIO THE FIELD EXISTS FOR. The parent was pinned to one box; by
+    // the time it is retried, somebody has added three more machines to the
+    // platform's pool. Without the recorded pin the child resolves against the
+    // new file and fans out over all four — a placement the user never asked
+    // for, on a run whose id says it is a replay of the confined one.
+    const root = tmpCatalog();
+    aFinishedRun(root, { hostPins: [`${PLATFORM}=builder-7.internal`] });
+    const launcher = stubLauncher();
+    const widened: HostsConfig = {
+      hosts: { [PLATFORM]: ["builder-1", "builder-2", "builder-3", "builder-4"] },
+      source: "/test/hosts-after.json",
+    };
+
+    accepted(
+      await retry({
+        runId: PARENT_RUN,
+        selector: "unit",
+        catalog: { root },
+        launcher: launcher.launcher,
+        hosts: () => widened,
+      }),
+    );
+
+    // The pin still names the one machine, so `resolvePools` will collapse that
+    // four-host pool back to it — which is what "did not widen" means, stated
+    // where it can be checked rather than inferred.
+    expect(launcher.calls[0]?.hostPins).toEqual([
+      `${PLATFORM}=builder-7.internal`,
+    ]);
+  });
+
+  it("refuses when today's inventory cannot express the parent's placement", async () => {
+    // `--platform` slices the fanout, and a platform the hosts file no longer
+    // configures makes the slice unstateable — `resolvePools` throws rather
+    // than quietly dropping it. Launching anyway would start a child that
+    // resolves to a DIFFERENT set of lanes than the run it claims to replay.
+    const root = tmpCatalog();
+    aFinishedRun(root, { hostPins: [] });
+    const launcher = stubLauncher();
+    const gone: HostsConfig = {
+      hosts: { "aarch64-darwin": ["mac-1"] },
+      source: "/test/hosts-after.json",
+    };
+
+    const out = refused(
+      await retry({
+        runId: PARENT_RUN,
+        selector: "unit",
+        catalog: { root },
+        launcher: launcher.launcher,
+        hosts: () => gone,
+      }),
+    );
+
+    expect(out.code).toBe("no_venue");
+    expect(out.message).toContain("cannot be replayed where it ran");
+    // The engine's own sentence, carried through rather than reworded — it
+    // knows which platform lost its host and this layer does not.
+    expect(out.message).toContain(PLATFORM);
+    expect(out.suggestion).toEqual(["odu", "hosts"]);
+    expect(launcher.calls).toEqual([]);
+  });
+
+  it("narrows an unnamed platform set to the lanes the parent actually had", async () => {
+    // WIDENING WITHOUT A PIN. `scope.platforms: []` means "whatever the fanout
+    // resolves to", and the fanout resolves against TODAY's hosts file — so a
+    // platform added since the parent ran would get the retried selector
+    // dispatched onto it, on a run whose id says it is a replay. No `--host`
+    // needs to be involved for this to happen, which is why the pins alone are
+    // not enough.
+    //
+    // `aFinishedRun` journals a lane for PLATFORM (via `PLACEMENT`), so the
+    // parent's real lane set is knowable and is what the child gets.
+    const root = tmpCatalog();
+    aFinishedRun(root, {
+      scope: { selectors: ["unit"], platforms: [], noDeps: false },
+      hostPins: [],
+    });
+    const launcher = stubLauncher();
+
+    accepted(
+      await retry({
+        runId: PARENT_RUN,
+        selector: "unit",
+        catalog: { root },
+        launcher: launcher.launcher,
+        hosts: () => ({
+          hosts: { [PLATFORM]: ["builder-1"], "aarch64-darwin": ["mac-1"] },
+          source: "/test/hosts-after.json",
+        }),
+      }),
+    );
+
+    expect(launcher.calls[0]?.scope.platforms).toEqual([PLATFORM]);
+  });
+
+  it("replays an explicitly unpinned parent as unpinned", async () => {
+    // `[]` is a recorded answer, not a missing one, and it must not be confused
+    // with the refusal below.
+    const root = tmpCatalog();
+    aFinishedRun(root, { hostPins: [] });
+    const launcher = stubLauncher();
+
+    accepted(
+      await retry({
+        runId: PARENT_RUN,
+        selector: "unit",
+        catalog: { root },
+        launcher: launcher.launcher,
+      }),
+    );
+
+    expect(launcher.calls[0]?.hostPins).toEqual([]);
+  });
+
+  it("refuses a record that predates placement evidence, and starts nothing", async () => {
+    // The case an empty array cannot express. A record written by an older odu
+    // does not say whether the run was pinned, and the two possible answers
+    // differ by "dispatch work onto every machine in the pool" — so the honest
+    // move is to refuse and let a person state the placement they want.
+    const root = tmpCatalog();
+    aFinishedRun(root, { hostPins: undefined });
+    const launcher = stubLauncher();
+
+    const out = refused(
+      await retry({
+        runId: PARENT_RUN,
+        selector: "unit",
+        catalog: { root },
+        launcher: launcher.launcher,
+      }),
+    );
+
+    expect(out.code).toBe("not_replayable");
+    expect(out.message).toContain("placement evidence");
+    expect(out.message).toContain("--host");
+    // A recovery the caller can run, as argv.
+    expect(out.suggestion).toEqual(["odu", "run", "unit", "e2e"]);
+    // And above all: nothing was launched anywhere.
+    expect(launcher.calls).toEqual([]);
+  });
+
+  it("does not refuse a LIVE retry for want of placement evidence", async () => {
+    // The refusal is scoped to a REPLAY, and it has to be. A live retry resets
+    // nodes on a coordinator that is still up — placement is that coordinator's
+    // already-resolved lanes, not something this path reconstructs — so an old
+    // record with no pins recorded has nothing missing that a live retry needs.
+    // Refusing it would take away the cheaper recovery on the strength of a
+    // fact only the expensive one depends on.
+    const root = tmpCatalog();
+    aRun(root, ENDPOINT, { hostPins: undefined });
+    const launcher = stubLauncher();
+    const dial = stubDial(liveState());
+
+    const out = accepted(
+      await retry({
+        runId: PARENT_RUN,
+        selector: "unit",
+        catalog: { root },
+        launcher: launcher.launcher,
+        dial: dial.dial,
+      }),
+    );
+
+    expect(out.receipt.mode).toBe("live");
+    expect(out.receipt.effective_run).toBe(PARENT_RUN);
+    // The coordinator was asked, and nothing was relaunched.
+    expect(dial.asked).toEqual([UNIT]);
+    expect(launcher.calls).toEqual([]);
+  });
+});
+
 describe("a run whose inputs were never committed", () => {
   it("is refused rather than replaced by a run of today's tree", async () => {
     // The substitution the whole design forbids: a dirty working tree exists
@@ -601,7 +883,7 @@ describe("a run whose inputs were never committed", () => {
     const launcher = stubLauncher();
 
     const out = refused(
-      await retryRun({
+      await retry({
         runId: PARENT_RUN,
         selector: "unit",
         catalog: { root },
@@ -632,7 +914,7 @@ describe("a run whose inputs were never committed", () => {
     });
     const launcher = stubLauncher();
     const ask = (): Promise<RetryOutcome> =>
-      retryRun({
+      retry({
         runId: PARENT_RUN,
         selector: "unit",
         requestId: "the-same-id",
@@ -658,7 +940,7 @@ describe("a run whose inputs were never committed", () => {
     const launcher = stubLauncher();
 
     const out = refused(
-      await retryRun({
+      await retry({
         runId: PARENT_RUN,
         selector: "unit",
         catalog: { root },
@@ -680,7 +962,7 @@ describe("expectAttempt", () => {
     const launcher = stubLauncher();
 
     const out = refused(
-      await retryRun({
+      await retry({
         runId: PARENT_RUN,
         selector: "unit",
         expectAttempt: { node: UNIT, attempt: 2 },
@@ -701,7 +983,7 @@ describe("expectAttempt", () => {
     const launcher = stubLauncher();
 
     const out = accepted(
-      await retryRun({
+      await retry({
         runId: PARENT_RUN,
         selector: "unit",
         expectAttempt: { node: UNIT, attempt: 1 },
@@ -753,7 +1035,7 @@ describe("a request id asked twice", () => {
 
     accepted(await retryRun(sameRequest(root, launcher)));
     const out = refused(
-      await retryRun({ ...sameRequest(root, launcher), selector: "e2e" }),
+      await retry({ ...sameRequest(root, launcher), selector: "e2e" }),
     );
 
     expect(out.message).toContain("already used for a different retry");
@@ -944,7 +1226,7 @@ describe("a reply that was lost mid-flight", () => {
      *  whole post-grace branch turns on, so every test states it. */
     claimantAlive = false,
   ): Promise<RetryOutcome> {
-    return retryRun({
+    return retry({
       runId: PARENT_RUN,
       selector: "unit",
       requestId: REQUEST,
@@ -966,7 +1248,7 @@ describe("a reply that was lost mid-flight", () => {
     const launcher = stubLauncher();
 
     const out = accepted(
-      await retryRun({
+      await retry({
         runId: PARENT_RUN,
         selector: "unit",
         requestId: REQUEST,
@@ -994,7 +1276,7 @@ describe("a reply that was lost mid-flight", () => {
     aRun(root, ENDPOINT);
     const dial = stubDial(liveState());
 
-    await retryRun({
+    await retry({
       runId: PARENT_RUN,
       selector: "unit",
       catalog: { root },
@@ -1018,7 +1300,7 @@ describe("a reply that was lost mid-flight", () => {
     const warnings: string[] = [];
 
     const out = accepted(
-      await retryRun({
+      await retry({
         runId: PARENT_RUN,
         selector: "unit",
         requestId: REQUEST,
@@ -1042,7 +1324,7 @@ describe("a reply that was lost mid-flight", () => {
     const warnings: string[] = [];
 
     accepted(
-      await retryRun({
+      await retry({
         runId: PARENT_RUN,
         selector: "unit",
         requestId: REQUEST,
@@ -1273,7 +1555,7 @@ describe("a reply that was lost mid-flight", () => {
     const dial = stubDial(liveState(), (id) => id === UNIT);
 
     const out = refused(
-      await retryRun({
+      await retry({
         runId: PARENT_RUN,
         selector: `@${PLATFORM}`,
         requestId: REQUEST,
@@ -1292,7 +1574,7 @@ describe("a reply that was lost mid-flight", () => {
     // request, or the digest would make it a conflict — is told the truth
     // rather than handed a cached unqualified success.
     const again = refused(
-      await retryRun({
+      await retry({
         runId: PARENT_RUN,
         selector: `@${PLATFORM}`,
         requestId: REQUEST,
@@ -1319,7 +1601,7 @@ describe("a reply that was lost mid-flight", () => {
     const launcher = stubLauncher();
 
     const out = refused(
-      await retryRun({
+      await retry({
         runId: PARENT_RUN,
         selector: "unit",
         requestId: REQUEST,
@@ -1353,7 +1635,7 @@ describe("a reply that was lost mid-flight", () => {
     const launcher = stubLauncher();
 
     const out = refused(
-      await retryRun({
+      await retry({
         runId: PARENT_RUN,
         selector: "unit",
         expectAttempt: { node: UNIT, attempt: 2 },
@@ -1380,7 +1662,7 @@ describe("a reply that was lost mid-flight", () => {
     aRun(root, ENDPOINT);
     const dial = stubDial(liveState());
 
-    await retryRun({
+    await retry({
       runId: PARENT_RUN,
       selector: `@${PLATFORM}`,
       expectAttempt: { node: UNIT, attempt: 2 },
@@ -1403,7 +1685,7 @@ describe("a reply that was lost mid-flight", () => {
     const root = tmpCatalog();
     const handle = aRun(root, ENDPOINT);
     const guarded = (): Promise<RetryOutcome> =>
-      retryRun({
+      retry({
         runId: PARENT_RUN,
         selector: "unit",
         requestId: REQUEST,
@@ -1463,7 +1745,7 @@ describe("a reply that was lost mid-flight", () => {
     claimByHand(handle, "0000000b-0002");
 
     const out = refused(
-      await retryRun({
+      await retry({
         runId: PARENT_RUN,
         selector: "unit",
         requestId: REQUEST,
@@ -1620,7 +1902,7 @@ describe("a reply that was lost mid-flight", () => {
       },
     });
 
-    await retryRun({
+    await retry({
       runId: PARENT_RUN,
       selector: "unit",
       requestId: REQUEST,
@@ -1692,7 +1974,7 @@ describe("requests that never get as far as a decision", () => {
     const launcher = stubLauncher();
 
     const out = refused(
-      await retryRun({
+      await retry({
         runId: "0000000z-9999",
         selector: "unit",
         catalog: { root },
@@ -1709,7 +1991,7 @@ describe("requests that never get as far as a decision", () => {
     const launcher = stubLauncher();
 
     const out = refused(
-      await retryRun({
+      await retry({
         runId: PARENT_RUN,
         selector: "unit",
         requestId: "../../etc/passwd",
