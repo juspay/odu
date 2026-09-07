@@ -103,33 +103,66 @@ export function waitExitFor(answer: AttentionAnswer): number {
 
 // ── the connection ──────────────────────────────────────────────────────────
 
-/** Do one thing with the service and let go.
+/** Do one thing with the service and let go, answering with a process exit.
  *
  *  `dispose` is not bookkeeping: the link holds the dial, ping and response
- *  fibers, and a command that dropped it would be a process that never exits. */
-export async function withService<T>(
+ *  fibers, and a command that dropped it would be a process that never exits.
+ *
+ *  The return is a `number` rather than a generic because every caller is a
+ *  COMMAND, and a command's answer is its exit code — which is also what lets
+ *  a failure to reach the service be reported as an exit rather than escaping
+ *  as a rejection. See {@link dial}. */
+export async function withService(
   origin: string | undefined,
-  use: (client: OduServiceClient) => Promise<T>,
-): Promise<T> {
-  const connection = await connectOrStart(origin ?? serviceOrigin());
+  use: (client: OduServiceClient) => Promise<number>,
+): Promise<number> {
+  const dialled = await dial(origin);
+  if (typeof dialled === "number") return dialled;
   try {
-    return await use(connection.client);
+    return await use(dialled.client);
   } finally {
-    await connection.dispose();
+    await dialled.dispose();
+  }
+}
+
+/**
+ * Reach the service, or turn the failure into an EXIT rather than a rejection.
+ *
+ * `connectOrStart` rejects when it cannot dial and cannot start — an occupied
+ * port, a misbuilt package, a daemon that will not come up. Left to reject, it
+ * unwound to `src/main.ts`'s catch-all, which prints the message and exits 1 —
+ * the code this file's own table reserves for "there is a failure to act on",
+ * i.e. red CI. A script branching on that exit would have read "your tests
+ * failed" from a machine where odu never started, which is the single most
+ * misleading answer available.
+ *
+ * Exit 3 is the honest one and it is already the documented "nothing serving".
+ */
+async function dial(
+  origin: string | undefined,
+): Promise<ServiceConnection | number> {
+  try {
+    return await connectOrStart(origin ?? serviceOrigin());
+  } catch (err) {
+    process.stderr.write(
+      `${String((err as { message?: unknown }).message ?? err)}\n`,
+    );
+    return WAIT_EXITS.ownerLost;
   }
 }
 
 /** The same, for the readers that need the raw dispatch as well as the typed
  *  face — see {@link readRows} on why a collection is reached that way. */
-export async function withConnection<T>(
+export async function withConnection(
   origin: string | undefined,
-  use: (connection: ServiceConnection) => Promise<T>,
-): Promise<T> {
-  const connection = await connectOrStart(origin ?? serviceOrigin());
+  use: (connection: ServiceConnection) => Promise<number>,
+): Promise<number> {
+  const dialled = await dial(origin);
+  if (typeof dialled === "number") return dialled;
   try {
-    return await use(connection);
+    return await use(dialled);
   } finally {
-    await connection.dispose();
+    await dialled.dispose();
   }
 }
 
@@ -232,6 +265,18 @@ export function reportFailure(
  *  is a property of where the bytes go rather than of the terminal. */
 export function emitJson(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+/** ONE LINE, no indentation — for a stream of values rather than a single
+ *  answer.
+ *
+ *  `emitJson` pretty-prints, which is right for a command that emits one object
+ *  and wrong for a follow: `odu logs -f -o json` promised NDJSON in its own
+ *  comment, in the usage text and in the docs, and emitted an indented object
+ *  spanning many lines per page. An agent reading it line by line got fragments
+ *  that do not parse. */
+export function emitJsonLine(value: unknown): void {
+  process.stdout.write(`${JSON.stringify(value)}\n`);
 }
 
 // ── what the caller meant ───────────────────────────────────────────────────

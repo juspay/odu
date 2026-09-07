@@ -97,7 +97,9 @@ wait --run R [--after CURSOR] [--deadline-ms N] [--settle] [-o json]
                               # red · 3 owner lost · 4 no such run · 5 refused
 rerun --run R [--request-id ID] [--expect-attempt N] [-o json] <selector>
                               # a new attempt if its coordinator is still up,
-                              # else a new linked run. odu decides, and says so
+                              # else a new linked run. odu decides, and says so.
+                              # --expect-attempt guards one node against having
+                              # moved on, so the selector must be a full node id
 cancel --run R [node|@platform] [--request-id ID] [-o json]
                               # bare = whole run; node or @plat = partial
 logs <log-key> [-f] [--offset B] [--limit B] [--wait-ms N] [-o json]
@@ -507,14 +509,31 @@ async function dispatch(argv: string[]): Promise<number> {
         );
       }
       // `--expect-attempt` guards against acting on a stale reading, so it has
-      // to name WHICH node it is about. It used to be a bare number resolved
-      // against the selector, which could not express the guard when the
-      // selector matched more than one node.
+      // to name WHICH node it is about — and the only node it can name is the
+      // selector, because there is nowhere else to put one.
+      //
+      // So it is refused for a selector that is not a node id. `odu rerun` also
+      // takes `@platform` and a bare recipe name, both of which can match
+      // several nodes; the guard looks its argument up as a node id, finds
+      // nothing, and the service refuses `stale_attempt` — a refusal about a
+      // run that has moved on, for a request that was merely unaskable. A usage
+      // error naming the reason is the honest answer.
+      const target = positionals[0];
+      // `indexOf("@") > 0`, not `includes("@")`: a node id is
+      // `<namepath>@<platform>`, and a LANE selector is `@<platform>` — which
+      // contains an `@` and names no node at all.
+      if (values["expect-attempt"] !== undefined && target.indexOf("@") <= 0) {
+        throw new Error(
+          `odu: --expect-attempt names one node's attempt, but "${target}" is ` +
+            "a recipe or a lane, which can match several. Give the full node " +
+            "id (`ci::unit@x86_64-linux`), or drop the guard.",
+        );
+      }
       const expect =
         values["expect-attempt"] === undefined
           ? undefined
           : {
-              node: positionals[0],
+              node: target,
               attempt: positiveInt("--expect-attempt", values["expect-attempt"]),
             };
       return retryViaService({

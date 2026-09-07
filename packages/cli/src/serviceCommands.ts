@@ -58,6 +58,7 @@ import {
   call,
   checkoutHere,
   emitJson,
+  emitJsonLine,
   firstFrame,
   formatAgo,
   git,
@@ -696,9 +697,11 @@ export async function followLog(
     }
 
     if (opts.json) {
-      // One complete page per line: an agent reads NDJSON and never has to
-      // reassemble a value split across writes.
-      if (page.text !== "" || !page.open) emitJson(page);
+      // One complete page per LINE — `emitJsonLine`, not `emitJson`. The
+      // pretty-printer spans many lines per page, so an agent reading this
+      // stream line by line got fragments that do not parse, from a branch
+      // whose whole promise is NDJSON.
+      if (page.text !== "" || !page.open) emitJsonLine(page);
     } else if (page.text !== "") {
       process.stdout.write(page.text);
     }

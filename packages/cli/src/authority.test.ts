@@ -249,18 +249,28 @@ describe("the authority wall", () => {
     expect(reachedFromMain.length).toBeGreaterThan(5);
   });
 
-  it("classifies every module main.ts reaches, on purpose", () => {
-    // THE ASSERTION THAT MAKES FORGETTING IMPOSSIBLE. Every `@odu/cli/*` import
-    // in `main.ts` is either a public client (walled) or a named service root
-    // (exempt, with its reason above). A new one is neither until somebody
-    // decides, and until then this fails — which is the opposite of the old
-    // literal list, where a new one was silently unpoliced.
+  it("keeps the exempt set exactly these two, and no more", () => {
+    // THE PRESSURE IS ON THE EXEMPTIONS, and it took a review to see that.
+    //
+    // This assertion used to compare `[...PUBLIC_CLIENTS, ...SERVICE_ROOTS]`
+    // against `reachedFromMain` and call itself "the assertion that makes
+    // forgetting impossible". `PUBLIC_CLIENTS` is DEFINED as
+    // `reachedFromMain \ SERVICE_ROOTS`, so it was comparing (A \ S) ∪ (S ∩ A)
+    // to A — equal for every possible input, and incapable of failing.
+    //
+    // A new import into `main.ts` was never the danger: it lands in
+    // `PUBLIC_CLIENTS` by default and gets walled. The danger is the other
+    // direction — adding a name to `SERVICE_ROOTS` silently removes that module
+    // AND its whole transitive closure from the walk, which is the one edit
+    // that can quietly un-police the engine. So the exempt set is pinned to a
+    // literal here: growing it is a diff a reviewer sees and has to agree with.
     expect(
-      [...PUBLIC_CLIENTS, ...SERVICE_ROOTS.filter((r) => reachedFromMain.includes(r))].sort(),
-      "src/main.ts imports an @odu/cli module this test has not classified. " +
-        "Add it to SERVICE_ROOTS with the reason it is the service rather than " +
-        "a face onto it — or leave it out, and it will be walled as a client.",
-    ).toEqual(reachedFromMain);
+      [...SERVICE_ROOTS].sort(),
+      "SERVICE_ROOTS changed. Every name here is a module the wall STOPS " +
+        "walking, so adding one removes it and everything it imports from the " +
+        "policed set. That is occasionally right — `web.ts` IS the service — " +
+        "and it is never something to do in passing.",
+    ).toEqual(["internalCli.ts", "web.ts"]);
   });
 
   it("names no service root that main.ts has stopped importing", () => {

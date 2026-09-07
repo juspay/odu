@@ -78,11 +78,11 @@ function currentRun(rows: readonly RunRow[], checkout: string): RunRow | undefin
 /** The frame both commands start from: the board resolved to a run, then that
  *  run's first nodes frame. Split out because `status` prints it once and
  *  `attach` keeps reading, and the resolution must not be two implementations. */
-async function openHere<T>(
+async function openHere(
   opts: HereRunOpts,
-  use: (client: OduServiceClient, row: RunRow) => Promise<T>,
-  none: () => T,
-): Promise<T> {
+  use: (client: OduServiceClient, row: RunRow) => Promise<number>,
+  none: () => number,
+): Promise<number> {
   const checkout = checkoutHere(opts.cwd);
   return withConnection(opts.origin, async (connection) => {
     const rows = await readRows(connection.dispatch);
