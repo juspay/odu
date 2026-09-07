@@ -185,9 +185,18 @@ export const ServiceIdentitySchema = Schema.Struct({
 });
 export type ServiceIdentity = typeof ServiceIdentitySchema.Type;
 
-/** Which BUILD is serving. Every field is nullable because a source run
- *  (`bun src/main.ts`) has no wrapper to name — reported as null rather than
- *  as a plausible-looking blank. */
+/** Which BUILD is serving.
+ *
+ *  `buildId` and `self` identify the PACKAGE and are baked unconditionally by
+ *  the Nix wrapper — a daemon reporting null for either is misbuilt, and
+ *  `assertPackaged` refuses to start one. `commit` is separate PROVENANCE and
+ *  is genuinely optional: a dirty tree is still a complete Nix package, it just
+ *  has no navigable commit to offer.
+ *
+ *  The fields stay NULLABLE on the wire even so, because `UNKNOWN_SERVICE` is
+ *  what a client reads before the first frame arrives — a pre-connect default
+ *  is not a claim about a build. The packaging rule is enforced at the daemon's
+ *  own startup, which is where it belongs. */
 export const ServiceBuildSchema = Schema.Struct({
   oduVersion: Schema.String,
   /** The commit the build was made from, when the build baked one. */

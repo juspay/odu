@@ -50,8 +50,8 @@ import {
   surfaceHelp,
 } from "@kolu/surface-cli";
 import { ODU_VERSION } from "@odu/execution/common/version";
-import { dialService } from "@odu/service-client/dial";
 import { serviceOrigin } from "@odu/service-client/endpoint";
+import { connectOrStart } from "./webLauncher";
 import { oduServiceSurface } from "@odu/service-client/surface";
 import { ODU_SERVICE_EXPOSE } from "@odu/service-client/verbs";
 import { Effect } from "effect";
@@ -74,7 +74,17 @@ const endpoint: EndpointSeam<typeof endpointFlags> = {
       // resolution order is walked once.
       where: values.origin,
       open: async (): Promise<SurfaceCliConnection> => {
-        const connection = await dialService(values.origin);
+        // BOOTSTRAP, not just dial. On a fresh machine there is no daemon, and
+        // this face holds no run authority of its own — so "nothing is serving"
+        // used to be the end of the story for a first-time caller. It starts
+        // one and uses it, and it NEVER recovers a failed dial by doing the
+        // work locally.
+        //
+        // Only when the caller meant the singleton: `connectOrStart` starts
+        // nothing for an explicitly named `--origin`, so a typo reports that
+        // nothing is serving there rather than spawning a daemon that could not
+        // bind the address anyway.
+        const connection = await connectOrStart(values.origin);
         return {
           // The degenerate rooted bundle: one unprefixed core, no siblings, so
           // every argv spelling is the bare one.
@@ -137,7 +147,8 @@ const help: SurfaceCliHelp = {
   answer:
     "Exit 0 is a call that was answered — including an answer that reports red " +
     "CI or a deadline. Exit 1 is a refusal odu declared. Exit 3 is nothing " +
-    "serving: run `odu web --background`.",
+    "serving — which at the default origin means odu tried to start the " +
+    "service and could not, and says why.",
 };
 
 const projection = {

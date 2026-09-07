@@ -185,17 +185,43 @@ let
     # commit the shell reports comes from the dist, so a hand-pointed one
     # reports itself honestly rather than claiming the wrapper's identity.
     #
-    # ODU_COMMIT_HASH and ODU_BUILD_ID are baked TOGETHER or not at all — the
-    # frozen control contract's own rule. A supervisor deciding whether to
-    # recycle a running daemon reads the pair, and a half-set identity is
-    # refused rather than guessed at. A dirty tree has no navigable commit, so
-    # it bakes neither and the daemon honestly reports itself as off-nix.
+    # ODU_BUILD_ID IS THIS DERIVATION, AND IT IS UNCONDITIONAL.
+    #
+    # Two things were wrong with baking `base.outPath` under `selfRev != null`.
+    #
+    # It named the wrong thing. `base` is the hydrated SOURCE tree; the binary a
+    # user actually runs is composed outside it — this wrapper, the web-ui
+    # bundle, the pinned bun/git/gh/just/openssh, the binary-cache declaration,
+    # the runner flake. Bumping `pkgs.gh` or editing nix/binary-cache.nix
+    # produced a materially different application with an IDENTICAL build id,
+    # and `ensureService` uses that id to decide whether an explicit upgrade is
+    # needed. `$out` is the out-path of the complete package, so it covers every
+    # input of the thing that runs — which is what an identity has to do.
+    #
+    # And it was gated on a navigable commit, which is a DIFFERENT fact. A dirty
+    # local tree still produces a complete, hash-identified Nix package; calling
+    # it "off-nix" and refusing it an identity made the singleton's compatible
+    # -reuse branch permanently dead on every developer machine. So identity is
+    # unconditional and provenance stays optional beside it.
+    #
+    # This deviates from `@kolu/surface-daemon`'s `readBakedIdentity`, which
+    # requires the pair or neither on the premise that "a Nix build id means the
+    # source commit was knowable". That premise does not hold for a dirty build,
+    # so odu reads the two env vars itself (see `bakedBuild`) rather than
+    # adopting a rule that would erase the identity of a real package.
+    #
+    # The full store path, not its basename: `ServiceBuild.self` already carries
+    # `$out/bin/odu`, so the basename is derivable from what is already on the
+    # wire, and the full path is the thing an operator can hand to
+    # `nix path-info` when a mismatch has to be explained.
     makeWrapper ${pkgs.bun}/bin/bun $out/bin/odu \
       --add-flags "${base}/src/main.ts" \
       --set-default ODU_GH_BIN "${pkgs.gh}/bin/gh" \
       --set ODU_SELF "$out/bin/odu" \
       --set-default ODU_WEB_DIST "${web-ui}" \
-      ${pkgs.lib.optionalString (selfRev != null) ''--set ODU_COMMIT_HASH "${selfRev}" --set ODU_BUILD_ID "${builtins.baseNameOf base.outPath}"''} \
+      --set ODU_BUILD_ID "$out" \
+      --set ODU_OSFACTS_BIN "${pkgs.osfacts}/bin/osfacts" \
+      ${pkgs.lib.optionalString (selfRev != null) ''--set ODU_COMMIT_HASH "${selfRev}"''} \
       --set ODU_AGENT_SUBSTITUTERS "${pkgs.lib.concatStringsSep " " binaryCache.substituters}" \
       --set ODU_AGENT_TRUSTED_PUBLIC_KEYS "${pkgs.lib.concatStringsSep " " binaryCache.trustedPublicKeys}" \
       ${pkgs.lib.optionalString (selfFlake != null) ''--set ODU_RUNNER_FLAKE "${selfFlake}"''} \

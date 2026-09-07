@@ -58,37 +58,25 @@
  */
 
 import { hostname } from "node:os";
-import { join } from "node:path";
-import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
   claimPidGate,
-  daemonHome,
   daemonMain,
   type DaemonExit,
   gateIdentity,
   type Logger,
   stderrLogger,
 } from "@kolu/surface-daemon";
-import { survivableSpawnDriver } from "@kolu/surface-daemon-supervisor";
 import { parseAllowedOrigins } from "@kolu/surface/ws-origin";
 import { reportSurfaceAppEvent, serveSurfaceApp } from "@kolu/surface-app/serve";
 import { runSocketPath } from "@odu/run-client/dial";
-import {
-  ODU_CHILD_ENV_KEYS,
-  pickEnv,
-  survivableSpawnPlan,
-} from "@odu/execution/coordinator/spawn";
 import { gitTopLevel } from "@odu/execution/common/git";
 import { ODU_VERSION } from "@odu/execution/common/version";
 import {
-  DEFAULT_SERVICE_ORIGIN,
-  SERVICE_APP,
   serviceBind,
   serviceMcpUrl,
   serviceOrigin,
 } from "@odu/service-client/endpoint";
-import type { ServiceBuild } from "@odu/service-client/surface";
 import { createOduService } from "@odu/service/service";
 import { Effect, Exit, Layer, Scope } from "effect";
 import { HttpRouter } from "effect/unstable/http";
@@ -101,6 +89,12 @@ import {
 } from "./serviceMcp";
 import { webPorts } from "./webPorts";
 import {
+  assertPackaged,
+  bakedBuild,
+  spawnWebDaemon,
+  webHome,
+} from "./webDaemonLaunch";
+import {
   clearTheGate,
   ensureService,
   type EnsureOutcome,
@@ -112,62 +106,7 @@ import {
   type WebAuthority,
 } from "./webAuthority";
 
-/** Where the browser bundle lives. Baked by the Nix wrapper; absent in a source
- *  run, where the service still serves its wire and simply has no page. */
-const DIST_ENV = "ODU_WEB_DIST";
 
-/**
- * ONE GATE PER ADDRESS.
- *
- * `ODU_WEB_ORIGIN` is documented as moving the whole service, so a developer
- * can run a second odu against a scratch catalog. It moved the address and not
- * the gate: both services computed `~/.local/state/odu-web/`, so the second one
- * read a live holder there and yielded — to a daemon serving a different port
- * and a different catalog. A singleton is per-address or it is not a singleton,
- * and the two spellings of "which service am I" have to be one.
- *
- * The default origin keeps the plain namespace, so nothing about an ordinary
- * install moves. Any other origin gets its own, named by a digest of the origin
- * rather than by the port alone — `http://127.0.0.1:9000` and
- * `http://[::1]:9000` are two addresses.
- */
-export function webAppNamespace(origin: string): string {
-  if (origin === DEFAULT_SERVICE_ORIGIN) return SERVICE_APP;
-  const digest = createHash("sha256").update(origin).digest("hex").slice(0, 12);
-  return `${SERVICE_APP}-${digest}`;
-}
-
-/** The daemon's own home — the same call the launcher makes, so the two cannot
- *  disagree about where the gate and the control socket are. */
-export function webHome(
-  origin: string = serviceOrigin(),
-): ReturnType<typeof daemonHome> {
-  return daemonHome({ app: webAppNamespace(origin), placement: "state" });
-}
-
-/**
- * WHICH BUILD this is, as a pair or as nothing.
- *
- * The frozen control contract requires `commit` and `buildId` to be both
- * present or both absent, and it is right to: a supervisor recognises a running
- * daemon by its build, and a half-set identity would let one axis claim to
- * match while the other said nothing. So a half-baked wrapper reads as UNKNOWN
- * here rather than as half-known — the same rule the Nix wrapper keeps on the
- * other side, enforced again on this one, because a wrapper is a thing somebody
- * edits.
- */
-export function bakedBuild(): ServiceBuild {
-  const commit = process.env.ODU_COMMIT_HASH?.trim();
-  const buildId = process.env.ODU_BUILD_ID?.trim();
-  const both =
-    commit !== undefined && commit !== "" && buildId !== undefined && buildId !== "";
-  return {
-    oduVersion: ODU_VERSION,
-    commit: both ? (commit as string) : null,
-    buildId: both ? (buildId as string) : null,
-    self: process.env.ODU_SELF ?? null,
-  };
-}
 
 /** The exit code a daemon tenure ends with. `@kolu/surface-daemon` computes
  *  this too, but only inside `daemonProcessMain`, which owns `process.exit` —
@@ -229,6 +168,11 @@ export interface Tenure {
  * it is narrated and how it ends.
  */
 export async function serveWebService(tenure: Tenure): Promise<number> {
+  // BEFORE ANYTHING IS CLAIMED OR BOUND. A misbuilt package must not take the
+  // singleton's gate, bind the port, and then serve an application with no page
+  // — which is exactly what the old `ODU_WEB_DIST`-absent branch did.
+  assertPackaged();
+  const dist = process.env.ODU_WEB_DIST as string;
   // The origin FIRST, because the home is derived from it: one address, one
   // gate, and never two readings of `ODU_WEB_ORIGIN` that could disagree.
   const origin = serviceOrigin();
@@ -314,9 +258,11 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
           group: service.runtime.group,
           handlers: service.runtime.handlers,
         }),
-        ...(process.env[DIST_ENV] === undefined
-          ? {}
-          : { clientDist: process.env[DIST_ENV] }),
+        // Not optional. `serveSurfaceApp` treats a missing `clientDist` as "no
+        // static route" and a nonexistent one as a 404 — it will not fail for
+        // you — so the packaged contract is asserted before we get here
+        // ({@link assertPackaged}) and this reads a value that is present.
+        clientDist: dist,
         manifest: { name: "odu", themeColor: "#1f6feb", icons: [] },
         host,
         port,
@@ -510,16 +456,8 @@ async function foregroundWeb(opts: {
       process.stderr.write(
         `odu · serving in this terminal (pid ${pid}) — Ctrl-C stops it\n` +
           `odu · MCP (Streamable HTTP): ${serviceMcpUrl(bound)}\n` +
-          `odu · runs you start keep going after this stops\n` +
-          "odu · to leave a service running instead: odu web --background\n" +
-          // A URL that 404s is worse than no URL. A source run has no baked
-          // bundle, so the wire is up and the PAGE is not — and the one thing a
-          // person needs at that moment is to be told which of those they have.
-          (process.env[DIST_ENV] === undefined
-            ? "odu · NO BROWSER PAGE in this build — the wire is serving but " +
-              "`/` is empty.\nodu ·   from a checkout, use `just web`, which " +
-              "builds the bundle first\n"
-            : ""),
+          "odu · runs you start keep going after this stops\n" +
+          "odu · to leave a service running instead: odu web --background\n",
       );
     },
   });
@@ -575,113 +513,16 @@ function describe(outcome: Extract<EnsureOutcome, { ok: true }>): string {
   }
 }
 
-/**
- * Start the daemon so it OUTLIVES this process.
- *
- * The framework's own survivable-spawn driver, not a bare `detached: true`:
- * under cgroup-v2 a detached child does not survive its session, so the driver
- * re-launches into its own transient user service where one is available and
- * falls back to a detached process group where it is not.
- *
- * **WHICH branch is odu's decision, not the driver's**, and it is the same
- * decision a coordinator gets. The driver's own gate is `INVOCATION_ID`;
- * {@link survivableSpawnPlan} is richer — it honours `ODU_NO_SYSTEMD_RUN` and
- * probes for a session bus that actually exists — so it decides and the driver
- * is told, exactly as `@odu/execution`'s `coordinatorSpawnConfig` does. Passing
- * `fromSource` unconditionally, as this used to, forced the detached branch
- * even inside a systemd service, where detaching escapes nothing: the daemon
- * stays in the launching unit's cgroup and dies with it, having promised the
- * opposite.
- *
- * `inheritParentEnv` is FALSE on that branch. This is a packaged launch — the
- * binary is a Nix wrapper that carries its own environment — so the child needs
- * {@link daemonEnv} and nothing layered under it. The opposite is what a
- * coordinator needs, and the two differ for a reason: a coordinator is a
- * developer's shell made durable, a daemon must not inherit an orchestrator's
- * ambient identity and pass it to every run it later starts.
- */
-function spawnWebDaemon(): Effect.Effect<void, Error> {
-  const self = process.env.ODU_SELF;
-  if (self === undefined || self === "") {
-    return Effect.fail(
-      new Error(
-        "odu: ODU_SELF is not set, so odu cannot re-launch itself as a daemon. " +
-          "The Nix wrapper bakes it; a source run should start the daemon by " +
-          "hand (`bun src/main.ts web-daemon`).",
-      ),
-    );
-  }
-  const plan = survivableSpawnPlan(process.env, process.platform, "odu-web");
-  return survivableSpawnDriver(
-    webDaemonSpawnConfig(self, plan, process.env, webHome().dir),
-  ).spawn;
-}
 
-/**
- * The four values odu supplies to the framework's mechanism, plus the launch
- * mode. Pure and exported for the same reason `coordinatorSpawnConfig` is: this
- * is the WHOLE of odu's contribution to how the daemon starts, and it is what a
- * suite can pin on a machine with no systemd.
- */
-export function webDaemonSpawnConfig(
-  self: string,
-  plan: ReturnType<typeof survivableSpawnPlan>,
-  env: NodeJS.ProcessEnv,
-  homeDir: string,
-): Parameters<typeof survivableSpawnDriver>[0] {
-  return {
-    binPath: self,
-    args: ["web-daemon"],
-    // On the systemd branch this OVERLAYS the transient unit's manager env via
-    // `--setenv`; on the detached branch it is the COMPLETE child env, with no
-    // parent layered under it. Either way it must name everything odu reads,
-    // which is why the list below is long rather than clever.
-    env: daemonEnv(env),
-    unitPrefix: "odu-web",
-    ...(plan.mechanism === "detached"
-      ? { fromSource: { inheritParentEnv: false } as const }
-      : {}),
-    // Nobody holds a detached child's stderr, so a daemon that dies before it
-    // can log has nowhere to say why. Under systemd the unit's own journal has
-    // it and the driver ignores this.
-    stderrLog: join(homeDir, "web-daemon.stderr.log"),
-  };
-}
-
-/**
- * What only the WEB daemon needs, on top of what every odu child needs.
- *
- * Four locators for the service itself and the pair that names this build. A
- * coordinator has no use for any of them, which is why they are here and not in
- * `ODU_CHILD_ENV_KEYS`.
- */
-const WEB_DAEMON_ENV_KEYS = [
-  "ODU_WEB_ORIGIN",
-  "ODU_WEB_DIST",
-  "ODU_WEB_ALLOWED_ORIGINS",
-  "ODU_WEB_MCP_TOKEN",
-  "ODU_COMMIT_HASH",
-  "ODU_BUILD_ID",
-] as const;
-
-/**
- * The env a daemon runs with, named rather than inherited wholesale.
- *
- * On the detached branch this is the COMPLETE environment, and this daemon's
- * job includes starting coordinators that shell out to `nix` and `git` — so
- * anything they need has to be named or the failure appears four layers away,
- * as a run that will not provision, in a process nobody is watching. That is
- * not hypothetical: it is what happened, and it happened because this list and
- * the coordinator's were two lists. There is one now
- * ({@link ODU_CHILD_ENV_KEYS}), and this adds only what is genuinely the web
- * face's.
- */
-export function daemonEnv(
-  source: NodeJS.ProcessEnv = process.env,
-): Record<string, string> {
-  return pickEnv(source, [...ODU_CHILD_ENV_KEYS, ...WEB_DAEMON_ENV_KEYS]);
-}
-
-/** Re-exported so a caller that wants the gate's current holder does not learn
- *  a second import path. */
+/** Re-exported so a caller that wants the gate's current holder — or any of the
+ *  launch facts that now live in `./webDaemonLaunch` — does not learn a second
+ *  import path for something it already reaches `./web` for. */
 export { gateIdentity, runSocketPath, gitTopLevel, hostname };
+export {
+  assertPackaged,
+  bakedBuild,
+  daemonEnv,
+  webAppNamespace,
+  webDaemonSpawnConfig,
+  webHome,
+} from "./webDaemonLaunch";

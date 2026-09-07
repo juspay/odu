@@ -1,6 +1,11 @@
 /**
- * The survival property of the `run` tool's spawn, measured — not assumed:
- * an `odu run` coordinator outlives the MCP server that launched it.
+ * The survival property of the coordinator spawn, measured — not assumed:
+ * a coordinator outlives the process that launched it.
+ *
+ * This is what makes "your run survives this shell" true. Whatever asked for
+ * the run — the web daemon, a terminal, an agent's MCP bridge — is a launcher
+ * that may exit, restart or be Ctrl-C'd a second later, and none of that may
+ * reach the work.
  *
  * Measured against the REAL runtime (`process.execPath` — bun, the runtime
  * every shipped coordinator runs on) and the REAL spawn options
@@ -14,7 +19,7 @@
  *   - the write contract: bun's stdio swallows EPIPE — a write to a pipe
  *     whose reader is gone never becomes an uncaughtException (Node would
  *     crash the child here). If a runtime bump changes that, this file goes
- *     red and the run-descriptor comment in `runTool.ts` goes with it.
+ *     red and `spawn.ts`'s run-descriptor comment goes with it.
  */
 
 import { spawn } from "node:child_process";
@@ -28,7 +33,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
-import { coordinatorSpawnSpec } from "./runTool";
+import { coordinatorSpawnSpec } from "./spawn";
 
 const dirs: string[] = [];
 const pids: number[] = [];
@@ -56,7 +61,7 @@ const alive = (pid: number): boolean => {
   }
 };
 
-describe("an MCP-spawned run outlives its MCP server", () => {
+describe("a spawned run outlives the process that launched it", () => {
   it("parent dies, pipes die, the child keeps writing", async () => {
     const dir = mkdtempSync(join(tmpdir(), "odu-survive-"));
     dirs.push(dir);
@@ -68,14 +73,14 @@ describe("an MCP-spawned run outlives its MCP server", () => {
     // pipe is gone.
     writeChildAndParent(dir);
 
-    // Spawn the PARENT (the stand-in for the exiting `odu mcp`): it spawns
-    // the child with the real spawn spec, unrefs, and exits. Every path it
-    // needs arrives as ARGV — see `writeChildAndParent`.
+    // Spawn the PARENT (the stand-in for any launcher that exits under its
+    // run): it spawns the child with the real spawn spec, unrefs, and exits.
+    // Every path it needs arrives as ARGV — see `writeChildAndParent`.
     const parent = spawn(
       process.execPath,
       [
         join(dir, "parent.ts"),
-        new URL("./runTool.ts", import.meta.url).pathname,
+        new URL("./spawn.ts", import.meta.url).pathname,
         join(dir, "child.ts"),
         dir,
         pidFile,
@@ -149,7 +154,7 @@ function writeChildAndParent(dir: string): void {
       `const child = spawn(process.execPath, [childPath, aliveFile], coordinatorSpawnSpec(cwd));`,
       `child.unref();`,
       `writeFileSync(pidFile, String(child.pid));`,
-      `process.exit(0); // the harness restarting its MCP server`,
+      `process.exit(0); // the launcher exiting under the run`,
     ].join("\n"),
   );
 }

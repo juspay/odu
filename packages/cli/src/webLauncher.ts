@@ -54,7 +54,11 @@ import {
 import { buildSurfaceFace, type UnaryEffect } from "@kolu/surface/client";
 import { composeSurfaceContracts } from "@kolu/surface/define";
 import { unixSocketLink } from "@kolu/surface/links/unix-socket";
-import { dialService, readServiceCell } from "@odu/service-client/dial";
+import {
+  dialService,
+  readServiceCell,
+  type ServiceConnection,
+} from "@odu/service-client/dial";
 import {
   SERVICE_CONTRACT_VERSION,
   type ServiceBuild,
@@ -62,6 +66,8 @@ import {
 } from "@odu/service-client/surface";
 import { Effect } from "effect";
 import { readProcessIdentity } from "./processIdentity";
+import { bakedBuild, spawnWebDaemon, webHome } from "./webDaemonLaunch";
+import { DEFAULT_SERVICE_ORIGIN } from "@odu/service-client/endpoint";
 
 /** The composed contract a control dial speaks: the frozen fragment under the
  *  sibling key the daemon mounts it at, which is also where the framework's own
@@ -350,3 +356,74 @@ async function untilValue<T>(
     await sleep(pollMs);
   }
 }
+
+/**
+ * DIAL THE SERVICE, STARTING ONE IF THERE IS NONE — the seam every thin client
+ * bootstraps through.
+ *
+ * Public odu is now a set of clients: `odu run`, `odu wait`, `odu surface`, the
+ * `odu mcp` bridge. None of them owns execution, and on a fresh machine none of
+ * them can do anything until a daemon exists. Two ways that could have gone,
+ * and only one of them is honest:
+ *
+ *   - **Recover a failed dial by doing the work locally.** Never. That is the
+ *     second authority the whole consolidation exists to remove, and it would
+ *     reappear exactly where it is least visible — at the moment the shared
+ *     service is unreachable, which is precisely when two answers about one run
+ *     start to diverge.
+ *   - **Start the shared service and use it.** This.
+ *
+ * ## Only at the DEFAULT origin
+ *
+ * `allowStart` is false whenever the caller named an origin, and that is not a
+ * nicety: `--origin` is how a person addresses a service somewhere else, and a
+ * mistyped one must report that nothing is serving there rather than starting a
+ * daemon of our own — which could not bind that address anyway, and would spend
+ * the whole readiness deadline discovering it. So a named origin is dialled and
+ * only dialled; the singleton is ensured only when the caller meant the
+ * singleton.
+ *
+ * ## The absence probe is short; the readiness wait is not
+ *
+ * A dial that finds nothing must fail FAST, because the common case for a
+ * failure here is "there is no daemon" and the caller is about to start one.
+ * Once a daemon has been started, `ensureService` waits on its readiness CELL —
+ * `starting` is a service reconciling the catalog and is a reason to keep
+ * waiting; silence is not. That asymmetry is why the two deadlines differ by an
+ * order of magnitude instead of being one number.
+ */
+export async function connectOrStart(
+  origin: string = DEFAULT_SERVICE_ORIGIN,
+  opts: { allowStart?: boolean } = {},
+): Promise<ServiceConnection> {
+  const allowStart = opts.allowStart ?? origin === DEFAULT_SERVICE_ORIGIN;
+  try {
+    return await dialService(origin, { readyMs: ABSENCE_PROBE_MS });
+  } catch (err) {
+    if (!allowStart) throw err;
+  }
+  const outcome = await ensureService({
+    origin,
+    home: webHome(origin),
+    baked: bakedBuild(),
+    upgrade: false,
+    spawn: spawnWebDaemon,
+  });
+  if (!outcome.ok) {
+    // The launcher's own sentence, carried out verbatim. It already names the
+    // recovery — an upgrade, a wedged gate, a misbuilt package — and rewording
+    // it here would be a second, worse account of the same fact.
+    throw new Error(outcome.message);
+  }
+  return dialService(outcome.origin);
+}
+
+/**
+ * How long a client waits to find out there is NOTHING there.
+ *
+ * Deliberately shorter than {@link DIAL_READY_MS}'s three seconds: this dial's
+ * failure is not an error, it is the ordinary first step of a bootstrap, and
+ * every second spent proving it is a second added to `odu run` on a cold
+ * machine. Loopback answers in microseconds when anything is listening.
+ */
+const ABSENCE_PROBE_MS = 300;

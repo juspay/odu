@@ -22,15 +22,11 @@ import { buildSurfaceFace } from "@kolu/surface/client";
 import { directDispatch } from "@kolu/surface/links/direct";
 import { oduSurface } from "@odu/run-client/surface";
 import {
-  buildAgentProjection,
-} from "./mcp/agentSurface";
-import {
   agentReaderForSocket,
   dialAFor,
   redialingAClient,
 } from "@odu/execution/coordinator/agentReader";
 import { serveTestSurface, type TestSurface } from "@odu/execution/coordinator/serveForTest";
-import { makeWaitTool } from "./mcp/waitTool";
 import {
   attachStream,
   logStream,
@@ -514,68 +510,6 @@ describe("waitCommand", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
-
-  it("agrees with the MCP `wait_for_settle` verdict on one run", async () => {
-    // The two faces, the same live run, one verdict — and each reaching that
-    // run the way IT ships, which is the part this test used to fake. It handed
-    // both sides `agentReaderForSocket` and called that a pin on two code
-    // paths; it was two calls on one reader. `odu mcp` hands the handler the
-    // adapter's projected B-client, so that is what the MCP side gets here:
-    // `buildSurfaceFace ∘ directDispatch ∘ deriveStream` over the same
-    // re-dialing A-client `mcpCommand` builds, against the same socket.
-    //
-    // What that buys is the thing worth pinning: the two faces share the settle
-    // core and the row mapping but NOT the error channel (`deriveStream`
-    // `orDie`s, so a transport death crosses as a defect on the MCP side), and
-    // a verdict that came out equal field-for-field through both is a verdict
-    // neither channel bent. (The ride-out case through that same B-client is
-    // pinned next door, in server.test.ts.)
-    const surface = await served(
-      doneState([
-        ["ci::unit@x86_64-linux", "running"],
-        ["ci::e2e@x86_64-linux", "running"],
-      ]),
-    );
-    const projection = buildAgentProjection(oduSurface, () => null);
-    const bClient = buildSurfaceFace(
-      projection.surface,
-      directDispatch(
-        projection.implement(
-          redialingAClient(dialAFor(surface.socketPath)) as never,
-        ),
-      ),
-    );
-    const cli = capturingStdout(() =>
-      waitCommand({ settle: true, socketPath: surface.socketPath, timeoutMs: 5_000 }),
-    );
-    const mcp = Effect.runPromise(
-      makeWaitTool(() => null).handler(
-        { fail_fast: false, timeout_ms: 5_000 },
-        bClient as never,
-        undefined,
-      ),
-    ) as Promise<SettleVerdict>;
-    setTimeout(() => {
-      surface.setState(
-        doneState([
-          ["ci::unit@x86_64-linux", "ok", 0],
-          ["ci::e2e@x86_64-linux", "failed", 1],
-        ]),
-      );
-    }, 60);
-    const [{ out, result }, tool] = await Promise.all([cli, mcp]);
-    const verdict = JSON.parse(out.trim()) as SettleVerdict;
-    // `duration_ms` is the one field that legitimately differs (two clocks).
-    const { duration_ms: _cliMs, ...cliRest } = verdict;
-    const { duration_ms: _mcpMs, ...mcpRest } = tool;
-    expect(cliRest).toEqual(mcpRest);
-    expect(verdict).toMatchObject({
-      settled: true,
-      passed: false,
-      failed: ["ci::e2e@x86_64-linux"],
-    });
-    expect(result).toBe(1);
   });
 
   it("refuses when --expected-sha does not match the live run", async () => {

@@ -97,6 +97,16 @@ const SANCTIONED = new Map<string, string>([
       "themselves take callbacks and hold no client at all.",
   ],
   [
+    "packages/cli/src/serviceCommands.ts",
+    "The public commands' EDGE, and the reason it is one file rather than six. " +
+      "Every retained public command is now a client of the shared service, so " +
+      "each of them ends with a surface procedure — an `Effect` carrying a " +
+      "declared `ServiceRefused` channel — being turned into bytes on a stream " +
+      "and a number for `process.exit`. `call` is where that happens, once, " +
+      "which is also what keeps a REFUSAL apart from a dead link: both arrive " +
+      "on one error channel and they must not become the same exit.",
+  ],
+  [
     "packages/cli/src/webLauncher.ts",
     "Converging on the singleton. Reading the service cell and asking a running " +
       "daemon to drain are Effects; everything that decides between adopt, " +

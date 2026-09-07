@@ -30,7 +30,7 @@ import {
   resolveRunnerFlake,
   runnerDrvResolver,
 } from "@odu/execution/coordinator/runnerFlake";
-import { oduSelfArgv } from "./mcp/runTool";
+import { oduSelfArgv } from "@odu/execution/coordinator/spawn";
 
 function log(msg: string): void {
   process.stderr.write(`${msg}\n`);

@@ -91,6 +91,26 @@ export interface LaunchReceipt {
 export type RunLauncher = (request: LaunchRequest) => Promise<LaunchReceipt>;
 
 /**
+ * The verb a launched coordinator is invoked with — INTERNAL, and that is the
+ * point.
+ *
+ * This used to be `run`, the public command, and once `odu run` became a thin
+ * client of the service the two could not both be that name: `run.start` calls
+ * this launcher, the launcher would invoke `odu run`, and `odu run` would call
+ * `run.start`. Unbounded recursion, arrived at by a rename rather than by a
+ * loop anybody wrote.
+ *
+ * So the coordinator has a verb of its own. It is absent from the usage text —
+ * the same convention `web-daemon` and `lease-hold` already keep — because
+ * nobody should type it: it takes exactly the argv {@link launchArgv} emits,
+ * including the four identity flags (`--run-id`, `--expected-sha`,
+ * `--parent-run`, `--request-id`) that let a caller mint a run identity the
+ * catalog will accept. Those belong to a LAUNCHER, and leaving them on a public
+ * verb was always the recursion trap written down in advance.
+ */
+export const COORDINATOR_VERB = "run-coordinator";
+
+/**
  * The argv a launch request becomes.
  *
  * Pure, exported, and tested: this is the "structured data/argv, never a
@@ -99,7 +119,7 @@ export type RunLauncher = (request: LaunchRequest) => Promise<LaunchReceipt>;
  * command out of a user's selectors.
  */
 export function launchArgv(request: LaunchRequest): string[] {
-  const args = ["run", ...request.scope.selectors];
+  const args = [COORDINATOR_VERB, ...request.scope.selectors];
   for (const p of request.scope.platforms) args.push("--platform", p);
   for (const h of request.hostPins) args.push("--host", h);
   if (request.scope.root !== undefined) args.push("--root", request.scope.root);

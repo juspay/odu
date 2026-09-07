@@ -46,6 +46,13 @@ const HYDRATED = new Set<string>([
   "@kolu/surface-cli",
   "@kolu/surface-daemon",
   "@kolu/surface-daemon-supervisor",
+  // NOT a `@kolu/*` package, and hydrated for the same reason they are: kolu
+  // gitignores `osfacts-client` and grafts it from its own `osfacts` pin, so no
+  // revision of juspay/kolu contains it. odu performs the same graft from the
+  // same upstream — and, since the singleton gate needs a reader rather than a
+  // type, also builds the BINARY from that pin (`nix/overlay.nix`) and bakes
+  // its path onto the wrapper.
+  "osfacts-client",
 ]);
 
 /** Test-only imports — the harness, not the shipped closure. */

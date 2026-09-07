@@ -23,8 +23,9 @@
  *     signal addressed to the launcher's group reaches it, and its parent
  *     exiting reparents rather than reaps it.
  *
- * WHAT CHANGED, AND THE RULING IT REVISITS. `packages/cli/src/mcp/runTool.ts` records a
- * decision (2026-09-02) that odu would NOT escape the host's cgroup — the
+ * WHAT CHANGED, AND THE RULING IT REVISITS. odu's since-deleted per-checkout
+ * MCP face recorded a decision (2026-09-02) that odu would NOT escape the
+ * host's cgroup — the
  * limit was admitted and the corpse reported instead. That decision is why
  * `deadRun` exists and why every face names a death rather than answering as
  * if the run never happened, and none of that is undone here: a coordinator
@@ -71,7 +72,7 @@
  *     exactly the split this file needs; waiting for the socket is odu's.
  *
  * HONEST ABOUT WHAT IS MEASURED. The detached branch is exercised by
- * `packages/cli/src/mcp/spawnSurvival.test.ts` against the real runtime and the real spawn
+ * `packages/execution/src/coordinator/spawnSurvival.test.ts` against the real runtime and the real spawn
  * options. The systemd branch is NOT covered by odu's suite: it needs a user
  * manager and a session bus, which the Nix build sandbox and the CI container
  * do not have. {@link survivableSpawnPlan} is pure and IS tested — what a
@@ -91,16 +92,33 @@ import { dirname, join } from "node:path";
 import { dialRun } from "@odu/run-client/dial";
 import { runDetached } from "../common/effectEdge";
 
-/** The argv prefix that re-invokes the odu CLI. The nix wrapper bakes
- *  `ODU_SELF` to its own store path; in a dev checkout we re-exec the entry
- *  through the very bun that is running us (`process.execPath`), so the child
- *  gets this exact runtime rather than whatever a bare `bun` on its PATH
- *  resolves to. */
+/**
+ * The argv prefix that re-invokes odu — the Nix wrapper's own absolute path,
+ * and nothing else.
+ *
+ * This used to fall back to `[process.execPath, process.argv[1]]`, re-execing
+ * the entry through whatever interpreter happened to be running. It looked like
+ * a courtesy to a dev checkout and it was a hole in the runtime contract: Nix is
+ * odu's only supported runtime, and a fallback meant an unpackaged odu could
+ * spawn coordinators that half-worked — with none of the wrapper's baked
+ * locators, so the child hit `nix`, `git` and `gh` from an ambient PATH and
+ * failed several layers away from the cause.
+ *
+ * A missing `ODU_SELF` is therefore a MISBUILT PACKAGE, and the throw says so
+ * where it can still be understood. It is not reachable from a supported
+ * invocation: every `nix run` of odu goes through the wrapper that sets it.
+ */
 export function oduSelfArgv(env: NodeJS.ProcessEnv = process.env): string[] {
   const self = env.ODU_SELF;
-  if (self !== undefined && self !== "") return [self];
-  const entry = process.argv[1];
-  return entry !== undefined ? [process.execPath, entry] : [process.execPath];
+  if (self === undefined || self === "") {
+    throw new Error(
+      "odu: ODU_SELF is unset, so odu cannot re-invoke itself. The Nix wrapper " +
+        "bakes it (see default.nix) and nothing sets it at runtime — this is a " +
+        "misbuilt package, not a mode. Run odu from its Nix package: " +
+        "`nix run github:juspay/odu -- …`, or `nix run . -- …` in a checkout.",
+    );
+  }
+  return [self];
 }
 
 /** The spawn options that make a coordinator outlive its LAUNCHER'S plain

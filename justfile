@@ -38,25 +38,29 @@ test: install
 e2e: install
     {{ nix_shell }} bun run test:e2e
 
-# Run odu from source: `just run -- run --no-strict biome`. The nix build bakes
-# ODU_RUNNER_FLAKE onto the `odu` wrapper, but `bun run start` is a raw bun entry
-# with no wrapper — and there is no fallback — so point the runner at this
-# checkout (odu's own flake exports odu-runner; git+file sees live tracked edits
-# and skips node_modules).
-run *args: install
-    {{ nix_shell }} env ODU_RUNNER_FLAKE="git+file://{{ justfile_directory() }}" bun run start {{ args }}
-
-# Serve the web service from source, WITH the browser page.
+# Run odu from THIS checkout, as a package: `just run -- run --no-strict biome`.
 #
-# `just run web` alone serves the wire and 404s on `/`: a source run has no
-# baked ODU_WEB_DIST, so the service has no bundle to hand a browser and the URL
-# it prints goes nowhere. This builds one into the gitignored
-# `packages/web-ui/dist/` and points the service at it. Ctrl-C stops it.
-web *args: install
-    {{ nix_shell }} bun scripts/build-web-ui.ts
-    {{ nix_shell }} env ODU_RUNNER_FLAKE="git+file://{{ justfile_directory() }}" \
-      ODU_WEB_DIST="{{ justfile_directory() }}/packages/web-ui/dist" \
-      bun run start web {{ args }}
+# NIX IS THE ONLY SUPPORTED WAY TO RUN ODU, and this recipe is that rule applied
+# to local development. It used to be `bun run start`, which is a raw bun entry
+# with no wrapper — so it had none of the locators the wrapper bakes (ODU_SELF,
+# ODU_WEB_DIST, ODU_BUILD_ID, the pinned nix/git/gh/just), and every one of those
+# absences had a runtime fallback keeping it alive. Running that way exercised an
+# application no user has. Those fallbacks are gone and so is the recipe.
+#
+# The cost is honest: an edit under `src/` or `packages/` now rebuilds `base`
+# (a sandboxed bun install + hydrate) before it runs. `just test`, `just
+# typecheck` and `just e2e` still drive bun directly in the devshell — bun there
+# is a TEST runtime, not a second way to run the application.
+run *args:
+    {{ nix_shell }} nix run --accept-flake-config {{ justfile_directory() }} -- {{ args }}
+
+# Serve the web service from this checkout, browser page included.
+#
+# `just run -- web` does this too; the recipe survives only as the obvious name.
+# There is no dist-building step any more: the bundle is part of the package
+# (default.nix's `web-ui`), so a service either has its page or is a misbuilt
+# package that refuses to start. Ctrl-C stops it.
+web *args: (run "web" args)
 
 # The site lives in website/ as a standalone npm project (its own
 # package-lock.json, not the root bun.lock), so this shells in and uses npm. Pass

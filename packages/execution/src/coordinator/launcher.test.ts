@@ -73,7 +73,7 @@ describe("launchArgv", () => {
     // lost its answer cannot ask whether the run happened; without the sha, the
     // child's strict gate has nothing to refuse against.
     const argv = launchArgv(request());
-    expect(argv[0]).toBe("run");
+    expect(argv[0]).toBe("run-coordinator");
     expect(valueAfter(argv, "--run-id")).toBe(RUN_ID);
     expect(valueAfter(argv, "--expected-sha")).toBe(SHA);
   });
@@ -87,7 +87,9 @@ describe("launchArgv", () => {
         }),
       }),
     );
-    expect(argv.slice(0, 3)).toEqual(["run", "unit", "e2e"]);
+    // The INTERNAL verb, not the public one. `odu run` is a service client now,
+    // and a launcher that invoked it would recurse through `run.start` forever.
+    expect(argv.slice(0, 3)).toEqual(["run-coordinator", "unit", "e2e"]);
     expect(argv.filter((a) => a === "--platform")).toHaveLength(2);
     expect(argv.slice(3, 7)).toEqual([
       "--platform",

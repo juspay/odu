@@ -32,9 +32,7 @@ import {
   waitFor,
 } from "@odu/execution/common/scaffoldForTest";
 import { subscribe } from "@odu/execution/common/effectEdge";
-import {
-  toAgentNodes,
-} from "./mcp/agentSurface";
+import { toAgentNodes } from "@odu/execution/common/agentNodes";
 import {
   agentReaderForSocket,
 } from "@odu/execution/coordinator/agentReader";

@@ -9,8 +9,6 @@
     "packages/*"
   ],
   "scripts": {
-    "start": "bun src/main.ts",
-    "start:runner": "bun src/runner-main.ts --stdio",
     "typecheck": "tsc --noEmit",
     "test:unit": "bun test ./src ./packages",
     "test:e2e": "bun test ./tests/e2e"
