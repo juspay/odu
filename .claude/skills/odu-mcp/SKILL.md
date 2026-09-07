@@ -119,7 +119,7 @@ enumerates them. No MCP tool exposes these — reach for the CLI, or `runs` /
 
 Everything above is about the run live in **this checkout**. `odu mcp --service`
 is about **every registered run**: it dials the singleton web service
-(`odu web`, `http://127.0.0.1:18440`) and projects the same five verbs the
+(`odu web --background`, `http://127.0.0.1:18440`) and projects the same five verbs the
 browser and `odu surface` use, under the same names.
 
 ```text

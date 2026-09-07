@@ -101,7 +101,7 @@ export interface EnsureOptions {
 /** Read the service cell, or `null` when nothing answers. A dial that fails is
  *  ABSENCE; a dial that succeeds and then cannot read is a service that is
  *  there and broken, which is a different answer and is reported as a throw. */
-async function readService(origin: string): Promise<ServiceCell | null> {
+export async function readService(origin: string): Promise<ServiceCell | null> {
   let connection: Awaited<ReturnType<typeof dialService>>;
   try {
     connection = await dialService(origin);
@@ -188,28 +188,15 @@ export async function ensureService(
         protocolVersion: running.identity.protocolVersion,
       };
     }
-    // CAPTURE: what is running, read before anything is asked of it.
-    try {
-      await drain(opts.home);
-    } catch (err) {
-      return {
-        ok: false,
-        message:
-          `odu: the service on ${opts.origin} (pid ${running.identity.pid}) ` +
-          `would not drain — ${(err as Error).message}. It is not being killed: ` +
-          "it may be finishing a write. Stop it yourself and run `odu web` again.",
-      };
-    }
-    const drained = await until(() => gateFree(opts.home), drainMs, pollMs, sleep);
-    if (!drained) {
-      return {
-        ok: false,
-        message:
-          `odu: the service on ${opts.origin} accepted a drain but still holds ` +
-          `its gate after ${Math.round(drainMs / 1000)}s (pid ` +
-          `${running.identity.pid}). Nothing was killed.`,
-      };
-    }
+    const cleared = await clearTheGate({
+      origin: opts.origin,
+      home: opts.home,
+      pid: running.identity.pid,
+      drainMs,
+      pollMs,
+      sleep,
+    });
+    if (!cleared.ok) return cleared;
     return spawnAndVerify(opts, sleep, pollMs, readyMs, "upgraded");
   }
 
@@ -243,6 +230,49 @@ export async function ensureService(
     };
   }
   return spawnAndVerify(opts, sleep, pollMs, readyMs, "spawned");
+}
+
+/**
+ * CAPTURE → DRAIN → WAIT FOR THE GATE. What a takeover is, wherever it happens.
+ *
+ * Shared by the background launcher (which then spawns a successor) and by the
+ * foreground server (which then becomes one). Nothing is signalled: a service
+ * that will not drain is REPORTED, because it may be finishing a write, and the
+ * gate rather than the process is what a successor has to be able to claim.
+ */
+export async function clearTheGate(opts: {
+  origin: string;
+  home: DaemonHomePaths;
+  pid: number;
+  drainMs?: number;
+  pollMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+}): Promise<{ ok: true } | { ok: false; message: string }> {
+  const sleep = opts.sleep ?? ((ms: number) => delay(ms));
+  const pollMs = opts.pollMs ?? 100;
+  const drainMs = opts.drainMs ?? 15_000;
+  try {
+    await drain(opts.home);
+  } catch (err) {
+    return {
+      ok: false,
+      message:
+        `odu: the service on ${opts.origin} (pid ${opts.pid}) would not drain ` +
+        `— ${(err as Error).message}. It is not being killed: it may be ` +
+        "finishing a write. Stop it yourself and try again.",
+    };
+  }
+  const drained = await until(() => gateFree(opts.home), drainMs, pollMs, sleep);
+  if (!drained) {
+    return {
+      ok: false,
+      message:
+        `odu: the service on ${opts.origin} accepted a drain but still holds ` +
+        `its gate after ${Math.round(drainMs / 1000)}s (pid ${opts.pid}). ` +
+        "Nothing was killed.",
+    };
+  }
+  return { ok: true };
 }
 
 async function spawnAndVerify(

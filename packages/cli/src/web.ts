@@ -1,13 +1,27 @@
 /**
- * `odu web` — the singleton web service, and the two halves of its life.
+ * `odu web` — the singleton web service, and the two lifetimes it can have.
  *
- * `webCommand` is what a person types. It ensures a service is up, verifies it
- * is one this build can speak to, prints the URL and RETURNS — the service is a
- * daemon and outlives the shell that asked for it, which is the whole point of
- * a singleton.
+ * **Serving is one function** ({@link serveWebService}); what differs is only
+ * how the tenure is narrated and how it ends:
  *
- * `webDaemonCommand` is what that spawns. It is not in the usage text because
- * nobody should type it: a person types `odu web`, and a supervisor types this.
+ *   - **`odu web`** serves in the FOREGROUND. Ctrl-C stops it, the person can
+ *     see it running, and finding the gate already held is reported rather than
+ *     passed off as success — they asked to serve here, and here is taken.
+ *   - **`odu web --background`** ensures a service that outlives the shell, the
+ *     way it always did: adopt one, or spawn `web-daemon` and verify it answers.
+ *   - **`web-daemon`** is what that spawns. Absent from the usage text because
+ *     nobody should type it: it is quiet, it yields silently to a live holder,
+ *     and it ends only through the control fragment's `drain`.
+ *
+ * The foreground being the DEFAULT is a deliberate reversal. Printing a URL and
+ * exiting left a person with a server they had not watched start, could not
+ * watch stop, and had no obvious way to end. Backgrounding is a real thing to
+ * want; it is not the thing to assume.
+ *
+ * **A run outlives the server either way.** Ctrl-C reaches this process's
+ * group; a coordinator is a detached group (or a transient unit) of its own, so
+ * it never arrives there. Stopping the web service ends an OBSERVATION, which
+ * is the same asymmetry `run_cancel` keeps.
  *
  * ## The singleton, exactly
  *
@@ -33,7 +47,8 @@
  *
  * ## Upgrading a running one
  *
- * `odu web --upgrade` is the explicit path. It reads the running daemon's
+ * `odu web --upgrade` is the explicit path, in either lifetime. It reads the
+ * running daemon's
  * identity off the framework's frozen control fragment (`core.hello` — the one
  * contract that never versions within a protocol epoch), and when the build or
  * the contract differs it drains it (`core.drain`), waits for the gate to
@@ -52,6 +67,7 @@ import {
   daemonMain,
   type DaemonExit,
   gateIdentity,
+  type Logger,
   stderrLogger,
 } from "@kolu/surface-daemon";
 import { survivableSpawnDriver } from "@kolu/surface-daemon-supervisor";
@@ -84,7 +100,12 @@ import {
   serveServiceMcpInProcess,
 } from "./serviceMcp";
 import { webPorts } from "./webPorts";
-import { ensureService, type EnsureOutcome } from "./webLauncher";
+import {
+  clearTheGate,
+  ensureService,
+  type EnsureOutcome,
+  readService,
+} from "./webLauncher";
 import {
   allowedHostsFor,
   authorityAllowed,
@@ -176,13 +197,44 @@ function exitCodeOf(exit: DaemonExit): number {
  * act and a live handle would keep it alive after its tenure ended — the
  * lingering-daemon class.
  */
-export async function webDaemonCommand(): Promise<number> {
+/**
+ * HOW A TENURE PRESENTS ITSELF — the only thing the two lifetimes differ in.
+ *
+ * A backgrounded daemon narrates to a log nobody is watching and yields quietly
+ * when it finds the gate held, because a launcher racing three of them wants
+ * exactly one survivor and no noise. A foreground server narrates to a PERSON
+ * who is standing there, and finding the gate held means the thing they asked
+ * for — serve, here, in this terminal — did not happen and must be said.
+ *
+ * Everything else about serving is identical, which is why it is one function.
+ */
+export interface Tenure {
+  /** Where this tenure narrates itself. A daemon writes structured JSON to a
+   *  stderr nobody reads until something goes wrong; a foreground server writes
+   *  to a person's terminal, where four lines of JSON before the URL are noise
+   *  standing between them and the thing they asked for. */
+  log: Logger;
+  /** Another process holds the gate. Answer with this command's exit code. */
+  onHeld: (pid: number) => Promise<number> | number;
+  /** Bound and serving, at the origin the OS actually gave us. */
+  onServing: (origin: string, pid: number) => void;
+  /** Signals that end this tenure. A daemon has none of its own — it is ended
+   *  through the control fragment's `drain` — and a foreground server has
+   *  Ctrl-C, which is the whole of its contract with the person running it. */
+  stopOn?: readonly NodeJS.Signals[];
+}
+
+/**
+ * SERVE. One listener, one gate, one surface — and a `Tenure` deciding only how
+ * it is narrated and how it ends.
+ */
+export async function serveWebService(tenure: Tenure): Promise<number> {
   // The origin FIRST, because the home is derived from it: one address, one
   // gate, and never two readings of `ODU_WEB_ORIGIN` that could disagree.
   const origin = serviceOrigin();
   const home = webHome(origin);
   const { host, port } = serviceBind(origin);
-  const log = stderrLogger();
+  const log = tenure.log;
   const controller = new AbortController();
   // ONE policy, read once, applied at both doors — the websocket and `/mcp`.
   // Two reads of one env var is how two doors end up with two answers to the
@@ -202,16 +254,26 @@ export async function webDaemonCommand(): Promise<number> {
     selfProcessIdentity(),
     readProcessIdentity,
   );
-  if (gate.kind === "held") {
-    log.info({ pid: gate.pid }, "odu web: a service is already running; yielding");
-    return 0;
-  }
+  if (gate.kind === "held") return tenure.onHeld(gate.pid);
   if (gate.kind === "dir-not-private") {
     process.stderr.write(
       `odu: ${gate.dir} is not a private owner-only directory — the web ` +
         "service's home must be yours alone (mode 0700)\n",
     );
     return 1;
+  }
+
+  // Ctrl-C, for a tenure that has one. Installed AFTER the gate is claimed and
+  // removed in the `finally`, so a signal can never abort a process that is not
+  // yet serving and never outlive the tenure it belongs to. The handlers stop
+  // the SERVER; a coordinator it started is in its own process group (see
+  // `@odu/execution`'s spawn plan) and a Ctrl-C in this terminal never reaches
+  // it, which is the promise "your run survives this shell" made concrete.
+  const stopHandlers: (() => void)[] = [];
+  for (const signal of tenure.stopOn ?? []) {
+    const onSignal = (): void => controller.abort();
+    process.on(signal, onSignal);
+    stopHandlers.push(() => process.off(signal, onSignal));
   }
 
   const service = createOduService({
@@ -324,26 +386,154 @@ export async function webDaemonCommand(): Promise<number> {
       lifetime: { kind: "forever" },
       log,
       signal: controller.signal,
-      onReady: ({ socketPath, pid }) =>
-        log.info({ socketPath, pid, origin: bound }, "odu web: serving"),
+      onReady: ({ socketPath, pid }) => {
+        log.info({ socketPath, pid, origin: bound }, "odu web: serving");
+        tenure.onServing(bound, pid);
+      },
     });
     return exitCodeOf(exit);
   } finally {
+    for (const stop of stopHandlers) stop();
     await mcp.close();
     await Effect.runPromise(Scope.close(scope, Exit.void));
     await service.close();
   }
 }
 
+/** The daemon `odu web --background` spawns: quiet, and ended only by `drain`. */
+export async function webDaemonCommand(): Promise<number> {
+  const log = stderrLogger();
+  return serveWebService({
+    log,
+    onHeld: (pid) => {
+      log.info({ pid }, "odu web: a service is already running; yielding");
+      return 0;
+    },
+    onServing: () => {},
+  });
+}
+
 /**
- * `odu web` — ensure a service, print where it is, return.
+ * `odu web` — SERVE, HERE, until Ctrl-C.
+ *
+ * The default is the foreground, and that is a deliberate reversal. A command
+ * that printed a URL and exited left a person with a server they had not seen
+ * start, could not see stop, and had no obvious way to end — the surprise being
+ * that the shell prompt came back while something was still listening.
+ * Backgrounding is a real thing to want, so it has a flag; it is not the thing
+ * to assume.
+ *
+ * **A coordinator outlives this terminal either way.** Ctrl-C ends the SERVER.
+ * Runs it started are detached process groups (or transient units), so the
+ * signal never reaches them, and their evidence is in the catalog rather than
+ * in this process. That asymmetry is the same one `run_cancel` keeps: ending an
+ * observation is not ending the work.
+ */
+export async function webCommand(opts: {
+  upgrade: boolean;
+  json: boolean;
+  background: boolean;
+}): Promise<number> {
+  return opts.background ? backgroundWeb(opts) : foregroundWeb(opts);
+}
+
+/** A logger that says nothing until it has something wrong to say. */
+function quietLogger(): Logger {
+  const loud = stderrLogger();
+  return {
+    debug: () => {},
+    info: () => {},
+    warn: loud.warn,
+    error: loud.error,
+  };
+}
+
+/**
+ * Serve in this terminal.
+ *
+ * The singleton still holds: if another process owns the gate, this one cannot
+ * serve, and it SAYS SO instead of returning as though it had. That is the
+ * difference the flag exists for — `--background` asks for "make sure one is
+ * running", and bare `odu web` asks for "run one here", which are different
+ * requests with different answers when one is already up.
+ */
+async function foregroundWeb(opts: {
+  upgrade: boolean;
+  json: boolean;
+}): Promise<number> {
+  const origin = serviceOrigin();
+  if (opts.upgrade) {
+    const running = await readService(origin);
+    if (running !== null) {
+      const cleared = await clearTheGate({
+        origin,
+        home: webHome(origin),
+        pid: running.identity.pid,
+      });
+      if (!cleared.ok) {
+        process.stderr.write(`${cleared.message}\n`);
+        return 1;
+      }
+    }
+  }
+  return serveWebService({
+    // QUIET unless something is wrong. The spine's routine narration —
+    // "listener bound", "daemon listening" — is what a supervisor reads out of
+    // a file later; a person watching a terminal wants the URL and the way to
+    // stop it, and anything else is in the way. Warnings and faults still come
+    // through, because those are the lines they need most.
+    log: quietLogger(),
+    stopOn: ["SIGINT", "SIGTERM"],
+    onHeld: async (pid) => {
+      const running = await readService(origin);
+      process.stderr.write(
+        running === null
+          ? `odu: something holds the web service's gate (pid ${pid}) but ` +
+            `nothing is answering on ${origin}. Nothing is serving here.\n` +
+            "It may be wedged; stop it and try again.\n"
+          : `odu: a web service is already running at ${running.identity.origin} ` +
+            `(pid ${running.identity.pid}). This terminal is NOT serving it.\n` +
+            `  open it            ${running.identity.origin}\n` +
+            "  replace it         odu web --upgrade\n" +
+            "  leave it running   odu web --background\n",
+      );
+      return 1;
+    },
+    onServing: (bound, pid) => {
+      if (opts.json) {
+        process.stdout.write(
+          `${JSON.stringify({ ok: true, action: "serving", origin: bound, pid }, null, 2)}\n`,
+        );
+        return;
+      }
+      process.stdout.write(`${bound}\n`);
+      process.stderr.write(
+        `odu · serving in this terminal (pid ${pid}) — Ctrl-C stops it\n` +
+          `odu · MCP (Streamable HTTP): ${serviceMcpUrl(bound)}\n` +
+          `odu · runs you start keep going after this stops\n` +
+          "odu · to leave a service running instead: odu web --background\n" +
+          // A URL that 404s is worse than no URL. A source run has no baked
+          // bundle, so the wire is up and the PAGE is not — and the one thing a
+          // person needs at that moment is to be told which of those they have.
+          (process.env[DIST_ENV] === undefined
+            ? "odu · NO BROWSER PAGE in this build — the wire is serving but " +
+              "`/` is empty.\nodu ·   from a checkout, use `just web`, which " +
+              "builds the bundle first\n"
+            : ""),
+      );
+    },
+  });
+}
+
+/**
+ * `odu web --background` — ensure a service, print where it is, return.
  *
  * The whole command is `ensureService` plus wording. Everything about
  * converging on a singleton — adopt, spawn, wait for readiness, refuse — lives
  * in `./webLauncher`, because that is the part a test has to be able to drive
  * without a terminal.
  */
-export async function webCommand(opts: {
+async function backgroundWeb(opts: {
   upgrade: boolean;
   json: boolean;
 }): Promise<number> {

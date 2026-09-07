@@ -396,10 +396,16 @@ question — *what is my CI doing, across all my repositories* — and it is a
 per-user singleton, not a mode of a run:
 
 ```sh
-odu web            # prints http://127.0.0.1:18440 and RETURNS; the service
-                   # outlives this shell
-odu web --upgrade  # drain a running service of another build, start this one
+odu web                # SERVES IN THIS TERMINAL until Ctrl-C, printing
+                       # http://127.0.0.1:18440. Runs it started keep going.
+odu web --background   # ensure one that outlives this shell, print its URL and
+                       # return — what an agent should use
+odu web --upgrade      # drain a running service of another build, start this one
 ```
+
+**An agent wants `--background`.** Bare `odu web` does not return, so a tool
+call that ran it would block until its own timeout; and if a service is already
+up, bare `odu web` REFUSES rather than pretending this invocation is serving it.
 
 One service, one fixed address, one catalog. A browser, `odu surface` in a
 terminal and an agent over MCP are three views of that one truth rather than
@@ -425,7 +431,7 @@ odu surface --help               # the whole projection
 about the CALL: **0** answered — *including* an answer that reports red CI —
 · **1** odu declared a refusal (one JSON line on stderr, with a `code` you
 branch on) · **2** a usage error that never left the process · **3** nothing is
-serving, run `odu web` · **130** interrupted, and the run carries on.
+serving, run `odu web --background` · **130** interrupted, and the run carries on.
 
 Three habits this face rewards:
 

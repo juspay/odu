@@ -46,6 +46,18 @@ e2e: install
 run *args: install
     {{ nix_shell }} env ODU_RUNNER_FLAKE="git+file://{{ justfile_directory() }}" bun run start {{ args }}
 
+# Serve the web service from source, WITH the browser page.
+#
+# `just run web` alone serves the wire and 404s on `/`: a source run has no
+# baked ODU_WEB_DIST, so the service has no bundle to hand a browser and the URL
+# it prints goes nowhere. This builds one into the gitignored
+# `packages/web-ui/dist/` and points the service at it. Ctrl-C stops it.
+web *args: install
+    {{ nix_shell }} bun scripts/build-web-ui.ts
+    {{ nix_shell }} env ODU_RUNNER_FLAKE="git+file://{{ justfile_directory() }}" \
+      ODU_WEB_DIST="{{ justfile_directory() }}/packages/web-ui/dist" \
+      bun run start web {{ args }}
+
 # The site lives in website/ as a standalone npm project (its own
 # package-lock.json, not the root bun.lock), so this shells in and uses npm. Pass
 # Astro flags through, e.g. `just website --port 3000 --open`.

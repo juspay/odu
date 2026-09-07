@@ -19,6 +19,7 @@ odu wait            # fail-fast JSON verdict (or `wait --settle`)
 odu wait --run latest   # the same question, after the coordinator is gone
 odu rerun unit      # restart a recipe on the still-live run
 odu web             # every run, in a browser — one service, all your repos
+                    # (--background to leave it running)
 odu mcp             # same run, agent face (MCP over stdio)
 ```
 
@@ -72,12 +73,21 @@ every one of them visible at once:
 ```sh
 nix run github:juspay/odu -- web
 # http://127.0.0.1:18440
+# serving in this terminal — Ctrl-C stops it
 ```
 
-That prints a URL and returns. The service is a per-user singleton that outlives
-the shell — one gate, one fixed address, one catalog — so the board in your
-browser, `odu surface` in a terminal and an agent over MCP are three views of
-**one** truth rather than three programs that agree by convention:
+**`odu web` serves in the foreground**; Ctrl-C stops the server, and runs it
+started keep going, because a coordinator is a process group of its own. To
+leave one running instead — which is what an agent wants — ask for it:
+
+```sh
+nix run github:juspay/odu -- web --background
+```
+
+Either way it is a per-user singleton — one gate, one fixed address, one catalog
+— so the board in your browser, `odu surface` in a terminal and an agent over
+MCP are three views of **one** truth rather than three programs that agree by
+convention:
 
 ```sh
 odu surface run_start --input '{"checkout":"/code/app","expectedSha":"'$SHA'","requestId":"fix-1"}' --json
@@ -108,7 +118,8 @@ carries the same log key an agent echoes back.
 surface` answers *what happened to my call*, so it spends them on the call: **0**
 answered — including an answer that reports red CI — · **1** odu declared a
 refusal (one JSON line on stderr) · **2** a usage error that never left the
-process · **3** nothing is serving, run `odu web` · **130** interrupted, and the
+process · **3** nothing is serving, run `odu web --background` · **130**
+interrupted, and the
 run carries on.
 
 Nothing is superseded. `odu run`, `odu wait`, `odu logs`, `odu history` and the
@@ -155,10 +166,13 @@ odu dump [--root NAMEPATH]        # resolved pipeline as JSON
 odu graph [--root NAMEPATH]       # dependency graph (Mermaid)
 odu protect [--dry-run] [--branch B] [--platform P]… [--create]
                                   # --create: make the branch's ruleset if absent
-odu web [--upgrade] [-o json]     # ensure the singleton web service; prints its
-                                  # URL and returns (the service outlives the
-                                  # shell). --upgrade drains a running one of
-                                  # another build and starts this one
+odu web [--background] [--upgrade] [-o json]
+                                  # every run, in a browser. Bare: serves in
+                                  # this terminal until Ctrl-C (runs you start
+                                  # keep going). --background: ensure one that
+                                  # outlives the shell, print its URL, return.
+                                  # --upgrade drains a running one of another
+                                  # build and starts this one
 odu surface <verb> [--input JSON] [--json]
                                   # every registered run, as argv: run_start,
                                   # run_wait, run_retry, run_cancel, log_read,

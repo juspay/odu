@@ -25,7 +25,7 @@
  *   0   the call was answered, INCLUDING an answer that reports red CI
  *   1   odu declared a refusal (one JSON line on stderr)
  *   2   a usage error that never left this process
- *   3   nothing is serving — run `odu web`
+ *   3   nothing is serving — run `odu web --background`
  *   130 interrupted; the run carries on
  *
  * `odu wait --run`'s own exits are DIFFERENT and deliberately so: that command
@@ -137,7 +137,7 @@ const help: SurfaceCliHelp = {
   answer:
     "Exit 0 is a call that was answered — including an answer that reports red " +
     "CI or a deadline. Exit 1 is a refusal odu declared. Exit 3 is nothing " +
-    "serving: run `odu web`.",
+    "serving: run `odu web --background`.",
 };
 
 const projection = {

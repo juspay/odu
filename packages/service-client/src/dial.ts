@@ -119,7 +119,7 @@ export async function dialService(
     // fibers, and a caller about to report "nothing is serving" must not leave
     // a background reconnect loop behind it.
     await link.dispose();
-    throw new Error(`odu: nothing is serving ${url} — run \`odu web\``);
+    throw new Error(`odu: nothing is serving ${url} — run \`odu web --background\``);
   }
   return {
     client: oduServiceClientOver(link.dispatch),

@@ -13,7 +13,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { buildOduBinary, cleanup } from "./harness";
 import {
@@ -24,6 +24,8 @@ import {
   mcp,
   renderPage,
   renderUntil,
+  runSocketExists,
+  suitePort,
   startWebService,
   startWebServiceViaCommand,
   surfaceCall,
@@ -134,11 +136,26 @@ describe("the web service", () => {
     expect(second.stderr.toString()).toContain("already running");
   }, 120_000);
 
-  it("`odu web` adopts the running one and prints its URL", () => {
-    const res = Bun.spawnSync([odu, "web"], { env: world.env });
+  it("`odu web --background` adopts the running one and prints its URL", () => {
+    const res = Bun.spawnSync([odu, "web", "--background"], { env: world.env });
     expect(res.exitCode).toBe(0);
     expect(res.stdout.toString().trim()).toBe(world.origin);
     expect(res.stderr.toString()).toContain("reused the service already running");
+  }, 120_000);
+
+  it("bare `odu web` REFUSES to pretend it is serving one that already is", () => {
+    // The UX this default exists for. `--background` asks "make sure one is
+    // running", and there is one, so it succeeds. Bare `odu web` asks "serve
+    // HERE", and here is taken — returning 0 with a URL would tell a person
+    // this terminal is the server when Ctrl-C would stop nothing.
+    const res = Bun.spawnSync([odu, "web"], { env: world.env });
+    expect(res.exitCode).toBe(1);
+    const said = res.stderr.toString();
+    expect(said).toContain("already running");
+    expect(said).toContain("This terminal is NOT serving it");
+    // And it names both ways out rather than leaving a person stuck.
+    expect(said).toContain("odu web --upgrade");
+    expect(said).toContain("odu web --background");
   }, 120_000);
 
   it("reports its own identity, build and readiness", () => {
@@ -697,23 +714,108 @@ describe("the websocket door", () => {
 });
 
 /**
- * THE BOOTSTRAP — `odu web`, which is what a person types.
+ * THE FOREGROUND — bare `odu web`, which is what a person types.
+ *
+ * Two promises, and neither is checkable from the inside: the server lives as
+ * long as the terminal does, and a run it started does NOT. Ctrl-C reaches this
+ * process's group; a coordinator is a detached group of its own, so the signal
+ * never arrives there.
+ */
+describe("`odu web` serves in this terminal", () => {
+  it("serves until it is interrupted, and leaves the run it started going", async () => {
+    // A THIRD origin, which is also what gives this server its own gate: the
+    // daemon home is named for the origin (`daemonHome`'s "state" placement
+    // ignores XDG_STATE_HOME on purpose), so moving the port moves the gate.
+    const origin = `http://127.0.0.1:${suitePort() + 2}`;
+    const env = { ...world.env, ODU_WEB_ORIGIN: origin };
+    const server = Bun.spawn([odu, "web"], { env, stdout: "pipe", stderr: "pipe" });
+    const at = { ...world, origin, env } as WebWorld;
+    let home: string | undefined;
+    try {
+      // It STAYS UP. A command that printed a URL and exited is the thing this
+      // default replaced, so the first assertion is that it is still there.
+      home = await until(
+        "the foreground server to answer",
+        () => {
+          const cell = surfaceCall(at, ["get", "service"]);
+          if (cell.status !== 0) return null;
+          const value = JSON.parse(cell.stdout) as {
+            identity: { home: string };
+            readiness: { state: string };
+          };
+          return value.readiness.state === "ready" ? value.identity.home : null;
+        },
+        120_000,
+      );
+      expect(server.killed).toBe(false);
+
+      // A run started through it, which must outlive it.
+      const dir = fixture(SLOW);
+      const { runId } = startOrExplain(at, {
+        checkout: dir,
+        expectedSha: headOf(dir),
+        requestId: "fg-run",
+        noPost: true,
+      });
+      await until(
+        `run ${runId} to be running`,
+        () => {
+          const row = surfaceCall(at, ["get", "runs", runId]);
+          if (row.status !== 0) return null;
+          return (JSON.parse(row.stdout) as { state: string }).state === "running"
+            ? true
+            : null;
+        },
+        300_000,
+      );
+
+      // Ctrl-C.
+      server.kill("SIGINT");
+      await server.exited;
+      // The SERVER is gone: nothing answers its address any more.
+      await until(
+        "the foreground server to stop serving",
+        () => (surfaceCall(at, ["get", "service"]).status === 0 ? null : true),
+        60_000,
+      );
+
+      // The RUN is not. Its coordinator is a process group of its own, so the
+      // interrupt never reached it — and its evidence is in the catalog, which
+      // this suite can still read with a different service.
+      const stillThere = surfaceCall(world, ["get", "runs", runId]);
+      expect(stillThere.status).toBe(0);
+      expect(runSocketExists(dir)).toBe(true);
+
+      verb(world, "run_cancel", {
+        runId,
+        scope: { kind: "run" },
+        requestId: "fg-cleanup",
+      });
+    } finally {
+      server.kill("SIGKILL");
+      if (home !== undefined) rmSync(home, { recursive: true, force: true });
+    }
+  }, 900_000);
+});
+
+/**
+ * THE BOOTSTRAP — `odu web --background`, which is what an agent runs.
  *
  * Everything above drives a daemon this suite forked itself, which means it
  * never used the one path a person does: the launch-mode decision, the
- * environment the child is handed, and the readiness handshake `odu web` prints
- * a URL on the strength of. All three were wrong at once, and no test noticed,
- * because none of them was ever executed.
+ * environment the child is handed, and the readiness handshake the command
+ * prints a URL on the strength of. All three were wrong at once, and no test
+ * noticed, because none of them was ever executed.
  */
-describe("`odu web` starts a service that can run CI", () => {
+describe("`odu web --background` starts a service that can run CI", () => {
   let booted: WebWorld | null = null;
 
   afterAll(() => booted?.dispose());
 
   it("spawns a daemon that outlives the command, and runs a real pipeline", async () => {
     booted = await startWebServiceViaCommand(odu);
-    // The daemon is nobody's child — `odu web` returned and this process never
-    // forked it — and it is nonetheless serving.
+    // The daemon is nobody's child — the command returned and this process
+    // never forked it — and it is nonetheless serving.
     const cell = surfaceCall(booted, ["get", "service"]);
     expect(cell.status).toBe(0);
 

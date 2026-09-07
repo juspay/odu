@@ -53,6 +53,10 @@ export interface WebWorld {
   /** The daemon's log, for a failure that needs to say why. */
   logPath: string;
   root: string;
+  /** Where the daemon put its gate and control socket — read off the service's
+   *  own identity rather than re-derived, and removed at teardown so a suite
+   *  leaves nothing under the developer's state root. */
+  daemonHome?: string;
   dispose: () => void;
 }
 
@@ -135,13 +139,15 @@ function privateWorld(port: number): {
     origin,
     env: {
       ...process.env,
-      // The daemon home — the gate and the control socket. Derived from
-      // XDG_STATE_HOME when it is set and from HOME otherwise, so naming it is
-      // what keeps this suite's daemon out of a developer's own gate.
-      XDG_STATE_HOME: join(root, "xdg-state"),
       // The catalog.
       ODU_STATE_DIR: state,
       ODU_HOSTS: hostsFile(root),
+      // AND the daemon home, transitively: `daemonHome`'s "state" placement
+      // deliberately ignores `XDG_STATE_HOME` (it varies by launch context and
+      // would split one daemon's identity), so `~/.local/state/<app>` is the
+      // only lever — and odu derives `<app>` from the origin. Moving the origin
+      // is therefore what keeps this suite's gate out of a developer's own.
+      // `dispose` removes the directory it leaves behind.
       ODU_WEB_ORIGIN: origin,
     },
   };
@@ -178,10 +184,13 @@ export async function startWebService(oduBin: string): Promise<WebWorld> {
         // Already gone. Nothing to do, and nothing worth failing a teardown for.
       }
       void sink.end();
-      try {
-        rmSync(root, { recursive: true, force: true });
-      } catch (err) {
-        process.stderr.write(`e2e: failed to remove ${root}: ${String(err)}\n`);
+      for (const dir of [root, world.daemonHome]) {
+        if (dir === undefined) continue;
+        try {
+          rmSync(dir, { recursive: true, force: true });
+        } catch (err) {
+          process.stderr.write(`e2e: failed to remove ${dir}: ${String(err)}\n`);
+        }
       }
     },
   };
@@ -189,18 +198,22 @@ export async function startWebService(oduBin: string): Promise<WebWorld> {
   // READINESS IS ASKED FOR, never slept on: the service publishes its own state
   // and this reads it.
   try {
-    await until("the web service to say it is ready", () => {
+    const cell = await until("the web service to say it is ready", () => {
       const answer = surfaceCall(world, ["get", "service"]);
       if (answer.status !== 0) return null;
       try {
-        const cell = JSON.parse(answer.stdout) as {
+        const value = JSON.parse(answer.stdout) as {
+          identity: { home: string };
           readiness: { state: string };
         };
-        return cell.readiness.state === "ready" ? cell : null;
+        return value.readiness.state === "ready" ? value : null;
       } catch {
         return null;
       }
     });
+    // The daemon home lives under the real `~/.local/state`, named for this
+    // suite's origin — so it is ours to remove and nobody else's to trip over.
+    world.daemonHome = cell.identity.home;
   } catch (err) {
     // A daemon that never answered has usually SAID why, and a bare "did not
     // happen within 120000ms" throws that away — which on a CI runner is the
@@ -211,13 +224,13 @@ export async function startWebService(oduBin: string): Promise<WebWorld> {
 }
 
 /**
- * Start a service THE WAY A PERSON DOES — `odu web`, which spawns the daemon and
- * returns.
+ * Start a service the way a person leaves one running — `odu web --background`,
+ * which spawns the daemon and returns.
  *
  * Deliberately a different path from {@link startWebService}, which forks
  * `web-daemon` itself. That one exercises the daemon; this one exercises the
  * BOOTSTRAP — the launch-mode decision, the environment allowlist the child
- * gets, and the readiness handshake `odu web` prints a URL on the strength of.
+ * gets, and the readiness handshake the command prints a URL on the strength of.
  * A suite that only ever forked the daemon could not have caught a spawn that
  * forced the wrong branch or handed the child an environment it could not run
  * a coordinator in, because it never used either.
@@ -228,13 +241,16 @@ export async function startWebServiceViaCommand(
   // A different port from the forked-daemon world, so the two coexist — which
   // they can only do because the gate is derived from the origin.
   const { root, origin, env } = privateWorld(suitePort() + 1);
-  const started = spawnSync(oduBin, ["web"], { env, encoding: "utf-8" });
+  const started = spawnSync(oduBin, ["web", "--background"], {
+    env,
+    encoding: "utf-8",
+  });
   if (started.status !== 0) {
     throw new Error(
-      `e2e: \`odu web\` exited ${started.status}\n${started.stderr}${started.stdout}`,
+      `e2e: \`odu web --background\` exited ${started.status}\n${started.stderr}${started.stdout}`,
     );
   }
-  const cell = await until("`odu web` to leave a service running", () => {
+  const cell = await until("`odu web --background` to leave a service running", () => {
     const answer = spawnSync(oduBin, ["surface", "get", "service"], {
       env,
       encoding: "utf-8",
@@ -261,6 +277,7 @@ export async function startWebServiceViaCommand(
     // second thing that can be wrong about where the daemon put its reasons.
     logPath: join(cell.identity.home, "web-daemon.stderr.log"),
     root,
+    daemonHome: cell.identity.home,
     dispose: () => {
       // Its GROUP first — the daemon is a session leader on either branch — and
       // then the pid, for a host where it is not.
@@ -271,10 +288,12 @@ export async function startWebServiceViaCommand(
           // Already gone, or never a group leader. Nothing worth failing on.
         }
       }
-      try {
-        rmSync(root, { recursive: true, force: true });
-      } catch (err) {
-        process.stderr.write(`e2e: failed to remove ${root}: ${String(err)}\n`);
+      for (const dir of [root, cell.identity.home]) {
+        try {
+          rmSync(dir, { recursive: true, force: true });
+        } catch (err) {
+          process.stderr.write(`e2e: failed to remove ${dir}: ${String(err)}\n`);
+        }
       }
     },
   };

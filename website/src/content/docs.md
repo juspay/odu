@@ -351,9 +351,13 @@ odu protect [--dry-run]           sync required GitHub status contexts
     --branch B                    branch to protect (default: repo default)
     --create                      make the branch's ruleset if absent
                                   writes the branch's ruleset; see below
-odu web [--upgrade] [-o json]     ensure the singleton web service; prints its
-                                  URL and returns. --upgrade drains a running
-                                  service of another build and starts this one
+odu web [--background] [--upgrade] [-o json]
+                                  every run, in a browser. Bare: serves in this
+                                  terminal until Ctrl-C; runs you start keep
+                                  going. --background: ensure one that outlives
+                                  the shell, print its URL and return.
+                                  --upgrade drains a running service of another
+                                  build and starts this one
 odu surface <verb> [--json]       every registered run, as argv
     --input '{…}' | --input -     the whole input as JSON (or from stdin)
     --origin URL                  the service to dial (default 18440)
@@ -471,7 +475,20 @@ per-user singleton rather than a mode of a run:
 ```sh
 nix run github:juspay/odu -- web
 # http://127.0.0.1:18440
+# serving in this terminal — Ctrl-C stops it
 ```
+
+`odu web` **serves in the foreground**. Ctrl-C stops the server; runs it started
+keep going, because a coordinator is a detached process group of its own. To
+leave a service running instead — which is what an agent or a login script wants
+— ask for it explicitly:
+
+```sh
+nix run github:juspay/odu -- web --background
+```
+
+If a service is already running, `--background` reuses it and says so, while
+bare `odu web` refuses: it was asked to serve *here*, and here is taken.
 
 That prints a URL and returns. The service outlives the shell that asked for it:
 one gate, one fixed address, one catalog. Concurrent launchers converge through
@@ -530,7 +547,7 @@ the call:
 | `0` | The call was answered — **including** an answer reporting red CI or a deadline. |
 | `1` | odu declared a refusal. One JSON line on stderr, with a `code` to branch on. |
 | `2` | A usage error that never left the process. |
-| `3` | Nothing is serving. Run `odu web`. |
+| `3` | Nothing is serving. Run `odu web --background`. |
 | `130` | Interrupted. The run carries on — cancelling an observation is not cancelling a run. |
 
 `run_wait` returning `reason: "failure"` is CI going red, and it is a success at

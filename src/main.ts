@@ -16,7 +16,9 @@
  *   odu dump                               resolved pipeline as JSON
  *   odu graph                              dependency graph (Mermaid)
  *   odu protect [--dry-run] [--create]     sync required status checks
- *   odu web [--upgrade]                    the singleton web service (all runs)
+ *   odu web [--background] [--upgrade]      the web service (every run, in a
+ *                                          browser). Foreground by default;
+ *                                          --background leaves one running
  *   odu surface <verb>                     the service, projected as argv
  *   odu mcp [--service]                    the agent face (MCP, stdio): this
  *                                          checkout's live run, or --service
@@ -98,9 +100,12 @@ dump [--root NAMEPATH]
 graph [--root NAMEPATH]
 protect [--dry-run] [--branch B] [--platform P]… [--create]
                               # --create: make the branch's ruleset if absent
-web [--upgrade] [-o json]     # ensure the singleton web service, print its URL
-                              # (it outlives this shell). --upgrade drains a
-                              # running one of another build and starts this one
+web [--background] [--upgrade] [-o json]
+                              # every run, in a browser. Bare: serves in this
+                              # terminal until Ctrl-C (runs you start keep
+                              # going). --background: ensure a service that
+                              # outlives this shell, print its URL and return.
+                              # --upgrade drains a running one of another build
 surface <verb> [--input JSON] [--json]
                               # every registered run, as argv: run_start,
                               # run_wait, run_retry, run_cancel, log_read, and
@@ -584,18 +589,21 @@ async function dispatch(argv: string[]): Promise<number> {
         args: rest,
         options: {
           upgrade: { type: "boolean" },
+          background: { type: "boolean" },
           output: { type: "string", short: "o" },
         },
       });
       return webCommand({
         upgrade: values.upgrade ?? false,
+        background: values.background ?? false,
         json: values.output === "json",
       });
     }
-    // The daemon `odu web` spawns. Deliberately absent from USAGE: a person
-    // types `odu web`, and only a supervisor types this — running it by hand
-    // in a terminal would tie the service's life to that terminal, which is
-    // the one property the singleton exists to not have.
+    // The daemon `odu web --background` spawns. Deliberately absent from USAGE:
+    // a person who wants to watch a server runs `odu web`, which serves in the
+    // foreground and says so. This one is quiet, yields silently to a live
+    // holder, and ends only through the control fragment's `drain` — which is
+    // what a supervisor wants and what a person almost never does.
     case "web-daemon":
       return webDaemonCommand();
     // The generated face owns its own process edge (the Effect CLI runtime
