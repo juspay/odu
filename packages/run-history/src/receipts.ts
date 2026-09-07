@@ -40,7 +40,6 @@ import { Result, Schema } from "effect";
 import { createExclusive, writeAtomic } from "./atomic";
 import { RUN_FILES } from "./paths";
 import { RUN_RECORD_FORMAT } from "./schema";
-import { type RunHandle } from "./store";
 
 
 /** A request id is a caller's string and becomes a filename, so it is
@@ -58,13 +57,17 @@ export const ReceiptSchema = Schema.Struct({
   requestId: Schema.String,
   /** What kind of mutation this receipt is for.
    *
-   *  One value today. Kept as a discriminant rather than dropped because it is
-   *  a REQUIRED field: removing it now and needing it later is a format bump,
-   *  while carrying it costs a literal. The next one is already visible —
-   *  `cancel` is the other mutation an agent asks for twice when its reply goes
-   *  missing, and it wants exactly this machinery. If that has not arrived by
-   *  the time anything else here changes shape, drop this with the bump. */
-  kind: Schema.Literals(["retry"]),
+   *  `retry` is claimed against ONE RUN's evidence directory; `start` and
+   *  `cancel` are claimed against the service's own, because a start has no run
+   *  to belong to yet (that being exactly why it needs a receipt) and a cancel
+   *  must stay answerable after the run it named has expired.
+   *
+   *  A build older than this one meeting a `start` or `cancel` receipt fails to
+   *  decode it, and `readReceipt` answers `null` — which every caller here
+   *  treats as "unreadable, do not assume free". Fail-closed, and only reachable
+   *  for the run-scoped `retry` directory, since the service's own is a
+   *  directory no previous build ever reads. */
+  kind: Schema.Literals(["retry", "start", "cancel"]),
   /** A hash of the request's meaningful input. A repeat with the same id and a
    *  different digest is a conflict, not a replay. */
   digest: Schema.String,
@@ -148,18 +151,35 @@ export type ReceiptRecord = typeof ReceiptSchema.Type;
 
 const decodeReceipt = Schema.decodeUnknownResult(ReceiptSchema);
 
-function receiptPath(handle: RunHandle, requestId: string): string {
-  return join(handle.dir, RUN_FILES.receipts, `${requestId}.json`);
+/**
+ * WHERE a set of receipts lives — a directory, and nothing else.
+ *
+ * Deliberately NOT a `RunHandle`. A receipt is "an idempotency claim in a
+ * directory", and that is true of a retry claimed against one run's evidence
+ * and of a `run.start` claimed against the service's own state, which has no
+ * run to belong to yet — that being the whole reason `start` needs one. Typing
+ * this as a run made the run part of the concept and would have forced a second
+ * copy of every function below the moment a caller had no run to name.
+ *
+ * `RunHandle` satisfies it structurally, so every run-scoped call site is
+ * unchanged.
+ */
+export interface ReceiptStore {
+  readonly dir: string;
+}
+
+function receiptPath(store: ReceiptStore, requestId: string): string {
+  return join(store.dir, RUN_FILES.receipts, `${requestId}.json`);
 }
 
 export function readReceipt(
-  handle: RunHandle,
+  store: ReceiptStore,
   requestId: string,
 ): ReceiptRecord | null {
   if (!isRequestId(requestId)) return null;
   let text: string;
   try {
-    text = readFileSync(receiptPath(handle, requestId), "utf-8");
+    text = readFileSync(receiptPath(store, requestId), "utf-8");
   } catch {
     return null;
   }
@@ -193,7 +213,7 @@ export type ClaimOutcome =
  * identity in the receipt, which is a question with an answer.
  */
 export function claimReceipt(
-  handle: RunHandle,
+  store: ReceiptStore,
   input: {
     requestId: string;
     kind: ReceiptRecord["kind"];
@@ -218,11 +238,11 @@ export function claimReceipt(
     claimant: input.claimant ?? { pid: process.pid, host: hostname() },
     result: null,
   };
-  const path = receiptPath(handle, input.requestId);
+  const path = receiptPath(store, input.requestId);
   if (createExclusive(path, `${JSON.stringify(receipt, null, 2)}\n`)) {
     return { kind: "claimed", receipt };
   }
-  const existing = readReceipt(handle, input.requestId);
+  const existing = readReceipt(store, input.requestId);
   if (existing === null) {
     // The file is there but unreadable — a torn write, or a format this build
     // does not know. Treating it as free would risk doing the work twice, so
@@ -251,7 +271,7 @@ export function claimReceipt(
  * caller's reconciliation treats an absent marker conservatively anyway.
  */
 export function markDispatched(
-  handle: RunHandle,
+  store: ReceiptStore,
   requestId: string,
   /** The complete set of roots this request will act on — see
    *  {@link ReceiptSchema}'s `roots`. Recorded in the SAME write as the
@@ -261,11 +281,11 @@ export function markDispatched(
   roots: readonly string[],
   now: number = Date.now(),
 ): void {
-  const existing = readReceipt(handle, requestId);
+  const existing = readReceipt(store, requestId);
   if (existing === null || existing.state === "completed") return;
   if (existing.dispatchedAt !== undefined) return;
   writeAtomic(
-    receiptPath(handle, requestId),
+    receiptPath(store, requestId),
     `${JSON.stringify({ ...existing, dispatchedAt: now, roots: [...roots] }, null, 2)}\n`,
   );
 }
@@ -274,12 +294,12 @@ export function markDispatched(
  *  already-completed receipt leaves the first result in place, so a race
  *  between a reconciler and the original caller cannot rewrite history. */
 export function completeReceipt(
-  handle: RunHandle,
+  store: ReceiptStore,
   requestId: string,
   result: unknown,
   now: number = Date.now(),
 ): ReceiptRecord | null {
-  const existing = readReceipt(handle, requestId);
+  const existing = readReceipt(store, requestId);
   if (existing === null) return null;
   if (existing.state === "completed") return existing;
   const completed: ReceiptRecord = {
@@ -289,7 +309,7 @@ export function completeReceipt(
     result,
   };
   writeAtomic(
-    receiptPath(handle, requestId),
+    receiptPath(store, requestId),
     `${JSON.stringify(completed, null, 2)}\n`,
   );
   return completed;
@@ -297,17 +317,17 @@ export function completeReceipt(
 
 /** Every receipt on a run, for a face that wants to show what was asked of
  *  it. Unreadable files are skipped, as everywhere else in this package. */
-export function listReceipts(handle: RunHandle): ReceiptRecord[] {
+export function listReceipts(store: ReceiptStore): ReceiptRecord[] {
   let entries: string[];
   try {
-    entries = readdirSync(join(handle.dir, RUN_FILES.receipts));
+    entries = readdirSync(join(store.dir, RUN_FILES.receipts));
   } catch {
     return [];
   }
   const out: ReceiptRecord[] = [];
   for (const entry of entries) {
     if (!entry.endsWith(".json")) continue;
-    const receipt = readReceipt(handle, entry.slice(0, -".json".length));
+    const receipt = readReceipt(store, entry.slice(0, -".json".length));
     if (receipt !== null) out.push(receipt);
   }
   return out.sort((a, b) => a.acceptedAt - b.acceptedAt);

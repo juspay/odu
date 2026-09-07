@@ -389,6 +389,58 @@ commits (no git-bundle transport; push first). The lane host's own nix is
 used on the runner's PATH (never a pinned client — version skew against the
 host daemon corrupts CA-derivation handling).
 
+## Every run at once: `odu web`
+
+Everything above is about one run in one checkout. `odu web` is the other
+question — *what is my CI doing, across all my repositories* — and it is a
+per-user singleton, not a mode of a run:
+
+```sh
+odu web            # prints http://127.0.0.1:18440 and RETURNS; the service
+                   # outlives this shell
+odu web --upgrade  # drain a running service of another build, start this one
+```
+
+One service, one fixed address, one catalog. A browser, `odu surface` in a
+terminal and an agent over MCP are three views of that one truth rather than
+three programs that agree by convention — every run registered by `odu run`
+appears on the board the moment the service reads the catalog, with nothing
+having told it.
+
+The five shared verbs, spelled identically as argv and as MCP tools:
+
+```sh
+odu surface run_start  --input '{"checkout":"/abs/path","expectedSha":"SHA","requestId":"ID"}' --json
+odu surface run_wait   --input '{"runId":"RUN","after":"CURSOR"}' --json
+odu surface log_read   --input '{"key":"LOGKEY","offset":-4096}' --json
+odu surface run_retry  --input '{"runId":"RUN","selector":"ci::unit","requestId":"ID"}' --json
+odu surface run_cancel --input '{"runId":"RUN","scope":{"kind":"run"},"requestId":"ID"}' --json
+odu surface keys runs            # the board
+odu surface get runs RUN         # one row
+odu surface --help               # the whole projection
+```
+
+**The exits answer a different question from `odu wait --run`'s, deliberately.**
+`odu wait --run` is about CI, so its codes are CI's answer. `odu surface` is
+about the CALL: **0** answered — *including* an answer that reports red CI —
+· **1** odu declared a refusal (one JSON line on stderr, with a `code` you
+branch on) · **2** a usage error that never left the process · **3** nothing is
+serving, run `odu web` · **130** interrupted, and the run carries on.
+
+Three habits this face rewards:
+
+- **`requestId` is mandatory on every mutation, and that is the feature.** A
+  repeat of the same id returns the recorded answer instead of starting a
+  second run — which is exactly what you want when a reply is lost. Mint a
+  fresh id per *intent*, never per attempt.
+- **Feed the cursor back.** `run_wait` returns a `cursor`; pass it as `after`
+  next time and you are not shown the same events twice. It suppresses repeats
+  and resolves nothing: a red node you already saw is still listed, because it
+  is still red.
+- **Watch `effectiveRun` after a retry.** `run_retry` decides whether that means
+  a new attempt on a live coordinator or a linked replay run, and a replay is a
+  NEW run — your old cursor belongs to its parent and will be refused.
+
 ## Semantics worth knowing
 
 - **Lanes are one-shot**: a lane whose ssh link dies mid-run fails as

@@ -1,0 +1,20 @@
+{
+  "name": "@odu/service",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "//": "THE CROSS-RUN AUTHORITY — see README.md. Everything the singleton web service OWNS: the registry projection every face reads the board from, the durable request receipts that make a lost reply reconcilable, and the handlers behind @odu/service-client's five verbs. What it deliberately does NOT own is a run: scheduling, log verdicts, retry closure and GitHub posting all stay in @odu/execution, which this package cannot import. It reaches them through PORTS (`./ports`) that the composition root binds.",
+  "//exports": "A subpath pattern, for the reason @odu/execution's manifest gives: this package ships from this tree with its only consumers (`packages/cli` and the roots in `src/`), so a curated surface here would be a list nobody reads rather than a promise somebody depends on.",
+  "//dependencies": "The wall runs service → service-client → run-history → run-client, and `@odu/execution` is ABSENT ON PURPOSE — src/closure.test.ts asserts it, because the day this package imports the coordinator is the day the service can no longer be reasoned about without one. The @kolu/* sources are hydrated from a Nix pin (see bunfig.toml at the root) and so are absent here by design; the closure test pins the hydrated set instead.",
+  "sideEffects": false,
+  "exports": {
+    "./*": "./src/*.ts"
+  },
+  "dependencies": {
+    "@odu/run-client": "workspace:*",
+    "@odu/run-history": "workspace:*",
+    "@odu/service-client": "workspace:*",
+    "effect": "4.0.0-rc.112"
+  }
+}

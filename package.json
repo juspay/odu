@@ -4,7 +4,7 @@
   "private": true,
   "license": "AGPL-3.0-or-later",
   "type": "module",
-  "//workspaces": "Each member is a WALL, not a folder, and the walls run ONE WAY: cli \u2192 execution \u2192 run-history \u2192 run-client. run-client is the half of odu a client of a LIVE run holds; run-history is everything that OUTLIVES a coordinator (the per-user catalog, the journal, per-attempt evidence, and the checkout-scoped ledger as its legacy half); execution is everything that DOES a run; cli is the two ways of WATCHING one (the native CLI/TUI and the MCP surface). What is left in src/ is the composition roots \u2014 main.ts and runner-main.ts \u2014 the only place the faces and the engine are wired to each other. Each member's src/closure.test.ts walks its own import graph, so the direction is physics rather than discipline. Every member is also listed in `dependencies` below: the isolated linker symlinks only the root package's DIRECT dependencies into the root node_modules, so without those entries `@odu/*` would not resolve from src/.",
+  "//workspaces": "Each member is a WALL, not a folder, and the walls run ONE WAY: cli \u2192 execution \u2192 run-history \u2192 run-client. run-client is the half of odu a client of a LIVE run holds; run-history is everything that OUTLIVES a coordinator (the per-user catalog, the journal, per-attempt evidence, and the checkout-scoped ledger as its legacy half); execution is everything that DOES a run; cli is the two ways of WATCHING one (the native CLI/TUI and the MCP surface). PR 2 adds three more, and the arrow still runs one way: service-client is the CONTRACT the web service serves (browser-safe by construction \u2014 its closure test refuses a `node:` import); service is what IMPLEMENTS it, and it cannot import execution, so the three things it must cause \u2014 launch, retry, cancel \u2014 arrive as ports the root binds; web-ui is the browser, which holds views and no domain logic at all. What is left in src/ is the composition roots \u2014 main.ts and runner-main.ts \u2014 the only place the faces and the engine are wired to each other. Each member's src/closure.test.ts walks its own import graph, so the direction is physics rather than discipline. Every member is also listed in `dependencies` below: the isolated linker symlinks only the root package's DIRECT dependencies into the root node_modules, so without those entries `@odu/*` would not resolve from src/.",
   "workspaces": [
     "packages/*"
   ],
@@ -20,10 +20,14 @@
     "@odu/execution": "workspace:*",
     "@odu/run-client": "workspace:*",
     "@odu/run-history": "workspace:*",
+    "@odu/service": "workspace:*",
+    "@odu/service-client": "workspace:*",
+    "@effect/platform-browser": "4.0.0-rc.112",
     "@effect/platform-node": "4.0.0-rc.112",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@opentui/core": "^0.4.5",
     "@preact/signals-core": "^1.8.0",
+    "@solid-primitives/rootless": "^1.5.3",
     "@solid-primitives/scheduled": "^1.5.3",
     "@xterm/headless": "^6.0.0",
     "dequal": "^2.0.3",
@@ -32,17 +36,20 @@
     "quick-lru": "^7.3.0",
     "solid-js": "^1.9.0",
     "split2": "^4.2.0",
-    "ts-pattern": "^5.9.0"
+    "ts-pattern": "^5.9.0",
+    "ws": "^8.21.0"
   },
   "//overrides": "One effect instance, always. The @kolu/* sources are hydrated from the Nix store and resolve `effect` by walking up to this root node_modules (bunfig.toml explains the isolated-linker invariant), so a second copy arriving transitively would give kolu's _tag-based error narrowing two class realms to disagree about.",
   "overrides": {
     "effect": "4.0.0-rc.112",
-    "@effect/platform-node": "4.0.0-rc.112"
+    "@effect/platform-node": "4.0.0-rc.112",
+    "@effect/platform-browser": "4.0.0-rc.112"
   },
   "devDependencies": {
     "@types/bun": "^1.2.0",
     "@types/node": "^22.0.0",
     "@types/split2": "^4.2.3",
+    "@types/ws": "^8.18.1",
     "typescript": "^5.8.0"
   }
 }

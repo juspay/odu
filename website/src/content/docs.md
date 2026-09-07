@@ -351,7 +351,20 @@ odu protect [--dry-run]           sync required GitHub status contexts
     --branch B                    branch to protect (default: repo default)
     --create                      make the branch's ruleset if absent
                                   writes the branch's ruleset; see below
-odu mcp                           serve the agent interface over stdio
+odu web [--upgrade] [-o json]     ensure the singleton web service; prints its
+                                  URL and returns. --upgrade drains a running
+                                  service of another build and starts this one
+odu surface <verb> [--json]       every registered run, as argv
+    --input '{…}' | --input -     the whole input as JSON (or from stdin)
+    --origin URL                  the service to dial (default 18440)
+                                  verbs: run_start run_wait run_retry
+                                         run_cancel log_read
+                                  readers: get keys watch list
+                                  exits: 0 answered (red CI included) · 1 refused
+                                         2 usage · 3 nothing serving · 130 interrupted
+odu mcp [--service]               serve the agent interface over stdio.
+                                  Bare: this checkout's LIVE run.
+                                  --service: EVERY run, via the web service
 ```
 
 ### The live dashboard
@@ -449,6 +462,112 @@ aged out" rather than the answer a typo gets.
 
 `odu run --supersede` combines full-run cancel and start for the common “stop this run and test the fix” move. Runs normally exit as soon as they settle; `--linger` keeps the coordinator available so a node can be retried later, then reaps it after an idle period or explicit cancellation.
 
+## Every run at once: the web service
+
+Everything above is about one run in one checkout. `odu web` is the other
+question — *what is my CI doing, across all my repositories* — and it is a
+per-user singleton rather than a mode of a run:
+
+```sh
+nix run github:juspay/odu -- web
+# http://127.0.0.1:18440
+```
+
+That prints a URL and returns. The service outlives the shell that asked for it:
+one gate, one fixed address, one catalog. Concurrent launchers converge through
+the framework's pid gate — exactly one wins the atomic claim, every loser proves
+the holder alive and yields — so the address is findable rather than variable. A
+fixed port occupied by something else is an actionable refusal, never a quiet
+relocation to a port nobody else can guess.
+
+### One truth, three faces
+
+The board in a browser, `odu surface` in a terminal and an agent over MCP are
+three views of one typed contract, not three programs that agree by convention.
+The five verbs are derived from one surface spec, so they carry the same names
+and the same input shapes everywhere:
+
+```sh
+odu surface run_start  --input '{"checkout":"/code/app","expectedSha":"SHA","requestId":"ID"}' --json
+odu surface run_wait   --input '{"runId":"RUN","after":"CURSOR"}' --json
+odu surface log_read   --input '{"key":"LOGKEY","offset":-4096}' --json
+odu surface run_retry  --input '{"runId":"RUN","selector":"ci::unit","requestId":"ID"}' --json
+odu surface run_cancel --input '{"runId":"RUN","scope":{"kind":"run"},"requestId":"ID"}' --json
+```
+
+An agent reaches the same five as MCP tools, over **Streamable HTTP** at
+`http://127.0.0.1:18440/mcp` or through `odu mcp --service`, a stdio bridge that
+dials the singleton and holds no run authority of its own.
+
+### The board
+
+Every registered run, across every checkout: project, worktree, branch, the
+exact commit tested, what the run actually covered, where it is, whether
+anything is red, and whether any commit status is still owed. Runs are
+discovered from the per-user catalog — a run started by `odu run` in a terminal
+appears without anything having told the service, and without scanning arbitrary
+filesystem paths.
+
+Opening a run shows its nodes with per-attempt state and placement, each
+attempt's own log, and three controls: retry (odu decides whether that means a
+new attempt on a live coordinator or a linked replay run, and the receipt says
+which), cancel at an explicit run / node / lane scope, and run again. Every one
+is a single procedure call on the same wire the other faces use — the browser
+holds no execution or retry logic of its own.
+
+A failing node's output is linkable: `#/run/<id>/<encoded node>/<attempt>` is
+exactly the log key an agent echoes into `log_read`, so the address in the URL
+bar and the address in a tool call are one address.
+
+### Exits: the call, not the CI
+
+`odu wait --run` answers *what did CI do*, so it spends its exit codes on CI's
+answer. `odu surface` answers *what happened to my call*, so it spends them on
+the call:
+
+| Exit | Meaning |
+| --- | --- |
+| `0` | The call was answered — **including** an answer reporting red CI or a deadline. |
+| `1` | odu declared a refusal. One JSON line on stderr, with a `code` to branch on. |
+| `2` | A usage error that never left the process. |
+| `3` | Nothing is serving. Run `odu web`. |
+| `130` | Interrupted. The run carries on — cancelling an observation is not cancelling a run. |
+
+`run_wait` returning `reason: "failure"` is CI going red, and it is a success at
+every face: exit 0 on the CLI, a normal tool result over MCP. Only a request odu
+*declines* is an error.
+
+### Requests are identified, and repeats are safe
+
+Every mutation takes a `requestId`. The id is claimed on disk before anything is
+started, with the new run's id pre-minted — so a repeat of the same id returns
+the recorded answer instead of starting a second run, and a crash between the
+claim and the coordinator's registration leaves a question with an answer rather
+than a choice between two mutations. Mint a fresh id per *intent*, never per
+attempt.
+
+### Upgrading a running service
+
+```sh
+odu web --upgrade
+```
+
+Reads the running daemon's identity off the framework's frozen control contract
+(readable even when the application surface is skewed past speaking), asks it to
+drain, waits for the **gate** to clear rather than for the process to look gone,
+and starts this build. Nothing is signalled; a service that will not drain is
+reported rather than killed — it may be finishing a write.
+
+### Access
+
+The listener binds loopback. Browser origins other than the page's own must be
+named (`ODU_WEB_ALLOWED_ORIGINS`), and the origin gate runs on the raw
+pre-upgrade socket, so a hostile page never gets a connection to argue about —
+which is what stands between a web page somebody visited and `run_start` on an
+arbitrary checkout. The MCP route can additionally require a bearer token
+(`ODU_WEB_MCP_TOKEN`) for an operator who has chosen to front the port with a
+proxy.
+
 ## Coding agents (MCP)
 
 `odu mcp` exposes the live run over [Model Context Protocol](https://modelcontextprotocol.io). It dials the same `.ci/odu.sock` as `status`, `logs`, and `attach`; lane selection remains the coordinator's job.
@@ -467,7 +586,9 @@ The interface projects odu's [@kolu/surface](https://kolu.dev/surface/) through 
 | `lease` | Agent-held venue: spawn a detached holder and return immediately with `held {host}` or `waiting {behind…}`. Re-call to observe the queue. |
 | `release` | Drop agent-held venue lease(s). |
 
-Every tool takes an optional `checkout` argument — the absolute path of the checkout root the call targets. Default is the server's own working directory, so a single-checkout agent never sends it; a server serving many conversations addresses another tree by naming it (`run({checkout: "/path/to/wt"})` spawns its coordinator there, waits on `<checkout>/.ci/odu.sock`, and the read/drive verbs dial that checkout per call). The `nodes`/`logs` resources stay bound to the server's home checkout — they are subscribable streams, not calls, so per-checkout reads arrive on the verbs; a node's log file is addressed off disk via `@odu/run-client`'s `logPathFor`, the exported spelling of `.ci/<sha7>/<platform>/<namepath>.log`.
+`odu mcp --service` is the other face: it dials the singleton web service and projects the five global verbs above (`run_start`, `run_wait`, `run_retry`, `run_cancel`, `log_read`) with resources for the board and the service's own identity. It addresses runs by run id rather than by working directory, and holds no run authority of its own — a harness restarting it kills nothing. The table above is the *live-run* face, unchanged; which one an agent wants is a fact about the agent, spelled in its config.
+
+Every tool in the table takes an optional `checkout` argument — the absolute path of the checkout root the call targets. Default is the server's own working directory, so a single-checkout agent never sends it; a server serving many conversations addresses another tree by naming it (`run({checkout: "/path/to/wt"})` spawns its coordinator there, waits on `<checkout>/.ci/odu.sock`, and the read/drive verbs dial that checkout per call). The `nodes`/`logs` resources stay bound to the server's home checkout — they are subscribable streams, not calls, so per-checkout reads arrive on the verbs; a node's log file is addressed off disk via `@odu/run-client`'s `logPathFor`, the exported spelling of `.ci/<sha7>/<platform>/<namepath>.log`.
 
 A `run`-spawned coordinator is detached and is never reaped when the MCP server *exits* — an agent harness restarting `odu mcp` alone kills no run. But the coordinator lives and dies with the process that started it — a restart of that host kills the run: a service stop kills the host's whole cgroup, `detached` or not, and there is deliberately no supervisor escaping that. The corpse is then named, never hidden: the stale lock, socket and unfinalized reservation left in `.ci` are what `runs`, `wait_for_settle`, `node_rerun` (and any `dialRun`→`null` consumer, via `@odu/run-client`'s `deadRun`) answer from — "this run died at `<sha#seq>`" — and starting a new run over the residue works without `supersede`. Cancel via the `cancel` tool while the server lives, or `odu cancel` from any shell.
 

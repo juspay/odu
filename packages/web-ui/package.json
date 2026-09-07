@@ -1,0 +1,19 @@
+{
+  "name": "@odu/web-ui",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "//": "THE BROWSER. Everything a person sees, and nothing a person could not: this package holds views over @odu/service-client's surface and no domain logic at all — no second retry rule, no second idea of what 'red' means, no execution path of its own. A control here is one procedure call on the same wire the CLI and the MCP face use, which is what makes the acceptance gate's 'same addressed state through every face' a property rather than a promise.",
+  "//exports": "A subpath pattern: this package is BUILT, not imported. `bun scripts/build-web-ui.ts` bundles `src/main.ts` into a dist the service serves; nothing in this tree imports it at runtime, and the map exists so the build script and the tests can reach the modules by name.",
+  "//dependencies": "Deliberately tiny. `@odu/service-client` is the contract (browser-safe by construction — see its own manifest), `solid-js` is the reactive runtime, and `effect` runs a procedure call at the UI edge. No component library, no bundler plugin, and no JSX transform: the views are written with Solid's own hyperscript, so the build is `Bun.build` with nothing configured beyond the entry point.",
+  "sideEffects": false,
+  "exports": {
+    "./*": "./src/*.ts"
+  },
+  "dependencies": {
+    "@odu/service-client": "workspace:*",
+    "effect": "4.0.0-rc.112",
+    "solid-js": "^1.9.0"
+  }
+}

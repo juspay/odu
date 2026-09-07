@@ -142,6 +142,20 @@ export const RunManifestSchema = Schema.Struct({
    *  existing face already prints. */
   seq: Schema.NullOr(Schema.Int),
   pipeline: Schema.String,
+  /**
+   * The branch the run was started on.
+   *
+   * Stamped at registration and never updated, because it is a fact about the
+   * run rather than about the checkout: a reader that asked the checkout would
+   * get whatever branch is checked out TODAY, which for a board of last week's
+   * runs is a different answer to the one it looks like. The checkout may also
+   * be gone by then, and a run's branch is not.
+   *
+   * ABSENT rather than nullable, and absent covers both "this record predates
+   * the field" and "HEAD was detached" — two things a reader does the same
+   * thing about (show the commit instead) and neither of which is a branch.
+   */
+  branch: Schema.optionalKey(Schema.String),
   /** Absolute path of the checkout this run was started from. The catalog is
    *  per-user, not per-checkout (that is the point — PR 2 discovers runs
    *  without scanning arbitrary directories), so the checkout is a FIELD.

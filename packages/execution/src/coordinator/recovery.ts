@@ -81,10 +81,35 @@ import {
   transitiveDependents,
 } from "../common/nodeId";
 import type { LaunchRequest, RunLauncher } from "./launcher";
+/**
+ * WHY a retry was refused, as a value.
+ *
+ * The message is for a person; this is for a caller that has to DECIDE. They
+ * are different jobs and a caller that read the sentence would be parsing prose
+ * that exists to be reworded — which is exactly what PR 2's service face did
+ * before this field, and what it stopped doing when the classification moved to
+ * the module that knows why it refused.
+ *
+ * The union is deliberately the one `@odu/service`'s `RunRetrier` port names.
+ * Two spellings, because the arrow runs cli → execution and the service must
+ * not import the engine; the compiler proves them equal where the composition
+ * root binds one to the other, which is the only place both are in scope.
+ */
+export type RetryRefusal =
+  | "bad_input"
+  | "unknown_run"
+  | "not_replayable"
+  | "request_conflict"
+  | "request_unresolved"
+  | "stale_attempt"
+  | "partial"
+  | "launch_failed";
+
 export type RetryOutcome =
   | { ok: true; receipt: RetryReceipt; replayed: boolean }
   | {
       ok: false;
+      code: RetryRefusal;
       message: string;
       /** A recovery the caller can run, as ARGV — never a string to eval. */
       suggestion?: string[];
@@ -124,11 +149,16 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
   const handle = handleFor(input.runId, catalog);
   const manifest = readManifest(handle);
   if (manifest === null) {
-    return { ok: false, message: `odu: no run ${input.runId} in the catalog` };
+    return {
+      ok: false,
+      code: "unknown_run",
+      message: `odu: no run ${input.runId} in the catalog`,
+    };
   }
   if (input.requestId !== undefined && !isRequestId(input.requestId)) {
     return {
       ok: false,
+      code: "bad_input",
       message:
         `odu: "${input.requestId}" is not a usable request id ` +
         "(letters, digits, dot, dash and underscore; 128 chars)",
@@ -155,6 +185,7 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
     if (latest === input.expectAttempt.attempt) return null;
     return {
       ok: false,
+      code: "stale_attempt",
       message:
         `odu: ${input.expectAttempt.node} is on attempt ${latest}, not ` +
         `${input.expectAttempt.attempt} — this run has moved on since you read it`,
@@ -188,11 +219,16 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
       plannedRunId,
     });
     if (claim === null) {
-      return { ok: false, message: `odu: could not record request ${input.requestId}` };
+      return {
+        ok: false,
+        code: "bad_input",
+        message: `odu: could not record request ${input.requestId}`,
+      };
     }
     if (claim.kind === "conflict") {
       return {
         ok: false,
+        code: "request_conflict",
         message:
           `odu: request id "${input.requestId}" was already used for a different retry ` +
           "— use a fresh id, or repeat the original request exactly",
@@ -231,6 +267,7 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
         // a plain replay rather than a third round of reconciliation.
         const outcome: RetryOutcome = {
           ok: false,
+          code: "request_unresolved",
           message: reconciled.message,
           suggestion: ["odu", "history", "show", "--run", input.runId],
         };
@@ -244,6 +281,7 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
         // unknown and pointed at the evidence to settle it by hand.
         return {
           ok: false,
+          code: "request_unresolved",
           message:
             `odu: request "${input.requestId}" was accepted and its outcome is UNKNOWN — ` +
             `${reconciled.reason}. Do not repeat it with a fresh id until you have ` +
@@ -253,6 +291,7 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
       }
       return {
         ok: false,
+        code: "request_unresolved",
         message:
           `odu: request "${input.requestId}" was accepted and its outcome is not recorded. ` +
           "No run was started under it, this run's coordinator recorded no acceptance " +
@@ -286,6 +325,7 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
       input,
       {
         ok: false,
+        code: "partial",
         message: live.partial,
         suggestion: ["odu", "history", "show", "--run", input.runId],
       },
@@ -321,10 +361,11 @@ function replayOf(stored: unknown): RetryOutcome {
   if (value !== null && value !== undefined && "ok" in value) {
     return value.ok === true
       ? { ok: true, receipt: (value as { receipt: RetryReceipt }).receipt, replayed: true }
-      : (value as { ok: false; message: string; suggestion?: string[] });
+      : (value as Extract<RetryOutcome, { ok: false }>);
   }
   return {
     ok: false,
+    code: "request_unresolved",
     message:
       "odu: that request id was used before, but this build cannot read what it recorded",
   };
@@ -561,10 +602,11 @@ async function relaunch(
   runId: string,
   catalog: CatalogOptions,
   onDispatch?: (roots: readonly string[]) => void,
-): Promise<{ ok: true; receipt: RetryReceipt } | { ok: false; message: string; suggestion?: string[] }> {
+): Promise<{ ok: true; receipt: RetryReceipt } | Extract<RetryOutcome, { ok: false }>> {
   if (!manifest.snapshot.retryable) {
     return {
       ok: false,
+      code: "not_replayable",
       message:
         `odu: run ${handle.runId} cannot be replayed — it ran a ` +
         `${manifest.snapshot.dirty ? "dirty working tree" : "live working tree"}, ` +
@@ -576,6 +618,7 @@ async function relaunch(
   if (!existsSync(manifest.repoRoot)) {
     return {
       ok: false,
+      code: "not_replayable",
       message:
         `odu: run ${handle.runId} was started in ${manifest.repoRoot}, which is gone — ` +
         "a replay has to run where the run ran. Its logs are still readable.",
@@ -628,6 +671,7 @@ async function relaunch(
   if (!receiptOfLaunch.ok) {
     return {
       ok: false,
+      code: "launch_failed",
       message: `odu: could not start the replay run — ${receiptOfLaunch.error ?? "unknown error"}`,
       suggestion: ["odu", "run", ...scope.selectors],
     };

@@ -7,6 +7,13 @@ in
 {
   kolu-surface = mkKoluPackage "surface";
   kolu-surface-mcp = mkKoluPackage "surface-mcp";
+  # PR 2's three faces. `surface-app` is the browser shell and the one HTTP/WS
+  # listener the web service binds; `surface-cli` projects the same surface as
+  # argv (`odu surface …`); `url-shape` is `surface-app`'s own dependency (the
+  # IPv6-safe authority spelling behind the bound URL it reports).
+  kolu-surface-app = mkKoluPackage "surface-app";
+  kolu-surface-cli = mkKoluPackage "surface-cli";
+  kolu-url-shape = mkKoluPackage "url-shape";
   kolu-surface-remote = mkKoluPackage "surface-remote";
   # `surface-remote` imports `@kolu/shell-quote` (its ssh-command construction),
   # `@kolu/surface-map` (`serveHostMap`'s host-topology surface), and `@kolu/log`

@@ -16,6 +16,9 @@ install:
     {{ nix_shell }} sh -c 'sh scripts/hydrate-kolu-packages.sh \
       "$ODU_KOLU_SURFACE" @kolu/surface \
       "$ODU_KOLU_SURFACE_MCP" @kolu/surface-mcp \
+      "$ODU_KOLU_SURFACE_APP" @kolu/surface-app \
+      "$ODU_KOLU_SURFACE_CLI" @kolu/surface-cli \
+      "$ODU_KOLU_URL_SHAPE" @kolu/url-shape \
       "$ODU_KOLU_SURFACE_REMOTE" @kolu/surface-remote \
       "$ODU_KOLU_SHELL_QUOTE" @kolu/shell-quote \
       "$ODU_KOLU_SURFACE_MAP" @kolu/surface-map \
@@ -40,7 +43,7 @@ fmt:
     {{ nix_shell }} nixpkgs-fmt --check *.nix nix/*.nix nix/packages/*.nix
 
 nix:
-    nix build .#odu .#odu-runner --no-link
+    nix build .#odu .#odu-runner .#web-ui --no-link
 
 # crates.io 403s the `curl/*` User-Agent nixpkgs fetchurl sends, so building
 # bun2nix from source (askama / basic-toml / jsonc-parser …) fails on a runner

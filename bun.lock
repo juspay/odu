@@ -5,14 +5,18 @@
     "": {
       "name": "odu",
       "dependencies": {
+        "@effect/platform-browser": "4.0.0-rc.112",
         "@effect/platform-node": "4.0.0-rc.112",
         "@modelcontextprotocol/sdk": "^1.29.0",
         "@odu/cli": "workspace:*",
         "@odu/execution": "workspace:*",
         "@odu/run-client": "workspace:*",
         "@odu/run-history": "workspace:*",
+        "@odu/service": "workspace:*",
+        "@odu/service-client": "workspace:*",
         "@opentui/core": "^0.4.5",
         "@preact/signals-core": "^1.8.0",
+        "@solid-primitives/rootless": "^1.5.3",
         "@solid-primitives/scheduled": "^1.5.3",
         "@xterm/headless": "^6.0.0",
         "dequal": "^2.0.3",
@@ -22,11 +26,13 @@
         "solid-js": "^1.9.0",
         "split2": "^4.2.0",
         "ts-pattern": "^5.9.0",
+        "ws": "^8.21.0",
       },
       "devDependencies": {
         "@types/bun": "^1.2.0",
         "@types/node": "^22.0.0",
         "@types/split2": "^4.2.3",
+        "@types/ws": "^8.18.1",
         "typescript": "^5.8.0",
       },
     },
@@ -34,10 +40,13 @@
       "name": "@odu/cli",
       "version": "0.1.0",
       "dependencies": {
+        "@effect/platform-node": "4.0.0-rc.112",
         "@modelcontextprotocol/sdk": "^1.29.0",
         "@odu/execution": "workspace:*",
         "@odu/run-client": "workspace:*",
         "@odu/run-history": "workspace:*",
+        "@odu/service": "workspace:*",
+        "@odu/service-client": "workspace:*",
         "@opentui/core": "^0.4.5",
         "@xterm/headless": "^6.0.0",
         "effect": "4.0.0-rc.112",
@@ -67,12 +76,43 @@
         "effect": "4.0.0-rc.112",
       },
     },
+    "packages/service": {
+      "name": "@odu/service",
+      "version": "0.1.0",
+      "dependencies": {
+        "@odu/run-client": "workspace:*",
+        "@odu/run-history": "workspace:*",
+        "@odu/service-client": "workspace:*",
+        "effect": "4.0.0-rc.112",
+      },
+    },
+    "packages/service-client": {
+      "name": "@odu/service-client",
+      "version": "0.1.0",
+      "dependencies": {
+        "@odu/run-client": "workspace:*",
+        "@odu/run-history": "workspace:*",
+        "effect": "4.0.0-rc.112",
+      },
+    },
+    "packages/web-ui": {
+      "name": "@odu/web-ui",
+      "version": "0.1.0",
+      "dependencies": {
+        "@odu/service-client": "workspace:*",
+        "effect": "4.0.0-rc.112",
+        "solid-js": "^1.9.0",
+      },
+    },
   },
   "overrides": {
+    "@effect/platform-browser": "4.0.0-rc.112",
     "@effect/platform-node": "4.0.0-rc.112",
     "effect": "4.0.0-rc.112",
   },
   "packages": {
+    "@effect/platform-browser": ["@effect/platform-browser@4.0.0-rc.112", "", { "peerDependencies": { "effect": "^4.0.0-rc.112" } }, "sha512-GSlqNDnjILz2EqOFPhVdMEHxlPq6SGb8+KOpNnLfRvVJjXRTMawEO+v1PCuwt2CHAqESbJAa2Nk+qcQvTrv4MQ=="],
+
     "@effect/platform-node": ["@effect/platform-node@4.0.0-rc.112", "", { "dependencies": { "@effect/platform-node-shared": "^4.0.0-rc.112", "mime": "^4.1.0", "undici": "^8.10.0" }, "peerDependencies": { "effect": "^4.0.0-rc.112", "redis": ">=5.0.0 <7.0.0" } }, "sha512-/BMAcdNGQQskLmI0Zoa95KfTZkr9HV9N4NSxaSrusG6GeW6Ulp9KvZ+Rlaiw8lnOt43CXjFLdfll5/k5rxL4hQ=="],
 
     "@effect/platform-node-shared": ["@effect/platform-node-shared@4.0.0-rc.112", "", { "dependencies": { "@types/ws": "^8.18.1", "ws": "^8.21.3" }, "peerDependencies": { "effect": "^4.0.0-rc.112" } }, "sha512-ttjz0xKamFN7vL8pNDYVwddJLjZvqKePc05djlz2VcdaKbLsnYbtMnL1rbOfHgEnIUSHGh7FkjaN4DM1Ov81sQ=="],
@@ -100,6 +140,12 @@
     "@odu/run-client": ["@odu/run-client@workspace:packages/run-client"],
 
     "@odu/run-history": ["@odu/run-history@workspace:packages/run-history"],
+
+    "@odu/service": ["@odu/service@workspace:packages/service"],
+
+    "@odu/service-client": ["@odu/service-client@workspace:packages/service-client"],
+
+    "@odu/web-ui": ["@odu/web-ui@workspace:packages/web-ui"],
 
     "@opentui/core": ["@opentui/core@0.4.5", "", { "dependencies": { "bun-ffi-structs": "0.2.4", "diff": "9.0.0", "marked": "17.0.1", "string-width": "7.2.0", "strip-ansi": "7.1.2" }, "optionalDependencies": { "@opentui/core-darwin-arm64": "0.4.5", "@opentui/core-darwin-x64": "0.4.5", "@opentui/core-linux-arm64": "0.4.5", "@opentui/core-linux-arm64-musl": "0.4.5", "@opentui/core-linux-x64": "0.4.5", "@opentui/core-linux-x64-musl": "0.4.5", "@opentui/core-win32-arm64": "0.4.5", "@opentui/core-win32-x64": "0.4.5" }, "peerDependencies": { "web-tree-sitter": "0.25.10" } }, "sha512-JsgRTPkA6e+Vxmumxai6SElOSlRQkbzNKHlCfemlArRiLhfC1IZ9RXJo2QH4xSu+uBOWAM90uss73/pPlkdEig=="],
 
@@ -133,7 +179,11 @@
 
     "@rollup/rollup-linux-x64-gnu": ["@rollup/rollup-linux-x64-gnu@4.62.3", "", { "os": "linux", "cpu": "x64" }, "sha512-V4KtWtQfAFMU7+9/A/VDps/VI8CHd3cYz0L8sgJzz8qK7eY7wI4ruFD82UYIYvW9Z4DtlTfhQcsl4XyPHW5uSg=="],
 
+    "@solid-primitives/rootless": ["@solid-primitives/rootless@1.5.4", "", { "dependencies": { "@solid-primitives/utils": "^6.4.1" }, "peerDependencies": { "solid-js": "^1.6.12" } }, "sha512-TOIZa1VUfVJ+9nkCcRajw3U4t9vBOP1HxX1WHNTbXq32mXwlqTvUnC4CRIilohcryBkT9u2ZkhUDSHRTaGp55g=="],
+
     "@solid-primitives/scheduled": ["@solid-primitives/scheduled@1.5.3", "", { "peerDependencies": { "solid-js": "^1.6.12" } }, "sha512-oNwLE6E6lxJAWrc8QXuwM0k2oU1BnANnkChwMw82aK1j3+mWGJkG1IFe5gCwbV+afYmjI76t9JJV3md/8tLw+g=="],
+
+    "@solid-primitives/utils": ["@solid-primitives/utils@6.4.1", "", { "peerDependencies": { "solid-js": "^1.6.12" } }, "sha512-ISSB5QX1qP2ynrheIpYwc4oKR5Ny4siNuUyf1qZniy+Il+p/PtDB0QK1Dnle8noiHpwRD3gpPdubOC3qI/Zamg=="],
 
     "@types/bun": ["@types/bun@1.3.14", "", { "dependencies": { "bun-types": "1.3.14" } }, "sha512-h1hFqFVcvAvD9j9K7ZW7vd82aSA+rTdznZa+5bwvCwqSB1jmmfLcbIWhOLx1/+boy/xmjgCs/OMUL8hRJSmnPw=="],
 

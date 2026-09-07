@@ -30,10 +30,23 @@ const DECLARED = Object.keys(MANIFEST.dependencies ?? {});
 
 /** Pinned as a literal set: every entry is a wall this package leans on, and
  *  the renderer/terminal entries are exactly what the engine must not carry. */
-const EXPECTED_DEPENDENCIES = ["@modelcontextprotocol/sdk", "@odu/execution", "@odu/run-client", "@odu/run-history", "@opentui/core", "@xterm/headless", "effect"];
+const EXPECTED_DEPENDENCIES = ["@effect/platform-node", "@modelcontextprotocol/sdk", "@odu/execution", "@odu/run-client", "@odu/run-history", "@odu/service", "@odu/service-client", "@opentui/core", "@xterm/headless", "effect"];
 
 /** The `@kolu/*` sources hydrated from a Nix pin rather than installed. */
-const HYDRATED = new Set<string>(["@kolu/surface", "@kolu/surface-mcp"]);
+const HYDRATED = new Set<string>([
+  "@kolu/surface",
+  "@kolu/surface-mcp",
+  // PR 2's three faces. `surface-app` is the ONE HTTP/WS listener the web
+  // service binds (its shell, its origin gate, its `/mcp` route seam);
+  // `surface-cli` projects the same surface as argv; `surface-daemon` and its
+  // supervisor half carry the singleton gate and the survivable spawn. Each is
+  // a directory a consumer of THIS package would have to hydrate, which is why
+  // the set is pinned here rather than derived.
+  "@kolu/surface-app",
+  "@kolu/surface-cli",
+  "@kolu/surface-daemon",
+  "@kolu/surface-daemon-supervisor",
+]);
 
 /** Test-only imports — the harness, not the shipped closure. */
 const TEST_ONLY = new Set(["bun:test", "typescript"]);

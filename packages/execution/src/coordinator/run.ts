@@ -68,7 +68,7 @@ import {
   progressEvent,
   SILENT_FACE,
 } from "../common/presentation";
-import { gitTopLevel } from "../common/git";
+import { gitBranch, gitTopLevel } from "../common/git";
 import { appendIfOpen, createNodeLogSink } from "./nodeLogSink";
 import { createVerdictGate } from "./verdictGate";
 import { maxLaneResurrections } from "./laneResurrection";
@@ -724,6 +724,11 @@ async function orchestrate(
   const history = openRunHistory({
     repoRoot,
     repo,
+    // Read HERE, where the run begins, because it is a fact about this run and
+    // not about the checkout: by the time a board asks, the developer has moved
+    // on and the checkout would answer with today's branch under last week's
+    // commit. A detached HEAD has no branch and says so by omission.
+    branch: gitBranch(repoRoot),
     sha,
     seq,
     pipeline: spec.name,

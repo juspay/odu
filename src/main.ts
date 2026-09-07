@@ -16,7 +16,11 @@
  *   odu dump                               resolved pipeline as JSON
  *   odu graph                              dependency graph (Mermaid)
  *   odu protect [--dry-run] [--create]     sync required status checks
- *   odu mcp                                serve the agent face (MCP, stdio)
+ *   odu web [--upgrade]                    the singleton web service (all runs)
+ *   odu surface <verb>                     the service, projected as argv
+ *   odu mcp [--service]                    the agent face (MCP, stdio): this
+ *                                          checkout's live run, or --service
+ *                                          for every run via the web service
  *
  * Strict by default: refuses a dirty tree, pins HEAD via `git worktree`,
  * posts commit statuses under `<recipe>@<platform>` contexts, splits logs
@@ -53,10 +57,14 @@ import {
 } from "@odu/cli/history";
 import { cliRunFace, faceEnv } from "@odu/cli/runFace";
 import { mcpCommand } from "@odu/cli/mcp";
+import { serviceMcpCommand } from "@odu/cli/serviceMcp";
+import { ODU_VERSION } from "@odu/execution/common/version";
+import { surfaceCliMain } from "@odu/cli/serviceCli";
+import { webCommand, webDaemonCommand } from "@odu/cli/web";
 import { protectCommand } from "@odu/cli/protect";
 import { runsCommand } from "@odu/cli/runs";
 
-const USAGE = `usage: odu <run|status|logs|attach|wait|rerun|cancel|runs|history|hosts|lease|release|dump|graph|protect|mcp> [args]
+const USAGE = `usage: odu <run|status|logs|attach|wait|rerun|cancel|runs|history|hosts|lease|release|dump|graph|protect|web|surface|mcp> [args]
 
 run [recipe[@platform]…] [--platform P]… [--host P=ADDR]… [--root NAMEPATH]
     [--no-deps] [--no-strict] [--no-snapshot] [--no-post] [--progress json]
@@ -90,7 +98,21 @@ dump [--root NAMEPATH]
 graph [--root NAMEPATH]
 protect [--dry-run] [--branch B] [--platform P]… [--create]
                               # --create: make the branch's ruleset if absent
-mcp
+web [--upgrade] [-o json]     # ensure the singleton web service, print its URL
+                              # (it outlives this shell). --upgrade drains a
+                              # running one of another build and starts this one
+surface <verb> [--input JSON] [--json]
+                              # every registered run, as argv: run_start,
+                              # run_wait, run_retry, run_cancel, log_read, and
+                              # get/keys/watch/list. odu surface --help lists
+                              # them. Exits: 0 answered (red CI included) · 1
+                              # refused · 2 usage · 3 nothing serving · 130 interrupted
+mcp [--service]               # the agent face over stdio. Bare: the run live in
+                              # THIS checkout (run, node_rerun, wait_for_settle,
+                              # cancel, runs, node_cancel, lane_cancel, lease,
+                              # release). --service: EVERY run, through the web
+                              # service — the same five verbs the browser and
+                              # odu surface use, and no run authority of its own
 `;
 
 /** A flag's integer value, or a usage error naming the flag.
@@ -557,8 +579,49 @@ async function dispatch(argv: string[]): Promise<number> {
         create: values.create ?? false,
       });
     }
-    case "mcp":
-      return mcpCommand();
+    case "web": {
+      const { values } = parseArgs({
+        args: rest,
+        options: {
+          upgrade: { type: "boolean" },
+          output: { type: "string", short: "o" },
+        },
+      });
+      return webCommand({
+        upgrade: values.upgrade ?? false,
+        json: values.output === "json",
+      });
+    }
+    // The daemon `odu web` spawns. Deliberately absent from USAGE: a person
+    // types `odu web`, and only a supervisor types this — running it by hand
+    // in a terminal would tie the service's life to that terminal, which is
+    // the one property the singleton exists to not have.
+    case "web-daemon":
+      return webDaemonCommand();
+    // The generated face owns its own process edge (the Effect CLI runtime
+    // writes the failure's line and exits with the verdict), so this never
+    // returns — see `surfaceCliMain`.
+    case "surface":
+      return surfaceCliMain(rest);
+    case "mcp": {
+      const { values } = parseArgs({
+        args: rest,
+        options: { service: { type: "boolean" } },
+      });
+      // TWO SUBJECTS, one binary. The default face is about the run live in
+      // THIS checkout — it dies with that run, its resources are that run's,
+      // and its nine tools are a published contract consumers configure by
+      // name. `--service` is about EVERY run: it dials the singleton and
+      // projects the same five verbs the browser and `odu surface` use, under
+      // the same names, and holds no run authority of its own.
+      //
+      // A flag rather than a replacement because the two answer different
+      // questions and consumers already depend on the first. Which one a host
+      // wants is a fact about the host, so it is spelled in its config.
+      return values.service === true
+        ? serviceMcpCommand({ version: ODU_VERSION })
+        : mcpCommand();
+    }
     case undefined:
     case "help":
     case "--help":
