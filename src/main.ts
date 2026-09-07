@@ -87,7 +87,7 @@ if none is running; nothing here runs CI by itself.
 
 run [recipe[@platform]…] [--platform P]… [--host P=ADDR]… [--root NAMEPATH]
     [--no-deps] [--no-strict] [--no-snapshot] [--no-post] [--supersede]
-    [--no-wait] [--request-id ID] [-o json]
+    [--no-wait] [--request-id ID] [--progress json] [-o json]
                               # start a run in THIS checkout and watch it.
                               # Ctrl-C stops watching; the run keeps going.
 wait --run R [--after CURSOR] [--deadline-ms N] [--settle] [-o json]
@@ -333,10 +333,20 @@ async function dispatch(argv: string[]): Promise<number> {
           supersede: { type: "boolean" },
           "no-wait": { type: "boolean" },
           "request-id": { type: "string" },
+          progress: { type: "string" },
           origin: { type: "string" },
           output: { type: "string", short: "o" },
         },
       });
+      // `--progress json` is a FROZEN contract that `/do` and kolu's CI parse.
+      // It was the coordinator's flag while `odu run` WAS the coordinator, and
+      // when this verb became a client it went to `run-coordinator` and nothing
+      // put it back — so every caller passing it got `parseArgs` throwing on an
+      // unknown option and an immediate exit 1. Same spelling, same events, now
+      // read off the service's own node stream.
+      if (values.progress !== undefined && values.progress !== "json") {
+        throw new Error(`odu: unknown --progress format "${values.progress}"`);
+      }
       return runViaService({
         selectors: positionals,
         platforms: values.platform ?? [],
@@ -348,6 +358,7 @@ async function dispatch(argv: string[]): Promise<number> {
         noPost: values["no-post"] ?? false,
         supersede: values.supersede ?? false,
         noWait: values["no-wait"] ?? false,
+        ...(values.progress === "json" ? { progressJson: true } : {}),
         ...(values["request-id"] === undefined
           ? {}
           : { requestId: values["request-id"] }),

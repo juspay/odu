@@ -43,8 +43,12 @@
  * different act.
  */
 
+import { subscribe } from "@odu/execution/common/effectEdge";
+import { progressEvent } from "@odu/execution/common/presentation";
+import { STATUS_META } from "@odu/run-client/surface";
 import type {
   AttentionAnswer,
+  NodesFrame,
   CatalogImportReport,
   CatalogPruneReport,
   LogPage,
@@ -93,6 +97,10 @@ export interface RunOpts {
   supersede: boolean;
   /** Start it and return, rather than watching it settle. */
   noWait: boolean;
+  /** Emit one NDJSON `ProgressEvent` per node transition on stdout. A FROZEN
+   *  contract that `/do` and kolu's CI parse — see
+   *  `@odu/execution/common/presentation`. */
+  progressJson?: boolean;
   requestId?: string;
   json: boolean;
   origin?: string;
@@ -146,6 +154,9 @@ export async function runViaService(opts: RunOpts): Promise<number> {
     }
     if (!opts.json) process.stderr.write(renderStart(receipt, opts.origin));
     if (opts.noWait) return receipt.accepted ? 0 : WAIT_EXITS.stillRunning;
+    if (opts.progressJson === true) {
+      return progressStream(client, receipt.runId, receipt.sha.slice(0, 7));
+    }
     return observe(client, receipt.runId, receipt.cursor, opts.json);
   });
 }
@@ -730,4 +741,67 @@ export async function followLog(
     }
     return 0;
   }
+}
+
+/**
+ * `odu run --progress json` — one NDJSON line per node transition.
+ *
+ * A FROZEN contract: `/do` and kolu's CI parse these bytes, and
+ * `@odu/execution/common/presentation` owns the projection so this face and the
+ * coordinator's own emit byte-identical events rather than each hand-rolling
+ * one. That shared projection is the fix for juspay/odu#4 and it is not going to
+ * be re-derived here.
+ *
+ * **It was lost, and losing it was the sharpest regression in this whole
+ * change.** `--progress json` used to be the coordinator's flag, because
+ * `odu run` WAS the coordinator; when the public verb became a service client
+ * the flag went with the coordinator to `run-coordinator` and nothing put it
+ * back. `parseArgs` throws on an unknown option, so every caller passing it —
+ * which is every e2e test that drives a run, plus every consumer — got an
+ * immediate exit 1 and no output at all. The failure did not read as "that flag
+ * is gone": on one platform it read as four assertion failures about missing
+ * events, and on another as a ten-minute timeout waiting for a socket that was
+ * never going to be served.
+ *
+ * The events come off `streams.nodes` now rather than the coordinator's own
+ * face, which is what makes them available to a client at all — and means a
+ * second `odu run --progress json` watching the same run sees the same stream.
+ */
+async function progressStream(
+  client: Pick<OduServiceClient, "surface">,
+  runId: string,
+  sha7: string,
+): Promise<number> {
+  // Only TRANSITIONS are events. A frame arrives whenever anything moved,
+  // including a lane landing on a box, so emitting per frame would repeat a
+  // node's line for a reason the contract has no word for.
+  const seen = new Map<string, string>();
+  let final: NodesFrame | undefined;
+  for await (const frame of subscribe(client.surface.nodes.get({ runId }))) {
+    final = frame;
+    for (const node of frame.nodes) {
+      if (seen.get(node.id) === node.status) continue;
+      seen.set(node.id, node.status);
+      const event = progressEvent(sha7, node.id, {
+        id: node.id,
+        name: node.id,
+        command: "",
+        needs: [],
+        status: node.status,
+        exitCode: node.exitCode,
+        startedAt: node.startedAt,
+        durationMs: node.durationMs,
+      });
+      // `null` for a status that emits nothing — `pending`, whose progress
+      // mapping is deliberately absent. The caller skips it; it is not a gap.
+      if (event !== null) process.stdout.write(`${JSON.stringify(event)}\n`);
+    }
+    if (frame.done) break;
+  }
+  if (final === undefined) return 3;
+  if (final.state === "owner_lost") return WAIT_EXITS.ownerLost;
+  if (!final.done) return WAIT_EXITS.stillRunning;
+  return final.nodes.some((n) => STATUS_META[n.status].isRed)
+    ? WAIT_EXITS.failed
+    : WAIT_EXITS.passed;
 }
