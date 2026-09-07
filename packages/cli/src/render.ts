@@ -17,6 +17,7 @@ import {
   type NodeState,
   type NodeStatus,
   type PipelineState,
+  type PostingHealth,
   type RunHeader,
   STATUS_META,
   type StatusHue,
@@ -278,4 +279,30 @@ export function verdictLine(state: PipelineState): string {
   // all the failures", which is the one thing a verdict must not imply.
   if (reds.length > 3) lines.push(`  … +${reds.length - 3} more`);
   return `${lines.join("\n")}\n`;
+}
+
+/**
+ * The banner a face shows when commit statuses are owed — MOVED here, and the
+ * move is the point.
+ *
+ * It lived in `@odu/execution/coordinator/statuses`, beside the poster that
+ * produces the debt. But it is a pure function of `PostingHealth` with no
+ * authority in it at all, and its only caller is a terminal: keeping it there
+ * meant the live matrix imported the coordinator's GitHub poster to format one
+ * sentence — which is how `odu attach` came to drag the whole engine into a
+ * public client, and how the import wall came to refuse it.
+ *
+ * Rendering belongs with the renderings. What a status MEANS is still
+ * `@odu/execution`'s; what it LOOKS like is this file's, which is exactly the
+ * split the header already claims.
+ */
+export function postingWarning(health: PostingHealth): string | null {
+  if (health.owed.length === 0) return null;
+  const n = health.owed.length;
+  const last = health.owed.find((o) => o.lastError)?.lastError ?? null;
+  const noun = n === 1 ? "status" : "statuses";
+  const err = last !== null ? `, last error: ${last}` : "";
+  // "sending" before the first attempt (debounce window); "retrying" after.
+  const phase = health.owed.some((o) => o.attempts > 0) ? "retrying" : "sending";
+  return `⚠ github: ${n} ${noun} unconfirmed (${phase}${err})`;
 }

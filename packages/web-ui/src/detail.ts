@@ -19,7 +19,7 @@
  * failure this whole release exists to remove.
  */
 
-import { createMemo, For } from "solid-js";
+import { createEffect, createMemo, For } from "solid-js";
 import { button, classes, el, pill, type View, when } from "./dom";
 import { bytes, duration, NODE_STATUS, OUTCOME, runRef, scopeLabel } from "./format";
 import type { LogPage, LogTail, NodesFrame, RunNode, RunRow } from "./types";
@@ -147,11 +147,19 @@ function nodeRow(opts: {
  *   - **Which part.** A log is unbounded, so it is read a window at a time and
  *     the window says where it is. See {@link LOG_PAGE_BYTES}.
  */
+/** How far from the bottom still counts as "at the bottom". A few pixels of
+ *  slack, because a fractional scrollHeight on a zoomed page never lands
+ *  exactly on zero and a reader who never scrolled would stop being followed. */
+const STICK_SLACK = 24;
+
 function logPanel(opts: {
   node: () => RunNode | null;
   attempt: () => number | null;
   onAttempt: (attempt: number) => void;
   tail: () => LogTail | undefined;
+  /** The cursored follow's accumulated text — byte-exact, unlike the bounded
+   *  tail beside it. Null before the first page arrives. */
+  followed: () => string | null;
   pending: () => boolean;
   error: () => Error | undefined;
   onPage: (offset: number) => void;
@@ -161,6 +169,32 @@ function logPanel(opts: {
    *  Read once per use rather than re-derived, so the two buttons and the
    *  indicator cannot disagree about which page is on screen. */
   const at = (): LogPage | null => opts.page();
+
+  let pane: HTMLElement | undefined;
+  /** Following the tail, until the reader scrolls away from it. */
+  let stuck = true;
+  const shown = createMemo(
+    () => at()?.text ?? opts.followed() ?? opts.tail()?.text ?? "",
+  );
+  /** A new SUBJECT is a fresh request to see the newest output, not a
+   *  continuation of wherever the last one was scrolled to. */
+  createEffect(() => {
+    opts.node()?.id;
+    opts.attempt();
+    stuck = true;
+  });
+  createEffect(() => {
+    shown();
+    const node = pane;
+    if (node === undefined || !stuck) return;
+    // On the NEXT task: Solid runs effects after render, but the `<pre>`'s text
+    // is inserted by its own computation, so the height read here is only
+    // correct once that has run.
+    queueMicrotask(() => {
+      node.scrollTop = node.scrollHeight;
+    });
+  });
+
   return el(
     "section",
     { class: "log", "aria-label": "Node output" },
@@ -277,8 +311,27 @@ function logPanel(opts: {
           ),
           el(
             "pre",
-            { class: "log-text", tabindex: "0" },
-            () => at()?.text ?? opts.tail()?.text ?? "",
+            {
+              class: "log-text",
+              tabindex: "0",
+              ref: (node: HTMLElement) => {
+                pane = node;
+                // STICK unless the reader has scrolled away. `tail -f` and the
+                // attach TUI both do this, and a pane that did not is a pane
+                // that shows you the first screen of a log whose interesting
+                // end is somewhere below the fold — which is every log anybody
+                // opens a failure to read.
+                node.addEventListener("scroll", () => {
+                  const room = node.scrollHeight - node.scrollTop - node.clientHeight;
+                  stuck = room <= STICK_SLACK;
+                });
+              },
+            },
+            // PAGE, then FOLLOW, then tail. An explicit page is what the
+            // reader asked for; the follow is byte-exact and cursored; the
+            // bounded tail is the last resort, and it is last because it is the
+            // only one of the three that can silently show less than happened.
+            () => at()?.text ?? opts.followed() ?? opts.tail()?.text ?? "",
           ),
         ),
     ),
@@ -297,6 +350,9 @@ export function detail(opts: {
   selectedAttempt: () => number | null;
   onAttempt: (attempt: number) => void;
   tail: () => LogTail | undefined;
+  /** The cursored follow's accumulated text — byte-exact, unlike the bounded
+   *  tail beside it. Null before the first page arrives. */
+  followed: () => string | null;
   tailPending: () => boolean;
   tailError: () => Error | undefined;
   page: () => LogPage | null;
@@ -453,6 +509,7 @@ export function detail(opts: {
         attempt: opts.selectedAttempt,
         onAttempt: opts.onAttempt,
         tail: opts.tail,
+        followed: opts.followed,
         pending: opts.tailPending,
         error: opts.tailError,
         onPage: opts.onPage,

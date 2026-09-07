@@ -52,7 +52,6 @@ import {
 } from "@odu/run-client/surface";
 import { splitFanId } from "@odu/run-client/nodeId";
 import { subscribe } from "@odu/execution/common/effectEdge";
-import { postingWarning } from "@odu/execution/coordinator/statuses";
 import { formatGoDuration } from "@odu/execution/common/duration";
 import {
   commitLabel,
@@ -64,6 +63,7 @@ import {
   OUTCOME_MARK,
   recipeLabel,
   STATUS_CELL,
+  postingWarning,
   stepFocus,
 } from "./render";
 import {

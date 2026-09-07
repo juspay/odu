@@ -22,6 +22,7 @@
 import type { SurfaceClient } from "@kolu/surface/solid";
 import type { SurfaceReadout } from "@kolu/surface/solid";
 import { formatLogKey, parseLogKey } from "@odu/service-client/logKey";
+import { LOG_TAIL_BYTES } from "@odu/service-client/surface";
 import type { oduServiceSurface } from "@odu/service-client/surface";
 import { Effect } from "effect";
 import { createEffect, createMemo, createSignal, onCleanup } from "solid-js";
@@ -345,6 +346,82 @@ export function app(opts: {
     },
   };
 
+  /**
+   * THE LIVE LOG, FOLLOWED BYTE-EXACTLY — parity with `odu attach`.
+   *
+   * `logTails` streams, and for a long time that was the whole of the browser's
+   * live view. But a tail is the last {@link LOG_TAIL_BYTES} re-sent WHOLE on
+   * every change, with no cursor: a recipe that outruns the service's 250 ms
+   * tick by more than 64 KiB has the excess silently dropped, and the page
+   * shows less than happened with nothing to say so. The terminal's log pane
+   * does not lose those bytes, and a browser that does is not the same
+   * application.
+   *
+   * So the live pane is a CURSORED follow — the same `log.read` + `waitMs` loop
+   * `odu logs -f` and the attach TUI run, holding `nextOffset` and appending.
+   * One mechanism, three faces, and no face that quietly sees less.
+   *
+   * `logTails` stays for the header's `totalBytes` / `complete`, which are
+   * facts about the whole file rather than about what has been read.
+   */
+  /** One followed read's deadline. `run_wait`'s, deliberately — a longer one
+   *  holds a request open past what a proxy between a tab and the service will
+   *  tolerate, and the loop re-issues anyway. */
+  const FOLLOW_WAIT_MS = 30_000;
+  const [followed, setFollowed] = createSignal<string | null>(null);
+  createEffect(() => {
+    const key = logKey();
+    setFollowed(null);
+    if (key === null) return;
+    let live = true;
+    // The tab moved on — a new node, a new run, or the view closed. The loop
+    // notices at its next answer and stops appending into a pane that is now
+    // showing something else.
+    onCleanup(() => {
+      live = false;
+    });
+    void (async () => {
+      let cursor: number | undefined;
+      let text = "";
+      while (live) {
+        let page: LogPage;
+        try {
+          page = await Effect.runPromise(
+            opts.client.procedures.log.read({
+              key,
+              ...(cursor === undefined ? { offset: -LOG_TAIL_BYTES } : { offset: cursor }),
+              limit: LOG_PAGE_BYTES,
+              waitMs: FOLLOW_WAIT_MS,
+            }),
+          );
+        } catch {
+          // A refused or dropped read ends the FOLLOW, not the pane: whatever
+          // arrived stays on screen, and `logTails` keeps the header honest.
+          return;
+        }
+        if (!live) return;
+        // The attempt was re-run underneath us and its log rewritten in place,
+        // so the file is shorter than the cursor. Start over rather than show
+        // the tail of a different attempt as a continuation of this one.
+        if (cursor !== undefined && cursor > 0 && page.offset < cursor) {
+          cursor = 0;
+          text = "";
+          setFollowed("");
+          continue;
+        }
+        cursor = page.nextOffset;
+        if (page.text !== "") {
+          text += page.text;
+          setFollowed(text);
+        }
+        // `open` is the stop, and it is a fact the page carries rather than one
+        // inferred from `eof`: a log whose writer was killed is at EOF, not
+        // complete, and never getting another byte.
+        if (!page.open) return;
+      }
+    })();
+  });
+
   const readLogPage = (offset: number): void => {
     const key = logKey();
     if (key === null) return;
@@ -484,6 +561,7 @@ export function app(opts: {
             });
           },
           tail,
+          followed,
           tailPending,
           tailError,
           page,

@@ -28,7 +28,12 @@
  * standing, which is the one kind of fact a face is still allowed to know.
  */
 
-import { firstFrame as headFrame, subscribe } from "@odu/execution/common/effectEdge";
+import { randomUUID } from "node:crypto";
+import {
+  firstFrame as headFrame,
+  runUnary,
+  subscribe,
+} from "@odu/execution/common/effectEdge";
 import { STATUS_META } from "@odu/run-client/surface";
 import type {
   NodesFrame,
@@ -39,6 +44,8 @@ import type {
   RunRow,
 } from "@odu/service-client/surface";
 import { yellow } from "./ansi";
+import { createDisplay } from "./display";
+import { headerOf, nodeLogStream, pipelineStateOf } from "./liveFromService";
 import { statusGlyph } from "./render";
 import {
   checkoutHere,
@@ -245,25 +252,19 @@ function statusExit(row: RunRow): number {
 /**
  * `odu attach` — the same run, followed until it stops moving.
  *
- * **The curses dashboard is gone, and its going is not incidental.** That view
- * — the matrix, `r` to rerun the focused node, a log pane beside it — was built
- * on a direct dial into the coordinator's own surface, which is precisely the
- * authority a public command may no longer hold. It is the cost of the thing
- * that was asked for rather than an oversight, and it is said out loud here and
- * in the usage text rather than left for somebody to discover.
+ * **The matrix is the same matrix.** `odu attach` in a terminal opens the live
+ * view it always has — the node grid, `r` to rerun the focused node, the log
+ * pane beside it — and NOTHING about that is allowed to change here. It used to
+ * be fed by a direct dial into the coordinator's own surface, which is the
+ * authority a public command may no longer hold; it is fed from the shared
+ * service now, through `./liveFromService`. The plumbing moved. The view did
+ * not, because a consolidation that costs a person their dashboard is a
+ * consolidation that has taken something from them.
  *
- * What replaces it is the transition stream both faces of the old command
- * shared: every frame that differs from the last, rendered as it arrives. That
- * is what a person piping `odu attach` into a file wanted, what an agent can
- * use, and what survives a coordinator restart — none of which was true of a
- * matrix bound to one socket.
- *
- * Restoring the interactive view over the service is possible and is not being
- * deferred quietly: `streams.nodes` carries the live statuses, `pipeline.read`
- * carries the DAG the catalog deliberately does not store, and `log.read` with
- * `waitMs` carries the log pane. What it needs is an adapter from those three
- * onto `liveView`'s `PipelineState` / `NodeLogFrame` shapes — and shipping a
- * subtly-wrong TUI would be worse than shipping none.
+ * Piped or `-o json`, it is the transition stream instead — every frame that
+ * differs from the last. That is not a lesser fallback, it is the right thing
+ * for a non-terminal: `createDisplay` has always chosen between live, plain and
+ * json on exactly this basis, and the choice is made here for the same reason.
  *
  * Ctrl-C ends the WATCHING. The run is a detached process group with its
  * evidence in the catalog; interrupting here changes nothing about it, which is
@@ -273,6 +274,12 @@ export async function attachViaService(opts: HereRunOpts): Promise<number> {
   return openHere(
     opts,
     async (client, row) => {
+      // A TERMINAL GETS THE MATRIX. The same rule `createDisplay` has always
+      // applied: interactive when there is a tty to be interactive on, and the
+      // stream otherwise.
+      if (!opts.json && process.stdout.isTTY === true) {
+        return attachLive(client, row);
+      }
       let last = "";
       let final: NodesFrame | undefined;
       for await (const frame of subscribe(
@@ -320,4 +327,78 @@ export async function attachViaService(opts: HereRunOpts): Promise<number> {
       return 0;
     },
   );
+}
+
+/**
+ * The live dashboard, fed from the shared service.
+ *
+ * Every fact the view wants is on the surface: the node grid and the lane
+ * roster from `streams.nodes` (its frame carries `env`), an attempt's output
+ * from `log.read` with `waitMs`, and `r` from `run.retry`. `./liveFromService`
+ * maps those onto the shapes `liveView` was written against, so there is one
+ * matrix rather than two that have to be kept identical.
+ */
+async function attachLive(
+  client: OduServiceClient,
+  row: RunRow,
+): Promise<number> {
+  let latest: NodesFrame | undefined;
+  /** The focused node's log ADDRESS, from the frame that drew it — never
+   *  reassembled here. A face that built its own log key would be a second
+   *  spelling of an address the service already published. */
+  const logKeyOf = (id: string): string =>
+    latest?.nodes.find((n) => n.id === id)?.logKey ?? "";
+
+  const view = createDisplay("live", {
+    interactive: true,
+    hookStderr: false,
+    openLog: (id) => nodeLogStream(client, logKeyOf(id)),
+    // Fire-and-forget, as it always was: a refused retry shows up as the node
+    // not moving. What matters is that the call is DISPATCHED — an Effect that
+    // is merely described does nothing, which is how `r` once silently stopped
+    // working with nothing in the type system to say so.
+    rerun: (id) => {
+      void runUnary(
+        client.surface.run.retry({
+          runId: row.runId,
+          selector: id,
+          requestId: `attach-${randomUUID()}`,
+        }),
+      ).catch(() => {});
+    },
+    onQuit: () => {
+      view.stop(latest === undefined ? undefined : pipelineStateOf(latest, row));
+      process.exit(latest === undefined ? 0 : frameExit(latest));
+    },
+  });
+
+  let started = false;
+  for await (const frame of subscribe(
+    client.surface.nodes.get({ runId: row.runId }),
+  )) {
+    latest = frame;
+    const state = pipelineStateOf(frame, row);
+    // The header BEFORE the first paint: a run attached to during provisioning
+    // — which is exactly when somebody reaches for a dashboard — would
+    // otherwise show the claiming line for its whole life.
+    view.setHeader(headerOf(frame.env, Date.now()));
+    if (!started) {
+      view.start(state);
+      started = true;
+    } else {
+      view.update(state);
+    }
+    if (frame.done) break;
+  }
+  view.stop(latest === undefined ? undefined : pipelineStateOf(latest, row));
+  return latest === undefined ? 3 : frameExit(latest);
+}
+
+/** The exit a finished frame earns, on the shared run table. */
+function frameExit(frame: NodesFrame): number {
+  if (frame.state === "owner_lost") return WAIT_EXITS.ownerLost;
+  if (!frame.done) return WAIT_EXITS.stillRunning;
+  return frame.nodes.some((n) => STATUS_META[n.status].isRed)
+    ? WAIT_EXITS.failed
+    : WAIT_EXITS.passed;
 }
