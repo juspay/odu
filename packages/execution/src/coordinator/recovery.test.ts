@@ -29,10 +29,10 @@
  * writes.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, describe, expect, it } from "bun:test";
 import { Effect, Stream } from "effect";
 import { pendingNode, type PipelineState } from "@odu/run-client/surface";
 import {
@@ -87,6 +87,34 @@ const TEST_HOSTS: HostsConfig = {
   hosts: { [PLATFORM]: ["builder-1"], "aarch64-darwin": ["mac-1"] },
   source: "/test/hosts.json",
 };
+
+/**
+ * NEUTRALISE THE AMBIENT HOSTS FILE, so forgetting the wrapper fails HERE.
+ *
+ * `relaunch` checks the parent's placement against today's declared inventory,
+ * and `loadHosts()` reads whatever the developer has. Three call sites in this
+ * file passed a prepared `RetryInput` variable rather than an object literal,
+ * so a search-and-replace that injected `hosts` missed them — and they went on
+ * consulting the machine. On a laptop with an `x86_64-linux` entry they passed;
+ * on a CI runner with no hosts file at all they failed, which is the worst
+ * possible place to find out and exactly where they were found.
+ *
+ * Pointing `$ODU_HOSTS` at an empty-but-PRESENT config makes the real
+ * `loadHosts()` answer "no host for that platform" for every test in this file.
+ * So a call that skips {@link retry} now fails on every machine, not just the
+ * ones without a hosts file.
+ */
+const HOSTLESS = join(
+  mkdtempSync(join(tmpdir(), "odu-recovery-nohosts-")),
+  "hosts.json",
+);
+writeFileSync(HOSTLESS, "{}");
+const HOSTS_WAS = process.env.ODU_HOSTS;
+process.env.ODU_HOSTS = HOSTLESS;
+afterAll(() => {
+  if (HOSTS_WAS === undefined) delete process.env.ODU_HOSTS;
+  else process.env.ODU_HOSTS = HOSTS_WAS;
+});
 
 /** `retryRun` with this suite's inventory injected. Every call goes through it
  *  so no test can accidentally consult the machine. */
@@ -1050,8 +1078,8 @@ describe("a request id asked twice", () => {
     aFinishedRun(root);
     const launcher = stubLauncher();
 
-    const first = accepted(await retryRun(sameRequest(root, launcher)));
-    const second = accepted(await retryRun(sameRequest(root, launcher)));
+    const first = accepted(await retry(sameRequest(root, launcher)));
+    const second = accepted(await retry(sameRequest(root, launcher)));
 
     // THE assertion: one ask, one run. A second launch here is two runs
     // competing for the same venue lease because a reply went missing.
@@ -1068,7 +1096,7 @@ describe("a request id asked twice", () => {
     aFinishedRun(root);
     const launcher = stubLauncher();
 
-    accepted(await retryRun(sameRequest(root, launcher)));
+    accepted(await retry(sameRequest(root, launcher)));
     const out = refused(
       await retry({ ...sameRequest(root, launcher), selector: "e2e" }),
     );

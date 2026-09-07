@@ -139,10 +139,27 @@ describe("a client that walks away mid-wait", () => {
 
   beforeAll(async () => {
     world = await startWebServiceViaCommand(oduBin, suitePortFor("disconnect"));
-    trash.push(() => world.dispose());
     dir = makeWebFixture(SLOW);
-    trash.push(() => cleanup(dir));
     runId = await startRunning(world, dir, "disconnect-1");
+    // CANCEL THE RUN BEFORE THE SERVICE GOES, and in that order.
+    //
+    // These three gates all end by proving the run OUTLIVED whoever walked away
+    // — which is the point, and which also means nothing here has stopped it.
+    // A `sleep 600` coordinator is its own process group, so disposing the
+    // world does not reach it: it would sit on this machine's localhost lane
+    // for ten minutes after the suite finished, and the next test to claim a
+    // venue would queue behind a run whose test ended long ago. `trash` runs in
+    // reverse, so pushing the cancel LAST is what makes it run FIRST — the
+    // cancel has to travel through a service that is still up.
+    trash.push(() => cleanup(dir));
+    trash.push(() => world.dispose());
+    trash.push(() => {
+      verb(world, "run_cancel", {
+        runId,
+        scope: { kind: "run" },
+        requestId: "disconnect-cleanup",
+      });
+    });
   }, 900_000);
 
   it("leaves the endpoint answering, and the run running", async () => {
