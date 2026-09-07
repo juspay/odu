@@ -8,6 +8,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { createRegistry, projectRun } from "./registry";
 import {
+  crashOwner,
   finalizeRun,
   makeWorld,
   registerFixtureRun,
@@ -15,6 +16,7 @@ import {
   writeNode,
   writeRoster,
 } from "./fixture.testlib";
+import { OWNERSHIP_GRACE_MS } from "@odu/run-history/owner";
 
 let world: World | null = null;
 const open = (): World => {
@@ -213,5 +215,56 @@ describe("the run registry", () => {
     const delta = registry.refresh();
     expect(delta.removed).toEqual([run.runId]);
     expect(registry.rows()).toHaveLength(0);
+  });
+
+  it("reports a crashed coordinator as owner_lost WITHOUT anything on disk moving", () => {
+    // The bug this pins: a dead coordinator stops writing, so it stops moving
+    // the very files a "did anything change?" check reads. Fingerprinting only
+    // the files left such a row saying `provisioning` for ever — the one state
+    // a crashed run must not be reported in — while `projectRun`, which reads
+    // straight through, said `owner_lost` about the same run.
+    const w = open();
+    const at = Date.now();
+    const run = registerFixtureRun(w, {
+      repoRoot: "/code/app",
+      sha: "e".repeat(40),
+      now: at,
+    });
+    const registry = createRegistry({ root: w.catalogRoot });
+    registry.refresh(at);
+    expect(registry.row(run.runId)?.state).toBe("provisioning");
+
+    // The coordinator dies. Its heartbeat is now as old as the grace, and
+    // NOTHING in the run directory changes from here on.
+    crashOwner(run.handle, { heartbeatAt: at - OWNERSHIP_GRACE_MS - 1 });
+    const moved = registry.refresh(at);
+    expect(moved.upserted.map((row) => row.runId)).toEqual([run.runId]);
+    expect(registry.row(run.runId)?.state).toBe("owner_lost");
+    // And the board now agrees with the read-through projection, which is the
+    // property that was actually broken.
+    expect(projectRun(run.runId, { root: w.catalogRoot }, at)?.row.state).toBe(
+      "owner_lost",
+    );
+  });
+
+  it("flips to owner_lost when the GRACE expires, with no write at all", () => {
+    // Time alone, which is the harder half: the record was written by a process
+    // that is gone, and the only thing that changes between these two refreshes
+    // is the clock.
+    const w = open();
+    const at = Date.now();
+    const run = registerFixtureRun(w, {
+      repoRoot: "/code/app",
+      sha: "f".repeat(40),
+      now: at,
+    });
+    crashOwner(run.handle, { heartbeatAt: at });
+    const registry = createRegistry({ root: w.catalogRoot });
+    registry.refresh(at);
+    expect(registry.row(run.runId)?.state).toBe("provisioning");
+
+    const later = at + OWNERSHIP_GRACE_MS + 1;
+    expect(registry.refresh(later).upserted.map((r) => r.runId)).toEqual([run.runId]);
+    expect(registry.row(run.runId)?.state).toBe("owner_lost");
   });
 });

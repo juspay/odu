@@ -17,6 +17,16 @@
  * a hundred-run catalog affordable without a cache that can go stale, because
  * there is nothing to invalidate: the fingerprint IS the invalidation.
  *
+ * **And OWNER LIVENESS is part of that fingerprint, because it is not a file.**
+ * A coordinator that crashes stops writing — which means it stops moving the
+ * very files a "did anything change?" check reads. Its heartbeat then ages past
+ * the ownership grace and the run becomes `owner_lost`, and nothing on disk
+ * moved to say so. Fingerprinting the files alone left such a row reading
+ * `running` forever, which is precisely the state a crashed coordinator must
+ * not be reported in. So the fingerprint carries the ownership fence's own
+ * answer alongside the three `stat`s, and it is computed once per run per tick
+ * and handed to the projection rather than asked for twice.
+ *
  * **Discovery is the catalog and only the catalog.** `listRuns` walks the
  * per-user run directory, so a run started by `odu run` in a terminal before
  * this service existed appears on the board the moment the service starts —
@@ -61,8 +71,11 @@ const FINGERPRINTED = [
 
 /** A run directory's observable state, cheaply. Missing files contribute a
  *  fixed marker rather than being skipped, so a verdict APPEARING moves the
- *  fingerprint just as much as one changing. */
-function fingerprint(dir: string): string {
+ *  fingerprint just as much as one changing.
+ *
+ *  `ownerAlive` is the one component that is not a file: see the module header
+ *  — a dead coordinator's silence is exactly what the file half cannot see. */
+function fingerprint(dir: string, ownerAlive: boolean | null): string {
   const parts: string[] = [];
   for (const file of FINGERPRINTED) {
     try {
@@ -72,6 +85,7 @@ function fingerprint(dir: string): string {
       parts.push("-");
     }
   }
+  parts.push(ownerAlive === null ? "unowned" : ownerAlive ? "alive" : "lost");
   return parts.join("|");
 }
 
@@ -168,7 +182,15 @@ function nodesOf(
 /** Project one run. Reads the journal ONCE and folds it twice — for the row's
  *  counts and for the node list — which is what keeps the two views of one run
  *  from being two readings of it. */
-function project(handle: RunHandle, manifest: RunManifest, now: number): Entry {
+function project(
+  handle: RunHandle,
+  manifest: RunManifest,
+  now: number,
+  // Passed IN, and passed in from the same call that fingerprinted this run —
+  // so the row a reader sees and the reason it was re-projected are one answer
+  // rather than two reads that can straddle the grace boundary.
+  ownerAlive: boolean | null,
+): Entry {
   const journal = readJournal(handle);
   const owner = currentOwner(handle.dir);
   const attention = attentionFor(
@@ -179,7 +201,7 @@ function project(handle: RunHandle, manifest: RunManifest, now: number): Entry {
       unreadableEvents: journal.unreadable,
       verdict: readVerdict(handle),
       expiry: readExpiry(handle),
-      ownerAlive: ownerProvablyAlive(handle.dir, now),
+      ownerAlive,
       endpoint: owner?.endpoint ?? null,
       // A BOARD ROW carries no excerpts, so the log is never opened: a refresh
       // that read forty failing runs' tails to produce four counters would be
@@ -194,7 +216,7 @@ function project(handle: RunHandle, manifest: RunManifest, now: number): Entry {
   const fold = foldJournal(journal.entries);
   const state = boardState(attention.state, fold.latest);
   return {
-    fingerprint: fingerprint(handle.dir),
+    fingerprint: fingerprint(handle.dir, ownerAlive),
     row: {
       runId: handle.runId,
       repo: manifest.repo,
@@ -286,7 +308,8 @@ export function createRegistry(opts: RegistryOptions = {}): RunRegistry {
       nextOrder.push(runId);
       seen.add(runId);
       const handle: RunHandle = { runId, dir: runDir(catalog, runId) };
-      const stamp = fingerprint(handle.dir);
+      const alive = ownerProvablyAlive(handle.dir, now);
+      const stamp = fingerprint(handle.dir, alive);
       const held = entries.get(runId);
       if (held !== undefined && held.fingerprint === stamp) continue;
       // A row without a manifest is barely a row: the run id exists, but
@@ -298,7 +321,7 @@ export function createRegistry(opts: RegistryOptions = {}): RunRegistry {
         entries.delete(runId);
         continue;
       }
-      entries.set(runId, project(handle, manifest, now));
+      entries.set(runId, project(handle, manifest, now, alive));
       const row = entries.get(runId)?.row;
       if (row !== undefined) upserted.push(row);
     }
@@ -335,6 +358,11 @@ export function projectRun(
   const handle = handleFor(runId, opts);
   const manifest = readManifest(handle);
   if (manifest === null) return null;
-  const { row, nodes } = project(handle, manifest, now);
+  const { row, nodes } = project(
+    handle,
+    manifest,
+    now,
+    ownerProvablyAlive(handle.dir, now),
+  );
   return { row, nodes };
 }

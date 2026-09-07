@@ -13,9 +13,11 @@
  * exercised without one.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { hostname } from "node:os";
 import { join } from "node:path";
+import { RUN_FILES } from "@odu/run-history/paths";
 import { mintRunId } from "@odu/run-history/ids";
 import {
   appendEvent,
@@ -30,6 +32,8 @@ import {
 import type { OwnershipToken } from "@odu/run-history/owner";
 import type { RunScope } from "@odu/run-history/schema";
 import type {
+  CancelOutcome,
+  CancelRequest,
   CheckoutFacts,
   LaunchReceipt,
   LaunchRequest,
@@ -102,6 +106,38 @@ export function registerFixtureRun(
   );
   if (!registered.ok) throw new Error(`fixture: could not register ${runId}`);
   return { handle: registered.handle, token: registered.token, runId };
+}
+
+/**
+ * Rewrite a run's ownership record as a coordinator that CRASHED.
+ *
+ * A pid on this host that is not running, and a heartbeat as old as the caller
+ * says. This is the one state a projection cannot see by watching files: a dead
+ * coordinator writes nothing, so nothing about the run's directory changes when
+ * its grace runs out — the ownership fence's answer is the only thing that
+ * moves, and a board that did not ask would show it running forever.
+ */
+export function crashOwner(
+  handle: RunHandle,
+  opts: { heartbeatAt: number; pid?: number },
+): void {
+  const path = join(handle.dir, RUN_FILES.owner);
+  const owner = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
+  writeFileSync(
+    path,
+    `${JSON.stringify(
+      {
+        ...owner,
+        // A pid that cannot be alive. `kill(0)` on it answers ESRCH, which is
+        // what the fence requires before it will call an owner gone.
+        pid: opts.pid ?? 0x7ffffff0,
+        host: hostname(),
+        heartbeatAt: opts.heartbeatAt,
+      },
+      null,
+      2,
+    )}\n`,
+  );
 }
 
 /**
@@ -206,18 +242,20 @@ export function finalizeRun(
 export interface RecordingPorts extends ServicePorts {
   launches: LaunchRequest[];
   retries: RetryRequest[];
-  cancels: { endpoint: string; scope: unknown }[];
+  cancels: CancelRequest[];
 }
 
 export function recordingPorts(opts: {
   checkout?: (path: string) => CheckoutFacts;
   launch?: (request: LaunchRequest) => LaunchReceipt;
   retry?: (request: RetryRequest) => RetryOutcome;
-  cancelOk?: boolean;
+  /** What the stub coordinator says back. `false` is the declined arm; a whole
+   *  outcome is how a suite states `unresolved` without a socket. */
+  cancelOk?: boolean | CancelOutcome;
 } = {}): RecordingPorts {
   const launches: LaunchRequest[] = [];
   const retries: RetryRequest[] = [];
-  const cancels: { endpoint: string; scope: unknown }[] = [];
+  const cancels: CancelRequest[] = [];
   return {
     launches,
     retries,
@@ -254,11 +292,12 @@ export function recordingPorts(opts: {
         }
       );
     },
-    cancel: async ({ endpoint, scope }) => {
-      cancels.push({ endpoint, scope });
+    cancel: async (request) => {
+      cancels.push(request);
+      if (typeof opts.cancelOk === "object") return opts.cancelOk;
       return opts.cancelOk === false
-        ? { ok: false, detail: "the stub declined" }
-        : { ok: true, detail: null };
+        ? { kind: "declined", detail: "the stub declined" }
+        : { kind: "cancelled", detail: null };
     },
     probeCheckout: (path) =>
       opts.checkout?.(path) ?? {

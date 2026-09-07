@@ -17,10 +17,19 @@
  * cleared; `owner.json` is the copy a heartbeat refreshes and a clean exit
  * clears, so it is the one that can say "nothing is serving this".
  *
+ * **And an endpoint is still not an identity.** `owner.json` is refreshed by a
+ * heartbeat, so a coordinator that CRASHED keeps its recorded endpoint for the
+ * length of the ownership grace — during which a new run can start in that same
+ * checkout and bind that same socket. Dialling it then reaches a live stranger.
+ * So the run's `<sha>#<seq>` travels with the request and the adapter compares
+ * it against what the coordinator publishes BEFORE it mutates anything; the
+ * same rule, and for the same reason, as the retry policy's live path.
+ *
  * **A run with no live coordinator is an ANSWER, not a failure.** There is
  * nothing to stop, the caller is told so with `effective: "nothing"` and the
  * reason, and the exit is a success — because the request was understood and
- * answered. A refusal is for a request odu declines.
+ * answered. A refusal is for a request odu declines, or for one whose effect it
+ * cannot vouch for.
  */
 
 import { currentOwner, ownerProvablyAlive } from "@odu/run-history/owner";
@@ -84,7 +93,8 @@ async function run(
     };
   }
   const handle = handleFor(input.runId, catalog);
-  if (readManifest(handle) === null) {
+  const manifest = readManifest(handle);
+  if (manifest === null) {
     return {
       refusal:
         readExpiry(handle) === null
@@ -167,7 +177,29 @@ async function run(
   }
 
   markDispatched(deps.requests, input.requestId, [input.scope.kind], deps.now());
-  const outcome = await deps.cancel({ endpoint: owner.endpoint, scope: input.scope });
+  const outcome = await deps.cancel({
+    endpoint: owner.endpoint,
+    runId: input.runId,
+    // WHO the socket must be serving. Read from the durable record, which is
+    // the only copy that cannot have been overwritten by whatever took the
+    // checkout next.
+    expect: { sha: manifest.sha, seq: manifest.seq },
+    scope: input.scope,
+  });
+  if (outcome.kind === "unresolved") {
+    // NOT completed. The receipt stays in flight so a repeat asks again —
+    // which is safe, because cancelling twice cancels once, and is the only
+    // honest thing to record about a mutation whose effect is unknown.
+    return {
+      refusal: refuse(
+        "request_unresolved",
+        `odu: the cancel was sent to run ${input.runId}'s coordinator and its ` +
+          `outcome is UNKNOWN — ${outcome.detail}. Ask again with the same ` +
+          "request id: cancelling twice cancels once.",
+        input.runId,
+      ),
+    };
+  }
   const result: CancelResult = {
     runId: input.runId,
     requestId: input.requestId,
@@ -176,7 +208,7 @@ async function run(
     // that the coordinator declined (a platform it has no lane for) says
     // `nothing` and why — a cheerful ok there would leave a caller believing it
     // had stopped work that is still running.
-    effective: outcome.ok ? input.scope.kind : "nothing",
+    effective: outcome.kind === "cancelled" ? input.scope.kind : "nothing",
     detail: outcome.detail,
   };
   completeReceipt(deps.requests, input.requestId, result, deps.now());

@@ -43,6 +43,7 @@
 
 import { existsSync } from "node:fs";
 import { hostname } from "node:os";
+import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import {
   claimPidGate,
@@ -57,9 +58,13 @@ import { parseAllowedOrigins } from "@kolu/surface/ws-origin";
 import { reportSurfaceAppEvent, serveSurfaceApp } from "@kolu/surface-app/serve";
 import { runSocketPath } from "@odu/run-client/dial";
 import { dialRun } from "@odu/run-client/dial";
-import { runUnary } from "@odu/execution/common/effectEdge";
+import { firstFrame, runUnary } from "@odu/execution/common/effectEdge";
 import { packagedLauncher } from "@odu/execution/coordinator/launcher";
-import { retryRun as retryRecordedRun } from "@odu/execution/coordinator/recovery";
+import {
+  isSameRun,
+  retryRun as retryRecordedRun,
+} from "@odu/execution/coordinator/recovery";
+import { survivableSpawnPlan } from "@odu/execution/coordinator/spawn";
 import { gitBranch, gitTopLevel } from "@odu/execution/common/git";
 import { ODU_VERSION } from "@odu/execution/common/version";
 import { listRuns } from "@odu/run-history/store";
@@ -70,12 +75,18 @@ import {
   serviceOrigin,
 } from "@odu/service-client/endpoint";
 import type { ServiceBuild } from "@odu/service-client/surface";
-import type { CheckoutFacts, ServicePorts } from "@odu/service/ports";
+import type {
+  CancelOutcome,
+  CancelRequest,
+  CheckoutFacts,
+  ServicePorts,
+} from "@odu/service/ports";
 import { createOduService } from "@odu/service/service";
 import { Effect, Exit, Layer, Scope } from "effect";
 import { HttpRouter } from "effect/unstable/http";
 import { readProcessIdentity, selfProcessIdentity } from "./processIdentity";
 import {
+  allowedHostsFor,
   mcpGetRoute,
   mcpRoute,
   RouteTransport,
@@ -191,54 +202,140 @@ export function webPorts(): ServicePorts {
         ...(request.catalog === undefined ? {} : { catalog: request.catalog }),
         launcher,
       }),
-    cancel: async ({ endpoint, scope }) => {
-      const dialed = await dialRun(endpoint);
-      // Nothing serving that path. An ANSWER, not a failure: the run the caller
-      // named has no coordinator to stop, and saying so beats a cheerful ok.
-      if (dialed === null) {
-        return { ok: false, detail: "nothing is serving this run's socket" };
-      }
-      try {
-        switch (scope.kind) {
-          case "run": {
-            // The reply may never arrive: this call routes into the same
-            // teardown a SIGINT takes, and the coordinator may exit before it
-            // flushes. The caller confirms by the socket going away, so a lost
-            // ack is reported as the success it is rather than as a failure.
-            await runUnary(dialed.client.surface.run.cancel({})).catch(() => ({
-              ok: true,
-            }));
-            return { ok: true, detail: null };
-          }
-          case "node": {
-            const result = await runUnary(
-              dialed.client.surface.node.cancel({ id: scope.node }),
-            );
-            return result.ok
-              ? { ok: true, detail: null }
-              : {
-                  ok: false,
-                  detail: `this run has no node ${scope.node} to cancel`,
-                };
-          }
-          case "lane": {
-            const result = await runUnary(
-              dialed.client.surface.lane.cancel({ platform: scope.platform }),
-            );
-            return result.ok
-              ? { ok: true, detail: null }
-              : {
-                  ok: false,
-                  detail: `this run has no ${scope.platform} lane to cancel`,
-                };
-          }
-        }
-      } finally {
-        await dialed.close();
-      }
-    },
+    cancel: cancelThroughSocket,
     probeCheckout,
   };
+}
+
+/** How long a whole-run cancel waits for the socket to go away before it says
+ *  it does not know. Teardown finalizes posted statuses and closes lanes, so it
+ *  is not instant; bounded, because a caller must eventually be answered. */
+const TEARDOWN_CONFIRM_MS = 10_000;
+
+/** Has the coordinator let go of this socket? The run surface's own documented
+ *  confirmation for a cancel — the ack may never flush, the socket always
+ *  goes. */
+async function socketGone(endpoint: string): Promise<boolean> {
+  const dialed = await dialRun(endpoint).catch(() => null);
+  if (dialed === null) return true;
+  await dialed.close();
+  return false;
+}
+
+/**
+ * Reach the coordinator serving a run and stop what the caller named — after
+ * proving it is that run.
+ *
+ * The identity check is not a nicety. `owner.json` keeps a crashed
+ * coordinator's endpoint for the ownership grace, and a checkout serves one run
+ * after another on one socket path, so the window where "the address the dead
+ * run recorded" and "the address the live run is on" are the same string is a
+ * real one. `isSameRun` is the retry policy's own comparison, reused rather
+ * than re-derived: one answer to "is this the run I mean".
+ */
+async function cancelThroughSocket(
+  request: CancelRequest,
+): Promise<CancelOutcome> {
+  const dispatched = await dispatchCancel(request);
+  if (dispatched.kind !== "await-teardown") return dispatched;
+  // The whole-run case, and the connection is CLOSED before this: the caller
+  // confirms teardown by the socket going away, and a dial this process is
+  // still holding open is not a socket that has gone away.
+  const deadline = Date.now() + TEARDOWN_CONFIRM_MS;
+  for (;;) {
+    if (await socketGone(request.endpoint)) {
+      return { kind: "cancelled", detail: null };
+    }
+    if (Date.now() >= deadline) break;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return dispatched.acked
+    ? {
+        // It said yes. Teardown finalizes posted statuses and closes lanes, and
+        // a slow one is not a failed one.
+        kind: "cancelled",
+        detail: "the coordinator accepted the cancel and is still shutting down",
+      }
+    : {
+        kind: "unresolved",
+        detail:
+          "the coordinator did not answer and its socket is still up after " +
+          `${Math.round(TEARDOWN_CONFIRM_MS / 1000)}s`,
+      };
+}
+
+/** Dial, prove it is the right run, mutate, and let go. `await-teardown` is the
+ *  whole-run arm, which cannot be settled from this side of the connection. */
+async function dispatchCancel({
+  endpoint,
+  runId,
+  expect,
+  scope,
+}: CancelRequest): Promise<
+  CancelOutcome | { kind: "await-teardown"; acked: boolean }
+> {
+  const dialed = await dialRun(endpoint);
+  // Nothing serving that path. An ANSWER, not a failure: the run the caller
+  // named has no coordinator to stop, and saying so beats a cheerful ok.
+  if (dialed === null) {
+    return { kind: "declined", detail: "nothing is serving this run's socket" };
+  }
+  try {
+    const state = await firstFrame(dialed.client.surface.nodes.get(undefined));
+    if (state === undefined || !isSameRun(expect, state)) {
+      return {
+        kind: "declined",
+        detail:
+          `the coordinator on this checkout's socket is not run ${runId} — ` +
+          "that run's coordinator is gone and another has taken the checkout, " +
+          "so nothing was cancelled",
+      };
+    }
+    switch (scope.kind) {
+      case "run": {
+        // The reply may never arrive: this call routes into the same teardown a
+        // SIGINT takes, and the coordinator may exit before it flushes. So the
+        // ack is not what is believed — the socket is — and this arm carries the
+        // ack out only as a tiebreaker for the case where the socket stays up.
+        const acked = await runUnary(dialed.client.surface.run.cancel({}))
+          .then(() => true)
+          .catch(() => false);
+        return { kind: "await-teardown", acked };
+      }
+      case "node": {
+        const result = await runUnary(
+          dialed.client.surface.node.cancel({ id: scope.node }),
+        );
+        return result.ok
+          ? { kind: "cancelled", detail: null }
+          : {
+              kind: "declined",
+              detail: `this run has no node ${scope.node} to cancel`,
+            };
+      }
+      case "lane": {
+        const result = await runUnary(
+          dialed.client.surface.lane.cancel({ platform: scope.platform }),
+        );
+        return result.ok
+          ? { kind: "cancelled", detail: null }
+          : {
+              kind: "declined",
+              detail: `this run has no ${scope.platform} lane to cancel`,
+            };
+      }
+    }
+  } catch (err) {
+    // A node or lane cancel whose reply was lost. Those do NOT tear the socket
+    // down, so there is no second signal to confirm them by — and a mutation
+    // with no confirmation is exactly what `unresolved` is for.
+    return {
+      kind: "unresolved",
+      detail: `the call to the coordinator failed — ${(err as Error).message}`,
+    };
+  } finally {
+    await dialed.close();
+  }
 }
 
 /**
@@ -256,6 +353,9 @@ export async function webDaemonCommand(): Promise<number> {
   const { host, port } = serviceBind(origin);
   const log = stderrLogger();
   const controller = new AbortController();
+  // Read once and used by BOTH doors — the websocket upgrade and `/mcp`. Two
+  // reads of one env var is how two doors end up with two policies.
+  const allowedOrigins = parseAllowedOrigins(process.env.ODU_WEB_ALLOWED_ORIGINS);
 
   // Claimed FIRST, so a launcher that lost the race never binds the port. The
   // framework's own gate: one atomic link, a liveness-proved holder, and a
@@ -326,11 +426,21 @@ export async function webDaemonCommand(): Promise<number> {
         // runs on the RAW pre-upgrade socket, so a hostile page never gets a
         // connection to argue about — which is what stands between a web page
         // somebody visited and `run_start` on an arbitrary checkout.
-        allowedOrigins: parseAllowedOrigins(process.env.ODU_WEB_ALLOWED_ORIGINS),
+        allowedOrigins,
         // Two layers merged into one, because `routes` takes one. Merged and
         // not ordered: `HttpRouter` ranks by specificity, so both literal `/mcp`
         // routes beat the shell's `GET /*` catch-all either way round.
-        routes: Layer.merge(mcpRoute(transport), mcpGetRoute()),
+        //
+        // `/mcp` carries the SAME policy: `serveSurfaceApp`'s origin gate runs
+        // at the websocket upgrade and nowhere else, so an HTTP route added
+        // beside it is a second door and has to be locked with the same key.
+        routes: Layer.merge(
+          mcpRoute(transport, {
+            allowedOrigins,
+            allowedHosts: allowedHostsFor(origin, allowedOrigins),
+          }),
+          mcpGetRoute(),
+        ),
         onEvent: reportSurfaceAppEvent,
       }).pipe(Scope.provide(scope)),
     );
@@ -425,9 +535,24 @@ function describe(outcome: Extract<EnsureOutcome, { ok: true }>): string {
  * The framework's own survivable-spawn driver, not a bare `detached: true`:
  * under cgroup-v2 a detached child does not survive its session, so the driver
  * re-launches into its own transient user service where one is available and
- * falls back to a detached process group where it is not. The same mechanism
- * odu already uses for coordinators — see `@odu/execution`'s `spawn.ts`, which
- * documents the branch.
+ * falls back to a detached process group where it is not.
+ *
+ * **WHICH branch is odu's decision, not the driver's**, and it is the same
+ * decision a coordinator gets. The driver's own gate is `INVOCATION_ID`;
+ * {@link survivableSpawnPlan} is richer — it honours `ODU_NO_SYSTEMD_RUN` and
+ * probes for a session bus that actually exists — so it decides and the driver
+ * is told, exactly as `@odu/execution`'s `coordinatorSpawnConfig` does. Passing
+ * `fromSource` unconditionally, as this used to, forced the detached branch
+ * even inside a systemd service, where detaching escapes nothing: the daemon
+ * stays in the launching unit's cgroup and dies with it, having promised the
+ * opposite.
+ *
+ * `inheritParentEnv` is FALSE on that branch. This is a packaged launch — the
+ * binary is a Nix wrapper that carries its own environment — so the child needs
+ * {@link daemonEnv} and nothing layered under it. The opposite is what a
+ * coordinator needs, and the two differ for a reason: a coordinator is a
+ * developer's shell made durable, a daemon must not inherit an orchestrator's
+ * ambient identity and pass it to every run it later starts.
  */
 function spawnWebDaemon(): Effect.Effect<void, Error> {
   const self = process.env.ODU_SELF;
@@ -440,33 +565,83 @@ function spawnWebDaemon(): Effect.Effect<void, Error> {
       ),
     );
   }
-  return survivableSpawnDriver({
-    binPath: self,
-    args: ["web-daemon"],
-    // The COMPLETE child env: the detached branch layers no parent env under
-    // it, and a daemon spawned with no HOME or PATH would fail in ways that
-    // look like odu bugs. An allowlist rather than the whole environment, so a
-    // supervisor's ambient identity does not leak into every run the daemon
-    // later starts.
-    env: daemonEnv(),
-    unitPrefix: "odu-web",
-    // odu ships raw TypeScript run by a bun wrapper, so the child must inherit
-    // enough of this process's environment to be the same odu. Stated rather
-    // than assumed.
-    fromSource: { inheritParentEnv: true },
-  }).spawn;
+  const plan = survivableSpawnPlan(process.env, process.platform, "odu-web");
+  return survivableSpawnDriver(
+    webDaemonSpawnConfig(self, plan, process.env, webHome().dir),
+  ).spawn;
 }
 
-/** The env a daemon needs, named rather than inherited wholesale. */
-function daemonEnv(): Record<string, string> {
+/**
+ * The four values odu supplies to the framework's mechanism, plus the launch
+ * mode. Pure and exported for the same reason `coordinatorSpawnConfig` is: this
+ * is the WHOLE of odu's contribution to how the daemon starts, and it is what a
+ * suite can pin on a machine with no systemd.
+ */
+export function webDaemonSpawnConfig(
+  self: string,
+  plan: ReturnType<typeof survivableSpawnPlan>,
+  env: NodeJS.ProcessEnv,
+  homeDir: string,
+): Parameters<typeof survivableSpawnDriver>[0] {
+  return {
+    binPath: self,
+    args: ["web-daemon"],
+    // On the systemd branch this OVERLAYS the transient unit's manager env via
+    // `--setenv`; on the detached branch it is the COMPLETE child env, with no
+    // parent layered under it. Either way it must name everything odu reads,
+    // which is why the list below is long rather than clever.
+    env: daemonEnv(env),
+    unitPrefix: "odu-web",
+    ...(plan.mechanism === "detached"
+      ? { fromSource: { inheritParentEnv: false } as const }
+      : {}),
+    // Nobody holds a detached child's stderr, so a daemon that dies before it
+    // can log has nowhere to say why. Under systemd the unit's own journal has
+    // it and the driver ignores this.
+    stderrLog: join(homeDir, "web-daemon.stderr.log"),
+  };
+}
+
+/**
+ * The env a daemon needs, named rather than inherited wholesale.
+ *
+ * Long on purpose. This is the COMPLETE environment of a detached daemon, and
+ * that daemon's job includes starting coordinators that shell out to `nix` and
+ * `git` — so anything those need to work has to be named here or the failure
+ * appears much later, as a run that cannot provision, in a process nobody was
+ * watching. The rule for what belongs: a variable odu reads, a variable the
+ * platform needs to find its own directories, or a variable the toolchain a run
+ * depends on reads. Not an orchestrator's ambient identity, which is the whole
+ * reason this is a list and not `process.env`.
+ */
+export function daemonEnv(
+  source: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
   const keep = [
     "HOME",
     "PATH",
     "SHELL",
     "LANG",
+    "LC_ALL",
     "USER",
+    "LOGNAME",
+    "TERM",
+    "TZ",
+    "TMPDIR",
     "XDG_RUNTIME_DIR",
     "XDG_STATE_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    // What a coordinator this daemon starts needs to reach the store, the
+    // caches and the certificates. A daemon with none of these looks fine until
+    // the first run tries to provision a lane.
+    "NIX_PATH",
+    "NIX_REMOTE",
+    "NIX_CONFIG",
+    "NIX_SSL_CERT_FILE",
+    "SSL_CERT_FILE",
+    "LOCALE_ARCHIVE",
     // odu's own locators — where the catalog is, which odu this is, which flake
     // the lane runner comes from, and where the browser bundle lives.
     "ODU_STATE_DIR",
@@ -476,6 +651,8 @@ function daemonEnv(): Record<string, string> {
     "ODU_HOSTS",
     "ODU_AGENT_SUBSTITUTERS",
     "ODU_AGENT_TRUSTED_PUBLIC_KEYS",
+    "ODU_NO_SYSTEMD_RUN",
+    "ODU_LINGER_IDLE_MS",
     "ODU_WEB_ORIGIN",
     "ODU_WEB_DIST",
     "ODU_WEB_ALLOWED_ORIGINS",
@@ -485,7 +662,7 @@ function daemonEnv(): Record<string, string> {
   ];
   const env: Record<string, string> = {};
   for (const key of keep) {
-    const value = process.env[key];
+    const value = source[key];
     if (value !== undefined) env[key] = value;
   }
   return env;

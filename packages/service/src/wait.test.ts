@@ -23,7 +23,7 @@ import {
   writeRoster,
 } from "./fixture.testlib";
 import { readLog, readTail } from "./logs";
-import { requestStore } from "./requests";
+import { readReceipt, requestStore } from "./requests";
 import { waitForRun } from "./wait";
 
 let world: World | null = null;
@@ -357,5 +357,51 @@ describe("run.cancel", () => {
     expect(answer._tag).toBe("Failure");
     if (answer._tag !== "Failure") return;
     expect((answer.failure as ServiceRefused).code).toBe("unknown_run");
+  });
+
+  it("carries the run's identity to the port, so the socket can be checked", async () => {
+    // `.ci/odu.sock` is scoped to a CHECKOUT and a crashed coordinator keeps its
+    // recorded endpoint through the ownership grace — so the address alone can
+    // reach a DIFFERENT, live run. The adapter compares `<sha>#<seq>` before it
+    // mutates anything, and it can only do that if the service sends it.
+    const w = open();
+    const fixture = registerFixtureRun(w, { repoRoot: "/code/app", sha: SHA });
+    const { ports, deps } = cancelDeps(w);
+    await run(
+      cancelRun({ runId: fixture.runId, scope: { kind: "run" }, requestId: "c-5" }, deps),
+    );
+    const sent = ports.cancels[0];
+    expect(sent?.runId).toBe(fixture.runId);
+    expect(sent?.expect.sha).toBe(SHA);
+  });
+
+  it("keeps an UNCONFIRMED cancel unresolved, and the receipt open", async () => {
+    // The reply went missing and the socket stayed up, so whether the run was
+    // cancelled is not known. Reporting success would write a completed receipt
+    // for a mutation nobody saw happen; reporting failure would tell a caller
+    // nothing happened when it may have. Neither — and the claim stays in
+    // flight so the same request id may ask again, which is safe because
+    // cancelling twice cancels once.
+    const w = open();
+    const fixture = registerFixtureRun(w, { repoRoot: "/code/app", sha: SHA });
+    const { ports, deps } = cancelDeps(
+      w,
+      recordingPorts({
+        cancelOk: { kind: "unresolved", detail: "the socket is still up" },
+      }),
+    );
+    const answer = await run(
+      cancelRun({ runId: fixture.runId, scope: { kind: "run" }, requestId: "c-6" }, deps),
+    );
+    expect(answer._tag).toBe("Failure");
+    if (answer._tag !== "Failure") return;
+    expect((answer.failure as ServiceRefused).code).toBe("request_unresolved");
+    expect(readReceipt(deps.requests, "c-6")?.state).not.toBe("completed");
+
+    // And the repeat DOES ask again rather than replaying a non-answer.
+    await run(
+      cancelRun({ runId: fixture.runId, scope: { kind: "run" }, requestId: "c-6" }, deps),
+    );
+    expect(ports.cancels).toHaveLength(2);
   });
 });

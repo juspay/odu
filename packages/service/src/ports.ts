@@ -54,6 +54,12 @@ export interface LaunchRequest {
   readonly noSnapshot: boolean;
   readonly noPost: boolean;
   readonly hostPins: readonly string[];
+  /** The caller said it really did mean to take this checkout from the run
+   *  already in progress there. Carried through rather than consumed here: what
+   *  superseding MEANS — cancel the incumbent, confirm it is gone, then claim
+   *  the lock — belongs to the process that is about to hold that lock, because
+   *  only it can do the three without a window in between. */
+  readonly supersede: boolean;
 }
 
 export interface LaunchReceipt {
@@ -144,22 +150,53 @@ export type CancelScope =
   | { kind: "lane"; platform: string };
 
 export interface CancelRequest {
-  /** Where the live coordinator serves. The service reads this off the run's
-   *  ownership record, so a cancel can only ever reach the process that is
-   *  actually serving that run now. */
+  /** Where a coordinator serves. Read off the run's ownership record rather
+   *  than its manifest — but an endpoint is a PATH, and `.ci/odu.sock` is
+   *  scoped to a checkout that serves one run after another. So it is not an
+   *  identity, which is what {@link CancelRequest.expect} is for. */
   endpoint: string;
+  /** The run the caller named, for the message. */
+  runId: string;
+  /**
+   * WHO must be on the other end of that socket.
+   *
+   * `<sha>#<seq>` is the identity the coordinator publishes and the catalog
+   * stores, and the adapter compares it before it mutates anything. Without
+   * this, a run whose coordinator crashed keeps its endpoint through the
+   * heartbeat grace while a NEW run takes the same checkout — and cancelling
+   * the dead one would tear down the live one, with a receipt naming the run
+   * that was already over. `seq: null` is a run that reserved no ordinal and so
+   * cannot prove which run it is; the adapter refuses rather than guessing,
+   * because the cost of the wrong answer is stopping a stranger's CI.
+   */
+  expect: { sha: string; seq: number | null };
   scope: CancelScope;
 }
 
-export interface CancelResult {
-  /** Did the live coordinator accept the mutation? `false` with a `detail` is
-   *  the honest "nothing was cancelled and here is why" — never a cheerful ok
-   *  over a run whose coordinator had already gone. */
-  ok: boolean;
-  detail: string | null;
-}
+/**
+ * What reaching the coordinator came to. THREE arms, because a lost reply is
+ * not a `false`.
+ *
+ * A run-scope cancel routes into the same teardown a SIGINT takes, so the
+ * coordinator may exit before its ack flushes — which means "no answer" covers
+ * both "it did it and died" and "it never heard me". Collapsing that into
+ * success writes a completed receipt for a mutation nobody confirmed;
+ * collapsing it into failure tells a caller nothing happened when it did. So
+ * the adapter confirms by the socket going away — the run surface's own
+ * documented signal — and reports `unresolved` only when it could not.
+ */
+export type CancelOutcome =
+  /** The coordinator took the mutation, or is confirmed gone. */
+  | { kind: "cancelled"; detail: string | null }
+  /** Understood and declined — no such node, no such lane, or the socket is
+   *  serving a different run than the one the caller named. */
+  | { kind: "declined"; detail: string }
+  /** Dispatched, and what became of it is not known. Never recorded as a
+   *  finished request: a repeat must be free to ask again, which is safe
+   *  because cancelling twice cancels once. */
+  | { kind: "unresolved"; detail: string };
 
-export type RunCanceller = (request: CancelRequest) => Promise<CancelResult>;
+export type RunCanceller = (request: CancelRequest) => Promise<CancelOutcome>;
 
 // ── validating a checkout before accepting work ─────────────────────────────
 

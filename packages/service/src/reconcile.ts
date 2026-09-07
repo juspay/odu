@@ -48,6 +48,7 @@ import { formatCursor } from "@odu/run-history/ids";
 import { type CatalogOptions, handleFor, readManifest } from "@odu/run-history/store";
 import type { StartReceipt } from "@odu/service-client/surface";
 import { completeReceipt, reconcileStart, type ReceiptStore } from "./requests";
+import { recordedStart } from "./start";
 
 export interface ReconcileOptions {
   requests: ReceiptStore;
@@ -91,7 +92,7 @@ export function reconcileRequests(opts: ReconcileOptions): number {
       endpoint: manifest.registeredBy.endpoint,
       cursor: formatCursor({ runId: outcome.runId, seq: 0 }),
     };
-    completeReceipt(opts.requests, receipt.requestId, rebuilt, opts.now);
+    completeReceipt(opts.requests, receipt.requestId, recordedStart(rebuilt), opts.now);
     settled += 1;
   }
   return settled;

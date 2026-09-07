@@ -16,7 +16,14 @@
  */
 
 import { type ChildProcess, execFileSync, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BIG, currentNixSystem } from "./harness";
@@ -29,8 +36,10 @@ export interface WebWorld {
   origin: string;
   /** The private HOME/state the daemon was started with. */
   env: NodeJS.ProcessEnv;
-  /** The daemon process, so a test can prove a run outlives it. */
-  daemon: ChildProcess;
+  /** The daemon process when this suite forked it directly; `null` when it was
+   *  started by `odu web`, which is the whole point of that path — the daemon
+   *  is nobody's child. */
+  daemon: ChildProcess | null;
   /** The daemon's log, for a failure that needs to say why. */
   logPath: string;
   root: string;
@@ -57,6 +66,17 @@ function hostsFile(root: string): string {
   return path;
 }
 
+/** Whatever the daemon has said about itself, for a failure that needs to name
+ *  a cause rather than a status code. Absent is normal on the systemd branch,
+ *  where the journal has it instead. */
+export function daemonLog(world: WebWorld): string {
+  try {
+    return readFileSync(world.logPath, "utf-8").slice(-4000);
+  } catch {
+    return `(no daemon log at ${world.logPath})`;
+  }
+}
+
 /** Poll until `ask` answers, or fail with a sentence naming what was waited on. */
 export async function until<T>(
   what: string,
@@ -75,21 +95,41 @@ export async function until<T>(
   }
 }
 
-/** Start a service in a private world and wait for it to say it is ready. */
-export async function startWebService(oduBin: string): Promise<WebWorld> {
+/** A private world for one service: its own HOME, daemon home, catalog, hosts
+ *  file and port. Two suites on one machine do not fight, and a developer's own
+ *  `odu web` is untouched. */
+function privateWorld(port: number): {
+  root: string;
+  origin: string;
+  env: NodeJS.ProcessEnv;
+} {
   const root = mkdtempSync(join(tmpdir(), "odu-e2e-web-"));
   const home = join(root, "home");
   const state = join(root, "state");
   mkdirSync(home, { recursive: true });
   mkdirSync(state, { recursive: true });
-  const origin = `http://127.0.0.1:${suitePort()}`;
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    HOME: home,
-    ODU_STATE_DIR: state,
-    ODU_HOSTS: hostsFile(root),
-    ODU_WEB_ORIGIN: origin,
+  const origin = `http://127.0.0.1:${port}`;
+  return {
+    root,
+    origin,
+    env: {
+      ...process.env,
+      HOME: home,
+      // The daemon home (gate + control socket) is derived from XDG_STATE_HOME
+      // when it is set and from HOME otherwise — so a developer who exports the
+      // former would have this suite's daemon claim their own gate. Named
+      // rather than left to the environment.
+      XDG_STATE_HOME: join(root, "xdg-state"),
+      ODU_STATE_DIR: state,
+      ODU_HOSTS: hostsFile(root),
+      ODU_WEB_ORIGIN: origin,
+    },
   };
+}
+
+/** Start a service in a private world and wait for it to say it is ready. */
+export async function startWebService(oduBin: string): Promise<WebWorld> {
+  const { root, origin, env } = privateWorld(suitePort());
   const logPath = join(root, "daemon.log");
   const log = Bun.file(logPath);
   const daemon = spawn(oduBin, ["web-daemon"], {
@@ -141,6 +181,73 @@ export async function startWebService(oduBin: string): Promise<WebWorld> {
     }
   });
   return world;
+}
+
+/**
+ * Start a service THE WAY A PERSON DOES — `odu web`, which spawns the daemon and
+ * returns.
+ *
+ * Deliberately a different path from {@link startWebService}, which forks
+ * `web-daemon` itself. That one exercises the daemon; this one exercises the
+ * BOOTSTRAP — the launch-mode decision, the environment allowlist the child
+ * gets, and the readiness handshake `odu web` prints a URL on the strength of.
+ * A suite that only ever forked the daemon could not have caught a spawn that
+ * forced the wrong branch or handed the child an environment it could not run
+ * a coordinator in, because it never used either.
+ */
+export async function startWebServiceViaCommand(
+  oduBin: string,
+): Promise<WebWorld> {
+  // A different port from the forked-daemon world, so the two coexist.
+  const { root, origin, env } = privateWorld(suitePort() + 1);
+  const logPath = join(root, "xdg-state", "odu-web", "web-daemon.stderr.log");
+  const started = spawnSync(oduBin, ["web"], { env, encoding: "utf-8" });
+  if (started.status !== 0) {
+    throw new Error(
+      `e2e: \`odu web\` exited ${started.status}\n${started.stderr}${started.stdout}`,
+    );
+  }
+  const cell = await until("`odu web` to leave a service running", () => {
+    const answer = spawnSync(oduBin, ["surface", "get", "service"], {
+      env,
+      encoding: "utf-8",
+      maxBuffer: BIG,
+    });
+    if (answer.status !== 0) return null;
+    try {
+      const value = JSON.parse(answer.stdout) as {
+        identity: { pid: number };
+        readiness: { state: string };
+      };
+      return value.readiness.state === "ready" ? value : null;
+    } catch {
+      return null;
+    }
+  });
+  return {
+    odu: oduBin,
+    origin,
+    env,
+    daemon: null,
+    logPath,
+    root,
+    dispose: () => {
+      // Its GROUP first — the daemon is a session leader on either branch — and
+      // then the pid, for a host where it is not.
+      for (const target of [-cell.identity.pid, cell.identity.pid]) {
+        try {
+          process.kill(target, "SIGTERM");
+        } catch {
+          // Already gone, or never a group leader. Nothing worth failing on.
+        }
+      }
+      try {
+        rmSync(root, { recursive: true, force: true });
+      } catch (err) {
+        process.stderr.write(`e2e: failed to remove ${root}: ${String(err)}\n`);
+      }
+    },
+  };
 }
 
 /** One `odu surface …` call against this world's service. */

@@ -16,11 +16,13 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { buildOduBinary, cleanup } from "./harness";
 import {
   chromePath,
+  daemonLog,
   headOf,
   makeWebFixture,
   mcp,
   renderPage,
   startWebService,
+  startWebServiceViaCommand,
   surfaceCall,
   until,
   verb,
@@ -71,19 +73,40 @@ function fixture(justfile: string): string {
   return dir;
 }
 
+/**
+ * Start a run through the service, or fail with the reason.
+ *
+ * The reason MATTERS. `run_start` refusing is one assertion — `status` is 1 —
+ * and on a CI runner nobody can attach to, "expected 0, received 1" is the
+ * whole of what a failure says. The refusal carries a sentence naming what odu
+ * declined and why, and the daemon's own log carries the rest, so both go into
+ * the message.
+ */
+function startOrExplain(
+  at: WebWorld,
+  input: Record<string, unknown>,
+): { runId: string } {
+  const start = verb(at, "run_start", input);
+  if (start.status !== 0) {
+    throw new Error(
+      `e2e: run_start refused (exit ${start.status})\n` +
+        `${start.stderr}\n--- daemon log ---\n${daemonLog(at)}`,
+    );
+  }
+  return start.json as { runId: string };
+}
+
 /** Start a run through the service and wait for it to settle. */
 async function runToSettle(
   dir: string,
   requestId: string,
 ): Promise<{ runId: string; answer: Record<string, unknown> }> {
-  const start = verb(world, "run_start", {
+  const { runId } = startOrExplain(world, {
     checkout: dir,
     expectedSha: headOf(dir),
     requestId,
     noPost: true,
   });
-  expect(start.status).toBe(0);
-  const runId = (start.json as { runId: string }).runId;
   const answer = await until(
     `run ${runId} to settle`,
     () => {
@@ -384,6 +407,66 @@ describe("the HTTP MCP face", () => {
     expect(response.status).toBe(405);
   }, 60_000);
 
+  it("refuses a POST from a page the operator merely visited", async () => {
+    // The mutation IS the attack: a cross-site page never has to read the
+    // reply. This used to answer 200 and reach domain dispatch.
+    const response = await fetch(`${world.origin}/mcp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: "https://untrusted.example",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "run_cancel", arguments: { runId: "x", scope: { kind: "run" } } },
+      }),
+    });
+    expect(response.status).toBe(403);
+  }, 60_000);
+
+  it("refuses a form-shaped POST, which is the one a browser sends with no Origin rules", async () => {
+    const response = await fetch(`${world.origin}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+    expect(response.status).toBe(415);
+  }, 60_000);
+
+  it("refuses a Host it does not answer to — the rebinding case", async () => {
+    const response = await fetch(`${world.origin}/mcp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        host: "untrusted.example",
+        origin: "https://untrusted.example",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+    expect(response.status).toBe(421);
+  }, 60_000);
+
+  it("hands a client a session id at the handshake, so it can cancel its own calls", async () => {
+    const response = await fetch(`${world.origin}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "odu-e2e", version: "0" },
+        },
+      }),
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("mcp-session-id")).not.toBeNull();
+  }, 60_000);
+
   it("reads a resource", async () => {
     const answer = await mcp(
       world,
@@ -402,14 +485,12 @@ describe("the HTTP MCP face", () => {
 describe("cancelling, and outliving the caller", () => {
   it("cancels a live run at an explicit scope, idempotently", async () => {
     const dir = fixture(SLOW);
-    const start = verb(world, "run_start", {
+    const { runId } = startOrExplain(world, {
       checkout: dir,
       expectedSha: headOf(dir),
       requestId: "gate-cancel",
       noPost: true,
     });
-    expect(start.status).toBe(0);
-    const runId = (start.json as { runId: string }).runId;
 
     await until(
       `run ${runId} to be running`,
@@ -489,6 +570,55 @@ describe("cancelling, and outliving the caller", () => {
       300_000,
     );
     expect(found.repoRoot).toBe(dir);
+  }, 900_000);
+});
+
+/**
+ * THE BOOTSTRAP — `odu web`, which is what a person types.
+ *
+ * Everything above drives a daemon this suite forked itself, which means it
+ * never used the one path a person does: the launch-mode decision, the
+ * environment the child is handed, and the readiness handshake `odu web` prints
+ * a URL on the strength of. All three were wrong at once, and no test noticed,
+ * because none of them was ever executed.
+ */
+describe("`odu web` starts a service that can run CI", () => {
+  let booted: WebWorld | null = null;
+
+  afterAll(() => booted?.dispose());
+
+  it("spawns a daemon that outlives the command, and runs a real pipeline", async () => {
+    booted = await startWebServiceViaCommand(odu);
+    // The daemon is nobody's child — `odu web` returned and this process never
+    // forked it — and it is nonetheless serving.
+    const cell = surfaceCall(booted, ["get", "service"]);
+    expect(cell.status).toBe(0);
+
+    // And the environment it was handed is enough to START A RUN, which is the
+    // part an allowlist gets wrong quietly: a daemon missing PATH or the nix
+    // variables looks perfectly healthy until the first coordinator.
+    const dir = fixture(FAILING);
+    const { runId } = startOrExplain(booted, {
+      checkout: dir,
+      expectedSha: headOf(dir),
+      requestId: "boot-1",
+      noPost: true,
+    });
+    const settled = await until(
+      `run ${runId} to settle`,
+      () => {
+        const waited = verb(booted as WebWorld, "run_wait", {
+          runId,
+          deadlineMs: 20_000,
+        });
+        if (waited.status !== 0) return null;
+        const value = waited.json as { settled: boolean; passed: boolean };
+        return value.settled ? value : null;
+      },
+      300_000,
+      0,
+    );
+    expect(settled.passed).toBe(false);
   }, 900_000);
 });
 

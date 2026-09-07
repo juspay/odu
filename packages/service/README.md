@@ -26,8 +26,18 @@ binds (`./ports`):
 | --- | --- | --- |
 | `RunLauncher` | start a coordinator | `@odu/execution`'s `packagedLauncher` |
 | `RunRetrier` | retry a recorded run | `@odu/execution`'s retry policy |
-| `RunCanceller` | reach a live coordinator | a dial of its socket |
+| `RunCanceller` | reach *this run's* coordinator | a dial of its socket, identity checked |
 | `CheckoutProbe` | what git says about a path | `spawnSync("git", …)` |
+
+`RunCanceller` carries the run's `<sha>#<seq>` and not only its endpoint,
+because **an endpoint is not an identity**: `.ci/odu.sock` belongs to a
+*checkout*, a crashed coordinator keeps its recorded endpoint for the length of
+the ownership grace, and in that window a new run can be on the other end of it.
+The adapter compares before it mutates. It also answers in three arms rather
+than two — cancelled, declined, *unresolved* — because a whole-run cancel routes
+into the same teardown a SIGINT takes and the coordinator can exit before its
+ack flushes. An unconfirmed cancel is left unresolved and its receipt left open,
+which is safe to repeat: cancelling twice cancels once.
 
 Three consequences, and each is the reason the seam exists rather than an
 import:
@@ -59,6 +69,13 @@ journal, the verdict, the ownership record — and re-folds only what moved. A
 settled run from last week is stat'd and skipped. There is nothing to
 invalidate, because the fingerprint *is* the invalidation.
 
+**Owner liveness is part of that fingerprint, because it is not a file.** A
+coordinator that crashes stops writing, so it stops moving the very files a
+"did anything change?" check reads — and then its heartbeat ages past the
+ownership grace with nothing on disk to say so. Fingerprinting files alone left
+such a row reading `running` for ever. So the fence's own answer is computed
+once per run per tick and folded into the stamp beside the three `stat`s.
+
 **Discovery is the catalog and only the catalog.** A run started by `odu run` in
 a terminal, before the service existed, appears on the board the moment the
 service reads the catalog — without scanning arbitrary filesystem paths for
@@ -67,15 +84,26 @@ anyone having to do.
 
 ## One execution per request ID
 
-`run.start` claims its request id and pre-mints the run id **before** it spawns
-anything, in the service's own state (`<state>/odu/service/receipts/<ID>.json`,
-beside the catalog rather than inside it — a start has no run to belong to yet,
-which is exactly why it needs a receipt).
+`run.start` claims its request id and pre-mints the run id **before it looks at
+the checkout at all**, in the service's own state
+(`<state>/odu/service/receipts/<ID>.json`, beside the catalog rather than inside
+it — a start has no run to belong to yet, which is exactly why it needs a
+receipt).
 
 That ordering is what makes a crash survivable. A repeat that finds an
 unfinished claim does not spawn again to find out what happened; it asks the
 catalog whether that run id exists. One question, one answer, no second
 coordinator.
+
+And **the receipt is consulted before the world**, because everything about a
+checkout is mutable. HEAD moves; a run starts in it; a run ends in it. A repeat
+answered from the checkout got a different answer each time — the id of a run
+it never started, or `checkout_refused` for a request that had already
+succeeded — which is the same thing as performing it twice. So the digest is
+built from what the caller sent (including `supersede`, which changes what the
+request *does*), the claim comes first, and every outcome — an accepted run, a
+busy checkout, a refused checkout, a failed launch — is written to the receipt
+so that repeating the request replays it.
 
 The primitive is `@odu/run-history/receipts` — the same one a retry uses,
 generalised over a *directory* rather than a run, so the exclusive-create claim,

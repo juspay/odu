@@ -657,6 +657,11 @@ async function relaunch(
     // this policy refuses elsewhere.
     noPost: true,
     hostPins: [],
+    // A REPLAY never takes a checkout from whatever is running there now. The
+    // run it replays has finalized; the thing occupying that checkout is
+    // somebody else's, and the honest answer is the coordinator's ordinary
+    // busy-checkout refusal rather than a silent eviction.
+    supersede: false,
   };
   // A LAUNCH IS A DISPATCH. Marked before the launcher is entered, for the same
   // reason the live path marks before its rerun call: from here on, a lost

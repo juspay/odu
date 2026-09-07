@@ -159,16 +159,38 @@ export function waitForRun(
       );
     }
     return Effect.map(
-      Effect.promise(() =>
-        waitForAttention(handle, {
+      // `Effect.callback`, not `Effect.promise`: a promise is UNINTERRUPTIBLE,
+      // so a caller that walked away — an HTTP client that disconnected, an MCP
+      // request that was cancelled, a browser tab that closed — left this poll
+      // running to its full deadline with nobody to answer. Interruption is the
+      // signal here, and the finalizer turns it into the abort the poll already
+      // knows how to take. The RUN is untouched either way: ending an
+      // observation and stopping CI are different acts, and only one of them
+      // was asked for.
+      Effect.callback<Attention>((resume) => {
+        const controller = new AbortController();
+        const stop = (): void => controller.abort();
+        const outer = deps.signal;
+        if (outer !== undefined) {
+          if (outer.aborted) stop();
+          else outer.addEventListener("abort", stop, { once: true });
+        }
+        void waitForAttention(handle, {
           after: cursor.cursor,
           deadlineMs: input.deadlineMs ?? DEFAULT_ATTENTION_DEADLINE_MS,
           settle: input.settle ?? false,
           excerptBytes: EXCERPT_BUDGET_BYTES,
           ...(input.limit === undefined ? {} : { limit: input.limit }),
-          ...(deps.signal === undefined ? {} : { signal: deps.signal }),
-        }),
-      ),
+          signal: controller.signal,
+        }).then(
+          (attention) => resume(Effect.succeed(attention)),
+          (err: unknown) => resume(Effect.die(err)),
+        );
+        return Effect.sync(() => {
+          controller.abort();
+          outer?.removeEventListener("abort", stop);
+        });
+      }),
       answerOf,
     );
   });

@@ -24,8 +24,9 @@ import {
   readReceipt,
   requestStore,
 } from "./requests";
+import type { CheckoutFacts } from "./ports";
 import { reconcileRequests } from "./reconcile";
-import { startRun } from "./start";
+import { digestOfRequest, startRun } from "./start";
 
 let world: World | null = null;
 const open = (): World => {
@@ -263,6 +264,158 @@ describe("run.start", () => {
   });
 });
 
+/**
+ * THE RECEIPT IS CONSULTED BEFORE THE WORLD.
+ *
+ * Everything about a checkout is mutable — HEAD moves, a run starts in it, a
+ * run ends in it — and a receipt that could be invalidated by any of those is
+ * not a receipt. These four are the cases where looking at the checkout first
+ * gave a repeated request a DIFFERENT answer, which is the same thing as
+ * performing it twice.
+ */
+describe("a repeat is answered from the receipt, not from the checkout", () => {
+  /** A probe whose answers a test can move under the service's feet. */
+  function movingCheckout(initial: {
+    head: string;
+    liveRunId: string | null;
+  }): { facts: { head: string; liveRunId: string | null }; probe: () => CheckoutFacts } {
+    const facts = { ...initial };
+    return {
+      facts,
+      probe: () => ({
+        isRepo: true,
+        head: facts.head,
+        branch: "main",
+        liveRunId: facts.liveRunId,
+      }),
+    };
+  }
+
+  it("replays the accepted run after HEAD has moved on", async () => {
+    const w = open();
+    const world = movingCheckout({ head: HEAD, liveRunId: null });
+    const d = deps(w, recordingPorts({ checkout: world.probe }));
+    const first = await d.run();
+    expect(first._tag).toBe("Success");
+    if (first._tag !== "Success") return;
+
+    // The developer pulls. The request has not changed, and neither has its
+    // answer: repeating it must not become `checkout_refused`, which would
+    // leave a caller unable to recover the identity of the run it started.
+    world.facts.head = "b".repeat(40);
+    const again = await d.run();
+    expect(again._tag).toBe("Success");
+    if (again._tag !== "Success") return;
+    expect(again.success.runId).toBe(first.success.runId);
+    expect(again.success.replayed).toBe(true);
+    expect(d.ports.launches).toHaveLength(1);
+  });
+
+  it("replays the accepted run even while a DIFFERENT run holds the checkout", async () => {
+    const w = open();
+    const other = registerFixtureRun(w, { repoRoot: "/code/app", sha: HEAD });
+    const world = movingCheckout({ head: HEAD, liveRunId: null });
+    const d = deps(w, recordingPorts({ checkout: world.probe }));
+    const first = await d.run();
+    expect(first._tag).toBe("Success");
+    if (first._tag !== "Success") return;
+
+    // Something else takes the checkout. A repeat that consulted the checkout
+    // first would hand back THAT run's id under this request id — a receipt
+    // pointing at a run the request never started.
+    world.facts.liveRunId = other.runId;
+    const again = await d.run();
+    expect(again._tag).toBe("Success");
+    if (again._tag !== "Success") return;
+    expect(again.success.runId).toBe(first.success.runId);
+    expect(again.success.runId).not.toBe(other.runId);
+  });
+
+  it("still refuses a CHANGED request under a used id while the checkout is busy", async () => {
+    const w = open();
+    const other = registerFixtureRun(w, { repoRoot: "/code/app", sha: HEAD });
+    const world = movingCheckout({ head: HEAD, liveRunId: null });
+    const d = deps(w, recordingPorts({ checkout: world.probe }));
+    await d.run();
+    world.facts.liveRunId = other.runId;
+    // A busy checkout used to be answered before the id was claimed, so a
+    // caller could reuse one id for a different request and never be told.
+    const conflict = await d.run({ selectors: ["unit"] });
+    expect(conflict._tag).toBe("Failure");
+    if (conflict._tag !== "Failure") return;
+    expect((conflict.failure as ServiceRefused).code).toBe("request_conflict");
+  });
+
+  it("records the busy-checkout answer, so a repeat replays it after the run ends", async () => {
+    const w = open();
+    const existing = registerFixtureRun(w, { repoRoot: "/code/app", sha: HEAD });
+    const world = movingCheckout({ head: HEAD, liveRunId: existing.runId });
+    const d = deps(w, recordingPorts({ checkout: world.probe }));
+    const first = await d.run();
+    expect(first._tag).toBe("Success");
+    if (first._tag !== "Success") return;
+    expect(first.success.accepted).toBe(false);
+
+    // That run finishes and the checkout is free. One request id, one answer:
+    // the repeat replays rather than quietly starting the run it declined to.
+    world.facts.liveRunId = null;
+    const again = await d.run();
+    expect(again._tag).toBe("Success");
+    if (again._tag !== "Success") return;
+    expect(again.success.accepted).toBe(false);
+    expect(again.success.runId).toBe(existing.runId);
+    expect(d.ports.launches).toHaveLength(0);
+  });
+
+  it("records a refused checkout, so a repeat replays the refusal", async () => {
+    const w = open();
+    const world = movingCheckout({ head: "b".repeat(40), liveRunId: null });
+    const d = deps(w, recordingPorts({ checkout: world.probe }));
+    const first = await d.run();
+    expect(first._tag).toBe("Failure");
+    if (first._tag !== "Failure") return;
+    expect((first.failure as ServiceRefused).code).toBe("checkout_refused");
+
+    world.facts.head = HEAD;
+    const again = await d.run();
+    expect(again._tag).toBe("Failure");
+    if (again._tag !== "Failure") return;
+    // The world moved into agreement, but the request was already answered.
+    // A fresh id is how a caller says "ask again".
+    expect((again.failure as ServiceRefused).code).toBe("checkout_refused");
+    expect(d.ports.launches).toHaveLength(0);
+  });
+
+  it("carries supersede to the launcher, and into the request's identity", async () => {
+    const w = open();
+    const existing = registerFixtureRun(w, { repoRoot: "/code/app", sha: HEAD });
+    const d = deps(
+      w,
+      recordingPorts({
+        checkout: () => ({
+          isRepo: true,
+          head: HEAD,
+          branch: "main",
+          liveRunId: existing.runId,
+        }),
+      }),
+    );
+    const result = await d.run({ supersede: true });
+    expect(result._tag).toBe("Success");
+    // Without this the flag stopped at the service: the coordinator was
+    // launched normally and refused by the run already in that checkout, so
+    // the browser's checkbox and the CLI's option did nothing at all.
+    expect(d.ports.launches[0]?.supersede).toBe(true);
+
+    // And it is part of what the request IS: the same id with the flag off is
+    // a different request, not a repeat of this one.
+    const other = await d.run({ supersede: false });
+    expect(other._tag).toBe("Failure");
+    if (other._tag !== "Failure") return;
+    expect((other.failure as ServiceRefused).code).toBe("request_conflict");
+  });
+});
+
 describe("crash reconciliation", () => {
   it("completes a claim whose run reached the catalog", async () => {
     // The crash-after-dispatch case: the coordinator registered, the answer was
@@ -289,7 +442,14 @@ describe("crash reconciliation", () => {
     expect(settled).toBe(1);
     const receipt = readReceipt(store, "orphan-1");
     expect(receipt?.state).toBe("completed");
-    expect((receipt?.result as { runId: string }).runId).toBe(run.runId);
+    // The stored value is a TAGGED envelope — an answer or a refusal — because
+    // both have to replay and only a tag tells a reader which it is holding.
+    expect(
+      (receipt?.result as { outcome: string; receipt: { runId: string } }).outcome,
+    ).toBe("receipt");
+    expect(
+      (receipt?.result as { receipt: { runId: string } }).receipt.runId,
+    ).toBe(run.runId);
   });
 
   it("leaves a claim whose run never appeared in flight", async () => {
@@ -351,21 +511,15 @@ describe("crash reconciliation", () => {
   });
 });
 
-/** The digest `start.ts` computes for the default fixture input. Spelled by
- *  running the real thing once rather than transcribed: a hand-copied digest
- *  would silently stop matching the moment a field joined the request. */
+/** The digest `start.ts` computes for the default fixture input — from the real
+ *  function, not transcribed. A hand-copied digest silently stops matching the
+ *  moment a field joins the request, which is exactly what happened when
+ *  `supersede` did. */
 function startDigest(): string {
-  const { digestOf } = require("./requests") as typeof import("./requests");
-  return digestOf([
-    "/code/app",
-    HEAD,
-    "",
-    "",
-    "",
-    false,
-    "",
-    false,
-    false,
-    false,
-  ]);
+  const request = input();
+  return digestOfRequest(request, {
+    selectors: [...(request.selectors ?? [])],
+    platforms: [...(request.platforms ?? [])],
+    noDeps: request.noDeps ?? false,
+  });
 }

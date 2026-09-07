@@ -42,6 +42,22 @@ export const SERVICE_WS_PATH = "/rpc/ws";
 /** Where MCP-over-HTTP answers. */
 export const SERVICE_MCP_PATH = "/mcp";
 
+/**
+ * Drop trailing slashes from an origin.
+ *
+ * A LOOP rather than `replace(/\/+$/, "")`. The regex is correct but its cost
+ * is quadratic in a string of slashes: the engine restarts the `\/+$` match at
+ * every position, so `"/".repeat(100_000)` is a hundred million steps. The
+ * origin comes from an environment variable and from callers, which is close
+ * enough to untrusted for the shape to matter — and a backwards walk is both
+ * linear and easier to read than the regex it replaces.
+ */
+function withoutTrailingSlashes(origin: string): string {
+  let end = origin.length;
+  while (end > 0 && origin.charCodeAt(end - 1) === 47 /* "/" */) end -= 1;
+  return origin.slice(0, end);
+}
+
 /** The origin this process should use, from the environment or the default.
  *  Trailing slashes are trimmed so `origin + path` is never `//rpc/ws` — a
  *  path the listener compares for EQUALITY and would silently destroy. */
@@ -50,7 +66,7 @@ export function serviceOrigin(
 ): string {
   const raw = env[SERVICE_ORIGIN_ENV]?.trim();
   const origin = raw === undefined || raw === "" ? DEFAULT_SERVICE_ORIGIN : raw;
-  return origin.replace(/\/+$/, "");
+  return withoutTrailingSlashes(origin);
 }
 
 /** The host and port a listener binds, parsed out of an origin. Returned as a

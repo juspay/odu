@@ -86,8 +86,14 @@ odu surface log_read  --input '{"key":"'$LOG_KEY'","offset":-4096}' --json
 ```
 
 An agent reaches the same five verbs as MCP tools, either over **Streamable
-HTTP** at `http://127.0.0.1:18440/mcp` or through `odu mcp`, which is a stdio
-bridge to the singleton and holds no run authority of its own.
+HTTP** at `http://127.0.0.1:18440/mcp` or through `odu mcp --service`, a stdio
+bridge to the singleton that holds no run authority of its own. (Bare `odu mcp`
+is unchanged: the nine tools of the live run in one checkout.)
+
+That HTTP endpoint is loopback-only and gated the way the websocket is: a JSON
+content type, a `Host` this service actually answers to, and an `Origin` that is
+same-origin or named in `ODU_WEB_ALLOWED_ORIGINS`. A page you merely visited
+cannot post `run_cancel` at it.
 
 The board shows every registered run across every checkout: project, worktree,
 branch, the exact commit tested, what the run covered, where it is, whether
