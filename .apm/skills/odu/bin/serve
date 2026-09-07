@@ -11,14 +11,19 @@
 # not load-bearing. If no service is listening it starts one in the background
 # and waits for it to be ready, so a cold machine needs no separate setup step.
 #
-# odu itself is resolved through Nix, unpinned by default: `github:juspay/odu`
-# at its current master, so the agent face tracks upstream rather than ageing
-# behind a consumer-side pin. Self-contained — no surrounding devshell.
-# Requires flakes (`experimental-features = nix-command flakes`).
+# odu itself is resolved through Nix, UNPINNED: `github:juspay/odu` at its
+# current master, so the agent face tracks upstream rather than ageing behind a
+# consumer-side pin. Self-contained — no surrounding devshell, no override.
 #
-# Override knobs (env vars):
-#   ODU_FLAKE   — flake-ref for odu (default: github:juspay/odu). A consumer
-#                 that pins odu — kolu, say — points this at its own pinned
-#                 output, e.g. ODU_FLAKE=.#odu
+# There is deliberately no `ODU_FLAKE` knob any more. It let a consumer point
+# this at a pinned output of their own, which is a second supported build
+# reachable by environment variable — an alternate adoption route, which is
+# exactly what one launcher is supposed to end. A consumer that must pin odu
+# pins the whole skill, rather than keeping the skill and quietly swapping the
+# binary under it.
+#
+# `--accept-flake-config` is load-bearing: odu's flake declares a binary cache,
+# and without it `nix run` stops on an interactive trust prompt no MCP host can
+# answer. Requires flakes (`experimental-features = nix-command flakes`).
 set -euo pipefail
-exec nix run --accept-flake-config "${ODU_FLAKE:-github:juspay/odu}" -- mcp "$@"
+exec nix run --accept-flake-config github:juspay/odu -- mcp "$@"

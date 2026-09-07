@@ -1,9 +1,13 @@
 # @odu/service
 
-**The cross-run authority.** Everything the singleton web service owns: the
+**The cross-run authority — and, since the per-checkout agent face was
+deleted, the only one.** Everything the singleton web service owns: the
 registry projection every face reads the board from, the durable request
 receipts that make a lost reply reconcilable, and the handlers behind
-`@odu/service-client`'s five verbs.
+`@odu/service-client`'s five verbs — `run_start`, `run_wait`, `run_retry`,
+`run_cancel`, `log_read`. The browser, `odu surface` and `odu mcp` are three
+projections of that one contract; none of them adds a verb, and every one of
+their mutations lands here.
 
 What it deliberately does **not** own is a run.
 
@@ -27,7 +31,7 @@ binds (`./ports`):
 | `RunLauncher` | start a coordinator | `@odu/execution`'s `packagedLauncher` |
 | `RunRetrier` | retry a recorded run | `@odu/execution`'s retry policy |
 | `RunCanceller` | reach *this run's* coordinator | a dial of its socket, identity checked |
-| `CheckoutProbe` | what git says about a path | `spawnSync("git", …)` |
+| `CheckoutProbe` | is that path a repo, what commit is it on, and does the CATALOG say a run is live there | `spawnSync("git", …)` + `listRuns` |
 
 `RunCanceller` carries the run's `<sha>#<seq>` and not only its endpoint,
 because **an endpoint is not an identity**: `.ci/odu.sock` belongs to a
@@ -86,9 +90,11 @@ anyone having to do.
 
 `run.start` claims its request id and pre-mints the run id **before it looks at
 the checkout at all**, in the service's own state
-(`<state>/odu/service/receipts/<ID>.json`, beside the catalog rather than inside
-it — a start has no run to belong to yet, which is exactly why it needs a
-receipt).
+(`<state>/odu/service/receipts/<ID>.json` — beside the catalog rather than
+inside it, because a start has no run to belong to yet, which is exactly why it
+needs a receipt; a whole-run cancel is recorded there for the same reason,
+while a retry's receipt lives under the run it belongs to at
+`<state>/odu/runs/<RUN_ID>/receipts/<ID>.json`).
 
 That ordering is what makes a crash survivable. A repeat that finds an
 unfinished claim does not spawn again to find out what happened; it asks the

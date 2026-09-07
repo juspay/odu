@@ -82,8 +82,14 @@ describe("the odu skill's MCP wiring", () => {
     // deprecated spelling and must not be what a fresh install runs.
     expect(script).toMatch(/--\s+mcp\b/);
     expect(script).not.toContain("--service");
-    // The escape hatch a consumer that pins odu (kolu) uses.
-    expect(script).toContain("ODU_FLAKE");
+    // NO pin-override knob. `ODU_FLAKE` used to let a consumer point this at a
+    // pinned output of their own, which is a second supported build reachable
+    // by environment variable — an alternate adoption route, and the review
+    // asked for those to go. It may still be NAMED in the comment that explains
+    // its removal, so this asserts it is not read by the command.
+    expect(script).not.toMatch(/\$\{?ODU_FLAKE/);
+    // The trust prompt an MCP host cannot answer.
+    expect(script).toContain("--accept-flake-config");
     // Nix is the only supported runtime; a launcher reaching for bun or a
     // source entry point would be a second way to run odu.
     expect(script).not.toMatch(/\bbun\b/);

@@ -67,7 +67,7 @@ import {
 import { Effect } from "effect";
 import { readProcessIdentity } from "./processIdentity";
 import { bakedBuild, spawnWebDaemon, webHome } from "./webDaemonLaunch";
-import { DEFAULT_SERVICE_ORIGIN } from "@odu/service-client/endpoint";
+import { serviceOrigin } from "@odu/service-client/endpoint";
 
 /** The composed contract a control dial speaks: the frozen fragment under the
  *  sibling key the daemon mounts it at, which is also where the framework's own
@@ -373,15 +373,23 @@ async function untilValue<T>(
  *     start to diverge.
  *   - **Start the shared service and use it.** This.
  *
- * ## Only at the DEFAULT origin
+ * ## Only at THIS INSTALL'S OWN origin
  *
- * `allowStart` is false whenever the caller named an origin, and that is not a
- * nicety: `--origin` is how a person addresses a service somewhere else, and a
- * mistyped one must report that nothing is serving there rather than starting a
- * daemon of our own — which could not bind that address anyway, and would spend
- * the whole readiness deadline discovering it. So a named origin is dialled and
- * only dialled; the singleton is ensured only when the caller meant the
- * singleton.
+ * `allowStart` is false whenever the caller named an origin OTHER than the one
+ * this install answers to, and that is not a nicety: `--origin` is how a person
+ * addresses a service somewhere else, and a mistyped one must report that
+ * nothing is serving there rather than starting a daemon of our own — which
+ * could not bind that address anyway, and would spend the whole readiness
+ * deadline discovering it.
+ *
+ * **The comparison is against `serviceOrigin()`, not against the compiled-in
+ * default**, and getting that wrong is a real bug this had. `ODU_WEB_ORIGIN` is
+ * how a developer, and every e2e world, moves the whole service — address,
+ * gate, catalog and all — and it is still THEIR singleton. Comparing against
+ * `DEFAULT_SERVICE_ORIGIN` meant that anybody who set it got a face that would
+ * dial but never start, so a cold machine with a moved origin had no way to
+ * bootstrap at all. The rule is "did the caller ask for somewhere else", and
+ * the environment is not somewhere else.
  *
  * ## The absence probe is short; the readiness wait is not
  *
@@ -393,10 +401,10 @@ async function untilValue<T>(
  * order of magnitude instead of being one number.
  */
 export async function connectOrStart(
-  origin: string = DEFAULT_SERVICE_ORIGIN,
+  origin: string = serviceOrigin(),
   opts: { allowStart?: boolean } = {},
 ): Promise<ServiceConnection> {
-  const allowStart = opts.allowStart ?? origin === DEFAULT_SERVICE_ORIGIN;
+  const allowStart = opts.allowStart ?? origin === serviceOrigin();
   try {
     return await dialService(origin, { readyMs: ABSENCE_PROBE_MS });
   } catch (err) {

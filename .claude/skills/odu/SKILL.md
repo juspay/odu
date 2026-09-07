@@ -56,10 +56,12 @@ two clients of one truth, and the run outlives whoever started it.
 ### 1. Bootstrap
 
 Nix is the only supported way to run odu, and the reference is **unpinned
-upstream**:
+upstream**. `--accept-flake-config` is not optional for an agent: odu's flake
+declares a binary cache, and without the flag `nix run` stops on an interactive
+trust prompt your tool call cannot answer.
 
 ```sh
-nix run github:juspay/odu -- web --background   # ensure the service, print its URL, return
+nix run --accept-flake-config github:juspay/odu -- web --background
 ```
 
 Every face bootstraps for you: `odu surface …` and the MCP bridge dial the
@@ -73,8 +75,10 @@ want its URL to hand the human.
   spelling.
 - A face **never** recovers a failed dial by executing locally. If bootstrap
   fails you get exit 3 and a reason, not a silent local run.
-- An explicitly passed `--origin` is dialled and only dialled — a typo reports
-  "nothing is serving there" rather than spawning a daemon.
+- An `--origin` naming somewhere OTHER than your own service is dialled and only
+  dialled — a typo reports "nothing is serving there" rather than spawning a
+  daemon that could not bind that address anyway. Your own origin still
+  bootstraps, whether it is the default or one `$ODU_WEB_ORIGIN` moved.
 
 ### 2. Start
 
@@ -99,12 +103,13 @@ the named nodes.
 - **`expectedSha` is a hard check.** A checkout that has moved on is refused
   (`checkout_refused`), never quietly a different run.
 - **`requestId` is mandatory, and that is the feature.** See below.
-- A checkout that already has a live run does **not** get a second one: you are
-  handed the existing run instead (`accepted: false` with `existing`, or a
-  `checkout_busy` refusal naming it). Observe that run, or repeat the call with
-  `supersede: true` — which cancels the WHOLE live run there.
+- A checkout that already has a live run does **not** get a second one, and this
+  is an ANSWER rather than a refusal: you get `accepted: false` with `existing`
+  naming the run that is already there. Observe it, or repeat the call with
+  `supersede: true` — which cancels the WHOLE live run in that checkout.
 
-The receipt carries `runId`, `sha`, `scope`, `endpoint`, and a `cursor`
+The receipt carries `runId`, `requestId`, `sha`, `scope`, a usually-null
+`endpoint` (the coordinator has not bound its socket yet), and a `cursor`
 positioned at the run's beginning — pass that cursor straight into your first
 `run_wait` so you resume rather than replay.
 
@@ -182,8 +187,11 @@ odu surface log_read --input '{"key":"'"$LOG_KEY"'","offset":-4096}' --json
 - Page forward with `nextOffset`; `eof` is about this read, `complete` is about
   the log.
 - Watching a live node instead of reading evidence? Subscribe to the
-  `logTails` resource (`surface://collections/logTails/<key>`, or
-  `odu surface watch logTails <key>`). Evidence for a verdict is `log_read`.
+  `logTails` resource — `surface://collections/logTails/<key>` as MCP, or
+  `odu surface get logTails "$KEY" --follow` as ndjson. (`watch` is not mounted
+  on `logTails`: it carries no delta verb, because its key set is whatever
+  happens to be subscribed rather than a set of runs.) Evidence for a verdict is
+  always `log_read`.
 
 ### 5. Retry the same commit — or start the new one
 
@@ -274,8 +282,10 @@ MCP resources: `surface://cells/service`, `surface://collections/runs`,
 `surface://collections/logTails/{key}`.
 
 `odu run` is the human's one-shot spelling of the same thing: it calls
-`run_start` for the current checkout and then observes. Its options are
-`run_start`'s inputs. Ctrl-C of it stops observing; the run keeps going.
+`run_start` for the checkout you are standing in and then observes. Its options
+are `run_start`'s inputs plus four of its own — `--no-wait` (start and return
+without observing), `--request-id`, `--origin` and `-o json`. Ctrl-C stops
+observing; the run keeps going.
 
 ## Refusals, and what to do about them
 
@@ -289,17 +299,15 @@ error. `code` is what you branch on; `message` is for the human; `resync` and
 | `unknown_run` / `expired` | The run is not in the catalog (or aged out). Find it on the board, or start a fresh run. |
 | `bad_cursor` | Run the `resync` it carries. Usually a cursor from a parent run after a `relaunched` retry. |
 | `checkout_refused` | Not a git repo, or the checkout moved off `expectedSha`. Re-read HEAD and re-issue. |
-| `checkout_busy` | A run is already live there. Observe it, or repeat with `supersede`. |
 | `not_replayable` | Dirty live tree, or the checkout is gone. Start a new run instead of retrying. |
 | `request_conflict` | Same id, different input. New intent ⇒ new id. |
 | `request_unresolved` | Outcome unknown. **Do not re-issue with a new id** — find the run and reconcile. |
 | `stale_attempt` | The node moved past your `expectAttempt`. Re-read, then decide again. |
-| `no_venue` | No lane resolved for those platforms, or the pool refused. Check hosts config. |
 | `launch_failed` | The service could not start the coordinator; the message says why. |
 
-## Exits (`odu surface`)
+## Exits — two vocabularies, and `1` means opposite things
 
-These are about the CALL, not about CI:
+**`odu surface` exits are about the CALL**, not about CI:
 
 | Exit | Meaning |
 | --- | --- |
@@ -308,6 +316,21 @@ These are about the CALL, not about CI:
 | 2 | Usage error; the call never left the process. |
 | 3 | Nothing serving (and, at the default origin, odu tried to start it and says why). |
 | 130 | Interrupted — the observation ended, the run carries on. |
+
+**`odu run` / `odu wait` exits are about CI**, because that is what they answer:
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | Settled, and it passed. |
+| 1 | **There is a failure to act on.** Not a refusal — red CI. |
+| 2 | Still going, nothing red yet. Ask again with the returned cursor. |
+| 3 | Its coordinator is gone and it never finalized. Start a fresh run. |
+| 4 | No such run, or its evidence expired. |
+| 5 | The request itself was refused. |
+
+Read that difference carefully before you branch on a number: exit 1 from
+`odu surface` is odu refusing you, and exit 1 from `odu run` is your tests
+failing. An agent that conflates them reports a broken test as a broken tool.
 
 ## Wiring the MCP face
 
