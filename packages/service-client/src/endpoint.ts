@@ -99,5 +99,5 @@ export function serviceWsUrl(origin: string): string {
 
 /** The MCP endpoint an HTTP agent posts to. */
 export function serviceMcpUrl(origin: string): string {
-  return `${origin.replace(/\/+$/, "")}${SERVICE_MCP_PATH}`;
+  return `${withoutTrailingSlashes(origin)}${SERVICE_MCP_PATH}`;
 }
