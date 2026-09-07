@@ -45,7 +45,11 @@ import {
   type LogSlice,
   type RunHandle,
 } from "@odu/run-history/store";
-import { type LogGrowth, waitForLogGrowth } from "@odu/run-history/query";
+import {
+  type LogGrowth,
+  ownerAliveFor,
+  waitForLogGrowth,
+} from "@odu/run-history/query";
 import { type LogKey, parseLogKey } from "@odu/service-client/logKey";
 import {
   LOG_TAIL_BYTES,
@@ -82,7 +86,13 @@ export const DEFAULT_LOG_PAGE_BYTES = 12 * 1024;
  *  after a wait. Two would be two places for `open` to be computed, and a
  *  follow whose last page disagreed with its first about whether the log can
  *  still grow is precisely the bug that makes a follower spin. */
-function pageOf(handle: RunHandle, key: LogKey, keyText: string, slice: LogSlice): LogPage {
+function pageOf(
+  handle: RunHandle,
+  key: LogKey,
+  keyText: string,
+  slice: LogSlice,
+  now: number,
+): LogPage {
   // Completeness comes from the attempt RECORD rather than from the bytes: a
   // log that simply ends looks identical to one that was cut off, and only the
   // sidecar knows which. Absent means unknown, and unknown is reported as NOT
@@ -104,11 +114,28 @@ function pageOf(handle: RunHandle, key: LogKey, keyText: string, slice: LogSlice
     eof: slice.eof,
     complete,
     // Can this log still GROW? Not while the producer has said its last word,
-    // and not once the run itself reached a terminal record — a verdict or an
-    // expiry both mean there is nobody left to append. The run's records are
-    // the arm that answers for the killed writer, whose attempt will never be
-    // sealed and so is never `complete`.
-    open: !complete && readVerdict(handle) === null && readExpiry(handle) === null,
+    // not once the run reached a terminal record — a verdict or an expiry both
+    // mean there is nobody left to append — and not once its owner is PROVABLY
+    // GONE.
+    //
+    // That third arm is the one a killed coordinator needs, and the first two
+    // do not cover it. A verdict is written in exactly one place: the
+    // coordinator's own `finalize`. A SIGKILLed coordinator writes no verdict,
+    // no expiry, and never seals the attempt it was mid-write on — so
+    // `complete` is false, both records are null, and `open` would stay true
+    // for ever. A follow of that log issues one deadline-length read after
+    // another until somebody notices, while `odu wait --run` on the same run
+    // answers `owner_lost` immediately. Two faces disagreeing about a run that
+    // is provably dead is exactly what `open` exists to prevent.
+    //
+    // `null` — no owner record at all — is NOT "gone": an imported run has
+    // never had one, and reading its absence as death would close a log nobody
+    // has finished writing.
+    open:
+      !complete &&
+      readVerdict(handle) === null &&
+      readExpiry(handle) === null &&
+      ownerAliveFor(handle, now) !== false,
   };
 }
 
@@ -131,6 +158,7 @@ export function readLog(
 ): Effect.Effect<LogPage, ServiceRefused> {
   return Effect.suspend(() => {
     const catalog = deps.catalog ?? {};
+    const clock = deps.now ?? Date.now;
     const key = parseLogKey(input.key);
     if (key === null) {
       // A malformed key is refused BEFORE any deadline is honoured. A follow
@@ -152,7 +180,7 @@ export function readLog(
       limit,
     });
     if (slice === null) return Effect.fail(noEvidence(key));
-    const page = pageOf(handle, key, input.key, slice);
+    const page = pageOf(handle, key, input.key, slice, clock());
     // THE WAIT FIRES ONLY FOR A CAUGHT-UP FOLLOWER. `bytesRead === 0` is
     // load-bearing: a caller that is BEHIND has bytes in hand and must get them
     // now — delaying a page that is already full would turn a follow of a
@@ -207,7 +235,7 @@ export function readLog(
         });
         return grown === null
           ? Effect.fail(noEvidence(key))
-          : Effect.succeed(pageOf(handle, key, input.key, grown));
+          : Effect.succeed(pageOf(handle, key, input.key, grown, clock()));
       },
     );
   });
@@ -240,7 +268,7 @@ export function readTail(
   // The same three facts the page carries, minus the addressing a tail has no
   // cursor for — so a view that stops re-subscribing when a log closes reaches
   // that decision by the same rule a follower does.
-  const page = pageOf(handle, parsed, key, slice);
+  const page = pageOf(handle, parsed, key, slice, Date.now());
   return {
     key,
     text: slice.text,

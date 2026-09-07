@@ -704,8 +704,21 @@ export async function followLog(
     }
     cursor = page.nextOffset;
 
-    if (page.open) continue;
-    // Closed. `complete` is what says whether we have the whole thing.
+    // KEEP GOING while there is more to come OR more already there. A page is
+    // bounded by `limit` (12 KiB by default), so a log that is ALREADY closed
+    // comes back `eof: false, open: false` on its first page — and stopping on
+    // `open` alone printed those twelve kilobytes and exited 0, silently
+    // dropping the rest of a fifty-kilobyte failure while the usage text
+    // promised "the whole log". The same loss hit a live follow the moment its
+    // run finalized: the page that first reports `open: false` is also the one
+    // carrying unread bytes.
+    //
+    // This cannot spin. With `offset < size` and a positive limit the store
+    // always returns at least one byte, so `nextOffset` strictly advances until
+    // `eof` — and once `eof` is true with `open` false, the loop ends below.
+    if (page.open || !page.eof) continue;
+    // Closed, and drained. `complete` is what says whether we have the whole
+    // thing.
     if (!page.complete) {
       process.stderr.write(
         "\nodu: this log never got its producer's last word — it is truncated\n",

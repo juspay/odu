@@ -46,14 +46,28 @@ collections  runs         the board: every registered run, one row each
 streams      nodes        one run's work, as whole self-contained pictures
 procedures   run.start    start a run, addressed by an explicit checkout
              run.wait     bounded, resumable attention on one run
+             run.read     the same answer, without waiting
              run.retry    live attempt or linked replay — odu decides which
              run.cancel   explicit run / node / lane scope
-             log.read     one attempt's bytes, by offset
+             log.read     one attempt's bytes, by offset — and, with `waitMs`,
+                          the follow
+             catalog.*    import a checkout's legacy records; prune expired ones
+             pipeline.*   the resolved DAG a checkout declares
+             venue.*      the machines, and the holds on them
+             protect.*    required status checks on a branch
 ```
 
-The five procedures project to `run_start`, `run_wait`, `run_retry`,
-`run_cancel` and `log_read` — the framework's own `<ns>_<verb>` derivation, so
-an MCP tool and an argv verb are one name and cannot drift.
+The procedures project to `run_start`, `run_wait`, `run_read`, `run_retry`,
+`run_cancel`, `log_read`, `catalog_import`, `catalog_prune`, `pipeline_read`,
+`venue_probe`, `venue_hold`, `venue_release` and `protect_apply` — the
+framework's own `<ns>_<verb>` derivation, so an MCP tool and an argv verb are
+one name and cannot drift.
+
+Thirteen, and the growth is the point: five was not a design, it was the subset
+of odu's public capabilities that had been moved at the time. `odu status`,
+`odu hosts`, `odu lease`, `odu history import` and `odu protect` each did their
+own work in the caller's process, so an agent and a browser could not do those
+things at all.
 
 ## Three decisions worth knowing
 

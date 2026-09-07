@@ -208,7 +208,7 @@ hosts first. String entries and `--host` pins remain one-slot declarations.
 Rules:
 
 - **One run per declared slot.** The lock is an `flock` **on the builder**, held by the **odu-runner agent** the coordinator dials over surface-remote (`lease.claim`). Slot zero always uses the historical `/tmp/odu.lease`; additional slots use `/tmp/odu.lease.<zero-based-slot>`. A capacity edit therefore never changes an existing slot's identity. `flock` comes from odu-runner's Nix closure (util-linux on its PATH)—builders need ssh + Nix, not a system-installed flock.
-- **Busy pool → wait in line** (and say who you're waiting for). `--no-wait` fails immediately instead.
+- **Busy pool → wait in line** (and say who you're waiting for). That is the RUN's claim: a coordinator whose platform has no free slot queues rather than failing. The `odu lease` COMMAND is different — it answers as soon as its holder is spawned, reporting `waiting` and who it is behind, because through the service a blocking call would hold a request open for as long as somebody else's run takes, on a door a browser and an agent share. Its `--no-wait` governs the holder's persistence, not the call's.
 - **`--host P=ADDR`** pins a specific machine for that run (waits if busy).
 - **`localhost` is never an implicit fallback** (see [juspay/odu#46](https://github.com/juspay/odu/issues/46)). It participates only when you name it as the sole, pure-local pool; mixing it with remotes is refused.
 - Multi-platform claims are independent: each ready platform starts immediately while the others keep claiming. The complete pool set is still validated up front, so one remote host cannot be assigned to two platform lanes.
@@ -370,10 +370,11 @@ odu history prune [--days N] [--dry-run] [-o json]
 odu hosts [-o json]               venue inventory (free / busy / held by), with
                                   hosts-file warnings on stderr
 odu lease [PLAT…] [--no-wait] [-o json]
-                                  hold a venue across runs (--no-wait: fail
-                                  rather than queue behind a busy pool). The
-                                  holder is the SERVICE's child, so it outlives
-                                  the shell that asked for it
+                                  hold a venue across runs. Answers at once —
+                                  `held`, `already`, or `waiting` with who it is
+                                  behind (exit 2); it does not block. The holder
+                                  is the SERVICE's child, so it outlives the
+                                  shell that asked for it
 odu release [PLAT…] [-o json]     drop held lease(s)
 odu dump | graph [--root NAMEPATH]
                                   the resolved DAG as JSON or Mermaid. Resolved

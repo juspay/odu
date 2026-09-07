@@ -55,20 +55,47 @@ Then("the node {string} is marked current", async function (this: OduWorld, id: 
   );
 });
 
+/** How big is the log, in bytes — the size a person reads off the header.
+ *
+ *  WAITED FOR, not sampled. The header's text comes from the `logTails`
+ *  subscription, so it is empty between the panel opening and the first frame
+ *  arriving; a single sample is a race that a quiet laptop wins and a machine
+ *  running the rest of CI beside it loses. That is not hypothetical — it is the
+ *  one scenario of twenty-six that failed when this suite first ran inside a
+ *  full `odu run`, and it failed for the machine's reasons rather than the
+ *  page's. What is being waited for is a page STATE, which is the rule every
+ *  other wait in this tree already keeps. */
+const BYTE_SIZE = /\d+(\.\d+)?\s(B|KiB|MiB)/;
+
+async function logHeader(world: OduWorld): Promise<string> {
+  await world.waitUntil(
+    async () => BYTE_SIZE.test(await world.page.locator(".log-meta").innerText()),
+    "the output header to state a byte size",
+  );
+  return await world.page.locator(".log-meta").innerText();
+}
+
 /** TWO facts, and this asserts the first: how much output there is. A panel that
  *  said nothing about size would leave "the recipe was quiet" and "the evidence
  *  is truncated" looking identical. */
 Then("the output header states a byte size", async function (this: OduWorld) {
-  const meta = await this.page.locator(".log-meta").innerText();
+  const meta = await logHeader(this);
   assert.match(
     meta,
-    /\d+(\.\d+)?\s(B|KiB|MiB)/,
+    BYTE_SIZE,
     `the output header states no byte size — it read ${JSON.stringify(meta)}`,
   );
 });
 
+/** The absence of the incompleteness notice — asserted only once the header has
+ *  SOMETHING to say.
+ *
+ *  Sampling immediately made this pass for the wrong reason: an empty header
+ *  contains no substring, so the assertion held before the panel had rendered
+ *  anything at all. A check that cannot fail while the thing it describes is
+ *  still loading is not checking the thing. */
 Then("the output header does not say {string}", async function (this: OduWorld, text: string) {
-  const meta = await this.page.locator(".log-meta").innerText();
+  const meta = await logHeader(this);
   assert.ok(
     !meta.includes(text),
     `the output header said ${JSON.stringify(text)}: ${JSON.stringify(meta)}`,

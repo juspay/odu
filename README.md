@@ -295,9 +295,11 @@ odu mcp                           # the agent face (MCP, stdio): the same
                                   # service. There is no --service — it is
                                   # parsed and ignored for one release
 
---origin URL selects which service to dial (run, logs, wait, rerun, cancel);
-every other command above takes the same address from $ODU_WEB_ORIGIN, else
-http://127.0.0.1:18440. A named origin is dialled and only dialled.
+--origin URL selects which service to dial, and EVERY command above takes it —
+they are all service clients now, so a flag only some of them accepted would be
+a hole in exactly the claim this section makes. Default $ODU_WEB_ORIGIN, else
+http://127.0.0.1:18440. A named origin is dialled and only dialled: odu starts
+a service for you only when you meant the default one.
 
 Removed: `odu runs` (use `odu history list`; the JSON shape differs) and
 `odu run --linger` (retry a settled run with `odu rerun --run R`).

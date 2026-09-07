@@ -45,6 +45,7 @@ import type { RunManifest } from "@odu/run-history/schema";
 import { claimOwnership, OWNERSHIP_GRACE_MS } from "@odu/run-history/owner";
 import {
   appendEvent,
+  expireRun,
   readJournal,
   registerRun,
   type RunHandle,
@@ -813,6 +814,40 @@ describe("a replay runs where its parent was allowed to run", () => {
     );
 
     expect(launcher.calls[0]?.hostPins).toEqual([]);
+  });
+
+  it("refuses a run retention has expired, whose journal is gone", async () => {
+    // THE HOLE THE JOURNAL-NARROWING OPENED. Expiry keeps a run's IDENTITY and
+    // deletes its EVIDENCE, so an expired run reads back with a good manifest —
+    // `retryable` true, `repoRoot` present, `hostPins` recorded — and sails
+    // through every placement gate. What it no longer has is the journal, which
+    // is the only thing that can narrow an empty `scope.platforms` down to the
+    // lanes the run really had. Without this refusal a month-old run confined
+    // to one platform comes back across today's whole fleet, with every other
+    // guard green.
+    const root = tmpCatalog();
+    const handle = aFinishedRun(root, {
+      scope: { selectors: ["unit"], platforms: [], noDeps: false },
+      hostPins: [],
+    });
+    // Past the ownership grace: `expireRun` refuses to touch a run whose owner
+    // record still looks live, which is the same fence every other writer keeps.
+    expect(expireRun(handle, T0 + OWNERSHIP_GRACE_MS + 1)).toBe(true);
+    const launcher = stubLauncher();
+
+    const out = refused(
+      await retry({
+        runId: PARENT_RUN,
+        selector: "unit",
+        catalog: { root },
+        launcher: launcher.launcher,
+      }),
+    );
+
+    expect(out.code).toBe("expired");
+    expect(out.message).toContain("expired by retention");
+    expect(out.suggestion).toEqual(["odu", "run", "unit"]);
+    expect(launcher.calls).toEqual([]);
   });
 
   it("refuses a record that predates placement evidence, and starts nothing", async () => {

@@ -385,7 +385,20 @@ export async function waitForLogGrowth(
     // The backstop for the killed writer: no sidecar will ever say `complete`
     // for an attempt whose process died, but a finalized or expired RUN proves
     // just as firmly that nothing is going to append again.
-    if (readVerdict(handle) !== null || readExpiry(handle) !== null) {
+    //
+    // …and neither of those is written by a coordinator that was SIGKILLed. A
+    // verdict comes from `finalize` and an expiry from retention days later, so
+    // a killed writer leaves an unsealed attempt inside a run with neither —
+    // and a wait that asked only those two questions would poll to its deadline
+    // for ever, on the one run a caller most needs told about. A provably lost
+    // owner is the third answer, and it is the same fact `run.wait` already
+    // reports as `owner_lost`. `null` — no owner record at all — is NOT death:
+    // an imported run never had one.
+    if (
+      readVerdict(handle) !== null ||
+      readExpiry(handle) !== null ||
+      ownerAliveFor(handle, now()) === false
+    ) {
       return "run_terminal";
     }
     if (opts.signal?.aborted === true || now() >= deadline) return "deadline";

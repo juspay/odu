@@ -404,15 +404,15 @@ The bridge dials the singleton, bootstraps it if nothing is serving, and
 projects the thirteen verbs and three resources. It starts no coordinator and
 holds no run authority, so a harness restarting it kills nothing.
 
-## Commands that stay local, deliberately
+## Nothing stays local
 
-Two commands do not go through the service, and this is a stated exception, not
-an oversight:
-
-| Command | Why local |
-| --- | --- |
-| `odu dump` | Pure `justfile` read — resolved pipeline as JSON. No execution, no socket, no catalog write. |
-| `odu graph` | Pure `justfile` read — dependency graph as Mermaid. Same. |
+Every public command goes through the service, including `odu dump` and
+`odu graph` — both are `pipeline_read`, and an agent can call that verb
+directly. They used to be listed here as a deliberate exception on the grounds
+that a `justfile` read touches no run. That was wrong: what odu will run for a
+checkout is a question `run_start` answers through the same engine, so a face
+answering it locally is a SECOND RESOLVER of the one thing you most need to be
+able to trust — and it could disagree with the run it is meant to predict.
 
 ## Hosts
 

@@ -109,7 +109,10 @@ export type RetryRefusal =
   | "launch_failed"
   /** The parent's recorded placement cannot be expressed against today's
    *  declared inventory. See `relaunch`. */
-  | "no_venue";
+  | "no_venue"
+  /** Retention has expired the run's evidence. Its identity survives; the
+   *  journal, attempts and receipts a replay reads do not. */
+  | "expired";
 
 export type RetryOutcome =
   | { ok: true; receipt: RetryReceipt; replayed: boolean }
@@ -163,6 +166,38 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
       ok: false,
       code: "unknown_run",
       message: `odu: no run ${input.runId} in the catalog`,
+    };
+  }
+  /**
+   * AN EXPIRED RUN IS NOT REPLAYABLE, and the reason is what expiry deletes.
+   *
+   * Retention keeps a run's IDENTITY — manifest, owner, verdict, expiry — and
+   * removes its EVIDENCE: attempts, events, receipts, the coordinator log. So
+   * an expired run still reads back with a perfectly good manifest, passes the
+   * `retryable` gate, passes the `repoRoot` gate, and passes the placement gate
+   * because `hostPins` lives on the manifest and survives.
+   *
+   * What does not survive is the journal — and the journal is exactly what
+   * narrows a run whose `scope.platforms` is empty down to the lanes it
+   * actually had. `platformsFor` would fold an empty journal, find nothing, and
+   * carry `[]` through under the reading "a run that died before publishing
+   * anything"; the child then fans out over whatever today's hosts file lists.
+   * A month-old run confined to one platform comes back across the fleet, with
+   * every guard green.
+   *
+   * `run.wait` and `run.cancel` already refuse an expired run. This is the
+   * third, and it belongs beside them rather than deeper: once the evidence is
+   * gone there is nothing further down that can reconstruct it.
+   */
+  if (readExpiry(handle) !== null) {
+    return {
+      ok: false,
+      code: "expired",
+      message:
+        `odu: run ${input.runId} has been expired by retention — its manifest ` +
+        "survives but the journal a replay reads does not, so odu cannot " +
+        "promise the replay would run where it ran. Start a fresh run.",
+      suggestion: ["odu", "run", ...manifest.scope.selectors],
     };
   }
   if (input.requestId !== undefined && !isRequestId(input.requestId)) {

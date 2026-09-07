@@ -120,7 +120,9 @@ export type RetryRefusal =
    *  declared inventory. A replay reproduces WHERE a run was allowed to run;
    *  when it cannot, it refuses rather than placing the work somewhere the
    *  original never was. */
-  | "no_venue";
+  | "no_venue"
+  /** Retention has expired the run's evidence. */
+  | "expired";
 
 export type RetryOutcome =
   | { ok: true; receipt: RetryReceipt; replayed: boolean }

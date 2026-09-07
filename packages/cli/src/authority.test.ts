@@ -193,16 +193,51 @@ function closureOf(entries: readonly string[]): Map<string, string[]> {
     );
     seen.set(file, specifiers);
     for (const spec of specifiers) {
-      if (!spec.startsWith(".")) continue;
-      const local = `${spec.replace(/^\.\//, "")}.ts`;
-      queue.push(local);
+      const local = localFile(spec);
+      if (local !== null) queue.push(local);
     }
   }
   return seen;
 }
 
+/**
+ * The file inside THIS package a specifier names, or `null` for anything else.
+ *
+ * Two spellings reach the same file and BOTH have to be followed.
+ * `./leaseCmd` is the obvious one. `@odu/cli/leaseCmd` is the one that matters:
+ * `packages/cli/package.json` declares `"exports": { "./*": "./src/*.ts" }` and
+ * `node_modules/@odu/cli` is a symlink back to this package, so a module here
+ * can import its own sibling by the package name — and that is the idiomatic
+ * form in this tree, not an exotic dodge. `src/main.ts` uses it for every one
+ * of its imports.
+ *
+ * Following only `.` left a one-hop hole big enough for everything the wall
+ * exists to stop: an `import { … } from "@odu/cli/leaseCmd"` in a public client
+ * was neither followed (not dot-prefixed) nor forbidden (`@odu/cli` is not an
+ * authority), so that module and its whole import closure — the engine, the
+ * lease machinery, `runCommand` — dropped silently out of the walk. It was
+ * demonstrated against this tree: the wall stayed green.
+ */
+function localFile(specifier: string): string | null {
+  if (specifier.startsWith("./")) return `${specifier.slice(2)}.ts`;
+  if (specifier.startsWith("@odu/cli/")) {
+    return `${specifier.slice("@odu/cli/".length)}.ts`;
+  }
+  return null;
+}
+
 describe("the authority wall", () => {
   const closure = closureOf(PUBLIC_CLIENTS);
+  // THE ROOT IS POLICED TOO. `src/main.ts` seeds the derivation, so it was
+  // never a member of the closure and its own imports were never checked —
+  // and it is the single likeliest site for the regression this file exists
+  // against, because every public verb's `case` body is in it. A `case "run":`
+  // that called `runCommand(...)` when `connectOrStart` threw would have been
+  // exactly the "fell back to doing the work itself" fallback the header
+  // describes, and the wall would have stayed green. It is spelled under a
+  // pseudo-name because it lives outside `srcRoot` and is not a module of this
+  // package.
+  const policed = new Map(closure).set("src/main.ts", mainImports);
 
   it("has public clients to police", () => {
     // A wall that policed nothing would pass forever. Both halves are asserted:
@@ -262,7 +297,7 @@ describe("the authority wall", () => {
 
   it("lets no public client reach execution, the catalog, or a checkout dial", () => {
     const offenders: string[] = [];
-    for (const [file, specifiers] of closure) {
+    for (const [file, specifiers] of policed) {
       for (const spec of specifiers) {
         const forbidden = FORBIDDEN.find((f) => spec.startsWith(f.prefix));
         if (forbidden === undefined) continue;
@@ -293,7 +328,7 @@ describe("the authority wall", () => {
   });
 
   it("does not let the allowance travel to another file", () => {
-    for (const [file, specifiers] of closure) {
+    for (const [file, specifiers] of policed) {
       if (file === "webDaemonLaunch.ts") continue;
       expect(
         specifiers.filter((s) => s.startsWith("@odu/execution/coordinator")),
