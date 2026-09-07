@@ -1,0 +1,27 @@
+<!doctype html>
+<!--
+  The SHELL. Served `no-store` and rewritten at build time to name the hashed
+  bundle beside it — the freshness contract `@kolu/surface-app` keeps: the shell
+  is always re-fetched, the assets it names are pinned immutable for a year, so
+  an installed browser converges on a new build without ever holding a stale
+  one. Nothing here is content; everything is in the bundle.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>odu</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <!-- The mount point `main.ts` names. A hard failure if it is missing,
+         rather than a silent no-render. -->
+    <div id="odu"></div>
+    <noscript>
+      odu's board is a live view of your runs and needs JavaScript. Every
+      run is also addressable from a terminal — `odu history list`,
+      `odu surface run_wait` — and from an agent over MCP.
+    </noscript>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

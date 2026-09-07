@@ -18,6 +18,7 @@ odu attach          # live matrix + logs from another terminal
 odu wait            # fail-fast JSON verdict (or `wait --settle`)
 odu wait --run latest   # the same question, after the coordinator is gone
 odu rerun unit      # restart a recipe on the still-live run
+odu web             # every run, in a browser — one service, all your repos
 odu mcp             # same run, agent face (MCP over stdio)
 ```
 
@@ -62,6 +63,59 @@ closure in parallel; the primary reuses prerequisites it ran during capacity
 discovery. Both expose nodes such as `e2e[2-of-4]::install` in the UI, logs,
 timing sidecar, and run record without creating extra GitHub contexts.
 
+## Every run, in one place
+
+A run used to be something you watched from the terminal that started it. The
+catalog made a run *addressable* after its coordinator was gone; `odu web` makes
+every one of them visible at once:
+
+```sh
+nix run github:juspay/odu -- web
+# http://127.0.0.1:18440
+```
+
+That prints a URL and returns. The service is a per-user singleton that outlives
+the shell — one gate, one fixed address, one catalog — so the board in your
+browser, `odu surface` in a terminal and an agent over MCP are three views of
+**one** truth rather than three programs that agree by convention:
+
+```sh
+odu surface run_start --input '{"checkout":"/code/app","expectedSha":"'$SHA'","requestId":"fix-1"}' --json
+odu surface run_wait  --input '{"runId":"'$RUN'","after":"'$CURSOR'"}' --json
+odu surface log_read  --input '{"key":"'$LOG_KEY'","offset":-4096}' --json
+```
+
+An agent reaches the same five verbs as MCP tools, either over **Streamable
+HTTP** at `http://127.0.0.1:18440/mcp` or through `odu mcp --service`, a stdio
+bridge to the singleton that holds no run authority of its own. (Bare `odu mcp`
+is unchanged: the nine tools of the live run in one checkout.)
+
+That HTTP endpoint is loopback-only and gated the way the websocket is: a JSON
+content type, a `Host` this service actually answers to, and an `Origin` that is
+same-origin or named in `ODU_WEB_ALLOWED_ORIGINS`. A page you merely visited
+cannot post `run_cancel` at it.
+
+The board shows every registered run across every checkout: project, worktree,
+branch, the exact commit tested, what the run covered, where it is, whether
+anything is red and whether any commit status is still owed. Opening a run shows
+its nodes, each attempt's own log, and the three controls — retry, cancel at an
+explicit scope, run again — every one of which is a single procedure call on the
+same wire the other two faces use. A failing node's output is linkable: the URL
+carries the same log key an agent echoes back.
+
+**The exits are a different question from `odu wait`'s, on purpose.** `odu wait
+--run` answers *what did CI do*, so it spends its codes on CI's answer. `odu
+surface` answers *what happened to my call*, so it spends them on the call: **0**
+answered — including an answer that reports red CI — · **1** odu declared a
+refusal (one JSON line on stderr) · **2** a usage error that never left the
+process · **3** nothing is serving, run `odu web` · **130** interrupted, and the
+run carries on.
+
+Nothing is superseded. `odu run`, `odu wait`, `odu logs`, `odu history` and the
+existing `odu mcp` tools behave exactly as before; a run started by `odu run` in
+a terminal appears on the board the moment the service reads the catalog, with
+nothing having told it.
+
 ## CLI
 
 ```text
@@ -101,6 +155,16 @@ odu dump [--root NAMEPATH]        # resolved pipeline as JSON
 odu graph [--root NAMEPATH]       # dependency graph (Mermaid)
 odu protect [--dry-run] [--branch B] [--platform P]… [--create]
                                   # --create: make the branch's ruleset if absent
+odu web [--upgrade] [-o json]     # ensure the singleton web service; prints its
+                                  # URL and returns (the service outlives the
+                                  # shell). --upgrade drains a running one of
+                                  # another build and starts this one
+odu surface <verb> [--input JSON] [--json]
+                                  # every registered run, as argv: run_start,
+                                  # run_wait, run_retry, run_cancel, log_read,
+                                  # plus get/keys/watch/list. Exits: 0 answered
+                                  # (red CI included) · 1 refused · 2 usage ·
+                                  # 3 nothing serving · 130 interrupted
 odu mcp                           # serve the agent face (MCP, stdio)
 ```
 

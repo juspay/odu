@@ -70,6 +70,40 @@ const SANCTIONED = new Map<string, string>([
       "iterator. All three exist so no consumer re-derives the laziness, " +
       "teardown and dispatch rules — nor invents a second boundary.",
   ],
+  [
+    "packages/cli/src/serviceCli.ts",
+    "The generated CLI face's PROCESS EDGE. `@kolu/surface-cli` returns command " +
+      "VALUES and runs no program, so the host owns the run — and here the host " +
+      "hands the whole tree to `NodeRuntime.runMain`, which writes the failure's " +
+      "own line and maps the verdict to one of the five documented exit codes. " +
+      "An argv face's last act is to end the process, so it is an edge by " +
+      "construction.",
+  ],
+  [
+    "packages/cli/src/web.ts",
+    "The web daemon's COMPOSITION ROOT. `serveSurfaceApp` is an Effect over a " +
+      "Scope — the listener's whole teardown hangs off it — and the survivable " +
+      "spawn driver is an Effect value, while `daemonMain` and odu's own argv " +
+      "dispatch are Promise-shaped. This file is that crossing, and the only " +
+      "one that may open and close the listener's scope.",
+  ],
+  [
+    "packages/web-ui/src/app.ts",
+    "The BROWSER's UI edge. A surface procedure is an `Effect` — a description — " +
+      "and a click is the moment one becomes execution, so this file's `run` " +
+      "helper is where that crossing happens for every control on the page. ONE " +
+      "helper rather than a run per button, which is what keeps a control's " +
+      "whole story (pending → receipt or refusal) in one function; the views " +
+      "themselves take callbacks and hold no client at all.",
+  ],
+  [
+    "packages/cli/src/webLauncher.ts",
+    "Converging on the singleton. Reading the service cell and asking a running " +
+      "daemon to drain are Effects; everything that decides between adopt, " +
+      "spawn and refuse is ordinary Promise code a test drives without a " +
+      "runtime. The two are joined here rather than leaking `Effect` into every " +
+      "branch of that decision.",
+  ],
 ]);
 
 const IDENT = "[A-Za-z_$][A-Za-z0-9_$]*";

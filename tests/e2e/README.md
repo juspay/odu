@@ -18,6 +18,9 @@ tests/e2e/
 ├── protect.e2e.test.ts   # `odu protect --dry-run` context enumeration
 ├── mcp.e2e.test.ts       # the `odu mcp` agent face over a real MCP client
 ├── logs.e2e.test.ts      # durable node logs: complete to the last line, one run per file
+├── webHarness.ts         # a real web service in a private world (HOME, state, port)
+├── web.e2e.test.ts       # the CROSS-FACE gate: one run through browser, CLI,
+│                         # HTTP MCP and the singleton
 ├── fixtures/
 │   ├── pass/justfile     # a DAG that goes green
 │   ├── fail/justfile     # a DAG whose node fails (exit 1)
@@ -48,6 +51,22 @@ still runs — now against odu's flake, a Nix cache hit since the harness builds
 
 The leaf recipes are pure shell — the fixture's own "CI" is trivial on purpose,
 so the test exercises *odu's* machinery, not a real toolchain.
+
+## The cross-face gate
+
+`web.e2e.test.ts` is the one suite that can check the property the web release
+rests on: a start, a wait, a log read, a retry and a cancel produce the **same
+addressed state** whichever door they came through, and the three outcomes
+(answered · refused · nothing serving) stay apart at each one. It cannot be a
+unit test, because every one of those doors is a separate process.
+
+Its world is private on purpose — `HOME`, `ODU_STATE_DIR` and the port are all
+per-suite — so it does not touch a developer's own running `odu web`, and two
+copies of the suite on one machine do not fight over a gate.
+
+The browser leg is **skipped**, not failed, where the machine has no Chrome. A
+CI runner without a browser is a real environment, and a suite that failed there
+would be reporting the environment rather than the code.
 
 ## Deliberate tradeoffs
 
@@ -80,6 +99,8 @@ so the test exercises *odu's* machinery, not a real toolchain.
   `nix copy` → remote realise → spawn-over-ssh path that localhost
   short-circuits.
 - Drive the **MCP agent face** (`odu mcp`) end-to-end as a subprocess.
+- Drive `odu mcp --service` (the stdio bridge to the singleton) as a subprocess;
+  the HTTP face of the same projection is covered.
 - Cover `status -o json` and `logs -f` against a live run (they need the
   `.ci/odu.sock` socket, so the harness would run `odu run` in the background
   and dial it concurrently).

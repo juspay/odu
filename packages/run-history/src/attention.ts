@@ -254,13 +254,25 @@ export function clampTailBytes(
   return { text: chars.slice(chars.length - take).join(""), truncated: true };
 }
 
-interface AttemptState {
+/** One node's newest attempt, as the fold has it so far. EXPORTED because
+ *  `foldJournal` is: a caller that folds a journal for its own projection (the
+ *  service's per-run node view is the one in this tree) needs to be able to
+ *  name what it got back, and a structural re-declaration on the other side
+ *  would be a second spelling of the same record to keep true. */
+export interface AttemptState {
   node: string;
   attempt: number;
   placement: Placement;
   status: NodeStatus | null;
   exitCode: number | null;
   durationMs: number | null;
+  /** The journal's own clock for the `attempt_started` line — when this attempt
+   *  BEGAN. Taken from the entry rather than from a field on the event because
+   *  the entry is where the time already is, and a second timestamp inside the
+   *  payload would be a second thing that could disagree with it. Null for a
+   *  node the fold only ever saw a status for (a status without a start is a
+   *  torn journal, and inventing a start time for it would hide that). */
+  startedAt: number | null;
   logComplete: boolean;
   logBytes: number;
   logReason: string | null;
@@ -322,6 +334,7 @@ export function foldJournal(journal: readonly JournalEntry[]): {
           status: null,
           exitCode: null,
           durationMs: null,
+          startedAt: entry.at,
           logComplete: false,
           logBytes: 0,
           logReason: null,
@@ -342,6 +355,9 @@ export function foldJournal(journal: readonly JournalEntry[]): {
           status: null,
           exitCode: null,
           durationMs: null,
+          // A status with no `attempt_started` before it is a torn journal, and
+          // the honest answer is that this attempt's start time is unknown.
+          startedAt: null,
           logComplete: false,
           logBytes: 0,
           logReason: null,

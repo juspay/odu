@@ -80,14 +80,14 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { closeSync, mkdirSync, openSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, statSync } from "node:fs";
 import {
   type DaemonSpawnConfig,
   type SpawnDriverDeps,
   survivableSpawnDriver,
 } from "@kolu/surface-daemon-supervisor";
 import { readFileSlice } from "@odu/run-history/store";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { dialRun } from "@odu/run-client/dial";
 import { runDetached } from "../common/effectEdge";
 
@@ -167,9 +167,11 @@ export interface SpawnEnv {
    *  than parsing `/proc/self/cgroup`, which differs between cgroup v1 and v2
    *  and is absent entirely on darwin. */
   INVOCATION_ID?: string | undefined;
-  /** Without a session bus there is no user manager to ask, so `systemd-run
-   *  --user` cannot work even inside a unit. */
+  /** Where the session bus is — checked for a real socket, not merely for a
+   *  value, because `systemd-run --user` cannot work without a user manager on
+   *  the other end of it however confidently the variable is set. */
   DBUS_SESSION_BUS_ADDRESS?: string | undefined;
+  /** The fallback place to look for that socket (`$XDG_RUNTIME_DIR/bus`). */
   XDG_RUNTIME_DIR?: string | undefined;
   /** The explicit opt-out. A caller that has its own supervision, or that has
    *  measured `systemd-run` misbehaving on its host, sets this and gets the
@@ -180,9 +182,61 @@ export interface SpawnEnv {
   readonly [other: string]: string | undefined;
 }
 
+/** Is there a unix socket at this path? A missing file, a regular file and a
+ *  directory all answer `false`; only an actual socket is a bus. */
+function isSocket(path: string): boolean {
+  try {
+    return statSync(path).isSocket();
+  } catch {
+    return false;
+  }
+}
+
+/** The filesystem path out of a D-Bus address, or `null` for one that names no
+ *  path (an `abstract=` or `tcp:` address, neither of which a session bus
+ *  normally is). */
+export function busSocketPath(address: string): string | null {
+  for (const part of address.split(",")) {
+    const at = part.indexOf("path=");
+    if (at === -1) continue;
+    const path = part.slice(at + "path=".length);
+    if (path !== "") return path;
+  }
+  return null;
+}
+
 /**
- * Decide how to start a coordinator. Pure — every input is an argument — so
- * the decision is testable on a machine that has none of these mechanisms.
+ * Is there a user systemd manager to submit a transient unit TO?
+ *
+ * **The name of a bus is not a bus.** `DBUS_SESSION_BUS_ADDRESS` and
+ * `XDG_RUNTIME_DIR` are set by plenty of environments that have no user manager
+ * at all — a GitHub Actions runner is the one that cost this repo a CI suite —
+ * and on those, `systemd-run --user` fails at submission. A launcher then
+ * reports that as a run which could not start, which is a true sentence about
+ * the wrong thing: nothing was wrong with the run.
+ *
+ * So the probe is for the SOCKET `systemd-run` will actually connect to, not
+ * for the variable that names it. Injectable, because the decision must stay
+ * testable on a machine that has a bus and on one that does not.
+ */
+export function userManagerReachable(
+  env: SpawnEnv,
+  exists: (path: string) => boolean = isSocket,
+): boolean {
+  const address = env.DBUS_SESSION_BUS_ADDRESS;
+  if (address !== undefined && address !== "") {
+    const path = busSocketPath(address);
+    if (path !== null) return exists(path);
+  }
+  const runtime = env.XDG_RUNTIME_DIR;
+  if (runtime === undefined || runtime === "") return false;
+  return exists(join(runtime, "bus"));
+}
+
+/**
+ * Decide how to start a coordinator. Pure — every input is an argument,
+ * including the bus probe — so the decision is testable on a machine that has
+ * none of these mechanisms.
  *
  * `unitName` scopes the transient service to the run, so two coordinators
  * never collide on a unit name and `systemctl --user status` names the run an
@@ -192,6 +246,7 @@ export function survivableSpawnPlan(
   env: SpawnEnv,
   platform: NodeJS.Platform,
   unitName: string,
+  reachable: (env: SpawnEnv) => boolean = userManagerReachable,
 ): SpawnPlan {
   const detached = (reason: string): SpawnPlan => ({
     mechanism: "detached",
@@ -215,11 +270,7 @@ export function survivableSpawnPlan(
       "not running under a systemd unit; a detached process group is already independent",
     );
   }
-  const hasBus =
-    (env.DBUS_SESSION_BUS_ADDRESS !== undefined &&
-      env.DBUS_SESSION_BUS_ADDRESS !== "") ||
-    (env.XDG_RUNTIME_DIR !== undefined && env.XDG_RUNTIME_DIR !== "");
-  if (!hasBus) {
+  if (!reachable(env)) {
     // Inside a unit but with no user manager to ask. Said out loud, because
     // this is the case where the coordinator genuinely WILL die with its host
     // and an operator is entitled to know before the run does.

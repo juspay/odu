@@ -75,6 +75,9 @@ const IN_FLIGHT: ReadonlySet<NodeStatus> = new Set<NodeStatus>([
 export interface RunHistoryInit {
   repoRoot: string;
   repo: string | null;
+  /** The branch this run was started on, when HEAD named one. Recorded here
+   *  rather than looked up by a reader — see `RunManifestSchema.branch`. */
+  branch?: string | null;
   sha: string;
   seq: number | null;
   pipeline: string;
@@ -256,6 +259,12 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
         sha: init.sha,
         seq: init.seq,
         pipeline: init.pipeline,
+        // `optionalKey` REJECTS a present-but-`undefined` key on encode, so a
+        // run with no branch omits it rather than spelling it — the same law
+        // every other optional wire field in this tree keeps.
+        ...(init.branch === undefined || init.branch === null
+          ? {}
+          : { branch: init.branch }),
         repoRoot: init.repoRoot,
         createdAt: now(),
         scope: init.scope,

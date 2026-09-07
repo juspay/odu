@@ -1,0 +1,22 @@
+{
+  "name": "@odu/service-client",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "//": "WHAT A CLIENT OF THE ODU SERVICE HOLDS — see README.md. The typed contract the singleton web service serves, the shared verb table every face projects it through, and the dial that reaches it. It is the browser's half AND the generated CLI's half AND the MCP bridge's half, which is the whole reason it is a package: three faces that agreed by convention would be three faces that drift. It knows nothing about how a run happens, where the catalog is, or what a coordinator is — those are @odu/service's, one wall up.",
+  "//dependencies": "BROWSER-SAFE, and the manifest is the promise. `@odu/run-history` is here for its PORTABLE half alone — `./schema` (the durable record shapes this surface re-publishes) and `./ids` (the cursor/attempt/node-key spellings a caller echoes back) — never its `./store` platform I/O; src/closure.test.ts pins exactly which subpaths are reached. `@odu/run-client` comes along for the node-status vocabulary `schema` itself reads. The @kolu/* sources are hydrated as raw TypeScript from a Nix pin (see bunfig.toml at the root), so naming one here would send bun to the registry for a package that is not there — the closure test pins the hydrated set instead.",
+  "sideEffects": false,
+  "exports": {
+    "./surface": "./src/surface.ts",
+    "./verbs": "./src/verbs.ts",
+    "./endpoint": "./src/endpoint.ts",
+    "./logKey": "./src/logKey.ts",
+    "./dial": "./src/dial.ts"
+  },
+  "dependencies": {
+    "@odu/run-client": "workspace:*",
+    "@odu/run-history": "workspace:*",
+    "effect": "4.0.0-rc.112"
+  }
+}

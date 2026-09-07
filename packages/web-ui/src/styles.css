@@ -1,0 +1,340 @@
+/*
+ * odu's board, dressed.
+ *
+ * Two properties are load-bearing rather than decorative, and both are
+ * acceptance gates:
+ *
+ *   - **Narrow viewports work.** The row is a grid that collapses to two lines
+ *     on a phone rather than a table that scrolls sideways. A board you cannot
+ *     read on the device you are holding is a board you do not check.
+ *   - **Focus is visible.** Every control here is a real `<button>` (see
+ *     `dom.ts`), and the focus ring is never removed — `:focus-visible` is
+ *     styled up, not off. Keyboard access is not a mode; it is the same app.
+ *
+ * The palette follows the terminal dashboard's five hues, so a status means the
+ * same colour whichever face a person is looking at.
+ */
+
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --panel: #f6f8fa;
+  --line: #d0d7de;
+  --ink: #1f2328;
+  --dim: #59636e;
+  --grey: #6e7781;
+  --amber: #9a6700;
+  --green: #1a7f37;
+  --red: #cf222e;
+  --violet: #8250df;
+  --accent: #0969da;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --line: #30363d;
+    --ink: #e6edf3;
+    --dim: #8d96a0;
+    --grey: #8d96a0;
+    --amber: #d29922;
+    --green: #3fb950;
+    --red: #f85149;
+    --violet: #a371f7;
+    --accent: #58a6ff;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.shell {
+  max-width: 72rem;
+  margin: 0 auto;
+  padding: 0 1rem 4rem;
+}
+
+/* ── the connection indicator ──────────────────────────────────────────── */
+
+.wire {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.8125rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--dim);
+}
+
+.wire::before {
+  content: "";
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+
+.wire-live { color: var(--green); }
+.wire-connecting { color: var(--dim); }
+.wire-reconnecting { color: var(--amber); }
+.wire-degraded { color: var(--amber); }
+.wire-retired { color: var(--red); }
+
+/* ── controls ──────────────────────────────────────────────────────────── */
+
+.btn {
+  font: inherit;
+  color: inherit;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.25rem 0.6rem;
+  cursor: pointer;
+}
+
+.btn:hover:not(:disabled) { border-color: var(--accent); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+/* NEVER removed — see the header. The ring is what makes the keyboard path the
+   same app rather than a second, invisible one. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.pill {
+  display: inline-block;
+  padding: 0 0.4rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  border: 1px solid currentColor;
+  white-space: nowrap;
+}
+
+.pill-grey { color: var(--grey); }
+.pill-amber { color: var(--amber); }
+.pill-green { color: var(--green); }
+.pill-red { color: var(--red); }
+.pill-violet { color: var(--violet); }
+
+/* ── the board ─────────────────────────────────────────────────────────── */
+
+.board-head,
+.detail-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 1rem 0 0.5rem;
+}
+
+.board-head h1,
+.detail-head h1 {
+  font-size: 1.25rem;
+  margin: 0;
+  margin-right: auto;
+}
+
+.filters { display: flex; gap: 0.25rem; }
+.filters button { font-size: 0.8125rem; }
+
+.row {
+  display: grid;
+  grid-template-columns:
+    minmax(8rem, 1.4fr) minmax(6rem, 0.7fr) 7rem 6rem minmax(6rem, 0.8fr)
+    minmax(6rem, 1fr) 5rem;
+  gap: 0.5rem;
+  align-items: center;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  padding: 0.6rem 0.25rem;
+  cursor: pointer;
+}
+
+.row:hover { background: var(--panel); }
+.row-red { box-shadow: inset 3px 0 0 var(--red); }
+
+.row-project { font-weight: 600; overflow-wrap: anywhere; }
+.row-branch { color: var(--dim); font-weight: 400; margin-left: 0.4rem; }
+.row-sha { font-family: var(--mono); font-size: 0.8125rem; }
+.row-dirty { color: var(--amber); margin-left: 0.3rem; }
+.row-scope,
+.row-age { color: var(--dim); font-size: 0.8125rem; }
+.row-attention { display: flex; gap: 0.25rem; flex-wrap: wrap; }
+
+.empty {
+  color: var(--dim);
+  padding: 2rem 0.25rem;
+}
+
+/* ── one run ───────────────────────────────────────────────────────────── */
+
+.detail-sub {
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  /* A checkout path is arbitrarily long and is the one thing on this header
+     that must never push the page sideways. It wraps rather than truncating:
+     the tail of a worktree path is exactly the part that tells two of them
+     apart. */
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.detail-scope { color: var(--dim); font-size: 0.8125rem; }
+.detail-parent { color: var(--violet); font-size: 0.8125rem; }
+
+.detail-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.25rem 0 0.75rem;
+}
+
+.receipt {
+  margin: 0 0 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-left: 3px solid var(--accent);
+  background: var(--panel);
+}
+
+.receipt-bad { border-left-color: var(--red); }
+
+.detail-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.node-list { list-style: none; margin: 0; padding: 0; }
+
+.node {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.node-open {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0.5rem 0.25rem;
+  cursor: pointer;
+}
+
+.node-open:disabled { cursor: default; opacity: 0.6; }
+.node-current { background: var(--panel); }
+.node-id { font-family: var(--mono); font-size: 0.8125rem; overflow-wrap: anywhere; }
+.node-attempt,
+.node-host,
+.node-duration,
+.node-exit { color: var(--dim); font-size: 0.75rem; white-space: nowrap; }
+.node-exit { color: var(--red); }
+.node-controls { display: flex; gap: 0.25rem; flex: none; }
+.node-controls .btn { font-size: 0.75rem; }
+
+.glyph-grey { color: var(--grey); }
+.glyph-amber { color: var(--amber); }
+.glyph-green { color: var(--green); }
+.glyph-red { color: var(--red); }
+.glyph-violet { color: var(--violet); }
+
+.log-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.log-head h3 { margin: 0; font-size: 0.9375rem; font-family: var(--mono); }
+.log-meta { color: var(--dim); font-size: 0.75rem; margin-right: auto; }
+
+.log-text {
+  margin: 0.5rem 0 0;
+  padding: 0.75rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  /* The one place sideways scrolling is right: a log line is a log line, and
+     wrapping one changes what it says. Scoped to this box so the PAGE never
+     scrolls sideways. */
+  overflow: auto;
+  max-height: 60vh;
+  white-space: pre;
+}
+
+.fault { color: var(--red); }
+
+/* ── the form ──────────────────────────────────────────────────────────── */
+
+.create-form { display: grid; gap: 1rem; max-width: 40rem; }
+.field { display: grid; gap: 0.25rem; }
+.field label { font-weight: 600; }
+.hint { margin: 0; color: var(--dim); font-size: 0.8125rem; }
+
+.input {
+  font: inherit;
+  font-family: var(--mono);
+  padding: 0.4rem 0.5rem;
+  background: var(--bg);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.toggles { border: 1px solid var(--line); border-radius: 6px; }
+.toggle { display: flex; align-items: center; gap: 0.5rem; padding: 0.2rem 0; }
+
+/* ── narrow viewports ──────────────────────────────────────────────────── */
+
+@media (max-width: 60rem) {
+  .detail-body { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 44rem) {
+  /* Two lines instead of seven columns. Everything stays on screen; nothing is
+     hidden and nothing scrolls sideways. */
+  .row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    row-gap: 0.25rem;
+  }
+  .row-scope { grid-column: 1 / -1; }
+  .row-attention { grid-column: 1 / -1; }
+  .node { flex-wrap: wrap; }
+}

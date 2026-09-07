@@ -83,6 +83,25 @@ function version(): string {
   }
 }
 
+/**
+ * Wait until the MCP client disconnects (stdio EOF / server close) or a signal.
+ *
+ * Shared by both faces, because the process lifetime is the same fact for
+ * either: this server owns stdin and stdout, and nothing it started is reaped
+ * on the way out — a coordinator outlives the face that asked for it, by
+ * design, so a harness restarting this process kills no run.
+ */
+export async function serveUntilDisconnect(server: {
+  onclose?: (() => void) | undefined;
+}): Promise<void> {
+  await new Promise<void>((resolve) => {
+    const shutdown = (): void => resolve();
+    server.onclose = shutdown;
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
+  });
+}
+
 /** Serve the agent MCP face over stdio until the client disconnects
  *  (stdin EOF / server close). */
 export async function mcpCommand(socketPath: string = SOCKET_PATH): Promise<number> {

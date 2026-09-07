@@ -12,6 +12,10 @@
 , ...
 }:
 {
+  "@effect/platform-browser@4.0.0-rc.112" = fetchurl {
+    url = "https://registry.npmjs.org/@effect/platform-browser/-/platform-browser-4.0.0-rc.112.tgz";
+    hash = "sha512-GSlqNDnjILz2EqOFPhVdMEHxlPq6SGb8+KOpNnLfRvVJjXRTMawEO+v1PCuwt2CHAqESbJAa2Nk+qcQvTrv4MQ==";
+  };
   "@effect/platform-node-shared@4.0.0-rc.112" = fetchurl {
     url = "https://registry.npmjs.org/@effect/platform-node-shared/-/platform-node-shared-4.0.0-rc.112.tgz";
     hash = "sha512-ttjz0xKamFN7vL8pNDYVwddJLjZvqKePc05djlz2VcdaKbLsnYbtMnL1rbOfHgEnIUSHGh7FkjaN4DM1Ov81sQ==";
@@ -56,6 +60,9 @@
   "@odu/execution" = copyPathToStore ./packages/execution;
   "@odu/run-client" = copyPathToStore ./packages/run-client;
   "@odu/run-history" = copyPathToStore ./packages/run-history;
+  "@odu/service" = copyPathToStore ./packages/service;
+  "@odu/service-client" = copyPathToStore ./packages/service-client;
+  "@odu/web-ui" = copyPathToStore ./packages/web-ui;
   "@opentui/core-darwin-arm64@0.4.5" = fetchurl {
     url = "https://registry.npmjs.org/@opentui/core-darwin-arm64/-/core-darwin-arm64-0.4.5.tgz";
     hash = "sha512-8KUG0oRidnR+oW1RSZJ72/PhZLl+qRRMk5U/mieF4c0SJ5V3tYACpBZAKzQfHNd1f7QzD8FHZct1lPpQgtmkWg==";
@@ -120,9 +127,17 @@
     url = "https://registry.npmjs.org/@rollup/rollup-linux-x64-gnu/-/rollup-linux-x64-gnu-4.62.3.tgz";
     hash = "sha512-V4KtWtQfAFMU7+9/A/VDps/VI8CHd3cYz0L8sgJzz8qK7eY7wI4ruFD82UYIYvW9Z4DtlTfhQcsl4XyPHW5uSg==";
   };
+  "@solid-primitives/rootless@1.5.4" = fetchurl {
+    url = "https://registry.npmjs.org/@solid-primitives/rootless/-/rootless-1.5.4.tgz";
+    hash = "sha512-TOIZa1VUfVJ+9nkCcRajw3U4t9vBOP1HxX1WHNTbXq32mXwlqTvUnC4CRIilohcryBkT9u2ZkhUDSHRTaGp55g==";
+  };
   "@solid-primitives/scheduled@1.5.3" = fetchurl {
     url = "https://registry.npmjs.org/@solid-primitives/scheduled/-/scheduled-1.5.3.tgz";
     hash = "sha512-oNwLE6E6lxJAWrc8QXuwM0k2oU1BnANnkChwMw82aK1j3+mWGJkG1IFe5gCwbV+afYmjI76t9JJV3md/8tLw+g==";
+  };
+  "@solid-primitives/utils@6.4.1" = fetchurl {
+    url = "https://registry.npmjs.org/@solid-primitives/utils/-/utils-6.4.1.tgz";
+    hash = "sha512-ISSB5QX1qP2ynrheIpYwc4oKR5Ny4siNuUyf1qZniy+Il+p/PtDB0QK1Dnle8noiHpwRD3gpPdubOC3qI/Zamg==";
   };
   "@types/bun@1.3.14" = fetchurl {
     url = "https://registry.npmjs.org/@types/bun/-/bun-1.3.14.tgz";

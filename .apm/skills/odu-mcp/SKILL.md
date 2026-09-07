@@ -1,6 +1,6 @@
 ---
 name: odu-mcp
-description: odu MCP server launcher — drive CI from a coding agent. `bin/serve` resolves odu via Nix and runs `odu mcp` in the cwd. See the repo README for the tools/resources and override knobs.
+description: odu MCP server launcher — drive CI from a coding agent. `bin/serve` resolves odu via Nix and runs `odu mcp` in the cwd. `odu mcp --service` is the other face: EVERY registered run, through the singleton web service, with the same five verbs the browser and `odu surface` use. See the repo README for the tools/resources and override knobs.
 user-invocable: false
 ---
 
@@ -114,6 +114,51 @@ lost" (3) from "there is a failure to act on" (1), and `odu rerun --run R
 `R` is a run id, a unique prefix, `<sha7>#<seq>`, or `latest`; `odu history list`
 enumerates them. No MCP tool exposes these — reach for the CLI, or `runs` /
 `dead_run` for the checkout-scoped answer this server already gives.
+
+## The other face: `odu mcp --service`
+
+Everything above is about the run live in **this checkout**. `odu mcp --service`
+is about **every registered run**: it dials the singleton web service
+(`odu web`, `http://127.0.0.1:18440`) and projects the same five verbs the
+browser and `odu surface` use, under the same names.
+
+```text
+run_start   { checkout, expectedSha, requestId, selectors?, platforms?, hostPins?,
+              root?, noDeps?, noStrict?, noSnapshot?, noPost?, supersede? }
+run_wait    { runId, after?, deadlineMs?, settle?, limit? }
+run_retry   { runId, selector, requestId, expectAttempt? }
+run_cancel  { runId, scope: {kind:"run"} | {kind:"node",node} | {kind:"lane",platform}, requestId }
+log_read    { key, offset?, limit? }
+```
+
+Resources: `surface://cells/service` (who is serving, which build, is it ready),
+`surface://collections/runs` (the board), `surface://collections/logTails/{key}`.
+
+Four differences from the face above, and each is the point of it:
+
+- **It is GLOBAL.** A run is addressed by run id, never by your working
+  directory, so an agent whose cwd is somebody's home directory reaches the same
+  run the browser is looking at. `run_start` takes the checkout as an explicit
+  absolute path — the subject of the call rather than an implicit frame around it.
+- **It holds no run authority.** Every call goes over the wire to the singleton,
+  so a harness restarting this process kills nothing and two agents are two
+  clients of one truth.
+- **`requestId` is mandatory on every mutation.** That is what makes a lost reply
+  reconcilable: the same id repeated returns the recorded answer instead of
+  starting a second run. Mint a fresh one per intent, never per attempt.
+- **A red answer is a NORMAL result.** `run_wait` returning
+  `reason: "failure"` is CI going red — read `failures[].excerpt`, then
+  `log_read` its `logKey`. A tool ERROR means odu refused the request itself
+  (`code`: `bad_cursor`, `unknown_run`, `checkout_refused`, `request_conflict`, …).
+  `reason: "still_running"` means the deadline was reached with nothing red: ask
+  again with the returned `cursor` as `after`.
+
+The loop: `run_start` → `run_wait` (bounded; feed the cursor back) → `log_read`
+on a failure's `logKey` → `run_retry` for the same commit, or a fresh
+`run_start` for a new one. `run_retry` decides for you whether that means a new
+attempt on a live coordinator or a linked replay run, and says which in `mode`
+— watch `effectiveRun`, not the run you asked about, and drop the old cursor
+with it.
 
 `bin/serve` is self-contained — it resolves odu via `nix run` and serves over
 stdio in the consumer's repo (dialing `.ci/odu.sock`). Set `ODU_FLAKE` to

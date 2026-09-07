@@ -35,9 +35,20 @@
     in
     {
       packages = eachSystem ({ pkgs, b2n }:
-        let odu = import ./default.nix { inherit pkgs b2n; selfFlake = self.outPath; };
-        in {
-          inherit (odu) odu odu-runner;
+        let
+          odu = import ./default.nix {
+            inherit pkgs b2n;
+            selfFlake = self.outPath;
+            # The commit this build is OF, when there is one. Absent for a dirty
+            # tree, and absent is the honest answer there: a build identity that
+            # named a commit whose tree it was not built from would be worse
+            # than none, because a supervisor compares builds to decide whether
+            # to recycle a running daemon.
+            selfRev = self.rev or null;
+          };
+        in
+        {
+          inherit (odu) odu odu-runner web-ui;
           default = odu.odu;
           # bun2nix CLI — `nix run .#bun2nix -- -l bun.lock -o bun.nix`
           # regenerates the lockfile-derived nix expression.

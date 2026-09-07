@@ -28,7 +28,13 @@
 
 import { describe, expect, it } from "bun:test";
 import type { RunScope } from "@odu/run-history/schema";
-import { type LaunchRequest, launchArgv, unitNameFor } from "./launcher";
+import {
+  type LaunchRequest,
+  launchArgv,
+  mayRelaunchDetached,
+  unitNameFor,
+} from "./launcher";
+import type { SpawnPlan } from "./spawn";
 
 const RUN_ID = "0000000b-0002";
 const PARENT = "0000000a-0001";
@@ -50,6 +56,7 @@ function request(over: Partial<LaunchRequest> = {}): LaunchRequest {
     noSnapshot: false,
     noPost: false,
     hostPins: [],
+    supersede: false,
     ...over,
   };
 }
@@ -121,6 +128,16 @@ describe("launchArgv", () => {
     expect(loose).toContain("--no-post");
   });
 
+  it("carries --supersede, because dropping it silently declines the request", () => {
+    // The service accepts `supersede` and the browser has a checkbox for it,
+    // but only the coordinator can perform it: cancel the incumbent, confirm it
+    // is gone, then claim the lock, with no window in between. A launcher that
+    // swallowed the flag sent the caller's explicit "replace it" straight into
+    // the ordinary busy-checkout refusal.
+    expect(launchArgv(request())).not.toContain("--supersede");
+    expect(launchArgv(request({ supersede: true }))).toContain("--supersede");
+  });
+
   it("names the parent run and the request id only when there is one", () => {
     const bare = launchArgv(request());
     expect(bare).not.toContain("--parent-run");
@@ -177,5 +194,46 @@ describe("unitNameFor", () => {
     // systemd unit names are a restricted alphabet; a name that needed escaping
     // would fail at `systemd-run` time on someone else's machine.
     expect(unitNameFor(RUN_ID)).toMatch(/^[A-Za-z0-9:_.@-]+$/);
+  });
+});
+
+describe("when a launch may be tried again", () => {
+  // The GitHub-runner case: a host that sets every systemd marker, has a bus
+  // socket, and whose user manager still refuses the job. That refusal used to
+  // be reported as a run that could not start — nothing was wrong with the run.
+  //
+  // Retrying is only safe when NOTHING was started, so this decision is pure
+  // and pinned here; getting it wrong in the other direction is two
+  // coordinators for one request.
+  const submitter: SpawnPlan = {
+    mechanism: "systemd-run",
+    reason: "under a unit",
+    exitIsDeath: false,
+    describeExit: () => "",
+  };
+  const detached: SpawnPlan = {
+    mechanism: "detached",
+    reason: "no unit",
+    exitIsDeath: true,
+    describeExit: () => "",
+  };
+
+  it("retries when the user manager REFUSED the unit", () => {
+    expect(mayRelaunchDetached(submitter, 1)).toBe(true);
+  });
+
+  it("does not retry when the manager ACCEPTED it — something may be coming up", () => {
+    expect(mayRelaunchDetached(submitter, 0)).toBe(false);
+  });
+
+  it("does not retry when the submitter has not exited — the ceiling was hit", () => {
+    expect(mayRelaunchDetached(submitter, null)).toBe(false);
+  });
+
+  it("never retries a detached spawn: that exit IS the coordinator's death", () => {
+    // A dirty tree, a bad justfile, a strict-gate refusal. Launching again
+    // would paper over an answer the caller is entitled to.
+    expect(mayRelaunchDetached(detached, 1)).toBe(false);
+    expect(mayRelaunchDetached(detached, 0)).toBe(false);
   });
 });
