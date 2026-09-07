@@ -12,7 +12,7 @@
     },
     "odu": {
       "type": "stdio",
-      "command": ".claude/skills/odu-mcp/bin/serve",
+      "command": ".claude/skills/odu/bin/serve",
       "args": []
     }
   }

@@ -3,23 +3,35 @@ version: 1.0.0
 type: hybrid
 
 # Gate exactly what odu publishes to consumers (e.g. kolu). `includes` is an
-# allow-list — only these paths ship. odu's agent face is its two skills; the
-# odu MCP server ships separately via `dependencies.mcp` below. Internal dev
-# guidance lives outside `.apm/` and is wired as a devDependency so consumers
-# never pull it.
+# allow-list — only these paths ship. odu's agent face is ONE skill: the
+# workflow and the MCP launcher that serves it (`bin/serve`) travel together,
+# because a terminal and an agent are two faces of one shared service rather
+# than two adoption paths. There were two skills, and the second one existed to
+# explain a second MCP face that no longer exists. Internal dev guidance lives
+# outside `.apm/` and is wired as a devDependency so consumers never pull it.
+# WHICH HARNESS THIS REPO DEPLOYS TO. odu's own tracked `.grok/` directory is a
+# second harness signal, so apm cannot infer one and refuses rather than
+# guessing which of `.claude/` and a grok layout to write. Declared here rather
+# than passed as `--target` on the command line, so `just apm` and a maintainer
+# running apm by hand deploy the same way. This governs where odu's own managed
+# copies land; what odu PUBLISHES to consumers is `includes` below.
+targets:
+  - claude
+
 includes:
   - .apm/skills/odu/
-  - .apm/skills/odu-mcp/
 
 dependencies:
   # odu's agent face: consumers that depend on juspay/odu get the odu MCP
-  # server wired into their .mcp.json (Claude) / .codex / .opencode. The
-  # launcher resolves odu via Nix and serves `odu mcp` in the consumer's repo.
+  # bridge wired into their .mcp.json (Claude) / .codex / .opencode. The
+  # launcher resolves odu via Nix, unpinned, and runs `odu mcp` — which dials
+  # the shared service, starting one if none is running, and addresses every run
+  # by id. The directory a host launches it from is not load-bearing.
   mcp:
     - name: odu
       registry: false
       transport: stdio
-      command: .agents/skills/odu-mcp/bin/serve
+      command: .agents/skills/odu/bin/serve
 
 # Maintainer-only: deployed into odu's own .claude/ for odu developers, but
 # excluded from what consumers receive (and from `apm pack`).

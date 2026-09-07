@@ -1,474 +1,377 @@
 ---
 name: odu
-description: Reference for the `odu` runner — how to invoke a full pipeline, a single recipe, or a platform-pinned node, and how to attach to a live run, from a project whose CI odu runs. Trigger when the user asks to "run CI", "run the pipeline", "re-run a check", to run named lanes or recipes (e.g. "run fmt and nix", "just the e2e lane", bare selectors like `fmt`/`nix`/`e2e`), or names a recipe by `<recipe>@<platform>`. This skill — not a repo's local `just ci` / `just <recipe>` — is how an odu-run request is served.
+description: Drive CI with `odu` — one shared service, reached from a terminal (`odu surface`), from an agent (`odu mcp`), or from a browser. Trigger when the user asks to "run CI", "run the pipeline", "re-run a check", to run named lanes or recipes (e.g. "run fmt and nix", "just the e2e lane", bare selectors like `fmt`/`nix`/`e2e`), or names a recipe by `<recipe>@<platform>`. This skill — not a repo's local `just ci` / `just <recipe>` — is how an odu-run request is served, whichever face you are on.
 ---
 
 # odu
 
-[`odu`](https://github.com/juspay/odu) (Tamil ஓடு — "run") runs the `just`
-recipe DAG tagged `[metadata("ci")]` across platforms and posts GitHub
-commit statuses per `<recipe>@<platform>` context. Unlike batch runners,
-the run is **live state you attach to**: the coordinator serves a typed
-surface on `.ci/odu.sock`, so `status`/`logs`/`attach` are in-band — no
-process-compose, no separately-versioned socket client.
+[`odu`](https://github.com/juspay/odu) (Tamil ஓடு — "run") runs a repository's
+`just` recipe DAG tagged `[metadata("ci")]` across machines, posts a GitHub
+commit status per `<recipe>@<platform>`, and keeps every run in a per-user
+catalog.
+
+**There is one shared service and one vocabulary.** A per-user singleton
+(`http://127.0.0.1:18440`) owns every run. Three faces project the same five
+verbs — `run_start`, `run_wait`, `run_retry`, `run_cancel`, `log_read` — and
+none of them has a verb of its own:
+
+| Face | Spelling | Who uses it |
+| --- | --- | --- |
+| terminal | `odu surface <verb> --input '{…}' --json` | you, with shell access |
+| agent | MCP tools of the same names | you, in an MCP host |
+| browser | `odu web` | the human |
+
+The two spellings below are the same call. Use whichever face you have; never
+mix vocabularies, and never reach for a face-specific workaround.
 
 > **A request to run CI is a request to run `odu` — never `just ci`.** Many
-> consuming repos expose a `just ci` (or `just <recipe>`) target that runs a
-> pipeline locally. Do **not** shell out to it: it is a parallel, non-attachable
-> path that bypasses everything odu gives you — the live surface, per-node GitHub
-> statuses, structured results, fail-fast, `cancel`/`supersede`, and the log
-> resources below. "run CI", "run fmt and nix", "re-run the e2e lane" all mean
-> *drive an odu run*, by the MCP face first and the `odu` CLI otherwise.
->
-> **Prefer the MCP face for runs.** When the `odu-mcp` skill is present (the
-> `mcp__odu__*` tools — check for an odu MCP server before shelling out), drive
-> runs through it — `run` (pass `selectors` for named lanes/recipes) →
-> `wait_for_settle` (fail-fast) → read the red node's log → `node_rerun`, with
-> `cancel` / `run({supersede})` to call off or replace a run. It spawns the same
-> coordinator but gives you structured results and the fail-fast loop instead of
-> scraping terminal output. The `nix run … -- run` CLI below is the reference and
-> the fallback when no MCP server is wired.
->
-> **Don't block on the full run — fail-fast is the point.** `wait_for_settle`
-> defaults to `fail_fast: true`: it returns the **instant the first node goes
-> red**, while the slow lanes (e2e, build) keep running. That instant includes
-> that node's LOG — a verdict is not published until the node's output is on
-> disk — so when you drill in, the summary is already there rather than still
-> on the wire. What you wait for is that one node's remaining backlog, not the
-> rest of the DAG: a red `fmt` unblocks you while e2e is still running, and a
-> node whose log ended first publishes with no wait at all. That early return
-> *is* your unblock signal — drill into the red node's log and start fixing at once;
-> never sit through the remaining lanes to "see the full status". The verdict is
-> explicitly partial when it trips: `fail_fast_tripped: true` with
-> `settled: false`, and `failed[]`/`errored[]` list only what's red **so far** —
-> a floor, not the final tally, so more lanes may still fail. Conversely
-> `passed: true` is the *only* trustworthy green — it comes solely from a fully
-> settled run with zero red; never infer success from a fail-fast return. The
-> coordinator does **not** stop when the tool returns: only your call did, so you
-> can `node_rerun` the fixed node against the still-live run (the pending slow
-> lanes keep it alive; `linger` covers the case where it already settled) and
-> `wait_for_settle` again to catch any reds that surfaced meanwhile — or
-> `run({supersede})` when the fix is a new commit. Don't pad `timeout_ms` and
-> wait: the loop is fail-fast → fix → re-wait, not one long block.
->
-> **Retrying one lane is `node_rerun`, never `supersede`.** `node_rerun` re-runs
-> a single node (`<recipe>@<platform>`) and its dependents on the run that is
-> still live, alongside the sibling lanes, cancelling nothing — the other
-> platforms keep going and the run keeps its coordinator, venue leases and
-> GitHub statuses. `run({supersede})` cancels the WHOLE run, every lane of it,
-> and is for replacing a run with a *different commit*. Superseding to retry a
-> flaky linux lane throws away the darwin lane that was still running and
-> green — the expensive operation for a job the cheap one does. Same rule on the
-> CLI: `odu rerun <selector>`, not `odu run --supersede`.
->
-> **A verdict names its run; no run fails loud.** A verdict about an observed
-> run carries that run's identity — `sha7` always, and `seq` (`sha7#seq`)
-> whenever the coordinator reserved an ordinal — so you match it to the run you
-> dispatched, not a previously-settled one; pass `expected_sha` (a full sha or a
-> `sha7` prefix) to make that a hard, loud check. *(`seq` is `null` only when
-> none was reserved — a wait that saw no frame, or the rare case the coordinator
-> couldn't reserve one; the run then claims `sha7` but no unique `sha7#seq`.)*
-> And `wait_for_settle` **never** returns an empty
-> nothing-verdict: called with no live run in the checkout it fails loud, not
-> an instant `settled: false` — and WHICH loud it is answers the incident,
-> not just the absence: a killed run leaves residue a clean exit removes (the
-> run lock, the socket, the unfinished reservation), so when that residue is
-> there the error *names the death* — "the run died with the process that
-> started it", from the one `deadRun` read in `@odu/run-client` that `runs`
-> (`dead_run` field), `node_rerun`, `run`, and the CLI twins all answer — and
-> otherwise it mirrors `odu status`'s "no run in progress". So a loud error
-> means *start or find a run* (or read history with `runs`) — never hand-roll
-> a process-liveness poll as a workaround.
->
-> **Logs are a resource, not a tool.** Don't look for a log-tail tool — there
-> isn't one. A node's output is the MCP **resource** `surface://collections/logs/{id}`
-> (`{id}` is the node, e.g. `ci::unit@aarch64-darwin`), read with
-> `ReadMcpResourceTool`: the live buffered tail while the run is up, else the
-> durable per-SHA log on disk. So when `wait_for_settle` returns a red node, the
-> "read the log" step is `ReadMcpResourceTool` on that node's
-> `surface://collections/logs/{id}` — subscribe for push updates, or just re-read
-> to poll. (`surface://streams/nodes` is the pipeline snapshot resource alongside
-> it.) These URIs resolve in the MCP server's HOME checkout only: for a run you
-> targeted with a named `checkout` argument, read the log off THAT disk instead —
-> `join(checkout, logPathFor(sha7, id))` from `@odu/run-client`, never the home
-> URI (which shows another tree's run, or "missing").
+> consuming repos expose a `just ci` (or `just <recipe>`) that runs a pipeline
+> locally. Do **not** shell out to it: it bypasses everything odu gives you —
+> the durable run record, per-node GitHub statuses, structured failures with
+> addressed evidence, fail-fast, retry and cancel. "run CI", "run fmt and nix",
+> "re-run the e2e lane" all mean *drive an odu run through the verbs below*.
 
-## Invoking
+**Run keys are host-global.** Every address is a run id or a key built from one
+— never a path relative to whoever is calling. Your cwd is not a fact about
+what the user meant, so `run_start` takes the checkout as an explicit absolute
+path, and `run_start` is the only verb a filesystem path appears in at all.
 
-```sh
-nix run github:juspay/odu -- <subcommand> [args]
+**The face holds no run authority.** Every call goes over the wire to the
+singleton. A harness restarting your MCP server kills nothing, two agents are
+two clients of one truth, and the run outlives whoever started it.
+
+---
+
+## The loop
+
+```
+1. bootstrap   — a face, once, unpinned from upstream
+2. run_start   — absolute checkout + expectedSha + YOUR requestId
+3. run_wait    — bounded; feed the returned cursor back as `after`
+4. log_read    — on a failure's logKey, echoed verbatim
+5. run_retry   — same commit; a NEW commit is a new run_start
+6. verify      — scope, sha, reportingDebt, before you say "green"
 ```
 
-Pin a ref for reproducibility, or — if the consuming repo npins-pins odu
-and re-exports it (kolu does) — prefer its own flake output so the version
-is repo-controlled:
+### 1. Bootstrap
+
+Nix is the only supported way to run odu, and the reference is **unpinned
+upstream**:
 
 ```sh
-nix run .#odu -- <subcommand> [args]
+nix run github:juspay/odu -- web --background   # ensure the service, print its URL, return
 ```
 
-## Modes
+Every face bootstraps for you: `odu surface …` and the MCP bridge dial the
+singleton and, **at the default origin only**, start one and verify it is ready
+before issuing your call. So in practice you just issue the verb. Run `web
+--background` explicitly when you want the service up before the first verb, or
+want its URL to hand the human.
 
-**Strict by default** — `odu run` refuses a dirty tree, pins `HEAD` via
-`git worktree`, posts commit statuses, and splits per-recipe logs into
-`.ci/<sha>/<plat>/<recipe>.log`. Three flags relax that policy:
+- Bare `odu web` **serves in this terminal until Ctrl-C**. Never run it from a
+  tool call — it will block until your timeout. `--background` is the agent's
+  spelling.
+- A face **never** recovers a failed dial by executing locally. If bootstrap
+  fails you get exit 3 and a reason, not a silent local run.
+- An explicitly passed `--origin` is dialled and only dialled — a typo reports
+  "nothing is serving there" rather than spawning a daemon.
 
-| Flags | Tree | HEAD pin | Status posts | Use for |
+### 2. Start
+
+```sh
+odu surface run_start --input '{"checkout":"/abs/path/to/repo","expectedSha":"'"$SHA"'","requestId":"fix-lint-1"}' --json
+```
+
+```jsonc
+// MCP tool: run_start
+{ "checkout": "/abs/path/to/repo", "expectedSha": "<sha>", "requestId": "fix-lint-1" }
+// optional: selectors[], platforms[], hostPins[], root, noDeps,
+//           noStrict, noSnapshot, noPost, supersede
+```
+
+`selectors` are `recipe[@platform]` — `["ci::e2e"]`, `["fmt","nix"]`,
+`["ci::unit@x86_64-linux"]`. Empty means the whole `[metadata("ci")]` DAG on
+every configured platform. `platforms` slices the fanout; `noDeps` runs only
+the named nodes.
+
+- **`checkout` is absolute and explicit.** Read it from the repo you are working
+  in; do not pass a relative path and do not assume the service shares your cwd.
+- **`expectedSha` is a hard check.** A checkout that has moved on is refused
+  (`checkout_refused`), never quietly a different run.
+- **`requestId` is mandatory, and that is the feature.** See below.
+- A checkout that already has a live run does **not** get a second one: you are
+  handed the existing run instead (`accepted: false` with `existing`, or a
+  `checkout_busy` refusal naming it). Observe that run, or repeat the call with
+  `supersede: true` — which cancels the WHOLE live run there.
+
+The receipt carries `runId`, `sha`, `scope`, `endpoint`, and a `cursor`
+positioned at the run's beginning — pass that cursor straight into your first
+`run_wait` so you resume rather than replay.
+
+**Lost replies are why `requestId` exists.** Mint one id per *intent*, never per
+attempt. If a reply is lost — a timeout, a killed tool call, a restarted harness
+— repeat the call with **the same id and the same input**: you get the recorded
+receipt back with `replayed: true`, and no second run. A fresh id is a licence
+to run twice; never mint one to "retry a call". Two rules follow:
+
+- `request_conflict` — that id was used for a *different* input. Pick a new id
+  for the new intent, or resend the original input.
+- `request_unresolved` — the request was accepted and its outcome is genuinely
+  unknown. Do **not** re-issue it with a new id. Look for the run
+  (`odu surface keys runs` / `get runs`, or the board) and reconcile from what
+  is actually there.
+
+### 3. Wait — bounded, resumable, fail-fast
+
+```sh
+odu surface run_wait --input '{"runId":"'"$RUN"'","after":"'"$CURSOR"'","deadlineMs":120000}' --json
+```
+
+```jsonc
+// MCP tool: run_wait
+{ "runId": "<run>", "after": "<cursor>", "deadlineMs": 120000 }
+// optional: settle (wait for the whole run), limit (page size)
+```
+
+`reason` is what you branch on:
+
+| `reason` | Meaning | Next move |
+| --- | --- | --- |
+| `failure` | A red node whose evidence is ready. **A normal result, not an error.** | Read `failures[].excerpt`, then `log_read` its `logKey`. Start fixing now. |
+| `still_running` | The deadline passed with nothing red. | Ask again with the returned `cursor` as `after`. |
+| `settled` | The whole run is done. | Verify (step 6). |
+| `owner_lost` | The coordinator is provably gone without finalizing. | Start a fresh run. |
+
+**Fail-fast is the point.** `run_wait` returns on the first *actionable* red —
+a failure whose log has had its last word — while the slow lanes keep running.
+`failures[]` is a floor, not the final tally: more lanes may still go red. Do
+**not** sit through the remaining lanes to "see the full status", and do not pad
+`deadlineMs` and block. The loop is wait → fix → wait again.
+
+**`passed: true` is only trustworthy with `settled: true`.** Never infer green
+from a bounded wait that saw nothing red.
+
+**Feed the cursor back.** Every answer carries a `cursor`; pass it as `after`
+next time and you are not shown the same events twice. It suppresses repeats and
+resolves nothing — a red node you already saw is still red. A cursor from
+another run is refused (`bad_cursor`) with a `resync` route rather than silently
+restarted; that bites hardest after a retry that relaunched (step 5).
+
+**Terminal handling: Ctrl-C ends an OBSERVATION, not the run.** An interrupted
+or disconnected wait exits 130 and the run carries on — as does a wait that
+simply hit its deadline. Re-attach with `run_wait` and your last cursor.
+**Stopping work is an explicit act**: `run_cancel`.
+
+### 4. Diagnose — addressed evidence
+
+```sh
+odu surface log_read --input '{"key":"'"$LOG_KEY"'","offset":-4096}' --json
+```
+
+```jsonc
+// MCP tool: log_read
+{ "key": "<logKey from failures[]>", "offset": -4096 }   // negative offset = tail; limit pages
+```
+
+- **Echo the `logKey` verbatim.** A run id, a node and an attempt travel as one
+  token precisely so no caller reassembles them from parts. Never build a path.
+- `complete: false` means the producer's last word is missing — the evidence is
+  truncated, not "the recipe was quiet". Say so rather than concluding from it.
+- `excerptSource: "none"` on a failure means the log was unreadable. That is
+  never a pass and never "flaky".
+- Page forward with `nextOffset`; `eof` is about this read, `complete` is about
+  the log.
+- Watching a live node instead of reading evidence? Subscribe to the
+  `logTails` resource (`surface://collections/logTails/<key>`, or
+  `odu surface watch logTails <key>`). Evidence for a verdict is `log_read`.
+
+### 5. Retry the same commit — or start the new one
+
+```sh
+odu surface run_retry --input '{"runId":"'"$RUN"'","selector":"ci::unit@x86_64-linux","requestId":"retry-unit-1"}' --json
+```
+
+```jsonc
+// MCP tool: run_retry
+{ "runId": "<run>", "selector": "ci::unit@x86_64-linux", "requestId": "retry-unit-1" }
+// optional guard: expectAttempt { node, attempt }
+```
+
+`selector` is `<recipe>@<platform>`, `@<platform>`, or a bare recipe name.
+
+- **Retrying is not your choice to make.** `run_retry` resets nodes on a live
+  coordinator when there is one and starts a linked replay run when there is
+  not, and tells you which in `mode` (`live` | `relaunched`).
+- **Watch `effectiveRun`, not the run you asked about**, and use the receipt's
+  `cursor`. A `relaunched` retry is a NEW run; your old cursor belongs to its
+  parent and will be refused.
+- **Siblings are preserved.** `roots` are the nodes actually reset and
+  `resetDependants` their consequence; every other lane keeps running, keeps its
+  venue and keeps its statuses.
+- `expectAttempt` refuses (`stale_attempt`) if the node moved past the attempt
+  you read. Use it when acting on a reading you took a while ago.
+- `requestId` is mandatory here too, with exactly the semantics of step 2.
+
+**Retry vs. supersede — the rule that costs the most to get wrong.**
+
+| Situation | Verb | What it does |
+| --- | --- | --- |
+| One lane failed; same commit | `run_retry` | Re-runs that selector (and its dependants). Cancels nothing. |
+| A **new commit** fixes it | `run_start` on the new sha, `supersede: true` if a run is live in that checkout | Replaces the WHOLE run, every lane. |
+
+A new commit is a new run — never a retry, which replays recorded inputs with
+the old commit pinned. And superseding to retry a flaky lane throws away the
+darwin lane that was still running and green: the expensive operation for a job
+the cheap one does.
+
+**Cancelling** is `run_cancel` with an explicit scope — `{"kind":"run"}`,
+`{"kind":"node","node":"ci::fmt@x86_64-linux"}` or
+`{"kind":"lane","platform":"aarch64-darwin"}` — plus a `requestId`. The answer
+echoes what was actually cancelled; `effective: "nothing"` with a `detail` means
+nothing was, and is not a cheerful ok.
+
+### 6. Verify before you call CI green
+
+Three checks, every time, from the wait answer or the board row:
+
+- **`scope` — a selection is not a pipeline.** `{selectors, platforms, root?,
+  noDeps}`. A green over three recipes is a green over three recipes. Only an
+  empty `selectors` and empty `platforms` (and no `noDeps`) is "CI is green".
+  Say what you actually ran.
+- **`sha` — is it the commit you meant?** Compare against the commit you asked
+  for. A `dirty` run on the board is a verdict about a working tree, not about a
+  commit.
+- **`reportingDebt` — statuses that did not land.** Debt never blocks settle
+  (the test verdict is the truth), but an unwritten required context is what
+  blocks a merge. A green run with debt is not a green PR; report it.
+
+And say `passed` only from `settled: true`.
+
+---
+
+## Verb reference
+
+| Verb | argv | MCP tool | Input | Answers |
 | --- | --- | --- | --- | --- |
-| _(none — default)_ | clean (refuses dirty) | `git worktree` at HEAD | posted | "real" CI runs |
-| `--no-post` | clean | `git worktree` at HEAD | _none_ | non-GitHub strict consumers; debugging strict without writing the PR's check list |
-| `--no-snapshot` (implies `--no-post`) | live working tree | none | _none_ | strict-mode dev iteration without clean-tree refuse |
-| `--no-strict` (meta — same as `--no-snapshot --no-post`) | live working tree | none | _none_ | dev iteration; the one-flag opt-out for "just run the pipeline" |
+| start | `odu surface run_start --input '{…}' --json` | `run_start` | `checkout`, `expectedSha`, `requestId`, `selectors?`, `platforms?`, `hostPins?`, `root?`, `noDeps?`, `noStrict?`, `noSnapshot?`, `noPost?`, `supersede?` | `accepted`, `runId`, `replayed`, `sha`, `scope`, `endpoint`, `cursor`, `existing?` |
+| wait | `odu surface run_wait --input '{…}' --json` | `run_wait` | `runId`, `after?`, `deadlineMs?` (30s default), `settle?`, `limit?` | `reason`, `settled`, `passed`, `outcome`, `failures[]`, `failuresTotal`, `cursor`, `remaining`, `reportingDebt[]`, `scope`, `sha` |
+| diagnose | `odu surface log_read --input '{…}' --json` | `log_read` | `key`, `offset?` (negative = tail), `limit?` | `text`, `offset`, `size`, `nextOffset`, `eof`, `complete` |
+| retry | `odu surface run_retry --input '{…}' --json` | `run_retry` | `runId`, `selector`, `requestId`, `expectAttempt?` | `mode`, `effectiveRun`, `parentRun`, `roots[]`, `resetDependants[]`, `scope`, `sha`, `cursor` |
+| cancel | `odu surface run_cancel --input '{…}' --json` | `run_cancel` | `runId`, `scope`, `requestId` | `effective`, `detail` |
 
-Every mode ends with the same `── ci run summary @ <sha7> ──` verdict block
-(the sha reads `<sha7>+dirty` for a live-tree run on uncommitted changes)
-and exits non-zero if any node failed or errored.
-
-## Common invocations
+Reading state without a verb — the same three resources on both faces:
 
 ```sh
-# Full pipeline (the [metadata("ci")] root, every configured platform).
-nix run github:juspay/odu -- run
-
-# Dev iteration on a dirty tree: no clean-tree refuse, no HEAD pin, no posts.
-nix run github:juspay/odu -- run --no-strict
-
-# Re-run a single failed recipe on one lane — overwrites the same GitHub
-# commit-status context the full run wrote (closes the red check).
-nix run github:juspay/odu -- run e2e@x86_64-linux
-
-# One recipe across every pipeline platform; selectors compose.
-nix run github:juspay/odu -- run e2e lint
-
-# Restrict the WHOLE fanout to one platform (repeatable).
-nix run github:juspay/odu -- run --platform x86_64-linux
-
-# Skip the dependency closure; run ONLY the named nodes (_ci-setup still rides).
-nix run github:juspay/odu -- run --no-deps e2e@aarch64-darwin
-
-# A different DAG root instead of the [metadata("ci")] recipe.
-nix run github:juspay/odu -- run --root ci::e2e
-
-# One-shot redirect of a platform's host (pins one box; waits if busy).
-nix run github:juspay/odu -- run --host x86_64-linux=my-build-box
-
-# Fail immediately when every host in a pool is busy (default: wait in line).
-nix run github:juspay/odu -- run --no-wait
-
-# Venue inventory — free / busy / held-by for every configured host.
-nix run github:juspay/odu -- hosts
-
-# Agent-held lease across runs (no re-queue between odu run iterations).
-nix run github:juspay/odu -- lease
-nix run github:juspay/odu -- lease x86_64-linux --no-wait
-nix run github:juspay/odu -- release
-
-# One NDJSON line per node transition, for agents/tools driving CI:
-# {"node":"ci::e2e@x86_64-linux","recipe":"ci::e2e","platform":"x86_64-linux",
-#  "status":"running|success|failed|skipped|errored","exit_code":1,
-#  "log":".ci/<sha7>/x86_64-linux/ci::e2e.log"}
-nix run github:juspay/odu -- run --progress json
+odu surface keys runs            # the board: every registered run
+odu surface get runs "$RUN"      # one row (state, sha, scope, passed, reportingDebt, cursor)
+odu surface get service          # who is serving, which build, is it ready
+odu surface watch runs           # follow the board
+odu surface --help               # the whole projection
+odu history list [--all] [--limit N] [-o json]   # the catalog from a terminal
 ```
 
-Without `--progress json`, output adapts to where stdout points: a live
-colour lane-matrix with a log-tail footer on a TTY; quiet transition lines
-plus a once-a-minute "… still running" heartbeat when piped.
+MCP resources: `surface://cells/service`, `surface://collections/runs`,
+`surface://collections/logTails/{key}`.
 
-## Inspection subcommands (no side effects)
+`odu run` is the human's one-shot spelling of the same thing: it calls
+`run_start` for the current checkout and then observes. Its options are
+`run_start`'s inputs. Ctrl-C of it stops observing; the run keeps going.
+
+## Refusals, and what to do about them
+
+A refusal is odu declining the request — not CI failing, and not a transport
+error. `code` is what you branch on; `message` is for the human; `resync` and
+`suggestion` carry the recovery where there is one.
+
+| `code` | Next move |
+| --- | --- |
+| `bad_input` | Fix the input; it could not have meant anything. |
+| `unknown_run` / `expired` | The run is not in the catalog (or aged out). Find it on the board, or start a fresh run. |
+| `bad_cursor` | Run the `resync` it carries. Usually a cursor from a parent run after a `relaunched` retry. |
+| `checkout_refused` | Not a git repo, or the checkout moved off `expectedSha`. Re-read HEAD and re-issue. |
+| `checkout_busy` | A run is already live there. Observe it, or repeat with `supersede`. |
+| `not_replayable` | Dirty live tree, or the checkout is gone. Start a new run instead of retrying. |
+| `request_conflict` | Same id, different input. New intent ⇒ new id. |
+| `request_unresolved` | Outcome unknown. **Do not re-issue with a new id** — find the run and reconcile. |
+| `stale_attempt` | The node moved past your `expectAttempt`. Re-read, then decide again. |
+| `no_venue` | No lane resolved for those platforms, or the pool refused. Check hosts config. |
+| `launch_failed` | The service could not start the coordinator; the message says why. |
+
+## Exits (`odu surface`)
+
+These are about the CALL, not about CI:
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | Answered — **including an answer that reports red CI**. |
+| 1 | odu declared a refusal (one JSON line on stderr, with a `code`). |
+| 2 | Usage error; the call never left the process. |
+| 3 | Nothing serving (and, at the default origin, odu tried to start it and says why). |
+| 130 | Interrupted — the observation ended, the run carries on. |
+
+## Wiring the MCP face
+
+The launcher ships beside this skill at `bin/serve`, installed as
+`.agents/skills/odu/bin/serve`. It is one line — unpinned upstream, over stdio:
 
 ```sh
-nix run github:juspay/odu -- dump            # resolved pipeline as JSON
-nix run github:juspay/odu -- graph           # dependency graph (Mermaid)
-nix run github:juspay/odu -- protect --dry-run   # the (recipe × platform) contexts
-nix run github:juspay/odu -- protect             # require exactly those on the branch
-nix run github:juspay/odu -- protect --create    # …making the ruleset if absent
-# --platform P (repeatable) pins the repo's platform set with no hosts config;
-# omitted, the set derives from the machine's hosts file (warned on stderr).
-# The contexts land in the GitHub ruleset governing the branch; classic branch
-# protection is not written. Without a ruleset protect refuses — `--create`
-# makes one holding only the required checks, enforcing, exempting nobody.
+exec nix run --accept-flake-config github:juspay/odu -- mcp "$@"
 ```
 
-## Live introspection (attach to a run in progress)
-
-While `odu run` is live in a checkout, these attach to its surface over
-`.ci/odu.sock`:
-
-```sh
-nix run github:juspay/odu -- status          # snapshot; -o json → {nodes, posting, run}
-                                             # (warns while GitHub posts are owed;
-                                             #  `run` = {phase, elapsed_ms, lanes[]}
-                                             #  lane = {state: claiming|leased, …})
-nix run github:juspay/odu -- attach          # live TUI dashboard on a tty
-                                             # (digits attach · n/p cycle ·
-                                             #  r rerun · q quit); -o json
-                                             # = transition stream
-nix run github:juspay/odu -- logs -f e2e@x86_64-linux   # -f returns once that
-                                             # node's log is complete
-nix run github:juspay/odu -- wait            # fail-fast JSON verdict (MCP wait_for_settle)
-nix run github:juspay/odu -- wait --settle   # block until the whole run settles
-nix run github:juspay/odu -- wait --expected-sha SHA [--timeout-ms N]
-nix run github:juspay/odu -- rerun ci::unit@x86_64-linux   # one node
-nix run github:juspay/odu -- rerun @x86_64-linux           # recipe nodes on that lane (not _ci-setup)
-nix run github:juspay/odu -- rerun unit                    # that recipe on every lane
-nix run github:juspay/odu -- cancel          # stop the live run, cleanly
-nix run github:juspay/odu -- cancel @aarch64-darwin   # drop one platform lane
-nix run github:juspay/odu -- cancel ci::fmt@x86_64-linux  # cancel one node
-nix run github:juspay/odu -- runs            # this CHECKOUT's history (flags unposted
-                                             # statuses); per-user view: `history list`
-```
-
-No run in progress ⇒ exit non-zero with `no run in progress in this
-checkout (no live socket at .ci/odu.sock)`. One run per checkout — a
-second `odu run` refuses while the socket is live.
-
-**A run is attachable before it has lanes.** The socket comes up *before* the
-venue claim, so `status` / `attach` / `logs -f` / `wait` all see a run from the
-moment it exists — including the minutes a cold host spends receiving the runner
-closure, which used to read as "no run in progress". In that window `status`
-prints a `provisioning <elapsed>` block naming the pool each lane is claiming
-from (`run.phase` is `provisioning` under `-o json`), `_ci-setup@<platform>` is
-`running` with the copy's own `copying path …` narration in its log
-(`logs -f _ci-setup@x86_64-linux`), and `wait` blocks instead of refusing. A
-claim that never succeeds lands as a red `_ci-setup@<platform>` with the reason
-in its log — a verdict and a `runs` record, not a vanished socket.
-
-**A red node's log holds the whole recipe, summary and all.** That is the point
-of drilling into it, so a node's VERDICT waits for its output: a terminal status
-is not published until that node's log has ended, sealed in the same breath the
-durable file is. By the time anything tells you a node went red — `wait_for_settle`,
-`odu wait`, the commit status, the `runs` record, the settle verdict itself —
-the summary is already on disk. That holds on every path, `--linger` included,
-where the coordinator never tears down at all: the promise is kept where it is
-made rather than on the way out. The join is needed because a node's status
-arrives on a different stream than its output and gets there first, and a
-recipe's final lines — the `N scenarios (2 failed)` that says what went wrong —
-are the last to land. The same holds for the durable file and for `logs -f`. A
-lane that goes silent still owing output, or a run stopped before a node
-finished (`cancel`, an interrupt, the `--linger` idle self-reap), stamps
-`[odu] log truncated: …` into the log rather than ending mid-line, so a
-short log is never mistaken for a quiet recipe. And because the file is
-addressed by commit, not by run, re-running the same SHA REPLACES
-`.ci/<sha>/<plat>/<recipe>.log` — you are never reading two runs concatenated.
-
-**Wait / rerun (plain-CLI agent loop).** `odu wait` is the CLI twin of MCP
-`wait_for_settle` — the same settle core, over a reader built the same way, so
-the two faces answer a run alike: default fail-fast (return the instant a node goes
-red), `--settle` for the full run; prints one JSON verdict line; exit 0 only on
-a fully-settled all-green run. A wait rides out a dropped LINK: if the
-connection to the coordinator dies while the run is still going (a busy
-coordinator can go quiet long enough for the keep-alive to give up), the wait
-re-dials and keeps waiting rather than reporting a live run as unsettled. It
-returns when the run settles, a node goes red, `timeout_ms` elapses (and says
-`timed_out`), or the coordinator is genuinely gone — in which case the verdict
-comes from that run's finalized record on disk. `odu rerun <selector>` is the headless face of
-surface `node.rerun` (and of the attach TUI's `r` key) — restart node(s) on
-the still-live run by fan-in id, `@platform`, or bare recipe name.
-
-`odu rerun` and MCP `node_rerun` are the SAME operation, and they are the answer
-to "one lane failed": the run stays up, the sibling lanes keep running, and
-nothing is cancelled. `odu run --supersede` / `run({supersede})` is the other
-thing — it kills the whole live run, every lane — so it belongs to "test the
-fixed commit", not to "retry that lane".
-
-**Cancel / supersede / linger.** Bare `odu cancel` drives the live run's teardown
-from a second process (finalize posted statuses, close lanes, drop the socket)
-and waits until it's gone — no need to wait out a doomed run or `pkill` the
-coordinator. `odu cancel <node>` or `odu cancel @<platform>` cancels only that
-node or lane (`cancelled` status, not red) and leaves the rest of the run
-settling — MCP twins `node_cancel` / `lane_cancel`. `odu run --supersede` cancels whatever's live
-here first, then starts ("stop this, run the fixed commit"). By default a run
-exits the instant it drains; `odu run --linger` keeps it serving past settle so a
-node can be rerun later (retry a flake), self-reaping after an idle period or on
-`cancel`.
-
-## Durable introspection (after the coordinator is gone)
-
-Every run is also written to a **per-user catalog** — `ODU_STATE_DIR`, else
-`$XDG_STATE_HOME/odu/runs` (`~/.local/state/odu/runs`) on Linux,
-`~/Library/Application Support/odu/runs` on macOS. It survives the checkout, so
-these answer after the coordinator exited, from another terminal, and after a
-`git worktree remove`. Nothing was retired: `.ci` is still written, `odu runs` is
-still the CHECKOUT view, and every live command above is unchanged.
-
-`--run R` is `R` = a run id, a unique prefix of one, `<sha7>#<seq>`, or `latest`.
-
-```sh
-nix run github:juspay/odu -- history list [--all] [--limit N] [-o json]
-                                             # the catalog, newest first (--all = every checkout)
-nix run github:juspay/odu -- history show --run R [--after CURSOR] [-o json]
-                                             # one run's attention payload, without waiting
-nix run github:juspay/odu -- history import [--dry-run] [-o json]
-                                             # bring this checkout's .ci records in
-nix run github:juspay/odu -- history prune [--days N] [--dry-run] [-o json]
-                                             # expire finished runs past the window (30d default)
-nix run github:juspay/odu -- logs --run R [--attempt N] [--offset B] [--limit B] [-o json] <node>
-                                             # ONE recorded attempt; byte offsets, not lines
-nix run github:juspay/odu -- wait --run R [--after CURSOR] [--deadline-ms N] [--settle] [-o json]
-                                             # bounded, resumable; exits below
-nix run github:juspay/odu -- rerun --run R [--request-id ID] [--expect-attempt N] [-o json] <selector>
-                                             # retry a RECORDED run
-```
-
-**The loop: start → bounded wait → diagnose → retry → resume.** `odu wait --run`
-returns on the first ACTIONABLE red (a failure whose log has had its last word),
-not on settle — a fast lane's failure is reported without waiting out the slow
-ones; `--settle` waits for the whole run. Its exits are the contract, because
-"there is something to fix", "nothing has happened yet" and "its coordinator
-died" need different next moves: **0** passed · **1** a failure to act on —
-which does NOT mean settled, a red lane beside a still-running one already
-counts · **2** still going, nothing red at the deadline (ask again with the
-returned cursor) · **3** owner lost — provably gone without finalizing, start a
-fresh run · **4** no such run, or expired · **5** request refused (e.g. a cursor
-belonging to another run; the refusal carries a resync command). The bare
-`odu wait` above is UNCHANGED at 0/1.
-`--after CURSOR` resumes without showing you the same events twice, and the
-cursor advances only through events actually delivered.
-
-Evidence is per ATTEMPT and old attempts are immutable — a retry adds `N+1` and
-never overwrites the log you are reading (the `.ci` file, addressed by commit,
-still does). `odu logs --run` reports `complete` as a FIELD, so a truncated log
-says so rather than reading as a quiet recipe. `odu rerun --run` retries a
-recorded run and odu picks what that means: a new attempt if its coordinator is
-still up, else a NEW run linked to it, replayed from recorded inputs with the
-commit pinned (and not posting — a selection's verdict is not the pipeline's). A
-dirty live-tree run cannot be replayed and is refused. `--request-id` makes a
-repeat safe: same id, same input replays the recorded answer instead of starting
-a second run. `--expect-attempt N` refuses if the node has moved on since you
-read it — checked by the coordinator as it accepts the reset, so the node
-cannot advance between the check and the mutation it guards. Expiry leaves a tombstone, so an old run id answers "it existed, it
-failed, its evidence aged out" rather than "no such run".
-
-## Hosts config
-
-`$ODU_HOSTS` (a file path) → `~/.config/odu/hosts.json` → fallback
-`~/.config/justci/hosts.json` (zero-config migration from justci):
+`.mcp.json` (Claude Code; the same command for Codex / opencode / Gemini CLI):
 
 ```json
-{
-  "x86_64-linux": ["ci-1", "ci-2", "ci-3"],
-  "aarch64-darwin": "me@mac-mini.local"
-}
+{ "mcpServers": { "odu": { "type": "stdio", "command": ".claude/skills/odu/bin/serve" } } }
 ```
 
-Keys are Nix system tuples; values are anything ssh dials, a **list** of them
-(a venue pool), or `localhost` (runs directly against the snapshot, no closure
-copy). A plain string is a pool of one. For each platform, `odu run` picks a
-free machine and leases it for the run: the coordinator dials **odu-runner**
-(same agent as the lane) over surface-remote and calls `lease.claim` — flock
-is a Nix dep of odu-runner, held by the agent process. Releases on finish /
-agent death unless an **agent-held** lease (`odu lease` / MCP `lease`) already
-covers the platform — then run reuses that host and leaves the lock alone.
-Busy pool → wait in line (or `--no-wait` fails); the whole claim is watchable
-live (see "attachable before it has lanes" above). A **cold** host is bounded by
-going *silent*, not by total time — the pin's idle bound
-(`ODU_LEASE_CLAIM_TIMEOUT_MS`, 180s) re-arms on every line the dial narrates, so
-a first run against a fresh box is not killed for being slow whether it is
-copying, evaluating or building. A second, absolute ceiling
-(`ODU_LEASE_PIN_CEILING_MS`, 45m) no line can move catches the other shape: the
-surface-remote session's own backstop *retries* rather than giving up and
-announces each retry as a progress line, so an idle-only bound would never fire
-on a host that keeps talking without finishing. The timeout message names which
-bound fired and what it was doing (`… timed out after 180000ms without progress
-(still copying the runner closure — N store paths so far, last …)`).
-`odu hosts` probes via `lease.probe`. Platforms absent from an *existing* config silently drop from
-the fanout, but a run that resolves **zero** lanes — no file anywhere, no
-`--host`, no `--platform` — is **refused**, not defaulted to `localhost`
-(juspay/odu#46). `--host PLAT=ADDR` pins one box for the run; run on this
-machine on purpose with `--host PLAT=localhost` or a `"PLAT": "localhost"`
-entry. A pool must be pure-local or pure-remote: mixing localhost with remotes
-is refused when a run leases that platform, because a lease-exempt localhost
-reads as always-free and starves the busy remotes beside it (juspay/odu#54). A
-mixed pool for a platform the run never leases is nobody's business and does
-not refuse the run (juspay/odu#66).
+The bridge dials the singleton, bootstraps it if nothing is serving, and
+projects the five verbs and three resources. It starts no coordinator and holds
+no run authority, so a harness restarting it kills nothing.
 
-A lane host needs only **ssh + Nix + outbound https**: the runner ships as
-a Nix closure (`nix copy` → realise on the host), and the source arrives by
-`git fetch` of the **pushed** SHA — remote lanes cannot test unpushed
-commits (no git-bundle transport; push first). The lane host's own nix is
-used on the runner's PATH (never a pinned client — version skew against the
-host daemon corrupts CA-derivation handling).
+## Commands that stay local, deliberately
 
-## Every run at once: `odu web`
+Three commands do not go through the service, and this is a stated exception,
+not an oversight:
 
-Everything above is about one run in one checkout. `odu web` is the other
-question — *what is my CI doing, across all my repositories* — and it is a
-per-user singleton, not a mode of a run:
+| Command | Why local |
+| --- | --- |
+| `odu dump` | Pure `justfile` read — resolved pipeline as JSON. No execution, no socket, no catalog write. |
+| `odu graph` | Pure `justfile` read — dependency graph as Mermaid. Same. |
+| `odu protect [--dry-run] [--create]` | Mutates GitHub using **the caller's** `gh` credential; the daemon has no credential-delegation story. |
 
-```sh
-odu web                # SERVES IN THIS TERMINAL until Ctrl-C, printing
-                       # http://127.0.0.1:18440. Runs it started keep going.
-odu web --background   # ensure one that outlives this shell, print its URL and
-                       # return — what an agent should use
-odu web --upgrade      # drain a running service of another build, start this one
+## Hosts
+
+Lanes need machines. `$ODU_HOSTS` (a file path) → `~/.config/odu/hosts.json`:
+
+```json
+{ "x86_64-linux": ["ci-1", "ci-2"], "aarch64-darwin": "me@mac-mini.local" }
 ```
 
-**An agent wants `--background`.** Bare `odu web` does not return, so a tool
-call that ran it would block until its own timeout; and if a service is already
-up, bare `odu web` REFUSES rather than pretending this invocation is serving it.
+Keys are Nix system tuples; values are anything ssh dials, a list of them (a
+pool), or `localhost`. A run that resolves **zero** lanes is refused, never
+defaulted to `localhost`. `hostPins` (`"P=ADDR"`) pins one box for one run;
+`odu hosts` shows the inventory. A lane host needs ssh + Nix + outbound https,
+and the source arrives by `git fetch` of the **pushed** SHA — remote lanes
+cannot test unpushed commits, so push first.
 
-One service, one fixed address, one catalog. A browser, `odu surface` in a
-terminal and an agent over MCP are three views of that one truth rather than
-three programs that agree by convention — every run registered by `odu run`
-appears on the board the moment the service reads the catalog, with nothing
-having told it.
+## What changed (state it honestly if asked)
 
-The five shared verbs, spelled identically as argv and as MCP tools:
-
-```sh
-odu surface run_start  --input '{"checkout":"/abs/path","expectedSha":"SHA","requestId":"ID"}' --json
-odu surface run_wait   --input '{"runId":"RUN","after":"CURSOR"}' --json
-odu surface log_read   --input '{"key":"LOGKEY","offset":-4096}' --json
-odu surface run_retry  --input '{"runId":"RUN","selector":"ci::unit","requestId":"ID"}' --json
-odu surface run_cancel --input '{"runId":"RUN","scope":{"kind":"run"},"requestId":"ID"}' --json
-odu surface keys runs            # the board
-odu surface get runs RUN         # one row
-odu surface --help               # the whole projection
-```
-
-**The exits answer a different question from `odu wait --run`'s, deliberately.**
-`odu wait --run` is about CI, so its codes are CI's answer. `odu surface` is
-about the CALL: **0** answered — *including* an answer that reports red CI —
-· **1** odu declared a refusal (one JSON line on stderr, with a `code` you
-branch on) · **2** a usage error that never left the process · **3** nothing is
-serving, run `odu web --background` · **130** interrupted, and the run carries on.
-
-Three habits this face rewards:
-
-- **`requestId` is mandatory on every mutation, and that is the feature.** A
-  repeat of the same id returns the recorded answer instead of starting a
-  second run — which is exactly what you want when a reply is lost. Mint a
-  fresh id per *intent*, never per attempt.
-- **Feed the cursor back.** `run_wait` returns a `cursor`; pass it as `after`
-  next time and you are not shown the same events twice. It suppresses repeats
-  and resolves nothing: a red node you already saw is still listed, because it
-  is still red.
-- **Watch `effectiveRun` after a retry.** `run_retry` decides whether that means
-  a new attempt on a live coordinator or a linked replay run, and a replay is a
-  NEW run — your old cursor belongs to its parent and will be refused.
-
-## Semantics worth knowing
-
-- **Lanes are one-shot**: a lane whose ssh link dies mid-run fails as
-  `errored` (GitHub state `error`, `Errored (<dur>)` description); live
-  state does not survive a runner restart — the per-SHA log files do.
-- **Skipped nodes post no status**: an absent required context is what
-  blocks the merge.
-- The coordinator resolves the **generic lane runner from odu's own flake**,
-  not the repo under test:
-  `nix eval $ODU_RUNNER_FLAKE#packages.<platform>.odu-runner.drvPath`, where
-  `ODU_RUNNER_FLAKE` is baked onto the `odu` wrapper from `self.outPath` at
-  build time. A consuming repo no longer re-exports `odu-runner`. There is no
-  override or fallback — the runner is the exact build that shipped the
-  coordinator (they share an RPC contract); a binary built without the baked
-  flake refuses to run.
+- `odu runs` is gone. Use `odu history list` (or the `runs` resource); the JSON
+  shape differs.
+- `odu run --linger` is gone from the public verb — it only meant something when
+  a human attached to a coordinator directly.
+- There is one MCP face. Bare `odu mcp` **is** the shared-service bridge; the
+  old per-checkout tools (`run`, `node_rerun`, `wait_for_settle`, `cancel`,
+  `runs`, `node_cancel`, `lane_cancel`, `lease`, `release`) no longer exist.
+  `--service` is still parsed, ignored and warned about for one release, so
+  existing `.mcp.json` argv does not crash.
+- The per-run coordinator is internal execution machinery, reached only through
+  a hidden verb. Do not invoke it, and do not dial `.ci/odu.sock`.
 
 ## When NOT to use this skill
 
 - Questions about odu's internals or design history — read the
-  [README](https://github.com/juspay/odu/blob/master/README.md) and the
-  kolu Atlas note
-  [*A CI runner you attach to*](https://github.com/juspay/kolu/blob/master/docs/atlas/dist/mini-ci-vs-justci.html).
-- Project-specific CI operations (warm pools, host leases, banned flags)
-  — that's the consuming repo's operational docs, layered on top of this
-  reference.
+  [README](https://github.com/juspay/odu/blob/master/README.md).
+- Project-specific CI operations (warm pools, banned flags, which lanes are
+  required) — that is the consuming repo's operational docs, layered on top of
+  this reference.
