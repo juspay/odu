@@ -234,9 +234,9 @@ export function Receipt(props: {
   role: "status" | "alert";
   bad?: boolean;
   children: JSX.Element;
-  /** Given only for a receipt somebody may be done with. A refusal has no
-   *  dismissal: it is the answer to what they just asked, and it goes when the
-   *  next control answers. */
+  /** Given only for a receipt somebody can be DONE with — an answer, whether it
+   *  was a yes or a refusal. A receipt that is still PENDING has none: the thing
+   *  it describes has not happened yet, so there is nothing to have read. */
   onDismiss?: () => void;
 }): JSX.Element {
   return (

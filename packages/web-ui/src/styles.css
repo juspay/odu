@@ -464,8 +464,9 @@
      the work off the screen.
 
      A row rather than a paragraph, because a receipt that has been READ is
-     clutter over the work — so an `ok` receipt carries its own dismissal at the
-     end of the line. The element stays a `<p class="receipt">`: that is what the
+     clutter over the work — so a receipt that is an ANSWER, yes or refusal,
+     carries its own dismissal at the end of the line; only a pending one has
+     none. The element stays a `<p class="receipt">`: that is what the
      acceptance suite reads a control's answer out of, and the sentence inside it
      stays one flex item (`.receipt-text`, always present — see `dom.tsx`) so a
      receipt that embeds a control of its own is still a sentence rather than
@@ -624,6 +625,12 @@
     font-weight: 400;
   }
 
+  /* One count is a glyph and a number, held together so the pair never wraps
+     apart — and the glyph drops the fixed column it takes in the node list,
+     which beside a digit would be a hole rather than an alignment. */
+  .lane-counts > span { display: inline-flex; align-items: center; gap: 0.15rem; }
+  .lane-counts .glyph { width: auto; font-size: 0.85rem; }
+
   /* A fixed column, so the glyphs stack into a readable strip down the left of
      the DAG rather than jittering with each id's width. The vocabulary is
      `format.ts`'s, which is the TUI's. */
@@ -683,10 +690,18 @@
      looks exactly like a log that has stopped moving because the recipe stopped
      writing, and those are very different facts. */
   .log-follow {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
     margin-left: auto;
     color: var(--muted);
     font: 0.8rem var(--mono);
   }
+
+  /* The follow marker is a `.glyph`, sized for the fixed column down the node
+     list. In a line of running text that column is a hole, so here it is only
+     as wide as the dot it draws. */
+  .log-follow .glyph { width: auto; font-size: 0.8rem; }
 
   .log-head h3 {
     margin: 0;
@@ -760,6 +775,16 @@
     .ansi-15 { color: var(--ansi-15); }
     .ansi-b { font-weight: 700; }
     .ansi-d { opacity: 0.6; }
+  }
+
+  /* WRAPPED, when the reader asks for it. The default above is right — a log
+     line is a log line — but a stack trace or a paragraph of prose in a narrow
+     pane is unreadable behind a horizontal scrollbar, and `anywhere` is what
+     breaks the unbroken 400-character token a build tool prints rather than
+     leaving it to scroll on its own. */
+  .log-text.log-wrap {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 
   .fault { color: var(--red-ink); }
@@ -1063,8 +1088,12 @@
     letter-spacing: -0.01em;
   }
 
-  .detail-branch { color: var(--muted); font-weight: 400; }
+  .detail-branch { color: var(--muted); font-weight: 400; margin-left: 0.4rem; }
   .detail-ref { color: var(--ink); font: 0.9rem var(--mono); margin-right: auto; }
+  /* The board's `+dirty` marker, in the header that names the same commit: the
+     ref alone would claim this run tested that commit, and it did not — it
+     tested that commit plus whatever was uncommitted at the time. */
+  .detail-dirty { color: var(--amber-ink); margin-left: 0.3rem; }
 
   .detail-sub {
     color: var(--muted);

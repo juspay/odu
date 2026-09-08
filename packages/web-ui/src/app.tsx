@@ -436,6 +436,12 @@ export function App(props: {
             : `That checkout already has a live run: ${receipt.runId}.`,
       );
     },
+    // The receipt has been read. Back to `idle` is the same state every control
+    // above starts from, so a dismissal is the one control here that needs no
+    // wire at all.
+    dismiss: (): void => {
+      setControl({ kind: "idle" });
+    },
   };
 
   /**
