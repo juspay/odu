@@ -381,6 +381,85 @@ export async function readRows(dispatch: SurfaceDispatch): Promise<RunRow[]> {
   return rows;
 }
 
+/**
+ * THE THREE WAYS TO NAME A RUN, resolved in one place.
+ *
+ * `odu wait`, `odu rerun`, `odu cancel` and `odu history show` all refuse a
+ * missing `--run` with the same sentence: "a run id, `<sha7>#<seq>`, or
+ * `latest`". Two of those three spellings did not resolve anywhere — the
+ * grammar was promised by the error message and implemented by nobody, so
+ * `odu wait --run latest` exited 4 with "no run latest in the catalog" against
+ * a run that had just finished in the directory the caller was standing in.
+ *
+ * A promise made by a refusal is still a promise, and this is where it is kept.
+ *
+ *   - a RUN ID passes through untouched — it is already the global address, and
+ *     resolving it here would mean a board read on every command that has one;
+ *   - `latest` is the newest run OF THIS CHECKOUT. Deliberately not the newest
+ *     run in the catalog: the catalog is per user, and a person standing in one
+ *     repository who types `latest` means the thing they just started, not
+ *     whatever another worktree began a second later;
+ *   - `<sha7>#<seq>` is the seq-th run recorded at that commit — the spelling
+ *     `odu history list` prints, so what is on the screen can be typed back.
+ */
+export async function resolveRunAddress(
+  dispatch: SurfaceDispatch,
+  address: string,
+  cwd: string,
+  json = false,
+): Promise<{ ok: true; runId: string } | { ok: false; exit: number }> {
+  const hash = address.indexOf("#");
+  // A run id passes through WITHOUT a board read. The service is the authority
+  // on whether it exists and refuses it properly; resolving it here would buy
+  // nothing and cost a collection scan on every `odu wait`.
+  if (address !== "latest" && hash <= 0) return { ok: true, runId: address };
+  const rows = await readRows(dispatch);
+  const found =
+    address === "latest"
+      ? newestHere(rows, git(["rev-parse", "--show-toplevel"], cwd))
+      : rows.find(
+          (r) =>
+            r.sha.startsWith(address.slice(0, hash)) &&
+            r.seq === Number(address.slice(hash + 1)),
+        );
+  if (found !== undefined) return { ok: true, runId: found.runId };
+  // EXIT 4, not a throw. An unresolvable address is a fact about the QUESTION,
+  // which is what exit 4 means in this file's table — and a throw would unwind
+  // to `main.ts` and exit 1, the code reserved for "your CI is red". A script
+  // branching on that would report a test failure for a run it could not name.
+  return {
+    ok: false,
+    exit: unknownRun(
+      address,
+      address === "latest"
+        ? `odu: no run recorded for ${git(["rev-parse", "--show-toplevel"], cwd) ?? cwd}` +
+            " — `latest` means the newest run OF THIS CHECKOUT, and this one" +
+            " has none. `odu history list --all` shows every run in your catalog."
+        : `odu: no run ${address} in the catalog — \`<sha7>#<seq>\` addresses` +
+            " the seq-th run recorded at a commit, as `odu history list` prints it.",
+      json,
+    ),
+  };
+}
+
+/** The newest run of ONE checkout. Separated because "newest" and "of this
+ *  checkout" are two decisions and only the second is contestable. */
+function newestHere(rows: RunRow[], checkout: string | null): RunRow | undefined {
+  if (checkout === null) return undefined;
+  return rows
+    .filter((r) => r.repoRoot === checkout)
+    .sort((a, b) => b.createdAt - a.createdAt)[0];
+}
+
+/** Report an address that named no run, in whichever voice the caller asked
+ *  for — the same `{error, message, run}` shape the service's own `unknown_run`
+ *  refusal emits, so a JSON consumer branches on one thing. */
+function unknownRun(address: string, message: string, json: boolean): number {
+  if (json) emitJson({ error: "unknown_run", message, run: address });
+  else process.stderr.write(`${message}\n`);
+  return WAIT_EXITS.unknownRun;
+}
+
 /** A collection member always opens with a SNAPSHOT, so the first frame is the
  *  read. An empty stream is a link that answered and said nothing, which is a
  *  different thing from an empty board — reported as `undefined` so the caller

@@ -45,7 +45,21 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BIG, currentNixSystem } from "./harness";
+import {
+  BIG,
+  currentNixSystem,
+  hostsFile,
+  PORT_SLOT,
+  privateWorld,
+  suitePort,
+  suitePortFor,
+} from "./harness";
+
+// The port scheme and the private world moved to `./harness`, because the
+// black-box suite needs them too: `odu run` is a client now, so a fixture run
+// reaches a daemon and must reach ITS OWN. Re-exported here so the web tests
+// that have always named them here do not have to learn where they went.
+export { hostsFile, PORT_SLOT, privateWorld, suitePort, suitePortFor };
 
 /** One service, and the world it owns. */
 export interface WebWorld {
@@ -67,63 +81,6 @@ export interface WebWorld {
    *  leaves nothing under the developer's state root. */
   daemonHome?: string;
   dispose: () => void;
-}
-
-/**
- * A port for THIS suite.
- *
- * Derived from the pid rather than fixed, because the fixed 18440 is a
- * developer's own service and a suite that took it would both fail and be
- * disruptive. Above the ephemeral range's usual floor is not required here —
- * the bind is immediate and the window for a collision is the process's own.
- */
-export function suitePort(): number {
-  return 18500 + (process.pid % 900);
-}
-
-/**
- * EVERY PORT THIS SUITE USES, named in one place.
- *
- * The offsets were scattered across three files as bare `suitePort() + 1` /
- * `+ 2` arithmetic, and the cold-bootstrap gate had skipped the scheme entirely
- * for a hardcoded `18493` — which collided, deterministically, with any second
- * checkout of this suite running at the same time (there are two dozen odu
- * worktrees on the author's machine). Each suite killed the other's daemon and
- * immediately re-bootstrapped, and the failure surfaced as
- * "the stale cold-port daemon to go away did not happen within 120000ms" in a
- * test whose subject is "nothing is serving".
- *
- * A named slot cannot be silently reused the way a `+ 1` can, and adding one is
- * the moment you see the ones already taken.
- */
-export const PORT_SLOT = {
-  /** {@link startWebService} — the forked `web-daemon`. */
-  forkedDaemon: 0,
-  /** {@link startWebServiceViaCommand} — `odu web --background`. */
-  commandDaemon: 1,
-  /** `web.e2e.test.ts`'s foreground `odu web` tenure. */
-  foreground: 2,
-  /** `mcp.e2e.test.ts` — a bridge bootstrapping onto an empty machine. */
-  coldBootstrap: 3,
-  /** `mcp.e2e.test.ts` — four cold faces racing for one daemon. */
-  coldRace: 4,
-  /** `mcp.e2e.test.ts` — a foreign listener, met through `odu mcp`. */
-  occupiedAgent: 5,
-  /** `lifecycle.e2e.test.ts` — a foreign listener, met through `odu web`. */
-  occupiedTerminal: 6,
-  /** `lifecycle.e2e.test.ts` — a daemon killed mid-mutation, then restarted. */
-  crashWindow: 7,
-  /** `lifecycle.e2e.test.ts` — a daemon restarted under live runs. */
-  restartUnderRuns: 8,
-  /** `lifecycle.e2e.test.ts` — clients that walk away mid-wait. */
-  disconnect: 9,
-  /** `install.e2e.test.ts` — the daemon a freshly installed launcher starts. */
-  freshInstall: 10,
-} as const;
-
-/** The port for one named slot in THIS suite's block. */
-export function suitePortFor(slot: keyof typeof PORT_SLOT): number {
-  return suitePort() + PORT_SLOT[slot];
 }
 
 /**
@@ -158,12 +115,6 @@ export const SHARED_TOOLS = [
 
 /** A hosts file pinning this machine's platform to a localhost lane, so lane
  *  resolution is hermetic wherever the suite runs. */
-function hostsFile(root: string): string {
-  const path = join(root, "hosts.json");
-  writeFileSync(path, JSON.stringify({ [currentNixSystem()]: "localhost" }));
-  return path;
-}
-
 /** Whatever the daemon has said about itself, for a failure that needs to name
  *  a cause rather than a status code. Absent is normal on the systemd branch,
  *  where the journal has it instead. */
@@ -240,50 +191,6 @@ export async function until<T>(
     }
     await new Promise((r) => setTimeout(r, pollMs));
   }
-}
-
-/**
- * A private world for one service: its own daemon home, catalog, hosts file and
- * port. Two suites on one machine do not fight, and a developer's own `odu web`
- * is untouched.
- *
- * **`HOME` is deliberately NOT redirected.** It was, and that is what made this
- * suite fail on CI in a way no local run could reproduce: a single-user Nix
- * install — which is what a GitHub runner has — keeps
- * `experimental-features = nix-command flakes` in `$HOME/.config/nix/nix.conf`,
- * so a coordinator started inside a world with a synthetic home could not
- * evaluate a flake and every run refused with `launch_failed`. A machine on
- * which `HOME` has to be faked for isolation is a machine odu would not work on
- * either, so the isolation is done with the two variables that actually name
- * what odu owns — the daemon home and the catalog — and everything the
- * toolchain reads out of the real home is left alone.
- */
-export function privateWorld(port: number): {
-  root: string;
-  origin: string;
-  env: NodeJS.ProcessEnv;
-} {
-  const root = mkdtempSync(join(tmpdir(), "odu-e2e-web-"));
-  const state = join(root, "state");
-  mkdirSync(state, { recursive: true });
-  const origin = `http://127.0.0.1:${port}`;
-  return {
-    root,
-    origin,
-    env: {
-      ...process.env,
-      // The catalog.
-      ODU_STATE_DIR: state,
-      ODU_HOSTS: hostsFile(root),
-      // AND the daemon home, transitively: `daemonHome`'s "state" placement
-      // deliberately ignores `XDG_STATE_HOME` (it varies by launch context and
-      // would split one daemon's identity), so `~/.local/state/<app>` is the
-      // only lever — and odu derives `<app>` from the origin. Moving the origin
-      // is therefore what keeps this suite's gate out of a developer's own.
-      // `dispose` removes the directory it leaves behind.
-      ODU_WEB_ORIGIN: origin,
-    },
-  };
 }
 
 /** Start a service in a private world and wait for it to say it is ready. */

@@ -69,6 +69,7 @@ import {
   git,
   here,
   readRows,
+  resolveRunAddress,
   reportFailure,
   reportLost,
   reportRefusal,
@@ -232,14 +233,23 @@ export interface WaitOpts {
   deadlineMs?: number;
   settle: boolean;
   json: boolean;
-  origin?: string;
+  origin?: string;  /** Where the caller is standing — the checkout `--run latest` is about. */
+  cwd?: string;
 }
 
 export async function waitViaService(opts: WaitOpts): Promise<number> {
-  return withService(opts.origin, async (client) => {
+  return withConnection(opts.origin, async ({ client, dispatch }) => {
+    const resolved = await resolveRunAddress(
+      dispatch,
+      opts.run,
+      opts.cwd ?? process.cwd(),
+      opts.json,
+    );
+    if (!resolved.ok) return resolved.exit;
+    const runId = resolved.runId;
     const answered = await call(
       client.surface.run.wait({
-        runId: opts.run,
+        runId,
         ...(opts.after === undefined ? {} : { after: opts.after }),
         ...(opts.deadlineMs === undefined ? {} : { deadlineMs: opts.deadlineMs }),
         settle: opts.settle,
@@ -302,7 +312,8 @@ export interface RetryOpts {
   requestId?: string;
   expectAttempt?: { node: string; attempt: number };
   json: boolean;
-  origin?: string;
+  origin?: string;  /** Where the caller is standing — the checkout `--run latest` is about. */
+  cwd?: string;
 }
 
 /**
@@ -315,10 +326,18 @@ export interface RetryOpts {
  * to watch next.
  */
 export async function retryViaService(opts: RetryOpts): Promise<number> {
-  return withService(opts.origin, async (client) => {
+  return withConnection(opts.origin, async ({ client, dispatch }) => {
+    const resolved = await resolveRunAddress(
+      dispatch,
+      opts.run,
+      opts.cwd ?? process.cwd(),
+      opts.json,
+    );
+    if (!resolved.ok) return resolved.exit;
+    const runId = resolved.runId;
     const done = await call(
       client.surface.run.retry({
-        runId: opts.run,
+        runId,
         selector: opts.selector,
         requestId: requestId(opts.requestId),
         ...(opts.expectAttempt === undefined
@@ -362,14 +381,23 @@ export interface CancelOpts {
   scope: { kind: "run" } | { kind: "node"; node: string } | { kind: "lane"; platform: string };
   requestId?: string;
   json: boolean;
-  origin?: string;
+  origin?: string;  /** Where the caller is standing — the checkout `--run latest` is about. */
+  cwd?: string;
 }
 
 export async function cancelViaService(opts: CancelOpts): Promise<number> {
-  return withService(opts.origin, async (client) => {
+  return withConnection(opts.origin, async ({ client, dispatch }) => {
+    const resolved = await resolveRunAddress(
+      dispatch,
+      opts.run,
+      opts.cwd ?? process.cwd(),
+      opts.json,
+    );
+    if (!resolved.ok) return resolved.exit;
+    const runId = resolved.runId;
     const done = await call(
       client.surface.run.cancel({
-        runId: opts.run,
+        runId,
         scope: opts.scope,
         requestId: requestId(opts.requestId),
       }),
@@ -518,7 +546,8 @@ export interface ShowOpts {
   run: string;
   after?: string;
   json: boolean;
-  origin?: string;
+  origin?: string;  /** Where the caller is standing — the checkout `--run latest` is about. */
+  cwd?: string;
 }
 
 /**
@@ -537,10 +566,18 @@ export interface ShowOpts {
  * service holds the call open.
  */
 export async function showViaService(opts: ShowOpts): Promise<number> {
-  return withService(opts.origin, async (client) => {
+  return withConnection(opts.origin, async ({ client, dispatch }) => {
+    const resolved = await resolveRunAddress(
+      dispatch,
+      opts.run,
+      opts.cwd ?? process.cwd(),
+      opts.json,
+    );
+    if (!resolved.ok) return resolved.exit;
+    const runId = resolved.runId;
     const answered = await call(
       client.surface.run.read({
-        runId: opts.run,
+        runId,
         ...(opts.after === undefined ? {} : { after: opts.after }),
       }),
     );

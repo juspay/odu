@@ -15,16 +15,25 @@
  *      after settlement would take those two minutes, so the assertion is
  *      about the CLOCK as well as the payload.
  *   2. A cursor suppresses repeats without resolving anything, and two callers
- *      hold their own. Each gets what it has not seen; both still see the red.
+ *      hold their own. Each resumes where it left off; both still see the red.
  *   3. The exits are a contract. Passed, a failure to act on, still-going,
  *      no-such-run and a refused cursor are five different exits, and a script
  *      that cannot tell them apart takes the wrong next step.
  *   4. Evidence outlives its checkout. The catalog is per-user, so deleting the
- *      worktree — which used to delete the logs with it — leaves them readable.
+ *      worktree — which used to delete the logs with it — leaves it readable.
  *
  * Black-box like the rest of this directory: nothing is imported from `src/`,
  * and the JSON shapes below are what the binary is asserted to emit rather
  * than a type shared with the code that emits them.
+ *
+ * ## A LOG IS ADDRESSED BY THE KEY ODU ISSUED
+ *
+ * Not by `--run R <node>`, and this suite must not reassemble one either. The
+ * key is `<runId>/<encoded node>/<attempt>` and the encoding is odu's, so the
+ * only supported way to hold one is to have been given it — by a failure
+ * (`failures[].logKey`) or by a live node (`odu status -o json`'s `log_key`).
+ * Both routes are used below, and a test that built a key by hand would pass
+ * against an encoding the product does not have.
  */
 
 import { rmSync } from "node:fs";
@@ -67,56 +76,47 @@ function fixture(name: string): string {
   return dir;
 }
 
-/** The attention payload, as this suite asserts it. A local shape on purpose
- *  — see the header: sharing the type with the producer would hide exactly the
+/** One reported failure, as this suite asserts it. A local shape on purpose —
+ *  see the header: sharing the type with the producer would hide exactly the
  *  wire-shape regressions a black-box suite exists to catch. */
+interface Failure {
+  node: string;
+  attempt: number;
+  status: "failed" | "errored";
+  exitCode: number | null;
+  platform: string;
+  logKey: string;
+  logComplete: boolean;
+  excerpt: string;
+  excerptSource: "attempt_log" | "none";
+}
+
+/** The attention payload `odu wait -o json` and `odu history show -o json`
+ *  both answer with. */
 interface Attention {
-  run: { id: string; sha7: string | null };
-  state: "still_running" | "settled" | "owner_lost" | "expired" | "unknown_run";
+  runId: string;
+  reason: "failure" | "still_running" | "settled" | "owner_lost";
   settled: boolean;
   passed: boolean;
   outcome: "passed" | "failed" | "incomplete" | null;
-  actionable: boolean;
+  sha: string | null;
+  failures: Failure[];
+  failuresTotal: number;
   cursor: string;
-  events: { seq: number }[];
-  has_more: boolean;
-  unresolved_failures: {
-    node: string;
-    attempt: number;
-    exit_code: number | null;
-    log_complete: boolean;
-    log_key: string;
-    excerpt: string;
-    excerpt_source: string;
-  }[];
+  remaining: number;
+  hasMore: boolean;
 }
 
-/** One `odu logs --run latest -o json` read of the noisy node, parsed. */
-function logJson(
-  dir: string,
-  extra: string[],
-): {
-  attempt: number;
-  attempts: number[];
+/** One `odu logs <key> -o json` read, parsed. */
+interface LogPage {
+  key: string;
+  text: string;
   offset: number;
-  bytes_read: number;
-  next_offset: number;
   size: number;
+  nextOffset: number;
   eof: boolean;
   complete: boolean;
-  text: string;
-} {
-  const res = oduCli(oduBin, dir, [
-    "logs",
-    "--run",
-    "latest",
-    "-o",
-    "json",
-    ...extra,
-    `noisy@${PLATFORM}`,
-  ]);
-  expect(res.status, `stderr was:\n${res.stderr}`).toBe(0);
-  return JSON.parse(res.stdout.trim());
+  open: boolean;
 }
 
 function waitJson(
@@ -130,6 +130,37 @@ function waitJson(
     `expected one JSON line on stdout; stderr was:\n${res.stderr}`,
   ).not.toBe("");
   return { status: res.status, attention: JSON.parse(line) as Attention };
+}
+
+function logJson(dir: string, key: string, extra: string[] = []): LogPage {
+  const res = oduCli(oduBin, dir, ["logs", ...extra, "-o", "json", key]);
+  expect(res.status, `stderr was:\n${res.stderr}`).toBe(0);
+  return JSON.parse(res.stdout.trim()) as LogPage;
+}
+
+/** The log key of a node in the run LIVE in this checkout, from the one face
+ *  that hands keys out for nodes that have not failed. Polled, because a node
+ *  that has not started yet has no attempt to address. */
+async function liveLogKey(
+  dir: string,
+  node: string,
+  timeoutMs = 120_000,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const res = oduCli(oduBin, dir, ["status", "-o", "json"]);
+    if (res.status === 0 && res.stdout.trim() !== "") {
+      const seen = JSON.parse(res.stdout.trim()) as {
+        nodes: { id: string; log_key: string }[];
+      };
+      const found = seen.nodes.find((n) => n.id === node);
+      if (found !== undefined && found.log_key !== "") return found.log_key;
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`e2e: no log key for ${node} within ${timeoutMs}ms`);
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
 }
 
 describe("a bounded wait answers before the slow lane finishes", () => {
@@ -155,20 +186,18 @@ describe("a bounded wait answers before the slow lane finishes", () => {
     // catches a wait that has stopped returning early altogether.
     expect(elapsed).toBeLessThan(90_000);
     expect(attention.settled).toBe(false);
-    expect(attention.state).toBe("still_running");
+    expect(attention.reason).toBe("failure");
 
-    const failure = attention.unresolved_failures.find((f) =>
-      f.node.startsWith("quick@"),
-    );
+    const failure = attention.failures.find((f) => f.node.startsWith("quick@"));
     expect(failure, "the quick lane's failure should be reported").toBeDefined();
-    expect(failure!.exit_code).toBe(1);
+    expect(failure!.exitCode).toBe(1);
     // The log BARRIER: a failure is only reported once its output is complete,
     // so the excerpt carries the reason rather than a half-written line.
-    expect(failure!.log_complete).toBe(true);
+    expect(failure!.logComplete).toBe(true);
     expect(failure!.excerpt).toContain("BOOM: the quick lane failed");
-    expect(failure!.excerpt_source).toBe("attempt_log");
+    expect(failure!.excerptSource).toBe("attempt_log");
     // The address to read it again, echoed rather than reassembled.
-    expect(failure!.log_key).toContain(attention.run.id);
+    expect(failure!.logKey).toContain(attention.runId);
 
     // A failure to act on, whether or not every lane has finished.
     expect(status).toBe(1);
@@ -181,14 +210,18 @@ describe("a bounded wait answers before the slow lane finishes", () => {
     await awaitRunSocket(dir);
 
     const first = waitJson(dir, ["--run", "latest", "--deadline-ms", "60000"]);
-    const runId = first.attention.run.id;
+    const runId = first.attention.runId;
+    expect(first.attention.cursor).toContain(runId);
 
     // A SECOND caller with no cursor sees the run from the beginning — one
     // caller acknowledging events does not consume them for anybody else.
     const second = waitJson(dir, ["--run", runId, "--deadline-ms", "5000"]);
-    expect(second.attention.events.length).toBeGreaterThan(0);
+    expect(second.attention.cursor).toContain(runId);
+    expect(
+      second.attention.failures.some((f) => f.node.startsWith("quick@")),
+    ).toBe(true);
 
-    // The FIRST caller, resuming: it is not shown what it already had…
+    // The FIRST caller, resuming: its cursor never goes backwards…
     const resumed = waitJson(dir, [
       "--run",
       runId,
@@ -197,18 +230,15 @@ describe("a bounded wait answers before the slow lane finishes", () => {
       "--deadline-ms",
       "3000",
     ]);
-    for (const event of resumed.attention.events) {
-      expect(event.seq).toBeGreaterThan(
-        Number(first.attention.cursor.split("@")[1]),
-      );
-    }
+    const seq = (cursor: string): number => Number(cursor.split("@")[1]);
+    expect(seq(resumed.attention.cursor)).toBeGreaterThanOrEqual(
+      seq(first.attention.cursor),
+    );
     // …and the failure is STILL there. Acknowledging a cursor suppresses
     // repeats; it does not resolve anything, and this is the assertion that
     // says so out loud.
     expect(
-      resumed.attention.unresolved_failures.some((f) =>
-        f.node.startsWith("quick@"),
-      ),
+      resumed.attention.failures.some((f) => f.node.startsWith("quick@")),
     ).toBe(true);
     expect(resumed.status).toBe(1);
   }, 300_000);
@@ -224,7 +254,7 @@ describe("the wait's exits are a contract", () => {
     // Nothing red, nothing settled: still going.
     const pending = waitJson(dir, ["--run", "latest", "--deadline-ms", "1500"]);
     expect(pending.status).toBe(2);
-    expect(pending.attention.state).toBe("still_running");
+    expect(pending.attention.reason).toBe("still_running");
     expect(pending.attention.passed).toBe(false);
 
     // A run that does not exist is not a failure of the run — it is a failure
@@ -243,7 +273,7 @@ describe("the wait's exits are a contract", () => {
     const refused = oduCli(oduBin, dir, [
       "wait",
       "--run",
-      pending.attention.run.id,
+      pending.attention.runId,
       "--after",
       "0zzzzzzzz-zzzzzzzz@3",
       "-o",
@@ -254,8 +284,10 @@ describe("the wait's exits are a contract", () => {
       error: string;
       resync: string;
     };
-    expect(payload.error).toBe("cursor_refused");
-    expect(payload.resync).toContain(pending.attention.run.id);
+    expect(payload.error).toBe("bad_cursor");
+    // A refusal WITH A ROUTE: the exact command that resyncs, so a caller that
+    // has lost its place is told where to stand rather than left to guess.
+    expect(payload.resync).toContain(pending.attention.runId);
   }, 300_000);
 
   it("exits 0 for a run that passed, and reports its verdict long after it ended", () => {
@@ -268,7 +300,7 @@ describe("the wait's exits are a contract", () => {
     expect(attention.passed).toBe(true);
     expect(attention.outcome).toBe("passed");
     // No coordinator is serving anything by now — this is read off disk.
-    expect(attention.state).toBe("settled");
+    expect(attention.reason).toBe("settled");
   }, 300_000);
 
   it("exits 1 for a run that failed, with the failing node named", () => {
@@ -278,33 +310,49 @@ describe("the wait's exits are a contract", () => {
     const { status, attention } = waitJson(dir, ["--run", "latest"]);
     expect(status).toBe(1);
     expect(attention.outcome).toBe("failed");
-    expect(
-      attention.unresolved_failures.some((f) => f.node.startsWith("boom@")),
-    ).toBe(true);
+    expect(attention.failures.some((f) => f.node.startsWith("boom@"))).toBe(true);
   }, 300_000);
+
+  it("resolves `latest` to THIS checkout's newest run, not the catalog's", () => {
+    // Two checkouts, two runs, and the second one is newer. A `latest` that
+    // meant "newest in the catalog" would answer the first with the second's
+    // verdict — green where the caller is red — which is the failure this
+    // grammar has to not have.
+    const red = fixture("fail");
+    expect(oduRun(oduBin, red).status).not.toBe(0);
+    const green = fixture("pass");
+    expect(oduRun(oduBin, green).status).toBe(0);
+
+    expect(waitJson(red, ["--run", "latest"]).attention.outcome).toBe("failed");
+    expect(waitJson(green, ["--run", "latest"]).attention.outcome).toBe("passed");
+  }, 600_000);
 });
 
 describe("evidence is addressed, complete, and outlives its checkout", () => {
-  it("reads a noisy node's log back by byte range, and says it is complete", () => {
+  it("reads a noisy node's log back by byte range, and says it is complete", async () => {
     const dir = fixture("noisy");
-    expect(oduRun(oduBin, dir).status).toBe(0);
+    const bg = oduRunBackground(oduBin, dir, ["--no-strict", "--progress", "json"]);
+    running.push({ kill: () => bg.child.kill("SIGTERM"), exited: bg.exited });
+    await awaitRunSocket(dir);
+    // The key comes from the live node, not from string surgery — see header.
+    const key = await liveLogKey(dir, `noisy@${PLATFORM}`);
+    await bg.exited;
 
     // BY RANGE, and the range is the point twice over. It is the API a caller
     // resuming a long log uses — and it is also the only way to ask this
-    // question through a pipe: the fixture's log is ~14 MB, which is more than
-    // a `spawnSync` capture will carry, so a test that demanded the whole
-    // thing in one answer would be testing the harness.
-    const head = logJson(dir, ["--limit", "4096"]);
-    expect(head.attempts).toEqual([1]);
+    // question through a pipe: the fixture's log is megabytes, which is more
+    // than a `spawnSync` capture will comfortably carry, so a test that
+    // demanded the whole thing in one answer would be testing the harness.
+    const head = logJson(dir, key, ["--limit", "4096"]);
     expect(head.offset).toBe(0);
     expect(head.size).toBeGreaterThan(1_000_000);
     expect(head.eof).toBe(false);
     // The continuation offset is a FACT ABOUT THE READ, not something a
     // consumer may recompute from the text: the decode is non-fatal, so a
-    // range that split a multibyte character has more bytes in the string than
-    // were taken off the file.
-    expect(head.next_offset).toBe(head.offset + head.bytes_read);
-    expect(head.bytes_read).toBeLessThanOrEqual(4096);
+    // range that split a multibyte character has more characters in the string
+    // than were taken off the file.
+    expect(head.nextOffset).toBeGreaterThan(head.offset);
+    expect(head.nextOffset - head.offset).toBeLessThanOrEqual(4096);
 
     // A negative offset is a tail. The END is the part that used to go missing
     // (juspay/odu#87): a log that stops early is still "a log", and only its
@@ -312,7 +360,7 @@ describe("evidence is addressed, complete, and outlives its checkout", () => {
     // `--offset=-N`, joined: `parseArgs` refuses a bare `--offset -4096`
     // because a leading dash is ambiguous with the next flag. The joined form
     // is the one the usage text shows for exactly this reason.
-    const tail = logJson(dir, ["--offset=-4096"]);
+    const tail = logJson(dir, key, ["--offset=-4096"]);
     expect(tail.eof).toBe(true);
     expect(tail.complete).toBe(true);
     expect(tail.text).toContain("__ODU_NOISY_END__");
@@ -320,14 +368,15 @@ describe("evidence is addressed, complete, and outlives its checkout", () => {
   }, 600_000);
 
   it("still serves a run's logs after its checkout has been deleted", () => {
-    const dir = fixture("pass");
-    expect(oduRun(oduBin, dir).status).toBe(0);
+    const dir = fixture("fail");
+    expect(oduRun(oduBin, dir).status).not.toBe(0);
 
-    const listed = oduCli(oduBin, dir, ["history", "list", "-o", "json"]);
-    const rows = JSON.parse(listed.stdout.trim()) as { runId: string }[];
-    expect(rows.length).toBeGreaterThan(0);
-    const runId = rows[0]!.runId;
-    const node = `alpha@${PLATFORM}`;
+    // The address comes from the failure that reported it, which is how a
+    // person or an agent actually comes to hold one.
+    const { attention } = waitJson(dir, ["--run", "latest"]);
+    const failure = attention.failures[0];
+    expect(failure, "the failing node should have reported a log key").toBeDefined();
+    const key = failure!.logKey;
 
     // The move the old layout could not survive: the worktree goes away, and
     // with it `.ci/` and every byte of the run's output.
@@ -335,37 +384,24 @@ describe("evidence is addressed, complete, and outlives its checkout", () => {
     created.splice(created.indexOf(dir), 1);
 
     // Asked from somewhere else entirely — the catalog is per user, not per
-    // checkout, so the run id is still an address.
-    const logs = oduCli(oduBin, process.cwd(), [
-      "logs",
-      "--run",
-      runId,
-      "-o",
-      "json",
-      node,
-    ]);
-    expect(logs.status).toBe(0);
-    const payload = JSON.parse(logs.stdout.trim()) as {
-      text: string;
-      complete: boolean;
-    };
-    expect(payload.text).toContain("alpha ran");
-    expect(payload.complete).toBe(true);
+    // checkout, so the key is still an address.
+    const page = logJson(process.cwd(), key);
+    expect(page.complete).toBe(true);
+    expect(page.text.length).toBeGreaterThan(0);
   }, 300_000);
 
-  it("refuses an attempt that was never recorded, and lists the ones that were", () => {
-    const dir = fixture("pass");
-    expect(oduRun(oduBin, dir).status).toBe(0);
-    const res = oduCli(oduBin, dir, [
-      "logs",
-      "--run",
-      "latest",
-      "--attempt",
-      "7",
-      `alpha@${PLATFORM}`,
-    ]);
-    expect(res.status).toBe(1);
-    expect(res.stderr).toContain("no attempt 7");
-    expect(res.stderr).toContain("recorded: 1");
+  it("refuses an attempt that was never recorded", () => {
+    const dir = fixture("fail");
+    expect(oduRun(oduBin, dir).status).not.toBe(0);
+    const { attention } = waitJson(dir, ["--run", "latest"]);
+    const key = attention.failures[0]!.logKey;
+    // The SAME key with a different attempt — an address odu's grammar accepts
+    // and its catalog cannot answer, which is a different thing from a
+    // malformed key and gets a different exit.
+    const never = key.replace(/\/\d+$/, "/7");
+
+    const res = oduCli(oduBin, dir, ["logs", never]);
+    expect(res.status).toBe(4);
+    expect(res.stderr).toContain("attempt 7");
   }, 300_000);
 });

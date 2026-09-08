@@ -16,6 +16,7 @@ import {
 import {
   cpSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   rmSync,
   writeFileSync,
@@ -43,26 +44,184 @@ export function currentNixSystem(): string {
 }
 
 /**
- * A hosts file, pointed at via `ODU_HOSTS`, that pins THIS machine's platform
- * to an explicit `localhost` lane — regardless of the dev machine's ambient
- * `~/.config/odu/hosts.json` (a configured remote lane would need an origin
- * the throwaway fixture has none of). The localhost lane is a named decision,
- * not the no-config fork-bomb odu now refuses (juspay/odu#46): an empty `{}`
- * file would resolve zero lanes and be rejected, so the harness names the lane.
+ * A port for THIS suite.
+ *
+ * Derived from the pid rather than fixed, because the fixed 18440 is a
+ * developer's own service and a suite that took it would both fail and be
+ * disruptive. Above the ephemeral range's usual floor is not required here —
+ * the bind is immediate and the window for a collision is the process's own.
  */
-const hostsFile = join(
-  mkdtempSync(join(tmpdir(), "odu-e2e-hosts-")),
-  "hosts.json",
-);
-writeFileSync(hostsFile, JSON.stringify({ [currentNixSystem()]: "localhost" }));
+export function suitePort(): number {
+  return 18500 + (process.pid % 900);
+}
 
-/** A fixture run's env: the ambient env plus an `ODU_HOSTS` pinning this
- *  machine's platform to localhost, so lane resolution is hermetic
- *  (localhost-only) on any machine. */
-export const hermeticEnv: NodeJS.ProcessEnv = {
-  ...process.env,
-  ODU_HOSTS: hostsFile,
-};
+/**
+ * EVERY PORT THIS SUITE USES, named in one place.
+ *
+ * The offsets were scattered across three files as bare `suitePort() + 1` /
+ * `+ 2` arithmetic, and the cold-bootstrap gate had skipped the scheme entirely
+ * for a hardcoded `18493` — which collided, deterministically, with any second
+ * checkout of this suite running at the same time (there are two dozen odu
+ * worktrees on the author's machine). Each suite killed the other's daemon and
+ * immediately re-bootstrapped, and the failure surfaced as
+ * "the stale cold-port daemon to go away did not happen within 120000ms" in a
+ * test whose subject is "nothing is serving".
+ *
+ * A named slot cannot be silently reused the way a `+ 1` can, and adding one is
+ * the moment you see the ones already taken.
+ */
+export const PORT_SLOT = {
+  /** {@link startWebService} — the forked `web-daemon`. */
+  forkedDaemon: 0,
+  /** {@link startWebServiceViaCommand} — `odu web --background`. */
+  commandDaemon: 1,
+  /** `web.e2e.test.ts`'s foreground `odu web` tenure. */
+  foreground: 2,
+  /** `mcp.e2e.test.ts` — a bridge bootstrapping onto an empty machine. */
+  coldBootstrap: 3,
+  /** `mcp.e2e.test.ts` — four cold faces racing for one daemon. */
+  coldRace: 4,
+  /** `mcp.e2e.test.ts` — a foreign listener, met through `odu mcp`. */
+  occupiedAgent: 5,
+  /** `lifecycle.e2e.test.ts` — a foreign listener, met through `odu web`. */
+  occupiedTerminal: 6,
+  /** `lifecycle.e2e.test.ts` — a daemon killed mid-mutation, then restarted. */
+  crashWindow: 7,
+  /** `lifecycle.e2e.test.ts` — a daemon restarted under live runs. */
+  restartUnderRuns: 8,
+  /** `lifecycle.e2e.test.ts` — clients that walk away mid-wait. */
+  disconnect: 9,
+  /** `install.e2e.test.ts` — the daemon a freshly installed launcher starts. */
+  freshInstall: 10,
+  /** {@link hermeticEnv} — the service every black-box `odu run` in this
+   *  directory reaches. It is a SLOT and not the default 18440 because
+   *  `odu run` became a client of a per-user singleton: without this, a
+   *  fixture run would be executed by whatever daemon the machine already
+   *  had, write into the developer's real catalog, and — on a persistent CI
+   *  runner with two jobs in flight — be served by the OTHER job's build. */
+  blackBoxRuns: 11,
+} as const;
+
+/** The port for one named slot in THIS suite's block. */
+export function suitePortFor(slot: keyof typeof PORT_SLOT): number {
+  return suitePort() + PORT_SLOT[slot];
+}
+
+
+export function hostsFile(root: string): string {
+  const path = join(root, "hosts.json");
+  writeFileSync(path, JSON.stringify({ [currentNixSystem()]: "localhost" }));
+  return path;
+}
+
+
+/**
+ * A private world for one service: its own daemon home, catalog, hosts file and
+ * port. Two suites on one machine do not fight, and a developer's own `odu web`
+ * is untouched.
+ *
+ * **`HOME` is deliberately NOT redirected.** It was, and that is what made this
+ * suite fail on CI in a way no local run could reproduce: a single-user Nix
+ * install — which is what a GitHub runner has — keeps
+ * `experimental-features = nix-command flakes` in `$HOME/.config/nix/nix.conf`,
+ * so a coordinator started inside a world with a synthetic home could not
+ * evaluate a flake and every run refused with `launch_failed`. A machine on
+ * which `HOME` has to be faked for isolation is a machine odu would not work on
+ * either, so the isolation is done with the two variables that actually name
+ * what odu owns — the daemon home and the catalog — and everything the
+ * toolchain reads out of the real home is left alone.
+ */
+export function privateWorld(port: number): {
+  root: string;
+  origin: string;
+  env: NodeJS.ProcessEnv;
+} {
+  const root = mkdtempSync(join(tmpdir(), "odu-e2e-web-"));
+  const state = join(root, "state");
+  mkdirSync(state, { recursive: true });
+  const origin = `http://127.0.0.1:${port}`;
+  return {
+    root,
+    origin,
+    env: {
+      ...process.env,
+      // The catalog.
+      ODU_STATE_DIR: state,
+      ODU_HOSTS: hostsFile(root),
+      // AND the daemon home, transitively: `daemonHome`'s "state" placement
+      // deliberately ignores `XDG_STATE_HOME` (it varies by launch context and
+      // would split one daemon's identity), so `~/.local/state/<app>` is the
+      // only lever — and odu derives `<app>` from the origin. Moving the origin
+      // is therefore what keeps this suite's gate out of a developer's own.
+      // `dispose` removes the directory it leaves behind.
+      ODU_WEB_ORIGIN: origin,
+    },
+  };
+}
+
+
+/**
+ * A fixture run's env: a PRIVATE WORLD, not the ambient one plus a hosts file.
+ *
+ * It used to be exactly that — `{...process.env, ODU_HOSTS}` — and it was
+ * enough while `odu run` did the work in its own process. It stopped being
+ * enough the moment `odu run` became a client: the run is executed by a child
+ * of a per-user singleton, so what the fixture reached was whichever daemon the
+ * machine already had, with that daemon's catalog and that daemon's build. On a
+ * persistent CI runner with two jobs in flight, one suite's runs were served by
+ * the other suite's service.
+ *
+ * The three variables below are the ones that actually name what odu owns — the
+ * catalog, the host inventory, and (through the origin) the daemon's home. See
+ * {@link privateWorld} on why `HOME` is deliberately left alone.
+ */
+const blackBox = privateWorld(suitePortFor("blackBoxRuns"));
+export const hermeticEnv: NodeJS.ProcessEnv = blackBox.env;
+
+/**
+ * The odu that will be driven, remembered so teardown can reach the service it
+ * started. Set by {@link buildOduBinary}, which every suite calls in
+ * `beforeAll` — null until then, and teardown does nothing in that case
+ * because nothing can have been started either.
+ */
+let driven: string | null = null;
+
+/**
+ * STOP THE SERVICE THIS SUITE STARTED. Nobody else will.
+ *
+ * The daemon is spawned lazily, by whichever `odu run` came first, and it is
+ * detached ON PURPOSE — that is the property `odu run` exists to have, and it
+ * means a suite that walks away leaves a service running on its port with a
+ * catalog under a temp directory nothing will ever read again.
+ *
+ * Asked for its own pid rather than tracked: the process this suite forked is
+ * not necessarily the one serving (a launcher may hand off), and the service's
+ * identity cell is the only thing that knows which one is.
+ */
+process.on("exit", () => {
+  if (driven !== null) {
+    try {
+      const said = spawnSync(driven, ["surface", "get", "service"], {
+        env: hermeticEnv,
+        encoding: "utf-8",
+        maxBuffer: BIG,
+      });
+      if (said.status === 0) {
+        const cell = JSON.parse(said.stdout) as { identity: { pid: number } };
+        process.kill(cell.identity.pid, "SIGTERM");
+      }
+    } catch {
+      // Teardown, on the way out. A service that cannot be reached is a
+      // service that is already gone, and a throw here would replace a suite's
+      // real verdict with a cleanup error.
+    }
+  }
+  try {
+    rmSync(blackBox.root, { recursive: true, force: true });
+  } catch {
+    // Same.
+  }
+});
 
 /** The odu checkout under test — the worktree this test file lives in. */
 export const repoRoot = execFileSync(
@@ -115,7 +274,10 @@ export function buildOduBinary(): string {
 
   const oduOut = build(".#odu");
   build(".#odu-runner"); // warm the store path the fixture will realise
-  return join(oduOut, "bin", "odu");
+  const bin = join(oduOut, "bin", "odu");
+  // Remembered for teardown — see the `exit` handler beside `hermeticEnv`.
+  driven = bin;
+  return bin;
 }
 
 /**
