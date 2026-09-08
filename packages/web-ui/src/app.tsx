@@ -35,10 +35,10 @@ import {
   Switch,
   type JSX,
 } from "solid-js";
-import { Board } from "./board";
+import { Board, latestPerCheckout } from "./board";
 import { Create, type CreateState, type StartForm } from "./create";
 import { type ControlState, Detail, LOG_PAGE_BYTES } from "./detail";
-import { CONNECTION } from "./format";
+import { CONNECTION, faviconSvg } from "./format";
 import type { LogPage, LogTail, NodesFrame, RunNode, RunRow } from "./types";
 
 type ServiceSpec = (typeof oduServiceSurface)["spec"];
@@ -188,6 +188,54 @@ export function App(props: {
     // delivery `keys()` is arrival order, which the framework's own contract
     // says to treat as a set rather than a list.
     return out.sort((a, b) => b.createdAt - a.createdAt);
+  });
+
+  /**
+   * THE TAB IS THE AMBIENT MONITOR.
+   *
+   * The whole point of a browser board is that it can be left open, and a page
+   * that is left open is a page nobody is looking at. A tab title and a favicon
+   * are the two pixels of this app that stay visible from another window, so
+   * they carry the one fact worth interrupting somebody for: is anything broken,
+   * and is anything still moving.
+   *
+   * Counted over the SAME rows the board shows by default — `latestPerCheckout`,
+   * shared with `./board` rather than re-derived — because a tab claiming three
+   * failures over a board showing one is a tab nobody trusts twice.
+   *
+   * `document` is guarded because these modules are also loaded outside a
+   * browser: `compile.test.ts` runs them through bun to check what the compiler
+   * emitted.
+   */
+  let restingIcon: string | null = null;
+  createEffect(() => {
+    if (typeof document === "undefined") return;
+    const latest = latestPerCheckout(rows());
+    const failing = latest.filter((row) => row.unresolvedFailures > 0).length;
+    const active = latest.filter(
+      (row) => row.state === "running" || row.state === "provisioning",
+    ).length;
+    // Broken outranks busy: a run still going is worth a glance, a failure is
+    // worth coming back for. And it is a WORD as well as a glyph, because a
+    // title read aloud is the only version of this some people get.
+    document.title =
+      failing > 0
+        ? `✗ ${failing} failing · odu`
+        : active > 0
+          ? `● ${active} running · odu`
+          : "odu";
+    const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+    if (link === null) return;
+    // The build hashes the logo's filename, so the resting icon is a URL only
+    // the shell knows — remembered on the first pass rather than spelled here,
+    // which is also what lets a quiet board go back to the plain mark.
+    if (restingIcon === null) restingIcon = link.href;
+    link.href =
+      failing > 0
+        ? faviconSvg("red")
+        : active > 0
+          ? faviconSvg("amber")
+          : restingIcon;
   });
 
   // ── the selected run ──

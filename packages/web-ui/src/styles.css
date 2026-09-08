@@ -839,8 +839,12 @@
       50% { opacity: 0.35; }
     }
 
+    /* The amber pill's marker pulses only where amber MEANS live: the board
+       row's status cell, which holds "running" or "provisioning". Every amber
+       pill on the page used to breathe, which put a heartbeat on a row's
+       "3 unposted" — a debt that is sitting perfectly still. */
     .glyph-amber,
-    .pill-amber::before,
+    .row-status .pill-amber::before,
     .row-running::before,
     .row-provisioning::before {
       animation: odu-pulse 1.8s ease-in-out infinite;
@@ -983,16 +987,6 @@
     align-items: center;
   }
 
-  /* TRANSITIONAL. The board still renders the old state/outcome pair, and seven
-     cells in a six-column grid would drop the age onto a second line. A row that
-     still has the old cell keeps the old geometry; the rule dies with the last
-     `.row-state` in the markup. */
-  .board-body:has(.row-state) :is(.row, .row-head) {
-    grid-template-columns:
-      minmax(8rem, 1.4fr) minmax(6rem, 0.7fr) 7rem 6rem minmax(6rem, 0.8fr)
-      minmax(6rem, 1fr) 5rem;
-  }
-
   /* The heads are a VISUAL guide and nothing else — the rows are buttons rather
      than a table, so a handful of stray nouns announced ahead of them would be
      noise to a screen reader. `aria-hidden` in the markup says so; this only
@@ -1051,7 +1045,7 @@
   .row-scope,
   .row-age { color: var(--muted); font: 0.8rem/1.4 var(--mono); }
   .row-attention { display: flex; gap: 0.25rem; flex-wrap: wrap; }
-  /* "and 4 earlier" — how many runs of this project the board folded away. It
+  /* "4 earlier" — how many runs of this checkout the board folded away. It
      rides the age cell because that is what it is about: the older ones, and it
      takes its own line under the age rather than running on from it. */
   .row-earlier { display: block; color: var(--quiet); font: 0.8rem/1.4 var(--mono); }
@@ -1132,8 +1126,7 @@
        hidden and nothing scrolls sideways — and the heads go, because a label
        strip over a reflowed row labels the wrong cells. */
     .row-head { display: none; }
-    .row,
-    .board-body:has(.row-state) .row {
+    .row {
       grid-template-columns: minmax(0, 1fr) auto;
       row-gap: 0.25rem;
     }

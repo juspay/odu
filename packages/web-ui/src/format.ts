@@ -126,6 +126,38 @@ export function scopeLabel(scope: {
   return `${what}${where}${scope.noDeps ? " · no deps" : ""}`;
 }
 
+/**
+ * THE TAB'S OWN ICON, drawn — the one place this app draws a picture.
+ *
+ * Everywhere else a status is words and a shape, because that is the only
+ * spelling a colour-blind reader, a screen reader and a test can all read. A
+ * browser tab is the one surface with room for none of those: it is sixteen
+ * pixels of icon and a title that is usually clipped, and it is also where a
+ * person looks when this page is NOT the page they are on. So the tab is the
+ * ambient monitor — a dot on the mark, said again in words in `document.title`
+ * beside it, which is what keeps the rule above intact.
+ *
+ * The mark is `logo.svg`'s own idea rather than a second drawing of it: a slate
+ * `$` on a dark rounded square, because odu is a shell prompt you attach to. It
+ * is built here rather than shipped as two more assets because the hue is a
+ * function of live state, and a build cannot know which of them is true.
+ *
+ * Returns the whole `data:` URI, ready to assign to a `<link rel="icon">`, so
+ * the encoding lives in one place — `#` in an unencoded SVG would truncate the
+ * URI at the first colour.
+ */
+export function faviconSvg(hue: "red" | "amber"): string {
+  const dot = hue === "red" ? "#ff7d74" : "#f5c451";
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">` +
+    `<rect width="32" height="32" rx="7" fill="#080b0a"/>` +
+    `<text x="6" y="23" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" ` +
+    `font-size="18" font-weight="700" fill="#7d8e87">$</text>` +
+    `<circle cx="24" cy="24" r="6" fill="${dot}"/>` +
+    `</svg>`;
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
+}
+
 /** A byte count, at the precision a log page needs. */
 export function bytes(n: number): string {
   if (n < 1024) return `${n} B`;

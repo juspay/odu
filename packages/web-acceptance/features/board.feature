@@ -24,6 +24,22 @@ Feature: The board answers "what is my CI doing"
     When I press the "Needs attention" filter
     Then that run is listed
 
+  # One row per CHECKOUT is the default, because "what is my CI doing" is a
+  # question about checkouts and a superseded run's verdict is history. What is
+  # graded here is that the folded rows are ANNOUNCED rather than silently
+  # dropped — a board that quietly hid a run would be worse than one that
+  # listed forty.
+  Scenario: History shows every run of a checkout
+    Given a fresh settled red run of the failing fixture
+    And I open that run
+    When I press "Run again"
+    Then a status reads "Started"
+    When I press "← Runs"
+    Then that row shows "1 earlier" in the age cell
+    When I show the history
+    Then the board lists two runs of the fixture project
+    And there should be no page errors
+
   Scenario: An empty filter says which kind of empty it is
     Given a settled red run of the failing fixture
     And I open the board

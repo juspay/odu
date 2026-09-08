@@ -45,8 +45,11 @@ Then("that row shows the run's short commit ref", async function (this: OduWorld
   );
 });
 
+/** The row's ONE status cell. A run that has reached a verdict draws the
+ *  verdict there and nothing else, so a red "failed" in `.row-status` is both
+ *  "the outcome is drawn" and "it is the only thing the column claims". */
 Then("that row shows a red {string} outcome", async function (this: OduWorld, label: string) {
-  const pill = projectRow(this).first().locator(".row-outcome .pill");
+  const pill = projectRow(this).first().locator(".row-status .pill");
   await this.saysThat(pill, "the run row's outcome", label);
   const classes = (await pill.first().getAttribute("class")) ?? "";
   assert.ok(
@@ -62,6 +65,20 @@ Then("that row shows {string}", async function (this: OduWorld, text: string) {
     text,
   );
 });
+
+/** "N earlier" — how many runs of this checkout the default board folded away.
+ *  Reading it is two assertions at once: the checkout is drawn as ONE row, and
+ *  the row says how many runs it stands for. */
+Then(
+  "that row shows {string} in the age cell",
+  async function (this: OduWorld, text: string) {
+    await this.saysThat(
+      projectRow(this).first().locator(".row-age"),
+      "the run row's age",
+      text,
+    );
+  },
+);
 
 When("I press the {string} filter", async function (this: OduWorld, label: string) {
   await filter(this, label).click();
@@ -80,6 +97,24 @@ Then("the {string} filter is not pressed", async function (this: OduWorld, label
     await filter(this, label).getAttribute("aria-pressed"),
     "false",
     `the "${label}" filter still announces itself as pressed`,
+  );
+});
+
+/**
+ * Press History and wait until the board says it is showing it.
+ *
+ * The board is one row per CHECKOUT by default — the latest run of each — so a
+ * scenario about two runs of one fixture sees one row until this is pressed.
+ * Waited on `aria-pressed` rather than on a row count: the toggle's own state is
+ * the thing that has to have landed, and a count would be a wait on whichever
+ * rows the live collection happened to have delivered.
+ */
+When("I show the history", async function (this: OduWorld) {
+  const history = this.page.getByRole("button", { name: "History", exact: true });
+  await history.click();
+  await this.waitUntil(
+    async () => (await history.getAttribute("aria-pressed")) === "true",
+    "the History toggle to announce itself as pressed",
   );
 });
 
