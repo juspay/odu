@@ -37,13 +37,17 @@
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import { buildSurfaceFace } from "@kolu/surface/client";
+import {
+  buildSurfaceFace,
+  unenrolledStreamCall,
+} from "@kolu/surface/client";
 import type { SurfaceDispatch } from "@kolu/surface/link";
 import { firstFrame as headFrame } from "@odu/execution/common/effectEdge";
 import type { ServiceConnection } from "@odu/service-client/dial";
 import { serviceOrigin } from "@odu/service-client/endpoint";
 import type {
   AttentionAnswer,
+  NodesFrame,
   OduServiceClient,
   RunRow,
 } from "@odu/service-client/surface";
@@ -521,4 +525,37 @@ export function hostsFileHere(cwd: string | undefined): string {
   const raw = process.env.ODU_HOSTS;
   if (raw === undefined || raw === "") return "";
   return resolve(cwd ?? process.cwd(), raw);
+}
+
+/**
+ * ONE RUN'S NODE STREAM, FENCED — the only way this package opens one.
+ *
+ * A bare `client.surface.nodes.get(…)` is an unfenced stream, and the framework
+ * is explicit about what that costs: `fenceStream` is where transparent
+ * re-subscribe lives, and a call that skips it "silently loses the reconnect
+ * context". Silently is the word that matters. A retryable transport hiccup —
+ * a busy machine, a momentary stall on the socket — does not raise; it ENDS the
+ * iteration, and every consumer here reads that as "the stream is over".
+ *
+ * The three consumers then each reported something false. `odu run --progress
+ * json` stopped emitting events for a run that was still going and exited `2`;
+ * `odu status` said "the service opened this run's node stream and sent no
+ * frame"; `odu attach` closed the matrix on a live run. All three intermittent,
+ * all three under load, which is exactly when a fence earns its keep — the e2e
+ * suite lost a different one of them on each platform, on the same commit.
+ *
+ * `label` is the liveness registry's name for the subscription, spelled in
+ * `client.health()`'s vocabulary so a diagnostic snapshot says which run's
+ * stream is parked rather than "(unlabeled)".
+ */
+export function nodesStream(
+  client: Pick<OduServiceClient, "surface">,
+  runId: string,
+  onRetry?: () => void,
+): Stream.Stream<NodesFrame, unknown> {
+  return unenrolledStreamCall(
+    client.surface.nodes.get,
+    { runId },
+    { label: `nodes[${runId}]`, ...(onRetry === undefined ? {} : { onRetry }) },
+  );
 }

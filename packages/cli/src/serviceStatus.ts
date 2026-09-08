@@ -56,6 +56,7 @@ import { statusGlyph } from "./render";
 import {
   checkoutHere,
   emitJson,
+  nodesStream,
   readRows,
   WAIT_EXITS,
   withConnection,
@@ -143,7 +144,7 @@ export async function statusViaService(opts: HereRunOpts): Promise<number> {
       // A stream member is reached through `.get`, and a stream always opens
       // with a SNAPSHOT — so the head frame IS the read, with no polling and no
       // second call.
-      const frame = await headFrame(client.surface.nodes.get({ runId: row.runId }));
+      const frame = await headFrame(nodesStream(client, row.runId));
       if (frame === undefined) {
         // A stream that opened and said nothing. Reported as itself rather than
         // as an empty run: "the service answered with no frame" and "this run
@@ -311,7 +312,7 @@ export async function attachViaService(opts: HereRunOpts): Promise<number> {
       let last = "";
       let final: NodesFrame | undefined;
       for await (const frame of subscribe(
-        client.surface.nodes.get({ runId: row.runId }),
+        nodesStream(client, row.runId),
       )) {
         final = frame;
         if (opts.json) {
@@ -402,7 +403,7 @@ async function attachLive(
 
   let started = false;
   for await (const frame of subscribe(
-    client.surface.nodes.get({ runId: row.runId }),
+    nodesStream(client, row.runId),
   )) {
     latest = frame;
     const state = pipelineStateOf(frame, row);

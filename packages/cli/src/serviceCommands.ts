@@ -71,6 +71,7 @@ import {
   git,
   here,
   hostsFileHere,
+  nodesStream,
   readRows,
   resolveRunAddress,
   reportFailure,
@@ -265,7 +266,7 @@ async function verdictOf(
   sha: string | null,
 ): Promise<void> {
   const sha7 = sha === null ? "" : sha.slice(0, 7);
-  const frame = await firstFrame(client.surface.nodes.get({ runId }));
+  const frame = await firstFrame(nodesStream(client, runId));
   if (frame === undefined) return;
   printVerdict({
     state: verdictStateOf(frame, sha7),
@@ -337,7 +338,13 @@ export async function waitViaService(opts: WaitOpts): Promise<number> {
         opts.json,
       );
     }
-    if (opts.json) emitJson(answer);
+    // WHERE STDOUT POINTS PICKS THE MEDIUM — odu's own rule, and the reason
+    // `odu wait` is not free to be prose by default. It wrote one JSON object
+    // on stdout unconditionally before this rewrite, and it is the command
+    // scripts and agents parse; making that opt-in silently fed them a
+    // paragraph. A person at a terminal still gets the readable block, because
+    // for them it is the better answer and no script is watching.
+    if (opts.json || process.stdout.isTTY !== true) emitJson(answer);
     else process.stdout.write(renderAttention(answer));
     return waitExitFor(answer);
   });
@@ -909,7 +916,7 @@ async function progressStream(
   // node's line for a reason the contract has no word for.
   const seen = new Map<string, string>();
   let final: NodesFrame | undefined;
-  for await (const frame of subscribe(client.surface.nodes.get({ runId }))) {
+  for await (const frame of subscribe(nodesStream(client, runId))) {
     final = frame;
     for (const node of frame.nodes) {
       if (seen.get(node.id) === node.status) continue;
