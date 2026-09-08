@@ -24,14 +24,17 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import { type AnsiSpan, ansiClass, ansiColor, ansiSpans } from "./ansi";
+import { ansiSpans } from "./ansi";
 
 const ESC = "\u001b";
 const BEL = "\u0007";
 
-/** The spans as tuples, which is how the cases below want to read. */
-function shape(text: string): Array<[string, AnsiSpan["fg"], string]> {
-  return ansiSpans(text).map((s) => [s.text, s.fg, ansiClass(s)]);
+/** The spans as tuples, which is how the cases below want to read: the text, an
+ *  inline colour where there is one, and the class list. That IS the span now —
+ *  the module hands a view something ready to draw rather than an `fg` union and
+ *  two decoders to run over it. */
+function shape(text: string): Array<[string, string | null, string]> {
+  return ansiSpans(text).map((s) => [s.text, s.color ?? null, s.class]);
 }
 
 /** Just the text, which is what a `<pre>`'s `innerText` would come out as. */
@@ -44,9 +47,7 @@ function flat(text: string): string {
 describe("ansiSpans — the plain page", () => {
   it("returns one span for text with no escapes and no redraws", () => {
     const text = "building odu\nran 12 tests\n";
-    expect(ansiSpans(text)).toEqual([
-      { text, fg: null, bold: false, dim: false },
-    ]);
+    expect(ansiSpans(text)).toEqual([{ text, class: "" }]);
   });
 
   it("returns nothing at all for empty input", () => {
@@ -63,37 +64,37 @@ describe("ansiSpans — the plain page", () => {
 describe("ansiSpans — SGR", () => {
   it("splits a nix-style error line into its colour runs", () => {
     expect(shape(`${ESC}[31;1merror:${ESC}[0m building`)).toEqual([
-      ["error:", 1, "ansi-1 ansi-b"],
+      ["error:", null, "ansi-1 ansi-b"],
       [" building", null, ""],
     ]);
   });
 
   it("carries the eight base colours as palette indices", () => {
     expect(shape(`${ESC}[32mok${ESC}[36m·${ESC}[39mplain`)).toEqual([
-      ["ok", 2, "ansi-2"],
-      ["·", 6, "ansi-6"],
+      ["ok", null, "ansi-2"],
+      ["·", null, "ansi-6"],
       ["plain", null, ""],
     ]);
   });
 
   it("carries the bright colours as indices 8-15", () => {
     expect(shape(`${ESC}[90mdim grey${ESC}[97mwhite`)).toEqual([
-      ["dim grey", 8, "ansi-8"],
-      ["white", 15, "ansi-15"],
+      ["dim grey", null, "ansi-8"],
+      ["white", null, "ansi-15"],
     ]);
   });
 
   it("treats a bare ESC[m as a reset", () => {
     expect(shape(`${ESC}[1;31mloud${ESC}[mquiet`)).toEqual([
-      ["loud", 1, "ansi-1 ansi-b"],
+      ["loud", null, "ansi-1 ansi-b"],
       ["quiet", null, ""],
     ]);
   });
 
   it("clears weight with 22 and leaves the colour alone", () => {
     expect(shape(`${ESC}[31;1;2mboth${ESC}[22mjust red`)).toEqual([
-      ["both", 1, "ansi-1 ansi-b ansi-d"],
-      ["just red", 1, "ansi-1"],
+      ["both", null, "ansi-1 ansi-b ansi-d"],
+      ["just red", null, "ansi-1"],
     ]);
   });
 
@@ -104,7 +105,7 @@ describe("ansiSpans — SGR", () => {
   it("folds a 256-colour index below 16 back onto the palette", () => {
     // So `38;5;9` re-tints with the theme exactly like `91` does, rather than
     // arriving as a hard-coded red the stylesheet cannot reach.
-    expect(shape(`${ESC}[38;5;9mred`)).toEqual([["red", 9, "ansi-9"]]);
+    expect(shape(`${ESC}[38;5;9mred`)).toEqual([["red", null, "ansi-9"]]);
   });
 
   it("resolves the 256-colour cube and greyscale ramp to hex", () => {
@@ -139,8 +140,8 @@ describe("ansiSpans — SGR", () => {
     // Parsed rather than skipped: the parameters of a 48 must not be mistaken
     // for the attributes that follow it.
     expect(shape(`${ESC}[41;33mwarn${ESC}[48;5;196;32mok`)).toEqual([
-      ["warn", 3, "ansi-3"],
-      ["ok", 2, "ansi-2"],
+      ["warn", null, "ansi-3"],
+      ["ok", null, "ansi-2"],
     ]);
   });
 
@@ -148,13 +149,13 @@ describe("ansiSpans — SGR", () => {
     // 3 italic, 4 underline, 7 inverse, 53 overline — dropped without
     // disturbing the colour around them.
     expect(shape(`${ESC}[31m${ESC}[3;4;7;53mtext`)).toEqual([
-      ["text", 1, "ansi-1"],
+      ["text", null, "ansi-1"],
     ]);
   });
 
   it("holds style across a newline and across chunks", () => {
     expect(shape(`${ESC}[31mtwo\nlines`)).toEqual([
-      ["two\nlines", 1, "ansi-1"],
+      ["two\nlines", null, "ansi-1"],
     ]);
   });
 });
@@ -217,7 +218,7 @@ describe("ansiSpans — the carriage return", () => {
 
   it("throws away styled spans on the returned line too", () => {
     expect(shape(`${ESC}[31mfailing…\r${ESC}[32mpassed\n`)).toEqual([
-      ["passed\n", 2, "ansi-2"],
+      ["passed\n", null, "ansi-2"],
     ]);
   });
 
@@ -237,14 +238,14 @@ describe("ansiSpans — the carriage return", () => {
 describe("ansiSpans — coalescing", () => {
   it("merges adjacent runs that say the same thing", () => {
     expect(shape(`${ESC}[31ma${ESC}[31mb${ESC}[0m${ESC}[0mc`)).toEqual([
-      ["ab", 1, "ansi-1"],
+      ["ab", null, "ansi-1"],
       ["c", null, ""],
     ]);
   });
 
   it("merges across a committed line boundary", () => {
     expect(shape(`${ESC}[31mred\n${ESC}[31mstill red`)).toEqual([
-      ["red\nstill red", 1, "ansi-1"],
+      ["red\nstill red", null, "ansi-1"],
     ]);
   });
 
@@ -261,7 +262,7 @@ describe("ansiSpans — coalescing", () => {
         const a = spans[i - 1];
         const b = spans[i];
         expect(
-          a?.fg === b?.fg && a?.bold === b?.bold && a?.dim === b?.dim,
+          a?.class === b?.class && a?.color === b?.color,
           `${JSON.stringify(input)} produced two adjacent spans of one style`,
         ).toBe(false);
       }
@@ -356,36 +357,41 @@ describe("ansiSpans — a megabyte of log", () => {
   });
 });
 
-describe("ansiClass and ansiColor", () => {
-  const span = (over: Partial<AnsiSpan>): AnsiSpan => ({
-    text: "x",
-    fg: null,
-    bold: false,
-    dim: false,
-    ...over,
-  });
+describe("ansiSpans — the span a view draws", () => {
+  /** The projection every case above reads through, asserted on its own: a view
+   *  sets `class` and `color` unconditionally and asks nothing about how the
+   *  colour was spelled, which is the whole reason the two decoders that used to
+   *  be exported are not. */
+  const one = (text: string) => ansiSpans(text)[0];
 
   it("gives a plain span no class and no inline colour", () => {
-    expect(ansiClass(span({}))).toBe("");
-    expect(ansiColor(span({}))).toBeUndefined();
+    expect(one("plain")).toEqual({ text: "plain", class: "" });
   });
 
   it("names a palette colour by index and leaves the tint to the stylesheet", () => {
-    expect(ansiClass(span({ fg: 12 }))).toBe("ansi-12");
-    expect(ansiColor(span({ fg: 12 }))).toBeUndefined();
+    expect(one(`${ESC}[94mblue`)).toEqual({ text: "blue", class: "ansi-12" });
   });
 
   it("draws a non-palette colour inline and adds no class for it", () => {
-    expect(ansiClass(span({ fg: "#ff0000" }))).toBe("");
-    expect(ansiColor(span({ fg: "#ff0000" }))).toBe("#ff0000");
-    expect(ansiColor(span({ fg: "rgb(1 2 3)" }))).toBe("rgb(1 2 3)");
+    expect(one(`${ESC}[38;5;196mcube`)).toEqual({
+      text: "cube",
+      class: "",
+      color: "#ff0000",
+    });
+    expect(one(`${ESC}[38;2;1;2;3mtrue`)).toEqual({
+      text: "true",
+      class: "",
+      color: "rgb(1 2 3)",
+    });
   });
 
   it("carries weight alongside a colour", () => {
-    expect(ansiClass(span({ fg: 1, bold: true, dim: true }))).toBe(
-      "ansi-1 ansi-b ansi-d",
-    );
-    expect(ansiClass(span({ bold: true }))).toBe("ansi-b");
-    expect(ansiClass(span({ fg: "#abcdef", dim: true }))).toBe("ansi-d");
+    expect(one(`${ESC}[31;1;2mboth`)?.class).toBe("ansi-1 ansi-b ansi-d");
+    expect(one(`${ESC}[1mloud`)?.class).toBe("ansi-b");
+    expect(one(`${ESC}[38;2;171;205;239;2mfaint`)).toEqual({
+      text: "faint",
+      class: "ansi-d",
+      color: "rgb(171 205 239)",
+    });
   });
 });

@@ -38,7 +38,7 @@ import {
   Show,
   type JSX,
 } from "solid-js";
-import { ansiClass, ansiColor, ansiSpans } from "./ansi";
+import { ansiSpans } from "./ansi";
 import { Button, CommitRef, Confirm, Pill, Receipt } from "./dom";
 import {
   bytes,
@@ -481,25 +481,22 @@ function LogPanel(props: {
                 );
               }}
             >
-              {/* A PLAIN span is a bare TEXT NODE, not a `<span>`. Almost every
-                  log has no escapes at all and comes back as one span, and
-                  wrapping that would put a pointless element around every log in
-                  the app for the sake of the occasional coloured one. Either way
-                  `innerText` reads the log's own text, which is what the
+              {/* `Index`, not `For`. The span list is re-minted WHOLE on every
+                  append — `ansiSpans` returns brand-new objects each tick — so
+                  keying by reference, which is what `For` does, would tear down
+                  and rebuild the whole pane several times a second while a run
+                  is live, taking a reader's selection with it. That is the same
+                  rule the node list and the board keep, and this is the one
+                  surface somebody is actively reading while it moves.
+                  `innerText` still reads the log's own text, which is what the
                   acceptance suite takes it from. */}
-              <For each={spans()}>
-                {(span) => {
-                  const cls = ansiClass(span);
-                  const colour = ansiColor(span);
-                  return cls === "" && colour === undefined ? (
-                    span.text
-                  ) : (
-                    <span class={cls} style={{ color: colour }}>
-                      {span.text}
-                    </span>
-                  );
-                }}
-              </For>
+              <Index each={spans()}>
+                {(span) => (
+                  <span class={span().class} style={{ color: span().color }}>
+                    {span().text}
+                  </span>
+                )}
+              </Index>
             </pre>
             <footer class="log-foot">
               {/* Not "read the whole log": that request can hand a `<pre>` a

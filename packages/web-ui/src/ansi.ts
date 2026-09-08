@@ -32,15 +32,30 @@
  * terminal's. 256-colour and truecolor have no such token and are drawn
  * inline.
  *
- * Pure and DOM-free: it takes a string and returns spans, which is the whole
- * of its contract with a view.
+ * Pure and DOM-free: it takes a string and returns spans READY TO DRAW, which
+ * is the whole of its contract with a view. WHICH of the two colour strategies
+ * a run needs — a palette index the stylesheet tints, or a hex string drawn
+ * inline — is this module's own business and stops at this module's edge: a
+ * view that ran that discrimination itself would be holding a rendering rule
+ * that is not its to hold, and would then have to re-derive the plain-run case
+ * this module already knew.
  */
 
-/** One run of same-styled text. `fg` is an ANSI palette index 0-15 (drawn
- *  through the stylesheet's `--ansi-N` tokens so it can be re-tinted), a CSS
- *  colour string for 256-colour and truecolor (drawn inline), or null for the
- *  console's default ink. */
+/** One run of same-styled text, READY TO DRAW. `class` is "" and `color` is
+ *  undefined for the console's default ink, so a view sets both
+ *  unconditionally and asks nothing about how a colour was spelled. */
 export interface AnsiSpan {
+  text: string;
+  class: string;
+  color?: string;
+}
+
+/** The working shape, private to this module. `fg` is an ANSI palette index
+ *  0-15 (drawn through the stylesheet's `--ansi-N` tokens so it can be
+ *  re-tinted), a CSS colour string for 256-colour and truecolor (drawn
+ *  inline), or null for the console's default ink; `write` and `commit`
+ *  coalesce runs on exactly these three fields. */
+interface Run {
   text: string;
   fg: number | string | null;
   bold: boolean;
@@ -59,10 +74,10 @@ export function ansiSpans(text: string): AnsiSpan[] {
   // The overwhelmingly common page: no escapes, no redraws, one span. Two
   // linear scans and no per-character work at all.
   if (!text.includes("\u001b") && !text.includes("\r")) {
-    return [{ text, fg: null, bold: false, dim: false }];
+    return [{ text, class: "" }];
   }
 
-  const out: AnsiSpan[] = [];
+  const out: Run[] = [];
   let fg: number | string | null = null;
   let bold = false;
   let dim = false;
@@ -73,7 +88,7 @@ export function ansiSpans(text: string): AnsiSpan[] {
   // already been committed is never re-examined, so a progress bar that
   // returns the carriage ten thousand times costs ten thousand small arrays
   // rather than ten thousand copies of the log so far.
-  let line: AnsiSpan[] = [];
+  let line: Run[] = [];
 
   /** Append to the current line, coalescing into its last span when the style
    *  has not changed. Empty text is never a span. */
@@ -206,24 +221,24 @@ export function ansiSpans(text: string): AnsiSpan[] {
   // whole log back through here instead of page-at-a-time gets the right
   // answer, because then the two halves are one string.
   commit();
-  return out;
+  return out.map(drawable);
 }
 
-/** The class list a span is drawn with: `ansi-<n>` for a palette fg, `ansi-b`
- *  for bold, `ansi-d` for dim; "" for plain — so a view can set `class` from
- *  this unconditionally. */
-export function ansiClass(span: AnsiSpan): string {
+/** A working run as a view can draw it. The two decisions folded in here used
+ *  to be two more exports the only consumer imported and composed by hand:
+ *  `ansi-<n>` for a palette fg, `ansi-b` for bold, `ansi-d` for dim — and an
+ *  inline `color` ONLY for a colour the stylesheet has no token for, because a
+ *  palette index is the stylesheet's to tint. */
+function drawable(run: Run): AnsiSpan {
   const classes: string[] = [];
-  if (typeof span.fg === "number") classes.push(`ansi-${span.fg}`);
-  if (span.bold) classes.push("ansi-b");
-  if (span.dim) classes.push("ansi-d");
-  return classes.join(" ");
-}
-
-/** The inline `color` for a non-palette fg, or undefined. A palette fg
- *  deliberately returns undefined: it is the stylesheet's to tint. */
-export function ansiColor(span: AnsiSpan): string | undefined {
-  return typeof span.fg === "string" ? span.fg : undefined;
+  if (typeof run.fg === "number") classes.push(`ansi-${run.fg}`);
+  if (run.bold) classes.push("ansi-b");
+  if (run.dim) classes.push("ansi-d");
+  return {
+    text: run.text,
+    class: classes.join(" "),
+    ...(typeof run.fg === "string" ? { color: run.fg } : {}),
+  };
 }
 
 /**

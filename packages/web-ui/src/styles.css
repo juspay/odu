@@ -147,6 +147,10 @@
      page; two palettes for one byte stream would make the terminal and the
      browser disagree about a colour the recipe chose.
 
+     CHECKED, not promised: `logView.test.ts` reads this file and pins every
+     token below to that table, in both directions. The CLI is node-side so it
+     may read the stylesheet, which is why the assertion lives over there.
+
      ONE set, not two, and scoped to the console rather than declared on `:root`:
      these only ever paint on `.log-text`, which is pinned dark in both themes,
      so a light-theme variant would be a token nothing could ever use. */
