@@ -59,6 +59,8 @@ import type {
   StartReceipt,
 } from "@odu/service-client/surface";
 import { serviceOrigin } from "@odu/service-client/endpoint";
+import { verdictStateOf } from "./liveFromService";
+import { printVerdict } from "./render";
 import {
   call,
   checkoutHere,
@@ -144,10 +146,11 @@ export async function runViaService(opts: RunOpts): Promise<number> {
         // Made absolute HERE, against the caller's cwd, because that is the
         // only place the relative form has a meaning. `$ODU_HOSTS=hosts.json`
         // has always meant "in the directory I am standing in".
-        ...(process.env.ODU_HOSTS === undefined ||
-        process.env.ODU_HOSTS === ""
-          ? {}
-          : { hostsFile: resolve(opts.cwd ?? process.cwd(), process.env.ODU_HOSTS) }),
+        //
+        // ALWAYS sent, including as `""`. A terminal knows the answer either
+        // way, and saying nothing would mean "use the service's own" — right
+        // for an agent, wrong for the person who just unset the variable.
+        hostsFile: hostsFileHere(opts.cwd),
         ...(opts.root === undefined ? {} : { root: opts.root }),
         noDeps: opts.noDeps,
         noStrict: opts.noStrict,
@@ -173,6 +176,21 @@ export async function runViaService(opts: RunOpts): Promise<number> {
     }
     return observe(client, receipt.runId, receipt.cursor, opts.json);
   });
+}
+
+/**
+ * THIS shell's `$ODU_HOSTS`, as `run.start` takes it.
+ *
+ * The service is a per-user singleton somebody else may have started, and
+ * `loadHosts` runs in the coordinator it spawns — so a variable that is not
+ * carried here is a variable that stopped working the moment `odu run` became
+ * a client. `""` is an answer, not a gap: it says this shell has none, which
+ * is different from an agent's silence.
+ */
+function hostsFileHere(cwd: string | undefined): string {
+  const raw = process.env.ODU_HOSTS;
+  if (raw === undefined || raw === "") return "";
+  return resolve(cwd ?? process.cwd(), raw);
 }
 
 /** What a start says to a person: which run this is, and where to see it. */
@@ -219,10 +237,53 @@ async function observe(
     const answer = answered.value;
     cursor = answer.cursor;
     if (answer.reason === "still_running") continue;
-    if (json) emitJson(answer);
-    else process.stdout.write(renderAttention(answer));
+    if (json) {
+      emitJson(answer);
+      return waitExitFor(answer);
+    }
+    // TWO ANSWERS, ON TWO STREAMS, because they are for two readers.
+    //
+    // The verdict grid on stderr is what `odu run` has always ended with: every
+    // node, its status and its duration — which is the only thing that says
+    // what a green actually COVERED. It came from the coordinator's own face
+    // and was lost when the coordinator became a detached process writing to a
+    // log nobody reads.
+    //
+    // The attention block on stdout is what this command gained: the run id
+    // (the address every other verb now takes) and, per failure, the host, the
+    // attempt and the log key to read next.
+    await verdictOf(client, runId, answer.sha);
+    process.stdout.write(renderAttention(answer));
     return waitExitFor(answer);
   }
+}
+
+/**
+ * Print the run's verdict grid, from one read of its final frame.
+ *
+ * A read rather than a fold of what `observe` already saw: `run.wait` answers
+ * about ATTENTION — what a caller must act on — and deliberately carries only
+ * the failures. The grid is about every node, including the ones that went
+ * green, which is the half a person needs to know what the green covered.
+ *
+ * Best-effort. A verdict that cannot be drawn must not change the exit code of
+ * the run it is describing.
+ */
+async function verdictOf(
+  client: OduServiceClient,
+  runId: string,
+  sha: string | null,
+): Promise<void> {
+  const sha7 = sha === null ? "" : sha.slice(0, 7);
+  const frame = await firstFrame(client.surface.nodes.get({ runId }));
+  if (frame === undefined) return;
+  printVerdict({
+    state: verdictStateOf(frame, sha7),
+    sha7,
+    dirty: false,
+    commitUrl: frame.env.commitUrl,
+    unpostedCount: frame.env.owed.length,
+  });
 }
 
 // ── odu wait ────────────────────────────────────────────────────────────────
@@ -849,6 +910,20 @@ async function progressStream(
     if (frame.done) break;
   }
   if (final === undefined) return 3;
+  // THE VERDICT BLOCK, on stderr, after the NDJSON. Both halves of the
+  // `--progress json` contract: the stream is the machine's and the summary is
+  // the person's, and a pipeline that emits the first without the second gives
+  // whoever is watching the terminal a wall of JSON and no answer. It used to
+  // come from the coordinator's own face; the coordinator is detached now and
+  // writes to a log nobody is reading, so the client prints it — the same
+  // `printVerdict`, from the same state.
+  printVerdict({
+    state: verdictStateOf(final, sha7),
+    sha7,
+    dirty: false,
+    commitUrl: final.env.commitUrl,
+    unpostedCount: final.env.owed.length,
+  });
   if (final.state === "owner_lost") return WAIT_EXITS.ownerLost;
   if (!final.done) return WAIT_EXITS.stillRunning;
   return final.nodes.some((n) => STATUS_META[n.status].isRed)

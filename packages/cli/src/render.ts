@@ -22,14 +22,26 @@ import {
   STATUS_META,
   type StatusHue,
 } from "@odu/run-client/surface";
-import { fanId, splitFanId } from "@odu/run-client/nodeId";
+import { fanId, logPathFor, splitFanId } from "@odu/run-client/nodeId";
 import {
   countsLine,
   outcomeOf,
   type Outcome,
   summarize,
+  unpostedNote,
 } from "@odu/execution/common/verdict";
-import { dim, green, magenta, red, stripAnsi, yellow } from "./ansi";
+import { formatGoDuration } from "@odu/execution/common/duration";
+import type { VerdictInput } from "@odu/execution/common/presentation";
+import {
+  bold,
+  dim,
+  green,
+  link,
+  magenta,
+  red,
+  stripAnsi,
+  yellow,
+} from "./ansi";
 
 /** The two encodings of `STATUS_META`'s hue. Which *medium* a face paints in is
  *  a real difference — a stream takes escape wrappers, opentui takes cell
@@ -305,4 +317,63 @@ export function postingWarning(health: PostingHealth): string | null {
   // "sending" before the first attempt (debounce window); "retrying" after.
   const phase = health.owed.some((o) => o.attempts > 0) ? "retrying" : "sending";
   return `⚠ github: ${n} ${noun} unconfirmed (${phase}${err})`;
+}
+
+/** The bucket list and order `odu run`'s final summary has always printed.
+ *  Kept explicit and zero-inclusive: the live faces drop empty buckets (a
+ *  status bar has no room for `0 errored`), but this line is the run's durable
+ *  verdict and is the kind of output people grep. */
+const VERDICT_BUCKETS = [
+  "ok",
+  "failed",
+  "errored",
+  "skipped",
+  "cancelled",
+] as const;
+
+/**
+ * The human verdict summary — foreground completion only, never mid-linger
+ * where the live display still owns the screen.
+ *
+ * HERE rather than in `runFace`, because it has two callers now and they are
+ * on opposite sides of the authority wall. The coordinator's own face prints
+ * it, and so does `odu run` — which is a CLIENT, and may not import a module
+ * that reaches `coordinator/`. One block, one place, or the two would drift
+ * and only one of them would be the one people grep.
+ */
+export function printVerdict(input: VerdictInput): void {
+  const { state } = input;
+  const counts = summarize(state);
+  const shaLabel = commitLabel({ sha7: input.sha7, dirty: input.dirty });
+  const lines: string[] = [
+    dim(
+      `── ci run summary @ ${
+        input.commitUrl !== null ? link(shaLabel, input.commitUrl) : shaLabel
+      } ──`,
+    ),
+  ];
+  for (const id of state.order) {
+    const node = state.nodes[id];
+    if (node === undefined) continue;
+    const glyph = statusGlyph(node.status);
+    const dur =
+      node.durationMs !== null
+        ? ` ${dim(formatGoDuration(node.durationMs))}`
+        : "";
+    const logRef =
+      node.status === "failed" || node.status === "errored"
+        ? dim(`  ${logPathFor(input.sha7, id)}`)
+        : "";
+    lines.push(`  ${glyph} ${id.padEnd(44)} ${node.status}${dur}${logRef}`);
+  }
+  const debt = unpostedNote(input.unpostedCount);
+  // The outcome taxonomy and the counts line both come from `common/verdict` —
+  // this summary, the live header and the live status bar were three
+  // hand-rolled versions, and only this one knew about INCOMPLETE.
+  const outcome = outcomeOf(counts);
+  const label = bold(OUTCOME_COLOR[outcome](OUTCOME_LABEL[outcome]));
+  lines.push(
+    `${countsLine(counts, VERDICT_BUCKETS, true)} — ${label}${debt !== "" ? dim(debt) : ""}`,
+  );
+  process.stderr.write(`${lines.join("\n")}\n`);
 }

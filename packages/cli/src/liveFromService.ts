@@ -69,6 +69,28 @@ function nodeStateOf(node: NodesFrame["nodes"][number]): NodeState {
   };
 }
 
+/**
+ * A frame as the VERDICT reads it — everything `summarize` and `printVerdict`
+ * touch, and nothing that needs a board row.
+ *
+ * Separate from {@link pipelineStateOf} because the caller is: `odu run
+ * --progress json` has the frame and the sha it was handed by the receipt, and
+ * fetching a row it would use two fields of would be a second read for a
+ * heading. The verdict is a fold over nodes; that is all this gives it.
+ */
+export function verdictStateOf(frame: NodesFrame, sha7: string): PipelineState {
+  const nodes: Record<string, NodeState> = {};
+  for (const node of frame.nodes) nodes[node.id] = nodeStateOf(node);
+  return {
+    name: "",
+    sha7,
+    dirty: false,
+    order: [...frame.order],
+    nodes,
+    posting: frame.env.owed.length === 0 ? EMPTY_POSTING : { owed: [...frame.env.owed] },
+  } as PipelineState;
+}
+
 /** A whole frame, as the view expects it. */
 export function pipelineStateOf(frame: NodesFrame, row: RunRow): PipelineState {
   const nodes: Record<string, NodeState> = {};

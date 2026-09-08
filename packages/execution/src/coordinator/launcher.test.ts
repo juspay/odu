@@ -254,12 +254,22 @@ describe("the environment a coordinator is started in", () => {
     expect(env.ODU_HOSTS).toBe("/callers/hosts.json");
   });
 
-  it("UNSETS it when the caller had none — omitting the key is not the same", () => {
-    // The whole bug in one assertion. A spread that skips an absent value
-    // leaves the daemon's variable standing, and the run silently fans out
-    // across the machines in a stranger's config. `null` is a decision.
+  it("blanks it when the caller's own shell has none", () => {
+    // `""` and `null` look like the same nothing at a call site and mean
+    // opposite things. This one is a TERMINAL reporting that its shell has no
+    // `$ODU_HOSTS` — so the child's chain must start where that shell's does,
+    // at `~/.config/odu/hosts.json`, and not at the daemon's file.
+    const env = coordinatorEnv(request({ hostsFile: "" }), daemon);
+    expect(env.ODU_HOSTS).toBe("");
+  });
+
+  it("leaves the service's own standing when the caller expressed nothing", () => {
+    // An agent and a browser have no shell to have a `$ODU_HOSTS` in. A
+    // service started with an explicit hosts file was configured on purpose,
+    // and discarding that for callers who never mentioned it would be its own
+    // surprise.
     const env = coordinatorEnv(request({ hostsFile: null }), daemon);
-    expect("ODU_HOSTS" in env).toBe(false);
+    expect(env.ODU_HOSTS).toBe("/daemons/hosts.json");
   });
 
   it("carries everything else through untouched", () => {
@@ -268,7 +278,7 @@ describe("the environment a coordinator is started in", () => {
   });
 
   it("does not mutate the environment it was handed", () => {
-    coordinatorEnv(request({ hostsFile: null }), daemon);
+    coordinatorEnv(request({ hostsFile: "" }), daemon);
     expect(daemon.ODU_HOSTS).toBe("/daemons/hosts.json");
   });
 });

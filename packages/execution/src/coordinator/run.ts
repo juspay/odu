@@ -62,6 +62,7 @@ import { dialRun } from "@odu/run-client/dial";
 import {
   exitCode,
   NON_TERMINAL_STATUSES,
+  unpostedNote,
 } from "../common/verdict";
 import {
   type MakeRunFace,
@@ -124,7 +125,6 @@ import {
   postingEqual,
   StatusPoster,
   statusFor,
-  unpostedNote,
 } from "./statuses";
 import {
   dependencyClosure,

@@ -737,10 +737,6 @@ export function fetchUrlFor(url: string): string {
 }
 
 /** Shared "N statuses never reached GitHub" note for verdict lines. */
-export function unpostedNote(n: number): string {
-  if (n <= 0) return "";
-  return `, ${n} status${n === 1 ? "" : "es"} never reached GitHub`;
-}
 
 
 /** Structural equality for posting health — avoids JSON.stringify on the hot path. */

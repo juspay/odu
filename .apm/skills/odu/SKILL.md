@@ -96,7 +96,8 @@ odu surface run_start --input '{"checkout":"/abs/path/to/repo","expectedSha":"'"
 { "checkout": "/abs/path/to/repo", "expectedSha": "<sha>", "requestId": "fix-lint-1" }
 // optional: selectors[], platforms[], hostPins[], root, noDeps,
 //           noStrict, noSnapshot, noPost, supersede
-// hostsFile is the CALLER's $ODU_HOSTS. Omit it — you have no shell.
+// hostsFile is a terminal's own $ODU_HOSTS. Omit it — you have no shell,
+// and omitting it keeps the service's configured inventory.
 ```
 
 `selectors` are `recipe[@platform]` — `["ci::e2e"]`, `["fmt","nix"]`,
@@ -274,7 +275,7 @@ And say `passed` only from `settled: true`.
 
 | Verb | argv | MCP tool | Input | Answers |
 | --- | --- | --- | --- | --- |
-| start | `odu surface run_start --input '{…}' --json` | `run_start` | `checkout`, `expectedSha`, `requestId`, `selectors?`, `platforms?`, `hostPins?`, `hostsFile?` (the caller's `$ODU_HOSTS`; agents omit it), `root?`, `noDeps?`, `noStrict?`, `noSnapshot?`, `noPost?`, `supersede?` | `accepted`, `runId`, `replayed`, `sha`, `scope`, `endpoint`, `cursor`, `existing?` |
+| start | `odu surface run_start --input '{…}' --json` | `run_start` | `checkout`, `expectedSha`, `requestId`, `selectors?`, `platforms?`, `hostPins?`, `hostsFile?` (a terminal's own `$ODU_HOSTS`; agents omit it), `root?`, `noDeps?`, `noStrict?`, `noSnapshot?`, `noPost?`, `supersede?` | `accepted`, `runId`, `replayed`, `sha`, `scope`, `endpoint`, `cursor`, `existing?` |
 | wait | `odu surface run_wait --input '{…}' --json` | `run_wait` | `runId`, `after?`, `deadlineMs?` (30s default), `settle?`, `limit?` | `reason`, `settled`, `passed`, `outcome`, `failures[]`, `failuresTotal`, `cursor`, `remaining`, `reportingDebt[]`, `scope`, `sha` |
 | diagnose | `odu surface log_read --input '{…}' --json` | `log_read` | `key`, `offset?` (negative = tail), `limit?`, `waitMs?` (follow) | `text`, `offset`, `size`, `nextOffset`, `eof`, `complete`, `open` |
 | retry | `odu surface run_retry --input '{…}' --json` | `run_retry` | `runId`, `selector`, `requestId`, `expectAttempt?` | `mode`, `effectiveRun`, `parentRun`, `roots[]`, `resetDependants[]`, `scope`, `sha`, `cursor` |
@@ -431,12 +432,10 @@ terminal spelling.
 
 **`$ODU_HOSTS` belongs to the caller, and travels with the request.** The
 service is a per-user singleton, so the process that starts your coordinator is
-not the one you typed into — an inherited `$ODU_HOSTS` would mean "whichever
-shell started the daemon, possibly days ago". `odu run` therefore sends its own,
-absolute, as `run_start`'s `hostsFile`, and absent means UNSET on the child
-rather than "use the daemon's". **An agent should omit it**: you have no shell
-whose `$ODU_HOSTS` is a fact about anything, and omitting it is what selects
-`~/.config/odu/hosts.json`.
+not the one a person typed into. `odu run` therefore sends its own shell's
+value, absolute, as `run_start`'s `hostsFile` — a path, or `""` for "this shell
+has none". **An agent omits the field entirely**, which means "I have no shell
+and no preference" and leaves the service's own configuration standing.
 
 A lane host needs ssh + Nix + outbound https,
 and the source arrives by `git fetch` of the **pushed** SHA — remote lanes

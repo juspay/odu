@@ -314,7 +314,13 @@ async function start(input: StartInput, deps: StartDeps): Promise<Outcome> {
   // relative one would name a file inside the repository being tested rather
   // than the one the caller's shell meant. That is a config a run could ship
   // its own copy of, which is the one shape this must never allow.
-  if (input.hostsFile !== undefined && !isAbsolute(input.hostsFile)) {
+  // `""` is exempt because it is not a path: it is a caller saying its shell
+  // has no `$ODU_HOSTS`, which is exactly what `loadHosts` reads it as.
+  if (
+    input.hostsFile !== undefined &&
+    input.hostsFile !== "" &&
+    !isAbsolute(input.hostsFile)
+  ) {
     return refuseAndRecord(
       deps,
       input.requestId,

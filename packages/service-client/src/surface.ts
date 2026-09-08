@@ -601,8 +601,18 @@ const StartInputSchema = Schema.Struct({
    * the daemon is the same user on the same machine, so forwarding the
    * variable makes the coordinator's chain EXACTLY the caller's chain.
    *
-   * Absent means the caller had it unset — which the launcher honours by
-   * UNSETTING it on the child, never by leaving the daemon's value in place.
+   * THREE READINGS, and the third is why an empty string is legal:
+   *
+   *   - a PATH — resolve hosts from this file.
+   *   - `""` — the caller HAS a shell and it has no `$ODU_HOSTS`. Unset on the
+   *     child, so the chain falls to `~/.config/odu/hosts.json` the way it
+   *     does in that shell. (`loadHosts` already reads `""` as unset, so this
+   *     is the same spelling, not a second one.)
+   *   - ABSENT — the caller has no shell to speak of: an agent, a browser. It
+   *     is expressing no preference, so the SERVICE's own configuration
+   *     stands. A service started with an explicit hosts file was configured
+   *     on purpose, and a verb that quietly discarded that would be its own
+   *     kind of surprise.
    */
   hostsFile: Schema.optionalKey(Schema.String),
   root: Schema.optionalKey(Schema.String),

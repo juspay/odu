@@ -7,7 +7,6 @@ import {
   postingEqual,
   StatusPoster,
   statusFor,
-  unpostedNote,
   type GhSendResult,
   type StatusPayload,
 } from "./statuses";
@@ -110,13 +109,6 @@ describe("github remote parsing", () => {
   });
 });
 
-describe("unpostedNote", () => {
-  it("is empty for zero and pluralizes", () => {
-    expect(unpostedNote(0)).toBe("");
-    expect(unpostedNote(1)).toBe(", 1 status never reached GitHub");
-    expect(unpostedNote(3)).toBe(", 3 statuses never reached GitHub");
-  });
-});
 
 describe("postingEqual", () => {
   it("compares owed entries structurally", () => {

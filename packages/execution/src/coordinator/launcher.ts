@@ -70,8 +70,12 @@ export interface LaunchRequest {
    * belongs to whichever shell started the daemon, possibly days ago. The
    * coordinator resolves its host inventory by reading an environment
    * (`./hosts`), so inheriting ours silently substitutes that shell's
-   * inventory for the caller's. `null` is a DECISION and not a default: it
-   * means the caller had no `$ODU_HOSTS`, and the child must have none either.
+   * inventory for the caller's.
+   *
+   * `null` means the caller expressed nothing — an agent, a browser — and the
+   * service's own configuration stands. A caller WITH a shell says so
+   * exactly: a path, or `""` for "my shell has no `$ODU_HOSTS`", which
+   * `loadHosts` already reads as unset.
    */
   readonly hostsFile: string | null;
   /** Take the checkout from a run that is already in progress there, rather
@@ -312,19 +316,19 @@ async function attemptLaunch(
  * The environment a coordinator is started in: this process's, with the ONE
  * variable that decides where the run's work lands replaced by the caller's.
  *
- * Pure and exported because the interesting case is the one that is invisible
- * in a passing test — `hostsFile: null` has to DELETE the key, not skip the
- * assignment. A spread that merely omits an absent value leaves the daemon's
- * own `$ODU_HOSTS` in place, which is the leak this exists to close, and it
- * looks identical at the call site.
+ * Pure and exported because the interesting case is invisible in a passing
+ * test: `""` and `null` both look like "nothing" at a call site and mean
+ * opposite things. `""` is a caller's shell reporting that it has no
+ * `$ODU_HOSTS` — assigned, so the child's chain starts where that shell's
+ * does. `null` is a caller with no shell at all, and the service's own
+ * configuration stands.
  */
 export function coordinatorEnv(
   request: LaunchRequest,
   base: NodeJS.ProcessEnv,
 ): NodeJS.ProcessEnv {
   const env = { ...base };
-  if (request.hostsFile === null) delete env.ODU_HOSTS;
-  else env.ODU_HOSTS = request.hostsFile;
+  if (request.hostsFile !== null) env.ODU_HOSTS = request.hostsFile;
   return env;
 }
 
