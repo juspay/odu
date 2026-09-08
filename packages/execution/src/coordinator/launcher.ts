@@ -21,7 +21,11 @@
 import { join } from "node:path";
 import { runSocketPath } from "@odu/run-client/dial";
 import { RUN_FILES } from "@odu/run-history/paths";
-import { type CatalogOptions, handleFor } from "@odu/run-history/store";
+import {
+  type CatalogOptions,
+  handleFor,
+  readManifest,
+} from "@odu/run-history/store";
 import type { RunScope } from "@odu/run-history/schema";
 import {
   oduSelfArgv,
@@ -58,6 +62,33 @@ export interface LaunchRequest {
   readonly noSnapshot: boolean;
   readonly noPost: boolean;
   readonly hostPins: readonly string[];
+  /**
+   * The value `$ODU_HOSTS` must have in the coordinator — the CALLER's, not
+   * this process's.
+   *
+   * A launcher runs inside a per-user singleton service, so `process.env` here
+   * belongs to whichever shell started the daemon, possibly days ago. The
+   * coordinator resolves its host inventory by reading an environment
+   * (`./hosts`), so inheriting ours silently substitutes that shell's
+   * inventory for the caller's.
+   *
+   * `null` means the caller expressed nothing — an agent, a browser — and the
+   * service's own configuration stands. A caller WITH a shell says so
+   * exactly: a path, or `""` for "my shell has no `$ODU_HOSTS`", which
+   * `loadHosts` already reads as unset.
+   */
+  readonly hostsFile: string | null;
+  /** Take the checkout from a run that is already in progress there, rather
+   *  than being refused by it. The coordinator owns what that MEANS (cancel the
+   *  incumbent, confirm it is gone, then claim the lock — see `./run`), and it
+   *  has to, because only the process about to hold the lock can do the
+   *  cancel-then-confirm without a window. A launcher that dropped this flag
+   *  would send a caller's explicit "replace it" into the ordinary
+   *  busy-checkout refusal. */
+  readonly supersede: boolean;
+  /** Park at settle rather than tearing down. Carried because it is the
+   *  CALLER's shape of run, not the launcher's policy. */
+  readonly linger: boolean;
 }
 
 export interface LaunchReceipt {
@@ -79,6 +110,26 @@ export interface LaunchReceipt {
 export type RunLauncher = (request: LaunchRequest) => Promise<LaunchReceipt>;
 
 /**
+ * The verb a launched coordinator is invoked with — INTERNAL, and that is the
+ * point.
+ *
+ * This used to be `run`, the public command, and once `odu run` became a thin
+ * client of the service the two could not both be that name: `run.start` calls
+ * this launcher, the launcher would invoke `odu run`, and `odu run` would call
+ * `run.start`. Unbounded recursion, arrived at by a rename rather than by a
+ * loop anybody wrote.
+ *
+ * So the coordinator has a verb of its own. It is absent from the usage text —
+ * the same convention `web-daemon` and `lease-hold` already keep — because
+ * nobody should type it: it takes exactly the argv {@link launchArgv} emits,
+ * including the four identity flags (`--run-id`, `--expected-sha`,
+ * `--parent-run`, `--request-id`) that let a caller mint a run identity the
+ * catalog will accept. Those belong to a LAUNCHER, and leaving them on a public
+ * verb was always the recursion trap written down in advance.
+ */
+export const COORDINATOR_VERB = "run-coordinator";
+
+/**
  * The argv a launch request becomes.
  *
  * Pure, exported, and tested: this is the "structured data/argv, never a
@@ -87,7 +138,7 @@ export type RunLauncher = (request: LaunchRequest) => Promise<LaunchReceipt>;
  * command out of a user's selectors.
  */
 export function launchArgv(request: LaunchRequest): string[] {
-  const args = ["run", ...request.scope.selectors];
+  const args = [COORDINATOR_VERB, ...request.scope.selectors];
   for (const p of request.scope.platforms) args.push("--platform", p);
   for (const h of request.hostPins) args.push("--host", h);
   if (request.scope.root !== undefined) args.push("--root", request.scope.root);
@@ -95,6 +146,8 @@ export function launchArgv(request: LaunchRequest): string[] {
   if (request.noStrict) args.push("--no-strict");
   if (request.noSnapshot) args.push("--no-snapshot");
   if (request.noPost) args.push("--no-post");
+  if (request.supersede) args.push("--supersede");
+  if (request.linger) args.push("--linger");
   // The identity the caller minted, so the child publishes under the id the
   // receipt already names.
   args.push("--run-id", request.runId);
@@ -123,63 +176,188 @@ function lifetimeOf(plan: SpawnPlan): string {
 }
 
 /**
- * The packaged launcher: start `odu run` for this request and return once its
- * socket answers.
+ * MAY A FAILED LAUNCH BE TRIED AGAIN?
  *
- * Waiting for the socket is what makes the receipt worth anything. A launcher
- * that returned as soon as `spawn` succeeded would hand back a run id that may
- * belong to a process which died on the strict gate a millisecond later, and
- * the caller would then wait thirty seconds on a run that never existed.
+ * Only one shape says yes, and getting it wrong doubles a run — so the decision
+ * is a pure function rather than a condition inline. `systemd-run` is a
+ * SUBMITTER: a non-zero exit from it means the user manager declined to create
+ * the unit, which is the only failure that proves nothing was started.
+ *
+ *   - a ZERO exit means the job was accepted and says nothing about the
+ *     service, so a second launch might be a second coordinator;
+ *   - a DETACHED spawn's exit is the coordinator's own death, and re-launching
+ *     over that would paper over a real refusal (a dirty tree, a bad justfile);
+ *   - no exit at all means the readiness ceiling was reached with something
+ *     possibly still coming up.
  */
+export function mayRelaunchDetached(
+  plan: SpawnPlan,
+  exitCode: number | null,
+): boolean {
+  return plan.mechanism === "systemd-run" && exitCode !== null && exitCode !== 0;
+}
+
+/**
+ * HAS THE RUN THIS REQUEST ASKED FOR COME INTO EXISTENCE?
+ *
+ * The manifest, addressed by the id the caller minted before the spawn — which
+ * is the only fact about the launch that no other run can satisfy.
+ *
+ * A socket cannot answer this, and believing it could was a bug with no error
+ * in it. `.ci/odu.sock` belongs to a CHECKOUT: when a start supersedes the run
+ * already there, the incumbent's socket answers immediately, so a launcher
+ * waiting on the path returned `ok: true` for a replacement that had not
+ * reached its strict gate — and `run.start` then wrote an accepted receipt for
+ * a run that never registered. The same mistake in the other direction refused
+ * a run that started, finished and closed its socket faster than the poll.
+ *
+ * The manifest is written before the venue claim and before the socket is
+ * served (`./history`'s "called BEFORE the run executes"), so this is also the
+ * EARLIER signal, not a slower one bought for correctness.
+ */
+function runIsRegistered(request: LaunchRequest): boolean {
+  return (
+    readManifest(handleFor(request.runId, request.catalog ?? {})) !== null
+  );
+}
+
+/** What one launch attempt came to. `managerRefused` is the one outcome a
+ *  SECOND attempt is allowed to follow — see {@link mayRelaunchDetached}. */
+interface Attempt {
+  receipt: LaunchReceipt;
+  managerRefused: boolean;
+}
+
+async function attemptLaunch(
+  request: LaunchRequest,
+  endpoint: string,
+  env: NodeJS.ProcessEnv,
+  lifetime: (plan: SpawnPlan) => string,
+): Promise<Attempt> {
+  const argv = [...oduSelfArgv(env), ...launchArgv(request)];
+  // The coordinator's own narration goes into its catalog directory, beside
+  // the evidence it is about to produce. The run id is pre-minted, so the
+  // path exists to be named before the process does — and a launcher that
+  // exits (as this one does, the moment the run registers) must not leave the
+  // child writing into a pipe nobody is reading. See `spawnCoordinator`.
+  const spawned = spawnCoordinator(
+    argv,
+    request.checkout,
+    unitNameFor(request.runId),
+    coordinatorLogPath(request.runId, request.catalog ?? {}),
+    env,
+  );
+  // Remembered rather than awaited on the failure path: under `systemd-run`
+  // the readiness wait can end on its own ceiling while the submitter is
+  // still around, and `await`ing an exit that has not happened would hang the
+  // very call that is trying to report a failure. Registered BEFORE the wait,
+  // so by the time the wait has resolved this has too.
+  let exitCode: number | null = null;
+  void spawned.onExit.then((code) => {
+    exitCode = code;
+  });
+  // Readiness, not "did the process we forked exit". Under `systemd-run`
+  // the process we forked is a SUBMITTER that exits while the service is
+  // still starting, so reading its exit as the coordinator's would refuse a
+  // run that is coming up — and leave it running with nobody watching.
+  // `waitForReadiness` asks the PLAN which of those it just started.
+  const up = await waitForReadiness(
+    spawned.plan,
+    () => Promise.resolve(runIsRegistered(request)),
+    spawned.onExit,
+  );
+  if (up) {
+    return {
+      managerRefused: false,
+      receipt: {
+        ok: true,
+        runId: request.runId,
+        endpoint,
+        ...(spawned.child.pid === undefined ? {} : { pid: spawned.child.pid }),
+        lifetime: lifetime(spawned.plan),
+      },
+    };
+  }
+  const tail = spawned.stderrTail().trim();
+  return {
+    managerRefused: mayRelaunchDetached(spawned.plan, exitCode),
+    receipt: {
+      ok: false,
+      runId: request.runId,
+      endpoint,
+      error:
+        tail !== ""
+          ? tail
+          : exitCode === null
+            ? `the coordinator never registered run ${request.runId}`
+            : spawned.plan.describeExit(exitCode),
+    },
+  };
+}
+
+/**
+ * The packaged launcher: start `odu run` for this request and return once the
+ * run it asked for is IN THE CATALOG.
+ *
+ * Waiting for that is what makes the receipt worth anything. A launcher that
+ * returned as soon as `spawn` succeeded would hand back a run id that may
+ * belong to a process which died on the strict gate a millisecond later, and
+ * the caller would then wait thirty seconds on a run that never existed. It
+ * waits on the RUN and not on the checkout's socket, for the reason
+ * {@link runIsRegistered} gives.
+ *
+ * **A user manager that refuses the unit is not a failed run.** The plan probes
+ * for a session bus before it chooses `systemd-run`, but a socket that exists is
+ * not yet a manager that will accept a job — a container, a locked-down runner,
+ * a user with `linger` off. When the submitter comes back non-zero, NOTHING was
+ * started, so the launch is made again the way it would have been made on a host
+ * with no systemd at all. The receipt says which one it got: `lifetime` is the
+ * field where "your run survives this shell" and "your run dies with this unit"
+ * are different sentences, and a fallback that stayed quiet would print the
+ * first while meaning the second.
+ */
+/**
+ * The environment a coordinator is started in: this process's, with the ONE
+ * variable that decides where the run's work lands replaced by the caller's.
+ *
+ * Pure and exported because the interesting case is invisible in a passing
+ * test: `""` and `null` both look like "nothing" at a call site and mean
+ * opposite things. `""` is a caller's shell reporting that it has no
+ * `$ODU_HOSTS` — assigned, so the child's chain starts where that shell's
+ * does. `null` is a caller with no shell at all, and the service's own
+ * configuration stands.
+ */
+export function coordinatorEnv(
+  request: LaunchRequest,
+  base: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  const env = { ...base };
+  if (request.hostsFile !== null) env.ODU_HOSTS = request.hostsFile;
+  return env;
+}
+
 export function packagedLauncher(): RunLauncher {
   return async (request) => {
     const endpoint = runSocketPath(request.checkout);
-    const argv = [...oduSelfArgv(), ...launchArgv(request)];
-    // The coordinator's own narration goes into its catalog directory, beside
-    // the evidence it is about to produce. The run id is pre-minted, so the
-    // path exists to be named before the process does — and a launcher that
-    // exits (as this one does, the moment the socket answers) must not leave
-    // the child writing into a pipe nobody is reading. See `spawnCoordinator`.
-    const spawned = spawnCoordinator(
-      argv,
-      request.checkout,
-      unitNameFor(request.runId),
-      coordinatorLogPath(request.runId, request.catalog ?? {}),
-    );
-    // Remembered rather than awaited on the failure path: under `systemd-run`
-    // the readiness wait can end on its own ceiling while the submitter is
-    // still around, and `await`ing an exit that has not happened would hang the
-    // very call that is trying to report a failure.
-    let exitCode: number | null = null;
-    void spawned.onExit.then((code) => {
-      exitCode = code;
-    });
-    // Readiness, not "did the process we forked exit". Under `systemd-run`
-    // the process we forked is a SUBMITTER that exits while the service is
-    // still starting, so reading its exit as the coordinator's would refuse a
-    // run that is coming up — and leave it running with nobody watching.
-    // `waitForReadiness` asks the PLAN which of those it just started.
-    const up = await waitForReadiness(spawned.plan, endpoint, spawned.onExit);
-    if (!up) {
-      const tail = spawned.stderrTail().trim();
-      return {
-        ok: false,
-        runId: request.runId,
-        endpoint,
-        error:
-          tail !== ""
-            ? tail
-            : exitCode === null
-              ? "the coordinator did not serve a socket in time"
-              : spawned.plan.describeExit(exitCode),
-      };
-    }
-    return {
-      ok: true,
-      runId: request.runId,
+    const base = coordinatorEnv(request, process.env);
+    const first = await attemptLaunch(request, endpoint, base, lifetimeOf);
+    if (!first.managerRefused) return first.receipt;
+    // The opt-out the plan already honours, set for this one retry — so the
+    // fallback re-uses the decision rather than adding a second way to spell it.
+    const refusal = first.receipt.error ?? "the user manager refused the unit";
+    const second = await attemptLaunch(
+      request,
       endpoint,
-      ...(spawned.child.pid === undefined ? {} : { pid: spawned.child.pid }),
-      lifetime: lifetimeOf(spawned.plan),
+      { ...base, ODU_NO_SYSTEMD_RUN: "1" },
+      (plan) =>
+        `the coordinator is a detached process group — systemd-run refused ` +
+        `the unit, so odu started it directly (${plan.reason}). It shares this ` +
+        `process's cgroup: a restart of the enclosing unit will kill the run.`,
+    );
+    if (second.receipt.ok) return second.receipt;
+    return {
+      ...second.receipt,
+      error: `${refusal}\nodu then started it directly, and that failed too: ${second.receipt.error}`,
     };
   };
 }

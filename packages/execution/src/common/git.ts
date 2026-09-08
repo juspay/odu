@@ -32,6 +32,29 @@ export function headSha7(repoRoot: string | null): string | null {
   return sha.status === 0 ? shortSha(sha.stdout.trim()) : null;
 }
 
+/**
+ * The branch `repoRoot` has checked out, or `null` for a detached HEAD (and for
+ * anything else git declines to answer).
+ *
+ * Read ONCE, at registration, and stamped on the run record — never by a reader
+ * of that record. The distinction is the whole point: this checkout's branch is
+ * a fact that moves at the developer's clock, and a board asking it now about a
+ * run from last Tuesday would print today's branch under that run's commit.
+ *
+ * `--symbolic-full-name` rather than `--abbrev-ref`, because the latter answers
+ * the literal string `HEAD` when detached — a value that reads exactly like a
+ * branch called HEAD.
+ */
+export function gitBranch(repoRoot: string): string | null {
+  const ref = spawnSync("git", ["symbolic-ref", "--short", "-q", "HEAD"], {
+    cwd: repoRoot,
+    encoding: "utf-8",
+  });
+  if (ref.status !== 0) return null;
+  const name = ref.stdout.trim();
+  return name === "" ? null : name;
+}
+
 /** The durable-log identity from the process's real git: the repo root and the
  *  current short SHA. Returns `null` outside a git checkout (→ "missing" for
  *  any durable-log read). Used by both `mcpCommand` and the test harness. */

@@ -20,11 +20,24 @@ import {
   type SpawnSyncReturns,
   spawnSync,
 } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
-import { BIG, buildOduBinary, cleanup, makeFixture } from "./harness";
+import {
+  BIG,
+  buildOduBinary,
+  cleanup,
+  hermeticEnv,
+  makeFixture,
+  scratchDir,
+  useGh,
+} from "./harness";
 
 let oduBin: string;
 
@@ -61,7 +74,7 @@ function oduProtect(
   hosts: Record<string, string> | string,
   args: string[] = [],
 ): { res: SpawnSyncReturns<string>; hostsFile: string } {
-  const hostsDir = mkdtempSync(join(tmpdir(), "odu-e2e-protect-"));
+  const hostsDir = scratchDir("odu-e2e-protect-");
   created.push(hostsDir);
   const hostsFile = join(hostsDir, "hosts.json");
   writeFileSync(
@@ -72,7 +85,11 @@ function oduProtect(
     cwd: dir,
     encoding: "utf-8",
     maxBuffer: BIG,
-    env: { ...process.env, ODU_HOSTS: hostsFile },
+    // The suite's OWN service (`hermeticEnv`), with this test's hosts file on
+    // the client — which is where `$ODU_HOSTS` is read and from where it
+    // travels to the service as `hostsFile`. Using the ambient env here
+    // reached whatever daemon the machine already had.
+    env: { ...hermeticEnv, ODU_HOSTS: hostsFile },
   });
   return { res, hostsFile };
 }
@@ -225,7 +242,7 @@ function oduProtectWrite(opts: {
     cwd: dir,
   });
 
-  const gh = mkdtempSync(join(tmpdir(), "odu-e2e-gh-"));
+  const gh = scratchDir("odu-e2e-gh-");
   created.push(gh);
   const at = (name: string): string => join(gh, name);
   writeFileSync(at("branch-rules.json"), JSON.stringify(opts.branchRules));
@@ -246,9 +263,10 @@ case "$*" in
   *) printf 'fake gh: unexpected call: %s\\n' "$*" >&2; exit 1 ;;
 esac
 `;
-  const ghBin = at("gh");
-  writeFileSync(ghBin, script);
-  chmodSync(ghBin, 0o755);
+  // Installed AS the world's fixed `gh` rather than passed as an env var:
+  // `protect` is a client, and the `gh` it means is spawned by the service,
+  // which cannot learn a path invented after it started. See `useGh`.
+  useGh(script);
 
   const res = spawnSync(
     oduBin,
@@ -257,7 +275,7 @@ esac
       cwd: dir,
       encoding: "utf-8",
       maxBuffer: BIG,
-      env: { ...process.env, ODU_GH_BIN: ghBin },
+      env: hermeticEnv,
     },
   );
   const calls = lines(readFileSync(at("calls.txt"), "utf-8"));
@@ -266,8 +284,17 @@ esac
   // than `--set-default`-ing ODU_GH_BIN did exactly that. Fail here rather than
   // let assertions further down interpret a real API's answers.
   if (calls.length === 0) {
+    // WHAT ODU SAID, not just that the stand-in went unused. `gh` is reached
+    // last — after the checkout, the justfile, the platform set and the origin
+    // — so "no calls recorded" is far more often a refusal before that point
+    // than a bypassed seam, and the original message named only the one cause
+    // it was written for.
+    const seam = hermeticEnv.ODU_GH_BIN ?? "(unset)";
     throw new Error(
-      "e2e: $ODU_GH_BIN was bypassed — protect ran against the real `gh`",
+      `e2e: protect made no gh call (exit ${res.status}). Either the ` +
+        "$ODU_GH_BIN seam was bypassed, or protect refused before reaching " +
+        `the forge.\n  seam: ${seam} (exists: ${existsSync(seam)})` +
+        `\n  it said:\n${res.stderr}${res.stdout}`,
     );
   }
   /** The captured body of a write, or null when protect never made that call. */

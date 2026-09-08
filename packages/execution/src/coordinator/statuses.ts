@@ -737,22 +737,7 @@ export function fetchUrlFor(url: string): string {
 }
 
 /** Shared "N statuses never reached GitHub" note for verdict lines. */
-export function unpostedNote(n: number): string {
-  if (n <= 0) return "";
-  return `, ${n} status${n === 1 ? "" : "es"} never reached GitHub`;
-}
 
-/** Human warning strip for attach/status while posts are owed. */
-export function postingWarning(health: PostingHealth): string | null {
-  if (health.owed.length === 0) return null;
-  const n = health.owed.length;
-  const last = health.owed.find((o) => o.lastError)?.lastError ?? null;
-  const noun = n === 1 ? "status" : "statuses";
-  const err = last !== null ? `, last error: ${last}` : "";
-  // "sending" before the first attempt (debounce window); "retrying" after.
-  const phase = health.owed.some((o) => o.attempts > 0) ? "retrying" : "sending";
-  return `⚠ github: ${n} ${noun} unconfirmed (${phase}${err})`;
-}
 
 /** Structural equality for posting health — avoids JSON.stringify on the hot path. */
 export function postingEqual(

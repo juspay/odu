@@ -93,12 +93,37 @@ function isRunner(args: string): boolean {
   );
 }
 
-function findRunnerPid(oduPid: number): number {
-  const tree = descendants(oduPid);
+/** The run id `odu run` printed on stderr — the only handle a black-box caller
+ *  gets on the process tree, now that the tree is not its own. */
+function runIdOf(stderr: string): string {
+  const said = /odu · started (\S+)/.exec(stderr);
+  if (said === null) {
+    throw new Error(`e2e: odu never said which run it started:\n${stderr}`);
+  }
+  return said[1] as string;
+}
+
+/**
+ * The lane runner, found under the COORDINATOR rather than under `odu run`.
+ *
+ * `odu run` is a client: the coordinator it asks for is a detached process
+ * group belonging to the service, so the runner is not a descendant of the
+ * process this test spawned and walking that tree finds nothing at all. The
+ * coordinator is still findable — it carries `--run-id` in its argv, which is
+ * exactly the id the caller was told — and the runner is under IT.
+ */
+function findRunnerPid(runId: string): number {
+  const coordinator = processTable().find(
+    (p) => p.args.includes("run-coordinator") && p.args.includes(runId),
+  );
+  if (coordinator === undefined) {
+    throw new Error(`e2e: no coordinator in the process table for run ${runId}`);
+  }
+  const tree = descendants(coordinator.pid);
   const runner = tree.find((p) => isRunner(p.args));
   if (runner === undefined) {
     throw new Error(
-      `no odu-runner under pid ${oduPid}: ${tree.map((p) => `${p.pid} ${p.args}`).join("; ") || "(empty tree)"}`,
+      `no odu-runner under coordinator ${coordinator.pid} (run ${runId}): ${tree.map((p) => `${p.pid} ${p.args}`).join("; ") || "(empty tree)"}`,
     );
   }
   return runner.pid;
@@ -177,8 +202,6 @@ describe("odu lane transport death (black-box)", () => {
         env,
       });
       live.push(child);
-      const oduPid = child.pid;
-      if (oduPid === undefined) throw new Error("odu spawn produced no pid");
 
       let stdout = "";
       let stderr = "";
@@ -209,7 +232,7 @@ describe("odu lane transport death (black-box)", () => {
         "eight recipes to succeed while slow is still running",
       );
 
-      const runnerPid = findRunnerPid(oduPid);
+      const runnerPid = findRunnerPid(runIdOf(stderr));
       // Snapshot recipe children now: SIGKILL of the runner cannot reap them.
       const recipeTree = descendants(runnerPid);
       killIfAlive(runnerPid);
@@ -274,8 +297,6 @@ describe("odu lane transport death (black-box)", () => {
         },
       );
       live.push(child);
-      const oduPid = child.pid;
-      if (oduPid === undefined) throw new Error("odu spawn produced no pid");
 
       let stdout = "";
       let stderr = "";
@@ -304,7 +325,7 @@ describe("odu lane transport death (black-box)", () => {
         "every recipe of the pass fixture to succeed",
       );
 
-      const runnerPid = findRunnerPid(oduPid);
+      const runnerPid = findRunnerPid(runIdOf(stderr));
       const recipeTree = descendants(runnerPid);
       killIfAlive(runnerPid);
 
@@ -317,8 +338,19 @@ describe("odu lane transport death (black-box)", () => {
       // linger that idle-reaped without noticing the kill would also exit 0
       // and satisfy the negative greps. `die()` writes this line onto
       // `_ci-setup` via `onSetupLine`.
-      expect(readFileSync(findRecipeLog(dir, "_ci-setup"), "utf-8")).toMatch(
-        /\[odu\] lane \S+ died:/,
+      //
+      // WAITED FOR, because the client's exit stopped being the signal that the
+      // coordinator has caught up. `odu run` is a client: `--progress json`
+      // returns the moment the run settles, which is BEFORE this test kills the
+      // runner, so `await exited` no longer bounds anything. The coordinator is
+      // a separate, lingering process and it notices the death on its own clock.
+      await waitUntil(
+        () =>
+          /\[odu\] lane \S+ died:/.test(
+            readFileSync(findRecipeLog(dir, "_ci-setup"), "utf-8"),
+          ),
+        60_000,
+        "the coordinator to record the lane's death",
       );
       expect(code).toBe(0);
       expect(stderr).not.toContain("write EPIPE");

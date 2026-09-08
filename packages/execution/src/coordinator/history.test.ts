@@ -82,6 +82,8 @@ function init(root: string, over: Partial<RunHistoryInit> = {}): RunHistoryInit 
     seq: 7,
     pipeline: "ci",
     scope: { selectors: ["e2e"], platforms: [], noDeps: false },
+    hostPins: [],
+    hostsFile: "",
     snapshotMode: "strict",
     dirty: false,
     runnerFlake: null,
@@ -269,7 +271,7 @@ describe("registering a run", () => {
     expect(() => {
       history.roster([NODE]);
       history.phase("lanes");
-      history.lane("x86_64-linux", "leased", "builder-1");
+      history.lane("x86_64-linux", "leased", "builder-1", [], "/etc/odu/hosts.json");
       history.nodeStatus(NODE, "running", running);
       history.log(NODE, "bytes nobody will keep\n");
       history.logFinalized(NODE, true, null);
@@ -330,6 +332,69 @@ describe("allocating attempts", () => {
 
     expect(attemptsFor(handle, NODE)).toEqual([1]);
     expect(logText(handle, NODE, 1)).toBe("the tail, re-sent\n and then more\n");
+  });
+
+  it("does not let a re-sent TAIL delete the beginning of a log", async () => {
+    // THE FIELD FAILURE. A `snapshot` frame is the producer's in-memory buffer,
+    // and that buffer is clamped to 64 KiB — so once a node has printed more
+    // than that, a snapshot is a TAIL, not the log. Writing it over the file
+    // threw away everything before it, silently: a 200,000-line recipe recorded
+    // 198,092 lines, ending at its true last line, with no truncation notice,
+    // because a lane re-attached after the first 133 KB had already been
+    // written.
+    //
+    // Two facts make the loss invisible without this test. The end of the log
+    // is intact, so every "is it complete" check passes; and the `end` frame
+    // still arrives, so the truncation sweep has nothing to stamp.
+    const { history, handle } = started();
+    history.nodeStatus(NODE, "running", running);
+
+    const early = Array.from(
+      { length: 2_000 },
+      (_, i) => `line ${String(i).padStart(6, "0")}\n`,
+    ).join("");
+    history.log(NODE, early);
+    // A lane re-attaches and re-sends what the producer still holds: the last
+    // slice of what we already have.
+    const resent = early.slice(early.length - 4_000);
+    history.replaceLog(NODE, resent);
+    history.log(NODE, "and then the rest\n");
+
+    const written = logText(handle, NODE, 1) ?? "";
+    expect(written.startsWith("line 000000\n")).toBe(true);
+    expect(written.split("\n").filter((l) => l.startsWith("line ")).length).toBe(2_000);
+    expect(written.endsWith("and then the rest\n")).toBe(true);
+    // And nothing was written twice.
+    expect(written).toBe(`${early}and then the rest\n`);
+  });
+
+  it("catches up when the re-sent tail continues where the file stops", () => {
+    // The other direction: the producer is AHEAD of us, and its snapshot
+    // overlaps the end of what we hold. Only the part we do not have is
+    // appended — writing the whole snapshot would duplicate the overlap.
+    const { history, handle } = started();
+    history.nodeStatus(NODE, "running", running);
+
+    history.log(NODE, "aaa bbb ");
+    history.replaceLog(NODE, "bbb ccc ddd");
+
+    expect(logText(handle, NODE, 1)).toBe("aaa bbb ccc ddd");
+  });
+
+  it("says so when a re-sent tail does not meet the file at all", () => {
+    // The producer's buffer has run past everything we hold — real loss, and
+    // the only honest thing to do is record the answer AND the fact that it is
+    // not continuous. Silence here is the failure this whole path is about.
+    const { history, handle } = started();
+    history.nodeStatus(NODE, "running", running);
+
+    history.log(NODE, "the beginning\n");
+    history.replaceLog(NODE, "something else entirely\n");
+
+    const written = logText(handle, NODE, 1) ?? "";
+    expect(written).toContain("[odu] log truncated");
+    expect(written).toContain("does not continue what precedes it");
+    expect(written.endsWith("something else entirely\n")).toBe(true);
   });
 
   it("seals the open attempt on a RESTART, so the next bytes land on a NEW ordinal", () => {
@@ -749,7 +814,7 @@ describe("the ownership fence", () => {
     // nothing further is appended, no attempt is allocated, no bytes are
     // mirrored. Two writers on one journal is the unrecoverable case.
     history.phase("no_lanes");
-    history.lane("x86_64-linux", "leased", "builder-9");
+    history.lane("x86_64-linux", "leased", "builder-9", [], "/etc/odu/hosts.json");
     history.nodeStatus(NODE, "running", running);
     history.log(NODE, "bytes from a coordinator nobody is listening to\n");
     history.logFinalized(NODE, true, null);

@@ -5,10 +5,8 @@ import {
   interruptStatus,
   parseGithubRemote,
   postingEqual,
-  postingWarning,
   StatusPoster,
   statusFor,
-  unpostedNote,
   type GhSendResult,
   type StatusPayload,
 } from "./statuses";
@@ -111,41 +109,6 @@ describe("github remote parsing", () => {
   });
 });
 
-describe("postingWarning", () => {
-  it("is null when healthy", () => {
-    expect(postingWarning(EMPTY_POSTING)).toBeNull();
-  });
-
-  it("says sending before any attempt, retrying after", () => {
-    expect(
-      postingWarning({
-        owed: [
-          { context: "ci::unit@x86_64-linux", lastError: null, attempts: 0 },
-        ],
-      }),
-    ).toMatch(/unconfirmed \(sending\)/);
-    const w = postingWarning({
-      owed: [
-        {
-          context: "ci::unit@x86_64-linux",
-          lastError: "403 rate limited",
-          attempts: 2,
-        },
-      ],
-    });
-    expect(w).toMatch(/1 status unconfirmed/);
-    expect(w).toMatch(/retrying/);
-    expect(w).toMatch(/403 rate limited/);
-  });
-});
-
-describe("unpostedNote", () => {
-  it("is empty for zero and pluralizes", () => {
-    expect(unpostedNote(0)).toBe("");
-    expect(unpostedNote(1)).toBe(", 1 status never reached GitHub");
-    expect(unpostedNote(3)).toBe(", 3 statuses never reached GitHub");
-  });
-});
 
 describe("postingEqual", () => {
   it("compares owed entries structurally", () => {

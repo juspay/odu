@@ -26,7 +26,7 @@ import { deadRun, describeDeadRun } from "@odu/run-client/deadRun";
 import { gitTopLevel, shortSha } from "@odu/execution/common/git";
 import { formatRunRef, type RunRecord } from "@odu/run-history/legacy/record";
 import { readLedger } from "@odu/run-history/legacy/ledger";
-import { unpostedNote } from "@odu/execution/coordinator/statuses";
+import { unpostedNote } from "@odu/execution/common/verdict";
 
 /** A coarse "2h ago" / "3d ago" stamp — the ledger is browsed at human
  *  resolution, so seconds/minutes/hours/days is enough, and a future-dated

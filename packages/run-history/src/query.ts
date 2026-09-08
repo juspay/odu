@@ -3,9 +3,10 @@
  * answer the attention query over real files.
  *
  * `./attention` is the pure fold and `./store` is the I/O; this is the seam
- * that joins them, plus the two decisions that need both — how a cursor is
- * validated against the run it names, and how a bounded wait decides it has
- * something worth returning.
+ * that joins them, plus the decisions that need both — how a cursor is
+ * validated against the run it names, and how the two bounded waits decide they
+ * have something worth returning: {@link waitForAttention} over a run's
+ * journal, {@link waitForLogGrowth} over one attempt's log.
  *
  * THE BOUNDED WAIT is the piece the whole "react before the slow lane
  * finishes" promise rests on, and it is a poll rather than a watch on purpose.
@@ -26,18 +27,20 @@ import {
 } from "./attention";
 import {
   type Cursor,
+  encodeNodeKey,
   isRunId,
   parseCursor,
   parseRunSelector,
 } from "./ids";
 import { currentOwner, ownerProvablyAlive } from "./owner";
-import { RUN_FILES } from "./paths";
+import { ATTEMPT_FILES, attemptDir, RUN_FILES } from "./paths";
 import {
   type CatalogOptions,
   catalogPath,
   handleFor,
   latestRun,
   readAttemptLog,
+  readAttemptRecord,
   readExpiry,
   readJournal,
   readManifest,
@@ -297,6 +300,110 @@ function isAnswer(attention: Attention, opts: WaitOptions): boolean {
   if (opts.settle === true) return false;
   if (opts.after != null) return attention.events.length > 0;
   return attention.actionable;
+}
+
+// ── the bounded wait on ONE attempt's log ───────────────────────────────────
+
+/**
+ * Why a log wait ended. Four of the five are terminal facts about the log and
+ * only one is the clock, and they are kept apart because the caller's next move
+ * differs for each: `grew` means read again from where you stopped, `shrank`
+ * means the cursor you are holding no longer addresses what it did, `complete`
+ * and `run_terminal` mean stop following, `deadline` means ask again.
+ *
+ * `complete` and `run_terminal` are BOTH here rather than folded into one
+ * "closed", because they are different evidence for the same conclusion: the
+ * first is the producer saying its last word, the second is nobody being left
+ * to say one. A log whose writer was killed only ever gets the second, and a
+ * follower that waited for the first would wait forever.
+ */
+export type LogGrowth = "grew" | "shrank" | "complete" | "run_terminal" | "deadline";
+
+export interface LogGrowthOptions {
+  /** The byte offset the caller has already read up to. Growth is measured
+   *  against THIS rather than against a size remembered between polls, so a
+   *  wait resumed by a reconnecting follower is the same wait as a fresh one. */
+  from: number;
+  /** Bounded observation deadline. Reaching it is `deadline`, which is a fact. */
+  deadlineMs?: number;
+  /** How often to look. */
+  pollMs?: number;
+  signal?: AbortSignal;
+  now?: () => number;
+}
+
+/**
+ * Wait for one attempt's log to grow past `from`, or for it to become certain
+ * that it never will.
+ *
+ * A poll for the same reasons {@link waitForAttention} is one, and one more
+ * that is specific to a log: the writer is a recipe in another process on
+ * possibly another host, and the case a follower most needs answered is the one
+ * where that writer DIED. No watch reports that; a stat plus the two records
+ * does.
+ *
+ * The three questions are asked in that order on purpose. Bytes first, so a
+ * lane that appended its last line and sealed the attempt in the same instant
+ * hands over the bytes rather than reporting a closed log the caller never got
+ * to read. Then the attempt's own record, then the run's — because a sealed
+ * attempt is a precise fact and a terminal run is the backstop for an attempt
+ * that was never sealed at all.
+ */
+export async function waitForLogGrowth(
+  handle: RunHandle,
+  node: string,
+  attempt: number,
+  opts: LogGrowthOptions,
+): Promise<LogGrowth> {
+  const now = opts.now ?? Date.now;
+  const deadline = now() + (opts.deadlineMs ?? DEFAULT_ATTENTION_DEADLINE_MS);
+  const pollMs = Math.max(10, opts.pollMs ?? 150);
+  const logPath = join(
+    attemptDir(handle.dir, encodeNodeKey(node), attempt),
+    ATTEMPT_FILES.log,
+  );
+  for (;;) {
+    // `-1` for a log that is not there, which is neither growth nor a shrink:
+    // an attempt that has been announced but has not opened its file yet must
+    // read as "nothing known", not as a rewrite back to zero.
+    let size = -1;
+    try {
+      size = statSync(logPath).size;
+    } catch {
+      size = -1;
+    }
+    if (size > opts.from) return "grew";
+    // A log SHORTER than the caller's cursor was rewritten under it —
+    // `writeAttemptLog`'s re-sync replaces an attempt's bytes in place. Saying
+    // so is the whole difference between a follower that resyncs and one that
+    // waits out its deadline for bytes that were already delivered under
+    // different offsets.
+    if (size >= 0 && size < opts.from) return "shrank";
+    if (readAttemptRecord(handle, node, attempt)?.logComplete === true) {
+      return "complete";
+    }
+    // The backstop for the killed writer: no sidecar will ever say `complete`
+    // for an attempt whose process died, but a finalized or expired RUN proves
+    // just as firmly that nothing is going to append again.
+    //
+    // …and neither of those is written by a coordinator that was SIGKILLed. A
+    // verdict comes from `finalize` and an expiry from retention days later, so
+    // a killed writer leaves an unsealed attempt inside a run with neither —
+    // and a wait that asked only those two questions would poll to its deadline
+    // for ever, on the one run a caller most needs told about. A provably lost
+    // owner is the third answer, and it is the same fact `run.wait` already
+    // reports as `owner_lost`. `null` — no owner record at all — is NOT death:
+    // an imported run never had one.
+    if (
+      readVerdict(handle) !== null ||
+      readExpiry(handle) !== null ||
+      ownerAliveFor(handle, now()) === false
+    ) {
+      return "run_terminal";
+    }
+    if (opts.signal?.aborted === true || now() >= deadline) return "deadline";
+    await sleep(Math.min(pollMs, Math.max(1, deadline - now())), opts.signal);
+  }
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {

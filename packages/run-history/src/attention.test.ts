@@ -539,7 +539,15 @@ describe("the byte budget", () => {
         500,
       );
     }
-  });
+    // A GENEROUS deadline, and the reason is that this test is honestly
+    // expensive rather than slow by accident: it re-folds a 40-node journal
+    // once per page until the backlog drains, which is the whole point — the
+    // property is that the loop TERMINATES, and a cheaper fixture would not
+    // exercise it. Bun's 5-second default is comfortable on an idle machine and
+    // was exceeded on a loaded one, which would have made this the suite's
+    // first flake on a busy CI runner: a red build about the machine rather
+    // than the code, on the one test whose failure should mean something.
+  }, 60_000);
 
   it("clamps each excerpt to the per-failure ceiling before the payload budget", () => {
     const src = bigRun(0, "y".repeat(10_000));

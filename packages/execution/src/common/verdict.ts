@@ -210,3 +210,18 @@ export function agentSummary(snap: {
   }
   return { done, failed, errored, cancelled };
 }
+
+/**
+ * The debt clause a verdict line carries — ", 3 statuses never reached
+ * GitHub".
+ *
+ * A DISPLAY string, so it lives beside `countsLine` rather than in the poster
+ * that produces the number. Its two callers are a coordinator's own summary
+ * and a client's, and only a module both may import can keep them the same
+ * sentence: `cli/` cannot reach into `coordinator/`, which is the wall that
+ * makes "one vocabulary" true rather than aspirational.
+ */
+export function unpostedNote(n: number): string {
+  if (n <= 0) return "";
+  return `, ${n} status${n === 1 ? "" : "es"} never reached GitHub`;
+}

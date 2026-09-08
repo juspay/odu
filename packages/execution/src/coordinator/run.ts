@@ -62,13 +62,14 @@ import { dialRun } from "@odu/run-client/dial";
 import {
   exitCode,
   NON_TERMINAL_STATUSES,
+  unpostedNote,
 } from "../common/verdict";
 import {
   type MakeRunFace,
   progressEvent,
   SILENT_FACE,
 } from "../common/presentation";
-import { gitTopLevel } from "../common/git";
+import { gitBranch, gitTopLevel } from "../common/git";
 import { appendIfOpen, createNodeLogSink } from "./nodeLogSink";
 import { createVerdictGate } from "./verdictGate";
 import { maxLaneResurrections } from "./laneResurrection";
@@ -124,7 +125,6 @@ import {
   postingEqual,
   StatusPoster,
   statusFor,
-  unpostedNote,
 } from "./statuses";
 import {
   dependencyClosure,
@@ -402,6 +402,19 @@ export async function runCommand(
   }
 
   const sha = git(repoRoot, ["rev-parse", "HEAD"]);
+  // A COMMIT WE DID NOT READ IS NOT A COMMIT. `git` exiting 0 and saying
+  // nothing has told us nothing, and treating that as the head made the
+  // refusal below read "this checkout is at , not 7ba435e" — a sentence
+  // asserting a commit nobody read, and pointing the reader at the wrong
+  // problem. Seen on a loaded runner where subprocesses were returning no
+  // output at all.
+  if (sha === "") {
+    process.stderr.write(
+      `odu: could not read HEAD in ${repoRoot} — \`git rev-parse HEAD\` ` +
+        "answered with nothing. odu runs a commit, so it will not guess one.\n",
+    );
+    return 1;
+  }
   const sha7 = sha.slice(0, 7);
 
   // A launcher told us which commit this run is supposed to be about. REFUSE
@@ -724,6 +737,11 @@ async function orchestrate(
   const history = openRunHistory({
     repoRoot,
     repo,
+    // Read HERE, where the run begins, because it is a fact about this run and
+    // not about the checkout: by the time a board asks, the developer has moved
+    // on and the checkout would answer with today's branch under last week's
+    // commit. A detached HEAD has no branch and says so by omission.
+    branch: gitBranch(repoRoot),
     sha,
     seq,
     pipeline: spec.name,
@@ -733,6 +751,17 @@ async function orchestrate(
       ...(args.root === undefined ? {} : { root: args.root }),
       noDeps: args.noDeps,
     },
+    // The caller's own `--host` pins, unresolved. Not `resolvedPools` and not
+    // the lanes a lease produced: those are what the constraint RESOLVED TO on
+    // this machine at this moment, and replaying a resolution would pin a
+    // retry to a box the user never named.
+    hostPins: [...args.hostPins],
+    // The FLEET those pins name, so a replay resolves them against the same
+    // one. `loadHosts` already read this chain to build `hostsConfig` above;
+    // recording the variable rather than the resolved config is deliberate —
+    // a replay re-reads the file, which is what makes an edited hosts file
+    // visible to a retry rather than frozen into it.
+    hostsFile: process.env.ODU_HOSTS ?? "",
     snapshotMode: ctx.snapshotMode ? "strict" : "live",
     dirty: ctx.dirty,
     runnerFlake,
@@ -1980,11 +2009,17 @@ async function orchestrate(
     // report is half as useful without. Derived from the published header
     // rather than from `lanesByPlatform` directly, so the record and the
     // surface cannot describe two different run environments.
+    const hostsSource = runtime.ctx.cells.header.get().hostsSource;
     for (const lane of lanes) {
       history.lane(
         lane.platform,
         lane.state,
         lane.state === "leased" ? lane.host : null,
+        // The pool is a fact about a lane that has NOT landed. Once it has, the
+        // host is the whole answer, and carrying the candidates it beat would
+        // invite a reader to present them as though the choice were still open.
+        lane.state === "claiming" ? lane.pool : [],
+        hostsSource,
       );
     }
     // `unstarted` is unreachable here — this run published its header before

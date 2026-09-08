@@ -14,9 +14,9 @@
  * pool claim/probe and lane CI share this resolution path.
  *
  * There is deliberately NO fallback either: a coordinator that carries no baked
- * flake is misbuilt (a raw `bun src/main.ts`, or a non-flake `nix-build`),
- * and resolving the runner from the consumer's flake is exactly the silent
- * failure this indirection exists to remove. So we refuse loudly.
+ * flake is a MISBUILT PACKAGE (a non-flake `nix-build`), and resolving the
+ * runner from the consumer's flake is exactly the silent failure this
+ * indirection exists to remove. So we refuse loudly.
  */
 
 import { execFile } from "node:child_process";
@@ -63,9 +63,8 @@ export function resolveRunnerFlake(env: NodeJS.ProcessEnv): string {
     throw new Error(
       "odu: ODU_RUNNER_FLAKE is unset — the coordinator resolves the lane " +
         "runner from odu's own flake, baked onto the `odu` wrapper at build " +
-        "time. This binary carries none (a raw `bun src/main.ts`, or a " +
-        "non-flake `nix-build`). Set ODU_RUNNER_FLAKE to an odu flake " +
-        "(`github:juspay/odu`, or `git+file://$PWD` in an odu checkout).",
+        "time. This binary carries none, so it is a misbuilt package rather " +
+        "than a mode: run odu from its Nix package (`nix run github:juspay/odu -- …`, or `nix run . -- …` in a checkout).",
     );
   }
   return flake;
@@ -99,9 +98,8 @@ export function resolveAgentBinaryCache(
       "odu: ODU_AGENT_SUBSTITUTERS / ODU_AGENT_TRUSTED_PUBLIC_KEYS are unset " +
         "— the coordinator prefetches the lane runner's closure from odu's own " +
         "binary cache, baked onto the `odu` wrapper at build time from " +
-        "nix/binary-cache.nix. This binary carries none (a raw " +
-        "`bun src/main.ts`, or a non-flake `nix-build`), and provisioning " +
-        "refuses to run cache-blind.",
+        "nix/binary-cache.nix. This binary carries none — a misbuilt package " +
+        "— and provisioning refuses to run cache-blind.",
     );
   }
   return agentBinaryCache({ substituters, trustedPublicKeys });

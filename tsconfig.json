@@ -1,4 +1,6 @@
 {
+  "//": "ONE typecheck over the whole tree. `lib` carries DOM because PR 2 put a browser in this repo: `packages/web-ui` renders one, and `@kolu/surface`'s Solid half — which the browser and the daemon's own listener both reach — names `window`, `document` and `WebSocket`. Splitting into two projects would type the node half without DOM at the cost of two `tsc` passes and a second config to keep true; the trade taken here is one pass and one config, and the cost is that a node module CAN name `document`. That is a real loss, and the fence against it is the per-package closure tests: a node package that imported a browser module would fail its own wall before anybody noticed the global.",
+  "//jsx": "`preserve` because tsc never compiles the JSX in this tree — `tsc --noEmit` only TYPECHECKS it, and the transform that matters is `babel-preset-solid`, run by scripts/build-web-ui.ts and by the Nix derivation that packages the bundle. `jsxImportSource` is what points the checker at SOLID's JSX namespace rather than React's, so an element is checked against Solid's attribute types (`class`, not `className`; `aria-pressed` as a real tri-state) and a React-ism is a compile error here rather than a silent no-op in a browser. Global rather than in a second config: every `.tsx` in this tree belongs to packages/web-ui, and a per-package tsconfig would be a second file to keep true for the sake of one setting that harms nothing else.",
   "compilerOptions": {
     "target": "ESNext",
     "module": "ESNext",
@@ -16,7 +18,8 @@
     "allowImportingTsExtensions": true,
     "noEmit": true,
     "jsx": "preserve",
-    "lib": ["ESNext"],
+    "jsxImportSource": "solid-js",
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
     "types": ["bun", "node"]
   },
   "include": ["src", "tests", "packages"]

@@ -18,6 +18,9 @@ tests/e2e/
 ├── protect.e2e.test.ts   # `odu protect --dry-run` context enumeration
 ├── mcp.e2e.test.ts       # the `odu mcp` agent face over a real MCP client
 ├── logs.e2e.test.ts      # durable node logs: complete to the last line, one run per file
+├── webHarness.ts         # a real web service in a private world (HOME, state, port)
+├── web.e2e.test.ts       # the CROSS-FACE gate: one run through the CLI, the
+│                         # HTTP MCP face and the singleton
 ├── fixtures/
 │   ├── pass/justfile     # a DAG that goes green
 │   ├── fail/justfile     # a DAG whose node fails (exit 1)
@@ -29,10 +32,13 @@ tests/e2e/
 Run locally:
 
 ```sh
-bun run test:e2e         # bun test tests/e2e
+bun run test:e2e-cli     # bun test tests/e2e
+just e2e-cli             # the same suite, against a freshly nix-built odu
+just e2e                 # BOTH end-to-end suites: this one and e2e-web
 ```
 
-In CI it's the `e2e` step in `ci/mod.just`.
+In CI it's the `e2e-cli` step in `ci/mod.just`. The browser suite is `e2e-web`
+beside it; the two are one gate with two drivers, which is what the names say.
 
 ## How a fixture works
 
@@ -48,6 +54,32 @@ still runs — now against odu's flake, a Nix cache hit since the harness builds
 
 The leaf recipes are pure shell — the fixture's own "CI" is trivial on purpose,
 so the test exercises *odu's* machinery, not a real toolchain.
+
+## The cross-face gate
+
+`web.e2e.test.ts` is the one suite that can check the property the web release
+rests on: a start, a wait, a log read, a retry and a cancel produce the **same
+addressed state** whichever door they came through, and the three outcomes
+(answered · refused · nothing serving) stay apart at each one. It cannot be a
+unit test, because every one of those doors is a separate process.
+
+Its world is private on purpose — `ODU_STATE_DIR`, `ODU_WEB_ORIGIN` and the port
+are all per-suite — so it does not touch a developer's own running `odu web`, and
+two copies of the suite on one machine do not fight over a gate. `HOME` is
+deliberately *not* redirected; `webHarness.ts` records the CI-only failure that
+taught us why.
+
+**The browser is not one of the doors this suite drives.** It used to be: three
+cases shelled out to `chrome --headless --dump-dom` and asserted on substrings of
+one static snapshot — no click, no keystroke, no viewport, no reconnect — and
+skipped themselves where no browser was on PATH, so on a CI runner they graded
+nothing at all.
+
+That coverage now lives in [`packages/web-acceptance`](../../packages/web-acceptance/README.md):
+Gherkin scenarios driven through Playwright, against this same nix-built binary,
+with the browsers supplied by nixpkgs. It is a **required** leg on both platforms
+(`ci/mod.just`'s `e2e-web`) and it never skips — a machine with no
+browsers fails it with the sentence that gets them.
 
 ## Deliberate tradeoffs
 
@@ -80,6 +112,8 @@ so the test exercises *odu's* machinery, not a real toolchain.
   `nix copy` → remote realise → spawn-over-ssh path that localhost
   short-circuits.
 - Drive the **MCP agent face** (`odu mcp`) end-to-end as a subprocess.
+- Drive `odu mcp --service` (the stdio bridge to the singleton) as a subprocess;
+  the HTTP face of the same projection is covered.
 - Cover `status -o json` and `logs -f` against a live run (they need the
   `.ci/odu.sock` socket, so the harness would run `odu run` in the background
   and dial it concurrently).

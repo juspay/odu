@@ -24,13 +24,14 @@
  * `systemd-run` itself is NOT executed here, and cannot be: the Nix build
  * sandbox and the CI container have neither a user manager nor a session bus.
  * The module header says as much. This suite pins the DECISION; the detached
- * branch's real syscalls are exercised by `packages/cli/src/mcp/spawnSurvival.test.ts`.
+ * branch's real syscalls are exercised by `packages/execution/src/coordinator/spawnSurvival.test.ts`.
  */
 
 import { describe, expect, it } from "bun:test";
 import { Effect } from "effect";
 import { survivableSpawnDriver } from "@kolu/surface-daemon-supervisor";
 import {
+  busSocketPath,
   coordinatorSpawnConfig,
   coordinatorSpawnSpec,
   withSameDir,
@@ -38,6 +39,7 @@ import {
   type SpawnEnv,
   type SpawnPlan,
   survivableSpawnPlan,
+  userManagerReachable,
 } from "./spawn";
 
 const UNIT = "odu-run-0000000a-0001";
@@ -60,7 +62,7 @@ function launched(
   unit = UNIT,
   platform: NodeJS.Platform = "linux",
 ): { command: string; args: string[] } {
-  const plan: SpawnPlan = survivableSpawnPlan(env, platform, unit);
+  const plan: SpawnPlan = survivableSpawnPlan(env, platform, unit, HAS_BUS);
   let seen: { command: string; args: string[] } | undefined;
   Effect.runSync(
     survivableSpawnDriver(coordinatorSpawnConfig(oduArgv, env, plan, unit), {
@@ -76,10 +78,19 @@ function launched(
   return seen;
 }
 
+/**
+ * A machine that HAS a user manager, so these tests state the variable half of
+ * the decision without also asserting a socket exists on whatever host they run
+ * on. `userManagerReachable` gets its own tests below, where the probe is the
+ * subject rather than the setting.
+ */
+const HAS_BUS = (env: SpawnEnv): boolean =>
+  userManagerReachable(env, () => true);
+
 /** A world, named. `platform` defaults to linux because every interesting
  *  branch is a linux branch. */
 function plan(env: SpawnEnv, platform: NodeJS.Platform = "linux") {
-  return survivableSpawnPlan(env, platform, UNIT);
+  return survivableSpawnPlan(env, platform, UNIT, HAS_BUS);
 }
 
 describe("the spawn plan off linux", () => {
@@ -216,14 +227,17 @@ describe("oduSelfArgv", () => {
     ]);
   });
 
-  it("falls back to THIS runtime and entry, never a bare `bun` on a PATH", () => {
-    // In a dev checkout the child must get the interpreter that is running us,
-    // because whatever `bun` a spawned shell resolves is a different build.
-    const argv = oduSelfArgv({});
-    expect(argv.length).toBeGreaterThan(0);
-    expect(argv[0]).toBe(process.execPath);
-    // An empty ODU_SELF is unset here too.
-    expect(oduSelfArgv({ ODU_SELF: "" })).toEqual(argv);
+  it("REFUSES when the wrapper baked nothing — a misbuilt package, not a mode", () => {
+    // This used to fall back to `[process.execPath, process.argv[1]]`, which
+    // re-execed the entry through whatever interpreter was running. It read as
+    // a courtesy to a dev checkout and it was a hole in the runtime contract:
+    // Nix is odu's only supported runtime, and the fallback let an unpackaged
+    // odu spawn coordinators carrying NONE of the wrapper's baked locators —
+    // so the child reached for `nix`, `git` and `gh` on an ambient PATH and
+    // failed several layers from the cause. The throw names the cause.
+    expect(() => oduSelfArgv({})).toThrow(/ODU_SELF is unset/);
+    // An empty ODU_SELF is unset here too — a wrapper is a thing somebody edits.
+    expect(() => oduSelfArgv({ ODU_SELF: "" })).toThrow(/misbuilt package/);
   });
 });
 
@@ -236,6 +250,57 @@ describe("coordinatorSpawnSpec", () => {
     expect(spec.cwd).toBe("/checkouts/odu");
     expect(spec.detached).toBe(true);
     expect(spec.stdio).toEqual(["ignore", "pipe", "pipe"]);
+  });
+});
+
+describe("the bus is a SOCKET, not a variable", () => {
+  // The bug this exists for: a GitHub Actions runner sets INVOCATION_ID and
+  // XDG_RUNTIME_DIR and has no user manager at all. Reading those names as
+  // evidence chose `systemd-run --user`, which failed at submission — and every
+  // run started through the web service was reported as a run that could not
+  // start. Nothing was wrong with any of those runs.
+  it("refuses a named bus whose socket is not there", () => {
+    const looked: string[] = [];
+    const reachable = userManagerReachable(
+      { DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus" },
+      (path) => {
+        looked.push(path);
+        return false;
+      },
+    );
+    expect(reachable).toBe(false);
+    expect(looked).toEqual(["/run/user/1000/bus"]);
+  });
+
+  it("looks under XDG_RUNTIME_DIR when no address names a path", () => {
+    const looked: string[] = [];
+    userManagerReachable({ XDG_RUNTIME_DIR: "/run/user/1000" }, (path) => {
+      looked.push(path);
+      return true;
+    });
+    expect(looked).toEqual(["/run/user/1000/bus"]);
+  });
+
+  it("has nowhere to look when neither variable is set", () => {
+    expect(userManagerReachable({}, () => true)).toBe(false);
+  });
+
+  it("reads an address that names no path as naming none", () => {
+    expect(busSocketPath("unix:abstract=/tmp/dbus-abc")).toBeNull();
+    expect(busSocketPath("unix:path=/run/user/1000/bus,guid=deadbeef")).toBe(
+      "/run/user/1000/bus",
+    );
+  });
+
+  it("takes the detached branch, with the honest reason, when nothing answers", () => {
+    const p = survivableSpawnPlan(
+      { INVOCATION_ID: "9d7a", XDG_RUNTIME_DIR: "/run/user/1000" },
+      "linux",
+      UNIT,
+      () => false,
+    );
+    expect(p.mechanism).toBe("detached");
+    expect(p.reason).toContain("no user session bus is reachable");
   });
 });
 
@@ -255,9 +320,10 @@ describe("what a spawned process EXITING means", () => {
 
   it("is NOT death for systemd-run — it only submitted the unit", () => {
     const plan = survivableSpawnPlan(
-      { INVOCATION_ID: "abc", DBUS_SESSION_BUS_ADDRESS: "unix:/run/bus" },
+      { INVOCATION_ID: "abc", DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/bus" },
       "linux",
       "odu-run-x",
+      HAS_BUS,
     );
     expect(plan.mechanism).toBe("systemd-run");
     expect(plan.exitIsDeath).toBe(false);

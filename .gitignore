@@ -11,3 +11,8 @@ result-*
 .codex-debate/
 .agent-debate/
 .lens-debate/
+
+# The browser bundle a local `bun scripts/build-web-ui.ts` writes. The one the
+# service ships is built by Nix into the store (`.#web-ui`) and baked onto the
+# wrapper as ODU_WEB_DIST; this directory is only ever a developer's own copy.
+packages/web-ui/dist/

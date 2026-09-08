@@ -7,6 +7,13 @@ in
 {
   kolu-surface = mkKoluPackage "surface";
   kolu-surface-mcp = mkKoluPackage "surface-mcp";
+  # PR 2's three faces. `surface-app` is the browser shell and the one HTTP/WS
+  # listener the web service binds; `surface-cli` projects the same surface as
+  # argv (`odu surface …`); `url-shape` is `surface-app`'s own dependency (the
+  # IPv6-safe authority spelling behind the bound URL it reports).
+  kolu-surface-app = mkKoluPackage "surface-app";
+  kolu-surface-cli = mkKoluPackage "surface-cli";
+  kolu-url-shape = mkKoluPackage "url-shape";
   kolu-surface-remote = mkKoluPackage "surface-remote";
   # `surface-remote` imports `@kolu/shell-quote` (its ssh-command construction),
   # `@kolu/surface-map` (`serveHostMap`'s host-topology surface), and `@kolu/log`
@@ -38,4 +45,23 @@ in
     ''
       cp -r ${(import ../npins).osfacts}/client-ts $out
     '';
+
+  # THE BINARY THE CLIENT ABOVE IS A FACE FOR.
+  #
+  # odu hydrated `osfacts-client` and then never gave it a binary to spawn, so
+  # the singleton gate's start-time reader was hand-rolled instead — `/proc`
+  # field-22 arithmetic against a hardcoded `USER_HZ = 100` on Linux, and a
+  # `Date.parse` of locale-formatted `ps -o lstart=` on macOS. The stated reason
+  # was that shipping osfacts would need a flake input odu's policy forbids.
+  # That was simply wrong: the same pin the client is grafted from ALSO carries
+  # the Rust package, its `default.nix` takes `{ pkgs }`, and this is what
+  # composing it costs.
+  #
+  # `doCheck = false` because odu is not the place to run osfacts' own test
+  # suite. The pin's `checkPhase` is a cargo-nextest gate that belongs to
+  # osfacts' CI; running it here would put it on the critical path of every cold
+  # `nix build .#odu` — including a consumer's first `nix run github:juspay/odu`
+  # — to re-prove something upstream already proved at this exact revision.
+  osfacts = ((import (import ../npins).osfacts { pkgs = final; }).overrideAttrs
+    (_: { doCheck = false; }));
 }

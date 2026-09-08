@@ -70,6 +70,55 @@ const SANCTIONED = new Map<string, string>([
       "iterator. All three exist so no consumer re-derives the laziness, " +
       "teardown and dispatch rules — nor invents a second boundary.",
   ],
+  [
+    "packages/cli/src/serviceCli.ts",
+    "The generated CLI face's PROCESS EDGE. `@kolu/surface-cli` returns command " +
+      "VALUES and runs no program, so the host owns the run — and here the host " +
+      "hands the whole tree to `NodeRuntime.runMain`, which writes the failure's " +
+      "own line and maps the verdict to one of the five documented exit codes. " +
+      "An argv face's last act is to end the process, so it is an edge by " +
+      "construction.",
+  ],
+  [
+    "packages/cli/src/web.ts",
+    "The web daemon's COMPOSITION ROOT. `serveSurfaceApp` is an Effect over a " +
+      "Scope — the listener's whole teardown hangs off it — and the survivable " +
+      "spawn driver is an Effect value, while `daemonMain` and odu's own argv " +
+      "dispatch are Promise-shaped. This file is that crossing, and the only " +
+      "one that may open and close the listener's scope.",
+  ],
+  [
+    "packages/web-ui/src/app.tsx",
+    "The BROWSER's UI edge. A surface procedure is an `Effect` — a description — " +
+      "and a click is the moment one becomes execution, so this file's `run` " +
+      "helper is where that crossing happens for every control on the page. ONE " +
+      "helper rather than a run per button, which is what keeps a control's " +
+      "whole story (pending → receipt or refusal) in one function; the views " +
+      "themselves take callbacks and hold no client at all.",
+  ],
+  [
+    "packages/cli/src/serviceFace.ts",
+    "The public commands' EDGE, and the reason it is ONE file for all of them. " +
+      "Every public command is a client of the shared service, so each ends " +
+      "with a surface procedure — an `Effect` carrying a declared " +
+      "`ServiceRefused` channel — becoming bytes on a stream and a number for " +
+      "`process.exit`. `call` is where that happens, once, which is also what " +
+      "keeps a REFUSAL apart from a dead link: both arrive on one error " +
+      "channel and they must not become the same exit. The four command " +
+      "modules that import it (`serviceCommands`, `serviceStatus`, " +
+      "`serviceVenue`, `servicePipeline`) are four SUBJECTS, not four edges — " +
+      "which is exactly the property this entry exists to hold, because a " +
+      "second `Effect.runPromise` in any of them would be a second answer to " +
+      "what a refusal means.",
+  ],
+  [
+    "packages/cli/src/webLauncher.ts",
+    "Converging on the singleton. Reading the service cell and asking a running " +
+      "daemon to drain are Effects; everything that decides between adopt, " +
+      "spawn and refuse is ordinary Promise code a test drives without a " +
+      "runtime. The two are joined here rather than leaking `Effect` into every " +
+      "branch of that decision.",
+  ],
 ]);
 
 const IDENT = "[A-Za-z_$][A-Za-z0-9_$]*";

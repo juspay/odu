@@ -10,7 +10,7 @@
  *
  * Not a test file — no `bun:test` import, and the name misses the `*.test.ts`
  * glob — so it is imported by the harnesses rather than collected as a suite.
- * Same convention as `packages/cli/src/mcp/serveForTest.ts`.
+ * Same convention as `packages/execution/src/coordinator/serveForTest.ts`.
  */
 
 import type { RunHeader } from "@odu/run-client/surface";

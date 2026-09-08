@@ -16,35 +16,9 @@
  * printing it wrongly.
  */
 
-import { bold, dim, link } from "./ansi";
 import { createDisplay } from "./display";
-import {
-  countsLine,
-  outcomeOf,
-  summarize,
-} from "@odu/execution/common/verdict";
-import type { MakeRunFace, VerdictInput } from "@odu/execution/common/presentation";
-import { formatGoDuration } from "@odu/execution/common/duration";
-import { logPathFor } from "@odu/run-client/nodeId";
-import {
-  commitLabel,
-  OUTCOME_COLOR,
-  OUTCOME_LABEL,
-  statusGlyph,
-} from "./render";
-import { unpostedNote } from "@odu/execution/coordinator/statuses";
-
-/** The bucket list and order `odu run`'s final summary has always printed.
- *  Kept explicit and zero-inclusive: the live faces drop empty buckets (a
- *  status bar has no room for `0 errored`), but this line is the run's durable
- *  verdict and is the kind of output people grep. */
-const VERDICT_BUCKETS = [
-  "ok",
-  "failed",
-  "errored",
-  "skipped",
-  "cancelled",
-] as const;
+import type { MakeRunFace } from "@odu/execution/common/presentation";
+import { printVerdict } from "./render";
 
 /** How `odu run` decides which of the three renderings to be. Passed in rather
  *  than probed, so a test states the world instead of the process's tty bits
@@ -87,41 +61,7 @@ export function cliRunFace(env: FaceEnv): MakeRunFace {
   };
 }
 
-/** The human verdict summary — foreground completion only, never mid-linger
- *  where the live display still owns the screen. */
-export function printVerdict(input: VerdictInput): void {
-  const { state } = input;
-  const counts = summarize(state);
-  const shaLabel = commitLabel({ sha7: input.sha7, dirty: input.dirty });
-  const lines: string[] = [
-    dim(
-      `── ci run summary @ ${
-        input.commitUrl !== null ? link(shaLabel, input.commitUrl) : shaLabel
-      } ──`,
-    ),
-  ];
-  for (const id of state.order) {
-    const node = state.nodes[id];
-    if (node === undefined) continue;
-    const glyph = statusGlyph(node.status);
-    const dur =
-      node.durationMs !== null
-        ? ` ${dim(formatGoDuration(node.durationMs))}`
-        : "";
-    const logRef =
-      node.status === "failed" || node.status === "errored"
-        ? dim(`  ${logPathFor(input.sha7, id)}`)
-        : "";
-    lines.push(`  ${glyph} ${id.padEnd(44)} ${node.status}${dur}${logRef}`);
-  }
-  const debt = unpostedNote(input.unpostedCount);
-  // The outcome taxonomy and the counts line both come from `common/verdict` —
-  // this summary, the live header and the live status bar were three
-  // hand-rolled versions, and only this one knew about INCOMPLETE.
-  const outcome = outcomeOf(counts);
-  const label = bold(OUTCOME_COLOR[outcome](OUTCOME_LABEL[outcome]));
-  lines.push(
-    `${countsLine(counts, VERDICT_BUCKETS, true)} — ${label}${debt !== "" ? dim(debt) : ""}`,
-  );
-  process.stderr.write(`${lines.join("\n")}\n`);
-}
+// The verdict block moved to `./render`, which is where a terminal
+// projection of a run belongs and — unlike this file — is reachable from a
+// public client. `odu run` is one now, and it has to print the same block.
+export { printVerdict } from "./render";

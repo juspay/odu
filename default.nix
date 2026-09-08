@@ -12,7 +12,7 @@
 # `lib.mkBun2nix { inherit pkgs; }` (juspay/bun2nix rawflake standalone API).
 # Every derivation here is backed by `base`, so a b2n-less import can only
 # reach the overlay attrs — `base` throws on use if bun2nix isn't wired up.
-{ pkgs ? import ./nix/nixpkgs.nix { }, b2n ? null, selfFlake ? null }:
+{ pkgs ? import ./nix/nixpkgs.nix { }, b2n ? null, selfFlake ? null, selfRev ? null }:
 let
   version = (pkgs.lib.importJSON ./package.json).version;
 
@@ -32,11 +32,66 @@ let
       ./bunfig.toml
       ./bun.nix
       ./tsconfig.json
+      # The favicon the browser bundle serves. `scripts/build-web-ui.ts` reads
+      # it from the repo root rather than from a copy beside the bundle, so it
+      # has to be in the source the derivation sees — without this the build
+      # fails inside the sandbox on a file that is right there in the checkout.
+      ./logo.svg
       ./src
-      ./packages
+      # Every workspace member EXCEPT the acceptance suite's scenarios. That
+      # suite drives this very package, so leaving its features and steps in the
+      # fileset would make `.#odu` — a sandboxed `bun install` and hydrate —
+      # rebuild on every edit to a `.feature` file, which is to say on every edit
+      # made while writing one. Its `package.json` and `cucumber.js` stay in,
+      # because `bun install --frozen-lockfile` has to be able to resolve the
+      # member; nothing in the built binary reads the rest.
+      (pkgs.lib.fileset.difference ./packages (pkgs.lib.fileset.unions [
+        ./packages/web-acceptance/features
+        ./packages/web-acceptance/step_definitions
+        ./packages/web-acceptance/support
+      ]))
       ./scripts
     ];
   };
+
+  # The BROWSER BUNDLE the web service serves.
+  #
+  # Built from `base` — which already has node_modules and the hydrated
+  # `@kolu/*` sources — by the one call `@kolu/surface-app/bun` publishes, so
+  # the dist satisfies the freshness contract its own server half is built to
+  # serve: content-hashed assets, the commit on the `no-store` shell, module
+  # preloads, and precompressed siblings.
+  #
+  # SOLID'S COMPILER RUNS HERE, and that is the point of building the bundle in
+  # Nix rather than committing one: `packages/web-ui` is written in Solid JSX,
+  # `scripts/build-web-ui.ts` runs `babel-preset-solid` over it as a `Bun.build`
+  # plugin, and the presets are pinned exactly in the root manifest and fetched
+  # through `bun.nix` like every other dependency. So the page a user gets is
+  # compiled by the same toolchain as the page a developer builds, with no step
+  # that depends on what happens to be installed — Nix stays the only supported
+  # way to run odu, compiler included.
+  #
+  # A DERIVATION of its own rather than a step inside `base`: the bundle is what
+  # a browser downloads and `base` is what a coordinator runs, and a lane host
+  # realising the runner closure has no business fetching a stylesheet.
+  web-ui =
+    if b2n == null
+    then throw "odu's web bundle needs `b2n` (lib.mkBun2nix output) — invoke via flake.nix"
+    else
+      pkgs.runCommand "odu-web-ui"
+        {
+          nativeBuildInputs = [ pkgs.bun ];
+          meta.description = "odu's browser bundle";
+        } ''
+        cp -r ${base} ./tree
+        chmod -R u+w ./tree
+        cd ./tree
+        # The commit the SHELL reports, and the one the service reports, are one
+        # value — which is what makes a staleness comparison a real comparison
+        # rather than two independent guesses.
+        ${pkgs.lib.optionalString (selfRev != null) ''export ODU_COMMIT_HASH="${selfRev}"''}
+        bun scripts/build-web-ui.ts $out
+      '';
 
   # The repo tree with node_modules installed and the @kolu/* surface
   # libraries hydrated from the npins kolu pin — bun-runnable, no build
@@ -93,6 +148,9 @@ let
           sh scripts/hydrate-kolu-packages.sh \
             ${pkgs.kolu-surface} @kolu/surface \
             ${pkgs.kolu-surface-mcp} @kolu/surface-mcp \
+            ${pkgs.kolu-surface-app} @kolu/surface-app \
+            ${pkgs.kolu-surface-cli} @kolu/surface-cli \
+            ${pkgs.kolu-url-shape} @kolu/url-shape \
             ${pkgs.kolu-surface-remote} @kolu/surface-remote \
             ${pkgs.kolu-shell-quote} @kolu/shell-quote \
             ${pkgs.kolu-surface-map} @kolu/surface-map \
@@ -144,10 +202,65 @@ let
     # win. As an unconditional --set it read as an override while silently
     # being a hard pin, so a test pointing $ODU_GH_BIN at a stand-in got the
     # real `gh` — and the real GitHub — without a word.
+    #
+    # ODU_WEB_DIST IS NOT. It is --set, and the difference between it and
+    # ODU_GH_BIN is the difference between a tool odu CALLS and a part of what
+    # odu IS.
+    #
+    # `gh` is somebody else's program, invoked at an edge, spending the caller's
+    # own credential; naming a different one changes which external service the
+    # call reaches, not what this package is. The browser bundle is the
+    # application's own front end. Served under this wrapper's ODU_BUILD_ID, an
+    # ambient dist means two people can dial the same daemon, read the same
+    # build id off `service.build`, and be looking at different applications —
+    # and the id is what `ensureService` compares to decide a running daemon is
+    # the same build and may be adopted. An identity that can be true of two
+    # different programs is not an identity.
+    #
+    # It was --set-default for a developer iterating on the browser. That
+    # workflow is `just run`, which rebuilds and runs the package — the same
+    # honest cost the justfile already documents for deleting `bun run start`.
+    # Iterating against a build whose page is not the build's page is exercising
+    # an application no user has, which is the whole thing this wrapper exists
+    # to stop.
+    #
+    # ODU_BUILD_ID IS THIS DERIVATION, AND IT IS UNCONDITIONAL.
+    #
+    # Two things were wrong with baking `base.outPath` under `selfRev != null`.
+    #
+    # It named the wrong thing. `base` is the hydrated SOURCE tree; the binary a
+    # user actually runs is composed outside it — this wrapper, the web-ui
+    # bundle, the pinned bun/git/gh/just/openssh, the binary-cache declaration,
+    # the runner flake. Bumping `pkgs.gh` or editing nix/binary-cache.nix
+    # produced a materially different application with an IDENTICAL build id,
+    # and `ensureService` uses that id to decide whether an explicit upgrade is
+    # needed. `$out` is the out-path of the complete package, so it covers every
+    # input of the thing that runs — which is what an identity has to do.
+    #
+    # And it was gated on a navigable commit, which is a DIFFERENT fact. A dirty
+    # local tree still produces a complete, hash-identified Nix package; calling
+    # it "off-nix" and refusing it an identity made the singleton's compatible
+    # -reuse branch permanently dead on every developer machine. So identity is
+    # unconditional and provenance stays optional beside it.
+    #
+    # This deviates from `@kolu/surface-daemon`'s `readBakedIdentity`, which
+    # requires the pair or neither on the premise that "a Nix build id means the
+    # source commit was knowable". That premise does not hold for a dirty build,
+    # so odu reads the two env vars itself (see `bakedBuild`) rather than
+    # adopting a rule that would erase the identity of a real package.
+    #
+    # The full store path, not its basename: `ServiceBuild.self` already carries
+    # `$out/bin/odu`, so the basename is derivable from what is already on the
+    # wire, and the full path is the thing an operator can hand to
+    # `nix path-info` when a mismatch has to be explained.
     makeWrapper ${pkgs.bun}/bin/bun $out/bin/odu \
       --add-flags "${base}/src/main.ts" \
       --set-default ODU_GH_BIN "${pkgs.gh}/bin/gh" \
       --set ODU_SELF "$out/bin/odu" \
+      --set ODU_WEB_DIST "${web-ui}" \
+      --set ODU_BUILD_ID "$out" \
+      --set ODU_OSFACTS_BIN "${pkgs.osfacts}/bin/osfacts" \
+      ${pkgs.lib.optionalString (selfRev != null) ''--set ODU_COMMIT_HASH "${selfRev}"''} \
       --set ODU_AGENT_SUBSTITUTERS "${pkgs.lib.concatStringsSep " " binaryCache.substituters}" \
       --set ODU_AGENT_TRUSTED_PUBLIC_KEYS "${pkgs.lib.concatStringsSep " " binaryCache.trustedPublicKeys}" \
       ${pkgs.lib.optionalString (selfFlake != null) ''--set ODU_RUNNER_FLAKE "${selfFlake}"''} \
@@ -163,5 +276,5 @@ let
   '';
 in
 {
-  inherit odu odu-runner base;
+  inherit odu odu-runner base web-ui;
 }

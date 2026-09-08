@@ -23,8 +23,9 @@
  *     signal addressed to the launcher's group reaches it, and its parent
  *     exiting reparents rather than reaps it.
  *
- * WHAT CHANGED, AND THE RULING IT REVISITS. `packages/cli/src/mcp/runTool.ts` records a
- * decision (2026-09-02) that odu would NOT escape the host's cgroup — the
+ * WHAT CHANGED, AND THE RULING IT REVISITS. odu's since-deleted per-checkout
+ * MCP face recorded a decision (2026-09-02) that odu would NOT escape the
+ * host's cgroup — the
  * limit was admitted and the corpse reported instead. That decision is why
  * `deadRun` exists and why every face names a death rather than answering as
  * if the run never happened, and none of that is undone here: a coordinator
@@ -71,7 +72,7 @@
  *     exactly the split this file needs; waiting for the socket is odu's.
  *
  * HONEST ABOUT WHAT IS MEASURED. The detached branch is exercised by
- * `packages/cli/src/mcp/spawnSurvival.test.ts` against the real runtime and the real spawn
+ * `packages/execution/src/coordinator/spawnSurvival.test.ts` against the real runtime and the real spawn
  * options. The systemd branch is NOT covered by odu's suite: it needs a user
  * manager and a session bus, which the Nix build sandbox and the CI container
  * do not have. {@link survivableSpawnPlan} is pure and IS tested — what a
@@ -80,27 +81,44 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { closeSync, mkdirSync, openSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, statSync } from "node:fs";
 import {
   type DaemonSpawnConfig,
   type SpawnDriverDeps,
   survivableSpawnDriver,
 } from "@kolu/surface-daemon-supervisor";
 import { readFileSlice } from "@odu/run-history/store";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { dialRun } from "@odu/run-client/dial";
 import { runDetached } from "../common/effectEdge";
 
-/** The argv prefix that re-invokes the odu CLI. The nix wrapper bakes
- *  `ODU_SELF` to its own store path; in a dev checkout we re-exec the entry
- *  through the very bun that is running us (`process.execPath`), so the child
- *  gets this exact runtime rather than whatever a bare `bun` on its PATH
- *  resolves to. */
+/**
+ * The argv prefix that re-invokes odu — the Nix wrapper's own absolute path,
+ * and nothing else.
+ *
+ * This used to fall back to `[process.execPath, process.argv[1]]`, re-execing
+ * the entry through whatever interpreter happened to be running. It looked like
+ * a courtesy to a dev checkout and it was a hole in the runtime contract: Nix is
+ * odu's only supported runtime, and a fallback meant an unpackaged odu could
+ * spawn coordinators that half-worked — with none of the wrapper's baked
+ * locators, so the child hit `nix`, `git` and `gh` from an ambient PATH and
+ * failed several layers away from the cause.
+ *
+ * A missing `ODU_SELF` is therefore a MISBUILT PACKAGE, and the throw says so
+ * where it can still be understood. It is not reachable from a supported
+ * invocation: every `nix run` of odu goes through the wrapper that sets it.
+ */
 export function oduSelfArgv(env: NodeJS.ProcessEnv = process.env): string[] {
   const self = env.ODU_SELF;
-  if (self !== undefined && self !== "") return [self];
-  const entry = process.argv[1];
-  return entry !== undefined ? [process.execPath, entry] : [process.execPath];
+  if (self === undefined || self === "") {
+    throw new Error(
+      "odu: ODU_SELF is unset, so odu cannot re-invoke itself. The Nix wrapper " +
+        "bakes it (see default.nix) and nothing sets it at runtime — this is a " +
+        "misbuilt package, not a mode. Run odu from its Nix package: " +
+        "`nix run github:juspay/odu -- …`, or `nix run . -- …` in a checkout.",
+    );
+  }
+  return [self];
 }
 
 /** The spawn options that make a coordinator outlive its LAUNCHER'S plain
@@ -167,9 +185,11 @@ export interface SpawnEnv {
    *  than parsing `/proc/self/cgroup`, which differs between cgroup v1 and v2
    *  and is absent entirely on darwin. */
   INVOCATION_ID?: string | undefined;
-  /** Without a session bus there is no user manager to ask, so `systemd-run
-   *  --user` cannot work even inside a unit. */
+  /** Where the session bus is — checked for a real socket, not merely for a
+   *  value, because `systemd-run --user` cannot work without a user manager on
+   *  the other end of it however confidently the variable is set. */
   DBUS_SESSION_BUS_ADDRESS?: string | undefined;
+  /** The fallback place to look for that socket (`$XDG_RUNTIME_DIR/bus`). */
   XDG_RUNTIME_DIR?: string | undefined;
   /** The explicit opt-out. A caller that has its own supervision, or that has
    *  measured `systemd-run` misbehaving on its host, sets this and gets the
@@ -180,9 +200,61 @@ export interface SpawnEnv {
   readonly [other: string]: string | undefined;
 }
 
+/** Is there a unix socket at this path? A missing file, a regular file and a
+ *  directory all answer `false`; only an actual socket is a bus. */
+function isSocket(path: string): boolean {
+  try {
+    return statSync(path).isSocket();
+  } catch {
+    return false;
+  }
+}
+
+/** The filesystem path out of a D-Bus address, or `null` for one that names no
+ *  path (an `abstract=` or `tcp:` address, neither of which a session bus
+ *  normally is). */
+export function busSocketPath(address: string): string | null {
+  for (const part of address.split(",")) {
+    const at = part.indexOf("path=");
+    if (at === -1) continue;
+    const path = part.slice(at + "path=".length);
+    if (path !== "") return path;
+  }
+  return null;
+}
+
 /**
- * Decide how to start a coordinator. Pure — every input is an argument — so
- * the decision is testable on a machine that has none of these mechanisms.
+ * Is there a user systemd manager to submit a transient unit TO?
+ *
+ * **The name of a bus is not a bus.** `DBUS_SESSION_BUS_ADDRESS` and
+ * `XDG_RUNTIME_DIR` are set by plenty of environments that have no user manager
+ * at all — a GitHub Actions runner is the one that cost this repo a CI suite —
+ * and on those, `systemd-run --user` fails at submission. A launcher then
+ * reports that as a run which could not start, which is a true sentence about
+ * the wrong thing: nothing was wrong with the run.
+ *
+ * So the probe is for the SOCKET `systemd-run` will actually connect to, not
+ * for the variable that names it. Injectable, because the decision must stay
+ * testable on a machine that has a bus and on one that does not.
+ */
+export function userManagerReachable(
+  env: SpawnEnv,
+  exists: (path: string) => boolean = isSocket,
+): boolean {
+  const address = env.DBUS_SESSION_BUS_ADDRESS;
+  if (address !== undefined && address !== "") {
+    const path = busSocketPath(address);
+    if (path !== null) return exists(path);
+  }
+  const runtime = env.XDG_RUNTIME_DIR;
+  if (runtime === undefined || runtime === "") return false;
+  return exists(join(runtime, "bus"));
+}
+
+/**
+ * Decide how to start a coordinator. Pure — every input is an argument,
+ * including the bus probe — so the decision is testable on a machine that has
+ * none of these mechanisms.
  *
  * `unitName` scopes the transient service to the run, so two coordinators
  * never collide on a unit name and `systemctl --user status` names the run an
@@ -192,6 +264,7 @@ export function survivableSpawnPlan(
   env: SpawnEnv,
   platform: NodeJS.Platform,
   unitName: string,
+  reachable: (env: SpawnEnv) => boolean = userManagerReachable,
 ): SpawnPlan {
   const detached = (reason: string): SpawnPlan => ({
     mechanism: "detached",
@@ -215,11 +288,7 @@ export function survivableSpawnPlan(
       "not running under a systemd unit; a detached process group is already independent",
     );
   }
-  const hasBus =
-    (env.DBUS_SESSION_BUS_ADDRESS !== undefined &&
-      env.DBUS_SESSION_BUS_ADDRESS !== "") ||
-    (env.XDG_RUNTIME_DIR !== undefined && env.XDG_RUNTIME_DIR !== "");
-  if (!hasBus) {
+  if (!reachable(env)) {
     // Inside a unit but with no user manager to ask. Said out loud, because
     // this is the case where the coordinator genuinely WILL die with its host
     // and an operator is entitled to know before the run does.
@@ -240,40 +309,109 @@ export function survivableSpawnPlan(
   };
 }
 
-/** The variables a transient unit must be told about, as `KEY=VALUE`.
+/**
+ * EVERYTHING AN ODU CHILD NEEDS FROM ITS PARENT'S ENVIRONMENT — one list.
  *
- *  An allowlist, not the whole environment: a unit inherits the manager's
- *  `PATH`/`HOME` already, and forwarding a launcher's entire environment into
- *  a service is how an orchestrator's ambient identity variables end up inside
- *  every recipe the run executes. What is named here is what odu itself reads
- *  and what the platform needs to find its own runtime directory. */
-export function forwardedEnv(env: SpawnEnv): Record<string, string> {
-  const KEYS = [
-    "ODU_HOSTS",
-    "ODU_STATE_DIR",
-    "ODU_RUNNER_FLAKE",
-    "ODU_SELF",
-    "ODU_GH_BIN",
-    "ODU_AGENT_SUBSTITUTERS",
-    "ODU_AGENT_TRUSTED_PUBLIC_KEYS",
-    "ODU_LINGER_IDLE_MS",
-    "XDG_RUNTIME_DIR",
-    "XDG_STATE_HOME",
-    "NIX_PATH",
-    "PATH",
-    "HOME",
-  ];
-  // A MAP, not `KEY=VALUE` strings. The `--setenv` spelling belongs to whoever
-  // builds the argv — which is kolu's driver now — and returning it from here
-  // meant the one caller parsed it straight back apart on `indexOf("=")`.
+ * There were two, and the split is what let a real bug through: the daemon's
+ * copy named `NIX_PATH` and not `NIX_CONF_DIR`, so a web daemon started where
+ * nix keeps its configuration in the user's home spawned coordinators that
+ * could not evaluate a flake at all. The failure appeared four layers away, as
+ * a run that would not provision, and nothing connected it to a list somebody
+ * had written out twice.
+ *
+ * The volatility is one thing — "what odu and the toolchain it shells out to
+ * read from the environment" — so it is written once. Three groups, because a
+ * reader deciding whether to add a variable needs to know which question it
+ * answers:
+ *
+ *   - what the PLATFORM needs to be itself (a home, a PATH, a locale);
+ *   - what NIX needs to find its store, its config and its certificates —
+ *     odu's whole job is shelling out to it, and a child that has these wrong
+ *     fails in ways that look like odu bugs;
+ *   - what ODU itself reads.
+ *
+ * It is an allowlist and not the whole environment, because forwarding a
+ * launcher's entire environment is how an orchestrator's ambient identity ends
+ * up inside every recipe a run executes.
+ */
+export const ODU_CHILD_ENV_KEYS: readonly string[] = [
+  // The platform.
+  "HOME",
+  "PATH",
+  "SHELL",
+  "USER",
+  "LOGNAME",
+  "LANG",
+  "LC_ALL",
+  "TERM",
+  "TZ",
+  "TMPDIR",
+  "XDG_RUNTIME_DIR",
+  "XDG_STATE_HOME",
+  "XDG_CACHE_HOME",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  // Nix. `NIX_CONF_DIR` / `NIX_USER_CONF_FILES` are where `experimental-features`
+  // lives on a single-user install, which is what a CI runner is; `NIX_PROFILES`
+  // and `NIX_USER_PROFILE_DIR` are how such an install finds itself at all.
+  "NIX_PATH",
+  "NIX_REMOTE",
+  "NIX_CONFIG",
+  "NIX_CONF_DIR",
+  "NIX_USER_CONF_FILES",
+  "NIX_PROFILES",
+  "NIX_USER_PROFILE_DIR",
+  "NIX_STORE_DIR",
+  "NIX_STATE_DIR",
+  "NIX_SSL_CERT_FILE",
+  "SSL_CERT_FILE",
+  "LOCALE_ARCHIVE",
+  // GitHub. Commit statuses have always been posted by a coordinator this list
+  // launches, so `gh` resolving in a child is not a new capability — but it has
+  // been resolving by luck: `HOME` and `PATH` carry a logged-in `gh` on a
+  // developer's machine and carry nothing on a runner, where the credential is
+  // `GH_TOKEN` and the config lives wherever `GH_CONFIG_DIR` says. `odu protect`
+  // is what made the gap visible: it is served by the daemon now, and a daemon
+  // whose `gh` cannot authenticate refuses `no_credential` for an environment
+  // the operator had set correctly. `GH_HOST` is here for the same reason a
+  // GitHub Enterprise host is not github.com.
+  "GH_TOKEN",
+  "GH_HOST",
+  "GH_CONFIG_DIR",
+  // odu's own locators.
+  "ODU_HOSTS",
+  "ODU_STATE_DIR",
+  "ODU_RUNNER_FLAKE",
+  "ODU_SELF",
+  "ODU_GH_BIN",
+  "ODU_AGENT_SUBSTITUTERS",
+  "ODU_AGENT_TRUSTED_PUBLIC_KEYS",
+  "ODU_LINGER_IDLE_MS",
+  "ODU_NO_SYSTEMD_RUN",
+];
+
+/** Pick the named variables out of an environment. An empty value is UNSET,
+ *  not an empty assignment: forwarding `ODU_HOSTS=` into a unit is not the same
+ *  as leaving it absent. */
+export function pickEnv(
+  env: Record<string, string | undefined>,
+  keys: readonly string[],
+): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const k of KEYS) {
+  for (const k of keys) {
     const v = env[k];
-    // An empty value is UNSET, not an empty assignment: forwarding `ODU_HOSTS=`
-    // into a unit is not the same as leaving it absent.
     if (v !== undefined && v !== "") out[k] = v;
   }
   return out;
+}
+
+/** The variables a transient unit must be told about.
+ *
+ *  A MAP, not `KEY=VALUE` strings. The `--setenv` spelling belongs to whoever
+ *  builds the argv — which is kolu's driver now — and returning it from here
+ *  meant the one caller parsed it straight back apart on `indexOf("=")`. */
+export function forwardedEnv(env: SpawnEnv): Record<string, string> {
+  return pickEnv(env, ODU_CHILD_ENV_KEYS);
 }
 
 /**
@@ -330,8 +468,8 @@ export async function defaultWaitForSocket(
 export const READINESS_CEILING_MS = 120_000;
 
 /**
- * Wait until the coordinator is serving, given what this plan's process exit
- * actually means.
+ * Wait until `ready` says so, given what this plan's process exit actually
+ * means.
  *
  * Two different waits behind one call, because the launch mechanisms report
  * two different things. A DETACHED spawn forked the coordinator itself, so its
@@ -339,14 +477,23 @@ export const READINESS_CEILING_MS = 120_000;
  * SUBMITTED the unit and exits while the service is still starting, so its
  * exit bounds nothing — a non-zero code means the job was refused, and a zero
  * code means the wait carries on against its own deadline.
+ *
+ * **What `ready` asks is the CALLER's business, and it matters which question.**
+ * This function used to take a socket path and probe it, which reads as
+ * "readiness is a socket that answers" — and that is a fact about a CHECKOUT,
+ * not about a run. A checkout serves one run after another on one path, so the
+ * incumbent's socket answers the moment a replacement is asked for, and a
+ * launcher believing it would report a run that never started as started. The
+ * question a launcher wants is about the run it minted an id for; see
+ * `./launcher`.
  */
 export async function waitForReadiness(
   plan: SpawnPlan,
-  socketPath: string,
+  ready: () => Promise<boolean>,
   onExit: Promise<number>,
   ceilingMs: number = READINESS_CEILING_MS,
 ): Promise<boolean> {
-  if (plan.exitIsDeath) return defaultWaitForSocket(socketPath, onExit);
+  if (plan.exitIsDeath) return pollUntilSocketOrExit(ready, onExit);
   const refused = onExit.then((code) => code !== 0);
   const deadline = new Promise<void>((resolve) => {
     const timer = setTimeout(resolve, ceilingMs);
@@ -358,7 +505,7 @@ export async function waitForReadiness(
     refused.then((no) => (no ? undefined : new Promise<void>(() => {}))),
     deadline,
   ]);
-  return pollUntilSocketOrExit(() => socketAnswers(socketPath), give);
+  return pollUntilSocketOrExit(ready, give);
 }
 
 /**

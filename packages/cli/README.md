@@ -2,8 +2,10 @@
 
 The two ways of **watching** a run, and asking things of one.
 
-The native command line with its live matrix, and the MCP agent surface. Both
-are faces; neither is how a run happens. `@odu/execution` is that.
+The native command line and the MCP agent surface. Both are faces; neither is
+how a run happens. `@odu/execution` is that — and since the consolidation, so
+is `@odu/service`: every command here is a CLIENT of the shared daemon, and the
+one thing this package may still add is argument grammar, rendering and exits.
 
 Part of the odu repo — `"@odu/cli": "workspace:*"`.
 
@@ -28,21 +30,25 @@ direction lands on one of them.
 
 | | |
 | --- | --- |
-| `src/main.ts`'s commands | `status` · `logs` · `attach` · `wait` · `rerun` · `cancel` · `runs` · `history` · `hosts` · `lease` · `release` · `protect` — argument grammar, output, and exits |
-| `src/liveView.ts`, `src/display.ts`, `src/render.ts` | the live matrix, the three renderings a run picks between (NDJSON, live, plain), and what a status LOOKS like. What a status MEANS is `@odu/execution`'s `common/verdict.ts` |
+| `src/main.ts`'s commands | `run` · `wait` · `rerun` · `cancel` · `logs` · `status` · `attach` · `hosts` · `lease` · `release` · `dump` · `graph` · `protect` · `history` — argument grammar, output, and exits. Every one is a CLIENT; `./authority.test.ts` derives that set from this file's own imports and proves none of them can reach the engine |
+| `src/liveView.ts`, `src/display.ts`, `src/render.ts` | the live matrix, the three renderings a run picks between (NDJSON, live, plain), and what a status LOOKS like. What a status MEANS is `@odu/execution`'s `common/verdict.ts`. Reached only from `run-coordinator` now: the matrix was driven by a direct dial into the coordinator, which no public command may hold, so `odu attach` prints a transition stream instead |
 | `src/runFace.ts` | this package's implementation of the engine's presentation port, and the one place the three-way choice between them is made |
-| `src/history.ts` | the durable faces — `logs --run`, `wait --run`, `rerun --run`, `history …` — over `@odu/run-history` |
-| `src/mcp/` | the agent surface: the projection of the live run, and the bespoke tools (`run`, `wait_for_settle`, `node_rerun`, `cancel`, `runs`, `lease`) |
+| `src/serviceFace.ts` | the plumbing every public command shares: the connection, the three-way outcome (answer / refusal / dead link), and the one exit table. Four command modules import it — `serviceCommands`, `serviceStatus`, `serviceVenue`, `servicePipeline` — which are four SUBJECTS, not four authorities |
+| `src/internalCli.ts` | `run-coordinator` and `lease-hold`: the argv workers a launcher types and a person never does. Out of `main.ts` so the wall's derivation starts at a root that is itself clean |
+| `src/serviceCli.ts`, `src/serviceMcp.ts` | the two non-browser faces of the shared service: the same contract projected as argv and as MCP, neither holding a verb of its own |
+| `src/web.ts`, `src/webLauncher.ts`, `src/webPorts.ts` | the daemon that serves that contract, how a client converges on the singleton, and the one place the engine is bound to it |
 
-## The line between the two faces
+## The line between the faces
 
-There isn't one, and that is deliberate: they are in the same package because
-they are the same kind of thing. `odu wait` and the MCP `wait_for_settle` share
-the settle core; `odu rerun` and `node_rerun` share the retry policy; `odu
-lease` and the `lease` tool share the holder. What they do not share is
-argument grammar and rendering, which is all either of them adds.
+There isn't one, and that is deliberate: `odu surface` and `odu mcp` are two
+projections of ONE contract (`@odu/service-client`'s `oduServiceSurface`), and
+both are derived from the same `expose` map rather than hand-written per face.
+That is what makes "a verb means the same thing to an agent and to a person" a
+property of the code instead of a claim about it. What they add is argument
+grammar and rendering, which is all either of them adds.
 
-Both take their answers from the engine. Neither reaches into it — the
-policies they call (`retryRun`, `waitForSettle`, `runCommand`) are the engine's
-exports, and the exit codes they return are derived from the engine's own
-classification rather than re-decided here.
+Neither holds run authority. Every mutation crosses the wire to the singleton
+daemon, so two agents driving two bridges are two clients of one truth rather
+than two opinions about it — and the public CLI cannot spawn a coordinator,
+dial a checkout's socket, or write the catalog. The one legitimate binding of
+the engine is `src/webPorts.ts`, on the daemon's side of that wall.

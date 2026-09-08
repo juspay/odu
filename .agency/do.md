@@ -5,7 +5,8 @@
 
 ## Test command
 `bun run test:unit` — runs the unit suite (`bun test src`).
-`bun run test:e2e` — runs the black-box e2e suite (`bun test tests/e2e`).
+`bun run test:e2e-cli` — runs the black-box CLI e2e suite (`bun test tests/e2e`).
+`just e2e` — runs BOTH end-to-end suites (`e2e-cli` and the browser `e2e-web`).
 
 ## Documentation
 Keep `README.md` in sync with user-facing changes.

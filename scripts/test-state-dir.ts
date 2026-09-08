@@ -21,7 +21,8 @@
  * what was written points it at a directory it keeps.
  */
 
-import { mkdtempSync } from "node:fs";
+import { afterAll } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -29,5 +30,51 @@ if (
   process.env.ODU_STATE_DIR === undefined ||
   process.env.ODU_STATE_DIR === ""
 ) {
-  process.env.ODU_STATE_DIR = mkdtempSync(join(tmpdir(), "odu-test-state-"));
+  const root = mkdtempSync(join(tmpdir(), "odu-test-state-"));
+  process.env.ODU_STATE_DIR = root;
+
+  // AND REMOVED AGAIN. "Disposable" was only half true: the directory was
+  // made every run and removed by nothing, so a machine that runs the suite
+  // often accumulates one catalog per run — each holding whole fixture runs,
+  // their logs and their manifests. Seventeen of them had piled up before
+  // anybody looked.
+  //
+  // Idempotent and total, because `exit` does not fire for a signal and a test
+  // process is interrupted more often than it finishes while somebody is
+  // working on it. The signals leave by the route they arrived, so a runner
+  // reading how its child died still gets the truth.
+  let removed = false;
+  const dispose = (): void => {
+    if (removed) return;
+    removed = true;
+    try {
+      rmSync(root, { recursive: true, force: true });
+    } catch {
+      // On the way out. A cleanup that throws would replace the suite's real
+      // verdict with its own.
+    }
+  };
+  // A PRELOAD's `afterAll` is global — it runs after the last test in the
+  // process, which is exactly when this directory stops being needed.
+  // `process.on("exit")` is NOT an option: `bun test` ends without calling exit
+  // listeners, so a teardown hung on that hook never runs at all. Nor is an
+  // `afterAll` from an ordinary imported module: it registers into the scope of
+  // the file that imported it FIRST, so it fires at the end of that one file
+  // and takes the shared service with it while ten files still need it.
+  //
+  // Which is why this is also where a suite hands in its own teardown. See
+  // `ODU_TEST_TEARDOWN`.
+  afterAll(() => {
+    const theirs = (globalThis as { ODU_TEST_TEARDOWN?: () => void })
+      .ODU_TEST_TEARDOWN;
+    if (theirs !== undefined) theirs();
+    dispose();
+  });
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    process.on(signal, () => {
+      dispose();
+      process.removeAllListeners(signal);
+      process.kill(process.pid, signal);
+    });
+  }
 }

@@ -28,7 +28,14 @@
 
 import { describe, expect, it } from "bun:test";
 import type { RunScope } from "@odu/run-history/schema";
-import { type LaunchRequest, launchArgv, unitNameFor } from "./launcher";
+import {
+  coordinatorEnv,
+  type LaunchRequest,
+  launchArgv,
+  mayRelaunchDetached,
+  unitNameFor,
+} from "./launcher";
+import type { SpawnPlan } from "./spawn";
 
 const RUN_ID = "0000000b-0002";
 const PARENT = "0000000a-0001";
@@ -50,6 +57,9 @@ function request(over: Partial<LaunchRequest> = {}): LaunchRequest {
     noSnapshot: false,
     noPost: false,
     hostPins: [],
+    hostsFile: null,
+    supersede: false,
+    linger: false,
     ...over,
   };
 }
@@ -66,7 +76,7 @@ describe("launchArgv", () => {
     // lost its answer cannot ask whether the run happened; without the sha, the
     // child's strict gate has nothing to refuse against.
     const argv = launchArgv(request());
-    expect(argv[0]).toBe("run");
+    expect(argv[0]).toBe("run-coordinator");
     expect(valueAfter(argv, "--run-id")).toBe(RUN_ID);
     expect(valueAfter(argv, "--expected-sha")).toBe(SHA);
   });
@@ -80,7 +90,9 @@ describe("launchArgv", () => {
         }),
       }),
     );
-    expect(argv.slice(0, 3)).toEqual(["run", "unit", "e2e"]);
+    // The INTERNAL verb, not the public one. `odu run` is a service client now,
+    // and a launcher that invoked it would recurse through `run.start` forever.
+    expect(argv.slice(0, 3)).toEqual(["run-coordinator", "unit", "e2e"]);
     expect(argv.filter((a) => a === "--platform")).toHaveLength(2);
     expect(argv.slice(3, 7)).toEqual([
       "--platform",
@@ -119,6 +131,25 @@ describe("launchArgv", () => {
     expect(loose).toContain("--no-strict");
     expect(loose).toContain("--no-snapshot");
     expect(loose).toContain("--no-post");
+  });
+
+  it("carries --supersede, because dropping it silently declines the request", () => {
+    // The service accepts `supersede` and the browser has a checkbox for it,
+    // but only the coordinator can perform it: cancel the incumbent, confirm it
+    // is gone, then claim the lock, with no window in between. A launcher that
+    // swallowed the flag sent the caller's explicit "replace it" straight into
+    // the ordinary busy-checkout refusal.
+    expect(launchArgv(request())).not.toContain("--supersede");
+    expect(launchArgv(request({ supersede: true }))).toContain("--supersede");
+  });
+
+  it("carries --linger, the caller's shape of run", () => {
+    // `odu run --linger` parks the coordinator at settle instead of tearing
+    // down, so its socket is still answerable when a caller goes to read the
+    // log. Dropping the flag turns that into a race the caller cannot win, and
+    // it is the shape an agent's settle-then-read loop actually uses.
+    expect(launchArgv(request())).not.toContain("--linger");
+    expect(launchArgv(request({ linger: true }))).toContain("--linger");
   });
 
   it("names the parent run and the request id only when there is one", () => {
@@ -177,5 +208,87 @@ describe("unitNameFor", () => {
     // systemd unit names are a restricted alphabet; a name that needed escaping
     // would fail at `systemd-run` time on someone else's machine.
     expect(unitNameFor(RUN_ID)).toMatch(/^[A-Za-z0-9:_.@-]+$/);
+  });
+});
+
+describe("when a launch may be tried again", () => {
+  // The GitHub-runner case: a host that sets every systemd marker, has a bus
+  // socket, and whose user manager still refuses the job. That refusal used to
+  // be reported as a run that could not start — nothing was wrong with the run.
+  //
+  // Retrying is only safe when NOTHING was started, so this decision is pure
+  // and pinned here; getting it wrong in the other direction is two
+  // coordinators for one request.
+  const submitter: SpawnPlan = {
+    mechanism: "systemd-run",
+    reason: "under a unit",
+    exitIsDeath: false,
+    describeExit: () => "",
+  };
+  const detached: SpawnPlan = {
+    mechanism: "detached",
+    reason: "no unit",
+    exitIsDeath: true,
+    describeExit: () => "",
+  };
+
+  it("retries when the user manager REFUSED the unit", () => {
+    expect(mayRelaunchDetached(submitter, 1)).toBe(true);
+  });
+
+  it("does not retry when the manager ACCEPTED it — something may be coming up", () => {
+    expect(mayRelaunchDetached(submitter, 0)).toBe(false);
+  });
+
+  it("does not retry when the submitter has not exited — the ceiling was hit", () => {
+    expect(mayRelaunchDetached(submitter, null)).toBe(false);
+  });
+
+  it("never retries a detached spawn: that exit IS the coordinator's death", () => {
+    // A dirty tree, a bad justfile, a strict-gate refusal. Launching again
+    // would paper over an answer the caller is entitled to.
+    expect(mayRelaunchDetached(detached, 1)).toBe(false);
+    expect(mayRelaunchDetached(detached, 0)).toBe(false);
+  });
+});
+
+describe("the environment a coordinator is started in", () => {
+  // The service is a per-user SINGLETON. Somebody's shell started it — maybe
+  // days ago, maybe with `$ODU_HOSTS` pointing at their own builders — and
+  // every run since resolves its inventory in a child of that process. So the
+  // launcher's own environment is never evidence about the caller.
+  const daemon = { PATH: "/bin", ODU_HOSTS: "/daemons/hosts.json" };
+
+  it("gives the child the caller's hosts file, not this process's", () => {
+    const env = coordinatorEnv(request({ hostsFile: "/callers/hosts.json" }), daemon);
+    expect(env.ODU_HOSTS).toBe("/callers/hosts.json");
+  });
+
+  it("blanks it when the caller's own shell has none", () => {
+    // `""` and `null` look like the same nothing at a call site and mean
+    // opposite things. This one is a TERMINAL reporting that its shell has no
+    // `$ODU_HOSTS` — so the child's chain must start where that shell's does,
+    // at `~/.config/odu/hosts.json`, and not at the daemon's file.
+    const env = coordinatorEnv(request({ hostsFile: "" }), daemon);
+    expect(env.ODU_HOSTS).toBe("");
+  });
+
+  it("leaves the service's own standing when the caller expressed nothing", () => {
+    // An agent and a browser have no shell to have a `$ODU_HOSTS` in. A
+    // service started with an explicit hosts file was configured on purpose,
+    // and discarding that for callers who never mentioned it would be its own
+    // surprise.
+    const env = coordinatorEnv(request({ hostsFile: null }), daemon);
+    expect(env.ODU_HOSTS).toBe("/daemons/hosts.json");
+  });
+
+  it("carries everything else through untouched", () => {
+    const env = coordinatorEnv(request({ hostsFile: null }), daemon);
+    expect(env.PATH).toBe("/bin");
+  });
+
+  it("does not mutate the environment it was handed", () => {
+    coordinatorEnv(request({ hostsFile: "" }), daemon);
+    expect(daemon.ODU_HOSTS).toBe("/daemons/hosts.json");
   });
 });

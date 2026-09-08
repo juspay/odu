@@ -8,7 +8,12 @@
  * read its sockets + exit codes.
  */
 
-import { type ChildProcess, execFileSync, spawn } from "node:child_process";
+import {
+  type ChildProcess,
+  execFileSync,
+  spawn,
+  spawnSync,
+} from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
@@ -85,19 +90,18 @@ function sha7Of(dir: string): string {
   }).trim();
 }
 
-function statusExit(dir: string): number {
-  try {
-    execFileSync(oduBin, ["status"], { cwd: dir, stdio: "ignore", env });
-    return 0;
-  } catch {
-    return 1;
-  }
-}
-
-/** `.ci/odu.sock` exists *and* `odu status` dials it (a run is serving). */
+/**
+ * Is a coordinator SERVING this checkout? The socket, and only the socket.
+ *
+ * It used to be "the socket exists and `odu status` dials it", which was one
+ * fact twice: `status` reached the coordinator through that socket, so its exit
+ * proved the socket was answering. It does not any more — `status` is a catalog
+ * read, and it answers about a run whose coordinator has been gone for a week.
+ * Keeping it in this predicate made a liveness probe out of something that is
+ * no longer evidence of liveness.
+ */
 function runIsLive(dir: string): boolean {
-  if (!existsSync(join(dir, ".ci", "odu.sock"))) return false;
-  return statusExit(dir) === 0;
+  return existsSync(join(dir, ".ci", "odu.sock"));
 }
 
 describe("odu cancel / supersede / linger (black-box)", () => {
@@ -187,23 +191,41 @@ describe("odu cancel / supersede / linger (black-box)", () => {
       sleep(15_000).then(() => "timeout" as const),
     ]);
     expect(code).not.toBe("timeout");
-    await waitUntil(() => statusExit(dir) !== 0, 10_000, "the socket to vanish");
+    await waitUntil(() => !runIsLive(dir), 10_000, "the socket to vanish");
   }, 180_000);
 
-  it("a second run is refused, but --supersede takes over", async () => {
+  it("a second run does not start one, but --supersede takes over", async () => {
     const dir = fixture("sleep");
     const first = spawnOdu(dir, ["run", "--no-strict"]);
     await waitUntil(() => runIsLive(dir), 120_000, "the first run to come up");
+    const firstRun = execFileSync(oduBin, ["history", "list", "-o", "json"], {
+      cwd: dir,
+      encoding: "utf-8",
+      env,
+    });
+    const before = (JSON.parse(firstRun) as { runId: string }[]).length;
 
-    // Without supersede, the one-run lock refuses the second start.
-    let refusedStderr = "";
-    try {
-      execFileSync(oduBin, ["run", "--no-strict"], { cwd: dir, encoding: "utf-8", env });
-      throw new Error("expected the second run to be refused");
-    } catch (err) {
-      refusedStderr = String((err as { stderr?: string }).stderr ?? err);
-    }
-    expect(refusedStderr).toMatch(/already in progress/);
+    // THE ONE-RUN LOCK still holds; what changed is what a caller is told.
+    // `run.start` answers a busy checkout with the run that is ALREADY there —
+    // `accepted: false`, addressed — instead of refusing, because that run is
+    // almost always the one the caller wanted. So the property to assert is
+    // that no SECOND run came into existence, which is what the lock is for.
+    const second = spawnSync(oduBin, ["run", "--no-strict", "--no-wait"], {
+      cwd: dir,
+      encoding: "utf-8",
+      env,
+    });
+    expect(second.stderr).toMatch(/a run is already going in this checkout/);
+    const after = (
+      JSON.parse(
+        execFileSync(oduBin, ["history", "list", "-o", "json"], {
+          cwd: dir,
+          encoding: "utf-8",
+          env,
+        }),
+      ) as { runId: string }[]
+    ).length;
+    expect(after).toBe(before);
 
     // With supersede, the new run cancels the first and binds the lock itself.
     spawnOdu(dir, ["run", "--no-strict", "--supersede"]);
@@ -241,12 +263,16 @@ describe("odu cancel / supersede / linger (black-box)", () => {
       }
     }, 60_000, "the run to drain green");
 
-    // Several seconds after settle the socket is *still* live — the linger.
+    // Several seconds after settle the socket is *still* there — the linger.
+    // Asserted on the socket rather than on `odu status`, which now answers
+    // from the catalog and would say "settled" just as happily about a
+    // coordinator that exited an hour ago. What `--linger` promises is that
+    // something is still SERVING, and the socket is where that is visible.
     await sleep(3_000);
-    expect(statusExit(dir)).toBe(0);
+    expect(runIsLive(dir)).toBe(true);
 
     execFileSync(oduBin, ["cancel"], { cwd: dir, env });
-    await waitUntil(() => statusExit(dir) !== 0, 15_000, "cancel to drop the socket");
+    await waitUntil(() => !runIsLive(dir), 15_000, "cancel to drop the socket");
   }, 180_000);
 });
 

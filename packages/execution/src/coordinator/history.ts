@@ -53,6 +53,7 @@ import { isResumptionEvent } from "@odu/run-history/schema";
 import type { Placement, RunEvent, RunScope } from "@odu/run-history/schema";
 import {
   appendAttemptLog,
+  readAttemptLog,
   type JournalWriter,
   openJournal,
   type RunHandle,
@@ -75,10 +76,23 @@ const IN_FLIGHT: ReadonlySet<NodeStatus> = new Set<NodeStatus>([
 export interface RunHistoryInit {
   repoRoot: string;
   repo: string | null;
+  /** The branch this run was started on, when HEAD named one. Recorded here
+   *  rather than looked up by a reader — see `RunManifestSchema.branch`. */
+  branch?: string | null;
   sha: string;
   seq: number | null;
   pipeline: string;
   scope: RunScope;
+  /** The `PLATFORM=ADDR` pins this run was launched under, verbatim — the
+   *  caller's explicit placement constraint, recorded so a finalized retry can
+   *  replay it instead of widening to whatever the ambient hosts file says
+   *  today. See `RunManifestSchema.hostPins`; an empty array is "explicitly
+   *  unpinned" and is a different fact from the field being absent. */
+  hostPins: readonly string[];
+  /** The inventory those pins were names in — the caller's `$ODU_HOSTS`, as
+   *  this coordinator saw it. `""` is a real answer ("the caller's shell had
+   *  none"); see `RunManifestSchema.hostsFile`. */
+  hostsFile: string;
   snapshotMode: "strict" | "live";
   dirty: boolean;
   runnerFlake: string | null;
@@ -106,10 +120,20 @@ export interface RunHistory {
   readonly fenced: boolean;
   roster: (order: readonly string[]) => void;
   phase: (phase: "provisioning" | "lanes" | "no_lanes") => void;
+  /** A lane's whole state, journalled so it outlives the coordinator.
+   *
+   *  `pool` and `hostsSource` are carried because "which boxes is this waiting
+   *  on, and which file said so" is a question about a run and not about a
+   *  process — and while only the live header could answer it, the one face
+   *  that asked (`odu status`) had to be allowed to dial a checkout's socket. */
   lane: (
     platform: string,
     state: "claiming" | "leased",
     host: string | null,
+    /** The candidates a `claiming` lane may land on. Empty for a `leased` one:
+     *  the machine is the answer, and the pool it came from is history. */
+    pool: readonly string[],
+    hostsSource: string | null,
   ) => void;
   /** A node reached a status. A terminal one supplies half the seal. */
   nodeStatus: (
@@ -208,6 +232,7 @@ export const NO_HISTORY: RunHistory = {
   roster: () => {},
   phase: () => {},
   lane: () => {},
+  // (the no-op writer: every arm ignores its arguments)
   nodeStatus: () => {},
   log: () => {},
   logFinalized: () => {},
@@ -256,9 +281,25 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
         sha: init.sha,
         seq: init.seq,
         pipeline: init.pipeline,
+        // `optionalKey` REJECTS a present-but-`undefined` key on encode, so a
+        // run with no branch omits it rather than spelling it — the same law
+        // every other optional wire field in this tree keeps.
+        ...(init.branch === undefined || init.branch === null
+          ? {}
+          : { branch: init.branch }),
         repoRoot: init.repoRoot,
         createdAt: now(),
         scope: init.scope,
+        // ALWAYS written, including empty. Absence is reserved for records an
+        // older build wrote, and is the only thing that lets a finalized retry
+        // tell "the caller asked for no pins" from "nobody wrote down what the
+        // caller asked for".
+        hostPins: [...init.hostPins],
+        // ALWAYS written too, and for the same reason: absence is reserved for
+        // records an older build wrote, and is the only thing that lets a
+        // finalized retry tell "the caller's shell had no `$ODU_HOSTS`" from
+        // "nobody wrote down which fleet this ran against".
+        hostsFile: init.hostsFile,
         snapshot: {
           mode: init.snapshotMode,
           expectedSha: init.sha,
@@ -453,8 +494,8 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
     },
     roster: (order) => emit({ kind: "roster", order: [...order] }),
     phase: (phase) => emit({ kind: "phase", phase }),
-    lane: (platform, state, host) =>
-      emit({ kind: "lane", platform, state, host }),
+    lane: (platform, state, host, pool, hostsSource) =>
+      emit({ kind: "lane", platform, state, host, pool: [...pool], hostsSource }),
     nodeStatus: (node, status, outcome) => {
       // A node can reach a terminal status without ever having run — `skipped`
       // is the routine case, a lane that died during provisioning the other —
@@ -514,7 +555,50 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
       if (!open.has(node)) beginAttempt(node, null);
       const attempt = open.get(node)?.attempt;
       if (attempt === undefined) return;
-      writeAttemptLog(handle, node, attempt, text);
+      // A SNAPSHOT IS A BOUNDED TAIL, NOT A WHOLE LOG — and taking it as a
+      // replacement is how a durable log silently lost its beginning.
+      //
+      // `snapshot` re-sends the producer's in-memory buffer, which is clamped
+      // to `MAX_LOG_CHARS` (64 KiB). While the log is smaller than that, the
+      // snapshot IS the whole log and replacing is right. Once it is bigger, a
+      // snapshot arriving mid-run — a lane re-attaching after a reconnect —
+      // carries only the last 64 KiB, and writing it over the file threw away
+      // everything before it. Field evidence: a 200,000-line recipe recorded
+      // 198,092 lines, ending correctly, with no truncation notice, because the
+      // first 133 KB were replaced by a 64 KiB tail.
+      //
+      // So the file is RECONCILED against the snapshot rather than replaced by
+      // it. Three cases, and the third is the one worth naming:
+      const held = readAttemptLog(handle, node, attempt)?.text ?? "";
+      if (held !== "" && held.endsWith(text)) {
+        // We are level with the producer or ahead of it. Nothing to do — and
+        // in particular nothing to UNDO.
+        return;
+      }
+      const overlap = longestOverlap(held, text);
+      if (overlap > 0 || held === "") {
+        // We are behind: the snapshot continues where our bytes stop. Append
+        // only the part we do not have.
+        appendAttemptLog(handle, node, attempt, text.slice(overlap));
+        return;
+      }
+      // NO OVERLAP AT ALL. Either the producer started over (a rerun's
+      // `reset`), or its buffer has moved past everything we hold — which is
+      // loss, and loss is reported rather than papered over. Replacing is right
+      // for the first and the best available answer for the second; the notice
+      // is what tells them apart to whoever reads the log.
+      writeAttemptLog(
+        handle,
+        node,
+        attempt,
+        held === ""
+          ? text
+          : // ONE write, notice included. Stamping it first and replacing after
+            // would erase the stamp with the very replacement it is about.
+            "[odu] log truncated: this node's output ran ahead of the recorder" +
+              " — what follows does not continue what precedes it\n" +
+              text,
+      );
     },
     resetNode: (node, reason) => {
       const current = open.get(node);
@@ -610,4 +694,25 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
       }
     },
   };
+}
+
+/**
+ * How much of `snapshot`'s beginning we already hold at the end of `held`.
+ *
+ * The producer's snapshot is a suffix of everything it has ever written; our
+ * file is a prefix of the same thing. So the two overlap at our end and its
+ * beginning, and the length of that overlap is exactly what we must NOT write
+ * again. Zero means they do not meet — the buffer has moved past us, or the log
+ * started over.
+ *
+ * Searched longest-first because a short accidental match (a repeated line) at
+ * a shorter length would append bytes we already have. Bounded by the
+ * snapshot's own length, which is bounded by `MAX_LOG_CHARS`.
+ */
+export function longestOverlap(held: string, snapshot: string): number {
+  const most = Math.min(held.length, snapshot.length);
+  for (let n = most; n > 0; n -= 1) {
+    if (held.endsWith(snapshot.slice(0, n))) return n;
+  }
+  return 0;
 }
