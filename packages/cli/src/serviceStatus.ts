@@ -58,6 +58,7 @@ import {
   emitJson,
   nodesStream,
   readRows,
+  watchNodes,
   WAIT_EXITS,
   withConnection,
 } from "./serviceFace";
@@ -310,11 +311,8 @@ export async function attachViaService(opts: HereRunOpts): Promise<number> {
         return attachLive(client, row);
       }
       let last = "";
-      let final: NodesFrame | undefined;
-      for await (const frame of subscribe(
-        nodesStream(client, row.runId),
-      )) {
-        final = frame;
+      // Same reason as the matrix below: a stream ending is not a run ending.
+      const final = await watchNodes(client, row.runId, (frame) => {
         if (opts.json) {
           emitJson({
             run: row.runId,
@@ -335,8 +333,7 @@ export async function attachViaService(opts: HereRunOpts): Promise<number> {
             last = painted;
           }
         }
-        if (frame.done) break;
-      }
+      });
       if (final === undefined) {
         process.stderr.write(
           `odu: the service opened ${row.runId}'s node stream and sent no frame\n`,
@@ -345,11 +342,7 @@ export async function attachViaService(opts: HereRunOpts): Promise<number> {
       }
       // The FINAL frame decides the exit, not the row we resolved at the start:
       // by the time a follow ends, the row is minutes stale.
-      if (final.state === "owner_lost") return WAIT_EXITS.ownerLost;
-      if (!final.done) return WAIT_EXITS.stillRunning;
-      return final.nodes.some((n) => STATUS_META[n.status].isRed)
-        ? WAIT_EXITS.failed
-        : WAIT_EXITS.passed;
+      return frameExit(final);
     },
     () => {
       process.stderr.write("odu: no run in flight for this checkout\n");
@@ -402,9 +395,11 @@ async function attachLive(
   });
 
   let started = false;
-  for await (const frame of subscribe(
-    nodesStream(client, row.runId),
-  )) {
+  // Through `watchNodes`, so a momentary stall on a busy service does not close
+  // somebody's dashboard on a run that is still going. The view is idempotent
+  // per frame, and a re-subscribe opens with a snapshot, so a repaint is the
+  // whole cost.
+  await watchNodes(client, row.runId, (frame) => {
     latest = frame;
     const state = pipelineStateOf(frame, row);
     // The header BEFORE the first paint: a run attached to during provisioning
@@ -417,8 +412,7 @@ async function attachLive(
     } else {
       view.update(state);
     }
-    if (frame.done) break;
-  }
+  });
   view.stop(latest === undefined ? undefined : pipelineStateOf(latest, row));
   return latest === undefined ? 3 : frameExit(latest);
 }

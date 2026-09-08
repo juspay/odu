@@ -338,8 +338,19 @@ describe("odu lane transport death (black-box)", () => {
       // linger that idle-reaped without noticing the kill would also exit 0
       // and satisfy the negative greps. `die()` writes this line onto
       // `_ci-setup` via `onSetupLine`.
-      expect(readFileSync(findRecipeLog(dir, "_ci-setup"), "utf-8")).toMatch(
-        /\[odu\] lane \S+ died:/,
+      //
+      // WAITED FOR, because the client's exit stopped being the signal that the
+      // coordinator has caught up. `odu run` is a client: `--progress json`
+      // returns the moment the run settles, which is BEFORE this test kills the
+      // runner, so `await exited` no longer bounds anything. The coordinator is
+      // a separate, lingering process and it notices the death on its own clock.
+      await waitUntil(
+        () =>
+          /\[odu\] lane \S+ died:/.test(
+            readFileSync(findRecipeLog(dir, "_ci-setup"), "utf-8"),
+          ),
+        60_000,
+        "the coordinator to record the lane's death",
       );
       expect(code).toBe(0);
       expect(stderr).not.toContain("write EPIPE");

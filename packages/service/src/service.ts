@@ -36,7 +36,11 @@ import {
   inMemoryStore,
   type RootedSurfacesRuntime,
 } from "@kolu/surface/server";
-import type { CatalogOptions } from "@odu/run-history/store";
+import {
+  type CatalogOptions,
+  handleFor,
+  readManifest,
+} from "@odu/run-history/store";
 import {
   oduServiceSurface,
   SERVICE_CONTRACT_VERSION,
@@ -231,6 +235,10 @@ export function createOduService(opts: ServiceOptions): OduService {
             // gets whatever the last tick produced — one catalog walk per tick
             // rather than one per open detail view.
             poll: () => {},
+            // The CATALOG, not the projection: a run accepted a moment ago is
+            // real before the next refresh indexes it, and only the manifest can
+            // say so. See `nodesSource`.
+            exists: (runId) => readManifest(handleFor(runId, catalog)) !== null,
           }),
         },
       },

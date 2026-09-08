@@ -35,6 +35,14 @@ export const NODES_POLL_MS = 250;
 
 export interface NodesDeps {
   registry: RunRegistry;
+  /** Does a run with this id EXIST, whatever the registry currently holds?
+   *
+   *  The registry is a projection refreshed on a clock; the catalog is the
+   *  authority. A run accepted a moment ago is real and indexed shortly after,
+   *  and only this can tell that apart from an id that names nothing. Injected
+   *  rather than read here so this module keeps knowing nothing about where a
+   *  catalog lives. */
+  exists: (runId: string) => boolean;
   /** Re-read the catalog. Passed in rather than called on the registry, so a
    *  subscription cannot start a second refresh loop beside the service's own:
    *  in production this does nothing (the poller owns the clock), and in a test
@@ -146,6 +154,17 @@ const defaultSleep = (ms: number, signal: AbortSignal): Promise<void> =>
     else signal.addEventListener("abort", done, { once: true });
   });
 
+/**
+ * How long to wait for the registry to index a run the CATALOG already has.
+ *
+ * `run.start` answers with a run id the moment the coordinator publishes its
+ * manifest, and a caller subscribes with it immediately — before the next
+ * refresh has seen it. Generous enough to cover a refresh on a busy service,
+ * and short enough that a run the projection genuinely cannot see is reported
+ * rather than waited on.
+ */
+const INDEX_GRACE_MS = 30_000;
+
 /** In none of these three will anything move again. */
 function terminal(state: NodesFrame["state"]): boolean {
   return state === "settled" || state === "expired" || state === "owner_lost";
@@ -168,6 +187,9 @@ export function nodesSource(
   return ({ runId }) =>
     streamFromAbortableSource<NodesFrame>(async function* (signal) {
       let previous: { nodes: RunNode[]; env: RunEnv } | null = null;
+      // How long a run that EXISTS is allowed to be missing from the registry
+      // before this reports it absent — see the `row === undefined` branch.
+      const indexBy = Date.now() + INDEX_GRACE_MS;
       for (;;) {
         deps.poll();
         const row = deps.registry.row(runId);
@@ -176,7 +198,29 @@ export function nodesSource(
         // "there is no such run here" is an answer, and a subscription that hung
         // waiting for one to appear would be indistinguishable from a run that
         // is merely quiet.
+        //
+        // BUT "never heard of" and "not yet" are different, and the registry
+        // alone cannot tell them apart. `run.start` answers with a run id the
+        // moment the coordinator publishes its manifest, and a caller subscribes
+        // with that id immediately — before the next refresh has indexed it. The
+        // empty done frame then told `odu run` its own run had expired: no
+        // progress events at all, and a verdict computed from zero nodes.
+        //
+        // The catalog is the authority on existence, so it is what gets asked.
+        // A run that EXISTS is merely not indexed yet; the loop waits for the
+        // refresh that will index it.
         if (row === undefined) {
+          // BOUNDED, because "the projection will catch up" is a belief and a
+          // subscription that holds it forever is a hang. The window only has
+          // to cover a refresh; past it, a run the registry still cannot see is
+          // reported as absent whatever the catalog says, which is the answer
+          // this branch existed to give in the first place.
+          if (deps.exists(runId) && Date.now() < indexBy) {
+            if (signal.aborted) return;
+            await sleep(pollMs, signal);
+            if (signal.aborted) return;
+            continue;
+          }
           yield {
             order: [],
             nodes: [],

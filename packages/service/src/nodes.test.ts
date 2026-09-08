@@ -57,6 +57,8 @@ describe("the nodes stream", () => {
     const registry = createRegistry({ root: w.catalogRoot });
     const source = nodesSource({
       registry,
+      // The catalog says a run exists; these fixtures register real runs.
+      exists: () => true,
       poll: () => registry.refresh(),
       sleep: async () => {},
     });
@@ -78,6 +80,8 @@ describe("the nodes stream", () => {
     const registry = createRegistry({ root: w.catalogRoot });
     const source = nodesSource({
       registry,
+      // The catalog says a run exists; these fixtures register real runs.
+      exists: () => true,
       poll: () => registry.refresh(),
       // A REAL delay, unlike the other tests here: this run never settles, so
       // the loop is only left by an interrupt — and an interrupt has to be
@@ -127,6 +131,8 @@ describe("the nodes stream", () => {
     let polls = 0;
     const source = nodesSource({
       registry,
+      // The catalog says a run exists; these fixtures register real runs.
+      exists: () => true,
       poll: () => {
         polls += 1;
         // The node lands between the first frame and the second.
@@ -155,6 +161,10 @@ describe("the nodes stream", () => {
     const registry = createRegistry({ root: w.catalogRoot });
     const source = nodesSource({
       registry,
+      // NOTHING in the catalog either: that is what makes this run unknown
+      // rather than merely unindexed, and it is the whole distinction the
+      // source draws.
+      exists: () => false,
       poll: () => registry.refresh(),
       sleep: async () => {},
     });
@@ -193,6 +203,8 @@ describe("the nodes stream", () => {
     const registry = createRegistry({ root: w.catalogRoot });
     const source = nodesSource({
       registry,
+      // The catalog says a run exists; these fixtures register real runs.
+      exists: () => true,
       poll: () => registry.refresh(),
       sleep: async () => {},
     });
@@ -223,6 +235,8 @@ describe("the nodes stream", () => {
     let polls = 0;
     const source = nodesSource({
       registry,
+      // The catalog says a run exists; these fixtures register real runs.
+      exists: () => true,
       poll: () => {
         polls += 1;
         if (polls === 2) {
@@ -263,6 +277,8 @@ describe("the nodes stream", () => {
     let polls = 0;
     const source = nodesSource({
       registry,
+      // The catalog says a run exists; these fixtures register real runs.
+      exists: () => true,
       poll: () => {
         polls += 1;
         if (polls === 2) writePhase(fixture.handle, fixture.token, "no_lanes");

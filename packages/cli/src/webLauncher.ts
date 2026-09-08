@@ -520,6 +520,21 @@ export async function connectOrStart(
   try {
     return await dialService(origin, { readyMs: ABSENCE_PROBE_MS });
   } catch (err) {
+    // SLOW IS NOT ABSENT, and only one of the two is cheap to be sure about.
+    // The probe above is deliberately impatient (300ms) because its failure is
+    // the ordinary first step of a bootstrap — but on a machine running its own
+    // CI, a perfectly healthy daemon can miss that window, and the fall-through
+    // then takes a command through a bootstrap it did not need. Under load that
+    // path failed outright: `odu wait` exited 3 with an empty stdout and "All
+    // fibers interrupted without error" on stderr, which is a sentence about
+    // this process rather than about the service.
+    //
+    // Absence is a question the KERNEL answers, immediately: is anything
+    // accepting on that address. When something is, this waits the full dial
+    // budget for it instead of concluding it is not there.
+    if ((await whoeverIsListening(origin)) !== null) {
+      return await dialService(origin);
+    }
     if (!allowStart) throw err;
   }
   const outcome = await ensureService({

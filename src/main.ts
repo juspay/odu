@@ -841,7 +841,15 @@ async function exitAfterFlush(code: number): Promise<never> {
 dispatch(process.argv.slice(2)).then(
   (code) => exitAfterFlush(code),
   (err: unknown) => {
+    // The MESSAGE for a person, the stack under `$ODU_DEBUG` for whoever has to
+    // find out why. A failure that reaches here is by definition one nothing
+    // planned for, and some of them arrive with a message that names no cause
+    // at all — "All fibers interrupted without error" is a sentence about this
+    // process's runtime, not about anything a user did.
     process.stderr.write(`${(err as Error).message}\n`);
+    if (process.env.ODU_DEBUG !== undefined && process.env.ODU_DEBUG !== "") {
+      process.stderr.write(`${(err as Error).stack ?? String(err)}\n`);
+    }
     return exitAfterFlush(1);
   },
 );

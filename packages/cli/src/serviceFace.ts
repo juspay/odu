@@ -42,7 +42,10 @@ import {
   unenrolledStreamCall,
 } from "@kolu/surface/client";
 import type { SurfaceDispatch } from "@kolu/surface/link";
-import { firstFrame as headFrame } from "@odu/execution/common/effectEdge";
+import {
+  firstFrame as headFrame,
+  subscribe,
+} from "@odu/execution/common/effectEdge";
 import type { ServiceConnection } from "@odu/service-client/dial";
 import { serviceOrigin } from "@odu/service-client/endpoint";
 import type {
@@ -559,3 +562,50 @@ export function nodesStream(
     { label: `nodes[${runId}]`, ...(onRetry === undefined ? {} : { onRetry }) },
   );
 }
+
+/**
+ * EVERY FRAME OF A RUN, until it says it is done.
+ *
+ * A stream ENDING is not evidence about the run, and treating it as evidence is
+ * the bug this exists to remove. The link pings; a daemon busy with several
+ * live coordinators can miss one; the link's run then ends and the subscription
+ * is INTERRUPTED. `endOnInterrupt` turns that into a clean end of iteration —
+ * correctly, because an interrupt is not an error — and every consumer here
+ * then concluded the run was over. `odu run --progress json` stopped emitting
+ * events mid-run and exited 2; `odu attach` closed the matrix on a live run.
+ *
+ * The fence (`nodesStream`) handles a retryable FAILURE. It cannot handle this
+ * one: `Stream.retry` retries failures, and an interrupt is not one. So the
+ * loop is here, where the only fact that ends a watch is the one the service
+ * states — a frame with `done`.
+ *
+ * `sawDone` rather than a count: re-subscribing is cheap and idempotent (a
+ * stream opens with a snapshot, and every consumer of this dedupes), while
+ * stopping early is a wrong answer about somebody's CI. The deadline exists so
+ * a service that has gone away entirely cannot hold a terminal forever.
+ */
+export async function watchNodes(
+  client: Pick<OduServiceClient, "surface">,
+  runId: string,
+  onFrame: (frame: NodesFrame) => void,
+  deadlineMs = 24 * 60 * 60 * 1000,
+): Promise<NodesFrame | undefined> {
+  const until = Date.now() + deadlineMs;
+  let last: NodesFrame | undefined;
+  for (;;) {
+    for await (const frame of subscribe(nodesStream(client, runId))) {
+      last = frame;
+      onFrame(frame);
+      if (frame.done) return frame;
+    }
+    // The stream ended without saying the run had. Re-subscribe — unless the
+    // clock says nobody is coming back.
+    if (Date.now() >= until) return last;
+    await new Promise((resolve) => setTimeout(resolve, RESUBSCRIBE_MS));
+  }
+}
+
+/** How long to wait before re-opening a watch that ended without a verdict.
+ *  Short: the common cause is a momentary stall on a busy service, and the
+ *  subscription that replaces it opens with a fresh snapshot. */
+const RESUBSCRIBE_MS = 250;

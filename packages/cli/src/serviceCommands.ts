@@ -80,6 +80,7 @@ import {
   requestId,
   WAIT_EXITS,
   waitExitFor,
+  watchNodes,
   withConnection,
   withService,
 } from "./serviceFace";
@@ -915,9 +916,10 @@ async function progressStream(
   // including a lane landing on a box, so emitting per frame would repeat a
   // node's line for a reason the contract has no word for.
   const seen = new Map<string, string>();
-  let final: NodesFrame | undefined;
-  for await (const frame of subscribe(nodesStream(client, runId))) {
-    final = frame;
+  // `watchNodes` re-subscribes if the stream ends without a verdict, and the
+  // dedupe above is what makes that free: a fresh subscription opens with a
+  // snapshot, and a node whose status this has already reported emits nothing.
+  const final = await watchNodes(client, runId, (frame) => {
     for (const node of frame.nodes) {
       if (seen.get(node.id) === node.status) continue;
       seen.set(node.id, node.status);
@@ -935,8 +937,7 @@ async function progressStream(
       // mapping is deliberately absent. The caller skips it; it is not a gap.
       if (event !== null) process.stdout.write(`${JSON.stringify(event)}\n`);
     }
-    if (frame.done) break;
-  }
+  });
   if (final === undefined) return 3;
   // THE VERDICT BLOCK, on stderr, after the NDJSON. Both halves of the
   // `--progress json` contract: the stream is the machine's and the summary is
