@@ -728,11 +728,16 @@ export function Detail(props: {
           on a refusal is the browser's version of the failure this release
           removes. An answer that has been read can then be put away — but only
           once it IS an answer: a pending receipt carries no dismissal, because
-          the thing it describes has not happened yet. */}
+          the thing it describes has not happened yet.
+
+          ONE `<p>`, whose tone flips pending → answer in place, so the `role`
+          changes on a live element. That is the cheap spelling and it is what
+          the page has always done; if a screen-reader pass finds an `alert`
+          added to an existing node goes unannounced, key this `<Show>` on
+          `props.control.kind` so a fresh element is minted per answer. */}
       <Show when={props.control.kind !== "idle"}>
         <Receipt
-          role="status"
-          bad={props.control.kind === "refused"}
+          tone={props.control.kind === "refused" ? "refused" : "ok"}
           onDismiss={
             props.control.kind === "pending" ? undefined : props.controls.dismiss
           }

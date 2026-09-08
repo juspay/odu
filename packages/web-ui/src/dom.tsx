@@ -257,18 +257,24 @@ export function Confirm(props: {
  * The element is a `<p class="receipt">` and stays one: that is the selector the
  * acceptance suite reads an answer out of.
  *
- * `role` is the caller's, not this component's, and the two are different
- * promises. `status` is polite — it waits for a screen reader to finish the
- * sentence it is on, which is right for "Told the coordinator to stop". `alert`
- * interrupts, which is right for a refusal the person has to act on.
+ * ONE KNOB, because there is one fact underneath: was this an answer or a
+ * refusal. How it is DRAWN and how it is ANNOUNCED both follow from that, and
+ * they used to be two props for the caller to set consistently — which the two
+ * callers immediately did not: the run page, where every cancel and retry
+ * lands, sent its refusals with the polite role this comment says is wrong for
+ * them. `status` waits for a screen reader to finish the sentence it is on,
+ * which is right for "Told the coordinator to stop"; `alert` interrupts, which
+ * is right for a refusal the person has to act on.
  *
  * The sentence is always wrapped in `.receipt-text`, even with no dismissal
  * beside it, so the receipt is one flex item that wraps as a paragraph rather
  * than a row of bare text nodes each shrinking to its longest word.
  */
 export function Receipt(props: {
-  role: "status" | "alert";
-  bad?: boolean;
+  /** An answer, or a refusal — the one fact underneath. `refused` is drawn bad
+   *  and announced with `alert`, which interrupts; `ok` is `status`, which
+   *  waits its turn. */
+  tone: "ok" | "refused";
   children: JSX.Element;
   /** Given only for a receipt somebody can be DONE with — an answer, whether it
    *  was a yes or a refusal. A receipt that is still PENDING has none: the thing
@@ -278,8 +284,8 @@ export function Receipt(props: {
   return (
     <p
       class="receipt"
-      classList={{ "receipt-bad": props.bad === true }}
-      role={props.role}
+      classList={{ "receipt-bad": props.tone === "refused" }}
+      role={props.tone === "refused" ? "alert" : "status"}
     >
       <span class="receipt-text">{props.children}</span>
       <Show when={props.onDismiss !== undefined}>

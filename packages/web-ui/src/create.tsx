@@ -221,15 +221,21 @@ export function Create(props: {
           {props.state.kind === "starting" ? "Starting…" : "Start run"}
         </Button>
       </form>
-      {/* A refusal INTERRUPTS — `alert` rather than `status` — because it is the
-          answer to the thing the person just pressed, and the form is still
-          sitting there looking ready. */}
+      {/* A refusal INTERRUPTS — `Receipt`'s `refused` tone announces it with
+          `alert` rather than `status` — because it is the answer to the thing
+          the person just pressed, and the form is still sitting there looking
+          ready.
+
+          NEITHER receipt here is dismissable, unlike the run page's. There is
+          nothing to be stuck with: this form's one control replaces its answer
+          the moment it is pressed again, so a Dismiss button would be a second
+          way to clear something one press already clears. */}
       <Show when={props.state.kind === "refused" ? props.state : null}>
-        {(refused) => <Receipt role="alert" bad>{refused().message}</Receipt>}
+        {(refused) => <Receipt tone="refused">{refused().message}</Receipt>}
       </Show>
       <Show when={props.state.kind === "existing" ? props.state : null}>
         {(existing) => (
-          <Receipt role="status">
+          <Receipt tone="ok">
             {`That checkout already has a live run at ${existing().sha.slice(0, 7)}. `}
             <Button onClick={() => props.onOpen(existing().runId)}>
               Open it
