@@ -92,7 +92,7 @@ export type { NodeStatus };
  * still speakable by an older client, and refusing it would make every
  * additive change a flag day.
  */
-export const SERVICE_CONTRACT_VERSION = "1.1";
+export const SERVICE_CONTRACT_VERSION = "1.2";
 
 // ── refusals ────────────────────────────────────────────────────────────────
 
@@ -563,6 +563,33 @@ export type LogTail = typeof LogTailSchema.Type;
  *  a byte budget: a log of box-drawing characters would blow a
  *  character-counted bound by a factor of three. */
 export const LOG_TAIL_BYTES = 64 * 1024;
+
+/**
+ * IS THERE MORE OF THIS LOG TO READ? The one rule, for every follower.
+ *
+ * A page carries THREE facts and they are not interchangeable. `eof` is about
+ * THIS read — the page reached the end of the file as it stands. `complete` is
+ * about the PRODUCER — it said its last word. `open` is about the FUTURE — the
+ * file can still grow. A follower needs two of them together, and each face
+ * that wrote its own version got a different pair wrong:
+ *
+ *   - stopping on `!open` alone drops whatever the closing page carried. A read
+ *     is bounded by `limit`, so a producer that finished after appending more
+ *     than one page hands back `{open: false, eof: false}` with unread bytes
+ *     behind it — and the follower discards the rest of the output, including
+ *     the final diagnosis, which is the part somebody was reading it for.
+ *   - stopping on `eof` alone spins forever on the log of a coordinator that
+ *     was killed: that log is at EOF, is not complete, and is never getting
+ *     another byte.
+ *
+ * So: keep reading while the file can still grow, OR while this read did not
+ * reach the end. Stop only when both are settled. It cannot spin — with
+ * `offset < size` and a positive limit the store always returns at least one
+ * byte, so `nextOffset` strictly advances until `eof`.
+ */
+export function logHasMore(page: Pick<LogPage, "open" | "eof">): boolean {
+  return page.open || !page.eof;
+}
 
 // ── procedures ──────────────────────────────────────────────────────────────
 
@@ -1074,6 +1101,19 @@ export type VenueRow = typeof VenueRowSchema.Type;
  *  running the built binary tells you. */
 const VenueProbeInputSchema = Schema.Struct({
   platforms: Schema.optionalKey(Schema.Array(Schema.String)),
+  /**
+   * The CALLER's `$ODU_HOSTS`, on the same three readings `run.start` takes it
+   * on — a path, `""` for "my shell has none", absent for "I have no shell,
+   * use the service's own".
+   *
+   * Present on EVERY verb that resolves a host inventory, because the service
+   * is a per-user singleton and the ports resolve that inventory in the
+   * SERVICE's process. Without it, `ODU_HOSTS=A odu hosts` and
+   * `ODU_HOSTS=A odu run` addressed different fleets — the first the daemon's,
+   * the second the caller's — which is a disagreement about what machines
+   * exist, reported by two commands a person would reasonably expect to agree.
+   */
+  hostsFile: Schema.optionalKey(Schema.String),
 });
 export type VenueProbeInput = typeof VenueProbeInputSchema.Encoded;
 
@@ -1096,6 +1136,19 @@ const VenueHoldInputSchema = Schema.Struct({
   checkout: Schema.String.check(Schema.isMinLength(1)),
   /** Empty means every configured platform. */
   platforms: Schema.optionalKey(Schema.Array(Schema.String)),
+  /**
+   * The CALLER's `$ODU_HOSTS`, on the same three readings `run.start` takes it
+   * on — a path, `""` for "my shell has none", absent for "I have no shell,
+   * use the service's own".
+   *
+   * Present on EVERY verb that resolves a host inventory, because the service
+   * is a per-user singleton and the ports resolve that inventory in the
+   * SERVICE's process. Without it, `ODU_HOSTS=A odu hosts` and
+   * `ODU_HOSTS=A odu run` addressed different fleets — the first the daemon's,
+   * the second the caller's — which is a disagreement about what machines
+   * exist, reported by two commands a person would reasonably expect to agree.
+   */
+  hostsFile: Schema.optionalKey(Schema.String),
   /** Do not queue behind an existing holder — answer `waiting` and return. */
   noWait: Schema.optionalKey(Schema.Boolean),
   /** Correlates a call with its answer in the service's log. NOT an
@@ -1123,12 +1176,21 @@ const VenueHoldOutputSchema = Schema.Struct({
       message: Schema.String,
     }),
   ),
+  /** TRUE when this answer came from the request's RECEIPT rather than from
+   *  work this call did. The mutation happened once; you are being told what it
+   *  did. A caller that cannot tell the two apart cannot tell whether its first
+   *  attempt landed, which is the whole reason it repeated the call. */
+  replayed: Schema.Boolean,
 });
 export type VenueHoldOutput = typeof VenueHoldOutputSchema.Type;
 
 const VenueReleaseInputSchema = Schema.Struct({
   checkout: Schema.String.check(Schema.isMinLength(1)),
   platforms: Schema.optionalKey(Schema.Array(Schema.String)),
+  /** The caller's `$ODU_HOSTS` — see `venue.hold`. A release resolves the same
+   *  inventory a hold did, and the two disagreeing about which fleet a platform
+   *  names is how a hold becomes unreleasable. */
+  hostsFile: Schema.optionalKey(Schema.String),
   requestId: RequestId,
 });
 export type VenueReleaseInput = typeof VenueReleaseInputSchema.Encoded;
@@ -1145,6 +1207,11 @@ const VenueReleaseOutputSchema = Schema.Struct({
       detail: Schema.NullOr(Schema.String),
     }),
   ),
+  /** TRUE when this answer came from the request's RECEIPT rather than from
+   *  work this call did. The mutation happened once; you are being told what it
+   *  did. A caller that cannot tell the two apart cannot tell whether its first
+   *  attempt landed, which is the whole reason it repeated the call. */
+  replayed: Schema.Boolean,
 });
 export type VenueReleaseOutput = typeof VenueReleaseOutputSchema.Type;
 
@@ -1197,6 +1264,11 @@ const ProtectOutputSchema = Schema.Struct({
    *  named the platforms, which is the case a repo should be pinned to. */
   derivedFrom: Schema.NullOr(Schema.String),
   detail: Schema.NullOr(Schema.String),
+  /** TRUE when this answer came from the request's RECEIPT rather than from
+   *  work this call did. The mutation happened once; you are being told what it
+   *  did. A caller that cannot tell the two apart cannot tell whether its first
+   *  attempt landed, which is the whole reason it repeated the call. */
+  replayed: Schema.Boolean,
 });
 export type ProtectOutput = typeof ProtectOutputSchema.Type;
 

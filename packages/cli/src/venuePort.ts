@@ -43,6 +43,7 @@ export const holdVenue: VenueHolder = (request) =>
   leaseVenues({
     repoRoot: request.checkout,
     platforms: request.platforms,
+    hostsFile: request.hostsFile,
     noWait: request.noWait,
   });
 
@@ -53,5 +54,6 @@ export const releaseVenue: VenueReleaser = (request) =>
     releaseVenues({
       repoRoot: request.checkout,
       platforms: request.platforms,
+      hostsFile: request.hostsFile,
     }),
   );

@@ -193,6 +193,28 @@ export const RunManifestSchema = Schema.Struct({
    * and turn a retry refusal into a catalog that cannot be opened.
    */
   hostPins: Schema.optionalKey(Schema.Array(Schema.String)),
+  /**
+   * The INVENTORY this run resolved its placement against — the caller's
+   * `$ODU_HOSTS`, as the coordinator saw it.
+   *
+   * Pins say WHICH box; this says which fleet the pin was a name in. They are
+   * not the same fact and recording only the first was not enough: a run
+   * started with inventory A can be retried by a service holding inventory B,
+   * and then an unpinned platform resolves to different machines, or a pinned
+   * one is refused because B does not configure that platform at all. Nothing
+   * about that is visible in the replay's own answer.
+   *
+   * The same three readings as {@link RunManifest.hostPins}, for the same
+   * reason:
+   *
+   *   - a PATH — resolve against that file.
+   *   - `""` — the caller's shell had none, so the chain starts at
+   *     `~/.config`. A real answer, and different from not knowing.
+   *   - ABSENT — written before odu recorded inventory. A finalized retry
+   *     REFUSES, because guessing here places somebody's work on a fleet they
+   *     never named.
+   */
+  hostsFile: Schema.optionalKey(Schema.String),
   snapshot: RunSnapshotSchema,
   build: RunBuildSchema,
   /**

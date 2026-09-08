@@ -732,6 +732,26 @@ async function relaunch(
     };
   }
   const hostPins = [...manifest.hostPins];
+  // WHICH FLEET those pins are names in, replayed — or refused for want of the
+  // evidence to say, on exactly the reasoning above.
+  //
+  // Pins and inventory are two facts and recording only the first left the
+  // second free to move: a parent started with `$ODU_HOSTS=A` retried by a
+  // service holding `B` resolves an unpinned platform to different machines,
+  // or is refused because `B` does not configure that platform at all. Neither
+  // is visible in the replay's own answer, which claims to be a replay.
+  if (manifest.hostsFile === undefined) {
+    return {
+      ok: false,
+      code: "not_replayable",
+      message:
+        `odu: run ${handle.runId} predates inventory evidence — its record does ` +
+        "not say which hosts file it resolved placement against, so a replay " +
+        "cannot promise to run where it ran. Start a fresh run.",
+      suggestion: ["odu", "run", ...manifest.scope.selectors],
+    };
+  }
+  const hostsFile = manifest.hostsFile;
   // The SELECTION the new run covers: the nodes asked for, with their
   // dependency closure (odu expands dependencies unless told not to). Recorded
   // platforms and root are carried through so the replay lands on the same
@@ -753,12 +773,16 @@ async function relaunch(
   // parent's placement unstateable — and the honest answer is to refuse rather
   // than to launch a child that will resolve to somewhere else.
   //
-  // The result is DISCARDED. The child re-resolves from the same inputs (it
-  // inherits the daemon's environment, so `$ODU_HOSTS` resolves identically on
-  // both sides); what happens here is a check, not a decision. A recovery that
-  // picked the lanes would be the second scheduler by another route.
+  // The result is DISCARDED. The child re-resolves from the same inputs — the
+  // PARENT's inventory, handed to it explicitly below rather than inherited —
+  // so what happens here is a check, not a decision. A recovery that picked
+  // the lanes would be the second scheduler by another route.
   try {
-    fanoutPools((input.hosts ?? loadHosts)(), hostPins, scope.platforms);
+    fanoutPools(
+      (input.hosts ?? (() => loadHosts(hostsFile === "" ? undefined : hostsFile)))(),
+      hostPins,
+      scope.platforms,
+    );
   } catch (err) {
     return {
       ok: false,
@@ -792,11 +816,11 @@ async function relaunch(
     // `scope.platforms` is: a replay that resolved placement afresh would be a
     // different run wearing the same lineage.
     hostPins,
-    // A relaunch is decided HERE, by the service, from a recorded run — there
-    // is no caller shell in the picture, so this process's chain is the honest
-    // one and is named rather than inherited. The pins above are what actually
-    // constrain placement; this only resolves the pools they name.
-    hostsFile: process.env.ODU_HOSTS ?? null,
+    // THE PARENT'S inventory, not this process's. A replay reproduces a run,
+    // and which fleet its pins were names in is part of what that run was —
+    // the daemon's own `$ODU_HOSTS` is a fact about the shell that started the
+    // service, which has nothing to do with the run being replayed.
+    hostsFile,
     // A REPLAY never takes a checkout from whatever is running there now. The
     // run it replays has finalized; the thing occupying that checkout is
     // somebody else's, and the honest answer is the coordinator's ordinary

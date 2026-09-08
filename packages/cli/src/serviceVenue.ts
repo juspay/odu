@@ -28,6 +28,7 @@ import type {
   VenueRow,
 } from "@odu/service-client/surface";
 import {
+  hostsFileHere,
   call,
   checkoutHere,
   emitJson,
@@ -42,6 +43,8 @@ export interface HostsOpts {
   platforms: readonly string[];
   json: boolean;
   origin?: string;
+  /** Where the caller is standing — `$ODU_HOSTS` is resolved against it. */
+  cwd?: string;
 }
 
 /**
@@ -59,7 +62,10 @@ export interface HostsOpts {
 export async function hostsViaService(opts: HostsOpts): Promise<number> {
   return withService(opts.origin, async (client) => {
     const probed = await call(
-      client.surface.venue.probe({ platforms: opts.platforms }),
+      client.surface.venue.probe({
+        platforms: opts.platforms,
+        hostsFile: hostsFileHere(opts.cwd),
+      }),
     );
     if (!probed.ok) return reportFailure(probed, opts.json);
     const answer: VenueProbeOutput = probed.value;
@@ -145,6 +151,7 @@ export async function leaseViaService(opts: LeaseOpts): Promise<number> {
       client.surface.venue.hold({
         checkout,
         platforms: opts.platforms,
+        hostsFile: hostsFileHere(opts.cwd),
         noWait: opts.noWait,
         requestId: requestId(undefined),
       }),
@@ -179,6 +186,7 @@ export async function releaseViaService(opts: ReleaseOpts): Promise<number> {
       client.surface.venue.release({
         checkout,
         platforms: opts.platforms,
+        hostsFile: hostsFileHere(opts.cwd),
         requestId: requestId(undefined),
       }),
     );

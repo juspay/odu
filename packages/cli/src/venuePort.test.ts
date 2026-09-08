@@ -114,7 +114,7 @@ describe("probeVenues", () => {
     // Not `ok: true` with zero rows: a face showing an empty table would tell
     // the operator to wait for machines nobody has declared.
     const file = hosts({});
-    const outcome = await probeVenues({ platforms: [] });
+    const outcome = await probeVenues({ platforms: [], hostsFile: null });
     expect(outcome.ok).toBe(false);
     if (outcome.ok) return;
     expect(outcome.message).toContain(file);
@@ -123,7 +123,7 @@ describe("probeVenues", () => {
 
   it("answers with a row per venue, and no warnings for a clean config", async () => {
     const file = hosts({ "x86_64-linux": "localhost" });
-    const outcome = await probeVenues({ platforms: [] });
+    const outcome = await probeVenues({ platforms: [], hostsFile: null });
     if (!outcome.ok) throw new Error(outcome.message);
     expect(outcome.source).toBe(file);
     expect(outcome.warnings).toEqual([]);
@@ -145,7 +145,7 @@ describe("probeVenues", () => {
     // not to enforce it — and through the service the report cannot be stderr,
     // because there is no terminal attached to a browser.
     const file = hosts({ "x86_64-linux": ["localhost", "nope.invalid"] });
-    const outcome = await probeVenues({ platforms: [] });
+    const outcome = await probeVenues({ platforms: [], hostsFile: null });
     if (!outcome.ok) throw new Error(outcome.message);
     expect(outcome.warnings).toHaveLength(1);
     expect(outcome.warnings[0]).toContain(file);
@@ -159,7 +159,7 @@ describe("probeVenues", () => {
     // how a vocabulary stops being shared. Nothing is lost by the shorter
     // label: `error` on the same row is where the reason lives.
     hosts({ "x86_64-linux": "nope.invalid" });
-    const outcome = await probeVenues({ platforms: [] });
+    const outcome = await probeVenues({ platforms: [], hostsFile: null });
     if (!outcome.ok) throw new Error(outcome.message);
     const row = outcome.rows[0];
     expect(row?.state).toBe("down");
@@ -173,7 +173,7 @@ describe("probeVenues", () => {
     // this exists to avoid. `nope.invalid` is unreachable and would show as a
     // `down` row if it had been probed at all — its absence is the assertion.
     hosts({ "x86_64-linux": "localhost", "aarch64-darwin": "nope.invalid" });
-    const outcome = await probeVenues({ platforms: ["x86_64-linux"] });
+    const outcome = await probeVenues({ platforms: ["x86_64-linux"], hostsFile: null });
     if (!outcome.ok) throw new Error(outcome.message);
     expect(outcome.rows).toHaveLength(1);
     expect(outcome.rows[0]?.platform).toBe("x86_64-linux");
@@ -184,7 +184,7 @@ describe("probeVenues", () => {
     // A typo must not read as an empty fleet: zero rows cannot say whether the
     // machines are missing or the name is, and the two have opposite fixes.
     hosts({ "x86_64-linux": "localhost" });
-    const outcome = await probeVenues({ platforms: ["x86_54-linux"] });
+    const outcome = await probeVenues({ platforms: ["x86_54-linux"], hostsFile: null });
     expect(outcome.ok).toBe(false);
     if (outcome.ok) return;
     expect(outcome.message).toContain("x86_54-linux");
@@ -196,7 +196,7 @@ describe("probeVenues", () => {
     // caller can use; a warning names the part that went unprobed.
     hosts({ "x86_64-linux": "localhost" });
     const outcome = await probeVenues({
-      platforms: ["x86_64-linux", "riscv64-linux"],
+      platforms: ["x86_64-linux", "riscv64-linux"], hostsFile: null,
     });
     if (!outcome.ok) throw new Error(outcome.message);
     expect(outcome.rows).toHaveLength(1);
@@ -210,7 +210,7 @@ describe("holdVenue", () => {
     hosts({ "x86_64-linux": "localhost" });
     const outcome = await holdVenue({
       checkout: checkout(),
-      platforms: ["aarch64-darwin"],
+      platforms: ["aarch64-darwin"], hostsFile: null,
       noWait: true,
     });
     expect(outcome.ok).toBe(false);
@@ -227,7 +227,7 @@ describe("holdVenue", () => {
     const file = hosts({});
     const outcome = await holdVenue({
       checkout: checkout(),
-      platforms: [],
+      platforms: [], hostsFile: null,
       noWait: true,
     });
     expect(outcome.ok).toBe(false);
@@ -258,7 +258,7 @@ describe("holdVenue", () => {
 
     const outcome = await holdVenue({
       checkout: repo,
-      platforms: ["x86_64-linux"],
+      platforms: ["x86_64-linux"], hostsFile: null,
       noWait: true,
     });
     if (!outcome.ok) throw new Error(outcome.message);
@@ -279,7 +279,7 @@ describe("releaseVenue", () => {
     // who lost the first reply will do, and it must be safe.
     const { results } = await releaseVenue({
       checkout: checkout(),
-      platforms: ["x86_64-linux"],
+      platforms: ["x86_64-linux"], hostsFile: null,
     });
     expect(results).toHaveLength(1);
     expect(results[0]?.effective).toBe("nothing");
@@ -300,7 +300,7 @@ describe("releaseVenue", () => {
       },
     });
 
-    const { results } = await releaseVenue({ checkout: repo, platforms: [] });
+    const { results } = await releaseVenue({ checkout: repo, platforms: [], hostsFile: null });
     expect(results).toHaveLength(1);
     expect(results[0]?.effective).toBe("released");
     expect(results[0]?.host).toBe("some-box");
@@ -328,7 +328,7 @@ describe("releaseVenue", () => {
 
     const { results } = await releaseVenue({
       checkout: repo,
-      platforms: ["x86_64-linux"],
+      platforms: ["x86_64-linux"], hostsFile: null,
     });
     expect(results).toHaveLength(1);
     // NOT `released`: nothing was holding, so nothing was let go. Saying

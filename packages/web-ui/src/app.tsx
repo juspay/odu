@@ -22,7 +22,7 @@
 import type { SurfaceClient } from "@kolu/surface/solid";
 import type { SurfaceReadout } from "@kolu/surface/solid";
 import { formatLogKey, parseLogKey } from "@odu/service-client/logKey";
-import { LOG_TAIL_BYTES } from "@odu/service-client/surface";
+import { logHasMore, LOG_TAIL_BYTES } from "@odu/service-client/surface";
 import type { oduServiceSurface } from "@odu/service-client/surface";
 import { Effect } from "effect";
 import {
@@ -109,6 +109,34 @@ function refusalText(err: unknown): string {
     : "";
   return `${message}${suggestion}`;
 }
+
+/**
+ * A read that will never succeed, however many times it is tried.
+ *
+ * `log.read` REFUSES a key it cannot address — an expired run, an attempt that
+ * never ran, a malformed key — and those are answers, not outages. Retrying one
+ * is a spinner over a sentence somebody should be reading instead. Everything
+ * else (a dropped socket, a service mid-upgrade) is transient by default, which
+ * is the safe direction: a follow that resumes too eagerly costs a request, one
+ * that gives up too eagerly costs somebody the rest of their log.
+ */
+const TERMINAL_READ_REFUSALS = new Set([
+  "unknown_run",
+  "expired",
+  "bad_input",
+  "checkout_refused",
+]);
+
+function isTerminalReadRefusal(err: unknown): boolean {
+  const code = (err as { code?: unknown })?.code;
+  return typeof code === "string" && TERMINAL_READ_REFUSALS.has(code);
+}
+
+/** How long to wait before resuming a follow whose read did not answer, and
+ *  how many times. Twenty attempts at a second and a half covers a service
+ *  restart and an upgrade; past that, saying so beats spinning. */
+const FOLLOW_RETRY_MS = 1_500;
+const FOLLOW_RETRY_LIMIT = 20;
 
 /** odu's words for the framework's five states. `degraded` is the one that
  *  names what stopped, so the sentence can never come out with a hole in it. */
@@ -385,9 +413,14 @@ export function App(props: {
    *  tolerate, and the loop re-issues anyway. */
   const FOLLOW_WAIT_MS = 30_000;
   const [followed, setFollowed] = createSignal<string | null>(null);
+  /** Why the follow stopped, when it did. Shown rather than swallowed: a pane
+   *  that has quietly stopped updating looks exactly like a log that has
+   *  quietly stopped growing, and they are different things. */
+  const [followFault, setFollowFault] = createSignal<string | null>(null);
   createEffect(() => {
     const key = logKey();
     setFollowed(null);
+    setFollowFault(null);
     if (key === null) return;
     let live = true;
     // The tab moved on — a new node, a new run, or the view closed. The loop
@@ -399,6 +432,12 @@ export function App(props: {
     void (async () => {
       let cursor: number | undefined;
       let text = "";
+      // How many reads in a row have failed. A dropped connection is the
+      // ordinary case in a browser — a laptop lid, a sleeping tab, a service
+      // being upgraded — and it is not a reason to stop watching a log that is
+      // still being written. Reset by any answer, so this bounds a service that
+      // is GONE rather than one that hiccuped.
+      let refusals = 0;
       while (live) {
         let page: LogPage;
         try {
@@ -410,12 +449,35 @@ export function App(props: {
               waitMs: FOLLOW_WAIT_MS,
             }),
           );
-        } catch {
-          // A refused or dropped read ends the FOLLOW, not the pane: whatever
-          // arrived stays on screen, and `logTails` keeps the header honest.
-          return;
+        } catch (err) {
+          // RESUMED FROM THE CURSOR, not abandoned. This used to `return`, and
+          // the effect is keyed on the log key — so a reader who lost their
+          // connection and got it back, without changing node, watched a frozen
+          // pane for as long as they cared to look, while the header and the
+          // board recovered around it.
+          //
+          // A REFUSAL is different from a dropped read and says so. `log.read`
+          // refuses a key that is not addressable — an expired run, an attempt
+          // that never ran — and retrying that forever would be a spinner over
+          // an answer nobody is going to change.
+          if (!live) return;
+          if (isTerminalReadRefusal(err)) {
+            setFollowFault(refusalText(err));
+            return;
+          }
+          refusals += 1;
+          if (refusals > FOLLOW_RETRY_LIMIT) {
+            setFollowFault(
+              "odu: lost contact with the service while following this log",
+            );
+            return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, FOLLOW_RETRY_MS));
+          continue;
         }
         if (!live) return;
+        refusals = 0;
+        setFollowFault(null);
         // The attempt was re-run underneath us and its log rewritten in place,
         // so the file is shorter than the cursor. Start over rather than show
         // the tail of a different attempt as a continuation of this one.
@@ -430,10 +492,11 @@ export function App(props: {
           text += page.text;
           setFollowed(text);
         }
-        // `open` is the stop, and it is a fact the page carries rather than one
-        // inferred from `eof`: a log whose writer was killed is at EOF, not
-        // complete, and never getting another byte.
-        if (!page.open) return;
+        // `logHasMore`'s rule, shared with the CLI and the TUI. Stopping on
+        // `!open` alone dropped whatever the closing page carried — a producer
+        // that finishes after appending more than one page leaves an unread
+        // remainder behind that flag, and the pane lost the end of the output.
+        if (!logHasMore(page)) return;
       }
     })();
   });
@@ -560,6 +623,7 @@ export function App(props: {
             }}
             tail={tail()}
             followed={followed()}
+            followFault={followFault()}
             tailPending={tailPending()}
             tailError={tailError()}
             page={page()}

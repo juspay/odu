@@ -58,6 +58,7 @@ import type {
   StartReceipt,
 } from "@odu/service-client/surface";
 import { ServiceRefused } from "@odu/service-client/surface";
+import { logHasMore } from "@odu/service-client/surface";
 import { serviceOrigin } from "@odu/service-client/endpoint";
 import { verdictStateOf } from "./liveFromService";
 import { printVerdict } from "./render";
@@ -870,7 +871,7 @@ export async function followLog(
     // This cannot spin. With `offset < size` and a positive limit the store
     // always returns at least one byte, so `nextOffset` strictly advances until
     // `eof` — and once `eof` is true with `open` false, the loop ends below.
-    if (page.open || !page.eof) continue;
+    if (logHasMore(page)) continue;
     // Closed, and drained. `complete` is what says whether we have the whole
     // thing.
     if (!page.complete) {

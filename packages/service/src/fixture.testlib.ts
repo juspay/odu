@@ -302,7 +302,21 @@ export interface RecordingPorts extends ServicePorts {
   launches: LaunchRequest[];
   retries: RetryRequest[];
   cancels: CancelRequest[];
+  /** Every hold, release and protect the service ASKED FOR. A repeat that
+   *  replays leaves these unchanged, which is the assertion. */
+  holds: VenueHoldRequest[];
+  releases: VenueReleaseRequest[];
+  protects: ProtectRequest[];
 }
+
+type VenueHoldRequest = Parameters<ServicePorts["holdVenue"]>[0];
+type VenueReleaseRequest = Parameters<ServicePorts["releaseVenue"]>[0];
+type ProtectRequest = Parameters<ServicePorts["protect"]>[0];
+type VenueHoldOutcome = Awaited<ReturnType<ServicePorts["holdVenue"]>>;
+type VenueReleaseResult = Awaited<
+  ReturnType<ServicePorts["releaseVenue"]>
+>["results"][number];
+type ProtectOutcome = Awaited<ReturnType<ServicePorts["protect"]>>;
 
 export function recordingPorts(opts: {
   checkout?: (path: string) => CheckoutFacts;
@@ -311,14 +325,27 @@ export function recordingPorts(opts: {
   /** What the stub coordinator says back. `false` is the declined arm; a whole
    *  outcome is how a suite states `unresolved` without a socket. */
   cancelOk?: boolean | CancelOutcome;
+  /** The three shared-daemon mutations, when a suite is about THEM rather than
+   *  about a run. Each records what it was asked, so a test can assert that a
+   *  repeat performed nothing — which is the only way to see the difference
+   *  between a replayed answer and a second act. */
+  hold?: (request: VenueHoldRequest) => VenueHoldOutcome;
+  release?: (request: VenueReleaseRequest) => { results: readonly VenueReleaseResult[] };
+  protect?: (request: ProtectRequest) => ProtectOutcome;
 } = {}): RecordingPorts {
   const launches: LaunchRequest[] = [];
   const retries: RetryRequest[] = [];
   const cancels: CancelRequest[] = [];
+  const holds: VenueHoldRequest[] = [];
+  const releases: VenueReleaseRequest[] = [];
+  const protects: ProtectRequest[] = [];
   return {
     launches,
     retries,
     cancels,
+    holds,
+    releases,
+    protects,
     launch: async (request) => {
       launches.push(request);
       return (
@@ -371,12 +398,25 @@ export function recordingPorts(opts: {
     // instead of asserting against a fiction.
     pipeline: () => ({ ok: false, message: "the stub reads no pipeline" }),
     probeVenues: async () => ({ ok: false, message: "the stub probes nothing" }),
-    holdVenue: async () => ({ ok: false, message: "the stub holds nothing" }),
-    releaseVenue: async () => ({ results: [] }),
-    protect: async () => ({
-      ok: false,
-      code: "checkout_refused",
-      message: "the stub writes no rulesets",
-    }),
+    holdVenue: async (request) => {
+      holds.push(request);
+      return (
+        opts.hold?.(request) ?? { ok: false, message: "the stub holds nothing" }
+      );
+    },
+    releaseVenue: async (request) => {
+      releases.push(request);
+      return opts.release?.(request) ?? { results: [] };
+    },
+    protect: async (request) => {
+      protects.push(request);
+      return (
+        opts.protect?.(request) ?? {
+          ok: false,
+          code: "checkout_refused",
+          message: "the stub writes no rulesets",
+        }
+      );
+    },
   };
 }

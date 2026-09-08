@@ -74,7 +74,17 @@ export const ReceiptSchema = Schema.Struct({
    *  caller here treats as "unreadable, do not assume free". Fail-closed, and
    *  only reachable for the run-scoped `retry` directory, since the service's
    *  own is a directory no previous build ever reads. */
-  kind: Schema.Literals(["retry", "start", "cancel", "catalog"]),
+  kind: Schema.Literals([
+    "retry",
+    "start",
+    "cancel",
+    "catalog",
+    // The three shared-daemon mutations whose repeat must not act on a
+    // SUCCESSOR resource — see `onceOnly` in `@odu/service/requests`.
+    "venue.hold",
+    "venue.release",
+    "protect.apply",
+  ]),
   /** A hash of the request's meaningful input. A repeat with the same id and a
    *  different digest is a conflict, not a replay. */
   digest: Schema.String,

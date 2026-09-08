@@ -162,6 +162,10 @@ function LogPanel(props: {
   /** The cursored follow's accumulated text — byte-exact, unlike the bounded
    *  tail beside it. Null before the first page arrives. */
   followed: string | null;
+  /** Why the follow stopped, when it did — shown beside the log rather than
+   *  swallowed, because a pane that has quietly stopped updating looks exactly
+   *  like a log that has quietly stopped growing. */
+  followFault: string | null;
   pending: boolean;
   error: Error | undefined;
   onPage: (offset: number) => void;
@@ -180,9 +184,19 @@ function LogPanel(props: {
   // for; the follow is byte-exact and cursored; the bounded tail is the last
   // resort, and it is last because it is the only one of the three that can
   // silently show less than happened.
-  const shown = createMemo(
-    () => at()?.text ?? props.followed ?? props.tail?.text ?? "",
-  );
+  //
+  // UNLESS THE FOLLOW HAS STOPPED. A follow that has given up holds the bytes
+  // it had when it stopped, and preferring them over a live tail freezes the
+  // pane while the wire, the header and the board all recover around it —
+  // which is the one state a reader cannot distinguish from "the log stopped
+  // growing". When the follow is faulted the tail is the fresher of the two,
+  // so it wins, and the sentence beside the pane says why.
+  const shown = createMemo(() => {
+    const paged = at()?.text;
+    if (paged !== undefined) return paged;
+    const following = props.followFault === null ? props.followed : null;
+    return following ?? props.tail?.text ?? "";
+  });
 
   /** A new SUBJECT is a fresh request to see the newest output, not a
    *  continuation of wherever the last one was scrolled to. */
@@ -308,6 +322,13 @@ function LogPanel(props: {
             <Show when={props.pending && props.tail === undefined}>
               <p class="empty">Reading…</p>
             </Show>
+            {/* A stopped follow SAYS SO. Swallowing it left a pane that had
+                quietly stopped updating looking exactly like a log that had
+                quietly stopped growing — the same silent-loss failure the
+                cursored follow exists to remove, one layer up. */}
+            <Show when={props.followFault}>
+              {(fault) => <p class="fault">{fault()}</p>}
+            </Show>
             <pre
               class="log-text"
               tabindex="0"
@@ -346,6 +367,10 @@ export function Detail(props: {
   /** The cursored follow's accumulated text — byte-exact, unlike the bounded
    *  tail beside it. Null before the first page arrives. */
   followed: string | null;
+  /** Why the follow stopped, when it did — shown beside the log rather than
+   *  swallowed, because a pane that has quietly stopped updating looks exactly
+   *  like a log that has quietly stopped growing. */
+  followFault: string | null;
   tailPending: boolean;
   tailError: Error | undefined;
   page: LogPage | null;
@@ -469,6 +494,7 @@ export function Detail(props: {
           onAttempt={props.onAttempt}
           tail={props.tail}
           followed={props.followed}
+          followFault={props.followFault}
           pending={props.tailPending}
           error={props.tailError}
           onPage={props.onPage}

@@ -40,6 +40,7 @@ import {
 import { pidAlive } from "@odu/run-history/owner";
 import { type CatalogOptions, handleFor, readManifest } from "@odu/run-history/store";
 import { type StateEnv, stateRoot } from "@odu/run-history/paths";
+import { ServiceRefused } from "@odu/service-client/surface";
 
 /** The service's own state directory — sibling of `runs/`, never inside it.
  *  A request that has not produced a run yet has nowhere in the catalog to
@@ -165,3 +166,114 @@ export {
   type ReceiptRecord,
   type ReceiptStore,
 };
+
+/**
+ * A MUTATION THAT HAPPENS ONCE, whatever a lost reply makes a caller do.
+ *
+ * `run.start`, `run.cancel` and `run.retry` each grew their own version of this
+ * because each has a different thing to say about an unfinished claim. The
+ * three verbs below have the same need and no such difference, so they share
+ * one: `venue.hold`, `venue.release` and `protect.apply`.
+ *
+ * They were carrying a `requestId` and doing nothing with it. The schema said
+ * so, on the reasoning that these three are naturally idempotent — taking a
+ * hold you hold, dropping one you dropped, writing a ruleset that already says
+ * what you asked. That reasoning is true of the OPERATION and false of the
+ * SERVICE, because the daemon is shared and the resource has an identity:
+ *
+ * > A client releases platform P and its reply is lost. Another client takes a
+ * > new hold on P. The first client retries its release — the same request, by
+ * > its own reckoning — and drops somebody else's hold.
+ *
+ * The same shape gives a delayed `protect.apply` the power to overwrite a
+ * ruleset somebody edited in between. Neither is a repeat of the original
+ * operation; both are a NEW operation wearing an old request's name.
+ *
+ * So a repeat replays the recorded answer and performs nothing:
+ *
+ *   - **replay** — the first attempt finished. Its answer is returned verbatim,
+ *     however long ago, and the resource is not touched.
+ *   - **in flight** — the first attempt was accepted and its outcome is not
+ *     recorded. `request_unresolved`, never a second attempt: this is exactly
+ *     the window in which the successor exists, and "try again with a fresh id"
+ *     would be a licence to act on it.
+ *   - **conflict** — the id was used for a DIFFERENT input. Refused, rather
+ *     than dispatched, which is what the schema comment used to allow.
+ */
+export async function onceOnly<T>(
+  store: ReceiptStore,
+  request: {
+    requestId: string;
+    kind: "venue.hold" | "venue.release" | "protect.apply";
+    /** Everything about WHAT was asked. Two requests that differ here are two
+     *  requests, and sharing an id between them is the conflict. */
+    digest: string;
+    now: number;
+  },
+  perform: () => Promise<T>,
+): Promise<{ ok: true; value: T; replayed: boolean } | { ok: false; refusal: ServiceRefused }> {
+  if (!isRequestId(request.requestId)) {
+    return {
+      ok: false,
+      refusal: new ServiceRefused({
+        code: "bad_input",
+        message:
+          `odu: "${request.requestId}" is not a usable request id — ` +
+          "1–200 characters of letters, digits, dot, dash, underscore or colon",
+      }),
+    };
+  }
+  const claim = claimReceipt(store, {
+    requestId: request.requestId,
+    kind: request.kind,
+    digest: request.digest,
+    // None of these three creates a run, so there is nothing to pre-mint. The
+    // empty string is what "this request could never have produced a run" looks
+    // like, and is what stops a reconciler going to look for one.
+    plannedRunId: "",
+    now: request.now,
+  });
+  if (claim === null) {
+    return {
+      ok: false,
+      refusal: new ServiceRefused({
+        code: "bad_input",
+        message: `odu: could not record request ${request.requestId}`,
+      }),
+    };
+  }
+  if (claim.kind === "conflict") {
+    return {
+      ok: false,
+      refusal: new ServiceRefused({
+        code: "request_conflict",
+        message:
+          `odu: request id "${request.requestId}" was already used for a ` +
+          "different request — use a fresh id, or repeat the original exactly",
+      }),
+    };
+  }
+  if (claim.kind === "replay") {
+    const recorded = claim.receipt.result;
+    if (recorded !== undefined && recorded !== null) {
+      return { ok: true, value: recorded as T, replayed: true };
+    }
+  }
+  if (claim.kind === "in_flight" || claim.kind === "replay") {
+    // Accepted, outcome unknown. NOT re-performed: the resource may have been
+    // taken by somebody else since, and acting again would act on THEM.
+    return {
+      ok: false,
+      refusal: new ServiceRefused({
+        code: "request_unresolved",
+        message:
+          `odu: request "${request.requestId}" was accepted and its outcome is ` +
+          "not recorded. Do not re-issue it under a new id — read the current " +
+          "state (`odu hosts`, `odu protect --dry-run`) and decide from there.",
+      }),
+    };
+  }
+  const value = await perform();
+  completeReceipt(store, request.requestId, value, request.now);
+  return { ok: true, value, replayed: false };
+}

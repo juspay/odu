@@ -743,6 +743,12 @@ async function orchestrate(
     // this machine at this moment, and replaying a resolution would pin a
     // retry to a box the user never named.
     hostPins: [...args.hostPins],
+    // The FLEET those pins name, so a replay resolves them against the same
+    // one. `loadHosts` already read this chain to build `hostsConfig` above;
+    // recording the variable rather than the resolved config is deliberate —
+    // a replay re-reads the file, which is what makes an edited hosts file
+    // visible to a retry rather than frozen into it.
+    hostsFile: process.env.ODU_HOSTS ?? "",
     snapshotMode: ctx.snapshotMode ? "strict" : "live",
     dirty: ctx.dirty,
     runnerFlake,

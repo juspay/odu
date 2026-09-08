@@ -299,6 +299,11 @@ export type VenueProbeOutcome =
  *  `platforms` means every configured one. */
 export type VenueProber = (request: {
   platforms: readonly string[];
+  /** The CALLER's `$ODU_HOSTS`, or `null` for "the caller expressed nothing".
+   *  The inventory is resolved HERE, in a per-user singleton whose environment
+   *  belongs to whoever started it — so without this, `odu hosts` and `odu run`
+   *  can address different fleets from the same shell. */
+  hostsFile: string | null;
 }) => Promise<VenueProbeOutcome>;
 
 export interface VenueHoldResult {
@@ -327,6 +332,11 @@ export type VenueHoldOutcome =
 export type VenueHolder = (request: {
   checkout: string;
   platforms: readonly string[];
+  /** The CALLER's `$ODU_HOSTS`, or `null` for "the caller expressed nothing".
+   *  The inventory is resolved HERE, in a per-user singleton whose environment
+   *  belongs to whoever started it — so without this, `odu hosts` and `odu run`
+   *  can address different fleets from the same shell. */
+  hostsFile: string | null;
   noWait: boolean;
 }) => Promise<VenueHoldOutcome>;
 
@@ -340,6 +350,11 @@ export interface VenueReleaseResult {
 export type VenueReleaser = (request: {
   checkout: string;
   platforms: readonly string[];
+  /** The CALLER's `$ODU_HOSTS`, or `null` for "the caller expressed nothing".
+   *  The inventory is resolved HERE, in a per-user singleton whose environment
+   *  belongs to whoever started it — so without this, `odu hosts` and `odu run`
+   *  can address different fleets from the same shell. */
+  hostsFile: string | null;
 }) => Promise<{ results: readonly VenueReleaseResult[] }>;
 
 // ── branch protection ───────────────────────────────────────────────────────

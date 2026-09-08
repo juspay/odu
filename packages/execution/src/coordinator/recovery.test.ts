@@ -143,8 +143,8 @@ function tmpCatalog(): string {
 type ManifestInput = Omit<RunManifest, "version" | "registeredBy">;
 
 /**
- * A manifest, with one sentinel: passing `hostPins: undefined` OMITS the field
- * rather than writing an empty one.
+ * A manifest, with two sentinels: passing `hostPins: undefined` or
+ * `hostsFile: undefined` OMITS that field rather than writing an empty one.
  *
  * The two are different records and the difference is the whole of the
  * placement contract — `[]` is a run that asked for no pins, ABSENT is a run
@@ -159,6 +159,7 @@ function manifest(over: Partial<ManifestInput> = {}): ManifestInput {
   // could leave one, and this is the fixture that stands in for that build.
   const built = { ...manifestBase(over) } as Record<string, unknown>;
   if ("hostPins" in over && over.hostPins === undefined) delete built.hostPins;
+  if ("hostsFile" in over && over.hostsFile === undefined) delete built.hostsFile;
   return built as unknown as ManifestInput;
 }
 
@@ -177,6 +178,11 @@ function manifestBase(over: Partial<ManifestInput> = {}): ManifestInput {
     // between this and the field being absent is what the placement tests below
     // are about — every run odu registers today writes it.
     hostPins: [],
+    // The FLEET those pins are names in. `""` is an ordinary caller whose shell
+    // had no `$ODU_HOSTS`, and — like `hostPins: []` — is a different record
+    // from the field being absent, which is what the inventory tests below are
+    // about.
+    hostsFile: "",
     snapshot: { mode: "strict", expectedSha: SHA, dirty: false, retryable: true },
     build: { oduVersion: "0.1.0", self: "/nix/store/x/bin/odu", runnerFlake: null },
     parentRunId: null,
@@ -902,6 +908,76 @@ describe("a replay runs where its parent was allowed to run", () => {
     // A recovery the caller can run, as argv.
     expect(out.suggestion).toEqual(["odu", "run", "unit", "e2e"]);
     // And above all: nothing was launched anywhere.
+    expect(launcher.calls).toEqual([]);
+  });
+
+  it("replays the parent's INVENTORY, not the service's", async () => {
+    // Pins say WHICH box; the inventory says which fleet that name lives in,
+    // and they are two facts. A parent that resolved against `$ODU_HOSTS=A`
+    // retried by a service holding `B` gets a child that resolves against B —
+    // so an unpinned platform lands on different machines, or a pinned one is
+    // refused because B does not configure that platform at all. The replay
+    // says nothing about having moved, because from its side nothing did.
+    const root = tmpCatalog();
+    aFinishedRun(root, { hostsFile: "/fleets/a.json" });
+    const launcher = stubLauncher();
+
+    accepted(
+      await retry({
+        runId: PARENT_RUN,
+        selector: "unit",
+        catalog: { root },
+        launcher: launcher.launcher,
+      }),
+    );
+
+    // Handed to the child EXPLICITLY. Inheriting the daemon's environment is
+    // what put the service's fleet in a replay's hands in the first place.
+    expect(launcher.calls[0]?.hostsFile).toBe("/fleets/a.json");
+  });
+
+  it("replays a caller who had no hosts file as one who had none", async () => {
+    // `""` is an answer: the parent's shell had no `$ODU_HOSTS`, so it resolved
+    // from `~/.config`. A replay must do the same rather than pick up whatever
+    // the SERVICE was started with, which is the one value that has nothing to
+    // do with the run being replayed.
+    const root = tmpCatalog();
+    aFinishedRun(root, { hostsFile: "" });
+    const launcher = stubLauncher();
+
+    accepted(
+      await retry({
+        runId: PARENT_RUN,
+        selector: "unit",
+        catalog: { root },
+        launcher: launcher.launcher,
+      }),
+    );
+
+    expect(launcher.calls[0]?.hostsFile).toBe("");
+  });
+
+  it("refuses a record that predates inventory evidence, and starts nothing", async () => {
+    // The same shape as the placement refusal above, one fact over. A record
+    // that does not say which hosts file it resolved against cannot promise to
+    // replay against it, and guessing places somebody's work on a fleet they
+    // never named.
+    const root = tmpCatalog();
+    aFinishedRun(root, { hostsFile: undefined });
+    const launcher = stubLauncher();
+
+    const out = refused(
+      await retry({
+        runId: PARENT_RUN,
+        selector: "unit",
+        catalog: { root },
+        launcher: launcher.launcher,
+      }),
+    );
+
+    expect(out.code).toBe("not_replayable");
+    expect(out.message).toContain("inventory evidence");
+    expect(out.suggestion).toEqual(["odu", "run", "unit", "e2e"]);
     expect(launcher.calls).toEqual([]);
   });
 

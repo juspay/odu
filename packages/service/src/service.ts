@@ -60,7 +60,8 @@ import { nodesSource } from "./nodes";
 import type { ServicePorts } from "./ports";
 import { reconcileRequests } from "./reconcile";
 import { createRegistry, type RunRegistry } from "./registry";
-import { requestStore } from "./requests";
+import { onceOnly, requestStore } from "./requests";
+import { digestOf } from "@odu/run-history/receipts";
 import { retryRun } from "./retry";
 import { startRun } from "./start";
 import { readRun, waitForRun } from "./wait";
@@ -340,7 +341,10 @@ export function createOduService(opts: ServiceOptions): OduService {
           probe: ({ input }) =>
             Effect.flatMap(
               Effect.promise(() =>
-                opts.ports.probeVenues({ platforms: input.platforms ?? [] }),
+                opts.ports.probeVenues({
+                  platforms: input.platforms ?? [],
+                  hostsFile: input.hostsFile ?? null,
+                }),
               ),
               (outcome) =>
                 outcome.ok
@@ -361,41 +365,91 @@ export function createOduService(opts: ServiceOptions): OduService {
             Effect.flatMap(
               Effect.suspend(() => {
                 const bad = notAbsolute("venue.hold", input.checkout);
-                return bad !== null
-                  ? Effect.fail(bad)
-                  : Effect.promise(() =>
+                if (bad !== null) return Effect.fail(bad);
+                return Effect.promise(() =>
+                  // ONCE ONLY. A repeat replays the recorded answer and takes
+                  // no hold — see `onceOnly` on why "taking a hold you already
+                  // hold is harmless" is true of the operation and false of a
+                  // shared daemon.
+                  onceOnly(
+                    requests,
+                    {
+                      requestId: input.requestId,
+                      kind: "venue.hold",
+                      digest: digestOf([
+                        input.checkout,
+                        [...(input.platforms ?? [])].join(","),
+                        input.hostsFile ?? "",
+                        input.noWait ?? false,
+                      ]),
+                      now: now(),
+                    },
+                    () =>
                       opts.ports.holdVenue({
                         checkout: input.checkout,
                         platforms: input.platforms ?? [],
+                        hostsFile: input.hostsFile ?? null,
                         noWait: input.noWait ?? false,
                       }),
-                    );
+                  ),
+                );
               }),
-              (outcome) =>
-                outcome.ok
-                  ? Effect.succeed({ results: outcome.results, replayed: false })
+              (answered) => {
+                if (!answered.ok) return Effect.fail(answered.refusal);
+                const outcome = answered.value;
+                return outcome.ok
+                  ? Effect.succeed({
+                      results: outcome.results,
+                      replayed: answered.replayed,
+                    })
                   : Effect.fail(
                       new ServiceRefused({
                         code: "no_venue",
                         message: outcome.message,
                         suggestion: ["odu", "hosts"],
                       }),
-                    ),
+                    );
+              },
             ),
           release: ({ input }) =>
-            Effect.map(
+            Effect.flatMap(
               Effect.suspend(() => {
                 const bad = notAbsolute("venue.release", input.checkout);
-                return bad !== null
-                  ? Effect.fail(bad)
-                  : Effect.promise(() =>
+                if (bad !== null) return Effect.fail(bad);
+                return Effect.promise(() =>
+                  // THE SHARP ONE. Release A's reply is lost, another client
+                  // takes a new hold on the same platform, and A retries — a
+                  // repeat by its own reckoning, and a release of somebody
+                  // else's hold in fact. A replay answers from the record and
+                  // touches nothing.
+                  onceOnly(
+                    requests,
+                    {
+                      requestId: input.requestId,
+                      kind: "venue.release",
+                      digest: digestOf([
+                        input.checkout,
+                        [...(input.platforms ?? [])].join(","),
+                        input.hostsFile ?? "",
+                      ]),
+                      now: now(),
+                    },
+                    () =>
                       opts.ports.releaseVenue({
                         checkout: input.checkout,
                         platforms: input.platforms ?? [],
+                        hostsFile: input.hostsFile ?? null,
                       }),
-                    );
+                  ),
+                );
               }),
-              (outcome) => ({ released: outcome.results }),
+              (answered) =>
+                answered.ok
+                  ? Effect.succeed({
+                      released: answered.value.results,
+                      replayed: answered.replayed,
+                    })
+                  : Effect.fail(answered.refusal),
             ),
         },
         protect: {
@@ -403,9 +457,45 @@ export function createOduService(opts: ServiceOptions): OduService {
             Effect.flatMap(
               Effect.suspend(() => {
                 const bad = notAbsolute("protect.apply", input.checkout);
-                return bad !== null
-                  ? Effect.fail(bad)
-                  : Effect.promise(() =>
+                if (bad !== null) return Effect.fail(bad);
+                // A DRY RUN IS A READ. It writes nothing, contacts no forge and
+                // has no successor to act on, so putting a receipt in its way
+                // would only mean `--dry-run` twice with one id refusing the
+                // second — a refusal about nothing.
+                if (input.dryRun === true) {
+                  return Effect.promise(async () => ({
+                    ok: true as const,
+                    replayed: false,
+                    value: await opts.ports.protect({
+                      checkout: input.checkout,
+                      ...(input.branch === undefined ? {} : { branch: input.branch }),
+                      platforms: input.platforms ?? [],
+                      hostsFile: input.hostsFile ?? null,
+                      dryRun: true,
+                      create: input.create ?? false,
+                    }),
+                  }));
+                }
+                return Effect.promise(() =>
+                  // A WRITE, and a delayed repeat of one can overwrite a
+                  // ruleset somebody edited in between — the same successor
+                  // problem `venue.release` has, with a branch's merge policy
+                  // as the resource.
+                  onceOnly(
+                    requests,
+                    {
+                      requestId: input.requestId,
+                      kind: "protect.apply",
+                      digest: digestOf([
+                        input.checkout,
+                        input.branch ?? "",
+                        [...(input.platforms ?? [])].join(","),
+                        input.hostsFile ?? "",
+                        input.create ?? false,
+                      ]),
+                      now: now(),
+                    },
+                    () =>
                       opts.ports.protect({
                         checkout: input.checkout,
                         ...(input.branch === undefined
@@ -413,16 +503,20 @@ export function createOduService(opts: ServiceOptions): OduService {
                           : { branch: input.branch }),
                         platforms: input.platforms ?? [],
                         hostsFile: input.hostsFile ?? null,
-                        dryRun: input.dryRun ?? false,
+                        dryRun: false,
                         create: input.create ?? false,
                       }),
-                    );
+                  ),
+                );
               }),
-              (outcome) =>
-                outcome.ok
+              (answered) => {
+                if (!answered.ok) return Effect.fail(answered.refusal);
+                const outcome = answered.value;
+                return outcome.ok
                   ? Effect.succeed({
                       ...outcome.facts,
                       dryRun: input.dryRun ?? false,
+                      replayed: answered.replayed,
                     })
                   : Effect.fail(
                       new ServiceRefused({
@@ -432,7 +526,8 @@ export function createOduService(opts: ServiceOptions): OduService {
                           ? {}
                           : { suggestion: outcome.suggestion }),
                       }),
-                    ),
+                    );
+              },
             ),
         },
       },

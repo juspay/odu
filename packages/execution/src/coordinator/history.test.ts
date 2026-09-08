@@ -83,6 +83,7 @@ function init(root: string, over: Partial<RunHistoryInit> = {}): RunHistoryInit 
     pipeline: "ci",
     scope: { selectors: ["e2e"], platforms: [], noDeps: false },
     hostPins: [],
+    hostsFile: "",
     snapshotMode: "strict",
     dirty: false,
     runnerFlake: null,

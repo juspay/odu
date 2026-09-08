@@ -82,8 +82,12 @@ function rowFacts(platform: string, probe: ProbeResult): VenueRowFacts {
  */
 export async function venueInventory(request: {
   platforms: readonly string[];
+  /** The CALLER's `$ODU_HOSTS`. This runs in the service, whose environment is
+   *  a fact about the shell that started it — so without this, `odu hosts`
+   *  reported the daemon's fleet while `odu run` used the caller's. */
+  hostsFile: string | null;
 }): Promise<VenueProbeOutcome> {
-  const config = loadHosts();
+  const config = loadHosts(request.hostsFile ?? undefined);
   const configured = Object.keys(config.hosts).sort();
   if (configured.length === 0) {
     return {

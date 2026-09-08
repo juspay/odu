@@ -85,6 +85,7 @@ function spawnLeaseHold(opts: {
   platform: string;
   noWait: boolean;
   repoRoot: string;
+  hostsFile?: string | null;
 }): number {
   const argv = [
     ...oduSelfArgv(),
@@ -112,7 +113,14 @@ function spawnLeaseHold(opts: {
   const child = spawn(argv[0]!, argv.slice(1), {
     detached: true,
     stdio: ["ignore", logFd, logFd],
-    env: process.env,
+    // The CALLER's inventory, carried to the holder. A hold outlives the shell
+    // that asked for it and resolves its own pool, so a holder started from a
+    // service whose `$ODU_HOSTS` differs from the caller's would queue for a
+    // machine in a fleet the caller never named.
+    env:
+      opts.hostsFile === undefined || opts.hostsFile === null
+        ? process.env
+        : { ...process.env, ODU_HOSTS: opts.hostsFile },
     cwd: opts.repoRoot,
   });
   child.unref();
@@ -122,8 +130,11 @@ function spawnLeaseHold(opts: {
   return child.pid;
 }
 
-function resolvePlatforms(requested: readonly string[]): string[] {
-  const hostsConfig = loadHosts();
+function resolvePlatforms(
+  requested: readonly string[],
+  hostsFile: string | null,
+): string[] {
+  const hostsConfig = loadHosts(hostsFile ?? undefined);
   const pools = fanoutPools(
     hostsConfig,
     [],
@@ -160,6 +171,10 @@ function holderFacts(
 
 export interface LeaseOptions {
   platforms: readonly string[];
+  /** The CALLER's `$ODU_HOSTS`. Resolved here, in the service's process, whose
+   *  own environment is a fact about the shell that started it. `null` is a
+   *  caller that expressed nothing. */
+  hostsFile?: string | null;
   /** Try once and let the holder exit rather than queueing. The HOLDER's
    *  persistence, not this call's — this call never waits either way. */
   noWait: boolean;
@@ -187,7 +202,7 @@ export async function leaseVenues(
   const repoRoot = opts.repoRoot ?? process.cwd();
   let platforms: string[];
   try {
-    platforms = resolvePlatforms(opts.platforms);
+    platforms = resolvePlatforms(opts.platforms, opts.hostsFile ?? null);
   } catch (err) {
     return { ok: false, message: (err as Error).message };
   }
@@ -230,6 +245,7 @@ export async function leaseVenues(
       platform,
       noWait: opts.noWait,
       repoRoot,
+      hostsFile: opts.hostsFile ?? null,
     });
     upsertPlatformLease(repoRoot, platform, {
       host: null,
@@ -294,6 +310,8 @@ function waitingMessage(
 export function releaseVenues(opts: {
   platforms: readonly string[];
   repoRoot?: string;
+  /** The caller's `$ODU_HOSTS` — see {@link LeaseOptions}. */
+  hostsFile?: string | null;
 }): { results: readonly VenueReleaseResult[] } {
   const repoRoot = opts.repoRoot ?? process.cwd();
   const { record } = reconcileLeaseRecord(repoRoot);

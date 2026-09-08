@@ -88,6 +88,10 @@ export interface RunHistoryInit {
    *  today. See `RunManifestSchema.hostPins`; an empty array is "explicitly
    *  unpinned" and is a different fact from the field being absent. */
   hostPins: readonly string[];
+  /** The inventory those pins were names in — the caller's `$ODU_HOSTS`, as
+   *  this coordinator saw it. `""` is a real answer ("the caller's shell had
+   *  none"); see `RunManifestSchema.hostsFile`. */
+  hostsFile: string;
   snapshotMode: "strict" | "live";
   dirty: boolean;
   runnerFlake: string | null;
@@ -290,6 +294,11 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
         // tell "the caller asked for no pins" from "nobody wrote down what the
         // caller asked for".
         hostPins: [...init.hostPins],
+        // ALWAYS written too, and for the same reason: absence is reserved for
+        // records an older build wrote, and is the only thing that lets a
+        // finalized retry tell "the caller's shell had no `$ODU_HOSTS`" from
+        // "nobody wrote down which fleet this ran against".
+        hostsFile: init.hostsFile,
         snapshot: {
           mode: init.snapshotMode,
           expectedSha: init.sha,

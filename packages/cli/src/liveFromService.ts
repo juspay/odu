@@ -48,6 +48,7 @@ import type {
   RunEnv,
   RunRow,
 } from "@odu/service-client/surface";
+import { logHasMore } from "@odu/service-client/surface";
 
 /** One node, as the view expects it.
  *
@@ -182,12 +183,13 @@ async function* pages(
         : ({ kind: "snapshot", text: page.text } as NodeLogFrame);
       opened = true;
     }
-    // `end` when the log can no longer GROW — the producer said its last word,
-    // the run reached a terminal record, or its owner is provably gone. A pane
-    // that inferred the end from `eof` alone would spin forever on the log of a
-    // coordinator that was killed, which is the case an operator most needs
-    // told about.
-    if (!page.open) {
+    // `end` when the log can no longer grow AND this read reached its end —
+    // `logHasMore`'s rule, which is the CLI's and the browser's too. Ending on
+    // `!open` alone dropped whatever the closing page carried: a producer that
+    // finishes after appending more than one page hands back an unread
+    // remainder with `open: false`, and the pane threw away the last screenful
+    // of the log somebody had opened it to read.
+    if (!logHasMore(page)) {
       yield { kind: "end" } as NodeLogFrame;
       return;
     }

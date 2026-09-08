@@ -292,12 +292,20 @@ and a browser simply could not do them at all.
 | --- | --- | --- | --- | --- |
 | resolve a pipeline | `odu surface pipeline_read --input '{…}' --json` | `pipeline_read` | `checkout`, `root?` | `checkout`, `name`, `tasks[]`, `mermaid` — the DAG, without running it |
 | list machines | `odu surface venue_probe --input '{}' --json` | `venue_probe` | *(none)* | `source`, `warnings[]`, `rows[]` — the lanes and who holds them |
-| hold a machine | `odu surface venue_hold --input '{…}' --json` | `venue_hold` | `checkout`, `platforms?`, `noWait?`, `requestId` | `results[]` (`held` / `waiting` / `already`), `replayed` |
-| release it | `odu surface venue_release --input '{…}' --json` | `venue_release` | `checkout`, `platforms?`, `requestId` | `released[]` (`effective`: `released` / `nothing`), `replayed` |
+| hold a machine | `odu surface venue_hold --input '{…}' --json` | `venue_hold` | `checkout`, `platforms?`, `hostsFile?`, `noWait?`, `requestId` | `results[]` (`held` / `waiting` / `already`), `replayed` |
+| release it | `odu surface venue_release --input '{…}' --json` | `venue_release` | `checkout`, `platforms?`, `hostsFile?`, `requestId` | `released[]` (`effective`: `released` / `nothing`), `replayed` |
 | import old runs | `odu surface catalog_import --input '{…}' --json` | `catalog_import` | `checkout`, `dryRun?`, `requestId` | `imported[]`, `skipped[]`, `catalog` |
 | expire old runs | `odu surface catalog_prune --input '{…}' --json` | `catalog_prune` | `retentionDays?`, `dryRun?`, `requestId` | `expired[]`, `kept[]`, `retentionDays`, `dryRun`, `replayed` |
-| require odu's checks | `odu surface protect_apply --input '{…}' --json` | `protect_apply` | `checkout`, `branch?`, `platforms?`, `dryRun?`, `create?`, `requestId` | `repo`, `branch`, `contexts[]`, `rulesetId`, `applied`, `created`, `derivedFrom`, `detail` |
+| require odu's checks | `odu surface protect_apply --input '{…}' --json` | `protect_apply` | `checkout`, `branch?`, `platforms?`, `hostsFile?`, `dryRun?`, `create?`, `requestId` | `repo`, `branch`, `contexts[]`, `rulesetId`, `applied`, `created`, `derivedFrom`, `detail`, `replayed` |
 
+- **`requestId` is an idempotency key on these three too.** A repeat with the
+  same id replays the recorded answer and performs nothing — which is what
+  stops a lost reply's retry from releasing a hold somebody else has taken
+  since, or overwriting a ruleset edited in between. A repeat with the same id
+  and DIFFERENT input is `request_conflict`; one whose first attempt's outcome
+  is unrecorded is `request_unresolved`, and the answer to that is to read the
+  current state, never to re-issue under a fresh id. `replayed` says which you
+  got.
 - **A hold outlives your session.** `venue_hold` records the lease against a
   *checkout*, and the holder is the service's child rather than yours — so it
   survives your process ending, and you must `venue_release` it. `noWait` gives
@@ -432,10 +440,15 @@ terminal spelling.
 
 **`$ODU_HOSTS` belongs to the caller, and travels with the request.** The
 service is a per-user singleton, so the process that starts your coordinator is
-not the one a person typed into. `odu run` therefore sends its own shell's
-value, absolute, as `run_start`'s `hostsFile` — a path, or `""` for "this shell
-has none". **An agent omits the field entirely**, which means "I have no shell
-and no preference" and leaves the service's own configuration standing.
+not the one a person typed into. Every verb that resolves a host inventory —
+`run_start`, `venue_probe`, `venue_hold`, `venue_release`, `protect_apply` —
+takes `hostsFile`: a path, or `""` for "this shell has none". **An agent omits
+the field entirely**, which means "I have no shell and no preference" and
+leaves the service's own configuration standing.
+
+A finalized retry replays the PARENT's inventory, recorded in its manifest, and
+refuses (`not_replayable`) for a record written before odu wrote it down — a
+replay that resolved against today's fleet is not a replay.
 
 A lane host needs ssh + Nix + outbound https,
 and the source arrives by `git fetch` of the **pushed** SHA — remote lanes
