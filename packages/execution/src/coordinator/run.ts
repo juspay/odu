@@ -402,6 +402,19 @@ export async function runCommand(
   }
 
   const sha = git(repoRoot, ["rev-parse", "HEAD"]);
+  // A COMMIT WE DID NOT READ IS NOT A COMMIT. `git` exiting 0 and saying
+  // nothing has told us nothing, and treating that as the head made the
+  // refusal below read "this checkout is at , not 7ba435e" — a sentence
+  // asserting a commit nobody read, and pointing the reader at the wrong
+  // problem. Seen on a loaded runner where subprocesses were returning no
+  // output at all.
+  if (sha === "") {
+    process.stderr.write(
+      `odu: could not read HEAD in ${repoRoot} — \`git rev-parse HEAD\` ` +
+        "answered with nothing. odu runs a commit, so it will not guess one.\n",
+    );
+    return 1;
+  }
   const sha7 = sha.slice(0, 7);
 
   // A launcher told us which commit this run is supposed to be about. REFUSE

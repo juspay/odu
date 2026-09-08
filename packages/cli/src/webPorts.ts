@@ -86,9 +86,16 @@ export function probeCheckout(
   const live = listRuns({ ...catalog, repoRoot: top.stdout.trim() }).find(
     (row) => row.liveness === "owned" && row.endpoint !== null,
   );
+  // AN EMPTY ANSWER IS NOT AN ANSWER. `git rev-parse HEAD` that exits 0 and
+  // says nothing has told us nothing, and reporting `""` as the head made the
+  // refusal downstream read "this checkout is at , not 7ba435e" — a sentence
+  // asserting a commit odu never read, seen on a loaded runner where the daemon
+  // could not get output back from its subprocesses at all. `null` is what "we
+  // do not know" looks like, and every reader already handles it.
+  const said = head.status === 0 ? head.stdout.trim() : "";
   return {
     isRepo: true,
-    head: head.status === 0 ? head.stdout.trim() : null,
+    head: said === "" ? null : said,
     branch: gitBranch(checkout),
     liveRunId: live?.runId ?? null,
   };
