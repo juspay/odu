@@ -43,7 +43,6 @@
  * different act.
  */
 
-import { resolve } from "node:path";
 import { subscribe } from "@odu/execution/common/effectEdge";
 import { progressEvent } from "@odu/execution/common/presentation";
 import { STATUS_META } from "@odu/run-client/surface";
@@ -58,6 +57,7 @@ import type {
   RunRow,
   StartReceipt,
 } from "@odu/service-client/surface";
+import { ServiceRefused } from "@odu/service-client/surface";
 import { serviceOrigin } from "@odu/service-client/endpoint";
 import { verdictStateOf } from "./liveFromService";
 import { printVerdict } from "./render";
@@ -70,6 +70,7 @@ import {
   formatAgo,
   git,
   here,
+  hostsFileHere,
   readRows,
   resolveRunAddress,
   reportFailure,
@@ -99,6 +100,9 @@ export interface RunOpts {
   noSnapshot: boolean;
   noPost: boolean;
   supersede: boolean;
+  /** Park the coordinator at settle instead of tearing down, so its socket
+   *  stays answerable after the verdict. */
+  linger: boolean;
   /** Start it and return, rather than watching it settle. */
   noWait: boolean;
   /** Emit one NDJSON `ProgressEvent` per node transition on stdout. A FROZEN
@@ -157,6 +161,7 @@ export async function runViaService(opts: RunOpts): Promise<number> {
         noSnapshot: opts.noSnapshot,
         noPost: opts.noPost,
         supersede: opts.supersede,
+        linger: opts.linger,
       }),
     );
     if (!started.ok) {
@@ -176,21 +181,6 @@ export async function runViaService(opts: RunOpts): Promise<number> {
     }
     return observe(client, receipt.runId, receipt.cursor, opts.json);
   });
-}
-
-/**
- * THIS shell's `$ODU_HOSTS`, as `run.start` takes it.
- *
- * The service is a per-user singleton somebody else may have started, and
- * `loadHosts` runs in the coordinator it spawns — so a variable that is not
- * carried here is a variable that stopped working the moment `odu run` became
- * a client. `""` is an answer, not a gap: it says this shell has none, which
- * is different from an agent's silence.
- */
-function hostsFileHere(cwd: string | undefined): string {
-  const raw = process.env.ODU_HOSTS;
-  if (raw === undefined || raw === "") return "";
-  return resolve(cwd ?? process.cwd(), raw);
 }
 
 /** What a start says to a person: which run this is, and where to see it. */
@@ -292,6 +282,10 @@ export interface WaitOpts {
   run: string;
   after?: string;
   deadlineMs?: number;
+  /** Refuse unless the run is about this commit. The guard `odu wait` has
+   *  always had: a script that waited on "the run here" after a rebase was
+   *  waiting on the wrong commit and could not tell. */
+  expectedSha?: string;
   settle: boolean;
   json: boolean;
   origin?: string;  /** Where the caller is standing — the checkout `--run latest` is about. */
@@ -321,9 +315,31 @@ export async function waitViaService(opts: WaitOpts): Promise<number> {
         ? reportLost(answered.error, opts.json)
         : reportRefusal(answered.refusal, opts.json);
     }
-    if (opts.json) emitJson(answered.value);
-    else process.stdout.write(renderAttention(answered.value));
-    return waitExitFor(answered.value);
+    // THE COMMIT GUARD, checked here because only here are both halves known:
+    // the caller's claim about which commit it is waiting on, and the run's
+    // own. A script that waited on "the run in this checkout" across a rebase
+    // was waiting on the previous commit's run and had no way to tell.
+    const answer = answered.value;
+    if (
+      opts.expectedSha !== undefined &&
+      answer.sha !== null &&
+      !answer.sha.startsWith(opts.expectedSha)
+    ) {
+      return reportRefusal(
+        new ServiceRefused({
+          code: "checkout_refused",
+          message:
+            `odu: run ${answer.runId} is about ${answer.sha.slice(0, 7)}, not ` +
+            `${opts.expectedSha} — --expected-sha refuses rather than report a ` +
+            "verdict about a different commit",
+          runId: answer.runId,
+        }),
+        opts.json,
+      );
+    }
+    if (opts.json) emitJson(answer);
+    else process.stdout.write(renderAttention(answer));
+    return waitExitFor(answer);
   });
 }
 

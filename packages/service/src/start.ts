@@ -408,6 +408,7 @@ async function start(input: StartInput, deps: StartDeps): Promise<Outcome> {
     // The caller's explicit "take this checkout". The coordinator does the
     // cancel-then-confirm; this only has to not lose the word.
     supersede: input.supersede ?? false,
+    linger: input.linger ?? false,
   });
   if (!launched.ok) {
     return refuseAndRecord(

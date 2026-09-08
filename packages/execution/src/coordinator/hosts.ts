@@ -64,8 +64,16 @@ interface HostsCandidate {
   path: string | null;
 }
 
-function hostsCandidates(): HostsCandidate[] {
-  const oduHosts = process.env.ODU_HOSTS;
+/**
+ * @param override the CALLER's `$ODU_HOSTS`, when the caller is not this
+ *   process. Three readings, the same three the wire carries: a path uses that
+ *   file; `""` means the caller's shell had none, so the chain starts at
+ *   `~/.config`; `undefined` means nobody said, so this process's own
+ *   environment answers. A per-user singleton runs work on behalf of callers
+ *   whose environment is not its own, and that is exactly when it matters.
+ */
+function hostsCandidates(override?: string): HostsCandidate[] {
+  const oduHosts = override ?? process.env.ODU_HOSTS;
   return [
     {
       label: "$ODU_HOSTS",
@@ -142,8 +150,8 @@ function parsePool(
   return pool;
 }
 
-export function loadHosts(): HostsConfig {
-  const candidates = hostsCandidates()
+export function loadHosts(override?: string): HostsConfig {
+  const candidates = hostsCandidates(override)
     .map((c) => c.path)
     .filter((p): p is string => p !== null);
   for (const path of candidates) {

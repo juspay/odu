@@ -404,6 +404,7 @@ export function createOduService(opts: ServiceOptions): OduService {
                           ? {}
                           : { branch: input.branch }),
                         platforms: input.platforms ?? [],
+                        hostsFile: input.hostsFile ?? null,
                         dryRun: input.dryRun ?? false,
                         create: input.create ?? false,
                       }),

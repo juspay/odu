@@ -61,15 +61,25 @@ export interface HereRunOpts {
   cwd?: string;
 }
 
-/** A run is still this checkout's CURRENT one until it reaches a state nothing
- *  will move it out of. `owner_lost` counts as current on purpose: a run whose
- *  coordinator died without finalizing is exactly what a person standing in the
- *  checkout needs to be told about, and hiding it would send them looking for a
- *  run that "isn't there". */
+/** States nothing will move a run out of. `owner_lost` is deliberately NOT one
+ *  of them: a run whose coordinator died without finalizing is exactly what a
+ *  person standing in the checkout needs to be told about, and hiding it would
+ *  send them looking for a run that "isn't there". */
 const OVER = new Set(["settled", "expired"]);
 
 /**
- * The newest run started from this checkout that has not finished.
+ * The newest run started from this checkout, if it has not finished.
+ *
+ * NEWEST FIRST, THEN THE STATE TEST — and the order of those two is the whole
+ * function. Filtering first and sorting the survivors reads the same and is
+ * wrong: an `owner_lost` run never leaves that state, so it stayed "current"
+ * forever and SHADOWED every run started after it. `odu status` in this very
+ * checkout spent an hour reporting an abandoned run's nodes as `running` while
+ * the run the person had actually just started sat settled in the catalog,
+ * with the two disagreeing on screen.
+ *
+ * A dead run is news only while it is the last thing that happened here.
+ * Starting another run is a person saying they have moved on.
  *
  * `undefined` when there is none, which is an ANSWER and not an error — a
  * checkout with no run in flight is the ordinary state of most checkouts most
@@ -77,9 +87,10 @@ const OVER = new Set(["settled", "expired"]);
  * a prompt.
  */
 function currentRun(rows: readonly RunRow[], checkout: string): RunRow | undefined {
-  return rows
-    .filter((r) => r.repoRoot === checkout && !OVER.has(r.state))
+  const newest = rows
+    .filter((r) => r.repoRoot === checkout)
     .sort((a, b) => b.createdAt - a.createdAt)[0];
+  return newest === undefined || OVER.has(newest.state) ? undefined : newest;
 }
 
 /** The frame both commands start from: the board resolved to a run, then that

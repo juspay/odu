@@ -25,6 +25,7 @@
 
 import type { Pipeline, ProtectOutput, TaskRow } from "@odu/service-client/surface";
 import {
+  hostsFileHere,
   call,
   checkoutHere,
   emitJson,
@@ -107,6 +108,11 @@ export async function protectViaService(opts: ProtectOpts): Promise<number> {
         checkout,
         ...(opts.branch === undefined ? {} : { branch: opts.branch }),
         platforms: opts.platforms,
+        // THIS shell's `$ODU_HOSTS`, for the same reason `odu run` sends it:
+        // an unsliced protect derives its platform set from the hosts file,
+        // and that derivation happens in a singleton whose environment is a
+        // fact about the shell that started it.
+        hostsFile: hostsFileHere(opts.cwd),
         dryRun: opts.dryRun,
         create: opts.create,
         requestId: requestId(undefined),

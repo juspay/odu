@@ -30,6 +30,7 @@ import {
   makeWebFixture,
   mcp,
   runSocketExists,
+  SHARED_TOOLS,
   suitePort,
   startWebService,
   startWebServiceViaCommand,
@@ -367,16 +368,14 @@ describe("the HTTP MCP face", () => {
     expect(result.instructions).toContain("run_start");
   }, 60_000);
 
-  it("advertises exactly the five shared verbs, under the same names", async () => {
+  it("advertises exactly the shared verbs, under the same names", async () => {
     const answer = await mcp(world, "tools/list", undefined, 2);
     const tools = (answer.result as { tools: { name: string }[] }).tools.map((t) => t.name);
-    expect(tools.sort()).toEqual([
-      "log_read",
-      "run_cancel",
-      "run_retry",
-      "run_start",
-      "run_wait",
-    ]);
+    // Against `SHARED_TOOLS`, not a list written out here. This assertion held
+    // a copy of five verb names and went stale the moment the contract grew to
+    // thirteen — which made a test whose whole subject is "every face offers
+    // the same vocabulary" the one place a second vocabulary was written down.
+    expect(tools.sort()).toEqual([...SHARED_TOOLS]);
   }, 60_000);
 
   it("advertises the readable members as resources", async () => {

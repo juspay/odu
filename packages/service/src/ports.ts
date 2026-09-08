@@ -64,6 +64,8 @@ export interface LaunchRequest {
    *  the lock — belongs to the process that is about to hold that lock, because
    *  only it can do the three without a window in between. */
   readonly supersede: boolean;
+  /** Park the coordinator at settle instead of tearing down. */
+  readonly linger: boolean;
 }
 
 export interface LaunchReceipt {
@@ -380,6 +382,11 @@ export type RulesetWriter = (request: {
   checkout: string;
   branch?: string;
   platforms: readonly string[];
+  /** The CALLER's `$ODU_HOSTS`, or `null` for "the caller expressed nothing".
+   *  An unsliced `protect` DERIVES its platform set from the hosts file, and
+   *  that derivation runs here — in a per-user singleton whose environment
+   *  belongs to whoever started it, not to whoever asked. */
+  hostsFile: string | null;
   dryRun: boolean;
   create: boolean;
 }) => Promise<ProtectOutcome>;

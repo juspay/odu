@@ -14,6 +14,7 @@ import {
   spawnSync,
 } from "node:child_process";
 import {
+  chmodSync,
   cpSync,
   existsSync,
   mkdirSync,
@@ -177,6 +178,41 @@ export function privateWorld(port: number): {
  */
 const blackBox = privateWorld(suitePortFor("blackBoxRuns"));
 export const hermeticEnv: NodeJS.ProcessEnv = blackBox.env;
+
+/**
+ * A `gh` AT A FIXED PATH, dispatching to whichever stand-in the running test
+ * has installed.
+ *
+ * `$ODU_GH_BIN` has the same shape of problem `$ODU_HOSTS` had, and for the
+ * same reason: `protect` is a client now, and the `gh` it means is spawned by
+ * the SERVICE. A variable set on the `odu protect` process therefore never
+ * reaches the program that runs `gh` — and a test that wrote its stand-in to a
+ * fresh temp directory per case could not put that path into a daemon which
+ * had already started. Eleven `protect` assertions were being graded against
+ * the real GitHub API.
+ *
+ * So the PATH is fixed and part of the world, which the service inherits, and
+ * only the target moves. The pointer starts at the real `gh`, so a suite that
+ * installs nothing behaves exactly as before.
+ */
+const ghDispatch = join(blackBox.root, "gh");
+const ghTarget = join(blackBox.root, "gh-target");
+writeFileSync(
+  ghTarget,
+  spawnSync("sh", ["-c", "command -v gh || true"], { encoding: "utf-8" })
+    .stdout.trim() || "/bin/false",
+);
+writeFileSync(ghDispatch, `#!/bin/sh\nexec "$(cat '${ghTarget}')" "$@"\n`);
+chmodSync(ghDispatch, 0o755);
+hermeticEnv.ODU_GH_BIN = ghDispatch;
+
+/** Point the world's `gh` at this executable for the next call. Tests run one
+ *  at a time, so the pointer needs no locking — and a stand-in that outlives
+ *  its test is a stand-in the next one would silently inherit, which is why
+ *  {@link cleanup} is not where this is undone: the NEXT installer is. */
+export function useGh(executable: string): void {
+  writeFileSync(ghTarget, executable);
+}
 
 /**
  * The odu that will be driven, remembered so teardown can reach the service it

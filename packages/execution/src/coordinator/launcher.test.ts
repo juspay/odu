@@ -59,6 +59,7 @@ function request(over: Partial<LaunchRequest> = {}): LaunchRequest {
     hostPins: [],
     hostsFile: null,
     supersede: false,
+    linger: false,
     ...over,
   };
 }
@@ -140,6 +141,15 @@ describe("launchArgv", () => {
     // the ordinary busy-checkout refusal.
     expect(launchArgv(request())).not.toContain("--supersede");
     expect(launchArgv(request({ supersede: true }))).toContain("--supersede");
+  });
+
+  it("carries --linger, the caller's shape of run", () => {
+    // `odu run --linger` parks the coordinator at settle instead of tearing
+    // down, so its socket is still answerable when a caller goes to read the
+    // log. Dropping the flag turns that into a race the caller cannot win, and
+    // it is the shape an agent's settle-then-read loop actually uses.
+    expect(launchArgv(request())).not.toContain("--linger");
+    expect(launchArgv(request({ linger: true }))).toContain("--linger");
   });
 
   it("names the parent run and the request id only when there is one", () => {

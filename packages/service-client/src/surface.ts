@@ -624,6 +624,11 @@ const StartInputSchema = Schema.Struct({
    *  default answer to "a run is already going there" is to show the caller
    *  that run rather than to kill it. */
   supersede: Schema.optionalKey(Schema.Boolean),
+  /** Park the coordinator at settle instead of tearing down, so its socket
+   *  stays answerable after the verdict. The shape an agent's loop wants —
+   *  settle, then read — and the one a test uses to observe a settled run
+   *  without racing a teardown. */
+  linger: Schema.optionalKey(Schema.Boolean),
 });
 export type StartInput = typeof StartInputSchema.Encoded;
 
@@ -1155,6 +1160,13 @@ const ProtectInputSchema = Schema.Struct({
    *  — so a derived set is reported in `derivedFrom` and a caller can refuse
    *  it. */
   platforms: Schema.optionalKey(Schema.Array(Schema.String)),
+  /** The CALLER's `$ODU_HOSTS`, on the same three readings `run.start` takes
+   *  it on — a path, `""` for "my shell has none", absent for "I have no
+   *  shell, use the service's own". Present here for the same reason it is
+   *  present there: the platform set is DERIVED from the hosts file when
+   *  `platforms` is absent, and that derivation runs in the service, whose
+   *  environment belongs to whoever started it. */
+  hostsFile: Schema.optionalKey(Schema.String),
   /** Compute and report the contexts without writing anything. */
   dryRun: Schema.optionalKey(Schema.Boolean),
   /** Create the branch's ruleset when there is none. Explicit, because

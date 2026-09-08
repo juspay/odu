@@ -57,6 +57,11 @@ export interface ProtectArgs {
   /** The checkout to protect. The daemon serves many, so this can no longer be
    *  "wherever the process happens to be standing". */
   checkout: string;
+  /** The CALLER's `$ODU_HOSTS`. The unsliced path DERIVES the platform set
+   *  from the hosts file, and this runs inside the singleton — whose own
+   *  environment belongs to whoever started it, not to whoever asked. `null`
+   *  is a caller that expressed nothing, and gets the service's own. */
+  hostsFile: string | null;
 }
 
 /** The platform set protection covers, as pure data — the decision writes no
@@ -79,7 +84,10 @@ type PlatformSet =
  *  the hosts config, which is machine-local while protection is repo-global —
  *  that once silently halved a repo's required contexts, so the derivation
  *  names its source. */
-function protectPlatforms(explicit: readonly string[]): PlatformSet {
+function protectPlatforms(
+  explicit: readonly string[],
+  hostsFile: string | null,
+): PlatformSet {
   if (explicit.length > 0) {
     // A blank value (`--platform=`) would fan out contexts like `alpha@` and,
     // un-dry-run, PATCH them into protection — the host lookup that used to
@@ -96,7 +104,7 @@ function protectPlatforms(explicit: readonly string[]): PlatformSet {
     }
     return { kind: "explicit", platforms: [...new Set(explicit)].sort() };
   }
-  const config = loadHosts();
+  const config = loadHosts(hostsFile ?? undefined);
   const platforms = Object.keys(config.hosts).sort();
   // A null source implies zero platforms, so `derived` always carries the real
   // file that won.
@@ -230,7 +238,7 @@ export async function applyProtection(
 
   let set: PlatformSet;
   try {
-    set = protectPlatforms(args.platforms);
+    set = protectPlatforms(args.platforms, args.hostsFile);
   } catch (err) {
     return { ok: false, code: "bad_input", message: (err as Error).message };
   }

@@ -802,6 +802,9 @@ async function relaunch(
     // somebody else's, and the honest answer is the coordinator's ordinary
     // busy-checkout refusal rather than a silent eviction.
     supersede: false,
+    // A replay is machinery, not a person at a terminal waiting to read a
+    // socket afterwards. It tears down like any other run.
+    linger: false,
   };
   // A LAUNCH IS A DISPATCH. Marked before the launcher is entered, for the same
   // reason the live path marks before its rerun call: from here on, a lost

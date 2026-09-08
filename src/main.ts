@@ -28,9 +28,9 @@
  *
  *   odu run [recipe[@platform]…]           start a run here, then watch it
  *                                          (Ctrl-C stops WATCHING, not the run)
- *   odu wait --run R                       bounded, resumable attention
- *   odu rerun --run R <selector>           retry; odu decides live vs replay
- *   odu cancel --run R [node|@platform]    stop a run, a node, or a lane
+ *   odu wait [--run R]                     bounded, resumable attention
+ *   odu rerun [--run R] <selector>         retry; odu decides live vs replay
+ *   odu cancel [--run R] [node|@platform]  stop a run, a node, or a lane
  *   odu logs <log-key> [-f]                one attempt's bytes, by its key
  *   odu history <list|show|import|prune>   the per-user run catalog
  *   odu status / attach                    this checkout's newest live run
@@ -41,9 +41,11 @@
  *   odu surface <verb>                     the service, projected as argv
  *   odu mcp                                the service, projected as MCP
  *
- * Runs are addressed GLOBALLY, by run id — never by "the run in this
- * directory". That is why `wait`, `rerun` and `cancel` take `--run`: the id is
- * nameable from anywhere, and `odu history list` is where you find it.
+ * Runs are addressed GLOBALLY, by run id, so `wait`, `rerun` and `cancel`
+ * take `--run` and work from any directory about any run — `odu history list`
+ * is where you find an id. Omitting it means `latest`: the newest run of THIS
+ * checkout, which is what these three have always meant when typed bare and is
+ * a default rather than a second addressing scheme.
  *
  * Strict by default: refuses a dirty tree, pins HEAD via `git worktree`,
  * posts commit statuses under `<recipe>@<platform>` contexts, splits logs
@@ -90,17 +92,18 @@ run [recipe[@platform]…] [--platform P]… [--host P=ADDR]… [--root NAMEPATH
     [--no-wait] [--request-id ID] [--progress json] [-o json]
                               # start a run in THIS checkout and watch it.
                               # Ctrl-C stops watching; the run keeps going.
-wait --run R [--after CURSOR] [--deadline-ms N] [--settle] [-o json]
+wait [--run R] [--after CURSOR] [--deadline-ms N] [--settle] [-o json]
                               # bounded, resumable. Returns on the first red
                               # you can act on, not on settle. Exits: 0 passed
                               # 1 a failure to act on · 2 still going, nothing
                               # red · 3 owner lost · 4 no such run · 5 refused
-rerun --run R [--request-id ID] [--expect-attempt N] [-o json] <selector>
+                              # --run omitted = latest: this checkout's newest
+rerun [--run R] [--request-id ID] [--expect-attempt N] [-o json] <selector>
                               # a new attempt if its coordinator is still up,
                               # else a new linked run. odu decides, and says so.
                               # --expect-attempt guards one node against having
                               # moved on, so the selector must be a full node id
-cancel --run R [node|@platform] [--request-id ID] [-o json]
+cancel [--run R] [node|@platform] [--request-id ID] [-o json]
                               # bare = whole run; node or @plat = partial
 logs <log-key> [-f] [--offset B] [--limit B] [--wait-ms N] [-o json]
                               # ECHO the logKey a failure reported. --offset
@@ -174,7 +177,7 @@ function positiveInt(flag: string, raw: string): number {
 const HISTORY_USAGE = `usage: odu history <list|show|import|prune> [args]
 
 list [--all] [--limit N] [-o json]   runs in the per-user catalog, newest first
-show --run R [--after CURSOR] [-o json]
+show [--run R] [--after CURSOR] [-o json]
                                      one run's attention payload, without waiting
 import [--dry-run] [-o json]         bring this checkout's .ci records in
 prune [--days N] [--dry-run] [-o json]
@@ -222,11 +225,8 @@ async function historyCommand(
           output: { type: "string", short: "o" },
         },
       });
-      if (values.run === undefined) {
-        throw new Error("odu: history show needs --run (a run id, <sha7>#<seq>, or `latest`)");
-      }
       return showViaService({
-        run: values.run,
+        run: values.run ?? HERE_AND_NOW,
         ...(values.after === undefined ? {} : { after: values.after }),
         ...(values.origin === undefined ? {} : { origin: values.origin }),
         json: values.output === "json",
@@ -280,6 +280,20 @@ async function historyCommand(
   }
 }
 
+/**
+ * THE RUN A BARE COMMAND IS ABOUT.
+ *
+ * `odu wait`, `odu rerun` and `odu cancel` took no run at all before runs
+ * became globally addressed: they meant the one in this checkout, which is
+ * what somebody standing in a repository means when they type `odu cancel`.
+ * Making `--run` mandatory turned that gesture into a usage error.
+ *
+ * `latest` is that gesture, spelled in the new grammar — the newest run OF
+ * THIS CHECKOUT (see `resolveRunAddress`). A run id is still accepted, and now
+ * so is another checkout's, which is the capability the addressing bought.
+ */
+const HERE_AND_NOW = "latest";
+
 async function dispatch(argv: string[]): Promise<number> {
   const [command, ...rest] = argv;
   // THE WORKERS FIRST, and out of this file entirely — `run-coordinator` and
@@ -331,6 +345,7 @@ async function dispatch(argv: string[]): Promise<number> {
           "no-snapshot": { type: "boolean" },
           "no-post": { type: "boolean" },
           supersede: { type: "boolean" },
+          linger: { type: "boolean" },
           "no-wait": { type: "boolean" },
           "request-id": { type: "string" },
           progress: { type: "string" },
@@ -357,6 +372,7 @@ async function dispatch(argv: string[]): Promise<number> {
         noSnapshot: values["no-snapshot"] ?? false,
         noPost: values["no-post"] ?? false,
         supersede: values.supersede ?? false,
+        linger: values.linger ?? false,
         noWait: values["no-wait"] ?? false,
         ...(values.progress === "json" ? { progressJson: true } : {}),
         ...(values["request-id"] === undefined
@@ -444,13 +460,14 @@ async function dispatch(argv: string[]): Promise<number> {
       });
     }
     /**
-     * `odu wait --run R` — bounded, resumable attention on one run.
+     * `odu wait [--run R]` — bounded, resumable attention on one run.
      *
-     * `--run` is now REQUIRED, and that is the authority change surfacing in
-     * the grammar: bare `odu wait` meant "the run live in this checkout", which
-     * is a question only something allowed to dial that checkout's socket can
-     * answer. A run id is host-global, so this works from any directory about
-     * any run — and `odu history list` is how you find the id.
+     * A run id is host-global, so this works from any directory about any run,
+     * and `odu history list` is how you find one. Bare `odu wait` still means
+     * what it always meant — the run in this checkout — but it means it through
+     * the CATALOG now rather than by dialling that checkout's socket, which is
+     * the authority change. `latest` is the spelling of it, and it therefore
+     * also answers about a run whose coordinator has gone.
      */
     case "wait": {
       const { values, positionals } = parseArgs({
@@ -461,6 +478,11 @@ async function dispatch(argv: string[]): Promise<number> {
           run: { type: "string" },
           after: { type: "string" },
           "deadline-ms": { type: "string" },
+          // The spelling `odu wait` had before the deadline was a service
+          // parameter. Kept, because scripts are written against it and a flag
+          // that used to work is not a thing to remove in passing.
+          "timeout-ms": { type: "string" },
+          "expected-sha": { type: "string" },
           origin: { type: "string" },
           output: { type: "string", short: "o" },
         },
@@ -470,18 +492,23 @@ async function dispatch(argv: string[]): Promise<number> {
           "odu: wait takes no positional arguments (use --run / --after / --settle)",
         );
       }
-      if (values.run === undefined) {
-        throw new Error(
-          "odu: wait needs --run R (a run id, <sha7>#<seq>, or `latest`) — " +
-            "runs are addressed globally now; `odu history list` shows yours",
-        );
-      }
+      // One deadline, two spellings. `--deadline-ms` is the name the service
+      // parameter has; `--timeout-ms` is what this command took before there
+      // was a service. Naming both is not ambiguity — it is the same number —
+      // so the second is read only when the first is absent.
+      const deadline =
+        values["deadline-ms"] !== undefined
+          ? positiveInt("--deadline-ms", values["deadline-ms"])
+          : values["timeout-ms"] !== undefined
+            ? positiveInt("--timeout-ms", values["timeout-ms"])
+            : undefined;
       return waitViaService({
-        run: values.run,
+        run: values.run ?? HERE_AND_NOW,
         ...(values.after === undefined ? {} : { after: values.after }),
-        ...(values["deadline-ms"] === undefined
+        ...(deadline === undefined ? {} : { deadlineMs: deadline }),
+        ...(values["expected-sha"] === undefined
           ? {}
-          : { deadlineMs: positiveInt("--deadline-ms", values["deadline-ms"]) }),
+          : { expectedSha: values["expected-sha"] }),
         settle: values.settle ?? false,
         ...(values.origin === undefined ? {} : { origin: values.origin }),
         json: values.output === "json",
@@ -513,12 +540,6 @@ async function dispatch(argv: string[]): Promise<number> {
           "odu: rerun needs exactly one argument (node id, @platform, or recipe)",
         );
       }
-      if (values.run === undefined) {
-        throw new Error(
-          "odu: rerun needs --run R — runs are addressed globally now; " +
-            "`odu history list` shows yours",
-        );
-      }
       // `--expect-attempt` guards against acting on a stale reading, so it has
       // to name WHICH node it is about — and the only node it can name is the
       // selector, because there is nowhere else to put one.
@@ -548,7 +569,7 @@ async function dispatch(argv: string[]): Promise<number> {
               attempt: positiveInt("--expect-attempt", values["expect-attempt"]),
             };
       return retryViaService({
-        run: values.run,
+        run: values.run ?? HERE_AND_NOW,
         selector: positionals[0],
         ...(values["request-id"] === undefined
           ? {}
@@ -583,12 +604,6 @@ async function dispatch(argv: string[]): Promise<number> {
           "odu: cancel takes at most one argument (node id or @platform)",
         );
       }
-      if (values.run === undefined) {
-        throw new Error(
-          "odu: cancel needs --run R — runs are addressed globally now; " +
-            "`odu history list` shows yours",
-        );
-      }
       const target = positionals[0];
       // Three EXPLICIT scopes, never a precedence rule. A request that could be
       // read two ways is how somebody who meant to stop one node stops the
@@ -606,7 +621,7 @@ async function dispatch(argv: string[]): Promise<number> {
         );
       }
       return cancelViaService({
-        run: values.run,
+        run: values.run ?? HERE_AND_NOW,
         scope,
         ...(values["request-id"] === undefined
           ? {}
@@ -702,6 +717,19 @@ async function dispatch(argv: string[]): Promise<number> {
           output: { type: "string", short: "o" },
         },
       });
+      // A BLANK `--platform=` IS A USAGE ERROR, refused here.
+      //
+      // It has to be refused where the argument was typed. Left to the
+      // service, it comes back as a refusal — exit 5, "the request itself was
+      // refused" — and a malformed argument is not that: nothing was asked of
+      // odu that odu declined. It is exit 1, the same as every other unusable
+      // argv, which is what it was before `protect` became a client.
+      if ((values.platform ?? []).some((p) => p.trim() === "")) {
+        throw new Error(
+          "odu: --platform expects a Nix system tuple (e.g. x86_64-linux), " +
+            "got an empty value",
+        );
+      }
       return protectViaService({
         dryRun: values["dry-run"] ?? false,
         ...(values.branch === undefined ? {} : { branch: values.branch }),

@@ -129,6 +129,7 @@ describe("protectBranch refusals", () => {
     const outcome = await protectBranch({
       checkout: bare,
       platforms: LINUX,
+      hostsFile: null,
       dryRun: true,
       create: false,
     });
@@ -145,6 +146,7 @@ describe("protectBranch refusals", () => {
     const outcome = await protectBranch({
       checkout: checkout({ justfile: "alpha:\n    echo hi\n" }),
       platforms: LINUX,
+      hostsFile: null,
       dryRun: true,
       create: false,
     });
@@ -159,6 +161,7 @@ describe("protectBranch refusals", () => {
     const outcome = await protectBranch({
       checkout: checkout(),
       platforms: [],
+      hostsFile: null,
       dryRun: true,
       create: false,
     });
@@ -180,6 +183,7 @@ describe("protectBranch refusals", () => {
     const outcome = await protectBranch({
       checkout: checkout(),
       platforms: [""],
+      hostsFile: null,
       dryRun: true,
       create: false,
     });
@@ -196,6 +200,7 @@ describe("protectBranch refusals", () => {
     const outcome = await protectBranch({
       checkout: checkout({ origin: "git@gitlab.com:someone/thing.git" }),
       platforms: LINUX,
+      hostsFile: null,
       dryRun: false,
       create: false,
     });
@@ -209,6 +214,7 @@ describe("protectBranch refusals", () => {
     const outcome = await protectBranch({
       checkout: checkout({ origin: `https://github.com/${SLUG}` }),
       platforms: LINUX,
+      hostsFile: null,
       dryRun: false,
       create: false,
     });
@@ -228,6 +234,7 @@ describe("protectBranch refusals", () => {
     const outcome = await protectBranch({
       checkout: checkout({ origin: `https://github.com/${SLUG}` }),
       platforms: LINUX,
+      hostsFile: null,
       dryRun: false,
       create: false,
     });
@@ -243,6 +250,7 @@ describe("protectBranch refusals", () => {
       checkout: checkout({ origin: `https://github.com/${SLUG}` }),
       branch: "master",
       platforms: LINUX,
+      hostsFile: null,
       dryRun: false,
       create: false,
     });
@@ -297,6 +305,7 @@ describe("protectBranch successes", () => {
     const outcome = await protectBranch({
       checkout: checkout({ origin: `https://github.com/${SLUG}` }),
       platforms: ["x86_64-linux", "aarch64-darwin"],
+      hostsFile: null,
       dryRun: true,
       create: false,
     });
@@ -329,6 +338,7 @@ describe("protectBranch successes", () => {
     const outcome = await protectBranch({
       checkout: checkout({}),
       platforms: ["x86_64-linux"],
+      hostsFile: null,
       dryRun: true,
       create: false,
     });
@@ -349,6 +359,7 @@ describe("protectBranch successes", () => {
       checkout: checkout({ origin: `https://github.com/${SLUG}` }),
       branch: "master",
       platforms: [],
+      hostsFile: null,
       dryRun: true,
       create: false,
     });
@@ -369,6 +380,7 @@ describe("protectBranch successes", () => {
       checkout: checkout({ origin: `https://github.com/${SLUG}` }),
       branch: "master",
       platforms: LINUX,
+      hostsFile: null,
       dryRun: false,
       create: false,
     });
@@ -387,6 +399,7 @@ describe("protectBranch successes", () => {
       checkout: checkout({ origin: `https://github.com/${SLUG}` }),
       branch: "master",
       platforms: LINUX,
+      hostsFile: null,
       dryRun: false,
       create: true,
     });

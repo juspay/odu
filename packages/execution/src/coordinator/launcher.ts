@@ -86,6 +86,9 @@ export interface LaunchRequest {
    *  would send a caller's explicit "replace it" into the ordinary
    *  busy-checkout refusal. */
   readonly supersede: boolean;
+  /** Park at settle rather than tearing down. Carried because it is the
+   *  CALLER's shape of run, not the launcher's policy. */
+  readonly linger: boolean;
 }
 
 export interface LaunchReceipt {
@@ -144,6 +147,7 @@ export function launchArgv(request: LaunchRequest): string[] {
   if (request.noSnapshot) args.push("--no-snapshot");
   if (request.noPost) args.push("--no-post");
   if (request.supersede) args.push("--supersede");
+  if (request.linger) args.push("--linger");
   // The identity the caller minted, so the child publishes under the id the
   // receipt already names.
   args.push("--run-id", request.runId);

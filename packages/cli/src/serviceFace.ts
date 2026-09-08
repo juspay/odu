@@ -35,6 +35,7 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { buildSurfaceFace } from "@kolu/surface/client";
 import type { SurfaceDispatch } from "@kolu/surface/link";
@@ -487,4 +488,19 @@ export function formatAgo(deltaMs: number): string {
     if (deltaMs >= unit) return `${Math.floor(deltaMs / unit)}${label}`;
   }
   return "now";
+}
+
+/**
+ * THIS shell's `$ODU_HOSTS`, as `run.start` takes it.
+ *
+ * The service is a per-user singleton somebody else may have started, and
+ * `loadHosts` runs in the coordinator it spawns — so a variable that is not
+ * carried here is a variable that stopped working the moment `odu run` became
+ * a client. `""` is an answer, not a gap: it says this shell has none, which
+ * is different from an agent's silence.
+ */
+export function hostsFileHere(cwd: string | undefined): string {
+  const raw = process.env.ODU_HOSTS;
+  if (raw === undefined || raw === "") return "";
+  return resolve(cwd ?? process.cwd(), raw);
 }

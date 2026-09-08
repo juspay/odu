@@ -27,6 +27,7 @@ export const protectBranch: RulesetWriter = (request) =>
     // the first.
     ...(request.branch === undefined ? {} : { branch: request.branch }),
     platforms: request.platforms,
+    hostsFile: request.hostsFile,
     dryRun: request.dryRun,
     create: request.create,
   });

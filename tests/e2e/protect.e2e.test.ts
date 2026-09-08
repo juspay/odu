@@ -24,7 +24,14 @@ import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
-import { BIG, buildOduBinary, cleanup, makeFixture } from "./harness";
+import {
+  BIG,
+  buildOduBinary,
+  cleanup,
+  hermeticEnv,
+  makeFixture,
+  useGh,
+} from "./harness";
 
 let oduBin: string;
 
@@ -249,6 +256,10 @@ esac
   const ghBin = at("gh");
   writeFileSync(ghBin, script);
   chmodSync(ghBin, 0o755);
+  // Installed at the WORLD's fixed `gh` path rather than passed as an env var:
+  // `protect` is a client, and the `gh` it means is spawned by the service,
+  // which cannot learn a path invented after it started. See `useGh`.
+  useGh(ghBin);
 
   const res = spawnSync(
     oduBin,
@@ -257,7 +268,7 @@ esac
       cwd: dir,
       encoding: "utf-8",
       maxBuffer: BIG,
-      env: { ...process.env, ODU_GH_BIN: ghBin },
+      env: hermeticEnv,
     },
   );
   const calls = lines(readFileSync(at("calls.txt"), "utf-8"));
