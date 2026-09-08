@@ -29,7 +29,7 @@
  * writes.
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, describe, expect, it } from "bun:test";
@@ -966,25 +966,27 @@ describe("a replay runs where its parent was allowed to run", () => {
     // "no file", it means "ask this process", and this process is the daemon.
     // So the pre-check resolved the SERVICE's inventory while the child was
     // handed the caller's: two different fleets, one of them never named by
-    // anybody involved in the run. A caller on the ordinary `~/.config` chain,
-    // retried by a service started with `$ODU_HOSTS` pointing somewhere else,
-    // was refused `no_venue` for a placement that was still expressible.
+    // anybody involved in the run.
     //
-    // The suite's ambient `$ODU_HOSTS` (`HOSTLESS`, an empty config) IS the
-    // misconfigured daemon here, so all this test supplies is the caller's own
-    // side of the chain.
-    const home = mkdtempSync(join(tmpdir(), "odu-recovery-home-"));
-    dirs.push(home);
-    mkdirSync(join(home, ".config", "odu"), { recursive: true });
-    writeFileSync(
-      join(home, ".config", "odu", "hosts.json"),
-      JSON.stringify({ [PLATFORM]: ["builder-1"] }),
-    );
-    const homeWas = process.env.HOME;
-    process.env.HOME = home;
+    // Stated by giving the daemon an `$ODU_HOSTS` it cannot even parse. Nothing
+    // in a correct check opens that file; a check that consulted it refuses,
+    // quoting a JSON error from a fleet nobody in this run ever named. The
+    // caller's own side is a PIN rather than a file, because `""` starts the
+    // chain at `~/.config` — and what is in a developer's `~/.config` is not
+    // something a test may depend on either way. A pin admits the platform
+    // whether or not that file exists, so this states the daemon's inventory
+    // and nothing else.
+    const brokenDir = mkdtempSync(join(tmpdir(), "odu-recovery-broken-"));
+    dirs.push(brokenDir);
+    const broken = join(brokenDir, "hosts.json");
+    writeFileSync(broken, "{ this is not JSON");
+    process.env.ODU_HOSTS = broken;
     try {
       const root = tmpCatalog();
-      aFinishedRun(root, { hostsFile: "" });
+      aFinishedRun(root, {
+        hostsFile: "",
+        hostPins: [`${PLATFORM}=builder-7.internal`],
+      });
       const launcher = stubLauncher();
 
       // NO injected `hosts`: `retryRun` rather than this file's `retry`, so the
@@ -1000,8 +1002,9 @@ describe("a replay runs where its parent was allowed to run", () => {
 
       expect(launcher.calls[0]?.hostsFile).toBe("");
     } finally {
-      if (homeWas === undefined) delete process.env.HOME;
-      else process.env.HOME = homeWas;
+      // Back to the suite's own hostless config — every other test here depends
+      // on it. See `HOSTLESS`.
+      process.env.ODU_HOSTS = HOSTLESS;
     }
   });
 
