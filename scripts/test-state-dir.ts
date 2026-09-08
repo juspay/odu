@@ -21,7 +21,7 @@
  * what was written points it at a directory it keeps.
  */
 
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -29,5 +29,36 @@ if (
   process.env.ODU_STATE_DIR === undefined ||
   process.env.ODU_STATE_DIR === ""
 ) {
-  process.env.ODU_STATE_DIR = mkdtempSync(join(tmpdir(), "odu-test-state-"));
+  const root = mkdtempSync(join(tmpdir(), "odu-test-state-"));
+  process.env.ODU_STATE_DIR = root;
+
+  // AND REMOVED AGAIN. "Disposable" was only half true: the directory was
+  // made every run and removed by nothing, so a machine that runs the suite
+  // often accumulates one catalog per run — each holding whole fixture runs,
+  // their logs and their manifests. Seventeen of them had piled up before
+  // anybody looked.
+  //
+  // Idempotent and total, because `exit` does not fire for a signal and a test
+  // process is interrupted more often than it finishes while somebody is
+  // working on it. The signals leave by the route they arrived, so a runner
+  // reading how its child died still gets the truth.
+  let removed = false;
+  const dispose = (): void => {
+    if (removed) return;
+    removed = true;
+    try {
+      rmSync(root, { recursive: true, force: true });
+    } catch {
+      // On the way out. A cleanup that throws would replace the suite's real
+      // verdict with its own.
+    }
+  };
+  process.on("exit", dispose);
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    process.on(signal, () => {
+      dispose();
+      process.removeAllListeners(signal);
+      process.kill(process.pid, signal);
+    });
+  }
 }

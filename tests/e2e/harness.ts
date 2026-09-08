@@ -186,19 +186,43 @@ export const hermeticEnv: NodeJS.ProcessEnv = blackBox.env;
  */
 let driven: string | null = null;
 
+/** Every fixture directory this process made, so teardown can remove the ones
+ *  a killed run never got to. `cleanup` deregisters, so the ordinary
+ *  `afterEach` path stays the one that does the work. */
+const fixtures = new Set<string>();
+
 /**
- * STOP THE SERVICE THIS SUITE STARTED. Nobody else will.
+ * EVERYTHING THIS PROCESS LEAVES ON THE MACHINE, removed once.
  *
- * The daemon is spawned lazily, by whichever `odu run` came first, and it is
- * detached ON PURPOSE — that is the property `odu run` exists to have, and it
- * means a suite that walks away leaves a service running on its port with a
- * catalog under a temp directory nothing will ever read again.
+ * There are four things and they are easy to miss, because none of them fails
+ * a test:
  *
- * Asked for its own pid rather than tracked: the process this suite forked is
- * not necessarily the one serving (a launcher may hand off), and the service's
- * identity cell is the only thing that knows which one is.
+ *   1. **the service** — spawned lazily by whichever `odu run` came first, and
+ *      detached ON PURPOSE, which is the property `odu run` exists to have. A
+ *      suite that walks away leaves one serving on its port forever. Asked for
+ *      its own pid rather than tracked: the process this suite forked is not
+ *      necessarily the one serving, and the identity cell is the only thing
+ *      that knows which is.
+ *   2. **the daemon's home** — `~/.local/state/odu-web-<hash of origin>`, which
+ *      is under the REAL state root and not this world's temp directory: odu
+ *      derives the home from the origin and deliberately ignores
+ *      `XDG_STATE_HOME`, so moving the origin is what isolates it and nothing
+ *      moves it back. Forty-seven empty ones had accumulated before this
+ *      existed. Read off the identity rather than recomputed — this suite does
+ *      not get to own a copy of odu's naming.
+ *   3. **the world** — catalog, hosts file, everything under the temp root.
+ *   4. **fixture checkouts** — `afterEach` removes them, and a suite killed
+ *      mid-test never reaches its `afterEach`.
+ *
+ * Idempotent and total: `exit` does not fire for a signal, and a suite is
+ * interrupted far more often than it completes while somebody is working on
+ * it, so the signals run it too and then leave by the route they arrived.
  */
-process.on("exit", () => {
+let sweptUp = false;
+function sweepUp(): void {
+  if (sweptUp) return;
+  sweptUp = true;
+  let home: string | null = null;
   if (driven !== null) {
     try {
       const said = spawnSync(driven, ["surface", "get", "service"], {
@@ -207,21 +231,39 @@ process.on("exit", () => {
         maxBuffer: BIG,
       });
       if (said.status === 0) {
-        const cell = JSON.parse(said.stdout) as { identity: { pid: number } };
+        const cell = JSON.parse(said.stdout) as {
+          identity: { pid: number; home: string };
+        };
+        home = cell.identity.home;
         process.kill(cell.identity.pid, "SIGTERM");
       }
     } catch {
       // Teardown, on the way out. A service that cannot be reached is a
       // service that is already gone, and a throw here would replace a suite's
-      // real verdict with a cleanup error.
+      // real verdict with a cleanup error. Every removal below is `force`, for
+      // the same reason.
     }
   }
-  try {
-    rmSync(blackBox.root, { recursive: true, force: true });
-  } catch {
-    // Same.
+  for (const dir of [...fixtures, blackBox.root, ...(home === null ? [] : [home])]) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // As above.
+    }
   }
-});
+}
+
+process.on("exit", sweepUp);
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+  process.on(signal, () => {
+    sweepUp();
+    // Re-raise, so a runner reading how its child died gets the true answer
+    // rather than a synthesised exit code. The listener goes first or the
+    // signal lands back in this handler.
+    process.removeAllListeners(signal);
+    process.kill(process.pid, signal);
+  });
+}
 
 /** The odu checkout under test — the worktree this test file lives in. */
 export const repoRoot = execFileSync(
@@ -290,6 +332,9 @@ export function buildOduBinary(): string {
  */
 export function makeFixture(name: string): string {
   const dir = mkdtempSync(join(tmpdir(), `odu-e2e-${name}-`));
+  // Registered before anything else can throw: a fixture that failed halfway
+  // through `git init` is still a directory somebody has to remove.
+  fixtures.add(dir);
   cpSync(join(here, "fixtures", name), dir, { recursive: true });
 
   const git = (...args: string[]): void => {
@@ -346,6 +391,7 @@ export function terminalStatuses(
 /** Best-effort temp-dir cleanup; never throws, but a failure is logged so a
  *  leaked fixture dir is visible in CI rather than silently accumulating. */
 export function cleanup(dir: string): void {
+  fixtures.delete(dir);
   try {
     rmSync(dir, { recursive: true, force: true });
   } catch (err) {
