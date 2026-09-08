@@ -24,7 +24,7 @@
  */
 
 import { createMemo, createSignal, For, Index, Show, type JSX } from "solid-js";
-import { Button, CommitRef, Pill } from "./dom";
+import { Button, CommitRef, Hint, Pill } from "./dom";
 import { ago, BOARD_STATE, OUTCOME, projectOf, scopeLabel } from "./format";
 import type { RunRow } from "./types";
 
@@ -201,6 +201,13 @@ function Row(props: {
           <span class="row-earlier">{`${props.earlier} earlier`}</span>
         </Show>
       </span>
+      {/* The drawn half of the `title` above — the checkout path, which is
+          arguably the most useful hint on this board and used to be the only
+          one drawn by the browser's own slow tooltip, because this control is
+          hand-spelled rather than built from `Button`. A `.tip` is
+          `display: none` until hovered, and a `display: none` child is not a
+          grid item, so the six-column row does not move. */}
+      <Hint text={props.run.repoRoot} />
     </button>
   );
 }
@@ -302,14 +309,13 @@ export function Board(props: {
             would announce four mutually exclusive filters where there are
             three. It is a toggle, so it carries `aria-pressed` like they do. */}
         <Button
-          class="btn history"
           title="show every run of every checkout, not just the latest"
           pressed={history()}
           onClick={() => setHistory((on) => !on)}
         >
           History
         </Button>
-        <Button class="btn btn-primary" onClick={props.onCreate}>
+        <Button class="btn-primary" onClick={props.onCreate}>
           New run
         </Button>
       </header>

@@ -76,8 +76,12 @@ export type ButtonProps = {
   children: JSX.Element;
   title?: string;
   disabled?: boolean;
-  /** The class list, when it is not the default `btn`. */
+  /** Extra classes BESIDE `btn`, which this component always writes. */
   class?: string;
+  /** What this button's `<form method="dialog">` closes with, read back as the
+   *  dialog's `returnValue`. Only `Confirm` uses it; it is here rather than
+   *  hand-spelled there because a control in this app is a `Button`. */
+  value?: string;
   /**
    * Which of a group is CHOSEN, for a button that is a toggle rather than an
    * action. It rides the element as `aria-pressed` because that state is
@@ -103,9 +107,14 @@ export function Button(props: ButtonProps): JSX.Element {
   return (
     <button
       type={props.type ?? "button"}
-      class={props.class ?? "btn"}
+      // `btn` is not the caller's to remember: the prop ADDS to it. It used to
+      // REPLACE it, which made "every button carries `btn`" a convention four
+      // of five callers restated by hand and a fifth could silently lose — no
+      // error anywhere, just a control drawn as bare text.
+      class={props.class === undefined ? "btn" : `btn ${props.class}`}
       disabled={props.disabled}
       title={props.title}
+      value={props.value}
       // `undefined` REMOVES the attribute and `false` writes `"false"`, which is
       // exactly the distinction `pressed` above is about — an absent toggle
       // state versus a toggle that is off.
@@ -113,24 +122,40 @@ export function Button(props: ButtonProps): JSX.Element {
       onClick={props.onClick}
     >
       {props.children}
-      {/* The SAME sentence as `title`, drawn. The stylesheet shows `.tip` as a
-          tooltip — styled, instant, and on `:focus-visible` as well as on hover,
-          so a keyboard user gets the explanation a mouse user gets. `title`
-          stays as the fallback where anchor positioning is missing, and as what
-          assistive tech reads.
-
-          A CHILD ELEMENT, hidden from the accessibility tree, and its text in an
-          attribute rather than in the node. The first cut drew the hint as the
-          button's own `::after`, and generated content is part of an element's
-          accessible name — so the moment a button was hovered or focused its
-          name became "Active read attempt 1 of…" and nothing that addressed it
-          by name could find it, the acceptance suite included. `aria-hidden`
-          keeps the hint out of the name; `data-hint` + `::after` keeps it out of
-          `textContent` too, which the keyboard steps compare against. */}
-      <Show when={props.title !== undefined}>
-        <span class="tip" aria-hidden="true" data-hint={props.title} />
-      </Show>
+      <Hint text={props.title} />
     </button>
+  );
+}
+
+/**
+ * THE DRAWN HALF OF A `title`.
+ *
+ * The stylesheet shows `.tip` as a tooltip — styled, instant, and on
+ * `:focus-visible` as well as on hover, so a keyboard user gets the explanation
+ * a mouse user gets. `title` stays as the fallback where anchor positioning is
+ * missing, and as what assistive tech reads.
+ *
+ * A CHILD ELEMENT, hidden from the accessibility tree, and its text in an
+ * attribute rather than in the node. The first cut drew the hint as the
+ * control's own `::after`, and generated content is part of an element's
+ * accessible name — so the moment a button was hovered or focused its name
+ * became "Active read attempt 1 of…" and nothing that addressed it by name
+ * could find it, the acceptance suite included. `aria-hidden` keeps the hint
+ * out of the name; `data-hint` + `::after` keeps it out of `textContent` too,
+ * which the keyboard steps compare against.
+ *
+ * SPLIT OUT of `Button` because how a hint is presented is not a fact about
+ * being a button: the board row and the node opener are hand-spelled controls
+ * for good reasons of their own, and a page with two tooltip behaviours — one
+ * instant and styled, one the browser's slow unstylable one — is a page whose
+ * hints people stop trusting. The stylesheet's anchor is any element with a
+ * `.tip` child, not `.btn` with one, for the same reason.
+ */
+export function Hint(props: { text: string | undefined }): JSX.Element {
+  return (
+    <Show when={props.text !== undefined}>
+      <span class="tip" aria-hidden="true" data-hint={props.text} />
+    </Show>
   );
 }
 
@@ -197,8 +222,17 @@ export function CommitRef(props: {
  *
  * `open` is a PROP rather than a method call, so the dialog's visibility is a
  * function of the caller's state and there is no second place where it can be
- * open. The native `close` event — Esc, or the platform's own dismissal — is
- * wired back to `onClose`, so the two directions cannot drift apart.
+ * open. The native `close` event — Esc, the platform's own dismissal, or either
+ * button, which are `<form method="dialog">` submits — is wired back to
+ * `onClose`, so the two directions cannot drift apart.
+ *
+ * ONE EXIT, and the platform owns it. The buttons used to call `onClose`
+ * themselves AND cause the effect to call `el.close()`, which fires `close`,
+ * which called `onClose` again: every button press invoked the caller's handler
+ * twice while Esc invoked it once — harmless for a boolean setter and a latent
+ * bug for a caller that counts, logs or restores focus in it. Now the buttons
+ * submit the form, the platform closes the dialog and records WHICH button in
+ * `returnValue`, and the one `close` handler reads that and answers.
  *
  * **`confirmLabel` must never repeat the trigger's own words.** The acceptance
  * suite finds a control by its exact accessible name, and Playwright's strict
@@ -222,29 +256,46 @@ export function Confirm(props: {
     const el = dialog;
     if (el === undefined) return;
     // Guarded both ways: `showModal()` on an already-open dialog throws, and
-    // `close()` on a shut one fires a second `close` event.
-    if (props.open && !el.open) el.showModal();
+    // `close()` on a shut one fires a second `close` event. The verdict is
+    // cleared on the way IN, so a dialog opened a second time cannot answer
+    // with the button somebody pressed the first time.
+    if (props.open && !el.open) {
+      el.returnValue = "";
+      el.showModal();
+    }
     if (!props.open && el.open) el.close();
   });
   return (
-    <dialog class="confirm" ref={dialog} onClose={() => props.onClose()}>
+    <dialog
+      class="confirm"
+      ref={dialog}
+      onClose={() => {
+        // THE ONE EXIT. Esc, the platform's own dismissal and both buttons all
+        // arrive here; `returnValue` is which of them it was.
+        if (dialog?.returnValue === "confirm") props.onConfirm();
+        props.onClose();
+      }}
+    >
       <h2>{props.title}</h2>
       <p>{props.body}</p>
-      {/* Cancel FIRST. The dialog focuses its first focusable child on open, so
+      {/* A `<form method="dialog">`, so the browser closes the dialog and
+          records which button did it — no handler here reaches for `close()`.
+          Cancel FIRST: the dialog focuses its first focusable child on open, so
           the button under the keyboard at the moment it appears is the one that
-          changes nothing. */}
-      <div class="confirm-actions">
-        <Button onClick={() => props.onClose()}>{props.cancelLabel}</Button>
+          changes nothing. `.confirm-actions` styles a flex row and applies to
+          the form unchanged. */}
+      <form method="dialog" class="confirm-actions">
+        <Button type="submit" value="cancel">
+          {props.cancelLabel}
+        </Button>
         <Button
-          class={props.danger === true ? "btn btn-danger" : "btn"}
-          onClick={() => {
-            props.onConfirm();
-            props.onClose();
-          }}
+          type="submit"
+          value="confirm"
+          class={props.danger === true ? "btn-danger" : undefined}
         >
           {props.confirmLabel}
         </Button>
-      </div>
+      </form>
     </dialog>
   );
 }
@@ -290,7 +341,7 @@ export function Receipt(props: {
       <span class="receipt-text">{props.children}</span>
       <Show when={props.onDismiss !== undefined}>
         <Button
-          class="btn receipt-dismiss"
+          class="receipt-dismiss"
           title="clear this receipt"
           onClick={() => props.onDismiss?.()}
         >

@@ -97,8 +97,10 @@ here) and says whether it is still following the tail.
 
 **Raw CSS, on purpose.** One stylesheet, in four cascade layers, with a single
 `light-dark()` palette lifted from the website. There is no utility framework
-and no component library: the page has a few dozen class names, all in use,
-and every rule carries the reason it exists beside it.
+and no component library: the page has a few dozen class names — every rule
+carries the reason it exists beside it, and the two that declare no rule
+(`.board`, `.create`) are structural anchors the markup hangs on rather than
+dead paint.
 
 ## The connection is drawn, not hidden
 

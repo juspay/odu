@@ -35,11 +35,12 @@ import {
   createSignal,
   For,
   Index,
+  on,
   Show,
   type JSX,
 } from "solid-js";
 import { ansiSpans } from "./ansi";
-import { Button, CommitRef, Confirm, Pill, Receipt } from "./dom";
+import { Button, CommitRef, Confirm, Hint, Pill, Receipt } from "./dom";
 import {
   bytes,
   duration,
@@ -154,7 +155,14 @@ function LaneHead(props: {
       </span>
       {/* How far along, in the same glyph vocabulary the rows below use — and
           each count carries its status in WORDS as a hint, because a glyph and a
-          hue together are still not a sentence. */}
+          hue together are still not a sentence.
+
+          The NATIVE `title` here, deliberately, where every control on the page
+          gets a drawn `.tip`: these spans are not controls. They are not
+          focusable, so the half of a drawn tooltip that earns its keep — the
+          keyboard user who never sees a native one — has nobody to serve, and
+          five tooltips down a lane header would be five boxes chasing a
+          pointer across a row of digits. */}
       <span class="lane-counts">
         <For each={counts()}>
           {(entry) => (
@@ -191,6 +199,12 @@ function NodeRow(props: {
 }): JSX.Element {
   const meta = (): (typeof NODE_STATUS)[RunNode["status"]] =>
     NODE_STATUS[props.node.status];
+  /** Why this row can be opened, or why it cannot. Said once and drawn twice:
+   *  as the native `title` and as the `.tip` beside it. */
+  const hint = (): string =>
+    props.node.attempt === 0
+      ? "this node has not started, so it has no output yet"
+      : `read ${props.node.id}, attempt ${props.node.attempt}`;
   return (
     <li
       // The status class only. There WAS a third, `"node-selected": false` — a
@@ -208,11 +222,7 @@ function NodeRow(props: {
         // A node with no attempt has no evidence to show, and saying so beats a
         // button that opens an empty panel.
         disabled={props.node.attempt === 0}
-        title={
-          props.node.attempt === 0
-            ? "this node has not started, so it has no output yet"
-            : `read ${props.node.id}, attempt ${props.node.attempt}`
-        }
+        title={hint()}
       >
         <span class={`glyph hue-${meta().hue}`}>{meta().glyph}</span>
         <span class="node-id">{props.node.id}</span>
@@ -228,6 +238,13 @@ function NodeRow(props: {
         <Show when={props.node.exitCode !== null && props.node.exitCode !== 0}>
           <span class="node-exit">{`exit ${props.node.exitCode ?? 0}`}</span>
         </Show>
+        {/* The drawn half of the `title` above. This control is hand-spelled
+            rather than built from `Button` — it is a row of labelled cells —
+            and without this it was one of two places on the page still falling
+            back to the browser's own tooltip, which a keyboard user never sees
+            at all. The `.tip` is `display: none` until hovered, so the flex
+            line does not move. */}
+        <Hint text={hint()} />
       </button>
       {/* ONLY WHERE THEY APPLY. These two used to be on every row and disabled on
           most of them. A disabled button that can never be pressed is noise, and
@@ -317,7 +334,7 @@ function writeWrap(on: boolean): void {
  * out of text, and somebody who has just scrolled to the end of a failure should
  * not have to travel back up past it to ask for the next window.
  */
-function LogPanel(props: {
+export function LogPanel(props: {
   node: RunNode | null;
   attempt: number | null;
   onAttempt: (attempt: number) => void;
@@ -325,20 +342,16 @@ function LogPanel(props: {
   /** The cursored follow's accumulated text — byte-exact, unlike the bounded
    *  tail beside it. Null before the first page arrives. */
   followed: string | null;
-  /** Why the follow stopped, when it did — shown beside the log rather than
-   *  swallowed, because a pane that has quietly stopped updating looks exactly
-   *  like a log that has quietly stopped growing. */
-  followFault: string | null;
+  /** Why this log could not be read — a refused page, or a follow that gave up.
+   *  Shown beside the log rather than swallowed, because a pane that has quietly
+   *  stopped updating looks exactly like a log that has quietly stopped
+   *  growing. */
+  logFault: string | null;
   pending: boolean;
   error: Error | undefined;
   onPage: (offset: number) => void;
   page: LogPage | null;
 }): JSX.Element {
-  /** Where the shown window starts, or `null` when the tail is what is shown.
-   *  Read through one accessor rather than re-derived, so the two buttons and
-   *  the indicator cannot disagree about which page is on screen. */
-  const at = (): LogPage | null => props.page;
-
   let pane: HTMLPreElement | undefined;
   /** Following the tail, until the reader scrolls away from it. A SIGNAL rather
    *  than a plain local, because the footer now DRAWS it: the fact was always
@@ -359,9 +372,9 @@ function LogPanel(props: {
   // growing". When the follow is faulted the tail is the fresher of the two,
   // so it wins, and the sentence beside the pane says why.
   const shown = createMemo(() => {
-    const paged = at()?.text;
+    const paged = props.page?.text;
     if (paged !== undefined) return paged;
-    const following = props.followFault === null ? props.followed : null;
+    const following = props.logFault === null ? props.followed : null;
     return following ?? props.tail?.text ?? "";
   });
 
@@ -375,12 +388,13 @@ function LogPanel(props: {
   const spans = createMemo(() => ansiSpans(shown()));
 
   /** A new SUBJECT is a fresh request to see the newest output, not a
-   *  continuation of wherever the last one was scrolled to. */
-  createEffect(() => {
-    props.node?.id;
-    props.attempt;
-    setStuck(true);
-  });
+   *  continuation of wherever the last one was scrolled to. The dependency is
+   *  SAID, with Solid's own explicit form, rather than left to two bare
+   *  expression statements that read as dead code to a reader, to a linter and
+   *  to anything that strips no-ops. */
+  createEffect(
+    on([() => props.node?.id, () => props.attempt], () => setStuck(true)),
+  );
   createEffect(() => {
     shown();
     const node = pane;
@@ -461,7 +475,7 @@ function LogPanel(props: {
                 quietly stopped updating looking exactly like a log that had
                 quietly stopped growing — the same silent-loss failure the
                 cursored follow exists to remove, one layer up. */}
-            <Show when={props.followFault}>
+            <Show when={props.logFault}>
               {(fault) => <p class="fault">{fault()}</p>}
             </Show>
             <pre
@@ -513,9 +527,11 @@ function LogPanel(props: {
                 title="the page before this one"
                 // No page shown means the tail is on screen, which has no offset
                 // to step back from — the way in is "Read from the start".
-                disabled={(at()?.offset ?? 0) <= 0}
+                disabled={(props.page?.offset ?? 0) <= 0}
                 onClick={() =>
-                  props.onPage(Math.max(0, (at()?.offset ?? 0) - LOG_PAGE_BYTES))
+                  props.onPage(
+                    Math.max(0, (props.page?.offset ?? 0) - LOG_PAGE_BYTES),
+                  )
                 }
               >
                 Older
@@ -525,8 +541,8 @@ function LogPanel(props: {
                 // `eof` is the verb's own word for "this page reached the end",
                 // rather than an offset comparison this view would have to keep
                 // true against a log that is still growing.
-                disabled={at() === null || at()?.eof === true}
-                onClick={() => props.onPage(at()?.nextOffset ?? 0)}
+                disabled={props.page === null || props.page.eof}
+                onClick={() => props.onPage(props.page?.nextOffset ?? 0)}
               >
                 Newer
               </Button>
@@ -535,7 +551,7 @@ function LogPanel(props: {
                   change the text and say nothing about what changed — and a
                   person paging through a long log has no way to tell a step that
                   worked from one that hit an end. */}
-              <Show when={at()}>
+              <Show when={props.page}>
                 {(page) => (
                   <span class="log-page">
                     {`${bytes(page().offset)}–${bytes(page().nextOffset)} of ${bytes(page().size)}`}
@@ -568,12 +584,13 @@ function LogPanel(props: {
                   fallback={
                     <Button
                       title="scroll to the end and follow the output again"
-                      onClick={() => {
-                        setStuck(true);
-                        if (pane !== undefined) {
-                          pane.scrollTop = pane.scrollHeight;
-                        }
-                      }}
+                      // The FLAG, and nothing else: the effect above owns the
+                      // scroll and already tracks `stuck`, so it performs this
+                      // one on the next microtask exactly as it does for an
+                      // incoming append. Touching the pane here as well was a
+                      // second implementation of one behaviour, running one
+                      // tick earlier than the one that owns it.
+                      onClick={() => setStuck(true)}
                     >
                       Jump to latest
                     </Button>
@@ -602,22 +619,18 @@ export function Detail(props: {
   error: Error | undefined;
   selected: RunNode | null;
   onSelect: (node: RunNode | null) => void;
-  /** WHICH attempt the address names — not the node's highest. See
-   *  {@link LogPanel}. */
-  selectedAttempt: number | null;
-  onAttempt: (attempt: number) => void;
-  tail: LogTail | undefined;
-  /** The cursored follow's accumulated text — byte-exact, unlike the bounded
-   *  tail beside it. Null before the first page arrives. */
-  followed: string | null;
-  /** Why the follow stopped, when it did — shown beside the log rather than
-   *  swallowed, because a pane that has quietly stopped updating looks exactly
-   *  like a log that has quietly stopped growing. */
-  followFault: string | null;
-  tailPending: boolean;
-  tailError: Error | undefined;
-  page: LogPage | null;
-  onPage: (offset: number) => void;
+  /** THE LOG PANE, handed over built. Nine props used to arrive here — the
+   *  attempt, the tail, the follow, the page and their handlers — and `Detail`
+   *  read none of them: each was declared, documented and forwarded verbatim to
+   *  {@link LogPanel}, so what a log pane needs was spelled three times and a
+   *  change to it was a three-file edit through a component with no opinion
+   *  about logs. It is built in `app.tsx`, where the wire already is.
+   *
+   *  Safe against the `<Show>`-disposal hazard `./dom`'s header documents: this
+   *  sits in `.detail-body` with no `<Show>` or `<Match>` above it inside
+   *  `Detail`, and the whole `Detail` element is re-minted on route re-entry
+   *  because a `<Match>`'s children compile to a getter. */
+  log: JSX.Element;
   control: ControlState;
   controls: DetailControls;
   onBack: () => void;
@@ -696,7 +709,7 @@ export function Detail(props: {
           Run again
         </Button>
         <Button
-          class="btn btn-danger"
+          class="btn-danger"
           title="stop the whole run"
           disabled={busy()}
           onClick={() => setConfirmingCancel(true)}
@@ -791,18 +804,7 @@ export function Detail(props: {
             </For>
           </ul>
         </section>
-        <LogPanel
-          node={props.selected}
-          attempt={props.selectedAttempt}
-          onAttempt={props.onAttempt}
-          tail={props.tail}
-          followed={props.followed}
-          followFault={props.followFault}
-          pending={props.tailPending}
-          error={props.tailError}
-          onPage={props.onPage}
-          page={props.page}
-        />
+        {props.log}
       </div>
     </section>
   );

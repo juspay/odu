@@ -377,11 +377,17 @@
 
   /* ── the hint a button already carries, drawn ────────────────────────────
    *
-   * Every `Button` with a `title` also holds a `.tip` child carrying the same
-   * sentence in `data-hint` (see `dom.tsx`), so the explanation of what a
-   * control does is already in the DOM — it was just waiting on the browser's
+   * Every control with a `title` also holds a `.tip` child carrying the same
+   * sentence in `data-hint` (see `dom.tsx`'s `Hint`), so the explanation of what
+   * a control does is already in the DOM — it was just waiting on the browser's
    * own tooltip, which takes a second to appear, cannot be styled, and never
    * shows up for a keyboard user at all.
+   *
+   * ANY element with a `.tip` child, not `.btn` with one. How a hint is drawn is
+   * not a fact about being a button, and two of this page's controls are
+   * hand-spelled — the board row and the node opener are grids of labelled cells
+   * rather than a control with a caption. Anchored on `.btn` they were left with
+   * the native tooltip, which is two hint behaviours on one page.
    *
    * WHY A CHILD AND NOT THE BUTTON'S OWN `::after`. Generated content is part of
    * an element's accessible name, so a tooltip drawn as the button's pseudo-
@@ -416,10 +422,10 @@
   .tip { display: none; }
 
   @supports (anchor-name: --x) and (anchor-scope: --x) {
-    .btn:has(> .tip) { anchor-name: --btn; anchor-scope: --btn; }
+    :has(> .tip) { anchor-name: --btn; anchor-scope: --btn; }
 
-    .btn:hover > .tip,
-    .btn:focus-visible > .tip {
+    :hover > .tip,
+    :focus-visible > .tip {
       display: block;
       position: fixed;
       position-anchor: --btn;
@@ -563,6 +569,46 @@
   .confirm p { margin: 0 0 0.9rem; color: var(--muted); }
   .confirm-actions { display: flex; gap: 0.4rem; justify-content: flex-end; }
 
+  /* ── the board's rows ──────────────────────────────────────────────────────
+   *
+   * What a row LOOKS like lives here, with the node rows below that it mirrors;
+   * where its six columns GO is in `layout`. That split is the file's own
+   * contract, and this block used to break it — a row's type and chrome sat in
+   * `layout`, out-shouting every component rule for free, while the detail
+   * view's equivalent list row sat here. A layer is an override boundary, and it
+   * is worth nothing if appearance is filed under both.
+   */
+
+  /* Below the font floor deliberately: caps and letter-spacing carry the size
+     back, and these are furniture rather than facts. */
+  .row-head {
+    border-bottom: 1px solid var(--line-strong);
+    color: var(--quiet);
+    font: 500 0.72rem/1.4 var(--mono);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .row {
+    font: inherit;
+    color: inherit;
+    background: none;
+    border: 0;
+    border-bottom: 1px solid var(--line);
+    cursor: pointer;
+  }
+
+  .row:hover { background: var(--panel); }
+
+  .row-project { font-weight: 600; overflow-wrap: anywhere; }
+  .row-sha { font-family: var(--mono); font-size: 0.8rem; }
+  .row-scope,
+  .row-age { color: var(--muted); font: 0.8rem/1.4 var(--mono); }
+  /* "4 earlier" — how many runs of this checkout the board folded away. It
+     rides the age cell because that is what it is about: the older ones, and it
+     takes its own line under the age rather than running on from it. */
+  .row-earlier { display: block; color: var(--quiet); font: 0.8rem/1.4 var(--mono); }
+
   /* ── one run's nodes ─────────────────────────────────────────────────────── */
 
   .node-list {
@@ -647,7 +693,7 @@
   .lane {
     display: flex;
     align-items: center;
-    /* Same reason as `.node-open` below: a platform triple plus a host plus the
+    /* Same reason as `.node-open` above: a platform triple plus a host plus the
        counts plus `Cancel aarch64-darwin` does not fit one line of a 26 rem
        column, and the thing that gives when it is forced to is the platform
        NAME — the one word the row exists to say. */
@@ -674,10 +720,8 @@
   }
 
   /* One count is a glyph and a number, held together so the pair never wraps
-     apart — and the glyph drops the fixed column it takes in the node list,
-     which beside a digit would be a hole rather than an alignment. */
+     apart. */
   .lane-counts > span { display: inline-flex; align-items: center; gap: 0.15rem; }
-  .lane-counts .glyph { width: auto; font-size: 0.85rem; }
 
   /* A fixed column, so the glyphs stack into a readable strip down the left of
      the DAG rather than jittering with each id's width. The vocabulary is
@@ -694,6 +738,15 @@
     color: var(--hue-ink);
   }
 
+  /* A glyph in a line of RUNNING TEXT drops the fixed column it takes down the
+     node list, where that column is an alignment and here it would be a hole.
+     Two places say this — a lane's counts and the follow marker — and they said
+     it twice, in two sizes, for no reason either of them gave; both sit in
+     0.8 rem mono, so one size is one appearance. It comes AFTER the rule above
+     on purpose: `:where()` adds no specificity, which is the point — it is the
+     same weight as `.glyph` and wins on order alone. */
+  :where(.lane-counts, .log-follow) .glyph { width: auto; font-size: 0.85rem; }
+
   /* ── the console ───────────────────────────────────────────────────────────
    *
    * The output panel is one card: a bar of controls over a console, and a bar of
@@ -707,29 +760,25 @@
     overflow: hidden;
   }
 
-  .log-head {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    flex-wrap: wrap;
-    padding: 0.45rem 0.55rem;
-    border-bottom: 1px solid var(--line);
-    background: var(--panel-2);
-  }
-
-  /* The mirror of the head, under the pane. Paging belongs at the END of a log
-     for the same reason a book's page number does: it is what you reach for once
-     you have run out of text, and a reader who has scrolled to the bottom of a
-     failure should not have to travel back up to ask for the next window. */
+  /* The head over the pane and its MIRROR under it, which is one bar written
+     once — they differed in exactly which edge carries the hairline, and
+     grouping is this file's own convention (`.board-head, .detail-head`,
+     `.row, .row-head`). Paging belongs at the END of a log for the same reason
+     a book's page number does: it is what you reach for once you have run out
+     of text, and a reader who has scrolled to the bottom of a failure should
+     not have to travel back up to ask for the next window. */
+  .log-head,
   .log-foot {
     display: flex;
     align-items: center;
     gap: 0.4rem;
     flex-wrap: wrap;
     padding: 0.45rem 0.55rem;
-    border-top: 1px solid var(--line);
     background: var(--panel-2);
   }
+
+  .log-head { border-bottom: 1px solid var(--line); }
+  .log-foot { border-top: 1px solid var(--line); }
 
   /* Whether this pane is still following the tail — and, when it is not, the way
      back to it. A log that has stopped moving because the reader scrolled up
@@ -743,11 +792,6 @@
     color: var(--muted);
     font: 0.8rem var(--mono);
   }
-
-  /* The follow marker is a `.glyph`, sized for the fixed column down the node
-     list. In a line of running text that column is a hole, so here it is only
-     as wide as the dot it draws. */
-  .log-follow .glyph { width: auto; font-size: 0.8rem; }
 
   .log-head h3 {
     margin: 0;
@@ -889,6 +933,30 @@
     padding: 0.25rem 0;
     font-size: 0.82rem;
   }
+
+  /* THE ROW'S LEFT RAIL: a run that is MOVING and a run that is BROKEN are the
+     two a person scanning the board is looking for, and both are visible from
+     the edge of the row before any word is read. Red is written after amber
+     deliberately — a live run with a failure in it is a failure.
+
+     A pseudo-element rather than the `inset` box-shadow this used to be, because
+     the rail is one of the three things that PULSE while a run is live — and it
+     sits HERE, immediately above that motion block, because the rule that paints
+     it and the rule that animates it are one mechanism. They used to be two
+     hundred lines and one cascade layer apart. */
+  .row-running::before,
+  .row-provisioning::before,
+  .row-red::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: var(--amber);
+  }
+
+  .row-red::before { background: var(--red); }
 
   /* ── STATE MOTION, and nothing else ────────────────────────────────────────
    *
@@ -1068,66 +1136,23 @@
     align-items: center;
   }
 
-  /* The heads are a VISUAL guide and nothing else — the rows are buttons rather
-     than a table, so a handful of stray nouns announced ahead of them would be
-     noise to a screen reader. `aria-hidden` in the markup says so; this only
-     draws them. Below the floor deliberately: caps and letter-spacing carry the
-     size back, and these are furniture rather than facts. */
-  .row-head {
-    padding: 0.3rem 0.5rem;
-    border-bottom: 1px solid var(--line-strong);
-    color: var(--quiet);
-    font: 500 0.72rem/1.4 var(--mono);
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-  }
+  /* WHERE the heads and the rows sit; what they LOOK like is in `components`
+     with the node rows they mirror. `aria-hidden` in the markup says the heads
+     are a visual guide and nothing else — the rows are buttons rather than a
+     table, so a handful of stray nouns announced ahead of them would be noise
+     to a screen reader. */
+  .row-head { padding: 0.3rem 0.5rem; }
 
   .row {
+    /* `relative` is here rather than beside the rail it positions, because it
+       is this element's own box that is being established. */
     position: relative;
     width: 100%;
     text-align: left;
-    font: inherit;
-    color: inherit;
-    background: none;
-    border: 0;
-    border-bottom: 1px solid var(--line);
     padding: 0.5rem;
-    cursor: pointer;
   }
 
-  .row:hover { background: var(--panel); }
-
-  /* The left rail: a run that is MOVING and a run that is BROKEN are the two a
-     person scanning the board is looking for, and both are visible from the edge
-     of the row before any word is read. Red is written after amber deliberately —
-     a live run with a failure in it is a failure.
-
-     A pseudo-element rather than the `inset` box-shadow this used to be, because
-     the rail is one of the three things that PULSE while a run is live (see the
-     motion block) and a shadow cannot be animated without repainting the row. */
-  .row-running::before,
-  .row-provisioning::before,
-  .row-red::before {
-    content: "";
-    position: absolute;
-    left: 0;
-    top: 0;
-    bottom: 0;
-    width: 2px;
-    background: var(--amber);
-  }
-
-  .row-red::before { background: var(--red); }
-
-  .row-project { font-weight: 600; overflow-wrap: anywhere; }
-  .row-sha { font-family: var(--mono); font-size: 0.8rem; }
-  .row-scope,
-  .row-age { color: var(--muted); font: 0.8rem/1.4 var(--mono); }
   .row-attention { display: flex; gap: 0.25rem; flex-wrap: wrap; }
-  /* "4 earlier" — how many runs of this checkout the board folded away. It
-     rides the age cell because that is what it is about: the older ones, and it
-     takes its own line under the age rather than running on from it. */
-  .row-earlier { display: block; color: var(--quiet); font: 0.8rem/1.4 var(--mono); }
 
   /* ── one run ─────────────────────────────────────────────────────────────
    *

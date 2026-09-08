@@ -215,7 +215,7 @@ export function Create(props: {
             cannot start two runs. */}
         <Button
           type="submit"
-          class="btn btn-primary"
+          class="btn-primary"
           disabled={props.state.kind === "starting"}
         >
           {props.state.kind === "starting" ? "Starting…" : "Start run"}
