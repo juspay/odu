@@ -16,8 +16,8 @@
  * By DEFAULT the board is one row per checkout — the latest run of each — and
  * everything else is behind the History toggle. A person with four checkouts
  * asks "what is my CI doing", and forty rows of superseded history is the same
- * question left unanswered; see `latestPerCheckout` for why that collapse
- * happens before the filters rather than after them.
+ * question left unanswered; see `shown` for why that collapse happens before
+ * the filters rather than after them.
  *
  * Nothing here computes a verdict. Every field is the service's own row; the
  * view collapses, sorts, filters and words it.
@@ -47,45 +47,74 @@ const FILTERS: { id: BoardFilter; label: string; hint: string }[] = [
   { id: "all", label: "All", hint: "every run in the catalog" },
 ];
 
+/** A run the machines are still working on. */
+export const isActive = (row: RunRow): boolean =>
+  row.state === "running" || row.state === "provisioning";
+
+/** A run with a failure nobody has resolved — the board's red rail, its failing
+ *  pill, and the tab's own count, from one rule. Named once because a second
+ *  spelling of it in another module is how a tab starts disagreeing with the
+ *  board under it. */
+export const isFailing = (row: RunRow): boolean => row.unresolvedFailures > 0;
+
 function matches(row: RunRow, filter: BoardFilter): boolean {
   switch (filter) {
     case "all":
       return true;
     case "active":
-      return row.state === "running" || row.state === "provisioning";
+      return isActive(row);
     case "attention":
-      return row.unresolvedFailures > 0 || row.reportingDebt > 0;
+      return isFailing(row) || row.reportingDebt > 0;
   }
+}
+
+/** One checkout's runs, collapsed: the newest of them, and how many there
+ *  were. */
+export interface Checkout {
+  latest: RunRow;
+  runs: number;
 }
 
 /**
- * ONE ROW PER CHECKOUT — the newest run of each, in the order they came in.
+ * ONE ROW PER CHECKOUT — the newest run of each, and how many runs it stands
+ * for, keyed by the checkout path.
  *
- * Exported because the tab title reads it too (`app.tsx`), and a tab that
- * counted every run while the board under it counted checkouts would be two
- * different answers to one question.
+ * ONE walk, so "which row survives" and "how many were folded away" cannot come
+ * out of two maps that disagree — and no consumer has to re-join them at a
+ * render site with a coalesce for a case that cannot happen.
  *
- * The order of the input is preserved rather than re-derived, so the caller's
- * sort — newest first — survives the collapse.
+ * Keyed by `repoRoot` and not by project: two worktrees of one repo share a
+ * last path segment and are two different checkouts. The insertion order is the
+ * input's, so the caller's sort — newest first — survives the collapse.
  */
-export function latestPerCheckout(rows: RunRow[]): RunRow[] {
-  const newest = new Map<string, RunRow>();
+export function byCheckout(rows: RunRow[]): Map<string, Checkout> {
+  const groups = new Map<string, Checkout>();
   for (const row of rows) {
-    const held = newest.get(row.repoRoot);
-    if (held === undefined || row.createdAt > held.createdAt) {
-      newest.set(row.repoRoot, row);
+    const held = groups.get(row.repoRoot);
+    if (held === undefined) {
+      groups.set(row.repoRoot, { latest: row, runs: 1 });
+      continue;
     }
+    held.runs += 1;
+    if (row.createdAt > held.latest.createdAt) held.latest = row;
   }
-  return rows.filter((row) => newest.get(row.repoRoot) === row);
+  return groups;
 }
 
-/** How many runs each checkout has, so a collapsed row can say how many it
- *  stands for. Keyed by `repoRoot` and not by project: two worktrees of one
- *  repo share a last path segment and are two different checkouts. */
-function runsPerCheckout(rows: RunRow[]): Map<string, number> {
-  const counts = new Map<string, number>();
-  for (const row of rows) counts.set(row.repoRoot, (counts.get(row.repoRoot) ?? 0) + 1);
-  return counts;
+/** WHAT THE BOARD IS SAYING, at a glance — the same rows and the same buckets
+ *  the board itself uses, so the tab cannot drift from the page under it.
+ *  `failing` is deliberately narrower than the Needs-attention bucket: an
+ *  unposted status is a debt, not a failure, and a tab that cried "failing"
+ *  over one would be a tab people turn off. */
+export function boardTally(rows: RunRow[]): {
+  failing: number;
+  active: number;
+} {
+  const latest = [...byCheckout(rows).values()].map((group) => group.latest);
+  return {
+    failing: latest.filter(isFailing).length,
+    active: latest.filter(isActive).length,
+  };
 }
 
 /** Does this row answer the search box? Case-insensitive substring, over the
@@ -123,7 +152,7 @@ function Row(props: {
       class="row"
       classList={{
         [`row-${props.run.state}`]: true,
-        "row-red": props.run.unresolvedFailures > 0,
+        "row-red": isFailing(props.run),
       }}
       onClick={() => props.onOpen(props.run.runId)}
       // The whole path, because two worktrees of one repo share a last segment
@@ -159,7 +188,7 @@ function Row(props: {
         </Show>
       </span>
       <span class="row-attention">
-        <Show when={props.run.unresolvedFailures > 0}>
+        <Show when={isFailing(props.run)}>
           <Pill hue="red">{`${props.run.unresolvedFailures} failing`}</Pill>
         </Show>
         <Show when={props.run.reportingDebt > 0}>
@@ -182,6 +211,14 @@ function Row(props: {
   );
 }
 
+/** HOW THE BOARD WAS LEFT. Module-scope rather than component-scope because
+ *  `app.tsx`'s `Switch` rebuilds this branch on every entry (see its header),
+ *  and a filter you set, walked into a run from, and came back to should still
+ *  be set. There is one board, so there is one of each. */
+const [filter, setFilter] = createSignal<BoardFilter>("all");
+const [history, setHistory] = createSignal(false);
+const [query, setQuery] = createSignal("");
+
 /**
  * The board.
  *
@@ -197,23 +234,37 @@ export function Board(props: {
   onOpen: (runId: string) => void;
   onCreate: () => void;
 }): JSX.Element {
-  const [filter, setFilter] = createSignal<BoardFilter>("all");
-  const [history, setHistory] = createSignal(false);
-  const [query, setQuery] = createSignal("");
-  /** How many runs each checkout has in the catalog, counted over EVERY row —
-   *  the collapsed rows are the ones being counted, so this cannot be taken
-   *  off the shown list. */
-  const counts = createMemo(() => runsPerCheckout(props.rows));
-  const shown = createMemo(() => {
+  const shown = createMemo<Checkout[]>(() => {
+    const needle = query().trim().toLowerCase();
+    const admits = (run: RunRow): boolean =>
+      matches(run, filter()) && searched(run, needle);
+    // History folds nothing away, so every run is its own row and there is
+    // nothing for a row to stand for.
+    if (history()) {
+      return props.rows
+        .filter(admits)
+        .map((run) => ({ latest: run, runs: 1 }));
+    }
     // THE COLLAPSE COMES FIRST, before the bucket filter and before the search,
     // and the order is the whole meaning of "needs attention". That bucket is
     // about what is CURRENTLY wrong with a checkout, and a superseded run's red
     // is history: filter first and a checkout you fixed an hour ago sits in the
     // attention bucket forever, because the run that failed is still in the
     // catalog. Collapse first and the bucket asks the question a person meant.
-    const base = history() ? props.rows : latestPerCheckout(props.rows);
-    const needle = query().trim().toLowerCase();
-    return base.filter((run) => matches(run, filter()) && searched(run, needle));
+    const all = byCheckout(props.rows);
+    // The COUNT, though, is over the rows the filter and the search admit,
+    // because "N earlier" is a promise about what pressing History would
+    // reveal — counting rows the filter excludes makes it a number the button
+    // then contradicts.
+    //
+    // A checkout is shown when the run the collapse kept is admitted, and that
+    // run is then also the newest of the admitted subset — so the two groupings
+    // agree on it by construction, and this identity IS the membership test.
+    // No count to look up, and so nothing to coalesce for a case that cannot
+    // happen.
+    return [...byCheckout(props.rows.filter(admits))]
+      .filter(([repoRoot, group]) => group.latest === all.get(repoRoot)?.latest)
+      .map(([, group]) => group);
   });
   return (
     <section class="board">
@@ -315,15 +366,11 @@ export function Board(props: {
             only the cells whose value actually changed, which is the whole
             reason this app is written in Solid. */}
         <Index each={shown()}>
-          {(run) => (
+          {(entry) => (
             <Row
-              run={run()}
+              run={entry().latest}
               now={props.now}
-              // Nothing is folded away while History is pressed, so there is
-              // nothing for a row to stand for.
-              earlier={
-                history() ? 0 : (counts().get(run().repoRoot) ?? 1) - 1
-              }
+              earlier={entry().runs - 1}
               onOpen={props.onOpen}
             />
           )}

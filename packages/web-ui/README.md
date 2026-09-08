@@ -82,8 +82,9 @@ each, with `N earlier` under the age and a *History* toggle for the rest —
 because "what is my CI doing" is a question about checkouts, and a superseded
 run's red is history. One status cell per row: the outcome once there is one,
 the board state until then. Three coarse filters plus a text search over
-project, branch and path. The tab title and favicon carry the same count the
-board shows, so a tab in the background is still a monitor.
+project, branch and path. The tab title and favicon count the same rows the
+board shows by default — how many are failing, how many are still moving — so a
+tab in the background is still a monitor.
 
 **A run is read.** On a wide screen the run view is a viewport-height frame
 whose log pane scrolls inside itself; on a phone it is an ordinary page. Nodes

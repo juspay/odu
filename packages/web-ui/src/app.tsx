@@ -35,7 +35,7 @@ import {
   Switch,
   type JSX,
 } from "solid-js";
-import { Board, latestPerCheckout } from "./board";
+import { Board, boardTally } from "./board";
 import { Create, type CreateState, type StartForm } from "./create";
 import { type ControlState, Detail, LOG_PAGE_BYTES } from "./detail";
 import { CONNECTION, faviconSvg } from "./format";
@@ -199,9 +199,10 @@ export function App(props: {
    * they carry the one fact worth interrupting somebody for: is anything broken,
    * and is anything still moving.
    *
-   * Counted over the SAME rows the board shows by default — `latestPerCheckout`,
-   * shared with `./board` rather than re-derived — because a tab claiming three
-   * failures over a board showing one is a tab nobody trusts twice.
+   * Counted over the SAME rows AND through the same predicates the board uses —
+   * `boardTally`, asked of `./board` rather than re-derived here — because a tab
+   * claiming three failures over a board showing one is a tab nobody trusts
+   * twice, and sharing only the rows left the predicates free to drift.
    *
    * `document` is guarded because these modules are also loaded outside a
    * browser: `compile.test.ts` runs them through bun to check what the compiler
@@ -210,11 +211,7 @@ export function App(props: {
   let restingIcon: string | null = null;
   createEffect(() => {
     if (typeof document === "undefined") return;
-    const latest = latestPerCheckout(rows());
-    const failing = latest.filter((row) => row.unresolvedFailures > 0).length;
-    const active = latest.filter(
-      (row) => row.state === "running" || row.state === "provisioning",
-    ).length;
+    const { failing, active } = boardTally(rows());
     // Broken outranks busy: a run still going is worth a glance, a failure is
     // worth coming back for. And it is a WORD as well as a glyph, because a
     // title read aloud is the only version of this some people get.
