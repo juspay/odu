@@ -483,3 +483,7 @@ Use `run_start` with `noStrict: true` to snapshot current tracked edits, deletio
 When verifying, compare the answer's base `sha` **and** `contentSha`: a `contentSha` means a working tree was tested, not just `sha`. The board, `run_read` and `run_wait` expose this identity, and each lane's `_ci-setup` lists the overlay. A new edit is a new intent: use a new request id. Cache-hit evidence requires identical `contentSha`; red-to-green edits change it. Finalized working-tree runs need a new `run_start`; live retries retain the same snapshot.
 
 `.ci/` and ignored files are excluded. Sparse checkouts and submodule changes are refused; Git clean filters apply and LFS files travel as pointers. Capture fails on any Git error. Bundles are limited to 64 MiB (`ODU_SNAPSHOT_MAX_BYTES`); oversized captures name the largest paths. Recipes recreate ignored dependencies and outputs in their detached workspace.
+
+Bundle creation and `ODU_SNAPSHOT_MAX_BYTES` apply only when the selected pool may use remote transport. Local-only working-tree runs need no origin and do not pack repository history.
+
+To see `dirty` and `contentSha` over MCP, run the `odu mcp` bridge from the same build as the service; older bridges can drop these fields.

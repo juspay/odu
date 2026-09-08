@@ -527,6 +527,22 @@ export function sealAttempt(
   return true;
 }
 
+/** Fill an initially unknown placement without reallocating or truncating its log. */
+export function locateAttempt(
+  handle: RunHandle,
+  token: OwnershipToken,
+  node: string,
+  attempt: number,
+  placement: AttemptRecord["placement"],
+): boolean {
+  if (!stillOwner(token)) return false;
+  const path = join(attemptDir(handle.dir, encodeNodeKey(node), attempt), ATTEMPT_FILES.record);
+  const existing = readJson(path, decodeAttempt);
+  if (existing === null || existing.placement.host !== null || placement.host === null) return false;
+  writeAtomic(path, `${JSON.stringify({ ...existing, placement }, null, 2)}\n`);
+  return true;
+}
+
 export function readAttemptRecord(
   handle: RunHandle,
   node: string,

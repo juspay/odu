@@ -1,6 +1,6 @@
 import { afterEach, expect, it } from "bun:test";
 import { Effect } from "effect";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { LaneClient } from "../common/laneSurface";
@@ -54,6 +54,7 @@ it("ships >16 MiB in ordered 2 MiB chunks and skips upload only for an identical
       ...Array.from({ length: 9 }, (_, i) => `put:${i * 2 * 1024 * 1024}`),
     ]);
     expect(readFileSync(uploads.path(commit)!)).toEqual(content);
+    expect(uploads.path(commit)!.startsWith(join(tmpdir(), "odu", "snapshots"))).toBe(true);
     present = true;
     calls.length = 0;
     expect(
@@ -70,7 +71,9 @@ it("ships >16 MiB in ordered 2 MiB chunks and skips upload only for an identical
       uploads.put({ commit, offset: 0, total: bytes, data: "eA==" }).error,
     ).toContain("out-of-order");
   } finally {
+    const uploaded = uploads.path(commit);
     uploads.dispose();
+    if (uploaded !== null) expect(existsSync(uploaded)).toBe(false);
   }
 });
 it("rejects failed uploads and malformed staging inputs", async () => {

@@ -185,7 +185,7 @@ export async function runViaService(opts: RunOpts): Promise<number> {
     }
     if (opts.noWait) return receipt.accepted ? 0 : WAIT_EXITS.stillRunning;
     if (opts.progressJson === true) {
-      return progressStream(client, receipt.runId, receipt.sha.slice(0, 7), contentSha);
+      return progressStream(client, receipt.runId, receipt.sha.slice(0, 7));
     }
     return observe(client, receipt.runId, receipt.cursor, opts.json);
   });
@@ -250,7 +250,7 @@ async function observe(
     // The attention block on stdout is what this command gained: the run id
     // (the address every other verb now takes) and, per failure, the host, the
     // attempt and the log key to read next.
-    await verdictOf(client, runId, answer.sha, answer.contentSha);
+    await verdictOf(client, runId, answer.sha);
     process.stdout.write(renderAttention(answer));
     return waitExitFor(answer);
   }
@@ -271,10 +271,8 @@ async function verdictOf(
   client: OduServiceClient,
   runId: string,
   sha: string | null,
-  contentSha?: string,
 ): Promise<void> {
   const sha7 = sha === null ? "" : sha.slice(0, 7);
-  if (contentSha !== undefined) process.stderr.write(`odu · snapshot ${contentSha.slice(0, 7)} (${sha7} + working tree)\n`);
   const frame = await firstFrame(nodesStream(client, runId));
   if (frame === undefined) return;
   printVerdict({
@@ -919,7 +917,6 @@ async function progressStream(
   client: Pick<OduServiceClient, "surface">,
   runId: string,
   sha7: string,
-  contentSha?: string,
 ): Promise<number> {
   // Only TRANSITIONS are events. A frame arrives whenever anything moved,
   // including a lane landing on a box, so emitting per frame would repeat a
@@ -948,7 +945,6 @@ async function progressStream(
     }
   });
   if (final === undefined) return 3;
-  if (contentSha !== undefined) process.stderr.write(`odu · snapshot ${contentSha.slice(0, 7)} (${sha7} + working tree)\n`);
   // THE VERDICT BLOCK, on stderr, after the NDJSON. Both halves of the
   // `--progress json` contract: the stream is the machine's and the summary is
   // the person's, and a pipeline that emits the first without the second gives

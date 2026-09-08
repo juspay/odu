@@ -53,6 +53,7 @@ import { isResumptionEvent } from "@odu/run-history/schema";
 import type { Placement, RunEvent, RunScope } from "@odu/run-history/schema";
 import {
   appendAttemptLog,
+  locateAttempt,
   readAttemptLog,
   type JournalWriter,
   openJournal,
@@ -148,7 +149,7 @@ export interface RunHistory {
     },
   ) => void;
   /** Mirror a node's output into its current attempt's log. */
-  log: (node: string, text: string) => void;
+  log: (node: string, text: string, host?: string | null) => void;
   /** This node's log has had its last word — the other half of the seal.
    *  FIRST caller wins: a truncation notice and the lane's own `end` frame
    *  both arrive for one attempt and they disagree by design, since the notice
@@ -156,7 +157,7 @@ export interface RunHistory {
   logFinalized: (node: string, complete: boolean, reason: string | null) => void;
   /** A lane re-sent this node's buffered tail. NOT a retry: the attempt is the
    *  same attempt, so its bytes are replaced in place. */
-  replaceLog: (node: string, text: string) => void;
+  replaceLog: (node: string, text: string, host?: string | null) => void;
   /** This node's work is starting over on a new invocation — a resurrection
    *  re-running an interrupted node. Seals the open attempt as superseded so
    *  the bytes that follow land on a NEW ordinal, never on top of the failure
@@ -507,6 +508,17 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
       // for any status that is not merely `pending`.
       if (status !== "pending") beginAttempt(node, outcome.host);
       const current = open.get(node);
+      // Provisioning/log output can allocate before the venue is known. Fill
+      // that missing fact on the same attempt; never rewrite a known old host.
+      if (current?.placement.host === null && outcome.host !== null) {
+        const placement = placementOf(node, outcome.host);
+        try {
+          if (locateAttempt(handle, token, node, current.attempt, placement))
+            current.placement = placement;
+        } catch {
+          /* history remains best-effort */
+        }
+      }
       const attempt = current?.attempt ?? highest.get(node) ?? 1;
       emit({
         kind: "node_status",
@@ -521,12 +533,12 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
       current.outcome = { status, exitCode: outcome.exitCode };
       sealIfComplete(node);
     },
-    log: (node, text) => {
+    log: (node, text, host = null) => {
       if (fenced) return;
       // Output before any status — the provisioning narration into
       // `_ci-setup@<platform>` is exactly this. Open attempt 1 lazily rather
       // than dropping bytes nobody else will ever write down.
-      if (!open.has(node)) beginAttempt(node, null);
+      if (!open.has(node)) beginAttempt(node, host);
       const attempt = open.get(node)?.attempt;
       if (attempt === undefined) return;
       appendAttemptLog(handle, node, attempt, text);
@@ -554,9 +566,9 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
       current.log = { complete, reason };
       sealIfComplete(node);
     },
-    replaceLog: (node, text) => {
+    replaceLog: (node, text, host = null) => {
       if (fenced) return;
-      if (!open.has(node)) beginAttempt(node, null);
+      if (!open.has(node)) beginAttempt(node, host);
       const attempt = open.get(node)?.attempt;
       if (attempt === undefined) return;
       // A SNAPSHOT IS A BOUNDED TAIL, NOT A WHOLE LOG — and taking it as a

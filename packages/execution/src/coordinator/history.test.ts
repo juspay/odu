@@ -839,3 +839,21 @@ describe("the ownership fence", () => {
     expect(kinds(handle)).toEqual(["registered"]);
   });
 });
+
+it("fills log-first placement without truncating logs or changing the attempt ordinal", () => {
+  const { history, handle } = started();
+  history.log(NODE, "early output\n");
+  history.nodeStatus(NODE, "running", { exitCode: null, durationMs: null, host: "burst-two" });
+  expect(readAttemptRecord(handle, NODE, 1)?.placement.host).toBe("burst-two");
+  expect(readAttemptLog(handle, NODE, 1)?.text).toBe("early output\n");
+  history.nodeStatus(NODE, "failed", { exitCode: 1, durationMs: 5, host: "burst-two" });
+  history.logFinalized(NODE, true, null);
+  expect(readAttention(handle, {}).unresolved_failures[0]?.placement.host).toBe("burst-two");
+  history.resetNode(NODE, "retry");
+  history.replaceLog(NODE, "new worker\n", "burst-three");
+  history.nodeStatus(NODE, "ok", { exitCode: 0, durationMs: 3, host: "burst-three" });
+  history.logFinalized(NODE, true, null);
+  expect(readAttemptRecord(handle, NODE, 1)?.placement.host).toBe("burst-two");
+  expect(readAttemptRecord(handle, NODE, 2)?.placement.host).toBe("burst-three");
+  expect(readAttemptLog(handle, NODE, 1)?.text).toBe("early output\n");
+});

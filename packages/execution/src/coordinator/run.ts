@@ -438,11 +438,10 @@ export async function runCommand(
     snapshotDir = mkdtempSync(join(tmpdir(), `odu-${sha7}-`));
     git(repoRoot, ["worktree", "add", "--detach", snapshotDir, "HEAD"]);
   }
-  const snapshot = treeMode === "working-tree" ? snapshotWorkingTree(repoRoot) : null;
+  const snapshot = treeMode === "working-tree" ? snapshotWorkingTree(repoRoot, { bundle: false }) : null;
   if (snapshot !== null) {
     if (snapshot.base !== sha) { snapshot.cleanup(); throw new Error("odu: HEAD changed during snapshot capture; start a new run"); }
     dirty = snapshot.dirty;
-    process.stderr.write(`odu · working tree snapshot ${snapshot.contentSha.slice(0, 7)} = ${sha7} + ${snapshot.overlay.count} paths (${snapshot.overlay.paths.join(", ")}) — ${snapshot.bundle?.bytes ?? 0} bytes to ship\n`);
   }
   const specSource = snapshot?.worktreeDir ?? snapshotDir ?? repoRoot;
 
@@ -672,6 +671,17 @@ async function orchestrate(
           `with --host ${platform}=localhost, or pass --no-strict without --no-snapshot to ship a snapshot of your working tree.`,
       );
     }
+  }
+
+  if (ctx.snapshot !== null) {
+    const needsTransport = process.env.ODU_SNAPSHOT_TRANSPORT === "always" ||
+      [...tasksByPlatform.keys()].some(platform =>
+        (poolsByPlatform[platform] ?? []).some(entry => !isLocalHost(asHostSlot(entry).host)));
+    if (needsTransport && originUrl === null)
+      throw new Error("odu: snapshot transport has no origin remote to fetch from");
+    if (needsTransport) ctx.snapshot.prepareBundle();
+    const snap = ctx.snapshot;
+    info(`odu · working tree snapshot ${snap.contentSha.slice(0, 7)} = ${sha7} + ${snap.overlay.count} paths (${snap.overlay.paths.join(", ")}) — captured in ${snap.captureMs} ms; ${snap.bundle?.bytes ?? 0} bytes to ship`);
   }
 
   // ── one-run-per-checkout BEFORE any venue lease ──
@@ -958,6 +968,9 @@ async function orchestrate(
   //    stays here is the run's own policy: which frame routes where, and when a
   //    node's log has had this run's last word. ──
   const logs = createNodeLogSink(repoRoot, sha7);
+  // Placement belongs to the exact routed node, not the platform's primary.
+  // Keep assignments after a burst releases its lease: its evidence outlives it.
+  const nodeHosts = new Map<string, string>();
   // Bound below beside `setupLine`; declared here because interrupt teardown
   // must flush the last coalesced provisioning burst before sealing logs.
   let flushSetupLines: () => void = () => {};
@@ -981,7 +994,7 @@ async function orchestrate(
   const appendLocal = (id: string, text: string): void => {
     if (logs.isEnded(id)) return;
     logs.append(id, text);
-    history.log(id, text);
+    history.log(id, text, nodeHosts.get(id) ?? null);
   };
   const resetLocal = (id: string, text: string): void => {
     logs.reset(id, text);
@@ -992,7 +1005,7 @@ async function orchestrate(
     // empty ghost attempt for every node whose first output arrived after its
     // `running` frame, and then "attempt 2" meant nothing. The genuine restart
     // is `history.resetNode`, called where a node is actually re-run.
-    history.replaceLog(id, text);
+    history.replaceLog(id, text, nodeHosts.get(id) ?? null);
   };
   const endLocal = (id: string): void => {
     logs.end(id);
@@ -1835,13 +1848,12 @@ async function orchestrate(
       // The same transition, into the durable journal. Beside `emitProgress`
       // rather than folded into it: `--progress json` is a FEED a face renders
       // and forgets, this is a RECORD somebody reads a week later, and the two
-      // have different budgets for what they may leave out. `host` is read off
-      // the lane roster the run published, so a node's placement in the record
-      // is the same one the surface showed.
+      // have different budgets for what they may leave out. Placement comes
+      // from the node route, including burst workers and deferred verdicts.
       history.nodeStatus(id, next.status, {
         exitCode: next.exitCode,
         durationMs: next.durationMs,
-        host: lanesByPlatform[splitFanId(id).platform] ?? null,
+        host: nodeHosts.get(id) ?? null,
       });
       const payload = postableNodeIds.has(id)
         ? statusFor(id, next.status, next.durationMs, sha7)
@@ -2541,6 +2553,9 @@ async function orchestrate(
         // rather than leaving it to the successor lane's opening `snapshot`
         // frame — a party that does not know a resurrection happened deciding
         // what this file contains.
+        const nextHost = outcome.lanes[platform];
+        if (nextHost === undefined) nodeHosts.delete(id);
+        else nodeHosts.set(id, nextHost);
         resetLocal(id, "");
       }
       acceptClaim(platform, outcome, retryTasks);
@@ -2568,6 +2583,7 @@ async function orchestrate(
     tasks: TaskSpec[],
   ): Lane => {
     executions.ensure(platform);
+    nodeHosts.set(fanId(SETUP, platform), host);
     startSetup(platform);
     const setupId = fanId(SETUP, platform);
     const publicMainId = (laneId: string): string => {
@@ -2576,6 +2592,10 @@ async function orchestrate(
         ? fanId(shardNamepath(laneId, 0, plan.total), platform)
         : fanId(laneId, platform);
     };
+    for (const task of tasks) {
+      nodeHosts.set(fanId(task.id, platform), host);
+      nodeHosts.set(publicMainId(task.id), host);
+    }
     const local = isLocalHost(host);
     if (!local) remotePlatforms.add(platform);
     // Which episode this lane IS. Read now, so the death of a lane that has
@@ -3058,6 +3078,11 @@ async function orchestrate(
           ? fanId(shardNamepath(laneId, 0, plan.total), platform)
           : fanId(laneId, platform);
       };
+      for (const root of roots) {
+        // The aggregate belongs to the primary; physical shards keep their leases.
+        nodeHosts.set(fanId(root.id, platform), host);
+        nodeHosts.set(publicMainId(root.id), host);
+      }
       const routed = executions.extendLane(
         platform,
         lane,
@@ -3084,6 +3109,7 @@ async function orchestrate(
         const publicIdFor = projection.publicId;
         const setupId = projection.setupId;
         const publicLaneIds = projection.nodeIds;
+        for (const id of publicLaneIds) nodeHosts.set(id, lease.host);
         let burstLane: Lane | undefined;
         let finished = false;
         const finishBurst = (): void => {

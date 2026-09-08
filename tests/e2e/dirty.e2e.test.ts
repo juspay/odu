@@ -23,6 +23,7 @@ import {
 
 let odu: string;
 const local = privateWorld(suitePortFor("dirtyLocal"));
+local.env.ODU_SNAPSHOT_MAX_BYTES = "1";
 const remote = privateWorld(suitePortFor("dirtyTransport"));
 remote.env.ODU_SNAPSHOT_TRANSPORT = "always";
 const worlds = [local, remote];
@@ -88,6 +89,9 @@ it("pins edits locally and over stdio, changes red to green, then proves cache r
         `run exited ${result.status}: ${result.stdout}\n${result.stderr}`,
       );
     const answer = JSON.parse(result.stdout) as AttentionAnswer;
+    const coordinatorLog = readFileSync(join(world.env.ODU_STATE_DIR!, "runs", answer.runId, "coordinator.log"), "utf8");
+    console.log(coordinatorLog.split("\n").find(line => line.includes("captured in")));
+
     expect(answer.sha).toBe(base);
     expect(answer.dirty).toBe(true);
     expect(answer.contentSha).toMatch(/^[0-9a-f]{40}$/);

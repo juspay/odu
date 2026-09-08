@@ -49,12 +49,10 @@ export function createSnapshotUploads() {
         return fail("out-of-order snapshot chunk");
       try {
         if (directory === null) {
-          const root = join(
-            process.env.HOME ?? tmpdir(),
-            ".cache",
-            "odu",
-            "snapshots",
-          );
+          // Normal disposal removes these immediately. SIGKILL cannot run a
+          // finalizer, so staging belongs to the OS temporary-file lifecycle,
+          // like runner workspaces, rather than a permanent object cache.
+          const root = join(tmpdir(), "odu", "snapshots");
           mkdirSync(root, { recursive: true });
           directory = mkdtempSync(join(root, `upload-${process.pid}-`));
         }

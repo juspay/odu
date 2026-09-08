@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 export interface WorkingTreeSnapshot {
+  captureMs: number;
   base: string;
   contentSha: string;
   dirty: boolean;
@@ -12,6 +13,8 @@ export interface WorkingTreeSnapshot {
   worktreeDir: string;
   requires: string[];
   bundle: { path: string; bytes: number } | null;
+  /** Build transport bytes only after a run has resolved a pool that needs them. */
+  prepareBundle(): void;
   cleanup(): void;
 }
 export function treeModeFor(args: {
@@ -27,8 +30,9 @@ export function treeModeFor(args: {
 
 export function snapshotWorkingTree(
   repoRoot: string,
-  opts: { maxBytes?: number } = {},
+  opts: { maxBytes?: number; bundle?: boolean } = {},
 ): WorkingTreeSnapshot {
+  const captureStarted = performance.now();
   const git = (
     args: string[],
     env: NodeJS.ProcessEnv = {},
@@ -84,16 +88,31 @@ export function snapshotWorkingTree(
     git(["read-tree", base], env);
     // A negative pathspec naming an ignored .ci directory makes git add
     // exit 1 on supported Git versions. Enumerate the exact candidate set
-    // instead: tracked paths (including deletions) plus non-ignored new paths.
+    // instead: changed tracked paths (including deletions) plus non-ignored
+    // new paths. Avoid one literal pathspec per unchanged file in a large repo.
     // NUL-delimited literal pathspecs also preserve whitespace and magic names.
     const candidates = [
-      ...new Set(
-        git(
-          ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+      ...new Set([
+        ...git(
+          [
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            "-z",
+            base,
+            "--",
+          ],
           env,
           true,
         ).split("\0"),
-      ),
+        ...git(
+          ["ls-files", "-z", "--others", "--exclude-standard"],
+          env,
+          true,
+        ).split("\0"),
+      ]),
     ].filter(
       (path) => path !== "" && path !== ".ci" && !path.startsWith(".ci/"),
     );
@@ -176,63 +195,87 @@ export function snapshotWorkingTree(
       worktreeDir,
       contentSha,
     ]);
-    const boundary = git([
-      "rev-list",
-      "--boundary",
-      contentSha,
-      "--not",
-      "--remotes=origin",
-    ])
-      .split("\n")
-      .filter(Boolean);
-    const requires = boundary
-      .filter((line) => line.startsWith("-"))
-      .map((line) => line.slice(1));
-    let bundle: WorkingTreeSnapshot["bundle"] = null;
-    if (boundary.some((line) => !line.startsWith("-"))) {
-      const path = join(temp, "snapshot.bundle");
-      git([
-        "-C",
-        worktreeDir,
-        "bundle",
-        "create",
-        path,
-        "HEAD",
+    let prepared = false;
+    const prepareBundle = (): void => {
+      if (prepared) return;
+      const boundary = git([
+        "rev-list",
+        "--boundary",
+        contentSha,
         "--not",
-        ...requires,
-      ]);
-      const bytes = statSync(path).size;
-      if (bytes > maxBytes) {
-        const names = git([
-          "diff-tree",
-          "-r",
-          "--name-only",
-          "-z",
-          base,
-          contentSha,
-        ])
-          .split("\0")
-          .filter(Boolean);
-        const largest = git(["ls-tree", "-r", "-l", contentSha, "--", ...names])
-          .split("\n")
-          .sort((a, b) => Number(b.split(/\s+/)[3]) - Number(a.split(/\s+/)[3]))
-          .slice(0, 10);
-        throw new Error(
-          `odu: snapshot bundle ${bytes} bytes exceeds ODU_SNAPSHOT_MAX_BYTES=${maxBytes}; largest overlay paths:\n${largest.join("\n")}\nUse .gitignore, --no-snapshot on localhost, or commit and push.`,
-        );
-      }
-      bundle = { path, bytes };
-    } else requires.push(base);
-    return {
+        "--remotes=origin",
+      ])
+        .split("\n")
+        .filter(Boolean);
+      const requires = boundary
+        .filter((line) => line.startsWith("-"))
+        .map((line) => line.slice(1));
+      let bundle: WorkingTreeSnapshot["bundle"] = null;
+      if (boundary.some((line) => !line.startsWith("-"))) {
+        const path = join(temp, "snapshot.bundle");
+        git([
+          "-C",
+          worktreeDir,
+          "bundle",
+          "create",
+          path,
+          "HEAD",
+          "--not",
+          ...requires,
+        ]);
+        const bytes = statSync(path).size;
+        if (bytes > maxBytes) {
+          if (overlay.count === 0)
+            throw new Error(
+              `odu: snapshot bundle ${bytes} bytes exceeds ODU_SNAPSHOT_MAX_BYTES=${maxBytes}; the overlay is empty, so these bytes are repository history. Push the history to origin before remote execution, or use localhost.`,
+            );
+          const names = git([
+            "diff-tree",
+            "-r",
+            "--name-only",
+            "-z",
+            base,
+            contentSha,
+          ])
+            .split("\0")
+            .filter(Boolean);
+          const largest = git([
+            "ls-tree",
+            "-r",
+            "-l",
+            contentSha,
+            "--",
+            ...names,
+          ])
+            .split("\n")
+            .sort(
+              (a, b) => Number(b.split(/\s+/)[3]) - Number(a.split(/\s+/)[3]),
+            )
+            .slice(0, 10);
+          throw new Error(
+            `odu: snapshot bundle ${bytes} bytes exceeds ODU_SNAPSHOT_MAX_BYTES=${maxBytes}; largest overlay paths:\n${largest.join("\n")}\nUse .gitignore, --no-snapshot on localhost, or commit and push.`,
+          );
+        }
+        bundle = { path, bytes };
+      } else requires.push(base);
+      snapshot.requires = requires;
+      snapshot.bundle = bundle;
+      prepared = true;
+    };
+    const snapshot: WorkingTreeSnapshot = {
+      captureMs: Math.round(performance.now() - captureStarted),
       base,
       contentSha,
       dirty,
       overlay,
       worktreeDir,
-      requires,
-      bundle,
+      requires: [],
+      bundle: null,
+      prepareBundle,
       cleanup,
     };
+    if (opts.bundle !== false) prepareBundle();
+    return snapshot;
   } catch (error) {
     cleanup();
     throw error;

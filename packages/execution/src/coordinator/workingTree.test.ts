@@ -149,12 +149,41 @@ describe("working-tree capture", () => {
   });
   it("preserves literal filenames and does not execute checkout hooks", () => {
     const f = fixture();
-    for (const name of [" space ", ":(glob)*", "line\nbreak"]) f.write(name, "literal");
-    f.write(".git/hooks/post-checkout", `#!/bin/sh\ntouch '${f.dir}/HOOK-RAN'\n`);
+    for (const name of [" space ", ":(glob)*", "line\nbreak"])
+      f.write(name, "literal");
+    f.write(
+      ".git/hooks/post-checkout",
+      `#!/bin/sh\ntouch '${f.dir}/HOOK-RAN'\n`,
+    );
     chmodSync(join(f.dir, ".git/hooks/post-checkout"), 0o755);
     const snap = f.snap();
-    for (const name of [" space ", ":(glob)*", "line\nbreak"]) expect(readFileSync(join(snap.worktreeDir, name), "utf8")).toBe("literal");
+    for (const name of [" space ", ":(glob)*", "line\nbreak"])
+      expect(readFileSync(join(snap.worktreeDir, name), "utf8")).toBe(
+        "literal",
+      );
     expect(existsSync(join(f.dir, "HOOK-RAN"))).toBe(false);
+  });
+  it("captures a local-only repo without packing its history or enforcing a transport ceiling", () => {
+    const f = fixture();
+    f.write("history", "historical data".repeat(100_000));
+    f.git("add", "history");
+    f.git("commit", "-qm", "large history");
+    f.write("marker", "uncommitted");
+    const snapshot = snapshotWorkingTree(f.dir, { bundle: false, maxBytes: 1 });
+    snapshots.push(snapshot);
+    expect(snapshot.dirty).toBe(true);
+    expect(snapshot.bundle).toBeNull();
+    expect(readFileSync(join(snapshot.worktreeDir, "marker"), "utf8")).toBe(
+      "uncommitted",
+    );
+    // The same captured content must still enforce the ceiling if transport is requested.
+    expect(() => snapshot.prepareBundle()).toThrow("ODU_SNAPSHOT_MAX_BYTES=1");
+  });
+  it("identifies history rather than overlay paths when a clean bundle exceeds the ceiling", () => {
+    const f = fixture();
+    expect(() => snapshotWorkingTree(f.dir, { maxBytes: 1 })).toThrow(
+      "the overlay is empty, so these bytes are repository history. Push",
+    );
   });
   it("fails on git add errors rather than accepting a partial capture", () => {
     const f = fixture();

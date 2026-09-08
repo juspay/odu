@@ -412,3 +412,23 @@ it.if(hasJust)("refuses in-place mode for a remote pool even on a clean tree", a
   }, { claimVenues: async () => { claimed = true; return { ok: false, error: new Error("unexpected claim") }; } })).rejects.toThrow("only applies to localhost lanes");
   expect(claimed).toBe(false);
 });
+
+it.if(hasJust)("explains forced snapshot transport without origin before claiming", async () => {
+  const dir = fixture();
+  spawnSync("git", ["remote", "remove", "origin"], { cwd: dir });
+  writeFileSync(join(dir, "hosts.json"), JSON.stringify({ [PLATFORM]: "localhost" }));
+  const prior = process.env.ODU_SNAPSHOT_TRANSPORT;
+  process.env.ODU_SNAPSHOT_TRANSPORT = "always";
+  let claimed = false;
+  try {
+    await expect(runCommand({
+      selectors: [], platforms: [], hostPins: [], noDeps: false,
+      noStrict: true, noSnapshot: false, noPost: true,
+      supersede: false, linger: false, noWait: false,
+    }, { claimVenues: async () => { claimed = true; return { ok: false, error: new Error("unexpected claim") }; } })).rejects.toThrow("no origin remote");
+    expect(claimed).toBe(false);
+  } finally {
+    if (prior === undefined) delete process.env.ODU_SNAPSHOT_TRANSPORT;
+    else process.env.ODU_SNAPSHOT_TRANSPORT = prior;
+  }
+});
