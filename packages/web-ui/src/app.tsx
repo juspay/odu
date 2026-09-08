@@ -552,14 +552,30 @@ export function App(props: {
   // ── the shell ──
   return (
     <div class="shell">
-      <div class={`wire wire-${props.readout.status}`} role="status" aria-live="polite">
-        {wireText(props.readout)}
-        <Show when={props.readout.needsReload}>
-          <button type="button" class="btn" onClick={props.onReload}>
-            Reload
-          </button>
-        </Show>
-      </div>
+      {/* The masthead, and the wire beside it. The wordmark is `logo.svg`'s own
+          idea spelled in text — a slate `$` in front of `odu` in bold mono,
+          because odu is a shell prompt you attach to — rather than a second
+          drawing of the mark: the logo beside the bundle is content-hashed, so
+          a view that named it would be naming a URL only the build knows.
+
+          It is a `<span>` and not a link. There is nowhere for it to go that
+          this page is not already, and a decorative control at the top of the
+          document is one Tab stop between a person and the first thing they
+          came here to press. */}
+      <header class="topbar">
+        <span class="brand">
+          <span class="brand-sigil" aria-hidden="true">$</span>
+          <span class="brand-name">odu</span>
+        </span>
+        <div class={`wire wire-${props.readout.status}`} role="status" aria-live="polite">
+          {wireText(props.readout)}
+          <Show when={props.readout.needsReload}>
+            <button type="button" class="btn" onClick={props.onReload}>
+              Reload
+            </button>
+          </Show>
+        </div>
+      </header>
       {/* THE ROUTER. `Switch` rather than three independent `Show`s because the
           three are exclusive, and each branch is BUILT ON ENTRY: the compiler
           turns a `Match`'s children into a getter, so leaving a run and coming

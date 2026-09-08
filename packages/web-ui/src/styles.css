@@ -1,49 +1,134 @@
 /*
- * odu's board, dressed.
+ * odu's board, dressed — in the same clothes as odu's website.
  *
- * Two properties are load-bearing rather than decorative, and both are
+ * Every token below is lifted from `website/src/styles/global.css` rather than
+ * invented here. That is the whole point: a person who read the landing page and
+ * then opened their own board should not have to wonder whether they are looking
+ * at the same product. The palette, the two typefaces, the radii, the borders and
+ * the "no shadows, no decorative motion" rule are the website's; what changes is
+ * the DENSITY, because this is a page somebody stares at while their CI runs
+ * rather than a page they read once — and the CONTRAST of the greys and hues
+ * where they have to carry small type, which is the one place a marketing page's
+ * needs and an operator's differ. Each of those departures is one token, sits
+ * beside the site value it came from, and says why.
+ *
+ * Three properties are load-bearing rather than decorative, and the first two are
  * acceptance gates:
  *
- *   - **Narrow viewports work.** The row is a grid that collapses to two lines
- *     on a phone rather than a table that scrolls sideways. A board you cannot
- *     read on the device you are holding is a board you do not check.
+ *   - **Narrow viewports work.** The row is a grid that collapses to a couple of
+ *     lines on a phone rather than a table that scrolls sideways. A board you
+ *     cannot read on the device you are holding is a board you do not check.
  *   - **Focus is visible.** Every control here is a real `<button>` (see
- *     `dom.ts`), and the focus ring is never removed — `:focus-visible` is
+ *     `dom.tsx`), and the focus ring is never removed — `:focus-visible` is
  *     styled up, not off. Keyboard access is not a mode; it is the same app.
+ *   - **No status is carried by hue alone.** Every pill says its state in words
+ *     AND carries a marker whose SHAPE differs per state (✔ ✗ ● ◦ ◆); every node
+ *     row carries the same glyph vocabulary the TUI draws. A reader who cannot
+ *     tell odu's green from odu's red still reads the board correctly — which
+ *     matters most for exactly the two states that decide whether anybody has to
+ *     do anything.
  *
- * The palette follows the terminal dashboard's five hues, so a status means the
- * same colour whichever face a person is looking at.
+ * The hue names stay the terminal dashboard's five, so a status means the same
+ * colour whichever face a person is looking at.
  */
 
-:root {
-  color-scheme: light dark;
-  --bg: #ffffff;
-  --panel: #f6f8fa;
-  --line: #d0d7de;
-  --ink: #1f2328;
-  --dim: #59636e;
-  --grey: #6e7781;
-  --amber: #9a6700;
-  --green: #1a7f37;
-  --red: #cf222e;
-  --violet: #8250df;
-  --accent: #0969da;
-  --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+/* The website's mono, resolved from what the machine already has. `local()`
+   only — the board is served by a daemon on somebody's laptop and must never
+   depend on a font it would have to fetch from the internet to look right. */
+@font-face {
+  font-family: "Odu Mono";
+  src: local("SFMono-Regular"), local("Cascadia Mono"), local("JetBrains Mono"), local("Menlo");
+  font-display: swap;
 }
 
-@media (prefers-color-scheme: dark) {
+/* Dark is odu's default look — it is what the logo, the site and the terminal
+   all are. Light is a full re-tint rather than an afterthought, because half the
+   people who open this board are looking at it beside an editor that is white.
+   There is no toggle: the site keeps one because a visitor may want its dark
+   look on a light desktop, whereas a dashboard has no opinion worth overriding
+   the machine's — `prefers-color-scheme` is the whole of the policy here. */
+:root {
+  color-scheme: light dark;
+  --ink: #eef3f0;
+  --muted: #9db0a8;
+  /* The site's `--quiet`, one step brighter. On a marketing page the quiet grey
+     carries captions; here it carries column heads, scopes and byte offsets —
+     DATA — and the site's own value lands at 4.47:1 on this canvas, a rounding
+     error under the 4.5 a person is owed for text this small. */
+  --quiet: #7d8e87;
+  --canvas: #080b0a;
+  --panel: #101513;
+  --panel-2: #161d1a;
+  --line: #26302c;
+  --line-strong: #37453f;
+  --green: #45e39a;
+  --green-soft: rgba(69, 227, 154, 0.14);
+  --cyan: #46d6e0;
+  --violet: #b399ff;
+  --amber: #f5c451;
+  --red: #ff7d74;
+  /* THE SAME FIVE HUES, AS TEXT.
+   *
+   * A hue does two jobs here and they have different bars. As a SURFACE — a
+   * pill's tint, its border, a row's left rail, a status dot — it only has to be
+   * distinguishable. As TEXT it has to be readable, and this page sets a hue in
+   * type as small as 0.72 rem: `exit 3`, `+dirty`, the wire's own sentence.
+   *
+   * On odu's near-black canvas the site's hues clear 4.5:1 comfortably, so these
+   * ARE those hues. The light theme is where they part company — see below.
+   */
+  --green-ink: var(--green);
+  --amber-ink: var(--amber);
+  --red-ink: var(--red);
+  --violet-ink: var(--violet);
+  --cyan-ink: var(--cyan);
+  /* What sits on a filled brand surface — the website's `.button-primary` ink. */
+  --on-brand: #04140c;
+  --accent-grad: linear-gradient(105deg, var(--green), var(--cyan) 55%, var(--violet));
+  --mono: "Odu Mono", "SFMono-Regular", "Cascadia Mono", "Roboto Mono", Menlo, Consolas, monospace;
+  --sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+@media (prefers-color-scheme: light) {
   :root {
-    --bg: #0d1117;
-    --panel: #161b22;
-    --line: #30363d;
-    --ink: #e6edf3;
-    --dim: #8d96a0;
-    --grey: #8d96a0;
-    --amber: #d29922;
-    --green: #3fb950;
-    --red: #f85149;
-    --violet: #a371f7;
-    --accent: #58a6ff;
+    --ink: #10201a;
+    --muted: #48584f;
+    /* One step darker than the site's, for the reason given above its dark
+       counterpart: on this page the quiet grey is data, not caption. */
+    --quiet: #5d6d66;
+    --canvas: #f4f7f5;
+    --panel: #ffffff;
+    --panel-2: #eef2f0;
+    --line: #dde5e0;
+    --line-strong: #c3d0c9;
+    --green: #0ca678;
+    --green-soft: rgba(12, 166, 120, 0.13);
+    --cyan: #0e9ab0;
+    --violet: #7c5cff;
+    --amber: #b47500;
+    --red: #e5484d;
+    /* WHERE THE LIGHT THEME PARTS FROM THE SITE, and the only place it does.
+     *
+     * The five hues above are the website's exactly, and they stay exactly that
+     * everywhere a hue is a surface. But on a near-white canvas the same values
+     * sit between 2.8:1 and 3.9:1 as text — fine for an accent bar under a
+     * heading, not fine for `exit 3` at 0.72 rem, which is the one line on this
+     * page somebody is squinting at. So each hue has a darkened sibling for its
+     * text duty: same family, same reading, a contrast a person can actually
+     * take the diagnosis from. The board this replaced used GitHub's accessible
+     * set, and going to a prettier palette that is harder to read would not have
+     * been a redesign.
+     */
+    --green-ink: #077a58;
+    --amber-ink: #8f5d00;
+    --red-ink: #c42a30;
+    --violet-ink: #6b45e8;
+    /* Cyan is never type here, but the focus ring and the two selection rails
+       it draws are non-text INDICATORS, which owe a reader 3:1 against whatever
+       they land on. The site's light cyan gives 3.11:1 on the panel — passing,
+       with nothing left over for a thin ring on a bright screen. */
+    --cyan-ink: #0a7385;
+    --accent-grad: linear-gradient(105deg, #0ca678, #0e9ab0 55%, #7c5cff);
   }
 }
 
@@ -51,11 +136,34 @@
   box-sizing: border-box;
 }
 
+html {
+  background: var(--canvas);
+}
+
 body {
   margin: 0;
-  background: var(--bg);
+  background: var(--canvas);
   color: var(--ink);
-  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 0.875rem/1.5 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  color: #06100c;
+  background: var(--green);
+}
+
+code {
+  padding: 0.05rem 0.28rem;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--panel-2);
+  color: var(--ink);
+  font: 0.9em var(--mono);
+}
+
+input[type="checkbox"] {
+  accent-color: var(--green);
 }
 
 .shell {
@@ -64,20 +172,55 @@ body {
   padding: 0 1rem 4rem;
 }
 
-/* ── the connection indicator ──────────────────────────────────────────── */
+/* ── the masthead and the connection indicator ─────────────────────────────
+ *
+ * The wordmark is the logo's own idea rather than a second drawing of it:
+ * `logo.svg` is a shell prompt — a slate `$` beside `odu` in bold mono — because
+ * odu is a thing you attach to. Spelled in text it costs no asset, survives
+ * every theme, and stays legible at the one size it is ever drawn at.
+ *
+ * The wire rides beside it, and the pair STICKS: the connection is the one fact
+ * on this page that must never scroll away, because a board of stale rows and a
+ * board of live ones look exactly alike.
+ */
 
-.wire {
+.topbar {
   position: sticky;
   top: 0;
   z-index: 2;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 0.75rem;
-  padding: 0.35rem 0.5rem;
-  font-size: 0.8125rem;
+  gap: 0.5rem 1rem;
+  padding: 0.5rem 0.25rem;
   border-bottom: 1px solid var(--line);
-  background: var(--bg);
-  color: var(--dim);
+  background: var(--canvas);
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font: 700 0.9rem/1 var(--mono);
+  letter-spacing: 0.04em;
+}
+
+.brand-sigil { color: var(--quiet); font-weight: 500; }
+.brand-name { color: var(--ink); }
+
+.wire {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  /* Shrinkable to nothing, so the sentence WRAPS on a phone rather than pushing
+     the page sideways. `reconnecting — showing the last thing the service said`
+     is the longest string this app ever draws in its chrome, and it is also the
+     one nobody may be allowed to miss. */
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--muted);
+  font: 0.75rem/1.5 var(--mono);
 }
 
 .wire::before {
@@ -89,54 +232,120 @@ body {
   flex: none;
 }
 
-.wire-live { color: var(--green); }
-.wire-connecting { color: var(--dim); }
-.wire-reconnecting { color: var(--amber); }
-.wire-degraded { color: var(--amber); }
-.wire-retired { color: var(--red); }
+/* The dot is `currentColor`, so the state tints the sentence and the dot from
+   one declaration — and the ink variants are what the sentence is set in. */
+.wire-live { color: var(--green-ink); }
+.wire-connecting { color: var(--quiet); }
+.wire-reconnecting { color: var(--amber-ink); }
+.wire-degraded { color: var(--amber-ink); }
+.wire-retired { color: var(--red-ink); }
 
-/* ── controls ──────────────────────────────────────────────────────────── */
+/* ── controls ──────────────────────────────────────────────────────────────
+ *
+ * The website's button, shrunk. Mono, because every control here names a
+ * machine action; instant hover with no transition and no box-shadow, because
+ * that is the rule the site's own buttons keep — and a dashboard that shimmers
+ * while a run is in flight is a dashboard people stop watching.
+ */
 
 .btn {
-  font: inherit;
-  color: inherit;
-  background: var(--panel);
-  border: 1px solid var(--line);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  min-height: 1.7rem;
+  padding: 0.15rem 0.6rem;
+  border: 1px solid var(--line-strong);
   border-radius: 6px;
-  padding: 0.25rem 0.6rem;
+  background: var(--panel);
+  color: var(--ink);
+  font: 500 0.75rem/1.4 var(--mono);
+  white-space: nowrap;
   cursor: pointer;
 }
 
-.btn:hover:not(:disabled) { border-color: var(--accent); }
-.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn:hover:not(:disabled) {
+  border-color: var(--green);
+  background: var(--panel-2);
+}
+
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
 .btn-primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
+  border-color: transparent;
+  background: var(--accent-grad);
+  color: var(--on-brand);
+  font-weight: 600;
+}
+
+.btn-primary:hover:not(:disabled) {
+  border-color: transparent;
+  background: linear-gradient(105deg, var(--cyan), var(--violet));
 }
 
 /* NEVER removed — see the header. The ring is what makes the keyboard path the
-   same app rather than a second, invisible one. */
+   same app rather than a second, invisible one. Cyan, so it never collides with
+   a status hue: a focus ring that reads as "this node failed" is worse than no
+   ring at all. */
 :focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--cyan-ink);
   outline-offset: 2px;
 }
 
+/* Which of a group is CHOSEN, drawn. `aria-pressed` was already on the element
+   for assistive tech, but nothing drew it — so a sighted person could not see
+   which board filter or which attempt they were looking at. Styled off the
+   ATTRIBUTE rather than a class so the two can never disagree: there is one
+   fact, and both the screen reader and the eye read it from the same place.
+   Filled rather than merely tinted, so the chosen one differs in WEIGHT and not
+   only in hue. */
+.btn[aria-pressed="true"] {
+  border-color: var(--green);
+  background: var(--green);
+  color: var(--on-brand);
+  font-weight: 600;
+}
+
+.btn[aria-pressed="true"]:hover:not(:disabled) {
+  background: var(--green);
+}
+
+/* A state, a verdict, a count. The hue is one of the five; the WORD inside is
+   drawn in ink at full contrast, and the marker in front of it differs in shape
+   per hue — so the pill survives both a colour-blind reader and a bad monitor.
+   The modifier class sets the pair — `--hue` for the tint and the border,
+   `--hue-ink` for the marker — so a new status is one rule rather than four. */
 .pill {
-  display: inline-block;
-  padding: 0 0.4rem;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.3rem;
+  padding: 0.05rem 0.45rem;
+  border: 1px solid color-mix(in srgb, var(--hue) 55%, transparent);
   border-radius: 999px;
-  font-size: 0.75rem;
-  border: 1px solid currentColor;
+  background: color-mix(in srgb, var(--hue) 14%, transparent);
+  color: var(--ink);
+  font: 500 0.72rem/1.6 var(--mono);
   white-space: nowrap;
 }
 
-.pill-grey { color: var(--grey); }
-.pill-amber { color: var(--amber); }
-.pill-green { color: var(--green); }
-.pill-red { color: var(--red); }
-.pill-violet { color: var(--violet); }
+.pill::before {
+  color: var(--hue-ink);
+  font-size: 0.85em;
+}
+
+/* `--hue` paints the tint and the border; `--hue-ink` paints the marker, which
+   is the only part of a pill that is type. */
+.pill-grey { --hue: var(--quiet); --hue-ink: var(--quiet); }
+.pill-amber { --hue: var(--amber); --hue-ink: var(--amber-ink); }
+.pill-green { --hue: var(--green); --hue-ink: var(--green-ink); }
+.pill-red { --hue: var(--red); --hue-ink: var(--red-ink); }
+.pill-violet { --hue: var(--violet); --hue-ink: var(--violet-ink); }
+
+.pill-grey::before { content: "◦"; }
+.pill-amber::before { content: "●"; }
+.pill-green::before { content: "✔"; }
+.pill-red::before { content: "✗"; }
+.pill-violet::before { content: "◆"; }
 
 /* ── the board ─────────────────────────────────────────────────────────── */
 
@@ -145,38 +354,45 @@ body {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.75rem;
-  padding: 1rem 0 0.5rem;
+  gap: 0.5rem 0.75rem;
+  padding: 1.1rem 0 0.75rem;
 }
 
 .board-head h1,
 .detail-head h1 {
-  font-size: 1.25rem;
   margin: 0;
   margin-right: auto;
+  font: 600 1.05rem/1.2 var(--mono);
+  letter-spacing: -0.01em;
 }
 
-.filters { display: flex; gap: 0.25rem; }
-.filters button { font-size: 0.8125rem; }
+.filters { display: flex; flex-wrap: wrap; gap: 0.25rem; }
 
-/* Which of a group is CHOSEN, drawn. `aria-pressed` was already on the element
-   for assistive tech, but nothing drew it — so a sighted person could not see
-   which board filter or which attempt they were looking at. Styled off the
-   ATTRIBUTE rather than a class so the two can never disagree: there is one
-   fact, and both the screen reader and the eye read it from the same place. */
-.btn[aria-pressed="true"] {
-  background: var(--ink);
-  color: var(--bg);
-  border-color: var(--ink);
-}
-
-.row {
+/* One geometry, two users: the column heads and the rows beneath them. Written
+   once so a column cannot drift out from under its own label. */
+.row,
+.row-head {
   display: grid;
   grid-template-columns:
     minmax(8rem, 1.4fr) minmax(6rem, 0.7fr) 7rem 6rem minmax(6rem, 0.8fr)
     minmax(6rem, 1fr) 5rem;
   gap: 0.5rem;
   align-items: center;
+}
+
+/* The heads are a VISUAL guide and nothing else — the rows are buttons rather
+   than a table, so seven stray nouns announced ahead of them would be noise to
+   a screen reader. `aria-hidden` in the markup says so; this only draws them. */
+.row-head {
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid var(--line-strong);
+  color: var(--quiet);
+  font: 500 0.66rem/1.4 var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.row {
   width: 100%;
   text-align: left;
   font: inherit;
@@ -184,32 +400,48 @@ body {
   background: none;
   border: 0;
   border-bottom: 1px solid var(--line);
-  padding: 0.6rem 0.25rem;
+  padding: 0.5rem;
   cursor: pointer;
 }
 
 .row:hover { background: var(--panel); }
-.row-red { box-shadow: inset 3px 0 0 var(--red); }
+
+/* The left rail: a run that is MOVING and a run that is BROKEN are the two a
+   person scanning the board is looking for, and both are visible from the edge
+   of the row before any word is read. Red is written after amber deliberately —
+   a live run with a failure in it is a failure. */
+.row-running,
+.row-provisioning { box-shadow: inset 2px 0 0 var(--amber); }
+.row-red { box-shadow: inset 2px 0 0 var(--red); }
 
 .row-project { font-weight: 600; overflow-wrap: anywhere; }
-.row-branch { color: var(--dim); font-weight: 400; margin-left: 0.4rem; }
-.row-sha { font-family: var(--mono); font-size: 0.8125rem; }
-.row-dirty { color: var(--amber); margin-left: 0.3rem; }
+.row-branch { color: var(--muted); font-weight: 400; margin-left: 0.4rem; }
+.row-sha { font-family: var(--mono); font-size: 0.78rem; }
+.row-dirty { color: var(--amber-ink); margin-left: 0.3rem; }
 .row-scope,
-.row-age { color: var(--dim); font-size: 0.8125rem; }
+.row-age { color: var(--muted); font: 0.74rem/1.4 var(--mono); }
 .row-attention { display: flex; gap: 0.25rem; flex-wrap: wrap; }
 
+/* An empty state is an ANSWER — "nothing yet", "nothing matching", "pick a
+   node" are three different ones — so it is drawn as a panel with a dashed edge
+   rather than as a stray line of grey text that reads like a page still
+   loading. */
 .empty {
-  color: var(--dim);
-  padding: 2rem 0.25rem;
+  margin: 0;
+  padding: 1.6rem 1.1rem;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--muted);
+  line-height: 1.6;
 }
 
 /* ── one run ───────────────────────────────────────────────────────────── */
 
 .detail-sub {
-  color: var(--dim);
+  color: var(--muted);
   font-family: var(--mono);
-  font-size: 0.8125rem;
+  font-size: 0.78rem;
   /* A checkout path is arbitrarily long and is the one thing on this header
      that must never push the page sideways. It wraps rather than truncating:
      the tail of a worktree path is exactly the part that tells two of them
@@ -217,24 +449,34 @@ body {
   overflow-wrap: anywhere;
   min-width: 0;
 }
-.detail-scope { color: var(--dim); font-size: 0.8125rem; }
-.detail-parent { color: var(--violet); font-size: 0.8125rem; }
+.detail-scope { color: var(--muted); font: 0.74rem var(--mono); }
+.detail-parent { color: var(--violet-ink); font: 0.74rem var(--mono); }
 
 .detail-controls {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
-  padding: 0.25rem 0 0.75rem;
+  gap: 0.4rem;
+  padding: 0 0 0.85rem;
 }
 
+/* What a control answered, refusal included. A left rail rather than a filled
+   banner: this sits above a dense list and has to be noticed without pushing
+   the work off the screen. */
 .receipt {
-  margin: 0 0 0.75rem;
+  margin: 0 0 0.85rem;
   padding: 0.5rem 0.75rem;
-  border-left: 3px solid var(--accent);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--cyan-ink);
+  border-radius: 0 6px 6px 0;
   background: var(--panel);
+  color: var(--ink);
+  font-size: 0.82rem;
 }
 
-.receipt-bad { border-left-color: var(--red); }
+.receipt-bad {
+  border-left-color: var(--red);
+  background: color-mix(in srgb, var(--red) 8%, var(--panel));
+}
 
 .detail-body {
   display: grid;
@@ -243,14 +485,33 @@ body {
   align-items: start;
 }
 
-.node-list { list-style: none; margin: 0; padding: 0; }
+.nodes,
+.log { min-width: 0; }
+
+.node-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  overflow: hidden;
+}
+
+/* A run that has published no work yet gets a sentence above this list, not a
+   hairline card with nothing in it. */
+.node-list:empty { display: none; }
 
 .node {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  border-bottom: 1px solid var(--line);
+  padding-right: 0.5rem;
+  border-top: 1px solid var(--line);
 }
+
+.node:first-child { border-top: 0; }
+.node:hover { background: var(--panel-2); }
 
 .node-open {
   display: flex;
@@ -263,89 +524,174 @@ body {
   color: inherit;
   background: none;
   border: 0;
-  padding: 0.5rem 0.25rem;
+  padding: 0.4rem 0.5rem;
   cursor: pointer;
 }
 
-.node-open:disabled { cursor: default; opacity: 0.6; }
-.node-current { background: var(--panel); }
-.node-id { font-family: var(--mono); font-size: 0.8125rem; overflow-wrap: anywhere; }
+.node-open:disabled { cursor: default; opacity: 0.55; }
+
+/* WHICH node's log is open. Cyan, the selection colour, so being selected can
+   never be mistaken for being a status. */
+.node-current {
+  background: var(--panel-2);
+  box-shadow: inset 2px 0 0 var(--cyan-ink);
+}
+
+.node-id { font-family: var(--mono); font-size: 0.78rem; overflow-wrap: anywhere; }
 .node-attempt,
 .node-host,
 .node-duration,
-.node-exit { color: var(--dim); font-size: 0.75rem; white-space: nowrap; }
-.node-exit { color: var(--red); }
+.node-exit { color: var(--muted); font: 0.72rem var(--mono); white-space: nowrap; }
+.node-exit { color: var(--red-ink); }
 .node-controls { display: flex; gap: 0.25rem; flex: none; }
-.node-controls .btn { font-size: 0.75rem; }
+.node-controls .btn { font-size: 0.7rem; }
 
-.glyph-grey { color: var(--grey); }
-.glyph-amber { color: var(--amber); }
-.glyph-green { color: var(--green); }
-.glyph-red { color: var(--red); }
-.glyph-violet { color: var(--violet); }
+/* A fixed column, so the glyphs stack into a readable strip down the left of
+   the DAG rather than jittering with each id's width. The vocabulary is
+   `format.ts`'s, which is the TUI's. */
+.glyph {
+  flex: none;
+  width: 1rem;
+  text-align: center;
+  font-size: 0.9rem;
+  line-height: 1;
+}
+
+.glyph-grey { color: var(--quiet); }
+.glyph-amber { color: var(--amber-ink); }
+.glyph-green { color: var(--green-ink); }
+.glyph-red { color: var(--red-ink); }
+.glyph-violet { color: var(--violet-ink); }
+
+/* The output panel is one card: a bar of controls over a console. The website
+   draws its terminals the same way, and for the same reason — the frame is what
+   says "this text is a machine's, not ours". */
+.log-body {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  overflow: hidden;
+}
 
 .log-head {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.4rem;
   flex-wrap: wrap;
+  padding: 0.45rem 0.55rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
 }
 
-.log-head h3 { margin: 0; font-size: 0.9375rem; font-family: var(--mono); }
-.log-meta { color: var(--dim); font-size: 0.75rem; margin-right: auto; }
+.log-head h3 {
+  margin: 0;
+  font: 600 0.8rem/1.4 var(--mono);
+  overflow-wrap: anywhere;
+}
+.log-meta { color: var(--muted); font: 0.72rem var(--mono); margin-right: auto; }
 
 /* The attempt picker and the page-window readout. Both are small print beside
    the node's name, and both are FACTS rather than decoration — which is why the
    window offsets are monospaced: they are the same byte offsets `odu logs
    --offset` takes, and a person copying one out of the page needs the digits to
    line up. */
-.attempts { display: flex; gap: 0.25rem; }
-.attempts .btn { font-size: 0.75rem; }
-.log-head .btn { font-size: 0.75rem; }
+.attempts { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+.attempts .btn { font-size: 0.7rem; }
+.log-head .btn { font-size: 0.7rem; }
 .log-page {
-  color: var(--dim);
-  font-size: 0.75rem;
-  font-family: var(--mono);
+  color: var(--muted);
+  font: 0.72rem var(--mono);
   white-space: nowrap;
 }
 
+/* Inside the card the panel IS the frame, so the empty state drops its own —
+   a dashed box within a bordered box reads as two panels rather than one. */
+.log-body .empty,
+.log-body .fault {
+  margin: 0;
+  padding: 0.5rem 0.65rem;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  font-size: 0.8rem;
+}
+
+/* A CONSOLE, in both themes — the one surface the website also refuses to
+   re-tint, because a log is a machine's output and reads as one. `color-scheme`
+   is pinned with it so the scrollbar this box grows belongs to the box rather
+   than to the page around it. */
 .log-text {
-  margin: 0.5rem 0 0;
-  padding: 0.75rem;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  font-family: var(--mono);
-  font-size: 0.8125rem;
+  color-scheme: dark;
+  margin: 0;
+  padding: 0.8rem 0.9rem;
+  background: #0c0f0e;
+  color: #c2d0c9;
+  font: 0.78rem/1.6 var(--mono);
   /* The one place sideways scrolling is right: a log line is a log line, and
      wrapping one changes what it says. Scoped to this box so the PAGE never
      scrolls sideways. */
   overflow: auto;
   max-height: 60vh;
   white-space: pre;
+  scrollbar-width: thin;
 }
 
-.fault { color: var(--red); }
+.fault { color: var(--red-ink); }
 
 /* ── the form ──────────────────────────────────────────────────────────── */
 
-.create-form { display: grid; gap: 1rem; max-width: 40rem; }
-.field { display: grid; gap: 0.25rem; }
-.field label { font-weight: 600; }
-.hint { margin: 0; color: var(--dim); font-size: 0.8125rem; }
+.create-form { display: grid; gap: 1.1rem; max-width: 40rem; }
+
+/* The submit is a BUTTON, not a banner. As a bare grid item it stretched to the
+   full 40 rem of the form, which under the brand gradient read as a coloured
+   bar somebody had to work out was clickable. Sized to its words and given the
+   website's own 42 px target, because this is the one control on the page that
+   starts real work on a real machine. */
+.create-form .btn-primary {
+  justify-self: start;
+  min-height: 2.25rem;
+  padding: 0 1.1rem;
+}
+.field { display: grid; gap: 0.3rem; }
+.field label { font: 600 0.8rem var(--mono); }
+.hint { margin: 0; color: var(--muted); font-size: 0.78rem; line-height: 1.5; }
 
 .input {
-  font: inherit;
-  font-family: var(--mono);
-  padding: 0.4rem 0.5rem;
-  background: var(--bg);
+  font: 0.82rem var(--mono);
+  padding: 0.4rem 0.55rem;
+  background: var(--panel);
   color: var(--ink);
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   border-radius: 6px;
 }
 
-.toggles { border: 1px solid var(--line); border-radius: 6px; }
-.toggle { display: flex; align-items: center; gap: 0.5rem; padding: 0.2rem 0; }
+.input::placeholder { color: var(--quiet); }
+.input:hover { border-color: var(--green); }
+
+.toggles {
+  display: grid;
+  gap: 0.15rem;
+  margin: 0;
+  padding: 0.5rem 0.85rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.toggles legend {
+  padding: 0 0.35rem;
+  color: var(--quiet);
+  font: 500 0.68rem var(--mono);
+  letter-spacing: 0.08em;
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.25rem 0;
+  font-size: 0.82rem;
+}
 
 /* ── narrow viewports ──────────────────────────────────────────────────── */
 
@@ -354,8 +700,10 @@ body {
 }
 
 @media (max-width: 44rem) {
-  /* Two lines instead of seven columns. Everything stays on screen; nothing is
-     hidden and nothing scrolls sideways. */
+  /* Two columns instead of seven. Everything stays on screen; nothing is
+     hidden and nothing scrolls sideways — and the heads go, because a label
+     strip over a reflowed row labels the wrong cells. */
+  .row-head { display: none; }
   .row {
     grid-template-columns: minmax(0, 1fr) auto;
     row-gap: 0.25rem;

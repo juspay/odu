@@ -177,6 +177,25 @@ export function Board(props: {
             No runs match this filter — every run in the catalog is quiet.
           </p>
         </Show>
+        {/* The column heads — a VISUAL guide, and nothing else.
+            `aria-hidden` because the rows below are buttons rather than table
+            cells, so nothing binds a head to the value under it; seven stray
+            nouns announced ahead of the list would be noise to a screen reader,
+            which reads each row as one control with its facts in order. They
+            appear only when there are rows to label, and the stylesheet drops
+            them on a narrow viewport where the row reflows and the labels would
+            be sitting over the wrong cells. */}
+        <Show when={shown().length > 0}>
+          <div class="row-head" aria-hidden="true">
+            <span>Project</span>
+            <span>Commit</span>
+            <span>State</span>
+            <span>Outcome</span>
+            <span>Attention</span>
+            <span>Scope</span>
+            <span>Age</span>
+          </div>
+        </Show>
         {/* `Index`, not `For`. The catalog is a live collection that re-sends a
             row object whenever anything on it moves, so keying by REFERENCE —
             what `For` does — would tear down and rebuild a row on every tick,
