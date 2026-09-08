@@ -177,10 +177,15 @@ export async function runViaService(opts: RunOpts): Promise<number> {
       emitJson(receipt);
       return receipt.accepted ? 0 : WAIT_EXITS.stillRunning;
     }
-    if (!opts.json) process.stderr.write(renderStart(receipt, opts.origin));
+    const initial = await call(client.surface.run.read({ runId: receipt.runId }));
+    const contentSha = initial.ok ? initial.value.contentSha : undefined;
+    if (!opts.json) {
+      process.stderr.write(renderStart(receipt, opts.origin));
+      if (contentSha !== undefined) process.stderr.write(`odu · snapshot ${contentSha.slice(0, 7)} (${receipt.sha.slice(0, 7)} + working tree)\n`);
+    }
     if (opts.noWait) return receipt.accepted ? 0 : WAIT_EXITS.stillRunning;
     if (opts.progressJson === true) {
-      return progressStream(client, receipt.runId, receipt.sha.slice(0, 7));
+      return progressStream(client, receipt.runId, receipt.sha.slice(0, 7), contentSha);
     }
     return observe(client, receipt.runId, receipt.cursor, opts.json);
   });
@@ -245,7 +250,7 @@ async function observe(
     // The attention block on stdout is what this command gained: the run id
     // (the address every other verb now takes) and, per failure, the host, the
     // attempt and the log key to read next.
-    await verdictOf(client, runId, answer.sha);
+    await verdictOf(client, runId, answer.sha, answer.contentSha);
     process.stdout.write(renderAttention(answer));
     return waitExitFor(answer);
   }
@@ -266,8 +271,10 @@ async function verdictOf(
   client: OduServiceClient,
   runId: string,
   sha: string | null,
+  contentSha?: string,
 ): Promise<void> {
   const sha7 = sha === null ? "" : sha.slice(0, 7);
+  if (contentSha !== undefined) process.stderr.write(`odu · snapshot ${contentSha.slice(0, 7)} (${sha7} + working tree)\n`);
   const frame = await firstFrame(nodesStream(client, runId));
   if (frame === undefined) return;
   printVerdict({
@@ -357,7 +364,7 @@ export async function waitViaService(opts: WaitOpts): Promise<number> {
  *  `--after` and `-o json`. */
 export function renderAttention(a: AttentionAnswer): string {
   const lines: string[] = [];
-  const sha7 = a.sha === null ? "" : `  ${a.sha.slice(0, 7)}`;
+  const sha7 = a.sha === null ? "" : `  ${a.sha.slice(0, 7)}${a.contentSha === undefined ? "" : `+dirty→${a.contentSha.slice(0, 7)}`}`;
   // The run's own word, not a re-derivation of it: `passed: false` covers a red
   // run AND one that never finished, and telling an operator "failed" for the
   // second sends them looking for a broken test that does not exist.
@@ -626,7 +633,7 @@ export function renderRows(rows: readonly RunRow[], now: number): string {
     const verdict =
       r.state === "settled" ? (r.outcome ?? (r.passed ? "passed" : "failed")) : r.state;
     const debt = r.reportingDebt > 0 ? `  ⇐${r.reportingDebt}` : "";
-    return `${r.runId}  ${ref}${r.dirty ? "+dirty" : ""}  ${r.branch ?? "-"}  ${verdict}  ${formatAgo(now - r.createdAt)} ago${debt}`;
+    return `${r.runId}  ${ref}${r.dirty ? "+dirty" : ""}${r.contentSha === undefined ? "" : `→${r.contentSha.slice(0, 7)}`}  ${r.branch ?? "-"}  ${verdict}  ${formatAgo(now - r.createdAt)} ago${debt}`;
   });
   return `${lines.join("\n")}\n`;
 }
@@ -912,6 +919,7 @@ async function progressStream(
   client: Pick<OduServiceClient, "surface">,
   runId: string,
   sha7: string,
+  contentSha?: string,
 ): Promise<number> {
   // Only TRANSITIONS are events. A frame arrives whenever anything moved,
   // including a lane landing on a box, so emitting per frame would repeat a
@@ -940,6 +948,7 @@ async function progressStream(
     }
   });
   if (final === undefined) return 3;
+  if (contentSha !== undefined) process.stderr.write(`odu · snapshot ${contentSha.slice(0, 7)} (${sha7} + working tree)\n`);
   // THE VERDICT BLOCK, on stderr, after the NDJSON. Both halves of the
   // `--progress json` contract: the stream is the machine's and the summary is
   // the person's, and a pipeline that emits the first without the second gives

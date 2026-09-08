@@ -689,9 +689,10 @@ async function relaunch(
       code: "not_replayable",
       message:
         `odu: run ${handle.runId} cannot be replayed — it ran a ` +
-        `${manifest.snapshot.dirty ? "dirty working tree" : "live working tree"}, ` +
-        "whose inputs were never committed. Its logs are still readable; start a " +
-        "new run against a commit instead.",
+        `${manifest.snapshot.contentSha === undefined ? (manifest.snapshot.dirty ? "dirty working tree" : "live working tree") : `working-tree snapshot ${manifest.snapshot.contentSha.slice(0, 7)} of ${manifest.sha.slice(0, 7)}`}, ` +
+        (manifest.snapshot.contentSha === undefined
+          ? "whose inputs were never committed. Its logs are still readable; start a new run against a commit instead."
+          : "which is not replayable. Its logs are still readable; start a new run."),
       suggestion: ["odu", "run", ...manifest.scope.selectors],
     };
   }

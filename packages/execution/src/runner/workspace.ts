@@ -13,12 +13,11 @@
  * (justci's /tmp debris had the same lifecycle); a clean run removes its
  * own worktree on dispose.
  *
- * Remote lanes fetch the SHA from the origin URL, which requires the SHA to
- * be *pushed* — a deliberate divergence from justci's git-bundle transport,
- * documented in the README (the /do flow always pushes before CI).
+ * Strict lanes fetch a pushed SHA. Working-tree lanes import a snapshot bundle
+ * after fetching its origin prerequisites, then verify the materialized commit.
  */
 
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -27,6 +26,11 @@ import { join } from "node:path";
 export interface WorkspaceRequest {
   origin: string;
   sha: string;
+  snapshot?: {
+    commit: string;
+    requires: readonly string[];
+    bundlePath: string | null;
+  };
 }
 
 export interface WorkspaceResult {
@@ -44,6 +48,56 @@ export function slugFor(origin: string): string {
       .split(/[/:]/)
       .at(-1) ?? "repo";
   return tail.replace(/[^A-Za-z0-9._-]/g, "_") || "repo";
+}
+
+export function objectCacheFor(origin: string): string {
+  return join(
+    process.env.HOME ?? tmpdir(),
+    ".cache",
+    "odu",
+    "repos",
+    `${slugFor(origin)}.git`,
+  );
+}
+export function hasSnapshot(origin: string, commit: string): boolean {
+  if (!/^[0-9a-f]{40}$/.test(commit)) return false;
+  try {
+    execFileSync(
+      "git",
+      ["-C", objectCacheFor(origin), "cat-file", "-e", `${commit}^{commit}`],
+      { stdio: "ignore" },
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+export function narrateSnapshot(
+  workspace: string,
+  base: string,
+  commit: string,
+  output: (line: string) => void,
+): boolean {
+  try {
+    const git = (args: string[]) =>
+      execFileSync("git", ["-C", workspace, ...args], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim();
+    if (git(["rev-parse", "HEAD"]) !== commit)
+      throw new Error("snapshot HEAD mismatch");
+    const paths = git(["diff-tree", "-r", "--name-status", base, commit])
+      .split("\n")
+      .filter(Boolean);
+    output(
+      `[odu] snapshot ${commit.slice(0, 7)} = HEAD ${base.slice(0, 7)} + ${paths.length} paths`,
+    );
+    for (const path of paths.slice(0, 100)) output(`  ${path}`);
+    return true;
+  } catch (error) {
+    output(`[odu] snapshot verification failed: ${String(error)}`);
+    return false;
+  }
 }
 
 function run(
@@ -79,9 +133,9 @@ export async function prepareWorkspace(
   req: WorkspaceRequest,
   onOutput: (line: string) => void,
 ): Promise<WorkspaceResult> {
-  const home = process.env.HOME ?? tmpdir();
   const slug = slugFor(req.origin);
-  const cache = join(home, ".cache", "odu", "repos", `${slug}.git`);
+  const cache = objectCacheFor(req.origin);
+  const commit = req.snapshot?.commit ?? req.sha;
   // A fresh, unique worktree name per invocation — pid alone collides when the
   // same runner process prepares the same SHA twice (a `rerun(_ci-setup)` or a
   // same-SHA retry), and `git worktree add` refuses an existing directory. The
@@ -100,6 +154,7 @@ export async function prepareWorkspace(
   mkdirSync(cache, { recursive: true });
   onOutput(`[odu] object cache: ${cache}`);
   if (
+    req.snapshot === undefined &&
     (await run(
       "git",
       ["-C", cache, "rev-parse", "--git-dir"],
@@ -116,20 +171,78 @@ export async function prepareWorkspace(
   // the NixOS pool boxes; on hosts without it (macOS), fall back to a bare
   // fetch — fetching an explicit SHA touches no refs, which dodges the
   // common lock contention anyway.
-  onOutput(`[odu] fetching ${req.sha} from ${req.origin}`);
-  const fetchArgs = ["-C", cache, "fetch", "--no-tags", req.origin, req.sha];
-  let code = await run(
-    "flock",
-    [join(cache, "odu-fetch.lock"), "git", ...fetchArgs],
-    {},
-    onOutput,
-  );
-  if (code === 127) code = await run("git", fetchArgs, {}, onOutput);
-  if (code !== 0) {
-    return fail(
-      `git fetch exited ${code} — is ${req.sha} pushed to ${req.origin}? ` +
-        "(odu fetches pushed SHAs; it does not ship git bundles)",
+  let code: number;
+  if (req.snapshot !== undefined) {
+    const snap = req.snapshot;
+    if (
+      ![snap.commit, ...snap.requires].every((id) => /^[0-9a-f]{40}$/.test(id))
+    )
+      return fail("invalid snapshot commit");
+    // One flock covers prerequisite fetch, verify and import. Arguments are
+    // positional shell parameters, never interpolated shell source.
+    const script = `set -eu
+cache=$1; origin=$2; commit=$3; bundle=$4; shift 4
+if ! git -C "$cache" rev-parse --git-dir >/dev/null 2>&1; then git init --bare "$cache"; fi
+has() { git -C "$cache" cat-file -e "$1^{commit}" 2>/dev/null; }
+if has "$commit"; then
+  echo "[odu] snapshot $commit: already in object cache"
+else
+  for required in "$@"; do
+    if ! has "$required"; then
+      echo "[odu] fetching snapshot prerequisite $required from $origin (if stale, git fetch --prune origin)"
+      git -C "$cache" fetch --no-tags "$origin" "$required"
+    fi
+  done
+  if ! has "$commit"; then
+    test -n "$bundle" || { echo "snapshot $commit is not in the object cache and no bundle was uploaded"; exit 1; }
+    git -C "$cache" bundle verify "$bundle"
+    git -C "$cache" fetch --no-tags "$bundle" HEAD
+    has "$commit" || { echo "bundle did not deliver $commit"; exit 1; }
+    echo "[odu] snapshot $commit: fetched from bundle ($(wc -c < "$bundle") bytes)"
+  fi
+fi
+`;
+    const args = [
+      "-c",
+      script,
+      "odu-snapshot",
+      cache,
+      req.origin,
+      snap.commit,
+      snap.bundlePath ?? "",
+      ...snap.requires,
+    ];
+    code = await run(
+      "flock",
+      [join(cache, "odu-fetch.lock"), "sh", ...args],
+      {},
+      onOutput,
     );
+    if (code === 127) code = await run("sh", args, {}, onOutput);
+    if (snap.bundlePath !== null) {
+      try {
+        rmSync(snap.bundlePath, { force: true });
+      } catch {
+        /* disposed or already consumed */
+      }
+    }
+    if (code !== 0) return fail(`snapshot import exited ${code}`);
+  } else {
+    onOutput(`[odu] fetching ${req.sha} from ${req.origin}`);
+    const fetchArgs = ["-C", cache, "fetch", "--no-tags", req.origin, req.sha];
+    code = await run(
+      "flock",
+      [join(cache, "odu-fetch.lock"), "git", ...fetchArgs],
+      {},
+      onOutput,
+    );
+    if (code === 127) code = await run("git", fetchArgs, {}, onOutput);
+    if (code !== 0) {
+      return fail(
+        `git fetch exited ${code} — is ${req.sha} pushed to ${req.origin}? ` +
+          "(strict mode fetches pushed SHAs; use --no-strict to ship a working-tree snapshot)",
+      );
+    }
   }
 
   mkdirSync(join(workdir, ".."), { recursive: true });
@@ -137,11 +250,19 @@ export async function prepareWorkspace(
   onOutput(`[odu] worktree: ${workdir}`);
   code = await run(
     "git",
-    ["-C", cache, "worktree", "add", "--detach", workdir, req.sha],
+    ["-C", cache, "worktree", "add", "--detach", workdir, commit],
     {},
     onOutput,
   );
   if (code !== 0) return fail(`git worktree add exited ${code}`);
+
+  if (
+    req.snapshot !== undefined &&
+    !narrateSnapshot(workdir, req.sha, commit, onOutput)
+  ) {
+    rmSync(workdir, { recursive: true, force: true });
+    return fail("snapshot verification failed");
+  }
 
   return {
     ok: true,

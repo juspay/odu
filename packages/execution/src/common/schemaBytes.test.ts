@@ -269,3 +269,8 @@ describe("RunRecord — the durable ledger manifest", () => {
     );
   });
 });
+
+it("ConfigureInput preserves an optional snapshot without changing old fixtures", () => {
+  const bytes = '{"snapshot":{"commit":"abc","requires":["base"],"bundle":true},"name":"ci","origin":"file:///origin","sha":"base","workspace":null,"tasks":[{"id":"check","command":"true","needs":[]}]}';
+  expect(roundTrip(ConfigureInputSchema, bytes)).toBe(bytes);
+});

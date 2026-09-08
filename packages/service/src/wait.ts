@@ -101,6 +101,8 @@ export function answerOf(attention: Attention): AttentionAnswer {
     outcome: attention.outcome,
     actionable: attention.actionable,
     sha: attention.run.sha,
+    dirty: attention.run.dirty,
+    ...(attention.run.content_sha == null ? {} : { contentSha: attention.run.content_sha }),
     scope: attention.scope,
     failures: attention.unresolved_failures.map((failure) => ({
       node: failure.node,

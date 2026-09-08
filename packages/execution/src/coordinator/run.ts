@@ -104,6 +104,7 @@ import {
   type RunLockHandle,
 } from "./checkoutLock";
 import { releaseReservation, reserveNextSeq, writeRunRecord } from "@odu/run-history/legacy/ledger";
+import { snapshotWorkingTree, treeModeFor, type WorkingTreeSnapshot } from "./workingTree";
 import { openRunHistory } from "./history";
 import { ODU_VERSION } from "../common/version";
 import {
@@ -390,10 +391,10 @@ export async function runCommand(
   }
 
   // ── modes (the justci flag table: strict by default) ──
-  const snapshotMode = !args.noStrict && !args.noSnapshot;
-  const posting = snapshotMode && !args.noPost;
-  const dirty = git(repoRoot, ["status", "--porcelain"]) !== "";
-  if (snapshotMode && dirty) {
+  const treeMode = treeModeFor(args);
+  const posting = treeMode === "strict" && !args.noPost;
+  let dirty = git(repoRoot, ["status", "--porcelain"]) !== "";
+  if (treeMode === "strict" && dirty) {
     process.stderr.write(
       "odu: working tree is dirty — strict mode refuses it.\n" +
         "Commit (or stash) first, or pass --no-strict for a dev iteration run.\n",
@@ -433,13 +434,20 @@ export async function runCommand(
 
   // ── HEAD pin: the run sees the commit, never the live tree ──
   let snapshotDir: string | null = null;
-  if (snapshotMode) {
+  if (treeMode === "strict") {
     snapshotDir = mkdtempSync(join(tmpdir(), `odu-${sha7}-`));
     git(repoRoot, ["worktree", "add", "--detach", snapshotDir, "HEAD"]);
   }
-  const specSource = snapshotDir ?? repoRoot;
+  const snapshot = treeMode === "working-tree" ? snapshotWorkingTree(repoRoot) : null;
+  if (snapshot !== null) {
+    if (snapshot.base !== sha) { snapshot.cleanup(); throw new Error("odu: HEAD changed during snapshot capture; start a new run"); }
+    dirty = snapshot.dirty;
+    process.stderr.write(`odu · working tree snapshot ${snapshot.contentSha.slice(0, 7)} = ${sha7} + ${snapshot.overlay.count} paths (${snapshot.overlay.paths.join(", ")}) — ${snapshot.bundle?.bytes ?? 0} bytes to ship\n`);
+  }
+  const specSource = snapshot?.worktreeDir ?? snapshotDir ?? repoRoot;
 
   const cleanupSnapshot = (): void => {
+    snapshot?.cleanup();
     if (snapshotDir === null) return;
     tryGit(repoRoot, ["worktree", "remove", "--force", snapshotDir]);
     rmSync(snapshotDir, { recursive: true, force: true });
@@ -497,7 +505,8 @@ export async function runCommand(
         sha,
         sha7,
         posting,
-        snapshotMode,
+        treeMode,
+        snapshot,
         dirty,
       },
       createdLanes,
@@ -528,8 +537,9 @@ interface RunContext {
   sha: string;
   sha7: string;
   posting: boolean;
-  snapshotMode: boolean;
-  /** Working tree has uncommitted changes (only reachable when !snapshotMode). */
+  treeMode: ReturnType<typeof treeModeFor>;
+  snapshot: WorkingTreeSnapshot | null;
+  /** The captured or in-place tree differs from the base commit. */
   dirty: boolean;
 }
 
@@ -642,8 +652,7 @@ async function orchestrate(
     );
   }
   // Pool-level prechecks (before lease): a pool that can only land on a remote
-  // needs an origin; a dirty live-tree run refuses any pool that still has a
-  // remote candidate (it might lease that box and silently test committed HEAD).
+  // needs an origin; in-place runs refuse any pool with a remote candidate.
   for (const platform of tasksByPlatform.keys()) {
     const pool = poolsByPlatform[platform] ?? [];
     const remotes = pool
@@ -654,13 +663,13 @@ async function orchestrate(
         `odu: remote lane ${platform}=[${remotes.join(", ")}] needs an origin remote to fetch from`,
       );
     }
-    if (!ctx.snapshotMode && ctx.dirty && remotes.length > 0) {
+    if (ctx.treeMode === "in-place" && remotes.length > 0) {
       throw new Error(
-        `odu: live-tree mode (--no-snapshot/--no-strict) on a dirty tree only ` +
+        `odu: live-tree mode (--no-snapshot) only ` +
           `applies to localhost lanes — remote host(s) in ${platform} pool ` +
           `(${remotes.join(", ")}) would fetch the committed HEAD (${ctx.sha7}), ` +
           `not your uncommitted changes. Commit and push first, pin localhost ` +
-          `with --host ${platform}=localhost, or slice to local platforms.`,
+          `with --host ${platform}=localhost, or pass --no-strict without --no-snapshot to ship a snapshot of your working tree.`,
       );
     }
   }
@@ -762,7 +771,9 @@ async function orchestrate(
     // a replay re-reads the file, which is what makes an edited hosts file
     // visible to a retry rather than frozen into it.
     hostsFile: process.env.ODU_HOSTS ?? "",
-    snapshotMode: ctx.snapshotMode ? "strict" : "live",
+    snapshotMode: ctx.treeMode === "strict" ? "strict" : "live",
+    ...(ctx.snapshot?.dirty ? { contentSha: ctx.snapshot.contentSha } : {}),
+    ...(ctx.snapshot === null ? {} : { overlay: ctx.snapshot.overlay }),
     dirty: ctx.dirty,
     runnerFlake,
     oduVersion: ODU_VERSION,
@@ -2537,6 +2548,20 @@ async function orchestrate(
     })();
   };
 
+  const laneSource = (host: string) => {
+    // Test-only: exercise the real bundle wire on localhost without sshd.
+    const local = isLocalHost(host) && process.env.ODU_SNAPSHOT_TRANSPORT !== "always";
+    return {
+      origin: local || originUrl === null ? null : fetchUrlFor(originUrl),
+      sha: local && ctx.snapshot === null ? null : sha,
+      workspace: local ? specSource : null,
+      snapshot: ctx.snapshot === null ? null : {
+        commit: ctx.snapshot.contentSha, requires: ctx.snapshot.requires,
+        bundlePath: ctx.snapshot.bundle?.path ?? null, bytes: ctx.snapshot.bundle?.bytes ?? 0,
+      },
+    };
+  };
+
   const startPrimaryLane = (
     platform: string,
     host: string,
@@ -2561,9 +2586,7 @@ async function orchestrate(
       host,
       tasks,
       pipelineName: spec.name,
-      origin: local || originUrl === null ? null : fetchUrlFor(originUrl),
-      sha: local ? null : sha,
-      workspace: local ? specSource : null,
+      ...laneSource(host),
       resolveDrvPath: runnerResolverFor(platform),
       onSetupLine: (line) => appendLocal(setupId, `${line}\n`),
       onNodes: (laneState) => {
@@ -3083,16 +3106,12 @@ async function orchestrate(
           burstLane?.close();
           releaseBurstLease(platform, lease);
         };
-        const burstLocal = isLocalHost(lease.host);
         burstLane = buildLane({
           platform,
           host: lease.host,
           tasks: tasksForShard(plan.tasks, plan.rootId, index, plan.total),
           pipelineName: `${spec.name}:${plan.rootId}:${index + 1}/${plan.total}`,
-          origin:
-            burstLocal || originUrl === null ? null : fetchUrlFor(originUrl),
-          sha: burstLocal ? null : sha,
-          workspace: burstLocal ? specSource : null,
+          ...laneSource(lease.host),
           resolveDrvPath: runnerResolverFor(platform),
           onSetupLine: (line) =>
             appendLocal(setupId, `[host ${shortHost(lease.host)}] ${line}\n`),

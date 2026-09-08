@@ -45,6 +45,8 @@ import type { ResolveRunnerDrv } from "./runnerFlake";
 import { withTimeout } from "../common/withTimeout";
 import { localhostSpawnEnv, pinLaneFace } from "./surfaceRemoteOpts";
 
+import { uploadSnapshot, type LaneSnapshot } from "./snapshotTransport";
+
 const MAX_CONNECT_ATTEMPTS = 3;
 const CONNECT_DEADLINE_MS = Number(
   process.env.ODU_LANE_CONNECT_TIMEOUT_MS ?? 30 * 60 * 1000,
@@ -88,6 +90,7 @@ export interface LaneOptions {
   /** Pre-existing checkout (the coordinator's HEAD snapshot) for localhost
    *  lanes; null for remote lanes. */
   workspace: string | null;
+  snapshot?: LaneSnapshot | null;
   resolveDrvPath: ResolveRunnerDrv;
   /** Provision / lifecycle lines — land in `_ci-setup@<platform>`'s log. */
   onSetupLine: (line: string) => void;
@@ -344,6 +347,13 @@ export function startLane(opts: LaneOptions): Lane {
         configured = true;
         attached = true;
         session.markConnected();
+        let bundle = false;
+        try {
+          if (opts.snapshot != null && opts.workspace === null) {
+            bundle = await uploadSnapshot(client.surface, opts.snapshot, opts.origin as string, opts.host, opts.onSetupLine);
+          }
+        } catch (error) { die(`snapshot upload failed: ${String(error)}`); return; }
+        if (closed || dead) return;
         const ack = await runUnary(
           client.surface.run.configure({
             name: opts.pipelineName,
@@ -351,6 +361,7 @@ export function startLane(opts: LaneOptions): Lane {
             sha: opts.sha,
             workspace: opts.workspace,
             tasks: opts.tasks,
+            ...(opts.snapshot == null ? {} : { snapshot: { commit: opts.snapshot.commit, requires: opts.snapshot.requires, bundle } }),
           }),
         );
         if (!ack.ok) {

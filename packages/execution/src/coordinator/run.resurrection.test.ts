@@ -63,7 +63,7 @@ const runArgs = (): RunArgs => ({
   hostPins: [],
   noDeps: false,
   noStrict: true,
-  noSnapshot: true,
+  noSnapshot: false,
   noPost: true,
   supersede: false,
   linger: false,
@@ -226,6 +226,8 @@ function harness(opts: { hold?: () => Promise<void> } = {}) {
 
   const startLane = (laneOpts: LaneOptions): Lane => {
     const entry: FakeLane = { opts: laneOpts, closed: false };
+    if (lanes.length > 0) expect(laneOpts.snapshot?.commit).toBe(lanes[0]!.opts.snapshot?.commit);
+    expect(laneOpts.snapshot?.commit).toMatch(/^[0-9a-f]{40}$/);
     lanes.push(entry);
     // What a REAL lane does the moment it attaches: `nodeLog.get({ id })` opens
     // with a `snapshot` frame for every node it owns, and a fresh runner's

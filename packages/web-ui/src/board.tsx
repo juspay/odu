@@ -86,7 +86,7 @@ function Row(props: {
       <span class="row-sha">
         {runRef(props.run.sha, props.run.seq)}
         <Show when={props.run.dirty}>
-          <span class="row-dirty">+dirty</span>
+          <span class="row-dirty">+dirty<Show when={props.run.contentSha}>→{props.run.contentSha?.slice(0, 7)}</Show></span>
         </Show>
       </span>
       <span class="row-state">

@@ -131,6 +131,8 @@ export const PORT_SLOT = {
   /** `web.e2e.test.ts` — a daemon whose OWN `$ODU_HOSTS` is unreadable, so a
    *  replay that consulted it instead of the caller's would say so. */
   callerInventory: 12,
+  dirtyLocal: 13,
+  dirtyTransport: 14,
 } as const;
 
 /** The port for one named slot in THIS suite's block. */

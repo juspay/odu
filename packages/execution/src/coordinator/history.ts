@@ -94,6 +94,8 @@ export interface RunHistoryInit {
    *  none"); see `RunManifestSchema.hostsFile`. */
   hostsFile: string;
   snapshotMode: "strict" | "live";
+  contentSha?: string;
+  overlay?: { count: number; paths: string[] };
   dirty: boolean;
   runnerFlake: string | null;
   oduVersion: string;
@@ -302,6 +304,8 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
         hostsFile: init.hostsFile,
         snapshot: {
           mode: init.snapshotMode,
+          ...(init.contentSha === undefined ? {} : { contentSha: init.contentSha }),
+          ...(init.overlay === undefined ? {} : { overlay: init.overlay }),
           expectedSha: init.sha,
           dirty: init.dirty,
           // A dirty live tree was never committed, so its inputs cannot be

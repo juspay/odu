@@ -10,7 +10,7 @@ Odu runs a `just` CI pipeline across local or remote machines. One local service
 nix run github:juspay/odu -- run --host x86_64-linux=localhost --no-post
 ```
 
-Replace `x86_64-linux` with your Nix system (`nix eval --impure --raw --expr builtins.currentSystem`). This explicitly allows CI on your workstation. The checkout must be clean; use `--no-strict` for dirty-tree development.
+Replace `x86_64-linux` with your Nix system (`nix eval --impure --raw --expr builtins.currentSystem`). This explicitly allows CI on your workstation. The checkout must be clean; `--no-strict` snapshots uncommitted edits and new files for local and remote lanes, excludes ignored files, and never posts to GitHub. Use `--no-snapshot` for in-place localhost runs.
 
 Open **http://127.0.0.1:18440**. The command starts the shared service automatically, creates a run, and watches it. Ctrl-C stops watching; CI continues.
 
@@ -100,7 +100,7 @@ The setting admits both the Host and Origin for WebSocket and HTTP MCP requests.
 ```sh
 odu run                      # configured platforms, clean commit, GitHub statuses
 odu run --no-post            # clean commit, no GitHub writes
-odu run --no-strict          # dirty working tree, no GitHub writes
+odu run --no-strict          # snapshot working tree on every lane, no GitHub writes
 odu attach                   # interactive terminal view
 odu status -o json
 odu wait --run latest -o json
@@ -195,7 +195,7 @@ Other shared verbs: `run_cancel`, `pipeline_read`, `venue_probe`, `venue_hold`, 
 
 | Command | Purpose / useful flags |
 | --- | --- |
-| `run [recipe[@platform]…]` | `--host P=ADDR`, `--platform P`, `--root NAMEPATH`, `--no-deps`, `--no-post`, `--no-strict`, `--no-wait`, `--linger`, `--supersede` |
+| `run [recipe[@platform]…]` | `--host P=ADDR`, `--platform P`, `--root NAMEPATH`, `--no-deps`, `--no-post`, `--no-strict`, `--no-snapshot`, `--no-wait`, `--linger`, `--supersede` |
 | `status`, `attach` | Current checkout's run; `-o json` for machine output |
 | `wait [--run R]` | `--after CURSOR`, `--deadline-ms N`, `--settle`, `--expected-sha SHA`; `--timeout-ms` aliases the deadline |
 | `rerun [--run R] SELECTOR` | `--expect-attempt N`, `--request-id ID` |
@@ -216,9 +216,19 @@ For `wait`, `rerun`, and `cancel`, omitted `--run` means `latest` in this checko
 | Symptom | Next step |
 | --- | --- |
 | No hosts configured | Add a hosts file or explicitly use `--host SYSTEM=localhost` |
-| Dirty checkout refused | Commit changes, or use `--no-strict` for local development |
+| Dirty checkout refused | Commit changes, or use `--no-strict` to ship a working-tree snapshot |
 | Web service already running | Open its URL or use `web --upgrade` |
 | Forwarded Host refused | Set `ODU_WEB_ALLOWED_ORIGINS` when starting/replacing the server |
 | Service/build mismatch | Replace the service with the desired Nix build |
 | Retry refused | Read the reason; check snapshot, placement evidence and checkout availability |
 | CI passed but GitHub is waiting | Inspect posting debt and the service's `gh` credentials |
+
+### Working-tree snapshots
+
+`--no-strict` captures tracked modifications, deletions, modes, symlinks and non-ignored new files into a deterministic Git commit, without staging the user's index, changing HEAD or pushing. All workers and shards run that same `contentSha`. The base remains `sha`; board rows and `run_wait`/`run_read` expose `contentSha` when it differs from the base. Compare both identities when verifying a result. Repeating unchanged edits can reuse the remote object cache; changing content produces a different identity. Each edit needs a new request id.
+
+`--no-snapshot` takes precedence and runs in place on localhost only, including ignored dependencies/build outputs. Non-strict runs never post GitHub statuses, even on clean trees. Finalized working-tree runs cannot be replayed; start a new run. A live retry retains the captured snapshot.
+
+Snapshots always exclude `.ci/` and ignored files. Sparse checkouts and submodule changes are refused. Git clean filters apply; LFS files travel as pointers without remote smudging. Capture fails on any Git error. Bundles include unpushed history and are limited to 64 MiB by `ODU_SNAPSHOT_MAX_BYTES`; an oversized bundle reports its largest overlay paths. A stale prerequisite fetch may require `git fetch --prune origin`.
+
+For transport tests only, set `ODU_SNAPSHOT_TRANSPORT=always` on a private service before starting it: localhost lanes then use origin plus chunked bundles over the real lane stdio surface. This is a test seam, like `ODU_LANE_CONNECT_TIMEOUT_MS`, not a user mode.
