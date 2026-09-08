@@ -682,6 +682,62 @@ arbitrary checkout. The MCP route can additionally require a bearer token
 (`ODU_WEB_MCP_TOKEN`) for an operator who has chosen to front the port with a
 proxy.
 
+Two things are checked, not one. The `Origin` says which page is asking; the
+`Host` says which name the request arrived under, and odu refuses a `Host` it
+does not answer to. That second check is the one an `Origin` comparison cannot
+make: under DNS rebinding a page's `Origin` and the `Host` it sent are both the
+attacker's, so they match, and the only party who can still say no is the
+listener that knows its own addresses.
+
+#### Reaching it through a forwarder (Tailscale, SSH, a reverse proxy)
+
+Forward the port however you like — odu is not involved in that and the local
+listener stays on loopback — and the browser will then send a name odu has
+never heard of:
+
+```
+error: odu: refused a websocket claiming Host "pureintent.rooster-blues.ts.net:18440"
+       — this service answers to 127.0.0.1:18440, localhost:18440, [::1]:18440
+```
+
+Name the origin you type into the browser, in full — **scheme, hostname and
+port**:
+
+```sh
+ODU_WEB_ALLOWED_ORIGINS=http://pureintent.rooster-blues.ts.net:18440 \
+  odu web --background
+```
+
+One setting satisfies both halves: an allowed origin's **host** is admitted as
+an authority too, so the forwarded `Host` and the page's `Origin` are both
+accounted for. Several are comma-separated. The browser WebSocket and the HTTP
+MCP endpoint at `/mcp` read the same list, so a name that works for the board
+works for an agent on the same address.
+
+**It is read at startup, by the process that serves.** odu is a per-user
+singleton, so setting the variable in your shell does nothing to the daemon
+that is already running — restart it:
+
+```sh
+# already serving? replace it, carrying the setting to the new daemon
+ODU_WEB_ALLOWED_ORIGINS=http://pureintent.rooster-blues.ts.net:18440 \
+  odu web --upgrade
+```
+
+Set it in the shell that starts the service — a `launchd`/`systemd` unit, your
+shell profile, or the command above — not in the shell that later runs
+`odu run`. A client's environment never reaches a daemon somebody else started.
+
+`ODU_WEB_ORIGIN` is a different decision: it MOVES the service to that address
+rather than admitting a second name for it, which changes the daemon's identity
+and home and means every face has to agree on the new origin. Use it when you
+want odu to live on the tailnet; use `ODU_WEB_ALLOWED_ORIGINS` when you want a
+loopback service reachable through a forwarder.
+
+> Admitting an origin is a real decision, not a formality: whatever can reach
+> that address can start, retry and cancel runs, and can write branch
+> protection. Name the addresses you actually browse from, and no others.
+
 ## Coding agents (MCP)
 
 There is **one** agent face. `odu mcp` is a stdio bridge to the singleton web
@@ -867,7 +923,9 @@ Every run writes a `(repo, sha, seq)` record to `.ci/<sha>/runs/<seq>.json`, inc
 just install
 just typecheck
 just test
-just e2e
+just e2e        # both end-to-end suites: e2e-cli and e2e-web
+just e2e-cli    # or just one of them
+just e2e-web
 just run -- run --no-strict fmt
 ```
 

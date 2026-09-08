@@ -108,7 +108,36 @@ on an unknown option.
 That HTTP endpoint is loopback-only and gated the way the websocket is: a JSON
 content type, a `Host` this service actually answers to, and an `Origin` that is
 same-origin or named in `ODU_WEB_ALLOWED_ORIGINS`. A page you merely visited
-cannot post `run_cancel` at it.
+cannot post `run_cancel` at it. The `Host` half is not redundant with the
+`Origin` half: under DNS rebinding both headers are the attacker's and therefore
+match each other, and the only party left who can say no is the listener that
+knows its own addresses.
+
+**Reaching it through a forwarder** — Tailscale, `ssh -L`, a reverse proxy — is
+where you meet that check, because the browser sends a name odu has never heard
+of:
+
+```
+error: odu: refused a websocket claiming Host "pureintent.rooster-blues.ts.net:18440"
+       — this service answers to 127.0.0.1:18440, localhost:18440, [::1]:18440
+```
+
+Set up the forwarding however you like (odu is not involved, and the listener
+stays on loopback), then name the origin you type into the browser — **scheme,
+hostname and port** — on the process that SERVES:
+
+```sh
+ODU_WEB_ALLOWED_ORIGINS=http://pureintent.rooster-blues.ts.net:18440 \
+  odu web --background        # or --upgrade, if one is already running
+```
+
+One setting covers both halves: an allowed origin's host is admitted as an
+authority too, so the forwarded `Host` passes along with the page's `Origin`.
+Several are comma-separated, the websocket and `/mcp` read the same list, and it
+is read **at startup** — odu is a per-user singleton, so a service that is
+already running needs replacing (`odu web --upgrade`) rather than a variable set
+in some other shell. `ODU_WEB_ORIGIN` is the other decision: it moves the
+service to that address instead of admitting a second name for it.
 
 The board shows every registered run across every checkout: project, worktree,
 branch, the exact commit tested, what the run covered, where it is, whether
