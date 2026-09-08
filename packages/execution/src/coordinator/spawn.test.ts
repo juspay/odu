@@ -346,6 +346,8 @@ describe("a transient unit is told where odu keeps its things", () => {
         XDG_RUNTIME_DIR: "/run/user/1000",
         ODU_HOSTS: "/etc/odu/hosts.json",
         ODU_STATE_DIR: "/state/odu",
+        ODU_SNAPSHOT_TRANSPORT: "always",
+        ODU_SNAPSHOT_MAX_BYTES: "1024",
         ODU_RUNNER_FLAKE: "git+file:///src/odu",
       },
       ["odu", "run"],
@@ -355,6 +357,8 @@ describe("a transient unit is told where odu keeps its things", () => {
     expect(args).toContain("--setenv");
     expect(args).toContain("ODU_HOSTS=/etc/odu/hosts.json");
     expect(args).toContain("ODU_STATE_DIR=/state/odu");
+    expect(args).toContain("ODU_SNAPSHOT_TRANSPORT=always");
+    expect(args).toContain("ODU_SNAPSHOT_MAX_BYTES=1024");
     expect(args).toContain("ODU_RUNNER_FLAKE=git+file:///src/odu");
     // The runtime dir decides where a socket may live, so it travels too.
     expect(args).toContain("XDG_RUNTIME_DIR=/run/user/1000");

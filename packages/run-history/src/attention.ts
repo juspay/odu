@@ -123,6 +123,8 @@ export interface AttentionEvent {
 export interface Attention {
   run: {
     id: string;
+    content_sha: string | null;
+    dirty: boolean;
     sha: string | null;
     sha7: string | null;
     seq: number | null;
@@ -538,6 +540,8 @@ export function attentionFor(
   > = {
     run: {
       id: sources.runId,
+      content_sha: manifest?.snapshot.contentSha ?? null,
+      dirty: manifest?.snapshot.dirty ?? false,
       sha: manifest?.sha ?? null,
       sha7: manifest?.sha.slice(0, 7) ?? null,
       seq: manifest?.seq ?? null,

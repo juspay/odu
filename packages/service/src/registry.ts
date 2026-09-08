@@ -345,6 +345,7 @@ function project(
       branch: manifest.branch ?? null,
       sha: manifest.sha,
       dirty: manifest.snapshot.dirty,
+      ...(manifest.snapshot.contentSha === undefined ? {} : { contentSha: manifest.snapshot.contentSha }),
       seq: manifest.seq,
       pipeline: manifest.pipeline,
       createdAt: manifest.createdAt,

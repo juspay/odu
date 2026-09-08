@@ -52,6 +52,7 @@ import {
   expireRun,
   latestRun,
   listRuns,
+  locateAttempt,
   nodesWithEvidence,
   readAttemptLog,
   readAttemptRecord,
@@ -658,4 +659,21 @@ describe("expireRun", () => {
     expect(readExpiry(handle)?.outcome).toBe("unknown");
     expect(readVerdict(handle)).toBeNull();
   });
+});
+
+
+it("fills only unknown attempt placement, preserves output, and respects ownership", () => {
+  const root = tmpCatalog();
+  const { handle, token } = register(root);
+  const placement = { platform: "x86_64-linux", host: null };
+  startAttempt(handle, token, { node: NODE, attempt: 1, placement, startedAt: T0 });
+  appendAttemptLog(handle, NODE, 1, "original output");
+  expect(locateAttempt(handle, token, NODE, 1, { ...placement, host: "burst-two" })).toBe(true);
+  expect(locateAttempt(handle, token, NODE, 1, { ...placement, host: "primary" })).toBe(false);
+  expect(readAttemptRecord(handle, NODE, 1)?.placement.host).toBe("burst-two");
+  expect(readAttemptLog(handle, NODE, 1)?.text).toBe("original output");
+  startAttempt(handle, token, { node: NODE, attempt: 2, placement, startedAt: T0 + 1 });
+  fence(handle);
+  expect(locateAttempt(handle, token, NODE, 2, { ...placement, host: "burst-three" })).toBe(false);
+  expect(readAttemptRecord(handle, NODE, 2)?.placement.host).toBeNull();
 });

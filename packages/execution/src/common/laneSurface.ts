@@ -40,8 +40,15 @@ import { TaskSpecSchema } from "./spec";
 /** `run.configure` input: either `workspace` (a checkout the runner can use
  *  as-is — the coordinator's HEAD snapshot on a localhost lane) or
  *  `origin` + `sha` (the runner fetches the pushed SHA into a per-SHA
- *  worktree under ~/.cache/odu). */
+ *  worktree under ~/.cache/odu). `snapshot` supplies the content commit and
+ *  bundle prerequisites; local snapshots also carry it for setup attribution. */
+export const SnapshotRefSchema = Schema.Struct({
+  commit: Schema.String,
+  requires: Schema.Array(Schema.String),
+  bundle: Schema.Boolean,
+});
 export const ConfigureInputSchema = Schema.Struct({
+  snapshot: Schema.optionalKey(SnapshotRefSchema),
   name: Schema.String,
   origin: Schema.NullOr(Schema.String),
   sha: Schema.NullOr(Schema.String),
@@ -139,6 +146,16 @@ export const laneSurface = defineSurface({
   ...nodePrimitives,
   procedures: {
     node: nodeProcedures,
+    snapshot: {
+      has: {
+        input: Schema.Struct({ origin: Schema.String, commit: Schema.String }),
+        output: Schema.Struct({ present: Schema.Boolean }),
+      },
+      put: {
+        input: Schema.Struct({ commit: Schema.String, offset: Schema.Int, total: Schema.Int, data: Schema.String }),
+        output: Schema.Struct({ ok: Schema.Boolean, error: Schema.NullOr(Schema.String), received: Schema.Int }),
+      },
+    },
     run: {
       configure: {
         input: ConfigureInputSchema,

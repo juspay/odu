@@ -55,7 +55,7 @@ two clients of one truth, and the run outlives whoever started it.
 3. run_wait    — bounded; feed the returned cursor back as `after`
 4. log_read    — on a failure's logKey, echoed verbatim
 5. run_retry   — same commit; a NEW commit is a new run_start
-6. verify      — scope, sha, reportingDebt, before you say "green"
+6. verify      — scope, sha, contentSha, reportingDebt, before you say "green"
 ```
 
 ### 1. Bootstrap
@@ -260,7 +260,7 @@ Three checks, every time, from the wait answer or the board row:
   noDeps}`. A green over three recipes is a green over three recipes. Only an
   empty `selectors` and empty `platforms` (and no `noDeps`) is "CI is green".
   Say what you actually ran.
-- **`sha` — is it the commit you meant?** Compare against the commit you asked
+- **`sha` and `contentSha` — are these the inputs you meant?** Compare the base against the commit you asked
   for. A `dirty` run on the board is a verdict about a working tree, not about a
   commit.
 - **`reportingDebt` — statuses that did not land.** Debt never blocks settle
@@ -276,7 +276,7 @@ And say `passed` only from `settled: true`.
 | Verb | argv | MCP tool | Input | Answers |
 | --- | --- | --- | --- | --- |
 | start | `odu surface run_start --input '{…}' --json` | `run_start` | `checkout`, `expectedSha`, `requestId`, `selectors?`, `platforms?`, `hostPins?`, `hostsFile?` (a terminal's own `$ODU_HOSTS`; agents omit it), `root?`, `noDeps?`, `noStrict?`, `noSnapshot?`, `noPost?`, `supersede?` | `accepted`, `runId`, `replayed`, `sha`, `scope`, `endpoint`, `cursor`, `existing?` |
-| wait | `odu surface run_wait --input '{…}' --json` | `run_wait` | `runId`, `after?`, `deadlineMs?` (30s default), `settle?`, `limit?` | `reason`, `settled`, `passed`, `outcome`, `failures[]`, `failuresTotal`, `cursor`, `remaining`, `reportingDebt[]`, `scope`, `sha` |
+| wait | `odu surface run_wait --input '{…}' --json` | `run_wait` | `runId`, `after?`, `deadlineMs?` (30s default), `settle?`, `limit?` | `reason`, `settled`, `passed`, `outcome`, `failures[]`, `failuresTotal`, `cursor`, `remaining`, `reportingDebt[]`, `scope`, `sha`, `contentSha?`, `dirty?` |
 | diagnose | `odu surface log_read --input '{…}' --json` | `log_read` | `key`, `offset?` (negative = tail), `limit?`, `waitMs?` (follow) | `text`, `offset`, `size`, `nextOffset`, `eof`, `complete`, `open` |
 | retry | `odu surface run_retry --input '{…}' --json` | `run_retry` | `runId`, `selector`, `requestId`, `expectAttempt?` | `mode`, `effectiveRun`, `parentRun`, `roots[]`, `resetDependants[]`, `scope`, `sha`, `cursor` |
 | cancel | `odu surface run_cancel --input '{…}' --json` | `run_cancel` | `runId`, `scope`, `requestId` | `effective`, `detail` |
@@ -452,7 +452,7 @@ replay that resolved against today's fleet is not a replay.
 
 A lane host needs ssh + Nix + outbound https,
 and the source arrives by `git fetch` of the **pushed** SHA — remote lanes
-cannot test unpushed commits, so push first.
+fetch pushed commits in strict mode. With `noStrict`, odu ships a snapshot of the working tree, unpushed commits included.
 
 ## What changed (state it honestly if asked)
 
@@ -475,3 +475,15 @@ cannot test unpushed commits, so push first.
 - Project-specific CI operations (warm pools, banned flags, which lanes are
   required) — that is the consuming repo's operational docs, layered on top of
   this reference.
+
+### Working-tree development
+
+Use `run_start` with `noStrict: true` to snapshot current tracked edits, deletions and non-ignored new files consistently across local and remote workers/shards. This never posts GitHub statuses, even on a clean tree. `noSnapshot: true` takes precedence and runs in place on localhost only (including ignored dependencies/build outputs).
+
+When verifying, compare the answer's base `sha` **and** `contentSha`: a `contentSha` means a working tree was tested, not just `sha`. The board, `run_read` and `run_wait` expose this identity, and each lane's `_ci-setup` lists the overlay. A new edit is a new intent: use a new request id. Cache-hit evidence requires identical `contentSha`; red-to-green edits change it. Finalized working-tree runs need a new `run_start`; live retries retain the same snapshot.
+
+`.ci/` and ignored files are excluded. Sparse checkouts and submodule changes are refused; Git clean filters apply and LFS files travel as pointers. Capture fails on any Git error. Bundles are limited to 64 MiB (`ODU_SNAPSHOT_MAX_BYTES`); oversized captures name the largest paths. Recipes recreate ignored dependencies and outputs in their detached workspace.
+
+Bundle creation and `ODU_SNAPSHOT_MAX_BYTES` apply only when the selected pool may use remote transport. Local-only working-tree runs need no origin and do not pack repository history.
+
+To see `dirty` and `contentSha` over MCP, run the `odu mcp` bridge from the same build as the service; older bridges can drop these fields.

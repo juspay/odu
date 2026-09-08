@@ -1089,6 +1089,14 @@ describe("a replay runs where its parent was allowed to run", () => {
 });
 
 describe("a run whose inputs were never committed", () => {
+  it("names the working-tree snapshot and keeps finalized retry refused", async () => {
+    const root = tmpCatalog();
+    aFinishedRun(root, { snapshot: { mode: "live", expectedSha: SHA, dirty: true, retryable: false, contentSha: "a".repeat(40) } });
+    const launcher = stubLauncher();
+    const out = refused(await retry({ runId: PARENT_RUN, selector: "unit", catalog: { root }, launcher: launcher.launcher }));
+    expect(out.message).toContain(`working-tree snapshot aaaaaaa of ${SHA.slice(0, 7)}`);
+    expect(launcher.calls).toEqual([]);
+  });
   it("is refused rather than replaced by a run of today's tree", async () => {
     // The substitution the whole design forbids: a dirty working tree exists
     // nowhere but on that disk at that moment, so there is nothing to replay.

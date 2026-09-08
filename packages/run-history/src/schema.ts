@@ -63,6 +63,8 @@ export type RunScope = typeof RunScopeSchema.Type;
  *  `expectedSha` is the commit the run claims to be about either way — a
  *  finalized retry refuses rather than substituting today's HEAD. */
 export const RunSnapshotSchema = Schema.Struct({
+  contentSha: Schema.optionalKey(Schema.String),
+  overlay: Schema.optionalKey(Schema.Struct({ count: Schema.Int, paths: Schema.Array(Schema.String) })),
   mode: Schema.Literals(["strict", "live"]),
   expectedSha: Schema.String,
   /** The working tree carried uncommitted changes (only reachable in `live`).

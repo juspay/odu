@@ -92,7 +92,7 @@ browsers fails it with the sentence that gets them.
   dashboard is a separate rendering path; asserting on the clean, parseable
   stream keeps tests robust. The dashboard is currently uncovered by e2e.
 - **Local-only.** No remote/ssh lanes are exercised; fixtures run on a
-  localhost lane against the live working tree (`--no-strict`).
+  localhost lane against a working-tree snapshot (`--no-strict`).
 - **Black-box.** `harness.ts` imports nothing from `src/` — the contract under
   test is the binary's observable behavior, so internal refactors don't ripple
   into these tests.
@@ -118,3 +118,5 @@ browsers fails it with the sentence that gets them.
   `.ci/odu.sock` socket, so the harness would run `odu run` in the background
   and dial it concurrently).
 - **Multi-platform fanout** once remote lanes are in scope.
+
+`dirty.e2e.test.ts` exercises working-tree capture and chunked git-bundle transport over the real localhost stdio surface using `ODU_SNAPSHOT_TRANSPORT=always` and a private `file://` origin. Real SSH host acceptance remains downstream in Olai. Cache-hit assertions repeat identical content, separately from red-to-green edits.

@@ -143,7 +143,7 @@ describe.if(hasJust)("a cancel that lands mid-claim", () => {
         `import { runCommand } from ${JSON.stringify(runModule)};`,
         "void runCommand({",
         "  selectors: [], platforms: [], hostPins: [], noDeps: false,",
-        "  noStrict: true, noSnapshot: true, noPost: true,",
+        "  noStrict: true, noSnapshot: false, noPost: true,",
         "  supersede: false, linger: false, noWait: false,",
         "}, { claimVenues: () => new Promise(() => {}) }).catch((err) => {",
         "  console.error(err);",
@@ -220,7 +220,7 @@ describe.if(hasJust)("a cancel that lands mid-claim", () => {
         hostPins: [],
         noDeps: false,
         noStrict: true,
-        noSnapshot: true,
+        noSnapshot: false,
         noPost: true,
         supersede: false,
         linger: false,
@@ -238,7 +238,10 @@ describe.if(hasJust)("a cancel that lands mid-claim", () => {
     const runOutcome = run.catch((err: unknown) => err);
 
     // The socket comes up BEFORE the claim — the whole point of #84.
-    await waitFor(() => claimEntered, 20_000);
+    await Promise.race([
+      waitFor(() => claimEntered, 20_000),
+      runOutcome.then(result => { throw new Error(`run ended before claim: ${String(result)}`); }),
+    ]);
     const dialed = await dialUntilServing(socketPath);
 
     try {
@@ -326,7 +329,7 @@ describe.if(hasJust)("a node the coordinator itself terminalizes", () => {
         hostPins: [],
         noDeps: false,
         noStrict: true,
-        noSnapshot: true,
+        noSnapshot: false,
         noPost: true,
         supersede: false,
         linger: false,
@@ -341,7 +344,10 @@ describe.if(hasJust)("a node the coordinator itself terminalizes", () => {
     );
     const runOutcome = run.catch((err: unknown) => err);
 
-    await waitFor(() => claimEntered, 20_000);
+    await Promise.race([
+      waitFor(() => claimEntered, 20_000),
+      runOutcome.then(result => { throw new Error(`run ended before claim: ${String(result)}`); }),
+    ]);
     const dialed = await dialUntilServing(socketPath);
     try {
       // Attached BEFORE the node is terminalized, the way `odu logs -f` is:
@@ -394,4 +400,35 @@ describe.if(hasJust)("a node the coordinator itself terminalizes", () => {
       if (backstop !== undefined) clearTimeout(backstop);
     }
   }, 60_000);
+});
+
+it.if(hasJust)("refuses in-place mode for a remote pool even on a clean tree", async () => {
+  fixture();
+  let claimed = false;
+  await expect(runCommand({
+    selectors: [], platforms: [], hostPins: [], noDeps: false,
+    noStrict: true, noSnapshot: true, noPost: true,
+    supersede: false, linger: false, noWait: false,
+  }, { claimVenues: async () => { claimed = true; return { ok: false, error: new Error("unexpected claim") }; } })).rejects.toThrow("only applies to localhost lanes");
+  expect(claimed).toBe(false);
+});
+
+it.if(hasJust)("explains forced snapshot transport without origin before claiming", async () => {
+  const dir = fixture();
+  spawnSync("git", ["remote", "remove", "origin"], { cwd: dir });
+  writeFileSync(join(dir, "hosts.json"), JSON.stringify({ [PLATFORM]: "localhost" }));
+  const prior = process.env.ODU_SNAPSHOT_TRANSPORT;
+  process.env.ODU_SNAPSHOT_TRANSPORT = "always";
+  let claimed = false;
+  try {
+    await expect(runCommand({
+      selectors: [], platforms: [], hostPins: [], noDeps: false,
+      noStrict: true, noSnapshot: false, noPost: true,
+      supersede: false, linger: false, noWait: false,
+    }, { claimVenues: async () => { claimed = true; return { ok: false, error: new Error("unexpected claim") }; } })).rejects.toThrow("no origin remote");
+    expect(claimed).toBe(false);
+  } finally {
+    if (prior === undefined) delete process.env.ODU_SNAPSHOT_TRANSPORT;
+    else process.env.ODU_SNAPSHOT_TRANSPORT = prior;
+  }
 });

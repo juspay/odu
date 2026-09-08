@@ -177,7 +177,12 @@ export async function runViaService(opts: RunOpts): Promise<number> {
       emitJson(receipt);
       return receipt.accepted ? 0 : WAIT_EXITS.stillRunning;
     }
-    if (!opts.json) process.stderr.write(renderStart(receipt, opts.origin));
+    const initial = await call(client.surface.run.read({ runId: receipt.runId }));
+    const contentSha = initial.ok ? initial.value.contentSha : undefined;
+    if (!opts.json) {
+      process.stderr.write(renderStart(receipt, opts.origin));
+      if (contentSha !== undefined) process.stderr.write(`odu · snapshot ${contentSha.slice(0, 7)} (${receipt.sha.slice(0, 7)} + working tree)\n`);
+    }
     if (opts.noWait) return receipt.accepted ? 0 : WAIT_EXITS.stillRunning;
     if (opts.progressJson === true) {
       return progressStream(client, receipt.runId, receipt.sha.slice(0, 7));
@@ -357,7 +362,7 @@ export async function waitViaService(opts: WaitOpts): Promise<number> {
  *  `--after` and `-o json`. */
 export function renderAttention(a: AttentionAnswer): string {
   const lines: string[] = [];
-  const sha7 = a.sha === null ? "" : `  ${a.sha.slice(0, 7)}`;
+  const sha7 = a.sha === null ? "" : `  ${a.sha.slice(0, 7)}${a.contentSha === undefined ? "" : `+dirty→${a.contentSha.slice(0, 7)}`}`;
   // The run's own word, not a re-derivation of it: `passed: false` covers a red
   // run AND one that never finished, and telling an operator "failed" for the
   // second sends them looking for a broken test that does not exist.
@@ -626,7 +631,7 @@ export function renderRows(rows: readonly RunRow[], now: number): string {
     const verdict =
       r.state === "settled" ? (r.outcome ?? (r.passed ? "passed" : "failed")) : r.state;
     const debt = r.reportingDebt > 0 ? `  ⇐${r.reportingDebt}` : "";
-    return `${r.runId}  ${ref}${r.dirty ? "+dirty" : ""}  ${r.branch ?? "-"}  ${verdict}  ${formatAgo(now - r.createdAt)} ago${debt}`;
+    return `${r.runId}  ${ref}${r.dirty ? "+dirty" : ""}${r.contentSha === undefined ? "" : `→${r.contentSha.slice(0, 7)}`}  ${r.branch ?? "-"}  ${verdict}  ${formatAgo(now - r.createdAt)} ago${debt}`;
   });
   return `${lines.join("\n")}\n`;
 }

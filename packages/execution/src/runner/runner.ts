@@ -51,7 +51,8 @@ import {
 } from "./leaseHold";
 import { transitiveDependents } from "../common/nodeId";
 import { createGroupReaper } from "./reap";
-import { prepareWorkspace } from "./workspace";
+import { hasSnapshot, narrateSnapshot, prepareWorkspace } from "./workspace";
+import { createSnapshotUploads } from "./snapshotUpload";
 
 /** Lane-local setup node id — same namepath as fan-in `_ci-setup@plat`. */
 export const SETUP_NODE_ID = SETUP_NAMEPATH;
@@ -71,6 +72,7 @@ export interface LaneRunner {
 }
 
 export function createLaneRunner(): LaneRunner {
+  const uploads = createSnapshotUploads();
   const stateStore = inMemoryStore<PipelineState>(EMPTY_STATE);
   const tail = createLogTail();
 
@@ -97,6 +99,10 @@ export function createLaneRunner(): LaneRunner {
     // what its schemas have always spelled. An unexpected throw stays a DEFECT
     // and dies loudly rather than masquerading as a member failure.
     procedures: {
+      snapshot: {
+        has: ({ input }) => Effect.sync(() => ({ present: hasSnapshot(input.origin, input.commit) })),
+        put: ({ input }) => Effect.sync(() => uploads.put(input)),
+      },
       node: {
         rerun: ({ input }) =>
           Effect.sync(() => {
@@ -429,13 +435,19 @@ export function createLaneRunner(): LaneRunner {
           : `[odu] provided workspace ${cfg.workspace} does not exist\n`,
       );
       if (exists) workspace = cfg.workspace;
-      finish(exists);
+      const verified = exists && (cfg.snapshot === undefined || narrateSnapshot(cfg.workspace, cfg.sha as string, cfg.snapshot.commit, line => tail.append(SETUP_NODE_ID, `${line}\n`)));
+      finish(verified);
       return;
     }
 
     void prepareWorkspace(
       // configure() validated origin+sha when workspace is null
-      { origin: cfg.origin as string, sha: cfg.sha as string },
+      { origin: cfg.origin as string, sha: cfg.sha as string,
+        ...(cfg.snapshot === undefined ? {} : { snapshot: {
+          commit: cfg.snapshot.commit, requires: cfg.snapshot.requires,
+          bundlePath: cfg.snapshot.bundle ? uploads.path(cfg.snapshot.commit) : null,
+        } }),
+      },
       (line) => {
         // Narration belongs to a prep that is still running: a superseded one
         // must not write into the log its replacement opened, and a finished
@@ -617,6 +629,7 @@ export function createLaneRunner(): LaneRunner {
   function dispose(): void {
     if (disposed) return;
     disposed = true;
+    uploads.dispose();
     process.stdin.off("data", onStdinPulse);
     if (venueHold !== null) {
       venueHold.release();

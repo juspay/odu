@@ -104,6 +104,7 @@ import {
   type RunLockHandle,
 } from "./checkoutLock";
 import { releaseReservation, reserveNextSeq, writeRunRecord } from "@odu/run-history/legacy/ledger";
+import { snapshotWorkingTree, treeModeFor, type WorkingTreeSnapshot } from "./workingTree";
 import { openRunHistory } from "./history";
 import { ODU_VERSION } from "../common/version";
 import {
@@ -390,10 +391,10 @@ export async function runCommand(
   }
 
   // ── modes (the justci flag table: strict by default) ──
-  const snapshotMode = !args.noStrict && !args.noSnapshot;
-  const posting = snapshotMode && !args.noPost;
-  const dirty = git(repoRoot, ["status", "--porcelain"]) !== "";
-  if (snapshotMode && dirty) {
+  const treeMode = treeModeFor(args);
+  const posting = treeMode === "strict" && !args.noPost;
+  let dirty = git(repoRoot, ["status", "--porcelain"]) !== "";
+  if (treeMode === "strict" && dirty) {
     process.stderr.write(
       "odu: working tree is dirty — strict mode refuses it.\n" +
         "Commit (or stash) first, or pass --no-strict for a dev iteration run.\n",
@@ -433,13 +434,19 @@ export async function runCommand(
 
   // ── HEAD pin: the run sees the commit, never the live tree ──
   let snapshotDir: string | null = null;
-  if (snapshotMode) {
+  if (treeMode === "strict") {
     snapshotDir = mkdtempSync(join(tmpdir(), `odu-${sha7}-`));
     git(repoRoot, ["worktree", "add", "--detach", snapshotDir, "HEAD"]);
   }
-  const specSource = snapshotDir ?? repoRoot;
+  const snapshot = treeMode === "working-tree" ? snapshotWorkingTree(repoRoot, { bundle: false }) : null;
+  if (snapshot !== null) {
+    if (snapshot.base !== sha) { snapshot.cleanup(); throw new Error("odu: HEAD changed during snapshot capture; start a new run"); }
+    dirty = snapshot.dirty;
+  }
+  const specSource = snapshot?.worktreeDir ?? snapshotDir ?? repoRoot;
 
   const cleanupSnapshot = (): void => {
+    snapshot?.cleanup();
     if (snapshotDir === null) return;
     tryGit(repoRoot, ["worktree", "remove", "--force", snapshotDir]);
     rmSync(snapshotDir, { recursive: true, force: true });
@@ -497,7 +504,8 @@ export async function runCommand(
         sha,
         sha7,
         posting,
-        snapshotMode,
+        treeMode,
+        snapshot,
         dirty,
       },
       createdLanes,
@@ -528,8 +536,9 @@ interface RunContext {
   sha: string;
   sha7: string;
   posting: boolean;
-  snapshotMode: boolean;
-  /** Working tree has uncommitted changes (only reachable when !snapshotMode). */
+  treeMode: ReturnType<typeof treeModeFor>;
+  snapshot: WorkingTreeSnapshot | null;
+  /** The captured or in-place tree differs from the base commit. */
   dirty: boolean;
 }
 
@@ -642,8 +651,7 @@ async function orchestrate(
     );
   }
   // Pool-level prechecks (before lease): a pool that can only land on a remote
-  // needs an origin; a dirty live-tree run refuses any pool that still has a
-  // remote candidate (it might lease that box and silently test committed HEAD).
+  // needs an origin; in-place runs refuse any pool with a remote candidate.
   for (const platform of tasksByPlatform.keys()) {
     const pool = poolsByPlatform[platform] ?? [];
     const remotes = pool
@@ -654,15 +662,26 @@ async function orchestrate(
         `odu: remote lane ${platform}=[${remotes.join(", ")}] needs an origin remote to fetch from`,
       );
     }
-    if (!ctx.snapshotMode && ctx.dirty && remotes.length > 0) {
+    if (ctx.treeMode === "in-place" && remotes.length > 0) {
       throw new Error(
-        `odu: live-tree mode (--no-snapshot/--no-strict) on a dirty tree only ` +
+        `odu: live-tree mode (--no-snapshot) only ` +
           `applies to localhost lanes — remote host(s) in ${platform} pool ` +
           `(${remotes.join(", ")}) would fetch the committed HEAD (${ctx.sha7}), ` +
           `not your uncommitted changes. Commit and push first, pin localhost ` +
-          `with --host ${platform}=localhost, or slice to local platforms.`,
+          `with --host ${platform}=localhost, or pass --no-strict without --no-snapshot to ship a snapshot of your working tree.`,
       );
     }
+  }
+
+  if (ctx.snapshot !== null) {
+    const needsTransport = process.env.ODU_SNAPSHOT_TRANSPORT === "always" ||
+      [...tasksByPlatform.keys()].some(platform =>
+        (poolsByPlatform[platform] ?? []).some(entry => !isLocalHost(asHostSlot(entry).host)));
+    if (needsTransport && originUrl === null)
+      throw new Error("odu: snapshot transport has no origin remote to fetch from");
+    if (needsTransport) ctx.snapshot.prepareBundle();
+    const snap = ctx.snapshot;
+    info(`odu · working tree snapshot ${snap.contentSha.slice(0, 7)} = ${sha7} + ${snap.overlay.count} paths (${snap.overlay.paths.join(", ")}) — captured in ${snap.captureMs} ms; ${snap.bundle?.bytes ?? 0} bytes to ship`);
   }
 
   // ── one-run-per-checkout BEFORE any venue lease ──
@@ -762,7 +781,9 @@ async function orchestrate(
     // a replay re-reads the file, which is what makes an edited hosts file
     // visible to a retry rather than frozen into it.
     hostsFile: process.env.ODU_HOSTS ?? "",
-    snapshotMode: ctx.snapshotMode ? "strict" : "live",
+    snapshotMode: ctx.treeMode === "strict" ? "strict" : "live",
+    ...(ctx.snapshot?.dirty ? { contentSha: ctx.snapshot.contentSha } : {}),
+    ...(ctx.snapshot === null ? {} : { overlay: ctx.snapshot.overlay }),
     dirty: ctx.dirty,
     runnerFlake,
     oduVersion: ODU_VERSION,
@@ -947,6 +968,9 @@ async function orchestrate(
   //    stays here is the run's own policy: which frame routes where, and when a
   //    node's log has had this run's last word. ──
   const logs = createNodeLogSink(repoRoot, sha7);
+  // Placement belongs to the exact routed node, not the platform's primary.
+  // Keep assignments after a burst releases its lease: its evidence outlives it.
+  const nodeHosts = new Map<string, string>();
   // Bound below beside `setupLine`; declared here because interrupt teardown
   // must flush the last coalesced provisioning burst before sealing logs.
   let flushSetupLines: () => void = () => {};
@@ -970,7 +994,7 @@ async function orchestrate(
   const appendLocal = (id: string, text: string): void => {
     if (logs.isEnded(id)) return;
     logs.append(id, text);
-    history.log(id, text);
+    history.log(id, text, nodeHosts.get(id) ?? null);
   };
   const resetLocal = (id: string, text: string): void => {
     logs.reset(id, text);
@@ -981,7 +1005,7 @@ async function orchestrate(
     // empty ghost attempt for every node whose first output arrived after its
     // `running` frame, and then "attempt 2" meant nothing. The genuine restart
     // is `history.resetNode`, called where a node is actually re-run.
-    history.replaceLog(id, text);
+    history.replaceLog(id, text, nodeHosts.get(id) ?? null);
   };
   const endLocal = (id: string): void => {
     logs.end(id);
@@ -1824,13 +1848,12 @@ async function orchestrate(
       // The same transition, into the durable journal. Beside `emitProgress`
       // rather than folded into it: `--progress json` is a FEED a face renders
       // and forgets, this is a RECORD somebody reads a week later, and the two
-      // have different budgets for what they may leave out. `host` is read off
-      // the lane roster the run published, so a node's placement in the record
-      // is the same one the surface showed.
+      // have different budgets for what they may leave out. Placement comes
+      // from the node route, including burst workers and deferred verdicts.
       history.nodeStatus(id, next.status, {
         exitCode: next.exitCode,
         durationMs: next.durationMs,
-        host: lanesByPlatform[splitFanId(id).platform] ?? null,
+        host: nodeHosts.get(id) ?? null,
       });
       const payload = postableNodeIds.has(id)
         ? statusFor(id, next.status, next.durationMs, sha7)
@@ -2530,11 +2553,28 @@ async function orchestrate(
         // rather than leaving it to the successor lane's opening `snapshot`
         // frame — a party that does not know a resurrection happened deciding
         // what this file contains.
+        const nextHost = outcome.lanes[platform];
+        if (nextHost === undefined) nodeHosts.delete(id);
+        else nodeHosts.set(id, nextHost);
         resetLocal(id, "");
       }
       acceptClaim(platform, outcome, retryTasks);
       checkSettled();
     })();
+  };
+
+  const laneSource = (host: string) => {
+    // Test-only: exercise the real bundle wire on localhost without sshd.
+    const local = isLocalHost(host) && process.env.ODU_SNAPSHOT_TRANSPORT !== "always";
+    return {
+      origin: local || originUrl === null ? null : fetchUrlFor(originUrl),
+      sha: local && ctx.snapshot === null ? null : sha,
+      workspace: local ? specSource : null,
+      snapshot: ctx.snapshot === null ? null : {
+        commit: ctx.snapshot.contentSha, requires: ctx.snapshot.requires,
+        bundlePath: ctx.snapshot.bundle?.path ?? null, bytes: ctx.snapshot.bundle?.bytes ?? 0,
+      },
+    };
   };
 
   const startPrimaryLane = (
@@ -2543,6 +2583,7 @@ async function orchestrate(
     tasks: TaskSpec[],
   ): Lane => {
     executions.ensure(platform);
+    nodeHosts.set(fanId(SETUP, platform), host);
     startSetup(platform);
     const setupId = fanId(SETUP, platform);
     const publicMainId = (laneId: string): string => {
@@ -2551,6 +2592,10 @@ async function orchestrate(
         ? fanId(shardNamepath(laneId, 0, plan.total), platform)
         : fanId(laneId, platform);
     };
+    for (const task of tasks) {
+      nodeHosts.set(fanId(task.id, platform), host);
+      nodeHosts.set(publicMainId(task.id), host);
+    }
     const local = isLocalHost(host);
     if (!local) remotePlatforms.add(platform);
     // Which episode this lane IS. Read now, so the death of a lane that has
@@ -2561,9 +2606,7 @@ async function orchestrate(
       host,
       tasks,
       pipelineName: spec.name,
-      origin: local || originUrl === null ? null : fetchUrlFor(originUrl),
-      sha: local ? null : sha,
-      workspace: local ? specSource : null,
+      ...laneSource(host),
       resolveDrvPath: runnerResolverFor(platform),
       onSetupLine: (line) => appendLocal(setupId, `${line}\n`),
       onNodes: (laneState) => {
@@ -3035,6 +3078,11 @@ async function orchestrate(
           ? fanId(shardNamepath(laneId, 0, plan.total), platform)
           : fanId(laneId, platform);
       };
+      for (const root of roots) {
+        // The aggregate belongs to the primary; physical shards keep their leases.
+        nodeHosts.set(fanId(root.id, platform), host);
+        nodeHosts.set(publicMainId(root.id), host);
+      }
       const routed = executions.extendLane(
         platform,
         lane,
@@ -3061,6 +3109,7 @@ async function orchestrate(
         const publicIdFor = projection.publicId;
         const setupId = projection.setupId;
         const publicLaneIds = projection.nodeIds;
+        for (const id of publicLaneIds) nodeHosts.set(id, lease.host);
         let burstLane: Lane | undefined;
         let finished = false;
         const finishBurst = (): void => {
@@ -3083,16 +3132,12 @@ async function orchestrate(
           burstLane?.close();
           releaseBurstLease(platform, lease);
         };
-        const burstLocal = isLocalHost(lease.host);
         burstLane = buildLane({
           platform,
           host: lease.host,
           tasks: tasksForShard(plan.tasks, plan.rootId, index, plan.total),
           pipelineName: `${spec.name}:${plan.rootId}:${index + 1}/${plan.total}`,
-          origin:
-            burstLocal || originUrl === null ? null : fetchUrlFor(originUrl),
-          sha: burstLocal ? null : sha,
-          workspace: burstLocal ? specSource : null,
+          ...laneSource(lease.host),
           resolveDrvPath: runnerResolverFor(platform),
           onSetupLine: (line) =>
             appendLocal(setupId, `[host ${shortHost(lease.host)}] ${line}\n`),

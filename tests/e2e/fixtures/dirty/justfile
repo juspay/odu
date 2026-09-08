@@ -1,0 +1,8 @@
+[metadata("ci")]
+default: check
+
+check:
+    cat marker.txt
+    test "$(cat marker.txt)" = green
+    test -f new.txt
+    test ! -e gone.txt

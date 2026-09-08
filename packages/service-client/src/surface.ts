@@ -98,7 +98,7 @@ export { STATUS_META, type StatusHue } from "@odu/run-client/surface";
  * still speakable by an older client, and refusing it would make every
  * additive change a flag day.
  */
-export const SERVICE_CONTRACT_VERSION = "1.2";
+export const SERVICE_CONTRACT_VERSION = "1.3";
 
 // ── refusals ────────────────────────────────────────────────────────────────
 
@@ -321,13 +321,15 @@ export const RunOutcomeSchema = Schema.Literals([
  * One run, as a board row — everything needed to CHOOSE a run without opening
  * it, and nothing that would need the run's journal to produce.
  *
- * `sha` is the exact commit that was tested, in full, and `dirty` says whether
+ * `sha` is the base commit; `contentSha`, when present, identifies the tested
+ * working-tree snapshot. `dirty` says whether
  * the verdict is about that commit or about a working tree that merely claimed
  * it. Both are on the row rather than one line down, because "which commit is
  * this green about" is the question a board exists to answer and a row that
  * makes you click to find out has not answered it.
  */
 export const RunRowSchema = Schema.Struct({
+  contentSha: Schema.optionalKey(Schema.String),
   runId: Schema.String,
   /** `owner/repo` for a GitHub origin, null for a local-only checkout. */
   repo: Schema.NullOr(Schema.String),
@@ -774,6 +776,8 @@ const FailureSchema = Schema.Struct({
  * answer on every face; only a REFUSAL is an error.
  */
 const AttentionAnswerSchema = Schema.Struct({
+  dirty: Schema.optionalKey(Schema.Boolean),
+  contentSha: Schema.optionalKey(Schema.String),
   runId: Schema.String,
   reason: Schema.Literals(["failure", "still_running", "settled", "owner_lost"]),
   settled: Schema.Boolean,

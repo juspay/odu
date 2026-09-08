@@ -163,6 +163,7 @@ function Row(props: {
           sha={props.run.sha}
           seq={props.run.seq}
           dirty={props.run.dirty}
+          contentSha={props.run.contentSha}
         />
       </span>
       {/* ONE status cell, not two. A run's board state and its outcome used to

@@ -30,6 +30,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
+import { handleFor, readAttemptRecord } from "@odu/run-history/store";
 import { dialRun } from "@odu/run-client/dial";
 import {
   type NodeLogFrame,
@@ -63,7 +64,7 @@ const runArgs = (): RunArgs => ({
   hostPins: [],
   noDeps: false,
   noStrict: true,
-  noSnapshot: true,
+  noSnapshot: false,
   noPost: true,
   supersede: false,
   linger: false,
@@ -133,6 +134,7 @@ function fixture(): string {
   // resolver, because the lane that would is injected.
   const env: Record<string, string> = {
     ODU_HOSTS: join(dir, "hosts.json"),
+    ODU_STATE_DIR: join(dir, ".ci", "state"),
     ODU_RUNNER_FLAKE: "git+file:///nonexistent",
     ODU_AGENT_SUBSTITUTERS: "https://cache.invalid",
     ODU_AGENT_TRUSTED_PUBLIC_KEYS: "cache.invalid:0000000000",
@@ -226,6 +228,8 @@ function harness(opts: { hold?: () => Promise<void> } = {}) {
 
   const startLane = (laneOpts: LaneOptions): Lane => {
     const entry: FakeLane = { opts: laneOpts, closed: false };
+    if (lanes.length > 0) expect(laneOpts.snapshot?.commit).toBe(lanes[0]!.opts.snapshot?.commit);
+    expect(laneOpts.snapshot?.commit).toMatch(/^[0-9a-f]{40}$/);
     lanes.push(entry);
     // What a REAL lane does the moment it attaches: `nodeLog.get({ id })` opens
     // with a `snapshot` frame for every node it owns, and a fresh runner's
@@ -361,7 +365,7 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
     const socketPath = join(dir, ".ci", "odu.sock");
     const { lanes, leases, claimHosts, deps } = harness();
 
-    const run = runCommand(runArgs(), deps);
+    const run = runCommand({ ...runArgs(), runId: "placement-retry" }, deps);
     const outcome = run.catch((err: unknown) => err);
     const nodes = await watchNodes(socketPath);
 
@@ -464,6 +468,10 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
       second.opts.onLogFrame("gamma", laneFrame({ kind: "end" }));
 
       expect(await outcome).toBe(0);
+      const recorded = handleFor("placement-retry", { root: join(dir, ".ci", "state", "runs") });
+      expect(readAttemptRecord(recorded, `alpha@${PLATFORM}`, 1)?.placement.host).toBe(HOST_A);
+      expect(readAttemptRecord(recorded, `beta@${PLATFORM}`, 1)?.placement.host).toBe(HOST_A);
+      expect(readAttemptRecord(recorded, `beta@${PLATFORM}`, 2)?.placement.host).toBe(HOST_B);
     } finally {
       await nodes.close();
       await settleOrGiveUp(outcome);
