@@ -37,7 +37,6 @@ import { connect as netConnect } from "node:net";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -51,6 +50,7 @@ import {
   hostsFile,
   PORT_SLOT,
   privateWorld,
+  scratchDir,
   suitePort,
   suitePortFor,
 } from "./harness";
@@ -398,7 +398,7 @@ export async function mcp(
  * identity, so it is settled once, here.
  */
 export function makeWebFixture(justfile: string): string {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "odu-e2e-webrepo-")));
+  const dir = realpathSync(scratchDir("odu-e2e-webrepo-"));
   // `.ci/` is ignored so a SECOND run in the same checkout still sees a clean
   // tree: odu writes its per-checkout ledger there, and strict mode refuses a
   // dirty one — which is correct, and would otherwise make every fixture

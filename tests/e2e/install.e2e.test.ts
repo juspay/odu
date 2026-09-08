@@ -50,7 +50,6 @@ import {
   constants,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
@@ -60,7 +59,14 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { BIG, buildOduBinary, cleanup, hermeticEnv, repoRoot } from "./harness";
+import {
+  BIG,
+  buildOduBinary,
+  cleanup,
+  hermeticEnv,
+  repoRoot,
+  scratchDir,
+} from "./harness";
 import {
   headOf,
   killDaemon,
@@ -110,7 +116,7 @@ let daemonPid: number | null = null;
  * guesses at.
  */
 function makeConsumer(): string {
-  const dir = mkdtempSync(join(tmpdir(), "odu-e2e-consumer-"));
+  const dir = scratchDir("odu-e2e-consumer-");
   writeFileSync(
     join(dir, "apm.yml"),
     [
@@ -144,7 +150,7 @@ function makeConsumer(): string {
  *  contents — so an uncommitted edit to the skill under test is still what gets
  *  installed. */
 function publishable(): string {
-  const dir = mkdtempSync(join(tmpdir(), "odu-e2e-publishable-"));
+  const dir = scratchDir("odu-e2e-publishable-");
   const copied = spawnSync(
     "sh",
     ["-c", `git ls-files -z | tar --null -T - -cf - | tar -xf - -C '${dir}'`],
@@ -216,9 +222,9 @@ function writeNixShim(dir: string): void {
 beforeAll(() => {
   oduBin = buildOduBinary();
   consumer = makeConsumer();
-  shimDir = mkdtempSync(join(tmpdir(), "odu-e2e-nixshim-"));
+  shimDir = scratchDir("odu-e2e-nixshim-");
   writeNixShim(shimDir);
-  stateDir = mkdtempSync(join(tmpdir(), "odu-e2e-installstate-"));
+  stateDir = scratchDir("odu-e2e-installstate-");
   mkdirSync(stateDir, { recursive: true });
   origin = `http://127.0.0.1:${suitePortFor("freshInstall")}`;
   // One install, not one per test: it resolves a package tree and reaches PyPI,

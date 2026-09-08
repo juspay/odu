@@ -19,16 +19,43 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
+  readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 /** Large maxBuffer for nix output / NDJSON streams (256 MiB). */
 export const BIG = 256 * 1024 * 1024;
+
+/** Every directory this process made under `$TMPDIR`. The ordinary `afterEach`
+ *  path still does the work; this is what removes the ones a failed test never
+ *  reached, and the ones a detached coordinator wrote back afterwards. */
+const fixtures = new Set<string>();
+
+/** When this process started, so the sweep can tell a daemon home IT caused
+ *  from one that was already on the machine. */
+const startedAt = Date.now();
+
+/**
+ * A throwaway directory, REGISTERED.
+ *
+ * Every `mkdtempSync` in this directory goes through here. Four files were
+ * making their own and relying on an `afterEach` that a failed test skips, so
+ * a suite left fixtures, shim directories and consumer checkouts behind on
+ * every red run — the runs where somebody is most likely to look at the
+ * machine and least likely to want to sort out what is rubbish.
+ */
+export function scratchDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  fixtures.add(dir);
+  return dir;
+}
 
 /** This machine's Nix system tuple, asked of Nix itself — the same authority
  *  `resolveSystem` and the `tests/evidence/*.sh` scripts use. A hand-rolled
@@ -137,7 +164,7 @@ export function privateWorld(port: number): {
   origin: string;
   env: NodeJS.ProcessEnv;
 } {
-  const root = mkdtempSync(join(tmpdir(), "odu-e2e-web-"));
+  const root = scratchDir("odu-e2e-web-");
   const state = join(root, "state");
   mkdirSync(state, { recursive: true });
   const origin = `http://127.0.0.1:${port}`;
@@ -195,23 +222,33 @@ export const hermeticEnv: NodeJS.ProcessEnv = blackBox.env;
  * only the target moves. The pointer starts at the real `gh`, so a suite that
  * installs nothing behaves exactly as before.
  */
-const ghDispatch = join(blackBox.root, "gh");
-const ghTarget = join(blackBox.root, "gh-target");
+const ghSeam = join(blackBox.root, "gh");
 writeFileSync(
-  ghTarget,
-  spawnSync("sh", ["-c", "command -v gh || true"], { encoding: "utf-8" })
-    .stdout.trim() || "/bin/false",
+  ghSeam,
+  `#!/bin/sh\nexec ${
+    spawnSync("sh", ["-c", "command -v gh || true"], { encoding: "utf-8" })
+      .stdout.trim() || "/bin/false"
+  } "$@"\n`,
 );
-writeFileSync(ghDispatch, `#!/bin/sh\nexec "$(cat '${ghTarget}')" "$@"\n`);
-chmodSync(ghDispatch, 0o755);
-hermeticEnv.ODU_GH_BIN = ghDispatch;
+chmodSync(ghSeam, 0o755);
+hermeticEnv.ODU_GH_BIN = ghSeam;
 
-/** Point the world's `gh` at this executable for the next call. Tests run one
- *  at a time, so the pointer needs no locking — and a stand-in that outlives
- *  its test is a stand-in the next one would silently inherit, which is why
- *  {@link cleanup} is not where this is undone: the NEXT installer is. */
-export function useGh(executable: string): void {
-  writeFileSync(ghTarget, executable);
+/**
+ * Make this the world's `gh` for the next call.
+ *
+ * The SCRIPT is written here, not a pointer to one. The first shape of this was
+ * a dispatcher that `exec`ed whatever a sibling file named — and what that file
+ * named was a stand-in in the test's own temp directory, which `afterEach`
+ * removes. The pointer then dangled between tests, and a `protect` that landed
+ * on it failed with an exec error naming a path nobody had asked about. One
+ * file that is always present and always current has no such window.
+ *
+ * Tests run one at a time, so the seam needs no locking, and a stand-in that
+ * outlives its test is one the next installer replaces.
+ */
+export function useGh(script: string): void {
+  writeFileSync(ghSeam, script);
+  chmodSync(ghSeam, 0o755);
 }
 
 /**
@@ -222,10 +259,6 @@ export function useGh(executable: string): void {
  */
 let driven: string | null = null;
 
-/** Every fixture directory this process made, so teardown can remove the ones
- *  a killed run never got to. `cleanup` deregisters, so the ordinary
- *  `afterEach` path stays the one that does the work. */
-const fixtures = new Set<string>();
 
 /**
  * EVERYTHING THIS PROCESS LEAVES ON THE MACHINE, removed once.
@@ -298,24 +331,41 @@ function stopService(odu: string): string | null {
  * about somebody else's process.
  */
 function claimOrigin(odu: string): void {
+  // ASKED OF THE KERNEL, NOT OF ODU. Every odu command bootstraps its own
+  // origin when nothing is serving it — that is the property `odu run` exists
+  // to have — so using one to check whether the port is free STARTS a daemon,
+  // and using one in a loop starts a daemon per iteration. This is what that
+  // mistake looks like from outside: the eviction below killed the incumbent,
+  // the probe brought it straight back, and fifteen seconds of that left a
+  // machine covered in services nobody had asked for.
+  if (!portIsOpen()) return;
   const home = stopService(odu);
-  if (home === null) return;
-  // Wait for the gate, not for the pid: a successor cannot bind until the
+  // Wait for the PORT, not for the pid: a successor cannot bind until the
   // incumbent has let go, and that is the thing the next call is about to do.
   const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline) {
-    const said = spawnSync(odu, ["surface", "get", "service"], {
-      env: hermeticEnv,
-      encoding: "utf-8",
-      maxBuffer: BIG,
-    });
-    if (said.status !== 0) break;
+  while (Date.now() < deadline && portIsOpen()) {
+    // Synchronous by design — this runs inside `beforeAll`, before any test has
+    // an opinion, and a spin here is cheaper than making every caller async.
+    spawnSync("sleep", ["0.1"]);
   }
+  if (home === null) return;
   try {
     rmSync(home, { recursive: true, force: true });
   } catch {
     // Best effort; the sweep at exit tries again.
   }
+}
+
+/** Is anything accepting on this world's port? A raw connect, so it cannot
+ *  start what it is asking about. */
+function portIsOpen(): boolean {
+  const port = suitePortFor("blackBoxRuns");
+  const probe = spawnSync(
+    "bash",
+    ["-c", `exec 3<>/dev/tcp/127.0.0.1/${port}`],
+    { stdio: "ignore" },
+  );
+  return probe.status === 0;
 }
 
 let sweptUp = false;
@@ -330,15 +380,69 @@ function sweepUp(): void {
       // As above.
     }
   }
+  sweepDaemonHomes();
 }
 
-process.on("exit", sweepUp);
+/**
+ * Daemon homes THIS process caused, removed.
+ *
+ * `~/.local/state/odu-web-<hash of origin>` is created by every service a test
+ * starts, and several tests start their own on their own ports. Two conditions
+ * together make removing one safe: its recorded pid is dead, and the directory
+ * was created after this process began. The second is what keeps a developer's
+ * own daemon home — which is alive anyway, and older — out of the sweep.
+ */
+function sweepDaemonHomes(): void {
+  const state = join(homedir(), ".local", "state");
+  let entries: string[];
+  try {
+    entries = readdirSync(state).filter((name) => name.startsWith("odu-web-"));
+  } catch {
+    return;
+  }
+  for (const name of entries) {
+    const dir = join(state, name);
+    try {
+      if (statSync(dir).birthtimeMs < startedAt) continue;
+      const pidFile = readdirSync(dir).find((f) => f.endsWith(".pid"));
+      if (pidFile !== undefined) {
+        const pid = Number(readFileSync(join(dir, pidFile), "utf-8").trim());
+        if (Number.isInteger(pid) && alive(pid)) continue;
+      }
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // Best effort, on the way out.
+    }
+  }
+}
+
+/** Is this pid still a process? `signal 0` asks without sending anything. */
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// HANDED TO THE PRELOAD, because it is the only place that runs ONCE.
+//
+// Two hooks were tried and both were wrong. `process.on("exit")` never fires —
+// `bun test` ends its process without calling exit listeners, so a teardown
+// hung on it exists only in the source. And an `afterAll` from here registers
+// into the scope of whichever file imported this module FIRST, so it fired at
+// the end of file one and took the shared service away from the ten files that
+// still needed it.
+//
+// `bunfig.toml`'s preload registers a global `afterAll` and calls this from it.
+(globalThis as { ODU_TEST_TEARDOWN?: () => void }).ODU_TEST_TEARDOWN = sweepUp;
+// The signals still get one, for the case `afterAll` cannot cover: a suite
+// killed part-way through. They re-raise so a runner reading how its child died
+// gets the true answer rather than a synthesised exit code.
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
   process.on(signal, () => {
     sweepUp();
-    // Re-raise, so a runner reading how its child died gets the true answer
-    // rather than a synthesised exit code. The listener goes first or the
-    // signal lands back in this handler.
     process.removeAllListeners(signal);
     process.kill(process.pid, signal);
   });
@@ -413,10 +517,9 @@ export function buildOduBinary(): string {
  * was about. The coordinator reads HEAD, so we commit before returning.
  */
 export function makeFixture(name: string): string {
-  const dir = mkdtempSync(join(tmpdir(), `odu-e2e-${name}-`));
   // Registered before anything else can throw: a fixture that failed halfway
   // through `git init` is still a directory somebody has to remove.
-  fixtures.add(dir);
+  const dir = scratchDir(`odu-e2e-${name}-`);
   cpSync(join(here, "fixtures", name), dir, { recursive: true });
 
   const git = (...args: string[]): void => {
@@ -473,7 +576,10 @@ export function terminalStatuses(
 /** Best-effort temp-dir cleanup; never throws, but a failure is logged so a
  *  leaked fixture dir is visible in CI rather than silently accumulating. */
 export function cleanup(dir: string): void {
-  fixtures.delete(dir);
+  // NOT deregistered. A run's coordinator is a detached process group that
+  // outlives the test which started it, and it goes on writing `.ci/` — so a
+  // directory removed here comes BACK, and the final sweep has to remove it
+  // again. Keeping the registration is what lets it.
   try {
     rmSync(dir, { recursive: true, force: true });
   } catch (err) {

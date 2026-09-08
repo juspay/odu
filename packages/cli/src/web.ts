@@ -348,6 +348,7 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
 
 /** The daemon `odu web --background` spawns: quiet, and ended only by `drain`. */
 export async function webDaemonCommand(): Promise<number> {
+  standOnSolidGround();
   const log = stderrLogger();
   return serveWebService({
     log,
@@ -526,3 +527,33 @@ export {
   webDaemonSpawnConfig,
   webHome,
 } from "./webDaemonLaunch";
+
+/**
+ * LET GO OF WHOEVER'S DIRECTORY THIS WAS.
+ *
+ * A daemon inherits the working directory of the command that first needed it —
+ * somebody's checkout, a fixture, a temp dir — and then OUTLIVES it. That is
+ * the whole point of a singleton, and it makes the inherited cwd a liability:
+ * when that directory is removed, the kernel cannot resolve a working directory
+ * for anything the daemon forks, and EVERY spawn fails with `ENOENT` naming the
+ * program rather than the directory. It is a spectacular error to read —
+ * `posix_spawn '/…/gh'` for a `gh` that is right there, mode 755, executable
+ * from any other process on the machine.
+ *
+ * Found through `odu protect`, which is the shortest path to it: eight
+ * assertions failing with "the $ODU_GH_BIN seam was bypassed" because the
+ * daemon had been started from a test fixture that the test then deleted.
+ * Nothing about that is specific to tests — a person who runs `odu run` in a
+ * worktree and then removes the worktree gets the same daemon.
+ *
+ * `/` because it is the one directory that is always there, and because a
+ * daemon has no business holding a reference to any other.
+ */
+function standOnSolidGround(): void {
+  try {
+    process.chdir("/");
+  } catch {
+    // A cwd that cannot be changed is not a reason to refuse to serve; the
+    // spawns that would have failed will fail with their own message.
+  }
+}

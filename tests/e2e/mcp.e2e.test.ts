@@ -38,7 +38,12 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { buildOduBinary, cleanup, hermeticEnv } from "./harness";
+import {
+  buildOduBinary,
+  cleanup,
+  hermeticEnv,
+  scratchDir,
+} from "./harness";
 import {
   headOf,
   killDaemon,
@@ -540,7 +545,7 @@ function coldWorld(
   adopt: (pid: number) => void;
   dispose: (daemonHome: string | null) => void;
 } {
-  const root = mkdtempSync(join(tmpdir(), `odu-e2e-${name}-`));
+  const root = scratchDir(`odu-e2e-${name}-`);
   const state = join(root, "state");
   mkdirSync(state, { recursive: true });
   const origin = `http://127.0.0.1:${port}`;

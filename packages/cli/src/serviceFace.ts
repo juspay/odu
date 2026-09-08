@@ -593,11 +593,16 @@ export async function watchNodes(
   const until = Date.now() + deadlineMs;
   let last: NodesFrame | undefined;
   for (;;) {
-    for await (const frame of subscribe(nodesStream(client, runId))) {
+    trace(`watch ${runId}: subscribing`);
+    for await (const frame of subscribe(
+      nodesStream(client, runId, () => trace(`watch ${runId}: link retrying`)),
+    )) {
       last = frame;
+      trace(`watch ${runId}: frame done=${frame.done} nodes=${frame.nodes.length}`);
       onFrame(frame);
       if (frame.done) return frame;
     }
+    trace(`watch ${runId}: stream ended without a verdict`);
     // The stream ended without saying the run had. Re-subscribe — unless the
     // clock says nobody is coming back.
     if (Date.now() >= until) return last;
@@ -609,3 +614,13 @@ export async function watchNodes(
  *  Short: the common cause is a momentary stall on a busy service, and the
  *  subscription that replaces it opens with a fresh snapshot. */
 const RESUBSCRIBE_MS = 250;
+
+/** A line on stderr under `$ODU_DEBUG`, and nothing otherwise. The subscription
+ *  faults this exists to diagnose are invisible by construction — an interrupt
+ *  is not an error and a parked retry says nothing at all — so the only way to
+ *  see one is to have asked for it. */
+function trace(message: string): void {
+  if (process.env.ODU_DEBUG !== undefined && process.env.ODU_DEBUG !== "") {
+    process.stderr.write(`odu[debug] ${message}\n`);
+  }
+}

@@ -20,7 +20,12 @@ import {
   type SpawnSyncReturns,
   spawnSync,
 } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
@@ -30,6 +35,7 @@ import {
   cleanup,
   hermeticEnv,
   makeFixture,
+  scratchDir,
   useGh,
 } from "./harness";
 
@@ -68,7 +74,7 @@ function oduProtect(
   hosts: Record<string, string> | string,
   args: string[] = [],
 ): { res: SpawnSyncReturns<string>; hostsFile: string } {
-  const hostsDir = mkdtempSync(join(tmpdir(), "odu-e2e-protect-"));
+  const hostsDir = scratchDir("odu-e2e-protect-");
   created.push(hostsDir);
   const hostsFile = join(hostsDir, "hosts.json");
   writeFileSync(
@@ -236,7 +242,7 @@ function oduProtectWrite(opts: {
     cwd: dir,
   });
 
-  const gh = mkdtempSync(join(tmpdir(), "odu-e2e-gh-"));
+  const gh = scratchDir("odu-e2e-gh-");
   created.push(gh);
   const at = (name: string): string => join(gh, name);
   writeFileSync(at("branch-rules.json"), JSON.stringify(opts.branchRules));
@@ -257,13 +263,10 @@ case "$*" in
   *) printf 'fake gh: unexpected call: %s\\n' "$*" >&2; exit 1 ;;
 esac
 `;
-  const ghBin = at("gh");
-  writeFileSync(ghBin, script);
-  chmodSync(ghBin, 0o755);
-  // Installed at the WORLD's fixed `gh` path rather than passed as an env var:
+  // Installed AS the world's fixed `gh` rather than passed as an env var:
   // `protect` is a client, and the `gh` it means is spawned by the service,
   // which cannot learn a path invented after it started. See `useGh`.
-  useGh(ghBin);
+  useGh(script);
 
   const res = spawnSync(
     oduBin,
@@ -286,10 +289,12 @@ esac
     // — so "no calls recorded" is far more often a refusal before that point
     // than a bypassed seam, and the original message named only the one cause
     // it was written for.
+    const seam = hermeticEnv.ODU_GH_BIN ?? "(unset)";
     throw new Error(
       `e2e: protect made no gh call (exit ${res.status}). Either the ` +
         "$ODU_GH_BIN seam was bypassed, or protect refused before reaching " +
-        `the forge. It said:\n${res.stderr}${res.stdout}`,
+        `the forge.\n  seam: ${seam} (exists: ${existsSync(seam)})` +
+        `\n  it said:\n${res.stderr}${res.stdout}`,
     );
   }
   /** The captured body of a write, or null when protect never made that call. */
