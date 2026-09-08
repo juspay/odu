@@ -222,19 +222,3 @@ For `wait`, `rerun`, and `cancel`, omitted `--run` means `latest` in this checko
 | Service/build mismatch | Replace the service with the desired Nix build |
 | Retry refused | Read the reason; check snapshot, placement evidence and checkout availability |
 | CI passed but GitHub is waiting | Inspect posting debt and the service's `gh` credentials |
-
-## Development
-
-```sh
-just install
-just typecheck
-just test
-just e2e             # both required suites
-just e2e-cli         # Bun: packaged CLI/MCP/lifecycle/install
-just e2e-web         # Cucumber + Playwright: packaged browser app
-nix run . -- web     # run the application through Nix
-```
-
-Implementation boundaries live in the [package READMEs](https://github.com/juspay/odu/tree/master/packages). Public clients use the shared Surface contract; the service coordinates runs, and each run's coordinator owns execution and evidence.
-
-The migration shipped in [#104](https://github.com/juspay/odu/pull/104) and [#105](https://github.com/juspay/odu/pull/105). The [archived plan](../agent-plan/) preserves the original proposal; it is not a current implementation assignment.
