@@ -295,10 +295,13 @@ let driven: string | null = null;
  * thing that knows which is. `null` when nothing answered, which is the
  * ordinary case and not a fault.
  */
-function stopService(odu: string): string | null {
+function stopService(odu: string, origin?: string): string | null {
   try {
     const said = spawnSync(odu, ["surface", "get", "service"], {
-      env: hermeticEnv,
+      env:
+        origin === undefined
+          ? hermeticEnv
+          : { ...hermeticEnv, ODU_WEB_ORIGIN: origin },
       encoding: "utf-8",
       maxBuffer: BIG,
     });
@@ -331,19 +334,33 @@ function stopService(odu: string): string | null {
  * about somebody else's process.
  */
 function claimOrigin(odu: string): void {
+  // EVERY SLOT, not just this world's. The band is derived from the pid, and on
+  // a machine that runs this suite over and over — a persistent CI runner, a
+  // developer's laptop — a previous run's pid can land on the same band. A slot
+  // this suite does not serve but does BIND (the tests that put a foreign
+  // listener on a port to see how odu meets one) then fails with `EADDRINUSE`
+  // and reports it as a defect in odu.
+  for (const slot of Object.keys(PORT_SLOT) as (keyof typeof PORT_SLOT)[]) {
+    claimPort(odu, suitePortFor(slot));
+  }
+}
+
+/** Take one port: evict whatever odu service is on it, and wait for it to let
+ *  go. Silent when the port is free, which is the ordinary case. */
+function claimPort(odu: string, port: number): void {
   // ASKED OF THE KERNEL, NOT OF ODU. Every odu command bootstraps its own
   // origin when nothing is serving it — that is the property `odu run` exists
-  // to have — so using one to check whether the port is free STARTS a daemon,
+  // to have — so using one to check whether a port is free STARTS a daemon,
   // and using one in a loop starts a daemon per iteration. This is what that
   // mistake looks like from outside: the eviction below killed the incumbent,
   // the probe brought it straight back, and fifteen seconds of that left a
   // machine covered in services nobody had asked for.
-  if (!portIsOpen()) return;
-  const home = stopService(odu);
+  if (!portIsOpen(port)) return;
+  const home = stopService(odu, `http://127.0.0.1:${port}`);
   // Wait for the PORT, not for the pid: a successor cannot bind until the
   // incumbent has let go, and that is the thing the next call is about to do.
   const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline && portIsOpen()) {
+  while (Date.now() < deadline && portIsOpen(port)) {
     // Synchronous by design — this runs inside `beforeAll`, before any test has
     // an opinion, and a spin here is cheaper than making every caller async.
     spawnSync("sleep", ["0.1"]);
@@ -356,10 +373,9 @@ function claimOrigin(odu: string): void {
   }
 }
 
-/** Is anything accepting on this world's port? A raw connect, so it cannot
- *  start what it is asking about. */
-function portIsOpen(): boolean {
-  const port = suitePortFor("blackBoxRuns");
+/** Is anything accepting on this port? A raw connect, so it cannot start what
+ *  it is asking about. */
+function portIsOpen(port: number): boolean {
   const probe = spawnSync(
     "bash",
     ["-c", `exec 3<>/dev/tcp/127.0.0.1/${port}`],
