@@ -333,25 +333,32 @@ export async function clearTheGate(opts: {
   const sleep = opts.sleep ?? ((ms: number) => delay(ms));
   const pollMs = opts.pollMs ?? 100;
   const drainMs = opts.drainMs ?? 15_000;
+  // A THROW FROM THE DRAIN CALL IS NOT A FAILED DRAIN, and reading it as one
+  // reported failure on the successful path. `core.drain` asks a process to
+  // stop; a process that stops promptly closes the socket it would have
+  // replied on, and the client sees `SocketCloseError: 1000` — a NORMAL
+  // closure — where it wanted a reply. That is the drain working perfectly.
+  //
+  // So the transport error is kept as evidence and nothing is concluded from
+  // it. Only the gate answers this question, because the gate is the thing a
+  // successor actually has to claim, and it says the same word whether the
+  // incumbent replied first or simply left.
+  let said: string | null = null;
   try {
     await drain(opts.home);
   } catch (err) {
-    return {
-      ok: false,
-      message:
-        `odu: the service on ${opts.origin} (pid ${opts.pid}) would not drain ` +
-        `— ${(err as Error).message}. It is not being killed: it may be ` +
-        "finishing a write. Stop it yourself and try again.",
-    };
+    said = (err as Error).message;
   }
   const drained = await until(() => gateFree(opts.home), drainMs, pollMs, sleep);
   if (!drained) {
     return {
       ok: false,
       message:
-        `odu: the service on ${opts.origin} accepted a drain but still holds ` +
-        `its gate after ${Math.round(drainMs / 1000)}s (pid ${opts.pid}). ` +
-        "Nothing was killed.",
+        `odu: the service on ${opts.origin} (pid ${opts.pid}) still holds its ` +
+        `gate ${Math.round(drainMs / 1000)}s after being asked to drain` +
+        (said === null ? "" : ` — ${said}`) +
+        ". It is not being killed: it may be finishing a write. Stop it " +
+        "yourself and try again.",
     };
   }
   return { ok: true };

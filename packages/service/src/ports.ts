@@ -54,6 +54,10 @@ export interface LaunchRequest {
   readonly noSnapshot: boolean;
   readonly noPost: boolean;
   readonly hostPins: readonly string[];
+  /** The caller's `$ODU_HOSTS`, or `null` when the caller had none. The
+   *  service is a per-user singleton: its own environment is a fact about the
+   *  shell that started it, never about the person asking for this run. */
+  readonly hostsFile: string | null;
   /** The caller said it really did mean to take this checkout from the run
    *  already in progress there. Carried through rather than consumed here: what
    *  superseding MEANS — cancel the incumbent, confirm it is gone, then claim

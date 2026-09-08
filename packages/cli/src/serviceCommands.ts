@@ -43,6 +43,7 @@
  * different act.
  */
 
+import { resolve } from "node:path";
 import { subscribe } from "@odu/execution/common/effectEdge";
 import { progressEvent } from "@odu/execution/common/presentation";
 import { STATUS_META } from "@odu/run-client/surface";
@@ -134,6 +135,18 @@ export async function runViaService(opts: RunOpts): Promise<number> {
         selectors: opts.selectors,
         platforms: opts.platforms,
         hostPins: opts.hostPins,
+        // THIS shell's `$ODU_HOSTS`, because this is the shell the person
+        // typed in. The service is a singleton somebody else may have
+        // started, and `loadHosts` runs in the coordinator it spawns — so a
+        // variable that is not carried here is a variable that stopped
+        // working the moment `odu run` became a client.
+        // Made absolute HERE, against the caller's cwd, because that is the
+        // only place the relative form has a meaning. `$ODU_HOSTS=hosts.json`
+        // has always meant "in the directory I am standing in".
+        ...(process.env.ODU_HOSTS === undefined ||
+        process.env.ODU_HOSTS === ""
+          ? {}
+          : { hostsFile: resolve(opts.cwd ?? process.cwd(), process.env.ODU_HOSTS) }),
         ...(opts.root === undefined ? {} : { root: opts.root }),
         noDeps: opts.noDeps,
         noStrict: opts.noStrict,

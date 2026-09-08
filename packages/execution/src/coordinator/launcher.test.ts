@@ -29,6 +29,7 @@
 import { describe, expect, it } from "bun:test";
 import type { RunScope } from "@odu/run-history/schema";
 import {
+  coordinatorEnv,
   type LaunchRequest,
   launchArgv,
   mayRelaunchDetached,
@@ -56,6 +57,7 @@ function request(over: Partial<LaunchRequest> = {}): LaunchRequest {
     noSnapshot: false,
     noPost: false,
     hostPins: [],
+    hostsFile: null,
     supersede: false,
     ...over,
   };
@@ -237,5 +239,36 @@ describe("when a launch may be tried again", () => {
     // would paper over an answer the caller is entitled to.
     expect(mayRelaunchDetached(detached, 1)).toBe(false);
     expect(mayRelaunchDetached(detached, 0)).toBe(false);
+  });
+});
+
+describe("the environment a coordinator is started in", () => {
+  // The service is a per-user SINGLETON. Somebody's shell started it — maybe
+  // days ago, maybe with `$ODU_HOSTS` pointing at their own builders — and
+  // every run since resolves its inventory in a child of that process. So the
+  // launcher's own environment is never evidence about the caller.
+  const daemon = { PATH: "/bin", ODU_HOSTS: "/daemons/hosts.json" };
+
+  it("gives the child the caller's hosts file, not this process's", () => {
+    const env = coordinatorEnv(request({ hostsFile: "/callers/hosts.json" }), daemon);
+    expect(env.ODU_HOSTS).toBe("/callers/hosts.json");
+  });
+
+  it("UNSETS it when the caller had none — omitting the key is not the same", () => {
+    // The whole bug in one assertion. A spread that skips an absent value
+    // leaves the daemon's variable standing, and the run silently fans out
+    // across the machines in a stranger's config. `null` is a decision.
+    const env = coordinatorEnv(request({ hostsFile: null }), daemon);
+    expect("ODU_HOSTS" in env).toBe(false);
+  });
+
+  it("carries everything else through untouched", () => {
+    const env = coordinatorEnv(request({ hostsFile: null }), daemon);
+    expect(env.PATH).toBe("/bin");
+  });
+
+  it("does not mutate the environment it was handed", () => {
+    coordinatorEnv(request({ hostsFile: null }), daemon);
+    expect(daemon.ODU_HOSTS).toBe("/daemons/hosts.json");
   });
 });

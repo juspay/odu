@@ -175,6 +175,8 @@ Define platform lanes in `~/.config/odu/hosts.json`, or point `$ODU_HOSTS` at an
 }
 ```
 
+`$ODU_HOSTS` is read from **your** shell, not the service's. Runs execute in a child of a per-user singleton that somebody's shell started — possibly days ago — so `odu run` sends your `$ODU_HOSTS` with the request (absolute, resolved against your cwd) rather than letting the daemon's environment decide where your work lands. Unset in your shell means unset for your run.
+
 Keys are Nix system tuples. Values are anything ssh can dial, or `localhost`. A bare `odu run` fans out to every configured platform. Platforms absent from an existing hosts file are intentionally omitted: a partial configuration is still a decision. Use `--platform P` to select a subset or `--host P=ADDR` to pin or add a lane for one run.
 
 ### Venue pools and execution slots

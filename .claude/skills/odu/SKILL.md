@@ -96,6 +96,7 @@ odu surface run_start --input '{"checkout":"/abs/path/to/repo","expectedSha":"'"
 { "checkout": "/abs/path/to/repo", "expectedSha": "<sha>", "requestId": "fix-lint-1" }
 // optional: selectors[], platforms[], hostPins[], root, noDeps,
 //           noStrict, noSnapshot, noPost, supersede
+// hostsFile is the CALLER's $ODU_HOSTS. Omit it — you have no shell.
 ```
 
 `selectors` are `recipe[@platform]` — `["ci::e2e"]`, `["fmt","nix"]`,
@@ -273,7 +274,7 @@ And say `passed` only from `settled: true`.
 
 | Verb | argv | MCP tool | Input | Answers |
 | --- | --- | --- | --- | --- |
-| start | `odu surface run_start --input '{…}' --json` | `run_start` | `checkout`, `expectedSha`, `requestId`, `selectors?`, `platforms?`, `hostPins?`, `root?`, `noDeps?`, `noStrict?`, `noSnapshot?`, `noPost?`, `supersede?` | `accepted`, `runId`, `replayed`, `sha`, `scope`, `endpoint`, `cursor`, `existing?` |
+| start | `odu surface run_start --input '{…}' --json` | `run_start` | `checkout`, `expectedSha`, `requestId`, `selectors?`, `platforms?`, `hostPins?`, `hostsFile?` (the caller's `$ODU_HOSTS`; agents omit it), `root?`, `noDeps?`, `noStrict?`, `noSnapshot?`, `noPost?`, `supersede?` | `accepted`, `runId`, `replayed`, `sha`, `scope`, `endpoint`, `cursor`, `existing?` |
 | wait | `odu surface run_wait --input '{…}' --json` | `run_wait` | `runId`, `after?`, `deadlineMs?` (30s default), `settle?`, `limit?` | `reason`, `settled`, `passed`, `outcome`, `failures[]`, `failuresTotal`, `cursor`, `remaining`, `reportingDebt[]`, `scope`, `sha` |
 | diagnose | `odu surface log_read --input '{…}' --json` | `log_read` | `key`, `offset?` (negative = tail), `limit?`, `waitMs?` (follow) | `text`, `offset`, `size`, `nextOffset`, `eof`, `complete`, `open` |
 | retry | `odu surface run_retry --input '{…}' --json` | `run_retry` | `runId`, `selector`, `requestId`, `expectAttempt?` | `mode`, `effectiveRun`, `parentRun`, `roots[]`, `resetDependants[]`, `scope`, `sha`, `cursor` |
@@ -404,15 +405,15 @@ The bridge dials the singleton, bootstraps it if nothing is serving, and
 projects the thirteen verbs and three resources. It starts no coordinator and
 holds no run authority, so a harness restarting it kills nothing.
 
-## Commands that stay local, deliberately
+## Nothing stays local
 
-Two commands do not go through the service, and this is a stated exception, not
-an oversight:
-
-| Command | Why local |
-| --- | --- |
-| `odu dump` | Pure `justfile` read — resolved pipeline as JSON. No execution, no socket, no catalog write. |
-| `odu graph` | Pure `justfile` read — dependency graph as Mermaid. Same. |
+Every public command goes through the service, including `odu dump` and
+`odu graph` — both are `pipeline_read`, and an agent can call that verb
+directly. They used to be listed here as a deliberate exception on the grounds
+that a `justfile` read touches no run. That was wrong: what odu will run for a
+checkout is a question `run_start` answers through the same engine, so a face
+answering it locally is a SECOND RESOLVER of the one thing you most need to be
+able to trust — and it could disagree with the run it is meant to predict.
 
 ## Hosts
 
@@ -426,7 +427,18 @@ Keys are Nix system tuples; values are anything ssh dials, a list of them (a
 pool), or `localhost`. A run that resolves **zero** lanes is refused, never
 defaulted to `localhost`. `hostPins` (`"P=ADDR"`) pins one box for one run;
 `venue_probe` shows the inventory from any face; `odu hosts [platform…]` is its
-terminal spelling. A lane host needs ssh + Nix + outbound https,
+terminal spelling.
+
+**`$ODU_HOSTS` belongs to the caller, and travels with the request.** The
+service is a per-user singleton, so the process that starts your coordinator is
+not the one you typed into — an inherited `$ODU_HOSTS` would mean "whichever
+shell started the daemon, possibly days ago". `odu run` therefore sends its own,
+absolute, as `run_start`'s `hostsFile`, and absent means UNSET on the child
+rather than "use the daemon's". **An agent should omit it**: you have no shell
+whose `$ODU_HOSTS` is a fact about anything, and omitting it is what selects
+`~/.config/odu/hosts.json`.
+
+A lane host needs ssh + Nix + outbound https,
 and the source arrives by `git fetch` of the **pushed** SHA — remote lanes
 cannot test unpushed commits, so push first.
 

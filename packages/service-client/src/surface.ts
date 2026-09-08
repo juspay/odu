@@ -587,6 +587,24 @@ const StartInputSchema = Schema.Struct({
   platforms: Schema.optionalKey(Schema.Array(Schema.String)),
   /** `P=ADDR` host pins, the same spelling `odu run --host` takes. */
   hostPins: Schema.optionalKey(Schema.Array(Schema.String)),
+  /**
+   * The CALLER's `$ODU_HOSTS`, forwarded verbatim.
+   *
+   * The service is a per-user singleton, so the process that launches the
+   * coordinator is not the process the person typed into, and `loadHosts`
+   * reads an environment. Without this field a run resolves its inventory
+   * from whatever shell happened to start the daemon — which is how a
+   * hermetic test that pins one platform still fanned out to the operator's
+   * real builders, and how `$ODU_HOSTS` stopped meaning anything at all.
+   *
+   * Only this one variable travels: the rest of the chain is `homedir()`, and
+   * the daemon is the same user on the same machine, so forwarding the
+   * variable makes the coordinator's chain EXACTLY the caller's chain.
+   *
+   * Absent means the caller had it unset — which the launcher honours by
+   * UNSETTING it on the child, never by leaving the daemon's value in place.
+   */
+  hostsFile: Schema.optionalKey(Schema.String),
   root: Schema.optionalKey(Schema.String),
   noDeps: Schema.optionalKey(Schema.Boolean),
   noStrict: Schema.optionalKey(Schema.Boolean),

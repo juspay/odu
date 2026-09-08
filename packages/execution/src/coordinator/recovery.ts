@@ -792,6 +792,11 @@ async function relaunch(
     // `scope.platforms` is: a replay that resolved placement afresh would be a
     // different run wearing the same lineage.
     hostPins,
+    // A relaunch is decided HERE, by the service, from a recorded run — there
+    // is no caller shell in the picture, so this process's chain is the honest
+    // one and is named rather than inherited. The pins above are what actually
+    // constrain placement; this only resolves the pools they name.
+    hostsFile: process.env.ODU_HOSTS ?? null,
     // A REPLAY never takes a checkout from whatever is running there now. The
     // run it replays has finalized; the thing occupying that checkout is
     // somebody else's, and the honest answer is the coordinator's ordinary

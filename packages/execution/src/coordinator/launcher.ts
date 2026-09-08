@@ -62,6 +62,18 @@ export interface LaunchRequest {
   readonly noSnapshot: boolean;
   readonly noPost: boolean;
   readonly hostPins: readonly string[];
+  /**
+   * The value `$ODU_HOSTS` must have in the coordinator — the CALLER's, not
+   * this process's.
+   *
+   * A launcher runs inside a per-user singleton service, so `process.env` here
+   * belongs to whichever shell started the daemon, possibly days ago. The
+   * coordinator resolves its host inventory by reading an environment
+   * (`./hosts`), so inheriting ours silently substitutes that shell's
+   * inventory for the caller's. `null` is a DECISION and not a default: it
+   * means the caller had no `$ODU_HOSTS`, and the child must have none either.
+   */
+  readonly hostsFile: string | null;
   /** Take the checkout from a run that is already in progress there, rather
    *  than being refused by it. The coordinator owns what that MEANS (cancel the
    *  incumbent, confirm it is gone, then claim the lock — see `./run`), and it
@@ -296,10 +308,31 @@ async function attemptLaunch(
  * are different sentences, and a fallback that stayed quiet would print the
  * first while meaning the second.
  */
+/**
+ * The environment a coordinator is started in: this process's, with the ONE
+ * variable that decides where the run's work lands replaced by the caller's.
+ *
+ * Pure and exported because the interesting case is the one that is invisible
+ * in a passing test — `hostsFile: null` has to DELETE the key, not skip the
+ * assignment. A spread that merely omits an absent value leaves the daemon's
+ * own `$ODU_HOSTS` in place, which is the leak this exists to close, and it
+ * looks identical at the call site.
+ */
+export function coordinatorEnv(
+  request: LaunchRequest,
+  base: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  const env = { ...base };
+  if (request.hostsFile === null) delete env.ODU_HOSTS;
+  else env.ODU_HOSTS = request.hostsFile;
+  return env;
+}
+
 export function packagedLauncher(): RunLauncher {
   return async (request) => {
     const endpoint = runSocketPath(request.checkout);
-    const first = await attemptLaunch(request, endpoint, process.env, lifetimeOf);
+    const base = coordinatorEnv(request, process.env);
+    const first = await attemptLaunch(request, endpoint, base, lifetimeOf);
     if (!first.managerRefused) return first.receipt;
     // The opt-out the plan already honours, set for this one retry — so the
     // fallback re-uses the decision rather than adding a second way to spell it.
@@ -307,7 +340,7 @@ export function packagedLauncher(): RunLauncher {
     const second = await attemptLaunch(
       request,
       endpoint,
-      { ...process.env, ODU_NO_SYSTEMD_RUN: "1" },
+      { ...base, ODU_NO_SYSTEMD_RUN: "1" },
       (plan) =>
         `the coordinator is a detached process group — systemd-run refused ` +
         `the unit, so odu started it directly (${plan.reason}). It shares this ` +

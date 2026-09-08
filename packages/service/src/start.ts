@@ -309,6 +309,21 @@ async function start(input: StartInput, deps: StartDeps): Promise<Outcome> {
         "the daemon's working directory, which is not yours.",
     );
   }
+  // The same rule, for the same reason, one field over. `hostsFile` is read by
+  // the COORDINATOR — a child of the daemon, whose cwd is the checkout — so a
+  // relative one would name a file inside the repository being tested rather
+  // than the one the caller's shell meant. That is a config a run could ship
+  // its own copy of, which is the one shape this must never allow.
+  if (input.hostsFile !== undefined && !isAbsolute(input.hostsFile)) {
+    return refuseAndRecord(
+      deps,
+      input.requestId,
+      "checkout_refused",
+      `odu: $ODU_HOSTS is "${input.hostsFile}", which is not an absolute ` +
+        "path — run.start resolves it in the service, where your working " +
+        "directory does not exist. Point $ODU_HOSTS at an absolute path.",
+    );
+  }
   const facts = deps.probeCheckout(input.checkout);
   if (!facts.isRepo) {
     return refuseAndRecord(
@@ -380,6 +395,10 @@ async function start(input: StartInput, deps: StartDeps): Promise<Outcome> {
     noSnapshot: input.noSnapshot ?? false,
     noPost: input.noPost ?? false,
     hostPins: [...(input.hostPins ?? [])],
+    // Absent on the wire means the CALLER had no `$ODU_HOSTS` — which is a
+    // fact to carry, not a gap to fill from this process. Filling it is how
+    // the daemon's shell came to decide where other people's runs execute.
+    hostsFile: input.hostsFile ?? null,
     // The caller's explicit "take this checkout". The coordinator does the
     // cancel-then-confirm; this only has to not lose the word.
     supersede: input.supersede ?? false,
