@@ -128,6 +128,9 @@ export const PORT_SLOT = {
    *  had, write into the developer's real catalog, and — on a persistent CI
    *  runner with two jobs in flight — be served by the OTHER job's build. */
   blackBoxRuns: 11,
+  /** `web.e2e.test.ts` — a daemon whose OWN `$ODU_HOSTS` is unreadable, so a
+   *  replay that consulted it instead of the caller's would say so. */
+  callerInventory: 12,
 } as const;
 
 /** The port for one named slot in THIS suite's block. */

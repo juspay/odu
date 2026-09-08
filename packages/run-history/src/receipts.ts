@@ -383,3 +383,28 @@ export function digestOf(parts: readonly (string | number | boolean)[]): string 
   }
   return hash.toString(36).padStart(7, "0");
 }
+
+/**
+ * ONE OPTIONAL FIELD, spelled so that "nobody said" and "said nothing" are two
+ * different requests.
+ *
+ * `value ?? ""` is the obvious way to get an optional string into a digest and
+ * it is wrong wherever absence carries a meaning of its own — which, on this
+ * service, is everywhere the wire uses the three-readings idiom. `hostsFile` is
+ * the case that made it visible: ABSENT means "use the daemon's `$ODU_HOSTS`"
+ * and `""` means "the caller's shell had none, start at `~/.config`", so a
+ * digest that collapsed them told a caller asking about one fleet that its
+ * request had already succeeded — against the other.
+ *
+ * The point is not the encoding, which is trivial; it is that a REPLAY and a
+ * CONFLICT are the two answers a receipt exists to keep apart, and the digest
+ * is the only thing that separates them. A part that arrives here already
+ * flattened cannot be recovered downstream.
+ *
+ * `set:` cannot be forged into `absent` — every present value is prefixed, so
+ * the caller who literally passes `"absent"` gets `set:absent` — and the parts
+ * are NUL-joined, so no value can reach across into its neighbour.
+ */
+export function optionalPart(value: string | undefined): string {
+  return value === undefined ? "absent" : `set:${value}`;
+}

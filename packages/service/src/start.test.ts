@@ -197,6 +197,38 @@ describe("run.start", () => {
     expect(d.ports.launches).toHaveLength(1);
   });
 
+  it("refuses one id used for two different INVENTORIES", async () => {
+    // A start carries the caller's `$ODU_HOSTS` and hands it to the
+    // coordinator, so it decides which machines the run's pins are names of —
+    // and it was missing from the digest entirely. Two starts against two
+    // fleets under one id replayed as one, and the caller was handed the other
+    // fleet's run while believing its own had been accepted.
+    const w = open();
+    const d = deps(w);
+    await d.run({ hostsFile: "/fleets/a.json" });
+    const conflict = await d.run({ hostsFile: "/fleets/b.json" });
+    expect(conflict._tag).toBe("Failure");
+    if (conflict._tag !== "Failure") return;
+    expect((conflict.failure as ServiceRefused).code).toBe("request_conflict");
+    expect(d.ports.launches).toHaveLength(1);
+    expect(d.ports.launches[0]?.hostsFile).toBe("/fleets/a.json");
+  });
+
+  it("refuses an omitted inventory repeated as an explicit empty one", async () => {
+    // The reading that has no other spelling: ABSENT means "use the daemon's
+    // `$ODU_HOSTS`" and `""` means "the caller's shell had none". The launch
+    // request keeps them apart (`null` against `""`), so the digest must too.
+    const w = open();
+    const d = deps(w);
+    await d.run();
+    const conflict = await d.run({ hostsFile: "" });
+    expect(conflict._tag).toBe("Failure");
+    if (conflict._tag !== "Failure") return;
+    expect((conflict.failure as ServiceRefused).code).toBe("request_conflict");
+    expect(d.ports.launches).toHaveLength(1);
+    expect(d.ports.launches[0]?.hostsFile).toBeNull();
+  });
+
   it("refuses a request id outside the grammar", async () => {
     const w = open();
     const d = deps(w);

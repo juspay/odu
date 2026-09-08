@@ -61,7 +61,7 @@ import type { ServicePorts } from "./ports";
 import { reconcileRequests } from "./reconcile";
 import { createRegistry, type RunRegistry } from "./registry";
 import { onceOnly, requestStore } from "./requests";
-import { digestOf } from "@odu/run-history/receipts";
+import { digestOf, optionalPart } from "@odu/run-history/receipts";
 import { retryRun } from "./retry";
 import { startRun } from "./start";
 import { readRun, waitForRun } from "./wait";
@@ -379,7 +379,11 @@ export function createOduService(opts: ServiceOptions): OduService {
                       digest: digestOf([
                         input.checkout,
                         [...(input.platforms ?? [])].join(","),
-                        input.hostsFile ?? "",
+                        // Through `optionalPart`, because the port below keeps
+                        // absent and `""` apart (`?? null`) and a digest that
+                        // did not would answer a request about one fleet with
+                        // a hold taken on another.
+                        optionalPart(input.hostsFile),
                         input.noWait ?? false,
                       ]),
                       now: now(),
@@ -430,7 +434,7 @@ export function createOduService(opts: ServiceOptions): OduService {
                       digest: digestOf([
                         input.checkout,
                         [...(input.platforms ?? [])].join(","),
-                        input.hostsFile ?? "",
+                        optionalPart(input.hostsFile),
                       ]),
                       now: now(),
                     },
@@ -488,9 +492,13 @@ export function createOduService(opts: ServiceOptions): OduService {
                       kind: "protect.apply",
                       digest: digestOf([
                         input.checkout,
-                        input.branch ?? "",
+                        // `branch` too: absent means the repo's default branch,
+                        // whatever that is today, and the port keeps the two
+                        // apart the same way. A ruleset is written to exactly
+                        // one branch.
+                        optionalPart(input.branch),
                         [...(input.platforms ?? [])].join(","),
-                        input.hostsFile ?? "",
+                        optionalPart(input.hostsFile),
                         input.create ?? false,
                       ]),
                       now: now(),

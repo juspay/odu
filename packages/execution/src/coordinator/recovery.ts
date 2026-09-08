@@ -777,9 +777,19 @@ async function relaunch(
   // PARENT's inventory, handed to it explicitly below rather than inherited —
   // so what happens here is a check, not a decision. A recovery that picked
   // the lanes would be the second scheduler by another route.
+  //
+  // `hostsFile` reaches `loadHosts` VERBATIM, including `""`. The two spellings
+  // are not the same question: `loadHosts("")` starts the chain at `~/.config`
+  // because the caller's shell named no file, and `loadHosts(undefined)`
+  // consults THIS PROCESS's `$ODU_HOSTS` — the daemon's. Translating one into
+  // the other here validated the replay against the service's fleet while
+  // handing the child the parent's, so the check and the run disagreed about
+  // their inputs: a caller on the default inventory, retried by a daemon
+  // started with an empty one, was refused `no_venue` for a placement that was
+  // still perfectly expressible.
   try {
     fanoutPools(
-      (input.hosts ?? (() => loadHosts(hostsFile === "" ? undefined : hostsFile)))(),
+      (input.hosts ?? (() => loadHosts(hostsFile)))(),
       hostPins,
       scope.platforms,
     );

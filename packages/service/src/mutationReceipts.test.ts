@@ -285,3 +285,180 @@ describe("protect.apply happens once", () => {
     expect(ports.protects).toHaveLength(2);
   });
 });
+
+/**
+ * WHICH FLEET, and why a receipt has to be able to tell.
+ *
+ * `hostsFile` reaches these three verbs with three readings — a PATH names a
+ * file, `""` says the caller's shell had none (so resolution starts at
+ * `~/.config`), ABSENT says nobody said, which is the only reading under which
+ * the daemon's own `$ODU_HOSTS` answers. The ports keep all three apart
+ * (`input.hostsFile ?? null`); the digests collapsed the first two into `""`.
+ *
+ * A digest is the ONLY thing standing between a replay and a conflict, so a
+ * collapsed one is not a cosmetic loss: a caller that asked about fleet B under
+ * an id it had used for fleet A was told, with `replayed: true`, that its
+ * request had already succeeded — and handed A's answer, describing machines it
+ * had not asked about. Every test below asserts the refusal AND that the port
+ * was not reached, because "told about a conflict" and "quietly acted on"
+ * differ only in the second.
+ */
+describe("a receipt knows which inventory it was for", () => {
+  const HOLD = () => ({
+    ok: true as const,
+    results: [
+      {
+        platform: PLATFORM,
+        status: "held" as const,
+        host: "builder-1",
+        holderPid: 4242,
+        waitingBehind: null,
+        message: "held",
+      },
+    ],
+  });
+
+  it("refuses an omitted override repeated as an explicit empty one", async () => {
+    // THE REPRODUCTION. Omitted means "use the daemon's `$ODU_HOSTS`"; `""`
+    // means "bypass it". Two fleets, and the second call was being told it had
+    // already run on the first.
+    open();
+    const { service, ports } = serve(recordingPorts({ hold: HOLD }));
+    const base = { checkout: CHECKOUT, platforms: [PLATFORM], requestId: "fleet-1" };
+
+    const first = await call(service.surface.venue.hold(base));
+    const other = await call(
+      service.surface.venue.hold({ ...base, hostsFile: "" }),
+    );
+
+    expect(first.ok).toBe(true);
+    expect(other.ok).toBe(false);
+    if (!other.ok) expect(other.code).toBe("request_conflict");
+    // The port saw the FIRST request and nothing else. A `replayed: true` here
+    // would have been the answer to a question nobody asked.
+    expect(ports.holds).toHaveLength(1);
+    expect(ports.holds[0]?.hostsFile).toBeNull();
+  });
+
+  it("refuses two different explicit inventories under one id", async () => {
+    open();
+    const { service, ports } = serve(recordingPorts({ hold: HOLD }));
+    const base = { checkout: CHECKOUT, platforms: [PLATFORM], requestId: "fleet-2" };
+
+    await call(service.surface.venue.hold({ ...base, hostsFile: "/fleets/a.json" }));
+    const other = await call(
+      service.surface.venue.hold({ ...base, hostsFile: "/fleets/b.json" }),
+    );
+
+    expect(other.ok).toBe(false);
+    if (!other.ok) expect(other.code).toBe("request_conflict");
+    expect(ports.holds).toHaveLength(1);
+    expect(ports.holds[0]?.hostsFile).toBe("/fleets/a.json");
+  });
+
+  it("still replays the SAME inventory, however it was spelled", async () => {
+    // The other half of the contract, and the one a too-eager fix breaks: a
+    // genuine repeat is still a repeat. `""` twice is one request.
+    open();
+    const { service, ports } = serve(recordingPorts({ hold: HOLD }));
+    const request = {
+      checkout: CHECKOUT,
+      platforms: [PLATFORM],
+      requestId: "fleet-3",
+      hostsFile: "",
+    };
+
+    const first = await call(service.surface.venue.hold(request));
+    const again = await call(service.surface.venue.hold(request));
+
+    expect(first.ok).toBe(true);
+    expect(again.ok).toBe(true);
+    if (again.ok) expect(again.value.replayed).toBe(true);
+    expect(ports.holds).toHaveLength(1);
+    expect(ports.holds[0]?.hostsFile).toBe("");
+  });
+
+  it("keeps the distinction ACROSS A RESTART, because the receipt is on disk", async () => {
+    // A receipt outlives the service that wrote it — that is the whole reason
+    // it is a file — so the digest has to survive the trip too. A daemon that
+    // was restarted between a lost reply and its retry is exactly when a caller
+    // repeats an id, and it must not be the moment the distinction is lost.
+    const w = open();
+    const first = serve(recordingPorts({ hold: HOLD }));
+    const base = { checkout: CHECKOUT, platforms: [PLATFORM], requestId: "fleet-4" };
+    expect((await call(first.service.surface.venue.hold(base))).ok).toBe(true);
+    await first.close();
+
+    // A NEW service over the same state root: same receipts, no memory.
+    expect(w.requestsRoot).not.toBe("");
+    const second = serve(recordingPorts({ hold: HOLD }));
+    const other = await call(
+      second.service.surface.venue.hold({ ...base, hostsFile: "" }),
+    );
+
+    expect(other.ok).toBe(false);
+    if (!other.ok) expect(other.code).toBe("request_conflict");
+    // And the restarted service performed nothing.
+    expect(second.ports.holds).toHaveLength(0);
+    await second.close();
+  });
+
+  it("refuses a protect repeated against a different inventory", async () => {
+    // The same shape with a branch's merge policy as the resource. `protect`
+    // resolves its contexts against the fleet it is given, so the same id
+    // against a different one is a request to write a DIFFERENT ruleset.
+    open();
+    const { service, ports } = serve(
+      recordingPorts({
+        protect: () => ({
+          ok: true as const,
+          facts: {
+            repo: "juspay/odu",
+            branch: "master",
+            contexts: ["unit@x86_64-linux"],
+            rulesetId: 7,
+            applied: true,
+            created: false,
+            derivedFrom: null,
+            detail: null,
+          },
+        }),
+      }),
+    );
+    const base = {
+      checkout: CHECKOUT,
+      platforms: [PLATFORM],
+      requestId: "protect-fleet",
+    };
+
+    await call(service.surface.protect.apply(base));
+    const other = await call(
+      service.surface.protect.apply({ ...base, hostsFile: "" }),
+    );
+
+    expect(other.ok).toBe(false);
+    if (!other.ok) expect(other.code).toBe("request_conflict");
+    expect(ports.protects).toHaveLength(1);
+  });
+
+  it("refuses a release repeated against a different inventory", async () => {
+    // Release carries the same field for the same reason, so it gets the same
+    // answer. One shared mutation contract, not three that happen to agree.
+    open();
+    const { service, ports } = serve(recordingPorts());
+    const base = {
+      checkout: CHECKOUT,
+      platforms: [PLATFORM],
+      requestId: "release-fleet",
+    };
+
+    await call(service.surface.venue.release(base));
+    const other = await call(
+      service.surface.venue.release({ ...base, hostsFile: "" }),
+    );
+
+    expect(other.ok).toBe(false);
+    if (!other.ok) expect(other.code).toBe("request_conflict");
+    expect(ports.releases).toHaveLength(1);
+  });
+});

@@ -29,7 +29,7 @@
  * writes.
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, describe, expect, it } from "bun:test";
@@ -955,6 +955,80 @@ describe("a replay runs where its parent was allowed to run", () => {
     );
 
     expect(launcher.calls[0]?.hostsFile).toBe("");
+  });
+
+  it("checks that caller against the CALLER's chain, through the real resolver", async () => {
+    // THE SAME FACT, one layer down, and the layer is the point: every other
+    // test in this block injects `hosts`, so the recorded value's journey into
+    // `loadHosts` is the one step they all step over. It was wrong there.
+    //
+    // `""` was translated to `undefined` on the way in — which does not mean
+    // "no file", it means "ask this process", and this process is the daemon.
+    // So the pre-check resolved the SERVICE's inventory while the child was
+    // handed the caller's: two different fleets, one of them never named by
+    // anybody involved in the run. A caller on the ordinary `~/.config` chain,
+    // retried by a service started with `$ODU_HOSTS` pointing somewhere else,
+    // was refused `no_venue` for a placement that was still expressible.
+    //
+    // The suite's ambient `$ODU_HOSTS` (`HOSTLESS`, an empty config) IS the
+    // misconfigured daemon here, so all this test supplies is the caller's own
+    // side of the chain.
+    const home = mkdtempSync(join(tmpdir(), "odu-recovery-home-"));
+    dirs.push(home);
+    mkdirSync(join(home, ".config", "odu"), { recursive: true });
+    writeFileSync(
+      join(home, ".config", "odu", "hosts.json"),
+      JSON.stringify({ [PLATFORM]: ["builder-1"] }),
+    );
+    const homeWas = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const root = tmpCatalog();
+      aFinishedRun(root, { hostsFile: "" });
+      const launcher = stubLauncher();
+
+      // NO injected `hosts`: `retryRun` rather than this file's `retry`, so the
+      // resolver under test is the real one.
+      accepted(
+        await retryRun({
+          runId: PARENT_RUN,
+          selector: "unit",
+          catalog: { root },
+          launcher: launcher.launcher,
+        }),
+      );
+
+      expect(launcher.calls[0]?.hostsFile).toBe("");
+    } finally {
+      if (homeWas === undefined) delete process.env.HOME;
+      else process.env.HOME = homeWas;
+    }
+  });
+
+  it("checks a recorded PATH against that file, through the real resolver", async () => {
+    // The other half of the same seam, and the one a daemon actually meets: the
+    // parent named a fleet, the service was started against a different one,
+    // and the pre-check has to read the parent's. The daemon's is the suite's
+    // ambient `HOSTLESS` — present, and configuring nothing — so a check that
+    // consulted it would refuse `no_venue` here.
+    const fleetDir = mkdtempSync(join(tmpdir(), "odu-recovery-fleet-"));
+    dirs.push(fleetDir);
+    const fleet = join(fleetDir, "hosts.json");
+    writeFileSync(fleet, JSON.stringify({ [PLATFORM]: ["builder-1"] }));
+    const root = tmpCatalog();
+    aFinishedRun(root, { hostsFile: fleet });
+    const launcher = stubLauncher();
+
+    accepted(
+      await retryRun({
+        runId: PARENT_RUN,
+        selector: "unit",
+        catalog: { root },
+        launcher: launcher.launcher,
+      }),
+    );
+
+    expect(launcher.calls[0]?.hostsFile).toBe(fleet);
   });
 
   it("refuses a record that predates inventory evidence, and starts nothing", async () => {

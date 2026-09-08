@@ -278,12 +278,19 @@ export async function startWebService(oduBin: string): Promise<WebWorld> {
 export async function startWebServiceViaCommand(
   oduBin: string,
   port: number = suitePortFor("commandDaemon"),
+  envOver: NodeJS.ProcessEnv = {},
 ): Promise<WebWorld> {
   // A different port from the forked-daemon world, so the two coexist — which
   // they can only do because the gate is derived from the origin. A caller that
   // needs a world of its very own (the lifecycle gates kill and restart their
   // daemon, which no other test may be sharing) names its own slot.
-  const { root, origin, env } = privateWorld(port);
+  //
+  // `envOver` is how a caller states a DAEMON environment that differs from its
+  // clients'. Not a convenience: a per-user singleton runs work on behalf of
+  // callers whose environment is not its own, and a suite that could only ever
+  // give the two the same one cannot say what happens when they diverge.
+  const { root, origin, env: worldEnv } = privateWorld(port);
+  const env = { ...worldEnv, ...envOver };
   const started = spawnSync(oduBin, ["web", "--background"], {
     env,
     encoding: "utf-8",

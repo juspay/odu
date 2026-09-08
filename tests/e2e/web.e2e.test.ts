@@ -23,7 +23,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { buildOduBinary, cleanup } from "./harness";
+import { buildOduBinary, cleanup, currentNixSystem, scratchDir } from "./harness";
 import {
   daemonLog,
   headOf,
@@ -32,6 +32,7 @@ import {
   runSocketExists,
   SHARED_TOOLS,
   suitePort,
+  suitePortFor,
   startWebService,
   startWebServiceViaCommand,
   surfaceCall,
@@ -857,5 +858,104 @@ describe("`odu web --background` starts a service that can run CI", () => {
       0,
     );
     expect(settled.passed).toBe(false);
+  }, 900_000);
+});
+
+/**
+ * A REPLAY RESOLVES THE CALLER'S INVENTORY, NOT THE DAEMON'S.
+ *
+ * The service is a per-user singleton, so `$ODU_HOSTS` at the moment a run
+ * started is a fact about somebody's shell and has nothing to do with the shell
+ * the daemon was started in. A run records the caller's; a replay is checked
+ * against the recorded one and the child is handed the recorded one.
+ *
+ * Three readings, and the middle one is what this gate is about: a PATH names a
+ * file, `""` says the caller's shell named none (so resolution starts at
+ * `~/.config`), and ABSENT says nobody said, which is the only reading under
+ * which the daemon's own environment answers. `""` was being translated into
+ * absent on the way into the pre-check — so validation consulted the service's
+ * fleet while execution got the caller's, and the two disagreed about their
+ * inputs.
+ *
+ * Stated here by giving the DAEMON an `$ODU_HOSTS` it cannot even read. Nothing
+ * in a correct replay ever opens that file; a replay that consulted it refuses
+ * with `no_venue` naming a parse error, which is a sentence about a fleet
+ * nobody in this run ever named. Packaged, because the divergence only exists
+ * where the client and the service are separate processes.
+ */
+describe("a replay resolves the caller's inventory", () => {
+  /** One node, so the run settles in seconds; the placement is what is on
+   *  trial, not the DAG. */
+  const SOLO = `[metadata("ci")]
+default: solo
+
+solo:
+    echo "solo ok"
+`;
+  let alien: WebWorld | null = null;
+
+  afterAll(() => alien?.dispose());
+
+  it("replays a caller who had no hosts file, against a daemon whose own is unreadable", async () => {
+    const brokenDir = scratchDir("odu-e2e-daemon-hosts-");
+    const broken = join(brokenDir, "hosts.json");
+    writeFileSync(broken, "{ this is not JSON");
+    alien = await startWebServiceViaCommand(
+      odu,
+      suitePortFor("callerInventory"),
+      { ODU_HOSTS: broken },
+    );
+
+    const dir = fixture(SOLO);
+    // `hostsFile: ""` is the caller SAYING its shell had none — the reading the
+    // wire carries and the manifest records. The pin is what makes the run
+    // hermetic without one: `--host P=ADDR` upserts a pool on top of whatever
+    // the chain resolved, so this does not depend on the machine having a
+    // `~/.config/odu/hosts.json` (or on what is in one).
+    const { runId } = startOrExplain(alien, {
+      checkout: dir,
+      expectedSha: headOf(dir),
+      requestId: "alien-start",
+      noPost: true,
+      hostsFile: "",
+      // The pin AND the slice. `""` means resolution starts at `~/.config`, so
+      // on a developer's machine the chain resolves a real fleet — and an
+      // unsliced run would then fan out onto whatever platforms that file
+      // configures, which is somebody's build farm rather than this test's
+      // subject. One platform, pinned to localhost, on every machine.
+      platforms: [currentNixSystem()],
+      hostPins: [`${currentNixSystem()}=localhost`],
+    });
+    const settled = await until(
+      `run ${runId} to settle`,
+      () => {
+        const waited = verb(alien as WebWorld, "run_wait", {
+          runId,
+          deadlineMs: 20_000,
+        });
+        if (waited.status !== 0) return null;
+        const value = waited.json as { settled: boolean; passed: boolean };
+        return value.settled ? value : null;
+      },
+      300_000,
+      0,
+    );
+    expect(settled.passed).toBe(true);
+
+    // THE ASSERTION. A finalized run, so this is the replay path: the recorded
+    // `""` is checked against the caller's chain and handed to the child. A
+    // replay that read the daemon's `$ODU_HOSTS` instead would refuse here,
+    // and its refusal would quote a JSON parse error from a file this run
+    // never had anything to do with.
+    const retried = verb(alien, "run_retry", {
+      runId,
+      selector: "solo",
+      requestId: "alien-retry",
+    });
+    expect(retried.stderr).not.toContain("no_venue");
+    expect(retried.status).toBe(0);
+    const receipt = retried.json as { mode: string; parentRun: string };
+    expect(receipt.mode).toBe("relaunched");
+    expect(receipt.parentRun).toBe(runId);
   }, 900_000);
 });

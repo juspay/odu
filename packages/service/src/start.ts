@@ -48,6 +48,7 @@ import {
   digestOf,
   isRequestId,
   markDispatched,
+  optionalPart,
   reconcileStart,
   type ReceiptStore,
 } from "./requests";
@@ -92,6 +93,15 @@ export function digestOfRequest(input: StartInput, scope: RunScope): string {
     scope.root ?? "",
     scope.noDeps,
     (input.hostPins ?? []).join(","),
+    // THE FLEET those pins are names in — absent from this digest entirely
+    // until the three venue verbs were audited for the same fault. Pins say
+    // WHICH BOX; the inventory says which fleet that name resolves in, so a
+    // start repeated under one id against a different inventory is a request
+    // to run somewhere else — a conflict to be told about, not a replay of the
+    // first fleet's run. `optionalPart` rather than `?? ""` because absent
+    // (use the daemon's `$ODU_HOSTS`) and `""` (the caller's shell had none)
+    // reach the coordinator as different environments.
+    optionalPart(input.hostsFile),
     input.noStrict ?? false,
     input.noSnapshot ?? false,
     input.noPost ?? false,
