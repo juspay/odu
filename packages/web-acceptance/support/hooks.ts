@@ -97,7 +97,7 @@ BeforeAll({ timeout: RUN_SETUP_TIMEOUT }, async () => {
       "PLAYWRIGHT_BROWSERS_PATH is unset. This suite drives a REAL browser and " +
         "never skips: a browser gate that can skip is a gate that grades nothing " +
         "on the machine where it matters most. Get the browsers from nixpkgs — " +
-        "`just web-acceptance` does it for you, or enter the shell yourself with " +
+        "`just e2e-web` does it for you, or enter the shell yourself with " +
         "`nix develop .#e2e --accept-flake-config`.",
     );
   }

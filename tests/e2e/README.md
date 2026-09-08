@@ -32,10 +32,13 @@ tests/e2e/
 Run locally:
 
 ```sh
-bun run test:e2e         # bun test tests/e2e
+bun run test:e2e-cli     # bun test tests/e2e
+just e2e-cli             # the same suite, against a freshly nix-built odu
+just e2e                 # BOTH end-to-end suites: this one and e2e-web
 ```
 
-In CI it's the `e2e` step in `ci/mod.just`.
+In CI it's the `e2e-cli` step in `ci/mod.just`. The browser suite is `e2e-web`
+beside it; the two are one gate with two drivers, which is what the names say.
 
 ## How a fixture works
 
@@ -75,7 +78,7 @@ nothing at all.
 That coverage now lives in [`packages/web-acceptance`](../../packages/web-acceptance/README.md):
 Gherkin scenarios driven through Playwright, against this same nix-built binary,
 with the browsers supplied by nixpkgs. It is a **required** leg on both platforms
-(`ci/mod.just`'s `web-acceptance`) and it never skips — a machine with no
+(`ci/mod.just`'s `e2e-web`) and it never skips — a machine with no
 browsers fails it with the sentence that gets them.
 
 ## Deliberate tradeoffs

@@ -6,7 +6,8 @@ way through the page; nothing here calls a surface verb to do what a control
 does.
 
 ```sh
-just web-acceptance                      # everything, browsers and binary included
+just e2e-web                             # everything, browsers and binary included
+just e2e                                 # this suite and e2e-cli, both
 
 # or, once inside the e2e shell:
 nix develop .#e2e --accept-flake-config

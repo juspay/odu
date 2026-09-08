@@ -56,7 +56,7 @@
         });
       # Two shells, and the second IS the first plus browsers. Playwright's
       # browser set is a large closure every non-browser leg would realise for
-      # nothing, so `just web-acceptance` enters `.#e2e` and everything else
+      # nothing, so `just e2e-web` enters `.#e2e` and everything else
       # stays in `default`.
       #
       # The attrs go at the TOP level rather than inside an `env = { }` block,

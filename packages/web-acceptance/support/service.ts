@@ -42,7 +42,7 @@ const BIG = 256 * 1024 * 1024;
 /**
  * The `odu` under test.
  *
- * `ODU_BIN` is set by `just web-acceptance`, which builds it first. There is no
+ * `ODU_BIN` is set by `just e2e-web`, which builds it first. There is no
  * search of PATH either: a developer's installed `odu` is a DIFFERENT build from
  * the worktree, and a suite that silently graded the wrong binary is worse than
  * one that will not start.
@@ -53,7 +53,7 @@ export function readOduBin(): string {
     throw new Error(
       "ODU_BIN is not set, and this suite has no fallback. It drives the " +
         "PACKAGED odu — `nix build .#odu` → <out>/bin/odu — which is what " +
-        "`just web-acceptance` builds and passes. A source runtime (`bun " +
+        "`just e2e-web` builds and passes. A source runtime (`bun " +
         "src/main.ts`) has none of the locators the wrapper bakes (ODU_SELF, " +
         "ODU_WEB_DIST, ODU_BUILD_ID), so it cannot even serve the page these " +
         "features are about.",

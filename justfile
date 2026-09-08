@@ -4,6 +4,9 @@ nix_shell := if env('IN_NIX_SHELL', '') != '' { '' } else { 'nix develop ' + jus
 # shell sets the latter without supplying browsers, so a developer already inside
 # `nix develop` must still be sent into `.#e2e` to get them. Checking the wrong
 # variable here would drop them into a suite that fails at chromium.launch().
+#
+# `.#e2e` is the DEVSHELL's name and stays as it is — it supplies browsers to
+# whatever needs them, and is not one of the two suites.
 nix_shell_e2e := if env('PLAYWRIGHT_BROWSERS_PATH', '') != '' { '' } else { 'nix develop ' + justfile_directory() + '#e2e --accept-flake-config -c' }
 
 mod ci 'ci/mod.just'
@@ -39,12 +42,27 @@ typecheck: install
 test: install
     {{ nix_shell }} bun run test:unit
 
-# Black-box e2e: build the odu binary with nix and drive it against a
-# throwaway fixture repo on a localhost lane (tests/e2e/README.md).
-e2e: install
-    {{ nix_shell }} bun run test:e2e
+# BOTH end-to-end suites, and a failure in either fails this.
+#
+# They are one gate with two drivers, not a suite and an extra. Both drive the
+# NIX-BUILT binary — the odu a user actually runs — and the only thing that
+# differs is the door: `e2e-cli` comes in through the CLI, MCP and the daemon's
+# own lifecycle; `e2e-web` comes in through a browser. Naming them `e2e` and
+# `web-acceptance` said otherwise, and a name that says "acceptance" beside one
+# that says "e2e" invites the reading that only one of them is the end-to-end
+# gate.
+#
+# Dependencies, so `just e2e` fails on the first suite that does. Either one
+# failing is this command failing; there is no arrangement in which the browser
+# gate is the optional half.
+e2e: e2e-cli e2e-web
 
-# The BROWSER ACCEPTANCE gate: Cucumber features driven through Playwright
+# The CLI/MCP end-to-end gate: build the odu binary with nix and drive it
+# against a throwaway fixture repo on a localhost lane (tests/e2e/README.md).
+e2e-cli: install
+    {{ nix_shell }} bun run test:e2e-cli
+
+# The BROWSER end-to-end gate: Cucumber features driven through Playwright
 # against the nix-built binary, which is the odu a user actually runs
 # (packages/web-acceptance/README.md).
 #
@@ -55,7 +73,7 @@ e2e: install
 # `cd` rather than `bun --cwd`: with `--cwd`, bun swallows the script name and
 # prints its own help with status 0, which reads as a passing leg that ran no
 # tests at all.
-web-acceptance: install
+e2e-web: install
     #!/usr/bin/env bash
     set -euo pipefail
     odu="$(nix build .#odu --no-link --print-out-paths --accept-flake-config)/bin/odu"

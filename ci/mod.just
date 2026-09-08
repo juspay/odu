@@ -13,7 +13,7 @@ nix_shell_e2e := if env('PLAYWRIGHT_BROWSERS_PATH', '') != '' { '' } else { 'nix
 
 [parallel]
 [metadata("ci")]
-default: typecheck unit fmt nix e2e web-acceptance bun-nix-fresh
+default: typecheck unit fmt nix e2e-cli e2e-web bun-nix-fresh
 
 install:
     {{ nix_shell }} bun install --frozen-lockfile
@@ -37,24 +37,29 @@ typecheck: install
 unit: install
     {{ nix_shell }} bun run test:unit
 
-# Black-box e2e: builds the odu binary with nix and drives it against a
-# throwaway fixture repo on a localhost lane (tests/e2e/README.md). Needs the
+# THE CLI end-to-end gate: builds the odu binary with nix and drives it against
+# a throwaway fixture repo on a localhost lane (tests/e2e/README.md). Needs the
 # dev shell on PATH (nix, git, just, bun) plus the node_modules from `install`.
 #
-# `nix` IS A PREREQUISITE for the same reason it is one for `web-acceptance`
-# below: this leg builds `.#odu` too, and without the edge the two race. The
+# One of TWO end-to-end legs, and they stay two nodes here rather than one:
+# `just e2e` runs both for a person, but CI wants them parallel and wants a
+# failure to say which door it came in through. `e2e-cli` and `e2e-web` are the
+# contexts a required check names.
+#
+# `nix` IS A PREREQUISITE for the same reason it is one for `e2e-web` below:
+# this leg builds `.#odu` too, and without the edge the two race. The
 # loser pays for the whole build INSIDE a test's own timeout — which is exactly
 # how `cancel.e2e.test.ts` came to fail with "timed out waiting for the run to
 # serve its socket" after ten minutes on a builder whose store was cold, while
-# `ci::nix` beside it reported success in 24 seconds and `web-acceptance`, which
-# has the edge, finished in 37. The failure reads as a flaky test and is a
+# `ci::nix` beside it reported success in 24 seconds and `e2e-web`, which has
+# the edge, finished in 37. The failure reads as a flaky test and is a
 # missing dependency; the log gives it away, being two-fifths substituter noise
 # from a build that should have been a lookup.
-e2e: install nix
-    {{ nix_shell }} bun run test:e2e
+e2e-cli: install nix
+    {{ nix_shell }} bun run test:e2e-cli
 
-# Browser acceptance: Cucumber features driven through Playwright against the
-# nix-built binary, with the browsers supplied by nixpkgs
+# THE BROWSER end-to-end gate: Cucumber features driven through Playwright
+# against the nix-built binary, with the browsers supplied by nixpkgs
 # (packages/web-acceptance/README.md).
 #
 # REQUIRED on every platform, deliberately. odu's previous browser coverage
@@ -66,7 +71,7 @@ e2e: install nix
 #
 # `nix` is a prerequisite as well as a build here so the binary is an
 # already-realised lookup rather than a second build racing that leg's.
-web-acceptance: install nix
+e2e-web: install nix
     #!/usr/bin/env bash
     set -euo pipefail
     odu="$(nix build .#odu --no-link --print-out-paths --accept-flake-config)/bin/odu"
