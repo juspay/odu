@@ -29,8 +29,27 @@
  *     do anything.
  *
  * The hue names stay the terminal dashboard's five, so a status means the same
- * colour whichever face a person is looking at.
+ * colour whichever face a person is looking at. SELECTION is a sixth, cyan, and
+ * it is deliberately not one of the five: "this is the one you picked" must
+ * never be readable as "this one passed".
+ *
+ * ── HOW THIS FILE IS ORDERED ──
+ *
+ * Four cascade layers, declared once on the next line so the order is a fact
+ * you can read rather than one you have to infer from line numbers:
+ *
+ *   tokens      the palette and the two typefaces — nothing that paints
+ *   base        the document: resets, the body, the focus ring
+ *   components  what a thing LOOKS like — buttons, pills, nodes, the console
+ *   layout      where things GO — the shell, the grids, and the size queries
+ *
+ * A layer beats every layer named before it whatever the selectors say, which
+ * is why `layout` can put a one-class rule over a component's without either
+ * side counting specificity, and why a stray `#id` in `components` could never
+ * out-shout the frame.
  */
+
+@layer tokens, base, components, layout;
 
 /* The website's mono, resolved from what the machine already has. `local()`
    only — the board is served by a daemon on somebody's laptop and must never
@@ -41,674 +60,1183 @@
   font-display: swap;
 }
 
-/* Dark is odu's default look — it is what the logo, the site and the terminal
-   all are. Light is a full re-tint rather than an afterthought, because half the
-   people who open this board are looking at it beside an editor that is white.
-   There is no toggle: the site keeps one because a visitor may want its dark
-   look on a light desktop, whereas a dashboard has no opinion worth overriding
-   the machine's — `prefers-color-scheme` is the whole of the policy here. */
-:root {
-  color-scheme: light dark;
-  --ink: #eef3f0;
-  --muted: #9db0a8;
-  /* The site's `--quiet`, one step brighter. On a marketing page the quiet grey
-     carries captions; here it carries column heads, scopes and byte offsets —
-     DATA — and the site's own value lands at 4.47:1 on this canvas, a rounding
-     error under the 4.5 a person is owed for text this small. */
-  --quiet: #7d8e87;
-  --canvas: #080b0a;
-  --panel: #101513;
-  --panel-2: #161d1a;
-  --line: #26302c;
-  --line-strong: #37453f;
-  --green: #45e39a;
-  --green-soft: rgba(69, 227, 154, 0.14);
-  --cyan: #46d6e0;
-  --violet: #b399ff;
-  --amber: #f5c451;
-  --red: #ff7d74;
-  /* THE SAME FIVE HUES, AS TEXT.
-   *
-   * A hue does two jobs here and they have different bars. As a SURFACE — a
-   * pill's tint, its border, a row's left rail, a status dot — it only has to be
-   * distinguishable. As TEXT it has to be readable, and this page sets a hue in
-   * type as small as 0.72 rem: `exit 3`, `+dirty`, the wire's own sentence.
-   *
-   * On odu's near-black canvas the site's hues clear 4.5:1 comfortably, so these
-   * ARE those hues. The light theme is where they part company — see below.
-   */
-  --green-ink: var(--green);
-  --amber-ink: var(--amber);
-  --red-ink: var(--red);
-  --violet-ink: var(--violet);
-  --cyan-ink: var(--cyan);
-  /* What sits on a filled brand surface — the website's `.button-primary` ink. */
-  --on-brand: #04140c;
-  --accent-grad: linear-gradient(105deg, var(--green), var(--cyan) 55%, var(--violet));
-  --mono: "Odu Mono", "SFMono-Regular", "Cascadia Mono", "Roboto Mono", Menlo, Consolas, monospace;
-  --sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-}
+@layer tokens {
+  /* Dark is odu's default look — it is what the logo, the site and the terminal
+     all are. Light is a full re-tint rather than an afterthought, because half
+     the people who open this board are looking at it beside an editor that is
+     white. There is no toggle: the site keeps one because a visitor may want its
+     dark look on a light desktop, whereas a dashboard has no opinion worth
+     overriding the machine's — `prefers-color-scheme` is the whole of the policy
+     here.
 
-@media (prefers-color-scheme: light) {
+     One block, not two. `light-dark()` takes the LIGHT value first and the DARK
+     value second, and it reads off `color-scheme`, so the two themes sit on one
+     line per token and cannot drift apart the way a token added to one media
+     block and forgotten in the other did. It also means a subtree that pins its
+     own `color-scheme` — the console below does exactly that — re-resolves every
+     token it uses to that scheme, without a second palette. */
   :root {
-    --ink: #10201a;
-    --muted: #48584f;
-    /* One step darker than the site's, for the reason given above its dark
-       counterpart: on this page the quiet grey is data, not caption. */
-    --quiet: #5d6d66;
-    --canvas: #f4f7f5;
-    --panel: #ffffff;
-    --panel-2: #eef2f0;
-    --line: #dde5e0;
-    --line-strong: #c3d0c9;
-    --green: #0ca678;
-    --green-soft: rgba(12, 166, 120, 0.13);
-    --cyan: #0e9ab0;
-    --violet: #7c5cff;
-    --amber: #b47500;
-    --red: #e5484d;
-    /* WHERE THE LIGHT THEME PARTS FROM THE SITE, and the only place it does.
+    color-scheme: light dark;
+    --ink: light-dark(#10201a, #eef3f0);
+    --muted: light-dark(#48584f, #9db0a8);
+    /* The site's `--quiet`, one step off in each theme — brighter on the dark
+       canvas, darker on the light one. On a marketing page the quiet grey
+       carries captions; here it carries column heads, scopes and byte offsets —
+       DATA — and the site's own dark value lands at 4.47:1 on this canvas, a
+       rounding error under the 4.5 a person is owed for text this small. */
+    --quiet: light-dark(#5d6d66, #7d8e87);
+    --canvas: light-dark(#f4f7f5, #080b0a);
+    --panel: light-dark(#ffffff, #101513);
+    --panel-2: light-dark(#eef2f0, #161d1a);
+    --line: light-dark(#dde5e0, #26302c);
+    --line-strong: light-dark(#c3d0c9, #37453f);
+    --green: light-dark(#0ca678, #45e39a);
+    --green-soft: color-mix(in srgb, var(--green) 14%, transparent);
+    --cyan: light-dark(#0e9ab0, #46d6e0);
+    --violet: light-dark(#7c5cff, #b399ff);
+    --amber: light-dark(#b47500, #f5c451);
+    --red: light-dark(#e5484d, #ff7d74);
+    /* THE SAME FIVE HUES, AS TEXT.
      *
-     * The five hues above are the website's exactly, and they stay exactly that
-     * everywhere a hue is a surface. But on a near-white canvas the same values
-     * sit between 2.8:1 and 3.9:1 as text — fine for an accent bar under a
-     * heading, not fine for `exit 3` at 0.72 rem, which is the one line on this
-     * page somebody is squinting at. So each hue has a darkened sibling for its
-     * text duty: same family, same reading, a contrast a person can actually
-     * take the diagnosis from. The board this replaced used GitHub's accessible
-     * set, and going to a prettier palette that is harder to read would not have
-     * been a redesign.
+     * A hue does two jobs here and they have different bars. As a SURFACE — a
+     * pill's tint, its border, a row's left rail, a status dot — it only has to
+     * be distinguishable. As TEXT it has to be readable, and this page sets a
+     * hue in type as small as 0.8 rem: `exit 3`, `+dirty`, the wire's own
+     * sentence.
+     *
+     * On odu's near-black canvas the site's hues clear 4.5:1 comfortably, so the
+     * DARK half of each pair below is simply the hue again. The light theme is
+     * where they part company, and it is the only place this file departs from
+     * the site: on a near-white canvas the same values sit between 2.8:1 and
+     * 3.9:1 as text — fine for an accent bar under a heading, not fine for
+     * `exit 3`, which is the one line on this page somebody is squinting at. So
+     * each hue has a darkened sibling for its text duty: same family, same
+     * reading, a contrast a person can actually take the diagnosis from. The
+     * board this replaced used GitHub's accessible set, and going to a prettier
+     * palette that is harder to read would not have been a redesign.
      */
-    --green-ink: #077a58;
-    --amber-ink: #8f5d00;
-    --red-ink: #c42a30;
-    --violet-ink: #6b45e8;
-    /* Cyan is never type here, but the focus ring and the two selection rails
-       it draws are non-text INDICATORS, which owe a reader 3:1 against whatever
-       they land on. The site's light cyan gives 3.11:1 on the panel — passing,
-       with nothing left over for a thin ring on a bright screen. */
-    --cyan-ink: #0a7385;
-    --accent-grad: linear-gradient(105deg, #0ca678, #0e9ab0 55%, #7c5cff);
+    --green-ink: light-dark(#077a58, #45e39a);
+    --amber-ink: light-dark(#8f5d00, #f5c451);
+    --red-ink: light-dark(#c42a30, #ff7d74);
+    --violet-ink: light-dark(#6b45e8, #b399ff);
+    /* Cyan is never a status here, but the focus ring and the selection rails it
+       draws are non-text INDICATORS, which owe a reader 3:1 against whatever they
+       land on. The site's light cyan gives 3.11:1 on the panel — passing, with
+       nothing left over for a thin ring on a bright screen, hence the darker
+       sibling. */
+    --cyan-ink: light-dark(#0a7385, #46d6e0);
+    /* SELECTION — which filter, which attempt, which node's log is open. Its own
+       token rather than a reach for cyan at each site, because the rule it
+       encodes is a rule about MEANING: selection is the one signal on this page
+       that is not a status, and it may never borrow a status hue. A pressed chip
+       filled with green would read as "green CI" to somebody scanning, which is
+       the single most expensive misreading this app can cause. */
+    --select: var(--cyan-ink);
+    --on-select: light-dark(#ffffff, #04140c);
+    /* What sits on a filled brand surface — the website's `.button-primary` ink.
+       One value for both themes: the gradient it lands on is bright in both. */
+    --on-brand: #04140c;
+    --accent-grad: linear-gradient(105deg, var(--green), var(--cyan) 55%, var(--violet));
+    --mono: "Odu Mono", "SFMono-Regular", "Cascadia Mono", "Roboto Mono", Menlo, Consolas, monospace;
+    --sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+
+  /* THE SIXTEEN ANSI COLOURS — the CLI's own table, verbatim from
+     `packages/cli/src/logView.ts`. A recipe that prints a red FAIL prints the
+     same red whether a person is reading it through `odu attach` or through this
+     page; two palettes for one byte stream would make the terminal and the
+     browser disagree about a colour the recipe chose.
+
+     CHECKED, not promised: `logView.test.ts` reads this file and pins every
+     token below to that table, in both directions. The CLI is node-side so it
+     may read the stylesheet, which is why the assertion lives over there.
+
+     ONE set, not two, and scoped to the console rather than declared on `:root`:
+     these only ever paint on `.log-text`, which is pinned dark in both themes,
+     so a light-theme variant would be a token nothing could ever use. */
+  .log-text {
+    --ansi-0: #3b4650;
+    --ansi-1: #e8695b;
+    --ansi-2: #6fcf8e;
+    --ansi-3: #e6b24d;
+    --ansi-4: #6a9fdc;
+    --ansi-5: #bb8ce2;
+    --ansi-6: #5ec8c4;
+    --ansi-7: #c6d2d3;
+    --ansi-8: #5d6d70;
+    --ansi-9: #ef8578;
+    --ansi-10: #8ddba6;
+    --ansi-11: #f0c46e;
+    --ansi-12: #8bb8e8;
+    --ansi-13: #cda6ec;
+    --ansi-14: #7fd8d4;
+    --ansi-15: #e8f0f0;
   }
 }
 
-* {
-  box-sizing: border-box;
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    background: var(--canvas);
+  }
+
+  body {
+    margin: 0;
+    background: var(--canvas);
+    color: var(--ink);
+    font: 0.875rem/1.5 var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::selection {
+    color: #06100c;
+    background: var(--green);
+  }
+
+  code {
+    padding: 0.05rem 0.28rem;
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    background: var(--panel-2);
+    color: var(--ink);
+    font: 0.9em var(--mono);
+  }
+
+  input[type="checkbox"] {
+    accent-color: var(--green);
+  }
+
+  /* NEVER removed — see the header. The ring is what makes the keyboard path the
+     same app rather than a second, invisible one. The selection colour, so it
+     never collides with a status hue: a focus ring that reads as "this node
+     failed" is worse than no ring at all. */
+  :focus-visible {
+    outline: 2px solid var(--select);
+    outline-offset: 2px;
+  }
 }
 
-html {
-  background: var(--canvas);
-}
-
-body {
-  margin: 0;
-  background: var(--canvas);
-  color: var(--ink);
-  font: 0.875rem/1.5 var(--sans);
-  -webkit-font-smoothing: antialiased;
-}
-
-::selection {
-  color: #06100c;
-  background: var(--green);
-}
-
-code {
-  padding: 0.05rem 0.28rem;
-  border: 1px solid var(--line);
-  border-radius: 3px;
-  background: var(--panel-2);
-  color: var(--ink);
-  font: 0.9em var(--mono);
-}
-
-input[type="checkbox"] {
-  accent-color: var(--green);
-}
-
-.shell {
-  max-width: 72rem;
-  margin: 0 auto;
-  padding: 0 1rem 4rem;
-}
-
-/* ── the masthead and the connection indicator ─────────────────────────────
- *
- * The wordmark is the logo's own idea rather than a second drawing of it:
- * `logo.svg` is a shell prompt — a slate `$` beside `odu` in bold mono — because
- * odu is a thing you attach to. Spelled in text it costs no asset, survives
- * every theme, and stays legible at the one size it is ever drawn at.
- *
- * The wire rides beside it, and the pair STICKS: the connection is the one fact
- * on this page that must never scroll away, because a board of stale rows and a
- * board of live ones look exactly alike.
- */
-
-.topbar {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.5rem 1rem;
-  padding: 0.5rem 0.25rem;
-  border-bottom: 1px solid var(--line);
-  background: var(--canvas);
-}
-
-.brand {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.45rem;
-  font: 700 0.9rem/1 var(--mono);
-  letter-spacing: 0.04em;
-}
-
-.brand-sigil { color: var(--quiet); font-weight: 500; }
-.brand-name { color: var(--ink); }
-
-.wire {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.5rem;
-  /* Shrinkable to nothing, so the sentence WRAPS on a phone rather than pushing
-     the page sideways. `reconnecting — showing the last thing the service said`
-     is the longest string this app ever draws in its chrome, and it is also the
-     one nobody may be allowed to miss. */
-  flex: 1 1 auto;
-  min-width: 0;
-  color: var(--muted);
-  font: 0.75rem/1.5 var(--mono);
-}
-
-.wire::before {
-  content: "";
-  width: 0.5rem;
-  height: 0.5rem;
-  border-radius: 50%;
-  background: currentColor;
-  flex: none;
-}
-
-/* The dot is `currentColor`, so the state tints the sentence and the dot from
-   one declaration — and the ink variants are what the sentence is set in. */
-.wire-live { color: var(--green-ink); }
-.wire-connecting { color: var(--quiet); }
-.wire-reconnecting { color: var(--amber-ink); }
-.wire-degraded { color: var(--amber-ink); }
-.wire-retired { color: var(--red-ink); }
-
-/* ── controls ──────────────────────────────────────────────────────────────
- *
- * The website's button, shrunk. Mono, because every control here names a
- * machine action; instant hover with no transition and no box-shadow, because
- * that is the rule the site's own buttons keep — and a dashboard that shimmers
- * while a run is in flight is a dashboard people stop watching.
- */
-
-.btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.35rem;
-  min-height: 1.7rem;
-  padding: 0.15rem 0.6rem;
-  border: 1px solid var(--line-strong);
-  border-radius: 6px;
-  background: var(--panel);
-  color: var(--ink);
-  font: 500 0.75rem/1.4 var(--mono);
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.btn:hover:not(:disabled) {
-  border-color: var(--green);
-  background: var(--panel-2);
-}
-
-.btn:disabled { opacity: 0.45; cursor: not-allowed; }
-
-.btn-primary {
-  border-color: transparent;
-  background: var(--accent-grad);
-  color: var(--on-brand);
-  font-weight: 600;
-}
-
-.btn-primary:hover:not(:disabled) {
-  border-color: transparent;
-  background: linear-gradient(105deg, var(--cyan), var(--violet));
-}
-
-/* NEVER removed — see the header. The ring is what makes the keyboard path the
-   same app rather than a second, invisible one. Cyan, so it never collides with
-   a status hue: a focus ring that reads as "this node failed" is worse than no
-   ring at all. */
-:focus-visible {
-  outline: 2px solid var(--cyan-ink);
-  outline-offset: 2px;
-}
-
-/* Which of a group is CHOSEN, drawn. `aria-pressed` was already on the element
-   for assistive tech, but nothing drew it — so a sighted person could not see
-   which board filter or which attempt they were looking at. Styled off the
-   ATTRIBUTE rather than a class so the two can never disagree: there is one
-   fact, and both the screen reader and the eye read it from the same place.
-   Filled rather than merely tinted, so the chosen one differs in WEIGHT and not
-   only in hue. */
-.btn[aria-pressed="true"] {
-  border-color: var(--green);
-  background: var(--green);
-  color: var(--on-brand);
-  font-weight: 600;
-}
-
-.btn[aria-pressed="true"]:hover:not(:disabled) {
-  background: var(--green);
-}
-
-/* A state, a verdict, a count. The hue is one of the five; the WORD inside is
-   drawn in ink at full contrast, and the marker in front of it differs in shape
-   per hue — so the pill survives both a colour-blind reader and a bad monitor.
-   The modifier class sets the pair — `--hue` for the tint and the border,
-   `--hue-ink` for the marker — so a new status is one rule rather than four. */
-.pill {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 0.3rem;
-  padding: 0.05rem 0.45rem;
-  border: 1px solid color-mix(in srgb, var(--hue) 55%, transparent);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--hue) 14%, transparent);
-  color: var(--ink);
-  font: 500 0.72rem/1.6 var(--mono);
-  white-space: nowrap;
-}
-
-.pill::before {
-  color: var(--hue-ink);
-  font-size: 0.85em;
-}
-
-/* `--hue` paints the tint and the border; `--hue-ink` paints the marker, which
-   is the only part of a pill that is type. */
-.pill-grey { --hue: var(--quiet); --hue-ink: var(--quiet); }
-.pill-amber { --hue: var(--amber); --hue-ink: var(--amber-ink); }
-.pill-green { --hue: var(--green); --hue-ink: var(--green-ink); }
-.pill-red { --hue: var(--red); --hue-ink: var(--red-ink); }
-.pill-violet { --hue: var(--violet); --hue-ink: var(--violet-ink); }
-
-.pill-grey::before { content: "◦"; }
-.pill-amber::before { content: "●"; }
-.pill-green::before { content: "✔"; }
-.pill-red::before { content: "✗"; }
-.pill-violet::before { content: "◆"; }
-
-/* ── the board ─────────────────────────────────────────────────────────── */
-
-.board-head,
-.detail-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.5rem 0.75rem;
-  padding: 1.1rem 0 0.75rem;
-}
-
-.board-head h1,
-.detail-head h1 {
-  margin: 0;
-  margin-right: auto;
-  font: 600 1.05rem/1.2 var(--mono);
-  letter-spacing: -0.01em;
-}
-
-.filters { display: flex; flex-wrap: wrap; gap: 0.25rem; }
-
-/* One geometry, two users: the column heads and the rows beneath them. Written
-   once so a column cannot drift out from under its own label. */
-.row,
-.row-head {
-  display: grid;
-  grid-template-columns:
-    minmax(8rem, 1.4fr) minmax(6rem, 0.7fr) 7rem 6rem minmax(6rem, 0.8fr)
-    minmax(6rem, 1fr) 5rem;
-  gap: 0.5rem;
-  align-items: center;
-}
-
-/* The heads are a VISUAL guide and nothing else — the rows are buttons rather
-   than a table, so seven stray nouns announced ahead of them would be noise to
-   a screen reader. `aria-hidden` in the markup says so; this only draws them. */
-.row-head {
-  padding: 0.3rem 0.5rem;
-  border-bottom: 1px solid var(--line-strong);
-  color: var(--quiet);
-  font: 500 0.66rem/1.4 var(--mono);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.row {
-  width: 100%;
-  text-align: left;
-  font: inherit;
-  color: inherit;
-  background: none;
-  border: 0;
-  border-bottom: 1px solid var(--line);
-  padding: 0.5rem;
-  cursor: pointer;
-}
-
-.row:hover { background: var(--panel); }
-
-/* The left rail: a run that is MOVING and a run that is BROKEN are the two a
-   person scanning the board is looking for, and both are visible from the edge
-   of the row before any word is read. Red is written after amber deliberately —
-   a live run with a failure in it is a failure. */
-.row-running,
-.row-provisioning { box-shadow: inset 2px 0 0 var(--amber); }
-.row-red { box-shadow: inset 2px 0 0 var(--red); }
-
-.row-project { font-weight: 600; overflow-wrap: anywhere; }
-.row-branch { color: var(--muted); font-weight: 400; margin-left: 0.4rem; }
-.row-sha { font-family: var(--mono); font-size: 0.78rem; }
-.row-dirty { color: var(--amber-ink); margin-left: 0.3rem; }
-.row-scope,
-.row-age { color: var(--muted); font: 0.74rem/1.4 var(--mono); }
-.row-attention { display: flex; gap: 0.25rem; flex-wrap: wrap; }
-
-/* An empty state is an ANSWER — "nothing yet", "nothing matching", "pick a
-   node" are three different ones — so it is drawn as a panel with a dashed edge
-   rather than as a stray line of grey text that reads like a page still
-   loading. */
-.empty {
-  margin: 0;
-  padding: 1.6rem 1.1rem;
-  border: 1px dashed var(--line-strong);
-  border-radius: 8px;
-  background: var(--panel);
-  color: var(--muted);
-  line-height: 1.6;
-}
-
-/* ── one run ───────────────────────────────────────────────────────────── */
-
-.detail-sub {
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: 0.78rem;
-  /* A checkout path is arbitrarily long and is the one thing on this header
-     that must never push the page sideways. It wraps rather than truncating:
-     the tail of a worktree path is exactly the part that tells two of them
-     apart. */
-  overflow-wrap: anywhere;
-  min-width: 0;
-}
-.detail-scope { color: var(--muted); font: 0.74rem var(--mono); }
-.detail-parent { color: var(--violet-ink); font: 0.74rem var(--mono); }
-
-.detail-controls {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.4rem;
-  padding: 0 0 0.85rem;
-}
-
-/* What a control answered, refusal included. A left rail rather than a filled
-   banner: this sits above a dense list and has to be noticed without pushing
-   the work off the screen. */
-.receipt {
-  margin: 0 0 0.85rem;
-  padding: 0.5rem 0.75rem;
-  border: 1px solid var(--line);
-  border-left: 3px solid var(--cyan-ink);
-  border-radius: 0 6px 6px 0;
-  background: var(--panel);
-  color: var(--ink);
-  font-size: 0.82rem;
-}
-
-.receipt-bad {
-  border-left-color: var(--red);
-  background: color-mix(in srgb, var(--red) 8%, var(--panel));
-}
-
-.detail-body {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 1rem;
-  align-items: start;
-}
-
-.nodes,
-.log { min-width: 0; }
-
-.node-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel);
-  overflow: hidden;
-}
-
-/* A run that has published no work yet gets a sentence above this list, not a
-   hairline card with nothing in it. */
-.node-list:empty { display: none; }
-
-.node {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding-right: 0.5rem;
-  border-top: 1px solid var(--line);
-}
-
-.node:first-child { border-top: 0; }
-.node:hover { background: var(--panel-2); }
-
-.node-open {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  flex: 1;
-  min-width: 0;
-  text-align: left;
-  font: inherit;
-  color: inherit;
-  background: none;
-  border: 0;
-  padding: 0.4rem 0.5rem;
-  cursor: pointer;
-}
-
-.node-open:disabled { cursor: default; opacity: 0.55; }
-
-/* WHICH node's log is open. Cyan, the selection colour, so being selected can
-   never be mistaken for being a status. */
-.node-current {
-  background: var(--panel-2);
-  box-shadow: inset 2px 0 0 var(--cyan-ink);
-}
-
-.node-id { font-family: var(--mono); font-size: 0.78rem; overflow-wrap: anywhere; }
-.node-attempt,
-.node-host,
-.node-duration,
-.node-exit { color: var(--muted); font: 0.72rem var(--mono); white-space: nowrap; }
-.node-exit { color: var(--red-ink); }
-.node-controls { display: flex; gap: 0.25rem; flex: none; }
-.node-controls .btn { font-size: 0.7rem; }
-
-/* A fixed column, so the glyphs stack into a readable strip down the left of
-   the DAG rather than jittering with each id's width. The vocabulary is
-   `format.ts`'s, which is the TUI's. */
-.glyph {
-  flex: none;
-  width: 1rem;
-  text-align: center;
-  font-size: 0.9rem;
-  line-height: 1;
-}
-
-.glyph-grey { color: var(--quiet); }
-.glyph-amber { color: var(--amber-ink); }
-.glyph-green { color: var(--green-ink); }
-.glyph-red { color: var(--red-ink); }
-.glyph-violet { color: var(--violet-ink); }
-
-/* The output panel is one card: a bar of controls over a console. The website
-   draws its terminals the same way, and for the same reason — the frame is what
-   says "this text is a machine's, not ours". */
-.log-body {
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel);
-  overflow: hidden;
-}
-
-.log-head {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  flex-wrap: wrap;
-  padding: 0.45rem 0.55rem;
-  border-bottom: 1px solid var(--line);
-  background: var(--panel-2);
-}
-
-.log-head h3 {
-  margin: 0;
-  font: 600 0.8rem/1.4 var(--mono);
-  overflow-wrap: anywhere;
-}
-.log-meta { color: var(--muted); font: 0.72rem var(--mono); margin-right: auto; }
-
-/* The attempt picker and the page-window readout. Both are small print beside
-   the node's name, and both are FACTS rather than decoration — which is why the
-   window offsets are monospaced: they are the same byte offsets `odu logs
-   --offset` takes, and a person copying one out of the page needs the digits to
-   line up. */
-.attempts { display: flex; flex-wrap: wrap; gap: 0.25rem; }
-.attempts .btn { font-size: 0.7rem; }
-.log-head .btn { font-size: 0.7rem; }
-.log-page {
-  color: var(--muted);
-  font: 0.72rem var(--mono);
-  white-space: nowrap;
-}
-
-/* Inside the card the panel IS the frame, so the empty state drops its own —
-   a dashed box within a bordered box reads as two panels rather than one. */
-.log-body .empty,
-.log-body .fault {
-  margin: 0;
-  padding: 0.5rem 0.65rem;
-  border: 0;
-  border-radius: 0;
-  background: none;
-  font-size: 0.8rem;
-}
-
-/* A CONSOLE, in both themes — the one surface the website also refuses to
-   re-tint, because a log is a machine's output and reads as one. `color-scheme`
-   is pinned with it so the scrollbar this box grows belongs to the box rather
-   than to the page around it. */
-.log-text {
-  color-scheme: dark;
-  margin: 0;
-  padding: 0.8rem 0.9rem;
-  background: #0c0f0e;
-  color: #c2d0c9;
-  font: 0.78rem/1.6 var(--mono);
-  /* The one place sideways scrolling is right: a log line is a log line, and
-     wrapping one changes what it says. Scoped to this box so the PAGE never
-     scrolls sideways. */
-  overflow: auto;
-  max-height: 60vh;
-  white-space: pre;
-  scrollbar-width: thin;
-}
-
-.fault { color: var(--red-ink); }
-
-/* ── the form ──────────────────────────────────────────────────────────── */
-
-.create-form { display: grid; gap: 1.1rem; max-width: 40rem; }
-
-/* The submit is a BUTTON, not a banner. As a bare grid item it stretched to the
-   full 40 rem of the form, which under the brand gradient read as a coloured
-   bar somebody had to work out was clickable. Sized to its words and given the
-   website's own 42 px target, because this is the one control on the page that
-   starts real work on a real machine. */
-.create-form .btn-primary {
-  justify-self: start;
-  min-height: 2.25rem;
-  padding: 0 1.1rem;
-}
-.field { display: grid; gap: 0.3rem; }
-.field label { font: 600 0.8rem var(--mono); }
-.hint { margin: 0; color: var(--muted); font-size: 0.78rem; line-height: 1.5; }
-
-.input {
-  font: 0.82rem var(--mono);
-  padding: 0.4rem 0.55rem;
-  background: var(--panel);
-  color: var(--ink);
-  border: 1px solid var(--line-strong);
-  border-radius: 6px;
-}
-
-.input::placeholder { color: var(--quiet); }
-.input:hover { border-color: var(--green); }
-
-.toggles {
-  display: grid;
-  gap: 0.15rem;
-  margin: 0;
-  padding: 0.5rem 0.85rem 0.75rem;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel);
-}
-
-.toggles legend {
-  padding: 0 0.35rem;
-  color: var(--quiet);
-  font: 500 0.68rem var(--mono);
-  letter-spacing: 0.08em;
-}
-
-.toggle {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.25rem 0;
-  font-size: 0.82rem;
-}
-
-/* ── narrow viewports ──────────────────────────────────────────────────── */
-
-@media (max-width: 60rem) {
-  .detail-body { grid-template-columns: minmax(0, 1fr); }
-}
-
-@media (max-width: 44rem) {
-  /* Two columns instead of seven. Everything stays on screen; nothing is
-     hidden and nothing scrolls sideways — and the heads go, because a label
-     strip over a reflowed row labels the wrong cells. */
-  .row-head { display: none; }
+@layer components {
+  /* ── THE FONT FLOOR ────────────────────────────────────────────────────────
+   *
+   * 0.8 rem, for every piece of DATA on this page. The board used to run down to
+   * 0.66 rem for a column head and 0.70 rem for a button, which is small enough
+   * that a person leans in — and the whole argument for a dashboard is that you
+   * do not have to. Body sans stays 0.875 rem; the only things allowed below the
+   * floor are the two uppercase LABEL strips (`.row-head`, `.toggles legend`) at
+   * 0.72 rem, where the letter-spacing and the caps carry the size back and the
+   * words are furniture rather than facts.
+   *
+   * A consequence worth knowing: the small buttons inside the node list and the
+   * log header used to shrink to 0.7 rem, and those overrides are gone rather
+   * than raised — at the floor they say exactly what `.btn` already says.
+   */
+
+  /* ── THE FIVE HUES, once ───────────────────────────────────────────────────
+   *
+   * One family, three consumers. `--hue` paints a SURFACE — a pill's tint and
+   * its border; `--hue-ink` paints anything that is TYPE — a pill's marker, a
+   * node's glyph, the wire's sentence. The pills, the glyphs and the wire each
+   * used to carry their own five-rule table saying the same thing in three
+   * places, so a sixth hue was a four-place edit and a hue that meant one thing
+   * on a pill could quietly mean another on a glyph.
+   *
+   * The class is emitted from exactly one place per consumer — `dom.tsx`'s
+   * `Pill`, the glyph spans in `detail.tsx`, and `format.ts`'s `CONNECTION` —
+   * and the hue NAMES are `@odu/run-client`'s `StatusHue`, so a status carries
+   * one colour across the terminal dashboard and this page.
+   */
+  .hue-grey { --hue: var(--quiet); --hue-ink: var(--quiet); }
+  .hue-amber { --hue: var(--amber); --hue-ink: var(--amber-ink); }
+  .hue-green { --hue: var(--green); --hue-ink: var(--green-ink); }
+  .hue-red { --hue: var(--red); --hue-ink: var(--red-ink); }
+  .hue-violet { --hue: var(--violet); --hue-ink: var(--violet-ink); }
+
+  /* ── the masthead's two texts ───────────────────────────────────────────── */
+
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    font: 700 0.9rem/1 var(--mono);
+    letter-spacing: 0.04em;
+  }
+
+  .brand-sigil { color: var(--quiet); font-weight: 500; }
+  .brand-name { color: var(--ink); }
+
+  .wire {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    /* Shrinkable to nothing, so the sentence WRAPS on a phone rather than pushing
+       the page sideways. `reconnecting — showing the last thing the service said`
+       is the longest string this app ever draws in its chrome, and it is also the
+       one nobody may be allowed to miss. */
+    flex: 1 1 auto;
+    min-width: 0;
+    /* The dot below is `currentColor`, so the state tints the sentence and the
+       dot from this one declaration — and `--hue-ink` is the readable half of
+       the pair, which is what a sentence needs. The hue arrives as a `hue-*`
+       class from `format.ts`'s `CONNECTION`, the table that already owns the
+       words: five `.wire-<status>` rules here were an assignment of meaning
+       living in the one place no compiler can see it. */
+    color: var(--hue-ink, var(--muted));
+    font: 0.8rem/1.5 var(--mono);
+  }
+
+  .wire::before {
+    content: "";
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: currentColor;
+    flex: none;
+  }
+
+  /* ── controls ────────────────────────────────────────────────────────────
+   *
+   * The website's button, shrunk. Mono, because every control here names a
+   * machine action; instant hover with no transition and no box-shadow, because
+   * that is the rule the site's own buttons keep — and a dashboard that shimmers
+   * while a run is in flight is a dashboard people stop watching.
+   */
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
+    min-height: 1.7rem;
+    padding: 0.15rem 0.6rem;
+    border: 1px solid var(--line-strong);
+    border-radius: 6px;
+    background: var(--panel);
+    color: var(--ink);
+    font: 500 0.8rem/1.4 var(--mono);
+    white-space: nowrap;
+    cursor: pointer;
+  }
+
+  .btn:hover:not(:disabled) {
+    border-color: var(--green);
+    background: var(--panel-2);
+  }
+
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  .btn-primary {
+    border-color: transparent;
+    background: var(--accent-grad);
+    color: var(--on-brand);
+    font-weight: 600;
+  }
+
+  .btn-primary:hover:not(:disabled) {
+    border-color: transparent;
+    background: linear-gradient(105deg, var(--cyan), var(--violet));
+  }
+
+  /* The one control that destroys work — "Cancel run" and the dialog's own
+     confirm. Outlined rather than filled: red type on a panel is a warning, red
+     paint under white type is a primary action, and this is not one. */
+  .btn-danger {
+    border-color: var(--red);
+    color: var(--red-ink);
+  }
+
+  .btn-danger:hover:not(:disabled) {
+    border-color: var(--red);
+    background: color-mix(in srgb, var(--red) 12%, var(--panel));
+  }
+
+  /* Which of a group is CHOSEN, drawn. `aria-pressed` was already on the element
+     for assistive tech, but nothing drew it — so a sighted person could not see
+     which board filter or which attempt they were looking at. Styled off the
+     ATTRIBUTE rather than a class so the two can never disagree: there is one
+     fact, and both the screen reader and the eye read it from the same place.
+     Filled rather than merely tinted, so the chosen one differs in WEIGHT and not
+     only in hue — and filled with the SELECTION colour rather than green, because
+     a green chip in a row of CI states reads as a verdict about the runs behind
+     it rather than as the filter you happen to have picked. */
+  .btn[aria-pressed="true"] {
+    border-color: var(--select);
+    background: var(--select);
+    color: var(--on-select);
+    font-weight: 600;
+  }
+
+  .btn[aria-pressed="true"]:hover:not(:disabled) {
+    border-color: var(--select);
+    background: var(--select);
+  }
+
+  /* ── the hint a button already carries, drawn ────────────────────────────
+   *
+   * Every control with a `title` also holds a `.tip` child carrying the same
+   * sentence in `data-hint` (see `dom.tsx`'s `Hint`), so the explanation of what
+   * a control does is already in the DOM — it was just waiting on the browser's
+   * own tooltip, which takes a second to appear, cannot be styled, and never
+   * shows up for a keyboard user at all.
+   *
+   * ANY element with a `.tip` child, not `.btn` with one. How a hint is drawn is
+   * not a fact about being a button, and two of this page's controls are
+   * hand-spelled — the board row and the node opener are grids of labelled cells
+   * rather than a control with a caption. Anchored on `.btn` they were left with
+   * the native tooltip, which is two hint behaviours on one page.
+   *
+   * WHY A CHILD AND NOT THE BUTTON'S OWN `::after`. Generated content is part of
+   * an element's accessible name, so a tooltip drawn as the button's pseudo-
+   * element renamed the button the moment it was hovered or focused — and
+   * anything addressing it by name, a screen reader or the acceptance suite,
+   * lost it. The `.tip` span is `aria-hidden`, and its text lives in an
+   * attribute drawn through `::after`, so neither the name nor `textContent`
+   * ever changes.
+   *
+   * ANCHOR POSITIONING, and only where it exists. Inside `@supports` this paints
+   * a real tooltip under the control; outside it NOTHING is drawn and the native
+   * `title` is what a person gets, which is exactly what they got before.
+   *
+   * ONE anchor name for every button on the page, which is only safe because of
+   * `anchor-scope`: the name is confined to the element that declares it — its
+   * own subtree, which is where the tip lives — so a button's own tooltip is
+   * the only box that can see it. All three spellings were tried in Chrome 151
+   * and only this one is right — the implicit anchor (no `anchor-name`, relying
+   * on the originating element, which is what the spec suggests) does not
+   * resolve at all and drops the tooltip at its static position on top of the
+   * button; a shared name WITHOUT the scope resolves every tooltip on the page
+   * to the LAST button that carries it, so every hint appears under the same
+   * control. Hence the `and` in the `@supports`: a browser with anchor names
+   * but no scoping gets the native `title` instead of a page of tooltips piled
+   * on one button.
+   *
+   * `position-try-fallbacks` is what keeps a hint on a right-hand button from
+   * hanging off a narrow screen, and `position: fixed` is what keeps it from
+   * being clipped by the `overflow: hidden` of the node list or the log card it
+   * is drawn inside.
+   */
+  .tip { display: none; }
+
+  @supports (anchor-name: --x) and (anchor-scope: --x) {
+    :has(> .tip) { anchor-name: --btn; anchor-scope: --btn; }
+
+    :hover > .tip,
+    :focus-visible > .tip {
+      display: block;
+      position: fixed;
+      position-anchor: --btn;
+      top: anchor(bottom);
+      left: anchor(left);
+      position-try-fallbacks: flip-inline, flip-block;
+      margin-top: 0.35rem;
+      z-index: 5;
+      max-width: 22rem;
+      padding: 0.3rem 0.5rem;
+      border: 1px solid var(--line-strong);
+      border-radius: 6px;
+      background: var(--panel);
+      color: var(--ink);
+      font: 400 0.8rem/1.45 var(--sans);
+      white-space: normal;
+      /* It is a HINT about the control, not a second control: it must never eat
+         the click that was aimed at the button underneath it. */
+      pointer-events: none;
+    }
+
+    .tip::after { content: attr(data-hint); }
+  }
+
+  /* A state, a verdict, a count. The hue is one of the five; the WORD inside is
+     drawn in ink at full contrast, and the marker in front of it differs in shape
+     per hue — so the pill survives both a colour-blind reader and a bad monitor.
+     The `hue-*` class beside it sets the pair — `--hue` for the tint and the
+     border, `--hue-ink` for the marker — and that class is the same one the
+     glyphs and the wire carry, so a new hue is one rule for the whole page. */
+  .pill {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.3rem;
+    padding: 0.05rem 0.45rem;
+    border: 1px solid color-mix(in srgb, var(--hue) 55%, transparent);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--hue) 14%, transparent);
+    color: var(--ink);
+    font: 500 0.8rem/1.6 var(--mono);
+    white-space: nowrap;
+  }
+
+  .pill::before {
+    color: var(--hue-ink);
+    font-size: 0.85em;
+  }
+
+  /* The MARKER's shape per hue — the half of a pill that is not colour, and the
+     reason a colour-blind reader still reads the board. The `--hue` pair itself
+     comes from the five-hue family at the top of this layer. */
+  .pill.hue-grey::before { content: "◦"; }
+  .pill.hue-amber::before { content: "●"; }
+  .pill.hue-green::before { content: "✔"; }
+  .pill.hue-red::before { content: "✗"; }
+  .pill.hue-violet::before { content: "◆"; }
+
+  /* ── the commit a run tested, and the branch it was on ────────────────────
+   *
+   * ONE spelling for both views. The board row and the run header name the same
+   * fact, and they used to draw it with two sets of markup and two pairs of
+   * byte-identical rules — `.row-dirty`/`.detail-dirty`, `.row-branch`/
+   * `.detail-branch` — with a comment on the second pair explaining that it was
+   * the first pair again. `dom.tsx`'s `CommitRef` emits the markup; these two
+   * rules dress it.
+   *
+   * `+dirty` is amber and not muted because it is a caveat on the ref beside it:
+   * the ref alone would claim this run tested that commit, and it did not — it
+   * tested that commit plus whatever was uncommitted at the time.
+   */
+  .branch { color: var(--muted); font-weight: 400; margin-left: 0.4rem; }
+  .dirty { color: var(--amber-ink); margin-left: 0.3rem; }
+
+  /* An empty state is an ANSWER — "nothing yet", "nothing matching", "pick a
+     node" are three different ones — so it is drawn as a panel with a dashed edge
+     rather than as a stray line of grey text that reads like a page still
+     loading. */
+  .empty {
+    margin: 0;
+    padding: 1.6rem 1.1rem;
+    border: 1px dashed var(--line-strong);
+    border-radius: 8px;
+    background: var(--panel);
+    color: var(--muted);
+    line-height: 1.6;
+  }
+
+  /* What a control answered, refusal included. A left rail rather than a filled
+     banner: this sits above a dense list and has to be noticed without pushing
+     the work off the screen.
+
+     A row rather than a paragraph, because a receipt that has been READ is
+     clutter over the work — so a receipt that is an ANSWER, yes or refusal,
+     carries its own dismissal at the end of the line; only a pending one has
+     none. The element stays a `<p class="receipt">`: that is what the
+     acceptance suite reads a control's answer out of, and the sentence inside it
+     stays one flex item (`.receipt-text`, always present — see `dom.tsx`) so a
+     receipt that embeds a control of its own is still a sentence rather than
+     three columns of ragged text. */
+  .receipt {
+    display: flex;
+    gap: 0.5rem;
+    align-items: flex-start;
+    margin: 0 0 0.85rem;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--cyan-ink);
+    border-radius: 0 6px 6px 0;
+    background: var(--panel);
+    color: var(--ink);
+    font-size: 0.82rem;
+  }
+
+  .receipt-text { flex: 1 1 auto; min-width: 0; }
+  .receipt-dismiss { flex: none; }
+
+  .receipt-bad {
+    border-left-color: var(--red);
+    background: color-mix(in srgb, var(--red) 8%, var(--panel));
+  }
+
+  /* ── the confirmation ─────────────────────────────────────────────────────
+   *
+   * A native `<dialog>`, so Esc closes it, the backdrop is the browser's, focus
+   * is trapped inside it and everything behind it is inert — four behaviours a
+   * hand-rolled overlay gets wrong one at a time. It stands in front of exactly
+   * one class of action: the ones that throw away work somebody is waiting on.
+   */
+  .confirm {
+    border: 1px solid var(--line-strong);
+    border-radius: 10px;
+    background: var(--panel);
+    color: var(--ink);
+    padding: 1rem 1.1rem;
+    max-width: 26rem;
+    font: 0.875rem/1.5 var(--sans);
+  }
+
+  .confirm::backdrop { background: rgb(0 0 0 / 0.55); }
+  .confirm h2 { margin: 0 0 0.4rem; font: 600 0.95rem var(--mono); }
+  .confirm p { margin: 0 0 0.9rem; color: var(--muted); }
+  .confirm-actions { display: flex; gap: 0.4rem; justify-content: flex-end; }
+
+  /* ── the board's rows ──────────────────────────────────────────────────────
+   *
+   * What a row LOOKS like lives here, with the node rows below that it mirrors;
+   * where its six columns GO is in `layout`. That split is the file's own
+   * contract, and this block used to break it — a row's type and chrome sat in
+   * `layout`, out-shouting every component rule for free, while the detail
+   * view's equivalent list row sat here. A layer is an override boundary, and it
+   * is worth nothing if appearance is filed under both.
+   */
+
+  /* Below the font floor deliberately: caps and letter-spacing carry the size
+     back, and these are furniture rather than facts. */
+  .row-head {
+    border-bottom: 1px solid var(--line-strong);
+    color: var(--quiet);
+    font: 500 0.72rem/1.4 var(--mono);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
   .row {
-    grid-template-columns: minmax(0, 1fr) auto;
-    row-gap: 0.25rem;
+    font: inherit;
+    color: inherit;
+    background: none;
+    border: 0;
+    border-bottom: 1px solid var(--line);
+    cursor: pointer;
   }
-  .row-scope { grid-column: 1 / -1; }
-  .row-attention { grid-column: 1 / -1; }
-  .node { flex-wrap: wrap; }
+
+  .row:hover { background: var(--panel); }
+
+  .row-project { font-weight: 600; overflow-wrap: anywhere; }
+  .row-sha { font-family: var(--mono); font-size: 0.8rem; }
+  .row-scope,
+  .row-age { color: var(--muted); font: 0.8rem/1.4 var(--mono); }
+  /* "4 earlier" — how many runs of this checkout the board folded away. It
+     rides the age cell because that is what it is about: the older ones, and it
+     takes its own line under the age rather than running on from it. */
+  .row-earlier { display: block; color: var(--quiet); font: 0.8rem/1.4 var(--mono); }
+
+  /* ── one run's nodes ─────────────────────────────────────────────────────── */
+
+  .node-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--panel);
+    overflow: hidden;
+  }
+
+  /* A run that has published no work yet gets a sentence above this list, not a
+     hairline card with nothing in it. */
+  .node-list:empty { display: none; }
+
+  .node {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding-right: 0.5rem;
+    border-top: 1px solid var(--line);
+  }
+
+  .node:first-child { border-top: 0; }
+  .node:hover { background: var(--panel-2); }
+
+  .node-open {
+    display: flex;
+    align-items: center;
+    /* WRAPPING, because the nodes panel is a column and not a page. A node id is
+       a namepath and a platform — `packages/web-acceptance/e2e@aarch64-darwin` —
+       and beside it sit an attempt, a host, a duration and an exit code. Held on
+       one line in a 26 rem column that text does not shrink, it SHATTERS: the id
+       breaks one character per line and the row grows to twenty of them. */
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    flex: 1;
+    min-width: 0;
+    text-align: left;
+    font: inherit;
+    color: inherit;
+    background: none;
+    border: 0;
+    padding: 0.4rem 0.5rem;
+    cursor: pointer;
+  }
+
+  .node-open:disabled { cursor: default; opacity: 0.55; }
+
+  /* WHICH node's log is open. The selection colour, so being selected can never
+     be mistaken for being a status. */
+  .node-current {
+    background: var(--panel-2);
+    box-shadow: inset 2px 0 0 var(--select);
+  }
+
+  /* A basis rather than `auto`, and it is what keeps the glyph and the id on ONE
+     line. Flex breaks a line on an item's HYPOTHETICAL size, before any shrinking
+     — so an id wider than the column starts a line of its own and leaves the
+     status glyph sitting alone above it. Given a modest basis the id always fits
+     beside the glyph, then grows into whatever is left and wraps inside itself. */
+  .node-id {
+    flex: 1 1 8rem;
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    overflow-wrap: anywhere;
+  }
+  .node-attempt,
+  .node-host,
+  .node-duration,
+  .node-exit { color: var(--muted); font: 0.8rem var(--mono); white-space: nowrap; }
+  .node-exit { color: var(--red-ink); }
+  .node-controls { display: flex; gap: 0.25rem; flex: none; }
+
+  /* A LANE — one platform's worth of the DAG, headed by the machine it is
+     running on and the counts of what it has done so far, with the button that
+     drops the whole lane at the end. It is a row in the same list as the nodes
+     it heads, so a person reads "this platform, on this host, and here is its
+     work" downwards rather than matching a button at the top of the page to a
+     suffix at the end of a node id. */
+  .lane {
+    display: flex;
+    align-items: center;
+    /* Same reason as `.node-open` above: a platform triple plus a host plus the
+       counts plus `Cancel aarch64-darwin` does not fit one line of a 26 rem
+       column, and the thing that gives when it is forced to is the platform
+       NAME — the one word the row exists to say. */
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    padding: 0.35rem 0.5rem;
+    background: var(--panel-2);
+    border-top: 1px solid var(--line);
+    font: 600 0.8rem var(--mono);
+  }
+
+  .lane:first-child { border-top: 0; }
+  .lane-platform { color: var(--ink); white-space: nowrap; }
+  .lane-host { color: var(--muted); font-weight: 400; }
+  /* The counts push everything after them to the right edge, so the lane's
+     cancel button lands in one column down the list however wide the names are. */
+  .lane-counts {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-right: auto;
+    color: var(--muted);
+    font-weight: 400;
+  }
+
+  /* One count is a glyph and a number, held together so the pair never wraps
+     apart. */
+  .lane-counts > span { display: inline-flex; align-items: center; gap: 0.15rem; }
+
+  /* A fixed column, so the glyphs stack into a readable strip down the left of
+     the DAG rather than jittering with each id's width. The vocabulary is
+     `format.ts`'s, which is the TUI's. */
+  .glyph {
+    flex: none;
+    width: 1rem;
+    text-align: center;
+    font-size: 1rem;
+    line-height: 1;
+    /* A glyph is type, so it takes the readable half of its hue — and it takes
+       it from the `hue-*` class every other coloured thing on this page uses,
+       rather than from a second five-rule table saying the same thing. */
+    color: var(--hue-ink);
+  }
+
+  /* A glyph in a line of RUNNING TEXT drops the fixed column it takes down the
+     node list, where that column is an alignment and here it would be a hole.
+     Two places say this — a lane's counts and the follow marker — and they said
+     it twice, in two sizes, for no reason either of them gave; both sit in
+     0.8 rem mono, so one size is one appearance. It comes AFTER the rule above
+     on purpose: `:where()` adds no specificity, which is the point — it is the
+     same weight as `.glyph` and wins on order alone. */
+  :where(.lane-counts, .log-follow) .glyph { width: auto; font-size: 0.85rem; }
+
+  /* ── the console ───────────────────────────────────────────────────────────
+   *
+   * The output panel is one card: a bar of controls over a console, and a bar of
+   * paging under it. The website draws its terminals the same way, and for the
+   * same reason — the frame is what says "this text is a machine's, not ours".
+   */
+  .log-body {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--panel);
+    overflow: hidden;
+  }
+
+  /* The head over the pane and its MIRROR under it, which is one bar written
+     once — they differed in exactly which edge carries the hairline, and
+     grouping is this file's own convention (`.board-head, .detail-head`,
+     `.row, .row-head`). Paging belongs at the END of a log for the same reason
+     a book's page number does: it is what you reach for once you have run out
+     of text, and a reader who has scrolled to the bottom of a failure should
+     not have to travel back up to ask for the next window. */
+  .log-head,
+  .log-foot {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    padding: 0.45rem 0.55rem;
+    background: var(--panel-2);
+  }
+
+  .log-head { border-bottom: 1px solid var(--line); }
+  .log-foot { border-top: 1px solid var(--line); }
+
+  /* Whether this pane is still following the tail — and, when it is not, the way
+     back to it. A log that has stopped moving because the reader scrolled up
+     looks exactly like a log that has stopped moving because the recipe stopped
+     writing, and those are very different facts. */
+  .log-follow {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    margin-left: auto;
+    color: var(--muted);
+    font: 0.8rem var(--mono);
+  }
+
+  .log-head h3 {
+    margin: 0;
+    font: 600 0.8rem/1.4 var(--mono);
+    overflow-wrap: anywhere;
+  }
+  .log-meta { color: var(--muted); font: 0.8rem var(--mono); margin-right: auto; }
+
+  /* The attempt picker and the page-window readout. Both are small print beside
+     the node's name, and both are FACTS rather than decoration — which is why the
+     window offsets are monospaced: they are the same byte offsets `odu logs
+     --offset` takes, and a person copying one out of the page needs the digits to
+     line up. */
+  .attempts { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+  .log-page {
+    color: var(--muted);
+    font: 0.8rem var(--mono);
+    white-space: nowrap;
+  }
+
+  /* Inside the card the panel IS the frame, so the empty state drops its own —
+     a dashed box within a bordered box reads as two panels rather than one. */
+  .log-body .empty,
+  .log-body .fault {
+    margin: 0;
+    padding: 0.5rem 0.65rem;
+    border: 0;
+    border-radius: 0;
+    background: none;
+    font-size: 0.8rem;
+  }
+
+  /* A CONSOLE, in both themes — the one surface the website also refuses to
+     re-tint, because a log is a machine's output and reads as one. `color-scheme`
+     is pinned with it so the scrollbar this box grows belongs to the box rather
+     than to the page around it, and so every `light-dark()` token used inside
+     resolves to its dark value without a second palette. */
+  .log-text {
+    color-scheme: dark;
+    margin: 0;
+    padding: 0.8rem 0.9rem;
+    background: #0c0f0e;
+    color: #c2d0c9;
+    font: 0.8rem/1.6 var(--mono);
+    /* The one place sideways scrolling is right: a log line is a log line, and
+       wrapping one changes what it says. Scoped to this box so the PAGE never
+       scrolls sideways. */
+    overflow: auto;
+    max-height: 60vh;
+    white-space: pre;
+    scrollbar-width: thin;
+
+    /* What a recipe's own colours become. The classes are the 16 ANSI slots and
+       nothing else — no semantics are read into them here, because the meaning
+       of "red" in a log belongs to the program that printed it. */
+    .ansi-0 { color: var(--ansi-0); }
+    .ansi-1 { color: var(--ansi-1); }
+    .ansi-2 { color: var(--ansi-2); }
+    .ansi-3 { color: var(--ansi-3); }
+    .ansi-4 { color: var(--ansi-4); }
+    .ansi-5 { color: var(--ansi-5); }
+    .ansi-6 { color: var(--ansi-6); }
+    .ansi-7 { color: var(--ansi-7); }
+    .ansi-8 { color: var(--ansi-8); }
+    .ansi-9 { color: var(--ansi-9); }
+    .ansi-10 { color: var(--ansi-10); }
+    .ansi-11 { color: var(--ansi-11); }
+    .ansi-12 { color: var(--ansi-12); }
+    .ansi-13 { color: var(--ansi-13); }
+    .ansi-14 { color: var(--ansi-14); }
+    .ansi-15 { color: var(--ansi-15); }
+    .ansi-b { font-weight: 700; }
+    .ansi-d { opacity: 0.6; }
+  }
+
+  /* WRAPPED, when the reader asks for it. The default above is right — a log
+     line is a log line — but a stack trace or a paragraph of prose in a narrow
+     pane is unreadable behind a horizontal scrollbar, and `anywhere` is what
+     breaks the unbroken 400-character token a build tool prints rather than
+     leaving it to scroll on its own. */
+  .log-text.log-wrap {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .fault { color: var(--red-ink); }
+
+  /* ── the form ────────────────────────────────────────────────────────────── */
+
+  .create-form { display: grid; gap: 1.1rem; max-width: 40rem; }
+
+  /* The submit is a BUTTON, not a banner. As a bare grid item it stretched to the
+     full 40 rem of the form, which under the brand gradient read as a coloured
+     bar somebody had to work out was clickable. Sized to its words and given the
+     website's own 42 px target, because this is the one control on the page that
+     starts real work on a real machine. */
+  .create-form .btn-primary {
+    justify-self: start;
+    min-height: 2.25rem;
+    padding: 0 1.1rem;
+  }
+  .field { display: grid; gap: 0.3rem; }
+  .field label { font: 600 0.8rem var(--mono); }
+  .hint { margin: 0; color: var(--muted); font-size: 0.8rem; line-height: 1.5; }
+
+  .input {
+    font: 0.82rem var(--mono);
+    padding: 0.4rem 0.55rem;
+    background: var(--panel);
+    color: var(--ink);
+    border: 1px solid var(--line-strong);
+    border-radius: 6px;
+  }
+
+  .input::placeholder { color: var(--quiet); }
+  .input:hover { border-color: var(--green); }
+
+  .toggles {
+    display: grid;
+    gap: 0.15rem;
+    margin: 0;
+    padding: 0.5rem 0.85rem 0.75rem;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--panel);
+  }
+
+  .toggles legend {
+    padding: 0 0.35rem;
+    color: var(--quiet);
+    font: 500 0.72rem var(--mono);
+    letter-spacing: 0.08em;
+  }
+
+  .toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.25rem 0;
+    font-size: 0.82rem;
+  }
+
+  /* THE ROW'S LEFT RAIL: a run that is MOVING and a run that is BROKEN are the
+     two a person scanning the board is looking for, and both are visible from
+     the edge of the row before any word is read. Red is written after amber
+     deliberately — a live run with a failure in it is a failure.
+
+     A pseudo-element rather than the `inset` box-shadow this used to be, because
+     the rail is one of the three things that PULSE while a run is live — and it
+     sits HERE, immediately above that motion block, because the rule that paints
+     it and the rule that animates it are one mechanism. They used to be two
+     hundred lines and one cascade layer apart. */
+  .row-running::before,
+  .row-provisioning::before,
+  .row-red::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: var(--amber);
+  }
+
+  .row-red::before { background: var(--red); }
+
+  /* ── STATE MOTION, and nothing else ────────────────────────────────────────
+   *
+   * The one thing an operator has to tell apart at a glance is a run that is
+   * MOVING from a run that is STUCK, and those two look identical in a still
+   * frame. So the running glyph, the running pill's marker and a live run's left
+   * rail breathe — slowly, on opacity alone, at a rate closer to a heartbeat than
+   * to a spinner. Nothing else on this page moves: no hover transitions, no
+   * skeletons, no easing on a layout change. Motion here MEANS something, which
+   * it stops doing the moment it is also decoration.
+   *
+   * Under `prefers-reduced-motion` the whole block is simply absent and the page
+   * is exactly the page it was — the state is still in the words, the glyph and
+   * the rail's colour.
+   */
+  @media (prefers-reduced-motion: no-preference) {
+    @keyframes odu-pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.35; }
+    }
+
+    /* The amber pill's marker pulses only where amber MEANS live: the board
+       row's status cell, which holds "running" or "provisioning". Every amber
+       pill on the page used to breathe, which put a heartbeat on a row's
+       "3 unposted" — a debt that is sitting perfectly still. */
+    .glyph.hue-amber,
+    .row-status .pill.hue-amber::before,
+    .row-running::before,
+    .row-provisioning::before {
+      animation: odu-pulse 1.8s ease-in-out infinite;
+    }
+  }
+}
+
+@layer layout {
+  .shell {
+    max-width: 72rem;
+    margin: 0 auto;
+    padding: 0 1rem 4rem;
+  }
+
+  /* ── THE APP FRAME, for the detail route only ──────────────────────────────
+   *
+   * Two pages, two ways of using a screen. The BOARD is scanned: it is a list
+   * that can be any length, and the page scroll is the right way through it. A
+   * RUN is read: the thing a person came for is the log, and a log that scrolls
+   * the whole document takes its own header, the node list and the wire off the
+   * top of the screen exactly when they are needed. So the detail route becomes
+   * a viewport-height frame — the chrome stays put, and the pane holding the
+   * bytes scrolls inside itself.
+   *
+   * `app.tsx` puts `shell-frame` on the shell when the route is a run; the board
+   * and the create form keep ordinary page flow, and the `:has()` guards below
+   * mean the document only gives up its own scrolling when the frame is there.
+   *
+   * WIDE SCREENS ONLY. On a phone the frame is the wrong trade: the header, the
+   * receipt and the node list stack above the console and leave it a few lines
+   * of a fixed-height viewport, with no way to give it more. There the page
+   * scrolls as a page and the console keeps its own 60vh cap, which is the
+   * layout that has always worked at that width. A viewport query rather than a
+   * container one, because this is a decision about the document, not about the
+   * room a panel has.
+   */
+  @media (min-width: 60rem) {
+  html:has(.shell-frame),
+  body:has(.shell-frame) { height: 100%; }
+
+  .shell-frame {
+    max-width: none;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    padding-bottom: 0;
+  }
+
+  .shell-frame .detail {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* `min-height: 0` on every link of the chain, because a flex or grid item's
+     default minimum is its CONTENT — one un-zeroed link and a long log makes the
+     whole frame taller than the viewport instead of scrolling inside it. */
+  .shell-frame .detail-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    grid-template-rows: minmax(0, 1fr);
+    align-items: stretch;
+  }
+
+  .shell-frame .nodes { min-height: 0; overflow: auto; }
+
+  .shell-frame .log,
+  .shell-frame .log-body {
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .shell-frame .log-text {
+    flex: 1 1 auto;
+    max-height: none;
+  }
+
+  /* Inside the frame the topbar is not sticky, it is simply first: the frame
+     itself does not scroll, so there is nothing to stick to. */
+  .shell-frame .topbar { position: static; flex: none; }
+  }
+
+  /* ── the masthead and the connection indicator ───────────────────────────
+   *
+   * The wordmark is the logo's own idea rather than a second drawing of it:
+   * `logo.svg` is a shell prompt — a slate `$` beside `odu` in bold mono —
+   * because odu is a thing you attach to. Spelled in text it costs no asset,
+   * survives every theme, and stays legible at the one size it is ever drawn at.
+   *
+   * The wire rides beside it, and the pair STICKS: the connection is the one fact
+   * on this page that must never scroll away, because a board of stale rows and a
+   * board of live ones look exactly alike.
+   */
+
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 1rem;
+    padding: 0.5rem 0.25rem;
+    border-bottom: 1px solid var(--line);
+    background: var(--canvas);
+  }
+
+  /* ── the board ─────────────────────────────────────────────────────────── */
+
+  .board-head,
+  .detail-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 0.75rem;
+    padding: 1.1rem 0 0.75rem;
+  }
+
+  .board-head h1 {
+    margin: 0;
+    margin-right: auto;
+    font: 600 1.05rem/1.2 var(--mono);
+    letter-spacing: -0.01em;
+  }
+
+  .filters { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+
+  /* The text filter. Wide enough for a project name and a branch, and it sits in
+     the head beside the coarse chips rather than replacing them: the chips answer
+     "what needs me", this answers "where is the one I am thinking of". */
+  .board-search { min-width: 14rem; }
+
+  /* One geometry, two users: the column heads and the rows beneath them. Written
+     once so a column cannot drift out from under its own label.
+
+     SIX columns — project, commit, status, attention, scope, age. It was seven:
+     a run's board state and its outcome had a column each, which meant two of
+     the widest columns on the page were empty in every row where the other one
+     was full. One `.row-status` cell carries whichever of the two is the answer.
+   */
+  .row,
+  .row-head {
+    display: grid;
+    grid-template-columns:
+      minmax(8rem, 1.4fr) minmax(6rem, 0.7fr) 7.5rem minmax(6rem, 0.8fr)
+      minmax(6rem, 1fr) 5rem;
+    gap: 0.5rem;
+    align-items: center;
+  }
+
+  /* WHERE the heads and the rows sit; what they LOOK like is in `components`
+     with the node rows they mirror. `aria-hidden` in the markup says the heads
+     are a visual guide and nothing else — the rows are buttons rather than a
+     table, so a handful of stray nouns announced ahead of them would be noise
+     to a screen reader. */
+  .row-head { padding: 0.3rem 0.5rem; }
+
+  .row {
+    /* `relative` is here rather than beside the rail it positions, because it
+       is this element's own box that is being established. */
+    position: relative;
+    width: 100%;
+    text-align: left;
+    padding: 0.5rem;
+  }
+
+  .row-attention { display: flex; gap: 0.25rem; flex-wrap: wrap; }
+
+  /* ── one run ─────────────────────────────────────────────────────────────
+   *
+   * The header names the PROJECT, because that is what a person came looking
+   * for; the exact commit is beside it in mono, because that is what they will
+   * paste. Those two used to be one string and it read as neither.
+   */
+
+  .detail-head h1 {
+    margin: 0;
+    font: 600 1.05rem/1.2 var(--sans);
+    letter-spacing: -0.01em;
+  }
+
+  .detail-ref { color: var(--ink); font: 0.9rem var(--mono); margin-right: auto; }
+
+  .detail-sub {
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    /* A checkout path is arbitrarily long and is the one thing on this header
+       that must never push the page sideways. It wraps rather than truncating:
+       the tail of a worktree path is exactly the part that tells two of them
+       apart. And it takes a LINE of its own — `flex-basis: 100%` with a late
+       `order` — because a path elbowing its way between the commit and the
+       outcome pill is what made this header three ragged rows of small type. */
+    overflow-wrap: anywhere;
+    min-width: 0;
+    flex-basis: 100%;
+    order: 9;
+  }
+  .detail-scope { color: var(--muted); font: 0.8rem var(--mono); }
+  .detail-parent { color: var(--violet-ink); font: 0.8rem var(--mono); }
+
+  .detail-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    padding: 0 0 0.85rem;
+  }
+
+  /* The nodes and the console, side by side — and the switch to stacked is a
+     CONTAINER query rather than a viewport one, because what decides it is how
+     much room this body has, not how wide the window is. */
+  .detail { container-type: inline-size; }
+
+  .detail-body {
+    display: grid;
+    grid-template-columns: minmax(18rem, 26rem) minmax(0, 1fr);
+    gap: 1rem;
+    align-items: start;
+  }
+
+  .nodes,
+  .log { min-width: 0; }
+
+  /* ── narrow ──────────────────────────────────────────────────────────────── */
+
+  @container (max-width: 60rem) {
+    .detail-body { grid-template-columns: minmax(0, 1fr); }
+
+    /* Stacked AND inside the frame: the node list must not eat the height the
+       log came for. Two rows, the first capped at 40% of the frame — a short DAG
+       still takes only the room it needs, a hundred-node one stops at four
+       tenths and scrolls, and the console always starts at or below the bottom
+       of the list. */
+    @media (min-width: 60rem) {
+      .shell-frame .detail-body {
+        grid-template-rows: minmax(0, 40%) minmax(0, 1fr);
+      }
+    }
+  }
+
+  @media (max-width: 44rem) {
+    /* Two columns instead of six. Everything stays on screen; nothing is
+       hidden and nothing scrolls sideways — and the heads go, because a label
+       strip over a reflowed row labels the wrong cells. */
+    .row-head { display: none; }
+    .row {
+      grid-template-columns: minmax(0, 1fr) auto;
+      row-gap: 0.25rem;
+    }
+    .row-scope { grid-column: 1 / -1; }
+    .row-attention { grid-column: 1 / -1; }
+    .node { flex-wrap: wrap; }
+  }
 }

@@ -50,8 +50,15 @@ export interface LogRow {
 const SCROLLBACK = 5000;
 
 /** The 16 ANSI colours, in this view's palette rather than the terminal's, so a
- *  node's output sits in the same family as the frame around it. */
-const ANSI16 = [
+ *  node's output sits in the same family as the frame around it.
+ *
+ *  EXPORTED for one reason: the browser's log pane draws the same sixteen
+ *  colours as `--ansi-0..15` in `packages/web-ui/src/styles.css`, in a language
+ *  that cannot import this one, and the agreement was asserted only by a
+ *  comment at each end. `logView.test.ts` now reads that stylesheet and pins
+ *  the two together — a recipe's red is the same red in the terminal pane and
+ *  in the tab, or CI says so. */
+export const ANSI16 = [
   "#3b4650", "#e8695b", "#6fcf8e", "#e6b24d",
   "#6a9fdc", "#bb8ce2", "#5ec8c4", "#c6d2d3",
   "#5d6d70", "#ef8578", "#8ddba6", "#f0c46e",

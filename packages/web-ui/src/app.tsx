@@ -14,9 +14,11 @@
  * service said, and it says so rather than letting stale rows look live.
  *
  * **A procedure call runs at the UI edge.** Every control is an `Effect`, and
- * `Effect.runPromise` here is that edge — the one place this app crosses from
- * description to execution, so a control's whole story (pending → receipt or
- * refusal) is in one function rather than scattered per button.
+ * `call` below is that edge — the one place a control crosses from description
+ * to execution and the one place a thrown refusal becomes a sentence, so a
+ * control's whole story (pending → receipt or refusal) is in one function
+ * rather than scattered per button. The followed read is the one exception,
+ * because it retries, and it says so where it runs.
  */
 
 import type { SurfaceClient } from "@kolu/surface/solid";
@@ -30,15 +32,22 @@ import {
   createMemo,
   createSignal,
   Match,
+  on,
   onCleanup,
   Show,
   Switch,
   type JSX,
 } from "solid-js";
-import { Board } from "./board";
+import { Board, boardTally } from "./board";
 import { Create, type CreateState, type StartForm } from "./create";
-import { type ControlState, Detail, LOG_PAGE_BYTES } from "./detail";
-import { CONNECTION } from "./format";
+import {
+  type ControlState,
+  Detail,
+  LOG_PAGE_BYTES,
+  LogPanel,
+} from "./detail";
+import { Button } from "./dom";
+import { faviconSvg, wireText } from "./format";
 import type { LogPage, LogTail, NodesFrame, RunNode, RunRow } from "./types";
 
 type ServiceSpec = (typeof oduServiceSurface)["spec"];
@@ -138,14 +147,6 @@ function isTerminalReadRefusal(err: unknown): boolean {
 const FOLLOW_RETRY_MS = 1_500;
 const FOLLOW_RETRY_LIMIT = 20;
 
-/** odu's words for the framework's five states. `degraded` is the one that
- *  names what stopped, so the sentence can never come out with a hole in it. */
-function wireText(readout: SurfaceReadout): string {
-  return readout.status === "degraded"
-    ? `${CONNECTION.degraded} — nothing is arriving on ${readout.stopped.join(", ")}`
-    : CONNECTION[readout.status];
-}
-
 export function App(props: {
   client: Client;
   readout: SurfaceReadout;
@@ -190,6 +191,58 @@ export function App(props: {
     return out.sort((a, b) => b.createdAt - a.createdAt);
   });
 
+  /**
+   * THE TAB IS THE AMBIENT MONITOR.
+   *
+   * The whole point of a browser board is that it can be left open, and a page
+   * that is left open is a page nobody is looking at. A tab title and a favicon
+   * are the two pixels of this app that stay visible from another window, so
+   * they carry the one fact worth interrupting somebody for: is anything broken,
+   * and is anything still moving.
+   *
+   * Counted over the SAME rows AND through the same predicates the board uses —
+   * `boardTally`, asked of `./board` rather than re-derived here — because a tab
+   * claiming three failures over a board showing one is a tab nobody trusts
+   * twice, and sharing only the rows left the predicates free to drift.
+   *
+   * `document` is guarded because these modules are also loaded outside a
+   * browser: `compile.test.ts` runs them through bun to check what the compiler
+   * emitted.
+   */
+  /** The build hashes the logo's filename, so the resting icon is a URL only the
+   *  document knows. Read ONCE, up front, rather than remembered from inside the
+   *  effect on whichever branch happened to run first — a value, not a memory of
+   *  what the first repaint found. */
+  const restingIcon =
+    typeof document === "undefined"
+      ? null
+      : (document.querySelector<HTMLLinkElement>('link[rel="icon"]')?.href ??
+        null);
+  createEffect(() => {
+    if (typeof document === "undefined") return;
+    const { failing, active } = boardTally(rows());
+    // Broken outranks busy: a run still going is worth a glance, a failure is
+    // worth coming back for. And it is a WORD as well as a glyph, because a
+    // title read aloud is the only version of this some people get.
+    document.title =
+      failing > 0
+        ? `✗ ${failing} failing · odu`
+        : active > 0
+          ? `● ${active} running · odu`
+          : "odu";
+    const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+    if (link === null) return;
+    link.href =
+      failing > 0
+        ? faviconSvg("red")
+        : active > 0
+          ? faviconSvg("amber")
+          : // No resting icon means the document had no `<link rel="icon">` when
+            // this shell was built, so there is nothing to go back TO: leave the
+            // mark the page is wearing rather than blanking it.
+            (restingIcon ?? link.href);
+  });
+
   // ── the selected run ──
   const runId = createMemo(() => {
     const at = route();
@@ -214,33 +267,35 @@ export function App(props: {
     const at = route();
     return at.at === "run" ? at.log : null;
   });
-  const selected = createMemo<RunNode | null>(() => {
+  /** THE ADDRESS, taken apart ONCE. The node and the attempt are two halves of
+   *  one key, and they used to be two memos each parsing the same string and
+   *  keeping half the answer. */
+  const address = createMemo(() => {
     const key = logKey();
-    if (key === null) return null;
-    const parsed = parseLogKey(key);
-    if (parsed === null) return null;
+    return key === null ? null : parseLogKey(key);
+  });
+  const selected = createMemo<RunNode | null>(() => {
+    const at = address();
+    if (at === null) return null;
     // Matched on the node ID ALONE, and the attempt is carried beside it below.
     // `RunNode.attempt` is the HIGHEST attempt the run recorded, while the
     // address may name an older one — which is the whole point of the attempt
     // picker, and is also what a link pasted before a retry becomes. Matching on
     // both fields resolved every one of those to `null`, so the panel closed on
     // exactly the person who had asked to read an earlier failure.
-    return frame()?.nodes.find((node) => node.id === parsed.node) ?? null;
+    return frame()?.nodes.find((node) => node.id === at.node) ?? null;
   });
-  /** WHICH attempt the address names. Derived from the same key rather than
-   *  read off the node, for the reason above: they differ, and the difference
-   *  is the thing the picker exists to express. */
-  const selectedAttempt = createMemo<number | null>(() => {
-    const key = logKey();
-    return key === null ? null : (parseLogKey(key)?.attempt ?? null);
-  });
+  /** WHICH attempt the address names — read off the key rather than off the
+   *  node, for the reason above: they differ, and the difference is the thing
+   *  the picker exists to express. */
+  const selectedAttempt = createMemo<number | null>(
+    () => address()?.attempt ?? null,
+  );
   // The whole-log page is cleared whenever the address moves: a panel left
   // showing the previous node's output under a new heading is the worst kind of
-  // stale.
-  createEffect(() => {
-    logKey();
-    setPage(null);
-  });
+  // stale. The dependency is SAID rather than left to a bare `logKey();`
+  // statement that reads as dead code to everything but Solid.
+  createEffect(on(logKey, () => setPage(null)));
   const tails = props.client.collections.logTails.use({
     keys: () => {
       const key = logKey();
@@ -271,16 +326,36 @@ export function App(props: {
   const [control, setControl] = createSignal<ControlState>({ kind: "idle" });
   const [creating, setCreating] = createSignal<CreateState>({ kind: "idle" });
 
-  /** THE UI EDGE: one place a description becomes execution. */
+  /**
+   * THE UI EDGE: the one place a description becomes execution, and the one
+   * place a thrown refusal becomes a sentence.
+   *
+   * Every caller below says only what it does with the two answers. There used
+   * to be four `Effect.runPromise` call sites under a header claiming one, and
+   * three of them re-spelled the refusal branch by hand.
+   */
+  const call = <A,>(
+    effect: Effect.Effect<A, unknown>,
+    onOk: (value: A) => void,
+    onRefused: (message: string) => void,
+  ): void => {
+    void Effect.runPromise(effect).then(onOk, (err: unknown) =>
+      onRefused(refusalText(err)),
+    );
+  };
+
+  /** A CONTROL's whole story, through that edge: pending, then a receipt or a
+   *  refusal, in the one state the run view draws. */
   const run = <A,>(
     what: string,
     effect: Effect.Effect<A, unknown>,
     onOk: (value: A) => string,
   ): void => {
     setControl({ kind: "pending", what });
-    void Effect.runPromise(effect).then(
+    call(
+      effect,
       (value) => setControl({ kind: "ok", message: onOk(value) }),
-      (err: unknown) => setControl({ kind: "refused", message: refusalText(err) }),
+      (message) => setControl({ kind: "refused", message }),
     );
   };
 
@@ -388,6 +463,12 @@ export function App(props: {
             : `That checkout already has a live run: ${receipt.runId}.`,
       );
     },
+    // The receipt has been read. Back to `idle` is the same state every control
+    // above starts from, so a dismissal is the one control here that needs no
+    // wire at all.
+    dismiss: (): void => {
+      setControl({ kind: "idle" });
+    },
   };
 
   /**
@@ -413,14 +494,18 @@ export function App(props: {
    *  tolerate, and the loop re-issues anyway. */
   const FOLLOW_WAIT_MS = 30_000;
   const [followed, setFollowed] = createSignal<string | null>(null);
-  /** Why the follow stopped, when it did. Shown rather than swallowed: a pane
-   *  that has quietly stopped updating looks exactly like a log that has
-   *  quietly stopped growing, and they are different things. */
-  const [followFault, setFollowFault] = createSignal<string | null>(null);
+  /** Why this log could not be READ — a refused page, or a follow that gave up.
+   *  ONE destination for one event class: the two read paths used to report the
+   *  same refusal in two widgets, the follow's beside the pane it is about and
+   *  a button's as a receipt at the top of the run view, chosen by nothing but
+   *  which function happened to make the call. Shown rather than swallowed,
+   *  because a pane that has quietly stopped updating looks exactly like a log
+   *  that has quietly stopped growing. */
+  const [logFault, setLogFault] = createSignal<string | null>(null);
   createEffect(() => {
     const key = logKey();
     setFollowed(null);
-    setFollowFault(null);
+    setLogFault(null);
     if (key === null) return;
     let live = true;
     // The tab moved on — a new node, a new run, or the view closed. The loop
@@ -441,6 +526,10 @@ export function App(props: {
       while (live) {
         let page: LogPage;
         try {
+          // NOT through `call`: this one crossing needs the `try`/`continue`
+          // below, because a dropped read here is resumed from the cursor
+          // rather than reported and abandoned. It is the one exception the
+          // module header names.
           page = await Effect.runPromise(
             props.client.procedures.log.read({
               key,
@@ -462,12 +551,12 @@ export function App(props: {
           // an answer nobody is going to change.
           if (!live) return;
           if (isTerminalReadRefusal(err)) {
-            setFollowFault(refusalText(err));
+            setLogFault(refusalText(err));
             return;
           }
           refusals += 1;
           if (refusals > FOLLOW_RETRY_LIMIT) {
-            setFollowFault(
+            setLogFault(
               "odu: lost contact with the service while following this log",
             );
             return;
@@ -477,7 +566,7 @@ export function App(props: {
         }
         if (!live) return;
         refusals = 0;
-        setFollowFault(null);
+        setLogFault(null);
         // The attempt was re-run underneath us and its log rewritten in place,
         // so the file is shorter than the cursor. Start over rather than show
         // the tail of a different attempt as a continuation of this one.
@@ -504,20 +593,23 @@ export function App(props: {
   const readLogPage = (offset: number): void => {
     const key = logKey();
     if (key === null) return;
-    void Effect.runPromise(
+    call(
       // ALWAYS bounded. The verb will happily return a whole log, and this used
       // to ask for one — a request whose cost is set by whatever the recipe
       // printed, which is not a thing a browser may bet a tab on.
       props.client.procedures.log.read({ key, offset, limit: LOG_PAGE_BYTES }),
-    ).then(
       (answer) => setPage(answer),
-      (err: unknown) => setControl({ kind: "refused", message: refusalText(err) }),
+      // Beside the pane, not in the receipt channel over the node list: this is
+      // the same fact the follow reports, and a refusal that landed in one of
+      // two widgets depending on which read asked for it was one event class
+      // with two homes.
+      setLogFault,
     );
   };
 
   const start = (form: StartForm): void => {
     setCreating({ kind: "starting" });
-    void Effect.runPromise(
+    call(
       props.client.procedures.run.start({
         checkout: form.checkout,
         expectedSha: form.expectedSha,
@@ -531,7 +623,6 @@ export function App(props: {
         ...(form.noPost ? { noPost: true } : {}),
         ...(form.supersede ? { supersede: true } : {}),
       }),
-    ).then(
       (receipt) => {
         if (receipt.accepted) {
           setCreating({ kind: "started", runId: receipt.runId });
@@ -544,14 +635,37 @@ export function App(props: {
           sha: receipt.existing?.sha ?? receipt.sha,
         });
       },
-      (err: unknown) =>
-        setCreating({ kind: "refused", message: refusalText(err) }),
+      (message) => setCreating({ kind: "refused", message }),
     );
   };
 
+  /** MOVE THE ADDRESS, never a signal beside it — the rule the node selection
+   *  and the attempt picker both keep, so an earlier attempt is a link like any
+   *  other view here, Back walks out of it, and the tail subscription follows
+   *  because it is keyed by the log key. One mint, because the two callers
+   *  differed only in where the node and the attempt came from. */
+  const goToLog = (node: string | null, attempt: number): void => {
+    const id = runId();
+    if (id === null) return;
+    go({
+      at: "run",
+      runId: id,
+      log: node === null ? null : formatLogKey({ runId: id, node, attempt }),
+    });
+  };
+
   // ── the shell ──
+  /** What the connection indicator says, and in which hue — one call, because
+   *  the sentence and the colour are two halves of one answer. */
+  const wire = createMemo(() => wireText(props.readout));
   return (
-    <div class="shell">
+    <div
+      class="shell"
+      // A RUN is read, so it gets the viewport: `.shell-frame` in `styles.css`
+      // turns the page into an app frame whose log pane scrolls inside itself.
+      // The board is scanned, so it keeps the page's own scroll.
+      classList={{ "shell-frame": route().at === "run" }}
+    >
       {/* The masthead, and the wire beside it. The wordmark is `logo.svg`'s own
           idea spelled in text — a slate `$` in front of `odu` in bold mono,
           because odu is a shell prompt you attach to — rather than a second
@@ -567,12 +681,18 @@ export function App(props: {
           <span class="brand-sigil" aria-hidden="true">$</span>
           <span class="brand-name">odu</span>
         </span>
-        <div class={`wire wire-${props.readout.status}`} role="status" aria-live="polite">
-          {wireText(props.readout)}
+        {/* The words AND the hue come from `format.ts`'s `CONNECTION`, so the
+            shell names no status class of its own: which colour "reconnecting"
+            carries is an assignment of meaning, and it belongs in the table
+            with the words rather than in a selector list. */}
+        <div class={`wire hue-${wire().hue}`} role="status" aria-live="polite">
+          {wire().text}
           <Show when={props.readout.needsReload}>
-            <button type="button" class="btn" onClick={props.onReload}>
-              Reload
-            </button>
+            {/* Through `Button` like every other control: this was a
+                hand-spelled `<button>` re-implementing that component's default
+                branch exactly, which meant every future change to what a
+                control IS — the drawn hint was one — silently skipped it. */}
+            <Button onClick={props.onReload}>Reload</Button>
           </Show>
         </div>
       </header>
@@ -610,40 +730,25 @@ export function App(props: {
             pending={nodesSub.pending()}
             error={nodesSub.error()}
             selected={selected()}
-            onSelect={(node) => {
-              const id = runId();
-              if (id === null) return;
-              go({
-                at: "run",
-                runId: id,
-                log:
-                  node === null
-                    ? null
-                    : formatLogKey({ runId: id, node: node.id, attempt: node.attempt }),
-              });
-            }}
-            selectedAttempt={selectedAttempt()}
-            // Choosing an attempt moves the ADDRESS, not a signal beside it —
-            // the same rule the node selection keeps. So an earlier attempt is a
-            // link like any other view here, Back walks out of it, and the tail
-            // subscription follows because it is keyed by the log key.
-            onAttempt={(attempt) => {
-              const id = runId();
-              const node = selected();
-              if (id === null || node === null) return;
-              go({
-                at: "run",
-                runId: id,
-                log: formatLogKey({ runId: id, node: node.id, attempt }),
-              });
-            }}
-            tail={tail()}
-            followed={followed()}
-            followFault={followFault()}
-            tailPending={tailPending()}
-            tailError={tailError()}
-            page={page()}
-            onPage={readLogPage}
+            onSelect={(node) => goToLog(node?.id ?? null, node?.attempt ?? 0)}
+            // THE LOG PANE, built here where the wire already is rather than
+            // threaded through `Detail` as nine props it never reads.
+            log={
+              <LogPanel
+                node={selected()}
+                attempt={selectedAttempt()}
+                onAttempt={(attempt) =>
+                  goToLog(selected()?.id ?? null, attempt)
+                }
+                tail={tail()}
+                followed={followed()}
+                logFault={logFault()}
+                pending={tailPending()}
+                error={tailError()}
+                page={page()}
+                onPage={readLogPage}
+              />
+            }
             control={control()}
             controls={controls}
             onBack={() => go({ at: "board" })}

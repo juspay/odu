@@ -81,6 +81,12 @@ import { Schema } from "effect";
  *  to what "errored" is. */
 export type { NodeStatus };
 
+/** The glyph and the semantic hue a status is DRAWN with, re-exported for the
+ *  same reason `NodeStatus` is: a face reads its vocabulary out of ONE contract
+ *  module, and `STATUS_META`'s own doc says no face keeps a second table. What
+ *  a status is on the wire and what it means to a reader arrive together. */
+export { STATUS_META, type StatusHue } from "@odu/run-client/surface";
+
 /**
  * The contract version this build speaks, `major.minor`.
  *

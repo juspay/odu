@@ -1,5 +1,7 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "bun:test";
-import { LogView } from "./logView";
+import { ANSI16, LogView } from "./logView";
 
 /** Feed raw bytes the way the live view does when a surface frame lands: a
  *  `snapshot` frame resets the buffer first, an `append` just writes.
@@ -243,5 +245,38 @@ describe("LogView — search", () => {
     expect(view.matches).toBe(0);
     expect(view.rows().every((r) => !r.match)).toBe(true);
     view.dispose();
+  });
+});
+
+/**
+ * ONE PALETTE, TWO FACES.
+ *
+ * The browser's log pane is a `<pre>` with `--ansi-0..15` tokens rather than an
+ * emulator (see `packages/web-ui/src/ansi.ts` for why), so the sixteen colours
+ * above exist a second time, in CSS, in a package that cannot import this one.
+ * That agreement was a comment at each end — and this file is the only place
+ * that can hold it, because the CLI is node-side and may read the stylesheet
+ * while the browser may not read anything.
+ *
+ * A recipe that prints a red FAIL prints the same red whether a person is
+ * reading it through `odu attach` or through the board, or this fails.
+ */
+describe("the browser draws this view's sixteen colours", () => {
+  const css = readFileSync(
+    join(import.meta.dirname, "..", "..", "web-ui", "src", "styles.css"),
+    "utf-8",
+  );
+
+  it("declares an --ansi-N token per colour, with this table's value", () => {
+    for (const [i, hex] of ANSI16.entries()) {
+      expect(css, `--ansi-${i}`).toContain(`--ansi-${i}: ${hex};`);
+    }
+  });
+
+  it("declares no --ansi token this table does not name", () => {
+    const declared = [...css.matchAll(/--ansi-(\d+):/g)].map((m) => Number(m[1]));
+    expect(declared.sort((a, b) => a - b)).toEqual(
+      ANSI16.map((_, i) => i),
+    );
   });
 });

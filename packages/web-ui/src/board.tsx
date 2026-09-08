@@ -13,20 +13,19 @@
  * `reportingDebt` are the two ways a run can be quietly wrong, and a board that
  * made you click to find out has not told you anything.
  *
+ * By DEFAULT the board is one row per checkout — the latest run of each — and
+ * everything else is behind the History toggle. A person with four checkouts
+ * asks "what is my CI doing", and forty rows of superseded history is the same
+ * question left unanswered; see `shown` for why that collapse happens before
+ * the filters rather than after them.
+ *
  * Nothing here computes a verdict. Every field is the service's own row; the
- * view sorts, filters and words it.
+ * view collapses, sorts, filters and words it.
  */
 
 import { createMemo, createSignal, For, Index, Show, type JSX } from "solid-js";
-import { Button, Pill } from "./dom";
-import {
-  ago,
-  BOARD_STATE,
-  OUTCOME,
-  projectOf,
-  runRef,
-  scopeLabel,
-} from "./format";
+import { Button, CommitRef, Hint, Pill } from "./dom";
+import { ago, BOARD_STATE, OUTCOME, projectOf, scopeLabel } from "./format";
 import type { RunRow } from "./types";
 
 /** What a board can be narrowed to. Deliberately three coarse buckets rather
@@ -41,15 +40,87 @@ const FILTERS: { id: BoardFilter; label: string; hint: string }[] = [
   { id: "all", label: "All", hint: "every run in the catalog" },
 ];
 
+/** A run the machines are still working on. */
+export const isActive = (row: RunRow): boolean =>
+  row.state === "running" || row.state === "provisioning";
+
+/** A run with a failure nobody has resolved — the board's red rail, its failing
+ *  pill, and the tab's own count, from one rule. Named once because a second
+ *  spelling of it in another module is how a tab starts disagreeing with the
+ *  board under it. */
+export const isFailing = (row: RunRow): boolean => row.unresolvedFailures > 0;
+
 function matches(row: RunRow, filter: BoardFilter): boolean {
   switch (filter) {
     case "all":
       return true;
     case "active":
-      return row.state === "running" || row.state === "provisioning";
+      return isActive(row);
     case "attention":
-      return row.unresolvedFailures > 0 || row.reportingDebt > 0;
+      return isFailing(row) || row.reportingDebt > 0;
   }
+}
+
+/** One checkout's runs, collapsed: the newest of them, and how many there
+ *  were. */
+export interface Checkout {
+  latest: RunRow;
+  runs: number;
+}
+
+/**
+ * ONE ROW PER CHECKOUT — the newest run of each, and how many runs it stands
+ * for, keyed by the checkout path.
+ *
+ * ONE walk, so "which row survives" and "how many were folded away" cannot come
+ * out of two maps that disagree — and no consumer has to re-join them at a
+ * render site with a coalesce for a case that cannot happen.
+ *
+ * Keyed by `repoRoot` and not by project: two worktrees of one repo share a
+ * last path segment and are two different checkouts. The insertion order is the
+ * input's, so the caller's sort — newest first — survives the collapse.
+ */
+export function byCheckout(rows: RunRow[]): Map<string, Checkout> {
+  const groups = new Map<string, Checkout>();
+  for (const row of rows) {
+    const held = groups.get(row.repoRoot);
+    if (held === undefined) {
+      groups.set(row.repoRoot, { latest: row, runs: 1 });
+      continue;
+    }
+    held.runs += 1;
+    if (row.createdAt > held.latest.createdAt) held.latest = row;
+  }
+  return groups;
+}
+
+/** WHAT THE BOARD IS SAYING, at a glance — the same rows and the same buckets
+ *  the board itself uses, so the tab cannot drift from the page under it.
+ *  `failing` is deliberately narrower than the Needs-attention bucket: an
+ *  unposted status is a debt, not a failure, and a tab that cried "failing"
+ *  over one would be a tab people turn off. */
+export function boardTally(rows: RunRow[]): {
+  failing: number;
+  active: number;
+} {
+  const latest = [...byCheckout(rows).values()].map((group) => group.latest);
+  return {
+    failing: latest.filter(isFailing).length,
+    active: latest.filter(isActive).length,
+  };
+}
+
+/** Does this row answer the search box? Case-insensitive substring, over the
+ *  three strings a person would type: the project, the branch, and the whole
+ *  checkout path — the last because that is the only thing telling two
+ *  worktrees of one repo apart. An empty box matches everything. */
+function searched(row: RunRow, needle: string): boolean {
+  if (needle === "") return true;
+  return (
+    projectOf(row.repoRoot).toLowerCase().includes(needle) ||
+    (row.branch ?? "").toLowerCase().includes(needle) ||
+    row.repoRoot.toLowerCase().includes(needle)
+  );
 }
 
 /** One row. A `<button>` rather than a clickable `<div>`: it is reachable by
@@ -60,6 +131,10 @@ function matches(row: RunRow, filter: BoardFilter): boolean {
 function Row(props: {
   run: RunRow;
   now: number;
+  /** How many OLDER runs of this checkout the board folded away behind this
+   *  row. Zero when there are none, and zero throughout when History is on —
+   *  nothing is folded away then, so there is nothing to count. */
+  earlier: number;
   onOpen: (runId: string) => void;
 }): JSX.Element {
   const state = (): (typeof BOARD_STATE)[RunRow["state"]] =>
@@ -70,7 +145,7 @@ function Row(props: {
       class="row"
       classList={{
         [`row-${props.run.state}`]: true,
-        "row-red": props.run.unresolvedFailures > 0,
+        "row-red": isFailing(props.run),
       }}
       onClick={() => props.onOpen(props.run.runId)}
       // The whole path, because two worktrees of one repo share a last segment
@@ -80,27 +155,34 @@ function Row(props: {
       <span class="row-project">
         {projectOf(props.run.repoRoot)}
         <Show when={props.run.branch}>
-          {(branch) => <span class="row-branch">{branch()}</span>}
+          {(branch) => <span class="branch">{branch()}</span>}
         </Show>
       </span>
       <span class="row-sha">
-        {runRef(props.run.sha, props.run.seq)}
-        <Show when={props.run.dirty}>
-          <span class="row-dirty">+dirty</span>
-        </Show>
+        <CommitRef
+          sha={props.run.sha}
+          seq={props.run.seq}
+          dirty={props.run.dirty}
+        />
       </span>
-      <span class="row-state">
-        <Pill hue={state().hue}>{state().label}</Pill>
-      </span>
-      <span class="row-outcome">
-        <Show when={props.run.outcome}>
+      {/* ONE status cell, not two. A run's board state and its outcome used to
+          have a column each, and each was empty in exactly the rows where the
+          other one was full: "settled" beside "failed" says nothing "failed"
+          did not already say, and a live run has no outcome to put anywhere.
+          So the cell holds whichever of the two IS the answer — the verdict
+          once there is one, and where the run has got to until then. */}
+      <span class="row-status">
+        <Show
+          when={props.run.outcome}
+          fallback={<Pill hue={state().hue}>{state().label}</Pill>}
+        >
           {(outcome) => (
             <Pill hue={OUTCOME[outcome()].hue}>{OUTCOME[outcome()].label}</Pill>
           )}
         </Show>
       </span>
       <span class="row-attention">
-        <Show when={props.run.unresolvedFailures > 0}>
+        <Show when={isFailing(props.run)}>
           <Pill hue="red">{`${props.run.unresolvedFailures} failing`}</Pill>
         </Show>
         <Show when={props.run.reportingDebt > 0}>
@@ -108,10 +190,35 @@ function Row(props: {
         </Show>
       </span>
       <span class="row-scope">{scopeLabel(props.run.scope)}</span>
-      <span class="row-age">{ago(props.run.createdAt, props.now)}</span>
+      {/* The age, and under it what the collapse hid. It rides the age cell
+          because that is what it is about — the OLDER runs of this checkout —
+          and it says the number rather than merely hinting there are some, so
+          a person can tell one superseded run from forty before pressing
+          History. */}
+      <span class="row-age">
+        {ago(props.run.createdAt, props.now)}
+        <Show when={props.earlier > 0}>
+          <span class="row-earlier">{`${props.earlier} earlier`}</span>
+        </Show>
+      </span>
+      {/* The drawn half of the `title` above — the checkout path, which is
+          arguably the most useful hint on this board and used to be the only
+          one drawn by the browser's own slow tooltip, because this control is
+          hand-spelled rather than built from `Button`. A `.tip` is
+          `display: none` until hovered, and a `display: none` child is not a
+          grid item, so the six-column row does not move. */}
+      <Hint text={props.run.repoRoot} />
     </button>
   );
 }
+
+/** HOW THE BOARD WAS LEFT. Module-scope rather than component-scope because
+ *  `app.tsx`'s `Switch` rebuilds this branch on every entry (see its header),
+ *  and a filter you set, walked into a run from, and came back to should still
+ *  be set. There is one board, so there is one of each. */
+const [filter, setFilter] = createSignal<BoardFilter>("all");
+const [history, setHistory] = createSignal(false);
+const [query, setQuery] = createSignal("");
 
 /**
  * The board.
@@ -128,14 +235,58 @@ export function Board(props: {
   onOpen: (runId: string) => void;
   onCreate: () => void;
 }): JSX.Element {
-  const [filter, setFilter] = createSignal<BoardFilter>("all");
-  const shown = createMemo(() =>
-    props.rows.filter((run) => matches(run, filter())),
-  );
+  const shown = createMemo<Checkout[]>(() => {
+    const needle = query().trim().toLowerCase();
+    const admits = (run: RunRow): boolean =>
+      matches(run, filter()) && searched(run, needle);
+    // History folds nothing away, so every run is its own row and there is
+    // nothing for a row to stand for.
+    if (history()) {
+      return props.rows
+        .filter(admits)
+        .map((run) => ({ latest: run, runs: 1 }));
+    }
+    // THE COLLAPSE COMES FIRST, before the bucket filter and before the search,
+    // and the order is the whole meaning of "needs attention". That bucket is
+    // about what is CURRENTLY wrong with a checkout, and a superseded run's red
+    // is history: filter first and a checkout you fixed an hour ago sits in the
+    // attention bucket forever, because the run that failed is still in the
+    // catalog. Collapse first and the bucket asks the question a person meant.
+    const all = byCheckout(props.rows);
+    // The COUNT, though, is over the rows the filter and the search admit,
+    // because "N earlier" is a promise about what pressing History would
+    // reveal — counting rows the filter excludes makes it a number the button
+    // then contradicts.
+    //
+    // A checkout is shown when the run the collapse kept is admitted, and that
+    // run is then also the newest of the admitted subset — so the two groupings
+    // agree on it by construction, and this identity IS the membership test.
+    // No count to look up, and so nothing to coalesce for a case that cannot
+    // happen.
+    return [...byCheckout(props.rows.filter(admits))]
+      .filter(([repoRoot, group]) => group.latest === all.get(repoRoot)?.latest)
+      .map(([, group]) => group);
+  });
   return (
     <section class="board">
       <header class="board-head">
         <h1>Runs</h1>
+        {/* The search box. A `type="search"` input rather than a text one, so
+            the browser draws its own clear affordance and announces it as what
+            it is. The three `off`s are about a PATH and a BRANCH: autocorrect
+            on a mobile keyboard turns `web-ui-redesign` into prose, and a
+            capitalised first letter never matches a lowercase project. */}
+        <input
+          type="search"
+          class="input board-search"
+          aria-label="Filter by project or branch"
+          placeholder="project or branch"
+          spellcheck={false}
+          autocapitalize="off"
+          autocorrect="off"
+          value={query()}
+          onInput={(event) => setQuery(event.currentTarget.value)}
+        />
         {/* Which filter is ACTIVE is state, and state a sighted person reads
             off a highlight has to be in the DOM for everybody else — so it
             rides the element as `aria-pressed` rather than as a class name. */}
@@ -152,7 +303,19 @@ export function Board(props: {
             )}
           </For>
         </div>
-        <Button class="btn btn-primary" onClick={props.onCreate}>
+        {/* OUTSIDE the filter group, deliberately. The three chips narrow the
+            board to a bucket and are one control between them; this one changes
+            what a row IS — a checkout, or a run — and putting it in the group
+            would announce four mutually exclusive filters where there are
+            three. It is a toggle, so it carries `aria-pressed` like they do. */}
+        <Button
+          title="show every run of every checkout, not just the latest"
+          pressed={history()}
+          onClick={() => setHistory((on) => !on)}
+        >
+          History
+        </Button>
+        <Button class="btn-primary" onClick={props.onCreate}>
           New run
         </Button>
       </header>
@@ -179,7 +342,7 @@ export function Board(props: {
         </Show>
         {/* The column heads — a VISUAL guide, and nothing else.
             `aria-hidden` because the rows below are buttons rather than table
-            cells, so nothing binds a head to the value under it; seven stray
+            cells, so nothing binds a head to the value under it; six stray
             nouns announced ahead of the list would be noise to a screen reader,
             which reads each row as one control with its facts in order. They
             appear only when there are rows to label, and the stylesheet drops
@@ -189,8 +352,7 @@ export function Board(props: {
           <div class="row-head" aria-hidden="true">
             <span>Project</span>
             <span>Commit</span>
-            <span>State</span>
-            <span>Outcome</span>
+            <span>Status</span>
             <span>Attention</span>
             <span>Scope</span>
             <span>Age</span>
@@ -204,8 +366,13 @@ export function Board(props: {
             only the cells whose value actually changed, which is the whole
             reason this app is written in Solid. */}
         <Index each={shown()}>
-          {(run) => (
-            <Row run={run()} now={props.now} onOpen={props.onOpen} />
+          {(entry) => (
+            <Row
+              run={entry().latest}
+              now={props.now}
+              earlier={entry().runs - 1}
+              onOpen={props.onOpen}
+            />
           )}
         </Index>
       </div>

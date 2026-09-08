@@ -159,10 +159,13 @@ Given("I open that run", { timeout: RUN_SETUP_TIMEOUT }, async function (this: O
   // so a later step that has to tell two runs of one checkout apart needs it.
   //
   // WAITED FOR, not read on arrival. The detail view renders as soon as the
-  // route moves and draws the placeholder "run" until the row itself lands, so
-  // reading immediately captured that word — and a later step then looked for a
-  // board row containing "run", found none, and clicked whichever came first.
-  const header = this.page.locator(".detail-head h1");
+  // route moves and leaves this element EMPTY until the row itself lands, so an
+  // immediate read captures "" — and a later step addressing a board row by it
+  // would match every row and click whichever came first. (It used to read the
+  // `h1`, which drew the placeholder word "run" in the same gap, with the same
+  // result.) The `h1` now names the PROJECT and its branch; the ref a person
+  // copies lives in `.detail-ref` beside it.
+  const header = this.page.locator(".detail-ref");
   await this.waitUntil(
     async () => /^[0-9a-f]{7}/.test((await header.innerText()).trim()),
     "the run header to name the run rather than the placeholder",
