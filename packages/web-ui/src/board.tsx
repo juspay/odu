@@ -24,15 +24,8 @@
  */
 
 import { createMemo, createSignal, For, Index, Show, type JSX } from "solid-js";
-import { Button, Pill } from "./dom";
-import {
-  ago,
-  BOARD_STATE,
-  OUTCOME,
-  projectOf,
-  runRef,
-  scopeLabel,
-} from "./format";
+import { Button, CommitRef, Pill } from "./dom";
+import { ago, BOARD_STATE, OUTCOME, projectOf, scopeLabel } from "./format";
 import type { RunRow } from "./types";
 
 /** What a board can be narrowed to. Deliberately three coarse buckets rather
@@ -162,14 +155,15 @@ function Row(props: {
       <span class="row-project">
         {projectOf(props.run.repoRoot)}
         <Show when={props.run.branch}>
-          {(branch) => <span class="row-branch">{branch()}</span>}
+          {(branch) => <span class="branch">{branch()}</span>}
         </Show>
       </span>
       <span class="row-sha">
-        {runRef(props.run.sha, props.run.seq)}
-        <Show when={props.run.dirty}>
-          <span class="row-dirty">+dirty</span>
-        </Show>
+        <CommitRef
+          sha={props.run.sha}
+          seq={props.run.seq}
+          dirty={props.run.dirty}
+        />
       </span>
       {/* ONE status cell, not two. A run's board state and its outcome used to
           have a column each, and each was empty in exactly the rows where the

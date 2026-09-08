@@ -39,14 +39,13 @@ import {
   type JSX,
 } from "solid-js";
 import { ansiClass, ansiColor, ansiSpans } from "./ansi";
-import { Button, Confirm, Pill, Receipt } from "./dom";
+import { Button, CommitRef, Confirm, Pill, Receipt } from "./dom";
 import {
   bytes,
   duration,
   NODE_STATUS,
   OUTCOME,
   projectOf,
-  runRef,
   scopeLabel,
 } from "./format";
 import type {
@@ -160,7 +159,7 @@ function LaneHead(props: {
         <For each={counts()}>
           {(entry) => (
             <span title={`${entry.count} ${entry.status}`}>
-              <span class={`glyph glyph-${NODE_STATUS[entry.status].hue}`}>
+              <span class={`glyph hue-${NODE_STATUS[entry.status].hue}`}>
                 {NODE_STATUS[entry.status].glyph}
               </span>
               {entry.count}
@@ -215,7 +214,7 @@ function NodeRow(props: {
             : `read ${props.node.id}, attempt ${props.node.attempt}`
         }
       >
-        <span class={`glyph glyph-${meta().hue}`}>{meta().glyph}</span>
+        <span class={`glyph hue-${meta().hue}`}>{meta().glyph}</span>
         <span class="node-id">{props.node.id}</span>
         <Show when={props.node.attempt > 1}>
           <span class="node-attempt">{`attempt ${props.node.attempt}`}</span>
@@ -584,7 +583,7 @@ function LogPanel(props: {
                   }
                 >
                   <span
-                    class={`glyph glyph-${props.tail?.open === true ? "amber" : "grey"}`}
+                    class={`glyph hue-${props.tail?.open === true ? "amber" : "grey"}`}
                   >
                     ●
                   </span>
@@ -658,7 +657,7 @@ export function Detail(props: {
         <h1>
           {props.run === undefined ? "run" : projectOf(props.run.repoRoot)}
           <Show when={props.run?.branch}>
-            {(branch) => <span class="detail-branch">{branch()}</span>}
+            {(branch) => <span class="branch">{branch()}</span>}
           </Show>
         </h1>
         {/* The ref stays, in mono, because it is the string a person PASTES.
@@ -667,12 +666,7 @@ export function Detail(props: {
         <span class="detail-ref">
           <Show when={props.run}>
             {(run) => (
-              <>
-                {runRef(run().sha, run().seq)}
-                <Show when={run().dirty}>
-                  <span class="detail-dirty">+dirty</span>
-                </Show>
-              </>
+              <CommitRef sha={run().sha} seq={run().seq} dirty={run().dirty} />
             )}
           </Show>
         </span>

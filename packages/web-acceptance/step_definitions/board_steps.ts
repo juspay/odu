@@ -53,7 +53,7 @@ Then("that row shows a red {string} outcome", async function (this: OduWorld, la
   await this.saysThat(pill, "the run row's outcome", label);
   const classes = (await pill.first().getAttribute("class")) ?? "";
   assert.ok(
-    classes.split(/\s+/).includes("pill-red"),
+    classes.split(/\s+/).includes("hue-red"),
     `the "${label}" outcome is not drawn red — its pill read "${classes}"`,
   );
 });

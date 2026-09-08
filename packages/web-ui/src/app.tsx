@@ -38,7 +38,7 @@ import {
 import { Board, boardTally } from "./board";
 import { Create, type CreateState, type StartForm } from "./create";
 import { type ControlState, Detail, LOG_PAGE_BYTES } from "./detail";
-import { CONNECTION, faviconSvg } from "./format";
+import { faviconSvg, wireText } from "./format";
 import type { LogPage, LogTail, NodesFrame, RunNode, RunRow } from "./types";
 
 type ServiceSpec = (typeof oduServiceSurface)["spec"];
@@ -137,14 +137,6 @@ function isTerminalReadRefusal(err: unknown): boolean {
  *  restart and an upgrade; past that, saying so beats spinning. */
 const FOLLOW_RETRY_MS = 1_500;
 const FOLLOW_RETRY_LIMIT = 20;
-
-/** odu's words for the framework's five states. `degraded` is the one that
- *  names what stopped, so the sentence can never come out with a hole in it. */
-function wireText(readout: SurfaceReadout): string {
-  return readout.status === "degraded"
-    ? `${CONNECTION.degraded} — nothing is arriving on ${readout.stopped.join(", ")}`
-    : CONNECTION[readout.status];
-}
 
 export function App(props: {
   client: Client;
@@ -601,6 +593,9 @@ export function App(props: {
   };
 
   // ── the shell ──
+  /** What the connection indicator says, and in which hue — one call, because
+   *  the sentence and the colour are two halves of one answer. */
+  const wire = createMemo(() => wireText(props.readout));
   return (
     <div
       class="shell"
@@ -624,8 +619,12 @@ export function App(props: {
           <span class="brand-sigil" aria-hidden="true">$</span>
           <span class="brand-name">odu</span>
         </span>
-        <div class={`wire wire-${props.readout.status}`} role="status" aria-live="polite">
-          {wireText(props.readout)}
+        {/* The words AND the hue come from `format.ts`'s `CONNECTION`, so the
+            shell names no status class of its own: which colour "reconnecting"
+            carries is an assignment of meaning, and it belongs in the table
+            with the words rather than in a selector list. */}
+        <div class={`wire hue-${wire().hue}`} role="status" aria-live="polite">
+          {wire().text}
           <Show when={props.readout.needsReload}>
             <button type="button" class="btn" onClick={props.onReload}>
               Reload

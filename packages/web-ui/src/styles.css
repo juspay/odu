@@ -231,6 +231,26 @@
    * than raised — at the floor they say exactly what `.btn` already says.
    */
 
+  /* ── THE FIVE HUES, once ───────────────────────────────────────────────────
+   *
+   * One family, three consumers. `--hue` paints a SURFACE — a pill's tint and
+   * its border; `--hue-ink` paints anything that is TYPE — a pill's marker, a
+   * node's glyph, the wire's sentence. The pills, the glyphs and the wire each
+   * used to carry their own five-rule table saying the same thing in three
+   * places, so a sixth hue was a four-place edit and a hue that meant one thing
+   * on a pill could quietly mean another on a glyph.
+   *
+   * The class is emitted from exactly one place per consumer — `dom.tsx`'s
+   * `Pill`, the glyph spans in `detail.tsx`, and `format.ts`'s `CONNECTION` —
+   * and the hue NAMES are `@odu/run-client`'s `StatusHue`, so a status carries
+   * one colour across the terminal dashboard and this page.
+   */
+  .hue-grey { --hue: var(--quiet); --hue-ink: var(--quiet); }
+  .hue-amber { --hue: var(--amber); --hue-ink: var(--amber-ink); }
+  .hue-green { --hue: var(--green); --hue-ink: var(--green-ink); }
+  .hue-red { --hue: var(--red); --hue-ink: var(--red-ink); }
+  .hue-violet { --hue: var(--violet); --hue-ink: var(--violet-ink); }
+
   /* ── the masthead's two texts ───────────────────────────────────────────── */
 
   .brand {
@@ -255,7 +275,13 @@
        one nobody may be allowed to miss. */
     flex: 1 1 auto;
     min-width: 0;
-    color: var(--muted);
+    /* The dot below is `currentColor`, so the state tints the sentence and the
+       dot from this one declaration — and `--hue-ink` is the readable half of
+       the pair, which is what a sentence needs. The hue arrives as a `hue-*`
+       class from `format.ts`'s `CONNECTION`, the table that already owns the
+       words: five `.wire-<status>` rules here were an assignment of meaning
+       living in the one place no compiler can see it. */
+    color: var(--hue-ink, var(--muted));
     font: 0.8rem/1.5 var(--mono);
   }
 
@@ -267,14 +293,6 @@
     background: currentColor;
     flex: none;
   }
-
-  /* The dot is `currentColor`, so the state tints the sentence and the dot from
-     one declaration — and the ink variants are what the sentence is set in. */
-  .wire-live { color: var(--green-ink); }
-  .wire-connecting { color: var(--quiet); }
-  .wire-reconnecting { color: var(--amber-ink); }
-  .wire-degraded { color: var(--amber-ink); }
-  .wire-retired { color: var(--red-ink); }
 
   /* ── controls ────────────────────────────────────────────────────────────
    *
@@ -425,8 +443,9 @@
   /* A state, a verdict, a count. The hue is one of the five; the WORD inside is
      drawn in ink at full contrast, and the marker in front of it differs in shape
      per hue — so the pill survives both a colour-blind reader and a bad monitor.
-     The modifier class sets the pair — `--hue` for the tint and the border,
-     `--hue-ink` for the marker — so a new status is one rule rather than four. */
+     The `hue-*` class beside it sets the pair — `--hue` for the tint and the
+     border, `--hue-ink` for the marker — and that class is the same one the
+     glyphs and the wire carry, so a new hue is one rule for the whole page. */
   .pill {
     display: inline-flex;
     align-items: baseline;
@@ -445,19 +464,30 @@
     font-size: 0.85em;
   }
 
-  /* `--hue` paints the tint and the border; `--hue-ink` paints the marker, which
-     is the only part of a pill that is type. */
-  .pill-grey { --hue: var(--quiet); --hue-ink: var(--quiet); }
-  .pill-amber { --hue: var(--amber); --hue-ink: var(--amber-ink); }
-  .pill-green { --hue: var(--green); --hue-ink: var(--green-ink); }
-  .pill-red { --hue: var(--red); --hue-ink: var(--red-ink); }
-  .pill-violet { --hue: var(--violet); --hue-ink: var(--violet-ink); }
+  /* The MARKER's shape per hue — the half of a pill that is not colour, and the
+     reason a colour-blind reader still reads the board. The `--hue` pair itself
+     comes from the five-hue family at the top of this layer. */
+  .pill.hue-grey::before { content: "◦"; }
+  .pill.hue-amber::before { content: "●"; }
+  .pill.hue-green::before { content: "✔"; }
+  .pill.hue-red::before { content: "✗"; }
+  .pill.hue-violet::before { content: "◆"; }
 
-  .pill-grey::before { content: "◦"; }
-  .pill-amber::before { content: "●"; }
-  .pill-green::before { content: "✔"; }
-  .pill-red::before { content: "✗"; }
-  .pill-violet::before { content: "◆"; }
+  /* ── the commit a run tested, and the branch it was on ────────────────────
+   *
+   * ONE spelling for both views. The board row and the run header name the same
+   * fact, and they used to draw it with two sets of markup and two pairs of
+   * byte-identical rules — `.row-dirty`/`.detail-dirty`, `.row-branch`/
+   * `.detail-branch` — with a comment on the second pair explaining that it was
+   * the first pair again. `dom.tsx`'s `CommitRef` emits the markup; these two
+   * rules dress it.
+   *
+   * `+dirty` is amber and not muted because it is a caveat on the ref beside it:
+   * the ref alone would claim this run tested that commit, and it did not — it
+   * tested that commit plus whatever was uncommitted at the time.
+   */
+  .branch { color: var(--muted); font-weight: 400; margin-left: 0.4rem; }
+  .dirty { color: var(--amber-ink); margin-left: 0.3rem; }
 
   /* An empty state is an ANSWER — "nothing yet", "nothing matching", "pick a
      node" are three different ones — so it is drawn as a panel with a dashed edge
@@ -654,13 +684,11 @@
     text-align: center;
     font-size: 1rem;
     line-height: 1;
+    /* A glyph is type, so it takes the readable half of its hue — and it takes
+       it from the `hue-*` class every other coloured thing on this page uses,
+       rather than from a second five-rule table saying the same thing. */
+    color: var(--hue-ink);
   }
-
-  .glyph-grey { color: var(--quiet); }
-  .glyph-amber { color: var(--amber-ink); }
-  .glyph-green { color: var(--green-ink); }
-  .glyph-red { color: var(--red-ink); }
-  .glyph-violet { color: var(--violet-ink); }
 
   /* ── the console ───────────────────────────────────────────────────────────
    *
@@ -882,8 +910,8 @@
        row's status cell, which holds "running" or "provisioning". Every amber
        pill on the page used to breathe, which put a heartbeat on a row's
        "3 unposted" — a debt that is sitting perfectly still. */
-    .glyph-amber,
-    .row-status .pill-amber::before,
+    .glyph.hue-amber,
+    .row-status .pill.hue-amber::before,
     .row-running::before,
     .row-provisioning::before {
       animation: odu-pulse 1.8s ease-in-out infinite;
@@ -1088,9 +1116,7 @@
   .row-red::before { background: var(--red); }
 
   .row-project { font-weight: 600; overflow-wrap: anywhere; }
-  .row-branch { color: var(--muted); font-weight: 400; margin-left: 0.4rem; }
   .row-sha { font-family: var(--mono); font-size: 0.8rem; }
-  .row-dirty { color: var(--amber-ink); margin-left: 0.3rem; }
   .row-scope,
   .row-age { color: var(--muted); font: 0.8rem/1.4 var(--mono); }
   .row-attention { display: flex; gap: 0.25rem; flex-wrap: wrap; }
@@ -1112,12 +1138,7 @@
     letter-spacing: -0.01em;
   }
 
-  .detail-branch { color: var(--muted); font-weight: 400; margin-left: 0.4rem; }
   .detail-ref { color: var(--ink); font: 0.9rem var(--mono); margin-right: auto; }
-  /* The board's `+dirty` marker, in the header that names the same commit: the
-     ref alone would claim this run tested that commit, and it did not — it
-     tested that commit plus whatever was uncommitted at the time. */
-  .detail-dirty { color: var(--amber-ink); margin-left: 0.3rem; }
 
   .detail-sub {
     color: var(--muted);

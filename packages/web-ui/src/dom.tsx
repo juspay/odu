@@ -49,6 +49,7 @@
  */
 
 import { createEffect, Show, type JSX } from "solid-js";
+import { runRef, type StatusHue } from "./format";
 
 /**
  * WHO acts when this button is pressed, and the two answers are exclusive.
@@ -153,9 +154,34 @@ export function Field(props: {
 }
 
 /** A coloured pill — a state, a verdict, a count. `hue` is the semantic name,
- *  never a colour: the stylesheet decides what "red" looks like. */
-export function Pill(props: { hue: string; children: JSX.Element }): JSX.Element {
-  return <span class={`pill pill-${props.hue}`}>{props.children}</span>;
+ *  never a colour: the stylesheet decides what "red" looks like. Typed as
+ *  `StatusHue` rather than `string`, because the one place the vocabulary is
+ *  consumed should not be the one place it is unchecked — and `hue-<x>` is the
+ *  same class family the glyphs and the wire draw themselves with. */
+export function Pill(props: {
+  hue: StatusHue;
+  children: JSX.Element;
+}): JSX.Element {
+  return <span class={`pill hue-${props.hue}`}>{props.children}</span>;
+}
+
+/** The commit a run tested — the ref a person pastes, and the `+dirty` marker
+ *  that says the tree had uncommitted changes when it ran. One spelling,
+ *  because the board row and the run header name the same fact and used to draw
+ *  it with two sets of markup and two byte-identical rules. */
+export function CommitRef(props: {
+  sha: string;
+  seq: number | null;
+  dirty: boolean;
+}): JSX.Element {
+  return (
+    <>
+      {runRef(props.sha, props.seq)}
+      <Show when={props.dirty}>
+        <span class="dirty">+dirty</span>
+      </Show>
+    </>
+  );
 }
 
 /**
