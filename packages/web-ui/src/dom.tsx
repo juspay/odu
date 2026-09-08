@@ -105,13 +105,6 @@ export function Button(props: ButtonProps): JSX.Element {
       class={props.class ?? "btn"}
       disabled={props.disabled}
       title={props.title}
-      // The SAME sentence, twice, on purpose. `data-hint` is what the stylesheet
-      // draws as a tooltip — styled, instant, and shown on `:focus-visible` as
-      // well as on hover, so a keyboard user gets the explanation a mouse user
-      // gets. `title` stays because it is the fallback for every browser without
-      // anchor positioning, and because assistive tech reads it: a `data-`
-      // attribute is invisible to a screen reader.
-      data-hint={props.title}
       // `undefined` REMOVES the attribute and `false` writes `"false"`, which is
       // exactly the distinction `pressed` above is about — an absent toggle
       // state versus a toggle that is off.
@@ -119,6 +112,23 @@ export function Button(props: ButtonProps): JSX.Element {
       onClick={props.onClick}
     >
       {props.children}
+      {/* The SAME sentence as `title`, drawn. The stylesheet shows `.tip` as a
+          tooltip — styled, instant, and on `:focus-visible` as well as on hover,
+          so a keyboard user gets the explanation a mouse user gets. `title`
+          stays as the fallback where anchor positioning is missing, and as what
+          assistive tech reads.
+
+          A CHILD ELEMENT, hidden from the accessibility tree, and its text in an
+          attribute rather than in the node. The first cut drew the hint as the
+          button's own `::after`, and generated content is part of an element's
+          accessible name — so the moment a button was hovered or focused its
+          name became "Active read attempt 1 of…" and nothing that addressed it
+          by name could find it, the acceptance suite included. `aria-hidden`
+          keeps the hint out of the name; `data-hint` + `::after` keeps it out of
+          `textContent` too, which the keyboard steps compare against. */}
+      <Show when={props.title !== undefined}>
+        <span class="tip" aria-hidden="true" data-hint={props.title} />
+      </Show>
     </button>
   );
 }

@@ -355,38 +355,50 @@
 
   /* ── the hint a button already carries, drawn ────────────────────────────
    *
-   * Every `Button` passes its `title` through as `data-hint` (see `dom.tsx`), so
-   * the sentence explaining what a control does is already in the DOM — it was
-   * just waiting on the browser's own tooltip, which takes a second to appear,
-   * cannot be styled, and never shows up for a keyboard user at all.
+   * Every `Button` with a `title` also holds a `.tip` child carrying the same
+   * sentence in `data-hint` (see `dom.tsx`), so the explanation of what a
+   * control does is already in the DOM — it was just waiting on the browser's
+   * own tooltip, which takes a second to appear, cannot be styled, and never
+   * shows up for a keyboard user at all.
+   *
+   * WHY A CHILD AND NOT THE BUTTON'S OWN `::after`. Generated content is part of
+   * an element's accessible name, so a tooltip drawn as the button's pseudo-
+   * element renamed the button the moment it was hovered or focused — and
+   * anything addressing it by name, a screen reader or the acceptance suite,
+   * lost it. The `.tip` span is `aria-hidden`, and its text lives in an
+   * attribute drawn through `::after`, so neither the name nor `textContent`
+   * ever changes.
    *
    * ANCHOR POSITIONING, and only where it exists. Inside `@supports` this paints
    * a real tooltip under the control; outside it NOTHING is drawn and the native
    * `title` is what a person gets, which is exactly what they got before.
    *
    * ONE anchor name for every button on the page, which is only safe because of
-   * `anchor-scope`: the name is confined to the element that declares it, so a
-   * button's own tooltip is the only box that can see it. All three spellings
-   * were tried in Chrome 151 and only this one is right — the implicit anchor
-   * (no `anchor-name`, relying on the originating element, which is what the
-   * spec suggests) does not resolve at all and drops the tooltip at its static
-   * position on top of the button; a shared name WITHOUT the scope resolves
-   * every tooltip on the page to the LAST button that carries it, so every hint
-   * appears under the same control. Hence the `and` in the `@supports`: a
-   * browser with anchor names but no scoping gets the native `title` instead of
-   * a page of tooltips piled on one button.
+   * `anchor-scope`: the name is confined to the element that declares it — its
+   * own subtree, which is where the tip lives — so a button's own tooltip is
+   * the only box that can see it. All three spellings were tried in Chrome 151
+   * and only this one is right — the implicit anchor (no `anchor-name`, relying
+   * on the originating element, which is what the spec suggests) does not
+   * resolve at all and drops the tooltip at its static position on top of the
+   * button; a shared name WITHOUT the scope resolves every tooltip on the page
+   * to the LAST button that carries it, so every hint appears under the same
+   * control. Hence the `and` in the `@supports`: a browser with anchor names
+   * but no scoping gets the native `title` instead of a page of tooltips piled
+   * on one button.
    *
    * `position-try-fallbacks` is what keeps a hint on a right-hand button from
    * hanging off a narrow screen, and `position: fixed` is what keeps it from
    * being clipped by the `overflow: hidden` of the node list or the log card it
    * is drawn inside.
    */
-  @supports (anchor-name: --x) and (anchor-scope: --x) {
-    .btn[data-hint] { anchor-name: --btn; anchor-scope: --btn; }
+  .tip { display: none; }
 
-    .btn[data-hint]:hover::after,
-    .btn[data-hint]:focus-visible::after {
-      content: attr(data-hint);
+  @supports (anchor-name: --x) and (anchor-scope: --x) {
+    .btn:has(> .tip) { anchor-name: --btn; anchor-scope: --btn; }
+
+    .btn:hover > .tip,
+    .btn:focus-visible > .tip {
+      display: block;
       position: fixed;
       position-anchor: --btn;
       top: anchor(bottom);
@@ -406,6 +418,8 @@
          the click that was aimed at the button underneath it. */
       pointer-events: none;
     }
+
+    .tip::after { content: attr(data-hint); }
   }
 
   /* A state, a verdict, a count. The hue is one of the five; the WORD inside is
