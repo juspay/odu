@@ -23,3 +23,16 @@ When("the browser goes offline", async function (this: OduWorld) {
 When("the browser comes back online", async function (this: OduWorld) {
   await this.context.setOffline(false);
 });
+
+/**
+ * STAY offline while the producer keeps going.
+ *
+ * Going offline and straight back is not an outage — it may not even catch a
+ * read in flight. What has to happen is that the follow's read FAILS while the
+ * node writes on, so coming back has bytes to catch up on. Long enough to
+ * outlast one waiting read, which is what a follower is doing when it is
+ * caught up.
+ */
+When("the node writes on while the browser is offline", async function (this: OduWorld) {
+  await new Promise((resolve) => setTimeout(resolve, 8_000));
+});

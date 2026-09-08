@@ -24,6 +24,7 @@ import {
   FAILING,
   FAST_RED,
   headOf,
+  LIVE_BURST,
   LONG_LOG,
   makeFixture,
   SLOW,
@@ -102,6 +103,24 @@ Given(
     // is where the coordinator's progress is supposed to show up. A wait on the
     // wire before opening the page would be this suite checking the service and
     // then hoping the browser agreed.
+  },
+);
+
+Given(
+  "a live run of the fixture whose node bursts and then stops",
+  { timeout: RUN_SETUP_TIMEOUT },
+  async function (this: OduWorld) {
+    const dir = ownFixture(this, LIVE_BURST);
+    const runId = startRun(this.service, {
+      checkout: dir,
+      expectedSha: headOf(dir),
+      requestId: `wa-burst-${crypto.randomUUID()}`,
+    });
+    this.ownRuns.push(runId);
+    this.runId = runId;
+    // NOT waited on. The scenarios that use this are about a log while it is
+    // still being written — one loses the connection in the middle of it — so
+    // settling here first would remove the only condition being tested.
   },
 );
 

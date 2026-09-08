@@ -331,6 +331,43 @@ slow:
  * 3993 — which is a fact about the transport and would have been read here as a
  * fact about the buttons.
  */
+/**
+ * A node that keeps writing while somebody is watching, then STOPS.
+ *
+ * Two properties a settled fixture cannot state. The burst between the markers
+ * is far larger than one page, so a follower that ends when the producer
+ * finishes — rather than when it has read everything the producer wrote —
+ * loses the tail: the closing page carries unread bytes behind it. And the run
+ * stays live long enough for a browser to lose its connection in the middle
+ * and get it back, which is the other thing that used to end a follow for good.
+ *
+ * Every line is numbered and unique, so "arrived" and "arrived twice" are both
+ * checkable from the text alone.
+ */
+export const LIVE_BURST = `[metadata("ci")]
+default: burst
+
+burst:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "__BURST_BEGIN__"
+    # A SLOW OPENING, so a follower catches up and parks in a waiting read —
+    # which is the state it has to be in for the rest of this to mean anything.
+    for i in $(seq 1 40); do
+      printf 'burst line %06d — padding so every line is the same width in here\\n' "$i"
+      sleep 0.15
+    done
+    # THEN EVERYTHING AT ONCE, and exit. Several hundred kilobytes land between
+    # one read and the next, so the page that first reports "this log can no
+    # longer grow" has many more pages behind it. A follower that stops there
+    # keeps the first 64 KiB and loses the rest — including the last line, which
+    # for a failure is the diagnosis.
+    for i in $(seq 41 12000); do
+      printf 'burst line %06d — padding so every line is the same width in here\\n' "$i"
+    done
+    echo "__BURST_END__"
+`;
+
 export const LONG_LOG = `[metadata("ci")]
 default: noisy
 

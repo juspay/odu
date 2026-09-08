@@ -169,3 +169,33 @@ Then("the address names attempt {int}", async function (this: OduWorld, attempt:
     `the address to end at attempt ${attempt}`,
   );
 });
+
+/**
+ * NO LINE TWICE. A follow that resumes has to resume from its cursor, and a
+ * follow that resumed from the wrong place would show output it had already
+ * shown — which reads as the recipe having run twice, and is indistinguishable
+ * from it in the pane.
+ *
+ * Numbered lines are what make this checkable at all: the fixture prints each
+ * one once, so any repeat in the panel came from the follow.
+ */
+Then("every line of the output appears exactly once", async function (this: OduWorld) {
+  const said = await this.page.locator("pre.log-text").innerText();
+  const seen = new Map<string, number>();
+  for (const line of said.split("\n")) {
+    const numbered = /^burst line (\d{6})/.exec(line);
+    if (numbered === null) continue;
+    const at = numbered[1] as string;
+    seen.set(at, (seen.get(at) ?? 0) + 1);
+  }
+  const twice = [...seen.entries()].filter(([, count]) => count > 1);
+  assert.ok(
+    twice.length === 0,
+    `these lines arrived more than once: ${twice
+      .slice(0, 5)
+      .map(([at, count]) => `${at} x${count}`)
+      .join(", ")}`,
+  );
+  // And it actually saw some, so an empty pane cannot pass this.
+  assert.ok(seen.size > 0, "the output panel held no numbered lines at all");
+});
