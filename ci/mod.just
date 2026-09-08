@@ -1,14 +1,10 @@
-# odu's own CI pipeline — consumed by odu itself (`nix run .#odu -- run`).
-# The runner discovers the recipe tagged [metadata("ci")], expands its
-# reachable dependency subgraph, and runs each leaf via
-# `just --no-deps <namepath>`.
+# Odu CI: both e2e suites exercise the Nix-built application.
 
 set working-directory := '..'
 
 nix_shell := if env('IN_NIX_SHELL', '') != '' { '' } else { 'nix develop --accept-flake-config -c' }
 
-# See the justfile's copy: PLAYWRIGHT_BROWSERS_PATH, not IN_NIX_SHELL, because
-# the default shell sets the latter and supplies no browsers.
+# The default devshell has no browsers; use the e2e shell unless they are present.
 nix_shell_e2e := if env('PLAYWRIGHT_BROWSERS_PATH', '') != '' { '' } else { 'nix develop .#e2e --accept-flake-config -c' }
 
 [parallel]
@@ -37,40 +33,10 @@ typecheck: install
 unit: install
     {{ nix_shell }} bun run test:unit
 
-# THE CLI end-to-end gate: builds the odu binary with nix and drives it against
-# a throwaway fixture repo on a localhost lane (tests/e2e/README.md). Needs the
-# dev shell on PATH (nix, git, just, bun) plus the node_modules from `install`.
-#
-# One of TWO end-to-end legs, and they stay two nodes here rather than one:
-# `just e2e` runs both for a person, but CI wants them parallel and wants a
-# failure to say which door it came in through. `e2e-cli` and `e2e-web` are the
-# contexts a required check names.
-#
-# `nix` IS A PREREQUISITE for the same reason it is one for `e2e-web` below:
-# this leg builds `.#odu` too, and without the edge the two race. The
-# loser pays for the whole build INSIDE a test's own timeout — which is exactly
-# how `cancel.e2e.test.ts` came to fail with "timed out waiting for the run to
-# serve its socket" after ten minutes on a builder whose store was cold, while
-# `ci::nix` beside it reported success in 24 seconds and `e2e-web`, which has
-# the edge, finished in 37. The failure reads as a flaky test and is a
-# missing dependency; the log gives it away, being two-fifths substituter noise
-# from a build that should have been a lookup.
+# Build before e2e so a cold store cannot consume a test timeout.
 e2e-cli: install nix
     {{ nix_shell }} bun run test:e2e-cli
 
-# THE BROWSER end-to-end gate: Cucumber features driven through Playwright
-# against the nix-built binary, with the browsers supplied by nixpkgs
-# (packages/web-acceptance/README.md).
-#
-# REQUIRED on every platform, deliberately. odu's previous browser coverage
-# skipped itself where no Chrome was on PATH, so on a runner it graded nothing
-# and the one environment where a regression is caught by somebody other than its
-# author was the one environment that never looked. If this leg is too slow for
-# the workflow's `timeout-minutes`, raise that number — a platform-conditional
-# skip would put the silent gap straight back.
-#
-# `nix` is a prerequisite as well as a build here so the binary is an
-# already-realised lookup rather than a second build racing that leg's.
 e2e-web: install nix
     #!/usr/bin/env bash
     set -euo pipefail
@@ -85,16 +51,12 @@ fmt:
 nix:
     nix build .#odu .#odu-runner .#web-ui --no-link
 
-# crates.io 403s the `curl/*` User-Agent nixpkgs fetchurl sends, so building
-# bun2nix from source (askama / basic-toml / jsonc-parser …) fails on a runner
-# whose store lacks it. Idempotent and cheap warm. See the script.
+# Work around crates.io rejecting the fetchurl User-Agent on cold stores.
 [private]
 _prefetch-crates:
     {{ nix_shell }} bash scripts/ci-prefetch-crates.sh .
 
-# bun.nix freshness — regenerate from bun.lock into a tmpdir and diff
-# against the committed file. Fails the pipeline if bun.lock has moved
-# without `just regenerate-bun-nix` being run.
+# Verify bun.nix was regenerated after lockfile changes.
 bun-nix-fresh: _prefetch-crates
     {{ nix_shell }} sh -c '\
       set -eu; \

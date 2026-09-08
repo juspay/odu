@@ -7,7 +7,7 @@ import SiteChrome from "../components/SiteChrome.astro";
 
 const base = import.meta.env.BASE_URL.replace(/\/$/, "");
 const github = "https://github.com/juspay/odu";
-const runCmd = "nix run github:juspay/odu -- run --host x86_64-linux=localhost";
+const runCmd = "nix run github:juspay/odu -- run --host x86_64-linux=localhost --no-post";
 
 // Dogfood: show odu's real CI justfile. Astro's cwd is website/, so ../ci is the repo.
 const justfileSource = readFileSync(resolve(process.cwd(), "../ci/mod.just"), "utf-8");
@@ -38,14 +38,14 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
     </script>
     <link rel="icon" type="image/svg+xml" href={`${base}/logo.svg`} />
     <link rel="canonical" href="https://juspay.github.io/odu/" />
-    <meta property="og:title" content="odu — CI you can attach to" />
+    <meta property="og:title" content="odu — CI you can watch together" />
     <meta
       property="og:description"
       content="Batch CI leaves logs. odu keeps the pipeline alive as typed state — attach from a terminal or drive it over MCP."
     />
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://juspay.github.io/odu/" />
-    <title>odu — CI you can attach to</title>
+    <title>odu — CI you can watch together</title>
   </head>
   <body>
     <SiteChrome active="home">
@@ -55,12 +55,12 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
           <div class="hero-grid">
             <div>
               <p class="eyebrow">Live CI for just · humans + agents</p>
-              <h1>CI you can <em>attach to.</em><span class="cursor" aria-hidden="true">▌</span></h1>
+              <h1>CI you can <em>watch together.</em><span class="cursor" aria-hidden="true">▌</span></h1>
               <p class="hero-copy">
                 Batch CI turns your task graph into a process and leaves log
                 files. <strong>odu keeps the pipeline alive as typed state</strong> —
-                attach from another terminal, or let a coding agent drive the same
-                run over MCP. Your <a href="https://just.systems"><code>just</code></a> file
+                watch every run in the browser, attach from a terminal, or let a coding
+                agent drive those same runs over MCP. Your <a href="https://just.systems"><code>just</code></a> file
                 is still the pipeline.
               </p>
               <div class="actions">
@@ -77,7 +77,7 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
                   <button class="copy-btn" type="button" data-copy={runCmd} style="margin-left:auto">copy</button>
                 </div>
                 <div class="term-body">
-                  <div class="cmd"><span class="prompt">$</span> nix run github:juspay/odu -- run <span class="flag">--host x86_64-linux=localhost</span></div>
+                  <div class="cmd"><span class="prompt">$</span> nix run github:juspay/odu -- run <span class="flag">--host x86_64-linux=localhost --no-post</span></div>
                   <div class="pipeline" aria-hidden="true">
                     <span class="pnode"><span class="pdot" style="--d:0s"><span class="pcheck">✓</span></span>typecheck</span>
                     <span class="parrow">→</span>
@@ -89,7 +89,7 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
                     <span class="parrow">→</span>
                     <span class="pnode"><span class="pdot" style="--d:2.4s"><span class="pcheck">✓</span></span>e2e</span>
                   </div>
-                  <div class="term-status"><span class="live" aria-hidden="true"></span> attach · mcp · rerun — same live state<span class="caret" aria-hidden="true"></span></div>
+                  <div class="term-status"><span class="live" aria-hidden="true"></span> web · attach · MCP — same service<span class="caret" aria-hidden="true"></span></div>
                 </div>
               </div>
             </div>
@@ -101,7 +101,7 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
               </div>
               <div class="contrast-row after">
                 <span class="contrast-label">odu</span>
-                <p>The runner owns live state. <code>attach</code> for humans, <code>mcp</code> for agents — same run, fail-fast and rerun only what broke.</p>
+                <p>One local service tracks every run. Open the web board, attach from a terminal, or use MCP — diagnose failures while other jobs continue.</p>
               </div>
               <div class="contrast-row after">
                 <span class="contrast-label">Justfile</span>
@@ -111,15 +111,32 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
           </div>
         </section>
 
+        <section id="web" class="section">
+          <div class="shell">
+            <p class="eyebrow">Every repository, one board</p>
+            <h2 class="section-title">See the failure while the rest keeps running.</h2>
+            <p class="section-lead">Open <code>http://127.0.0.1:18440</code> after starting a run.
+              Select a run to inspect nodes, read an attempt’s logs, retry a failure or cancel work.
+              The CLI and MCP use the same service and run IDs.</p>
+            <pre class="code-block"><span class="line">nix run github:juspay/odu -- web</span></pre>
+            <p class="section-lead">This serves in the foreground. If a service is already running,
+              open its URL; use <code>web --upgrade</code> to replace it in this terminal.
+              Ctrl-C stops the web server; CI runs continue. Use <code>web --background</code>
+              when you explicitly want a daemon.</p>
+            <a class="button" href={`${base}/docs/#every-run-at-once-the-web-service`}>Web, agents and remote access →</a>
+          </div>
+        </section>
+
         <!-- 2. Proof: real videos first -->
         <section id="proof" class="section">
           <div class="shell">
             <div class="section-head">
               <p class="eyebrow">Recorded from real runs</p>
-              <h2 class="section-title">One state. Two readers.</h2>
+              <h2 class="section-title">One service. Browser, terminal, agent.</h2>
               <p class="section-lead">
-                Not a staged dashboard. The terminal and the agent are thin adapters
-                over the same live pipeline.
+                The web board shows runs across repositories. The terminal and agent
+                read and control those same runs. These earlier recordings show
+                the workflow; their command and tool names predate the shared service.
               </p>
             </div>
             <div class="proof-grid">
@@ -186,17 +203,17 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
                 <span class="who">Agent</span>
                 <h3>Stop on first red, not after 20 minutes</h3>
                 <p>
-                  <code>wait_for_settle</code> returns the instant a node fails.
-                  Read that log, fix the source, <code>node_rerun</code> only the
-                  failed node and its dependents.
+                  <code>run_wait</code> reports failures before the run settles.
+                  Use <code>log_read</code> to diagnose them. Retry unchanged inputs
+                  with <code>run_retry</code>; start a new run for a source fix.
                 </p>
               </article>
               <article class="outcome who-human">
                 <span class="who">Human</span>
                 <h3>Retry a flake without restarting CI</h3>
                 <p>
-                  Keep the coordinator with <code>--linger</code>, hit rerun on the
-                  flaky node. No full pipeline restart for one bad leaf.
+                  Choose Retry on the failed node. A live run gets a new attempt;
+                  a finalized run gets a linked replay of the selected scope.
                 </p>
               </article>
               <article class="outcome who-team">
@@ -219,7 +236,7 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
               <p class="eyebrow">Local coordinator · remote lanes</p>
               <h2 class="section-title">Runs from your machine. Executes anywhere.</h2>
               <p class="section-lead">
-                No CI service, no server-side YAML. The coordinator lives
+                The shared service runs locally. Each run’s coordinator lives
                 on <strong>your machine</strong> — a bare <code>odu run</code> fans out
                 across every configured platform at once, delegating each lane to a
                 host over plain ssh. The runner travels as a Nix closure, so hosts
@@ -300,36 +317,37 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
                 <div class="loop-step">
                   <span class="loop-n">01</span>
                   <div>
-                    <strong>run</strong>
-                    <span>Start the coordinator in the background.</span>
+                    <strong>run_start</strong>
+                    <span>Start a run through the shared service; keep its run ID and cursor.</span>
                   </div>
                 </div>
                 <div class="loop-step critical">
                   <span class="loop-n">02</span>
                   <div>
-                    <strong>wait_for_settle</strong>
+                    <strong>run_wait</strong>
                     <span>Return on settlement <em>or</em> the first red node — don’t wait out a doomed build.</span>
                   </div>
                 </div>
                 <div class="loop-step">
                   <span class="loop-n">03</span>
                   <div>
-                    <strong>inspect</strong>
-                    <span>Subscribe to that node’s log resource and read the failure.</span>
+                    <strong>log_read</strong>
+                    <span>Read the log key returned with the failure, paging by byte offset.</span>
                   </div>
                 </div>
                 <div class="loop-step">
                   <span class="loop-n">04</span>
                   <div>
-                    <strong>fix → node_rerun</strong>
-                    <span>Patch source, then reset only the failed node and its dependents.</span>
+                    <strong>Retry or start a new commit</strong>
+                    <span>Use run_retry for unchanged inputs. Commit a source fix and run_start at the new SHA; verify scope and reporting debt.</span>
                   </div>
                 </div>
               </div>
               <div>
                 <p class="section-lead" style="margin-top:0">
-                  Tools: <code>run</code>, <code>wait_for_settle</code>, <code>node_rerun</code>, <code>node_cancel</code>, <code>lane_cancel</code>, <code>cancel</code>, <code>runs</code>.
-                  Pipeline state and logs are subscribable resources, not scraped text.
+                  <code>run_start</code> → <code>run_wait</code> → <code>log_read</code> → <code>run_retry</code>.
+                  The unified Odu skill teaches this loop, including cursors, request IDs,
+                  cancellation and verifying the final result. MCP starts the service when needed.
                 </p>
                 <p class="section-lead">
                   Wire it with one stdio entry:
@@ -390,21 +408,22 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
               <div class="step">
                 <span class="step-n">02</span>
                 <h3>Run a lane</h3>
+                <p>This starts the local service automatically. Use your Nix system in the host pin; this example is x86_64 Linux.</p>
                 <div class="code-block">
                   <button class="copy-btn" type="button" data-copy={runCmd}>copy</button>
                   <span class="line"><span class="dim">$</span> nix run github:juspay/odu -- run</span>
-                  <span class="line indent">--host x86_64-linux=localhost</span>
+                  <span class="line indent">--host x86_64-linux=localhost --no-post</span>
                   <span class="line gap"><span class="accent">✓</span> typecheck  <span class="accent">✓</span> unit  <span class="dim">⠹</span> e2e</span>
                 </div>
               </div>
               <div class="step">
                 <span class="step-n">03</span>
-                <h3>Attach or agent</h3>
+                <h3>Open the board</h3>
                 <div class="code-block">
                   <span class="line dim"># another terminal</span>
-                  <span class="line"><span class="dim">$</span> odu attach</span>
+                  <span class="line">http://127.0.0.1:18440</span>
                   <span class="line gap dim"># or let an agent drive</span>
-                  <span class="line"><span class="dim">$</span> odu mcp</span>
+                  <span class="line"><span class="dim">$</span> nix run github:juspay/odu -- mcp</span>
                 </div>
               </div>
             </div>
