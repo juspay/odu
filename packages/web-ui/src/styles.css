@@ -897,7 +897,16 @@
    * `app.tsx` puts `shell-frame` on the shell when the route is a run; the board
    * and the create form keep ordinary page flow, and the `:has()` guards below
    * mean the document only gives up its own scrolling when the frame is there.
+   *
+   * WIDE SCREENS ONLY. On a phone the frame is the wrong trade: the header, the
+   * receipt and the node list stack above the console and leave it a few lines
+   * of a fixed-height viewport, with no way to give it more. There the page
+   * scrolls as a page and the console keeps its own 60vh cap, which is the
+   * layout that has always worked at that width. A viewport query rather than a
+   * container one, because this is a decision about the document, not about the
+   * room a panel has.
    */
+  @media (min-width: 60rem) {
   html:has(.shell-frame),
   body:has(.shell-frame) { height: 100%; }
 
@@ -940,6 +949,11 @@
     max-height: none;
   }
 
+  /* Inside the frame the topbar is not sticky, it is simply first: the frame
+     itself does not scroll, so there is nothing to stick to. */
+  .shell-frame .topbar { position: static; flex: none; }
+  }
+
   /* ── the masthead and the connection indicator ───────────────────────────
    *
    * The wordmark is the logo's own idea rather than a second drawing of it:
@@ -964,10 +978,6 @@
     border-bottom: 1px solid var(--line);
     background: var(--canvas);
   }
-
-  /* Inside the frame the topbar is not sticky, it is simply first: the frame
-     itself does not scroll, so there is nothing to stick to. */
-  .shell-frame .topbar { position: static; flex: none; }
 
   /* ── the board ─────────────────────────────────────────────────────────── */
 
@@ -1145,8 +1155,10 @@
        still takes only the room it needs, a hundred-node one stops at four
        tenths and scrolls, and the console always starts at or below the bottom
        of the list. */
-    .shell-frame .detail-body {
-      grid-template-rows: minmax(0, 40%) minmax(0, 1fr);
+    @media (min-width: 60rem) {
+      .shell-frame .detail-body {
+        grid-template-rows: minmax(0, 40%) minmax(0, 1fr);
+      }
     }
   }
 

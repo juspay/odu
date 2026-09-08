@@ -169,7 +169,7 @@ export function Pill(props: { hue: string; children: JSX.Element }): JSX.Element
  * mode fails a locator that matches two elements — so a dialog whose confirm
  * button also says "Cancel run", opened by a button that says "Cancel run",
  * breaks every step that presses either one. Name the trigger for the thing and
- * the confirmation for the act: "Cancel run" opens it, "Stop the run" commits.
+ * the confirmation for the act: "Cancel run" opens it, "Yes, cancel it" commits.
  */
 export function Confirm(props: {
   open: boolean;
