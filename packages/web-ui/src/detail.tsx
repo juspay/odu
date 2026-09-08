@@ -27,7 +27,7 @@ import {
   Show,
   type JSX,
 } from "solid-js";
-import { Button, Pill } from "./dom";
+import { Button, Pill, Receipt } from "./dom";
 import { bytes, duration, NODE_STATUS, OUTCOME, runRef, scopeLabel } from "./format";
 import type { LogPage, LogTail, NodesFrame, RunNode, RunRow } from "./types";
 
@@ -447,13 +447,9 @@ export function Detail(props: {
           on a refusal is the browser's version of the failure this release
           removes. */}
       <Show when={props.control.kind !== "idle"}>
-        <p
-          class="receipt"
-          classList={{ "receipt-bad": props.control.kind === "refused" }}
-          role="status"
-        >
+        <Receipt role="status" bad={props.control.kind === "refused"}>
           {receiptText(props.control)}
-        </p>
+        </Receipt>
       </Show>
       <div class="detail-body">
         <section class="nodes" aria-label="Nodes">

@@ -20,7 +20,7 @@
  */
 
 import { createSignal, Show, type JSX } from "solid-js";
-import { Button, Field } from "./dom";
+import { Button, Field, Receipt } from "./dom";
 
 /** What the caller filled in. Every optional field is left ABSENT rather than
  *  sent empty: the wire's optional keys mean "not said", and an empty array
@@ -221,22 +221,21 @@ export function Create(props: {
           {props.state.kind === "starting" ? "Starting…" : "Start run"}
         </Button>
       </form>
+      {/* A refusal INTERRUPTS — `alert` rather than `status` — because it is the
+          answer to the thing the person just pressed, and the form is still
+          sitting there looking ready. */}
       <Show when={props.state.kind === "refused" ? props.state : null}>
-        {(refused) => (
-          <p class="receipt receipt-bad" role="alert">
-            {refused().message}
-          </p>
-        )}
+        {(refused) => <Receipt role="alert" bad>{refused().message}</Receipt>}
       </Show>
       <Show when={props.state.kind === "existing" ? props.state : null}>
         {(existing) => (
-          <p class="receipt" role="status">
+          <Receipt role="status">
             {`That checkout already has a live run at ${existing().sha.slice(0, 7)}. `}
             <Button onClick={() => props.onOpen(existing().runId)}>
               Open it
             </Button>
             {" — or tick “Take the checkout” above and start again."}
-          </p>
+          </Receipt>
         )}
       </Show>
     </section>

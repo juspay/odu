@@ -48,7 +48,7 @@
  * another.
  */
 
-import { Show, type JSX } from "solid-js";
+import { createEffect, Show, type JSX } from "solid-js";
 
 /**
  * WHO acts when this button is pressed, and the two answers are exclusive.
@@ -105,6 +105,13 @@ export function Button(props: ButtonProps): JSX.Element {
       class={props.class ?? "btn"}
       disabled={props.disabled}
       title={props.title}
+      // The SAME sentence, twice, on purpose. `data-hint` is what the stylesheet
+      // draws as a tooltip — styled, instant, and shown on `:focus-visible` as
+      // well as on hover, so a keyboard user gets the explanation a mouse user
+      // gets. `title` stays because it is the fallback for every browser without
+      // anchor positioning, and because assistive tech reads it: a `data-`
+      // attribute is invisible to a screen reader.
+      data-hint={props.title}
       // `undefined` REMOVES the attribute and `false` writes `"false"`, which is
       // exactly the distinction `pressed` above is about — an absent toggle
       // state versus a toggle that is off.
@@ -139,4 +146,115 @@ export function Field(props: {
  *  never a colour: the stylesheet decides what "red" looks like. */
 export function Pill(props: { hue: string; children: JSX.Element }): JSX.Element {
   return <span class={`pill pill-${props.hue}`}>{props.children}</span>;
+}
+
+/**
+ * ARE YOU SURE — for the handful of controls that throw away work.
+ *
+ * A native `<dialog>` opened with `showModal()`, because the four behaviours a
+ * confirmation needs are the four the platform already implements and a
+ * hand-rolled overlay gets wrong one at a time: Esc closes it, the rest of the
+ * page goes inert, focus is trapped inside it and returns to the trigger on the
+ * way out, and the backdrop is the browser's own. A closed `<dialog>` hides its
+ * subtree outright, so nothing in here is focusable, tabbable or findable while
+ * it is shut — which is what keeps it out of the keyboard sweep.
+ *
+ * `open` is a PROP rather than a method call, so the dialog's visibility is a
+ * function of the caller's state and there is no second place where it can be
+ * open. The native `close` event — Esc, or the platform's own dismissal — is
+ * wired back to `onClose`, so the two directions cannot drift apart.
+ *
+ * **`confirmLabel` must never repeat the trigger's own words.** The acceptance
+ * suite finds a control by its exact accessible name, and Playwright's strict
+ * mode fails a locator that matches two elements — so a dialog whose confirm
+ * button also says "Cancel run", opened by a button that says "Cancel run",
+ * breaks every step that presses either one. Name the trigger for the thing and
+ * the confirmation for the act: "Cancel run" opens it, "Stop the run" commits.
+ */
+export function Confirm(props: {
+  open: boolean;
+  title: string;
+  body: string;
+  confirmLabel: string;
+  cancelLabel: string;
+  danger?: boolean;
+  onConfirm: () => void;
+  onClose: () => void;
+}): JSX.Element {
+  let dialog: HTMLDialogElement | undefined;
+  createEffect(() => {
+    const el = dialog;
+    if (el === undefined) return;
+    // Guarded both ways: `showModal()` on an already-open dialog throws, and
+    // `close()` on a shut one fires a second `close` event.
+    if (props.open && !el.open) el.showModal();
+    if (!props.open && el.open) el.close();
+  });
+  return (
+    <dialog class="confirm" ref={dialog} onClose={() => props.onClose()}>
+      <h2>{props.title}</h2>
+      <p>{props.body}</p>
+      {/* Cancel FIRST. The dialog focuses its first focusable child on open, so
+          the button under the keyboard at the moment it appears is the one that
+          changes nothing. */}
+      <div class="confirm-actions">
+        <Button onClick={() => props.onClose()}>{props.cancelLabel}</Button>
+        <Button
+          class={props.danger === true ? "btn btn-danger" : "btn"}
+          onClick={() => {
+            props.onConfirm();
+            props.onClose();
+          }}
+        >
+          {props.confirmLabel}
+        </Button>
+      </div>
+    </dialog>
+  );
+}
+
+/**
+ * WHAT A CONTROL ANSWERED — including a refusal.
+ *
+ * Every control in this app reports, because a control that went quiet on a
+ * refusal is the browser's version of the failure this whole release removes.
+ * The element is a `<p class="receipt">` and stays one: that is the selector the
+ * acceptance suite reads an answer out of.
+ *
+ * `role` is the caller's, not this component's, and the two are different
+ * promises. `status` is polite — it waits for a screen reader to finish the
+ * sentence it is on, which is right for "Told the coordinator to stop". `alert`
+ * interrupts, which is right for a refusal the person has to act on.
+ *
+ * The sentence is always wrapped in `.receipt-text`, even with no dismissal
+ * beside it, so the receipt is one flex item that wraps as a paragraph rather
+ * than a row of bare text nodes each shrinking to its longest word.
+ */
+export function Receipt(props: {
+  role: "status" | "alert";
+  bad?: boolean;
+  children: JSX.Element;
+  /** Given only for a receipt somebody may be done with. A refusal has no
+   *  dismissal: it is the answer to what they just asked, and it goes when the
+   *  next control answers. */
+  onDismiss?: () => void;
+}): JSX.Element {
+  return (
+    <p
+      class="receipt"
+      classList={{ "receipt-bad": props.bad === true }}
+      role={props.role}
+    >
+      <span class="receipt-text">{props.children}</span>
+      <Show when={props.onDismiss !== undefined}>
+        <Button
+          class="btn receipt-dismiss"
+          title="clear this receipt"
+          onClick={() => props.onDismiss?.()}
+        >
+          Dismiss
+        </Button>
+      </Show>
+    </p>
+  );
 }

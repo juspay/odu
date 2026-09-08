@@ -551,7 +551,13 @@ export function App(props: {
 
   // ── the shell ──
   return (
-    <div class="shell">
+    <div
+      class="shell"
+      // A RUN is read, so it gets the viewport: `.shell-frame` in `styles.css`
+      // turns the page into an app frame whose log pane scrolls inside itself.
+      // The board is scanned, so it keeps the page's own scroll.
+      classList={{ "shell-frame": route().at === "run" }}
+    >
       {/* The masthead, and the wire beside it. The wordmark is `logo.svg`'s own
           idea spelled in text — a slate `$` in front of `odu` in bold mono,
           because odu is a shell prompt you attach to — rather than a second
