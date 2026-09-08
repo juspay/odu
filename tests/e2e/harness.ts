@@ -254,32 +254,75 @@ const fixtures = new Set<string>();
  * interrupted far more often than it completes while somebody is working on
  * it, so the signals run it too and then leave by the route they arrived.
  */
+/**
+ * Stop whatever is serving at THIS suite's origin, and say where its home was.
+ *
+ * Asked for its own pid rather than tracked: the process this suite forked is
+ * not necessarily the one serving, and the service's identity cell is the only
+ * thing that knows which is. `null` when nothing answered, which is the
+ * ordinary case and not a fault.
+ */
+function stopService(odu: string): string | null {
+  try {
+    const said = spawnSync(odu, ["surface", "get", "service"], {
+      env: hermeticEnv,
+      encoding: "utf-8",
+      maxBuffer: BIG,
+    });
+    if (said.status !== 0) return null;
+    const cell = JSON.parse(said.stdout) as {
+      identity: { pid: number; home: string };
+    };
+    process.kill(cell.identity.pid, "SIGTERM");
+    return cell.identity.home;
+  } catch {
+    // A service that cannot be reached is a service that is already gone.
+    return null;
+  }
+}
+
+/**
+ * TAKE THE ORIGIN BEFORE USING IT — evict anything already serving there.
+ *
+ * `ensureService` ADOPTS a daemon that answers at the right origin with a
+ * compatible build, which is exactly right in production and silently voids
+ * this world in a suite: a daemon left behind by a previous run of these tests
+ * answers, is adopted, and then serves every call out of the PREVIOUS run's
+ * environment — its catalog, its hosts file, its `$ODU_GH_BIN`. All three of
+ * those point into a temp directory that has since been removed, so `protect`
+ * failed with `ENOENT … posix_spawn` on a stand-in this process had written and
+ * the daemon could not see.
+ *
+ * The port band is this suite's own (see {@link PORT_SLOT}), so anything on it
+ * is by construction a leftover of ours, and stopping it is not a decision
+ * about somebody else's process.
+ */
+function claimOrigin(odu: string): void {
+  const home = stopService(odu);
+  if (home === null) return;
+  // Wait for the gate, not for the pid: a successor cannot bind until the
+  // incumbent has let go, and that is the thing the next call is about to do.
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    const said = spawnSync(odu, ["surface", "get", "service"], {
+      env: hermeticEnv,
+      encoding: "utf-8",
+      maxBuffer: BIG,
+    });
+    if (said.status !== 0) break;
+  }
+  try {
+    rmSync(home, { recursive: true, force: true });
+  } catch {
+    // Best effort; the sweep at exit tries again.
+  }
+}
+
 let sweptUp = false;
 function sweepUp(): void {
   if (sweptUp) return;
   sweptUp = true;
-  let home: string | null = null;
-  if (driven !== null) {
-    try {
-      const said = spawnSync(driven, ["surface", "get", "service"], {
-        env: hermeticEnv,
-        encoding: "utf-8",
-        maxBuffer: BIG,
-      });
-      if (said.status === 0) {
-        const cell = JSON.parse(said.stdout) as {
-          identity: { pid: number; home: string };
-        };
-        home = cell.identity.home;
-        process.kill(cell.identity.pid, "SIGTERM");
-      }
-    } catch {
-      // Teardown, on the way out. A service that cannot be reached is a
-      // service that is already gone, and a throw here would replace a suite's
-      // real verdict with a cleanup error. Every removal below is `force`, for
-      // the same reason.
-    }
-  }
+  const home = driven === null ? null : stopService(driven);
   for (const dir of [...fixtures, blackBox.root, ...(home === null ? [] : [home])]) {
     try {
       rmSync(dir, { recursive: true, force: true });
@@ -355,6 +398,9 @@ export function buildOduBinary(): string {
   const bin = join(oduOut, "bin", "odu");
   // Remembered for teardown — see the `exit` handler beside `hermeticEnv`.
   driven = bin;
+  // And the origin is CLAIMED here, before any test has made a call: this is
+  // the one moment every suite in this directory passes through.
+  claimOrigin(bin);
   return bin;
 }
 

@@ -1,0 +1,28 @@
+# The `noisy` fixture's output, on a lane that FAILS.
+#
+# `noisy` exists to prove a big log arrives whole; this one exists so a big log
+# can be ADDRESSED. A log key is `<runId>/<encoded node>/<attempt>` and odu
+# hands one out in exactly two places — a failure's `logKey`, and a live node's
+# `log_key` — so a test that wants to read a large log back through `odu logs`
+# has to have been given the key rather than build one.
+#
+# Reading it off a LIVE node is a race the test cannot win: the fixture takes
+# tens of seconds, `odu status` reports only a run that has not finished, and
+# the poll then runs out against a run that settled underneath it. A red node's
+# key is available afterwards, for as long as the catalog holds the run.
+#
+# The volume matches `noisy` deliberately — the byte-range assertions are about
+# a log too big to hand back in one piece.
+
+[metadata("ci")]
+default: noisy-red
+
+noisy-red:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    for i in $(seq 1 200000); do
+      echo "noisy line $i — padding so each line is about seventy bytes wide"
+    done
+    echo "NOISY SUMMARY: 200000 lines emitted"
+    echo "__ODU_NOISY_END__"
+    exit 1

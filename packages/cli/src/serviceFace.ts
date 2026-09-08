@@ -92,7 +92,14 @@ export function refusalExit(code: string): number {
 /** The one place an answer about attention becomes an exit, so every face that
  *  reports one reports the same number for the same state. */
 export function waitExitFor(answer: AttentionAnswer): number {
-  if (answer.settled) return answer.passed ? WAIT_EXITS.passed : WAIT_EXITS.failed;
+  // INCOMPLETE IS NOT A PASS. `outcome` is the three-way — passed, failed,
+  // incomplete — and `passed` is the two-way that cannot express the third. A
+  // run whose only non-ok node was CANCELLED has no red node, so `passed` reads
+  // true and the exit was 0: `odu cancel @platform` on the only lane reported
+  // success for a pipeline that never finished.
+  if (answer.settled) {
+    return answer.outcome === "passed" ? WAIT_EXITS.passed : WAIT_EXITS.failed;
+  }
   // A red node is a failure whether or not the slow lanes have finished — the
   // run cannot pass from here. Reporting it as "still running" would be true
   // and useless: the caller has something to act on, and the exit is how it
@@ -255,10 +262,21 @@ export function reportFailure(
     | { ok: false; refusal: ServiceRefused }
     | { ok: false; refusal: null; error: unknown },
   json: boolean,
+  /**
+   * What a REFUSAL exits with, for a command the run-shaped table is not about.
+   *
+   * {@link WAIT_EXITS} numbers the states of a RUN — passed, red, still going,
+   * owner lost. `odu protect` and `odu graph` have none of those: they either
+   * did the thing or did not, which is `0` and `1`, and that is the contract
+   * they shipped with. Routing their refusals through `refusalExit` renumbered
+   * "protect found no platforms" from 1 to 5 — a script's error branch, moved
+   * for no reason its author could see.
+   */
+  refusalIs?: number,
 ): number {
-  return outcome.refusal === null
-    ? reportLost(outcome.error, json)
-    : reportRefusal(outcome.refusal, json);
+  if (outcome.refusal === null) return reportLost(outcome.error, json);
+  const reported = reportRefusal(outcome.refusal, json);
+  return refusalIs ?? reported;
 }
 
 /** One complete JSON value, one write, nothing else on stdout. An agent piping

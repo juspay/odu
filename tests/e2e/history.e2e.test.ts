@@ -30,10 +30,13 @@
  *
  * Not by `--run R <node>`, and this suite must not reassemble one either. The
  * key is `<runId>/<encoded node>/<attempt>` and the encoding is odu's, so the
- * only supported way to hold one is to have been given it — by a failure
- * (`failures[].logKey`) or by a live node (`odu status -o json`'s `log_key`).
- * Both routes are used below, and a test that built a key by hand would pass
- * against an encoding the product does not have.
+ * only supported way to hold one is to have been given it. This suite takes
+ * every key from a FAILURE's `logKey`, which is the route that still works
+ * once the run is over — `odu status` hands out keys too, but only for a run
+ * that has not finished, so reading one from there is a race against a fixture
+ * that settles in seconds. That is why the big-log fixture is red. A test that
+ * built a key by hand would pass against an encoding the product does not
+ * have.
  */
 
 import { rmSync } from "node:fs";
@@ -42,17 +45,11 @@ import {
   awaitRunSocket,
   buildOduBinary,
   cleanup,
-  currentNixSystem,
   makeFixture,
   oduCli,
   oduRun,
   oduRunBackground,
 } from "./harness";
-
-/** This machine's platform, as the node ids in a run of these fixtures spell
- *  it — a node id is `<recipe>@<platform>`. Asked of Nix once, like the rest
- *  of the suite does. */
-const PLATFORM = currentNixSystem();
 
 let oduBin: string;
 
@@ -136,31 +133,6 @@ function logJson(dir: string, key: string, extra: string[] = []): LogPage {
   const res = oduCli(oduBin, dir, ["logs", ...extra, "-o", "json", key]);
   expect(res.status, `stderr was:\n${res.stderr}`).toBe(0);
   return JSON.parse(res.stdout.trim()) as LogPage;
-}
-
-/** The log key of a node in the run LIVE in this checkout, from the one face
- *  that hands keys out for nodes that have not failed. Polled, because a node
- *  that has not started yet has no attempt to address. */
-async function liveLogKey(
-  dir: string,
-  node: string,
-  timeoutMs = 120_000,
-): Promise<string> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const res = oduCli(oduBin, dir, ["status", "-o", "json"]);
-    if (res.status === 0 && res.stdout.trim() !== "") {
-      const seen = JSON.parse(res.stdout.trim()) as {
-        nodes: { id: string; log_key: string }[];
-      };
-      const found = seen.nodes.find((n) => n.id === node);
-      if (found !== undefined && found.log_key !== "") return found.log_key;
-    }
-    if (Date.now() > deadline) {
-      throw new Error(`e2e: no log key for ${node} within ${timeoutMs}ms`);
-    }
-    await new Promise((r) => setTimeout(r, 200));
-  }
 }
 
 describe("a bounded wait answers before the slow lane finishes", () => {
@@ -329,14 +301,16 @@ describe("the wait's exits are a contract", () => {
 });
 
 describe("evidence is addressed, complete, and outlives its checkout", () => {
-  it("reads a noisy node's log back by byte range, and says it is complete", async () => {
-    const dir = fixture("noisy");
-    const bg = oduRunBackground(oduBin, dir, ["--no-strict", "--progress", "json"]);
-    running.push({ kill: () => bg.child.kill("SIGTERM"), exited: bg.exited });
-    await awaitRunSocket(dir);
-    // The key comes from the live node, not from string surgery — see header.
-    const key = await liveLogKey(dir, `noisy@${PLATFORM}`);
-    await bg.exited;
+  it("reads a noisy node's log back by byte range, and says it is complete", () => {
+    // RED on purpose. The key has to be one odu issued (see the header), and a
+    // failure is the route that still works once the run is over — reading it
+    // off a live node is a race against a fixture that settles in seconds.
+    const dir = fixture("noisy-red");
+    expect(oduRun(oduBin, dir).status).not.toBe(0);
+    const { attention } = waitJson(dir, ["--run", "latest"]);
+    const failure = attention.failures.find((f) => f.node.startsWith("noisy-red@"));
+    expect(failure, "the noisy lane's failure should carry a log key").toBeDefined();
+    const key = failure!.logKey;
 
     // BY RANGE, and the range is the point twice over. It is the API a caller
     // resuming a long log uses — and it is also the only way to ask this

@@ -79,7 +79,11 @@ function oduProtect(
     cwd: dir,
     encoding: "utf-8",
     maxBuffer: BIG,
-    env: { ...process.env, ODU_HOSTS: hostsFile },
+    // The suite's OWN service (`hermeticEnv`), with this test's hosts file on
+    // the client — which is where `$ODU_HOSTS` is read and from where it
+    // travels to the service as `hostsFile`. Using the ambient env here
+    // reached whatever daemon the machine already had.
+    env: { ...hermeticEnv, ODU_HOSTS: hostsFile },
   });
   return { res, hostsFile };
 }
@@ -277,8 +281,15 @@ esac
   // than `--set-default`-ing ODU_GH_BIN did exactly that. Fail here rather than
   // let assertions further down interpret a real API's answers.
   if (calls.length === 0) {
+    // WHAT ODU SAID, not just that the stand-in went unused. `gh` is reached
+    // last — after the checkout, the justfile, the platform set and the origin
+    // — so "no calls recorded" is far more often a refusal before that point
+    // than a bypassed seam, and the original message named only the one cause
+    // it was written for.
     throw new Error(
-      "e2e: $ODU_GH_BIN was bypassed — protect ran against the real `gh`",
+      `e2e: protect made no gh call (exit ${res.status}). Either the ` +
+        "$ODU_GH_BIN seam was bypassed, or protect refused before reaching " +
+        `the forge. It said:\n${res.stderr}${res.stdout}`,
     );
   }
   /** The captured body of a write, or null when protect never made that call. */

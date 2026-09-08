@@ -60,7 +60,9 @@ export async function pipelineViaService(opts: PipelineOpts): Promise<number> {
     );
     // `dump` has no non-JSON rendering — its whole output IS the JSON — so a
     // refusal here reports as prose on stderr either way.
-    if (!read.ok) return reportFailure(read, false);
+    // Same reasoning as `protect` below: `odu dump` and `odu graph` either
+    // printed the pipeline or did not.
+    if (!read.ok) return reportFailure(read, false, 1);
     const pipeline: Pipeline = read.value;
     if (opts.as === "graph") {
       process.stdout.write(pipeline.mermaid);
@@ -118,7 +120,7 @@ export async function protectViaService(opts: ProtectOpts): Promise<number> {
         requestId: requestId(undefined),
       }),
     );
-    if (!done.ok) return reportFailure(done, opts.json);
+    if (!done.ok) return reportFailure(done, opts.json, 1);
     const answer: ProtectOutput = done.value;
     if (opts.json) {
       emitJson(answer);
@@ -128,10 +130,19 @@ export async function protectViaService(opts: ProtectOpts): Promise<number> {
     // one — the hosts file on THIS laptop deciding what a repository requires
     // of everybody. It is allowed, and it is said out loud every time.
     if (answer.derivedFrom !== null) {
+      // The SET is named, not just the file it came from. A person reading
+      // this is being told a machine-local fact is about to become a repo-wide
+      // rule; which platforms is the part they have to check, and dropping it
+      // left them with a path and no way to see the halving.
+      const derived = [
+        ...new Set(
+          answer.contexts.map((c) => c.slice(c.lastIndexOf("@") + 1)),
+        ),
+      ].join(", ");
       process.stderr.write(
-        `odu: protect derived the platform set from ${answer.derivedFrom} — a\n` +
-          "     machine-local hosts config, not a repo fact; pass --platform to\n" +
-          "     pin the repo's platform set explicitly\n",
+        `odu: protect: platform set (${derived}) derives from\n` +
+          `     ${answer.derivedFrom} — a machine-local hosts config, not a repo\n` +
+          "     fact; pass --platform to pin the repo's platform set explicitly\n",
       );
     }
     if (answer.dryRun) {

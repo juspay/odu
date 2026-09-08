@@ -45,7 +45,7 @@
 
 import { subscribe } from "@odu/execution/common/effectEdge";
 import { progressEvent } from "@odu/execution/common/presentation";
-import { STATUS_META } from "@odu/run-client/surface";
+import { exitCode } from "@odu/execution/common/verdict";
 import type {
   AttentionAnswer,
   NodesFrame,
@@ -491,10 +491,15 @@ export async function cancelViaService(opts: CancelOpts): Promise<number> {
       // `effective: "nothing"` is an ANSWER with a reason, never a cheerful ok:
       // a caller asking to cancel a lane on a run whose coordinator has already
       // gone is entitled to know nothing happened.
+      // The sentence `odu cancel` has always printed, with the run named. It
+      // read "odu: run cancelled" before this command was addressed by run id;
+      // the id is genuinely new information and the words around it are not
+      // this rewrite's to change, since a script grepping them is a script that
+      // was working.
       process.stdout.write(
         result.effective === "nothing"
-          ? `${result.runId}  nothing cancelled — ${result.detail ?? "no reason given"}\n`
-          : `${result.runId}  cancelled (${result.effective})\n`,
+          ? `odu: nothing cancelled on ${result.runId} — ${result.detail ?? "no reason given"}\n`
+          : `odu: run cancelled — ${result.runId} (${result.effective})\n`,
       );
     }
     // Exit 0 either way: the CALL was answered. "Nothing was cancelled because
@@ -942,7 +947,10 @@ async function progressStream(
   });
   if (final.state === "owner_lost") return WAIT_EXITS.ownerLost;
   if (!final.done) return WAIT_EXITS.stillRunning;
-  return final.nodes.some((n) => STATUS_META[n.status].isRed)
-    ? WAIT_EXITS.failed
-    : WAIT_EXITS.passed;
+  // INCOMPLETE IS NOT A PASS, and "no red node" cannot see the difference: a
+  // CANCELLED node is not red, so a run whose only lane was cancelled reported
+  // success. `exitCode` is the rule this command shipped with — done and not
+  // clean is 1 — and it is the same fold the verdict block above just printed,
+  // so the number and the summary cannot disagree.
+  return exitCode(verdictStateOf(final, sha7));
 }

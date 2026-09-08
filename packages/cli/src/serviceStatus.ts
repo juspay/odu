@@ -34,6 +34,7 @@ import {
   runUnary,
   subscribe,
 } from "@odu/execution/common/effectEdge";
+import { exitCode } from "@odu/execution/common/verdict";
 import { STATUS_META } from "@odu/run-client/surface";
 import type {
   NodesFrame,
@@ -45,7 +46,12 @@ import type {
 } from "@odu/service-client/surface";
 import { yellow } from "./ansi";
 import { createDisplay } from "./display";
-import { headerOf, nodeLogStream, pipelineStateOf } from "./liveFromService";
+import {
+  headerOf,
+  nodeLogStream,
+  pipelineStateOf,
+  verdictStateOf,
+} from "./liveFromService";
 import { statusGlyph } from "./render";
 import {
   checkoutHere,
@@ -61,36 +67,44 @@ export interface HereRunOpts {
   cwd?: string;
 }
 
-/** States nothing will move a run out of. `owner_lost` is deliberately NOT one
- *  of them: a run whose coordinator died without finalizing is exactly what a
- *  person standing in the checkout needs to be told about, and hiding it would
- *  send them looking for a run that "isn't there". */
-const OVER = new Set(["settled", "expired"]);
+/** The one state with nothing left to show. `expired` means retention has
+ *  removed the evidence — the run's identity survives, its nodes and logs do
+ *  not — so there is no grid to draw. Everything else, including `settled` and
+ *  `owner_lost`, is a run a person standing here wants to see. */
+const NOTHING_TO_SHOW = new Set(["expired"]);
 
 /**
- * The newest run started from this checkout, if it has not finished.
+ * The newest run started from this checkout.
  *
- * NEWEST FIRST, THEN THE STATE TEST — and the order of those two is the whole
- * function. Filtering first and sorting the survivors reads the same and is
- * wrong: an `owner_lost` run never leaves that state, so it stayed "current"
+ * NEWEST FIRST, THEN THE STATE TEST, and both halves of that were wrong before.
+ *
+ * Filtering by state and sorting the survivors reads the same as this and is
+ * not: an `owner_lost` run never leaves that state, so it stayed "current"
  * forever and SHADOWED every run started after it. `odu status` in this very
  * checkout spent an hour reporting an abandoned run's nodes as `running` while
  * the run the person had actually just started sat settled in the catalog,
- * with the two disagreeing on screen.
+ * with the two disagreeing on screen. A dead run is news only while it is the
+ * last thing that happened here.
  *
- * A dead run is news only while it is the last thing that happened here.
- * Starting another run is a person saying they have moved on.
+ * And "has not finished" was the wrong test to begin with. A settled run is
+ * the most likely thing somebody typing `odu status` wants — they just ran CI
+ * and want the grid. Excluding it also broke the one feature whose entire
+ * purpose is being asked after settlement: `odu run --linger` parks the
+ * coordinator precisely so a caller can look afterwards, and `status` answered
+ * "no run in flight for this checkout".
  *
- * `undefined` when there is none, which is an ANSWER and not an error — a
- * checkout with no run in flight is the ordinary state of most checkouts most
- * of the time, and exiting non-zero for it would make `odu status` unusable in
- * a prompt.
+ * `undefined` when this checkout has never run, or when retention has removed
+ * the only run's evidence. That is an ANSWER and not an error — a checkout with
+ * no run is the ordinary state of most checkouts most of the time, and exiting
+ * non-zero for it would make `odu status` unusable in a prompt.
  */
 function currentRun(rows: readonly RunRow[], checkout: string): RunRow | undefined {
   const newest = rows
     .filter((r) => r.repoRoot === checkout)
     .sort((a, b) => b.createdAt - a.createdAt)[0];
-  return newest === undefined || OVER.has(newest.state) ? undefined : newest;
+  return newest === undefined || NOTHING_TO_SHOW.has(newest.state)
+    ? undefined
+    : newest;
 }
 
 /** The frame both commands start from: the board resolved to a run, then that
@@ -254,8 +268,11 @@ function envLines(env: RunEnv): string[] {
 /** `status` answers a question about a RUN, so it spends the run exit table. */
 function statusExit(row: RunRow): number {
   if (row.state === "owner_lost") return WAIT_EXITS.ownerLost;
-  if (!row.settled) return WAIT_EXITS.stillRunning;
-  return row.passed ? WAIT_EXITS.passed : WAIT_EXITS.failed;
+  // A run still going is the ORDINARY case, not an outcome — see `frameExit`.
+  // `odu status` reports what is true now; a script shaped `odu status && …`
+  // must not be told "2" for a run that is simply in progress.
+  if (!row.settled) return 0;
+  return row.passed ? 0 : 1;
 }
 
 // ── odu attach ──────────────────────────────────────────────────────────────
@@ -406,10 +423,23 @@ async function attachLive(
 }
 
 /** The exit a finished frame earns, on the shared run table. */
+/**
+ * What `status` and `attach` exit with — and it is NOT the run-shaped table.
+ *
+ * `WAIT_EXITS` numbers the states of a WAIT: passed, red, still going, owner
+ * lost. `odu status` does not wait; it prints what is true now, and a run that
+ * is still going is the ordinary case rather than an outcome. Reporting that as
+ * `2` broke every script shaped `odu status && …`, including this repo's own
+ * e2e helper, whose "is a run live here?" probe read any non-zero as "no" and
+ * then waited two minutes for a run that had been up the whole time.
+ *
+ * So: `exitCode`'s rule, which is what these two commands shipped with — 1 for
+ * a run that FINISHED and is not clean, 0 otherwise. `owner_lost` keeps its own
+ * code because a coordinator that died without finalizing is neither, and it is
+ * the one case where the previous implementation also failed (it could not dial
+ * at all).
+ */
 function frameExit(frame: NodesFrame): number {
   if (frame.state === "owner_lost") return WAIT_EXITS.ownerLost;
-  if (!frame.done) return WAIT_EXITS.stillRunning;
-  return frame.nodes.some((n) => STATUS_META[n.status].isRed)
-    ? WAIT_EXITS.failed
-    : WAIT_EXITS.passed;
+  return exitCode(verdictStateOf(frame, ""));
 }
