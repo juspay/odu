@@ -75,6 +75,33 @@ scrolling is right is inside a log box — a log line is a log line, and wrappin
 one changes what it says — so it is scoped there and the page itself never
 scrolls sideways.
 
+## How the two pages use a screen
+
+**The board is scanned.** One row per checkout by default — the latest run of
+each, with `N earlier` under the age and a *History* toggle for the rest —
+because "what is my CI doing" is a question about checkouts, and a superseded
+run's red is history. One status cell per row: the outcome once there is one,
+the board state until then. Three coarse filters plus a text search over
+project, branch and path. The tab title and favicon count the same rows the
+board shows by default — how many are failing, how many are still moving — so a
+tab in the background is still a monitor.
+
+**A run is read.** On a wide screen the run view is a viewport-height frame
+whose log pane scrolls inside itself; on a phone it is an ordinary page. Nodes
+are grouped into lanes by platform, each headed by its host, its counts and its
+own cancel; a node offers *Retry* only once it has stopped and *Cancel node*
+only while it runs. *Cancel run* asks first — it is the one control that throws
+away every lane at once. The console renders a recipe's own SGR colours through
+`./src/ansi.ts` (the CLI's palette, so a red in the terminal is the same red
+here) and says whether it is still following the tail.
+
+**Raw CSS, on purpose.** One stylesheet, in four cascade layers, with a single
+`light-dark()` palette lifted from the website. There is no utility framework
+and no component library: the page has a few dozen class names — every rule
+carries the reason it exists beside it, and the two that declare no rule
+(`.board`, `.create`) are structural anchors the markup hangs on rather than
+dead paint.
+
 ## The connection is drawn, not hidden
 
 `readout()` is the framework's own five-state fact — `connecting`, `live`,

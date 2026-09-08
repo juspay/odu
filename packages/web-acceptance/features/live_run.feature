@@ -34,7 +34,16 @@ Feature: A live run, its early failure, and its controls
     When I press the cancel button for this machine's lane
     Then a status reads "the rest of the run continues"
 
+  # THE DIALOG IS THE POINT. The whole-run cancel is the one control on this
+  # page that costs the most when it is pressed by mistake — it throws away
+  # every lane's work at once, it cannot be undone, and it sits one button away
+  # from "Run again" — so it asks first. The lane and node cancels above stay
+  # one click on purpose: they are scoped, and the run carries on around them.
+  # The confirmation is named for the ACT rather than for its trigger, because
+  # two buttons both reading "Cancel run" would be ambiguous to a person and
+  # unaddressable to this suite.
   Scenario: Cancelling the whole run reports what it told the coordinator
     When I press "Cancel run"
+    And I press "Yes, cancel it"
     Then a status reads "Told the coordinator to stop"
     And there should be no page errors
