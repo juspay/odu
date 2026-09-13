@@ -79,7 +79,6 @@ import {
 } from "@odu/service-client/endpoint";
 import { createOduService } from "@odu/service/service";
 import { Effect, Exit, Layer, Scope } from "effect";
-import { HttpRouter } from "effect/unstable/http";
 import { readProcessIdentity, selfProcessIdentity } from "./processIdentity";
 import {
   mcpGetRoute,
@@ -100,11 +99,6 @@ import {
   type EnsureOutcome,
   readService,
 } from "./webLauncher";
-import {
-  allowedHostsFor,
-  authorityAllowed,
-  type WebAuthority,
-} from "./webAuthority";
 
 
 
@@ -180,14 +174,11 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
   const { host, port } = serviceBind(origin);
   const log = tenure.log;
   const controller = new AbortController();
-  // ONE policy, read once, applied at both doors — the websocket and `/mcp`.
-  // Two reads of one env var is how two doors end up with two answers to the
-  // same question.
+  // ONE Origin allowlist, read once, applied at both doors — the websocket and
+  // `/mcp`. There is deliberately no Host allowlist: the service answers to
+  // whatever name it is reached by (an SSH forward, a tailnet name, a proxy),
+  // and the Origin check compares a browser's Origin against that same Host.
   const allowedOrigins = parseAllowedOrigins(process.env.ODU_WEB_ALLOWED_ORIGINS);
-  const authority: WebAuthority = {
-    allowedOrigins,
-    allowedHosts: allowedHostsFor(origin, allowedOrigins),
-  };
 
   // Claimed FIRST, so a launcher that lost the race never binds the port. The
   // framework's own gate: one atomic link, a liveness-proved holder, and a
@@ -267,43 +258,14 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
         host,
         port,
         // Same-origin is always allowed; anything else must be named. This gate
-        // runs on the RAW pre-upgrade socket, so a hostile page never gets a
-        // connection to argue about — but it compares Origin against the Host
-        // the request CLAIMS, which is why `services` below adds the half it
-        // cannot see.
+        // runs on the RAW pre-upgrade socket, so a cross-site page never gets a
+        // connection. Same-origin means the Origin matches the Host the request
+        // arrived with, whatever that Host is.
         allowedOrigins,
-        // Both headers the authority decision reads, off the upgrade. A literal
-        // array so the keys are a union and `connection.headers` typechecks.
-        upgradeHeaders: ["host", "origin"] as const,
-        // THE OTHER DOOR'S HALF OF THE SAME LOCK. `isAllowedWsOrigin` says yes
-        // to a page whose Origin matches the Host it sent — and under DNS
-        // rebinding both are the attacker's, so they match. The listener's own
-        // authorities are the missing half, and this is the earliest point odu
-        // can apply them: `serveSurfaceApp` owns the upgrade and takes no hook,
-        // so the handshake completes and then this connection gets NO serving
-        // stack — it reads no frame and can call nothing.
-        services: (connection) =>
-          authorityAllowed(
-            {
-              host: connection.headers.host,
-              origin: connection.headers.origin,
-            },
-            authority,
-          )
-            ? Layer.empty
-            : Layer.effectDiscard(
-                Effect.die(
-                  new Error(
-                    `odu: refused a websocket claiming Host ` +
-                      `"${connection.headers.host ?? "(absent)"}" — this ` +
-                      `service answers to ${authority.allowedHosts.join(", ")}`,
-                  ),
-                ),
-              ),
         // Two layers merged into one, because `routes` takes one. Merged and
         // not ordered: `HttpRouter` ranks by specificity, so both literal `/mcp`
         // routes beat the shell's `GET /*` catch-all either way round.
-        routes: Layer.merge(mcpRoute(transport, authority), mcpGetRoute()),
+        routes: Layer.merge(mcpRoute(transport, allowedOrigins), mcpGetRoute()),
         onEvent: reportSurfaceAppEvent,
       }).pipe(Scope.provide(scope)),
     );

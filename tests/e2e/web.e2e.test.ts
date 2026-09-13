@@ -461,17 +461,20 @@ describe("the HTTP MCP face", () => {
     expect(response.status).toBe(415);
   }, 60_000);
 
-  it("refuses a Host it does not answer to — the rebinding case", async () => {
+  it("answers under a forwarded name with no configuration", async () => {
+    // An SSH forward published on another machine's name: the Host and the
+    // page's Origin are both that name, and the service serves it.
+    const port = new URL(world.origin).port;
     const response = await fetch(`${world.origin}/mcp`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        host: "untrusted.example",
-        origin: "https://untrusted.example",
+        host: `forwarded.example:${port}`,
+        origin: `http://forwarded.example:${port}`,
       },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
     });
-    expect(response.status).toBe(421);
+    expect(response.status).toBe(200);
   }, 60_000);
 
   it("hands a client a session id at the handshake, so it can cancel its own calls", async () => {
@@ -690,32 +693,34 @@ describe("cancelling, and outliving the caller", () => {
 });
 
 describe("the websocket door", () => {
-  it("serves NOTHING on a websocket claiming somebody else's Host", async () => {
-    // The rebinding shape, on the real listener: a page from `untrusted.example`
-    // whose DNS points at loopback sends an Origin and a Host that MATCH — so
-    // the framework's same-origin gate says yes, and the connection used to be
-    // served. It reaches the same surface `/mcp` does.
+  it("serves a websocket reached under a forwarded name", async () => {
+    // issue #111: a tab opened through an SSH forward on another machine's
+    // name used to get an open socket that answered nothing, under a green
+    // "live". The service now answers to whatever name it was reached by.
     //
-    // The upgrade belongs to `serveSurfaceApp` and takes no hook, so the
-    // handshake completes; what must not happen is a serving stack behind it.
-    // The daemon says so on its own log, which is what this reads.
+    // Proven with the RPC protocol's own keep-alive: a `Ping` frame is
+    // answered with a `Pong` only by a connection that has a serving stack.
     const port = new URL(world.origin).port;
     const socket = new WebSocket(`ws://127.0.0.1:${port}/rpc/ws`, {
       headers: {
-        host: `untrusted.example:${port}`,
-        origin: `http://untrusted.example:${port}`,
+        host: `forwarded.example:${port}`,
+        origin: `http://forwarded.example:${port}`,
       },
     } as unknown as string[]);
-    const messages: unknown[] = [];
-    socket.addEventListener("message", (event) => messages.push(event.data));
-    await until(
-      "the service to refuse the hostile websocket",
-      () => (daemonLog(world).includes("refused a websocket") ? true : null),
-      30_000,
+    const messages: string[] = [];
+    socket.addEventListener("message", (event) =>
+      messages.push(String(event.data)),
     );
-    // And it answered nothing at all on the way.
-    expect(messages).toEqual([]);
-    socket.close();
+    socket.addEventListener("open", () => socket.send('{"_tag":"Ping"}\n'));
+    try {
+      await until(
+        "the forwarded websocket to answer a ping",
+        () => (messages.some((m) => m.includes('"Pong"')) ? true : null),
+        30_000,
+      );
+    } finally {
+      socket.close();
+    }
   }, 60_000);
 });
 

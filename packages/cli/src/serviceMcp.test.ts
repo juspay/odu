@@ -17,10 +17,8 @@
 import { describe, expect, it } from "bun:test";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { gateMcpRequest, RouteTransport } from "./serviceMcp";
-import { allowedHostsFor } from "./webAuthority";
 
 const ORIGIN = "http://127.0.0.1:18440";
-const HOSTS = allowedHostsFor(ORIGIN);
 
 const headers = (over: Record<string, string | undefined> = {}) => ({
   "content-type": "application/json",
@@ -30,21 +28,14 @@ const headers = (over: Record<string, string | undefined> = {}) => ({
 
 describe("what may POST to /mcp", () => {
   it("lets the browser this service serves talk to it", () => {
-    expect(
-      gateMcpRequest(headers({ origin: ORIGIN }), {
-        allowedOrigins: [],
-        allowedHosts: HOSTS,
-      }).ok,
-    ).toBe(true);
+    expect(gateMcpRequest(headers({ origin: ORIGIN }), []).ok).toBe(true);
   });
 
   it("lets a non-browser client with no Origin talk to it", () => {
     // A CLI, an agent, `curl`. They are not the CSWSH vector, and refusing them
     // would break every non-browser consumer — which is why the content-type
     // check has to carry the weight instead.
-    expect(gateMcpRequest(headers(), { allowedOrigins: [], allowedHosts: HOSTS }).ok).toBe(
-      true,
-    );
+    expect(gateMcpRequest(headers(), []).ok).toBe(true);
   });
 
   it("refuses a page from somewhere else — the mutation IS the attack", () => {
@@ -52,24 +43,27 @@ describe("what may POST to /mcp", () => {
     // Origin used to reach domain dispatch and answer 200.
     const verdict = gateMcpRequest(
       headers({ origin: "https://untrusted.example" }),
-      { allowedOrigins: [], allowedHosts: HOSTS },
+      [],
     );
     expect(verdict.ok).toBe(false);
     if (verdict.ok) return;
     expect(verdict.status).toBe(403);
   });
 
-  it("refuses a Host this service does not answer to", () => {
-    // DNS rebinding: the attacker's domain resolves to 127.0.0.1, so Origin and
-    // Host are BOTH theirs and match each other. Only naming the authorities
-    // this listener actually has catches it.
-    const verdict = gateMcpRequest(
-      headers({ origin: "https://untrusted.example", host: "untrusted.example" }),
-      { allowedOrigins: [], allowedHosts: HOSTS },
-    );
-    expect(verdict.ok).toBe(false);
-    if (verdict.ok) return;
-    expect(verdict.status).toBe(421);
+  it("answers to whatever name it was reached by", () => {
+    // An SSH forward published on another machine's name, a tailnet name, a
+    // proxy: the service does not keep a list of its own names, so a page
+    // served from that name talks to it with no configuration.
+    for (const host of [
+      "pureintent.rooster-blues.ts.net:18440",
+      "localhost:18440",
+      "[::1]:18440",
+    ]) {
+      expect(
+        gateMcpRequest(headers({ origin: `http://${host}`, host }), []).ok,
+      ).toBe(true);
+      expect(gateMcpRequest(headers({ host }), []).ok).toBe(true);
+    }
   });
 
   it("refuses the content types a form can post without a preflight", () => {
@@ -83,10 +77,7 @@ describe("what may POST to /mcp", () => {
       "application/x-www-form-urlencoded",
       undefined,
     ]) {
-      const verdict = gateMcpRequest(headers({ "content-type": type }), {
-        allowedOrigins: [],
-        allowedHosts: HOSTS,
-      });
+      const verdict = gateMcpRequest(headers({ "content-type": type }), []);
       expect(verdict.ok).toBe(false);
       if (verdict.ok) continue;
       expect(verdict.status).toBe(415);
@@ -95,30 +86,20 @@ describe("what may POST to /mcp", () => {
 
   it("accepts JSON with a charset, because that is what clients send", () => {
     expect(
-      gateMcpRequest(headers({ "content-type": "application/json; charset=utf-8" }), {
-        allowedOrigins: [],
-        allowedHosts: HOSTS,
-      }).ok,
-    ).toBe(true);
-  });
-
-  it("lets an operator name an origin, and takes its host with it", () => {
-    const allowedOrigins = ["https://box.tailnet.ts.net"];
-    const hosts = allowedHostsFor(ORIGIN, allowedOrigins);
-    expect(
       gateMcpRequest(
-        headers({ origin: "https://box.tailnet.ts.net", host: "box.tailnet.ts.net" }),
-        { allowedOrigins, allowedHosts: hosts },
+        headers({ "content-type": "application/json; charset=utf-8" }),
+        [],
       ).ok,
     ).toBe(true);
   });
 
-  it("answers to every spelling of loopback", () => {
-    // A browser sends `localhost:18440`, `curl` sends `127.0.0.1:18440`, an
-    // IPv6 client sends `[::1]:18440`. All three are this service.
-    expect(HOSTS).toContain("127.0.0.1:18440");
-    expect(HOSTS).toContain("localhost:18440");
-    expect(HOSTS).toContain("[::1]:18440");
+  it("lets an operator name an origin that differs from the Host", () => {
+    // A reverse proxy that rewrites Host: the browser's origin is the public
+    // name and the Host that arrives is loopback, so only the allowlist admits it.
+    const allowed = ["https://box.tailnet.ts.net"];
+    const proxied = headers({ origin: "https://box.tailnet.ts.net" });
+    expect(gateMcpRequest(proxied, allowed).ok).toBe(true);
+    expect(gateMcpRequest(proxied, []).ok).toBe(false);
   });
 });
 
