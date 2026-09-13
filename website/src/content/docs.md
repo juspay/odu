@@ -84,16 +84,16 @@ The board lists runs across repositories. Open a run to inspect nodes, follow lo
 
 ### Access through Tailscale or a proxy
 
-Configure forwarding separately; Odu can keep listening on loopback. If it refuses a WebSocket Host such as `pureintent.rooster-blues.ts.net:18440`, admit the full browser origin:
+Configure forwarding separately; Odu can keep listening on loopback. The service answers to whatever name it is reached by, so an SSH forward, a Tailscale name, or a proxy that passes the Host header through needs no configuration. Anyone who can reach the forwarded address can control CI.
+
+A proxy that rewrites Host sends a browser Origin that no longer matches it. Admit that origin when starting the service:
 
 ```sh
-ODU_WEB_ALLOWED_ORIGINS=http://pureintent.rooster-blues.ts.net:18440 \
+ODU_WEB_ALLOWED_ORIGINS=https://box.tailnet.ts.net \
   nix run github:juspay/odu -- web --upgrade
 ```
 
-This replaces the existing service in the foreground. The setting is read at server startup, so setting it in a later client's shell has no effect. Use the actual scheme and port of your forwarded URL; separate multiple origins with commas.
-
-The setting admits both the Host and Origin for WebSocket and HTTP MCP requests. Only admit addresses you trust: clients reaching them can control CI. `ODU_WEB_ORIGIN` instead changes the listener's address and service identity.
+This replaces the existing service in the foreground. The setting is read at server startup; separate multiple origins with commas. `ODU_WEB_ORIGIN` instead changes the listener's address and service identity.
 
 ## Daily workflow
 
@@ -218,7 +218,7 @@ For `wait`, `rerun`, and `cancel`, omitted `--run` means `latest` in this checko
 | No hosts configured | Add a hosts file or explicitly use `--host SYSTEM=localhost` |
 | Dirty checkout refused | Commit changes, or use `--no-strict` to ship a working-tree snapshot |
 | Web service already running | Open its URL or use `web --upgrade` |
-| Forwarded Host refused | Set `ODU_WEB_ALLOWED_ORIGINS` when starting/replacing the server |
+| Proxied page refused as cross-origin | Set `ODU_WEB_ALLOWED_ORIGINS` to the browser origin when starting/replacing the server |
 | Service/build mismatch | Replace the service with the desired Nix build |
 | Retry refused | Read the reason; check snapshot, placement evidence and checkout availability |
 | CI passed but GitHub is waiting | Inspect posting debt and the service's `gh` credentials |

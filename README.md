@@ -58,14 +58,7 @@ nix run --accept-flake-config github:juspay/odu -- mcp
 
 MCP, `odu surface`, and the browser use the same local service. The agent loop is `run_start` → `run_wait` → `log_read` → `run_retry` or a new-SHA `run_start`.
 
-For Tailscale or a reverse proxy, configure forwarding separately and admit its full browser origin when starting the service:
-
-```sh
-ODU_WEB_ALLOWED_ORIGINS=http://pureintent.rooster-blues.ts.net:18440 \
-  nix run github:juspay/odu -- web --upgrade
-```
-
-This replaces the existing server in the foreground. The listener stays on loopback; the setting admits the forwarded Host and Origin for both WebSocket and HTTP MCP. Only admit addresses you trust. See the [access guide](https://juspay.github.io/odu/docs/#access-through-tailscale-or-a-proxy).
+The listener stays on loopback. An SSH forward, a Tailscale name or a proxy that keeps the Host header works with no configuration: the service answers to whatever name it is reached by. Anyone who can reach that name can control CI. Only a proxy that rewrites Host needs its browser origin admitted with `ODU_WEB_ALLOWED_ORIGINS`. See the [access guide](https://juspay.github.io/odu/docs/#access-through-tailscale-or-a-proxy).
 
 ## Develop
 
