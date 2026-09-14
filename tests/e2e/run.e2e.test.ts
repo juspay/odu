@@ -14,6 +14,7 @@ import {
   BIG,
   buildOduBinary,
   cleanup,
+  hermeticEnv,
   makeFixture,
   oduRun,
   type ProgressEvent,
@@ -108,6 +109,11 @@ describe("odu run (local, black-box)", () => {
     const dir = fixture("pass");
     const out = execFileSync(oduBin, ["dump"], {
       cwd: dir,
+      // The SAME world as `oduRun` above, not the ambient environment:
+      // `dump` is a client of the per-user singleton now, and on a persistent
+      // CI runner the ambient daemon may speak another contract — which a
+      // thin client must refuse on sight (that's the whole fix for #115).
+      env: hermeticEnv,
       encoding: "utf-8",
       maxBuffer: BIG,
     });
