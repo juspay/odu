@@ -39,6 +39,7 @@ import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { unenrolledStreamCall } from "@kolu/surface/client";
 import {
+  errorMessage,
   firstFrame as headFrame,
   isNoAnswer,
   NoAnswerWithin,
@@ -161,9 +162,7 @@ async function dial(
   try {
     return await connectOrStart(origin ?? serviceOrigin());
   } catch (err) {
-    process.stderr.write(
-      `${String((err as { message?: unknown }).message ?? err)}\n`,
-    );
+    process.stderr.write(`${errorMessage(err)}\n`);
     return WAIT_EXITS.ownerLost;
   }
 }
@@ -212,10 +211,9 @@ export function isRefusal(value: unknown): value is ServiceRefused {
  *  was serving is not serving this call. */
 export function reportLost(error: unknown, json: boolean): number {
   const message =
-    `odu: the service went away mid-call — ${String(
-      (error as { message?: unknown }).message ?? error,
-    )}. Whether it acted is not known; re-issue with the SAME request id to ` +
-    "find out rather than a fresh one.";
+    `odu: the service went away mid-call — ${errorMessage(error)}. Whether it ` +
+    "acted is not known; re-issue with the SAME request id to find out rather " +
+    "than a fresh one.";
   if (json) emitJson({ error: "transport_lost", message });
   else process.stderr.write(`${message}\n`);
   return 3;

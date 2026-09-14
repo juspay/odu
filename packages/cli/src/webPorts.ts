@@ -29,7 +29,7 @@
 import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dialRun } from "@odu/run-client/dial";
-import { firstFrame, runUnary } from "@odu/execution/common/effectEdge";
+import { errorMessage, firstFrame, runUnary } from "@odu/execution/common/effectEdge";
 import { packagedLauncher } from "@odu/execution/coordinator/launcher";
 import {
   isSameRun,
@@ -260,7 +260,7 @@ async function dispatchCancel({
     // with no confirmation is exactly what `unresolved` is for.
     return {
       kind: "unresolved",
-      detail: `the call to the coordinator failed — ${(err as Error).message}`,
+      detail: `the call to the coordinator failed — ${errorMessage(err)}`,
     };
   } finally {
     await dialed.close();
