@@ -67,14 +67,14 @@ import {
   checkoutHere,
   emitJson,
   emitJsonLine,
+  findRuns,
   firstFrame,
   formatAgo,
   git,
   here,
   hostsFileHere,
   nodesStream,
-  readRows,
-  resolveRunAddress,
+  patience,
   reportFailure,
   reportLost,
   reportRefusal,
@@ -82,7 +82,7 @@ import {
   WAIT_EXITS,
   waitExitFor,
   watchNodes,
-  withConnection,
+  withRunAt,
   withService,
 } from "./serviceFace";
 
@@ -301,15 +301,7 @@ export interface WaitOpts {
 }
 
 export async function waitViaService(opts: WaitOpts): Promise<number> {
-  return withConnection(opts.origin, async ({ client, dispatch }) => {
-    const resolved = await resolveRunAddress(
-      dispatch,
-      opts.run,
-      opts.cwd ?? process.cwd(),
-      opts.json,
-    );
-    if (!resolved.ok) return resolved.exit;
-    const runId = resolved.runId;
+  return withRunAt(opts, async (client, runId) => {
     const answered = await call(
       client.surface.run.wait({
         runId,
@@ -417,15 +409,7 @@ export interface RetryOpts {
  * to watch next.
  */
 export async function retryViaService(opts: RetryOpts): Promise<number> {
-  return withConnection(opts.origin, async ({ client, dispatch }) => {
-    const resolved = await resolveRunAddress(
-      dispatch,
-      opts.run,
-      opts.cwd ?? process.cwd(),
-      opts.json,
-    );
-    if (!resolved.ok) return resolved.exit;
-    const runId = resolved.runId;
+  return withRunAt(opts, async (client, runId) => {
     const done = await call(
       client.surface.run.retry({
         runId,
@@ -477,15 +461,7 @@ export interface CancelOpts {
 }
 
 export async function cancelViaService(opts: CancelOpts): Promise<number> {
-  return withConnection(opts.origin, async ({ client, dispatch }) => {
-    const resolved = await resolveRunAddress(
-      dispatch,
-      opts.run,
-      opts.cwd ?? process.cwd(),
-      opts.json,
-    );
-    if (!resolved.ok) return resolved.exit;
-    const runId = resolved.runId;
+  return withRunAt(opts, async (client, runId) => {
     const done = await call(
       client.surface.run.cancel({
         runId,
@@ -604,24 +580,37 @@ export interface ListOpts {
 }
 
 export async function listViaService(opts: ListOpts): Promise<number> {
-  // The checkout filter is resolved HERE because "this checkout" is a fact
-  // about the caller. A run row carries its own `repoRoot`, so the service does
-  // not need to be told where anybody is standing.
+  // WHICH checkout is resolved here, because "this checkout" is a fact about
+  // the caller; it travels to the service as an explicit absolute path, and the
+  // filtering, ordering and cut happen where the rows are — one round trip
+  // whatever the catalog holds. Outside a repository there is no "this", and
+  // the listing is every run, as it always was.
   const mine = opts.all
     ? null
     : git(["rev-parse", "--show-toplevel"], opts.cwd ?? process.cwd());
-  return withConnection(opts.origin, async (connection) => {
-    const all = await readRows(connection.dispatch);
-    const rows = all.filter((r) => mine === null || r.repoRoot === mine);
-    const sorted = [...rows].sort((a, b) => b.createdAt - a.createdAt);
-    const shown = opts.limit === undefined ? sorted : sorted.slice(0, opts.limit);
-    if (opts.json) {
-      emitJson(shown);
+  const p = patience(opts.origin, opts.json);
+  return withService(
+    opts.origin,
+    async (client) => {
+      const found = await findRuns(
+        client,
+        {
+          ...(mine === null ? {} : { checkout: mine }),
+          ...(opts.limit === undefined ? {} : { limit: opts.limit }),
+        },
+        p,
+      );
+      if (!found.ok) return found.exit;
+      const shown = found.value.rows;
+      if (opts.json) {
+        emitJson(shown);
+        return 0;
+      }
+      process.stdout.write(renderRows(shown, Date.now()));
       return 0;
-    }
-    process.stdout.write(renderRows(shown, Date.now()));
-    return 0;
-  });
+    },
+    p.notice,
+  );
 }
 
 export function renderRows(rows: readonly RunRow[], now: number): string {
@@ -662,15 +651,7 @@ export interface ShowOpts {
  * service holds the call open.
  */
 export async function showViaService(opts: ShowOpts): Promise<number> {
-  return withConnection(opts.origin, async ({ client, dispatch }) => {
-    const resolved = await resolveRunAddress(
-      dispatch,
-      opts.run,
-      opts.cwd ?? process.cwd(),
-      opts.json,
-    );
-    if (!resolved.ok) return resolved.exit;
-    const runId = resolved.runId;
+  return withRunAt(opts, async (client, runId) => {
     const answered = await call(
       client.surface.run.read({
         runId,

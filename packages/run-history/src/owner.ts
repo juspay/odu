@@ -354,7 +354,14 @@ export function releaseOwnership(
  * and the attention query) and could have drifted in any of them.
  */
 export function ownerProvablyAlive(dir: string, now: number): boolean | null {
-  const owner = currentOwner(dir);
+  return ownerAlive(currentOwner(dir), now);
+}
+
+/** The same answer, for a caller that already holds the owner record — the
+ *  service's registry, which reads it once when it projects a run and then
+ *  re-asks only the clock (and, past the grace, the pid) on every tick while
+ *  nothing on disk has moved. One rule, so the two cannot disagree. */
+export function ownerAlive(owner: Owner | null, now: number): boolean | null {
   if (owner === null) return null;
   return !ownershipProvablyLost(owner, now).lost;
 }

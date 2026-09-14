@@ -51,6 +51,7 @@ import {
   attemptsFor,
   expireRun,
   latestRun,
+  listRunIds,
   listRuns,
   locateAttempt,
   nodesWithEvidence,
@@ -490,6 +491,25 @@ describe("discovery", () => {
     // from a finished one without opening it.
     expect(listRuns({ root })[0]?.endpoint).toBe("/run/odu.sock");
     expect(listRuns({ root })[0]?.liveness).toBe("owned");
+  });
+
+  it("lists run ids newest first without opening a single file", () => {
+    // The poller's discovery (juspay/odu#113). A run directory with NO files in
+    // it is still listed — the proof that this reads the directory and nothing
+    // inside it — and an entry that is not a run id is not.
+    const root = tmpCatalog();
+    threeRuns(root);
+    mkdirSync(join(root, "0000000f-0001"));
+    mkdirSync(join(root, "not-a-run"));
+    writeFileSync(join(root, "stray.json"), "{}");
+    expect(listRunIds({ root })).toEqual([
+      "0000000f-0001",
+      "0000000c-0001",
+      "0000000b-0001",
+      "0000000a-0001",
+    ]);
+    expect(listRunIds({ root, limit: 2 })).toEqual(["0000000f-0001", "0000000c-0001"]);
+    expect(listRunIds({ root: join(root, "never-created") })).toEqual([]);
   });
 
   it("reports a coordinator that died without finalizing as owner_lost, not running", () => {

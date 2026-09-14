@@ -133,6 +133,8 @@ export const PORT_SLOT = {
   callerInventory: 12,
   dirtyLocal: 13,
   dirtyTransport: 14,
+  /** `catalog-scale.e2e.test.ts` — a daemon over a thousand-run catalog. */
+  catalogScale: 15,
 } as const;
 
 /** The port for one named slot in THIS suite's block. */

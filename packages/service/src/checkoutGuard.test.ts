@@ -138,6 +138,7 @@ describe("service.ts's checkout-taking handlers", () => {
     expect([...handlers.keys()].sort()).toEqual([
       "pipeline.read",
       "protect.apply",
+      "run.list",
       "venue.hold",
       "venue.release",
     ]);

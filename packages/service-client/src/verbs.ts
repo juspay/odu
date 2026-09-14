@@ -12,7 +12,7 @@
  * The names fall out of the framework's own derivation (`toolName(ns, verb)` is
  * `<ns>_<verb>`), so the shared verbs are:
  *
- *   run_start · run_wait · run_read · run_retry · run_cancel · log_read
+ *   run_start · run_wait · run_read · run_list · run_retry · run_cancel · log_read
  *   catalog_import · catalog_prune · pipeline_read
  *   venue_probe · venue_hold · venue_release · protect_apply
  *
@@ -37,10 +37,10 @@
  * **`mutates` is a safety default, not a label.** The framework treats an
  * unannotated procedure as MUTATING, because `readOnlyHint: true` lets an MCP
  * host auto-execute a call without confirming it. Every entry below carries the
- * flag explicitly even so: five reads say `mutates: false`, and the eight writes
+ * flag explicitly even so: six reads say `mutates: false`, and the eight writes
  * say `true` rather than leaning on the default. Relying on the default was
  * fine while the map was five lines long and one could see the whole thing at
- * once; at thirteen, "this one is unannotated, so it is a write" is a fact a
+ * once; at fourteen, "this one is unannotated, so it is a write" is a fact a
  * reader has to reconstruct, and the one it is easiest to get wrong is a new
  * entry somebody meant to be a read.
  */
@@ -68,6 +68,7 @@ export const ODU_SERVICE_EXPOSE = {
   "run.start": { tool: { mutates: true } },
   "run.wait": { tool: { mutates: false } },
   "run.read": { tool: { mutates: false } },
+  "run.list": { tool: { mutates: false } },
   "run.retry": { tool: { mutates: true } },
   "run.cancel": { tool: { mutates: true } },
   "log.read": { tool: { mutates: false } },
@@ -113,6 +114,8 @@ export const ODU_SERVICE_MCP_INSTRUCTIONS = [
   "and its log rewritten — start again from 0.",
   "",
   "`run_read` is `run_wait` without the waiting — the same answer, now.",
+  "`run_list` filters the board by checkout, commit and seq without fetching",
+  "every row — how to find a run id you do not have.",
   "",
   "The rest address things other than a run. `pipeline_read` resolves a",
   "checkout's recipe DAG without running it. `venue_probe` lists the machines",

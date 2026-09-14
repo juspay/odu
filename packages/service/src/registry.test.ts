@@ -5,14 +5,20 @@
  * it projects, so every fixture here is written by the catalog's own writers.
  */
 
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
+import { appendEvent, expireRun } from "@odu/run-history/store";
 import { createRegistry, projectRun } from "./registry";
+import { REFRESH_MS } from "./service";
 import {
   crashOwner,
   finalizeRun,
   makeWorld,
   registerFixtureRun,
   type World,
+  writeBulkJournal,
   writeDebt,
   writeLane,
   writeNode,
@@ -516,5 +522,236 @@ describe("the run environment", () => {
     registry.refresh(at + 1_000);
     const direct = projectRun(run.runId, { root: w.catalogRoot }, at + 1_000);
     expect(direct?.env).toEqual(registry.env(run.runId, at + 1_000));
+  });
+});
+
+/**
+ * A LARGE CATALOG — what juspay/odu#113 was about.
+ *
+ * The poller walked every run's manifest, owner record, verdict and whole
+ * journal on every 250 ms tick, and only then compared the fingerprint that
+ * existed to skip the unchanged ones. Seven hundred runs kept the daemon's loop
+ * busy full-time and every RPC queued behind it. These pin the fix as a
+ * requirement — a warm tick parses nothing — and the cases the cheaper
+ * fingerprint must still see.
+ */
+describe("the registry over a large catalog", () => {
+  it("re-reads no journal on a warm tick, however long the journals are", () => {
+    // 200 settled runs with ~1 500-line journals: 300 000 lines, which a cold
+    // refresh takes seconds to parse. A warm tick that parsed even a fraction
+    // of them would blow the bound below by an order of magnitude, so this
+    // cannot pass by luck — only by not reading.
+    const w = open();
+    const checkouts = ["/code/a", "/code/b", "/code/c"];
+    for (let i = 0; i < 200; i += 1) {
+      const run = registerFixtureRun(w, {
+        repoRoot: checkouts[i % checkouts.length] as string,
+        sha: i.toString(16).padStart(40, "0"),
+      });
+      writeBulkJournal(run.handle, 1_500);
+      finalizeRun(run.handle, run.token, "passed");
+    }
+    const registry = createRegistry({ root: w.catalogRoot });
+    expect(registry.refresh().upserted).toHaveLength(200);
+
+    const began = performance.now();
+    const warm = registry.refresh();
+    const took = performance.now() - began;
+    expect(warm).toEqual({ upserted: [], removed: [] });
+    expect(registry.size()).toBe(200);
+    expect(took, `a warm tick over 200 runs took ${Math.round(took)}ms`).toBeLessThan(
+      REFRESH_MS,
+    );
+  }, 120_000);
+
+  it("stops asking a SETTLED run's fence, and still follows it if it resumes", () => {
+    // `releaseOwnership` keeps owner.json, so every finished run's heartbeat
+    // goes stale and the fence's answer flips once the grace passes. For a
+    // settled row that answer cannot change the row — the fold decides
+    // `settled` first — so re-projecting on it was pure cost: a journal
+    // re-parse per finished run, and a `kill(pid, 0)` per tick for ever after.
+    const w = open();
+    const at = Date.now();
+    const run = registerFixtureRun(w, { repoRoot: "/code/app", sha: "5e".repeat(20), now: at });
+    finalizeRun(run.handle, run.token, "passed", [], at);
+    crashOwner(run.handle, { heartbeatAt: at });
+    const registry = createRegistry({ root: w.catalogRoot });
+    registry.refresh(at);
+    expect(registry.row(run.runId)?.state).toBe("settled");
+
+    const later = at + OWNERSHIP_GRACE_MS + 1;
+    expect(registry.refresh(later)).toEqual({ upserted: [], removed: [] });
+    expect(registry.row(run.runId)?.state).toBe("settled");
+
+    // Resuming appends to the journal, which moves the fingerprint — so the
+    // run is projected again, and the (now provably lost) owner counts.
+    appendEvent(run.handle, run.token, {
+      kind: "attempt_started",
+      node: "unit@x86_64-linux",
+      attempt: 2,
+      placement: { platform: "x86_64-linux", host: "localhost" },
+    });
+    expect(registry.refresh(later).upserted.map((row) => row.runId)).toEqual([run.runId]);
+    expect(registry.row(run.runId)?.state).toBe("owner_lost");
+  });
+
+  it("re-projects a run when a takeover CLAIM appears and owner.json does not move", () => {
+    // `currentOwner` takes the highest epoch among owner.json AND the claim
+    // files. A successor that won epoch 2 and died before publishing leaves
+    // only `owner.2.claim` — so the owner changed while `owner.json`'s stat did
+    // not. The directory's own stat is what sees it; without it the cached
+    // owner would be served forever.
+    const w = open();
+    const at = Date.now();
+    const run = registerFixtureRun(w, { repoRoot: "/code/app", sha: "ab".repeat(20), now: at });
+    const registry = createRegistry({ root: w.catalogRoot });
+    registry.refresh(at);
+    expect(registry.row(run.runId)?.state).toBe("provisioning");
+
+    writeFileSync(
+      join(run.handle.dir, "owner.2.claim"),
+      `${JSON.stringify({
+        epoch: 2,
+        pid: 0x7ffffff0,
+        host: hostname(),
+        claimedAt: at - OWNERSHIP_GRACE_MS - 1,
+        heartbeatAt: at - OWNERSHIP_GRACE_MS - 1,
+        endpoint: null,
+      })}\n`,
+    );
+    const moved = registry.refresh(at);
+    expect(moved.upserted.map((row) => row.runId)).toEqual([run.runId]);
+    expect(registry.row(run.runId)?.state).toBe("owner_lost");
+  });
+
+  it("follows a finalized run that resumed, and settles it again", () => {
+    // `verdict.json` is last generation's until the next finalize, so a
+    // resumed run has a verdict on disk and work in flight. The journal is the
+    // authority — which the projection's own fold reads, now that discovery no
+    // longer computes `resumed` for it.
+    const w = open();
+    const run = registerFixtureRun(w, { repoRoot: "/code/app", sha: "cd".repeat(20) });
+    writeRoster(run.handle, run.token, ["unit@x86_64-linux"]);
+    writeNode(w, run.handle, run.token, { id: "unit@x86_64-linux", status: "failed" });
+    finalizeRun(run.handle, run.token, "failed", ["unit@x86_64-linux"]);
+    const registry = createRegistry({ root: w.catalogRoot });
+    registry.refresh();
+    expect(registry.row(run.runId)?.state).toBe("settled");
+
+    appendEvent(run.handle, run.token, {
+      kind: "attempt_started",
+      node: "unit@x86_64-linux",
+      attempt: 2,
+      placement: { platform: "x86_64-linux", host: "localhost" },
+    });
+    registry.refresh();
+    expect(registry.row(run.runId)?.state).toBe("running");
+    expect(registry.row(run.runId)?.outcome).toBeNull();
+
+    writeNode(w, run.handle, run.token, {
+      id: "unit@x86_64-linux",
+      attempt: 2,
+      status: "ok",
+    });
+    finalizeRun(run.handle, run.token, "passed");
+    registry.refresh();
+    expect(registry.row(run.runId)?.state).toBe("settled");
+    expect(registry.row(run.runId)?.outcome).toBe("passed");
+  });
+
+  it("reports a run retention expired on the next tick", () => {
+    const w = open();
+    const at = Date.now();
+    const run = registerFixtureRun(w, { repoRoot: "/code/app", sha: "ef".repeat(20), now: at });
+    finalizeRun(run.handle, run.token, "passed", [], at);
+    const registry = createRegistry({ root: w.catalogRoot });
+    registry.refresh(at);
+    expect(registry.row(run.runId)?.state).toBe("settled");
+
+    const later = at + OWNERSHIP_GRACE_MS * 4;
+    expect(expireRun(run.handle, later)).toBe(true);
+    expect(registry.refresh(later).upserted.map((row) => row.runId)).toEqual([run.runId]);
+    expect(registry.row(run.runId)?.state).toBe("expired");
+  });
+
+  it("never publishes a directory with no manifest, and drops a row whose manifest goes", () => {
+    const w = open();
+    const run = registerFixtureRun(w, { repoRoot: "/code/app", sha: "12".repeat(20) });
+    mkdirSync(join(w.catalogRoot, "0zzzzzzzz-zzzzzzzz"));
+    const registry = createRegistry({ root: w.catalogRoot });
+    expect(registry.refresh().upserted.map((row) => row.runId)).toEqual([run.runId]);
+    expect(registry.refresh()).toEqual({ upserted: [], removed: [] });
+    expect(registry.select({}).total).toBe(1);
+
+    // A manifest that disappears from a run on the board is a REMOVAL a
+    // subscriber must hear about, not a row that silently stops updating.
+    rmSync(join(run.handle.dir, "manifest.json"));
+    expect(registry.refresh().removed).toEqual([run.runId]);
+    expect(registry.select({}).total).toBe(0);
+  });
+});
+
+describe("registry.select", () => {
+  function board(w: World) {
+    const at = 1_700_000_000_000;
+    const make = (i: number, repoRoot: string, sha: string, seq: number) =>
+      registerFixtureRun(w, {
+        repoRoot,
+        sha,
+        seq,
+        now: at + i * 1_000,
+        runId: `0${(at + i * 1_000).toString(36)}-0000000${i}`,
+      }).runId;
+    return {
+      a1: make(1, "/code/a", `abcdef1${"0".repeat(33)}`, 1),
+      b1: make(2, "/code/b", `abcdef1${"0".repeat(33)}`, 1),
+      a2: make(3, "/code/a", `abcdef1${"0".repeat(33)}`, 2),
+      a3: make(4, "/code/a", `1234567${"0".repeat(33)}`, 1),
+    };
+  }
+
+  it("returns every run, newest first, when nothing filters", () => {
+    const w = open();
+    const ids = board(w);
+    const registry = createRegistry({ root: w.catalogRoot });
+    registry.refresh();
+    const all = registry.select({});
+    expect(all.rows.map((r) => r.runId)).toEqual([ids.a3, ids.a2, ids.b1, ids.a1]);
+    expect(all.total).toBe(4);
+  });
+
+  it("filters by checkout, commit prefix and seq, ANDed", () => {
+    const w = open();
+    const ids = board(w);
+    const registry = createRegistry({ root: w.catalogRoot });
+    registry.refresh();
+    expect(registry.select({ checkout: "/code/a" }).rows.map((r) => r.runId)).toEqual([
+      ids.a3,
+      ids.a2,
+      ids.a1,
+    ]);
+    // Case-insensitive, and a PREFIX — the `<sha7>` a face prints.
+    expect(registry.select({ sha: "ABCDEF1" }).rows.map((r) => r.runId)).toEqual([
+      ids.a2,
+      ids.b1,
+      ids.a1,
+    ]);
+    expect(
+      registry.select({ sha: "abcdef1", seq: 1 }).rows.map((r) => r.runId),
+    ).toEqual([ids.b1, ids.a1]);
+    expect(
+      registry.select({ checkout: "/code/a", sha: "abcdef1", seq: 1 }).rows.map((r) => r.runId),
+    ).toEqual([ids.a1]);
+    expect(registry.select({ checkout: "/code/nowhere" })).toEqual({ rows: [], total: 0 });
+  });
+
+  it("cuts rows at limit and still counts every match", () => {
+    const w = open();
+    const ids = board(w);
+    const registry = createRegistry({ root: w.catalogRoot });
+    registry.refresh();
+    const one = registry.select({ checkout: "/code/a", limit: 1 });
+    expect(one.rows.map((r) => r.runId)).toEqual([ids.a3]);
+    expect(one.total).toBe(3);
   });
 });

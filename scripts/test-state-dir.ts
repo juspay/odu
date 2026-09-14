@@ -64,12 +64,17 @@ if (
   //
   // Which is why this is also where a suite hands in its own teardown. See
   // `ODU_TEST_TEARDOWN`.
+  //
+  // With a budget of its own: the e2e teardown asks the service for its pid (a
+  // process start), stops it, and removes every fixture and world the suite
+  // made — a thousand-run catalog among them — and bun's 5 s hook default
+  // failed the last file of a green run for taking longer than that.
   afterAll(() => {
     const theirs = (globalThis as { ODU_TEST_TEARDOWN?: () => void })
       .ODU_TEST_TEARDOWN;
     if (theirs !== undefined) theirs();
     dispose();
-  });
+  }, 120_000);
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
     process.on(signal, () => {
       dispose();

@@ -37,25 +37,25 @@
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import {
-  buildSurfaceFace,
-  unenrolledStreamCall,
-} from "@kolu/surface/client";
-import type { SurfaceDispatch } from "@kolu/surface/link";
+import { unenrolledStreamCall } from "@kolu/surface/client";
 import {
   firstFrame as headFrame,
+  isNoAnswer,
+  NoAnswerWithin,
   subscribe,
+  withDeadline,
 } from "@odu/execution/common/effectEdge";
 import type { ServiceConnection } from "@odu/service-client/dial";
 import { serviceOrigin } from "@odu/service-client/endpoint";
 import type {
   AttentionAnswer,
+  ListInput,
+  ListOutput,
   NodesFrame,
   OduServiceClient,
-  RunRow,
 } from "@odu/service-client/surface";
-import { oduServiceSurface, ServiceRefused } from "@odu/service-client/surface";
-import { Effect, Stream } from "effect";
+import { isCommitPrefix, ServiceRefused } from "@odu/service-client/surface";
+import { Effect, type Stream } from "effect";
 import { connectOrStart } from "./webLauncher";
 
 // ── exits ───────────────────────────────────────────────────────────────────
@@ -130,8 +130,10 @@ export function waitExitFor(answer: AttentionAnswer): number {
 export async function withService(
   origin: string | undefined,
   use: (client: OduServiceClient) => Promise<number>,
+  /** Wraps the dial so a slow one says so — see {@link Patience}. */
+  notice: Patience["notice"] = (work) => work,
 ): Promise<number> {
-  const dialled = await dial(origin);
+  const dialled = await notice(dial(origin));
   if (typeof dialled === "number") return dialled;
   try {
     return await use(dialled.client);
@@ -163,21 +165,6 @@ async function dial(
       `${String((err as { message?: unknown }).message ?? err)}\n`,
     );
     return WAIT_EXITS.ownerLost;
-  }
-}
-
-/** The same, for the readers that need the raw dispatch as well as the typed
- *  face — see {@link readRows} on why a collection is reached that way. */
-export async function withConnection(
-  origin: string | undefined,
-  use: (connection: ServiceConnection) => Promise<number>,
-): Promise<number> {
-  const dialled = await dial(origin);
-  if (typeof dialled === "number") return dialled;
-  try {
-    return await use(dialled);
-  } finally {
-    await dialled.dispose();
   }
 }
 
@@ -359,52 +346,147 @@ export function requestId(given: string | undefined): string {
   return given ?? `cli-${randomUUID()}`;
 }
 
-// ── reading collections ─────────────────────────────────────────────────────
+// ── waiting on the service ──────────────────────────────────────────────────
 
 /**
- * The board, read off the `runs` COLLECTION.
+ * How long a command waits for the service's FIRST answer — a run listing, or
+ * a run's opening nodes frame — before it says the service is not answering.
  *
- * Through the structural face rather than the typed one, and that is the
- * framework's own shape rather than a workaround: `SurfaceReadFace` types cells,
- * streams and procedures and deliberately declines to type collection verbs
- * (per-member precision there is a union-budget problem the framework solved by
- * not solving it). `buildSurfaceFace` returns the structural view where the
- * verbs ARE present, and `odu surface keys runs` reaches them the same way —
- * one cast at an adapter seam, which is exactly where the framework says to put
- * it.
+ * Nothing bounded that wait before, and juspay/odu#113 is what that cost: a
+ * daemon whose loop was pinned by its own poller accepted the connection and
+ * then answered nothing for minutes, and `odu attach` sat on a blank terminal
+ * with no way to tell "slow" from "hung". Ten seconds is far beyond any healthy
+ * answer, which is a single in-memory scan, and short enough that a person
+ * learns something is wrong while they are still looking.
  *
- * `keys` then `get`, rather than a bespoke "list the board for me" procedure:
- * the collection IS the board, and asking the service for a pre-filtered list
- * would be asking it to know where the caller is standing.
- *
- * **A CAST IS A CLAIM, AND THIS ONE WAS WRONG TWICE.** It said the verbs
- * returned async iterables — they return Effect `Stream`s, and the `for await`
- * died with `undefined is not a function`. It said `get` took a bare key — the
- * framework mints it taking `{ key }`, so the input failed to decode and every
- * read of the board came back "Schema validation failed". Neither could be
- * contradicted by a compiler, and no unit test caught either, because every
- * test hands in a stand-in face shaped like the cast itself. Both were found by
- * running the packaged binary. When editing this, read `mintStream` in
- * `node_modules/@kolu/surface/src/client.ts` rather than the type above it.
+ * Only the FIRST answer: a follow that has started is bounded by
+ * {@link watchNodes}' own deadline, and a run that is simply long is not slow.
  */
-export async function readRows(dispatch: SurfaceDispatch): Promise<RunRow[]> {
-  const face = buildSurfaceFace(oduServiceSurface, dispatch) as unknown as {
-    surface: {
-      runs: {
-        keys: (input: undefined) => Stream.Stream<readonly string[], unknown>;
-        get: (
-          input: { key: string },
-        ) => Stream.Stream<RunRow | undefined, unknown>;
-      };
-    };
+export const FIRST_ANSWER_MS = 10_000;
+
+/** How long a command stays silent before saying it is waiting. Below this a
+ *  line would flash for an answer that was about to arrive anyway. */
+export const FEEDBACK_AFTER_MS = 250;
+
+/**
+ * How a command waits: bounded, and not in silence.
+ *
+ * One per command, so the waiting line is printed AT MOST ONCE however many
+ * steps (the dial, the listing, the first frame) turn out to be slow.
+ */
+export interface Patience {
+  origin: string;
+  json: boolean;
+  deadlineMs: number;
+  /** Resolve with `work`, writing the waiting line to stderr if it is still
+   *  pending after the threshold — and nothing otherwise. */
+  notice: <T>(work: Promise<T>) => Promise<T>;
+}
+
+export function patience(
+  origin: string | undefined,
+  json: boolean,
+  opts: {
+    afterMs?: number;
+    deadlineMs?: number;
+    /** Whether a person is watching stderr. Injected by tests. */
+    tty?: boolean;
+    write?: (text: string) => void;
+  } = {},
+): Patience {
+  const at = origin ?? serviceOrigin();
+  // Never under `-o json` and never into a pipe: the line is for a person, and
+  // a consumer parsing output should not have to know it might appear.
+  const speaks = !json && (opts.tty ?? process.stderr.isTTY === true);
+  const write = opts.write ?? ((text: string) => void process.stderr.write(text));
+  const afterMs = opts.afterMs ?? FEEDBACK_AFTER_MS;
+  let said = false;
+  return {
+    origin: at,
+    json,
+    deadlineMs: opts.deadlineMs ?? FIRST_ANSWER_MS,
+    notice: async (work) => {
+      if (!speaks || said) return work;
+      const timer = setTimeout(() => {
+        if (said) return;
+        said = true;
+        write(`odu: waiting for the service at ${at}…\n`);
+      }, afterMs);
+      try {
+        return await work;
+      } finally {
+        clearTimeout(timer);
+      }
+    },
   };
-  const keys = (await firstFrame(face.surface.runs.keys(undefined))) ?? [];
-  const rows: RunRow[] = [];
-  for (const key of keys) {
-    const row = await firstFrame(face.surface.runs.get({ key }));
-    if (row !== undefined && row !== null) rows.push(row);
+}
+
+/** The service accepted us and then said nothing in time. Exit 3, the
+ *  documented "nothing serving" — whatever is there is not serving THIS. */
+export function reportNoAnswer(p: Patience, what: string): number {
+  const message =
+    `odu: the service at ${p.origin} did not answer ${what} within ` +
+    `${Math.round(p.deadlineMs / 1000)}s — it accepted the connection and then ` +
+    "said nothing. Its log (`odu web` in a terminal, or the daemon's journal) " +
+    "says why.";
+  if (p.json) emitJson({ error: "no_answer", message });
+  else process.stderr.write(`${message}\n`);
+  return WAIT_EXITS.ownerLost;
+}
+
+/** A question the service answered, or one already reported to the user with
+ *  the exit it earned. One shape for every step a command threads through, so
+ *  a caller passes the failure on (`if (!x.ok) return x.exit`) without
+ *  remembering which step spelled its success arm how. */
+export type Answered<T> = { ok: true; value: T } | { ok: false; exit: number };
+
+// ── finding runs ────────────────────────────────────────────────────────────
+
+/**
+ * The board, filtered by the service — ONE round trip, bounded.
+ *
+ * This replaced reading the `runs` collection a row at a time (`keys`, then a
+ * `get` per key) and filtering here. That was one round trip per run in the
+ * catalog to name a single one of them, on every `odu status`, `attach`,
+ * `--run latest` and `history list` — 711 of them on the host that reported
+ * juspay/odu#113. The filters did not move to the service because it should
+ * know where the caller stands (it still does not: `checkout` is a path this
+ * side resolved and sends as data), but because a filter that runs where the
+ * rows are is one message, and one that runs here is all of them.
+ */
+export async function findRuns(
+  client: Pick<OduServiceClient, "surface">,
+  query: ListInput,
+  p: Patience,
+): Promise<Answered<ListOutput>> {
+  const answered = await p.notice(
+    call(withDeadline(client.surface.run.list(query), p.deadlineMs)),
+  );
+  if (answered.ok) return answered;
+  if (answered.refusal === null && isNoAnswer(answered.error)) {
+    return { ok: false, exit: reportNoAnswer(p, "a run listing") };
   }
-  return rows;
+  return { ok: false, exit: reportFailure(answered, p.json) };
+}
+
+/** A run's opening nodes frame, bounded the same way. `undefined` is still a
+ *  stream that opened and said nothing — a different fault from no answer. */
+export async function firstNodesFrame(
+  client: Pick<OduServiceClient, "surface">,
+  runId: string,
+  p: Patience,
+): Promise<Answered<NodesFrame | undefined>> {
+  try {
+    const value = await p.notice(
+      headFrame(nodesStream(client, runId), { deadlineMs: p.deadlineMs }),
+    );
+    return { ok: true, value };
+  } catch (err) {
+    if (isNoAnswer(err)) {
+      return { ok: false, exit: reportNoAnswer(p, `${runId}'s nodes`) };
+    }
+    throw err;
+  }
 }
 
 /**
@@ -420,61 +502,121 @@ export async function readRows(dispatch: SurfaceDispatch): Promise<RunRow[]> {
  * A promise made by a refusal is still a promise, and this is where it is kept.
  *
  *   - a RUN ID passes through untouched — it is already the global address, and
- *     resolving it here would mean a board read on every command that has one;
+ *     resolving it here would mean a listing on every command that has one;
  *   - `latest` is the newest run OF THIS CHECKOUT. Deliberately not the newest
  *     run in the catalog: the catalog is per user, and a person standing in one
  *     repository who types `latest` means the thing they just started, not
  *     whatever another worktree began a second later;
  *   - `<sha7>#<seq>` is the seq-th run recorded at that commit — the spelling
  *     `odu history list` prints, so what is on the screen can be typed back.
+ *     Global, newest first, like the catalog's own `resolveRunRef`.
  */
 export async function resolveRunAddress(
-  dispatch: SurfaceDispatch,
+  client: Pick<OduServiceClient, "surface">,
   address: string,
   cwd: string,
-  json = false,
-): Promise<{ ok: true; runId: string } | { ok: false; exit: number }> {
-  const hash = address.indexOf("#");
-  // A run id passes through WITHOUT a board read. The service is the authority
-  // on whether it exists and refuses it properly; resolving it here would buy
-  // nothing and cost a collection scan on every `odu wait`.
-  if (address !== "latest" && hash <= 0) return { ok: true, runId: address };
-  const rows = await readRows(dispatch);
-  const found =
-    address === "latest"
-      ? newestHere(rows, git(["rev-parse", "--show-toplevel"], cwd))
-      : rows.find(
-          (r) =>
-            r.sha.startsWith(address.slice(0, hash)) &&
-            r.seq === Number(address.slice(hash + 1)),
-        );
-  if (found !== undefined) return { ok: true, runId: found.runId };
-  // EXIT 4, not a throw. An unresolvable address is a fact about the QUESTION,
-  // which is what exit 4 means in this file's table — and a throw would unwind
-  // to `main.ts` and exit 1, the code reserved for "your CI is red". A script
-  // branching on that would report a test failure for a run it could not name.
-  return {
-    ok: false,
-    exit: unknownRun(
-      address,
-      address === "latest"
-        ? `odu: no run recorded for ${git(["rev-parse", "--show-toplevel"], cwd) ?? cwd}` +
+  p: Patience,
+): Promise<Answered<string>> {
+  // EXIT 4, not a throw, on every arm that names nothing. An unresolvable
+  // address is a fact about the QUESTION, which is what exit 4 means in this
+  // file's table — and a throw would unwind to `main.ts` and exit 1, the code
+  // reserved for "your CI is red". A script branching on that would report a
+  // test failure for a run it could not name.
+  const parsed = parseRunAddress(address);
+  switch (parsed.kind) {
+    // A run id passes through WITHOUT a listing. The service is the authority
+    // on whether it exists and refuses it properly; resolving it here would
+    // buy nothing and cost a round trip on every `odu wait`.
+    case "id":
+      return { ok: true, value: parsed.runId };
+    case "latest": {
+      const checkout = git(["rev-parse", "--show-toplevel"], cwd);
+      if (checkout !== null) {
+        const found = await findRuns(client, { checkout, limit: 1 }, p);
+        if (!found.ok) return found;
+        const row = found.value.rows[0];
+        if (row !== undefined) return { ok: true, value: row.runId };
+      }
+      return {
+        ok: false,
+        exit: unknownRun(
+          address,
+          `odu: no run recorded for ${checkout ?? cwd}` +
             " — `latest` means the newest run OF THIS CHECKOUT, and this one" +
-            " has none. `odu history list --all` shows every run in your catalog."
-        : `odu: no run ${address} in the catalog — \`<sha7>#<seq>\` addresses` +
-            " the seq-th run recorded at a commit, as `odu history list` prints it.",
-      json,
-    ),
-  };
+            " has none. `odu history list --all` shows every run in your catalog.",
+          p.json,
+        ),
+      };
+    }
+    case "ref": {
+      const found = await findRuns(client, { sha: parsed.sha, seq: parsed.seq, limit: 1 }, p);
+      if (!found.ok) return found;
+      const row = found.value.rows[0];
+      if (row !== undefined) return { ok: true, value: row.runId };
+      return { ok: false, exit: noRunAtRef(address, p.json) };
+    }
+    case "malformed":
+      return { ok: false, exit: noRunAtRef(address, p.json) };
+  }
 }
 
-/** The newest run of ONE checkout. Separated because "newest" and "of this
- *  checkout" are two decisions and only the second is contestable. */
-function newestHere(rows: RunRow[], checkout: string | null): RunRow | undefined {
-  if (checkout === null) return undefined;
-  return rows
-    .filter((r) => r.repoRoot === checkout)
-    .sort((a, b) => b.createdAt - a.createdAt)[0];
+/**
+ * One command that takes `--run <address>`: its patience, its connection and
+ * the address resolved, as ONE preamble.
+ *
+ * `odu wait`, `rerun`, `cancel` and `history show` each spelled these three
+ * steps out, with the origin passed twice and the waiting line's `notice`
+ * threaded to the dial by hand — so a fifth such command could build its
+ * patience and forget to hand it to the dial, and nothing would say so.
+ * Commands whose subject is not a run address (`status`, `attach`, `list`,
+ * `logs`) keep calling {@link withService} directly.
+ */
+export function withRunAt(
+  opts: { origin?: string; json: boolean; run: string; cwd?: string },
+  use: (client: OduServiceClient, runId: string) => Promise<number>,
+): Promise<number> {
+  const p = patience(opts.origin, opts.json);
+  return withService(
+    p.origin,
+    async (client) => {
+      const resolved = await resolveRunAddress(client, opts.run, opts.cwd ?? process.cwd(), p);
+      return resolved.ok ? use(client, resolved.value) : resolved.exit;
+    },
+    p.notice,
+  );
+}
+
+/** A `<sha7>#<seq>` that named nothing — well-formed and unmatched, or not a
+ *  ref at all; the same fact either way (see {@link RunAddress}). */
+function noRunAtRef(address: string, json: boolean): number {
+  return unknownRun(
+    address,
+    `odu: no run ${address} in the catalog — \`<sha7>#<seq>\` addresses` +
+      " the seq-th run recorded at a commit, as `odu history list` prints it.",
+    json,
+  );
+}
+
+/** The run-address grammar as a value — parsed once, so the resolver switches on
+ *  what was typed rather than re-asking the string at every step. */
+export type RunAddress =
+  | { kind: "id"; runId: string }
+  | { kind: "latest" }
+  | { kind: "ref"; sha: string; seq: number }
+  // A ref that cannot name a run is UNKNOWN, not refused: the grammar is this
+  // face's, so a malformed one is the same fact as a well-formed one nothing
+  // matches — and worth no round trip.
+  | { kind: "malformed" };
+
+export function parseRunAddress(address: string): RunAddress {
+  if (address === "latest") return { kind: "latest" };
+  const hash = address.indexOf("#");
+  if (hash <= 0) return { kind: "id", runId: address };
+  const sha = address.slice(0, hash);
+  const seq = Number(address.slice(hash + 1));
+  return isCommitPrefix(sha) && Number.isSafeInteger(seq) && seq > 0
+    ? { kind: "ref", sha, seq }
+    : { kind: "malformed" };
 }
 
 /** Report an address that named no run, in whichever voice the caller asked
@@ -486,15 +628,11 @@ function unknownRun(address: string, message: string, json: boolean): number {
   return WAIT_EXITS.unknownRun;
 }
 
-/** A collection member always opens with a SNAPSHOT, so the first frame is the
- *  read. An empty stream is a link that answered and said nothing, which is a
- *  different thing from an empty board — reported as `undefined` so the caller
- *  is never handed a plausible-looking zero.
- *
- *  Through the shared Effect edge rather than a local loop: `firstFrame` and
- *  `subscribe` are where the laziness, teardown and interruption rules for a
- *  surface stream live, and a face that re-derived them would get one of the
- *  three wrong. */
+/** The head of a stream, through the shared Effect edge rather than a local
+ *  loop: `firstFrame` and `subscribe` are where the laziness, teardown and
+ *  interruption rules for a surface stream live, and a face that re-derived
+ *  them would get one of the three wrong. `undefined` is a stream that ended
+ *  without a frame — never a plausible-looking empty answer. */
 export async function firstFrame<A>(
   stream: Stream.Stream<A, unknown>,
 ): Promise<A | undefined> {
@@ -583,30 +721,79 @@ export function nodesStream(
  * stream opens with a snapshot, and every consumer of this dedupes), while
  * stopping early is a wrong answer about somebody's CI. The deadline exists so
  * a service that has gone away entirely cannot hold a terminal forever.
+ *
+ * `patience` bounds the FIRST frame — across re-subscribes, on the subscription
+ * that is then kept — and rejects with {@link NoAnswerWithin} when it does not
+ * come (juspay/odu#113). On THIS stream rather than on a probe beside it: a
+ * probe that answered proved nothing about the second subscription the follow
+ * then opened, and cost `odu attach` two stream opens on the path it exists to
+ * make cheap. After the first frame the follow is unbounded but for
+ * `deadlineMs` — a long run is not a slow one.
  */
 export async function watchNodes(
   client: Pick<OduServiceClient, "surface">,
   runId: string,
   onFrame: (frame: NodesFrame) => void,
-  deadlineMs = 24 * 60 * 60 * 1000,
+  opts: { deadlineMs?: number; patience?: Patience } = {},
 ): Promise<NodesFrame | undefined> {
-  const until = Date.now() + deadlineMs;
+  const until = Date.now() + (opts.deadlineMs ?? 24 * 60 * 60 * 1000);
+  const p = opts.patience;
+  const firstBy = p === undefined ? undefined : Date.now() + p.deadlineMs;
   let last: NodesFrame | undefined;
   for (;;) {
     trace(`watch ${runId}: subscribing`);
-    for await (const frame of subscribe(
+    const sub = subscribe(
       nodesStream(client, runId, () => trace(`watch ${runId}: link retrying`)),
-    )) {
-      last = frame;
-      trace(`watch ${runId}: frame done=${frame.done} nodes=${frame.nodes.length}`);
-      onFrame(frame);
-      if (frame.done) return frame;
+    );
+    try {
+      for (;;) {
+        const next =
+          p !== undefined && firstBy !== undefined && last === undefined
+            ? await p.notice(nextBy(sub, firstBy, p.deadlineMs))
+            : await sub.next();
+        if (next.done) break;
+        const frame = next.value;
+        last = frame;
+        trace(`watch ${runId}: frame done=${frame.done} nodes=${frame.nodes.length}`);
+        onFrame(frame);
+        if (frame.done) return frame;
+      }
+    } finally {
+      // Hand-advanced, so released by hand — what `for await … return` did.
+      void sub.return?.();
     }
     trace(`watch ${runId}: stream ended without a verdict`);
+    // Still no first frame, and its bound is spent: re-subscribing would only
+    // hide a service that is not answering behind one that is slow.
+    if (p !== undefined && firstBy !== undefined && last === undefined && Date.now() >= firstBy) {
+      throw new NoAnswerWithin(p.deadlineMs);
+    }
     // The stream ended without saying the run had. Re-subscribe — unless the
     // clock says nobody is coming back.
     if (Date.now() >= until) return last;
     await new Promise((resolve) => setTimeout(resolve, RESUBSCRIBE_MS));
+  }
+}
+
+/** The iterator's next result, or {@link NoAnswerWithin} once `by` passes. The
+ *  caller releases the subscription; a `next()` that loses the race settles
+ *  into the interrupt that release issues, never into an unhandled rejection. */
+async function nextBy<T>(
+  sub: AsyncIterator<T>,
+  by: number,
+  deadlineMs: number,
+): Promise<IteratorResult<T>> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new NoAnswerWithin(deadlineMs)),
+      Math.max(0, by - Date.now()),
+    );
+  });
+  try {
+    return await Promise.race([sub.next(), late]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 

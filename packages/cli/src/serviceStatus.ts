@@ -19,21 +19,19 @@
  * can still say which machines it landed on and what it never managed to post.
  * A socket cannot be asked either question.
  *
- * ## "This checkout's run" is resolved on this side
+ * ## "This checkout" is resolved on this side; the listing is not
  *
  * The service addresses runs globally, so `status` and `attach` — the two
- * commands whose subject genuinely IS a directory — resolve it here: read the
- * board, keep the rows whose `repoRoot` is this checkout, take the newest that
- * has not reached a terminal state. That is a fact about where the caller is
- * standing, which is the one kind of fact a face is still allowed to know.
+ * commands whose subject genuinely IS a directory — resolve WHICH directory
+ * here, with `git rev-parse`, and send it as an explicit absolute `checkout` on
+ * one `run.list` call. The service answers with that checkout's newest run, and
+ * the policy of what is worth showing (`currentRun`) stays on this side. Where
+ * the caller is standing is still the one kind of fact a face knows; it is just
+ * no longer a reason to fetch every row in the catalog and filter them here.
  */
 
 import { randomUUID } from "node:crypto";
-import {
-  firstFrame as headFrame,
-  runUnary,
-  subscribe,
-} from "@odu/execution/common/effectEdge";
+import { isNoAnswer, runUnary } from "@odu/execution/common/effectEdge";
 import { exitCode } from "@odu/execution/common/verdict";
 import { STATUS_META } from "@odu/run-client/surface";
 import type {
@@ -56,11 +54,14 @@ import { statusGlyph } from "./render";
 import {
   checkoutHere,
   emitJson,
-  nodesStream,
-  readRows,
+  findRuns,
+  firstNodesFrame,
+  type Patience,
+  patience,
+  reportNoAnswer,
   watchNodes,
   WAIT_EXITS,
-  withConnection,
+  withService,
 } from "./serviceFace";
 
 export interface HereRunOpts {
@@ -68,6 +69,9 @@ export interface HereRunOpts {
   origin?: string;
   cwd?: string;
 }
+
+/** The service face these commands use, narrowed so a test can stand one in. */
+export type HereClient = Pick<OduServiceClient, "surface">;
 
 /** The one state with nothing left to show. `expired` means retention has
  *  removed the evidence — the run's identity survives, its nodes and logs do
@@ -79,6 +83,8 @@ const NOTHING_TO_SHOW = new Set(["expired"]);
  * The newest run started from this checkout.
  *
  * NEWEST FIRST, THEN THE STATE TEST, and both halves of that were wrong before.
+ * The service's listing is newest first, and asked for exactly one row, so
+ * the state test below can only ever look at the newest.
  *
  * Filtering by state and sorting the survivors reads the same as this and is
  * not: an `owner_lost` run never leaves that state, so it stayed "current"
@@ -100,30 +106,26 @@ const NOTHING_TO_SHOW = new Set(["expired"]);
  * no run is the ordinary state of most checkouts most of the time, and exiting
  * non-zero for it would make `odu status` unusable in a prompt.
  */
-function currentRun(rows: readonly RunRow[], checkout: string): RunRow | undefined {
-  const newest = rows
-    .filter((r) => r.repoRoot === checkout)
-    .sort((a, b) => b.createdAt - a.createdAt)[0];
+function currentRun(newest: RunRow | undefined): RunRow | undefined {
   return newest === undefined || NOTHING_TO_SHOW.has(newest.state)
     ? undefined
     : newest;
 }
 
-/** The frame both commands start from: the board resolved to a run, then that
- *  run's first nodes frame. Split out because `status` prints it once and
- *  `attach` keeps reading, and the resolution must not be two implementations. */
-async function openHere(
-  opts: HereRunOpts,
-  use: (client: OduServiceClient, row: RunRow) => Promise<number>,
+/** The run both commands start from: this checkout's newest, from one bounded
+ *  listing. Split out because `status` prints it once and `attach` keeps
+ *  reading, and the resolution must not be two implementations. */
+async function resolveHere(
+  client: HereClient,
+  checkout: string,
+  p: Patience,
+  use: (row: RunRow) => Promise<number>,
   none: () => number,
 ): Promise<number> {
-  const checkout = checkoutHere(opts.cwd);
-  return withConnection(opts.origin, async (connection) => {
-    const rows = await readRows(connection.dispatch);
-    const row = currentRun(rows, checkout);
-    if (row === undefined) return none();
-    return use(connection.client, row);
-  });
+  const found = await findRuns(client, { checkout, limit: 1 }, p);
+  if (!found.ok) return found.exit;
+  const row = currentRun(found.value.rows[0]);
+  return row === undefined ? none() : use(row);
 }
 
 // ── odu status ──────────────────────────────────────────────────────────────
@@ -139,13 +141,28 @@ async function openHere(
  * summarise.
  */
 export async function statusViaService(opts: HereRunOpts): Promise<number> {
-  return openHere(
-    opts,
-    async (client, row) => {
+  const checkout = checkoutHere(opts.cwd);
+  const p = patience(opts.origin, opts.json);
+  return withService(opts.origin, (client) => statusWith(client, checkout, p), p.notice);
+}
+
+/** `odu status` against a client already in hand — the half a test drives. */
+export async function statusWith(
+  client: HereClient,
+  checkout: string,
+  p: Patience,
+): Promise<number> {
+  return resolveHere(
+    client,
+    checkout,
+    p,
+    async (row) => {
       // A stream member is reached through `.get`, and a stream always opens
       // with a SNAPSHOT — so the head frame IS the read, with no polling and no
       // second call.
-      const frame = await headFrame(nodesStream(client, row.runId));
+      const opened = await firstNodesFrame(client, row.runId, p);
+      if (!opened.ok) return opened.exit;
+      const frame = opened.value;
       if (frame === undefined) {
         // A stream that opened and said nothing. Reported as itself rather than
         // as an empty run: "the service answered with no frame" and "this run
@@ -155,7 +172,7 @@ export async function statusViaService(opts: HereRunOpts): Promise<number> {
         );
         return 3;
       }
-      if (opts.json) {
+      if (p.json) {
         emitJson({
           run: {
             id: row.runId,
@@ -174,7 +191,7 @@ export async function statusViaService(opts: HereRunOpts): Promise<number> {
       return statusExit(row);
     },
     () => {
-      if (opts.json) emitJson({ run: null, nodes: [], posting: { owed: [] } });
+      if (p.json) emitJson({ run: null, nodes: [], posting: { owed: [] } });
       else process.stdout.write("no run in flight for this checkout\n");
       return 0;
     },
@@ -301,54 +318,96 @@ function statusExit(row: RunRow): number {
  * the same asymmetry `odu run` keeps.
  */
 export async function attachViaService(opts: HereRunOpts): Promise<number> {
-  return openHere(
-    opts,
-    async (client, row) => {
-      // A TERMINAL GETS THE MATRIX. The same rule `createDisplay` has always
-      // applied: interactive when there is a tty to be interactive on, and the
-      // stream otherwise.
-      if (!opts.json && process.stdout.isTTY === true) {
-        return attachLive(client, row);
+  const checkout = checkoutHere(opts.cwd);
+  const p = patience(opts.origin, opts.json);
+  return withService(
+    opts.origin,
+    (client) =>
+      attachWith(client, checkout, p, {
+        // A TERMINAL GETS THE MATRIX. The same rule `createDisplay` has always
+        // applied: interactive when there is a tty to be interactive on, and
+        // the stream otherwise.
+        live: !opts.json && process.stdout.isTTY === true ? attachLive : null,
+      }),
+    p.notice,
+  );
+}
+
+/** `odu attach` against a client already in hand — the half a test drives.
+ *  `live` is the matrix, or null for the transition stream. */
+export async function attachWith(
+  client: HereClient,
+  checkout: string,
+  p: Patience,
+  deps: {
+    live: ((client: HereClient, row: RunRow, p: Patience) => Promise<number>) | null;
+  },
+): Promise<number> {
+  return resolveHere(
+    client,
+    checkout,
+    p,
+    async (row) => {
+      // The FIRST frame is bounded, whichever face follows: a run that is
+      // there to watch answers at once, and a service that does not answer is
+      // reported rather than left painting a blank terminal (juspay/odu#113).
+      // The bound rides the follow's own subscription (`watchNodes`' patience)
+      // rather than a probe beside it, so `attach` opens the stream once.
+      try {
+        return await (deps.live === null
+          ? attachStream(client, row, p)
+          : deps.live(client, row, p));
+      } catch (err) {
+        if (isNoAnswer(err)) return reportNoAnswer(p, `${row.runId}'s nodes`);
+        throw err;
       }
-      let last = "";
-      // Same reason as the matrix below: a stream ending is not a run ending.
-      const final = await watchNodes(client, row.runId, (frame) => {
-        if (opts.json) {
-          emitJson({
-            run: row.runId,
-            phase: frame.env.phase,
-            state: frame.state,
-            nodes: frame.nodes.map(nodeJson),
-            done: frame.done,
-          });
-        } else {
-          // Only what CHANGED reaches the terminal. A frame is only sent when
-          // something moved, but "something moved" includes a lane landing on a
-          // box, which does not change a single node row — so a face that
-          // printed every frame would repeat the matrix for a reason the reader
-          // cannot see.
-          const painted = renderStatus(frame, row);
-          if (painted !== last) {
-            process.stdout.write(painted);
-            last = painted;
-          }
-        }
-      });
-      if (final === undefined) {
-        process.stderr.write(
-          `odu: the service opened ${row.runId}'s node stream and sent no frame\n`,
-        );
-        return 3;
-      }
-      // The FINAL frame decides the exit, not the row we resolved at the start:
-      // by the time a follow ends, the row is minutes stale.
-      return frameExit(final);
     },
     () => {
       process.stderr.write("odu: no run in flight for this checkout\n");
       return 0;
     },
   );
+}
+
+/** The transition stream — `attach` piped or under `-o json`. */
+async function attachStream(
+  client: HereClient,
+  row: RunRow,
+  p: Patience,
+): Promise<number> {
+  let last = "";
+  // Same reason as the matrix below: a stream ending is not a run ending.
+  const final = await watchNodes(client, row.runId, (frame) => {
+    if (p.json) {
+      emitJson({
+        run: row.runId,
+        phase: frame.env.phase,
+        state: frame.state,
+        nodes: frame.nodes.map(nodeJson),
+        done: frame.done,
+      });
+    } else {
+      // Only what CHANGED reaches the terminal. A frame is only sent when
+      // something moved, but "something moved" includes a lane landing on a
+      // box, which does not change a single node row — so a face that
+      // printed every frame would repeat the matrix for a reason the reader
+      // cannot see.
+      const painted = renderStatus(frame, row);
+      if (painted !== last) {
+        process.stdout.write(painted);
+        last = painted;
+      }
+    }
+  }, { patience: p });
+  if (final === undefined) {
+    process.stderr.write(
+      `odu: the service opened ${row.runId}'s node stream and sent no frame\n`,
+    );
+    return 3;
+  }
+  // The FINAL frame decides the exit, not the row we resolved at the start:
+  // by the time a follow ends, the row is minutes stale.
+  return frameExit(final);
 }
 
 /**
@@ -361,8 +420,9 @@ export async function attachViaService(opts: HereRunOpts): Promise<number> {
  * matrix rather than two that have to be kept identical.
  */
 async function attachLive(
-  client: OduServiceClient,
+  client: HereClient,
   row: RunRow,
+  p: Patience,
 ): Promise<number> {
   let latest: NodesFrame | undefined;
   /** The focused node's log ADDRESS, from the frame that drew it — never
@@ -412,7 +472,7 @@ async function attachLive(
     } else {
       view.update(state);
     }
-  });
+  }, { patience: p });
   view.stop(latest === undefined ? undefined : pipelineStateOf(latest, row));
   return latest === undefined ? 3 : frameExit(latest);
 }

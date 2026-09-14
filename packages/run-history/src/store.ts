@@ -779,6 +779,29 @@ export interface CatalogRow {
 }
 
 /**
+ * Every run id in the catalog, newest first — and NOTHING ELSE.
+ *
+ * `listRuns` below opens four files and a journal per run to build a row, and
+ * a caller that only wants the ids paid for all of it: the service's poller
+ * walked the whole catalog four times a second and used `runId` alone, which
+ * at seven hundred runs kept its event loop busy full-time (juspay/odu#113).
+ * This reads the directory and no file inside it, so its cost is the listing
+ * and the sort, whatever the runs hold.
+ */
+export function listRunIds(
+  opts: CatalogOptions & { limit?: number } = {},
+): string[] {
+  let entries: string[];
+  try {
+    entries = readdirSync(catalogPath(opts));
+  } catch {
+    return [];
+  }
+  const ids = entries.filter(isRunId).sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
+  return opts.limit === undefined ? ids : ids.slice(0, opts.limit);
+}
+
+/**
  * Every run in the catalog, newest first.
  *
  * The ordering comes from the run id, which encodes its start instant — so the
@@ -792,15 +815,10 @@ export function listRuns(
 ): CatalogRow[] {
   const now = opts.now ?? Date.now();
   const catalog = catalogPath(opts);
-  let entries: string[];
-  try {
-    entries = readdirSync(catalog);
-  } catch {
-    return [];
-  }
-  const ids = entries.filter(isRunId).sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
   const rows: CatalogRow[] = [];
-  for (const runId of ids) {
+  // Not `opts` itself: this listing's `limit` counts rows that survive the
+  // `repoRoot` filter, and handing it down would cut the ids before filtering.
+  for (const runId of listRunIds({ root: catalog })) {
     const handle: RunHandle = { runId, dir: runDir(catalog, runId) };
     const manifest = readManifest(handle);
     if (opts.repoRoot !== undefined && manifest?.repoRoot !== opts.repoRoot) {
