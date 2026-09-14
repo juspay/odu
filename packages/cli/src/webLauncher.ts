@@ -25,13 +25,15 @@
  *
  * ## Compatibility is TWO axes, and only one of them is ordered
  *
- * `protocolVersion` is `major.minor` and it is ORDERED: a running service one
- * minor behind still speaks everything this build knows how to ask, so it is
- * adopted. `buildId` is MATCH-ONLY — there is no such thing as a newer build —
- * so a differing one is reported and never acted on unless a person asks for
- * an upgrade. That asymmetry is the framework's (`contractIsCompatible` has no
- * `buildIsNewer` beside it) and it is right: versions are a protocol claim,
- * builds are an identity.
+ * `protocolVersion` is `major.minor` and it is ORDERED, and the order runs
+ * ONE way: a running service at the same major and an equal-or-higher minor
+ * speaks everything this build knows how to ask, so it is adopted. A service
+ * BEHIND this build does not — the predicate is `running.minor >= mine.minor` —
+ * and is refused with the upgrade sentence. `buildId` is MATCH-ONLY — there is
+ * no such thing as a newer build — so a differing one is reported and never
+ * acted on unless a person asks for an upgrade. That asymmetry is the
+ * framework's (`contractIsCompatible` has no `buildIsNewer` beside it) and it
+ * is right: versions are a protocol claim, builds are an identity.
  *
  * ## The upgrade is capture → drain → reattach
  *
@@ -75,6 +77,7 @@ import {
   webHome,
   webStderrLog,
 } from "./webDaemonLaunch";
+import { errorMessage } from "./serviceFace";
 import { serviceBind, serviceOrigin } from "@odu/service-client/endpoint";
 
 /** The composed contract a control dial speaks: the frozen fragment under the
@@ -132,6 +135,44 @@ export async function readService(origin: string): Promise<ServiceCell | null> {
   } finally {
     await connection.dispose();
   }
+}
+
+/** The one sentence for a service this build cannot speak to. */
+export function contractSkewMessage(origin: string, running: string): string {
+  return (
+    `odu: the service on ${origin} speaks contract ${running}; this build ` +
+    `speaks ${SERVICE_CONTRACT_VERSION}. Run \`odu web --upgrade\` to drain it ` +
+    "and start this build."
+  );
+}
+
+/**
+ * ADOPT OR REFUSE, over a connection already open. The framework's handshake
+ * rule — read the contract version BEFORE invoking anything else — applied
+ * to the thin-client path, which used to hand back whatever answered and let
+ * the first unknown verb surface as `Unknown request tag: …` from inside the
+ * RPC layer. On refusal the connection is disposed here: the caller never
+ * sees it, so nothing can leak the link's fibers.
+ */
+export async function adoptOrRefuse(
+  connection: ServiceConnection,
+  origin: string,
+): Promise<ServiceConnection> {
+  let cell: ServiceCell;
+  try {
+    cell = await Effect.runPromise(readServiceCell(connection.client));
+  } catch (err) {
+    await connection.dispose();
+    throw new Error(
+      `odu: something answered on ${origin} but published no service cell ` +
+        `(${errorMessage(err)}) — not an odu service this build can use`,
+    );
+  }
+  if (!contractIsCompatible(SERVICE_CONTRACT_VERSION, cell.identity.protocolVersion)) {
+    await connection.dispose();
+    throw new Error(contractSkewMessage(origin, cell.identity.protocolVersion));
+  }
+  return connection;
 }
 
 /** Ask the running daemon to drain, over the frozen control contract. */
@@ -226,11 +267,7 @@ export async function ensureService(
       if (!compatible) {
         return {
           ok: false,
-          message:
-            `odu: the service on ${opts.origin} speaks contract ` +
-            `${running.identity.protocolVersion}; this build speaks ` +
-            `${SERVICE_CONTRACT_VERSION}. Run \`odu web --upgrade\` to drain it ` +
-            "and start this build.",
+          message: contractSkewMessage(opts.origin, running.identity.protocolVersion),
         };
       }
       return {
@@ -347,7 +384,7 @@ export async function clearTheGate(opts: {
   try {
     await drain(opts.home);
   } catch (err) {
-    said = (err as Error).message;
+    said = errorMessage(err);
   }
   const drained = await until(() => gateFree(opts.home), drainMs, pollMs, sleep);
   if (!drained) {
@@ -517,8 +554,9 @@ export async function connectOrStart(
   opts: { allowStart?: boolean } = {},
 ): Promise<ServiceConnection> {
   const allowStart = opts.allowStart ?? origin === serviceOrigin();
+  let dialled: ServiceConnection | null = null;
   try {
-    return await dialService(origin, { readyMs: ABSENCE_PROBE_MS });
+    dialled = await dialService(origin, { readyMs: ABSENCE_PROBE_MS });
   } catch (err) {
     // SLOW IS NOT ABSENT, and only one of the two is cheap to be sure about.
     // The probe above is deliberately impatient (300ms) because its failure is
@@ -533,10 +571,15 @@ export async function connectOrStart(
     // accepting on that address. When something is, this waits the full dial
     // budget for it instead of concluding it is not there.
     if ((await whoeverIsListening(origin)) !== null) {
-      return await dialService(origin);
+      dialled = await dialService(origin);
+    } else if (!allowStart) {
+      throw err;
     }
-    if (!allowStart) throw err;
   }
+  // Whichever way the connection came — the probe or the slow-recovery wait —
+  // it is only adopted through the handshake. Anything else answers without
+  // ever having published a service cell this build can speak to.
+  if (dialled !== null) return adoptOrRefuse(dialled, origin);
   const outcome = await ensureService({
     origin,
     home: webHome(origin),

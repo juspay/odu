@@ -116,6 +116,15 @@ export function waitExitFor(answer: AttentionAnswer): number {
   return WAIT_EXITS.stillRunning;
 }
 
+/** What to print for a rejection that may not be an `Error`. Effect RPC
+ *  defects arrive as the squashed cause — often a bare string — and
+ *  `(err as Error).message` on one of those prints `undefined`. */
+export function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  const message = (err as { message?: unknown } | null)?.message;
+  return typeof message === "string" ? message : String(err);
+}
+
 // ── the connection ──────────────────────────────────────────────────────────
 
 /** Do one thing with the service and let go, answering with a process exit.
@@ -161,9 +170,7 @@ async function dial(
   try {
     return await connectOrStart(origin ?? serviceOrigin());
   } catch (err) {
-    process.stderr.write(
-      `${String((err as { message?: unknown }).message ?? err)}\n`,
-    );
+    process.stderr.write(`${errorMessage(err)}\n`);
     return WAIT_EXITS.ownerLost;
   }
 }
