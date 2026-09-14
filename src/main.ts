@@ -810,6 +810,10 @@ async function dispatch(argv: string[]): Promise<number> {
   }
 }
 
+/** How long an exit waits for stdout to drain before giving up on the reader.
+ *  Generous: a slow agent draining megabytes of log is the ordinary case. */
+const FLUSH_BOUND_MS = 30_000;
+
 /**
  * Exit, but not before what we printed has actually left the process.
  *
@@ -831,13 +835,17 @@ async function dispatch(argv: string[]): Promise<number> {
  * `odu history list --all -o json` on a thousand-run catalog was a third of
  * an array (juspay/odu#113's scale e2e caught it). `end()` then `finish` waits
  * for what was actually written, on a pipe, a file and a terminal alike; a
- * reader that went away raises `error` instead, which ends the wait too — an
- * exit that never happens is worse than an output that is short.
+ * reader that went away raises `error` instead, which ends the wait too. And
+ * the wait is BOUNDED, because an exit that never happens is worse than an
+ * output that is short: a stream already destroyed by an earlier EPIPE emits
+ * neither event, and neither might an fd type this runtime treats oddly.
  */
 async function exitAfterFlush(code: number): Promise<never> {
   await new Promise<void>((resolve) => {
     process.stdout.once("finish", () => resolve());
     process.stdout.once("error", () => resolve());
+    // Unref'd: the bound must never be the thing keeping the process alive.
+    setTimeout(resolve, FLUSH_BOUND_MS).unref();
     process.stdout.end();
   });
   process.exit(code);
