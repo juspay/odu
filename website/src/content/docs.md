@@ -189,7 +189,7 @@ For agents with an MCP client, an APM dependency on `juspay/odu` installs the un
 
 The stdio bridge bootstraps the service and exposes the same verbs as tools (`run_start`, `run_wait`, `log_read`, and so on). HTTP MCP clients can instead connect to **http://127.0.0.1:18440/mcp** once the service is running; an HTTP connection itself cannot start it.
 
-Other shared verbs: `run_cancel`, `pipeline_read`, `venue_probe`, `venue_hold`, `venue_release`, `catalog_import`, `catalog_prune`, and `protect_apply`. Use `odu surface --help` for their schemas.
+Other shared verbs: `run_list` (the board filtered by checkout, commit and seq, in one call), `run_cancel`, `pipeline_read`, `venue_probe`, `venue_hold`, `venue_release`, `catalog_import`, `catalog_prune`, and `protect_apply`. Use `odu surface --help` for their schemas.
 
 ## CLI reference
 

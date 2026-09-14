@@ -12,10 +12,10 @@ catalog.
 
 **There is one shared service and one vocabulary.** A per-user singleton
 (`http://127.0.0.1:18440`) owns every run. Three faces project the same
-thirteen verbs — and none of them has a verb of its own:
+fourteen verbs — and none of them has a verb of its own:
 
 ```
-run_start · run_wait · run_read · run_retry · run_cancel · log_read
+run_start · run_wait · run_read · run_list · run_retry · run_cancel · log_read
 catalog_import · catalog_prune · pipeline_read
 venue_probe · venue_hold · venue_release · protect_apply
 ```
@@ -290,6 +290,7 @@ and a browser simply could not do them at all.
 
 | Verb | argv | MCP tool | Input | Answers |
 | --- | --- | --- | --- | --- |
+| find runs | `odu surface run_list --input '{…}' --json` | `run_list` | `checkout?` (absolute), `sha?` (≥7 hex prefix), `seq?` (needs `sha`), `limit?` | `rows[]` (newest first), `total` — the board filtered by the service, in one call |
 | resolve a pipeline | `odu surface pipeline_read --input '{…}' --json` | `pipeline_read` | `checkout`, `root?` | `checkout`, `name`, `tasks[]`, `mermaid` — the DAG, without running it |
 | list machines | `odu surface venue_probe --input '{}' --json` | `venue_probe` | *(none)* | `source`, `warnings[]`, `rows[]` — the lanes and who holds them |
 | hold a machine | `odu surface venue_hold --input '{…}' --json` | `venue_hold` | `checkout`, `platforms?`, `hostsFile?`, `noWait?`, `requestId` | `results[]` (`held` / `waiting` / `already`), `replayed` |
@@ -411,7 +412,7 @@ which is every CI install — so a launcher placed there would be named in your
 `.mcp.json` and never actually written.
 
 The bridge dials the singleton, bootstraps it if nothing is serving, and
-projects the thirteen verbs and three resources. It starts no coordinator and
+projects the fourteen verbs and three resources. It starts no coordinator and
 holds no run authority, so a harness restarting it kills nothing.
 
 ## Nothing stays local

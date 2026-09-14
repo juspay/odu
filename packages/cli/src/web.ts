@@ -216,6 +216,9 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     origin,
     home: home.dir,
     build: bakedBuild(),
+    // A refresh tick that outran its interval is logged here, rate-limited —
+    // the one line that connects "the service is slow" to "the catalog is big".
+    log,
     // The frozen control fragment's `drain`, wired to this process's own stop.
     // A supervisor asks; the daemon decides how it ends.
     onDrain: () => controller.abort(),

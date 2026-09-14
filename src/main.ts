@@ -134,8 +134,8 @@ web [--background] [--upgrade] [-o json]
                               # shell. --upgrade drains a running other build
 surface <verb> [--input JSON] [--json]
                               # the service as argv: run_start, run_wait,
-                              # run_read, run_retry, run_cancel, log_read,
-                              # catalog_*, pipeline_read, venue_*,
+                              # run_read, run_list, run_retry, run_cancel,
+                              # log_read, catalog_*, pipeline_read, venue_*,
                               # protect_apply, and get/keys/watch/list. odu
                               # surface --help lists them.
                               # Exits: 0 answered (red CI included) · 1

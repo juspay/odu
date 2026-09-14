@@ -23,6 +23,13 @@
  * anything having told the service about it. The alternative (re-reading the
  * catalog inside each collection read) would put a disk walk on the path of
  * every subscribe and every publish.
+ *
+ * **The poller shares a thread with every RPC**, so its schedule is the
+ * service's responsiveness. It re-arms only after a tick completes (`./poller`)
+ * — a tick that outruns its interval delays the next tick, never a caller — and
+ * says so in the log, at most once a minute, naming how long and over how many
+ * runs. What keeps a tick short is the registry's stat-first fingerprint; read
+ * its header before reaching for a partial or time-budgeted refresh.
  */
 
 import { hostname } from "node:os";
@@ -59,6 +66,7 @@ import { readLog, readTail } from "./logs";
 import { nodesSource } from "./nodes";
 import type { ServicePorts } from "./ports";
 import { reconcileRequests } from "./reconcile";
+import { everyAfter, slowTickReporter } from "./poller";
 import { createRegistry, type RunRegistry } from "./registry";
 import { onceOnly, requestStore } from "./requests";
 import { digestOf, optionalPart } from "@odu/run-history/receipts";
@@ -66,9 +74,9 @@ import { retryRun } from "./retry";
 import { startRun } from "./start";
 import { readRun, waitForRun } from "./wait";
 
-/** How often the catalog is re-projected. Fast enough that a board feels live,
- *  slow enough that an idle daemon watching a hundred settled runs costs three
- *  `stat`s each per tick and nothing else. */
+/** How long the loop idles between two re-projections of the catalog. Fast
+ *  enough that a board feels live, slow enough that an idle daemon watching a
+ *  thousand settled runs costs four `stat`s each per tick and nothing else. */
 export const REFRESH_MS = 250;
 
 export interface ServiceOptions {
@@ -88,6 +96,10 @@ export interface ServiceOptions {
   onDrain: () => void | Promise<void>;
   refreshMs?: number;
   now?: () => number;
+  /** Where a degraded-but-serving fact goes — a refresh tick that outran its
+   *  interval. Structural rather than `@kolu/log`'s type, which this package
+   *  does not import; the daemon hands in its own logger. */
+  log?: { warn: (fields: Record<string, unknown>, message: string) => void };
 }
 
 export interface OduService {
@@ -273,6 +285,41 @@ export function createOduService(opts: ServiceOptions): OduService {
               retryRun(input, { retry: opts.ports.retry, catalog }),
               () => Effect.sync(refresh),
             ),
+          // THE BOARD, FILTERED, in one call. Before this, `odu status`,
+          // `attach`, `--run latest` and `history list` read every row with one
+          // round trip each and filtered on their own side — 711 round trips on
+          // a 710-run catalog to show one run (juspay/odu#113). The filters
+          // are the ones those faces applied, and `checkout` stays an explicit
+          // absolute path the caller resolved: the service still does not know
+          // where anybody is standing.
+          list: ({ input }) =>
+            Effect.suspend(() => {
+              if (input.checkout !== undefined) {
+                const bad = notAbsolute("run.list", input.checkout);
+                if (bad !== null) return Effect.fail(bad);
+              }
+              if (input.sha !== undefined && !/^[0-9a-fA-F]{7,}$/.test(input.sha)) {
+                return Effect.fail(
+                  new ServiceRefused({
+                    code: "bad_input",
+                    message:
+                      `odu: "${input.sha}" is not a commit prefix — run.list's ` +
+                      "`sha` takes at least 7 hex digits",
+                  }),
+                );
+              }
+              if (input.seq !== undefined && input.sha === undefined) {
+                return Effect.fail(
+                  new ServiceRefused({
+                    code: "bad_input",
+                    message:
+                      "odu: run.list's `seq` numbers the runs of ONE commit — " +
+                      "name the commit with `sha` as well",
+                  }),
+                );
+              }
+              return Effect.succeed(registry.select(input));
+            }),
           cancel: ({ input }) =>
             Effect.tap(
               cancelRun(input, {
@@ -568,8 +615,18 @@ export function createOduService(opts: ServiceOptions): OduService {
     }),
   );
 
+  const reportSlow = slowTickReporter(
+    opts.refreshMs ?? REFRESH_MS,
+    ({ durationMs, runs }) =>
+      opts.log?.warn(
+        { durationMs: Math.round(durationMs), runs },
+        "odu web: a catalog refresh outran its interval; the board lags, RPCs do not",
+      ),
+  );
+
   /** Re-project the catalog and publish what moved. */
   const refresh = (): void => {
+    const began = performance.now();
     const delta = registry.refresh(now());
     for (const row of delta.upserted) runtime.ctx.collections.runs.upsert(row.runId, row);
     for (const runId of delta.removed) runtime.ctx.collections.runs.remove(runId);
@@ -584,6 +641,8 @@ export function createOduService(opts: ServiceOptions): OduService {
       }
       runtime.ctx.collections.logTails.upsert(key, tail);
     }
+    const ended = performance.now();
+    reportSlow(ended - began, registry.rows().length, ended);
   };
 
   // ── startup: reconcile, then say ready ──
@@ -599,18 +658,16 @@ export function createOduService(opts: ServiceOptions): OduService {
   });
   runtime.ctx.cells.service.set(serviceStore.get());
 
-  const timer = setInterval(refresh, opts.refreshMs ?? REFRESH_MS);
-  // The poller must not hold the process open on its own: the daemon's lifetime
-  // is the gate's and the listener's, and a bare interval would keep it alive
-  // after both were closed — the lingering-daemon class.
-  timer.unref?.();
+  // Re-armed after each tick, never on a fixed clock — see `./poller`. The
+  // timer is unref'd there, so the poller never holds the process open.
+  const stopPolling = everyAfter(refresh, opts.refreshMs ?? REFRESH_MS);
 
   return {
     runtime,
     registry,
     refresh,
     close: async () => {
-      clearInterval(timer);
+      stopPolling();
       await runtime.close();
     },
     done: runtime.done,

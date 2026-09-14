@@ -104,6 +104,7 @@ export const SHARED_TOOLS = [
   "pipeline_read",
   "protect_apply",
   "run_cancel",
+  "run_list",
   "run_read",
   "run_retry",
   "run_start",

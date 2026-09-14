@@ -98,7 +98,7 @@ export { STATUS_META, type StatusHue } from "@odu/run-client/surface";
  * still speakable by an older client, and refusing it would make every
  * additive change a flag day.
  */
-export const SERVICE_CONTRACT_VERSION = "1.3";
+export const SERVICE_CONTRACT_VERSION = "1.4";
 
 // ── refusals ────────────────────────────────────────────────────────────────
 
@@ -740,6 +740,39 @@ const ReadInputSchema = Schema.Struct({
 });
 export type ReadInput = typeof ReadInputSchema.Encoded;
 
+/**
+ * The board, filtered on the service's side — one call for "which run".
+ *
+ * Every face that needed ONE run by where it came from (`odu status`, `attach`,
+ * `--run latest`, `<sha7>#<seq>`, `history list`) used to read the whole `runs`
+ * collection a row per round trip and filter locally, so the cost of naming one
+ * run grew with the catalog (juspay/odu#113). The filters are those faces' own,
+ * ANDed, and every one absent is the whole board.
+ *
+ * `checkout` is the SUBJECT of the query, as an absolute path the caller
+ * resolved — the same rule `run.start` keeps. This does not scope the surface
+ * to a working directory; it names one, explicitly, as data.
+ */
+const ListInputSchema = Schema.Struct({
+  /** ABSOLUTE path of a checkout: only runs started there (`repoRoot`). */
+  checkout: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1))),
+  /** A commit prefix of at least 7 hex digits, matched case-insensitively. */
+  sha: Schema.optionalKey(Schema.String),
+  /** The run's per-commit ordinal — the `#N` in `<sha7>#<seq>`. Requires `sha`. */
+  seq: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0))),
+  /** At most this many rows. `total` still counts every match. */
+  limit: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0))),
+});
+export type ListInput = typeof ListInputSchema.Encoded;
+
+const ListOutputSchema = Schema.Struct({
+  /** Matching rows, newest run first. */
+  rows: Schema.Array(RunRowSchema),
+  /** How many rows matched before `limit` cut them. */
+  total: Schema.Int,
+});
+export type ListOutput = typeof ListOutputSchema.Type;
+
 /** One node whose failure is still unresolved, with the evidence to act on it.
  *  Every field is the attention payload's own — this surface re-publishes the
  *  catalog's answer rather than deriving a second one, so the browser, the CLI
@@ -1324,6 +1357,11 @@ export const oduServiceSurface = defineSurface({
       read: {
         input: ReadInputSchema,
         output: AttentionAnswerSchema,
+        error: REFUSES,
+      },
+      list: {
+        input: ListInputSchema,
+        output: ListOutputSchema,
         error: REFUSES,
       },
       retry: {

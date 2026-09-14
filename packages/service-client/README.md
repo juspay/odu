@@ -57,7 +57,7 @@ procedures   run.start    start a run, addressed by an explicit checkout
              protect.*    required status checks on a branch
 ```
 
-The procedures project to `run_start`, `run_wait`, `run_read`, `run_retry`,
+The procedures project to `run_start`, `run_wait`, `run_read`, `run_list`, `run_retry`,
 `run_cancel`, `log_read`, `catalog_import`, `catalog_prune`, `pipeline_read`,
 `venue_probe`, `venue_hold`, `venue_release` and `protect_apply` — the
 framework's own `<ns>_<verb>` derivation, so an MCP tool and an argv verb are
