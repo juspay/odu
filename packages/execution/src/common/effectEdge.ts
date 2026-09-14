@@ -135,10 +135,58 @@ function endOnInterrupt<T>(
  */
 export async function firstFrame<T>(
   stream: Stream.Stream<T, unknown>,
+  opts: { deadlineMs?: number } = {},
 ): Promise<T | undefined> {
+  const head = Stream.runHead(endOnInterrupt(stream));
   return Option.getOrUndefined(
-    await Effect.runPromise(Stream.runHead(endOnInterrupt(stream))),
+    await Effect.runPromise(
+      opts.deadlineMs === undefined ? head : withDeadline(head, opts.deadlineMs),
+    ),
   );
+}
+
+/**
+ * A read that produced NO ANSWER within its deadline.
+ *
+ * A third outcome beside "answered" and "failed", and kept apart from both on
+ * purpose. `firstFrame`'s `undefined` means the producer answered and said
+ * nothing; a rejection from the link means the wire died. Neither is "the
+ * service is there and busy" — which is exactly what a caller facing a daemon
+ * pinned by its own poller saw, and could only report by hanging
+ * (juspay/odu#113). Named, so a face branches on `_tag` rather than on prose.
+ */
+export class NoAnswerWithin extends Error {
+  readonly _tag = "NoAnswerWithin";
+  constructor(readonly deadlineMs: number) {
+    super(`no answer within ${deadlineMs}ms`);
+  }
+}
+
+/** Is this the deadline, rather than the wire or a refusal? */
+export function isNoAnswer(value: unknown): value is NoAnswerWithin {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as { _tag?: unknown })._tag === "NoAnswerWithin"
+  );
+}
+
+/**
+ * Bound an effect's wait for its answer, failing with {@link NoAnswerWithin}.
+ *
+ * A COMPOSER, not a run: the caller still runs the result at its own sanctioned
+ * edge. The timeout INTERRUPTS the effect it bounds, so a stream's head that
+ * never arrives releases its subscription rather than leaking it past the
+ * caller's `dispose()`.
+ */
+export function withDeadline<A, E, R>(
+  effect: Effect.Effect<A, E, R>,
+  deadlineMs: number,
+): Effect.Effect<A, E | NoAnswerWithin, R> {
+  return Effect.timeoutOrElse(effect, {
+    duration: deadlineMs,
+    orElse: () => Effect.fail(new NoAnswerWithin(deadlineMs)),
+  });
 }
 
 /**

@@ -7,8 +7,8 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import { Cause, Stream } from "effect";
-import { firstFrame, subscribe } from "./effectEdge";
+import { Cause, Effect, Stream } from "effect";
+import { firstFrame, isNoAnswer, NoAnswerWithin, subscribe } from "./effectEdge";
 
 async function drain<T>(stream: Stream.Stream<T, unknown>): Promise<T[]> {
   const seen: T[] = [];
@@ -60,5 +60,23 @@ describe("firstFrame", () => {
       Error
     >;
     await expect(firstFrame(stream)).rejects.toThrow("the feed died");
+  });
+
+  it("rejects with a NAMED no-answer when the head misses its deadline", async () => {
+    // Three outcomes, three shapes: a frame, `undefined` for a stream that
+    // ended empty, and this for a producer that is there and silent. The last
+    // is the hung `odu attach` of juspay/odu#113, which had no way to say so.
+    const silent = Stream.fromEffect(Effect.never) as Stream.Stream<number>;
+    const outcome = await firstFrame(silent, { deadlineMs: 20 }).then(
+      () => "answered",
+      (err: unknown) => err,
+    );
+    expect(isNoAnswer(outcome)).toBe(true);
+    expect((outcome as NoAnswerWithin).deadlineMs).toBe(20);
+  });
+
+  it("answers normally inside the deadline, and an empty stream is still undefined", async () => {
+    expect(await firstFrame(Stream.make(7), { deadlineMs: 1_000 })).toBe(7);
+    expect(await firstFrame(Stream.empty, { deadlineMs: 1_000 })).toBeUndefined();
   });
 });
