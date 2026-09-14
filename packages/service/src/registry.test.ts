@@ -558,10 +558,42 @@ describe("the registry over a large catalog", () => {
     const warm = registry.refresh();
     const took = performance.now() - began;
     expect(warm).toEqual({ upserted: [], removed: [] });
+    expect(registry.size()).toBe(200);
     expect(took, `a warm tick over 200 runs took ${Math.round(took)}ms`).toBeLessThan(
       REFRESH_MS,
     );
   }, 120_000);
+
+  it("stops asking a SETTLED run's fence, and still follows it if it resumes", () => {
+    // `releaseOwnership` keeps owner.json, so every finished run's heartbeat
+    // goes stale and the fence's answer flips once the grace passes. For a
+    // settled row that answer cannot change the row — the fold decides
+    // `settled` first — so re-projecting on it was pure cost: a journal
+    // re-parse per finished run, and a `kill(pid, 0)` per tick for ever after.
+    const w = open();
+    const at = Date.now();
+    const run = registerFixtureRun(w, { repoRoot: "/code/app", sha: "5e".repeat(20), now: at });
+    finalizeRun(run.handle, run.token, "passed", [], at);
+    crashOwner(run.handle, { heartbeatAt: at });
+    const registry = createRegistry({ root: w.catalogRoot });
+    registry.refresh(at);
+    expect(registry.row(run.runId)?.state).toBe("settled");
+
+    const later = at + OWNERSHIP_GRACE_MS + 1;
+    expect(registry.refresh(later)).toEqual({ upserted: [], removed: [] });
+    expect(registry.row(run.runId)?.state).toBe("settled");
+
+    // Resuming appends to the journal, which moves the fingerprint — so the
+    // run is projected again, and the (now provably lost) owner counts.
+    appendEvent(run.handle, run.token, {
+      kind: "attempt_started",
+      node: "unit@x86_64-linux",
+      attempt: 2,
+      placement: { platform: "x86_64-linux", host: "localhost" },
+    });
+    expect(registry.refresh(later).upserted.map((row) => row.runId)).toEqual([run.runId]);
+    expect(registry.row(run.runId)?.state).toBe("owner_lost");
+  });
 
   it("re-projects a run when a takeover CLAIM appears and owner.json does not move", () => {
     // `currentOwner` takes the highest epoch among owner.json AND the claim

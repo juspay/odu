@@ -642,7 +642,7 @@ export function createOduService(opts: ServiceOptions): OduService {
       runtime.ctx.collections.logTails.upsert(key, tail);
     }
     const ended = performance.now();
-    reportSlow(ended - began, registry.rows().length, ended);
+    reportSlow(ended - began, registry.size(), ended);
   };
 
   // ── startup: reconcile, then say ready ──

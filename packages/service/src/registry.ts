@@ -34,7 +34,8 @@
  * stats are unchanged has the same `currentOwner` it had when it was projected,
  * and the decoded record is cached on the entry rather than re-read per tick.
  *
- * **And OWNER LIVENESS is re-asked every tick, because it is not a file.**
+ * **And OWNER LIVENESS is re-asked every tick while it can matter, because it
+ * is not a file.**
  * A coordinator that crashes stops writing — which means it stops moving the
  * very files a "did anything change?" check reads. Its heartbeat then ages past
  * the ownership grace and the run becomes `owner_lost`, and nothing on disk
@@ -43,6 +44,15 @@
  * owner record — arithmetic on its heartbeat, plus one `kill(pid, 0)` once the
  * grace has passed — and a changed answer re-projects the run like a moved file
  * would.
+ *
+ * "While it can matter" is a row that is not `settled` or `expired`. The
+ * attention fold decides both of those BEFORE it consults the fence, so for
+ * them the answer cannot change the row — and asking anyway was not free:
+ * `releaseOwnership` keeps `owner.json` with a heartbeat that goes stale, so
+ * every finished run on this host reached `kill(pid, 0)` four times a second,
+ * and a reused pid re-parsed a journal whose run could not change. A settled
+ * run that resumes appends to its journal, and an expiry writes a file, so
+ * either moves the fingerprint and brings the run back into the question.
  *
  * **No partial or time-budgeted refresh, on purpose.** A warm tick over ten
  * thousand runs is forty thousand `stat`s — tens of milliseconds. Chunking the
@@ -408,6 +418,11 @@ function project(
   };
 }
 
+/** A row the fence's answer can no longer change — see the module header. */
+function terminal(row: RunRow): boolean {
+  return row.state === "settled" || row.state === "expired";
+}
+
 /** What a refresh changed, so a caller can publish deltas rather than a whole
  *  collection.
  *
@@ -463,6 +478,8 @@ export interface RunRegistry {
   select: (query: RunQuery) => { rows: RunRow[]; total: number };
   /** Re-read the catalog and report what moved. */
   refresh: (now?: number) => RegistryDelta;
+  /** How many runs are on the board — without building the rows to count. */
+  size: () => number;
   /** The catalog directory this registry is a face onto — what an identity
    *  cell reports, so a caller can see WHICH catalog it is looking at. */
   catalog: string;
@@ -513,7 +530,7 @@ export function createRegistry(opts: RegistryOptions = {}): RunRegistry {
       if (
         held !== undefined &&
         held.fingerprint === stamp &&
-        ownerAlive(held.owner, now) === held.alive
+        (terminal(held.row) || ownerAlive(held.owner, now) === held.alive)
       ) {
         continue;
       }
@@ -581,6 +598,7 @@ export function createRegistry(opts: RegistryOptions = {}): RunRegistry {
     },
     select,
     refresh,
+    size: () => order.length,
     catalog: catalogPath(opts),
   };
 }
