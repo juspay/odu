@@ -823,18 +823,23 @@ async function dispatch(argv: string[]): Promise<number> {
  * theorised — the e2e suite caught it as `JSON Parse error: Unterminated
  * string` on the noisy fixture's log.
  *
- * The loop is the drain protocol: `write("")` is false while the buffer is
- * still above the high-water mark, and `drain` fires as it comes back under —
- * which for a large backlog can take several rounds. Bounded, because an exit
- * that never happens is worse than an output that is short, and a stdout that
- * cannot drain at all (a reader that went away) is exactly the case where
- * waiting forever is wrong.
+ * **Ending the stream is the only signal that holds under Bun.** This used to
+ * be the drain protocol — `write("")` false while above the high-water mark,
+ * then `drain` — and under the Bun runtime the binary ships on, a single large
+ * write reports `writableLength` 0 and `write("")` true while the bytes are
+ * still queued, so the loop exited at once and a pipe got a prefix of it.
+ * `odu history list --all -o json` on a thousand-run catalog was a third of
+ * an array (juspay/odu#113's scale e2e caught it). `end()` then `finish` waits
+ * for what was actually written, on a pipe, a file and a terminal alike; a
+ * reader that went away raises `error` instead, which ends the wait too — an
+ * exit that never happens is worse than an output that is short.
  */
 async function exitAfterFlush(code: number): Promise<never> {
-  for (let round = 0; round < 1024; round += 1) {
-    if (process.stdout.write("")) break;
-    await new Promise<void>((resolve) => process.stdout.once("drain", resolve));
-  }
+  await new Promise<void>((resolve) => {
+    process.stdout.once("finish", () => resolve());
+    process.stdout.once("error", () => resolve());
+    process.stdout.end();
+  });
   process.exit(code);
 }
 
