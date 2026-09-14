@@ -105,6 +105,13 @@ describe("errorMessage", () => {
     // nothing. Show what actually failed instead.
     expect(errorMessage({ code: "E_DIED" })).toBe('{"code":"E_DIED"}');
     expect(errorMessage(null)).toBe("null");
+    // Cyclic values and BigInts make `JSON.stringify` throw; the render path
+    // must not. It degrades to `String(err)` — "[object Object]" for the
+    // cyclic case, which names nothing but breaks nothing either.
+    const cyclic: { self?: unknown } = {};
+    cyclic.self = cyclic;
+    expect(() => errorMessage(cyclic)).not.toThrow();
+    expect(errorMessage(13n)).toBe("13");
   });
 });
 

@@ -274,9 +274,18 @@ export function errorMessage(err: unknown): string {
   const message = (err as { message?: unknown } | null)?.message;
   if (typeof message === "string") return message;
   // A rejection with no message at all. `String(err)` on an object is
-  // "[object Object]", which names nothing — so show the value instead of a
-  // generic placeholder.
-  return typeof err === "object" && err !== null ? JSON.stringify(err) : String(err);
+  // "[object Object]", which names nothing - so show the value instead of a
+  // generic placeholder. RENDERING A FAILURE MUST NOT ITSELF FAIL: a cyclic
+  // object (or a BigInt) makes `JSON.stringify` throw, which would mask them
+  // with a fresh throw from the error path that caught the original.
+  if (typeof err === "object" && err !== null) {
+    try {
+      return JSON.stringify(err);
+    } catch {
+      return String(err);
+    }
+  }
+  return String(err);
 }
 
 /** The stack for a rejection that may not be an `Error`, for `$ODU_DEBUG`.
