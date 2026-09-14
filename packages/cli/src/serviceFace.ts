@@ -116,6 +116,7 @@ export function waitExitFor(answer: AttentionAnswer): number {
   if (answer.reason === "owner_lost") return WAIT_EXITS.ownerLost;
   return WAIT_EXITS.stillRunning;
 }
+
 // ── the connection ──────────────────────────────────────────────────────────
 
 /** Do one thing with the service and let go, answering with a process exit.

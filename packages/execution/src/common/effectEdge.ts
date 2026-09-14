@@ -268,7 +268,7 @@ export function runDetached(effect: Effect.Effect<void, Error>): void {
  *  `(err as Error).message` on one of those prints `undefined`. Placed here
  *  rather than beside a face because the engine rejects the same way the faces
  *  do, and the import wall runs face → engine: a helper in a CLI module is
- *  book un-reachable from the half of the codebase that gets the same defects. */
+ * unreachable from the half of the codebase that gets the same defects. */
 export function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message === "" ? String(err) : err.message;
   const message = (err as { message?: unknown } | null)?.message;
@@ -280,7 +280,10 @@ export function errorMessage(err: unknown): string {
   // with a fresh throw from the error path that caught the original.
   if (typeof err === "object" && err !== null) {
     try {
-      return JSON.stringify(err);
+      // Capped: a Cause/Exit-shaped rejection prints whole structure otherwise,
+      // and the sentence a user reads must stay a sentence, not a page.
+      const rendered = JSON.stringify(err);
+      return rendered.length <= 512 ? rendered : rendered.slice(0, 512) + "…";
     } catch {
       return String(err);
     }

@@ -31,11 +31,11 @@ import {
   laneText,
   operatorLine,
 } from "./render";
+import { errorMessage } from "@odu/execution/common/effectEdge";
+import { formatGoDuration } from "@odu/execution/common/duration";
 
 /** Re-exported from `./render`, where the cross-face projections live. */
 export { commitLabel };
-import { errorMessage } from "@odu/execution/common/effectEdge";
-import { formatGoDuration } from "@odu/execution/common/duration";
 import type {
   Display,
   ProgressEvent,

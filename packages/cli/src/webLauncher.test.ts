@@ -93,6 +93,27 @@ describe("adoptOrRefuse", () => {
     expect(disposed()).toBe(1);
   });
 
+  it("refuses a service whose cell read never answers, within the handshake deadline", async () => {
+    // The wedged-daemon case: socket is open, no first frame ever arrives.
+    // #113 is this, one layer down — without the deadline every thin client
+    // would hang on a blank terminal waiting for a snapshot that never comes.
+    const { connection, disposed } = scripted(() => Stream.never);
+
+    await expect(
+      adoptOrRefuse(connection, ORIGIN, { handshakeMs: 50 }),
+    ).rejects.toThrow(/did not answer the handshake/);
+    expect(disposed()).toBe(1);
+  });
+
+  it("refuses a service whose cell read answers with nothing, and disposes", async () => {
+    const { connection, disposed } = scripted(() => Stream.empty);
+
+    await expect(adoptOrRefuse(connection, ORIGIN)).rejects.toThrow(
+      /published no service cell/,
+    );
+    expect(disposed()).toBe(1);
+  });
+
   // The fixture must be BEHIND, not malformed: at a future `x.0` bump
   // `minor - 1` is `-1`, which the framework's grammar rejects outright — the
   // tests above would still pass, for the wrong reason, and stop pinning the

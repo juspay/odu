@@ -56,7 +56,11 @@ import {
   type DaemonHomePaths,
   gateIdentity,
 } from "@kolu/surface-daemon";
-import { buildSurfaceFace, type UnaryEffect } from "@kolu/surface/client";
+import {
+  buildSurfaceFace,
+  unenrolledStreamCall,
+  type UnaryEffect,
+} from "@kolu/surface/client";
 import { composeSurfaceContracts } from "@kolu/surface/define";
 import { unixSocketLink } from "@kolu/surface/links/unix-socket";
 import {
@@ -70,7 +74,11 @@ import {
   type ServiceCell,
 } from "@odu/service-client/surface";
 import { Effect } from "effect";
-import { errorMessage } from "@odu/execution/common/effectEdge";
+import {
+  errorMessage,
+  firstFrame,
+  NoAnswerWithin,
+} from "@odu/execution/common/effectEdge";
 import { readProcessIdentity } from "./processIdentity";
 import {
   bakedBuild,
@@ -155,6 +163,13 @@ export function contractVerdict(cell: ServiceCell, origin: string): string | nul
   );
 }
 
+/** How long the handshake waits for the cell. One in-memory snapshot, so the
+ *  same reasoning as serviceFace's patience applies: far beyond any healthy
+ *  answer, short enough that a person learns the daemon is wedged while still
+ *  looking. UNBOUNDED here hangs every thin client before it can reach the
+ *  patience notice — the same #113 failure mode, one layer earlier. */
+const HANDSHAKE_MS = 10_000;
+
 /**
  * ADOPT OR REFUSE, over a connection already open. The framework's handshake
  * rule — read the contract version BEFORE invoking anything else — applied
@@ -166,15 +181,33 @@ export function contractVerdict(cell: ServiceCell, origin: string): string | nul
 export async function adoptOrRefuse<C extends Pick<ServiceConnection, "client" | "dispose">>(
   connection: C,
   origin: string,
+  opts: { handshakeMs?: number } = {},
 ): Promise<C> {
-  let cell: ServiceCell;
+  const handshakeMs = opts.handshakeMs ?? HANDSHAKE_MS;
+  let cell: ServiceCell | undefined;
   try {
-    cell = await Effect.runPromise(readServiceCell(connection.client));
+    cell = await firstFrame(
+      unenrolledStreamCall(connection.client.surface.service.get, undefined),
+      { deadlineMs: handshakeMs },
+    );
   } catch (err) {
     await connection.dispose();
     throw new Error(
+      err instanceof NoAnswerWithin
+        ? `odu: the service on ${origin} accepted the connection but did not ` +
+            `answer the handshake within ${handshakeMs / 1000}s — it may be ` +
+            "wedged; `odu web --upgrade` will drain and replace it"
+        : `odu: something answered on ${origin} but published no service cell ` +
+            `(${errorMessage(err)}) — not an odu service this build can use`,
+    );
+  }
+  if (cell === undefined) {
+    // First-frame read finished without one: the peer answered and said
+    // nothing. Same refusal as a dead cell — answered, but not a service.
+    await connection.dispose();
+    throw new Error(
       `odu: something answered on ${origin} but published no service cell ` +
-        `(${errorMessage(err)}) — not an odu service this build can use`,
+        "(the cell stream ended empty) — not an odu service this build can use",
     );
   }
   const refusal = contractVerdict(cell, origin);

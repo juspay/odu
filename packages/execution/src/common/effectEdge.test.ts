@@ -104,6 +104,9 @@ describe("errorMessage", () => {
     // `String({...})` would be "[object Object]" — a sentence that names
     // nothing. Show what actually failed instead.
     expect(errorMessage({ code: "E_DIED" })).toBe('{"code":"E_DIED"}');
+    // A large object caps: a Cause/Exit dropping into this arm would otherwise
+    // print whole structure on one line, burying the command's actual answer.
+    expect(errorMessage({ x: "A".repeat(600) })).toHaveLength(513);
     expect(errorMessage(null)).toBe("null");
     // Cyclic values and BigInts make `JSON.stringify` throw; the render path
     // must not. It degrades to `String(err)` — "[object Object]" for the
