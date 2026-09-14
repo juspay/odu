@@ -26,7 +26,7 @@ import type {
   RunRow,
 } from "@odu/service-client/surface";
 import { attachWith, statusWith } from "./serviceStatus";
-import { git, patience, resolveRunAddress } from "./serviceFace";
+import { git, parseRunAddress, patience, resolveRunAddress, watchNodes } from "./serviceFace";
 
 const CHECKOUT = "/code/app";
 
@@ -86,12 +86,18 @@ function frame(over: Partial<NodesFrame> = {}): NodesFrame {
 }
 
 /** A service answering `run.list` with `rows` (filtered by nothing — the
- *  script IS the answer) and `nodes.get` with `nodes`, recording each query. */
+ *  script IS the answer) and `nodes.get` with `nodes`, recording each query
+ *  and counting each node-stream subscription. */
 function scripted(opts: {
   rows?: readonly RunRow[];
   nodes?: Stream.Stream<NodesFrame>;
-}): { client: Pick<OduServiceClient, "surface">; asked: ListInput[] } {
+}): {
+  client: Pick<OduServiceClient, "surface">;
+  asked: ListInput[];
+  opened: () => number;
+} {
   const asked: ListInput[] = [];
+  let subscriptions = 0;
   const rows = opts.rows ?? [];
   const client = {
     surface: {
@@ -104,10 +110,15 @@ function scripted(opts: {
           });
         },
       },
-      nodes: { get: () => opts.nodes ?? Stream.make(frame()) },
+      nodes: {
+        get: () => {
+          subscriptions += 1;
+          return opts.nodes ?? Stream.make(frame());
+        },
+      },
     },
   } as unknown as Pick<OduServiceClient, "surface">;
-  return { client, asked };
+  return { client, asked, opened: () => subscriptions };
 }
 
 async function captured(
@@ -210,29 +221,46 @@ describe("odu status through run.list", () => {
 });
 
 describe("odu attach through run.list", () => {
-  it("bounds the first frame before handing off to the follow", async () => {
+  it("bounds the first frame of the follow, and reports it as exit 3", async () => {
     const { client } = scripted({ rows: [row()], nodes: Stream.never });
-    let live = false;
-    const { code } = await captured(() =>
+    const { code, err } = await captured(() =>
+      attachWith(client, CHECKOUT, quiet(false, 30), { live: null }),
+    );
+    expect(code).toBe(3);
+    expect(err).toContain("did not answer");
+  });
+
+  it("bounds the matrix's first frame the same way, before it paints", async () => {
+    const { client } = scripted({ rows: [row()], nodes: Stream.never });
+    let painted = false;
+    const { code, err } = await captured(() =>
       attachWith(client, CHECKOUT, quiet(false, 30), {
-        live: async () => {
-          live = true;
+        // What `attachLive` does with the patience it is handed.
+        live: async (c, r, p) => {
+          await watchNodes(c, r.runId, () => {
+            painted = true;
+          }, { patience: p });
           return 0;
         },
       }),
     );
     expect(code).toBe(3);
-    // The matrix never opened on a service that had not answered.
-    expect(live).toBe(false);
+    expect(err).toContain("did not answer");
+    // The matrix never painted on a service that had not answered.
+    expect(painted).toBe(false);
   });
 
-  it("opens the follow once the service has answered", async () => {
-    const { client } = scripted({ rows: [row()] });
+  it("opens the node stream ONCE, and follows it", async () => {
+    // Not a probe and then the follow: the bound rides the subscription that is
+    // kept, so a service that answers a probe and stalls on the second
+    // subscription cannot leave the terminal blank.
+    const { client, opened } = scripted({ rows: [row()] });
     const { code, out } = await captured(() =>
       attachWith(client, CHECKOUT, quiet(true), { live: null }),
     );
     expect(code).toBe(0);
     expect(JSON.parse(out)).toMatchObject({ run: row().runId, done: true });
+    expect(opened()).toBe(1);
   });
 
   it("says there is no run, on stderr, and exits 0", async () => {
@@ -289,7 +317,7 @@ describe("resolveRunAddress through run.list", () => {
   it("passes a run id through without asking the service", async () => {
     const { client, asked } = scripted({ rows: [row()] });
     const resolved = await resolveRunAddress(client, "0mtr-abc", "/", quiet());
-    expect(resolved).toEqual({ ok: true, runId: "0mtr-abc" });
+    expect(resolved).toEqual({ ok: true, value: "0mtr-abc" });
     expect(asked).toEqual([]);
   });
 
@@ -299,15 +327,25 @@ describe("resolveRunAddress through run.list", () => {
     const top = git(["rev-parse", "--show-toplevel"], repo) as string;
     const { client, asked } = scripted({ rows: [row({ runId: "newest" })] });
     const resolved = await resolveRunAddress(client, "latest", repo, quiet());
-    expect(resolved).toEqual({ ok: true, runId: "newest" });
+    expect(resolved).toEqual({ ok: true, value: "newest" });
     expect(asked).toEqual([{ checkout: top, limit: 1 }]);
   });
 
   it("resolves `<sha7>#<seq>` globally, newest first", async () => {
     const { client, asked } = scripted({ rows: [row({ runId: "by-ref" })] });
     const resolved = await resolveRunAddress(client, "AbCdEf1#2", "/", quiet());
-    expect(resolved).toEqual({ ok: true, runId: "by-ref" });
+    expect(resolved).toEqual({ ok: true, value: "by-ref" });
     expect(asked).toEqual([{ sha: "AbCdEf1", seq: 2, limit: 1 }]);
+  });
+
+  it("parses the grammar once, without a client", () => {
+    expect(parseRunAddress("latest")).toEqual({ kind: "latest" });
+    expect(parseRunAddress("0mtr-abc")).toEqual({ kind: "id", runId: "0mtr-abc" });
+    expect(parseRunAddress("#3")).toEqual({ kind: "id", runId: "#3" });
+    expect(parseRunAddress("AbCdEf1#2")).toEqual({ kind: "ref", sha: "AbCdEf1", seq: 2 });
+    for (const bad of ["abc#2", "abcdef1#x", "abcdef1#0", "abcdef1#1.5"]) {
+      expect(parseRunAddress(bad)).toEqual({ kind: "malformed" });
+    }
   });
 
   it("exits 4 for an address nothing matches, or that cannot name a run", async () => {

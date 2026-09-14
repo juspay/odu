@@ -756,7 +756,7 @@ export type ReadInput = typeof ReadInputSchema.Encoded;
 const ListInputSchema = Schema.Struct({
   /** ABSOLUTE path of a checkout: only runs started there (`repoRoot`). */
   checkout: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1))),
-  /** A commit prefix of at least 7 hex digits, matched case-insensitively. */
+  /** A commit prefix — see {@link isCommitPrefix} — matched case-insensitively. */
   sha: Schema.optionalKey(Schema.String),
   /** The run's per-commit ordinal — the `#N` in `<sha7>#<seq>`. Requires `sha`. */
   seq: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0))),
@@ -764,6 +764,17 @@ const ListInputSchema = Schema.Struct({
   limit: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0))),
 });
 export type ListInput = typeof ListInputSchema.Encoded;
+
+/**
+ * A commit PREFIX as `run.list` takes it: at least 7 hex digits.
+ *
+ * One rule, stated on the contract both sides import — the procedure refuses a
+ * `sha` that fails it, and the CLI's `<sha7>#<seq>` grammar declines to ask.
+ * Two copies of the regex would be two answers to "is this a commit", kept in
+ * step by nothing. The procedure keeps its own `bad_input` wording; only the
+ * rule is shared.
+ */
+export const isCommitPrefix = (s: string): boolean => /^[0-9a-fA-F]{7,}$/.test(s);
 
 const ListOutputSchema = Schema.Struct({
   /** Matching rows, newest run first. */

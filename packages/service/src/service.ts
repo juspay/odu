@@ -58,7 +58,11 @@ import {
   UNKNOWN_SERVICE,
 } from "@odu/service-client/surface";
 import { RUN_RECORD_FORMAT } from "@odu/run-history/schema";
-import type { LogTail, RunRow } from "@odu/service-client/surface";
+import {
+  isCommitPrefix,
+  type LogTail,
+  type RunRow,
+} from "@odu/service-client/surface";
 import { Effect } from "effect";
 import { cancelRun } from "./cancel";
 import { importCatalog, pruneCatalog } from "./catalog";
@@ -298,7 +302,7 @@ export function createOduService(opts: ServiceOptions): OduService {
                 const bad = notAbsolute("run.list", input.checkout);
                 if (bad !== null) return Effect.fail(bad);
               }
-              if (input.sha !== undefined && !/^[0-9a-fA-F]{7,}$/.test(input.sha)) {
+              if (input.sha !== undefined && !isCommitPrefix(input.sha)) {
                 return Effect.fail(
                   new ServiceRefused({
                     code: "bad_input",
@@ -615,8 +619,13 @@ export function createOduService(opts: ServiceOptions): OduService {
     }),
   );
 
+  const refreshMs = opts.refreshMs ?? REFRESH_MS;
+  // Measured at the POLLER, not inside `refresh`: "did this tick outrun its
+  // interval" is a question about the schedule, and the mutations that call
+  // `refresh` after a write are not ticks — timing them against the poll budget
+  // would log an overrun that never happened and spend the rate limit on it.
   const reportSlow = slowTickReporter(
-    opts.refreshMs ?? REFRESH_MS,
+    refreshMs,
     ({ durationMs, runs }) =>
       opts.log?.warn(
         { durationMs: Math.round(durationMs), runs },
@@ -626,7 +635,6 @@ export function createOduService(opts: ServiceOptions): OduService {
 
   /** Re-project the catalog and publish what moved. */
   const refresh = (): void => {
-    const began = performance.now();
     const delta = registry.refresh(now());
     for (const row of delta.upserted) runtime.ctx.collections.runs.upsert(row.runId, row);
     for (const runId of delta.removed) runtime.ctx.collections.runs.remove(runId);
@@ -641,8 +649,6 @@ export function createOduService(opts: ServiceOptions): OduService {
       }
       runtime.ctx.collections.logTails.upsert(key, tail);
     }
-    const ended = performance.now();
-    reportSlow(ended - began, registry.size(), ended);
   };
 
   // ── startup: reconcile, then say ready ──
@@ -660,7 +666,12 @@ export function createOduService(opts: ServiceOptions): OduService {
 
   // Re-armed after each tick, never on a fixed clock — see `./poller`. The
   // timer is unref'd there, so the poller never holds the process open.
-  const stopPolling = everyAfter(refresh, opts.refreshMs ?? REFRESH_MS);
+  const stopPolling = everyAfter(() => {
+    const began = performance.now();
+    refresh();
+    const ended = performance.now();
+    reportSlow(ended - began, registry.size(), ended);
+  }, refreshMs);
 
   return {
     runtime,

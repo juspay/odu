@@ -75,7 +75,6 @@ import {
   hostsFileHere,
   nodesStream,
   patience,
-  resolveRunAddress,
   reportFailure,
   reportLost,
   reportRefusal,
@@ -83,6 +82,7 @@ import {
   WAIT_EXITS,
   waitExitFor,
   watchNodes,
+  withRunAt,
   withService,
 } from "./serviceFace";
 
@@ -301,16 +301,7 @@ export interface WaitOpts {
 }
 
 export async function waitViaService(opts: WaitOpts): Promise<number> {
-  const p = patience(opts.origin, opts.json);
-  return withService(opts.origin, async (client) => {
-    const resolved = await resolveRunAddress(
-      client,
-      opts.run,
-      opts.cwd ?? process.cwd(),
-      p,
-    );
-    if (!resolved.ok) return resolved.exit;
-    const runId = resolved.runId;
+  return withRunAt(opts, async (client, runId) => {
     const answered = await call(
       client.surface.run.wait({
         runId,
@@ -355,7 +346,7 @@ export async function waitViaService(opts: WaitOpts): Promise<number> {
     if (opts.json || process.stdout.isTTY !== true) emitJson(answer);
     else process.stdout.write(renderAttention(answer));
     return waitExitFor(answer);
-  }, p.notice);
+  });
 }
 
 /** The human rendering of an attention answer. Deliberately short: the failures
@@ -418,16 +409,7 @@ export interface RetryOpts {
  * to watch next.
  */
 export async function retryViaService(opts: RetryOpts): Promise<number> {
-  const p = patience(opts.origin, opts.json);
-  return withService(opts.origin, async (client) => {
-    const resolved = await resolveRunAddress(
-      client,
-      opts.run,
-      opts.cwd ?? process.cwd(),
-      p,
-    );
-    if (!resolved.ok) return resolved.exit;
-    const runId = resolved.runId;
+  return withRunAt(opts, async (client, runId) => {
     const done = await call(
       client.surface.run.retry({
         runId,
@@ -446,7 +428,7 @@ export async function retryViaService(opts: RetryOpts): Promise<number> {
     if (opts.json) emitJson(done.value);
     else process.stdout.write(renderRetry(done.value));
     return 0;
-  }, p.notice);
+  });
 }
 
 export function renderRetry(r: RetryReceipt): string {
@@ -479,16 +461,7 @@ export interface CancelOpts {
 }
 
 export async function cancelViaService(opts: CancelOpts): Promise<number> {
-  const p = patience(opts.origin, opts.json);
-  return withService(opts.origin, async (client) => {
-    const resolved = await resolveRunAddress(
-      client,
-      opts.run,
-      opts.cwd ?? process.cwd(),
-      p,
-    );
-    if (!resolved.ok) return resolved.exit;
-    const runId = resolved.runId;
+  return withRunAt(opts, async (client, runId) => {
     const done = await call(
       client.surface.run.cancel({
         runId,
@@ -522,7 +495,7 @@ export async function cancelViaService(opts: CancelOpts): Promise<number> {
     // Exit 0 either way: the CALL was answered. "Nothing was cancelled because
     // the run had already finished" is not a failure of the request.
     return 0;
-  }, p.notice);
+  });
 }
 
 // ── odu logs ────────────────────────────────────────────────────────────────
@@ -678,16 +651,7 @@ export interface ShowOpts {
  * service holds the call open.
  */
 export async function showViaService(opts: ShowOpts): Promise<number> {
-  const p = patience(opts.origin, opts.json);
-  return withService(opts.origin, async (client) => {
-    const resolved = await resolveRunAddress(
-      client,
-      opts.run,
-      opts.cwd ?? process.cwd(),
-      p,
-    );
-    if (!resolved.ok) return resolved.exit;
-    const runId = resolved.runId;
+  return withRunAt(opts, async (client, runId) => {
     const answered = await call(
       client.surface.run.read({
         runId,
@@ -699,7 +663,7 @@ export async function showViaService(opts: ShowOpts): Promise<number> {
     if (opts.json) emitJson(answer);
     else process.stdout.write(renderAttention(answer));
     return waitExitFor(answer);
-  }, p.notice);
+  });
 }
 
 // ── odu history import / prune ──────────────────────────────────────────────

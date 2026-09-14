@@ -502,17 +502,29 @@ export interface RegistryOptions extends CatalogOptions {
   limit?: number;
 }
 
+/**
+ * Where one run id stands on the board this tick — ONE value per id.
+ *
+ * `run` is projected. `torn` is a directory with no readable manifest,
+ * remembered by the fingerprint it was skipped at — so a torn directory costs
+ * its `stat`s per tick like any other unchanged run, rather than a manifest
+ * read; a manifest appearing moves the directory's mtime, which is what brings
+ * it back. An id in neither state is simply absent from the map. One map rather
+ * than two keyed alike, so "never both" is a property of the type instead of a
+ * pairing every mutation below would have to remember.
+ */
+type Slot = { kind: "run"; entry: Entry } | { kind: "torn"; stamp: string };
+
 export function createRegistry(opts: RegistryOptions = {}): RunRegistry {
-  const entries = new Map<string, Entry>();
+  const slots = new Map<string, Slot>();
   /** Insertion order is the catalog's order (newest first), refreshed whole on
    *  every pass — so a new run appears at the top rather than at the end. */
   let order: string[] = [];
 
-  /** Directories with no readable manifest, by the fingerprint they were
-   *  skipped at — so a torn directory costs its `stat`s per tick like any other
-   *  unchanged run, rather than a manifest read. A manifest appearing moves the
-   *  directory's mtime, which is what brings it back. */
-  const skipped = new Map<string, string>();
+  const entryOf = (runId: string): Entry | undefined => {
+    const slot = slots.get(runId);
+    return slot?.kind === "run" ? slot.entry : undefined;
+  };
 
   const refresh = (now: number = Date.now()): RegistryDelta => {
     const upserted: RunRow[] = [];
@@ -526,42 +538,36 @@ export function createRegistry(opts: RegistryOptions = {}): RunRegistry {
       seen.add(runId);
       const handle: RunHandle = { runId, dir: runDir(catalog, runId) };
       const stamp = fingerprint(handle.dir);
-      const held = entries.get(runId);
+      const held = slots.get(runId);
+      if (held?.kind === "torn" && held.stamp === stamp) continue;
       if (
-        held !== undefined &&
-        held.fingerprint === stamp &&
-        (terminal(held.row) || ownerAlive(held.owner, now) === held.alive)
+        held?.kind === "run" &&
+        held.entry.fingerprint === stamp &&
+        (terminal(held.entry.row) || ownerAlive(held.entry.owner, now) === held.entry.alive)
       ) {
         continue;
       }
-      if (held === undefined && skipped.get(runId) === stamp) continue;
       // A row without a manifest is barely a row: the run id exists, but
       // nothing can be said about which commit it is or where it ran. Skipped
       // rather than shown as a row of blanks — `odu history list` over the
       // catalog is the face that reports a torn record as one.
       const manifest = readManifest(handle);
       if (manifest === null) {
-        skipped.set(runId, stamp);
-        if (held !== undefined) {
-          entries.delete(runId);
-          removed.push(runId);
-        }
+        if (held?.kind === "run") removed.push(runId);
+        slots.set(runId, { kind: "torn", stamp });
         continue;
       }
-      skipped.delete(runId);
       const entry = project(handle, manifest, now, stamp);
-      entries.set(runId, entry);
+      slots.set(runId, { kind: "run", entry });
       upserted.push(entry.row);
     }
 
-    for (const runId of entries.keys()) {
-      if (!seen.has(runId)) removed.push(runId);
+    for (const [runId, slot] of slots) {
+      if (seen.has(runId)) continue;
+      if (slot.kind === "run") removed.push(runId);
+      slots.delete(runId);
     }
-    for (const runId of removed) entries.delete(runId);
-    for (const runId of skipped.keys()) {
-      if (!seen.has(runId)) skipped.delete(runId);
-    }
-    order = nextOrder.filter((id) => entries.has(id));
+    order = nextOrder.filter((id) => entryOf(id) !== undefined);
     return { upserted, removed };
   };
 
@@ -570,7 +576,7 @@ export function createRegistry(opts: RegistryOptions = {}): RunRegistry {
     const rows: RunRow[] = [];
     let total = 0;
     for (const id of order) {
-      const row = entries.get(id)?.row;
+      const row = entryOf(id)?.row;
       if (row === undefined) continue;
       if (query.checkout !== undefined && row.repoRoot !== query.checkout) continue;
       if (sha !== undefined && !row.sha.toLowerCase().startsWith(sha)) continue;
@@ -584,12 +590,12 @@ export function createRegistry(opts: RegistryOptions = {}): RunRegistry {
   return {
     rows: () =>
       order
-        .map((id) => entries.get(id)?.row)
+        .map((id) => entryOf(id)?.row)
         .filter((row): row is RunRow => row !== undefined),
-    row: (runId) => entries.get(runId)?.row,
-    nodes: (runId) => entries.get(runId)?.nodes,
+    row: (runId) => entryOf(runId)?.row,
+    nodes: (runId) => entryOf(runId)?.nodes,
     env: (runId, now = Date.now()) => {
-      const held = entries.get(runId);
+      const held = entryOf(runId);
       if (held === undefined) return undefined;
       return {
         ...held.env,

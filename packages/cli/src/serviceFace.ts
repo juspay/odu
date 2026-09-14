@@ -41,6 +41,7 @@ import { unenrolledStreamCall } from "@kolu/surface/client";
 import {
   firstFrame as headFrame,
   isNoAnswer,
+  NoAnswerWithin,
   subscribe,
   withDeadline,
 } from "@odu/execution/common/effectEdge";
@@ -53,7 +54,7 @@ import type {
   NodesFrame,
   OduServiceClient,
 } from "@odu/service-client/surface";
-import { ServiceRefused } from "@odu/service-client/surface";
+import { isCommitPrefix, ServiceRefused } from "@odu/service-client/surface";
 import { Effect, type Stream } from "effect";
 import { connectOrStart } from "./webLauncher";
 
@@ -433,6 +434,12 @@ export function reportNoAnswer(p: Patience, what: string): number {
   return WAIT_EXITS.ownerLost;
 }
 
+/** A question the service answered, or one already reported to the user with
+ *  the exit it earned. One shape for every step a command threads through, so
+ *  a caller passes the failure on (`if (!x.ok) return x.exit`) without
+ *  remembering which step spelled its success arm how. */
+export type Answered<T> = { ok: true; value: T } | { ok: false; exit: number };
+
 // ── finding runs ────────────────────────────────────────────────────────────
 
 /**
@@ -451,7 +458,7 @@ export async function findRuns(
   client: Pick<OduServiceClient, "surface">,
   query: ListInput,
   p: Patience,
-): Promise<{ ok: true; value: ListOutput } | { ok: false; exit: number }> {
+): Promise<Answered<ListOutput>> {
   const answered = await p.notice(
     call(withDeadline(client.surface.run.list(query), p.deadlineMs)),
   );
@@ -468,12 +475,12 @@ export async function firstNodesFrame(
   client: Pick<OduServiceClient, "surface">,
   runId: string,
   p: Patience,
-): Promise<{ ok: true; frame: NodesFrame | undefined } | { ok: false; exit: number }> {
+): Promise<Answered<NodesFrame | undefined>> {
   try {
-    const frame = await p.notice(
+    const value = await p.notice(
       headFrame(nodesStream(client, runId), { deadlineMs: p.deadlineMs }),
     );
-    return { ok: true, frame };
+    return { ok: true, value };
   } catch (err) {
     if (isNoAnswer(err)) {
       return { ok: false, exit: reportNoAnswer(p, `${runId}'s nodes`) };
@@ -509,52 +516,107 @@ export async function resolveRunAddress(
   address: string,
   cwd: string,
   p: Patience,
-): Promise<{ ok: true; runId: string } | { ok: false; exit: number }> {
-  const hash = address.indexOf("#");
-  // A run id passes through WITHOUT a listing. The service is the authority
-  // on whether it exists and refuses it properly; resolving it here would buy
-  // nothing and cost a round trip on every `odu wait`.
-  if (address !== "latest" && hash <= 0) return { ok: true, runId: address };
-  const checkout =
-    address === "latest" ? git(["rev-parse", "--show-toplevel"], cwd) : null;
-  const sha = address.slice(0, hash);
-  const seq = Number(address.slice(hash + 1));
+): Promise<Answered<string>> {
+  // EXIT 4, not a throw, on every arm that names nothing. An unresolvable
+  // address is a fact about the QUESTION, which is what exit 4 means in this
+  // file's table — and a throw would unwind to `main.ts` and exit 1, the code
+  // reserved for "your CI is red". A script branching on that would report a
+  // test failure for a run it could not name.
+  const parsed = parseRunAddress(address);
+  switch (parsed.kind) {
+    // A run id passes through WITHOUT a listing. The service is the authority
+    // on whether it exists and refuses it properly; resolving it here would
+    // buy nothing and cost a round trip on every `odu wait`.
+    case "id":
+      return { ok: true, value: parsed.runId };
+    case "latest": {
+      const checkout = git(["rev-parse", "--show-toplevel"], cwd);
+      if (checkout !== null) {
+        const found = await findRuns(client, { checkout, limit: 1 }, p);
+        if (!found.ok) return found;
+        const row = found.value.rows[0];
+        if (row !== undefined) return { ok: true, value: row.runId };
+      }
+      return {
+        ok: false,
+        exit: unknownRun(
+          address,
+          `odu: no run recorded for ${checkout ?? cwd}` +
+            " — `latest` means the newest run OF THIS CHECKOUT, and this one" +
+            " has none. `odu history list --all` shows every run in your catalog.",
+          p.json,
+        ),
+      };
+    }
+    case "ref": {
+      const found = await findRuns(client, { sha: parsed.sha, seq: parsed.seq, limit: 1 }, p);
+      if (!found.ok) return found;
+      const row = found.value.rows[0];
+      if (row !== undefined) return { ok: true, value: row.runId };
+      return { ok: false, exit: noRunAtRef(address, p.json) };
+    }
+    case "malformed":
+      return { ok: false, exit: noRunAtRef(address, p.json) };
+  }
+}
+
+/**
+ * One command that takes `--run <address>`: its patience, its connection and
+ * the address resolved, as ONE preamble.
+ *
+ * `odu wait`, `rerun`, `cancel` and `history show` each spelled these three
+ * steps out, with the origin passed twice and the waiting line's `notice`
+ * threaded to the dial by hand — so a fifth such command could build its
+ * patience and forget to hand it to the dial, and nothing would say so.
+ * Commands whose subject is not a run address (`status`, `attach`, `list`,
+ * `logs`) keep calling {@link withService} directly.
+ */
+export function withRunAt(
+  opts: { origin?: string; json: boolean; run: string; cwd?: string },
+  use: (client: OduServiceClient, runId: string) => Promise<number>,
+): Promise<number> {
+  const p = patience(opts.origin, opts.json);
+  return withService(
+    p.origin,
+    async (client) => {
+      const resolved = await resolveRunAddress(client, opts.run, opts.cwd ?? process.cwd(), p);
+      return resolved.ok ? use(client, resolved.value) : resolved.exit;
+    },
+    p.notice,
+  );
+}
+
+/** A `<sha7>#<seq>` that named nothing — well-formed and unmatched, or not a
+ *  ref at all; the same fact either way (see {@link RunAddress}). */
+function noRunAtRef(address: string, json: boolean): number {
+  return unknownRun(
+    address,
+    `odu: no run ${address} in the catalog — \`<sha7>#<seq>\` addresses` +
+      " the seq-th run recorded at a commit, as `odu history list` prints it.",
+    json,
+  );
+}
+
+/** The run-address grammar as a value — parsed once, so the resolver switches on
+ *  what was typed rather than re-asking the string at every step. */
+export type RunAddress =
+  | { kind: "id"; runId: string }
+  | { kind: "latest" }
+  | { kind: "ref"; sha: string; seq: number }
   // A ref that cannot name a run is UNKNOWN, not refused: the grammar is this
   // face's, so a malformed one is the same fact as a well-formed one nothing
-  // matches — and the service would refuse `sha` shorter than 7 digits anyway.
-  const answerable =
-    address === "latest"
-      ? checkout !== null
-      : /^[0-9a-fA-F]{7,}$/.test(sha) && Number.isSafeInteger(seq) && seq > 0;
-  if (answerable) {
-    const found = await findRuns(
-      client,
-      address === "latest"
-        ? { checkout: checkout as string, limit: 1 }
-        : { sha, seq, limit: 1 },
-      p,
-    );
-    if (!found.ok) return found;
-    const row = found.value.rows[0];
-    if (row !== undefined) return { ok: true, runId: row.runId };
-  }
-  // EXIT 4, not a throw. An unresolvable address is a fact about the QUESTION,
-  // which is what exit 4 means in this file's table — and a throw would unwind
-  // to `main.ts` and exit 1, the code reserved for "your CI is red". A script
-  // branching on that would report a test failure for a run it could not name.
-  return {
-    ok: false,
-    exit: unknownRun(
-      address,
-      address === "latest"
-        ? `odu: no run recorded for ${checkout ?? cwd}` +
-            " — `latest` means the newest run OF THIS CHECKOUT, and this one" +
-            " has none. `odu history list --all` shows every run in your catalog."
-        : `odu: no run ${address} in the catalog — \`<sha7>#<seq>\` addresses` +
-            " the seq-th run recorded at a commit, as `odu history list` prints it.",
-      p.json,
-    ),
-  };
+  // matches — and worth no round trip.
+  | { kind: "malformed" };
+
+export function parseRunAddress(address: string): RunAddress {
+  if (address === "latest") return { kind: "latest" };
+  const hash = address.indexOf("#");
+  if (hash <= 0) return { kind: "id", runId: address };
+  const sha = address.slice(0, hash);
+  const seq = Number(address.slice(hash + 1));
+  return isCommitPrefix(sha) && Number.isSafeInteger(seq) && seq > 0
+    ? { kind: "ref", sha, seq }
+    : { kind: "malformed" };
 }
 
 /** Report an address that named no run, in whichever voice the caller asked
@@ -659,30 +721,79 @@ export function nodesStream(
  * stream opens with a snapshot, and every consumer of this dedupes), while
  * stopping early is a wrong answer about somebody's CI. The deadline exists so
  * a service that has gone away entirely cannot hold a terminal forever.
+ *
+ * `patience` bounds the FIRST frame — across re-subscribes, on the subscription
+ * that is then kept — and rejects with {@link NoAnswerWithin} when it does not
+ * come (juspay/odu#113). On THIS stream rather than on a probe beside it: a
+ * probe that answered proved nothing about the second subscription the follow
+ * then opened, and cost `odu attach` two stream opens on the path it exists to
+ * make cheap. After the first frame the follow is unbounded but for
+ * `deadlineMs` — a long run is not a slow one.
  */
 export async function watchNodes(
   client: Pick<OduServiceClient, "surface">,
   runId: string,
   onFrame: (frame: NodesFrame) => void,
-  deadlineMs = 24 * 60 * 60 * 1000,
+  opts: { deadlineMs?: number; patience?: Patience } = {},
 ): Promise<NodesFrame | undefined> {
-  const until = Date.now() + deadlineMs;
+  const until = Date.now() + (opts.deadlineMs ?? 24 * 60 * 60 * 1000);
+  const p = opts.patience;
+  const firstBy = p === undefined ? undefined : Date.now() + p.deadlineMs;
   let last: NodesFrame | undefined;
   for (;;) {
     trace(`watch ${runId}: subscribing`);
-    for await (const frame of subscribe(
+    const sub = subscribe(
       nodesStream(client, runId, () => trace(`watch ${runId}: link retrying`)),
-    )) {
-      last = frame;
-      trace(`watch ${runId}: frame done=${frame.done} nodes=${frame.nodes.length}`);
-      onFrame(frame);
-      if (frame.done) return frame;
+    );
+    try {
+      for (;;) {
+        const next =
+          p !== undefined && firstBy !== undefined && last === undefined
+            ? await p.notice(nextBy(sub, firstBy, p.deadlineMs))
+            : await sub.next();
+        if (next.done) break;
+        const frame = next.value;
+        last = frame;
+        trace(`watch ${runId}: frame done=${frame.done} nodes=${frame.nodes.length}`);
+        onFrame(frame);
+        if (frame.done) return frame;
+      }
+    } finally {
+      // Hand-advanced, so released by hand — what `for await … return` did.
+      void sub.return?.();
     }
     trace(`watch ${runId}: stream ended without a verdict`);
+    // Still no first frame, and its bound is spent: re-subscribing would only
+    // hide a service that is not answering behind one that is slow.
+    if (p !== undefined && firstBy !== undefined && last === undefined && Date.now() >= firstBy) {
+      throw new NoAnswerWithin(p.deadlineMs);
+    }
     // The stream ended without saying the run had. Re-subscribe — unless the
     // clock says nobody is coming back.
     if (Date.now() >= until) return last;
     await new Promise((resolve) => setTimeout(resolve, RESUBSCRIBE_MS));
+  }
+}
+
+/** The iterator's next result, or {@link NoAnswerWithin} once `by` passes. The
+ *  caller releases the subscription; a `next()` that loses the race settles
+ *  into the interrupt that release issues, never into an unhandled rejection. */
+async function nextBy<T>(
+  sub: AsyncIterator<T>,
+  by: number,
+  deadlineMs: number,
+): Promise<IteratorResult<T>> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new NoAnswerWithin(deadlineMs)),
+      Math.max(0, by - Date.now()),
+    );
+  });
+  try {
+    return await Promise.race([sub.next(), late]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 

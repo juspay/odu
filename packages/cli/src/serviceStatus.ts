@@ -31,7 +31,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { runUnary } from "@odu/execution/common/effectEdge";
+import { isNoAnswer, runUnary } from "@odu/execution/common/effectEdge";
 import { exitCode } from "@odu/execution/common/verdict";
 import { STATUS_META } from "@odu/run-client/surface";
 import type {
@@ -58,6 +58,7 @@ import {
   firstNodesFrame,
   type Patience,
   patience,
+  reportNoAnswer,
   watchNodes,
   WAIT_EXITS,
   withService,
@@ -161,7 +162,7 @@ export async function statusWith(
       // second call.
       const opened = await firstNodesFrame(client, row.runId, p);
       if (!opened.ok) return opened.exit;
-      const frame = opened.frame;
+      const frame = opened.value;
       if (frame === undefined) {
         // A stream that opened and said nothing. Reported as itself rather than
         // as an empty run: "the service answered with no frame" and "this run
@@ -338,7 +339,9 @@ export async function attachWith(
   client: HereClient,
   checkout: string,
   p: Patience,
-  deps: { live: ((client: HereClient, row: RunRow) => Promise<number>) | null },
+  deps: {
+    live: ((client: HereClient, row: RunRow, p: Patience) => Promise<number>) | null;
+  },
 ): Promise<number> {
   return resolveHere(
     client,
@@ -348,51 +351,63 @@ export async function attachWith(
       // The FIRST frame is bounded, whichever face follows: a run that is
       // there to watch answers at once, and a service that does not answer is
       // reported rather than left painting a blank terminal (juspay/odu#113).
-      // After that, the follow is `watchNodes`' — a long run is not a slow one.
-      const opened = await firstNodesFrame(client, row.runId, p);
-      if (!opened.ok) return opened.exit;
-      if (deps.live !== null) {
-        return deps.live(client, row);
+      // The bound rides the follow's own subscription (`watchNodes`' patience)
+      // rather than a probe beside it, so `attach` opens the stream once.
+      try {
+        return await (deps.live === null
+          ? attachStream(client, row, p)
+          : deps.live(client, row, p));
+      } catch (err) {
+        if (isNoAnswer(err)) return reportNoAnswer(p, `${row.runId}'s nodes`);
+        throw err;
       }
-      let last = "";
-      // Same reason as the matrix below: a stream ending is not a run ending.
-      const final = await watchNodes(client, row.runId, (frame) => {
-        if (p.json) {
-          emitJson({
-            run: row.runId,
-            phase: frame.env.phase,
-            state: frame.state,
-            nodes: frame.nodes.map(nodeJson),
-            done: frame.done,
-          });
-        } else {
-          // Only what CHANGED reaches the terminal. A frame is only sent when
-          // something moved, but "something moved" includes a lane landing on a
-          // box, which does not change a single node row — so a face that
-          // printed every frame would repeat the matrix for a reason the reader
-          // cannot see.
-          const painted = renderStatus(frame, row);
-          if (painted !== last) {
-            process.stdout.write(painted);
-            last = painted;
-          }
-        }
-      });
-      if (final === undefined) {
-        process.stderr.write(
-          `odu: the service opened ${row.runId}'s node stream and sent no frame\n`,
-        );
-        return 3;
-      }
-      // The FINAL frame decides the exit, not the row we resolved at the start:
-      // by the time a follow ends, the row is minutes stale.
-      return frameExit(final);
     },
     () => {
       process.stderr.write("odu: no run in flight for this checkout\n");
       return 0;
     },
   );
+}
+
+/** The transition stream — `attach` piped or under `-o json`. */
+async function attachStream(
+  client: HereClient,
+  row: RunRow,
+  p: Patience,
+): Promise<number> {
+  let last = "";
+  // Same reason as the matrix below: a stream ending is not a run ending.
+  const final = await watchNodes(client, row.runId, (frame) => {
+    if (p.json) {
+      emitJson({
+        run: row.runId,
+        phase: frame.env.phase,
+        state: frame.state,
+        nodes: frame.nodes.map(nodeJson),
+        done: frame.done,
+      });
+    } else {
+      // Only what CHANGED reaches the terminal. A frame is only sent when
+      // something moved, but "something moved" includes a lane landing on a
+      // box, which does not change a single node row — so a face that
+      // printed every frame would repeat the matrix for a reason the reader
+      // cannot see.
+      const painted = renderStatus(frame, row);
+      if (painted !== last) {
+        process.stdout.write(painted);
+        last = painted;
+      }
+    }
+  }, { patience: p });
+  if (final === undefined) {
+    process.stderr.write(
+      `odu: the service opened ${row.runId}'s node stream and sent no frame\n`,
+    );
+    return 3;
+  }
+  // The FINAL frame decides the exit, not the row we resolved at the start:
+  // by the time a follow ends, the row is minutes stale.
+  return frameExit(final);
 }
 
 /**
@@ -407,6 +422,7 @@ export async function attachWith(
 async function attachLive(
   client: HereClient,
   row: RunRow,
+  p: Patience,
 ): Promise<number> {
   let latest: NodesFrame | undefined;
   /** The focused node's log ADDRESS, from the frame that drew it — never
@@ -456,7 +472,7 @@ async function attachLive(
     } else {
       view.update(state);
     }
-  });
+  }, { patience: p });
   view.stop(latest === undefined ? undefined : pipelineStateOf(latest, row));
   return latest === undefined ? 3 : frameExit(latest);
 }
