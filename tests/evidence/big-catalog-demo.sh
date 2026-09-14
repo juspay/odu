@@ -16,6 +16,9 @@ NEW="$1"   # the odu under test
 OLD="$2"   # the odu before the fix
 WT="$3"    # the odu checkout (fixture source)
 CLONES="${CLONES:-1000}"
+# Journal lines per clone. A real run's journal is long, and the parse the
+# fix removes is proportional to it; a toy fixture's twenty lines hide the cost.
+JOURNAL="${JOURNAL:-1500}"
 
 ROOT=$(mktemp -d /tmp/odu-big-catalog-XXXX)
 printf '{"%s":"localhost"}' "$(nix eval --impure --raw --expr builtins.currentSystem)" > "$ROOT/hosts.json"
@@ -58,9 +61,9 @@ cd "$D"
 SRC=$("$NEW" run --no-strict --no-post -o json 2>/dev/null | grep -o '"runId": *"[^"]*"' | head -1 | grep -o '"[^"]*"$' | tr -d '"')
 # Clones are OLDER than the real run (ids encode their start instant), so the
 # real one stays this checkout's newest.
-python3 - "$ODU_STATE_DIR/runs" "$SRC" "$CLONES" <<'PY'
-import os, shutil, sys
-runs, src, clones = sys.argv[1], sys.argv[2], int(sys.argv[3])
+python3 - "$ODU_STATE_DIR/runs" "$SRC" "$CLONES" "$JOURNAL" <<'PY'
+import json, os, shutil, sys
+runs, src, clones, journal = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
 digits = "0123456789abcdefghijklmnopqrstuvwxyz"
 def b36(n, width):
     out = ""
@@ -76,13 +79,19 @@ for i in range(clones):
             path = os.path.join(base, name)
             text = open(path).read()
             if src in text: open(path, "w").write(text.replace(src, cid))
+    events = os.path.join(dst, "events")
+    lines = open(events).read().splitlines()
+    seq, at = json.loads(lines[-1])["seq"], json.loads(lines[-1])["at"]
+    pad = (json.dumps({"seq": seq + k + 1, "at": at, "event": {"kind": "phase", "phase": "lanes"}})
+           for k in range(max(0, journal - len(lines))))
+    open(events, "a").write("\n".join(pad) + "\n")
 PY
 mkdir -p "$ROOT/old/state/runs" && cp -r "$ROOT/new/state/runs/." "$ROOT/old/state/runs/"
 # A fresh daemon per world, so each starts on the catalog as it now stands.
 kill "$(daemon_pid "$NEW")" 2>/dev/null; sleep 1
 
 clear
-say "Two private catalogs, identical: one real run and $CLONES clones of it."
+say "Two private catalogs, identical: one real run and $CLONES clones, ~$JOURNAL-line journals."
 cmd "ls \$ODU_STATE_DIR/runs | wc -l"
 ls "$ROOT/new/state/runs" | wc -l; sleep 1.5
 
