@@ -262,3 +262,26 @@ export function subscribe<T>(
 export function runDetached(effect: Effect.Effect<void, Error>): void {
   Effect.runFork(effect);
 }
+
+/** What to print for a rejection that may not be an `Error`. Effect RPC
+ *  defects arrive as the squashed cause — often a bare string — and
+ *  `(err as Error).message` on one of those prints `undefined`. Placed here
+ *  rather than beside a face because the engine rejects the same way the faces
+ *  do, and the import wall runs face → engine: a helper in a CLI module is
+ *  book un-reachable from the half of the codebase that gets the same defects. */
+export function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message === "" ? String(err) : err.message;
+  const message = (err as { message?: unknown } | null)?.message;
+  if (typeof message === "string") return message;
+  // A rejection with no message at all. `String(err)` on an object is
+  // "[object Object]", which names nothing — so show the value instead of a
+  // generic placeholder.
+  return typeof err === "object" && err !== null ? JSON.stringify(err) : String(err);
+}
+
+/** The stack for a rejection that may not be an `Error`, for `$ODU_DEBUG`.
+ *  Same reason as {@link errorMessage}: a squashed Effect cause has no
+ *  `.stack`, and `(err as Error).stack` on one prints `undefined`. */
+export function errorStack(err: unknown): string {
+  return err instanceof Error && err.stack !== undefined ? err.stack : errorMessage(err);
+}

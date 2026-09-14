@@ -8,7 +8,14 @@
 
 import { describe, expect, it } from "bun:test";
 import { Cause, Effect, Stream } from "effect";
-import { firstFrame, isNoAnswer, NoAnswerWithin, subscribe } from "./effectEdge";
+import {
+  errorMessage,
+  errorStack,
+  firstFrame,
+  isNoAnswer,
+  NoAnswerWithin,
+  subscribe,
+} from "./effectEdge";
 
 async function drain<T>(stream: Stream.Stream<T, unknown>): Promise<T[]> {
   const seen: T[] = [];
@@ -78,5 +85,35 @@ describe("firstFrame", () => {
   it("answers normally inside the deadline, and an empty stream is still undefined", async () => {
     expect(await firstFrame(Stream.make(7), { deadlineMs: 1_000 })).toBe(7);
     expect(await firstFrame(Stream.empty, { deadlineMs: 1_000 })).toBeUndefined();
+  });
+});
+
+describe("errorMessage", () => {
+  it("renders an Error's message, or its name when the message is empty", () => {
+    expect(errorMessage(new Error("boom"))).toBe("boom");
+    // An empty message must not print a blank line — the same class of
+    // non-answer the function exists to eliminate. `String(new Error(""))` is
+    // the name, which is at least a noun.
+    expect(errorMessage(new Error(""))).toBe("Error");
+  });
+  it("renders a bare string", () => {
+    expect(errorMessage("raw line")).toBe("raw line");
+  });
+  it("renders an object's string message, else the value itself", () => {
+    expect(errorMessage({ message: "nested cause" })).toBe("nested cause");
+    // `String({...})` would be "[object Object]" — a sentence that names
+    // nothing. Show what actually failed instead.
+    expect(errorMessage({ code: "E_DIED" })).toBe('{"code":"E_DIED"}');
+    expect(errorMessage(null)).toBe("null");
+  });
+});
+
+describe("errorStack", () => {
+  it("uses the Error's stack when there is one, else the message render", () => {
+    const boom = new Error("boom");
+    const stack = boom.stack;
+    if (stack === undefined) throw new Error("Error() carries a stack");
+    expect(errorStack(boom)).toBe(stack);
+    expect(errorStack("raw line")).toBe("raw line");
   });
 });

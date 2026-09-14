@@ -51,7 +51,7 @@ import {
   STATUS_META,
 } from "@odu/run-client/surface";
 import { splitFanId } from "@odu/run-client/nodeId";
-import { subscribe } from "@odu/execution/common/effectEdge";
+import { errorMessage, subscribe } from "@odu/execution/common/effectEdge";
 import { formatGoDuration } from "@odu/execution/common/duration";
 import {
   commitLabel,
@@ -511,7 +511,7 @@ export class LiveView {
       // stdout, dimmed and line-shredded.
       this.unhook();
       this.stderrWrite(
-        `odu: live view unavailable (${(err as Error).message}) — continuing without it\n`,
+        `odu: live view unavailable (${errorMessage(err)}) — continuing without it\n`,
       );
     });
     this.wake();
@@ -1143,7 +1143,7 @@ export class LiveView {
         // Surfaced in the pane itself, where the operator is already looking,
         // rather than thrown — a broken log stream must not kill the view.
         await this.log?.write(
-          `\n[odu] log stream error: ${(err as Error).message}\n`,
+          `\n[odu] log stream error: ${errorMessage(err)}\n`,
         );
         this.paint();
       }

@@ -34,6 +34,7 @@ import {
 
 /** Re-exported from `./render`, where the cross-face projections live. */
 export { commitLabel };
+import { errorMessage } from "@odu/execution/common/effectEdge";
 import { formatGoDuration } from "@odu/execution/common/duration";
 import type {
   Display,
@@ -228,7 +229,7 @@ class LiveDisplay implements Display {
     // code, and odu owns that. Same reasoning as the view's own mount guard.
     void this.load().catch((err: unknown) => {
       process.stderr.write(
-        `odu: live view unavailable (${(err as Error).message}) — continuing without it\n`,
+        `odu: live view unavailable (${errorMessage(err)}) — continuing without it\n`,
       );
     });
   }

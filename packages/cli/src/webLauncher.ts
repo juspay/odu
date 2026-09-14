@@ -70,6 +70,7 @@ import {
   type ServiceCell,
 } from "@odu/service-client/surface";
 import { Effect } from "effect";
+import { errorMessage } from "@odu/execution/common/effectEdge";
 import { readProcessIdentity } from "./processIdentity";
 import {
   bakedBuild,
@@ -77,7 +78,6 @@ import {
   webHome,
   webStderrLog,
 } from "./webDaemonLaunch";
-import { errorMessage } from "./serviceFace";
 import { serviceBind, serviceOrigin } from "@odu/service-client/endpoint";
 
 /** The composed contract a control dial speaks: the frozen fragment under the
@@ -115,9 +115,12 @@ export interface EnsureOptions {
   sleep?: (ms: number) => Promise<void>;
 }
 
-/** Read the service cell, or `null` when nothing answers. A dial that fails is
- *  ABSENCE; a dial that succeeds and then cannot read is a service that is
- *  there and broken, which is a different answer and is reported as a throw. */
+/** Read the service cell, or `null` when nothing usable answers. A dial that
+ *  fails is ABSENCE. A dial that succeeds and then cannot read is a service
+ *  that is there and broken — a different fact, but reported as `null` here
+ *  too, because the caller tells the two apart by the GATE, which a foreign
+ *  program does not hold. The dial path wants the opposite answer and gets it
+ *  from {@link adoptOrRefuse}, which throws. */
 export async function readService(origin: string): Promise<ServiceCell | null> {
   let connection: Awaited<ReturnType<typeof dialService>>;
   try {
@@ -137,8 +140,14 @@ export async function readService(origin: string): Promise<ServiceCell | null> {
   }
 }
 
-/** The one sentence for a service this build cannot speak to. */
-export function contractSkewMessage(origin: string, running: string): string {
+/** The refusal a running service's cell earns, or `null` when this build can
+ *  speak to it. ONE decision and ONE sentence, so no adoption site can answer
+ *  differently: `contractIsCompatible`'s argument order flips internally, so a
+ *  transposed call at a second site would be a silent inversion, and putting
+ *  the predicate next to its sentence is what keeps them in step. */
+export function contractVerdict(cell: ServiceCell, origin: string): string | null {
+  const running = cell.identity.protocolVersion;
+  if (contractIsCompatible(SERVICE_CONTRACT_VERSION, running)) return null;
   return (
     `odu: the service on ${origin} speaks contract ${running}; this build ` +
     `speaks ${SERVICE_CONTRACT_VERSION}. Run \`odu web --upgrade\` to drain it ` +
@@ -154,10 +163,10 @@ export function contractSkewMessage(origin: string, running: string): string {
  * RPC layer. On refusal the connection is disposed here: the caller never
  * sees it, so nothing can leak the link's fibers.
  */
-export async function adoptOrRefuse(
-  connection: ServiceConnection,
+export async function adoptOrRefuse<C extends Pick<ServiceConnection, "client" | "dispose">>(
+  connection: C,
   origin: string,
-): Promise<ServiceConnection> {
+): Promise<C> {
   let cell: ServiceCell;
   try {
     cell = await Effect.runPromise(readServiceCell(connection.client));
@@ -168,9 +177,12 @@ export async function adoptOrRefuse(
         `(${errorMessage(err)}) — not an odu service this build can use`,
     );
   }
-  if (!contractIsCompatible(SERVICE_CONTRACT_VERSION, cell.identity.protocolVersion)) {
+  const refusal = contractVerdict(cell, origin);
+  if (refusal !== null) {
+    // Disposed HERE, on the only path that refuses: the caller never sees this
+    // connection, so nothing can leak the link's dial, ping and response fibers.
     await connection.dispose();
-    throw new Error(contractSkewMessage(origin, cell.identity.protocolVersion));
+    throw new Error(refusal);
   }
   return connection;
 }
@@ -249,15 +261,13 @@ export async function ensureService(
 
   const running = await readService(opts.origin);
   if (running !== null) {
-    const compatible = contractIsCompatible(
-      SERVICE_CONTRACT_VERSION,
-      running.identity.protocolVersion,
-    );
     // MATCH-ONLY, never ordered: there is no such thing as a newer build, so a
     // difference is reported and acted on only when a person asks for an
     // upgrade. Two UNKNOWN identities never match — an off-nix daemon and an
     // off-nix client are not the same build, they are two builds nobody can
     // name — which is why the null case answers false rather than true.
+    const verdict = contractVerdict(running, opts.origin);
+    const compatible = verdict === null;
     const mine = opts.baked;
     const sameBuild =
       mine.buildId !== null &&
@@ -265,10 +275,7 @@ export async function ensureService(
       running.build.buildId === mine.buildId;
     if (!opts.upgrade || (compatible && sameBuild)) {
       if (!compatible) {
-        return {
-          ok: false,
-          message: contractSkewMessage(opts.origin, running.identity.protocolVersion),
-        };
+        return { ok: false, message: verdict };
       }
       return {
         ok: true,
@@ -302,6 +309,12 @@ export async function ensureService(
       sleep,
     );
     if (cell !== null) {
+      // The SAME rule as the arm above: a daemon that came up behind a held
+      // gate is still a daemon this build may not be able to speak to, and
+      // adopting it here is how an `Unknown request tag` reaches a caller
+      // that never got the upgrade sentence.
+      const refusal = contractVerdict(cell, opts.origin);
+      if (refusal !== null) return { ok: false, message: refusal };
       return {
         ok: true,
         action: "adopted",
@@ -554,32 +567,8 @@ export async function connectOrStart(
   opts: { allowStart?: boolean } = {},
 ): Promise<ServiceConnection> {
   const allowStart = opts.allowStart ?? origin === serviceOrigin();
-  let dialled: ServiceConnection | null = null;
-  try {
-    dialled = await dialService(origin, { readyMs: ABSENCE_PROBE_MS });
-  } catch (err) {
-    // SLOW IS NOT ABSENT, and only one of the two is cheap to be sure about.
-    // The probe above is deliberately impatient (300ms) because its failure is
-    // the ordinary first step of a bootstrap — but on a machine running its own
-    // CI, a perfectly healthy daemon can miss that window, and the fall-through
-    // then takes a command through a bootstrap it did not need. Under load that
-    // path failed outright: `odu wait` exited 3 with an empty stdout and "All
-    // fibers interrupted without error" on stderr, which is a sentence about
-    // this process rather than about the service.
-    //
-    // Absence is a question the KERNEL answers, immediately: is anything
-    // accepting on that address. When something is, this waits the full dial
-    // budget for it instead of concluding it is not there.
-    if ((await whoeverIsListening(origin)) !== null) {
-      dialled = await dialService(origin);
-    } else if (!allowStart) {
-      throw err;
-    }
-  }
-  // Whichever way the connection came — the probe or the slow-recovery wait —
-  // it is only adopted through the handshake. Anything else answers without
-  // ever having published a service cell this build can speak to.
-  if (dialled !== null) return adoptOrRefuse(dialled, origin);
+  const existing = await dialExisting(origin, allowStart);
+  if (existing !== null) return adoptOrRefuse(existing, origin);
   const outcome = await ensureService({
     origin,
     home: webHome(origin),
@@ -593,7 +582,42 @@ export async function connectOrStart(
     // it here would be a second, worse account of the same fact.
     throw new Error(outcome.message);
   }
-  return dialService(outcome.origin);
+  // The ONLY way a connection leaves this function is through the handshake —
+  // even the one `ensureService` produced after its own contract check, so
+  // "adopted" means "read its cell and this build can speak to it" by
+  // construction rather than by argument.
+  return adoptOrRefuse(await dialService(outcome.origin), outcome.origin);
+}
+
+/**
+ * A CONNECTION TO A SERVICE ALREADY THERE, or `null` when there is none.
+ *
+ * SLOW IS NOT ABSENT, and only one of the two is cheap to be sure about. The
+ * probe above is deliberately impatient (300ms) because its failure is the
+ * ordinary first step of a bootstrap — but on a machine running its own CI, a
+ * perfectly healthy daemon can miss that window, and the fall-through then
+ * takes a command through a bootstrap it did not need. Under load that path
+ * failed outright: `odu wait` exited 3 with an empty stdout and "All fibers
+ * interrupted without error" on stderr, which is a sentence about this process
+ * rather than about the service.
+ *
+ * Absence is a question the KERNEL answers, immediately: is anything accepting
+ * on that address. When something is, this waits the full dial budget for it
+ * instead of concluding it is not there.
+ */
+async function dialExisting(
+  origin: string,
+  allowStart: boolean,
+): Promise<ServiceConnection | null> {
+  try {
+    return await dialService(origin, { readyMs: ABSENCE_PROBE_MS });
+  } catch (err) {
+    if ((await whoeverIsListening(origin)) !== null) return await dialService(origin);
+    // Nothing is accepting. That is absence — an answer only a caller allowed
+    // to bootstrap can act on; anyone else gets the dial's own sentence.
+    if (!allowStart) throw err;
+    return null;
+  }
 }
 
 /**

@@ -39,6 +39,7 @@ import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { unenrolledStreamCall } from "@kolu/surface/client";
 import {
+  errorMessage,
   firstFrame as headFrame,
   isNoAnswer,
   NoAnswerWithin,
@@ -115,16 +116,6 @@ export function waitExitFor(answer: AttentionAnswer): number {
   if (answer.reason === "owner_lost") return WAIT_EXITS.ownerLost;
   return WAIT_EXITS.stillRunning;
 }
-
-/** What to print for a rejection that may not be an `Error`. Effect RPC
- *  defects arrive as the squashed cause — often a bare string — and
- *  `(err as Error).message` on one of those prints `undefined`. */
-export function errorMessage(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  const message = (err as { message?: unknown } | null)?.message;
-  return typeof message === "string" ? message : String(err);
-}
-
 // ── the connection ──────────────────────────────────────────────────────────
 
 /** Do one thing with the service and let go, answering with a process exit.
@@ -219,10 +210,9 @@ export function isRefusal(value: unknown): value is ServiceRefused {
  *  was serving is not serving this call. */
 export function reportLost(error: unknown, json: boolean): number {
   const message =
-    `odu: the service went away mid-call — ${String(
-      (error as { message?: unknown }).message ?? error,
-    )}. Whether it acted is not known; re-issue with the SAME request id to ` +
-    "find out rather than a fresh one.";
+    `odu: the service went away mid-call — ${errorMessage(error)}. Whether it ` +
+    "acted is not known; re-issue with the SAME request id to find out rather " +
+    "than a fresh one.";
   if (json) emitJson({ error: "transport_lost", message });
   else process.stderr.write(`${message}\n`);
   return 3;

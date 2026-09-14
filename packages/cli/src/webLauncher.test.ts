@@ -14,33 +14,14 @@ import { Effect, Stream } from "effect";
 import type { OduServiceClient, ServiceCell } from "@odu/service-client/surface";
 import { SERVICE_CONTRACT_VERSION, UNKNOWN_SERVICE } from "@odu/service-client/surface";
 import type { ServiceConnection } from "@odu/service-client/dial";
-import { adoptOrRefuse } from "./webLauncher";
-import { errorMessage } from "./serviceFace";
+import { adoptOrRefuse, contractVerdict } from "./webLauncher";
 
-/** A connection whose `service.get` yields `cell`, counting disposes. */
-function scripted(opts: {
-  cell: ServiceCell;
-  failGet?: boolean;
-}): { connection: ServiceConnection; disposed: () => number } {
-  let disposes = 0;
-  const connection = {
-    client: {
-      surface: {
-        service: {
-          get: () =>
-            opts.failGet
-              ? Effect.fail("the link died")
-              : Stream.make(opts.cell),
-        },
-      },
-    } as unknown as OduServiceClient,
-    dispatch: null as unknown as ServiceConnection["dispatch"],
-    url: "http://127.0.0.1:3737",
-    dispose: async () => {
-      disposes += 1;
-    },
-  };
-  return { connection, disposed: () => disposes };
+const ORIGIN = "http://127.0.0.1:3737";
+
+/** A contract version one minor step from this build's, in either direction. */
+function minorStep(steps: number): string {
+  const [major, minor] = SERVICE_CONTRACT_VERSION.split(".");
+  return `${major}.${Number(minor) + steps}`;
 }
 
 function cell(protocolVersion: string): ServiceCell {
@@ -50,53 +31,75 @@ function cell(protocolVersion: string): ServiceCell {
   };
 }
 
-const [majorStr, minorStr] = SERVICE_CONTRACT_VERSION.split(".");
-const major = Number(majorStr);
-const minor = Number(minorStr);
+/** A connection whose `service.get` runs `get`, counting disposes. The fake's
+ *  `url` matches what `dialService` really produces (a websocket route, not an
+ *  origin) so the fixture does not teach that the two fields are the same. */
+function scripted(get: () => unknown): {
+  connection: ServiceConnection;
+  disposed: () => number;
+} {
+  let disposes = 0;
+  const connection = {
+    client: {
+      surface: {
+        service: { get },
+      },
+    } as unknown as OduServiceClient,
+    dispatch: null as unknown as ServiceConnection["dispatch"],
+    url: "ws://127.0.0.1:3737/rpc/ws",
+    dispose: async () => {
+      disposes += 1;
+    },
+  };
+  return { connection, disposed: () => disposes };
+}
+
+function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 describe("adoptOrRefuse", () => {
   it("refuses a service whose minor is BEHIND this build, and disposes", async () => {
-    const behind = `${major}.${minor - 1}`;
-    const { connection, disposed } = scripted({ cell: cell(behind) });
+    const behind = minorStep(-1);
+    const { connection, disposed } = scripted(() => Stream.make(cell(behind)));
 
-    const rejection = await adoptOrRefuse(connection, connection.url).then(
+    const rejection = await adoptOrRefuse(connection, ORIGIN).then(
       () => null,
       (err: unknown) => err,
     );
-    expect(String(rejection)).toContain(`speaks contract ${behind};`);
-    expect(String(rejection)).toContain("odu web --upgrade");
+    // The ONE sentence, asserted by identity against the shared verdict rather
+    // than as substrings — so a rewording fails the test instead of drifting.
+    const verdict = contractVerdict(cell(behind), ORIGIN);
+    if (verdict === null) throw new Error("behind-minor fixture must refuse");
+    expect(messageOf(rejection)).toBe(verdict);
     expect(disposed()).toBe(1);
   });
 
   it("adopts a service whose minor is AHEAD of this build, without disposing", async () => {
-    const ahead = `${major}.${minor + 1}`;
-    const { connection, disposed } = scripted({ cell: cell(ahead) });
+    const ahead = minorStep(1);
+    const { connection, disposed } = scripted(() => Stream.make(cell(ahead)));
 
-    const result = await adoptOrRefuse(connection, connection.url);
+    const result = await adoptOrRefuse(connection, ORIGIN);
     expect(result).toBe(connection);
     expect(disposed()).toBe(0);
   });
 
   it("refuses a service that fails the cell read, and disposes", async () => {
-    const { connection, disposed } = scripted({
-      cell: cell(SERVICE_CONTRACT_VERSION),
-      failGet: true,
-    });
+    const { connection, disposed } = scripted(() => Effect.fail("the link died"));
 
-    await expect(adoptOrRefuse(connection, connection.url)).rejects.toThrow(
+    await expect(adoptOrRefuse(connection, ORIGIN)).rejects.toThrow(
       /published no service cell/,
     );
     expect(disposed()).toBe(1);
   });
-});
 
-describe("errorMessage", () => {
-  it("renders an Error's message", () => {
-    expect(errorMessage(new Error("boom"))).toBe("boom");
-  });
-  it("renders a bare string", () => {
-    expect(errorMessage("raw line")).toBe("raw line");
-  });
-  it("renders an object with a string message", () => {
-    expect(errorMessage({ message: "nested cause" })).toBe("nested cause");
+  // The fixture must be BEHIND, not malformed: at a future `x.0` bump
+  // `minor - 1` is `-1`, which the framework's grammar rejects outright — the
+  // tests above would still pass, for the wrong reason, and stop pinning the
+  // ordering this module documents. Assert the fixtures mean what the test
+  // names claim.
+  it("uses fixtures that are genuinely a lower and a higher minor", () => {
+    expect(contractVerdict(cell(minorStep(-1)), ORIGIN)).not.toBeNull();
+    expect(contractVerdict(cell(minorStep(1)), ORIGIN)).toBeNull();
   });
 });

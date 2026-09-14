@@ -81,7 +81,7 @@ import { serviceMcpCommand } from "@odu/cli/serviceMcp";
 import { ODU_VERSION } from "@odu/execution/common/version";
 import { surfaceCliMain } from "@odu/cli/serviceCli";
 import { webCommand, webDaemonCommand } from "@odu/cli/web";
-import { errorMessage } from "@odu/cli/serviceFace";
+import { errorMessage, errorStack } from "@odu/execution/common/effectEdge";
 
 const USAGE = `usage: odu <run|wait|rerun|cancel|logs|history|status|attach|hosts|lease|release|dump|graph|protect|web|surface|mcp> [args]
 
@@ -862,9 +862,7 @@ dispatch(process.argv.slice(2)).then(
     // process's runtime, not about anything a user did.
     process.stderr.write(`${errorMessage(err)}\n`);
     if (process.env.ODU_DEBUG !== undefined && process.env.ODU_DEBUG !== "") {
-      process.stderr.write(
-        `${err instanceof Error && err.stack !== undefined ? err.stack : String(err)}\n`,
-      );
+      process.stderr.write(`${errorStack(err)}\n`);
     }
     return exitAfterFlush(1);
   },
