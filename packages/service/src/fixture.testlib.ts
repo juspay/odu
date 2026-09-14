@@ -13,7 +13,13 @@
  * exercised without one.
  */
 
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { hostname } from "node:os";
 import { join } from "node:path";
@@ -22,6 +28,7 @@ import { mintRunId } from "@odu/run-history/ids";
 import {
   appendEvent,
   openJournal,
+  readJournal,
   registerRun,
   type RunHandle,
   sealAttempt,
@@ -262,6 +269,27 @@ export function writeDebt(
   at: number = Date.now(),
 ): void {
   appendEvent(handle, token, { kind: "posting_debt", ...debt }, at);
+}
+
+/**
+ * Append `lines` journal entries in ONE write — a long run's history, cheaply.
+ *
+ * `appendEvent` re-derives the sequence floor from the file on every call, so
+ * a fixture that wrote fifteen hundred events through it would be quadratic in
+ * the thing it is trying to make big. The lines are `phase` events: well-formed,
+ * decoded by every reader, and neutral to a row's state.
+ */
+export function writeBulkJournal(
+  handle: RunHandle,
+  lines: number,
+  at: number = Date.now(),
+): void {
+  const from = readJournal(handle).highestSeq + 1;
+  const out: string[] = [];
+  for (let seq = from; seq < from + lines; seq += 1) {
+    out.push(JSON.stringify({ seq, at, event: { kind: "phase", phase: "lanes" } }));
+  }
+  appendFileSync(join(handle.dir, RUN_FILES.events), `${out.join("\n")}\n`);
 }
 
 /** Publish a roster, which is what makes "is this settled" answerable. */

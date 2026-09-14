@@ -10,24 +10,47 @@
  * would pay in latency and the disk would pay in reads.
  *
  * **Freshness is a fingerprint, not a clock.** A run's row changes when its
- * files change, so the refresh compares a cheap `stat` of the three files that
- * can move — the journal, the verdict, the ownership record — and re-folds only
- * the runs whose fingerprint moved. A settled run from last week is stat'd and
- * skipped; a run that is executing is re-folded every tick. That is what keeps
- * a hundred-run catalog affordable without a cache that can go stale, because
- * there is nothing to invalidate: the fingerprint IS the invalidation.
+ * files change, so the refresh compares a cheap `stat` of what can move — the
+ * journal, the verdict, the ownership record, and the run directory itself —
+ * and re-folds only the runs whose fingerprint moved. A settled run from last
+ * week is stat'd and skipped; a run that is executing is re-folded every tick.
+ * That is what keeps a large catalog affordable without a cache that can go
+ * stale, because there is nothing to invalidate: the fingerprint IS the
+ * invalidation.
  *
- * **And OWNER LIVENESS is part of that fingerprint, because it is not a file.**
+ * **The fingerprint comes BEFORE any read, and it is only `stat`s.** It used to
+ * be taken after `listRuns` had already opened every run's manifest, owner
+ * record, verdict and whole journal — so the check that existed to skip an
+ * unchanged run ran after the run had been fully parsed. At seven hundred runs
+ * that was a second of synchronous work per 250 ms tick, a daemon loop busy
+ * full-time, and every RPC queued behind it (juspay/odu#113). Discovery is now
+ * `listRunIds` (a directory listing) and an unchanged run costs four `stat`s.
+ *
+ * The directory's own stat is what lets the owner record be skipped too.
+ * `currentOwner` is a function of `owner.json` AND the set of epoch claim files
+ * (`owner.<epoch>.claim`, created exclusively and never rewritten). The first
+ * has its own stat; the second can only change by an entry appearing in or
+ * leaving the directory, which moves the directory's mtime. So a run whose four
+ * stats are unchanged has the same `currentOwner` it had when it was projected,
+ * and the decoded record is cached on the entry rather than re-read per tick.
+ *
+ * **And OWNER LIVENESS is re-asked every tick, because it is not a file.**
  * A coordinator that crashes stops writing — which means it stops moving the
  * very files a "did anything change?" check reads. Its heartbeat then ages past
  * the ownership grace and the run becomes `owner_lost`, and nothing on disk
  * moved to say so. Fingerprinting the files alone left such a row reading
- * `running` forever, which is precisely the state a crashed coordinator must
- * not be reported in. So the fingerprint carries the ownership fence's own
- * answer alongside the three `stat`s, and it is computed once per run per tick
- * and handed to the projection rather than asked for twice.
+ * `running` forever. So each tick recomputes the fence's answer from the CACHED
+ * owner record — arithmetic on its heartbeat, plus one `kill(pid, 0)` once the
+ * grace has passed — and a changed answer re-projects the run like a moved file
+ * would.
  *
- * **Discovery is the catalog and only the catalog.** `listRuns` walks the
+ * **No partial or time-budgeted refresh, on purpose.** A warm tick over ten
+ * thousand runs is forty thousand `stat`s — tens of milliseconds. Chunking the
+ * walk would buy nothing measurable and cost a board that is sometimes half
+ * fresh; measure before adding it. The poller (`./poller`) guarantees an idle
+ * gap between ticks regardless, so a slow disk degrades freshness, never RPCs.
+ *
+ * **Discovery is the catalog and only the catalog.** `listRunIds` walks the
  * per-user run directory, so a run started by `odu run` in a terminal before
  * this service existed appears on the board the moment the service starts —
  * without scanning arbitrary filesystem paths for `.ci` directories, which is
@@ -38,14 +61,14 @@ import { statSync } from "node:fs";
 import { join } from "node:path";
 import { attentionFor, type AttemptState, foldJournal } from "@odu/run-history/attention";
 import { formatCursor } from "@odu/run-history/ids";
-import { currentOwner, ownerProvablyAlive } from "@odu/run-history/owner";
+import { currentOwner, ownerAlive } from "@odu/run-history/owner";
 import { RUN_FILES, runDir } from "@odu/run-history/paths";
-import type { RunManifest } from "@odu/run-history/schema";
+import type { Owner, RunManifest } from "@odu/run-history/schema";
 import {
   type CatalogOptions,
   catalogPath,
   handleFor,
-  listRuns,
+  listRunIds,
   readExpiry,
   readJournal,
   readManifest,
@@ -62,39 +85,50 @@ import type {
   RunRow,
 } from "@odu/service-client/surface";
 
-/** The three files whose mtime+size decide whether a row is still current.
- *  Nothing else in a run directory can change a row: attempt logs grow, but a
- *  row says nothing about log CONTENT, and the journal is what records that a
- *  log was finalized. */
+/** The files whose mtime+size decide whether a row is still current. Nothing
+ *  else in a run directory can change a row: attempt logs grow, but a row says
+ *  nothing about log CONTENT, and the journal is what records that a log was
+ *  finalized. The directory itself is stat'd beside them — see the module
+ *  header on the claim files it stands in for. */
 const FINGERPRINTED = [
   RUN_FILES.events,
   RUN_FILES.verdict,
   RUN_FILES.owner,
 ] as const;
 
-/** A run directory's observable state, cheaply. Missing files contribute a
- *  fixed marker rather than being skipped, so a verdict APPEARING moves the
- *  fingerprint just as much as one changing.
- *
- *  `ownerAlive` is the one component that is not a file: see the module header
- *  — a dead coordinator's silence is exactly what the file half cannot see. */
-function fingerprint(dir: string, ownerAlive: boolean | null): string {
-  const parts: string[] = [];
-  for (const file of FINGERPRINTED) {
-    try {
-      const st = statSync(join(dir, file));
-      parts.push(`${st.size}:${st.mtimeMs}`);
-    } catch {
-      parts.push("-");
-    }
-  }
-  parts.push(ownerAlive === null ? "unowned" : ownerAlive ? "alive" : "lost");
+/** A run directory's observable state, from `stat`s alone — no file is opened.
+ *  Missing files contribute a fixed marker rather than being skipped, so a
+ *  verdict APPEARING moves the fingerprint just as much as one changing. */
+function fingerprint(dir: string): string {
+  const parts: string[] = [statPart(dir)];
+  for (const file of FINGERPRINTED) parts.push(statPart(join(dir, file)));
   return parts.join("|");
 }
 
-/** One run's projection, plus the fingerprint it was projected from. */
+function statPart(path: string): string {
+  try {
+    const st = statSync(path);
+    return `${st.size}:${st.mtimeMs}`;
+  } catch {
+    return "-";
+  }
+}
+
+/** One run's projection, plus what it was projected from. */
 interface Entry {
+  /** The `stat`s taken BEFORE the files were read. Before, not after: a write
+   *  landing between the two then leaves a stale stamp beside fresh content,
+   *  which the next tick re-reads — rather than a fresh stamp beside stale
+   *  content, which no tick ever would. */
   fingerprint: string;
+  /** The ownership record the row was folded against, decoded once. Re-asked
+   *  for liveness on every tick without re-reading it — see the module header
+   *  on why an unchanged fingerprint means an unchanged owner. */
+  owner: Owner | null;
+  /** The fence's answer the row was projected with. A tick whose answer
+   *  differs re-projects, which is how a dead coordinator's silence reaches
+   *  the board. */
+  alive: boolean | null;
   row: RunRow;
   /** The run's node list, folded from the same journal read that built the row.
    *  Held beside it because a detail view and a board row are two views of ONE
@@ -303,13 +337,14 @@ function project(
   handle: RunHandle,
   manifest: RunManifest,
   now: number,
-  // Passed IN, and passed in from the same call that fingerprinted this run —
-  // so the row a reader sees and the reason it was re-projected are one answer
-  // rather than two reads that can straddle the grace boundary.
-  ownerAlive: boolean | null,
+  stamp: string,
 ): Entry {
   const journal = readJournal(handle);
   const owner = currentOwner(handle.dir);
+  // Computed ONCE from the record just read, and stored beside it: the row a
+  // reader sees and the answer the next tick compares against are one answer
+  // rather than two reads that can straddle the grace boundary.
+  const alive = ownerAlive(owner, now);
   // Read ONCE and shared with the environment below: the row's settlement and
   // the moment the elapsed clock stops are the same fact, and two reads of the
   // verdict could straddle the instant it is written.
@@ -322,7 +357,7 @@ function project(
       unreadableEvents: journal.unreadable,
       verdict,
       expiry: readExpiry(handle),
-      ownerAlive,
+      ownerAlive: alive,
       endpoint: owner?.endpoint ?? null,
       // A BOARD ROW carries no excerpts, so the log is never opened: a refresh
       // that read forty failing runs' tails to produce four counters would be
@@ -337,7 +372,9 @@ function project(
   const fold = foldJournal(journal.entries);
   const state = boardState(attention.state, fold.latest);
   return {
-    fingerprint: fingerprint(handle.dir, ownerAlive),
+    fingerprint: stamp,
+    owner,
+    alive,
     row: {
       runId: handle.runId,
       repo: manifest.repo,
@@ -415,11 +452,30 @@ export interface RunRegistry {
    * hardest. So the fold is cached and the clock is not.
    */
   env: (runId: string, now?: number) => RunEnv | undefined;
+  /**
+   * The board, FILTERED — what `run.list` answers from.
+   *
+   * One pass over the projection in board order (newest first). Filters are
+   * ANDed; `rows` is cut at `limit` and `total` counts every match, so a caller
+   * asking for one row still learns how many there were. Validation of the
+   * query is the procedure's job, not this one's: this matches what it is given.
+   */
+  select: (query: RunQuery) => { rows: RunRow[]; total: number };
   /** Re-read the catalog and report what moved. */
   refresh: (now?: number) => RegistryDelta;
   /** The catalog directory this registry is a face onto — what an identity
    *  cell reports, so a caller can see WHICH catalog it is looking at. */
   catalog: string;
+}
+
+/** What `select` filters by. Every field absent means every run. */
+export interface RunQuery {
+  /** Exact `repoRoot` — the absolute checkout a run was started in. */
+  checkout?: string;
+  /** A commit PREFIX, compared case-insensitively. */
+  sha?: string;
+  seq?: number;
+  limit?: number;
 }
 
 export interface RegistryOptions extends CatalogOptions {
@@ -435,42 +491,77 @@ export function createRegistry(opts: RegistryOptions = {}): RunRegistry {
    *  every pass — so a new run appears at the top rather than at the end. */
   let order: string[] = [];
 
+  /** Directories with no readable manifest, by the fingerprint they were
+   *  skipped at — so a torn directory costs its `stat`s per tick like any other
+   *  unchanged run, rather than a manifest read. A manifest appearing moves the
+   *  directory's mtime, which is what brings it back. */
+  const skipped = new Map<string, string>();
+
   const refresh = (now: number = Date.now()): RegistryDelta => {
     const upserted: RunRow[] = [];
+    const removed: string[] = [];
     const seen = new Set<string>();
     const catalog = catalogPath(opts);
     const nextOrder: string[] = [];
 
-    for (const listed of listRuns({ ...opts, now })) {
-      const runId = listed.runId;
+    for (const runId of listRunIds(opts)) {
       nextOrder.push(runId);
       seen.add(runId);
       const handle: RunHandle = { runId, dir: runDir(catalog, runId) };
-      const alive = ownerProvablyAlive(handle.dir, now);
-      const stamp = fingerprint(handle.dir, alive);
+      const stamp = fingerprint(handle.dir);
       const held = entries.get(runId);
-      if (held !== undefined && held.fingerprint === stamp) continue;
-      // A row without a manifest is barely a row: the run id exists, but
-      // nothing can be said about which commit it is or where it ran. Skipped
-      // rather than shown as a row of blanks — `listRuns` still counts it, and
-      // `odu history list` is the face that reports a torn record as one.
-      const manifest = readManifest(handle);
-      if (manifest === null) {
-        entries.delete(runId);
+      if (
+        held !== undefined &&
+        held.fingerprint === stamp &&
+        ownerAlive(held.owner, now) === held.alive
+      ) {
         continue;
       }
-      entries.set(runId, project(handle, manifest, now, alive));
-      const row = entries.get(runId)?.row;
-      if (row !== undefined) upserted.push(row);
+      if (held === undefined && skipped.get(runId) === stamp) continue;
+      // A row without a manifest is barely a row: the run id exists, but
+      // nothing can be said about which commit it is or where it ran. Skipped
+      // rather than shown as a row of blanks — `odu history list` over the
+      // catalog is the face that reports a torn record as one.
+      const manifest = readManifest(handle);
+      if (manifest === null) {
+        skipped.set(runId, stamp);
+        if (held !== undefined) {
+          entries.delete(runId);
+          removed.push(runId);
+        }
+        continue;
+      }
+      skipped.delete(runId);
+      const entry = project(handle, manifest, now, stamp);
+      entries.set(runId, entry);
+      upserted.push(entry.row);
     }
 
-    const removed: string[] = [];
     for (const runId of entries.keys()) {
       if (!seen.has(runId)) removed.push(runId);
     }
     for (const runId of removed) entries.delete(runId);
+    for (const runId of skipped.keys()) {
+      if (!seen.has(runId)) skipped.delete(runId);
+    }
     order = nextOrder.filter((id) => entries.has(id));
     return { upserted, removed };
+  };
+
+  const select = (query: RunQuery): { rows: RunRow[]; total: number } => {
+    const sha = query.sha?.toLowerCase();
+    const rows: RunRow[] = [];
+    let total = 0;
+    for (const id of order) {
+      const row = entries.get(id)?.row;
+      if (row === undefined) continue;
+      if (query.checkout !== undefined && row.repoRoot !== query.checkout) continue;
+      if (sha !== undefined && !row.sha.toLowerCase().startsWith(sha)) continue;
+      if (query.seq !== undefined && row.seq !== query.seq) continue;
+      total += 1;
+      if (query.limit === undefined || rows.length < query.limit) rows.push(row);
+    }
+    return { rows, total };
   };
 
   return {
@@ -488,6 +579,7 @@ export function createRegistry(opts: RegistryOptions = {}): RunRegistry {
         elapsedMs: elapsedOf(held.row.createdAt, held.finishedAt, now),
       };
     },
+    select,
     refresh,
     catalog: catalogPath(opts),
   };
@@ -504,11 +596,6 @@ export function projectRun(
   const handle = handleFor(runId, opts);
   const manifest = readManifest(handle);
   if (manifest === null) return null;
-  const { row, nodes, env } = project(
-    handle,
-    manifest,
-    now,
-    ownerProvablyAlive(handle.dir, now),
-  );
+  const { row, nodes, env } = project(handle, manifest, now, fingerprint(handle.dir));
   return { row, nodes, env };
 }
