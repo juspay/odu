@@ -27,7 +27,7 @@ import {
   type SurfaceHandlers,
 } from "@kolu/surface/server";
 import { Effect } from "effect";
-import type { Rpc, RpcGroup } from "effect/unstable/rpc";
+import type { Rpc, RpcGroup } from "effect/rpc";
 import {
   EMPTY_STATE,
   type NodeState,

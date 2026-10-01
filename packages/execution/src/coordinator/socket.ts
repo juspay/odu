@@ -32,7 +32,7 @@ import { dirname, join } from "node:path";
 import type { Logger } from "@kolu/log";
 import type { SurfaceHandlers } from "@kolu/surface/server";
 import { serveOverUnixSocket } from "@kolu/surface/unix-socket";
-import type { Rpc, RpcGroup } from "effect/unstable/rpc";
+import type { Rpc, RpcGroup } from "effect/rpc";
 import "@odu/run-client/asyncConnectError";
 import {
   type DialedRun,

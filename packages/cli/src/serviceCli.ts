@@ -55,14 +55,14 @@ import { connectOrStart } from "./webLauncher";
 import { oduServiceSurface } from "@odu/service-client/surface";
 import { ODU_SERVICE_EXPOSE } from "@odu/service-client/verbs";
 import { Effect } from "effect";
-import { Command, Flag } from "effect/unstable/cli";
+import { Command, Flag } from "effect/cli";
 
 /** The one flag this face adds. Defaulted from the environment so the common
  *  case is no flag at all, and named `--origin` rather than `--url` because it
  *  is the SERVICE's address, not one endpoint of it: the websocket route and
  *  the MCP route are both derived from it. */
 const endpointFlags = {
-  origin: Flag.string("origin").pipe(Flag.withDefault(serviceOrigin())),
+  origin: Flag.String("origin").pipe(Flag.withDefault(serviceOrigin())),
 };
 
 const endpoint: EndpointSeam<typeof endpointFlags> = {
