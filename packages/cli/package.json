@@ -12,7 +12,7 @@
     "./*": "./src/*.ts"
   },
   "dependencies": {
-    "@effect/platform-node": "4.0.0-rc.112",
+    "@effect/platform-node": "4.0.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@odu/execution": "workspace:*",
     "@odu/run-client": "workspace:*",
@@ -21,6 +21,6 @@
     "@odu/service-client": "workspace:*",
     "@opentui/core": "^0.4.5",
     "@xterm/headless": "^6.0.0",
-    "effect": "4.0.0-rc.112"
+    "effect": "4.0.0"
   }
 }
