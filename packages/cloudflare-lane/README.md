@@ -23,6 +23,17 @@ travel as text inside the Worker, so there is no Dockerfile and no registry
 push. The Durable Object name carries a hash of both, because a redeploy does
 not restart a running container: new code always gets fresh containers.
 
+How work lands on containers:
+
+- **One venue per platform per run.** odu leases one container for a
+  platform and runs that platform's whole DAG in it; only `odu:shard=N`
+  recipes fan out to the other declared slots, one container per shard.
+- **`ODU_RUNNER_MAX_PARALLEL` = the container's vCPUs (4).** The bridge
+  starts each runner with it, so at most four recipes run at once in a
+  container; ready ones wait. ssh lanes leave it unset (unbounded).
+- Before a runner starts, the bridge collects the Nix store when under 30%
+  of the 20 GB disk is free.
+
 Cloudflare behaviours this design rests on, each measured on a live account:
 
 - A WebSocket proxied through the DO's `containerFetch` keeps the container

@@ -65,6 +65,8 @@ Odu can run `x86_64-linux` lanes in [Cloudflare Containers](https://developers.c
    ```
 
    Each cloudflare slot is its **own container** (`cloudflare:default-0` … `-3`), so a sharded recipe gets 4 × 4 vCPU. Named instances work too: `["cloudflare:a", "cloudflare:b"]`.
+
+   A run leases **one venue per platform**: every node of that platform's DAG runs in one container, and only `odu:shard=N` recipes fan out to the other slots. On a Cloudflare lane at most **one recipe per vCPU runs at once** (`ODU_RUNNER_MAX_PARALLEL` = 4); the rest wait their turn. Shard your heavy leaves (e2e suites, VM tests) so each gets its own container.
 4. `odu cloudflare setup` — deploys the `odu-lane` Worker with the wrangler odu pins, creates the `odu-lane-cache` R2 bucket and a signing key, and writes `~/.config/odu/cloudflare.json` (0600). Add `--github-token` to give containers your GitHub token (from `GH_TOKEN` or `gh auth token`) for private repositories and `api.github.com`. Re-run setup whenever hosts.json grows: it sizes `max_instances` from it.
 5. `odu run --no-post` as usual, or pin one run with `--host x86_64-linux=cloudflare`.
 
