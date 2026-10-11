@@ -132,14 +132,27 @@ export class OduLane extends Container<Env> {
     if (action === "start") return this.streamStart(url.origin);
     if (action === "state") {
       // Answered by the Durable Object alone — it never starts a container,
-      // so `odu hosts` and pool probes cost nothing on an idle instance.
-      return Response.json({ running: this.ctx.container?.running === true, version: CODE_VERSION });
+      // so `odu hosts` and pool probes cost nothing on an idle instance. A
+      // running one is asked about KVM (one local request, no boot).
+      const running = this.ctx.container?.running === true;
+      return Response.json({ running, kvm: running ? await this.kvm() : null, version: CODE_VERSION });
     }
     if (action === "agent" || action === "import") {
       await this.ensureStarted(url.origin);
       return this.containerFetch(request, PORT);
     }
     return new Response("not found\n", { status: 404 });
+  }
+
+  /** The bridge's live view of /dev/kvm; null when it cannot be asked. */
+  private async kvm(): Promise<boolean | null> {
+    try {
+      const response = await this.containerFetch("http://container/healthz", {}, PORT);
+      const body = (await response.json()) as { kvm?: unknown };
+      return body.kvm === true;
+    } catch {
+      return null;
+    }
   }
 
   /** Start the container, narrating the wait. The coordinator reads this
@@ -159,7 +172,14 @@ export class OduLane extends Container<Env> {
       (async () => {
         try {
           await this.ensureStarted(origin);
-          await writer.write(enc.encode(`ready (${was}, ${Math.round((Date.now() - t0) / 1000)}s)\n`));
+          const kvm = await this.kvm();
+          if (kvm !== true) {
+            // The entrypoint exits without KVM, so this is a lost race or a
+            // regression — never a lane to hand out.
+            await writer.write(enc.encode(`error: KVM is not usable in this container (kvm=${kvm}) — refusing the lane\n`));
+            return;
+          }
+          await writer.write(enc.encode(`ready (${was}, ${Math.round((Date.now() - t0) / 1000)}s, KVM)\n`));
         } catch (error) {
           await writer.write(enc.encode(`error: ${(error as Error).message}\n`));
         } finally {

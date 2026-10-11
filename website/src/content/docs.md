@@ -40,7 +40,7 @@ Pass `--host SYSTEM=localhost` for an explicit local run, or create `~/.config/o
 
 A remote pool leases one available machine per platform. Builders need SSH access and Nix. Do not mix localhost and remote machines in one pool.
 
-Hosts are read from the first existing file: `$ODU_HOSTS`, `~/.config/odu/hosts.json`, then the legacy `~/.config/justci/hosts.json`. No configured host means a refusal, never an implicit local build.
+Hosts are read from the first existing file: `$ODU_HOSTS`, `~/.config/odu/hosts.json`, then the legacy `~/.config/justci/hosts.json`. No configured host means a refusal, never an implicit local build. `ODU_CONFIG_DIR` moves odu's whole config directory (hosts.json and cloudflare.json) and disables the fallbacks — for a CI coordinator kept apart from your interactive one (start its service with its own `ODU_WEB_ORIGIN` and `ODU_STATE_DIR` too).
 
 ```sh
 odu hosts
@@ -67,6 +67,8 @@ Odu can run `x86_64-linux` lanes in [Cloudflare Containers](https://developers.c
    Each cloudflare slot is its **own container** (`cloudflare:default-0` … `-3`), so a sharded recipe gets 4 × 4 vCPU. Named instances work too: `["cloudflare:a", "cloudflare:b"]`.
 4. `odu cloudflare setup` — deploys the `odu-lane` Worker with the wrangler odu pins, creates the `odu-lane-cache` R2 bucket and a signing key, and writes `~/.config/odu/cloudflare.json` (0600). Add `--github-token` to give containers your GitHub token (from `GH_TOKEN` or `gh auth token`) for private repositories and `api.github.com`. Re-run setup whenever hosts.json grows: it sizes `max_instances` from it.
 5. `odu run --no-post` as usual, or pin one run with `--host x86_64-linux=cloudflare`.
+
+Every lane has **KVM, or it does not start**: the container's entrypoint makes `/dev/kvm` usable by Nix's build users and exits with a clear error if it is missing or cannot be opened, and the Worker re-checks it before handing out a lane — a NixOS VM test never silently falls back to QEMU's software emulation (2–5× slower). `odu cloudflare status` shows `KVM: yes` per running container.
 
 What a container provides is **Nix and nothing else** — the stock `nixos/nix` image has no `ps`, `awk`, fontconfig or browsers. Recipes must get every tool from Nix (`nix develop -c …`, as odu's own recipes do). `/dev/shm` (2 GiB, for Chromium) and `/dev/kvm` are set up for you. From Cloudflare's shared egress, unauthenticated `api.github.com` calls — including `github:` flake refs that are not locked — hit rate limits; use `--github-token`, or `git+https://` and tarball inputs.
 

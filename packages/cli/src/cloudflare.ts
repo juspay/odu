@@ -393,16 +393,16 @@ function requireConfig(): Readonly<CloudflareConfig> | null {
 async function runningHosts(
   config: Readonly<CloudflareConfig>,
   hosts: readonly string[],
-): Promise<{ host: string; running: boolean | null }[]> {
+): Promise<{ host: string; running: boolean | null; kvm: boolean | null }[]> {
   return Promise.all(
     hosts.map(async (host) => {
-      const running = await fetch(laneEndpoint(config, cloudflareInstance(host), "state"), {
+      const state = await fetch(laneEndpoint(config, cloudflareInstance(host), "state"), {
         headers: laneAuthHeaders(config),
         signal: AbortSignal.timeout(15_000),
       })
-        .then((r) => (r.ok ? (r.json() as Promise<{ running?: boolean }>) : null))
-        .then((b) => (b === null ? null : b.running === true), () => null);
-      return { host, running };
+        .then((r) => (r.ok ? (r.json() as Promise<{ running?: boolean; kvm?: boolean | null }>) : null))
+        .catch(() => null);
+      return { host, running: state === null ? null : state.running === true, kvm: state?.kvm ?? null };
     }),
   );
 }
@@ -438,7 +438,9 @@ async function status(json: boolean): Promise<number> {
         `cache     ${report.cache ?? "none (closure ships through the Worker)"}\n` +
         `github    ${report.githubToken ? "token installed" : "no token (public origins only)"}\n` +
         `capacity  max_instances ${report.maxInstances ?? "unknown"}; ${hosts.length} cloudflare host(s) in ${source ?? "no hosts file"}\n` +
-        states.map((s) => `  ${s.host.padEnd(28)} ${s.running === null ? "unknown" : s.running ? "running" : "stopped"}\n`).join("") +
+        states
+          .map((s) => `  ${s.host.padEnd(28)} ${s.running === null ? "unknown" : s.running ? `running  KVM: ${s.kvm === true ? "yes" : s.kvm === false ? "NO" : "?"}` : "stopped"}\n`)
+          .join("") +
         `cost now  ${running} running: ~$${report.costPerHourNow.provisioned}/h + up to $${report.costPerHourNow.cpuIfBusy}/h CPU while busy\n`,
     );
   }

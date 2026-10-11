@@ -38,6 +38,7 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
+import { statSync } from "node:fs";
 import { createGunzip } from "node:zlib";
 
 const PORT = 8080;
@@ -206,6 +207,15 @@ function firstMessage(ws: Socket, message: string | Uint8Array): void {
   void prepareImport(ws, paths as string[]).catch((error: unknown) => fail(ws, `import failed: ${(error as Error).message}`));
 }
 
+function kvmUsable(): boolean {
+  try {
+    const st = statSync("/dev/kvm");
+    return st.isCharacterDevice() && (st.mode & 0o666) === 0o666;
+  } catch {
+    return false;
+  }
+}
+
 Bun.serve<DialState>({
   port: PORT,
   hostname: "0.0.0.0",
@@ -219,7 +229,9 @@ Bun.serve<DialState>({
       if (server.upgrade(req, { data })) return undefined;
       return new Response("expected a WebSocket upgrade\n", { status: 426 });
     }
-    if (route === "/healthz") return new Response("ok\n");
+    // The entrypoint refuses to start without a usable /dev/kvm; this is the
+    // same fact, re-checked live, for `odu cloudflare status` and lane start.
+    if (route === "/healthz") return Response.json({ ok: true, kvm: kvmUsable() });
     return new Response("not found\n", { status: 404 });
   },
   websocket: {

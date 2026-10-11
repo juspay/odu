@@ -30,10 +30,27 @@ mkdir -p /dev/shm
 mount -t tmpfs -o mode=1777,size=2g shm /dev/shm 2>/dev/null || true
 chmod 1777 /dev/shm
 
-# 2. /dev/kvm exists but is 0600 root. Builds run as nixbld users; measured:
-#    without this QEMU logs "failed to initialize kvm: Permission denied" and
-#    falls back to software emulation (TCG).
-if [ -e /dev/kvm ]; then chmod 666 /dev/kvm; fi
+# 2. KVM is a guarantee of this lane, not a best effort: without it NixOS VM
+#    tests silently fall back to QEMU's software emulation (TCG) and run 2-5x
+#    slower. /dev/kvm arrives 0600 root; builds run as nixbld users (measured:
+#    "failed to initialize kvm: Permission denied" → TCG), so open it up, then
+#    prove it opens. No KVM → the container exits here and the lane start
+#    fails with this message instead of a slow lane.
+if [ ! -c /dev/kvm ]; then
+  echo "odu-lane: FATAL: /dev/kvm is missing — refusing to run a lane without KVM" >&2
+  exit 1
+fi
+chmod 666 /dev/kvm
+if ! { exec 3<>/dev/kvm; } 2>/dev/null; then
+  echo "odu-lane: FATAL: /dev/kvm cannot be opened — refusing to run a lane without KVM" >&2
+  exit 1
+fi
+exec 3>&-
+if [ "$(stat -c %a /dev/kvm)" != "666" ]; then
+  echo "odu-lane: FATAL: /dev/kvm is $(stat -c %a /dev/kvm), not 666 — nix build users would fall back to TCG" >&2
+  exit 1
+fi
+echo "odu-lane: KVM ok ($(stat -c '%A' /dev/kvm) /dev/kvm)"
 
 # 3. Nix: the lane cache first, then odu's caches and cache.nixos.org; KVM
 #    system features; fall back to building when a substituter is down.
