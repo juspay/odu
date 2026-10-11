@@ -174,39 +174,73 @@ function parseStart(raw: string): Start {
   return { agentPath: value.agentPath, binary: value.binary, args };
 }
 
-/** The container's disk: 20 GB on a standard-4, shared by every lane it has
- *  served since it started. */
-function diskFree(): { freeBytes: number; totalBytes: number } | null {
+/** The container's root filesystem — ext4, 18 GB usable and ~2.76 M inodes on
+ *  a standard-4 (measured), shared by every lane it serves. The store, /tmp
+ *  and Nix's build directories all live on it; nothing a recipe writes lands
+ *  on a small tmpfs. */
+interface Disk {
+  freeBytes: number;
+  totalBytes: number;
+  freeInodes: number;
+  totalInodes: number;
+}
+function disk(): Disk | null {
   try {
     const st = statfsSync("/");
-    return { freeBytes: st.bavail * st.bsize, totalBytes: st.blocks * st.bsize };
+    return { freeBytes: st.bavail * st.bsize, totalBytes: st.blocks * st.bsize, freeInodes: st.ffree, totalInodes: st.files };
   } catch {
     return null;
   }
 }
 
-/** Below this, a new dial first collects the store. Measured on kolu's CI:
- *  several nodes' closures and e2e artefacts on one container ran it out of
- *  space ("No space left on device"). */
-const GC_BELOW_FRACTION = 0.3;
+/** Below this fraction free — of bytes OR inodes (a pnpm tree runs out of
+ *  inodes before bytes) — the store is collected. Measured on kolu's CI: a
+ *  container that had 16 GiB free at run start hit "No space left on
+ *  device" with four nodes writing closures at once, so a check only at dial
+ *  time is not enough. */
+const GC_BELOW_FRACTION = 0.25;
+const WATCH_EVERY_MS = 10_000;
 
-/** Collect garbage before a runner starts, when the disk is low. Safe under a
- *  running lane: Nix treats every store path a live process uses as a root. */
-async function ensureDisk(ws: Socket): Promise<void> {
-  const before = diskFree();
-  if (before === null || before.freeBytes / before.totalBytes >= GC_BELOW_FRACTION) return;
-  const gib = (b: number): string => (b / 1024 ** 3).toFixed(1);
-  say(ws, `[cloudflare] disk low (${gib(before.freeBytes)} of ${gib(before.totalBytes)} GiB free) — collecting the Nix store`);
-  const t0 = Date.now();
-  await run(ws, ["nix-store", "--gc"]);
-  const after = diskFree();
-  say(ws, `[cloudflare] ${after === null ? "?" : gib(after.freeBytes)} GiB free after ${((Date.now() - t0) / 1000).toFixed(1)}s of gc`);
+const low = (d: Disk): boolean =>
+  d.freeBytes / d.totalBytes < GC_BELOW_FRACTION || d.freeInodes / d.totalInodes < GC_BELOW_FRACTION;
+
+const describeDisk = (d: Disk): string =>
+  `${(d.freeBytes / 1024 ** 3).toFixed(1)} of ${(d.totalBytes / 1024 ** 3).toFixed(1)} GiB, ` +
+  `${Math.round((100 * d.freeInodes) / d.totalInodes)}% of inodes free`;
+
+/** Every open dial, so the watchdog can narrate to the lanes it protects. */
+const dials = new Set<Socket>();
+let collecting: Promise<void> | null = null;
+
+/** Collect the store when the disk runs low. Safe under running lanes: Nix
+ *  treats every store path a live process uses as a root. One collection at
+ *  a time; the lanes attached hear why their recipes may have paused. */
+function collectIfLow(): Promise<void> {
+  if (collecting !== null) return collecting;
+  const before = disk();
+  if (before === null || !low(before)) return Promise.resolve();
+  const tell = (line: string): void => {
+    for (const ws of dials) say(ws, line);
+    console.log(line);
+  };
+  collecting = (async () => {
+    const t0 = Date.now();
+    tell(`[cloudflare] disk low (${describeDisk(before)}) — collecting the Nix store`);
+    const proc = Bun.spawn(["nix-store", "--gc"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    await proc.exited;
+    const after = disk();
+    tell(`[cloudflare] after ${((Date.now() - t0) / 1000).toFixed(1)}s of gc: ${after === null ? "?" : describeDisk(after)}`);
+  })().finally(() => {
+    collecting = null;
+  });
+  return collecting;
 }
+setInterval(() => void collectIfLow(), WATCH_EVERY_MS).unref();
 
 /** Realise the agent from the configured substituters (the lane cache first —
  *  entrypoint.sh), then spawn it with its stdio spliced onto this socket. */
 async function startAgent(ws: Socket, spec: Start): Promise<void> {
-  await ensureDisk(ws);
+  await collectIfLow();
   const t0 = Date.now();
   say(ws, `[cloudflare] realising ${spec.agentPath}`);
   const realised = await run(ws, ["nix-store", "--realise", spec.agentPath]);
@@ -335,7 +369,7 @@ Bun.serve<DialState>({
     }
     // The entrypoint refuses to start without a usable /dev/kvm; this is the
     // same fact, re-checked live, for `odu cloudflare status` and lane start.
-    if (route === "/healthz") return Response.json({ ok: true, kvm: kvmUsable(), disk: diskFree() });
+    if (route === "/healthz") return Response.json({ ok: true, kvm: kvmUsable(), disk: disk() });
     return new Response("not found\n", { status: 404 });
   },
   websocket: {
@@ -349,6 +383,9 @@ Bun.serve<DialState>({
         ws.data.child?.stdout?.resume();
         ws.data.child?.stderr?.resume();
       }
+    },
+    open(ws) {
+      dials.add(ws);
     },
     message(ws, message) {
       if (!ws.data.started) {
@@ -368,6 +405,7 @@ Bun.serve<DialState>({
       stdin.write(typeof message === "string" ? Buffer.from(message) : message);
     },
     close(ws) {
+      dials.delete(ws);
       ws.data.closed = true;
       const child = ws.data.child;
       if (child === null) return;

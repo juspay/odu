@@ -27,9 +27,11 @@ echo "odu-lane: entrypoint starting ($(nproc) cpu)"
 
 # 1. /dev/shm: Cloudflare mounts a devtmpfs over /dev after the shm mount, so
 #    it is missing. Measured: nixos-render-docs fails with a multiprocessing
-#    SemLock error without it. We have CAP_SYS_ADMIN, so mount one.
+#    SemLock error without it, and Chromium needs it. The image has no
+#    `mount`, so it is a 1777 directory on that devtmpfs — RAM-backed, up to
+#    half the container's memory (6 GB on a standard-4), which is what a
+#    tmpfs /dev/shm gives a CI host anyway.
 mkdir -p /dev/shm
-mount -t tmpfs -o mode=1777,size=2g shm /dev/shm 2>/dev/null || true
 chmod 1777 /dev/shm
 
 # 2. KVM is a guarantee of this lane, not a best effort: without it NixOS VM
