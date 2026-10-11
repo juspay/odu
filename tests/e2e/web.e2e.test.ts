@@ -347,8 +347,14 @@ describe("the outcomes stay apart", () => {
   }, 60_000);
 
   it("answers a dead endpoint as unreachable — exit 3", () => {
-    const res = Bun.spawnSync([odu, "surface", "keys", "runs"], {
-      env: { ...world.env, ODU_WEB_ORIGIN: "http://127.0.0.1:1" },
+    // `--origin`, not $ODU_WEB_ORIGIN: the environment names the DEFAULT
+    // service, which the CLI starts when nothing answers — and this test only
+    // ever passed because binding port 1 is refused to a non-root user. As
+    // root (a Cloudflare lane's container) the bind succeeds, odu serves on
+    // :1 and answers. A named origin is dialled and never started, which is
+    // what "a dead endpoint" means.
+    const res = Bun.spawnSync([odu, "surface", "keys", "runs", "--origin", "http://127.0.0.1:1"], {
+      env: world.env,
     });
     expect(res.exitCode).toBe(3);
     expect(res.stderr.toString()).toContain("no surface at");
