@@ -54,29 +54,43 @@ The CLI forwards your shell's `$ODU_HOSTS`. A browser or MCP caller can supply `
 
 ### Run lanes on Cloudflare Containers
 
-Odu can run `x86_64-linux` lanes in [Cloudflare Containers](https://developers.cloudflare.com/containers/) on your own account: each container is a 4 vCPU / 12 GiB / 20 GB Firecracker microVM with `/dev/kvm`, so NixOS VM tests run there.
+Odu can run `x86_64-linux` lanes in [Cloudflare Containers](https://developers.cloudflare.com/containers/) on your own account. Each container is a Firecracker microVM with 4 vCPU, 12 GiB, an 18 GB root disk and `/dev/kvm`, so NixOS VM tests run there.
 
-1. Have a Cloudflare account on the **Workers Paid** plan, and enable **R2** in the dashboard (it holds the lane's Nix cache; without it lanes still work, more slowly when cold).
+1. Use a Cloudflare account on the **Workers Paid** plan, and enable **R2** in the dashboard. R2 holds the lanes' Nix cache.
 2. `nix run nixpkgs#wrangler -- login` (or export `CLOUDFLARE_API_TOKEN`).
-3. Declare hosts, e.g. `~/.config/odu/hosts.json`:
+3. Declare hosts, e.g. in `~/.config/odu/hosts.json`:
 
    ```json
    { "x86_64-linux": { "host": "cloudflare", "slots": 4 } }
    ```
 
-   Each cloudflare slot is its **own container** (`cloudflare:default-0` … `-3`), so a sharded recipe gets 4 × 4 vCPU. Named instances work too: `["cloudflare:a", "cloudflare:b"]`.
+   Each slot is its own container (`cloudflare:default-0` … `-3`). Named instances work too: `["cloudflare:a", "cloudflare:b"]`.
+4. `odu cloudflare setup`. It deploys two Workers with the wrangler odu pins, creates the `odu-lane-cache` bucket and a cache-signing key, and writes `~/.config/odu/cloudflare.json` (mode 0600). Re-run it whenever hosts.json grows, because it sizes `max_instances` from it. Use `ODU_CONFIG_DIR` to keep a CI config apart from your own.
+5. Run `odu run` as usual, or pin one run with `--host x86_64-linux=cloudflare`.
 
-   A run leases **one venue per platform**: every node of that platform's DAG runs in one container, and only `odu:shard=N` recipes fan out to the other slots. On a Cloudflare lane at most **one recipe per vCPU runs at once** (`ODU_RUNNER_MAX_PARALLEL` = 4); the rest wait their turn. Shard your heavy leaves (e2e suites, VM tests) so each gets its own container.
-4. `odu cloudflare setup` — deploys the `odu-lane` Worker with the wrangler odu pins, creates the `odu-lane-cache` R2 bucket and a signing key, and writes `~/.config/odu/cloudflare.json` (0600). Add `--github-token` to give containers your GitHub token (from `GH_TOKEN` or `gh auth token`) for private repositories and `api.github.com`. Re-run setup whenever hosts.json grows: it sizes `max_instances` from it.
-5. `odu run --no-post` as usual, or pin one run with `--host x86_64-linux=cloudflare`.
+**Where work runs.** A run leases **one venue per platform**, and that platform's whole DAG runs in it, because a DAG's nodes share one workspace: `unit` uses the `node_modules` that `install` left. Spreading arbitrary nodes across containers would break that. **Sharding** is how work spreads: an `odu:shard=N` recipe gets N containers, and each re-runs its own dependency closure there. Inside one container, at most **one recipe per vCPU** runs at once (`ODU_RUNNER_MAX_PARALLEL` = 4), and the rest wait their turn. The measurements behind this:
 
-Every lane has **KVM, or it does not start**: the container's entrypoint makes `/dev/kvm` usable by Nix's build users and exits with a clear error if it is missing or cannot be opened, and the Worker re-checks it before handing out a lane — a NixOS VM test never silently falls back to QEMU's software emulation (2–5× slower). `odu cloudflare status` shows `KVM: yes` per running container.
+- kolu's whole 20-node DAG started at once on one container, and its e2e hooks timed out on CPU.
+- With one recipe per vCPU, a 70-scenario Cucumber shard runs in 2.5–6 minutes per container.
 
-What a container provides is **Nix and nothing else** — the stock `nixos/nix` image has no `ps`, `awk`, fontconfig or browsers. Recipes must get every tool from Nix (`nix develop -c …`, as odu's own recipes do). `/dev/shm` (2 GiB, for Chromium) and `/dev/kvm` are set up for you. From Cloudflare's shared egress, unauthenticated `api.github.com` calls — including `github:` flake refs that are not locked — hit rate limits; use `--github-token`, or `git+https://` and tarball inputs.
+So shard your heavy leaves (e2e suites, VM tests). On the account this was built on, Cloudflare ran **at most 7 containers of one application at a time**, below what `max_instances` allowed and with no documented limit; raise it through a Cloudflare support ticket.
 
-Measured on a live account: a cold container is ready in 3–65 s, substitutes the runner from R2 in ~13 s and attaches in ~25 s; a warm one attaches in ~1 s. A 17-minute recipe with a two-minute silent stretch runs through without the lane dropping.
+**If a lane dies**, odu claims a fresh container for that platform, then re-runs the unfinished nodes plus the finished prerequisites they need, since the new container has a fresh workspace. For a sharded platform, only the primary lane is re-placed, and the other shards keep running.
 
-**Cost and lifecycle.** A running container costs about $0.11/h (memory and disk) plus up to $0.29/h CPU while busy ([pricing](https://developers.cloudflare.com/containers/pricing/)); it stops after 10 idle minutes. `odu hosts` and pool probes never start one. `odu cloudflare status` lists which declared hosts are running and what that costs now. Redeploying the Worker (setup, or any secret change) drops attached lanes about 5 minutes later — odu then re-runs their in-flight nodes — so setup refuses while a declared host is running unless you pass `--force`. `odu cloudflare teardown` deletes the Worker, its containers, the bucket and the local credentials.
+**What a container provides.** Nix, and on the recipe's `PATH` behind it: bash, coreutils, gawk, sed, grep, procps, hostname, findutils, diffutils, which, tar and gzip. Anything else, including fontconfig, browsers and language toolchains, must come from the recipe's `nix develop` shell. `/dev/shm` is a 1777 directory on RAM-backed devfs, which is what Chromium needs. Every lane has **KVM, or it does not start**: the entrypoint makes `/dev/kvm` usable by Nix's build users and exits with an error if it can't, and the Worker re-checks before handing out a lane. A NixOS VM test therefore never silently falls back to QEMU's software emulation. The bridge collects the Nix store whenever free disk bytes or inodes fall under 25%.
+
+**The lane cache.** The runner closure is published to the R2 bucket and substituted by every container. The default path reaches the bucket through the Worker's own R2 binding, so it needs no R2 API token. With an R2 API token (Object Read & Write on `odu-lane-cache`), `setup --s3-cache 's3://odu-lane-cache?endpoint=<account-id>.r2.cloudflarestorage.com&region=auto'` uses R2's S3 endpoint directly, with `R2_ACCESS_KEY_ID`/`R2_SECRET_ACCESS_KEY` in the environment; that takes the cache traffic off the Worker. Measured cold substitution of the runner: 12.3–12.6 s through the Worker, 7.6–12.4 s over S3. Uploads are signed with a key `setup` generates, and containers trust only that key, cache.nixos.org and odu's own cache.
+
+**GitHub.** From Cloudflare's shared egress, unauthenticated `api.github.com` calls are rate-limited, and that includes unlocked `github:` flake refs. Private repositories also need credentials. `setup --github-token` installs your token (from `GH_TOKEN`, else `gh auth token`) as a Worker secret. Inside each container it becomes Nix's `access-tokens` (`/etc/nix/access-tokens.conf`) and git's credential store (`/root/.git-credentials`), both mode 0600 root. It is never in a recipe's environment or a log. **But CI runs the code under test as root inside that container, so any recipe can read those files.** Use a fine-grained token with *contents: read* on only the repositories CI needs, with a short expiry, never a classic `repo`/`workflow` token. `setup --no-github-token` removes it.
+
+**Cost.** A running container costs about $0.11/h (memory and disk) plus up to $0.29/h of CPU while busy ([pricing](https://developers.cloudflare.com/containers/pricing/)), and stops after 10 idle minutes. `odu hosts` and pool probes never start one. `odu cloudflare status` shows each declared host's state, KVM, free disk and inodes, and the hourly cost right now.
+
+**Upgrades.** There are two Workers:
+
+- **`odu-lane`** holds the routes, the cache and every secret and setting. Re-running setup, rotating a token or changing the cache redeploys only this Worker. Attached lanes ride through: a 15-minute run survived three such changes.
+- **`odu-lane-dp`** holds the containers and changes only when odu's container code changes. A new version of it drops attached lanes about 5 minutes later, so setup refuses to deploy it while a declared host is running, unless you pass `--force`.
+
+`odu cloudflare teardown` deletes both Workers, their containers, the bucket and the local credentials.
 
 ### Hold a machine across runs
 
@@ -234,7 +248,7 @@ Other shared verbs: `run_list` (the board filtered by checkout, commit and seq, 
 | `dump`, `graph` | Inspect the resolved pipeline |
 | `protect` | Configure GitHub required checks; preview with `--dry-run` |
 | `web`, `surface`, `mcp` | Browser server, generated CLI, agent transport |
-| `cloudflare setup/status/destroy/teardown` | The odu-lane Worker for `cloudflare[:<instance>]` hosts; setup takes `--github-token`, `--max-instances N`, `--s3-cache URL`, `--no-cache`, `--force` |
+| `cloudflare setup/status/destroy/teardown` | The odu-lane Workers for `cloudflare[:<instance>]` hosts; setup takes `--github-token`/`--no-github-token`, `--max-instances N`, `--s3-cache URL`, `--no-cache`, `--force` |
 
 For `wait`, `rerun`, and `cancel`, omitted `--run` means `latest` in this checkout. Run addresses also accept a run ID or `<sha7>#<seq>`. `odu runs` has been replaced by `history list`.
 
