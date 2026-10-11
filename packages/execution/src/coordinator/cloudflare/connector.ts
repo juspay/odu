@@ -137,6 +137,22 @@ function resolverContext(signal: AbortSignal, onProgress: (line: string) => void
 
 const message = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
+/** What this connector last saw end a host's link, in its own terms.
+ *  surface-remote words every transport death as an ssh failure; a lane on
+ *  a Cloudflare host reports this instead (surfaceRemoteOpts.laneDeathReason). */
+export const lastCloseByHost = new Map<string, string>();
+
+function closeNote(host: string, code: number, reason: string): string {
+  const said = reason === "" ? `${code}` : `${code} ${reason}`;
+  const why =
+    code === 1006
+      ? "the connection dropped with no close frame — a data-plane deploy evicts attached lanes 5–10 min later, or the container stopped"
+      : code === 1011
+        ? "the Worker or bridge failed the connection"
+        : "the far end closed it";
+  return `${host}: the WebSocket to the odu-lane Worker closed (${said}) without the runner exiting — ${why}`;
+}
+
 export function cloudflareConnector<S extends SurfaceSpec>(
   opts: CloudflareConnectorOptions<S>,
 ): Connector<AgentClient, SshProv> {
@@ -255,8 +271,10 @@ export function cloudflareConnector<S extends SurfaceSpec>(
       // An exit frame means the bridge saw the runner exit — the analogue of a
       // child's exit. A close without one is the transport going away, which
       // the session reads as `network` (retry), like ssh's own 255.
-      if (exitInfo === null) {
-        ctx.remoteProgress(`[cloudflare] WebSocket closed (${event.code} ${event.reason}) without an exit frame`);
+      if (exitInfo === null && !settled) {
+        const note = closeNote(opts.host, event.code, event.reason);
+        lastCloseByHost.set(opts.host, note);
+        ctx.remoteProgress(`[cloudflare] ${note}`);
       }
       settle(exitInfo ?? { kind: "transport-failed" });
     });

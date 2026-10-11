@@ -16,7 +16,7 @@ import {
   sshConnector,
 } from "@kolu/surface-remote";
 import { type LaneClient, laneClientOver, laneSurface } from "../common/laneSurface";
-import { cloudflareConnector } from "./cloudflare/connector";
+import { cloudflareConnector, lastCloseByHost } from "./cloudflare/connector";
 import { isCloudflareHost } from "../common/cloudflareConfig";
 import type { ResolveRunnerDrv } from "./runnerFlake";
 
@@ -125,4 +125,19 @@ export function lineLogger(onLine: (line: string) => void): Logger {
     warn: emit("warn"),
     error: emit("error"),
   };
+}
+
+/** The reason a lane on `host` died, in its transport's own terms.
+ *
+ *  surface-remote words a transport death as "ssh transport connection
+ *  failed" whatever carried it; on a Cloudflare lane that sent operators
+ *  chasing ssh (kolu's CI). For a cloudflare host the connector's own record
+ *  of the close — or, when the link went silent first, the RPC pinger's
+ *  verdict, which already names the host — is what the lane reports. */
+export function laneDeathReason(host: string, error: string): string {
+  if (!isCloudflareHost(host) || !error.startsWith("ssh transport connection failed")) return error;
+  return (
+    lastCloseByHost.get(host) ??
+    `${host}: the WebSocket to the odu-lane Worker closed without the runner exiting`
+  );
 }

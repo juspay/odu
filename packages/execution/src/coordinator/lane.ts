@@ -42,7 +42,7 @@ import { runUnary, subscribe } from "../common/effectEdge";
 import { type LaneClient, laneSurface } from "../common/laneSurface";
 import type { ResolveRunnerDrv } from "./runnerFlake";
 import { withTimeout } from "../common/withTimeout";
-import { laneConnector, pinLaneFace } from "./surfaceRemoteOpts";
+import { laneConnector, laneDeathReason, pinLaneFace } from "./surfaceRemoteOpts";
 
 import { uploadSnapshot, type LaneSnapshot } from "./snapshotTransport";
 
@@ -263,8 +263,9 @@ export function startLane(opts: LaneOptions): Lane {
     for (const wake of [...logWaiters]) wake();
   };
 
-  const die = (error: string): void => {
+  const die = (raw: string): void => {
     if (dead || closed) return;
+    const error = laneDeathReason(opts.host, raw);
     dead = true;
     readyReject?.(new Error(error));
     runLaneDeath(

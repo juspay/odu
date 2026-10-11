@@ -32,7 +32,8 @@ import type { CloudflareConfig } from "../../common/cloudflareConfig";
 import { runUnary } from "../../common/effectEdge";
 import { laneSurface } from "../../common/laneSurface";
 import { pinLaneFace } from "../surfaceRemoteOpts";
-import { cloudflareConnector, type LaneProvisioner } from "./connector";
+import { cloudflareConnector, type LaneProvisioner, lastCloseByHost } from "./connector";
+import { laneDeathReason } from "../surfaceRemoteOpts";
 import { openLaneSocket } from "./workerApi";
 
 const BUN = process.execPath;
@@ -239,4 +240,17 @@ describe("cloudflareConnector", () => {
     expect(silentForMs).toBeLessThan(20_000);
     for (const dial of worker.dials) dial.child?.kill();
   }, 45_000);
+});
+
+describe("laneDeathReason", () => {
+  it("never words a Cloudflare lane's death as ssh", () => {
+    const ssh = "ssh transport connection failed — host unreachable or link dropped";
+    lastCloseByHost.set("cloudflare:k-0", "cloudflare:k-0: the WebSocket to the odu-lane Worker closed (1006) without the runner exiting — …");
+    expect(laneDeathReason("cloudflare:k-0", ssh)).toContain("WebSocket to the odu-lane Worker closed (1006)");
+    expect(laneDeathReason("cloudflare:k-9", ssh)).toBe("cloudflare:k-9: the WebSocket to the odu-lane Worker closed without the runner exiting");
+    expect(laneDeathReason("cloudflare:k-0", "surface stdio transport closed: the peer stopped answering")).toBe(
+      "surface stdio transport closed: the peer stopped answering",
+    );
+    expect(laneDeathReason("ci-1.example", ssh)).toBe(ssh);
+  });
 });
