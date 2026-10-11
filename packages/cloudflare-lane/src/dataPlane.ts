@@ -58,7 +58,7 @@ const CODE_VERSION = (() => {
   return h.toString(36);
 })();
 
-export class OduLane extends Container {
+export class OduLaneContainer extends Container {
   override defaultPort = PORT;
   override sleepAfter = "10m";
   override entrypoint = [BASH, "-c", entrypointSource as string];

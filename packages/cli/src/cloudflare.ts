@@ -215,9 +215,9 @@ function writeDataPlaneConfig(dir: string, maxInstances: number): void {
     // handed to the container as env, so the image stays stock nixos/nix.
     rules: [{ type: "Text", globs: ["**/bridge.ts", "**/entrypoint.sh"], fallthrough: false }],
     observability: { enabled: true },
-    containers: [{ class_name: "OduLane", image: IMAGE, instance_type: INSTANCE_TYPE, max_instances: maxInstances }],
-    durable_objects: { bindings: [{ name: "LANE", class_name: "OduLane" }] },
-    migrations: [{ tag: "v1", new_sqlite_classes: ["OduLane"] }],
+    containers: [{ class_name: "OduLaneContainer", image: IMAGE, instance_type: INSTANCE_TYPE, max_instances: maxInstances }],
+    durable_objects: { bindings: [{ name: "LANE", class_name: "OduLaneContainer" }] },
+    migrations: [{ tag: "v1", new_sqlite_classes: ["OduLaneContainer"] }],
   };
   writeFileSync(join(dir, "wrangler.json"), `${JSON.stringify(config, null, 2)}\n`);
 }
@@ -233,7 +233,9 @@ function writeControlPlaneConfig(
     main: join(src, "worker.ts"),
     compatibility_date: "2026-09-01",
     observability: { enabled: true },
-    durable_objects: { bindings: [{ name: "LANE", class_name: "OduLane", script_name: DATA_PLANE_NAME }] },
+    // Its own class name, distinct from the pre-split `OduLane`: Cloudflare
+    // refuses to delete a class while any binding names it (code 10061).
+    durable_objects: { bindings: [{ name: "DATA_PLANE", class_name: "OduLaneContainer", script_name: DATA_PLANE_NAME }] },
     // A deployment from before the split owned the OduLane class itself;
     // delete it here (its containers were the previous version's anyway).
     ...(opts.legacy
@@ -360,6 +362,9 @@ async function setup(opts: SetupOptions): Promise<number> {
   } else {
     log(`odu: ${DATA_PLANE_NAME} is current — not redeploying it`);
   }
+  // The pre-split container application is bound to the old class, and
+  // Cloudflare refuses to delete a class anything still binds (10061).
+  if (legacy) deleteLegacyContainerApp();
   writeControlPlaneConfig(cpDir, { s3Cache: opts.s3Cache, bun, publicKey, r2, dataPlaneVersion, legacy });
   const fingerprint = deployFingerprint(cpDir, ["worker.ts", "http.ts"]);
   let url: string;
@@ -377,7 +382,6 @@ async function setup(opts: SetupOptions): Promise<number> {
     }
     url = parseWorkerUrl(found, "wrangler deploy output");
   }
-  if (legacy) deleteLegacyContainerApp();
   // The bearer is generated once and kept; it is put only when it is new.
   if (previous === null) wrangler(["secret", "put", "ODU_LANE_SECRET"], { cwd: cpDir, input: secret });
 

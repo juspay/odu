@@ -32,7 +32,7 @@ import { authorized, nixCache, purgeCache } from "./http";
 const START_ENV_HEADER = "x-odu-lane-start-env";
 
 interface Env {
-  LANE: DurableObjectNamespace;
+  DATA_PLANE: DurableObjectNamespace;
   /** Absent when R2 is not enabled on the account: lanes then provision over
    *  /import instead of a cache. */
   CACHE?: R2Bucket;
@@ -111,7 +111,7 @@ export default {
       const headers = new Headers(request.headers);
       headers.delete("authorization");
       headers.set(START_ENV_HEADER, btoa(JSON.stringify(startEnv(env, url.origin))));
-      return getContainer(env.LANE as never, `${lane[1]}-${env.ODU_LANE_DP_VERSION}`).fetch(new Request(request, { headers }));
+      return getContainer(env.DATA_PLANE as never, `${lane[1]}-${env.ODU_LANE_DP_VERSION}`).fetch(new Request(request, { headers }));
     }
     return new Response("not found\n", { status: 404 });
   },
