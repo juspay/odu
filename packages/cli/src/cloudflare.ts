@@ -2,14 +2,16 @@
  * `odu cloudflare setup|status|destroy|teardown` — the one-time act that makes
  * a `cloudflare[:<instance>]` lane host dialable, and the way back out.
  *
- * `setup` deploys the `odu-lane` Worker that ships inside odu
- * (`packages/cloudflare-lane`) to the operator's OWN Cloudflare account, with
- * the wrangler odu pins, and writes what the coordinator needs to dial it into
- * `~/.config/odu/cloudflare.json`. There is no per-project file: a repo opts in
- * by naming `cloudflare` in hosts.json like any other host.
+ * `setup` deploys the two Workers that ship inside odu
+ * (`packages/cloudflare-lane`: the `odu-lane` control plane and the
+ * `odu-lane-dp` data plane) to the operator's OWN Cloudflare account, with the
+ * wrangler odu pins, and writes what the coordinator needs to dial them into
+ * `cloudflare.json` in odu's config directory. There is no per-project file: a
+ * repo opts in by naming `cloudflare` in hosts.json like any other host.
  *
- * Idempotent: re-running it redeploys the Worker and keeps the secret and the
- * signing key, so a container that is already warm keeps trusting the cache.
+ * Idempotent: re-running it redeploys only a plane whose fingerprint changed,
+ * and keeps the secret and the signing key, so a container that is already
+ * warm keeps trusting the cache.
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
@@ -43,11 +45,14 @@ const USAGE = `usage: odu cloudflare <setup|status|destroy|teardown> [args]
 
 setup [--max-instances N] [--github-token | --no-github-token]
       [--s3-cache URL] [--no-cache] [--force]
-      deploy the odu-lane Worker and its R2 lane cache to YOUR Cloudflare
+      deploy odu's two lane Workers (odu-lane: routes, cache, secrets;
+      odu-lane-dp: the containers) and the R2 lane cache to YOUR Cloudflare
       account (Workers Paid; \`wrangler login\` first, or CLOUDFLARE_API_TOKEN)
-      and write ~/.config/odu/cloudflare.json. Re-run it after changing
-      hosts.json: max_instances is sized from the cloudflare hosts declared
-      there (x2, so a redeploy can overlap the previous version's containers).
+      and write cloudflare.json in $ODU_CONFIG_DIR (default ~/.config/odu).
+      Only what changed is redeployed. Re-run it after changing hosts.json:
+      max_instances is sized from the cloudflare hosts declared there (x2,
+      at least 8). Without R2 enabled, lanes still work: a cold container
+      gets the runner shipped through the Worker instead of from a cache.
       --github-token  give containers your GitHub token (GH_TOKEN, else
                       \`gh auth token\`) for private origins and api.github.com.
       --s3-cache s3://odu-lane-cache?endpoint=<account>.r2.cloudflarestorage.com&region=auto
@@ -60,8 +65,8 @@ setup [--max-instances N] [--github-token | --no-github-token]
 status                which configured cloudflare hosts are running now, and
                       what that costs per hour
 destroy [INSTANCE]    stop one container now (default: "default")
-teardown [--yes]      delete the Worker, its containers, the R2 bucket and the
-                      local credentials
+teardown [--yes]      delete both Workers, their containers, the R2 bucket and
+                      the local credentials
 `;
 
 function log(line: string): void {
@@ -568,7 +573,7 @@ function deleteLegacyContainerApp(): void {
 async function teardown(yes: boolean): Promise<number> {
   if (!yes) {
     const ok = await confirm(
-      `This deletes the ${WORKER_NAME} Worker, its containers, the R2 bucket ${BUCKET} and your local odu-lane credentials.\nType ${WORKER_NAME} to confirm: `,
+      `This deletes the ${WORKER_NAME} and ${DATA_PLANE_NAME} Workers, their containers, the R2 bucket ${BUCKET} and your local odu-lane credentials.\nType ${WORKER_NAME} to confirm: `,
       WORKER_NAME,
     );
     if (!ok) {
