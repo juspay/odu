@@ -138,7 +138,8 @@ export class OduLane extends Container<Env> {
       // so `odu hosts` and pool probes cost nothing on an idle instance. A
       // running one is asked about KVM (one local request, no boot).
       const running = this.ctx.container?.running === true;
-      return Response.json({ running, kvm: running ? await this.kvm() : null, version: CODE_VERSION });
+      const health = running ? await this.health() : null;
+      return Response.json({ running, kvm: health?.kvm ?? null, disk: health?.disk ?? null, version: CODE_VERSION });
     }
     if (action === "agent" || action === "import") {
       await this.ensureStarted(url.origin);
@@ -147,15 +148,19 @@ export class OduLane extends Container<Env> {
     return new Response("not found\n", { status: 404 });
   }
 
-  /** The bridge's live view of /dev/kvm; null when it cannot be asked. */
-  private async kvm(): Promise<boolean | null> {
+  /** The bridge's live view of the container; null when it cannot be asked. */
+  private async health(): Promise<{ kvm: boolean; disk: unknown } | null> {
     try {
       const response = await this.containerFetch("http://container/healthz", {}, PORT);
-      const body = (await response.json()) as { kvm?: unknown };
-      return body.kvm === true;
+      const body = (await response.json()) as { kvm?: unknown; disk?: unknown };
+      return { kvm: body.kvm === true, disk: body.disk ?? null };
     } catch {
       return null;
     }
+  }
+
+  private async kvm(): Promise<boolean | null> {
+    return (await this.health())?.kvm ?? null;
   }
 
   /** Start the container, narrating the wait. The coordinator reads this

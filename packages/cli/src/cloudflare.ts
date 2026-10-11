@@ -403,16 +403,22 @@ function requireConfig(): Readonly<CloudflareConfig> | null {
 async function runningHosts(
   config: Readonly<CloudflareConfig>,
   hosts: readonly string[],
-): Promise<{ host: string; running: boolean | null; kvm: boolean | null }[]> {
+): Promise<{ host: string; running: boolean | null; kvm: boolean | null; diskFreeGiB: number | null }[]> {
   return Promise.all(
     hosts.map(async (host) => {
       const state = await fetch(laneEndpoint(config, cloudflareInstance(host), "state"), {
         headers: laneAuthHeaders(config),
         signal: AbortSignal.timeout(15_000),
       })
-        .then((r) => (r.ok ? (r.json() as Promise<{ running?: boolean; kvm?: boolean | null }>) : null))
+        .then((r) => (r.ok ? (r.json() as Promise<{ running?: boolean; kvm?: boolean | null; disk?: { freeBytes: number } | null }>) : null))
         .catch(() => null);
-      return { host, running: state === null ? null : state.running === true, kvm: state?.kvm ?? null };
+      const free = state?.disk?.freeBytes;
+      return {
+        host,
+        running: state === null ? null : state.running === true,
+        kvm: state?.kvm ?? null,
+        diskFreeGiB: typeof free === "number" ? Number((free / 1024 ** 3).toFixed(1)) : null,
+      };
     }),
   );
 }
@@ -449,7 +455,7 @@ async function status(json: boolean): Promise<number> {
         `github    ${report.githubToken ? "token installed" : "no token (public origins only)"}\n` +
         `capacity  max_instances ${report.maxInstances ?? "unknown"}; ${hosts.length} cloudflare host(s) in ${source ?? "no hosts file"}\n` +
         states
-          .map((s) => `  ${s.host.padEnd(28)} ${s.running === null ? "unknown" : s.running ? `running  KVM: ${s.kvm === true ? "yes" : s.kvm === false ? "NO" : "?"}` : "stopped"}\n`)
+          .map((s) => `  ${s.host.padEnd(28)} ${s.running === null ? "unknown" : s.running ? `running  KVM: ${s.kvm === true ? "yes" : s.kvm === false ? "NO" : "?"}  disk free: ${s.diskFreeGiB ?? "?"} GiB` : "stopped"}\n`)
           .join("") +
         `cost now  ${running} running: ~$${report.costPerHourNow.provisioned}/h + up to $${report.costPerHourNow.cpuIfBusy}/h CPU while busy\n`,
     );

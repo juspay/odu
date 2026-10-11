@@ -38,7 +38,7 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { statSync } from "node:fs";
+import { statfsSync, statSync } from "node:fs";
 import { setPriority } from "node:os";
 import { createGunzip } from "node:zlib";
 
@@ -174,9 +174,39 @@ function parseStart(raw: string): Start {
   return { agentPath: value.agentPath, binary: value.binary, args };
 }
 
+/** The container's disk: 20 GB on a standard-4, shared by every lane it has
+ *  served since it started. */
+function diskFree(): { freeBytes: number; totalBytes: number } | null {
+  try {
+    const st = statfsSync("/");
+    return { freeBytes: st.bavail * st.bsize, totalBytes: st.blocks * st.bsize };
+  } catch {
+    return null;
+  }
+}
+
+/** Below this, a new dial first collects the store. Measured on kolu's CI:
+ *  several nodes' closures and e2e artefacts on one container ran it out of
+ *  space ("No space left on device"). */
+const GC_BELOW_FRACTION = 0.3;
+
+/** Collect garbage before a runner starts, when the disk is low. Safe under a
+ *  running lane: Nix treats every store path a live process uses as a root. */
+async function ensureDisk(ws: Socket): Promise<void> {
+  const before = diskFree();
+  if (before === null || before.freeBytes / before.totalBytes >= GC_BELOW_FRACTION) return;
+  const gib = (b: number): string => (b / 1024 ** 3).toFixed(1);
+  say(ws, `[cloudflare] disk low (${gib(before.freeBytes)} of ${gib(before.totalBytes)} GiB free) — collecting the Nix store`);
+  const t0 = Date.now();
+  await run(ws, ["nix-store", "--gc"]);
+  const after = diskFree();
+  say(ws, `[cloudflare] ${after === null ? "?" : gib(after.freeBytes)} GiB free after ${((Date.now() - t0) / 1000).toFixed(1)}s of gc`);
+}
+
 /** Realise the agent from the configured substituters (the lane cache first —
  *  entrypoint.sh), then spawn it with its stdio spliced onto this socket. */
 async function startAgent(ws: Socket, spec: Start): Promise<void> {
+  await ensureDisk(ws);
   const t0 = Date.now();
   say(ws, `[cloudflare] realising ${spec.agentPath}`);
   const realised = await run(ws, ["nix-store", "--realise", spec.agentPath]);
@@ -298,7 +328,7 @@ Bun.serve<DialState>({
     }
     // The entrypoint refuses to start without a usable /dev/kvm; this is the
     // same fact, re-checked live, for `odu cloudflare status` and lane start.
-    if (route === "/healthz") return Response.json({ ok: true, kvm: kvmUsable() });
+    if (route === "/healthz") return Response.json({ ok: true, kvm: kvmUsable(), disk: diskFree() });
     return new Response("not found\n", { status: 404 });
   },
   websocket: {
