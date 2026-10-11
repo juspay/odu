@@ -199,23 +199,49 @@ function sizeInstances(explicit: number | null): { max: number; declared: string
   return { max: explicit ?? Math.max(8, 2 * hosts.length), declared: hosts, source };
 }
 
-function writeWranglerConfig(dir: string, opts: { maxInstances: number; s3Cache: string | null; bun: string; publicKey: string; r2: boolean }): void {
+const DATA_PLANE_NAME = "odu-lane-dp";
+
+/** The data plane: the Durable Object that owns the containers, and nothing
+ *  that changes with configuration (see dataPlane.ts for why). */
+function writeDataPlaneConfig(dir: string, maxInstances: number): void {
+  const src = join(workerSourceDir(), "src");
+  const config = {
+    name: DATA_PLANE_NAME,
+    main: join(src, "dataPlane.ts"),
+    compatibility_date: "2026-09-01",
+    // Reachable only through the control plane's Durable Object binding.
+    workers_dev: false,
+    // bridge.ts and entrypoint.sh travel as TEXT inside the script and are
+    // handed to the container as env, so the image stays stock nixos/nix.
+    rules: [{ type: "Text", globs: ["**/bridge.ts", "**/entrypoint.sh"], fallthrough: false }],
+    observability: { enabled: true },
+    containers: [{ class_name: "OduLane", image: IMAGE, instance_type: INSTANCE_TYPE, max_instances: maxInstances }],
+    durable_objects: { bindings: [{ name: "LANE", class_name: "OduLane" }] },
+    migrations: [{ tag: "v1", new_sqlite_classes: ["OduLane"] }],
+  };
+  writeFileSync(join(dir, "wrangler.json"), `${JSON.stringify(config, null, 2)}\n`);
+}
+
+/** The control plane: routes, auth, the R2 cache, every secret and setting. */
+function writeControlPlaneConfig(
+  dir: string,
+  opts: { s3Cache: string | null; bun: string; publicKey: string; r2: boolean; dataPlaneVersion: string; legacy: boolean },
+): void {
   const src = join(workerSourceDir(), "src");
   const config = {
     name: WORKER_NAME,
     main: join(src, "worker.ts"),
     compatibility_date: "2026-09-01",
-    // bridge.ts and entrypoint.sh travel as TEXT inside the Worker and are
-    // handed to the container as env, so the image stays stock nixos/nix.
-    rules: [{ type: "Text", globs: ["**/bridge.ts", "**/entrypoint.sh"], fallthrough: false }],
     observability: { enabled: true },
-    containers: [
-      { class_name: "OduLane", image: IMAGE, instance_type: INSTANCE_TYPE, max_instances: opts.maxInstances },
-    ],
-    durable_objects: { bindings: [{ name: "LANE", class_name: "OduLane" }] },
-    migrations: [{ tag: "v1", new_sqlite_classes: ["OduLane"] }],
+    durable_objects: { bindings: [{ name: "LANE", class_name: "OduLane", script_name: DATA_PLANE_NAME }] },
+    // A deployment from before the split owned the OduLane class itself;
+    // delete it here (its containers were the previous version's anyway).
+    ...(opts.legacy
+      ? { migrations: [{ tag: "v1", new_sqlite_classes: ["OduLane"] }, { tag: "v2", deleted_classes: ["OduLane"] }] }
+      : {}),
     ...(opts.r2 ? { r2_buckets: [{ binding: "CACHE", bucket_name: BUCKET }] } : {}),
     vars: {
+      ODU_LANE_DP_VERSION: opts.dataPlaneVersion,
       ODU_LANE_BUN: opts.bun,
       ODU_LANE_TINI: tiniStorePath(),
       ODU_LANE_BASE: (process.env.ODU_LANE_BASE ?? "").split(/\s+/).filter((p) => /^\/nix\/store\/[0-9a-z]{32}-/.test(p)).join(" "),
@@ -228,20 +254,21 @@ function writeWranglerConfig(dir: string, opts: { maxInstances: number; s3Cache:
   writeFileSync(join(dir, "wrangler.json"), `${JSON.stringify(config, null, 2)}\n`);
 }
 
-/** The GitHub token odu already posts statuses with: GH_TOKEN, else the
- *  pinned gh's own login. Returned, never printed. */
-/** What a deploy is made of: the generated wrangler config (image, size,
- *  vars) and every source file wrangler bundles. Equal fingerprints mean a
- *  deploy would change nothing. */
-function deployFingerprint(dir: string): string {
+/** What a deploy is made of: the generated wrangler config and the sources
+ *  wrangler bundles from it. Equal fingerprints mean a deploy would change
+ *  nothing. */
+function deployFingerprint(dir: string, files: readonly string[]): string {
   const hash = createHash("sha256");
   hash.update(readFileSync(join(dir, "wrangler.json")));
   const src = join(workerSourceDir(), "src");
-  for (const file of ["worker.ts", "http.ts", "bridge.ts", "entrypoint.sh"]) hash.update(readFileSync(join(src, file)));
+  for (const file of files) hash.update(readFileSync(join(src, file)));
   hash.update(readFileSync(join(workerSourceDir(), "node_modules", "@cloudflare", "containers", "package.json")));
   return hash.digest("hex").slice(0, 16);
 }
 
+
+/** The GitHub token odu already posts statuses with: GH_TOKEN, else the
+ *  pinned gh's own login. Returned, never printed. */
 function githubToken(): string | null {
   const fromEnv = process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN;
   if (fromEnv !== undefined && fromEnv !== "") return fromEnv;
@@ -304,32 +331,44 @@ async function setup(opts: SetupOptions): Promise<number> {
     log(`odu: ${sized.source} declares ${sized.declared.length} cloudflare host(s): ${sized.declared.join(", ")}`);
   }
 
-  // Any new Worker version — a deploy, even a `secret put` — evicts the
-  // Durable Objects that proxy every attached lane's WebSocket. Measured
-  // twice: the socket drops ~5 min after the deploy (1006); a lane is then
-  // resurrected (its in-flight node re-runs) and a lost lease fails its run
-  // closed. So setup creates a new version only when something changed, and
-  // not under a running lane without being told to.
-  writeWranglerConfig(dir, { maxInstances: sized.max, s3Cache: opts.s3Cache, bun, publicKey, r2 });
-  const fingerprint = deployFingerprint(dir);
-  const unchanged = previous !== null && previous.deployed === fingerprint;
-  let url: string;
-  if (unchanged) {
-    url = previous.workerUrl;
-    log(`odu: ${WORKER_NAME} is already deployed with this odu and config — not redeploying`);
-  } else {
+  // Two scripts (dataPlane.ts explains why). A new version of the DATA plane
+  // evicts the Durable Objects carrying attached lanes — measured: dropped
+  // ~5 min after the deploy (1006) — so it deploys only when the container
+  // code itself changed, and not under a running declared host unless told
+  // to. The CONTROL plane holds every setting and secret and redeploys
+  // freely: measured, a lane survives it (see the PR's soak).
+  const dpDir = join(dir, "dp");
+  const cpDir = join(dir, "cp");
+  mkdirSync(dpDir, { recursive: true });
+  mkdirSync(cpDir, { recursive: true });
+  writeDataPlaneConfig(dpDir, sized.max);
+  const dataPlaneVersion = deployFingerprint(dpDir, ["dataPlane.ts", "bridge.ts", "entrypoint.sh"]);
+  const legacy = previous !== null && previous.dataPlane === undefined;
+  if (previous?.dataPlane !== dataPlaneVersion) {
     if (previous !== null && !opts.force) {
       const busy = (await runningHosts(previous, sized.declared)).filter((s) => s.running === true);
       if (busy.length > 0) {
         log(
-          `odu: ${busy.map((s) => s.host).join(", ")} ${busy.length === 1 ? "is" : "are"} running. Redeploying drops every attached lane ` +
-            "~5 min later (odu re-runs a lane's in-flight node; a run whose lease drops fails). Wait for them to stop (10 min idle), or pass --force.",
+          `odu: the lane's container code changed, and ${busy.map((s) => s.host).join(", ")} ${busy.length === 1 ? "is" : "are"} running. ` +
+            "Deploying it drops their attached lanes ~5 min later (odu re-runs a lane's unfinished nodes). Wait for them to stop (10 min idle), or pass --force.",
         );
         return 1;
       }
     }
-    log(`odu: deploying ${WORKER_NAME} (image ${IMAGE}, ${INSTANCE_TYPE}, max_instances ${sized.max})`);
-    const deployed = wrangler(["deploy"], { cwd: dir });
+    log(`odu: deploying ${DATA_PLANE_NAME} (image ${IMAGE}, ${INSTANCE_TYPE}, max_instances ${sized.max})`);
+    wrangler(["deploy"], { cwd: dpDir });
+  } else {
+    log(`odu: ${DATA_PLANE_NAME} is current — not redeploying it`);
+  }
+  writeControlPlaneConfig(cpDir, { s3Cache: opts.s3Cache, bun, publicKey, r2, dataPlaneVersion, legacy });
+  const fingerprint = deployFingerprint(cpDir, ["worker.ts", "http.ts"]);
+  let url: string;
+  if (previous !== null && previous.deployed === fingerprint && !legacy) {
+    url = previous.workerUrl;
+    log(`odu: ${WORKER_NAME} is current — not redeploying it`);
+  } else {
+    log(`odu: deploying ${WORKER_NAME}`);
+    const deployed = wrangler(["deploy"], { cwd: cpDir });
     const found = /https:\/\/[a-z0-9.-]+\.workers\.dev/.exec(deployed)?.[0] ?? previous?.workerUrl;
     if (found === undefined) {
       log(deployed);
@@ -338,9 +377,9 @@ async function setup(opts: SetupOptions): Promise<number> {
     }
     url = parseWorkerUrl(found, "wrangler deploy output");
   }
-  // The bearer is generated once and kept; it is put only when it is new,
-  // since every put is a new Worker version.
-  if (previous === null) wrangler(["secret", "put", "ODU_LANE_SECRET"], { cwd: dir, input: secret });
+  if (legacy) deleteLegacyContainerApp();
+  // The bearer is generated once and kept; it is put only when it is new.
+  if (previous === null) wrangler(["secret", "put", "ODU_LANE_SECRET"], { cwd: cpDir, input: secret });
 
   // GitHub token: an explicit flag decides; otherwise keep what was there.
   let withToken = previous?.githubToken === true;
@@ -350,11 +389,11 @@ async function setup(opts: SetupOptions): Promise<number> {
       log("odu: --github-token: no GH_TOKEN and `gh auth token` gave none — log gh in first");
       return 1;
     }
-    wrangler(["secret", "put", "GITHUB_TOKEN"], { cwd: dir, input: token });
+    wrangler(["secret", "put", "GITHUB_TOKEN"], { cwd: cpDir, input: token });
     withToken = true;
     log("odu: containers get your GitHub token (as a Worker secret; written to root-only files in the container)");
   } else if (opts.githubToken === false && withToken) {
-    wrangler(["secret", "delete", "GITHUB_TOKEN"], { cwd: dir, input: "y\n" });
+    wrangler(["secret", "delete", "GITHUB_TOKEN"], { cwd: cpDir, input: "y\n" });
     withToken = false;
     log("odu: removed the GitHub token from the Worker");
   }
@@ -369,8 +408,8 @@ async function setup(opts: SetupOptions): Promise<number> {
     }
     const awsCredentialsFile = join(configDir, "cloudflare-r2.credentials");
     writePrivate(awsCredentialsFile, `[default]\naws_access_key_id = ${id}\naws_secret_access_key = ${key}\n`);
-    wrangler(["secret", "put", "AWS_ACCESS_KEY_ID"], { cwd: dir, input: id });
-    wrangler(["secret", "put", "AWS_SECRET_ACCESS_KEY"], { cwd: dir, input: key });
+    wrangler(["secret", "put", "AWS_ACCESS_KEY_ID"], { cwd: cpDir, input: id });
+    wrangler(["secret", "put", "AWS_SECRET_ACCESS_KEY"], { cwd: cpDir, input: key });
     cache = { url: opts.s3Cache, secretKeyFile, publicKey, netrcFile: null, awsCredentialsFile };
   } else if (r2) {
     const netrcFile = join(configDir, "cloudflare-lane.netrc");
@@ -384,6 +423,7 @@ async function setup(opts: SetupOptions): Promise<number> {
     cache,
     maxInstances: sized.max,
     deployed: fingerprint,
+    dataPlane: dataPlaneVersion,
     ...(withToken ? { githubToken: true } : {}),
   };
   writePrivate(cloudflareConfigPath(), `${JSON.stringify(config, null, 2)}\n`);
@@ -491,6 +531,20 @@ async function confirm(question: string, expected: string): Promise<boolean> {
   }
 }
 
+/** Before the split, `odu-lane` owned a container application of its own;
+ *  its class is gone after the migration, so its application goes too. */
+function deleteLegacyContainerApp(): void {
+  const apps = JSON.parse(wrangler(["containers", "list", "--json"]).replace(/^[^[]*/s, "")) as { id: string; name: string }[];
+  for (const app of apps.filter((a) => a.name === `${WORKER_NAME}-odulane`)) {
+    try {
+      wrangler(["containers", "delete", app.id], { input: "y\n" });
+      log(`odu: deleted the pre-split container application ${app.name}`);
+    } catch {
+      log(`odu: could not delete ${app.name} — remove it with \`wrangler containers delete ${app.id}\``);
+    }
+  }
+}
+
 /** Remove everything setup created, account side and local. Ordered so a
  *  failure part-way leaves something `teardown` can be re-run against: the
  *  bucket is emptied through the Worker while it still exists, then the
@@ -531,6 +585,7 @@ async function teardown(yes: boolean): Promise<number> {
     }
   };
   step(`Worker ${WORKER_NAME}`, ["delete", "--name", WORKER_NAME, "--force"], /not found|does not exist|10007/i);
+  step(`Worker ${DATA_PLANE_NAME}`, ["delete", "--name", DATA_PLANE_NAME, "--force"], /not found|does not exist|10007/i);
   const apps = JSON.parse(wrangler(["containers", "list", "--json"]).replace(/^[^[]*/s, "")) as { id: string; name: string }[];
   for (const app of apps.filter((a) => a.name.startsWith(`${WORKER_NAME}-`))) {
     step(`container application ${app.name}`, ["containers", "delete", app.id], /not found/i);

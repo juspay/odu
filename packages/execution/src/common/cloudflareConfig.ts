@@ -83,6 +83,9 @@ export interface CloudflareConfig {
   /** Fingerprint of the last deploy (cli/src/cloudflare.ts) — an unchanged
    *  setup creates no new Worker version, which would drop attached lanes. */
   deployed?: string;
+  /** Fingerprint of the deployed data plane (`odu-lane-dp`); absent on a
+   *  deployment from before the control/data split. */
+  dataPlane?: string;
 }
 
 export { oduConfigDir };
@@ -131,6 +134,7 @@ export function readCloudflareConfig(): Readonly<CloudflareConfig> | null {
     ...(typeof raw.maxInstances === "number" ? { maxInstances: raw.maxInstances } : {}),
     ...(raw.githubToken === true ? { githubToken: true } : {}),
     ...(typeof raw.deployed === "string" ? { deployed: raw.deployed } : {}),
+    ...(typeof raw.dataPlane === "string" ? { dataPlane: raw.dataPlane } : {}),
   });
 }
 
