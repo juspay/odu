@@ -380,6 +380,7 @@ export const ODU_CHILD_ENV_KEYS: readonly string[] = [
   "GH_CONFIG_DIR",
   // odu's own locators.
   "ODU_HOSTS",
+  "ODU_CONFIG_DIR",
   "ODU_STATE_DIR",
   "ODU_RUNNER_FLAKE",
   "ODU_SELF",

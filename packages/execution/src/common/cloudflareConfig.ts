@@ -11,13 +11,14 @@
  * land in one container, which is what makes the venue flock mean anything).
  *
  * The Worker URL, its bearer secret and the lane cache are written once by
- * `odu cloudflare setup` to `~/.config/odu/cloudflare.json` (mode 0600). A
+ * `odu cloudflare setup` to `cloudflare.json` in odu's config directory
+ * (`$ODU_CONFIG_DIR`, else `~/.config/odu`; mode 0600). A
  * FILE rather than env vars because runs execute in the shared service daemon,
  * whose environment is an allowlist (`spawn.ts`), not the caller's shell.
  */
 
 import { readFileSync } from "node:fs";
-import { hostsCandidates } from "./hostsFile";
+import { hostsCandidates, oduConfigDir } from "./hostsFile";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -84,9 +85,7 @@ export interface CloudflareConfig {
   deployed?: string;
 }
 
-export function oduConfigDir(): string {
-  return join(homedir(), ".config", "odu");
-}
+export { oduConfigDir };
 
 export function cloudflareConfigPath(): string {
   return join(oduConfigDir(), "cloudflare.json");
