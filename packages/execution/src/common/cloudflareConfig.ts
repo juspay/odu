@@ -79,6 +79,9 @@ export interface CloudflareConfig {
    *  declares. Absent in configs written before it existed. */
   maxInstances?: number;
   githubToken?: boolean;
+  /** Fingerprint of the last deploy (cli/src/cloudflare.ts) — an unchanged
+   *  setup creates no new Worker version, which would drop attached lanes. */
+  deployed?: string;
 }
 
 export function oduConfigDir(): string {
@@ -128,6 +131,7 @@ export function readCloudflareConfig(): Readonly<CloudflareConfig> | null {
     cache: raw.cache ?? null,
     ...(typeof raw.maxInstances === "number" ? { maxInstances: raw.maxInstances } : {}),
     ...(raw.githubToken === true ? { githubToken: true } : {}),
+    ...(typeof raw.deployed === "string" ? { deployed: raw.deployed } : {}),
   });
 }
 
@@ -152,17 +156,6 @@ export function laneEndpoint(
  *  of a request to the Worker it was minted for. */
 export function laneAuthHeaders(config: Pick<CloudflareConfig, "secret">): Record<string, string> {
   return { authorization: `Bearer ${config.secret}` };
-}
-
-/** The config a dial needs, or the sentence that gets one. */
-export function requireCloudflareConfig(): Readonly<CloudflareConfig> {
-  const config = readCloudflareConfig();
-  if (config === null) {
-    throw new Error(
-      `odu: a cloudflare lane needs ${cloudflareConfigPath()} — run \`odu cloudflare setup\` once to deploy the odu-lane Worker to your account`,
-    );
-  }
-  return config;
 }
 
 /** Every cloudflare host the operator's hosts file declares, slots expanded —

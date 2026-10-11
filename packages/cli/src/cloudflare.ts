@@ -13,7 +13,7 @@
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { createInterface } from "node:readline/promises";
@@ -219,6 +219,18 @@ function writeWranglerConfig(dir: string, opts: { maxInstances: number; s3Cache:
 
 /** The GitHub token odu already posts statuses with: GH_TOKEN, else the
  *  pinned gh's own login. Returned, never printed. */
+/** What a deploy is made of: the generated wrangler config (image, size,
+ *  vars) and every source file wrangler bundles. Equal fingerprints mean a
+ *  deploy would change nothing. */
+function deployFingerprint(dir: string): string {
+  const hash = createHash("sha256");
+  hash.update(readFileSync(join(dir, "wrangler.json")));
+  const src = join(workerSourceDir(), "src");
+  for (const file of ["worker.ts", "http.ts", "bridge.ts", "entrypoint.sh"]) hash.update(readFileSync(join(src, file)));
+  hash.update(readFileSync(join(workerSourceDir(), "node_modules", "@cloudflare", "containers", "package.json")));
+  return hash.digest("hex").slice(0, 16);
+}
+
 function githubToken(): string | null {
   const fromEnv = process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN;
   if (fromEnv !== undefined && fromEnv !== "") return fromEnv;
@@ -282,32 +294,42 @@ async function setup(opts: SetupOptions): Promise<number> {
   }
 
   // Any new Worker version — a deploy, even a `secret put` — evicts the
-  // Durable Objects that proxy every attached lane's WebSocket. Measured: the
-  // socket drops ~5 min after the deploy (1006), and odu resurrects the lane
-  // by re-running its in-flight node. So do not do it under a running lane
-  // without being told to.
-  if (previous !== null && !opts.force) {
-    const busy = (await runningHosts(previous, sized.declared)).filter((s) => s.running === true);
-    if (busy.length > 0) {
-      log(
-        `odu: ${busy.map((s) => s.host).join(", ")} ${busy.length === 1 ? "is" : "are"} running. Redeploying drops every attached lane ` +
-          "~5 min later (odu then re-runs its in-flight node). Wait for them to stop (10 min idle), or pass --force.",
-      );
+  // Durable Objects that proxy every attached lane's WebSocket. Measured
+  // twice: the socket drops ~5 min after the deploy (1006); a lane is then
+  // resurrected (its in-flight node re-runs) and a lost lease fails its run
+  // closed. So setup creates a new version only when something changed, and
+  // not under a running lane without being told to.
+  writeWranglerConfig(dir, { maxInstances: sized.max, s3Cache: opts.s3Cache, bun, publicKey, r2 });
+  const fingerprint = deployFingerprint(dir);
+  const unchanged = previous !== null && previous.deployed === fingerprint;
+  let url: string;
+  if (unchanged) {
+    url = previous.workerUrl;
+    log(`odu: ${WORKER_NAME} is already deployed with this odu and config — not redeploying`);
+  } else {
+    if (previous !== null && !opts.force) {
+      const busy = (await runningHosts(previous, sized.declared)).filter((s) => s.running === true);
+      if (busy.length > 0) {
+        log(
+          `odu: ${busy.map((s) => s.host).join(", ")} ${busy.length === 1 ? "is" : "are"} running. Redeploying drops every attached lane ` +
+            "~5 min later (odu re-runs a lane's in-flight node; a run whose lease drops fails). Wait for them to stop (10 min idle), or pass --force.",
+        );
+        return 1;
+      }
+    }
+    log(`odu: deploying ${WORKER_NAME} (image ${IMAGE}, ${INSTANCE_TYPE}, max_instances ${sized.max})`);
+    const deployed = wrangler(["deploy"], { cwd: dir });
+    const found = /https:\/\/[a-z0-9.-]+\.workers\.dev/.exec(deployed)?.[0] ?? previous?.workerUrl;
+    if (found === undefined) {
+      log(deployed);
+      log("odu: could not find the Worker URL in wrangler's output");
       return 1;
     }
+    url = parseWorkerUrl(found, "wrangler deploy output");
   }
-
-  writeWranglerConfig(dir, { maxInstances: sized.max, s3Cache: opts.s3Cache, bun, publicKey, r2 });
-  log(`odu: deploying ${WORKER_NAME} (image ${IMAGE}, ${INSTANCE_TYPE}, max_instances ${sized.max})`);
-  const deployed = wrangler(["deploy"], { cwd: dir });
-  const found = /https:\/\/[a-z0-9.-]+\.workers\.dev/.exec(deployed)?.[0] ?? previous?.workerUrl;
-  if (found === undefined) {
-    log(deployed);
-    log("odu: could not find the Worker URL in wrangler's output");
-    return 1;
-  }
-  const url = parseWorkerUrl(found, "wrangler deploy output");
-  wrangler(["secret", "put", "ODU_LANE_SECRET"], { cwd: dir, input: secret });
+  // The bearer is generated once and kept; it is put only when it is new,
+  // since every put is a new Worker version.
+  if (previous === null) wrangler(["secret", "put", "ODU_LANE_SECRET"], { cwd: dir, input: secret });
 
   // GitHub token: an explicit flag decides; otherwise keep what was there.
   let withToken = previous?.githubToken === true;
@@ -350,6 +372,7 @@ async function setup(opts: SetupOptions): Promise<number> {
     secret,
     cache,
     maxInstances: sized.max,
+    deployed: fingerprint,
     ...(withToken ? { githubToken: true } : {}),
   };
   writePrivate(cloudflareConfigPath(), `${JSON.stringify(config, null, 2)}\n`);

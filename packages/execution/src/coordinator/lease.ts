@@ -27,7 +27,6 @@ import {
 import {
   DEFAULT_LEASE_LOCK,
   type LaneClient,
-  laneSurface,
   type LeaseHolder,
 } from "../common/laneSurface";
 import {
