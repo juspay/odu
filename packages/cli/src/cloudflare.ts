@@ -1,6 +1,6 @@
 /**
- * `odu cloudflare setup|status|destroy` — the one-time act that makes a
- * `cloudflare[:<instance>]` lane host dialable.
+ * `odu cloudflare setup|status|destroy|teardown` — the one-time act that makes
+ * a `cloudflare[:<instance>]` lane host dialable, and the way back out.
  *
  * `setup` deploys the `odu-lane` Worker that ships inside odu
  * (`packages/cloudflare-lane`) to the operator's OWN Cloudflare account, with
@@ -16,11 +16,14 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
+import { createInterface } from "node:readline/promises";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import {
   type CloudflareConfig,
   cloudflareConfigPath,
+  cloudflareInstance,
+  declaredCloudflareHosts,
   type LaneCacheConfig,
   laneAuthHeaders,
   laneEndpoint,
@@ -36,20 +39,29 @@ const BUCKET = "odu-lane-cache";
 const IMAGE = "docker.io/nixos/nix:2.35.2-amd64";
 const INSTANCE_TYPE = "standard-4";
 
-const USAGE = `usage: odu cloudflare <setup|status|destroy> [args]
+const USAGE = `usage: odu cloudflare <setup|status|destroy|teardown> [args]
 
-setup [--max-instances N] [--s3-cache URL] [--no-cache]
-      deploy the odu-lane Worker + R2 cache to your Cloudflare account (wrangler
-      must be logged in, or CLOUDFLARE_API_TOKEN set) and write
-      ~/.config/odu/cloudflare.json. Then name "cloudflare" (or
-      "cloudflare:<instance>") as a host in hosts.json or --host.
-      --s3-cache s3://odu-lane-cache?endpoint=<acct>.r2.cloudflarestorage.com&region=auto
-      uses R2's S3 API instead of the Worker-proxied cache; needs
-      R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY in the environment.
-      --no-cache (or R2 not enabled on the account): no lane cache; a cold
-      container gets the runner closure shipped through the Worker instead.
-status                     the config and whether the Worker answers
-destroy [INSTANCE]         kill a container (default: "default")
+setup [--max-instances N] [--github-token | --no-github-token]
+      [--s3-cache URL] [--no-cache] [--force]
+      deploy the odu-lane Worker and its R2 lane cache to YOUR Cloudflare
+      account (Workers Paid; \`wrangler login\` first, or CLOUDFLARE_API_TOKEN)
+      and write ~/.config/odu/cloudflare.json. Re-run it after changing
+      hosts.json: max_instances is sized from the cloudflare hosts declared
+      there (x2, so a redeploy can overlap the previous version's containers).
+      --github-token  give containers your GitHub token (GH_TOKEN, else
+                      \`gh auth token\`) for private origins and api.github.com.
+      --s3-cache s3://odu-lane-cache?endpoint=<account>.r2.cloudflarestorage.com&region=auto
+                      use R2's S3 API instead of the Worker-proxied cache; needs
+                      R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY in the environment.
+      --no-cache      no lane cache: a cold container gets the runner closure
+                      shipped through the Worker instead.
+      --force         redeploy even while a declared cloudflare host is running
+                      (its attached lanes drop ~5 min later; odu re-runs them).
+status                which configured cloudflare hosts are running now, and
+                      what that costs per hour
+destroy [INSTANCE]    stop one container now (default: "default")
+teardown [--yes]      delete the Worker, its containers, the R2 bucket and the
+                      local credentials
 `;
 
 function log(line: string): void {
@@ -63,7 +75,7 @@ function wranglerBin(): string {
   const pinned = process.env.ODU_WRANGLER;
   if (pinned !== undefined && pinned !== "") {
     // Unconditional: a no-op when it is already valid, and no check-then-act.
-    execFileSync("nix-store", ["--realise", pinned], { stdio: ["ignore", "ignore", "inherit"] });
+    execFileSync("nix-store", ["--realise", pinned], { stdio: ["ignore", "ignore", "pipe"] });
     return join(pinned, "bin", "wrangler");
   }
   return "wrangler";
@@ -151,13 +163,34 @@ function ensureSigningKey(dir: string): { secretKeyFile: string; publicKey: stri
   return { secretKeyFile, publicKey };
 }
 
+/** Cloudflare Containers pricing beyond the Workers Paid allowance
+ *  (developers.cloudflare.com/containers/pricing, read 2026-10-11): vCPU
+ *  $0.000020/s billed on ACTIVE use; memory $0.0000025/GiB-s and disk
+ *  $0.00000007/GB-s billed while the instance runs. standard-4 = 4 vCPU,
+ *  12 GiB, 20 GB. */
+const COST = {
+  provisionedPerHour: (12 * 0.0000025 + 20 * 0.00000007) * 3600, // ≈ $0.113
+  busyCpuPerHour: 4 * 0.00002 * 3600, // ≈ $0.288 at 100% of 4 vCPU
+};
+
 interface SetupOptions {
-  maxInstances: number;
+  maxInstances: number | null;
   s3Cache: string | null;
   noCache: boolean;
+  githubToken: boolean | null;
+  force: boolean;
 }
 
-function writeWranglerConfig(dir: string, opts: SetupOptions & { bun: string; publicKey: string; r2: boolean }): void {
+/** How many containers to allow. A run can ask for one per declared
+ *  cloudflare host at once, and the Durable Object names carry a code hash
+ *  (worker.ts), so for `sleepAfter` after a redeploy the previous version's
+ *  containers still count — hence twice the declared number, never below 8. */
+function sizeInstances(explicit: number | null): { max: number; declared: string[]; source: string | null } {
+  const { source, hosts } = declaredCloudflareHosts();
+  return { max: explicit ?? Math.max(8, 2 * hosts.length), declared: hosts, source };
+}
+
+function writeWranglerConfig(dir: string, opts: { maxInstances: number; s3Cache: string | null; bun: string; publicKey: string; r2: boolean }): void {
   const src = join(workerSourceDir(), "src");
   const config = {
     name: WORKER_NAME,
@@ -184,15 +217,52 @@ function writeWranglerConfig(dir: string, opts: SetupOptions & { bun: string; pu
   writeFileSync(join(dir, "wrangler.json"), `${JSON.stringify(config, null, 2)}\n`);
 }
 
+/** The GitHub token odu already posts statuses with: GH_TOKEN, else the
+ *  pinned gh's own login. Returned, never printed. */
+function githubToken(): string | null {
+  const fromEnv = process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN;
+  if (fromEnv !== undefined && fromEnv !== "") return fromEnv;
+  const gh = process.env.ODU_GH_BIN ?? "gh";
+  const result = spawnSync(gh, ["auth", "token"], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] });
+  const token = result.status === 0 ? result.stdout.trim() : "";
+  return token === "" ? null : token;
+}
+
+function deployDir(): string {
+  return join(homedir(), ".cache", "odu", "cloudflare-lane");
+}
+
+/** The R2 lane cache is a bucket, and R2 is opt-in per account (a dashboard
+ *  click wrangler cannot make: the API answers 10042). Its absence degrades to
+ *  shipping the closure through the Worker (shipClosure.ts), not a refusal. */
+function ensureBucket(): boolean {
+  log(`odu: ensuring R2 bucket ${BUCKET}`);
+  try {
+    wrangler(["r2", "bucket", "create", BUCKET]);
+    return true;
+  } catch (error) {
+    const output = (error as { output?: string }).output ?? "";
+    if (/already exists|already own/i.test(output)) return true;
+    if (/enable R2|10042/i.test(output)) {
+      log(
+        "odu: R2 is not enabled on this Cloudflare account (dashboard → R2 → enable).\n" +
+          "     Continuing WITHOUT a lane cache: each cold container is provisioned by shipping\n" +
+          "     the runner closure through the Worker. Re-run setup after enabling R2.",
+      );
+      return false;
+    }
+    throw error;
+  }
+}
+
 async function setup(opts: SetupOptions): Promise<number> {
   const configDir = oduConfigDir();
-  mkdirSync(configDir, { recursive: true });
-  const deployDir = join(homedir(), ".cache", "odu", "cloudflare-lane");
-  mkdirSync(deployDir, { recursive: true });
+  mkdirSync(configDir, { recursive: true, mode: 0o700 });
+  const dir = deployDir();
+  mkdirSync(dir, { recursive: true });
 
   log("odu: checking wrangler login");
-  const who = wrangler(["whoami"]);
-  if (/not authenticated/i.test(who)) {
+  if (/not authenticated/i.test(wrangler(["whoami"]))) {
     log("odu: wrangler is not logged in — run `wrangler login` (or set CLOUDFLARE_API_TOKEN) and retry");
     return 1;
   }
@@ -201,52 +271,63 @@ async function setup(opts: SetupOptions): Promise<number> {
   const secret = previous?.secret ?? randomBytes(32).toString("base64url");
   const { secretKeyFile, publicKey } = ensureSigningKey(configDir);
   const bun = bunStorePath();
-
-  // The lane cache is an R2 bucket. R2 is opt-in per account (a dashboard
-  // click wrangler cannot make), so its absence degrades to shipping the
-  // closure over the Worker (shipClosure.ts) rather than refusing setup.
-  let r2 = !opts.noCache;
-  if (r2) {
-    log(`odu: ensuring R2 bucket ${BUCKET}`);
-    try {
-      wrangler(["r2", "bucket", "create", BUCKET]);
-    } catch (error) {
-      const output = (error as { output?: string }).output ?? "";
-      if (/already exists|already own/i.test(output)) {
-        // fine
-      } else if (/enable R2|10042/i.test(output)) {
-        r2 = false;
-        log(
-          "odu: R2 is not enabled on this Cloudflare account (dashboard → R2 → enable/purchase).\n" +
-            "     Continuing WITHOUT a lane cache: each cold container is provisioned by shipping\n" +
-            "     the runner closure through the Worker. Re-run setup after enabling R2.",
-        );
-      } else {
-        throw error;
-      }
-    }
-  }
+  const r2 = !opts.noCache && ensureBucket();
   if (!r2 && opts.s3Cache !== null) {
     log("odu: --s3-cache needs R2 enabled on the account");
     return 1;
   }
+  const sized = sizeInstances(opts.maxInstances);
+  if (sized.declared.length > 0) {
+    log(`odu: ${sized.source} declares ${sized.declared.length} cloudflare host(s): ${sized.declared.join(", ")}`);
+  }
 
-  writeWranglerConfig(deployDir, { ...opts, bun, publicKey, r2 });
-  log(`odu: deploying ${WORKER_NAME} (image ${IMAGE}, ${INSTANCE_TYPE}, max ${opts.maxInstances} containers)`);
-  const deployed = wrangler(["deploy"], { cwd: deployDir });
+  // Any new Worker version — a deploy, even a `secret put` — evicts the
+  // Durable Objects that proxy every attached lane's WebSocket. Measured: the
+  // socket drops ~5 min after the deploy (1006), and odu resurrects the lane
+  // by re-running its in-flight node. So do not do it under a running lane
+  // without being told to.
+  if (previous !== null && !opts.force) {
+    const busy = (await runningHosts(previous, sized.declared)).filter((s) => s.running === true);
+    if (busy.length > 0) {
+      log(
+        `odu: ${busy.map((s) => s.host).join(", ")} ${busy.length === 1 ? "is" : "are"} running. Redeploying drops every attached lane ` +
+          "~5 min later (odu then re-runs its in-flight node). Wait for them to stop (10 min idle), or pass --force.",
+      );
+      return 1;
+    }
+  }
+
+  writeWranglerConfig(dir, { maxInstances: sized.max, s3Cache: opts.s3Cache, bun, publicKey, r2 });
+  log(`odu: deploying ${WORKER_NAME} (image ${IMAGE}, ${INSTANCE_TYPE}, max_instances ${sized.max})`);
+  const deployed = wrangler(["deploy"], { cwd: dir });
   const found = /https:\/\/[a-z0-9.-]+\.workers\.dev/.exec(deployed)?.[0] ?? previous?.workerUrl;
-  const url = found === undefined ? undefined : parseWorkerUrl(found, "wrangler deploy output");
-  if (url === undefined) {
+  if (found === undefined) {
     log(deployed);
     log("odu: could not find the Worker URL in wrangler's output");
     return 1;
   }
-  wrangler(["secret", "put", "ODU_LANE_SECRET"], { cwd: deployDir, input: secret });
+  const url = parseWorkerUrl(found, "wrangler deploy output");
+  wrangler(["secret", "put", "ODU_LANE_SECRET"], { cwd: dir, input: secret });
 
-  let cache: LaneCacheConfig | null;
-  if (!r2) {
-    cache = null;
-  } else if (opts.s3Cache !== null) {
+  // GitHub token: an explicit flag decides; otherwise keep what was there.
+  let withToken = previous?.githubToken === true;
+  if (opts.githubToken === true) {
+    const token = githubToken();
+    if (token === null) {
+      log("odu: --github-token: no GH_TOKEN and `gh auth token` gave none — log gh in first");
+      return 1;
+    }
+    wrangler(["secret", "put", "GITHUB_TOKEN"], { cwd: dir, input: token });
+    withToken = true;
+    log("odu: containers get your GitHub token (as a Worker secret; written to root-only files in the container)");
+  } else if (opts.githubToken === false && withToken) {
+    wrangler(["secret", "delete", "GITHUB_TOKEN"], { cwd: dir, input: "y\n" });
+    withToken = false;
+    log("odu: removed the GitHub token from the Worker");
+  }
+
+  let cache: LaneCacheConfig | null = null;
+  if (r2 && opts.s3Cache !== null) {
     const id = process.env.R2_ACCESS_KEY_ID;
     const key = process.env.R2_SECRET_ACCESS_KEY;
     if (id === undefined || key === undefined) {
@@ -255,48 +336,170 @@ async function setup(opts: SetupOptions): Promise<number> {
     }
     const awsCredentialsFile = join(configDir, "cloudflare-r2.credentials");
     writePrivate(awsCredentialsFile, `[default]\naws_access_key_id = ${id}\naws_secret_access_key = ${key}\n`);
-    wrangler(["secret", "put", "AWS_ACCESS_KEY_ID"], { cwd: deployDir, input: id });
-    wrangler(["secret", "put", "AWS_SECRET_ACCESS_KEY"], { cwd: deployDir, input: key });
+    wrangler(["secret", "put", "AWS_ACCESS_KEY_ID"], { cwd: dir, input: id });
+    wrangler(["secret", "put", "AWS_SECRET_ACCESS_KEY"], { cwd: dir, input: key });
     cache = { url: opts.s3Cache, secretKeyFile, publicKey, netrcFile: null, awsCredentialsFile };
-  } else {
+  } else if (r2) {
     const netrcFile = join(configDir, "cloudflare-lane.netrc");
     writePrivate(netrcFile, `machine ${new URL(url).hostname} login odu password ${secret}\n`);
     cache = { url: `${url}/nix-cache`, secretKeyFile, publicKey, netrcFile, awsCredentialsFile: null };
   }
 
-  const config: CloudflareConfig = { workerUrl: url, secret, cache };
+  const config: CloudflareConfig = {
+    workerUrl: url,
+    secret,
+    cache,
+    maxInstances: sized.max,
+    ...(withToken ? { githubToken: true } : {}),
+  };
   writePrivate(cloudflareConfigPath(), `${JSON.stringify(config, null, 2)}\n`);
   log(`odu: wrote ${cloudflareConfigPath()}`);
-  log(`odu: ${WORKER_NAME} is at ${url}`);
-  log('odu: use it with --host x86_64-linux=cloudflare, or {"x86_64-linux": "cloudflare"} in hosts.json');
+  log(`odu: ${WORKER_NAME} is at ${url}; lane cache: ${cache === null ? "none (closure ships through the Worker)" : cache.url}`);
+  log('odu: use it with --host x86_64-linux=cloudflare, or {"x86_64-linux": {"host": "cloudflare", "slots": 4}} in hosts.json');
+  log(`odu: cost: ~$${COST.provisionedPerHour.toFixed(2)}/h per running container + up to $${COST.busyCpuPerHour.toFixed(2)}/h CPU while busy; idle containers stop after 10 min`);
   return 0;
 }
 
-async function status(): Promise<number> {
+function requireConfig(): Readonly<CloudflareConfig> | null {
   const config = readCloudflareConfig();
-  if (config === null) {
-    log(`odu: no ${cloudflareConfigPath()} — run \`odu cloudflare setup\``);
+  if (config === null) log(`odu: no ${cloudflareConfigPath()} — run \`odu cloudflare setup\``);
+  return config;
+}
+
+/** Per-host state from each Durable Object — never starts a container. */
+async function runningHosts(
+  config: Readonly<CloudflareConfig>,
+  hosts: readonly string[],
+): Promise<{ host: string; running: boolean | null }[]> {
+  return Promise.all(
+    hosts.map(async (host) => {
+      const running = await fetch(laneEndpoint(config, cloudflareInstance(host), "state"), {
+        headers: laneAuthHeaders(config),
+        signal: AbortSignal.timeout(15_000),
+      })
+        .then((r) => (r.ok ? (r.json() as Promise<{ running?: boolean }>) : null))
+        .then((b) => (b === null ? null : b.running === true), () => null);
+      return { host, running };
+    }),
+  );
+}
+
+async function status(json: boolean): Promise<number> {
+  const config = requireConfig();
+  if (config === null) return 1;
+  const health = await fetch(new URL("/healthz", config.workerUrl), { signal: AbortSignal.timeout(15_000) }).then(
+    (r) => r.status,
+    () => 0,
+  );
+  const { source, hosts } = declaredCloudflareHosts();
+  const states = await runningHosts(config, hosts);
+  const running = states.filter((s) => s.running === true).length;
+  const report = {
+    workerUrl: config.workerUrl,
+    healthz: health,
+    cache: config.cache?.url ?? null,
+    githubToken: config.githubToken === true,
+    maxInstances: config.maxInstances ?? null,
+    hostsFile: source,
+    hosts: states,
+    costPerHourNow: {
+      provisioned: Number((running * COST.provisionedPerHour).toFixed(3)),
+      cpuIfBusy: Number((running * COST.busyCpuPerHour).toFixed(3)),
+    },
+  };
+  if (json) {
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+  } else {
+    process.stdout.write(
+      `odu-lane  ${config.workerUrl}  healthz ${health}\n` +
+        `cache     ${report.cache ?? "none (closure ships through the Worker)"}\n` +
+        `github    ${report.githubToken ? "token installed" : "no token (public origins only)"}\n` +
+        `capacity  max_instances ${report.maxInstances ?? "unknown"}; ${hosts.length} cloudflare host(s) in ${source ?? "no hosts file"}\n` +
+        states.map((s) => `  ${s.host.padEnd(28)} ${s.running === null ? "unknown" : s.running ? "running" : "stopped"}\n`).join("") +
+        `cost now  ${running} running: ~$${report.costPerHourNow.provisioned}/h + up to $${report.costPerHourNow.cpuIfBusy}/h CPU while busy\n`,
+    );
+  }
+  const needed = 2 * hosts.length;
+  if (config.maxInstances !== undefined && needed > config.maxInstances) {
+    log(`odu: hosts declare ${hosts.length} containers but max_instances is ${config.maxInstances} — re-run \`odu cloudflare setup\``);
     return 1;
   }
-  const health = await fetch(new URL("/healthz", config.workerUrl)).then((r) => r.status, () => 0);
-  process.stdout.write(
-    `${JSON.stringify({ workerUrl: config.workerUrl, cache: config.cache?.url ?? null, healthz: health }, null, 2)}\n`,
-  );
   return health === 200 ? 0 : 1;
 }
 
 async function destroy(instance: string): Promise<number> {
-  const config = readCloudflareConfig();
-  if (config === null) {
-    log(`odu: no ${cloudflareConfigPath()} — run \`odu cloudflare setup\``);
-    return 1;
-  }
+  const config = requireConfig();
+  if (config === null) return 1;
   const response = await fetch(laneEndpoint(config, instance, "destroy"), {
     method: "POST",
     headers: laneAuthHeaders(config),
+    signal: AbortSignal.timeout(60_000),
   });
   log(`odu: ${instance}: ${response.status} ${(await response.text()).trim()}`);
   return response.ok ? 0 : 1;
+}
+
+async function confirm(question: string, expected: string): Promise<boolean> {
+  if (!process.stdin.isTTY) return false;
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    return (await rl.question(question)).trim() === expected;
+  } finally {
+    rl.close();
+  }
+}
+
+/** Remove everything setup created, account side and local. Ordered so a
+ *  failure part-way leaves something `teardown` can be re-run against: the
+ *  bucket is emptied through the Worker while it still exists, then the
+ *  Worker, its container application, the bucket, and last the local files. */
+async function teardown(yes: boolean): Promise<number> {
+  if (!yes) {
+    const ok = await confirm(
+      `This deletes the ${WORKER_NAME} Worker, its containers, the R2 bucket ${BUCKET} and your local odu-lane credentials.\nType ${WORKER_NAME} to confirm: `,
+      WORKER_NAME,
+    );
+    if (!ok) {
+      log("odu: not confirmed (pass --yes when not at a terminal) — nothing deleted");
+      return 1;
+    }
+  }
+  const config = readCloudflareConfig();
+  if (config?.cache !== null && config !== null) {
+    for (let more = true; more; ) {
+      const response = await fetch(new URL("/nix-cache-purge", config.workerUrl), {
+        method: "POST",
+        headers: laneAuthHeaders(config),
+        signal: AbortSignal.timeout(120_000),
+      });
+      if (!response.ok) throw new Error(`odu: emptying ${BUCKET} failed: ${response.status}`);
+      const body = (await response.json()) as { deleted: number; more: boolean };
+      log(`odu: emptied ${body.deleted} object(s) from ${BUCKET}`);
+      more = body.more;
+    }
+  }
+  const step = (what: string, args: string[], absent: RegExp): void => {
+    try {
+      wrangler(args, { input: "y\n" });
+      log(`odu: deleted ${what}`);
+    } catch (error) {
+      const output = (error as { output?: string }).output ?? "";
+      if (!absent.test(output)) throw error;
+      log(`odu: ${what} already gone`);
+    }
+  };
+  step(`Worker ${WORKER_NAME}`, ["delete", "--name", WORKER_NAME, "--force"], /not found|does not exist|10007/i);
+  const apps = JSON.parse(wrangler(["containers", "list", "--json"]).replace(/^[^[]*/s, "")) as { id: string; name: string }[];
+  for (const app of apps.filter((a) => a.name.startsWith(`${WORKER_NAME}-`))) {
+    step(`container application ${app.name}`, ["containers", "delete", app.id], /not found/i);
+  }
+  step(`R2 bucket ${BUCKET}`, ["r2", "bucket", "delete", BUCKET], /not found|does not exist|10006|enable R2/i);
+  for (const file of ["cloudflare.json", "cloudflare-lane.netrc", "cloudflare-lane-cache.sec", "cloudflare-r2.credentials"]) {
+    rmSync(join(oduConfigDir(), file), { force: true });
+  }
+  rmSync(deployDir(), { recursive: true, force: true });
+  log("odu: removed local odu-lane credentials; nothing of odu-lane remains on the account");
+  return 0;
 }
 
 export async function cloudflareCommand(args: readonly string[]): Promise<number> {
@@ -304,24 +507,46 @@ export async function cloudflareCommand(args: readonly string[]): Promise<number
   switch (sub) {
     case "setup": {
       const { values } = parseArgs({
-        args: rest,
+        args: [...rest],
         options: {
           "max-instances": { type: "string" },
           "s3-cache": { type: "string" },
           "no-cache": { type: "boolean" },
+          "github-token": { type: "boolean" },
+          "no-github-token": { type: "boolean" },
+          force: { type: "boolean" },
         },
       });
-      const maxInstances = Number(values["max-instances"] ?? "8");
-      if (!Number.isInteger(maxInstances) || maxInstances < 1) {
-        log("odu: --max-instances needs a positive integer");
+      let maxInstances: number | null = null;
+      if (values["max-instances"] !== undefined) {
+        maxInstances = Number(values["max-instances"]);
+        if (!Number.isInteger(maxInstances) || maxInstances < 1) {
+          log("odu: --max-instances needs a positive integer");
+          return 2;
+        }
+      }
+      if (values["github-token"] === true && values["no-github-token"] === true) {
+        log("odu: --github-token and --no-github-token contradict each other");
         return 2;
       }
-      return setup({ maxInstances, s3Cache: values["s3-cache"] ?? null, noCache: values["no-cache"] ?? false });
+      return setup({
+        maxInstances,
+        s3Cache: values["s3-cache"] ?? null,
+        noCache: values["no-cache"] ?? false,
+        githubToken: values["github-token"] === true ? true : values["no-github-token"] === true ? false : null,
+        force: values.force === true,
+      });
     }
-    case "status":
-      return status();
+    case "status": {
+      const { values } = parseArgs({ args: [...rest], options: { output: { type: "string", short: "o" } } });
+      return status(values.output === "json");
+    }
     case "destroy":
       return destroy(rest[0] ?? "default");
+    case "teardown": {
+      const { values } = parseArgs({ args: [...rest], options: { yes: { type: "boolean" } } });
+      return teardown(values.yes === true);
+    }
     default:
       process.stderr.write(USAGE);
       return sub === undefined || sub === "help" || sub === "--help" ? 0 : 2;

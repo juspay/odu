@@ -142,7 +142,7 @@ surface <verb> [--input JSON] [--json]
                               # surface --help lists them.
                               # Exits: 0 answered (red CI included) · 1
                               # refused · 2 usage · 3 nothing serving · 130 interrupted
-cloudflare <setup|status|destroy>
+cloudflare <setup|status|destroy|teardown>
                               # deploy the odu-lane Worker to YOUR Cloudflare
                               # account; then "cloudflare[:<instance>]" is a
                               # lane host (odu cloudflare --help)
