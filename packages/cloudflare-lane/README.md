@@ -54,13 +54,18 @@ Each point below was measured on a live account.
   silent fallback to software emulation.
 - **Disk.** `/`, `/tmp` and Nix's build directories share one 18 GB ext4
   filesystem with about 2.76 M inodes. With four nodes writing at once, kolu
-  filled it during a run that had started with 16 GiB free. The bridge
-  collects the store whenever bytes or inodes fall under 25% free.
+  filled it during a run that had started with 16 GiB free: down to 0.6 GiB
+  within a minute, all of it bytes. The bridge checks every 10 s and collects
+  the store whenever bytes or inodes fall under 25% free. Collection frees
+  only paths no live process holds, so closures that outgrow the disk while
+  in use need sharding.
 - **16,000-byte env vars.** Cloudflare caps each container env var at 16,000
   bytes, and `bridge.ts` exceeds that as plain text. It ships gzip'd and
   base64'd (about 5 kB), and `http.test.ts` pins that size.
 - **Cold start.** A fresh instance starts in 3 s from the pre-warmed pool, or
   about 65 s on an account's first-ever pull of the image. The runner
   substitutes from the R2 cache in 7.6–12.6 s.
-- **Concurrency.** This account ran at most 7 containers of one application
-  at a time, a cap Cloudflare does not document. A support ticket raises it.
+- **Concurrency.** Up to `max_instances` containers run at once; 22
+  concurrent containers were measured. About 7 come from Cloudflare's
+  pre-warmed pool and start in 3–8 s. Each container beyond those is
+  provisioned cold in 50–205 s.
