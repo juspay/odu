@@ -40,6 +40,21 @@ const BASH =
   "/nix/store/0641h8qfqaxnwrsw2nzrz6i1wbzyx92l-bash-interactive-5.3p9/bin/bash";
 const PORT = 8080;
 
+/** Cloudflare caps a container env var at 16,000 bytes, and bridge.ts is past
+ *  it as plain text. Shipped gzip'd and base64'd (~4x smaller); the
+ *  entrypoint decodes it with the pinned bun. http.test.ts pins the size. */
+let bridgeGz: Promise<string> | undefined;
+function bridgeEncoded(): Promise<string> {
+  bridgeGz ??= (async () => {
+    const gz = new Blob([bridgeSource as string]).stream().pipeThrough(new CompressionStream("gzip"));
+    const bytes = new Uint8Array(await new Response(gz).arrayBuffer());
+    let binary = "";
+    for (const b of bytes) binary += String.fromCharCode(b);
+    return btoa(binary);
+  })();
+  return bridgeGz;
+}
+
 /** A short hash of what the container runs. A redeploy does not restart a
  *  running container (its entrypoint and env were fixed at start), so the
  *  Durable Object name carries this: new bridge/entrypoint code → new
@@ -91,7 +106,7 @@ export class OduLane extends Container<Env> {
 
   /** Per-start env. Derived at dial time because the Worker learns its own
    *  public origin from the request — setup never has to know it in advance. */
-  private laneEnv(origin: string): Record<string, string> {
+  private async laneEnv(origin: string): Promise<Record<string, string>> {
     // No bucket bound (R2 not enabled) → no lane cache at all; the closure
     // arrives over /import instead. Listing a cache that answers 503 would
     // cost every substitution Nix's full retry backoff.
@@ -106,7 +121,7 @@ export class OduLane extends Container<Env> {
       ODU_LANE_BUN: this.env.ODU_LANE_BUN,
       ODU_LANE_TINI: this.env.ODU_LANE_TINI,
       ODU_LANE_BASE: this.env.ODU_LANE_BASE ?? "",
-      ODU_LANE_BRIDGE: bridgeSource as string,
+      ODU_LANE_BRIDGE_GZ: await bridgeEncoded(),
       ODU_LANE_SUBSTITUTERS: `${cacheUrl} ${this.env.ODU_LANE_EXTRA_SUBSTITUTERS}`.trim(),
       ODU_LANE_TRUSTED_KEYS:
         `${this.env.ODU_LANE_CACHE_PUBLIC_KEY} ${this.env.ODU_LANE_EXTRA_TRUSTED_KEYS}`.trim(),
@@ -121,7 +136,7 @@ export class OduLane extends Container<Env> {
   private async ensureStarted(origin: string): Promise<void> {
     await this.startAndWaitForPorts({
       ports: PORT,
-      startOptions: { envVars: this.laneEnv(origin) },
+      startOptions: { envVars: await this.laneEnv(origin) },
       // A cold container realises bun before the port opens; the default 20 s
       // readiness wait is far too short (measured: minutes on a cold image).
       cancellationOptions: { instanceGetTimeoutMS: 120_000, portReadyTimeoutMS: 600_000 },
@@ -209,8 +224,12 @@ export class OduLane extends Container<Env> {
     console.log("odu-lane container stopped", JSON.stringify(params));
   }
   override onError(error: unknown): unknown {
-    console.log("odu-lane container error", String(error));
-    throw error;
+    // Logged and returned, never rethrown: a throw here breaks the Durable
+    // Object's in-flight request, so /start ended mid-stream with no verdict
+    // instead of reporting the error (measured, when the bridge outgrew the
+    // env limit below).
+    console.log("odu-lane container error", error instanceof Error ? error.message : String(error));
+    return error;
   }
 }
 

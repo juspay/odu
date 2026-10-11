@@ -7,6 +7,7 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { gzipSync } from "node:zlib";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -126,5 +127,14 @@ describe("nixCache", () => {
       expect(await (await purgeCache(bucket)).json()).toMatchObject({ more: false });
       expect(bucket.objects.size).toBe(0);
     }, 60_000);
+  });
+});
+
+describe("container env", () => {
+  it("ships the bridge under Cloudflare's 16,000-byte env var limit", () => {
+    // worker.ts sends bridge.ts gzip'd + base64'd as ODU_LANE_BRIDGE_GZ.
+    const source = readFileSync(new URL("./bridge.ts", import.meta.url));
+    const encoded = Buffer.from(gzipSync(source)).toString("base64");
+    expect(encoded.length).toBeLessThan(16_000 * 0.75); // headroom to grow
   });
 });

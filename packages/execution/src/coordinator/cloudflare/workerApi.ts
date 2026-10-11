@@ -85,8 +85,14 @@ export async function startContainer(opts: {
       "network",
     );
   }
+  if (last.startsWith("error:")) {
+    throw new ConnectError(`container ${opts.instance} did not start: ${last.slice(6).trim()}`, "network");
+  }
   if (!last.startsWith("ready")) {
-    throw new ConnectError(`container ${opts.instance} did not start: ${last || "no answer"}`, "network");
+    throw new ConnectError(
+      `container ${opts.instance}: the Worker's start stream ended without a verdict (last line: ${last || "none"}) — see \`wrangler tail\` for the Durable Object's error`,
+      "network",
+    );
   }
 }
 
