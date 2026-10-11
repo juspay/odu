@@ -27,13 +27,15 @@ Each point below was measured on a live account.
 
 - **Two scripts.** Any new version of a Worker script evicts its Durable
   Objects, and every attached lane's WebSocket runs through one of them.
-  Measured twice: the socket drops about 5 minutes after a deploy (close code
-  1006), and a `secret put` counts as a deploy. So everything that changes
+  Measured three times: the socket drops 5 to 7.5 minutes after a deploy,
+  either as close code 1006 or as the link going silent until the RPC
+  pinger ends it. A `secret put` counts as a deploy. So everything that changes
   with configuration lives in the control plane, which hands the start env to
   the data plane per request. A 15-minute run rode through three
   control-plane changes with zero drops. The data plane changes only with
-  container code, and setup will not deploy it under a running host without
-  `--force`.
+  container code. Setup will not deploy it under a running host without
+  `--force`, and afterwards it prints when new runs are safe (10 minutes
+  later).
 - **One venue per platform per run.** A DAG's nodes share one workspace
   (`install` → `unit`). Work spreads through `odu:shard`, where each shard gets
   its own container and its own dependency closure.

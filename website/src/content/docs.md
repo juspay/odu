@@ -75,7 +75,7 @@ Odu can run `x86_64-linux` lanes in [Cloudflare Containers](https://developers.c
 
 So shard your heavy leaves (e2e suites, VM tests). Up to `max_instances` containers run at once; 22 concurrent containers have been measured. Cloudflare keeps about 7 pre-warmed, which start in 3–8 s, while each container beyond those is provisioned cold in 50–205 s.
 
-**If a lane dies**, odu claims a fresh container for that platform, then re-runs the unfinished nodes plus the finished prerequisites they need, since the new container has a fresh workspace. For a sharded platform, only the primary lane is re-placed, and the other shards keep running.
+**If a lane dies**, whether its transport drops or its venue lease is lost, odu claims a fresh container for that lane alone. A dead primary re-runs its unfinished nodes plus the finished prerequisites they need, since the new container has a fresh workspace. A dead shard lane re-runs its shard's whole dependency closure on a fresh burst slot. The other lanes keep running throughout. Each lane may be re-placed twice before its nodes are errored.
 
 **What a container provides.** Nix, and on the recipe's `PATH` behind it: bash, coreutils, gawk, sed, grep, procps, hostname, findutils, diffutils, which, tar and gzip. Anything else, including fontconfig, browsers and language toolchains, must come from the recipe's `nix develop` shell. `/dev/shm` is a 1777 directory on RAM-backed devfs, which is what Chromium needs. Every lane has **KVM, or it does not start**: the entrypoint makes `/dev/kvm` usable by Nix's build users and exits with an error if it can't, and the Worker re-checks before handing out a lane. A NixOS VM test therefore never silently falls back to QEMU's software emulation. The bridge collects the Nix store whenever free disk bytes or inodes fall under 25%, checking every 10 s. Collection frees only what no running process holds, so nodes whose live closures together outgrow the 18 GB disk need sharding instead.
 
@@ -88,7 +88,7 @@ So shard your heavy leaves (e2e suites, VM tests). Up to `max_instances` contain
 **Upgrades.** There are two Workers:
 
 - **`odu-lane`** holds the routes, the cache and every secret and setting. Re-running setup, rotating a token or changing the cache redeploys only this Worker. Attached lanes ride through: a 15-minute run survived three such changes.
-- **`odu-lane-dp`** holds the containers and changes only when odu's container code changes. A new version of it drops attached lanes about 5 minutes later, so setup refuses to deploy it while a declared host is running, unless you pass `--force`.
+- **`odu-lane-dp`** holds the containers and changes only when odu's container code changes. A new version of it drops lanes attached within the next several minutes: drops were measured at 5 and 7.5 minutes after a deploy. So setup refuses to deploy it while a declared host is running, unless you pass `--force`, and then prints the time after which new runs are safe, 10 minutes after the deploy.
 
 `odu cloudflare teardown` deletes both Workers, their containers, the bucket and the local credentials.
 

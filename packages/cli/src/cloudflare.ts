@@ -200,6 +200,9 @@ function sizeInstances(explicit: number | null): { max: number; declared: string
 }
 
 const DATA_PLANE_NAME = "odu-lane-dp";
+/** How long after a data-plane deploy attached lanes may still be evicted —
+ *  measured drops at 5 and 7.5 min, rounded up with margin. */
+const DATA_PLANE_QUIET_MS = 10 * 60_000;
 
 /** The data plane: the Durable Object that owns the containers, and nothing
  *  that changes with configuration (see dataPlane.ts for why). */
@@ -359,6 +362,13 @@ async function setup(opts: SetupOptions): Promise<number> {
     }
     log(`odu: deploying ${DATA_PLANE_NAME} (image ${IMAGE}, ${INSTANCE_TYPE}, max_instances ${sized.max})`);
     wrangler(["deploy"], { cwd: dpDir });
+    // Measured: lanes attached to the previous version dropped 5 and 7.5 min
+    // after a data-plane deploy. Say when it is safe to start runs again.
+    const safe = new Date(Date.now() + DATA_PLANE_QUIET_MS);
+    log(
+      `odu: ${DATA_PLANE_NAME} deployed. Lanes attached before ${safe.toISOString().slice(11, 16)} UTC may drop ` +
+        "(odu re-places them); start new runs after that.",
+    );
   } else {
     log(`odu: ${DATA_PLANE_NAME} is current — not redeploying it`);
   }
