@@ -38,7 +38,7 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { statfsSync, statSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync, statfsSync, statSync, symlinkSync } from "node:fs";
 import { availableParallelism, setPriority } from "node:os";
 import { createGunzip } from "node:zlib";
 
@@ -212,9 +212,96 @@ const describeDisk = (d: Disk): string =>
 const dials = new Set<Socket>();
 let collecting: Promise<void> | null = null;
 
-/** Collect the store when the disk runs low. Safe under running lanes: Nix
- *  treats every store path a live process uses as a root. One collection at
- *  a time; the lanes attached hear why their recipes may have paused. */
+/** Linux's USER_HZ: the unit of /proc/<pid>/stat's start time, 100 on x86_64. */
+const USER_HZ = 100;
+
+/** Epoch seconds at which the oldest recipe still running on any lane
+ *  started, or null when none is. A recipe is a direct child of a runner (the
+ *  runner spawns each node as its own process group), so its start time is in
+ *  /proc. */
+function oldestRecipeStart(): number | null {
+  const runners = new Set<number>();
+  for (const ws of dials) {
+    const pid = ws.data.kind === "agent" ? ws.data.child?.pid : undefined;
+    if (pid !== undefined) runners.add(pid);
+  }
+  if (runners.size === 0) return null;
+  const btime = Number(/^btime (\d+)$/m.exec(readFileSync("/proc/stat", "utf-8"))?.[1] ?? 0);
+  let oldest: number | null = null;
+  for (const name of readdirSync("/proc")) {
+    if (!/^\d+$/.test(name)) continue;
+    let stat: string;
+    try {
+      stat = readFileSync(`/proc/${name}/stat`, "utf-8");
+    } catch {
+      continue; // gone between readdir and read
+    }
+    // Fields after the parenthesised command: state ppid pgrp ... starttime (22nd overall).
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    if (!runners.has(Number(fields[1]))) continue;
+    const started = btime + Number(fields[19]) / USER_HZ;
+    oldest = oldest === null ? started : Math.min(oldest, started);
+  }
+  return oldest;
+}
+
+/** Roots that keep a running recipe's work alive through a collection. */
+const PROTECT_DIR = "/nix/var/nix/gcroots/odu-lane-running-recipes";
+
+/** Root every store path registered since `since` (epoch seconds): whatever
+ *  a still-running recipe built or substituted. Measured on kolu's CI: a
+ *  recipe ran `nix build --no-link X` then `nix build --rebuild X`, and a
+ *  collection between the two deleted X — `--no-link` leaves no root, and the
+ *  first nix process had exited. In-progress builds need nothing from here:
+ *  Nix holds a temp root for outputs it is building, sandbox or not. */
+async function protectSince(since: number | null): Promise<number> {
+  rmSync(PROTECT_DIR, { recursive: true, force: true });
+  if (since === null) return 0;
+  mkdirSync(PROTECT_DIR, { recursive: true });
+  const proc = Bun.spawn(["nix", "--extra-experimental-features", "nix-command", "path-info", "--all", "--json"], {
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+  const text = await new Response(proc.stdout).text();
+  await proc.exited;
+  const parsed = JSON.parse(text === "" ? "[]" : text) as
+    | Record<string, { registrationTime?: number }>
+    | { path: string; registrationTime?: number }[];
+  const entries: [string, number | undefined][] = Array.isArray(parsed)
+    ? parsed.map((info) => [info.path, info.registrationTime])
+    : Object.entries(parsed).map(([path, info]) => [path, info?.registrationTime]);
+  let rooted = 0;
+  for (const [path, registered] of entries) {
+    // A second of slack for registration and process start clocks.
+    if (registered === undefined || registered < since - 1) continue;
+    try {
+      symlinkSync(path, `${PROTECT_DIR}/${path.slice("/nix/store/".length)}`);
+      rooted += 1;
+    } catch {
+      // Already rooted, or vanished: either way nothing to protect.
+    }
+  }
+  return rooted;
+}
+
+/** One collection: protect the running recipes' work, then `nix-store --gc`. */
+async function collect(why: string, tell: (line: string) => void): Promise<{ rooted: number; after: Disk | null }> {
+  const t0 = Date.now();
+  const rooted = await protectSince(oldestRecipeStart());
+  tell(`[cloudflare] ${why} — collecting the Nix store (${rooted} path(s) of running recipes kept)`);
+  const proc = Bun.spawn(["nix-store", "--gc"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+  await proc.exited;
+  const after = disk();
+  tell(`[cloudflare] after ${((Date.now() - t0) / 1000).toFixed(1)}s of gc: ${after === null ? "?" : describeDisk(after)}`);
+  return { rooted, after };
+}
+
+/** Collect the store when the disk runs low. Safe under running lanes: live
+ *  processes' paths are roots, in-progress builds hold temp roots, and
+ *  everything a running recipe has registered is rooted by protectSince. One
+ *  collection at a time; the lanes attached hear why their recipes may have
+ *  paused. */
 function collectIfLow(): Promise<void> {
   if (collecting !== null) return collecting;
   const before = disk();
@@ -223,14 +310,7 @@ function collectIfLow(): Promise<void> {
     for (const ws of dials) say(ws, line);
     console.log(line);
   };
-  collecting = (async () => {
-    const t0 = Date.now();
-    tell(`[cloudflare] disk low (${describeDisk(before)}) — collecting the Nix store`);
-    const proc = Bun.spawn(["nix-store", "--gc"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-    await proc.exited;
-    const after = disk();
-    tell(`[cloudflare] after ${((Date.now() - t0) / 1000).toFixed(1)}s of gc: ${after === null ? "?" : describeDisk(after)}`);
-  })().finally(() => {
+  collecting = collect(`disk low (${describeDisk(before)})`, tell).then(() => undefined).finally(() => {
     collecting = null;
   });
   return collecting;
@@ -370,6 +450,15 @@ Bun.serve<DialState>({
     // The entrypoint refuses to start without a usable /dev/kvm; this is the
     // same fact, re-checked live, for `odu cloudflare status` and lane start.
     if (route === "/healthz") return Response.json({ ok: true, kvm: kvmUsable(), disk: disk() });
+    // Reachable only from inside the container (the Worker forwards no such
+    // route): lets a recipe — the live test of the protection above — force
+    // a collection now, whatever the disk.
+    if (route === "/gc-now" && req.method === "POST") {
+      const lines: string[] = [];
+      return collect("collection requested from inside the container", (line) => lines.push(line)).then(
+        ({ rooted }) => Response.json({ rooted, lines }),
+      );
+    }
     return new Response("not found\n", { status: 404 });
   },
   websocket: {
