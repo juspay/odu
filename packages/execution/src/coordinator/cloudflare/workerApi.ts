@@ -75,6 +75,16 @@ export async function startContainer(opts: {
   } catch (error) {
     throw new ConnectError(`odu-lane /start stream: ${(error as Error).message}`, "network");
   }
+  if (/maximum number of running container instances/i.test(last)) {
+    // Retryable: containers of a previous Worker version still count until
+    // they idle out (10 min), as do other runs' lanes.
+    throw new ConnectError(
+      `container ${opts.instance} did not start: the account's max_instances for odu-lane is reached ` +
+        "(containers from a previous deploy count until they stop after 10 idle minutes) — " +
+        "raise it with `odu cloudflare setup --max-instances N`",
+      "network",
+    );
+  }
   if (!last.startsWith("ready")) {
     throw new ConnectError(`container ${opts.instance} did not start: ${last || "no answer"}`, "network");
   }
