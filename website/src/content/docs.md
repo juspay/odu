@@ -48,9 +48,31 @@ odu run --platform x86_64-linux
 odu run test@aarch64-darwin
 ```
 
-**Cloudflare Containers (experimental).** `odu cloudflare setup` deploys the `odu-lane` Worker to your own Cloudflare account (Workers Paid; wrangler logged in). After that, `cloudflare` or `cloudflare:<instance>` is an `x86_64-linux` host like any other — `--host x86_64-linux=cloudflare`, or a pool `["cloudflare:a", "cloudflare:b"]` (one container per instance). Each container is a 4 vCPU / 12 GiB microVM with `/dev/kvm`. The runner closure is published to an R2 bucket used as a Nix binary cache when R2 is enabled, and shipped through the Worker otherwise.
+No SSH builder of your own? See [Run lanes on Cloudflare Containers](#run-lanes-on-cloudflare-containers).
 
 The CLI forwards your shell's `$ODU_HOSTS`. A browser or MCP caller can supply `hostsFile`; omitted uses the service's configuration, while `""` bypasses its override. Retries preserve the parent's recorded inventory choice and host pins.
+
+### Run lanes on Cloudflare Containers
+
+Odu can run `x86_64-linux` lanes in [Cloudflare Containers](https://developers.cloudflare.com/containers/) on your own account: each container is a 4 vCPU / 12 GiB / 20 GB Firecracker microVM with `/dev/kvm`, so NixOS VM tests run there.
+
+1. Have a Cloudflare account on the **Workers Paid** plan, and enable **R2** in the dashboard (it holds the lane's Nix cache; without it lanes still work, more slowly when cold).
+2. `nix run nixpkgs#wrangler -- login` (or export `CLOUDFLARE_API_TOKEN`).
+3. Declare hosts, e.g. `~/.config/odu/hosts.json`:
+
+   ```json
+   { "x86_64-linux": { "host": "cloudflare", "slots": 4 } }
+   ```
+
+   Each cloudflare slot is its **own container** (`cloudflare:default-0` … `-3`), so a sharded recipe gets 4 × 4 vCPU. Named instances work too: `["cloudflare:a", "cloudflare:b"]`.
+4. `odu cloudflare setup` — deploys the `odu-lane` Worker with the wrangler odu pins, creates the `odu-lane-cache` R2 bucket and a signing key, and writes `~/.config/odu/cloudflare.json` (0600). Add `--github-token` to give containers your GitHub token (from `GH_TOKEN` or `gh auth token`) for private repositories and `api.github.com`. Re-run setup whenever hosts.json grows: it sizes `max_instances` from it.
+5. `odu run --no-post` as usual, or pin one run with `--host x86_64-linux=cloudflare`.
+
+What a container provides is **Nix and nothing else** — the stock `nixos/nix` image has no `ps`, `awk`, fontconfig or browsers. Recipes must get every tool from Nix (`nix develop -c …`, as odu's own recipes do). `/dev/shm` (2 GiB, for Chromium) and `/dev/kvm` are set up for you. From Cloudflare's shared egress, unauthenticated `api.github.com` calls — including `github:` flake refs that are not locked — hit rate limits; use `--github-token`, or `git+https://` and tarball inputs.
+
+Measured on a live account: a cold container is ready in 3–65 s, substitutes the runner from R2 in ~13 s and attaches in ~25 s; a warm one attaches in ~1 s. A 17-minute recipe with a two-minute silent stretch runs through without the lane dropping.
+
+**Cost and lifecycle.** A running container costs about $0.11/h (memory and disk) plus up to $0.29/h CPU while busy ([pricing](https://developers.cloudflare.com/containers/pricing/)); it stops after 10 idle minutes. `odu hosts` and pool probes never start one. `odu cloudflare status` lists which declared hosts are running and what that costs now. Redeploying the Worker (setup, or any secret change) drops attached lanes about 5 minutes later — odu then re-runs their in-flight nodes — so setup refuses while a declared host is running unless you pass `--force`. `odu cloudflare teardown` deletes the Worker, its containers, the bucket and the local credentials.
 
 ### Hold a machine across runs
 
@@ -208,7 +230,7 @@ Other shared verbs: `run_list` (the board filtered by checkout, commit and seq, 
 | `dump`, `graph` | Inspect the resolved pipeline |
 | `protect` | Configure GitHub required checks; preview with `--dry-run` |
 | `web`, `surface`, `mcp` | Browser server, generated CLI, agent transport |
-| `cloudflare setup/status/destroy` | Deploy the odu-lane Worker for `cloudflare[:<instance>]` hosts; `--s3-cache URL`, `--no-cache`, `--max-instances N` |
+| `cloudflare setup/status/destroy/teardown` | The odu-lane Worker for `cloudflare[:<instance>]` hosts; setup takes `--github-token`, `--max-instances N`, `--s3-cache URL`, `--no-cache`, `--force` |
 
 For `wait`, `rerun`, and `cancel`, omitted `--run` means `latest` in this checkout. Run addresses also accept a run ID or `<sha7>#<seq>`. `odu runs` has been replaced by `history list`.
 

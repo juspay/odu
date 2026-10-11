@@ -88,7 +88,7 @@ dependencies:
   - .claude/skills/odu
   - .claude/skills/odu/SKILL.md
   deployed_file_hashes:
-    .claude/skills/odu/SKILL.md: sha256:9bf645e3c45d6d8f3ee8c9ed7e849cda80b3ffe8e82743a65167ae5d011a4161
+    .claude/skills/odu/SKILL.md: sha256:1fc1eb5c88a0de80f2c16df266f740bef9d9cd3d86f68f9fa6bc8f7735b58ef0
   content_hash: sha256:a08f8496dbb9000c55eb75082b32657562bdd7284d114e53429ecc3ee4cf2f43
   is_dev: true
   skill_subset:
@@ -676,7 +676,7 @@ deployments:
   - juspay/odu
   - .
   active_owner: juspay/odu
-  content_hash: sha256:9bf645e3c45d6d8f3ee8c9ed7e849cda80b3ffe8e82743a65167ae5d011a4161
+  content_hash: sha256:1fc1eb5c88a0de80f2c16df266f740bef9d9cd3d86f68f9fa6bc8f7735b58ef0
 - kind: project-relative
   target: claude
   value: .claude/skills/odu/serve
@@ -823,5 +823,5 @@ local_deployed_files:
 - .claude/skills/odu/SKILL.md
 - .claude/skills/odu/serve
 local_deployed_file_hashes:
-  .claude/skills/odu/SKILL.md: sha256:9bf645e3c45d6d8f3ee8c9ed7e849cda80b3ffe8e82743a65167ae5d011a4161
+  .claude/skills/odu/SKILL.md: sha256:1fc1eb5c88a0de80f2c16df266f740bef9d9cd3d86f68f9fa6bc8f7735b58ef0
   .claude/skills/odu/serve: sha256:723ec470f7fcf2a59b8fb8cce15bd90e0055640dcef3336ec6dbd0ee29d49433
