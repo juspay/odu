@@ -48,8 +48,11 @@ import {
   cloudflareInstance,
   readCloudflareConfig,
   cloudflareConfigPath,
+  laneAuthHeaders,
+  laneEndpoint,
 } from "../../common/cloudflareConfig";
 import { publishToLaneCache, realiseLocally } from "./laneCache";
+import { openLaneSocket } from "./laneSocket";
 import { shipClosure } from "./shipClosure";
 
 const STDOUT = 0x01;
@@ -97,9 +100,9 @@ async function startContainer(
   onLine: (line: string) => void,
   signal: AbortSignal,
 ): Promise<void> {
-  const response = await fetch(`${config.workerUrl}/lane/${instance}/start`, {
+  const response = await fetch(laneEndpoint(config, instance, "start"), {
     method: "POST",
-    headers: { authorization: `Bearer ${config.secret}` },
+    headers: laneAuthHeaders(config),
     signal,
   });
   if (response.status === 401) {
@@ -216,14 +219,7 @@ export function cloudflareConnector<S extends SurfaceSpec>(
 
     // ── 3. The dial: one WebSocket, one odu-runner ────────────────────────
     ctx.connecting();
-    const wsUrl = `${config.workerUrl.replace(/^http/, "ws")}/lane/${instance}/agent`;
-    // Bun's WebSocket takes request headers; the Worker authenticates the
-    // upgrade like every other route.
-    const ws = new (WebSocket as unknown as new (
-      url: string,
-      init: { headers: Record<string, string> },
-    ) => WebSocket)(wsUrl, { headers: { authorization: `Bearer ${config.secret}` } });
-    ws.binaryType = "arraybuffer";
+    const ws = openLaneSocket(config, instance, "agent");
 
     const stdout = new PassThrough();
     const stdin = new Writable({

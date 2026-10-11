@@ -14,7 +14,7 @@
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
@@ -22,7 +22,10 @@ import {
   type CloudflareConfig,
   cloudflareConfigPath,
   type LaneCacheConfig,
+  laneAuthHeaders,
+  laneEndpoint,
   oduConfigDir,
+  parseWorkerUrl,
   readCloudflareConfig,
 } from "@odu/execution/common/cloudflareConfig";
 
@@ -59,10 +62,8 @@ function log(line: string): void {
 function wranglerBin(): string {
   const pinned = process.env.ODU_WRANGLER;
   if (pinned !== undefined && pinned !== "") {
-    if (!existsSync(pinned)) {
-      log(`odu: realising wrangler ${pinned}`);
-      execFileSync("nix-store", ["--realise", pinned], { stdio: ["ignore", "ignore", "inherit"] });
-    }
+    // Unconditional: a no-op when it is already valid, and no check-then-act.
+    execFileSync("nix-store", ["--realise", pinned], { stdio: ["ignore", "ignore", "inherit"] });
     return join(pinned, "bin", "wrangler");
   }
   return "wrangler";
@@ -101,16 +102,50 @@ function splitList(raw: string | undefined): string[] {
   return (raw ?? "").split(/\s+/).filter((s) => s !== "");
 }
 
+/** Write a credential file 0600 from the moment it exists, and replace any
+ *  previous one atomically: a fresh exclusive temp file (`wx`, so a planted
+ *  file or symlink at that name is refused, never followed) renamed over the
+ *  target. No check-then-act, and no window where the content is readable at
+ *  a wider mode. */
+function writePrivate(path: string, content: string): void {
+  const temp = `${path}.${process.pid}.tmp`;
+  try {
+    writeFileSync(temp, content, { mode: 0o600, flag: "wx" });
+    renameSync(temp, path);
+  } catch (error) {
+    rmSync(temp, { force: true });
+    throw error;
+  }
+}
+
+function readIfPresent(path: string): Buffer | null {
+  try {
+    return readFileSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
 function ensureSigningKey(dir: string): { secretKeyFile: string; publicKey: string } {
   const secretKeyFile = join(dir, "cloudflare-lane-cache.sec");
-  if (!existsSync(secretKeyFile)) {
+  // Read first and act on what was read: the key that is converted is the key
+  // that exists, not one that existed when we last looked.
+  let secret = readIfPresent(secretKeyFile);
+  if (secret === null) {
     const name = `odu-lane-${hostname().split(".")[0]}-1`;
-    const secret = execFileSync("nix", ["--extra-experimental-features", "nix-command", "key", "generate-secret", "--key-name", name], { encoding: "utf-8" });
-    writeFileSync(secretKeyFile, secret, { mode: 0o600 });
-    log(`odu: generated lane-cache signing key ${name}`);
+    const generated = execFileSync("nix", ["--extra-experimental-features", "nix-command", "key", "generate-secret", "--key-name", name], { encoding: "utf-8" });
+    try {
+      // `wx`: if a concurrent setup created the key first, keep theirs.
+      writeFileSync(secretKeyFile, generated, { mode: 0o600, flag: "wx" });
+      log(`odu: generated lane-cache signing key ${name}`);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    secret = readFileSync(secretKeyFile);
   }
   const publicKey = execFileSync("nix", ["--extra-experimental-features", "nix-command", "key", "convert-secret-to-public"], {
-    input: readFileSync(secretKeyFile),
+    input: secret,
     encoding: "utf-8",
   }).trim();
   return { secretKeyFile, publicKey };
@@ -199,7 +234,8 @@ async function setup(opts: SetupOptions): Promise<number> {
   writeWranglerConfig(deployDir, { ...opts, bun, publicKey, r2 });
   log(`odu: deploying ${WORKER_NAME} (image ${IMAGE}, ${INSTANCE_TYPE}, max ${opts.maxInstances} containers)`);
   const deployed = wrangler(["deploy"], { cwd: deployDir });
-  const url = /https:\/\/[a-z0-9.-]+\.workers\.dev/.exec(deployed)?.[0] ?? previous?.workerUrl;
+  const found = /https:\/\/[a-z0-9.-]+\.workers\.dev/.exec(deployed)?.[0] ?? previous?.workerUrl;
+  const url = found === undefined ? undefined : parseWorkerUrl(found, "wrangler deploy output");
   if (url === undefined) {
     log(deployed);
     log("odu: could not find the Worker URL in wrangler's output");
@@ -218,19 +254,18 @@ async function setup(opts: SetupOptions): Promise<number> {
       return 1;
     }
     const awsCredentialsFile = join(configDir, "cloudflare-r2.credentials");
-    writeFileSync(awsCredentialsFile, `[default]\naws_access_key_id = ${id}\naws_secret_access_key = ${key}\n`, { mode: 0o600 });
+    writePrivate(awsCredentialsFile, `[default]\naws_access_key_id = ${id}\naws_secret_access_key = ${key}\n`);
     wrangler(["secret", "put", "AWS_ACCESS_KEY_ID"], { cwd: deployDir, input: id });
     wrangler(["secret", "put", "AWS_SECRET_ACCESS_KEY"], { cwd: deployDir, input: key });
     cache = { url: opts.s3Cache, secretKeyFile, publicKey, netrcFile: null, awsCredentialsFile };
   } else {
     const netrcFile = join(configDir, "cloudflare-lane.netrc");
-    writeFileSync(netrcFile, `machine ${new URL(url).hostname} login odu password ${secret}\n`, { mode: 0o600 });
+    writePrivate(netrcFile, `machine ${new URL(url).hostname} login odu password ${secret}\n`);
     cache = { url: `${url}/nix-cache`, secretKeyFile, publicKey, netrcFile, awsCredentialsFile: null };
   }
 
   const config: CloudflareConfig = { workerUrl: url, secret, cache };
-  writeFileSync(cloudflareConfigPath(), `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
-  chmodSync(cloudflareConfigPath(), 0o600);
+  writePrivate(cloudflareConfigPath(), `${JSON.stringify(config, null, 2)}\n`);
   log(`odu: wrote ${cloudflareConfigPath()}`);
   log(`odu: ${WORKER_NAME} is at ${url}`);
   log('odu: use it with --host x86_64-linux=cloudflare, or {"x86_64-linux": "cloudflare"} in hosts.json');
@@ -243,7 +278,7 @@ async function status(): Promise<number> {
     log(`odu: no ${cloudflareConfigPath()} — run \`odu cloudflare setup\``);
     return 1;
   }
-  const health = await fetch(`${config.workerUrl}/healthz`).then((r) => r.status, () => 0);
+  const health = await fetch(new URL("/healthz", config.workerUrl)).then((r) => r.status, () => 0);
   process.stdout.write(
     `${JSON.stringify({ workerUrl: config.workerUrl, cache: config.cache?.url ?? null, healthz: health }, null, 2)}\n`,
   );
@@ -256,9 +291,9 @@ async function destroy(instance: string): Promise<number> {
     log(`odu: no ${cloudflareConfigPath()} — run \`odu cloudflare setup\``);
     return 1;
   }
-  const response = await fetch(`${config.workerUrl}/lane/${instance}/destroy`, {
+  const response = await fetch(laneEndpoint(config, instance, "destroy"), {
     method: "POST",
-    headers: { authorization: `Bearer ${config.secret}` },
+    headers: laneAuthHeaders(config),
   });
   log(`odu: ${instance}: ${response.status} ${(await response.text()).trim()}`);
   return response.ok ? 0 : 1;

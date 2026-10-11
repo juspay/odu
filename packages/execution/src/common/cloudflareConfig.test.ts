@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { cloudflareInstance, isCloudflareHost } from "./cloudflareConfig";
+import { cloudflareInstance, isCloudflareHost, laneAuthHeaders, laneEndpoint, parseWorkerUrl } from "./cloudflareConfig";
 import { laneCacheWriteUrl } from "../coordinator/cloudflare/laneCache";
 
 describe("cloudflare host spelling", () => {
@@ -42,5 +42,23 @@ describe("lane cache write URL", () => {
     ).toBe(
       "s3://odu-lane-cache?endpoint=acct.r2.cloudflarestorage.com&region=auto&secret-key=/home/u/.config/odu/cloudflare-lane-cache.sec&compression=zstd",
     );
+  });
+});
+
+describe("worker URL and lane endpoints", () => {
+  it("accepts only a bare https origin", () => {
+    expect(parseWorkerUrl("https://odu-lane.example.workers.dev/", "t")).toBe("https://odu-lane.example.workers.dev");
+    expect(() => parseWorkerUrl("http://odu-lane.example.workers.dev", "t")).toThrow(/https/);
+    expect(() => parseWorkerUrl("https://u:p@w.example", "t")).toThrow(/bare/);
+    expect(() => parseWorkerUrl("https://w.example/x", "t")).toThrow(/bare/);
+    expect(() => parseWorkerUrl("not a url", "t")).toThrow(/not a URL/);
+  });
+
+  it("spells every lane route from the validated origin", () => {
+    const config = { workerUrl: "https://w.example", secret: "s".repeat(32) };
+    expect(laneEndpoint(config, "a-1", "start").href).toBe("https://w.example/lane/a-1/start");
+    expect(laneEndpoint(config, "a-1", "agent", "wss").href).toBe("wss://w.example/lane/a-1/agent");
+    expect(() => laneEndpoint(config, "../x", "start")).toThrow(/instance/);
+    expect(laneAuthHeaders(config)).toEqual({ authorization: `Bearer ${"s".repeat(32)}` });
   });
 });

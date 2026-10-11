@@ -18,19 +18,11 @@ import { spawn } from "node:child_process";
 import { createGzip } from "node:zlib";
 import { captureProcess } from "../runnerFlake";
 import type { CloudflareConfig } from "../../common/cloudflareConfig";
+import { openLaneSocket } from "./laneSocket";
 
 const STDERR = 0x02;
 const CHUNK = 1024 * 1024;
 const HIGH_WATER = 8 * 1024 * 1024;
-
-function openSocket(url: string, secret: string): WebSocket {
-  const ws = new (WebSocket as unknown as new (
-    url: string,
-    init: { headers: Record<string, string> },
-  ) => WebSocket)(url, { headers: { authorization: `Bearer ${secret}` } });
-  ws.binaryType = "arraybuffer";
-  return ws;
-}
 
 async function drained(ws: WebSocket): Promise<void> {
   while (ws.bufferedAmount > HIGH_WATER && ws.readyState === WebSocket.OPEN) {
@@ -39,7 +31,7 @@ async function drained(ws: WebSocket): Promise<void> {
 }
 
 export async function shipClosure(opts: {
-  config: CloudflareConfig;
+  config: Readonly<CloudflareConfig>;
   instance: string;
   outPath: string;
   onProgress: (line: string) => void;
@@ -47,8 +39,7 @@ export async function shipClosure(opts: {
 }): Promise<void> {
   const { stdout } = await captureProcess("nix-store", ["--query", "--requisites", opts.outPath]);
   const paths = stdout.split("\n").filter((p) => p !== "");
-  const url = `${opts.config.workerUrl.replace(/^http/, "ws")}/lane/${opts.instance}/import`;
-  const ws = openSocket(url, opts.config.secret);
+  const ws = openLaneSocket(opts.config, opts.instance, "import");
   const decoder = new TextDecoder();
   const t0 = Date.now();
 

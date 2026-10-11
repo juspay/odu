@@ -16,7 +16,7 @@
  * whose environment is an allowlist (`spawn.ts`), not the caller's shell.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -69,18 +69,66 @@ export function cloudflareConfigPath(): string {
   return join(oduConfigDir(), "cloudflare.json");
 }
 
-export function readCloudflareConfig(): CloudflareConfig | null {
+/** Validate a Worker origin once, at the boundary: an https origin and
+ *  nothing else (no path, credentials, query), so every URL built from it
+ *  below can only address the odu-lane Worker. */
+export function parseWorkerUrl(raw: string, source: string): string {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(`odu: ${source}: workerUrl ${JSON.stringify(raw)} is not a URL`);
+  }
+  if (url.protocol !== "https:" || url.username !== "" || url.password !== "" || url.search !== "" || url.pathname.replace(/\/+$/, "") !== "") {
+    throw new Error(`odu: ${source}: workerUrl must be a bare https origin, got ${JSON.stringify(raw)}`);
+  }
+  return url.origin;
+}
+
+export function readCloudflareConfig(): Readonly<CloudflareConfig> | null {
   const path = cloudflareConfigPath();
-  if (!existsSync(path)) return null;
-  const raw = JSON.parse(readFileSync(path, "utf-8")) as Partial<CloudflareConfig>;
-  if (typeof raw.workerUrl !== "string" || typeof raw.secret !== "string") {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf-8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  const raw = JSON.parse(text) as Partial<CloudflareConfig>;
+  if (typeof raw.workerUrl !== "string" || typeof raw.secret !== "string" || !/^[A-Za-z0-9_-]{16,}$/.test(raw.secret)) {
     throw new Error(`odu: ${path} is missing workerUrl/secret — re-run \`odu cloudflare setup\``);
   }
-  return { workerUrl: raw.workerUrl.replace(/\/+$/, ""), secret: raw.secret, cache: raw.cache ?? null };
+  return Object.freeze({
+    workerUrl: parseWorkerUrl(raw.workerUrl, path),
+    secret: raw.secret,
+    cache: raw.cache ?? null,
+  });
+}
+
+export type LaneAction = "start" | "agent" | "import" | "destroy";
+
+/** The ONE place a lane route's URL is spelled. `ws` gives the WebSocket
+ *  scheme for the two upgrade routes. */
+export function laneEndpoint(
+  config: Pick<CloudflareConfig, "workerUrl">,
+  instance: string,
+  action: LaneAction,
+  scheme: "https" | "wss" = "https",
+): URL {
+  if (!INSTANCE.test(instance)) throw new Error(`odu: bad cloudflare instance ${JSON.stringify(instance)}`);
+  const url = new URL(`/lane/${instance}/${action}`, config.workerUrl);
+  url.protocol = scheme === "wss" ? "wss:" : "https:";
+  return url;
+}
+
+/** The ONE place the bearer leaves the config: as the Authorization header
+ *  of a request to the Worker it was minted for. */
+export function laneAuthHeaders(config: Pick<CloudflareConfig, "secret">): Record<string, string> {
+  return { authorization: `Bearer ${config.secret}` };
 }
 
 /** The config a dial needs, or the sentence that gets one. */
-export function requireCloudflareConfig(): CloudflareConfig {
+export function requireCloudflareConfig(): Readonly<CloudflareConfig> {
   const config = readCloudflareConfig();
   if (config === null) {
     throw new Error(
