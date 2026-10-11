@@ -36,6 +36,24 @@ let
   # for the same reason: the container realises it, the coordinator never runs it.
   tiniPath = builtins.unsafeDiscardStringContext "${pkgs.tini}";
 
+  # A lane container is the stock nixos/nix image: Nix, bash, coreutils — no
+  # awk, sed, ps or hostname, which recipe code outside `nix develop` tends to
+  # assume (measured on kolu's CI). These go on the runner's PATH, behind the
+  # image's own. Store paths, each in cache.nixos.org, realised by the
+  # container; nothing here is in odu's closure.
+  laneBasePaths = builtins.unsafeDiscardStringContext (pkgs.lib.concatMapStringsSep " " toString (with pkgs; [
+    gawk
+    gnused
+    gnugrep
+    procps
+    hostname
+    findutils
+    diffutils
+    which
+    gnutar
+    gzip
+  ]));
+
   src = pkgs.lib.fileset.toSource {
     root = ./.;
     fileset = pkgs.lib.fileset.unions [
@@ -274,6 +292,7 @@ let
       --set ODU_OSFACTS_BIN "${pkgs.osfacts}/bin/osfacts" \
       --set-default ODU_WRANGLER "${wranglerPath}" \
       --set-default ODU_LANE_TINI "${tiniPath}" \
+      --set-default ODU_LANE_BASE "${laneBasePaths}" \
       ${pkgs.lib.optionalString (selfRev != null) ''--set ODU_COMMIT_HASH "${selfRev}"''} \
       --set ODU_AGENT_SUBSTITUTERS "${pkgs.lib.concatStringsSep " " binaryCache.substituters}" \
       --set ODU_AGENT_TRUSTED_PUBLIC_KEYS "${pkgs.lib.concatStringsSep " " binaryCache.trustedPublicKeys}" \

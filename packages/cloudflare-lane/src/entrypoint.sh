@@ -9,6 +9,7 @@
 # Inputs (container env, set by the Durable Object at start):
 #   ODU_LANE_BUN              /nix/store/…-bun-X (odu's own pinned bun)
 #   ODU_LANE_TINI             /nix/store/…-tini-X (the container's init)
+#   ODU_LANE_BASE             space-separated store paths of base tools (awk, sed, ps, …)
 #   ODU_LANE_BRIDGE           bridge.ts source text
 #   ODU_LANE_SUBSTITUTERS     space-separated substituters (lane cache first; may be empty)
 #   ODU_LANE_TRUSTED_KEYS     space-separated public keys
@@ -94,7 +95,11 @@ echo 4194304 > /proc/sys/kernel/pid_max 2>/dev/null || echo "odu-lane: could not
 
 printf '%s' "$ODU_LANE_BRIDGE" > /odu-lane-bridge.ts
 unset ODU_LANE_NETRC AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY ODU_LANE_GITHUB_TOKEN ODU_LANE_BRIDGE
-nix-store --realise "$ODU_LANE_BUN" "$ODU_LANE_TINI" >/dev/null
+nix-store --realise "$ODU_LANE_BUN" "$ODU_LANE_TINI" ${ODU_LANE_BASE:-} >/dev/null
+# 6. Base tools for recipe code that runs outside `nix develop` (awk, sed, ps,
+#    hostname, …): after the image's own PATH, so they only fill gaps.
+for p in ${ODU_LANE_BASE:-}; do PATH="$PATH:$p/bin"; done
+export PATH
 echo "odu-lane: bridge starting under tini"
 # 5. A real init. This process is the container's PID 1, so every orphan a CI
 #    run leaves reparents to it — and bun reaps only its own children.

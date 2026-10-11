@@ -39,7 +39,7 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { statfsSync, statSync } from "node:fs";
-import { setPriority } from "node:os";
+import { availableParallelism, setPriority } from "node:os";
 import { createGunzip } from "node:zlib";
 
 const PORT = 8080;
@@ -216,7 +216,14 @@ async function startAgent(ws: Socket, spec: Start): Promise<void> {
   // Its own session and process group, as sshd gives each login: a group
   // kill aimed at one dial's runner (or anything it spawns) cannot reach the
   // bridge, the other dials, or — through a shared group 1 — everything.
-  const child = spawn(`${spec.agentPath}/bin/${spec.binary}`, spec.args, { stdio: ["pipe", "pipe", "pipe"], detached: true });
+  const child = spawn(`${spec.agentPath}/bin/${spec.binary}`, spec.args, {
+    stdio: ["pipe", "pipe", "pipe"],
+    detached: true,
+    // One recipe per vCPU at a time (runner.ts, maxParallelFrom): measured on
+    // kolu's CI, a whole DAG started at once on 4 vCPU timed out on CPU and
+    // ran out of disk.
+    env: { ...process.env, ODU_RUNNER_MAX_PARALLEL: process.env.ODU_RUNNER_MAX_PARALLEL ?? String(availableParallelism()) },
+  });
   ws.data.child = child;
   // The bridge runs above normal priority (below); its runner does not, so
   // the runner and its recipes are scheduled exactly as on an ssh box.

@@ -218,6 +218,7 @@ function writeWranglerConfig(dir: string, opts: { maxInstances: number; s3Cache:
     vars: {
       ODU_LANE_BUN: opts.bun,
       ODU_LANE_TINI: tiniStorePath(),
+      ODU_LANE_BASE: (process.env.ODU_LANE_BASE ?? "").split(/\s+/).filter((p) => /^\/nix\/store\/[0-9a-z]{32}-/.test(p)).join(" "),
       ODU_LANE_CACHE_PUBLIC_KEY: opts.publicKey,
       ODU_LANE_CACHE_URL: opts.s3Cache ?? "",
       ODU_LANE_EXTRA_SUBSTITUTERS: splitList(process.env.ODU_AGENT_SUBSTITUTERS).join(" "),
