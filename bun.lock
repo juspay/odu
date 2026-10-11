@@ -61,6 +61,9 @@
       "dependencies": {
         "@cloudflare/containers": "0.3.7",
       },
+      "devDependencies": {
+        "@odu/execution": "workspace:*",
+      },
     },
     "packages/execution": {
       "name": "@odu/execution",

@@ -10,26 +10,34 @@
  * Run by the container entrypoint with odu's pinned bun, from source text the
  * Worker carries, so the container image stays the stock `nixos/nix` one.
  *
- * Wire (deliberately tiny — the coordinator's `cloudflare/connector.ts` is the
- * other end, and the two always ship in the same odu build):
+ * Wire (deliberately tiny — the coordinator's `cloudflare/connector.ts` and
+ * `shipClosure.ts` are the other end, and all three ship in one odu build, the
+ * Worker keying containers by a hash of this file):
  *
- *   client → bridge, text   {"agentPath": "/nix/store/…", "binary": "odu-runner", "args": ["--stdio"]}
- *                           first message, exactly once
- *   client → bridge, binary agent stdin bytes
- *   bridge → client, binary tag byte + payload: 0x01 agent stdout, 0x02 progress/stderr
- *   bridge → client, text   {"exit": number|null, "signal": string|null}, then close
+ *   /lane/<i>/agent
+ *     client → bridge, text   {"agentPath": "/nix/store/…", "binary": "odu-runner", "args": ["--stdio"]}  (first, once)
+ *     client → bridge, binary agent stdin bytes
+ *     bridge → client, binary tag byte + payload: 0x01 agent stdout, 0x02 progress/stderr
+ *     bridge → client, text   {"exit": number|null, "signal": string|null}, then close
  *
- * `/import` is the no-cache provisioning path (no R2 lane cache configured):
+ *   /lane/<i>/import  (no-cache provisioning)
+ *     client → bridge, text   {"paths": ["/nix/store/…", …]}   the closure, dependencies first
+ *     bridge → client, binary 0x02 progress while it substitutes what public caches have
+ *     bridge → client, text   {"missing": [...]}                what the client must send
+ *     client → bridge, binary gzip(`nix-store --export <missing…>`)
+ *     bridge → client, text   {"ack": bytes}                    consumed so far (flow control)
+ *     client → bridge, text   {"done": true}
+ *     bridge → client, text   {"exit": number|null, "signal": null}, then close
  *
- *   client → bridge, text   {"paths": ["/nix/store/…", …]}   the closure, dependencies first
- *   bridge → client, binary 0x02 progress while it substitutes what public caches have
- *   bridge → client, text   {"missing": [...]}                what the client must send
- *   client → bridge, binary gzip(`nix-store --export <missing…>`)
- *   client → bridge, text   {"done": true}
- *   bridge → client, text   {"exit": number|null, "signal": null}, then close
+ * Every buffer on the splice is bounded. Toward the coordinator, the runner's
+ * output is paused while the WebSocket's send buffer is above HIGH_WATER and
+ * resumed on `drain`, so a slow link backs up into the runner's own pipe. The
+ * import stream is credit-based (`ack`). The stdin direction is request/response
+ * RPC with bounded frames, so it is only guarded: past MAX_PENDING the dial
+ * fails rather than grows.
  */
 
-import { spawn as spawnNode } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { createGunzip } from "node:zlib";
 
 const PORT = 8080;
@@ -37,6 +45,12 @@ const STDOUT = 0x01;
 const STDERR = 0x02;
 const STORE_PATH = /^\/nix\/store\/[0-9a-z]{32}-[A-Za-z0-9+._?=-]+$/;
 const BINARY = /^[A-Za-z0-9._-]+$/;
+const HIGH_WATER = 8 * 1024 * 1024;
+const MAX_PENDING = 64 * 1024 * 1024;
+const ACK_EVERY = 1024 * 1024;
+/** After the WebSocket closes, how long the runner gets to exit on stdin EOF
+ *  (it reaps its recipe process groups first) before SIGTERM. */
+const EOF_GRACE_MS = 10_000;
 
 interface Start {
   agentPath: string;
@@ -47,10 +61,11 @@ interface Start {
 interface DialState {
   kind: "agent" | "import";
   started: boolean;
-  /** `/import`: gunzip → `nix-store --import`, once the missing set is known. */
-  importer: { write: (chunk: Uint8Array) => void; end: () => void } | null;
-  child: ReturnType<typeof Bun.spawn> | null;
   closed: boolean;
+  /** The process whose output this dial relays (agent, or `nix-store --import`). */
+  child: ChildProcess | null;
+  /** `/import`: where received NAR bytes go, once the missing set is known. */
+  importer: { write: (chunk: Uint8Array) => void; end: () => void } | null;
 }
 
 type Socket = Bun.ServerWebSocket<DialState>;
@@ -62,29 +77,44 @@ function frame(tag: number, chunk: Uint8Array): Uint8Array {
   return out;
 }
 
-function say(ws: Socket, line: string): void {
+/** Send, and pause the child's output while the socket is backed up. */
+function relay(ws: Socket, tag: number, chunk: Uint8Array): void {
   if (ws.data.closed) return;
-  ws.send(frame(STDERR, new TextEncoder().encode(`${line}\n`)));
+  ws.send(frame(tag, chunk));
+  if (ws.getBufferedAmount() > HIGH_WATER) {
+    ws.data.child?.stdout?.pause();
+    ws.data.child?.stderr?.pause();
+  }
+}
+
+function say(ws: Socket, line: string): void {
+  relay(ws, STDERR, new TextEncoder().encode(`${line}\n`));
 }
 
 function finish(ws: Socket, exit: number | null, signal: string | null): void {
   if (ws.data.closed) return;
   ws.send(JSON.stringify({ exit, signal }));
   ws.data.closed = true;
-  ws.close(1000, "agent exited");
+  ws.close(1000, "exited");
 }
 
-async function pump(
-  ws: Socket,
-  tag: number,
-  stream: ReadableStream<Uint8Array>,
-): Promise<void> {
-  const reader = stream.getReader();
+function fail(ws: Socket, why: string): void {
+  say(ws, `[cloudflare] ${why}`);
+  ws.data.child?.kill("SIGTERM");
+  finish(ws, 1, null);
+}
+
+/** Run a short helper, narrating its stderr, and collect its stdout. */
+async function run(ws: Socket, argv: string[]): Promise<{ code: number; stdout: string }> {
+  const proc = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  const stdout = new Response(proc.stdout).text();
+  const reader = proc.stderr.getReader();
   for (;;) {
     const { done, value } = await reader.read();
-    if (done) return;
-    if (!ws.data.closed) ws.send(frame(tag, value));
+    if (done) break;
+    relay(ws, STDERR, value);
   }
+  return { code: await proc.exited, stdout: await stdout };
 }
 
 function parseStart(raw: string): Start {
@@ -97,55 +127,26 @@ function parseStart(raw: string): Start {
   return { agentPath: value.agentPath, binary: value.binary, args };
 }
 
-/** Realise the agent's closure from the configured substituters (the lane
- *  cache first — see entrypoint.sh), narrating Nix's progress to the
- *  coordinator, which shows it in `_ci-setup` exactly as an ssh lane's
- *  provisioning output is shown. */
-async function realise(ws: Socket, agentPath: string): Promise<boolean> {
+/** Realise the agent from the configured substituters (the lane cache first —
+ *  entrypoint.sh), then spawn it with its stdio spliced onto this socket. */
+async function startAgent(ws: Socket, spec: Start): Promise<void> {
   const t0 = Date.now();
-  say(ws, `[cloudflare] realising ${agentPath}`);
-  const proc = Bun.spawn(["nix-store", "--realise", agentPath], {
-    stdin: "ignore",
-    stdout: "ignore",
-    stderr: "pipe",
-  });
-  await pump(ws, STDERR, proc.stderr);
-  const code = await proc.exited;
-  say(ws, `[cloudflare] realise exited ${code} after ${((Date.now() - t0) / 1000).toFixed(1)}s`);
-  return code === 0;
-}
-
-async function start(ws: Socket, spec: Start): Promise<void> {
-  if (!(await realise(ws, spec.agentPath))) {
-    finish(ws, 1, null);
-    return;
-  }
+  say(ws, `[cloudflare] realising ${spec.agentPath}`);
+  const realised = await run(ws, ["nix-store", "--realise", spec.agentPath]);
+  say(ws, `[cloudflare] realise exited ${realised.code} after ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+  if (realised.code !== 0) return finish(ws, 1, null);
   if (ws.data.closed) return;
-  const child = Bun.spawn([`${spec.agentPath}/bin/${spec.binary}`, ...spec.args], {
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
-    env: { ...process.env, HOME: process.env.HOME ?? "/root" },
-  });
+  const child = spawn(`${spec.agentPath}/bin/${spec.binary}`, spec.args, { stdio: ["pipe", "pipe", "pipe"] });
   ws.data.child = child;
-  const out = pump(ws, STDOUT, child.stdout as ReadableStream<Uint8Array>);
-  const err = pump(ws, STDERR, child.stderr as ReadableStream<Uint8Array>);
-  const code = await child.exited;
-  await Promise.allSettled([out, err]);
-  finish(ws, child.signalCode === null ? code : null, child.signalCode ?? null);
-}
-
-/** Run a command, narrating its stderr, and collect its stdout. */
-async function run(ws: Socket, argv: string[]): Promise<{ code: number; stdout: string }> {
-  const proc = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-  const stdout = new Response(proc.stdout).text();
-  await pump(ws, STDERR, proc.stderr);
-  return { code: await proc.exited, stdout: await stdout };
+  child.stdout.on("data", (chunk: Buffer) => relay(ws, STDOUT, chunk));
+  child.stderr.on("data", (chunk: Buffer) => relay(ws, STDERR, chunk));
+  child.on("error", (error) => fail(ws, `spawn ${spec.binary}: ${error.message}`));
+  child.on("close", (code, signal) => finish(ws, code, signal));
 }
 
 /** First half of an import: substitute whatever the public caches have (most
  *  of a runner closure is plain nixpkgs), then name what is still missing. */
-async function importPrepare(ws: Socket, paths: string[]): Promise<void> {
+async function prepareImport(ws: Socket, paths: string[]): Promise<void> {
   const t0 = Date.now();
   say(ws, `[cloudflare] substituting ${paths.length} closure paths from public caches`);
   await run(ws, ["nix-store", "--realise", "--keep-going", ...paths]);
@@ -153,49 +154,56 @@ async function importPrepare(ws: Socket, paths: string[]): Promise<void> {
   const invalid = new Set(stdout.split("\n").filter((p) => p !== ""));
   const missing = paths.filter((p) => invalid.has(p));
   say(ws, `[cloudflare] substituted in ${((Date.now() - t0) / 1000).toFixed(1)}s; ${missing.length} path(s) must be shipped`);
+  if (ws.data.closed) return;
   if (missing.length === 0) {
     ws.send(JSON.stringify({ missing }));
-    finish(ws, 0, null);
-    return;
+    return finish(ws, 0, null);
   }
-  const child = spawnNode("nix-store", ["--import"], { stdio: ["pipe", "ignore", "pipe"] });
+  const child = spawn("nix-store", ["--import"], { stdio: ["pipe", "ignore", "pipe"] });
+  ws.data.child = child;
   const gunzip = createGunzip();
   gunzip.pipe(child.stdin);
-  child.stderr.on("data", (chunk: Buffer) => {
-    if (!ws.data.closed) ws.send(frame(STDERR, chunk));
-  });
-  child.on("exit", (code, signal) => {
+  gunzip.on("error", (error) => fail(ws, `import stream: ${error.message}`));
+  child.stderr.on("data", (chunk: Buffer) => relay(ws, STDERR, chunk));
+  child.on("close", (code, signal) => {
     say(ws, `[cloudflare] nix-store --import exited ${code ?? signal}`);
     finish(ws, code, signal);
   });
+  let consumed = 0;
+  let lastAck = 0;
   ws.data.importer = {
-    write: (chunk) => void gunzip.write(chunk),
+    write: (chunk) => {
+      if (gunzip.writableLength > MAX_PENDING) return fail(ws, "import sender ignored flow control");
+      gunzip.write(chunk, () => {
+        consumed += chunk.byteLength;
+        if (consumed - lastAck >= ACK_EVERY && !ws.data.closed) {
+          lastAck = consumed;
+          ws.send(JSON.stringify({ ack: consumed }));
+        }
+      });
+    },
     end: () => gunzip.end(),
   };
   ws.send(JSON.stringify({ missing }));
 }
 
-function importMessage(ws: Socket, message: string | Uint8Array): void {
-  if (!ws.data.started) {
-    ws.data.started = true;
-    const raw = typeof message === "string" ? message : new TextDecoder().decode(message);
-    const { paths } = JSON.parse(raw) as { paths?: unknown };
-    if (!Array.isArray(paths) || !paths.every((p) => typeof p === "string" && STORE_PATH.test(p))) {
-      say(ws, "[cloudflare] bad import request");
-      finish(ws, 2, null);
-      return;
+function firstMessage(ws: Socket, message: string | Uint8Array): void {
+  const raw = typeof message === "string" ? message : new TextDecoder().decode(message);
+  if (ws.data.kind === "agent") {
+    let spec: Start;
+    try {
+      spec = parseStart(raw);
+    } catch (error) {
+      return fail(ws, `bad start message: ${(error as Error).message}`);
     }
-    void importPrepare(ws, paths as string[]).catch((error: unknown) => {
-      say(ws, `[cloudflare] import failed: ${(error as Error).message}`);
-      finish(ws, 1, null);
-    });
+    void startAgent(ws, spec).catch((error: unknown) => fail(ws, `bridge failed: ${(error as Error).message}`));
     return;
   }
-  if (typeof message === "string") {
-    if (JSON.parse(message).done === true) ws.data.importer?.end();
-    return;
+  const { paths } = JSON.parse(raw) as { paths?: unknown };
+  if (!Array.isArray(paths) || !paths.every((p) => typeof p === "string" && STORE_PATH.test(p))) {
+    return fail(ws, "bad import request");
   }
-  ws.data.importer?.write(message);
+  void prepareImport(ws, paths as string[]).catch((error: unknown) => fail(ws, `import failed: ${(error as Error).message}`));
 }
 
 Bun.serve<DialState>({
@@ -203,48 +211,45 @@ Bun.serve<DialState>({
   hostname: "0.0.0.0",
   idleTimeout: 0,
   fetch(req, server) {
-    const url = new URL(req.url);
     // The DO forwards the Worker's path unchanged (`/lane/<instance>/agent`).
+    const url = new URL(req.url);
     const route = url.pathname.slice(url.pathname.lastIndexOf("/"));
     if (route === "/agent" || route === "/import") {
-      const kind = route === "/agent" ? "agent" : "import";
-      if (server.upgrade(req, { data: { kind, started: false, importer: null, child: null, closed: false } }))
-        return undefined;
+      const data: DialState = { kind: route === "/agent" ? "agent" : "import", started: false, closed: false, child: null, importer: null };
+      if (server.upgrade(req, { data })) return undefined;
       return new Response("expected a WebSocket upgrade\n", { status: 426 });
     }
     if (route === "/healthz") return new Response("ok\n");
     return new Response("not found\n", { status: 404 });
   },
   websocket: {
-    // A snapshot chunk is 2 MiB base64 inside one RPC frame; leave headroom.
-    maxPayloadLength: 64 * 1024 * 1024,
+    // One frame carries at most one RPC frame (16 MiB, a 2 MiB snapshot chunk
+    // base64'd inside one) or one 1 MiB import chunk; leave headroom.
+    maxPayloadLength: 32 * 1024 * 1024,
     idleTimeout: 0,
     sendPings: true,
-    message(ws, message) {
-      if (ws.data.kind === "import") {
-        importMessage(ws, message);
-        return;
+    drain(ws) {
+      if (ws.getBufferedAmount() <= HIGH_WATER) {
+        ws.data.child?.stdout?.resume();
+        ws.data.child?.stderr?.resume();
       }
+    },
+    message(ws, message) {
       if (!ws.data.started) {
         ws.data.started = true;
-        let spec: Start;
-        try {
-          spec = parseStart(typeof message === "string" ? message : new TextDecoder().decode(message));
-        } catch (error) {
-          say(ws, `[cloudflare] bad start message: ${(error as Error).message}`);
-          finish(ws, 2, null);
+        return firstMessage(ws, message);
+      }
+      if (ws.data.kind === "import") {
+        if (typeof message === "string") {
+          if ((JSON.parse(message) as { done?: boolean }).done === true) ws.data.importer?.end();
           return;
         }
-        void start(ws, spec).catch((error: unknown) => {
-          say(ws, `[cloudflare] bridge failed: ${(error as Error).message}`);
-          finish(ws, 1, null);
-        });
-        return;
+        return ws.data.importer?.write(message);
       }
       const stdin = ws.data.child?.stdin;
-      if (stdin === undefined || stdin === null || typeof stdin === "number") return;
-      stdin.write(typeof message === "string" ? new TextEncoder().encode(message) : message);
-      stdin.flush();
+      if (stdin === null || stdin === undefined) return;
+      if (stdin.writableLength > MAX_PENDING) return fail(ws, "runner stopped reading its stdin");
+      stdin.write(typeof message === "string" ? Buffer.from(message) : message);
     },
     close(ws) {
       ws.data.closed = true;
@@ -252,11 +257,10 @@ Bun.serve<DialState>({
       if (child === null) return;
       // EOF is the runner's own teardown signal (it reaps its recipe process
       // groups and exits); SIGTERM after a grace is the backstop.
-      const stdin = child.stdin;
-      if (stdin !== undefined && stdin !== null && typeof stdin !== "number") void stdin.end();
+      child.stdin?.end();
       setTimeout(() => {
         if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
-      }, 10_000);
+      }, EOF_GRACE_MS).unref();
     },
   },
 });

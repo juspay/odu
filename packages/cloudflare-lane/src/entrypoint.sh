@@ -1,38 +1,60 @@
 # odu Cloudflare lane — container entrypoint.
 #
-# Runs as PID 1's child inside docker.io/nixos/nix (single-user Nix, root, full
-# caps). The Worker passes this file as `bash -c "$ODU_LANE_ENTRYPOINT"`, so the
-# image needs no Dockerfile. It applies the three fixes a Firecracker container
-# needs before Nix builds behave like they do on a CI box, then realises the
-# pinned bun and execs the WebSocket bridge (bridge.ts) on :8080.
+# Runs inside the stock docker.io/nixos/nix image (single-user Nix, root, full
+# capabilities, Firecracker microVM). The Worker hands this file to the image's
+# own bash as `bash -c <text>`, so there is no Dockerfile and no registry push.
+# It makes the container behave like a CI box, then execs the WebSocket bridge
+# (bridge.ts) on :8080 with odu's pinned bun.
 #
-# Inputs (container env, set by the Durable Object):
+# Inputs (container env, set by the Durable Object at start):
 #   ODU_LANE_BUN              /nix/store/…-bun-X (odu's own pinned bun)
 #   ODU_LANE_BRIDGE           bridge.ts source text
-#   ODU_LANE_SUBSTITUTERS     space-separated substituters (lane cache first)
+#   ODU_LANE_SUBSTITUTERS     space-separated substituters (lane cache first; may be empty)
 #   ODU_LANE_TRUSTED_KEYS     space-separated public keys
-#   ODU_LANE_NETRC            optional netrc body for the lane cache
+#   ODU_LANE_NETRC            secret: netrc for the Worker-proxied lane cache
+#   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+#                             secret: R2 S3 read keys, for an s3:// lane cache
+#   ODU_LANE_GITHUB_TOKEN     secret: optional GitHub token
+#
+# Secrets are moved into root-only files and REMOVED from the environment
+# before the bridge starts, so no runner, recipe or log inherits them as env.
+# (Recipes run as root in this container, so a recipe that goes looking can
+# still read the files — scope the GitHub token accordingly.)
 set -euo pipefail
 echo "odu-lane: entrypoint starting ($(nproc) cpu)"
 
-# 1. /dev/shm is missing (CF mounts a devtmpfs over /dev after the shm mount);
-#    python multiprocessing and friends need it.
+# 1. /dev/shm: Cloudflare mounts a devtmpfs over /dev after the shm mount, so
+#    it is missing. Measured: nixos-render-docs fails with a multiprocessing
+#    SemLock error without it. We have CAP_SYS_ADMIN, so mount one.
 mkdir -p /dev/shm
 mount -t tmpfs -o mode=1777,size=2g shm /dev/shm 2>/dev/null || true
 chmod 1777 /dev/shm
 
-# 2. /dev/kvm is root-only (0600); builds run as nixbld users, so without this
-#    QEMU silently falls back to TCG.
+# 2. /dev/kvm exists but is 0600 root. Builds run as nixbld users; measured:
+#    without this QEMU logs "failed to initialize kvm: Permission denied" and
+#    falls back to software emulation (TCG).
 if [ -e /dev/kvm ]; then chmod 666 /dev/kvm; fi
 
-# 3. Nix configuration: the lane cache + odu's caches, KVM features, and
-#    `git+https`/tarball-friendly defaults (github: refs hit api.github.com,
-#    which rate-limits Cloudflare's shared egress).
-mkdir -p /etc/nix
+# 3. Nix: the lane cache first, then odu's caches and cache.nixos.org; KVM
+#    system features; fall back to building when a substituter is down.
+umask 077
+mkdir -p /etc/nix /root/.aws
 if [ -n "${ODU_LANE_NETRC:-}" ]; then
   printf '%s\n' "$ODU_LANE_NETRC" > /etc/nix/netrc
-  chmod 600 /etc/nix/netrc
 fi
+if [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ -n "${AWS_SECRET_ACCESS_KEY:-}" ]; then
+  printf '[default]\naws_access_key_id = %s\naws_secret_access_key = %s\n' \
+    "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" > /root/.aws/credentials
+fi
+# GitHub: Nix's access-tokens (api.github.com from Cloudflare's shared egress
+# is rate-limited — measured 403s on `github:` refs) and git's credential
+# store for the runner's fetch of a private origin.
+if [ -n "${ODU_LANE_GITHUB_TOKEN:-}" ]; then
+  printf 'access-tokens = github.com=%s\n' "$ODU_LANE_GITHUB_TOKEN" > /etc/nix/access-tokens.conf
+  printf 'https://x-access-token:%s@github.com\n' "$ODU_LANE_GITHUB_TOKEN" > /root/.git-credentials
+  printf '[credential "https://github.com"]\n\thelper = store\n' > /root/.gitconfig
+fi
+umask 022
 cat >> /etc/nix/nix.conf <<EOF
 experimental-features = nix-command flakes
 substituters = ${ODU_LANE_SUBSTITUTERS} https://cache.nixos.org
@@ -44,8 +66,10 @@ connect-timeout = 10
 fallback = true
 EOF
 if [ -f /etc/nix/netrc ]; then echo "netrc-file = /etc/nix/netrc" >> /etc/nix/nix.conf; fi
+if [ -f /etc/nix/access-tokens.conf ]; then echo "!include /etc/nix/access-tokens.conf" >> /etc/nix/nix.conf; fi
 
 printf '%s' "$ODU_LANE_BRIDGE" > /odu-lane-bridge.ts
+unset ODU_LANE_NETRC AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY ODU_LANE_GITHUB_TOKEN ODU_LANE_BRIDGE
 nix-store --realise "$ODU_LANE_BUN" >/dev/null
 echo "odu-lane: bridge starting"
 exec "$ODU_LANE_BUN/bin/bun" /odu-lane-bridge.ts

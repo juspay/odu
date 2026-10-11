@@ -8,8 +8,10 @@
  *   /lane/<instance>/start    POST  start the container, streaming progress until :8080 answers
  *   /lane/<instance>/agent    WS    one dial: the bridge spawns `odu-runner --stdio` and splices it
  *   /lane/<instance>/import   WS    no-cache provisioning: ship missing closure paths as a NAR stream
+ *   /lane/<instance>/state    GET   {running} without starting anything (cheap probes)
  *   /lane/<instance>/destroy  POST  SIGKILL the container (next dial cold-starts it)
  *   /nix-cache/<key>          GET/HEAD/PUT  the R2 bucket as a Nix binary cache
+ *   /nix-cache-purge          POST  empty the bucket (teardown)
  *   /healthz                  GET   unauthenticated liveness
  *
  * One Durable Object — and so one container — per `<instance>` (suffixed with
@@ -25,6 +27,7 @@
  */
 
 import { Container, getContainer } from "@cloudflare/containers";
+import { authorized, nixCache, purgeCache } from "./http";
 // Embedded as text via the wrangler `rules` that `odu cloudflare setup` writes.
 // @ts-ignore -- text module
 import bridgeSource from "./bridge.ts";
@@ -70,7 +73,10 @@ interface Env {
   /** Optional R2 S3 read credentials when ODU_LANE_CACHE_URL is s3://. */
   AWS_ACCESS_KEY_ID?: string;
   AWS_SECRET_ACCESS_KEY?: string;
-  /** Optional GitHub token for private origins / api.github.com (TODO). */
+  /** Optional GitHub token (`odu cloudflare setup --github-token`): lets the
+   *  runner fetch private origins and Nix reach api.github.com without the
+   *  shared-egress rate limit. Written to root-only files by the entrypoint,
+   *  never left in the environment. */
   GITHUB_TOKEN?: string;
 }
 
@@ -102,6 +108,7 @@ export class OduLane extends Container<Env> {
     };
     if (this.env.AWS_ACCESS_KEY_ID) env.AWS_ACCESS_KEY_ID = this.env.AWS_ACCESS_KEY_ID;
     if (this.env.AWS_SECRET_ACCESS_KEY) env.AWS_SECRET_ACCESS_KEY = this.env.AWS_SECRET_ACCESS_KEY;
+    if (this.env.GITHUB_TOKEN) env.ODU_LANE_GITHUB_TOKEN = this.env.GITHUB_TOKEN;
     return env;
   }
 
@@ -123,6 +130,11 @@ export class OduLane extends Container<Env> {
       return new Response("destroyed\n");
     }
     if (action === "start") return this.streamStart(url.origin);
+    if (action === "state") {
+      // Answered by the Durable Object alone — it never starts a container,
+      // so `odu hosts` and pool probes cost nothing on an idle instance.
+      return Response.json({ running: this.ctx.container?.running === true, version: CODE_VERSION });
+    }
     if (action === "agent" || action === "import") {
       await this.ensureStarted(url.origin);
       return this.containerFetch(request, PORT);
@@ -171,73 +183,6 @@ export class OduLane extends Container<Env> {
   }
 }
 
-function timingSafeEqual(a: string, b: string): boolean {
-  const ea = new TextEncoder().encode(a);
-  const eb = new TextEncoder().encode(b);
-  if (ea.byteLength !== eb.byteLength) return false;
-  return crypto.subtle.timingSafeEqual(ea, eb);
-}
-
-/** Bearer (coordinator) or Basic with the secret as password (Nix's netrc). */
-function authorized(request: Request, secret: string): boolean {
-  const header = request.headers.get("authorization") ?? "";
-  if (header.startsWith("Bearer ")) return timingSafeEqual(header.slice(7), secret);
-  if (header.startsWith("Basic ")) {
-    let decoded = "";
-    try {
-      decoded = atob(header.slice(6));
-    } catch {
-      return false;
-    }
-    return timingSafeEqual(decoded.slice(decoded.indexOf(":") + 1), secret);
-  }
-  return false;
-}
-
-const NIX_CACHE_INFO = "StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 20\n";
-
-/** The R2 bucket as a Nix HTTP binary cache — read by containers, written by
- *  the coordinator's `nix copy --to https://…/nix-cache`. Through the Worker's
- *  own binding, so neither side needs R2 S3 credentials. */
-async function nixCache(request: Request, env: Env, key: string): Promise<Response> {
-  const bucket = env.CACHE;
-  if (bucket === undefined) return new Response("no R2 bucket bound\n", { status: 503 });
-  if (key === "nix-cache-info") {
-    return request.method === "PUT"
-      ? new Response(null, { status: 204 })
-      : new Response(request.method === "HEAD" ? null : NIX_CACHE_INFO, {
-          headers: { "content-type": "text/x-nix-cache-info" },
-        });
-  }
-  if (key === "" || key.includes("..")) return new Response("bad key\n", { status: 400 });
-  switch (request.method) {
-    case "GET": {
-      const object = await bucket.get(key);
-      if (object === null) return new Response("not found\n", { status: 404 });
-      const headers = new Headers();
-      object.writeHttpMetadata(headers);
-      headers.set("content-length", String(object.size));
-      return new Response(object.body, { headers });
-    }
-    case "HEAD": {
-      const object = await bucket.head(key);
-      if (object === null) return new Response(null, { status: 404 });
-      return new Response(null, { headers: { "content-length": String(object.size) } });
-    }
-    case "PUT": {
-      const length = request.headers.get("content-length");
-      if (length === null) return new Response("content-length required\n", { status: 411 });
-      const contentType = request.headers.get("content-type") ?? "application/octet-stream";
-      // A known-length body streams straight into R2.
-      const body = request.body ?? new Uint8Array();
-      await bucket.put(key, body, { httpMetadata: { contentType } });
-      return new Response(null, { status: 201 });
-    }
-    default:
-      return new Response("method not allowed\n", { status: 405 });
-  }
-}
-
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -248,10 +193,11 @@ export default {
         headers: { "www-authenticate": 'Basic realm="odu-lane"' },
       });
     }
+    if (url.pathname === "/nix-cache-purge" && request.method === "POST") return purgeCache(env.CACHE);
     if (url.pathname.startsWith("/nix-cache/")) {
-      return nixCache(request, env, url.pathname.slice("/nix-cache/".length));
+      return nixCache(request, env.CACHE, url.pathname.slice("/nix-cache/".length));
     }
-    const lane = /^\/lane\/([A-Za-z0-9_-]{1,64})\/(start|agent|import|destroy)$/.exec(url.pathname);
+    const lane = /^\/lane\/([A-Za-z0-9_-]{1,64})\/(start|state|agent|import|destroy)$/.exec(url.pathname);
     if (lane !== null) {
       return getContainer(env.LANE, `${lane[1]}-${CODE_VERSION}`).fetch(request);
     }

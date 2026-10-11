@@ -1,20 +1,35 @@
 # @odu/cloudflare-lane
 
-The far side of a Cloudflare Containers lane (experimental). Nothing in odu
-imports it: `odu cloudflare setup` points the pinned wrangler at
-`src/worker.ts` and deploys it to the operator's own account as `odu-lane`.
+The far side of a Cloudflare Containers lane. Nothing in odu imports it:
+`odu cloudflare setup` points the pinned wrangler at `src/worker.ts` and
+deploys it to the operator's own account as `odu-lane`. The coordinator half
+is `packages/execution/src/coordinator/cloudflare/`; user-facing docs are the
+"Run lanes on Cloudflare Containers" section of the website docs.
 
 ```
-coordinator ──WS──▶ Worker ──▶ Durable Object (one per instance) ──▶ container :8080
+coordinator ──WS──▶ Worker ──▶ Durable Object <instance>-<codehash> ──▶ container :8080
                                                                      bridge.ts ──stdio──▶ odu-runner --stdio
 ```
 
 | file | runs where | what it is |
 | --- | --- | --- |
-| `src/worker.ts` | Cloudflare | routes `/lane/<instance>/{start,agent,import,destroy}` to one container per instance; serves the R2 bucket as a Nix binary cache at `/nix-cache` |
-| `src/entrypoint.sh` | container | the three Firecracker fixes (`/dev/shm`, `/dev/kvm`, nix.conf), then execs the bridge with odu's pinned bun |
-| `src/bridge.ts` | container | one WebSocket = one `odu-runner --stdio`, the part sshd plays on an ssh lane; `/import` receives a NAR stream when there is no lane cache |
+| `src/worker.ts` | Cloudflare | routes `/lane/<instance>/{start,state,agent,import,destroy}` to one container per instance; `/nix-cache/*` and `/nix-cache-purge` over the R2 binding |
+| `src/http.ts` | Cloudflare | the runtime-free handlers (auth, the R2 bucket as a Nix binary cache, purge), unit-tested with the real Nix client in `http.test.ts` |
+| `src/entrypoint.sh` | container | `/dev/shm`, `/dev/kvm`, nix.conf, secrets into root-only files, then the bridge with odu's pinned bun |
+| `src/bridge.ts` | container | one WebSocket = one `odu-runner --stdio` (the part sshd plays on an ssh lane); `/import` receives a NAR stream when there is no lane cache |
 
-The coordinator half is `packages/execution/src/coordinator/cloudflare/`.
 The image is the stock `docker.io/nixos/nix`; `bridge.ts` and `entrypoint.sh`
-travel as text inside the Worker, so there is no Dockerfile and no registry push.
+travel as text inside the Worker, so there is no Dockerfile and no registry
+push. The Durable Object name carries a hash of both, because a redeploy does
+not restart a running container: new code always gets fresh containers.
+
+Cloudflare behaviours this design rests on, each measured on a live account:
+
+- A WebSocket proxied through the DO's `containerFetch` keeps the container
+  awake; a 17-minute recipe with a 120 s silent stretch ran through.
+- A new Worker version evicts the DOs, dropping attached WebSockets ~5 minutes
+  after the deploy (1006). odu resurrects the lane; `setup` refuses to
+  redeploy under a running declared host without `--force`.
+- `api.github.com` from Cloudflare egress is rate-limited (403 on `github:` refs).
+- Cold start of a fresh instance: 3 s from the pre-warmed pool, ~65 s on the
+  account's first-ever pull of the image.
