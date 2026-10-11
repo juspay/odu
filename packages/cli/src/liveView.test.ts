@@ -258,13 +258,27 @@ describe("LiveView — the log pane takes the terminal's height", () => {
     // (`terminalWidth - 4` against a bordered box's real inner width), so long
     // lines broke mid-word two columns early — visible in a real run as ragged
     // continuation lines.
-    const { view, frame } = await mount(96, 30, { log: `${"z".repeat(240)}\n` });
+    const { view, setup, frame } = await mount(96, 30, { log: `${"z".repeat(240)}\n` });
+    // The log reaches the pane on its own schedule and repaints are coalesced
+    // into a tick, so a frame sampled right after mount can hold part of the
+    // line — the flake this test had on loaded machines (1 run in 3 under
+    // `just test` load). Wait for the whole line, then judge its wrapping.
+    const zCount = (): number => (frame().match(/z/g) ?? []).length;
+    await until(setup, () => zCount() === 240, "the whole log line on screen");
     const lines = frame().split("\n");
-    const border = lines.find((l) => l.includes("┌")) ?? "";
-    const inner = border.trimEnd().length - 2; // the box's own left/right border
-    const zRows = lines
-      .filter((l) => l.includes("z"))
-      .map((l) => (l.match(/z/g) ?? []).length);
+    const zLines = lines.filter((l) => l.includes("z"));
+    // The rows column of the box the log is IN: measured between the two
+    // borders around the first wrapped row, less the one-column scrollbar
+    // gutter (`paneCols`). The first `┌` on screen is not necessarily the log
+    // pane's — once the layout settles the log sits beside the matrix — and
+    // reading that one is what made this test pass only when it sampled the
+    // frame before the layout had settled.
+    const first = zLines[0] ?? "";
+    const left = first.lastIndexOf("│", first.indexOf("z"));
+    const right = first.indexOf("│", first.lastIndexOf("z"));
+    const inner = right - left - 1 - 1;
+    const zRows = zLines.map((l) => (l.match(/z/g) ?? []).length);
+    expect(left).toBeGreaterThanOrEqual(0);
     expect(inner).toBeGreaterThan(0);
     // Every row but the last is a full-width wrap.
     expect(zRows.slice(0, -1)).toEqual(zRows.slice(0, -1).map(() => inner));
