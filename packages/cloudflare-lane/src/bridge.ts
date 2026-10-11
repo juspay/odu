@@ -39,6 +39,7 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { statSync } from "node:fs";
+import { setPriority } from "node:os";
 import { createGunzip } from "node:zlib";
 
 const PORT = 8080;
@@ -79,13 +80,57 @@ function frame(tag: number, chunk: Uint8Array): Uint8Array {
 }
 
 /** Send, and pause the child's output while the socket is backed up. */
-function relay(ws: Socket, tag: number, chunk: Uint8Array): void {
+/** Coalesce output into few, large messages. Measured on odu's own CI (seven
+ *  recipes logging at once): one message per stdout chunk queued the RPC
+ *  ping replies behind thousands of tiny frames, and the lane died to the
+ *  pinger 30 s in — `@cloudflare/containers` forwards every message through
+ *  the Durable Object's single JS thread, shared by the instance's lease and
+ *  lane. Consecutive chunks of one stream join until COALESCE_BYTES or
+ *  COALESCE_MS; a change of stream flushes first, so order is kept. */
+const COALESCE_BYTES = 64 * 1024;
+const COALESCE_MS = 5;
+const pending = new WeakMap<Socket, { tag: number; chunks: Uint8Array[]; bytes: number; timer: ReturnType<typeof setTimeout> | null }>();
+
+function flush(ws: Socket): void {
+  const batch = pending.get(ws);
+  if (batch === undefined || batch.chunks.length === 0) return;
+  if (batch.timer !== null) clearTimeout(batch.timer);
+  const body = new Uint8Array(batch.bytes);
+  let offset = 0;
+  for (const chunk of batch.chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  pending.delete(ws);
   if (ws.data.closed) return;
-  ws.send(frame(tag, chunk));
+  ws.send(frame(batch.tag, body));
   if (ws.getBufferedAmount() > HIGH_WATER) {
     ws.data.child?.stdout?.pause();
     ws.data.child?.stderr?.pause();
   }
+}
+
+/** A control message, after whatever output was queued before it. */
+function sendText(ws: Socket, message: object): void {
+  flush(ws);
+  if (!ws.data.closed) ws.send(JSON.stringify(message));
+}
+
+function relay(ws: Socket, tag: number, chunk: Uint8Array): void {
+  if (ws.data.closed) return;
+  let batch = pending.get(ws);
+  if (batch !== undefined && batch.tag !== tag) {
+    flush(ws);
+    batch = undefined;
+  }
+  if (batch === undefined) {
+    batch = { tag, chunks: [], bytes: 0, timer: null };
+    pending.set(ws, batch);
+  }
+  batch.chunks.push(new Uint8Array(chunk));
+  batch.bytes += chunk.byteLength;
+  if (batch.bytes >= COALESCE_BYTES) return flush(ws);
+  batch.timer ??= setTimeout(() => flush(ws), COALESCE_MS);
 }
 
 function say(ws: Socket, line: string): void {
@@ -94,6 +139,7 @@ function say(ws: Socket, line: string): void {
 
 function finish(ws: Socket, exit: number | null, signal: string | null): void {
   if (ws.data.closed) return;
+  flush(ws);
   ws.send(JSON.stringify({ exit, signal }));
   ws.data.closed = true;
   ws.close(1000, "exited");
@@ -142,6 +188,15 @@ async function startAgent(ws: Socket, spec: Start): Promise<void> {
   // bridge, the other dials, or — through a shared group 1 — everything.
   const child = spawn(`${spec.agentPath}/bin/${spec.binary}`, spec.args, { stdio: ["pipe", "pipe", "pipe"], detached: true });
   ws.data.child = child;
+  // The bridge runs above normal priority (below); its runner does not, so
+  // the runner and its recipes are scheduled exactly as on an ssh box.
+  if (child.pid !== undefined) {
+    try {
+      setPriority(child.pid, 0);
+    } catch {
+      // Best effort: a runner at the bridge's priority still works.
+    }
+  }
   child.stdout.on("data", (chunk: Buffer) => relay(ws, STDOUT, chunk));
   child.stderr.on("data", (chunk: Buffer) => relay(ws, STDERR, chunk));
   child.on("error", (error) => fail(ws, `spawn ${spec.binary}: ${error.message}`));
@@ -160,7 +215,7 @@ async function prepareImport(ws: Socket, paths: string[]): Promise<void> {
   say(ws, `[cloudflare] substituted in ${((Date.now() - t0) / 1000).toFixed(1)}s; ${missing.length} path(s) must be shipped`);
   if (ws.data.closed) return;
   if (missing.length === 0) {
-    ws.send(JSON.stringify({ missing }));
+    sendText(ws, { missing });
     return finish(ws, 0, null);
   }
   const child = spawn("nix-store", ["--import"], { stdio: ["pipe", "ignore", "pipe"] });
@@ -182,13 +237,13 @@ async function prepareImport(ws: Socket, paths: string[]): Promise<void> {
         consumed += chunk.byteLength;
         if (consumed - lastAck >= ACK_EVERY && !ws.data.closed) {
           lastAck = consumed;
-          ws.send(JSON.stringify({ ack: consumed }));
+          sendText(ws, { ack: consumed });
         }
       });
     },
     end: () => gunzip.end(),
   };
-  ws.send(JSON.stringify({ missing }));
+  sendText(ws, { missing });
 }
 
 function firstMessage(ws: Socket, message: string | Uint8Array): void {
@@ -217,6 +272,15 @@ function kvmUsable(): boolean {
   } catch {
     return false;
   }
+}
+
+// Every byte of every lane passes through this process, including the RPC
+// pings that decide whether a lane is alive; on a 4-vCPU container running
+// seven recipes it must not wait its turn behind them.
+try {
+  setPriority(-5);
+} catch {
+  console.log("odu-lane bridge: could not raise its own priority");
 }
 
 Bun.serve<DialState>({

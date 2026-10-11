@@ -191,12 +191,23 @@ export function cloudflareConnector<S extends SurfaceSpec>(
     const describe = `${opts.binary} on ${opts.host}`;
 
     const stdout = new PassThrough();
+    // Writes in one turn of the event loop go out as one message: every
+    // message costs a hop through the Durable Object's JS thread (see
+    // bridge.ts, COALESCE_*), so fewer, larger ones keep pings prompt.
+    let queued: Buffer[] = [];
+    const sendQueued = (): void => {
+      const body = queued.length === 1 ? queued[0]! : Buffer.concat(queued);
+      queued = [];
+      if (ws.readyState === WebSocket.OPEN) ws.send(body);
+    };
     const stdin = new Writable({
       write(chunk: Buffer, _encoding, callback) {
-        if (ws.readyState === WebSocket.OPEN) ws.send(chunk);
+        if (queued.length === 0) setImmediate(sendQueued);
+        queued.push(chunk);
         callback();
       },
       final(callback) {
+        if (queued.length > 0) sendQueued();
         ws.close(1000, "coordinator closed stdin");
         callback();
       },
