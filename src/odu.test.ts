@@ -5,7 +5,7 @@
  * idle-until-configure, the builtin `_ci-setup` node, configure rejection.
  */
 
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stdioLink } from "@kolu/surface/links/stdio";
@@ -34,7 +34,7 @@ import {
   laneSurface,
 } from "@odu/execution/common/laneSurface";
 import { firstFrame, runUnary, subscribe } from "@odu/execution/common/effectEdge";
-import { createLaneRunner, SETUP_NODE_ID } from "@odu/execution/runner/runner";
+import { createLaneRunner, maxParallelFrom, SETUP_NODE_ID } from "@odu/execution/runner/runner";
 import {
   overlayOnLaneStop,
 } from "@odu/execution/coordinator/run";
@@ -74,8 +74,8 @@ afterEach(() => {
   while (cleanups.length > 0) cleanups.pop()?.();
 });
 
-async function harness(): Promise<Harness> {
-  const runner = createLaneRunner();
+async function harness(opts: { maxParallel?: number } = {}): Promise<Harness> {
+  const runner = createLaneRunner(opts);
   const pair = createLoopbackPair();
   void serveOverStdio({
     group: runner.group,
@@ -551,6 +551,36 @@ describe("shard aggregation", () => {
 // group. (Runner-death-by-signal — the localhost-lane path — is pinned in
 // runner/processTeardown.test.ts; the reaper's own contract in
 // runner/reap.test.ts.)
+describe("per-lane concurrency bound", () => {
+  it("runs at most maxParallel recipes at once, and the rest as slots free", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "odu-par-"));
+    mkdirSync(join(dir, "live"));
+    const h = await harness({ maxParallel: 2 });
+    // Each recipe records how many siblings are alive as it starts. Process
+    // overlap, not node status: a status stays "running" until the log
+    // closes, a moment after the process has gone.
+    const node = (id: string) => ({
+      id,
+      command: `ls ${dir}/live | wc -l >> ${dir}/peers; touch ${dir}/live/${id}; sleep 0.5; rm ${dir}/live/${id}`,
+      needs: [],
+    });
+    const t0 = Date.now();
+    await h.configure([node("a"), node("b"), node("c"), node("d")]);
+    await until(() => ["a", "b", "c", "d"].every((id) => last(h).nodes[id]?.status === "ok"), 15_000);
+    const peers = readFileSync(join(dir, "peers"), "utf-8").trim().split("\n").map(Number);
+    expect(peers).toHaveLength(4);
+    expect(Math.max(...peers)).toBeLessThanOrEqual(1);
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(1000);
+  }, 20_000);
+
+  it("reads the bound from the environment the bridge sets, and is unbounded otherwise", () => {
+    expect(maxParallelFrom("4")).toBe(4);
+    expect(maxParallelFrom(undefined)).toBe(Number.POSITIVE_INFINITY);
+    expect(maxParallelFrom("0")).toBe(Number.POSITIVE_INFINITY);
+    expect(maxParallelFrom("x")).toBe(Number.POSITIVE_INFINITY);
+  });
+});
+
 describe("recipe process-tree reaping", () => {
   const alive = (pid: number): boolean => {
     try {
