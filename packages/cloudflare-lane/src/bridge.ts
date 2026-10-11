@@ -137,7 +137,10 @@ async function startAgent(ws: Socket, spec: Start): Promise<void> {
   say(ws, `[cloudflare] realise exited ${realised.code} after ${((Date.now() - t0) / 1000).toFixed(1)}s`);
   if (realised.code !== 0) return finish(ws, 1, null);
   if (ws.data.closed) return;
-  const child = spawn(`${spec.agentPath}/bin/${spec.binary}`, spec.args, { stdio: ["pipe", "pipe", "pipe"] });
+  // Its own session and process group, as sshd gives each login: a group
+  // kill aimed at one dial's runner (or anything it spawns) cannot reach the
+  // bridge, the other dials, or — through a shared group 1 — everything.
+  const child = spawn(`${spec.agentPath}/bin/${spec.binary}`, spec.args, { stdio: ["pipe", "pipe", "pipe"], detached: true });
   ws.data.child = child;
   child.stdout.on("data", (chunk: Buffer) => relay(ws, STDOUT, chunk));
   child.stderr.on("data", (chunk: Buffer) => relay(ws, STDERR, chunk));

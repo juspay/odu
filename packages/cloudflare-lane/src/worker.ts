@@ -62,6 +62,8 @@ interface Env {
   ODU_LANE_SECRET: string;
   /** Pinned bun store path (odu's own), realised by the entrypoint. */
   ODU_LANE_BUN: string;
+  /** Pinned tini store path: the container's init. */
+  ODU_LANE_TINI: string;
   /** Public key the coordinator signs lane-cache uploads with. */
   ODU_LANE_CACHE_PUBLIC_KEY: string;
   /** Space-separated substituter URL that REPLACES the Worker-proxied cache
@@ -100,6 +102,7 @@ export class OduLane extends Container<Env> {
     const host = new URL(origin).hostname;
     const env: Record<string, string> = {
       ODU_LANE_BUN: this.env.ODU_LANE_BUN,
+      ODU_LANE_TINI: this.env.ODU_LANE_TINI,
       ODU_LANE_BRIDGE: bridgeSource as string,
       ODU_LANE_SUBSTITUTERS: `${cacheUrl} ${this.env.ODU_LANE_EXTRA_SUBSTITUTERS}`.trim(),
       ODU_LANE_TRUSTED_KEYS:

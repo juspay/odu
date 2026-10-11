@@ -8,6 +8,7 @@
 #
 # Inputs (container env, set by the Durable Object at start):
 #   ODU_LANE_BUN              /nix/store/…-bun-X (odu's own pinned bun)
+#   ODU_LANE_TINI             /nix/store/…-tini-X (the container's init)
 #   ODU_LANE_BRIDGE           bridge.ts source text
 #   ODU_LANE_SUBSTITUTERS     space-separated substituters (lane cache first; may be empty)
 #   ODU_LANE_TRUSTED_KEYS     space-separated public keys
@@ -85,8 +86,19 @@ EOF
 if [ -f /etc/nix/netrc ]; then echo "netrc-file = /etc/nix/netrc" >> /etc/nix/nix.conf; fi
 if [ -f /etc/nix/access-tokens.conf ]; then echo "!include /etc/nix/access-tokens.conf" >> /etc/nix/nix.conf; fi
 
+# 4. Host parity for process-heavy CI. Without systemd the kernel keeps its
+#    default pid_max (32768 on 4 vCPU); a CI box under systemd has 4194304.
+#    Measured: odu's own e2e suites wrap 32768 in minutes, and a recycled pid
+#    is how a stale `kill` lands on the wrong process.
+echo 4194304 > /proc/sys/kernel/pid_max 2>/dev/null || echo "odu-lane: could not raise pid_max ($(cat /proc/sys/kernel/pid_max))"
+
 printf '%s' "$ODU_LANE_BRIDGE" > /odu-lane-bridge.ts
 unset ODU_LANE_NETRC AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY ODU_LANE_GITHUB_TOKEN ODU_LANE_BRIDGE
-nix-store --realise "$ODU_LANE_BUN" >/dev/null
-echo "odu-lane: bridge starting"
-exec "$ODU_LANE_BUN/bin/bun" /odu-lane-bridge.ts
+nix-store --realise "$ODU_LANE_BUN" "$ODU_LANE_TINI" >/dev/null
+echo "odu-lane: bridge starting under tini"
+# 5. A real init. This process is the container's PID 1, so every orphan a CI
+#    run leaves reparents to it — and bun reaps only its own children.
+#    Measured: with the bridge as PID 1, killed recipe trees stayed zombies,
+#    `kill(pid, 0)` kept answering, and odu's reaping tests timed out. tini
+#    reaps them and forwards signals (-s: also when not PID 1).
+exec "$ODU_LANE_TINI/bin/tini" -s -- "$ODU_LANE_BUN/bin/bun" /odu-lane-bridge.ts

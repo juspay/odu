@@ -106,6 +106,15 @@ function bunStorePath(): string {
   return path;
 }
 
+/** The container's init, by store path, baked onto the odu wrapper. */
+function tiniStorePath(): string {
+  const path = process.env.ODU_LANE_TINI ?? "";
+  if (!/^\/nix\/store\/[0-9a-z]{32}-tini-/.test(path)) {
+    throw new Error("odu: ODU_LANE_TINI is unset — run odu from its Nix package (it bakes the lane container's init)");
+  }
+  return path;
+}
+
 function workerSourceDir(): string {
   return resolve(import.meta.dirname, "..", "..", "cloudflare-lane");
 }
@@ -208,6 +217,7 @@ function writeWranglerConfig(dir: string, opts: { maxInstances: number; s3Cache:
     ...(opts.r2 ? { r2_buckets: [{ binding: "CACHE", bucket_name: BUCKET }] } : {}),
     vars: {
       ODU_LANE_BUN: opts.bun,
+      ODU_LANE_TINI: tiniStorePath(),
       ODU_LANE_CACHE_PUBLIC_KEY: opts.publicKey,
       ODU_LANE_CACHE_URL: opts.s3Cache ?? "",
       ODU_LANE_EXTRA_SUBSTITUTERS: splitList(process.env.ODU_AGENT_SUBSTITUTERS).join(" "),

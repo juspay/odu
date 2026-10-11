@@ -31,6 +31,11 @@ let
   # from cache.nixos.org (packages/cli/src/cloudflare.ts).
   wranglerPath = builtins.unsafeDiscardStringContext "${pkgs.wrangler}";
 
+  # The init a Cloudflare lane container runs under (it reaps the orphans a
+  # CI run leaves; see packages/cloudflare-lane/src/entrypoint.sh). By path
+  # for the same reason: the container realises it, the coordinator never runs it.
+  tiniPath = builtins.unsafeDiscardStringContext "${pkgs.tini}";
+
   src = pkgs.lib.fileset.toSource {
     root = ./.;
     fileset = pkgs.lib.fileset.unions [
@@ -268,6 +273,7 @@ let
       --set ODU_BUILD_ID "$out" \
       --set ODU_OSFACTS_BIN "${pkgs.osfacts}/bin/osfacts" \
       --set-default ODU_WRANGLER "${wranglerPath}" \
+      --set-default ODU_LANE_TINI "${tiniPath}" \
       ${pkgs.lib.optionalString (selfRev != null) ''--set ODU_COMMIT_HASH "${selfRev}"''} \
       --set ODU_AGENT_SUBSTITUTERS "${pkgs.lib.concatStringsSep " " binaryCache.substituters}" \
       --set ODU_AGENT_TRUSTED_PUBLIC_KEYS "${pkgs.lib.concatStringsSep " " binaryCache.trustedPublicKeys}" \
