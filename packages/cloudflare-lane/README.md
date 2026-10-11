@@ -33,3 +33,15 @@ Cloudflare behaviours this design rests on, each measured on a live account:
 - `api.github.com` from Cloudflare egress is rate-limited (403 on `github:` refs).
 - Cold start of a fresh instance: 3 s from the pre-warmed pool, ~65 s on the
   account's first-ever pull of the image.
+- The entrypoint is the container's PID 1. With the bridge there, orphans were
+  never reaped (zombies kept answering `kill(pid, 0)`) and every runner shared
+  process group 1, so one group kill reached them all. `tini` is init, and
+  each dial's runner gets its own session.
+- Without systemd, `pid_max` is the kernel's 32768, which CI-scale test
+  suites wrap in minutes; the entrypoint raises it to a systemd host's 4194304.
+- `@cloudflare/containers` relays a WebSocket message by message through the
+  Durable Object's JS thread. One message per stdout chunk let seven
+  recipes' logs delay the RPC pings until the lane died; the bridge and the
+  connector coalesce, and the bridge runs at nice -5 above its runners.
+- `/dev/kvm` arrives 0600 root: the entrypoint makes it usable by Nix's build
+  users and refuses to run a lane without it (no silent TCG).
