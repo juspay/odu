@@ -38,6 +38,13 @@ import {
   shortHost,
 } from "./hosts";
 import type { ResolveRunnerDrv } from "./runnerFlake";
+import {
+  cloudflareConfigPath,
+  cloudflareInstance,
+  isCloudflareHost,
+  readCloudflareConfig,
+} from "../common/cloudflareConfig";
+import { laneState } from "./cloudflare/workerApi";
 import { type TimeoutOpts, withTimeout } from "../common/withTimeout";
 import { runUnary } from "../common/effectEdge";
 import {
@@ -47,6 +54,21 @@ import {
 } from "./surfaceRemoteOpts";
 
 export type HolderInfo = LeaseHolder;
+
+async function cloudflareIdle(
+  host: string,
+): Promise<{ kind: "idle" } | { kind: "running" } | { kind: "error"; error: string }> {
+  try {
+    const config = readCloudflareConfig();
+    if (config === null) {
+      return { kind: "error", error: `no ${cloudflareConfigPath()} — run \`odu cloudflare setup\`` };
+    }
+    const { running } = await laneState(config, cloudflareInstance(host));
+    return running ? { kind: "running" } : { kind: "idle" };
+  } catch (e) {
+    return { kind: "error", error: e instanceof Error ? e.message : String(e) };
+  }
+}
 
 export function leaseLockPath(): string {
   const fromEnv = process.env.ODU_LEASE_LOCK;
@@ -611,6 +633,16 @@ export async function probeHost(
   const venue = opts.slot ?? { host, slot: 0, slots: 1 };
   if (isLocalHost(host)) {
     return { ...venue, state: "local", heldBy: null };
+  }
+  if (isCloudflareHost(host)) {
+    // A probe must not cost a container. A stopped container holds no flock,
+    // so its Durable Object's "not running" IS the answer; only a running one
+    // is dialled (already up, so that costs a runner process, not a boot).
+    const idle = await cloudflareIdle(host);
+    if (idle.kind === "idle") return { ...venue, state: "free", heldBy: null };
+    if (idle.kind === "error") {
+      return { ...venue, state: "unreachable", heldBy: null, error: idle.error };
+    }
   }
 
   const timeoutMs = opts.timeoutMs ?? CLAIM_TIMEOUT_MS;
