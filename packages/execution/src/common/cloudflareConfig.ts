@@ -17,6 +17,7 @@
  */
 
 import { readFileSync } from "node:fs";
+import { hostsCandidates } from "./hostsFile";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -26,6 +27,21 @@ const INSTANCE = /^[A-Za-z0-9_-]{1,64}$/;
 /** True for `cloudflare` and `cloudflare:<instance>`. */
 export function isCloudflareHost(host: string): boolean {
   return host === CLOUDFLARE_HOST || host.startsWith(`${CLOUDFLARE_HOST}:`);
+}
+
+/** Expand one cloudflare hosts.json entry into its machines.
+ *
+ *  On ssh, `{"host": "ci-1", "slots": 4}` is four flocks on ONE box. On
+ *  Cloudflare there is no box to share: a container is 4 vCPU, so four slots
+ *  are only worth declaring as four containers. They are therefore spelled as
+ *  four distinct HOSTS — `cloudflare:default-0` … `cloudflare:default-3` — so
+ *  the lease dial and the lane dial that follows it name the same container
+ *  without the slot having to travel separately through the run. A single
+ *  slot keeps the spelling it was written with. */
+export function expandCloudflareSlots(host: string, slots: number): string[] {
+  const base = cloudflareInstance(host); // validates the spelling either way
+  if (slots === 1) return [host];
+  return Array.from({ length: slots }, (_, n) => `${CLOUDFLARE_HOST}:${base}-${n}`);
 }
 
 /** The Durable Object / container name a cloudflare host dials. */
@@ -59,6 +75,10 @@ export interface CloudflareConfig {
   workerUrl: string;
   secret: string;
   cache: LaneCacheConfig | null;
+  /** What setup deployed — `status` compares it with what hosts.json now
+   *  declares. Absent in configs written before it existed. */
+  maxInstances?: number;
+  githubToken?: boolean;
 }
 
 export function oduConfigDir(): string {
@@ -79,7 +99,11 @@ export function parseWorkerUrl(raw: string, source: string): string {
   } catch {
     throw new Error(`odu: ${source}: workerUrl ${JSON.stringify(raw)} is not a URL`);
   }
-  if (url.protocol !== "https:" || url.username !== "" || url.password !== "" || url.search !== "" || url.pathname.replace(/\/+$/, "") !== "") {
+  // Plain http only for a loopback Worker (the connector's tests): a real
+  // Worker carries the bearer, which must never cross the network in clear.
+  const loopback = url.hostname === "127.0.0.1" || url.hostname === "localhost";
+  const scheme = url.protocol === "https:" || (loopback && url.protocol === "http:");
+  if (!scheme || url.username !== "" || url.password !== "" || url.search !== "" || url.pathname.replace(/\/+$/, "") !== "") {
     throw new Error(`odu: ${source}: workerUrl must be a bare https origin, got ${JSON.stringify(raw)}`);
   }
   return url.origin;
@@ -102,13 +126,15 @@ export function readCloudflareConfig(): Readonly<CloudflareConfig> | null {
     workerUrl: parseWorkerUrl(raw.workerUrl, path),
     secret: raw.secret,
     cache: raw.cache ?? null,
+    ...(typeof raw.maxInstances === "number" ? { maxInstances: raw.maxInstances } : {}),
+    ...(raw.githubToken === true ? { githubToken: true } : {}),
   });
 }
 
-export type LaneAction = "start" | "agent" | "import" | "destroy";
+export type LaneAction = "start" | "state" | "agent" | "import" | "destroy";
 
-/** The ONE place a lane route's URL is spelled. `ws` gives the WebSocket
- *  scheme for the two upgrade routes. */
+/** The ONE place a lane route's URL is spelled. `wss` gives the WebSocket
+ *  scheme for the two upgrade routes (`ws` for a loopback test Worker). */
 export function laneEndpoint(
   config: Pick<CloudflareConfig, "workerUrl">,
   instance: string,
@@ -117,7 +143,8 @@ export function laneEndpoint(
 ): URL {
   if (!INSTANCE.test(instance)) throw new Error(`odu: bad cloudflare instance ${JSON.stringify(instance)}`);
   const url = new URL(`/lane/${instance}/${action}`, config.workerUrl);
-  url.protocol = scheme === "wss" ? "wss:" : "https:";
+  const secure = url.protocol === "https:";
+  if (scheme === "wss") url.protocol = secure ? "wss:" : "ws:";
   return url;
 }
 
@@ -136,4 +163,34 @@ export function requireCloudflareConfig(): Readonly<CloudflareConfig> {
     );
   }
   return config;
+}
+
+/** Every cloudflare host the operator's hosts file declares, slots expanded —
+ *  the containers a run can ask for at once, which is what `odu cloudflare
+ *  setup` sizes `max_instances` from. Reads the same chain the coordinator
+ *  does (`hostsFile.ts`); a malformed entry is left for the coordinator to
+ *  refuse, as here it only sizes a deployment. */
+export function declaredCloudflareHosts(override?: string): { source: string | null; hosts: string[] } {
+  for (const { path } of hostsCandidates(override)) {
+    if (path === null) continue;
+    let text: string;
+    try {
+      text = readFileSync(path, "utf-8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    const hosts = new Set<string>();
+    for (const value of Object.values(parsed ?? {})) {
+      for (const entry of Array.isArray(value) ? value : [value]) {
+        const host = typeof entry === "string" ? entry : (entry as { host?: unknown })?.host;
+        const slots = typeof entry === "string" ? 1 : Number((entry as { slots?: unknown })?.slots ?? 1);
+        if (typeof host !== "string" || !isCloudflareHost(host)) continue;
+        for (const expanded of expandCloudflareSlots(host, Number.isInteger(slots) && slots > 0 ? slots : 1)) hosts.add(expanded);
+      }
+    }
+    return { source: path, hosts: [...hosts] };
+  }
+  return { source: null, hosts: [] };
 }

@@ -49,6 +49,7 @@ describe("worker URL and lane endpoints", () => {
   it("accepts only a bare https origin", () => {
     expect(parseWorkerUrl("https://odu-lane.example.workers.dev/", "t")).toBe("https://odu-lane.example.workers.dev");
     expect(() => parseWorkerUrl("http://odu-lane.example.workers.dev", "t")).toThrow(/https/);
+    expect(parseWorkerUrl("http://127.0.0.1:8787", "t")).toBe("http://127.0.0.1:8787");
     expect(() => parseWorkerUrl("https://u:p@w.example", "t")).toThrow(/bare/);
     expect(() => parseWorkerUrl("https://w.example/x", "t")).toThrow(/bare/);
     expect(() => parseWorkerUrl("not a url", "t")).toThrow(/not a URL/);
