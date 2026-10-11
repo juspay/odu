@@ -31,6 +31,8 @@ nix run github:juspay/odu -- web --background  # explicit daemon
 nix run github:juspay/odu -- web --upgrade     # replace it, serve here
 ```
 
+No SSH builder? `odu cloudflare setup` deploys a Worker to your own Cloudflare account, after which `--host x86_64-linux=cloudflare` runs the lane in a Cloudflare container (experimental).
+
 ## Work with a run
 
 Below, `odu` abbreviates `nix run github:juspay/odu --`:

@@ -22,7 +22,6 @@ import {
   isLocalHost,
   makeSession,
   type SessionState,
-  sshConnector,
   type SshProv,
 } from "@kolu/surface-remote";
 import {
@@ -42,8 +41,8 @@ import type { ResolveRunnerDrv } from "./runnerFlake";
 import { type TimeoutOpts, withTimeout } from "../common/withTimeout";
 import { runUnary } from "../common/effectEdge";
 import {
+  laneConnector,
   lineLogger,
-  localhostSpawnEnv,
   pinLaneFace,
 } from "./surfaceRemoteOpts";
 
@@ -459,12 +458,9 @@ export async function tryClaim(
   // owns the diagnosis + liveness wiring both dials share.
   const sink = provisionSink(opts.onLog);
   const session = makeSession<AgentClient, SshProv>({
-    connectOnce: sshConnector({
-      surface: laneSurface,
-      host,
-      binary: "odu-runner",
+    connectOnce: laneConnector({
+      host: host,
       resolveDrvPath: opts.resolveDrvPath,
-      localEnv: localhostSpawnEnv(),
     }),
     initialConnection: "probing",
     label: `lease:${shortHost(host)}`,
@@ -623,12 +619,9 @@ export async function probeHost(
   // deadline tracks liveness rather than total elapsed.
   const sink = provisionSink(opts.onLog);
   const session = makeSession<AgentClient, SshProv>({
-    connectOnce: sshConnector({
-      surface: laneSurface,
-      host,
-      binary: "odu-runner",
+    connectOnce: laneConnector({
+      host: host,
       resolveDrvPath: opts.resolveDrvPath,
-      localEnv: localhostSpawnEnv(),
     }),
     initialConnection: "probing",
     label: `lease-probe:${shortHost(host)}`,

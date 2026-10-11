@@ -22,5 +22,7 @@
     "lib": ["ESNext", "DOM", "DOM.Iterable"],
     "types": ["bun", "node"]
   },
-  "include": ["src", "tests", "packages"]
+  "//exclude": "The odu-lane Worker runs on Cloudflare's runtime, whose globals (DurableObjectNamespace, R2Bucket, crypto.subtle.timingSafeEqual) are not in this tree's lib; wrangler's esbuild bundles it at `odu cloudflare setup` time.",
+  "include": ["src", "tests", "packages"],
+  "exclude": ["packages/cloudflare-lane/src/worker.ts"]
 }

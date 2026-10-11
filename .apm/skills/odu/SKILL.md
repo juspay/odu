@@ -434,7 +434,8 @@ Lanes need machines. `$ODU_HOSTS` (a file path) → `~/.config/odu/hosts.json`:
 ```
 
 Keys are Nix system tuples; values are anything ssh dials, a list of them (a
-pool), or `localhost`. A run that resolves **zero** lanes is refused, never
+pool), `localhost`, or `cloudflare[:<instance>]` (an `x86_64-linux` Cloudflare
+container, after a human has run `odu cloudflare setup` once). A run that resolves **zero** lanes is refused, never
 defaulted to `localhost`. `hostPins` (`"P=ADDR"`) pins one box for one run;
 `venue_probe` shows the inventory from any face; `odu hosts [platform…]` is its
 terminal spelling.

@@ -24,6 +24,13 @@ let
   # flake.nix's nixConfig.
   binaryCache = import ./nix/binary-cache.nix;
 
+  # The wrangler `odu cloudflare setup` deploys the odu-lane Worker with —
+  # pinned like every other tool odu runs, but by store PATH with its context
+  # discarded, so it is NOT in odu's closure: nearly nobody runs setup, and
+  # wrangler (with workerd) is hundreds of MiB. setup realises it on first use
+  # from cache.nixos.org (packages/cli/src/cloudflare.ts).
+  wranglerPath = builtins.unsafeDiscardStringContext "${pkgs.wrangler}";
+
   src = pkgs.lib.fileset.toSource {
     root = ./.;
     fileset = pkgs.lib.fileset.unions [
@@ -260,6 +267,7 @@ let
       --set ODU_WEB_DIST "${web-ui}" \
       --set ODU_BUILD_ID "$out" \
       --set ODU_OSFACTS_BIN "${pkgs.osfacts}/bin/osfacts" \
+      --set-default ODU_WRANGLER "${wranglerPath}" \
       ${pkgs.lib.optionalString (selfRev != null) ''--set ODU_COMMIT_HASH "${selfRev}"''} \
       --set ODU_AGENT_SUBSTITUTERS "${pkgs.lib.concatStringsSep " " binaryCache.substituters}" \
       --set ODU_AGENT_TRUSTED_PUBLIC_KEYS "${pkgs.lib.concatStringsSep " " binaryCache.trustedPublicKeys}" \

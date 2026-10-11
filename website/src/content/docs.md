@@ -48,6 +48,8 @@ odu run --platform x86_64-linux
 odu run test@aarch64-darwin
 ```
 
+**Cloudflare Containers (experimental).** `odu cloudflare setup` deploys the `odu-lane` Worker to your own Cloudflare account (Workers Paid; wrangler logged in). After that, `cloudflare` or `cloudflare:<instance>` is an `x86_64-linux` host like any other — `--host x86_64-linux=cloudflare`, or a pool `["cloudflare:a", "cloudflare:b"]` (one container per instance). Each container is a 4 vCPU / 12 GiB microVM with `/dev/kvm`. The runner closure is published to an R2 bucket used as a Nix binary cache when R2 is enabled, and shipped through the Worker otherwise.
+
 The CLI forwards your shell's `$ODU_HOSTS`. A browser or MCP caller can supply `hostsFile`; omitted uses the service's configuration, while `""` bypasses its override. Retries preserve the parent's recorded inventory choice and host pins.
 
 ### Hold a machine across runs
@@ -206,6 +208,7 @@ Other shared verbs: `run_list` (the board filtered by checkout, commit and seq, 
 | `dump`, `graph` | Inspect the resolved pipeline |
 | `protect` | Configure GitHub required checks; preview with `--dry-run` |
 | `web`, `surface`, `mcp` | Browser server, generated CLI, agent transport |
+| `cloudflare setup/status/destroy` | Deploy the odu-lane Worker for `cloudflare[:<instance>]` hosts; `--s3-cache URL`, `--no-cache`, `--max-instances N` |
 
 For `wait`, `rerun`, and `cancel`, omitted `--run` means `latest` in this checkout. Run addresses also accept a run ID or `<sha7>#<seq>`. `odu runs` has been replaced by `history list`.
 

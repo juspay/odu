@@ -128,6 +128,10 @@
     url = "https://registry.npmjs.org/@babel/types/-/types-7.29.8.tgz";
     hash = "sha512-Vj1jF3cPfxg7OAfoI7QnVKLoILlm2JF9pnVHrX8qx7AHMiYWT+NDAA7jChlNgRS4WTLc/fD1lXLmPixluj+3Gg==";
   };
+  "@cloudflare/containers@0.3.7" = fetchurl {
+    url = "https://registry.npmjs.org/@cloudflare/containers/-/containers-0.3.7.tgz";
+    hash = "sha512-DM9dm3FnIBSyiSJ1FLavKwl/lk3oAmTaynCzZQ9pZR0ncRPquSxkxd8Nu2MFILxmDDsPkxKsSNEh9mHHMty4Fw==";
+  };
   "@colors/colors@1.5.0" = fetchurl {
     url = "https://registry.npmjs.org/@colors/colors/-/colors-1.5.0.tgz";
     hash = "sha512-ooWCrlZP11i8GImSjTHYHLkvFDP48nS4+204nGb1RiX/WXYHmJA2III9/e2DWVabCESdW7hBAEzHRqUn9OUVvQ==";
@@ -225,6 +229,7 @@
     hash = "sha512-xKd8OIzlqNzcqcNumGAa6g+PW2kjD5vrpcKOnfldAUPP3j7lnqMPwlTXQm8gF+UwH72z0lqaRbjr9hqGz0eITA==";
   };
   "@odu/cli" = copyPathToStore ./packages/cli;
+  "@odu/cloudflare-lane" = copyPathToStore ./packages/cloudflare-lane;
   "@odu/execution" = copyPathToStore ./packages/execution;
   "@odu/run-client" = copyPathToStore ./packages/run-client;
   "@odu/run-history" = copyPathToStore ./packages/run-history;

@@ -8,8 +8,45 @@
  */
 
 import type { Logger } from "@kolu/log";
-import type { AgentClient, Session, SshProv } from "@kolu/surface-remote";
-import { type LaneClient, laneClientOver } from "../common/laneSurface";
+import {
+  type AgentClient,
+  type Connector,
+  type Session,
+  type SshProv,
+  sshConnector,
+} from "@kolu/surface-remote";
+import { type LaneClient, laneClientOver, laneSurface } from "../common/laneSurface";
+import { cloudflareConnector } from "./cloudflare/connector";
+import { isCloudflareHost } from "../common/cloudflareConfig";
+import type { ResolveRunnerDrv } from "./runnerFlake";
+
+/** The ONE place a lane host's spelling picks its transport. Every dial of
+ *  odu-runner — the lane, the venue claim, the probe — goes through here, so a
+ *  `cloudflare[:<instance>]` host is dialled through the odu-lane Worker and
+ *  anything else through ssh (or directly, for localhost), with no call site
+ *  able to disagree about which. */
+export function laneConnector(opts: {
+  host: string;
+  resolveDrvPath: ResolveRunnerDrv;
+}): Connector<AgentClient, SshProv> {
+  if (isCloudflareHost(opts.host)) {
+    return cloudflareConnector({
+      surface: laneSurface,
+      host: opts.host,
+      binary: "odu-runner",
+      resolveDrvPath: opts.resolveDrvPath,
+    });
+  }
+  return sshConnector({
+    surface: laneSurface,
+    host: opts.host,
+    binary: "odu-runner",
+    resolveDrvPath: opts.resolveDrvPath,
+    // Required (kolu#1884 / #1872): localhost arm refuses ambient inherit.
+    // Unused on a real ssh host. See localhostSpawnEnv.
+    localEnv: localhostSpawnEnv(),
+  });
+}
 
 /** Wait for the session to hold a client, then build odu's TYPED lane face over
  *  the same wire.
