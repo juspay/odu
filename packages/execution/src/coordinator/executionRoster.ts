@@ -62,10 +62,12 @@ export class ExecutionRoster {
   /** Give every box this platform holds back. The lane may be gone (a
    *  resurrection) or the whole platform may be (a cancel) — both want the same
    *  thing, so both ask for it here rather than writing the loop again. */
-  releaseLeases(platform: string): void {
+  /** Release the platform's leases — all of them, or those `which` selects
+   *  (a primary resurrection keeps the leases its shard lanes run on). */
+  releaseLeases(platform: string, which: (lease: LeaseHandle) => boolean = () => true): void {
     const execution = this.#platforms.get(platform);
     if (execution === undefined) return;
-    for (const lease of [...execution.leases]) {
+    for (const lease of [...execution.leases].filter(which)) {
       execution.leases.delete(lease);
       this.#release(lease);
     }

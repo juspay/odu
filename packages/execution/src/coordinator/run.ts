@@ -2269,10 +2269,25 @@ async function orchestrate(
    * gate has published what it is holding, which is a side effect and belongs
    * to the caller that is committing to a retry.
    */
+  /** A sharded platform is resurrectable once its shard plan is fixed: the
+   *  plan says which node is the primary's shard and which leases carry the
+   *  others, and only the primary is re-claimed — shard lanes on their own
+   *  venues keep running. Before the plan exists (the burst-claim window at
+   *  startup) there is no primary shard to re-place, so that window keeps the
+   *  old fail-closed path. */
   const isResurrectable = (platform: string): boolean =>
     claimablePlatforms.has(platform) &&
     remotePlatforms.has(platform) &&
-    shardRootsFor(platform).length === 0;
+    (shardRootsFor(platform).length === 0 || shardPlans.has(platform));
+
+  /** The public node a primary-lane task reports to: a shard root's primary
+   *  share is `root[1-of-N]`, everything else its own id. */
+  const primaryPublicId = (platform: string, localId: string): string => {
+    const plan = planFor(platform, localId);
+    return plan !== undefined && plan.total > 1
+      ? fanId(shardNamepath(localId, 0, plan.total), platform)
+      : fanId(localId, platform);
+  };
 
   /**
    * The tasks a fresh lane for this platform would have to run: every node the
@@ -2296,8 +2311,9 @@ async function orchestrate(
     state: PipelineState,
   ): TaskSpec[] => {
     const all = tasksByPlatform.get(platform) ?? [];
+    const byId = new Map(all.map((task) => [task.id, task] as const));
     const statusOf = (localId: string): NodeStatus | undefined =>
-      state.nodes[fanId(localId, platform)]?.status;
+      state.nodes[primaryPublicId(platform, localId)]?.status;
     // Every task in `tasksByPlatform` was given a node at startup, so a missing
     // status is unreachable — stated rather than defaulted, so a reader does
     // not have to work out whether "a node the run never heard of is done" is a
@@ -2309,6 +2325,28 @@ async function orchestrate(
     const retry = new Map(
       all.filter(unfinished).map((task) => [task.id, task] as const),
     );
+    // A fresh venue is a fresh workspace: whatever a finished prerequisite
+    // left there (an `install`'s node_modules, a build's outputs) is not on
+    // the new box. Measured on odu's own CI in a Cloudflare lane: `unit` and
+    // the e2e suites were retried without `install` and failed on every
+    // missing module. So a retried node brings its `ok` prerequisites with it,
+    // transitively, and they earn their verdicts again — exactly as a shard
+    // lane re-runs its root's dependency closure on its own venue.
+    const queue = [...retry.values()];
+    while (queue.length > 0) {
+      const task = queue.pop()!;
+      for (const dep of task.needs) {
+        const prerequisite = byId.get(dep);
+        if (prerequisite === undefined || retry.has(dep) || statusOf(dep) !== "ok") continue;
+        retry.set(dep, prerequisite);
+        queue.push(prerequisite);
+      }
+    }
+    // Keep the platform's own order, so the lane is configured as the DAG
+    // was declared rather than in discovery order.
+    const ordered = new Map(all.filter((task) => retry.has(task.id)).map((task) => [task.id, task] as const));
+    retry.clear();
+    for (const [id, task] of ordered) retry.set(id, task);
     // A dependency that is neither `ok` nor itself being retried is a verdict
     // this lane already reached; its dependents come off the retry with it.
     for (;;) {
@@ -2318,10 +2356,16 @@ async function orchestrate(
       if (blocked.length === 0) break;
       for (const task of blocked) retry.delete(task.id);
     }
-    return [...retry.values()].map((task) => ({
+    // A shard root's primary share runs with its immutable shard identity,
+    // as it did on the lane that died.
+    const tasks: TaskSpec[] = [...retry.values()].map((task) => ({
       ...task,
       needs: task.needs.filter((dep) => retry.has(dep)),
     }));
+    return plansFor(platform).reduce<TaskSpec[]>(
+      (configured, plan) => tasksForShard(configured, plan.rootId, 0, plan.total),
+      tasks,
+    );
   };
 
   /**
@@ -2444,7 +2488,7 @@ async function orchestrate(
         ` nodes (attempt ${attempt} of ${maxResurrections})`,
       platform,
     );
-    const retryIds = new Set(retryTasks.map((task) => fanId(task.id, platform)));
+    const retryIds = new Set(retryTasks.map((task) => primaryPublicId(platform, task.id)));
     const cutOff = state.order.filter(
       (id) => onPlatform(id, platform) && state.nodes[id]?.status === "running",
     );
@@ -2461,8 +2505,11 @@ async function orchestrate(
     if (dead !== undefined) retireLane(platform, dead);
     // Release on a lost lease is a tolerated no-op; on a lease that merely
     // outlived its lane it is the whole point — the box must be free before we
-    // queue for one, or a single-host pool waits on itself.
-    executions.releaseLeases(platform);
+    // queue for one, or a single-host pool waits on itself. Only the
+    // PRIMARY's: the shard plans' leases carry shard lanes that are still
+    // running on their own venues.
+    const shardLeases = new Set(plansFor(platform).flatMap((plan) => plan.leases));
+    executions.releaseLeases(platform, (lease) => !shardLeases.has(lease));
 
     // Re-open the provisioning bracket so the new claim narrates into it and
     // the new runner's setup verdict has somewhere to land (`finishSetup`

@@ -412,17 +412,19 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
       expect(leases[0]!.released).toBe(true);
       expect(first.closed).toBe(true);
 
-      // THE ASSERTION. Only the unfinished work, and `needs` filtered to it —
-      // the runner's `configure` validates the DAG it is handed and rejects a
-      // dependency it was never given, so an unfiltered `needs: ["alpha"]`
-      // would be refused outright.
+      // THE ASSERTION. The unfinished work, plus the finished prerequisite it
+      // needs: the new venue is a fresh workspace, so whatever `alpha` left
+      // on the dead box (an install's node_modules) is not there, and `beta`
+      // and `gamma` would run without it. `alpha` earns its verdict again on
+      // the new box; the DAG is handed over whole, edges intact.
       const second = lanes[1]!;
       expect(second.opts.host).toBe(HOST_B);
-      expect(second.opts.tasks.map((t) => t.id)).toEqual(["beta", "gamma"]);
-      expect(second.opts.tasks.map((t) => [...t.needs])).toEqual([[], []]);
+      expect(second.opts.tasks.map((t) => t.id)).toEqual(["alpha", "beta", "gamma"]);
+      expect(second.opts.tasks.map((t) => [...t.needs])).toEqual([[], ["alpha"], ["alpha"]]);
 
-      // The finished node keeps its verdict AND its output; the interrupted one
-      // goes back to pending with the interruption written into its log.
+      // The first attempt's verdict and output stay on record (attempt 1);
+      // the interrupted node goes back to pending with the interruption
+      // written into `_ci-setup`.
       //
       // WAITED FOR, not sampled. `lanes[1]` existing is an in-process fact,
       // while `nodes` is a real socket subscriber whose frames arrive a tick
@@ -432,7 +434,6 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
       // assertion: a `beta` that was wrongly left `running` (or a re-run
       // `alpha`) never reaches these values, so the wait fails rather than
       // passing late.
-      await waitFor(() => nodes.statusOf("alpha") === "ok", 20_000);
       await waitFor(() => nodes.statusOf("beta") === "pending", 20_000);
       const sha7 = sha7Of(dir);
       // Sync, because two assertions below poll it inside a `waitFor`. A log
@@ -443,9 +444,6 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
         const path = join(dir, ".ci", sha7, PLATFORM, `${node}.log`);
         return existsSync(path) ? readFileSync(path, "utf-8") : "";
       };
-      expect(
-        await readWhenWritten(join(dir, ".ci", sha7, PLATFORM, "alpha.log")),
-      ).toContain("ALPHA OUTPUT");
       // The interruption is narrated where it SURVIVES. A node's log is
       // addressed by commit and the successor lane opens it with a `snapshot`
       // that resets the file, so `_ci-setup` — coordinator-owned, never reset
@@ -460,16 +458,18 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
       );
       expect(logOf("beta")).toBe("");
 
-      // The retry lane finishes the run.
+      // The retry lane finishes the run, prerequisite first.
       second.opts.onNodes(
-        laneState({ "_ci-setup": "ok", beta: "ok", gamma: "ok" }),
+        laneState({ "_ci-setup": "ok", alpha: "ok", beta: "ok", gamma: "ok" }),
       );
+      second.opts.onLogFrame("alpha", laneFrame({ kind: "end" }));
       second.opts.onLogFrame("beta", laneFrame({ kind: "end" }));
       second.opts.onLogFrame("gamma", laneFrame({ kind: "end" }));
 
       expect(await outcome).toBe(0);
       const recorded = handleFor("placement-retry", { root: join(dir, ".ci", "state", "runs") });
       expect(readAttemptRecord(recorded, `alpha@${PLATFORM}`, 1)?.placement.host).toBe(HOST_A);
+      expect(readAttemptRecord(recorded, `alpha@${PLATFORM}`, 2)?.placement.host).toBe(HOST_B);
       expect(readAttemptRecord(recorded, `beta@${PLATFORM}`, 1)?.placement.host).toBe(HOST_A);
       expect(readAttemptRecord(recorded, `beta@${PLATFORM}`, 2)?.placement.host).toBe(HOST_B);
     } finally {
@@ -478,17 +478,20 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
     }
   }, 60_000);
 
-  it("does not re-run a node whose ok verdict was still in flight", async () => {
+  it("publishes an ok verdict still in flight before deciding the retry", async () => {
     // A node's terminal status is withheld until its log ends, so a node that
     // FINISHED with its tail still on the wire reads `running` on the fan-in.
     // The retry set is read off those statuses — so unless the held verdicts
-    // are published first, the one node that actually passed is exactly the one
-    // a resurrection would run again, throwing its output away in the process.
+    // are published first, the node that actually passed would be judged CUT
+    // OFF mid-recipe: its attempt recorded as interrupted, its output thrown
+    // away. Published first, it is a finished prerequisite: re-run on the new
+    // venue for the workspace it leaves (see the test above), with attempt 1
+    // kept as the pass it was.
     const dir = fixture();
     const socketPath = join(dir, ".ci", "odu.sock");
     const { lanes, deps } = harness();
 
-    const run = runCommand(runArgs(), deps);
+    const run = runCommand({ ...runArgs(), runId: "in-flight-ok" }, deps);
     const outcome = run.catch((err: unknown) => err);
     const nodes = await watchNodes(socketPath);
 
@@ -532,18 +535,19 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
       // This does not weaken the assertion: if the resurrection had wrongly
       // re-run `alpha`, its status would go back to pending/running and stay
       // there, so the wait fails instead of passing late.
-      await waitFor(() => nodes.statusOf("alpha") === "ok", 20_000);
-      expect(lanes[1]!.opts.tasks.map((t) => t.id)).toEqual(["beta", "gamma"]);
-      expect(
-        await readWhenWritten(join(dir, ".ci", sha7Of(dir), PLATFORM, "alpha.log")),
-      ).toContain("ALPHA OUTPUT");
+      expect(lanes[1]!.opts.tasks.map((t) => t.id)).toEqual(["alpha", "beta", "gamma"]);
+      const setupLog = await readWhenWritten(join(dir, ".ci", sha7Of(dir), PLATFORM, "_ci-setup.log"));
+      expect(setupLog).not.toContain("cut off mid-recipe");
 
       lanes[1]!.opts.onNodes(
-        laneState({ "_ci-setup": "ok", beta: "ok", gamma: "ok" }),
+        laneState({ "_ci-setup": "ok", alpha: "ok", beta: "ok", gamma: "ok" }),
       );
+      lanes[1]!.opts.onLogFrame("alpha", laneFrame({ kind: "end" }));
       lanes[1]!.opts.onLogFrame("beta", laneFrame({ kind: "end" }));
       lanes[1]!.opts.onLogFrame("gamma", laneFrame({ kind: "end" }));
       expect(await outcome).toBe(0);
+      const recorded = handleFor("in-flight-ok", { root: join(dir, ".ci", "state", "runs") });
+      expect(readAttemptRecord(recorded, `alpha@${PLATFORM}`, 1)?.status).toBe("ok");
     } finally {
       await nodes.close();
       await settleOrGiveUp(outcome);
