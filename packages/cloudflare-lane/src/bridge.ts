@@ -216,9 +216,11 @@ let collecting: Promise<void> | null = null;
 const USER_HZ = 100;
 
 /** Epoch seconds at which the oldest recipe still running on any lane
- *  started, or null when none is. A recipe is a direct child of a runner (the
- *  runner spawns each node as its own process group), so its start time is in
- *  /proc. */
+ *  started, or null when none is. A recipe is a direct child of a runner that
+ *  leads its own session: the runner spawns each node `detached` (setsid).
+ *  Other children do not count — the venue lease's `flock` lives as long as
+ *  the run, and counting it protected every path the run ever made (measured:
+ *  a finished node's rootless path survived a forced collection). */
 function oldestRecipeStart(): number | null {
   const runners = new Set<number>();
   for (const ws of dials) {
@@ -236,9 +238,10 @@ function oldestRecipeStart(): number | null {
     } catch {
       continue; // gone between readdir and read
     }
-    // Fields after the parenthesised command: state ppid pgrp ... starttime (22nd overall).
+    // Fields after the parenthesised command: state ppid pgrp session ...
+    // starttime (the 22nd field overall).
     const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-    if (!runners.has(Number(fields[1]))) continue;
+    if (!runners.has(Number(fields[1])) || Number(fields[3]) !== Number(name)) continue;
     const started = btime + Number(fields[19]) / USER_HZ;
     oldest = oldest === null ? started : Math.min(oldest, started);
   }
