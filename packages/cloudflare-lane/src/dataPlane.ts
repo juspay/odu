@@ -18,6 +18,7 @@
  */
 
 import { Container } from "@cloudflare/containers";
+import { chunkEnv } from "./http";
 // Embedded as text via the wrangler `rules` that `odu cloudflare setup` writes.
 // @ts-ignore -- text module
 import bridgeSource from "./bridge.ts";
@@ -35,8 +36,9 @@ const BASH =
 const PORT = 8080;
 
 /** Cloudflare caps a container env var at 16,000 bytes, and bridge.ts is past
- *  it as plain text. Shipped gzip'd and base64'd (~3x smaller); the
- *  entrypoint decodes it with the pinned bun. http.test.ts pins the size. */
+ *  it as plain text. Shipped gzip'd and base64'd, split across numbered vars
+ *  (`chunkEnv`), and reassembled and decoded by the entrypoint with the
+ *  pinned bun — so the bridge's size has no ceiling. */
 let bridgeGz: Promise<string> | undefined;
 function bridgeEncoded(): Promise<string> {
   bridgeGz ??= (async () => {
@@ -69,7 +71,7 @@ export class OduLaneContainer extends Container {
   private async startEnv(request: Request): Promise<Record<string, string>> {
     const raw = request.headers.get(START_ENV_HEADER);
     const env = raw === null ? {} : (JSON.parse(atob(raw)) as Record<string, string>);
-    return { ...env, ODU_LANE_BRIDGE_GZ: await bridgeEncoded() };
+    return { ...env, ...chunkEnv("ODU_LANE_BRIDGE_GZ", await bridgeEncoded()) };
   }
 
   private async ensureStarted(envVars: Record<string, string>): Promise<void> {

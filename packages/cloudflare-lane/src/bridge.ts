@@ -38,7 +38,7 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { mkdirSync, readdirSync, readFileSync, rmSync, statfsSync, statSync, symlinkSync } from "node:fs";
+import { readdirSync, readFileSync, statfsSync, statSync } from "node:fs";
 import { availableParallelism, setPriority } from "node:os";
 import { createGunzip } from "node:zlib";
 
@@ -248,77 +248,140 @@ function oldestRecipeStart(): number | null {
   return oldest;
 }
 
-/** Roots that keep a running recipe's work alive through a collection. */
-const PROTECT_DIR = "/nix/var/nix/gcroots/odu-lane-running-recipes";
+/** What one collection did, as the collector process reports it. */
+interface Collected {
+  freedBytes: number;
+  deleted: number;
+  /** Store paths registered since the oldest running recipe started: what
+   *  running recipes have built or fetched, never touched. */
+  keptPaths: number;
+  keptBytes: number;
+}
 
-/** Root every store path registered since `since` (epoch seconds): whatever
- *  a still-running recipe built or substituted. Measured on kolu's CI: a
- *  recipe ran `nix build --no-link X` then `nix build --rebuild X`, and a
- *  collection between the two deleted X — `--no-link` leaves no root, and the
- *  first nix process had exited. In-progress builds need nothing from here:
- *  Nix holds a temp root for outputs it is building, sandbox or not. */
-async function protectSince(since: number | null): Promise<number> {
-  rmSync(PROTECT_DIR, { recursive: true, force: true });
-  if (since === null) return 0;
-  mkdirSync(PROTECT_DIR, { recursive: true });
-  const proc = Bun.spawn(["nix", "--extra-experimental-features", "nix-command", "path-info", "--all", "--json"], {
+/** A pass that frees less than this is not worth repeating every 10 s: the
+ *  disk is full of live work, and only sharding helps. */
+const WORTHWHILE_BYTES = 512 * 1024 ** 2;
+const BACKOFF_MS = 5 * 60_000;
+let quietUntil = 0;
+
+/**
+ * One collection, run OUT of this process: `bun <this file> --collect <since>`
+ * at nice 19 and idle I/O priority. Measured on kolu's CI: collecting inside
+ * the bridge (a whole-store JSON parse) and back to back every 10 s starved
+ * the process that relays every lane's RPC pings, and all three lanes died
+ * to the pinger. The bridge only waits on the child's exit.
+ */
+async function collect(why: string, tell: (line: string) => void): Promise<Collected | null> {
+  const t0 = Date.now();
+  const since = oldestRecipeStart();
+  tell(`[cloudflare] ${why} — collecting the Nix store in the background`);
+  const child = Bun.spawn([process.execPath, process.argv[1]!, "--collect", String(since ?? Date.now() / 1000)], {
     stdin: "ignore",
     stdout: "pipe",
     stderr: "ignore",
   });
-  const text = await new Response(proc.stdout).text();
-  await proc.exited;
-  const parsed = JSON.parse(text === "" ? "[]" : text) as
-    | Record<string, { registrationTime?: number }>
-    | { path: string; registrationTime?: number }[];
-  const entries: [string, number | undefined][] = Array.isArray(parsed)
-    ? parsed.map((info) => [info.path, info.registrationTime])
-    : Object.entries(parsed).map(([path, info]) => [path, info?.registrationTime]);
-  let rooted = 0;
-  for (const [path, registered] of entries) {
-    // A second of slack for registration and process start clocks.
-    if (registered === undefined || registered < since - 1) continue;
-    try {
-      symlinkSync(path, `${PROTECT_DIR}/${path.slice("/nix/store/".length)}`);
-      rooted += 1;
-    } catch {
-      // Already rooted, or vanished: either way nothing to protect.
-    }
+  try {
+    setPriority(child.pid, 19);
+  } catch {
+    // Best effort: a collector at normal priority still works.
   }
-  return rooted;
-}
-
-/** One collection: protect the running recipes' work, then `nix-store --gc`. */
-async function collect(why: string, tell: (line: string) => void): Promise<{ rooted: number; after: Disk | null }> {
-  const t0 = Date.now();
-  const rooted = await protectSince(oldestRecipeStart());
-  tell(`[cloudflare] ${why} — collecting the Nix store (${rooted} path(s) of running recipes kept)`);
-  const proc = Bun.spawn(["nix-store", "--gc"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-  await proc.exited;
+  // Idle I/O class where util-linux's ionice is on PATH (ODU_LANE_BASE).
+  Bun.spawn(["ionice", "-c", "3", "-p", String(child.pid)], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+  const out = await new Response(child.stdout).text();
+  await child.exited;
+  let result: Collected | null = null;
+  try {
+    result = JSON.parse(out.trim().split("\n").pop() ?? "") as Collected;
+  } catch {
+    tell("[cloudflare] the collection failed — see the container log");
+    return null;
+  }
   const after = disk();
-  tell(`[cloudflare] after ${((Date.now() - t0) / 1000).toFixed(1)}s of gc: ${after === null ? "?" : describeDisk(after)}`);
-  return { rooted, after };
+  const gib = (b: number): string => (b / 1024 ** 3).toFixed(1);
+  tell(
+    `[cloudflare] collected ${gib(result.freedBytes)} GiB (${result.deleted} paths) in ${((Date.now() - t0) / 1000).toFixed(1)}s; ` +
+      `kept ${result.keptPaths} paths (${gib(result.keptBytes)} GiB) of running recipes; ${after === null ? "?" : describeDisk(after)}`,
+  );
+  return result;
 }
 
-/** Collect the store when the disk runs low. Safe under running lanes: live
- *  processes' paths are roots, in-progress builds hold temp roots, and
- *  everything a running recipe has registered is rooted by protectSince. One
- *  collection at a time; the lanes attached hear why their recipes may have
- *  paused. */
+/** Collect the store when the disk runs low, from a separate low-priority
+ *  process. A pass that frees little backs the watchdog off for 5 minutes
+ *  and says once, plainly, that running recipes' live work outgrew the disk
+ *  — the honest outcome for a DAG whose closures do not fit 18 GB. */
 function collectIfLow(): Promise<void> {
   if (collecting !== null) return collecting;
+  if (Date.now() < quietUntil) return Promise.resolve();
   const before = disk();
   if (before === null || !low(before)) return Promise.resolve();
   const tell = (line: string): void => {
     for (const ws of dials) say(ws, line);
     console.log(line);
   };
-  collecting = collect(`disk low (${describeDisk(before)})`, tell).then(() => undefined).finally(() => {
-    collecting = null;
-  });
+  collecting = collect(`disk low (${describeDisk(before)})`, tell)
+    .then((result) => {
+      if (result !== null && result.freedBytes < WORTHWHILE_BYTES) {
+        quietUntil = Date.now() + BACKOFF_MS;
+        tell(
+          `[cloudflare] this container's disk is full of live work: ${(result.keptBytes / 1024 ** 3).toFixed(1)} GiB ` +
+            `in ${result.keptPaths} paths that running recipes built or fetched, and collecting cannot free it. ` +
+            "Shard the heavy nodes (odu:shard) so they get containers of their own; collection pauses for 5 minutes.",
+        );
+      }
+    })
+    .finally(() => {
+      collecting = null;
+    });
   return collecting;
 }
 setInterval(() => void collectIfLow(), WATCH_EVERY_MS).unref();
+
+/**
+ * The collector itself (`--collect <since>`), in its own process.
+ *
+ * It never runs `nix-store --gc`, which also deletes every unregistered path
+ * in the store: a `--rebuild` check's scratch output, mid-build, is one of
+ * those, and kolu's CI lost one that way ("failed to produce output path"
+ * with gigabytes free). Instead it asks Nix which paths are dead and deletes,
+ * with `nix-store --delete` (which re-checks liveness itself), only those
+ * that are VALID and were registered before the oldest running recipe
+ * started — so neither an in-progress build nor a running recipe's
+ * rootless results (`nix build --no-link`) can be taken.
+ */
+async function runCollector(since: number): Promise<void> {
+  const { Database } = await import("bun:sqlite");
+  const db = new Database("/nix/var/nix/db/db.sqlite", { readonly: true });
+  const sizes = new Map<string, number>();
+  let keptPaths = 0;
+  let keptBytes = 0;
+  // A second of slack for registration and process-start clocks.
+  for (const row of db.query("SELECT path, registrationTime, narSize FROM ValidPaths").iterate() as Iterable<{
+    path: string;
+    registrationTime: number;
+    narSize: number | null;
+  }>) {
+    if (row.registrationTime >= since - 1) {
+      keptPaths += 1;
+      keptBytes += row.narSize ?? 0;
+    } else {
+      sizes.set(row.path, row.narSize ?? 0);
+    }
+  }
+  db.close();
+  const dead = Bun.spawnSync(["nix-store", "--gc", "--print-dead"], { stdout: "pipe", stderr: "ignore" }).stdout.toString();
+  const doomed = dead.split("\n").filter((p) => sizes.has(p));
+  let deleted = 0;
+  let freedBytes = 0;
+  for (let i = 0; i < doomed.length; i += 500) {
+    const batch = doomed.slice(i, i + 500);
+    const run = Bun.spawnSync(["nix-store", "--delete", ...batch], { stdout: "ignore", stderr: "ignore" });
+    // A batch with one path that came alive is refused whole; retry singly.
+    const done = run.exitCode === 0 ? batch : batch.filter((p) => Bun.spawnSync(["nix-store", "--delete", p], { stdout: "ignore", stderr: "ignore" }).exitCode === 0);
+    deleted += done.length;
+    for (const p of done) freedBytes += sizes.get(p) ?? 0;
+  }
+  console.log(JSON.stringify({ freedBytes, deleted, keptPaths, keptBytes } satisfies Collected));
+}
 
 /** Realise the agent from the configured substituters (the lane cache first —
  *  entrypoint.sh), then spawn it with its stdio spliced onto this socket. */
@@ -428,6 +491,11 @@ function kvmUsable(): boolean {
   }
 }
 
+if (process.argv[2] === "--collect") {
+  await runCollector(Number(process.argv[3]));
+  process.exit(0);
+}
+
 // Every byte of every lane passes through this process, including the RPC
 // pings that decide whether a lane is alive; on a 4-vCPU container running
 // seven recipes it must not wait its turn behind them.
@@ -459,7 +527,7 @@ Bun.serve<DialState>({
     if (route === "/gc-now" && req.method === "POST") {
       const lines: string[] = [];
       return collect("collection requested from inside the container", (line) => lines.push(line)).then(
-        ({ rooted }) => Response.json({ rooted, lines }),
+        (result) => Response.json({ ...result, lines }),
       );
     }
     return new Response("not found\n", { status: 404 });

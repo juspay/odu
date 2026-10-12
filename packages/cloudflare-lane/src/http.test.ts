@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { publishToLaneCache } from "@odu/execution/coordinator/cloudflare/laneCache";
 import { captureProcess } from "@odu/execution/coordinator/runnerFlake";
-import { authorized, type CacheBucket, nixCache, purgeCache } from "./http";
+import { authorized, type CacheBucket, chunkEnv, ENV_VAR_LIMIT, nixCache, purgeCache } from "./http";
 
 const SECRET = "lane-secret-0123456789abcdef";
 
@@ -131,10 +131,17 @@ describe("nixCache", () => {
 });
 
 describe("container env", () => {
-  it("ships the bridge under Cloudflare's 16,000-byte env var limit", () => {
-    // worker.ts sends bridge.ts gzip'd + base64'd as ODU_LANE_BRIDGE_GZ.
+  it("ships the bridge in env vars under Cloudflare's 16,000-byte cap, whatever its size", () => {
+    // dataPlane.ts sends bridge.ts gzip'd, base64'd and split by chunkEnv.
     const source = readFileSync(new URL("./bridge.ts", import.meta.url));
     const encoded = Buffer.from(gzipSync(source)).toString("base64");
-    expect(encoded.length).toBeLessThan(16_000 * 0.75); // headroom to grow
+    const vars = chunkEnv("ODU_LANE_BRIDGE_GZ", encoded);
+    for (const value of Object.values(vars)) expect(value.length).toBeLessThan(ENV_VAR_LIMIT);
+    // The entrypoint joins _0, _1, … in order: the round trip is exact.
+    let joined = "";
+    for (let n = 0; vars[`ODU_LANE_BRIDGE_GZ_${n}`] !== undefined; n++) joined += vars[`ODU_LANE_BRIDGE_GZ_${n}`];
+    expect(joined).toBe(encoded);
+    expect(Object.keys(chunkEnv("X", "x".repeat(40_000), 15_000))).toEqual(["X_0", "X_1", "X_2"]);
+    expect(chunkEnv("X", "")).toEqual({ X_0: "" });
   });
 });

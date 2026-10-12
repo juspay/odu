@@ -10,7 +10,7 @@
 #   ODU_LANE_BUN              /nix/store/…-bun-X (odu's own pinned bun)
 #   ODU_LANE_TINI             /nix/store/…-tini-X (the container's init)
 #   ODU_LANE_BASE             space-separated store paths of base tools (awk, sed, ps, …)
-#   ODU_LANE_BRIDGE_GZ        bridge.ts, gzip'd and base64'd (env vars are capped at 16 kB)
+#   ODU_LANE_BRIDGE_GZ_<n>    bridge.ts, gzip'd, base64'd, split (each env var is capped at 16 kB)
 #   ODU_LANE_SUBSTITUTERS     space-separated substituters (lane cache first; may be empty)
 #   ODU_LANE_TRUSTED_KEYS     space-separated public keys
 #   ODU_LANE_NETRC            secret: netrc for the Worker-proxied lane cache
@@ -97,8 +97,12 @@ echo 4194304 > /proc/sys/kernel/pid_max 2>/dev/null || echo "odu-lane: could not
 
 unset ODU_LANE_NETRC AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY ODU_LANE_GITHUB_TOKEN
 nix-store --realise "$ODU_LANE_BUN" "$ODU_LANE_TINI" ${ODU_LANE_BASE:-} >/dev/null
-"$ODU_LANE_BUN/bin/bun" -e 'process.stdout.write(require("node:zlib").gunzipSync(Buffer.from(process.env.ODU_LANE_BRIDGE_GZ, "base64")))' > /odu-lane-bridge.ts
-unset ODU_LANE_BRIDGE_GZ
+"$ODU_LANE_BUN/bin/bun" -e '
+  let b64 = "";
+  for (let n = 0; process.env[`ODU_LANE_BRIDGE_GZ_${n}`] !== undefined; n++) b64 += process.env[`ODU_LANE_BRIDGE_GZ_${n}`];
+  process.stdout.write(require("node:zlib").gunzipSync(Buffer.from(b64, "base64")));
+' > /odu-lane-bridge.ts
+for v in $(compgen -e | grep '^ODU_LANE_BRIDGE_GZ_'); do unset "$v"; done
 # 6. Base tools for recipe code that runs outside `nix develop` (awk, sed, ps,
 #    hostname, …): after the image's own PATH, so they only fill gaps.
 for p in ${ODU_LANE_BASE:-}; do PATH="$PATH:$p/bin"; done

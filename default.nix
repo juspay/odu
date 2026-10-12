@@ -52,6 +52,7 @@ let
     which
     gnutar
     gzip
+    util-linux # the bridge runs its store collector under `ionice -c 3`
   ]));
 
   src = pkgs.lib.fileset.toSource {

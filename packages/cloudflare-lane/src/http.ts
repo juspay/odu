@@ -107,3 +107,15 @@ export async function nixCache(request: Request, bucket: CacheBucket | undefined
       return new Response("method not allowed\n", { status: 405 });
   }
 }
+
+/** Cloudflare caps each container env var at 16,000 bytes (measured: a
+ *  larger one fails the container's start). Split `value` across
+ *  `${name}_0`, `${name}_1`, … for the entrypoint to join in order. */
+export const ENV_VAR_LIMIT = 16_000;
+export function chunkEnv(name: string, value: string, size = ENV_VAR_LIMIT - 1_000): Record<string, string> {
+  const vars: Record<string, string> = {};
+  for (let i = 0, n = 0; i < value.length || n === 0; i += size, n += 1) {
+    vars[`${name}_${n}`] = value.slice(i, i + size);
+  }
+  return vars;
+}
