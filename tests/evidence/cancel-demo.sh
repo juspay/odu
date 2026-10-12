@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Reproducible terminal evidence for cancel / supersede. Recorded with asciinema
-# and rendered to a gif with agg — see .agency/do.md → "PR evidence". Drives the
+# and rendered to a gif with agg — see tests/evidence/README.md. Drives the
 # real odu binary against a throwaway sleep fixture, pinned to a localhost lane.
 #
 #   odu=$(nix build .#odu --no-link --print-out-paths)/bin/odu

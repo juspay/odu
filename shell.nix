@@ -9,7 +9,6 @@ pkgs.mkShell ({
     bun
     nodejs # for npm: `just website` builds website/, a standalone npm project
     nixpkgs-fmt
-    uv # `just apm` runs apm via `uvx --from apm-cli`
   ];
 
   # The browsers come from nixpkgs, and only in the `e2e` shell (flake.nix) — so

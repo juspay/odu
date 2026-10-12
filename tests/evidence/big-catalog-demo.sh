@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Reproducible terminal evidence for juspay/odu#113 — `odu status` / `attach`
 # against a THOUSAND-RUN catalog, before and after. Recorded with asciinema,
-# rendered to a gif with agg — see .agency/do.md → "PR evidence".
+# rendered to a gif with agg — see tests/evidence/README.md.
 #
 # Two private worlds (own catalog, own daemon, own port), each seeded with the
 # same 1 000 cloned runs: one served by the build BEFORE the fix, one by the

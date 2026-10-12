@@ -32,10 +32,10 @@ update **all three** in the *same* change:
 
 1. **`README.md`** — the `## CLI` block, the verb table, and the agent-loop prose.
 2. **`website/src/content/docs.md`** — the reference the site publishes.
-3. **`.apm/skills/odu/SKILL.md`** — the single authored skill: the bootstrap, the
-   loop, and the CLI/MCP guidance, which are one skill because CLI and MCP are
-   two faces of one service rather than two adoption paths.
+3. **`agent-plugin/skills/odu/SKILL.md`** — the single authored skill: the
+   bootstrap, the loop, and the CLI/MCP guidance, which are one skill because
+   CLI and MCP are two faces of one service rather than two adoption paths.
 
-The skill is an APM source: edit it here, then `just apm` regenerates the
-`.claude/` copy (never edit `.claude/skills/**` directly). Keep all three
-concise — a one-line entry per verb or command, not a tutorial.
+`.claude/skills/odu` is a symlink to that skill, so there is no copy to
+regenerate. Keep all three concise — a one-line entry per verb or command, not a
+tutorial.

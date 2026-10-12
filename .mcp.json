@@ -1,19 +1,9 @@
 {
   "mcpServers": {
-    "kolu": {
-      "type": "stdio",
-      "command": "kolu",
-      "args": [
-        "mcp"
-      ],
-      "env_vars": [
-        "PADI_SOCKET"
-      ]
-    },
     "odu": {
       "type": "stdio",
-      "command": ".claude/skills/odu/serve",
-      "args": []
+      "command": "nix",
+      "args": ["run", "--accept-flake-config", "github:juspay/odu", "--", "mcp"]
     }
   }
 }

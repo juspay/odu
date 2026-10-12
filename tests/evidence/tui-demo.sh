@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Reproducible terminal evidence for the opentui live view (juspay/odu#73).
-# Recorded with asciinema and rendered to a gif with agg — see .agency/do.md →
-# "PR evidence". Drives the real odu binary against a throwaway fixture pinned
+# Recorded with asciinema and rendered to a gif with agg — see tests/evidence/README.md.
+# Drives the real odu binary against a throwaway fixture pinned
 # to a localhost lane.
 #
 # What it has to show, because these are the claims the PR makes:
