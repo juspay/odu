@@ -76,7 +76,14 @@ if [ -n "${ODU_LANE_GITHUB_TOKEN:-}" ]; then
   printf '[credential "https://github.com"]\n\thelper = store\n' > /root/.gitconfig
 fi
 umask 022
+# sandbox: the stock image turns it off. Unsandboxed, a build directory sits
+# on the store's own filesystem (and fs.protected_hardlinks is 0), so bun's
+# isolated linker HARDLINKS root-owned store files into the build tree and
+# bun2nix's `chmod -R u+w` fails with EPERM: odu's own `.#odu` would not build
+# in a lane. Sandboxed, as on every NixOS CI host, it builds, and /dev/kvm is
+# still bound into builds that require `kvm` (both measured).
 cat >> /etc/nix/nix.conf <<EOF
+sandbox = true
 experimental-features = nix-command flakes
 substituters = ${ODU_LANE_SUBSTITUTERS} https://cache.nixos.org
 trusted-public-keys = ${ODU_LANE_TRUSTED_KEYS} cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
