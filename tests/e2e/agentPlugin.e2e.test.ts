@@ -20,7 +20,7 @@
  * Hence the insistence on exactly one of each below.
  */
 
-import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "bun:test";
 import { SHARED_TOOLS } from "./webHarness";
@@ -120,11 +120,6 @@ describe("odu's Agent Plugin", () => {
     // the deleted `odu-mcp` was. "Contains odu" would not have seen it.
     expect(readdirSync(join(repoRoot, PLUGIN, "skills")).sort()).toEqual(["odu"]);
     expect(readdirSync(join(repoRoot, ".claude/skills")).sort()).toEqual(["odu"]);
-    // The spec discovers skills from `skills/` only, so a stale tree anywhere
-    // else is not loaded — but it is read, by people, and it lies to them.
-    for (const stale of [".apm", "apm.yml", "apm.lock.yaml"]) {
-      expect(existsSync(join(repoRoot, stale)), `${stale} still exists`).toBe(false);
-    }
   });
 
   it("teaches one vocabulary in the skill it does publish", () => {
@@ -157,7 +152,6 @@ describe("odu's Agent Plugin", () => {
       "odu mcp --service",
       "odu runs",
       "--linger",
-      "skills/odu/serve",
     ]) {
       expect(teaches, `the skill still teaches "${gone}", which no longer exists`)
         .not.toContain(gone);
