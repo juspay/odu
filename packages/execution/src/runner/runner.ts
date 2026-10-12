@@ -76,6 +76,12 @@ export interface LaneRunner {
  *  to the container's CPU count: measured on kolu's CI, a whole DAG started at
  *  once on one 4-vCPU container ran out of CPU (70 s BeforeAll timeouts) and
  *  disk. Ready nodes past the bound stay pending until a running one ends. */
+/** A hold claimed `untilReleased` (a run's own venue) has no max-hold
+ *  ceiling; any other keeps the agent's default (`ODU_LEASE_MAX_HOLD_MS`). */
+export function holdCeiling(untilReleased: boolean | undefined): { maxHoldMs?: number } {
+  return untilReleased === true ? { maxHoldMs: 0 } : {};
+}
+
 export function maxParallelFrom(raw: string | undefined): number {
   const n = Number(raw);
   return Number.isInteger(n) && n > 0 ? n : Number.POSITIVE_INFINITY;
@@ -158,6 +164,7 @@ export function createLaneRunner(
               lockPath,
               { holder: input.holder, run: input.run },
               {
+                ...holdCeiling(input.untilReleased),
                 onSelfRelease: (reason) => {
                   venueHold = null;
                   process.stderr.write(

@@ -32,8 +32,8 @@ import type { CloudflareConfig } from "../../common/cloudflareConfig";
 import { runUnary } from "../../common/effectEdge";
 import { laneSurface } from "../../common/laneSurface";
 import { pinLaneFace } from "../surfaceRemoteOpts";
-import { cloudflareConnector, type LaneProvisioner, lastCloseByHost } from "./connector";
-import { laneDeathReason } from "../surfaceRemoteOpts";
+import { closeNote, cloudflareConnector, describeDrop, type LaneProvisioner, lastCloseByHost } from "./connector";
+import { laneDeathReason, transportWording } from "../surfaceRemoteOpts";
 import { openLaneSocket } from "./workerApi";
 
 const BUN = process.execPath;
@@ -47,11 +47,14 @@ type Mode = "normal" | "close-before-banner";
 interface Dial {
   child: ChildProcess | null;
   frozen: boolean;
+  ws?: { close(code?: number, reason?: string): void };
 }
 
 /** The Worker + bridge, in one Bun server. */
 function fakeWorker(mode: Mode) {
   const dials: Dial[] = [];
+  /** The Durable Object's lifecycle journal, as /state serves it. */
+  const journal: { t: number; kind: string; exitCode?: number; reason?: string }[] = [];
   const server = Bun.serve<Dial>({
     port: 0,
     hostname: "127.0.0.1",
@@ -62,7 +65,7 @@ function fakeWorker(mode: Mode) {
       }
       const action = /^\/lane\/[A-Za-z0-9_-]+\/(\w+)$/.exec(url.pathname)?.[1];
       if (action === "start") return new Response("container cold; starting\nready (cold, 0s)\n");
-      if (action === "state") return Response.json({ running: true });
+      if (action === "state") return Response.json({ running: true, journal });
       if (action === "agent") {
         const dial: Dial = { child: null, frozen: false };
         dials.push(dial);
@@ -71,6 +74,9 @@ function fakeWorker(mode: Mode) {
       return new Response("not found\n", { status: 404 });
     },
     websocket: {
+      open(ws) {
+        ws.data.ws = ws;
+      },
       message(ws, message) {
         const dial = ws.data;
         if (dial.frozen) return;
@@ -104,7 +110,7 @@ function fakeWorker(mode: Mode) {
       },
     },
   });
-  return { server, dials, url: `http://127.0.0.1:${server.port}` };
+  return { server, dials, journal, url: `http://127.0.0.1:${server.port}` };
 }
 
 const noopProvisioner = (): LaneProvisioner => ({
@@ -213,6 +219,24 @@ describe("cloudflareConnector", () => {
     expect((error as ConnectError).terminal).toBe(true);
   }, 30_000);
 
+  it("asks the Durable Object why after an abnormal close, and says what it recorded", async () => {
+    const worker = fakeWorker("normal");
+    cleanups.push(() => worker.server.stop(true));
+    const { ctx, lines } = context();
+    const connection = await connectorFor(worker.url)(ctx);
+    await connection.isAlive();
+    // Cloudflare reset the object after the lane attached; the socket drops.
+    worker.journal.push({ t: Date.now() - 60_000, kind: "container-start" }, { t: Date.now(), kind: "object-start" });
+    worker.dials[0]?.ws?.close(1011, "gone");
+    expect(await connection.closed).toEqual({ kind: "transport-failed" });
+    const deadline = Date.now() + 5_000;
+    while (!lines.some((l) => l.includes("after the drop")) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+    const explained = lines.find((l) => l.includes("after the drop"));
+    expect(explained).toContain("local [cloudflare] cloudflare:test: after the drop, the Durable Object says: the lane's Durable Object restarted");
+    expect(explained).not.toContain("a container started");
+    for (const dial of worker.dials) dial.child?.kill();
+  }, 30_000);
+
   it("dies within the RPC pinger's bound when the link goes silent, as an ssh lane does", async () => {
     const worker = fakeWorker("normal");
     cleanups.push(() => worker.server.stop(true));
@@ -252,5 +276,54 @@ describe("laneDeathReason", () => {
       "surface stdio transport closed: the peer stopped answering",
     );
     expect(laneDeathReason("ci-1.example", ssh)).toBe(ssh);
+  });
+});
+
+describe("transport wording on a Cloudflare lane", () => {
+  const ssh = "ssh transport connection failed — host unreachable or link dropped";
+  it("rewrites surface-remote's retry and error lines, which odu does not write", () => {
+    // kolu run 10, coordinator.log 1671–1674: the lease session's own lines.
+    lastCloseByHost.set("cloudflare:k-6", "cloudflare:k-6: the WebSocket to the odu-lane Worker closed (1006 Connection ended) without the runner exiting");
+    for (const line of [
+      `[lease:cloudflare:k-6 local] ${ssh}`,
+      `[lease:cloudflare:k-6 local] attempt 1 failed: ${ssh} — retrying in 2000ms…`,
+    ]) {
+      const out = transportWording("cloudflare:k-6", line);
+      expect(out).not.toContain("ssh");
+      expect(out).toContain("WebSocket to the odu-lane Worker closed (1006 Connection ended)");
+    }
+    expect(transportWording("ci-1.example", `x ${ssh}`)).toBe(`x ${ssh}`);
+  });
+
+  it("does not claim a deploy it cannot know about on a 1006", () => {
+    const note = closeNote("cloudflare:k-6", 1006, "Connection ended");
+    expect(note).not.toContain("deploy");
+    expect(note).toContain("(1006 Connection ended)");
+  });
+});
+
+describe("describeDrop", () => {
+  const since = Date.parse("2026-10-12T02:00:00Z");
+  it("names a container stop with its exit code", () => {
+    const line = describeDrop(
+      "cloudflare:k-6",
+      { running: false, journal: [{ t: since - 60_000, kind: "container-start" }, { t: since + 1_000, kind: "container-stop", exitCode: 137, reason: "runtime_signal" }] },
+      since,
+    );
+    expect(line).toContain("the container stopped at 02:00:01 UTC (exit 137, runtime_signal)");
+    expect(line).not.toContain("a container started");
+    expect(line).toContain("now the container is not running");
+  });
+  it("names a Durable Object restart", () => {
+    const line = describeDrop("cloudflare:k-6", { running: true, journal: [{ t: since + 5_000, kind: "object-start" }] }, since);
+    expect(line).toContain("the lane's Durable Object restarted at 02:00:05 UTC");
+  });
+  it("says the connection itself failed when nothing on Cloudflare's side changed", () => {
+    const line = describeDrop("cloudflare:k-6", { running: true, journal: [{ t: since - 1, kind: "object-start" }] }, since);
+    expect(line).toContain("no restart and no container stop");
+    expect(line).toContain("the container is running");
+  });
+  it("says so when the Worker cannot be asked", () => {
+    expect(describeDrop("cloudflare:k-6", null, since)).toContain("could not be asked");
   });
 });

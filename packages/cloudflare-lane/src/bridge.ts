@@ -201,8 +201,12 @@ function disk(): Disk | null {
 const GC_BELOW_FRACTION = 0.25;
 const WATCH_EVERY_MS = 10_000;
 
-const low = (d: Disk): boolean =>
-  d.freeBytes / d.totalBytes < GC_BELOW_FRACTION || d.freeInodes / d.totalInodes < GC_BELOW_FRACTION;
+/** Below this, the store is collected even under running recipes. */
+const GC_CRITICAL_FRACTION = 0.1;
+
+const below = (d: Disk, fraction: number): boolean =>
+  d.freeBytes / d.totalBytes < fraction || d.freeInodes / d.totalInodes < fraction;
+const low = (d: Disk): boolean => below(d, GC_BELOW_FRACTION);
 
 const describeDisk = (d: Disk): string =>
   `${(d.freeBytes / 1024 ** 3).toFixed(1)} of ${(d.totalBytes / 1024 ** 3).toFixed(1)} GiB, ` +
@@ -256,6 +260,9 @@ interface Collected {
    *  running recipes have built or fetched, never touched. */
   keptPaths: number;
   keptBytes: number;
+  /** Garbage-collector sessions the pass opened (each one a root scan that
+   *  every running Nix client must report to). */
+  sessions: number;
 }
 
 /** A pass that frees less than this is not worth repeating every 10 s: the
@@ -263,6 +270,8 @@ interface Collected {
 const WORTHWHILE_BYTES = 512 * 1024 ** 2;
 const BACKOFF_MS = 5 * 60_000;
 let quietUntil = 0;
+/** Said once per low-disk episode that collection waits for running recipes. */
+let deferNoted = false;
 
 /**
  * One collection, run OUT of this process: `bun <this file> --collect <since>`
@@ -300,7 +309,7 @@ async function collect(why: string, tell: (line: string) => void): Promise<Colle
   const gib = (b: number): string => (b / 1024 ** 3).toFixed(1);
   tell(
     `[cloudflare] collected ${gib(result.freedBytes)} GiB (${result.deleted} paths) in ${((Date.now() - t0) / 1000).toFixed(1)}s; ` +
-      `kept ${result.keptPaths} paths (${gib(result.keptBytes)} GiB) of running recipes; ${after === null ? "?" : describeDisk(after)}`,
+      `kept ${result.keptPaths} paths (${gib(result.keptBytes)} GiB) of running recipes; ${result.sessions} GC session(s); ${after === null ? "?" : describeDisk(after)}`,
   );
   return result;
 }
@@ -313,11 +322,34 @@ function collectIfLow(): Promise<void> {
   if (collecting !== null) return collecting;
   if (Date.now() < quietUntil) return Promise.resolve();
   const before = disk();
-  if (before === null || !low(before)) return Promise.resolve();
+  if (before === null || !low(before)) {
+    deferNoted = false;
+    return Promise.resolve();
+  }
   const tell = (line: string): void => {
     for (const ws of dials) say(ws, line);
     console.log(line);
   };
+  // Not under running recipes, short of an emergency. The END of every
+  // garbage-collector session can kill a `nix develop`/`nix shell`/`nix run`
+  // that is registering its temporary roots at that moment: the write to the
+  // GC socket fails with EPIPE, Nix handles it with SIGPIPE blocked, and the
+  // still-pending signal is delivered when it unblocks signals to exec the
+  // shell (strace: `SIGPIPE {si_code=SI_USER, si_pid=<itself>}`, every thread
+  // killed). kolu's CI lost two recipes to it at start, exit 141; under
+  // back-to-back sessions 4 of 60 `nix develop` died, with none 0 of 120.
+  // Collecting while recipes run frees little anyway — what they made is
+  // kept — so the watchdog waits for a quiet moment unless the disk is
+  // nearly gone.
+  if (oldestRecipeStart() !== null && !below(before, GC_CRITICAL_FRACTION)) {
+    if (!deferNoted) {
+      deferNoted = true;
+      tell(
+        `[cloudflare] disk low (${describeDisk(before)}) — collecting once no recipe is running, or at once below ${GC_CRITICAL_FRACTION * 100}% free`,
+      );
+    }
+    return Promise.resolve();
+  }
   collecting = collect(`disk low (${describeDisk(before)})`, tell)
     .then((result) => {
       if (result !== null && result.freedBytes < WORTHWHILE_BYTES) {
@@ -350,37 +382,70 @@ setInterval(() => void collectIfLow(), WATCH_EVERY_MS).unref();
  */
 async function runCollector(since: number): Promise<void> {
   const { Database } = await import("bun:sqlite");
-  const db = new Database("/nix/var/nix/db/db.sqlite", { readonly: true });
-  const sizes = new Map<string, number>();
+  const validPaths = (): Map<string, { registrationTime: number; narSize: number }> => {
+    const db = new Database("/nix/var/nix/db/db.sqlite", { readonly: true });
+    const rows = new Map<string, { registrationTime: number; narSize: number }>();
+    for (const row of db.query("SELECT path, registrationTime, narSize FROM ValidPaths").iterate() as Iterable<{
+      path: string;
+      registrationTime: number;
+      narSize: number | null;
+    }>) {
+      rows.set(row.path, { registrationTime: row.registrationTime, narSize: row.narSize ?? 0 });
+    }
+    db.close();
+    return rows;
+  };
+  const before = validPaths();
   let keptPaths = 0;
   let keptBytes = 0;
+  const old = new Set<string>();
   // A second of slack for registration and process-start clocks.
-  for (const row of db.query("SELECT path, registrationTime, narSize FROM ValidPaths").iterate() as Iterable<{
-    path: string;
-    registrationTime: number;
-    narSize: number | null;
-  }>) {
+  for (const [path, row] of before) {
     if (row.registrationTime >= since - 1) {
       keptPaths += 1;
-      keptBytes += row.narSize ?? 0;
+      keptBytes += row.narSize;
     } else {
-      sizes.set(row.path, row.narSize ?? 0);
+      old.add(path);
     }
   }
-  db.close();
-  const dead = Bun.spawnSync(["nix-store", "--gc", "--print-dead"], { stdout: "pipe", stderr: "ignore" }).stdout.toString();
-  const doomed = dead.split("\n").filter((p) => sizes.has(p));
+  // Every `nix-store` call below is a whole garbage-collector session (the
+  // GC lock, a root scan of every process, a socket every other Nix client
+  // must report its temporary roots to), so a pass opens as few as it can:
+  // one to ask what is dead, one per 10,000 paths to delete — and when a
+  // delete is refused because a path came alive meanwhile, ONE re-ask, never
+  // a retry path by path. kolu's CI measured the path-by-path retry: 808 s for
+  // 74 paths, hundreds of sessions, under a primary running recipes.
+  let sessions = 0;
+  const dead = (): string[] => {
+    sessions += 1;
+    const out = Bun.spawnSync(["nix-store", "--gc", "--print-dead"], { stdout: "pipe", stderr: "ignore" }).stdout.toString();
+    return out.split("\n").filter((p) => old.has(p));
+  };
+  const remove = (paths: string[]): boolean => {
+    let complete = true;
+    for (let i = 0; i < paths.length; i += 10_000) {
+      sessions += 1;
+      const batch = paths.slice(i, i + 10_000);
+      if (Bun.spawnSync(["nix-store", "--delete", ...batch], { stdout: "ignore", stderr: "ignore" }).exitCode !== 0) complete = false;
+    }
+    return complete;
+  };
+  const doomed = dead();
+  if (doomed.length > 0 && !remove(doomed)) {
+    const after = validPaths();
+    const still = dead().filter((p) => after.has(p));
+    if (still.length > 0) remove(still);
+  }
+  const after = validPaths();
   let deleted = 0;
   let freedBytes = 0;
-  for (let i = 0; i < doomed.length; i += 500) {
-    const batch = doomed.slice(i, i + 500);
-    const run = Bun.spawnSync(["nix-store", "--delete", ...batch], { stdout: "ignore", stderr: "ignore" });
-    // A batch with one path that came alive is refused whole; retry singly.
-    const done = run.exitCode === 0 ? batch : batch.filter((p) => Bun.spawnSync(["nix-store", "--delete", p], { stdout: "ignore", stderr: "ignore" }).exitCode === 0);
-    deleted += done.length;
-    for (const p of done) freedBytes += sizes.get(p) ?? 0;
+  for (const path of old) {
+    if (!after.has(path)) {
+      deleted += 1;
+      freedBytes += before.get(path)?.narSize ?? 0;
+    }
   }
-  console.log(JSON.stringify({ freedBytes, deleted, keptPaths, keptBytes } satisfies Collected));
+  console.log(JSON.stringify({ freedBytes, deleted, keptPaths, keptBytes, sessions } satisfies Collected));
 }
 
 /** Realise the agent from the configured substituters (the lane cache first —

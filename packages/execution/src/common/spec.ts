@@ -39,9 +39,11 @@ export const TaskSpecSchema = Schema.Struct({
    *  it's enabled on. */
   os: Schema.optionalKey(Schema.Array(Schema.String)),
   /** Maximum number of execution slots this recipe may burst across. The
-   *  coordinator chooses the actual total from currently free capacity. */
+   *  coordinator chooses the actual total from currently free capacity.
+   *  1 is valid: one shard, on a lane of its own when a slot is spare —
+   *  and this schema is on the wire, so the runner must accept it too. */
   shards: Schema.optionalKey(
-    Schema.Int.check(Schema.isGreaterThan(1)),
+    Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
   ),
   /** Coordinator-injected task environment. Kept generic on the wire; shard
    *  lanes currently use it for ODU_SHARD_INDEX / ODU_SHARD_TOTAL. */

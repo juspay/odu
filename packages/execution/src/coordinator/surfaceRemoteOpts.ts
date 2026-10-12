@@ -135,9 +135,22 @@ export function lineLogger(onLine: (line: string) => void): Logger {
  *  of the close — or, when the link went silent first, the RPC pinger's
  *  verdict, which already names the host — is what the lane reports. */
 export function laneDeathReason(host: string, error: string): string {
-  if (!isCloudflareHost(host) || !error.startsWith("ssh transport connection failed")) return error;
-  return (
-    lastCloseByHost.get(host) ??
-    `${host}: the WebSocket to the odu-lane Worker closed without the runner exiting`
-  );
+  if (!isCloudflareHost(host) || !error.startsWith(SSH_TRANSPORT_WORDING)) return error;
+  return cloudflareTransportReason(host);
+}
+
+/** surface-remote's fixed wording for any transport death (session.ts). */
+const SSH_TRANSPORT_WORDING = "ssh transport connection failed — host unreachable or link dropped";
+
+function cloudflareTransportReason(host: string): string {
+  return lastCloseByHost.get(host) ?? `${host}: the WebSocket to the odu-lane Worker closed without the runner exiting`;
+}
+
+/** A session log line in its transport's own terms: on a Cloudflare host,
+ *  surface-remote's ssh wording (its retry and error lines, which odu does
+ *  not write) is replaced by the connector's record of the close. */
+export function transportWording(host: string, line: string): string {
+  return isCloudflareHost(host) && line.includes(SSH_TRANSPORT_WORDING)
+    ? line.replaceAll(SSH_TRANSPORT_WORDING, cloudflareTransportReason(host))
+    : line;
 }

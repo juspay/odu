@@ -60,10 +60,36 @@ const CODE_VERSION = (() => {
   return h.toString(36);
 })();
 
+/** One lifecycle fact, kept in the Durable Object's own storage so that a
+ *  lane that dropped can be explained afterwards (`/state`), without the
+ *  Worker logs: when this object started (a restart means Cloudflare reset
+ *  or moved it, or a deploy evicted it), and when the container started,
+ *  stopped (with its exit code) or errored. */
+export interface LaneEvent {
+  t: number;
+  kind: "object-start" | "container-start" | "container-stop" | "container-error";
+  exitCode?: number;
+  reason?: string;
+  message?: string;
+}
+const JOURNAL_KEY = "odu-lane-journal";
+const JOURNAL_LIMIT = 40;
+
 export class OduLaneContainer extends Container {
   override defaultPort = PORT;
   override sleepAfter = "10m";
   override entrypoint = [BASH, "-c", entrypointSource as string];
+  private objectStartRecorded = false;
+
+  private async record(event: Omit<LaneEvent, "t">): Promise<void> {
+    try {
+      const journal = ((await this.ctx.storage.get<LaneEvent[]>(JOURNAL_KEY)) ?? []).slice(-(JOURNAL_LIMIT - 1));
+      journal.push({ t: Date.now(), ...event });
+      await this.ctx.storage.put(JOURNAL_KEY, journal);
+    } catch (error) {
+      console.log("odu-lane journal write failed", error instanceof Error ? error.message : String(error));
+    }
+  }
 
   /** The container's start env, handed over by the control plane with each
    *  request (worker.ts). This script holds no secret and no configuration,
@@ -85,6 +111,10 @@ export class OduLaneContainer extends Container {
   }
 
   override async fetch(request: Request): Promise<Response> {
+    if (!this.objectStartRecorded) {
+      this.objectStartRecorded = true;
+      await this.record({ kind: "object-start" });
+    }
     const url = new URL(request.url);
     const action = url.pathname.split("/")[3];
     if (action === "destroy") {
@@ -98,7 +128,8 @@ export class OduLaneContainer extends Container {
       // running one is asked about KVM (one local request, no boot).
       const running = this.ctx.container?.running === true;
       const health = running ? await this.health() : null;
-      return Response.json({ running, kvm: health?.kvm ?? null, disk: health?.disk ?? null, version: CODE_VERSION });
+      const journal = (await this.ctx.storage.get<LaneEvent[]>(JOURNAL_KEY)) ?? [];
+      return Response.json({ running, kvm: health?.kvm ?? null, disk: health?.disk ?? null, version: CODE_VERSION, journal });
     }
     if (action === "agent" || action === "import") {
       await this.ensureStarted(await this.startEnv(request));
@@ -161,18 +192,22 @@ export class OduLaneContainer extends Container {
     return new Response(readable, { headers: { "content-type": "text/plain; charset=utf-8" } });
   }
 
-  override onStart(): void {
+  override async onStart(): Promise<void> {
     console.log("odu-lane container started");
+    await this.record({ kind: "container-start" });
   }
-  override onStop(params: unknown): void {
+  override async onStop(params: { exitCode: number; reason: string }): Promise<void> {
     console.log("odu-lane container stopped", JSON.stringify(params));
+    await this.record({ kind: "container-stop", exitCode: params.exitCode, reason: params.reason });
   }
   override onError(error: unknown): unknown {
     // Logged and returned, never rethrown: a throw here breaks the Durable
     // Object's in-flight request, so /start ended mid-stream with no verdict
     // instead of reporting the error (measured, when the bridge outgrew the
     // env limit below).
-    console.log("odu-lane container error", error instanceof Error ? error.message : String(error));
+    const message = error instanceof Error ? error.message : String(error);
+    console.log("odu-lane container error", message);
+    this.ctx.waitUntil(this.record({ kind: "container-error", message }));
     return error;
   }
 }

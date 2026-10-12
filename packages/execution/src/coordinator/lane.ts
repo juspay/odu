@@ -42,7 +42,7 @@ import { runUnary, subscribe } from "../common/effectEdge";
 import { type LaneClient, laneSurface } from "../common/laneSurface";
 import type { ResolveRunnerDrv } from "./runnerFlake";
 import { withTimeout } from "../common/withTimeout";
-import { laneConnector, laneDeathReason, pinLaneFace } from "./surfaceRemoteOpts";
+import { laneConnector, laneDeathReason, lineLogger, pinLaneFace, transportWording } from "./surfaceRemoteOpts";
 
 import { uploadSnapshot, type LaneSnapshot } from "./snapshotTransport";
 
@@ -250,6 +250,9 @@ export function startLane(opts: LaneOptions): Lane {
       resolveDrvPath: opts.resolveDrvPath,
     }),
     label: `host:${opts.host}`,
+    // The session's own lines, in the transport's own terms (a Cloudflare
+    // lane is not ssh); stderr, as without a logger.
+    log: lineLogger((line) => process.stderr.write(`${transportWording(opts.host, line)}\n`)),
   });
 
   /** Every in-flight drain's progress listener. A SET, not a slot: two drains

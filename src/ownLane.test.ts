@@ -19,7 +19,8 @@ import { join } from "node:path";
 import { runCommand } from "@odu/execution/coordinator/run";
 import type { LaneOptions } from "@odu/execution/coordinator/lane";
 import type { LeaseHandle } from "@odu/execution/coordinator/lease";
-import type { TaskSpec } from "@odu/execution/common/spec";
+import { Schema } from "effect";
+import { TaskSpecSchema, type TaskSpec } from "@odu/execution/common/spec";
 import { pendingNode, type NodeStatus, type PipelineState } from "@odu/run-client/surface";
 
 const platform = process.platform === "darwin" ? "aarch64-darwin" : "x86_64-linux";
@@ -93,6 +94,7 @@ function scenario(runId: string, burstsPerCall: string[][]) {
     return { host, lost, release: () => released.add(host) };
   };
   const lanes: FakeLane[] = [];
+  const claims: { untilReleased?: boolean }[] = [];
   let calls = 0;
   debugLanes = lanes;
   const startLane = (opts: LaneOptions) => {
@@ -119,11 +121,15 @@ function scenario(runId: string, burstsPerCall: string[][]) {
         }
       },
     };
+    // The tasks cross the wire to a real runner: they must decode there
+    // (kolu run 10 died on `shards: 1` failing the runner's schema).
+    Schema.decodeUnknownSync(Schema.Array(TaskSpecSchema))(opts.tasks);
     add(opts.tasks);
     lanes.push(lane);
     return {
       platform,
       extend: async (tasks: readonly TaskSpec[]) => {
+        Schema.decodeUnknownSync(Schema.Array(TaskSpecSchema))(tasks);
         lane.tasks.push(...tasks);
         add(tasks);
         return true;
@@ -151,13 +157,16 @@ function scenario(runId: string, burstsPerCall: string[][]) {
       runId,
     },
     {
-      claimVenues: async () => ({ ok: true, lanes: { [platform]: "primary.invalid" }, leases: [lease("primary.invalid")] }),
+      claimVenues: async (claim) => {
+        claims.push(claim.identity);
+        return { ok: true, lanes: { [platform]: "primary.invalid" }, leases: [lease("primary.invalid")] };
+      },
       leaseBurstSlots: async () => (burstsPerCall[calls++] ?? []).map(lease),
       startLane,
     },
   ).catch((error: unknown) => error);
   const on = (host: string) => lanes.find((l) => l.opts.host === host);
-  return { lanes, released, lose, outcome, on, catalog };
+  return { lanes, released, lose, outcome, on, catalog, claims };
 }
 
 describe("odu:shard=1 — a lane of its own", () => {
@@ -174,6 +183,8 @@ describe("odu:shard=1 — a lane of its own", () => {
     expect(await run.outcome).toBe(0);
     expect(primary.tasks.map((t) => t.id)).not.toContain("heavy");
     expect(run.released.has("spare.invalid")).toBe(true);
+    // A run's own venue is held until released — no 1h max-hold ceiling.
+    expect(run.claims.map((c) => c.untilReleased)).toEqual([true]);
     // Log routing: `heavy`'s log is the own lane's, `light`'s the primary's.
     const logs = execFileSync("grep", ["-rl", "on spare.invalid", run.catalog], { encoding: "utf8" });
     expect(logs).toContain("heavy");
@@ -206,4 +217,29 @@ describe("odu:shard=1 — a lane of its own", () => {
     again.report({ "_ci-setup": "ok", prepare: "ok", heavy: "ok" });
     expect(await run.outcome).toBe(0);
   }, 60_000);
+
+  it.each(["lease", "transport"] as const)(
+    "keeps an own lane running when the primary, owing nothing, loses its %s",
+    async (how) => {
+      // kolu's CI: the primary's hold ended (max-hold) after its last node had
+      // finished, and the whole platform was terminalized — taking a running
+      // shard lane on another venue with it.
+      const run = scenario(`own-lane-primary-ends-${how}`, [["spare.invalid"]]);
+      await waitFor(() => run.on("spare.invalid") !== undefined && run.on("primary.invalid") !== undefined);
+      const primary = run.on("primary.invalid")!;
+      const own = run.on("spare.invalid")!;
+      primary.report({ "_ci-setup": "ok", prepare: "ok", light: "ok" });
+      own.report({ "_ci-setup": "ok", prepare: "ok", heavy: "running" });
+      await new Promise((r) => setTimeout(r, 100));
+      if (how === "lease") run.lose.get("primary.invalid")!();
+      else primary.opts.onDead("surface stdio transport closed");
+      await waitFor(() => primary.closed);
+      expect(own.closed).toBe(false);
+      expect(run.released.has("primary.invalid")).toBe(true);
+      expect(run.released.has("spare.invalid")).toBe(false);
+      own.report({ "_ci-setup": "ok", prepare: "ok", heavy: "ok" });
+      expect(await run.outcome).toBe(0);
+    },
+    60_000,
+  );
 });

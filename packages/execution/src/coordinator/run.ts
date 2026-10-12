@@ -2397,6 +2397,25 @@ async function orchestrate(
   const laneDied = (platform: string, episode: number, reason: string): void => {
     if (!laneAccepting(platform)) return;
     if (episode !== episodeOf(platform)) return;
+    // The primary owes nothing, but its platform's shard lanes are still at
+    // work on their own venues: the primary alone ends. Terminalizing the
+    // platform here would kill shard lanes for a lease they do not hold —
+    // kolu's CI lost a re-placed home-manager shard on kolu-0 to "venue lease
+    // lost on cloudflare:kolu-4", the primary's, whose last node had long
+    // finished.
+    const shardsAtWork = plansFor(platform).some((plan) => plan.leases.some((lease) => shardLaneDeaths.has(lease)));
+    if (shardsAtWork) {
+      verdicts.releaseAll((id) => onPlatform(id, platform));
+      if (unfinishedTasksFor(platform, store.get()).length === 0) {
+        setupLine(`[odu] primary lane ended (${reason}) with nothing left to run on it; the shard lanes keep running`, platform);
+        const done = primaryLanes.get(platform);
+        if (done !== undefined) retireLane(platform, done);
+        const shardLeases = new Set(plansFor(platform).flatMap((plan) => plan.leases));
+        executions.releaseLeases(platform, (lease) => !shardLeases.has(lease));
+        checkSettled();
+        return;
+      }
+    }
     // The episode IS the retry count (see `laneEpisode`), and `episode` is the
     // current one — the guard above just said so.
     const spent = episode;
@@ -2542,7 +2561,7 @@ async function orchestrate(
         repoRoot,
         pools: resolvedPools,
         platforms: [platform],
-        identity: { holder: localHolderId(), run: runLabel },
+        identity: { holder: localHolderId(), run: runLabel, untilReleased: true },
         noWait: args.noWait,
         runLabel,
         onLine: setupLine,
@@ -2809,7 +2828,7 @@ async function orchestrate(
       const claimed = await (deps.leaseBurstSlots ?? leaseBurstSlots)({
         platform,
         pool: resolvedPools.hosts[platform] ?? [],
-        identity: { holder: localHolderId(), run: runLabel },
+        identity: { holder: localHolderId(), run: runLabel, untilReleased: true },
         limit: 1,
         exclude: held,
         ...(primary === undefined ? {} : { occupiedHosts: new Set([primary]) }),
@@ -3028,7 +3047,7 @@ async function orchestrate(
         pools: resolvedPools,
         platforms: [platform],
         validatePlatforms: platformsToClaim,
-        identity: { holder: localHolderId(), run: runLabel },
+        identity: { holder: localHolderId(), run: runLabel, untilReleased: true },
         noWait: args.noWait,
         runLabel,
         onLine: setupLine,
@@ -3128,7 +3147,7 @@ async function orchestrate(
         platforms: activePlatforms,
         bursts: burstRequests,
         pools: resolvedPools,
-        identity: { holder: localHolderId(), run: runLabel },
+        identity: { holder: localHolderId(), run: runLabel, untilReleased: true },
         onLine: setupLine,
         resolveDrvPath: runnerResolverFor,
         ...(deps.leaseBurstSlots === undefined

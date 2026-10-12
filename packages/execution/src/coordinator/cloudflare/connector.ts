@@ -52,7 +52,7 @@ import {
 import type { ResolveRunnerDrv } from "../runnerFlake";
 import { publishToLaneCache, realiseLocally } from "./laneCache";
 import { shipClosure } from "./shipClosure";
-import { lineSplitter, openLaneSocket, startContainer } from "./workerApi";
+import { type LaneEvent, laneFacts, lineSplitter, openLaneSocket, startContainer } from "./workerApi";
 
 const STDOUT = 0x01;
 const STDERR = 0x02;
@@ -142,15 +142,42 @@ const message = (error: unknown): string => (error instanceof Error ? error.mess
  *  a Cloudflare host reports this instead (surfaceRemoteOpts.laneDeathReason). */
 export const lastCloseByHost = new Map<string, string>();
 
-function closeNote(host: string, code: number, reason: string): string {
+export function closeNote(host: string, code: number, reason: string): string {
   const said = reason === "" ? `${code}` : `${code} ${reason}`;
+  // Only what the close itself proves. A 1006 is not the container's own
+  // socket ending — @cloudflare/containers relays that as a normal close —
+  // so the Worker, its Durable Object, or the network to Cloudflare ended
+  // it; which one, the connector asks the Durable Object (`explainDrop`).
   const why =
     code === 1006
-      ? "the connection dropped with no close frame — a data-plane deploy evicts attached lanes 5–10 min later, or the container stopped"
+      ? "the connection dropped with no close frame, so the Worker, its Durable Object or the network to Cloudflare ended it (the container's own socket closing arrives as a normal close)"
       : code === 1011
         ? "the Worker or bridge failed the connection"
         : "the far end closed it";
   return `${host}: the WebSocket to the odu-lane Worker closed (${said}) without the runner exiting — ${why}`;
+}
+
+/** What the Durable Object's journal says happened since `since` — the
+ *  facts behind a drop, in one line. Pure, for tests. */
+export function describeDrop(
+  host: string,
+  facts: { running: boolean; journal: readonly LaneEvent[] } | null,
+  since: number,
+): string {
+  if (facts === null) return `${host}: after the drop, the odu-lane Worker could not be asked what it saw`;
+  const at = (t: number): string => new Date(t).toISOString().slice(11, 19);
+  const recent = facts.journal.filter((e) => e.t >= since);
+  const said: string[] = [];
+  for (const e of recent) {
+    if (e.kind === "container-stop") said.push(`the container stopped at ${at(e.t)} UTC (exit ${e.exitCode ?? "?"}, ${e.reason ?? "?"})`);
+    else if (e.kind === "container-error") said.push(`the container errored at ${at(e.t)} UTC (${e.message ?? "?"})`);
+    else if (e.kind === "object-start") said.push(`the lane's Durable Object restarted at ${at(e.t)} UTC (Cloudflare reset or moved it, or a data-plane deploy evicted it)`);
+    else if (e.kind === "container-start") said.push(`a container started at ${at(e.t)} UTC`);
+  }
+  const now = facts.running ? "the container is running" : "the container is not running";
+  return said.length === 0
+    ? `${host}: after the drop, the Durable Object recorded no restart and no container stop since the lane attached, and ${now} — the connection itself failed between this coordinator and Cloudflare`
+    : `${host}: after the drop, the Durable Object says: ${said.join("; ")}; now ${now}`;
 }
 
 export function cloudflareConnector<S extends SurfaceSpec>(
@@ -204,6 +231,9 @@ export function cloudflareConnector<S extends SurfaceSpec>(
     // ── 3. The dial: one WebSocket, one odu-runner ────────────────────────
     ctx.connecting();
     const ws = await openLaneSocket({ config, instance, action: "agent", signal: ctx.signal });
+    // The start this dial caused is journaled before the socket opens, so
+    // anything recorded from here on is news about a drop.
+    const attachedAt = Date.now();
     const describe = `${opts.binary} on ${opts.host}`;
 
     const stdout = new PassThrough();
@@ -275,6 +305,11 @@ export function cloudflareConnector<S extends SurfaceSpec>(
         const note = closeNote(opts.host, event.code, event.reason);
         lastCloseByHost.set(opts.host, note);
         ctx.remoteProgress(`[cloudflare] ${note}`);
+        if (event.code !== 1000) {
+          void laneFacts(config, instance)
+            .then((facts) => facts, () => null)
+            .then((facts) => ctx.localProgress(`[cloudflare] ${describeDrop(opts.host, facts, attachedAt)}`));
+        }
       }
       settle(exitInfo ?? { kind: "transport-failed" });
     });

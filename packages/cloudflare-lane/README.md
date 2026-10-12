@@ -71,7 +71,17 @@ Each point below was measured on a live account.
   within a minute, all of it bytes. The bridge checks every 10 s and collects
   the store whenever bytes or inodes fall under 25% free. Collection frees
   only paths no live process holds, so closures that outgrow the disk while
-  in use need sharding.
+  in use need sharding. A pass opens as few garbage-collector sessions as it
+  can (one to list the dead, one per 10,000 paths to delete, one re-ask if a
+  delete is refused): every session is a root scan that every running Nix
+  client must report to, and kolu's CI measured the old path-by-path retry
+  at 808 s for 74 paths.
+- **Why a lane dropped.** The Durable Object journals its own restarts and
+  the container's starts, stops (with exit code) and errors in its storage,
+  and `/state` returns them. When a lane's WebSocket drops, the connector
+  asks, and the lane's log says what Cloudflare's side recorded instead of
+  guessing. A 1006 is never the container's own socket closing:
+  `@cloudflare/containers` relays that as a normal close.
 - **16,000-byte env vars.** Cloudflare caps each container env var at 16,000
   bytes, and `bridge.ts` exceeds that as plain text. It ships gzip'd and
   base64'd (about 5 kB), and `http.test.ts` pins that size.

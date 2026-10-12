@@ -224,4 +224,57 @@ describe.skipIf(!flockAvailable)("claimLocal / probeLocal", () => {
     expect(self).toHaveBeenCalledWith("max-hold");
     await new Promise((r) => setTimeout(r, 200));
   });
+
+  it("a run's own hold (untilReleased) has no max-hold ceiling, and still has the dead-man", async () => {
+    // kolu's CI: a 56-minute VM test outlived the 1h ceiling on its run's
+    // primary venue (\"venue lease self-released (max-hold)\").
+    const { holdCeiling } = await import("./runner");
+    const { Schema } = await import("effect");
+    const { LeaseClaimInputSchema } = await import("../common/laneSurface");
+    expect(holdCeiling(true)).toEqual({ maxHoldMs: 0 });
+    expect(holdCeiling(undefined)).toEqual({});
+    expect(holdCeiling(false)).toEqual({});
+    // The flag is on the wire, optional for older callers.
+    expect(Schema.decodeUnknownSync(LeaseClaimInputSchema)({ holder: "h", run: "r", untilReleased: true })).toMatchObject({ untilReleased: true });
+    expect(Schema.decodeUnknownSync(LeaseClaimInputSchema)({ holder: "h", run: "r" })).not.toHaveProperty("untilReleased");
+
+    const lock = tmpLock();
+    let clock = 1_000;
+    const timers: Array<{ cb: () => void }> = [];
+    const self = jest.fn();
+    const c = await claimLocal(
+      lock,
+      { holder: "t@h", run: "run-1" },
+      {
+        now: () => clock,
+        nowMs: clock,
+        deadManMs: 45_000,
+        ...holdCeiling(true),
+        setIntervalFn: ((cb: () => void) => {
+          const id = { cb };
+          timers.push(id);
+          return id as unknown as ReturnType<typeof setInterval>;
+        }) as typeof setInterval,
+        clearIntervalFn: ((id: unknown) => {
+          const i = timers.indexOf(id as (typeof timers)[0]);
+          if (i >= 0) timers.splice(i, 1);
+        }) as typeof clearInterval,
+        onSelfRelease: self,
+      },
+    );
+    expect(c.status).toBe("held");
+    if (c.status !== "held") return;
+    // Three hours of a live, pulsing coordinator: still held.
+    for (let i = 0; i < 3 * 60; i++) {
+      clock += 60_000;
+      c.hold.noteActivity();
+      for (const t of [...timers]) t.cb();
+    }
+    expect(self).not.toHaveBeenCalled();
+    // A silent coordinator still loses it to the dead-man.
+    clock += 46_000;
+    for (const t of [...timers]) t.cb();
+    expect(self).toHaveBeenCalledWith("dead-man");
+    await new Promise((r) => setTimeout(r, 200));
+  });
 });

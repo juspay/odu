@@ -112,6 +112,34 @@ export async function laneState(
   return { running: body.running === true };
 }
 
+/** One lifecycle fact the lane's Durable Object recorded (dataPlane.ts). */
+export interface LaneEvent {
+  t: number;
+  kind: "object-start" | "container-start" | "container-stop" | "container-error";
+  exitCode?: number;
+  reason?: string;
+  message?: string;
+}
+
+/** What the lane's Durable Object knows about its container now and lately:
+ *  whether it runs, and its lifecycle journal. Used to explain a drop. */
+export async function laneFacts(
+  config: Readonly<CloudflareConfig>,
+  instance: string,
+  signal: AbortSignal = AbortSignal.timeout(STATE_DEADLINE_MS),
+): Promise<{ running: boolean; journal: LaneEvent[] }> {
+  const response = await fetch(laneEndpoint(config, instance, "state"), {
+    headers: laneAuthHeaders(config),
+    signal: deadline(signal, STATE_DEADLINE_MS),
+  });
+  if (!response.ok) throw new Error(`odu-lane /state answered ${response.status}`);
+  const body = (await response.json()) as { running?: unknown; journal?: unknown };
+  const journal = Array.isArray(body.journal)
+    ? body.journal.filter((e): e is LaneEvent => typeof e === "object" && e !== null && typeof (e as LaneEvent).t === "number")
+    : [];
+  return { running: body.running === true, journal };
+}
+
 /** Open an authenticated WebSocket to a lane route and wait until it is open.
  *  Bun's WebSocket takes request headers; the Worker authenticates the upgrade
  *  like every other route. Rejects with a classified `ConnectError`: a refused
