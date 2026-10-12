@@ -305,7 +305,11 @@ export function cloudflareConnector<S extends SurfaceSpec>(
         const note = closeNote(opts.host, event.code, event.reason);
         lastCloseByHost.set(opts.host, note);
         ctx.remoteProgress(`[cloudflare] ${note}`);
-        if (event.code !== 1000) {
+        // Every close without an exit frame that this dial did not ask for:
+        // a container that went away arrives as a 1000 (the containers
+        // library relays its abnormal close as normal; measured with
+        // `odu cloudflare destroy` under an attached lane).
+        if (!ctx.signal.aborted) {
           void laneFacts(config, instance)
             .then((facts) => facts, () => null)
             .then((facts) => ctx.localProgress(`[cloudflare] ${describeDrop(opts.host, facts, attachedAt)}`));

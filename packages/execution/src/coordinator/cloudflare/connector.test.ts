@@ -227,7 +227,8 @@ describe("cloudflareConnector", () => {
     await connection.isAlive();
     // Cloudflare reset the object after the lane attached; the socket drops.
     worker.journal.push({ t: Date.now() - 60_000, kind: "container-start" }, { t: Date.now(), kind: "object-start" });
-    worker.dials[0]?.ws?.close(1011, "gone");
+    // As the containers library relays a container that went away: 1000.
+    worker.dials[0]?.ws?.close(1000, "WebSocket disconnected without sending Close frame.");
     expect(await connection.closed).toEqual({ kind: "transport-failed" });
     const deadline = Date.now() + 5_000;
     while (!lines.some((l) => l.includes("after the drop")) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));

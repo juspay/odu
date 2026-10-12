@@ -81,7 +81,9 @@ Each point below was measured on a live account.
   and `/state` returns them. When a lane's WebSocket drops, the connector
   asks, and the lane's log says what Cloudflare's side recorded instead of
   guessing. A 1006 is never the container's own socket closing:
-  `@cloudflare/containers` relays that as a normal close.
+  `@cloudflare/containers` relays that as a normal close (measured: a
+  container destroyed under an attached lane arrived as `1000 WebSocket
+  disconnected without sending Close frame.`).
 - **16,000-byte env vars.** Cloudflare caps each container env var at 16,000
   bytes, and `bridge.ts` exceeds that as plain text. It ships gzip'd and
   base64'd (about 5 kB), and `http.test.ts` pins that size.
