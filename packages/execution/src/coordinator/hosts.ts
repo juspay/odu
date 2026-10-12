@@ -1,7 +1,8 @@
 /**
  * Platform → host-pool resolution. Keys are Nix system tuples; values are
  * pools of anything ssh can dial (or `localhost`, which short-circuits the
- * nix-copy transport). A plain string in hosts.json is a pool of one — fully
+ * nix-copy transport, or `cloudflare[:<instance>]`, a Cloudflare container —
+ * whose `slots` expand to that many containers, see `expandCloudflareSlots`). A plain string in hosts.json is a pool of one — fully
  * back-compatible. Missing platforms silently drop from the fanout — the
  * operator opts in per platform, exactly the justci hosts.json semantics. But
  * a config that names *no* platform at all is not "run everything here": that
@@ -21,8 +22,8 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { isIP } from "node:net";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { expandCloudflareSlots, isCloudflareHost } from "../common/cloudflareConfig";
+import { hostsCandidates } from "../common/hostsFile";
 
 /** One independently leasable execution slot on a host. `slot` is zero-based
  *  and becomes part of the remote flock path; `slots` is retained for display
@@ -53,41 +54,6 @@ export interface HostsConfig {
    *  when no candidate file existed (typed absence, not a sentinel string, so
    *  consumers branch on it instead of matching display text). */
   source: string | null;
-}
-
-/** A resolution-chain slot: the label the operator sees and the path we probe
- *  (null for `$ODU_HOSTS` when it is unset — the slot still shows in the
- *  refusal so the chain reads in full). One source of truth for both the
- *  lookup in `loadHosts` and the named chain in the no-config refusal. */
-interface HostsCandidate {
-  label: string;
-  path: string | null;
-}
-
-/**
- * @param override the CALLER's `$ODU_HOSTS`, when the caller is not this
- *   process. Three readings, the same three the wire carries: a path uses that
- *   file; `""` means the caller's shell had none, so the chain starts at
- *   `~/.config`; `undefined` means nobody said, so this process's own
- *   environment answers. A per-user singleton runs work on behalf of callers
- *   whose environment is not its own, and that is exactly when it matters.
- */
-function hostsCandidates(override?: string): HostsCandidate[] {
-  const oduHosts = override ?? process.env.ODU_HOSTS;
-  return [
-    {
-      label: "$ODU_HOSTS",
-      path: oduHosts !== undefined && oduHosts !== "" ? oduHosts : null,
-    },
-    {
-      label: "~/.config/odu/hosts.json",
-      path: join(homedir(), ".config", "odu", "hosts.json"),
-    },
-    {
-      label: "~/.config/justci/hosts.json",
-      path: join(homedir(), ".config", "justci", "hosts.json"),
-    },
-  ];
 }
 
 interface HostCapacity {
@@ -131,12 +97,24 @@ function parsePool(
       `odu: ${path}: host pool for "${platform}" must not be empty`,
     );
   }
-  if (entries.every((entry) => typeof entry === "string" && entry !== "")) {
-    return entries as string[];
+  const capacities = entries.flatMap((entry): HostCapacity[] => {
+    const capacity = parseHostCapacity(path, platform, entry);
+    // A cloudflare "slot" is a whole container, so N of them are N hosts.
+    return isCloudflareHost(capacity.host)
+      ? expandCloudflareSlots(capacity.host, capacity.slots).map((host) => ({ host, slots: 1 }))
+      : [capacity];
+  });
+  const containers = capacities.map((entry) => entry.host).filter(isCloudflareHost);
+  const twice = containers.find((host, i) => containers.indexOf(host) !== i);
+  if (twice !== undefined) {
+    throw new Error(
+      `odu: ${path}: "${twice}" appears twice in the "${platform}" pool — one cloudflare host is one container; ` +
+        `name distinct instances (cloudflare:a, cloudflare:b) or give one entry "slots"`,
+    );
   }
-  const capacities = entries.map((entry) =>
-    parseHostCapacity(path, platform, entry),
-  );
+  if (capacities.every((entry) => entry.slots === 1)) {
+    return capacities.map((entry) => entry.host);
+  }
   const maxSlots = Math.max(...capacities.map((entry) => entry.slots));
   const pool: HostSlot[] = [];
   // Breadth-first by slot index: ci-1/0, ci-2/0, ci-1/1, ci-2/1.

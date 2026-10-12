@@ -24,6 +24,37 @@ let
   # flake.nix's nixConfig.
   binaryCache = import ./nix/binary-cache.nix;
 
+  # The wrangler `odu cloudflare setup` deploys the odu-lane Worker with —
+  # pinned like every other tool odu runs, but by store PATH with its context
+  # discarded, so it is NOT in odu's closure: nearly nobody runs setup, and
+  # wrangler (with workerd) is hundreds of MiB. setup realises it on first use
+  # from cache.nixos.org (packages/cli/src/cloudflare.ts).
+  wranglerPath = builtins.unsafeDiscardStringContext "${pkgs.wrangler}";
+
+  # The init a Cloudflare lane container runs under (it reaps the orphans a
+  # CI run leaves; see packages/cloudflare-lane/src/entrypoint.sh). By path
+  # for the same reason: the container realises it, the coordinator never runs it.
+  tiniPath = builtins.unsafeDiscardStringContext "${pkgs.tini}";
+
+  # A lane container is the stock nixos/nix image: Nix, bash, coreutils — no
+  # awk, sed, ps or hostname, which recipe code outside `nix develop` tends to
+  # assume (measured on kolu's CI). These go on the runner's PATH, behind the
+  # image's own. Store paths, each in cache.nixos.org, realised by the
+  # container; nothing here is in odu's closure.
+  laneBasePaths = builtins.unsafeDiscardStringContext (pkgs.lib.concatMapStringsSep " " toString (with pkgs; [
+    gawk
+    gnused
+    gnugrep
+    procps
+    hostname
+    findutils
+    diffutils
+    which
+    gnutar
+    gzip
+    util-linux # the bridge runs its store collector under `ionice -c 3`
+  ]));
+
   src = pkgs.lib.fileset.toSource {
     root = ./.;
     fileset = pkgs.lib.fileset.unions [
@@ -260,6 +291,9 @@ let
       --set ODU_WEB_DIST "${web-ui}" \
       --set ODU_BUILD_ID "$out" \
       --set ODU_OSFACTS_BIN "${pkgs.osfacts}/bin/osfacts" \
+      --set-default ODU_WRANGLER "${wranglerPath}" \
+      --set-default ODU_LANE_TINI "${tiniPath}" \
+      --set-default ODU_LANE_BASE "${laneBasePaths}" \
       ${pkgs.lib.optionalString (selfRev != null) ''--set ODU_COMMIT_HASH "${selfRev}"''} \
       --set ODU_AGENT_SUBSTITUTERS "${pkgs.lib.concatStringsSep " " binaryCache.substituters}" \
       --set ODU_AGENT_TRUSTED_PUBLIC_KEYS "${pkgs.lib.concatStringsSep " " binaryCache.trustedPublicKeys}" \

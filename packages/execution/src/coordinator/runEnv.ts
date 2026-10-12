@@ -275,6 +275,7 @@ export async function prepareVenues(
         identity: {
           holder: opts.identity.holder,
           run: `${opts.identity.run ?? "run"}:${request.label}`,
+          ...(opts.identity.untilReleased === true ? { untilReleased: true } : {}),
         },
         limit: request.limit,
         ...(primary === undefined

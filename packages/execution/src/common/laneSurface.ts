@@ -85,13 +85,16 @@ export type LeaseHolder = typeof LeaseHolderSchema.Type;
  *  `ODU_LEASE_LOCK` on the agent. */
 export const DEFAULT_LEASE_LOCK = "/tmp/odu.lease";
 
-const LeaseClaimInputSchema = Schema.Struct({
+export const LeaseClaimInputSchema = Schema.Struct({
   holder: Schema.String.check(Schema.isMinLength(1)),
   run: Schema.NullOr(Schema.String),
   /** Absolute path on the agent host. Omit → agent default (`ODU_LEASE_LOCK`
    *  or {@link DEFAULT_LEASE_LOCK}). `optionalKey`, so a caller with no override
    *  must OMIT the key — spelling it `undefined` is a decode failure. */
   lockPath: Schema.optionalKey(Schema.String),
+  /** Hold until released: no max-hold ceiling (a run's own venue; see
+   *  `LeaseIdentity.untilReleased`). The dead-man still applies. */
+  untilReleased: Schema.optionalKey(Schema.Boolean),
 });
 
 /** Discriminated on `status`, not `_tag` — `Schema.Union` keeps the frozen

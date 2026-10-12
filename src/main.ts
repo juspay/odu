@@ -81,9 +81,10 @@ import { serviceMcpCommand } from "@odu/cli/serviceMcp";
 import { ODU_VERSION } from "@odu/execution/common/version";
 import { surfaceCliMain } from "@odu/cli/serviceCli";
 import { webCommand, webDaemonCommand } from "@odu/cli/web";
+import { cloudflareCommand } from "@odu/cli/cloudflare";
 import { errorMessage, errorStack } from "@odu/execution/common/effectEdge";
 
-const USAGE = `usage: odu <run|wait|rerun|cancel|logs|history|status|attach|hosts|lease|release|dump|graph|protect|web|surface|mcp> [args]
+const USAGE = `usage: odu <run|wait|rerun|cancel|logs|history|status|attach|hosts|lease|release|dump|graph|protect|web|surface|mcp|cloudflare> [args]
 
 Every command below is a client of the shared odu service. It is started for you
 if none is running; nothing here runs CI by itself.
@@ -141,6 +142,10 @@ surface <verb> [--input JSON] [--json]
                               # surface --help lists them.
                               # Exits: 0 answered (red CI included) · 1
                               # refused · 2 usage · 3 nothing serving · 130 interrupted
+cloudflare <setup|status|destroy|teardown>
+                              # deploy the odu-lane Worker to YOUR Cloudflare
+                              # account; then "cloudflare[:<instance>]" is a
+                              # lane host (odu cloudflare --help)
 mcp                           # the service as MCP over stdio — the same verbs,
                               # the same names, no run authority of its own.
                               # Starts the service if none is running.
@@ -659,6 +664,8 @@ async function dispatch(argv: string[]): Promise<number> {
         json: values.output === "json",
       });
     }
+    case "cloudflare":
+      return cloudflareCommand(rest);
     case "lease": {
       const { values, positionals } = parseArgs({
         args: rest,

@@ -60,7 +60,11 @@ afterAll(() => {
     cleanup(world.root);
   }
   for (const dir of fixtures) cleanup(dir);
-});
+  // Its own budget, not bun's 5 s hook default: asking each world's service
+  // who it is spawns `odu` (a cold bun start), and stopping it waits for it.
+  // Under the default this hook failed as an unnamed test on every loaded
+  // machine — the same on master — while every real assertion had passed.
+}, 120_000);
 
 it("pins edits locally and over stdio, changes red to green, then proves cache reuse for unchanged content", () => {
   const dir = makeFixture("dirty");

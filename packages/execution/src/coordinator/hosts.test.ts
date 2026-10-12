@@ -201,6 +201,34 @@ describe("loadHosts — string | list values", () => {
     ]);
   });
 
+  it("gives each cloudflare slot its own container (its own host)", () => {
+    writeHosts({ "x86_64-linux": { host: "cloudflare", slots: 3 } });
+    expect(loadHosts().hosts["x86_64-linux"]).toEqual([
+      "cloudflare:default-0",
+      "cloudflare:default-1",
+      "cloudflare:default-2",
+    ]);
+    writeHosts({ "x86_64-linux": [{ host: "cloudflare:big", slots: 2 }, { host: "ci-1", slots: 2 }] });
+    expect(loadHosts().hosts["x86_64-linux"]).toEqual([
+      { host: "cloudflare:big-0", slot: 0, slots: 1 },
+      { host: "cloudflare:big-1", slot: 0, slots: 1 },
+      { host: "ci-1", slot: 0, slots: 2 },
+      { host: "ci-1", slot: 1, slots: 2 },
+    ]);
+  });
+
+  it("keeps a one-slot cloudflare host and named instances as written", () => {
+    writeHosts({ "x86_64-linux": ["cloudflare", "cloudflare:b"] });
+    expect(loadHosts().hosts["x86_64-linux"]).toEqual(["cloudflare", "cloudflare:b"]);
+  });
+
+  it("refuses the same cloudflare container twice in one pool", () => {
+    writeHosts({ "x86_64-linux": ["cloudflare:a", "cloudflare:a"] });
+    expect(() => loadHosts()).toThrow(/appears twice/);
+    writeHosts({ "x86_64-linux": ["cloudflare:x/y"] });
+    expect(() => loadHosts()).toThrow(/instance/);
+  });
+
   it("refuses zero, fractional, and malformed slot counts", () => {
     for (const slots of [0, 1.5, "2"]) {
       writeHosts({ "x86_64-linux": { host: "ci-1", slots } });

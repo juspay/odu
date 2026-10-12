@@ -82,6 +82,7 @@ import {
   type ExecutionLane,
 } from "./executionRoster";
 import {
+  hostSlotKey,
   leaseBurstSlots,
   type LeaseHandle,
   localHolderId,
@@ -887,6 +888,10 @@ async function orchestrate(
   interface ShardPlan extends ShardTopology {
     leases: LeaseHandle[];
   }
+  /** Which of a plan's leases carries shard `index`: shard 0 has none when it
+   *  runs on the primary. */
+  const leaseSlot = (plan: ShardPlan, index: number): number =>
+    plan.primaryShard ? index - 1 : index;
   const shardPlans = new Map<string, ShardPlan[]>();
   const burstLeaseUsers = new Map<LeaseHandle, number>();
   const plansFor = (platform: string): readonly ShardPlan[] =>
@@ -1456,6 +1461,12 @@ async function orchestrate(
         laneDied(platform, episode, reason);
         return;
       }
+      // A burst venue carries a shard lane, which re-places itself.
+      const shardDied = shardLaneDeaths.get(lease);
+      if (shardDied !== undefined) {
+        shardDied(reason);
+        return;
+      }
       shutdown(1, reason, { exclusivityLost: true });
     });
   };
@@ -1873,7 +1884,7 @@ async function orchestrate(
   };
 
   const refreshShardAggregate = (platform: string, plan: ShardPlan): void => {
-    if (plan.total <= 1) return;
+    if (plan.total <= 1 && plan.primaryShard) return;
     const logicalId = fanId(plan.rootId, platform);
     const state = store.get();
     const children = shardRootIds(platform, plan);
@@ -2269,10 +2280,25 @@ async function orchestrate(
    * gate has published what it is holding, which is a side effect and belongs
    * to the caller that is committing to a retry.
    */
+  /** A sharded platform is resurrectable once its shard plan is fixed: the
+   *  plan says which node is the primary's shard and which leases carry the
+   *  others, and only the primary is re-claimed — shard lanes on their own
+   *  venues keep running. Before the plan exists (the burst-claim window at
+   *  startup) there is no primary shard to re-place, so that window keeps the
+   *  old fail-closed path. */
   const isResurrectable = (platform: string): boolean =>
     claimablePlatforms.has(platform) &&
     remotePlatforms.has(platform) &&
-    shardRootsFor(platform).length === 0;
+    (shardRootsFor(platform).length === 0 || shardPlans.has(platform));
+
+  /** The public node a primary-lane task reports to: a shard root's primary
+   *  share is `root[1-of-N]`, everything else its own id. */
+  const primaryPublicId = (platform: string, localId: string): string => {
+    const plan = planFor(platform, localId);
+    return plan !== undefined && plan.total > 1
+      ? fanId(shardNamepath(localId, 0, plan.total), platform)
+      : fanId(localId, platform);
+  };
 
   /**
    * The tasks a fresh lane for this platform would have to run: every node the
@@ -2295,9 +2321,11 @@ async function orchestrate(
     platform: string,
     state: PipelineState,
   ): TaskSpec[] => {
-    const all = tasksByPlatform.get(platform) ?? [];
+    const offPrimary = new Set(plansFor(platform).filter((plan) => !plan.primaryShard).map((plan) => plan.rootId));
+    const all = (tasksByPlatform.get(platform) ?? []).filter((task) => !offPrimary.has(task.id));
+    const byId = new Map(all.map((task) => [task.id, task] as const));
     const statusOf = (localId: string): NodeStatus | undefined =>
-      state.nodes[fanId(localId, platform)]?.status;
+      state.nodes[primaryPublicId(platform, localId)]?.status;
     // Every task in `tasksByPlatform` was given a node at startup, so a missing
     // status is unreachable — stated rather than defaulted, so a reader does
     // not have to work out whether "a node the run never heard of is done" is a
@@ -2309,6 +2337,28 @@ async function orchestrate(
     const retry = new Map(
       all.filter(unfinished).map((task) => [task.id, task] as const),
     );
+    // A fresh venue is a fresh workspace: whatever a finished prerequisite
+    // left there (an `install`'s node_modules, a build's outputs) is not on
+    // the new box. Measured on odu's own CI in a Cloudflare lane: `unit` and
+    // the e2e suites were retried without `install` and failed on every
+    // missing module. So a retried node brings its `ok` prerequisites with it,
+    // transitively, and they earn their verdicts again — exactly as a shard
+    // lane re-runs its root's dependency closure on its own venue.
+    const queue = [...retry.values()];
+    while (queue.length > 0) {
+      const task = queue.pop()!;
+      for (const dep of task.needs) {
+        const prerequisite = byId.get(dep);
+        if (prerequisite === undefined || retry.has(dep) || statusOf(dep) !== "ok") continue;
+        retry.set(dep, prerequisite);
+        queue.push(prerequisite);
+      }
+    }
+    // Keep the platform's own order, so the lane is configured as the DAG
+    // was declared rather than in discovery order.
+    const ordered = new Map(all.filter((task) => retry.has(task.id)).map((task) => [task.id, task] as const));
+    retry.clear();
+    for (const [id, task] of ordered) retry.set(id, task);
     // A dependency that is neither `ok` nor itself being retried is a verdict
     // this lane already reached; its dependents come off the retry with it.
     for (;;) {
@@ -2318,10 +2368,18 @@ async function orchestrate(
       if (blocked.length === 0) break;
       for (const task of blocked) retry.delete(task.id);
     }
-    return [...retry.values()].map((task) => ({
+    // A shard root's primary share runs with its immutable shard identity,
+    // as it did on the lane that died.
+    const tasks: TaskSpec[] = [...retry.values()].map((task) => ({
       ...task,
       needs: task.needs.filter((dep) => retry.has(dep)),
     }));
+    return plansFor(platform)
+      .filter((plan) => plan.primaryShard)
+      .reduce<TaskSpec[]>(
+        (configured, plan) => tasksForShard(configured, plan.rootId, 0, plan.total),
+        tasks,
+      );
   };
 
   /**
@@ -2339,6 +2397,25 @@ async function orchestrate(
   const laneDied = (platform: string, episode: number, reason: string): void => {
     if (!laneAccepting(platform)) return;
     if (episode !== episodeOf(platform)) return;
+    // The primary owes nothing, but its platform's shard lanes are still at
+    // work on their own venues: the primary alone ends. Terminalizing the
+    // platform here would kill shard lanes for a lease they do not hold —
+    // kolu's CI lost a re-placed home-manager shard on kolu-0 to "venue lease
+    // lost on cloudflare:kolu-4", the primary's, whose last node had long
+    // finished.
+    const shardsAtWork = plansFor(platform).some((plan) => plan.leases.some((lease) => shardLaneDeaths.has(lease)));
+    if (shardsAtWork) {
+      verdicts.releaseAll((id) => onPlatform(id, platform));
+      if (unfinishedTasksFor(platform, store.get()).length === 0) {
+        setupLine(`[odu] primary lane ended (${reason}) with nothing left to run on it; the shard lanes keep running`, platform);
+        const done = primaryLanes.get(platform);
+        if (done !== undefined) retireLane(platform, done);
+        const shardLeases = new Set(plansFor(platform).flatMap((plan) => plan.leases));
+        executions.releaseLeases(platform, (lease) => !shardLeases.has(lease));
+        checkSettled();
+        return;
+      }
+    }
     // The episode IS the retry count (see `laneEpisode`), and `episode` is the
     // current one — the guard above just said so.
     const spent = episode;
@@ -2444,7 +2521,7 @@ async function orchestrate(
         ` nodes (attempt ${attempt} of ${maxResurrections})`,
       platform,
     );
-    const retryIds = new Set(retryTasks.map((task) => fanId(task.id, platform)));
+    const retryIds = new Set(retryTasks.map((task) => primaryPublicId(platform, task.id)));
     const cutOff = state.order.filter(
       (id) => onPlatform(id, platform) && state.nodes[id]?.status === "running",
     );
@@ -2461,8 +2538,11 @@ async function orchestrate(
     if (dead !== undefined) retireLane(platform, dead);
     // Release on a lost lease is a tolerated no-op; on a lease that merely
     // outlived its lane it is the whole point — the box must be free before we
-    // queue for one, or a single-host pool waits on itself.
-    executions.releaseLeases(platform);
+    // queue for one, or a single-host pool waits on itself. Only the
+    // PRIMARY's: the shard plans' leases carry shard lanes that are still
+    // running on their own venues.
+    const shardLeases = new Set(plansFor(platform).flatMap((plan) => plan.leases));
+    executions.releaseLeases(platform, (lease) => !shardLeases.has(lease));
 
     // Re-open the provisioning bracket so the new claim narrates into it and
     // the new runner's setup verdict has somewhere to land (`finishSetup`
@@ -2481,7 +2561,7 @@ async function orchestrate(
         repoRoot,
         pools: resolvedPools,
         platforms: [platform],
-        identity: { holder: localHolderId(), run: runLabel },
+        identity: { holder: localHolderId(), run: runLabel, untilReleased: true },
         noWait: args.noWait,
         runLabel,
         onLine: setupLine,
@@ -2561,6 +2641,234 @@ async function orchestrate(
       acceptClaim(platform, outcome, retryTasks);
       checkSettled();
     })();
+  };
+
+  /**
+   * One shard of a sharded root on its own burst venue (index ≥ 1; the
+   * primary lane carries shard 0). `attempt` counts how many venues this
+   * shard has already died on.
+   *
+   * A shard lane's death — its transport, or its venue lease — no longer ends
+   * the shard or the run: like a primary, it is re-placed on a fresh burst
+   * venue and re-runs its whole dependency closure there (a fresh workspace),
+   * up to the same resurrection budget. Measured on kolu's CI: a burst lane's
+   * lease loss shut the entire run down as incomplete.
+   */
+  const startShardLane = (
+    platform: string,
+    plan: ShardPlan,
+    index: number,
+    lease: LeaseHandle,
+    attempt: number,
+  ): void => {
+    const projection = shardLaneProjection(platform, plan, index);
+    const publicIdFor = projection.publicId;
+    const setupId = projection.setupId;
+    const publicLaneIds = projection.nodeIds;
+    for (const id of publicLaneIds) nodeHosts.set(id, lease.host);
+    let burstLane: Lane | undefined;
+    let finished = false;
+    let dead = false;
+    /** Set once a resurrection has handed this lane's venue back, so the
+     *  give-up path does not release it a second time. */
+    let leaseHandedBack = false;
+    const finishBurst = (): void => {
+      if (finished) return;
+      const state = store.get();
+      if (
+        publicLaneIds.some((id) => {
+          const status = state.nodes[id]?.status;
+          return (
+            status === "pending" ||
+            status === "running" ||
+            status === undefined
+          );
+        })
+      ) {
+        return;
+      }
+      finished = true;
+      shardLaneDeaths.delete(lease);
+      endLocal(setupId);
+      burstLane?.close();
+      if (!leaseHandedBack) releaseBurstLease(platform, lease);
+    };
+    burstLane = buildLane({
+      platform,
+      host: lease.host,
+      tasks: tasksForShard(plan.tasks, plan.rootId, index, plan.total),
+      pipelineName: `${spec.name}:${plan.rootId}:${index + 1}/${plan.total}`,
+      ...laneSource(lease.host),
+      resolveDrvPath: runnerResolverFor(platform),
+      onSetupLine: (line) =>
+        appendLocal(setupId, `[host ${shortHost(lease.host)}] ${line}\n`),
+      onNodes: (laneState) => {
+        if (!laneAccepting(platform)) return;
+        for (const laneId of laneState.order) {
+          const laneNode = laneState.nodes[laneId];
+          if (laneNode === undefined) continue;
+          const publicId = publicIdFor(laneId);
+          const patch = {
+            status: laneNode.status,
+            exitCode: laneNode.exitCode,
+            startedAt: laneNode.startedAt,
+            durationMs: laneNode.durationMs,
+          };
+          // Like the primary `_ci-setup`, this log has a coordinator half
+          // (`onSetupLine`) in addition to the runner stream. Its state is
+          // therefore mirrored directly and its log is sealed only when
+          // the whole burst lane settles.
+          if (laneId === SETUP) updateNode(publicId, patch);
+          else verdicts.offer(publicId, patch);
+          if (laneId === plan.rootId) {
+            refreshShardAggregate(platform, plan);
+          }
+        }
+      },
+      onLogFrame: (laneId, frame) => {
+        if (!laneAccepting(platform)) return;
+        const publicId = publicIdFor(laneId);
+        if (frame.kind === "append") appendLocal(publicId, frame.text);
+        else if (frame.kind === "snapshot") {
+          if (laneId === SETUP) {
+            if (frame.text !== "") appendLocal(publicId, frame.text);
+          } else if (!logs.isNoopReset(publicId, frame.text)) {
+            resetLocal(publicId, frame.text);
+          }
+        } else if (frame.kind === "end") {
+          // `_ci-setup` still has a coordinator-side producer; finishBurst
+          // seals it after the recipe root settles. Every recipe node uses
+          // the ordinary verdict/log join.
+          if (laneId !== SETUP) {
+            endLocal(publicId);
+            verdicts.release(publicId);
+          }
+          if (laneId === plan.rootId) {
+            refreshShardAggregate(platform, plan);
+          }
+          finishBurst();
+        }
+      },
+      onDead: (error) => die(error),
+    });
+    createdLanes.add(burstLane);
+    executions.addLane(
+      platform,
+      burstLane,
+      [SETUP, ...plan.tasks.map((task) => task.id)],
+      publicIdFor,
+    );
+
+    const die = (error: string): void => {
+      if (dead || finished) return;
+      dead = true;
+      shardLaneDeaths.delete(lease);
+      if (!laneAccepting(platform)) return;
+      if (attempt < maxResurrections) {
+        leaseHandedBack = true;
+        void resurrectShard(platform, plan, index, lease, burstLane, attempt, error, () => terminalize(error));
+        return;
+      }
+      terminalize(`${error} (gave up after ${maxResurrections} lane resurrections)`);
+    };
+    const terminalize = (error: string): void => {
+      if (!laneAccepting(platform)) return;
+      for (const id of publicLaneIds) {
+        const status = store.get().nodes[id]?.status;
+        if (status === "pending" || status === "running") {
+          appendLocal(id, `\n[odu] shard lane died: ${error}\n`);
+          endLocal(id);
+          verdicts.release(id);
+          updateNode(id, {
+            status: status === "running" ? "errored" : "skipped",
+            exitCode: 1,
+          });
+        } else {
+          endLocal(id);
+        }
+      }
+      refreshShardAggregate(platform, plan);
+      finishBurst();
+    };
+    shardLaneDeaths.set(lease, die);
+  };
+
+  /** Shard lanes by the burst lease they run on, so a lost lease reaches the
+   *  lane that loses its venue instead of the whole run. */
+  const shardLaneDeaths = new Map<LeaseHandle, (reason: string) => void>();
+
+  /** Re-place a dead shard lane: hand its venue back, claim another burst
+   *  slot, reopen the shard's nodes and start them there. No venue to be had
+   *  is the old answer — the shard's unfinished nodes are errored. */
+  const resurrectShard = async (
+    platform: string,
+    plan: ShardPlan,
+    index: number,
+    deadLease: LeaseHandle,
+    deadLane: Lane | undefined,
+    attempt: number,
+    reason: string,
+    giveUp: () => void,
+  ): Promise<void> => {
+    const projection = shardLaneProjection(platform, plan, index);
+    appendLocal(
+      projection.setupId,
+      `[odu] shard lane died: ${reason} — claiming another venue for shard ${index + 1}/${plan.total}` +
+        ` (attempt ${attempt + 1} of ${maxResurrections})\n`,
+    );
+    deadLane?.close();
+    releaseBurstLease(platform, deadLease);
+    const held = new Set(
+      plansFor(platform).flatMap((p) => p.leases).map((l) => hostSlotKey(l.host, l.slot ?? 0)),
+    );
+    const primary = lanesByPlatform[platform];
+    beginClaim(platform);
+    let next: LeaseHandle | undefined;
+    try {
+      const claimed = await (deps.leaseBurstSlots ?? leaseBurstSlots)({
+        platform,
+        pool: resolvedPools.hosts[platform] ?? [],
+        identity: { holder: localHolderId(), run: runLabel, untilReleased: true },
+        limit: 1,
+        exclude: held,
+        ...(primary === undefined ? {} : { occupiedHosts: new Set([primary]) }),
+        onLine: (line) => appendLocal(projection.setupId, `${line}\n`),
+        resolveDrvPath: runnerResolverFor(platform),
+      });
+      next = claimed[0];
+      for (const extra of claimed.slice(1)) extra.release();
+    } catch (error) {
+      appendLocal(projection.setupId, `[odu] no venue for the retry: ${(error as Error).message}\n`);
+    } finally {
+      endClaim(platform);
+    }
+    if (next === undefined || !laneAccepting(platform) || shuttingDown) {
+      next?.release();
+      giveUp();
+      checkSettled();
+      return;
+    }
+    if (!executions.addLease(platform, next)) {
+      next.release();
+      giveUp();
+      checkSettled();
+      return;
+    }
+    acquiredLeases.push(next);
+    burstLeaseUsers.set(next, 1);
+    watchLease(platform, next);
+    plan.leases[leaseSlot(plan, index)] = next;
+    // A fresh venue is a fresh workspace: the whole shard closure runs again.
+    for (const id of projection.nodeIds) {
+      verdicts.release(id);
+      updateNode(id, REOPENED);
+      if (id === projection.setupId) continue;
+      history.resetNode(id, "the shard lane running this node died; it was re-run on another venue");
+      resetLocal(id, "");
+    }
+    refreshShardAggregate(platform, plan);
+    startShardLane(platform, plan, index, next, attempt + 1);
+    checkSettled();
   };
 
   const laneSource = (host: string) => {
@@ -2739,7 +3047,7 @@ async function orchestrate(
         pools: resolvedPools,
         platforms: [platform],
         validatePlatforms: platformsToClaim,
-        identity: { holder: localHolderId(), run: runLabel },
+        identity: { holder: localHolderId(), run: runLabel, untilReleased: true },
         noWait: args.noWait,
         runLabel,
         onLine: setupLine,
@@ -2811,9 +3119,10 @@ async function orchestrate(
         };
   const burstRequests = activePlatforms.flatMap((platform) => {
     const roots = shardRootsFor(platform);
+    // Enough for every shard of every root to have a container of its own;
+    // the pool answers with what it has, and the plans degrade from there.
     const limit = roots.reduce(
-      (largest, root) =>
-        Math.max(largest, Math.max(0, (root.shards ?? 1) - 1)),
+      (sum, root) => sum + Math.max(0, root.shards ?? 1),
       0,
     );
     return limit === 0
@@ -2838,7 +3147,7 @@ async function orchestrate(
         platforms: activePlatforms,
         bursts: burstRequests,
         pools: resolvedPools,
-        identity: { holder: localHolderId(), run: runLabel },
+        identity: { holder: localHolderId(), run: runLabel, untilReleased: true },
         onLine: setupLine,
         resolveDrvPath: runnerResolverFor,
         ...(deps.leaseBurstSlots === undefined
@@ -2891,19 +3200,26 @@ async function orchestrate(
       const shared = shareShardCapacity(
         roots.map((root) => ({
           rootId: root.id,
-          limit: Math.max(0, (root.shards ?? 1) - 1),
+          limit: Math.max(0, root.shards ?? 1),
         })),
         venue.bursts,
       );
       const plans = roots.map((root): ShardPlan => {
-        const leases = shared.get(root.id) ?? [];
+        const wanted = root.shards ?? 1;
+        const offered = shared.get(root.id) ?? [];
+        // A slot for every shard: all of them run off the primary, each with
+        // its own closure (odu:shard=1 is a node on a lane of its own).
+        // Fewer: shard 0 stays on the primary, as it always has.
+        const primaryShard = offered.length < wanted;
+        const leases = primaryShard ? offered.slice(0, wanted - 1) : offered.slice(0, wanted);
         for (const lease of leases) {
           burstLeaseUsers.set(lease, (burstLeaseUsers.get(lease) ?? 0) + 1);
         }
         return {
           rootId: root.id,
           tasks: dependencyClosure(tasks, root.id),
-          total: 1 + leases.length,
+          total: primaryShard ? 1 + leases.length : leases.length,
+          primaryShard,
           leases,
         };
       });
@@ -2912,7 +3228,8 @@ async function orchestrate(
         installShardNodes(platform, plan);
         const ceiling = roots.find((root) => root.id === plan.rootId)?.shards;
         info(
-          `${platform}: ${plan.rootId} using ${plan.total}/${ceiling ?? plan.total} shard slots`,
+          `${platform}: ${plan.rootId} using ${plan.total}/${ceiling ?? plan.total} shard slots` +
+            (plan.primaryShard ? "" : " (every shard on its own lane)"),
         );
       }
     }
@@ -3052,10 +3369,13 @@ async function orchestrate(
     // dropped from the map above. `continue` is the honest answer if it isn't.
     const host = lanesByPlatform[platform];
     if (host === undefined) continue;
-    const baseTasks = tasksByPlatform.get(platform) ?? [];
     const plans = plansFor(platform);
+    // A root whose every shard has its own lane is not the primary's to run.
+    const offPrimary = new Set(plans.filter((plan) => !plan.primaryShard).map((plan) => plan.rootId));
+    const baseTasks = (tasksByPlatform.get(platform) ?? []).filter((task) => !offPrimary.has(task.id));
+    const primaryPlans = plans.filter((plan) => plan.primaryShard);
     const withPrimaryShardEnv = (tasks: readonly TaskSpec[]): TaskSpec[] =>
-      plans.reduce(
+      primaryPlans.reduce(
         (configured, plan) =>
           tasksForShard(configured, plan.rootId, 0, plan.total),
         [...tasks],
@@ -3063,8 +3383,8 @@ async function orchestrate(
     let lane = primaryLanes.get(platform);
     if (lane === undefined) {
       lane = startPrimaryLane(platform, host, withPrimaryShardEnv(baseTasks));
-    } else if (plans.length > 0) {
-      const roots = plans.map((plan) => {
+    } else if (primaryPlans.length > 0) {
+      const roots = primaryPlans.map((plan) => {
         const root = baseTasks.find((task) => task.id === plan.rootId);
         if (root === undefined) {
           throw new Error(`odu: shard root ${plan.rootId} disappeared`);
@@ -3101,120 +3421,10 @@ async function orchestrate(
     }
 
     for (const plan of plans) {
-      if (plan.total <= 1) continue;
-      for (let index = 1; index < plan.total; index += 1) {
-        const lease = plan.leases[index - 1];
+      for (let index = plan.primaryShard ? 1 : 0; index < plan.total; index += 1) {
+        const lease = plan.leases[leaseSlot(plan, index)];
         if (lease === undefined) continue;
-        const projection = shardLaneProjection(platform, plan, index);
-        const publicIdFor = projection.publicId;
-        const setupId = projection.setupId;
-        const publicLaneIds = projection.nodeIds;
-        for (const id of publicLaneIds) nodeHosts.set(id, lease.host);
-        let burstLane: Lane | undefined;
-        let finished = false;
-        const finishBurst = (): void => {
-          if (finished) return;
-          const state = store.get();
-          if (
-            publicLaneIds.some((id) => {
-              const status = state.nodes[id]?.status;
-              return (
-                status === "pending" ||
-                status === "running" ||
-                status === undefined
-              );
-            })
-          ) {
-            return;
-          }
-          finished = true;
-          endLocal(setupId);
-          burstLane?.close();
-          releaseBurstLease(platform, lease);
-        };
-        burstLane = buildLane({
-          platform,
-          host: lease.host,
-          tasks: tasksForShard(plan.tasks, plan.rootId, index, plan.total),
-          pipelineName: `${spec.name}:${plan.rootId}:${index + 1}/${plan.total}`,
-          ...laneSource(lease.host),
-          resolveDrvPath: runnerResolverFor(platform),
-          onSetupLine: (line) =>
-            appendLocal(setupId, `[host ${shortHost(lease.host)}] ${line}\n`),
-          onNodes: (laneState) => {
-            if (!laneAccepting(platform)) return;
-            for (const laneId of laneState.order) {
-              const laneNode = laneState.nodes[laneId];
-              if (laneNode === undefined) continue;
-              const publicId = publicIdFor(laneId);
-              const patch = {
-                status: laneNode.status,
-                exitCode: laneNode.exitCode,
-                startedAt: laneNode.startedAt,
-                durationMs: laneNode.durationMs,
-              };
-              // Like the primary `_ci-setup`, this log has a coordinator half
-              // (`onSetupLine`) in addition to the runner stream. Its state is
-              // therefore mirrored directly and its log is sealed only when
-              // the whole burst lane settles.
-              if (laneId === SETUP) updateNode(publicId, patch);
-              else verdicts.offer(publicId, patch);
-              if (laneId === plan.rootId) {
-                refreshShardAggregate(platform, plan);
-              }
-            }
-          },
-          onLogFrame: (laneId, frame) => {
-            if (!laneAccepting(platform)) return;
-            const publicId = publicIdFor(laneId);
-            if (frame.kind === "append") appendLocal(publicId, frame.text);
-            else if (frame.kind === "snapshot") {
-              if (laneId === SETUP) {
-                if (frame.text !== "") appendLocal(publicId, frame.text);
-              } else if (!logs.isNoopReset(publicId, frame.text)) {
-                resetLocal(publicId, frame.text);
-              }
-            } else if (frame.kind === "end") {
-              // `_ci-setup` still has a coordinator-side producer; finishBurst
-              // seals it after the recipe root settles. Every recipe node uses
-              // the ordinary verdict/log join.
-              if (laneId !== SETUP) {
-                endLocal(publicId);
-                verdicts.release(publicId);
-              }
-              if (laneId === plan.rootId) {
-                refreshShardAggregate(platform, plan);
-              }
-              finishBurst();
-            }
-          },
-          onDead: (error) => {
-            if (!laneAccepting(platform)) return;
-            for (const id of publicLaneIds) {
-              const status = store.get().nodes[id]?.status;
-              if (status === "pending" || status === "running") {
-                appendLocal(id, `\n[odu] shard lane died: ${error}\n`);
-                endLocal(id);
-                verdicts.release(id);
-                updateNode(id, {
-                  status: status === "running" ? "errored" : "skipped",
-                  exitCode: 1,
-                });
-              } else {
-                endLocal(id);
-              }
-            }
-            refreshShardAggregate(platform, plan);
-            finishBurst();
-          },
-        });
-        createdLanes.add(burstLane);
-        executions.addLane(
-          platform,
-          burstLane,
-          [SETUP, ...plan.tasks.map((task) => task.id)],
-          publicIdFor,
-        );
+        startShardLane(platform, plan, index, lease, 0);
       }
     }
   }

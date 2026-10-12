@@ -773,6 +773,49 @@ export async function watchNodes(
   }
 }
 
+/**
+ * THE FRAME A VERDICT IS DRAWN FROM: the first one that says the run is done.
+ *
+ * Not the stream's opening frame. `run.wait` answers from the run's journal,
+ * and the node stream's snapshot can trail it — a node's terminal status is
+ * withheld until its log has ended — so a grid drawn from the opening frame of
+ * a run that had just finished said `▶ running … — RUNNING` beside an exit 0
+ * (measured on a Cloudflare lane, 2 of 3 runs of a 60 s recipe: the node ended
+ * at 05:51:49, `odu run` returned at 05:51:50 with that grid). Bounded: a
+ * stream that never says done yields its last frame, not.done, and the caller
+ * says so rather than drawing it as a verdict.
+ */
+export async function verdictFrame(
+  client: Pick<OduServiceClient, "surface">,
+  runId: string,
+  boundMs = VERDICT_FRAME_MS,
+): Promise<NodesFrame | undefined> {
+  const until = Date.now() + boundMs;
+  let last: NodesFrame | undefined;
+  while (Date.now() < until) {
+    const sub = subscribe(nodesStream(client, runId));
+    try {
+      for (;;) {
+        const next = await nextBy(sub, until, boundMs).catch((error: unknown) => {
+          if (error instanceof NoAnswerWithin) return { done: true as const, value: undefined };
+          throw error;
+        });
+        if (next.done) break;
+        last = next.value;
+        if (last.done) return last;
+      }
+    } finally {
+      void sub.return?.();
+    }
+    if (Date.now() >= until) break;
+    await new Promise((resolve) => setTimeout(resolve, RESUBSCRIBE_MS));
+  }
+  return last;
+}
+
+/** How long a verdict waits for the frame that says the run is done. */
+export const VERDICT_FRAME_MS = 10_000;
+
 /** The iterator's next result, or {@link NoAnswerWithin} once `by` passes. The
  *  caller releases the subscription; a `next()` that loses the race settles
  *  into the interrupt that release issues, never into an unhandled rejection. */

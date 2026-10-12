@@ -33,7 +33,6 @@ import {
   makeSession,
   type SessionState,
   type SshProv,
-  sshConnector,
 } from "@kolu/surface-remote";
 import { SETUP_NAMEPATH } from "@odu/run-client/nodeId";
 import { type NodeLogFrame, type PipelineState } from "@odu/run-client/surface";
@@ -43,7 +42,7 @@ import { runUnary, subscribe } from "../common/effectEdge";
 import { type LaneClient, laneSurface } from "../common/laneSurface";
 import type { ResolveRunnerDrv } from "./runnerFlake";
 import { withTimeout } from "../common/withTimeout";
-import { localhostSpawnEnv, pinLaneFace } from "./surfaceRemoteOpts";
+import { laneConnector, laneDeathReason, lineLogger, pinLaneFace, transportWording } from "./surfaceRemoteOpts";
 
 import { uploadSnapshot, type LaneSnapshot } from "./snapshotTransport";
 
@@ -246,16 +245,14 @@ export function startLane(opts: LaneOptions): Lane {
     // the flat `RpcGroup` to build the wire client, which oRPC could conjure
     // from a type alone. It is also what makes the dialled face and the served
     // group provably the same tag set.
-    connectOnce: sshConnector({
-      surface: laneSurface,
+    connectOnce: laneConnector({
       host: opts.host,
-      binary: "odu-runner",
       resolveDrvPath: opts.resolveDrvPath,
-      // Required (kolu#1884 / #1872): localhost arm refuses ambient inherit.
-      // Unused on a real ssh host. See surfaceRemoteOpts.localhostSpawnEnv.
-      localEnv: localhostSpawnEnv(),
     }),
     label: `host:${opts.host}`,
+    // The session's own lines, in the transport's own terms (a Cloudflare
+    // lane is not ssh); stderr, as without a logger.
+    log: lineLogger((line) => process.stderr.write(`${transportWording(opts.host, line)}\n`)),
   });
 
   /** Every in-flight drain's progress listener. A SET, not a slot: two drains
@@ -269,8 +266,9 @@ export function startLane(opts: LaneOptions): Lane {
     for (const wake of [...logWaiters]) wake();
   };
 
-  const die = (error: string): void => {
+  const die = (raw: string): void => {
     if (dead || closed) return;
+    const error = laneDeathReason(opts.host, raw);
     dead = true;
     readyReject?.(new Error(error));
     runLaneDeath(

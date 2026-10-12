@@ -77,6 +77,13 @@
             # minutes into a lane, with nothing naming a version. See
             # packages/web-acceptance/support/hooks.ts and pins.test.ts.
             PLAYWRIGHT_DRIVER_VERSION = pkgs.playwright-driver.version;
+            # Chromium aborts ("SkFontMgr_FontConfigInterface: Not
+            # implemented") when fontconfig finds no config — on any host
+            # without /etc/fonts, such as a Cloudflare lane's bare nixos/nix
+            # container. The shell brings its own, as it brings the browsers.
+            FONTCONFIG_FILE = pkgs.makeFontsConf {
+              fontDirectories = [ pkgs.dejavu_fonts ];
+            };
           });
         });
     };

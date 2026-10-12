@@ -68,18 +68,17 @@ import {
   emitJson,
   emitJsonLine,
   findRuns,
-  firstFrame,
   formatAgo,
   git,
   here,
   hostsFileHere,
-  nodesStream,
   patience,
   reportFailure,
   reportLost,
   reportRefusal,
   requestId,
   WAIT_EXITS,
+  verdictFrame,
   waitExitFor,
   watchNodes,
   withRunAt,
@@ -273,8 +272,14 @@ async function verdictOf(
   sha: string | null,
 ): Promise<void> {
   const sha7 = sha === null ? "" : sha.slice(0, 7);
-  const frame = await firstFrame(nodesStream(client, runId));
+  // The frame that says done — never the stream's opening snapshot, which can
+  // trail the journal the exit was decided from (`verdictFrame`).
+  const frame = await verdictFrame(client, runId);
   if (frame === undefined) return;
+  if (!frame.done) {
+    process.stderr.write(`odu · the node grid had not caught up with the verdict; \`odu show --run ${runId}\` shows it\n`);
+    return;
+  }
   printVerdict({
     state: verdictStateOf(frame, sha7),
     sha7,

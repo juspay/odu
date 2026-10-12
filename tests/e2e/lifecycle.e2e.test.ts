@@ -71,7 +71,10 @@ afterAll(() => {
       process.stderr.write(`e2e: teardown: ${String(err)}\n`);
     }
   }
-});
+  // Its own budget, not bun's 5 s hook default: each drop may stop a daemon
+  // and wait for it. Under the default this hook failed as an unnamed test
+  // on loaded machines (the same on master) after every assertion passed.
+}, 120_000);
 
 // ---------------------------------------------------------------------------
 

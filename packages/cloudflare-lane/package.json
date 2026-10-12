@@ -1,0 +1,19 @@
+{
+  "name": "@odu/cloudflare-lane",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "//": "The FAR side of a Cloudflare Containers lane \u2014 see README.md. Nothing in odu imports this package's code: `odu cloudflare setup` hands its directory to wrangler, which bundles `src/worker.ts` (and embeds `src/bridge.ts` + `src/entrypoint.sh` as text) and deploys it to the operator's own account. `@cloudflare/containers` is a dependency only so the bundle wrangler builds resolves it from this tree, offline, at the version pinned in bun.lock.",
+  "sideEffects": false,
+  "exports": {
+    "./*": "./src/*.ts"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "0.3.7"
+  },
+  "//devDependencies": "`@odu/execution` only for http.test.ts, which drives the coordinator's real upload (`publishToLaneCache`) against these handlers. Nothing the Worker bundle imports.",
+  "devDependencies": {
+    "@odu/execution": "workspace:*"
+  }
+}

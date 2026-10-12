@@ -71,7 +71,27 @@ export interface LaneRunner {
   dispose(): void;
 }
 
-export function createLaneRunner(): LaneRunner {
+/** How many recipe nodes one lane runs at once. Unbounded by default — an
+ *  ssh lane's box is sized by its operator. A Cloudflare lane's bridge sets it
+ *  to the container's CPU count: measured on kolu's CI, a whole DAG started at
+ *  once on one 4-vCPU container ran out of CPU (70 s BeforeAll timeouts) and
+ *  disk. Ready nodes past the bound stay pending until a running one ends. */
+/** A hold claimed `untilReleased` (a run's own venue) has no max-hold
+ *  ceiling; any other keeps the agent's default (`ODU_LEASE_MAX_HOLD_MS`). */
+export function holdCeiling(untilReleased: boolean | undefined): { maxHoldMs?: number } {
+  return untilReleased === true ? { maxHoldMs: 0 } : {};
+}
+
+export function maxParallelFrom(raw: string | undefined): number {
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : Number.POSITIVE_INFINITY;
+}
+
+export function createLaneRunner(
+  opts: { maxParallel?: number } = {},
+): LaneRunner {
+  const MAX_PARALLEL =
+    opts.maxParallel ?? maxParallelFrom(process.env.ODU_RUNNER_MAX_PARALLEL);
   const uploads = createSnapshotUploads();
   const stateStore = inMemoryStore<PipelineState>(EMPTY_STATE);
   const tail = createLogTail();
@@ -144,6 +164,7 @@ export function createLaneRunner(): LaneRunner {
               lockPath,
               { holder: input.holder, run: input.run },
               {
+                ...holdCeiling(input.untilReleased),
                 onSelfRelease: (reason) => {
                   venueHold = null;
                   process.stderr.write(
@@ -379,6 +400,14 @@ export function createLaneRunner(): LaneRunner {
       );
     });
 
+  const runningRecipes = (): number => {
+    let n = 0;
+    for (const [id, inv] of invocations) {
+      if (id !== SETUP_NODE_ID && inv.phase === "running") n += 1;
+    }
+    return n;
+  };
+
   const tick = (): void => {
     if (disposed) return;
     let changed = true;
@@ -397,6 +426,11 @@ export function createLaneRunner(): LaneRunner {
           changed = true;
         } else if (runnable(node) && invocations.get(id)?.phase !== "running") {
           if (id === SETUP_NODE_ID) runSetup();
+          // Counted at each decision, from live invocations: a node status set
+          // a moment ago may not be in this snapshot, and spawning re-enters
+          // `tick` through the state store, so a counter kept across this
+          // loop goes stale. A finishing node ticks again.
+          else if (runningRecipes() >= MAX_PARALLEL) continue;
           else spawnNode(node);
           changed = true;
         }

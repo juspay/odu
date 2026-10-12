@@ -113,7 +113,7 @@ describe("pipelineFromDump", () => {
     invalid.modules.ci.recipes.e2e.attributes = [
       { metadata: ["odu:shard=all"] },
     ];
-    expect(() => pipelineFromDump(invalid)).toThrow(/integer N >= 2/);
+    expect(() => pipelineFromDump(invalid)).toThrow(/integer N >= 1/);
 
     const nonLeaf = dump() as any;
     nonLeaf.modules.ci.recipes.install.attributes = [

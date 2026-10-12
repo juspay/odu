@@ -8,8 +8,45 @@
  */
 
 import type { Logger } from "@kolu/log";
-import type { AgentClient, Session, SshProv } from "@kolu/surface-remote";
-import { type LaneClient, laneClientOver } from "../common/laneSurface";
+import {
+  type AgentClient,
+  type Connector,
+  type Session,
+  type SshProv,
+  sshConnector,
+} from "@kolu/surface-remote";
+import { type LaneClient, laneClientOver, laneSurface } from "../common/laneSurface";
+import { cloudflareConnector, lastCloseByHost } from "./cloudflare/connector";
+import { isCloudflareHost } from "../common/cloudflareConfig";
+import type { ResolveRunnerDrv } from "./runnerFlake";
+
+/** The ONE place a lane host's spelling picks its transport. Every dial of
+ *  odu-runner — the lane, the venue claim, the probe — goes through here, so a
+ *  `cloudflare[:<instance>]` host is dialled through the odu-lane Worker and
+ *  anything else through ssh (or directly, for localhost), with no call site
+ *  able to disagree about which. */
+export function laneConnector(opts: {
+  host: string;
+  resolveDrvPath: ResolveRunnerDrv;
+}): Connector<AgentClient, SshProv> {
+  if (isCloudflareHost(opts.host)) {
+    return cloudflareConnector({
+      surface: laneSurface,
+      host: opts.host,
+      binary: "odu-runner",
+      resolveDrvPath: opts.resolveDrvPath,
+    });
+  }
+  return sshConnector({
+    surface: laneSurface,
+    host: opts.host,
+    binary: "odu-runner",
+    resolveDrvPath: opts.resolveDrvPath,
+    // Required (kolu#1884 / #1872): localhost arm refuses ambient inherit.
+    // Unused on a real ssh host. See localhostSpawnEnv.
+    localEnv: localhostSpawnEnv(),
+  });
+}
 
 /** Wait for the session to hold a client, then build odu's TYPED lane face over
  *  the same wire.
@@ -88,4 +125,32 @@ export function lineLogger(onLine: (line: string) => void): Logger {
     warn: emit("warn"),
     error: emit("error"),
   };
+}
+
+/** The reason a lane on `host` died, in its transport's own terms.
+ *
+ *  surface-remote words a transport death as "ssh transport connection
+ *  failed" whatever carried it; on a Cloudflare lane that sent operators
+ *  chasing ssh (kolu's CI). For a cloudflare host the connector's own record
+ *  of the close — or, when the link went silent first, the RPC pinger's
+ *  verdict, which already names the host — is what the lane reports. */
+export function laneDeathReason(host: string, error: string): string {
+  if (!isCloudflareHost(host) || !error.startsWith(SSH_TRANSPORT_WORDING)) return error;
+  return cloudflareTransportReason(host);
+}
+
+/** surface-remote's fixed wording for any transport death (session.ts). */
+const SSH_TRANSPORT_WORDING = "ssh transport connection failed — host unreachable or link dropped";
+
+function cloudflareTransportReason(host: string): string {
+  return lastCloseByHost.get(host) ?? `${host}: the WebSocket to the odu-lane Worker closed without the runner exiting`;
+}
+
+/** A session log line in its transport's own terms: on a Cloudflare host,
+ *  surface-remote's ssh wording (its retry and error lines, which odu does
+ *  not write) is replaced by the connector's record of the close. */
+export function transportWording(host: string, line: string): string {
+  return isCloudflareHost(host) && line.includes(SSH_TRANSPORT_WORDING)
+    ? line.replaceAll(SSH_TRANSPORT_WORDING, cloudflareTransportReason(host))
+    : line;
 }

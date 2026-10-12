@@ -22,11 +22,18 @@ export interface ShardTopology {
   /** The root and its transitive prerequisites, in runner order. */
   tasks: TaskSpec[];
   total: number;
+  /** Whether shard 0 runs on the platform's primary lane. False when the
+   *  pool had a burst slot for EVERY shard: then each shard, the first
+   *  included, runs on a container of its own with its own closure, and the
+   *  primary keeps only the unsharded nodes. This is what `odu:shard=1`
+   *  is for — one node on its own lane. */
+  primaryShard: boolean;
 }
 
 export interface ShardCapacityRequest {
   rootId: string;
-  /** Optional workers only; every root also uses the primary lane. */
+  /** Burst workers wanted: up to the root's shard count, so that every shard
+   *  can run off the primary when the pool allows. */
   limit: number;
 }
 
@@ -37,10 +44,26 @@ export interface ShardCapacityRequest {
  * prefix up to its own ceiling; one worker may appear in several roots and its
  * lease stays held until every lane using it settles.
  */
+/** Hand burst workers to sharded roots. When there are enough for every
+ *  root's full ceiling, each root gets workers of its OWN — a root marked
+ *  for its own lane must not land on a container another heavy root is
+ *  using (a standard-4 has 18 GB of disk). When there are not, every root
+ *  may use all available workers up to its own ceiling, shared. */
 export function shareShardCapacity<T>(
   requests: readonly ShardCapacityRequest[],
   workers: readonly T[],
 ): ReadonlyMap<string, T[]> {
+  const demand = requests.reduce((sum, { limit }) => sum + Math.max(0, limit), 0);
+  if (demand <= workers.length) {
+    let next = 0;
+    return new Map(
+      requests.map(({ rootId, limit }) => {
+        const mine = workers.slice(next, next + Math.max(0, limit));
+        next += mine.length;
+        return [rootId, mine];
+      }),
+    );
+  }
   return new Map(
     requests.map(({ rootId, limit }) => [
       rootId,
@@ -141,7 +164,7 @@ export function installShardTopology(
   platform: string,
   topology: ShardTopology,
 ): PipelineState {
-  if (topology.total <= 1) return state;
+  if (topology.total <= 1 && topology.primaryShard) return state;
 
   const logicalId = fanId(topology.rootId, platform);
   const root = topology.tasks.find((task) => task.id === topology.rootId);
@@ -152,7 +175,9 @@ export function installShardTopology(
   const nodes = { ...state.nodes };
   for (let index = 0; index < topology.total; index += 1) {
     const projection = shardLaneProjection(platform, topology, index);
-    if (index > 0) {
+    // Shard 0 shares the primary's workspace only when it runs there.
+    const ownLane = index > 0 || !topology.primaryShard;
+    if (ownLane) {
       children.push(projection.setupId);
       nodes[projection.setupId] = pendingNode({
         id: projection.setupId,
@@ -189,10 +214,9 @@ export function installShardTopology(
       command:
         `ODU_SHARD_INDEX=${index} ODU_SHARD_TOTAL=${topology.total} ` +
         root.command,
-      needs:
-        index === 0
-          ? [...root.needs, SETUP].map((dep) => fanId(dep, platform))
-          : [...root.needs, SETUP].map(projection.publicId),
+      needs: ownLane
+        ? [...root.needs, SETUP].map(projection.publicId)
+        : [...root.needs, SETUP].map((dep) => fanId(dep, platform)),
     });
   }
 

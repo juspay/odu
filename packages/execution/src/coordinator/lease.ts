@@ -22,13 +22,11 @@ import {
   isLocalHost,
   makeSession,
   type SessionState,
-  sshConnector,
   type SshProv,
 } from "@kolu/surface-remote";
 import {
   DEFAULT_LEASE_LOCK,
   type LaneClient,
-  laneSurface,
   type LeaseHolder,
 } from "../common/laneSurface";
 import {
@@ -39,15 +37,38 @@ import {
   shortHost,
 } from "./hosts";
 import type { ResolveRunnerDrv } from "./runnerFlake";
+import {
+  cloudflareConfigPath,
+  cloudflareInstance,
+  isCloudflareHost,
+  readCloudflareConfig,
+} from "../common/cloudflareConfig";
+import { laneState } from "./cloudflare/workerApi";
 import { type TimeoutOpts, withTimeout } from "../common/withTimeout";
 import { runUnary } from "../common/effectEdge";
 import {
+  laneConnector,
   lineLogger,
-  localhostSpawnEnv,
   pinLaneFace,
+  transportWording,
 } from "./surfaceRemoteOpts";
 
 export type HolderInfo = LeaseHolder;
+
+async function cloudflareIdle(
+  host: string,
+): Promise<{ kind: "idle" } | { kind: "running" } | { kind: "error"; error: string }> {
+  try {
+    const config = readCloudflareConfig();
+    if (config === null) {
+      return { kind: "error", error: `no ${cloudflareConfigPath()} — run \`odu cloudflare setup\`` };
+    }
+    const { running } = await laneState(config, cloudflareInstance(host));
+    return running ? { kind: "running" } : { kind: "idle" };
+  } catch (e) {
+    return { kind: "error", error: e instanceof Error ? e.message : String(e) };
+  }
+}
 
 export function leaseLockPath(): string {
   const fromEnv = process.env.ODU_LEASE_LOCK;
@@ -131,6 +152,14 @@ export const LEASE_PULSE_MS = 2_000;
 export interface LeaseIdentity {
   holder: string;
   run: string | null;
+  /** A RUN's own hold: it lasts until released, with no max-hold ceiling.
+   *  The ceiling (`ODU_LEASE_MAX_HOLD_MS`, 1h) exists for forgotten
+   *  operator holds (`odu lease`); a run's hold has a coordinator that
+   *  releases it at the end and pulses it throughout, and the dead-man frees
+   *  it within 45 s if that coordinator goes silent. With the ceiling, a run
+   *  past one hour lost its primary venue mid-run (kolu's CI, a 56-minute
+   *  VM test). */
+  untilReleased?: boolean;
 }
 
 export interface LeaseHandle {
@@ -391,7 +420,7 @@ export function copyProgress(): {
  * `Set` nobody will ever read. `done()` drops both, so the rest of the run
  * pays only `onLog?.(line)`.
  */
-function provisionSink(onLog?: (line: string) => void): {
+function provisionSink(host: string, onLog?: (line: string) => void): {
   log: ReturnType<typeof lineLogger>;
   pin: TimeoutOpts;
   /** Call once the pin's `withTimeout` has settled, either way. */
@@ -400,7 +429,8 @@ function provisionSink(onLog?: (line: string) => void): {
   const progress = copyProgress();
   let bump: (() => void) | null = null;
   return {
-    log: lineLogger((line) => {
+    log: lineLogger((raw) => {
+      const line = transportWording(host, raw);
       progress.observe(line);
       bump?.();
       onLog?.(line);
@@ -457,14 +487,11 @@ export async function tryClaim(
   const timeoutMs = opts.timeoutMs ?? CLAIM_TIMEOUT_MS;
   // The session log is read as well as forwarded — see `provisionSink`, which
   // owns the diagnosis + liveness wiring both dials share.
-  const sink = provisionSink(opts.onLog);
+  const sink = provisionSink(host, opts.onLog);
   const session = makeSession<AgentClient, SshProv>({
-    connectOnce: sshConnector({
-      surface: laneSurface,
-      host,
-      binary: "odu-runner",
+    connectOnce: laneConnector({
+      host: host,
       resolveDrvPath: opts.resolveDrvPath,
-      localEnv: localhostSpawnEnv(),
     }),
     initialConnection: "probing",
     label: `lease:${shortHost(host)}`,
@@ -506,6 +533,7 @@ export async function tryClaim(
           holder: identity.holder,
           run: identity.run,
           ...lockPathKey(lockPath),
+          ...(identity.untilReleased === true ? { untilReleased: true } : {}),
         }),
       ),
       timeoutMs,
@@ -616,19 +644,26 @@ export async function probeHost(
   if (isLocalHost(host)) {
     return { ...venue, state: "local", heldBy: null };
   }
+  if (isCloudflareHost(host)) {
+    // A probe must not cost a container. A stopped container holds no flock,
+    // so its Durable Object's "not running" IS the answer; only a running one
+    // is dialled (already up, so that costs a runner process, not a boot).
+    const idle = await cloudflareIdle(host);
+    if (idle.kind === "idle") return { ...venue, state: "free", heldBy: null };
+    if (idle.kind === "error") {
+      return { ...venue, state: "unreachable", heldBy: null, error: idle.error };
+    }
+  }
 
   const timeoutMs = opts.timeoutMs ?? CLAIM_TIMEOUT_MS;
   // Same cold-store bounds as `tryClaim`, from the same sink: probing a host
   // that has never seen odu-runner provisions the whole closure, so the pin
   // deadline tracks liveness rather than total elapsed.
-  const sink = provisionSink(opts.onLog);
+  const sink = provisionSink(host, opts.onLog);
   const session = makeSession<AgentClient, SshProv>({
-    connectOnce: sshConnector({
-      surface: laneSurface,
-      host,
-      binary: "odu-runner",
+    connectOnce: laneConnector({
+      host: host,
       resolveDrvPath: opts.resolveDrvPath,
-      localEnv: localhostSpawnEnv(),
     }),
     initialConnection: "probing",
     label: `lease-probe:${shortHost(host)}`,
