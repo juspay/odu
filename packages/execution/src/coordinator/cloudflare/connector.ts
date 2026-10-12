@@ -142,6 +142,9 @@ const message = (error: unknown): string => (error instanceof Error ? error.mess
  *  a Cloudflare host reports this instead (surfaceRemoteOpts.laneDeathReason). */
 export const lastCloseByHost = new Map<string, string>();
 
+/** How long a drop waits for the Durable Object's account of it. */
+const DROP_FACTS_DEADLINE_MS = 3_000;
+
 export function closeNote(host: string, code: number, reason: string): string {
   const said = reason === "" ? `${code}` : `${code} ${reason}`;
   // Only what the close itself proves. A 1006 is not the container's own
@@ -234,6 +237,12 @@ export function cloudflareConnector<S extends SurfaceSpec>(
     // The start this dial caused is journaled before the socket opens, so
     // anything recorded from here on is news about a drop.
     const attachedAt = Date.now();
+    /** This dial closed the socket itself (teardown, abort, a bound). */
+    let selfClosed = false;
+    const closeOurselves = (code: number, reason: string): void => {
+      selfClosed = true;
+      ws.close(code, reason);
+    };
     const describe = `${opts.binary} on ${opts.host}`;
 
     const stdout = new PassThrough();
@@ -254,7 +263,7 @@ export function cloudflareConnector<S extends SurfaceSpec>(
       },
       final(callback) {
         if (queued.length > 0) sendQueued();
-        ws.close(1000, "coordinator closed stdin");
+        closeOurselves(1000, "coordinator closed stdin");
         callback();
       },
     });
@@ -291,7 +300,7 @@ export function cloudflareConnector<S extends SurfaceSpec>(
         stdout.write(Buffer.from(payload));
         if (stdout.readableLength > MAX_UNREAD_STDOUT) {
           ctx.remoteProgress(`[cloudflare] ${describe}: more than ${MAX_UNREAD_STDOUT} bytes unread — ending the connection`);
-          ws.close(1011, "unread output bound");
+          closeOurselves(1011, "unread output bound");
         }
       } else if (bytes[0] === STDERR) {
         remote(payload);
@@ -301,23 +310,27 @@ export function cloudflareConnector<S extends SurfaceSpec>(
       // An exit frame means the bridge saw the runner exit — the analogue of a
       // child's exit. A close without one is the transport going away, which
       // the session reads as `network` (retry), like ssh's own 255.
-      if (exitInfo === null && !settled) {
-        const note = closeNote(opts.host, event.code, event.reason);
+      if (exitInfo !== null || settled) return settle(exitInfo ?? { kind: "transport-failed" });
+      const note = closeNote(opts.host, event.code, event.reason);
+      if (selfClosed) {
         lastCloseByHost.set(opts.host, note);
-        ctx.remoteProgress(`[cloudflare] ${note}`);
-        // Every close without an exit frame that this dial did not ask for:
-        // a container that went away arrives as a 1000 (the containers
-        // library relays its abnormal close as normal; measured with
-        // `odu cloudflare destroy` under an attached lane).
-        if (!ctx.signal.aborted) {
-          void laneFacts(config, instance)
-            .then((facts) => facts, () => null)
-            .then((facts) => ctx.localProgress(`[cloudflare] ${describeDrop(opts.host, facts, attachedAt)}`));
-        }
+        return settle({ kind: "transport-failed" });
       }
-      settle(exitInfo ?? { kind: "transport-failed" });
+      // A close this dial did not ask for — which includes a 1000: the
+      // containers library relays a container that went away as a normal
+      // close (measured with `odu cloudflare destroy` under an attached
+      // lane). Ask the Durable Object what it recorded before declaring the
+      // drop, briefly, so the reason the lane dies with says it.
+      void laneFacts(config, instance, AbortSignal.timeout(DROP_FACTS_DEADLINE_MS))
+        .then((facts) => facts, () => null)
+        .then((facts) => {
+          const explained = `${note}; ${describeDrop(opts.host, facts, attachedAt).replace(`${opts.host}: `, "")}`;
+          lastCloseByHost.set(opts.host, explained);
+          ctx.remoteProgress(`[cloudflare] ${explained}`);
+          settle({ kind: "transport-failed" });
+        });
     });
-    const abort = (): void => ws.close(1000, "dial aborted");
+    const abort = (): void => closeOurselves(1000, "dial aborted");
     ctx.signal.addEventListener("abort", abort, { once: true });
 
     // The same verdicts the ssh connector reaches for the same facts: a
@@ -338,7 +351,7 @@ export function cloudflareConnector<S extends SurfaceSpec>(
       }),
     ]).catch(async (error: unknown) => {
       ctx.signal.removeEventListener("abort", abort);
-      ws.close(1000, "readiness failed");
+      closeOurselves(1000, "readiness failed");
       // stdout ENDING is the socket closing, not something the runner said —
       // and it can reach the gate before the close event's own verdict does.
       if (isStdioReadinessError(error) && error.kind === "closed") throw exitedBeforeReady(await closed);
@@ -364,7 +377,7 @@ export function cloudflareConnector<S extends SurfaceSpec>(
         // closed socket can no longer carry. First, so no close event wins.
         settle({ kind: "exit", code: null, signal: "SIGTERM" });
         void link.dispose().catch(() => {});
-        ws.close(1000, "teardown");
+        closeOurselves(1000, "teardown");
       },
     };
   };

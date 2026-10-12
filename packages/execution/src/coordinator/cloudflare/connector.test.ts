@@ -229,12 +229,14 @@ describe("cloudflareConnector", () => {
     worker.journal.push({ t: Date.now() - 60_000, kind: "container-start" }, { t: Date.now(), kind: "object-start" });
     // As the containers library relays a container that went away: 1000.
     worker.dials[0]?.ws?.close(1000, "WebSocket disconnected without sending Close frame.");
+    // The drop is declared only once the Durable Object has been asked, and
+    // the reason the lane dies with carries its account.
     expect(await connection.closed).toEqual({ kind: "transport-failed" });
-    const deadline = Date.now() + 5_000;
-    while (!lines.some((l) => l.includes("after the drop")) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
     const explained = lines.find((l) => l.includes("after the drop"));
-    expect(explained).toContain("local [cloudflare] cloudflare:test: after the drop, the Durable Object says: the lane's Durable Object restarted");
+    expect(explained).toContain("remote [cloudflare] cloudflare:test: the WebSocket to the odu-lane Worker closed (1000 WebSocket disconnected without sending Close frame.)");
+    expect(explained).toContain("after the drop, the Durable Object says: the lane's Durable Object restarted");
     expect(explained).not.toContain("a container started");
+    expect(lastCloseByHost.get("cloudflare:test")).toBe(explained?.replace("remote [cloudflare] ", ""));
     for (const dial of worker.dials) dial.child?.kill();
   }, 30_000);
 
