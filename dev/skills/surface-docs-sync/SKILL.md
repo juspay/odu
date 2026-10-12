@@ -1,12 +1,6 @@
 ---
-paths:
-  - "src/main.ts"
-  - "packages/service-client/src/surface.ts"
-  - "packages/service-client/src/verbs.ts"
-  - "packages/run-client/src/surface.ts"
-  - "packages/execution/src/common/laneSurface.ts"
-  - "packages/cli/src/serviceCli.ts"
-  - "packages/cli/src/serviceMcp.ts"
+name: surface-docs-sync
+description: Keep odu's three surface docs (README.md, website/src/content/docs.md, the odu skill) in sync with the service contract. Use whenever editing src/main.ts, packages/service-client/src/surface.ts, packages/service-client/src/verbs.ts, packages/run-client/src/surface.ts, packages/execution/src/common/laneSurface.ts, packages/cli/src/serviceCli.ts, packages/cli/src/serviceMcp.ts, or anything that adds, renames or changes a verb, cell, CLI command or flag.
 ---
 
 ## Keep the surface docs in sync
@@ -36,6 +30,4 @@ update **all three** in the *same* change:
    bootstrap, the loop, and the CLI/MCP guidance, which are one skill because
    CLI and MCP are two faces of one service rather than two adoption paths.
 
-`.claude/skills/odu` is a symlink to that skill, so there is no copy to
-regenerate. Keep all three concise — a one-line entry per verb or command, not a
-tutorial.
+Keep all three concise — a one-line entry per verb or command, not a tutorial.

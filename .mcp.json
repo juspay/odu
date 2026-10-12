@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "odu": {
-      "type": "stdio",
-      "command": "nix",
-      "args": ["run", "--accept-flake-config", "github:juspay/odu", "--", "mcp"]
-    }
-  }
-}

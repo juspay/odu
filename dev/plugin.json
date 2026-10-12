@@ -1,0 +1,5 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "odu-dev",
+  "description": "Maintainer-only guidance for developing odu. Loaded by this repository's agent-distro profile; never part of the published odu plugin."
+}

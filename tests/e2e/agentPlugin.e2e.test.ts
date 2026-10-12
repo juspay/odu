@@ -3,23 +3,23 @@
  *
  * odu's agent face is an Agent Plugin (https://agent-plugins.org/, spec 1.0.0)
  * rooted at `agent-plugin/`: a `plugin.json`, the `odu` skill under `skills/`,
- * and the `odu` MCP server in `mcp.json`. odu's own `.claude/` and `.mcp.json`
- * reach the very same skill and command rather than a copy of them.
+ * and the `odu` MCP server in `mcp.json`. odu's own `agent-distro.nix` profile
+ * loads that very directory rather than a copy of it.
  *
  * ## What this file checks, and what it deliberately does not
  *
  * These are STATIC checks over the committed tree: the manifests are shaped the
- * way the spec requires, every place that names the MCP server names the same
- * command, and the skill teaches the one vocabulary. They are cheap and run
- * everywhere. They are not a loading gate — `install.e2e.test.ts` loads the
- * exported plugin the way a client does and drives a real tool call through it.
+ * way the spec requires, the profile loads them, and the skill teaches the one
+ * vocabulary. They are cheap and run everywhere. They are not a loading gate —
+ * `install.e2e.test.ts` loads the exported plugin the way a client does and
+ * drives a real tool call through it.
  *
  * odu's agent face used to be two authored skills, `odu` and `odu-mcp`; while
  * two existed, an agent could read either and reach a different vocabulary.
  * Hence the insistence on exactly one of each below.
  */
 
-import { lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "bun:test";
 import { SHARED_TOOLS } from "./webHarness";
@@ -85,24 +85,21 @@ describe("odu's Agent Plugin", () => {
     expect(config.mcpServers.odu).toEqual(ODU_SERVER);
   });
 
-  it("is what odu's own checkout uses, not a copy of it", () => {
-    // `.mcp.json` is Claude's project config. It names the same command, so
-    // what a maintainer runs is what a consumer installs.
-    const project = readJson<McpConfig>(".mcp.json");
-    expect(project.mcpServers.odu).toEqual(ODU_SERVER);
-
-    // `.claude/skills/odu` is a symlink INTO the plugin, so there is nothing to
-    // regenerate and nothing to drift.
-    const link = join(repoRoot, ".claude/skills/odu");
-    expect(lstatSync(link).isSymbolicLink(), `${link} is not a symlink`).toBe(true);
-    expect(realpathSync(link)).toBe(realpathSync(join(repoRoot, PLUGIN, "skills/odu")));
+  it("is what odu's own agent-distro profile loads, not a copy of it", () => {
+    // Maintainers get the published plugin exactly as consumers do, plus the
+    // maintainer-only `dev/` plugin — which is its own package, so nothing in it
+    // can ride along into `agent-plugin/`.
+    const profile = read("agent-distro.nix");
+    expect(profile).toMatch(/plugins\s*=\s*\[\s*\.\/agent-plugin\s+\.\/dev\s*\]/);
+    const dev = readJson<Record<string, unknown>>("dev/plugin.json");
+    expect(dev.$schema).toBe(`${SPEC}/plugin.schema.json`);
+    expect(dev.name).toBe("odu-dev");
   });
 
   it("publishes exactly one skill", () => {
     // EQUALITY. A second skill directory is a second vocabulary — that is what
     // the deleted `odu-mcp` was. "Contains odu" would not have seen it.
     expect(readdirSync(join(repoRoot, PLUGIN, "skills")).sort()).toEqual(["odu"]);
-    expect(readdirSync(join(repoRoot, ".claude/skills")).sort()).toEqual(["odu"]);
   });
 
   it("teaches one vocabulary in the skill it does publish", () => {

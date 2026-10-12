@@ -1,8 +1,7 @@
 /**
  * THE FRESH CONSUMER — loading the plugin, all the way to a tool call.
  *
- * Every other gate in this suite starts from odu's own checkout, where
- * `.claude/` and `.mcp.json` are already there and already correct. That is not
+ * Every other gate in this suite starts from odu's own checkout. That is not
  * first contact. First contact is a client that has installed odu's Agent
  * Plugin (https://agent-plugins.org/): it has a copy of `agent-plugin/` as a
  * plugin root, reads `mcp.json` there, and spawns what it names — with the
