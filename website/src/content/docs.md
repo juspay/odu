@@ -174,7 +174,7 @@ Replace placeholders with the previous responses. `odu run`, `wait`, `logs`, and
 
 ### MCP
 
-For agents with an MCP client, odu ships the unified skill and its MCP server together as an [Agent Plugin](https://agent-plugins.org/) in [`agent-plugin/`](https://github.com/juspay/odu/tree/master/agent-plugin). In Claude Code, install it with `/plugin install odu --marketplace juspay/odu`. Other clients load that directory directly. To configure stdio manually instead:
+For agents with an MCP client, odu ships the unified skill and its MCP server together as an [Agent Plugin](https://agent-plugins.org/) in [`agent-plugin/`](https://github.com/juspay/odu/tree/master/agent-plugin). Load that directory in any compatible client, or configure stdio manually:
 
 ```json
 {

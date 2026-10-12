@@ -50,13 +50,7 @@ A live retry creates a new attempt; a finalized retry creates a linked replay. `
 
 ## Agents and remote access
 
-The [unified skill](agent-plugin/skills/odu/SKILL.md) and its MCP server ship together as an [Agent Plugin](https://agent-plugins.org/) in [`agent-plugin/`](agent-plugin/). In Claude Code:
-
-```
-/plugin install odu --marketplace juspay/odu
-```
-
-Other clients load `agent-plugin/` directly. Or configure a stdio MCP server running:
+The [unified skill](agent-plugin/skills/odu/SKILL.md) and its MCP server ship together as an [Agent Plugin](https://agent-plugins.org/) in [`agent-plugin/`](agent-plugin/) — load that directory in any compatible client. Or configure a stdio MCP server running:
 
 ```sh
 nix run --accept-flake-config github:juspay/odu -- mcp

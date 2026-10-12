@@ -3,9 +3,8 @@
  *
  * odu's agent face is an Agent Plugin (https://agent-plugins.org/, spec 1.0.0)
  * rooted at `agent-plugin/`: a `plugin.json`, the `odu` skill under `skills/`,
- * and the `odu` MCP server in `mcp.json`. A Claude marketplace at the repo root
- * points at the same directory, and odu's own `.claude/` and `.mcp.json` reach
- * the very same skill and command rather than a copy of them.
+ * and the `odu` MCP server in `mcp.json`. odu's own `.claude/` and `.mcp.json`
+ * reach the very same skill and command rather than a copy of them.
  *
  * ## What this file checks, and what it deliberately does not
  *
@@ -97,22 +96,6 @@ describe("odu's Agent Plugin", () => {
     const link = join(repoRoot, ".claude/skills/odu");
     expect(lstatSync(link).isSymbolicLink(), `${link} is not a symlink`).toBe(true);
     expect(realpathSync(link)).toBe(realpathSync(join(repoRoot, PLUGIN, "skills/odu")));
-  });
-
-  it("is installable from Claude's marketplace", () => {
-    const marketplace = readJson<{
-      name: string;
-      plugins: { name: string; source: string }[];
-    }>(".claude-plugin/marketplace.json");
-    expect(marketplace.plugins).toEqual([
-      expect.objectContaining({ name: "odu", source: `./${PLUGIN}` }),
-    ]);
-    // Claude's default MCP filename is `.mcp.json`; its own manifest points it
-    // at the portable `mcp.json` rather than duplicating the server.
-    const claude = readJson<Record<string, unknown>>(
-      `${PLUGIN}/.claude-plugin/plugin.json`,
-    );
-    expect(claude).toEqual({ name: "odu", mcpServers: "./mcp.json" });
   });
 
   it("publishes exactly one skill", () => {
