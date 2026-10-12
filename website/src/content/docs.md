@@ -73,7 +73,9 @@ Odu can run `x86_64-linux` lanes in [Cloudflare Containers](https://developers.c
 - kolu's whole 20-node DAG started at once on one container, and its e2e hooks timed out on CPU.
 - With one recipe per vCPU, a 70-scenario Cucumber shard runs in 2.5–6 minutes per container.
 
-So shard your heavy leaves (e2e suites, VM tests). Up to `max_instances` containers run at once; 22 concurrent containers have been measured. Cloudflare keeps about 7 pre-warmed, which start in 3–8 s, while each container beyond those is provisioned cold in 50–205 s.
+So shard your heavy leaves (e2e suites, VM tests).
+
+**A lane of its own.** `odu:shard=1` puts one heavy leaf on its own container when the pool has a spare slot, so it gets a whole 18 GB disk and its own vCPUs instead of competing with the rest of the DAG. It re-runs its dependency closure there (`install` again, say), which is the price of a fresh workspace. With no spare slot it runs on the platform's venue, exactly as an unmarked recipe would. Generally, when the pool can give an `odu:shard=N` recipe all N slots, every shard runs off the primary venue; with fewer, shard 1 stays on the primary and the rest take what slots there are. Own-lane shards die and are re-placed like any other shard lane. Up to `max_instances` containers run at once; 22 concurrent containers have been measured. Cloudflare keeps about 7 pre-warmed, which start in 3–8 s, while each container beyond those is provisioned cold in 50–205 s.
 
 **If a lane dies**, whether its transport drops or its venue lease is lost, odu claims a fresh container for that lane alone. A dead primary re-runs its unfinished nodes plus the finished prerequisites they need, since the new container has a fresh workspace. A dead shard lane re-runs its shard's whole dependency closure on a fresh burst slot. The other lanes keep running throughout. Each lane may be re-placed twice before its nodes are errored.
 
@@ -110,7 +112,7 @@ e2e: install
     CUCUMBER_SHARD="$((ODU_SHARD_INDEX + 1))/$ODU_SHARD_TOTAL" just test-e2e
 ```
 
-Only leaf recipes can be sharded. Odu supplies a zero-based `ODU_SHARD_INDEX` and the actual `ODU_SHARD_TOTAL`, which may be below the ceiling if capacity is unavailable. The recipe must divide its own work. Shards aggregate into one GitHub context per recipe/platform.
+`odu:shard=1` is valid: one shard, on its own lane when a slot is spare (see *A lane of its own* above). Only leaf recipes can be sharded. Odu supplies a zero-based `ODU_SHARD_INDEX` and the actual `ODU_SHARD_TOTAL`, which may be below the ceiling if capacity is unavailable. The recipe must divide its own work. Shards aggregate into one GitHub context per recipe/platform.
 
 ## Every run at once: the web service
 

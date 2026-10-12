@@ -105,9 +105,12 @@ function shardCount(recipe: DumpRecipe): number | undefined {
   }
   const raw = shardMetadata[0]!.slice("odu:shard=".length);
   const count = Number(raw);
-  if (!Number.isInteger(count) || count < 2) {
+  // N = 1 is meaningful: one shard, on a lane of its own when the pool has a
+  // spare slot (it pays its dependency closure there), on the primary when
+  // it does not. See "Placement" in the docs.
+  if (!Number.isInteger(count) || count < 1) {
     throw new Error(
-      `odu: recipe "${recipe.namepath}" metadata must be odu:shard=N with integer N >= 2`,
+      `odu: recipe "${recipe.namepath}" metadata must be odu:shard=N with integer N >= 1 (N = 1 asks for a lane of its own)`,
     );
   }
   return count;

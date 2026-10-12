@@ -39,6 +39,17 @@ Each point below was measured on a live account.
 - **One venue per platform per run.** A DAG's nodes share one workspace
   (`install` → `unit`). Work spreads through `odu:shard`, where each shard gets
   its own container and its own dependency closure.
+- **A lane of its own: `odu:shard=1`.** Kolu's heavy leaves (home-manager,
+  e2e, unit, upgrade-window) shared one 18 GB disk because of the rule above,
+  and their live closures together outgrew it. Spreading arbitrary nodes would
+  break the shared workspace, so placement is per recipe and explicit: when the
+  pool can give a sharded recipe a slot for every shard, all of its shards run
+  off the primary, each paying its own dependency closure; with fewer slots,
+  shard 1 stays on the primary as before, and with none, nothing changes.
+  `odu:shard=1` therefore means "on its own lane if a slot is spare" rather
+  than being rejected. It is the N = 1 case of the existing mechanism, so it
+  reuses its roster, log routing and per-lane resurrection, and it needs no new
+  metadata word.
 - **One recipe per vCPU.** The bridge starts each runner with
   `ODU_RUNNER_MAX_PARALLEL` = 4. A whole 20-node DAG started at once on 4 vCPU
   timed out on CPU.

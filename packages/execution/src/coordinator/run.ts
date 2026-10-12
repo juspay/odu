@@ -888,6 +888,10 @@ async function orchestrate(
   interface ShardPlan extends ShardTopology {
     leases: LeaseHandle[];
   }
+  /** Which of a plan's leases carries shard `index`: shard 0 has none when it
+   *  runs on the primary. */
+  const leaseSlot = (plan: ShardPlan, index: number): number =>
+    plan.primaryShard ? index - 1 : index;
   const shardPlans = new Map<string, ShardPlan[]>();
   const burstLeaseUsers = new Map<LeaseHandle, number>();
   const plansFor = (platform: string): readonly ShardPlan[] =>
@@ -1880,7 +1884,7 @@ async function orchestrate(
   };
 
   const refreshShardAggregate = (platform: string, plan: ShardPlan): void => {
-    if (plan.total <= 1) return;
+    if (plan.total <= 1 && plan.primaryShard) return;
     const logicalId = fanId(plan.rootId, platform);
     const state = store.get();
     const children = shardRootIds(platform, plan);
@@ -2317,7 +2321,8 @@ async function orchestrate(
     platform: string,
     state: PipelineState,
   ): TaskSpec[] => {
-    const all = tasksByPlatform.get(platform) ?? [];
+    const offPrimary = new Set(plansFor(platform).filter((plan) => !plan.primaryShard).map((plan) => plan.rootId));
+    const all = (tasksByPlatform.get(platform) ?? []).filter((task) => !offPrimary.has(task.id));
     const byId = new Map(all.map((task) => [task.id, task] as const));
     const statusOf = (localId: string): NodeStatus | undefined =>
       state.nodes[primaryPublicId(platform, localId)]?.status;
@@ -2369,10 +2374,12 @@ async function orchestrate(
       ...task,
       needs: task.needs.filter((dep) => retry.has(dep)),
     }));
-    return plansFor(platform).reduce<TaskSpec[]>(
-      (configured, plan) => tasksForShard(configured, plan.rootId, 0, plan.total),
-      tasks,
-    );
+    return plansFor(platform)
+      .filter((plan) => plan.primaryShard)
+      .reduce<TaskSpec[]>(
+        (configured, plan) => tasksForShard(configured, plan.rootId, 0, plan.total),
+        tasks,
+      );
   };
 
   /**
@@ -2831,7 +2838,7 @@ async function orchestrate(
     acquiredLeases.push(next);
     burstLeaseUsers.set(next, 1);
     watchLease(platform, next);
-    plan.leases[index - 1] = next;
+    plan.leases[leaseSlot(plan, index)] = next;
     // A fresh venue is a fresh workspace: the whole shard closure runs again.
     for (const id of projection.nodeIds) {
       verdicts.release(id);
@@ -3093,9 +3100,10 @@ async function orchestrate(
         };
   const burstRequests = activePlatforms.flatMap((platform) => {
     const roots = shardRootsFor(platform);
+    // Enough for every shard of every root to have a container of its own;
+    // the pool answers with what it has, and the plans degrade from there.
     const limit = roots.reduce(
-      (largest, root) =>
-        Math.max(largest, Math.max(0, (root.shards ?? 1) - 1)),
+      (sum, root) => sum + Math.max(0, root.shards ?? 1),
       0,
     );
     return limit === 0
@@ -3173,19 +3181,26 @@ async function orchestrate(
       const shared = shareShardCapacity(
         roots.map((root) => ({
           rootId: root.id,
-          limit: Math.max(0, (root.shards ?? 1) - 1),
+          limit: Math.max(0, root.shards ?? 1),
         })),
         venue.bursts,
       );
       const plans = roots.map((root): ShardPlan => {
-        const leases = shared.get(root.id) ?? [];
+        const wanted = root.shards ?? 1;
+        const offered = shared.get(root.id) ?? [];
+        // A slot for every shard: all of them run off the primary, each with
+        // its own closure (odu:shard=1 is a node on a lane of its own).
+        // Fewer: shard 0 stays on the primary, as it always has.
+        const primaryShard = offered.length < wanted;
+        const leases = primaryShard ? offered.slice(0, wanted - 1) : offered.slice(0, wanted);
         for (const lease of leases) {
           burstLeaseUsers.set(lease, (burstLeaseUsers.get(lease) ?? 0) + 1);
         }
         return {
           rootId: root.id,
           tasks: dependencyClosure(tasks, root.id),
-          total: 1 + leases.length,
+          total: primaryShard ? 1 + leases.length : leases.length,
+          primaryShard,
           leases,
         };
       });
@@ -3194,7 +3209,8 @@ async function orchestrate(
         installShardNodes(platform, plan);
         const ceiling = roots.find((root) => root.id === plan.rootId)?.shards;
         info(
-          `${platform}: ${plan.rootId} using ${plan.total}/${ceiling ?? plan.total} shard slots`,
+          `${platform}: ${plan.rootId} using ${plan.total}/${ceiling ?? plan.total} shard slots` +
+            (plan.primaryShard ? "" : " (every shard on its own lane)"),
         );
       }
     }
@@ -3334,10 +3350,13 @@ async function orchestrate(
     // dropped from the map above. `continue` is the honest answer if it isn't.
     const host = lanesByPlatform[platform];
     if (host === undefined) continue;
-    const baseTasks = tasksByPlatform.get(platform) ?? [];
     const plans = plansFor(platform);
+    // A root whose every shard has its own lane is not the primary's to run.
+    const offPrimary = new Set(plans.filter((plan) => !plan.primaryShard).map((plan) => plan.rootId));
+    const baseTasks = (tasksByPlatform.get(platform) ?? []).filter((task) => !offPrimary.has(task.id));
+    const primaryPlans = plans.filter((plan) => plan.primaryShard);
     const withPrimaryShardEnv = (tasks: readonly TaskSpec[]): TaskSpec[] =>
-      plans.reduce(
+      primaryPlans.reduce(
         (configured, plan) =>
           tasksForShard(configured, plan.rootId, 0, plan.total),
         [...tasks],
@@ -3345,8 +3364,8 @@ async function orchestrate(
     let lane = primaryLanes.get(platform);
     if (lane === undefined) {
       lane = startPrimaryLane(platform, host, withPrimaryShardEnv(baseTasks));
-    } else if (plans.length > 0) {
-      const roots = plans.map((plan) => {
+    } else if (primaryPlans.length > 0) {
+      const roots = primaryPlans.map((plan) => {
         const root = baseTasks.find((task) => task.id === plan.rootId);
         if (root === undefined) {
           throw new Error(`odu: shard root ${plan.rootId} disappeared`);
@@ -3383,9 +3402,8 @@ async function orchestrate(
     }
 
     for (const plan of plans) {
-      if (plan.total <= 1) continue;
-      for (let index = 1; index < plan.total; index += 1) {
-        const lease = plan.leases[index - 1];
+      for (let index = plan.primaryShard ? 1 : 0; index < plan.total; index += 1) {
+        const lease = plan.leases[leaseSlot(plan, index)];
         if (lease === undefined) continue;
         startShardLane(platform, plan, index, lease, 0);
       }

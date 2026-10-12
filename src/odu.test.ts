@@ -483,7 +483,7 @@ describe("odu lane runner over stdio (loopback)", () => {
 });
 
 describe("shard aggregation", () => {
-  it("shares workers between roots without exceeding either ceiling", () => {
+  it("gives each root workers of its own when there are enough for all", () => {
     const shared = shareShardCapacity(
       [
         { rootId: "e2e", limit: 5 },
@@ -492,7 +492,7 @@ describe("shard aggregation", () => {
       ["a", "b", "c", "d", "e", "f", "unused"],
     );
     expect(shared.get("e2e")).toEqual(["a", "b", "c", "d", "e"]);
-    expect(shared.get("test")).toEqual(["a"]);
+    expect(shared.get("test")).toEqual(["f"]);
   });
 
   it("lets every root use all available workers up to its own ceiling", () => {
