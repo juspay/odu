@@ -1,3 +1,8 @@
+---
+name: pr-evidence
+description: Record reproducible terminal evidence (asciinema → agg gif) for an odu PR and embed it in a `## Evidence` PR comment. Use whenever an odu change has observable runtime behavior worth showing — a new command, a state transition, a fixed hang or leak — or when writing or re-running a script under tests/evidence/.
+---
+
 # PR evidence
 
 odu is a terminal tool, so evidence is a **live terminal recording**, not a

@@ -2,7 +2,7 @@
 # Reproducible terminal evidence for #30: a consumer repo with NO flake (it
 # re-exports nothing) runs odu green, because the lane runner now comes from
 # odu's OWN flake — baked onto the binary as ODU_RUNNER_FLAKE — not the repo
-# under test. Recorded with asciinema, rendered with agg — see tests/evidence/README.md.
+# under test. Recorded with asciinema, rendered with agg — see dev/skills/pr-evidence/SKILL.md.
 #
 #   odu=$(nix build .#odu --no-link --print-out-paths)/bin/odu
 #   asciinema rec --headless --window-size 92x24 -i 2 --overwrite \

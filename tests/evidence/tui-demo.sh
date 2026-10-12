@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Reproducible terminal evidence for the opentui live view (juspay/odu#73).
-# Recorded with asciinema and rendered to a gif with agg — see tests/evidence/README.md.
+# Recorded with asciinema and rendered to a gif with agg — see dev/skills/pr-evidence/SKILL.md.
 # Drives the real odu binary against a throwaway fixture pinned
 # to a localhost lane.
 #

@@ -2,7 +2,7 @@
 # Reproducible terminal evidence for the settle-shaped residual after
 # juspay/odu#88: a run that reports itself SETTLED while its node's log is
 # still arriving. Recorded with asciinema and rendered to a gif with agg; see
-# tests/evidence/README.md.
+# dev/skills/pr-evidence/SKILL.md.
 #
 #   odu=$(nix build .#odu --no-link --print-out-paths)/bin/odu
 #   asciinema rec --headless --window-size 100x24 -i 2 --overwrite \

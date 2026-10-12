@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Reproducible terminal evidence for `odu protect` platform enumeration
 # (PR #53, issue #52). Recorded with asciinema, rendered to a gif with agg —
-# see tests/evidence/README.md. Drives the real odu binary against a
+# see dev/skills/pr-evidence/SKILL.md. Drives the real odu binary against a
 # throwaway fixture; protect --dry-run never dials a host, which is the point.
 #
 #   odu=$(nix build .#odu --no-link --print-out-paths)/bin/odu

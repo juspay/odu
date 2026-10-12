@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Reproducible terminal evidence for "a run you can watch before it has lanes"
 # (PR #85, issue #84). Recorded with asciinema, rendered to a gif with agg —
-# see tests/evidence/README.md.
+# see dev/skills/pr-evidence/SKILL.md.
 #
 # The window under demonstration is the one between `odu run` starting and its
 # first lane existing: the coordinator holds the checkout and is claiming a

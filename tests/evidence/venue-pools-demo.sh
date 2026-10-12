@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Reproducible terminal evidence for venue pools / machine lease (PR #56,
 # issue #54). Recorded with asciinema, rendered to a gif with agg — see
-# tests/evidence/README.md. Drives the real odu binary against a throwaway
+# dev/skills/pr-evidence/SKILL.md. Drives the real odu binary against a throwaway
 # fixture; the "venue" is this machine reached over ssh (not the localhost
 # short-circuit) so flock-over-ssh lease, `odu hosts`, and `--no-wait` are real.
 #

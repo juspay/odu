@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Reproducible terminal evidence for lazy pool-locality (PR #67, issue #66).
-# Recorded with asciinema, rendered to a gif with agg — see tests/evidence/README.md.
+# Recorded with asciinema, rendered to a gif with agg — see dev/skills/pr-evidence/SKILL.md.
 # Drives the real odu binary against a throwaway fixture with a
 # hosts file whose x86_64-linux pool illegally mixes localhost with remotes:
 # the shape that used to kill EVERY run in the checkout at config-load time.
