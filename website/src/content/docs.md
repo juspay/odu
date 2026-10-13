@@ -140,7 +140,7 @@ Strict runs post `<recipe>@<platform>` commit statuses using `gh` credentials av
 
 Agents can use **CLI or MCP**. Both start the local web service in the background if needed, reuse it otherwise, and act on the same runs you see at **http://127.0.0.1:18440**. No separate `odu web` step is needed. Disconnecting an agent stops its observation, not CI.
 
-Use the [unified Odu skill](https://github.com/juspay/odu/tree/master/.apm/skills/odu) for either interface. The workflow is the same:
+Use the [unified Odu skill](https://github.com/juspay/odu/tree/master/agent-plugin/skills/odu) for either interface. The workflow is the same:
 
 | Step | Tool | Keep or check |
 | --- | --- | --- |
@@ -174,7 +174,7 @@ Replace placeholders with the previous responses. `odu run`, `wait`, `logs`, and
 
 ### MCP
 
-For agents with an MCP client, an APM dependency on `juspay/odu` installs the unified skill and launcher. Use its generated harness configuration, or configure stdio manually:
+For agents with an MCP client, odu ships the unified skill and its MCP server together as an [Agent Plugin](https://agent-plugins.org/) in [`agent-plugin/`](https://github.com/juspay/odu/tree/master/agent-plugin). With [agent-distro](https://agent-distro.nixos.asia/#profiles), add it to your profile's `plugins` as `"github:juspay/odu?dir=agent-plugin"`. Or configure stdio manually:
 
 ```json
 {

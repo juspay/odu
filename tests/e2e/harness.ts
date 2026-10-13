@@ -119,7 +119,7 @@ export const PORT_SLOT = {
   restartUnderRuns: 8,
   /** `lifecycle.e2e.test.ts` — clients that walk away mid-wait. */
   disconnect: 9,
-  /** `install.e2e.test.ts` — the daemon a freshly installed launcher starts. */
+  /** `install.e2e.test.ts` — the daemon an installed plugin's MCP server starts. */
   freshInstall: 10,
   /** {@link hermeticEnv} — the service every black-box `odu run` in this
    *  directory reaches. It is a SLOT and not the default 18440 because

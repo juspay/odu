@@ -88,8 +88,8 @@ export interface WebWorld {
  * as a tool, and nothing else.
  *
  * Here rather than in each test file because two faces assert it: the bridge
- * this repo builds (`mcp.e2e.test.ts`) and the launcher a fresh consumer
- * installs (`install.e2e.test.ts`). Two copies would drift, and the drift would
+ * this repo builds (`mcp.e2e.test.ts`) and the MCP server odu's Agent Plugin
+ * declares (`install.e2e.test.ts`). Two copies would drift, and the drift would
  * be invisible — each file would still pass against its own stale list.
  *
  * Derived from `packages/service-client/src/verbs.ts`'s `ODU_SERVICE_EXPOSE` by

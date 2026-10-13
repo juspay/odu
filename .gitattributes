@@ -1,7 +1,0 @@
-# Everything APM writes on `just apm` — never edited by hand. Marked generated
-# so GitHub collapses their diffs and excludes them from language stats. Edit
-# the sources instead: `.apm/` for the deployed skills, `apm.yml` for the MCP
-# servers and the dependency set.
-.claude/** linguist-generated=true
-.mcp.json linguist-generated=true
-apm.lock.yaml linguist-generated=true

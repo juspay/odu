@@ -2,7 +2,7 @@
 
 Live CI for `just` pipelines. Watch every run in a browser, attach from a terminal, or let an agent diagnose failures while other jobs continue.
 
-[Website](https://juspay.github.io/odu/) · [Documentation](https://juspay.github.io/odu/docs/) · [Agent skill](.apm/skills/odu/SKILL.md)
+[Website](https://juspay.github.io/odu/) · [Documentation](https://juspay.github.io/odu/docs/) · [Agent skill](agent-plugin/skills/odu/SKILL.md)
 
 ## Start
 
@@ -50,7 +50,7 @@ A live retry creates a new attempt; a finalized retry creates a linked replay. `
 
 ## Agents and remote access
 
-Use the [unified skill](.apm/skills/odu/SKILL.md), or configure a stdio MCP server running:
+The [unified skill](agent-plugin/skills/odu/SKILL.md) and its MCP server ship together as an [Agent Plugin](https://agent-plugins.org/) in [`agent-plugin/`](agent-plugin/). With [agent-distro](https://agent-distro.nixos.asia/#profiles), add `"github:juspay/odu?dir=agent-plugin"` to your profile's `plugins`. Or configure a stdio MCP server running:
 
 ```sh
 nix run --accept-flake-config github:juspay/odu -- mcp

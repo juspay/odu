@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Reproducible terminal evidence for `odu runs` — the durable run ledger
 # (PR #28). Recorded with asciinema, rendered to a gif with agg — see
-# .agency/do.md → "PR evidence". Drives the real odu binary against a throwaway
+# dev/skills/pr-evidence/SKILL.md. Drives the real odu binary against a throwaway
 # fixture, pinned to a localhost lane; the run output is hidden so the gif stays
 # about the ledger, not the matrix.
 #

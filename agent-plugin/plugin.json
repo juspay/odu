@@ -1,0 +1,8 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "odu",
+  "description": "Drive CI with odu: the odu skill and the odu MCP server, one shared service for terminals, agents and browsers.",
+  "homepage": "https://juspay.github.io/odu/",
+  "repository": "https://github.com/juspay/odu",
+  "license": "AGPL-3.0-or-later"
+}

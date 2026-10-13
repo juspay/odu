@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Reproducible terminal evidence for juspay/odu#87 — a lane node's durable log
 # losing its end. Recorded with asciinema and rendered to a gif with agg; see
-# .agency/do.md → "PR evidence". Drives the real odu binary against a throwaway
+# dev/skills/pr-evidence/SKILL.md. Drives the real odu binary against a throwaway
 # noisy fixture, pinned to a localhost lane.
 #
 #   odu=$(nix build .#odu --no-link --print-out-paths)/bin/odu
