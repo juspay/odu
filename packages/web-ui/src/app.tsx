@@ -38,6 +38,7 @@ import {
   Switch,
   type JSX,
 } from "solid-js";
+import { newestFirst } from "@odu/service-client/board";
 import { Board, boardTally } from "./board";
 import { Create, type CreateState, type StartForm } from "./create";
 import {
@@ -187,8 +188,9 @@ export function App(props: {
     }
     // Newest first. Sorted HERE rather than trusted from the wire: under batched
     // delivery `keys()` is arrival order, which the framework's own contract
-    // says to treat as a set rather than a list.
-    return out.sort((a, b) => b.createdAt - a.createdAt);
+    // says to treat as a set rather than a list. The order itself is
+    // `@odu/service-client/board`'s, so every reader of a board sorts alike.
+    return newestFirst(out);
   });
 
   /**

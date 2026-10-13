@@ -39,6 +39,22 @@ serving rather than turning a missing daemon into an error.
 That refusal is exactly why the service's platform half — the serving, the
 catalog, the coordinator — lives one wall up, in `@odu/service`.
 
+## The board readings — `./board`
+
+`web-ui` was the board, and the readings a board performs on a row lived inside
+it: which runs belong to one checkout, which are moving, which are failing, and
+what a run is called. A board is not one face's idea — a terminal dashboard or a
+downstream panel is the same board — so they live here now, next to the row
+shape they read, and `web-ui` imports them back.
+
+The one worth naming is `runStatus`: a run's board STATE and its OUTCOME each
+had a column in the browser, and each was empty exactly where the other was
+full, so the cell holds whichever IS the answer — the verdict once there is one,
+and where the run has got to until then. That precedence is load-bearing: a run
+torn down early settles with `passed: false` and `outcome: "incomplete"`, and a
+reader that skipped the outcome would call it `failed` and send somebody looking
+for a test that broke.
+
 ## What the surface is about
 
 The coordinator's own surface (`@odu/run-client/surface`) is about ONE run: it

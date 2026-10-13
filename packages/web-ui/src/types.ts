@@ -15,12 +15,8 @@ export type {
   NodeStatus,
   RunBoardState,
   RunNode,
+  RunOutcome,
   RunRow,
   ServiceCell,
   StartReceipt,
 } from "@odu/service-client/surface";
-
-/** The run outcome, as a bare union. The surface declares it inline on the row
- *  (a nullable literal), so this is the non-null half a total label table is
- *  written against. */
-export type RunOutcome = "passed" | "failed" | "incomplete";

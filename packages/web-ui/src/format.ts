@@ -10,36 +10,23 @@
  */
 
 import type { SurfaceReadout, SurfaceReadoutStatus } from "@kolu/surface/solid";
-import { STATUS_META, type StatusHue } from "@odu/service-client/surface";
-import type { RunBoardState, RunOutcome } from "./types";
+import {
+  BOARD_STATE,
+  OUTCOME,
+  type StatusHue,
+} from "@odu/service-client/board";
+import { STATUS_META } from "@odu/service-client/surface";
 
 /** The five semantic hues, from the contract module rather than spelled again
  *  here — so the one place a hue is consumed is a place the compiler can check
  *  and a reader can look up. */
 export type { StatusHue };
 
-/** What each board state is called, and what colour it carries. The hue names
- *  are the same five `@odu/run-client`'s `STATUS_META` uses — one assignment of
- *  meaning to colour across the terminal dashboard and the browser. */
-export const BOARD_STATE: Record<
-  RunBoardState,
-  { label: string; hue: StatusHue }
-> = {
-  provisioning: { label: "provisioning", hue: "amber" },
-  running: { label: "running", hue: "amber" },
-  settled: { label: "settled", hue: "grey" },
-  owner_lost: { label: "owner lost", hue: "violet" },
-  expired: { label: "expired", hue: "grey" },
-};
-
-/** A run's terminal word. `null` — no outcome yet — is deliberately absent from
- *  this table: a run that has not finished has nothing to say here, and a
- *  fallback label would be a verdict about a run that has not reached one. */
-export const OUTCOME: Record<RunOutcome, { label: string; hue: StatusHue }> = {
-  passed: { label: "passed", hue: "green" },
-  failed: { label: "failed", hue: "red" },
-  incomplete: { label: "incomplete", hue: "amber" },
-};
+/** What a run is called, and what colour it carries. Not this app's assignment:
+ *  `@odu/service-client/board` owns it, because a board is not one face's idea
+ *  and a second copy of "what is this run called" is how two faces come to
+ *  disagree. Re-exported so a view still reads its vocabulary from here. */
+export { BOARD_STATE, OUTCOME };
 
 /** The node glyphs and hues are not this app's to assign: `STATUS_META` is the
  *  wire's own table, and its doc says no face keeps a second one. Re-exported

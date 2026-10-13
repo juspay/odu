@@ -13,7 +13,8 @@
     "./endpoint": "./src/endpoint.ts",
     "./logKey": "./src/logKey.ts",
     "./dial": "./src/dial.ts",
-    "./socket": "./src/socket.ts"
+    "./socket": "./src/socket.ts",
+    "./board": "./src/board.ts"
   },
   "dependencies": {
     "@odu/run-client": "workspace:*",
