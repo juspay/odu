@@ -24,6 +24,11 @@
 import type { SurfaceClient } from "@kolu/surface/solid";
 import type { SurfaceReadout } from "@kolu/surface/solid";
 import { formatLogKey, parseLogKey } from "@odu/service-client/logKey";
+import {
+  logHash,
+  parseRunHash,
+  runHash,
+} from "@odu/service-client/routes";
 import { logHasMore, LOG_TAIL_BYTES } from "@odu/service-client/surface";
 import type { oduServiceSurface } from "@odu/service-client/surface";
 import { Effect } from "effect";
@@ -57,15 +62,16 @@ type Client = SurfaceClient<ServiceSpec>;
 /**
  * Where the page is, in the URL hash.
  *
- * A run — and a NODE's output within it — is linkable: a person pastes the
- * address into a message and whoever opens it is looking at the same failure,
- * not at a board they then have to navigate. That is also why the selected node
- * is part of the route rather than a signal beside it: one source of truth, so
- * Back works through a log the same way it works through a run.
+ * The RUN ADDRESS itself — what `#/run/<id>` names, and what makes a run and one
+ * node's output within it linkable — is `@odu/service-client/routes`, minted and
+ * read there because a link is minted by whoever holds the run (an editor, a
+ * terminal, another app's panel) and opened here. What stays local is the rest of
+ * this page's states: `#/` for the board and `#/new` for the create form, which
+ * are this app's own navigation rather than addresses anything links to.
  *
- * `#/run/<id>` · `#/run/<id>/<encoded node>/<attempt>` · `#/new`; anything else
- * is the board. The node/attempt pair is spelled exactly as a LOG KEY, so the
- * address in the URL bar and the address an agent echoes are the same string.
+ * The selected node is part of the ROUTE rather than a signal beside it: one
+ * source of truth, so Back works through a log the same way it works through a
+ * run.
  */
 type Route =
   | { at: "board" }
@@ -73,20 +79,9 @@ type Route =
   | { at: "new" };
 
 function routeOf(hash: string): Route {
-  const path = hash.replace(/^#\/?/, "");
-  if (path === "new") return { at: "new" };
-  const run = /^run\/(.+)$/.exec(path);
-  if (run?.[1] === undefined) return { at: "board" };
-  const parts = run[1].split("/");
-  const runId = parts[0];
-  if (runId === undefined || runId === "") return { at: "board" };
-  // Three segments IS a log key — the same spelling `formatLogKey` mints — so
-  // the URL carries the address rather than a second encoding of it.
-  return {
-    at: "run",
-    runId,
-    log: parts.length === 3 ? run[1] : null,
-  };
+  const run = parseRunHash(hash);
+  if (run !== null) return { at: "run", ...run };
+  return hash.replace(/^#\/?/, "") === "new" ? { at: "new" } : { at: "board" };
 }
 
 function hashOf(route: Route): string {
@@ -96,7 +91,7 @@ function hashOf(route: Route): string {
     case "new":
       return "#/new";
     case "run":
-      return route.log === null ? `#/run/${route.runId}` : `#/run/${route.log}`;
+      return route.log === null ? runHash(route.runId) : logHash(route.log);
   }
 }
 

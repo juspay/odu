@@ -91,6 +91,44 @@ export const isActive = (row: RunRow): boolean =>
  *  board under it. */
 export const isFailing = (row: RunRow): boolean => row.unresolvedFailures > 0;
 
+/** The three fields of a scope these readings use — narrowed off the row's own
+ *  scope rather than restated, so a fourth field on the wire is one type error
+ *  away from a reading that would ignore it, and a caller holding a full
+ *  `RunScope` (with its optional `--root`) passes it unchanged. */
+type ScopeShape = Pick<RunRow["scope"], "selectors" | "platforms" | "noDeps">;
+
+/**
+ * The scope as a QUALIFIER — what a reader appends after the run it belongs to —
+ * or `null` when the run covered the whole pipeline and a qualifier would say
+ * nothing.
+ *
+ * `null` rather than an empty string, because "say nothing" is a decision the
+ * caller renders as NO suffix: a caller that forgot to test it would render a
+ * stray separator. The one caller that must say something anyway is a board row,
+ * where an empty cell would read as a run that tested nothing — see
+ * {@link scopeLabel}.
+ *
+ * A selection is not a pipeline. `selectors: ["ci::unit"]` runs one recipe and
+ * its dependencies, so the handful of lanes behind it says nothing about the
+ * rest of the DAG — and a reader who takes those lanes for the whole pipeline
+ * has been told the wrong thing about what is green.
+ */
+export function scopeSuffix(scope: ScopeShape): string | null {
+  const parts = [
+    scope.selectors.join(" "),
+    scope.platforms.join(" "),
+    scope.noDeps ? "no deps" : "",
+  ].filter((part) => part !== "");
+  return parts.length === 0 ? null : parts.join(" · ");
+}
+
+/** What a green here actually covers — the whole reason a scope rides the row.
+ *  An empty selection is the WHOLE pipeline and says so, because "" would read
+ *  as a run that tested nothing. */
+export function scopeLabel(scope: ScopeShape): string {
+  return scopeSuffix(scope) ?? "whole pipeline";
+}
+
 // ── the board, narrowed ─────────────────────────────────────────────────────
 
 /** Rows NEWEST `createdAt` first. `runId` breaks a `createdAt` tie, so the order

@@ -13,6 +13,7 @@ import type { SurfaceReadout, SurfaceReadoutStatus } from "@kolu/surface/solid";
 import {
   BOARD_STATE,
   OUTCOME,
+  scopeLabel,
   type StatusHue,
 } from "@odu/service-client/board";
 import { STATUS_META } from "@odu/service-client/surface";
@@ -123,19 +124,12 @@ export function ago(at: number, now: number): string {
 }
 
 /** What a green here actually covers — the whole reason a scope rides the row.
- *  An empty selection is the WHOLE pipeline and says so, because "" would read
- *  as a run that tested nothing. */
-export function scopeLabel(scope: {
-  selectors: readonly string[];
-  platforms: readonly string[];
-  noDeps: boolean;
-}): string {
-  const what =
-    scope.selectors.length === 0 ? "whole pipeline" : scope.selectors.join(" ");
-  const where =
-    scope.platforms.length === 0 ? "" : ` · ${scope.platforms.join(" ")}`;
-  return `${what}${where}${scope.noDeps ? " · no deps" : ""}`;
-}
+ *  odu's own reading, because what a run COVERED is a fact about the run and not
+ *  one face's idea of it (`@odu/service-client/board` owns it, beside the other
+ *  board readings). Re-exported so a view still reads its vocabulary from here,
+ *  and so a link that hands somebody else's board a qualifier spells the scope
+ *  the same way this one does. */
+export { scopeLabel };
 
 /**
  * THE TAB'S OWN ICON, drawn — the one place this app draws a picture.
