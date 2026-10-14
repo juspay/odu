@@ -129,11 +129,11 @@ jobs:
       # whole module graph and exits 0 without needing stdin, which `--stdio`
       # would (it serves until the pipe closes).
       #
-      # The pin is kolu's own `b147690`, whose `.gitattributes` keeps
+      # The pin is kolu's merged head, whose `.gitattributes` keeps
       # `.github/actions` in the archive a remote `uses:` is downloaded from —
-      # at the earlier pin it was export-ignored, and this step died at job
-      # setup with "Can't find 'action.yml'".
-      - uses: juspay/kolu/.github/actions/publish-closure@b1476908938f4fc5683e8b99404c36f01b438ab4
+      # before that it was export-ignored, and this step died at job setup with
+      # "Can't find 'action.yml'".
+      - uses: juspay/kolu/.github/actions/publish-closure@5b14790a4eb9c383dfd7fa247bbff1af60f9eb92
         with:
           source: .#agent-flake-source
           installables: odu-runner
