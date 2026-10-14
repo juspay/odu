@@ -140,8 +140,13 @@ describe("a run's scope", () => {
       "whole pipeline · x86_64-linux",
     );
     expect(scopeLabel(scope({ noDeps: true }))).toBe("whole pipeline · no deps");
+    // A `--root` narrows what RAN, so the cell names the root alone — this is
+    // not a whole-pipeline run with a qualifier, it is a run of a subgraph.
     expect(scopeLabel(scope({ root: "ci::install" }))).toBe(
-      "whole pipeline · under ci::install",
+      "under ci::install",
+    );
+    expect(scopeLabel(scope({ root: "ci::install", noDeps: true }))).toBe(
+      "under ci::install · no deps",
     );
   });
 

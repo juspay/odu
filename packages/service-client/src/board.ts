@@ -153,9 +153,11 @@ export function scopeSuffix(scope: ScopeShape): string | null {
 export function scopeLabel(scope: ScopeShape): string {
   const parts = scopeParts(scope).join(" · ");
   if (parts === "") return "whole pipeline";
-  // An explicit selection names what ran on its own; without one the cell leads
-  // with what the selection WOULD have been.
-  return scope.selectors.length === 0
+  // An explicit selection names what ran on its own, and so does a `--root`:
+  // both narrow what RAN, so neither leaves a cell that can call itself the
+  // whole pipeline. A platform slice and `--no-deps` qualify a whole-pipeline
+  // run instead, which is why those keep the lead-in.
+  return scope.selectors.length === 0 && scope.root === undefined
     ? `whole pipeline · ${parts}`
     : parts;
 }
