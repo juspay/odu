@@ -43,7 +43,7 @@ const base = (repoRoot: string) => ({
   onLine: (): void => {},
   // Never reached: an injected `claim` is what stands in for the ssh dial that
   // would have needed a resolved runner derivation.
-  resolveDrvPath: () => (): never => {
+  resolveDrvPath: (): never => {
     throw new Error("resolveDrvPath must not be called with an injected claim");
   },
 });
@@ -237,7 +237,7 @@ describe("prepareVenues", () => {
       },
       identity: { holder: "me@box", run: "abc1234#1" },
       onLine: (line) => lines.push(line),
-      resolveDrvPath: () => (): never => {
+      resolveDrvPath: (): never => {
         throw new Error("injected burst acquisition must be used");
       },
       leaseBurst: async () => [promoted],
@@ -276,7 +276,7 @@ describe("prepareVenues", () => {
       },
       identity: { holder: "me@box", run: "abc1234#1" },
       onLine: () => {},
-      resolveDrvPath: () => (): never => {
+      resolveDrvPath: (): never => {
         throw new Error("injected burst acquisition must be used");
       },
       leaseBurst: async (opts) => {
@@ -328,7 +328,7 @@ describe("prepareVenues", () => {
       },
       identity: { holder: "me@box", run: "abc1234#1" },
       onLine: () => {},
-      resolveDrvPath: () => (): never => {
+      resolveDrvPath: (): never => {
         throw new Error("injected burst acquisition must be used");
       },
       leaseBurst: async ({ platform }) => {

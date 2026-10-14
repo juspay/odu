@@ -454,9 +454,14 @@ A finalized retry replays the PARENT's inventory, recorded in its manifest, and
 refuses (`not_replayable`) for a record written before odu wrote it down — a
 replay that resolved against today's fleet is not a replay.
 
-A lane host needs ssh + Nix + outbound https,
-and the source arrives by `git fetch` of the **pushed** SHA — remote lanes
-fetch pushed commits in strict mode. With `noStrict`, odu ships a snapshot of the working tree, unpushed commits included.
+A lane host needs ssh + Nix + outbound https, and the source arrives by
+`git fetch` of the **pushed** SHA — remote lanes fetch pushed commits in strict
+mode. With `noStrict`, odu ships a snapshot of the working tree, unpushed
+commits included. The lane runner itself is resolved from the build that shipped
+the coordinator, so a host whose Nix trusts nothing still works on Linux with
+Nix 2.17–2.34: a published revision is pulled by the host, content-addressed. A
+macOS host, or a Linux one on Nix ≥ 2.35, must trust the cache odu's flake
+declares.
 
 ## What changed (state it honestly if asked)
 

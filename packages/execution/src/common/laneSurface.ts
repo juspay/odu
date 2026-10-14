@@ -14,7 +14,8 @@
  *
  * It is PRIVATE, which is why it did not go into `@odu/run-client` with the
  * fan-in surface: the runner is pinned to the build that shipped its
- * coordinator (`runnerFlake.ts`, no override), so both ends of this wire always
+ * coordinator (the agent source baked onto the wrapper — `runnerFlake.ts`, no
+ * override), so both ends of this wire always
  * ship together and there is no third party to publish it to. The package's
  * README argues the cut.
  *

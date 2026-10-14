@@ -94,7 +94,7 @@ import {
   type PreparedVenues,
 } from "./runEnv";
 import { liveHeldPlatforms } from "./leaseRecord";
-import { resolveRunnerFlake, runnerDrvResolver } from "./runnerFlake";
+import { laneRunnerDrvPath, requireBakedRunnerSource } from "./runnerFlake";
 import { cancelRun } from "./cancel";
 import {
   liveRunLockPid,
@@ -378,10 +378,10 @@ export async function runCommand(
   deps: RunDeps = {},
 ): Promise<number> {
   // Resolve where the generic lane runner comes from before any side effect
-  // (worktree snapshot, socket) — a misbuilt binary with no runner flake should
-  // refuse instantly, not after pinning HEAD. Throws when ODU_RUNNER_FLAKE is
-  // unset; there is no override or fallback to the repo under test.
-  const runnerFlake = resolveRunnerFlake(process.env);
+  // (worktree snapshot, socket) — a misbuilt binary with no baked agent source
+  // should refuse instantly, not after pinning HEAD. Throws when the wrapper
+  // baked no source; there is no override or fallback to the repo under test.
+  const runnerFlake = requireBakedRunnerSource();
 
   const repoRoot = gitTopLevel();
   if (repoRoot === null) {
@@ -564,21 +564,6 @@ async function orchestrate(
   deps: RunDeps,
 ): Promise<number> {
   const { repoRoot, specSource, runnerFlake, sha, sha7 } = ctx;
-  // One asynchronous Nix evaluation per platform for the whole run. Claims,
-  // optional capacity and execution lanes all ask for the same runner; making
-  // separate resolvers repeated setup work and, before runnerFlake's async
-  // fix, repeatedly froze the live renderer.
-  const runnerResolvers = new Map<
-    string,
-    ReturnType<typeof runnerDrvResolver>
-  >();
-  const runnerResolverFor = (platform: string) => {
-    const existing = runnerResolvers.get(platform);
-    if (existing !== undefined) return existing;
-    const resolver = runnerDrvResolver(runnerFlake, platform);
-    runnerResolvers.set(platform, resolver);
-    return resolver;
-  };
   // The FACE, built by whoever started this run — see `common/presentation`.
   // The engine hands over the seam an interactive face needs (the focused
   // node's log, the rerun verb, what quitting costs) and learns nothing about
@@ -2485,7 +2470,7 @@ async function orchestrate(
         noWait: args.noWait,
         runLabel,
         onLine: setupLine,
-        resolveDrvPath: runnerResolverFor,
+        resolveDrvPath: laneRunnerDrvPath,
       });
       endClaim(platform);
       // `claiming` does not survive this claim on ANY exit below — the same
@@ -2607,7 +2592,7 @@ async function orchestrate(
       tasks,
       pipelineName: spec.name,
       ...laneSource(host),
-      resolveDrvPath: runnerResolverFor(platform),
+      resolveDrvPath: laneRunnerDrvPath,
       onSetupLine: (line) => appendLocal(setupId, `${line}\n`),
       onNodes: (laneState) => {
         if (!laneAccepting(platform)) return;
@@ -2743,7 +2728,7 @@ async function orchestrate(
         noWait: args.noWait,
         runLabel,
         onLine: setupLine,
-        resolveDrvPath: runnerResolverFor,
+        resolveDrvPath: laneRunnerDrvPath,
       });
       await seeded;
       if (!shuttingDown) startSetup(platform);
@@ -2840,7 +2825,7 @@ async function orchestrate(
         pools: resolvedPools,
         identity: { holder: localHolderId(), run: runLabel },
         onLine: setupLine,
-        resolveDrvPath: runnerResolverFor,
+        resolveDrvPath: laneRunnerDrvPath,
         ...(deps.leaseBurstSlots === undefined
           ? {}
           : { leaseBurst: deps.leaseBurstSlots }),
@@ -3138,7 +3123,7 @@ async function orchestrate(
           tasks: tasksForShard(plan.tasks, plan.rootId, index, plan.total),
           pipelineName: `${spec.name}:${plan.rootId}:${index + 1}/${plan.total}`,
           ...laneSource(lease.host),
-          resolveDrvPath: runnerResolverFor(platform),
+          resolveDrvPath: laneRunnerDrvPath,
           onSetupLine: (line) =>
             appendLocal(setupId, `[host ${shortHost(lease.host)}] ${line}\n`),
           onNodes: (laneState) => {

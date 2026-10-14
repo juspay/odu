@@ -87,6 +87,7 @@ import {
   type SpawnDriverDeps,
   survivableSpawnDriver,
 } from "@kolu/surface-daemon-supervisor";
+import { SURFACE_AGENT_FLAKE_REF_ENV } from "@kolu/surface-remote";
 import { readFileSlice } from "@odu/run-history/store";
 import { dirname, join } from "node:path";
 import { dialRun } from "@odu/run-client/dial";
@@ -381,11 +382,15 @@ export const ODU_CHILD_ENV_KEYS: readonly string[] = [
   // odu's own locators.
   "ODU_HOSTS",
   "ODU_STATE_DIR",
-  "ODU_RUNNER_FLAKE",
+  // The BAKED AGENT SOURCE — the repo's own flake, assembled with the sidecar
+  // and `commit-hash` (default.nix). A coordinator spawned as a systemd unit
+  // starts from a nearly-empty environment, so a child that cannot see this one
+  // is a coordinator that cannot resolve the lane runner at all. The name is
+  // the framework's (`@kolu/surface-remote` exports it); spelling it here would
+  // be a second authority for a string kolu already ships.
+  SURFACE_AGENT_FLAKE_REF_ENV,
   "ODU_SELF",
   "ODU_GH_BIN",
-  "ODU_AGENT_SUBSTITUTERS",
-  "ODU_AGENT_TRUSTED_PUBLIC_KEYS",
   "ODU_LINGER_IDLE_MS",
   "ODU_SNAPSHOT_MAX_BYTES",
   "ODU_SNAPSHOT_TRANSPORT",

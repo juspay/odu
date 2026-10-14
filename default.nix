@@ -2,11 +2,13 @@
 # shell.nix, and nix-build directly.
 #
 # `selfFlake` is odu's OWN flake source (`self.outPath`), threaded in by
-# flake.nix so the `odu` wrapper bakes it as ODU_RUNNER_FLAKE — the coordinator
-# resolves the GENERIC lane runner from odu's flake, never the consumer's. It is
-# null under plain `nix-build` / `shell.nix` (no `self`): the wrapper bakes
-# nothing, and such a binary refuses to run until given ODU_RUNNER_FLAKE (there
-# is no override or fallback to the repo under test).
+# flake.nix so this file can assemble the AGENT SOURCE a remote host resolves
+# the generic lane runner (`odu-runner`) from — never the consumer's — and bake
+# its store path onto the `odu` wrapper. It is null under plain `nix-build` /
+# `shell.nix` (no `self`): the wrapper bakes nothing, and such a binary refuses
+# to run (there is no override or fallback to the repo under test). `selfRev`
+# is the commit this build is of, when there is one — it keys the closure index
+# the publisher writes, and is absent for a dirty tree.
 #
 # `b2n` carries the bun2nix helpers; passed in from flake.nix via
 # `lib.mkBun2nix { inherit pkgs; }` (juspay/bun2nix rawflake standalone API).
@@ -15,14 +17,53 @@
 { pkgs ? import ./nix/nixpkgs.nix { }, b2n ? null, selfFlake ? null, selfRev ? null }:
 let
   version = (pkgs.lib.importJSON ./package.json).version;
+  sources = import ./npins;
 
-  # The agent's binary-cache declaration, baked onto the `odu` wrapper the same
-  # way ODU_RUNNER_FLAKE is: surface-remote REQUIRES one on every
-  # `AgentDerivation` (kolu#2018), and a coordinator that carries none is
-  # misbuilt — `runnerFlake.ts` refuses loudly rather than provisioning
-  # cache-blind. Spelled once in nix/binary-cache.nix, which asserts it matches
-  # flake.nix's nixConfig.
-  binaryCache = import ./nix/binary-cache.nix;
+  # ── the agent source: the tree a remote host resolves `odu-runner` from ──
+  #
+  # The lane runner is odu's OWN — none of the repo under test's code — so it is
+  # resolved from this repository's own flake, never the consumer's
+  # (`packages/execution/src/coordinator/runnerFlake.ts`). `mkAgentSourceTree`
+  # (from the pinned kolu, the same recipe kolu and drishti bake with) makes
+  # that tree flake-shaped: a copy of odu's source, writable, with `flake.nix` at
+  # its root, a `commit-hash` file, and the `binary-cache.json` sidecar
+  # `@kolu/surface-remote` reads on every dial.
+  #
+  # The sidecar's caches are DERIVED from this repository's `nixConfig` (that is
+  # what `binary-cache.nix` inside the recipe does), which is why the elimin-
+  # ated `nix/binary-cache.nix` and its text-match assertion are gone: there is
+  # no longer a second spelling of one fact to keep honest. odu's `nixConfig` is
+  # the only place the cache is written down.
+  #
+  # `closureIndex` is where `nix-cache.yml`'s `publish-closure` step writes each
+  # published `odu-runner`, keyed by the `commit-hash` beside it — the index
+  # `provisionAgent` reads to let a Linux host on Nix 2.17–2.34 pull the build
+  # itself with no trust. It is declared only when this build KNOWS its commit:
+  # the index is keyed by that hash, and a dirty tree (no `self.rev`) would
+  # otherwise name a key nothing was ever published under. No index is an honest
+  # absence — provisioning takes its other steps, unchanged.
+  mkAgentSourceTree =
+    import "${sources.kolu}/packages/surface-daemon/nix/agent-source-tree.nix"
+      { inherit (pkgs) lib; };
+  agentFlakeRefEnv =
+    (pkgs.lib.importJSON "${sources.kolu}/packages/surface-remote/agent-env.json").flakeRef;
+  commitHash = if selfRev == null then "" else selfRev;
+  agentSource =
+    if selfFlake == null
+    then null
+    else
+      mkAgentSourceTree {
+        inherit pkgs;
+        name = "odu-agent-flake-source";
+        src = selfFlake;
+        flakeNix = ./flake.nix;
+        label = "odu";
+        closureIndex =
+          if selfRev == null
+          then null
+          else { repo = "juspay/odu"; branch = "ca-index"; };
+        extraFiles = { "commit-hash" = commitHash; };
+      };
 
   src = pkgs.lib.fileset.toSource {
     root = ./.;
@@ -230,8 +271,8 @@ let
     #
     # It named the wrong thing. `base` is the hydrated SOURCE tree; the binary a
     # user actually runs is composed outside it — this wrapper, the web-ui
-    # bundle, the pinned bun/git/gh/just/openssh, the binary-cache declaration,
-    # the runner flake. Bumping `pkgs.gh` or editing nix/binary-cache.nix
+    # bundle, the pinned bun/git/gh/just/openssh, the agent source the lane
+    # runner is resolved from. Bumping `pkgs.gh` or changing that source
     # produced a materially different application with an IDENTICAL build id,
     # and `ensureService` uses that id to decide whether an explicit upgrade is
     # needed. `$out` is the out-path of the complete package, so it covers every
@@ -261,9 +302,7 @@ let
       --set ODU_BUILD_ID "$out" \
       --set ODU_OSFACTS_BIN "${pkgs.osfacts}/bin/osfacts" \
       ${pkgs.lib.optionalString (selfRev != null) ''--set ODU_COMMIT_HASH "${selfRev}"''} \
-      --set ODU_AGENT_SUBSTITUTERS "${pkgs.lib.concatStringsSep " " binaryCache.substituters}" \
-      --set ODU_AGENT_TRUSTED_PUBLIC_KEYS "${pkgs.lib.concatStringsSep " " binaryCache.trustedPublicKeys}" \
-      ${pkgs.lib.optionalString (selfFlake != null) ''--set ODU_RUNNER_FLAKE "${selfFlake}"''} \
+      ${pkgs.lib.optionalString (agentSource != null) ''--set ${agentFlakeRefEnv} "${agentSource}"''} \
       --prefix PATH : ${pkgs.lib.makeBinPath [
         pkgs.bun
         pkgs.git
@@ -277,4 +316,9 @@ let
 in
 {
   inherit odu odu-runner base web-ui;
+  # The tree a remote host resolves the lane runner from, with the
+  # `binary-cache.json` sidecar and `commit-hash` beside it. The `odu` wrapper
+  # bakes this same derivation; `nix-cache.yml`'s `publish-closure` step
+  # publishes its builds from it.
+  agent-flake-source = agentSource;
 }

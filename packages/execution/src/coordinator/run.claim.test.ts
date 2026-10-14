@@ -86,20 +86,20 @@ function fixture(): string {
 
   const prevCwd = process.cwd();
   const prevHosts = process.env.ODU_HOSTS;
-  const prevFlake = process.env.ODU_RUNNER_FLAKE;
+  const prevSource = process.env.SURFACE_AGENT_FLAKE_REF;
   process.chdir(dir);
   process.env.ODU_HOSTS = join(dir, "hosts.json");
-  // Never resolved — `resolveRunnerFlake` only has to not throw, because the
-  // injected claim is what would have used it.
-  process.env.ODU_RUNNER_FLAKE = "git+file:///nonexistent";
+  // Never resolved — `requireBakedRunnerSource` only has to not throw, because
+  // the injected claim is what would have used it.
+  process.env.SURFACE_AGENT_FLAKE_REF = "path:/nonexistent";
   open.push({
     dir,
     restore: () => {
       process.chdir(prevCwd);
       if (prevHosts === undefined) delete process.env.ODU_HOSTS;
       else process.env.ODU_HOSTS = prevHosts;
-      if (prevFlake === undefined) delete process.env.ODU_RUNNER_FLAKE;
-      else process.env.ODU_RUNNER_FLAKE = prevFlake;
+      if (prevSource === undefined) delete process.env.SURFACE_AGENT_FLAKE_REF;
+      else process.env.SURFACE_AGENT_FLAKE_REF = prevSource;
     },
   });
   return dir;

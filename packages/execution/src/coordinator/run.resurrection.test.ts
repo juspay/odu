@@ -129,15 +129,13 @@ function fixture(): string {
   git("remote", "add", "origin", "file:///nonexistent/origin.git");
 
   const prevCwd = process.cwd();
-  // Never resolved: the coordinator builds a runner resolver per platform, and
-  // that construction refuses a cache-blind binary — but nothing ever calls the
-  // resolver, because the lane that would is injected.
+  // Never dialled: the coordinator refuses a wrapper that baked no agent source
+  // (a MISBUILT PACKAGE), so the suite has to supply one — but nothing ever
+  // resolves from it, because the lane that would is injected.
   const env: Record<string, string> = {
     ODU_HOSTS: join(dir, "hosts.json"),
     ODU_STATE_DIR: join(dir, ".ci", "state"),
-    ODU_RUNNER_FLAKE: "git+file:///nonexistent",
-    ODU_AGENT_SUBSTITUTERS: "https://cache.invalid",
-    ODU_AGENT_TRUSTED_PUBLIC_KEYS: "cache.invalid:0000000000",
+    SURFACE_AGENT_FLAKE_REF: "path:/nonexistent",
   };
   const previous = new Map(
     Object.keys(env).map((key) => [key, process.env[key]] as const),

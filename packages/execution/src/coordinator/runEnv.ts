@@ -96,7 +96,7 @@ export interface PrepareVenuesOpts {
   pools: ResolvedPools;
   identity: LeaseIdentity;
   onLine: (msg: string, platform: string) => void;
-  resolveDrvPath: (platform: string) => ResolveRunnerDrv;
+  resolveDrvPath: ResolveRunnerDrv;
   /** Injectable because optional capacity otherwise dials ssh. */
   leaseBurst?: typeof leaseBurstSlots;
 }
@@ -116,7 +116,7 @@ export interface ClaimVenuesOpts {
   noWait: boolean;
   runLabel: string;
   onLine: (msg: string, platform: string) => void;
-  resolveDrvPath: (platform: string) => ResolveRunnerDrv;
+  resolveDrvPath: ResolveRunnerDrv;
   /** Injected by the unit test in place of a real ssh claim. */
   claim?: LeaseLanesOpts["claim"];
 }
@@ -282,7 +282,7 @@ export async function prepareVenues(
           : { exclude: new Set([hostSlotKey(primaryHost, primary.slot ?? 0)]) }),
         occupiedHosts: new Set([primaryHost]),
         onLine: (line) => opts.onLine(line, platform),
-        resolveDrvPath: opts.resolveDrvPath(platform),
+        resolveDrvPath: opts.resolveDrvPath,
       });
       return {
         platform,

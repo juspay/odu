@@ -33,8 +33,8 @@ import {
   upsertPlatformLease,
 } from "@odu/execution/coordinator/leaseRecord";
 import {
-  resolveRunnerFlake,
-  runnerDrvResolver,
+  laneRunnerDrvPath,
+  requireBakedRunnerSource,
 } from "@odu/execution/coordinator/runnerFlake";
 import { oduSelfArgv } from "@odu/execution/coordinator/spawn";
 import type {
@@ -383,7 +383,9 @@ export async function leaseHoldCommand(opts: {
     return 1;
   }
 
-  const runnerFlake = resolveRunnerFlake(process.env);
+  // Refuse a misbuilt binary (no baked agent source) before the pool claim
+  // dials any host.
+  requireBakedRunnerSource();
   const pid = process.pid;
 
   upsertPlatformLease(repoRoot, platform, {
@@ -405,7 +407,7 @@ export async function leaseHoldCommand(opts: {
         run: `lease-hold:${pid}`,
       },
       noWait,
-      resolveDrvPath: runnerDrvResolver(runnerFlake, platform),
+      resolveDrvPath: laneRunnerDrvPath,
       onLine: (msg) => {
         log(msg);
         // Keep waiting state visible while queueing.

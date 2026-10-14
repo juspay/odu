@@ -18,6 +18,8 @@ const log = (msg: string): void => {
   process.stderr.write(`${msg}\n`);
 };
 
+const USAGE = "usage: odu-runner --stdio   (spawned by the odu coordinator)";
+
 /** Set once the runner exists so the fatal-error exit below can reap recipe
  *  process groups too — they are `detached`, so an unswept exit orphans them. */
 let disposeRunner: (() => void) | null = null;
@@ -27,10 +29,22 @@ async function main(): Promise<void> {
     args: process.argv.slice(2),
     options: {
       stdio: { type: "boolean" },
+      // `--help` is the ONE invocation that reports what this binary is and
+      // exits 0. It exists for the publisher's smoke step (nix-cache.yml →
+      // kolu's `publish-closure` action), which runs a program out of each
+      // rewritten closure to prove the rewrite still execs, and does so with
+      // stdin OPEN: `--stdio` would serve until the pipe closed, and it is the
+      // runner's job to prove it STARTS, not to hang. Loading the whole module
+      // graph and exiting is exactly that proof.
+      help: { type: "boolean" },
     },
   });
+  if (values.help === true) {
+    log(USAGE);
+    process.exit(0);
+  }
   if (values.stdio !== true) {
-    log("usage: odu-runner --stdio   (spawned by the odu coordinator)");
+    log(USAGE);
     process.exit(1);
   }
 

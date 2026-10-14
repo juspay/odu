@@ -48,7 +48,7 @@
           };
         in
         {
-          inherit (odu) odu odu-runner web-ui;
+          inherit (odu) odu odu-runner web-ui agent-flake-source;
           default = odu.odu;
           # bun2nix CLI — `nix run .#bun2nix -- -l bun.lock -o bun.nix`
           # regenerates the lockfile-derived nix expression.

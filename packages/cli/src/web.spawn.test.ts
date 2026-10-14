@@ -67,14 +67,14 @@ describe("the daemon's environment", () => {
       ODU_SELF: SELF,
       ODU_HOSTS: "/hosts.json",
       ODU_WEB_ORIGIN: "http://127.0.0.1:18441",
-      ODU_RUNNER_FLAKE: "github:juspay/odu",
+      SURFACE_AGENT_FLAKE_REF: "/nix/store/abc-odu-agent-flake-source",
     });
     expect(env).toEqual({
       ODU_STATE_DIR: "/state",
       ODU_SELF: SELF,
       ODU_HOSTS: "/hosts.json",
       ODU_WEB_ORIGIN: "http://127.0.0.1:18441",
-      ODU_RUNNER_FLAKE: "github:juspay/odu",
+      SURFACE_AGENT_FLAKE_REF: "/nix/store/abc-odu-agent-flake-source",
     });
   });
 
@@ -91,6 +91,9 @@ describe("the daemon's environment", () => {
       NIX_SSL_CERT_FILE: "/etc/ssl/certs/ca-bundle.crt",
       LOCALE_ARCHIVE: "/nix/store/l/lib/locale/locale-archive",
       XDG_RUNTIME_DIR: "/run/user/1000",
+      // The lane runner is resolved from this baked source; a coordinator that
+      // cannot see it is a coordinator that cannot provision a lane.
+      SURFACE_AGENT_FLAKE_REF: "/nix/store/abc-odu-agent-flake-source",
     });
     for (const key of [
       "HOME",
@@ -100,6 +103,7 @@ describe("the daemon's environment", () => {
       "NIX_SSL_CERT_FILE",
       "LOCALE_ARCHIVE",
       "XDG_RUNTIME_DIR",
+      "SURFACE_AGENT_FLAKE_REF",
     ]) {
       expect(env[key]).toBeDefined();
     }

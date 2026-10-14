@@ -38,20 +38,15 @@ const trash: string[] = [];
 const strays: ChildProcess[] = [];
 const HOSTS_WAS = process.env.ODU_HOSTS;
 const BUILD_WAS = {
-  ODU_RUNNER_FLAKE: process.env.ODU_RUNNER_FLAKE,
-  ODU_AGENT_SUBSTITUTERS: process.env.ODU_AGENT_SUBSTITUTERS,
-  ODU_AGENT_TRUSTED_PUBLIC_KEYS: process.env.ODU_AGENT_TRUSTED_PUBLIC_KEYS,
+  SURFACE_AGENT_FLAKE_REF: process.env.SURFACE_AGENT_FLAKE_REF,
 };
 
-// The probe builds a runner resolver per venue before it knows the venue is
-// local, and that resolver refuses an unset flake or binary cache as a MISBUILT
-// PACKAGE rather than a mode. A real `odu` carries all three baked onto its
-// wrapper; a bun test process does not, so the suite supplies them. The flake
+// The probe refuses a coordinator whose wrapper baked no agent source as a
+// MISBUILT PACKAGE rather than a mode. A real `odu` carries one baked onto its
+// wrapper; a bun test process does not, so the suite supplies one. The source
 // deliberately does not exist: nothing below is meant to provision, and a
 // pointer that resolves would let a slip reach the network.
-process.env.ODU_RUNNER_FLAKE = "path:/nonexistent#odu-runner";
-process.env.ODU_AGENT_SUBSTITUTERS = "https://cache.invalid";
-process.env.ODU_AGENT_TRUSTED_PUBLIC_KEYS = "cache.invalid-1:AAAA";
+process.env.SURFACE_AGENT_FLAKE_REF = "path:/nonexistent";
 
 afterEach(() => {
   for (const child of strays.splice(0)) child.kill("SIGKILL");
