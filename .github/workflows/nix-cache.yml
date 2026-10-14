@@ -122,34 +122,18 @@ jobs:
         run: |
           echo "nixpkgs=$(jq -r .pins.nixpkgs.url npins/sources.json)" >> "$GITHUB_OUTPUT"
 
-      # KOLU'S PUBLISHER, FETCHED WITH GIT — not `uses: juspay/kolu/…@<pin>`.
-      #
-      # A remote action is downloaded as the repository ARCHIVE, and kolu's
-      # `.gitattributes` carries `/.github export-ignore` (it trims the monorepo
-      # its own flake inputs unpack). So the archive has no `.github`, and
-      # `uses: juspay/kolu/.github/actions/publish-closure@<pin>` fails at job
-      # setup with "Can't find 'action.yml'" — before a single step runs. kolu's
-      # own CI never meets this: it consumes the action through a local path.
-      #
-      # A `git` checkout is not an archive, so this is the same action, at the
-      # same pin, with one implementation and no copy to drift. Replace it with
-      # the direct `uses:` when kolu's archive carries `.github`.
-      - name: Check out kolu's publisher at the pinned revision
-        uses: actions/checkout@v7
-        with:
-          repository: juspay/kolu
-          ref: 3173f7f539192549038945335ee97a8b5acfaa38
-          # Untracked, so it is outside the flake source odu's `.#agent-flake-source`
-          # copies — verified: `self.rev` survives it and the tree is unchanged.
-          path: .kolu-publisher
-
       # odu's declaration is `.#agent-flake-source`'s own sidecar + commit-hash
       # (the same derivation the `odu` wrapper bakes), so the action reads them
       # rather than being told. `odu-runner` is the ONE attr a remote resolves.
       # The smoke runs out of the REWRITTEN closure: `--help` loads the runner's
       # whole module graph and exits 0 without needing stdin, which `--stdio`
       # would (it serves until the pipe closes).
-      - uses: ./.kolu-publisher/.github/actions/publish-closure
+      #
+      # The pin is kolu's own `b147690`, whose `.gitattributes` keeps
+      # `.github/actions` in the archive a remote `uses:` is downloaded from —
+      # at the earlier pin it was export-ignored, and this step died at job
+      # setup with "Can't find 'action.yml'".
+      - uses: juspay/kolu/.github/actions/publish-closure@b1476908938f4fc5683e8b99404c36f01b438ab4
         with:
           source: .#agent-flake-source
           installables: odu-runner
