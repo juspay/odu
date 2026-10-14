@@ -14,9 +14,10 @@
  * real here).
  */
 
-import { existsSync } from "node:fs";
-import { Socket } from "node:net";
-import { basename, dirname } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { createServer, Socket } from "node:net";
+import { tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
 import { describe, expect, it } from "bun:test";
 import { DEFAULT_SERVICE_ORIGIN, SERVICE_APP } from "./endpoint";
 import { dialServiceSocket, serviceSocketPath, webAppNamespace } from "./socket";
@@ -122,6 +123,32 @@ describe("dialServiceSocket", () => {
         withFailingConnect(code, () => dialServiceSocket(UNUSED_ORIGIN)),
         `${code ?? "no code"} is a live problem, not absence`,
       ).rejects.toThrow();
+    }
+  });
+
+  it("refuses a daemon that accepts the socket and never publishes its cell", async () => {
+    // The wedge: `connect(2)` succeeds, so this is not absence, and nothing is
+    // ever written back, so the handshake has nothing to read. Unbounded, the
+    // dial's three-way answer simply never arrives (juspay/odu#113) — the
+    // caller waits on a promise nothing will settle.
+    const home = mkdtempSync(join(tmpdir(), "odu-socket-test-"));
+    const realHome = process.env.HOME;
+    process.env.HOME = home;
+    const socketPath = serviceSocketPath(UNUSED_ORIGIN);
+    mkdirSync(dirname(socketPath), { recursive: true });
+    const server = createServer(() => {
+      /* accept, and say nothing at all */
+    });
+    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+    try {
+      await expect(
+        dialServiceSocket(UNUSED_ORIGIN, { handshakeMs: 100 }),
+      ).rejects.toThrow(/did not answer the handshake/);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      if (realHome === undefined) delete process.env.HOME;
+      else process.env.HOME = realHome;
+      rmSync(home, { recursive: true, force: true });
     }
   });
 });

@@ -67,7 +67,9 @@ import {
  * catalog at the moment it actually happened — which is the whole point of
  * importing it rather than appending it.
  */
-export function importedRunId(record: RunRecord): string {
+export function importedRunId(
+  record: Pick<RunRecord, "repo" | "sha" | "seq" | "startedAt">,
+): string {
   const ts = Math.floor(record.startedAt).toString(36).padStart(8, "0");
   // A stable tail from the record's own identity: same commit + same ordinal =
   // same id, different ones never collide. Hashed to base36 so the id keeps the

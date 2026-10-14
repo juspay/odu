@@ -185,6 +185,11 @@ export function Board(props: {
   /** One frame per checkout on the board, newest checkout first — the service's
    *  own collapse, which this view paints rather than performs. */
   checkouts: CheckoutFrame[];
+  /** The checkouts whose reading FAILED, with the reason. A board that showed
+   *  only the ones it could read would answer "what is my CI doing here" with
+   *  silence about the one checkout it could not answer for — while History
+   *  below still lists that checkout's runs. */
+  unreadable: { repoRoot: string; message: string }[];
   /** Every run, newest first. The History list, and nothing else: with the
    *  collapse off the wire, this is the only thing left that wants them. */
   rows: RunRow[];
@@ -278,6 +283,17 @@ export function Board(props: {
           would send somebody looking for a run that is right there under
           another filter. */}
       <div class="board-body">
+        {/* ABOVE the rows and outside every filter: this is not a run state
+            that a bucket could be about, it is the board failing to read a
+            checkout, and the person it concerns is whoever is looking now. */}
+        <For each={props.unreadable}>
+          {(checkout) => (
+            <p class="fault" role="alert">
+              {projectOf(checkout.repoRoot)} could not be read —{" "}
+              {checkout.message}
+            </p>
+          )}
+        </For>
         <Show when={props.loading}>
           <p class="empty">Reading the catalog…</p>
         </Show>

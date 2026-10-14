@@ -85,6 +85,7 @@ import {
   readVerdict,
   type RunHandle,
 } from "@odu/run-history/store";
+import { newestFirst } from "@odu/service-client/board";
 import { formatLogKey } from "@odu/service-client/logKey";
 import type {
   RunBoardState,
@@ -517,8 +518,19 @@ type Slot = { kind: "run"; entry: Entry } | { kind: "torn"; stamp: string };
 
 export function createRegistry(opts: RegistryOptions = {}): RunRegistry {
   const slots = new Map<string, Slot>();
-  /** Insertion order is the catalog's order (newest first), refreshed whole on
-   *  every pass — so a new run appears at the top rather than at the end. */
+  /**
+   * Every projected run, NEWEST FIRST — the order every reader of this
+   * registry sees, refreshed whole on every pass so a new run appears at the
+   * top rather than at the end.
+   *
+   * Ordered by the ROWS and not by the catalog's directory listing. An id
+   * encodes the instant its run started, but not at one width: a minted id
+   * pads its base36 timestamp to nine digits and an IMPORTED one to eight
+   * (`mintRunId` vs `importedRunId`), so a lexicographic listing sorts every
+   * imported run above every minted one and "newest first" quietly becomes
+   * "imported first". A board reading `rows[0]` as the run a checkout stands
+   * for would then name an ancient import as what is happening now.
+   */
   let order: string[] = [];
 
   const entryOf = (runId: string): Entry | undefined => {
@@ -567,7 +579,13 @@ export function createRegistry(opts: RegistryOptions = {}): RunRegistry {
       if (slot.kind === "run") removed.push(runId);
       slots.delete(runId);
     }
-    order = nextOrder.filter((id) => entryOf(id) !== undefined);
+    // `newestFirst` and not a local sort: a board's rows and the catalog they
+    // came from must agree on which run is the newest, down to the tiebreak.
+    order = newestFirst(
+      nextOrder
+        .map((id) => entryOf(id)?.row)
+        .filter((row): row is RunRow => row !== undefined),
+    ).map((row) => row.runId);
     return { upserted, removed };
   };
 

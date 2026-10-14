@@ -69,6 +69,8 @@ import {
 } from "@odu/service-client/dial";
 import {
   admitService,
+  handshakeTimedOut,
+  SERVICE_HANDSHAKE_MS,
   type ServiceBuild,
   type ServiceCell,
 } from "@odu/service-client/surface";
@@ -160,13 +162,6 @@ export function contractVerdict(
   return verdict.kind === "adopt" ? null : verdict.message;
 }
 
-/** How long the handshake waits for the cell. One in-memory snapshot, so the
- *  same reasoning as serviceFace's patience applies: far beyond any healthy
- *  answer, short enough that a person learns the daemon is wedged while still
- *  looking. UNBOUNDED here hangs every thin client before it can reach the
- *  patience notice — the same #113 failure mode, one layer earlier. */
-const HANDSHAKE_MS = 10_000;
-
 /**
  * ADOPT OR REFUSE, over a connection already open. The framework's handshake
  * rule — read the contract version BEFORE invoking anything else — applied
@@ -180,7 +175,7 @@ export async function adoptOrRefuse<C extends Pick<ServiceConnection, "client" |
   origin: string,
   opts: { handshakeMs?: number } = {},
 ): Promise<C> {
-  const handshakeMs = opts.handshakeMs ?? HANDSHAKE_MS;
+  const handshakeMs = opts.handshakeMs ?? SERVICE_HANDSHAKE_MS;
   let cell: ServiceCell | undefined;
   try {
     cell = await firstFrame(
@@ -191,9 +186,7 @@ export async function adoptOrRefuse<C extends Pick<ServiceConnection, "client" |
     await connection.dispose();
     throw new Error(
       err instanceof NoAnswerWithin
-        ? `odu: the service on ${origin} accepted the connection but did not ` +
-            `answer the handshake within ${handshakeMs / 1000}s — it may be ` +
-            "wedged; `odu web --upgrade` will drain and replace it"
+        ? `odu: ${handshakeTimedOut(origin, handshakeMs)}`
         : `odu: something answered on ${origin} but published no service cell ` +
             `(${errorMessage(err)}) — not an odu service this build can use`,
     );

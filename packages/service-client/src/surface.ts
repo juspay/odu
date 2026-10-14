@@ -339,6 +339,33 @@ export function admitService(
   };
 }
 
+/**
+ * How long a handshake waits for the cell, EVERYWHERE one is read.
+ *
+ * One in-memory snapshot, so the number is far beyond any healthy answer and
+ * short enough that a person learns the daemon is wedged while still looking.
+ * Unbounded is the failure this constant exists against: a daemon that accepts
+ * the connection and never publishes (juspay/odu#113's wedged refresh loop)
+ * leaves every caller waiting on a promise that has no reason to settle, and
+ * the three-way answer the dial is written to give — absent, refused,
+ * connected — simply never arrives.
+ */
+export const SERVICE_HANDSHAKE_MS = 10_000;
+
+/** The sentence for a daemon that accepted the connection and then said
+ *  nothing within its handshake deadline. Beside {@link admitService} because
+ *  it is the same kind of fact — a verdict on a daemon that answered the
+ *  socket — and because a face must not have to invent its own words for it:
+ *  wedged reads the same whether a thin client, the launcher or a local socket
+ *  dial met it. */
+export function handshakeTimedOut(where: string, deadlineMs: number): string {
+  return (
+    `the odu service at ${where} accepted the connection but did not answer ` +
+    `the handshake within ${deadlineMs / 1000}s — it may be wedged; ` +
+    "`odu web --upgrade` will drain and replace it."
+  );
+}
+
 // ── the board ───────────────────────────────────────────────────────────────
 
 /**
