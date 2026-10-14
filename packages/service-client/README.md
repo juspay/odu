@@ -39,6 +39,50 @@ serving rather than turning a missing daemon into an error.
 That refusal is exactly why the service's platform half — the serving, the
 catalog, the coordinator — lives one wall up, in `@odu/service`.
 
+## The board readings — `./board`
+
+`web-ui` was the board, and the readings a board performs on a row lived inside
+it: which runs belong to one checkout, which are moving, which are failing, and
+what a run is called. A board is not one face's idea — a terminal dashboard or a
+downstream panel is the same board — so they live here now, next to the row
+shape they read, and `web-ui` imports them back.
+
+The one worth naming is `runStatus`: a run's board STATE and its OUTCOME each
+had a column in the browser, and each was empty exactly where the other was
+full, so the cell holds whichever IS the answer — the verdict once there is one,
+and where the run has got to until then. That precedence is load-bearing: a run
+torn down early settles with `passed: false` and `outcome: "incomplete"`, and a
+reader that skipped the outcome would call it `failed` and send somebody looking
+for a test that broke.
+
+**What a run covered**, and what a row calls it. `scopeSuffix` is the qualifier a
+caller appends after a run it has already named — `ci::unit`, `under ci::install`,
+`no deps` — or `null` when the run covered the whole pipeline, where a qualifier
+says nothing and an empty string would render a stray separator. `scopeLabel` is
+the same scope as a board CELL, where an empty selector IS the whole pipeline and
+has to say so: `""` there would read as a run that tested nothing. Two renderings
+of one scope, deliberately different, composed from one spelling of its parts.
+
+A selection is not a pipeline — the reason a scope rides the row at all. Three
+lanes under `selectors: ["ci::unit"]` say nothing about the rest of the DAG, and a
+`--root NAMEPATH` run is the same kind of subset, which is why the reading names
+both.
+
+## The run address — `./routes`
+
+A run, and one attempt's output within it, are LINKABLE: a person pastes
+`#/run/<runId>` or `#/run/<logKey>` into a message and whoever opens it is looking
+at the same failure rather than at a board they then have to navigate. That makes
+the address a fact about the RUN rather than about one page — the web face is
+where it is opened, but it is minted by whoever holds the run (an editor, a
+terminal, another app's panel), and a second spelling of `#/run/` at each of those
+callers is how one of them comes to mint an address the page does not answer.
+
+So both halves live here, beside `./logKey`, whose token is the second half of the
+address: `runHash` · `logHash` mint, `parseRunHash` reads back. The log form takes
+the key verbatim, so the address in a URL bar and the address an agent echoes into
+`log_read` are one string.
+
 ## What the surface is about
 
 The coordinator's own surface (`@odu/run-client/surface`) is about ONE run: it
