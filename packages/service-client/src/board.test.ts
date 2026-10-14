@@ -19,12 +19,11 @@
 import { describe, expect, it } from "bun:test";
 import {
   boardTally,
-  byCheckout,
+  checkoutRoots,
   isActive,
   isFailing,
   newestFirst,
   runStatus,
-  runsForCheckout,
   scopeLabel,
   scopeSuffix,
 } from "./board";
@@ -171,35 +170,20 @@ describe("the board, narrowed", () => {
     expect(newestFirst(rows).map((r) => r.runId)).toEqual(["c", "a", "b"]);
   });
 
-  it("keeps one checkout's runs, and only that checkout's", () => {
-    const rows = [
+  it("names the checkouts on the board, once each, in the rows' order", () => {
+    const rows = newestFirst([
       row({ runId: "here-old", createdAt: 1 }),
       row({ runId: "elsewhere", createdAt: 2, repoRoot: "/home/dev/other" }),
       row({ runId: "here-new", createdAt: 3 }),
-    ];
-    expect(
-      runsForCheckout(rows, "/home/dev/kolu").map((r) => r.runId),
-    ).toEqual(["here-new", "here-old"]);
-  });
-
-  it("collapses a checkout to its newest run and a count", () => {
-    const groups = byCheckout([
-      row({ runId: "old", createdAt: 1 }),
-      row({ runId: "new", createdAt: 2 }),
-      row({ runId: "other", createdAt: 3, repoRoot: "/home/dev/other" }),
     ]);
-    expect(groups.get("/home/dev/kolu")).toEqual({
-      latest: row({ runId: "new", createdAt: 2 }),
-      runs: 2,
-    });
-    expect(groups.size).toBe(2);
+    expect(checkoutRoots(rows)).toEqual(["/home/dev/kolu", "/home/dev/other"]);
   });
 
-  it("counts the board's two buckets off the newest row of each checkout", () => {
-    // The old row of a checkout is not what the board shows, so it is not what
-    // the summary counts either.
+  it("counts the board's two buckets off the run each checkout stands for", () => {
+    // What the board SHOWS is what the summary counts: it is handed the runs
+    // the checkouts stand for, so an older failing run of a checkout that is
+    // green now cannot reach it.
     const tally = boardTally([
-      row({ runId: "old-fail", createdAt: 1, unresolvedFailures: 3 }),
       row({ runId: "new-ok", createdAt: 2 }),
       row({
         runId: "moving",

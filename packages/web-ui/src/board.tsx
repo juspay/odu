@@ -13,34 +13,42 @@
  * `reportingDebt` are the two ways a run can be quietly wrong, and a board that
  * made you click to find out has not told you anything.
  *
- * By DEFAULT the board is one row per checkout — the latest run of each — and
- * everything else is behind the History toggle. A person with four checkouts
- * asks "what is my CI doing", and forty rows of superseded history is the same
- * question left unanswered; see `shown` for why that collapse happens before
- * the filters rather than after them.
+ * By DEFAULT the board is one row per checkout — the run each checkout STANDS
+ * FOR — and everything else is behind the History toggle. A person with four
+ * checkouts asks "what is my CI doing", and forty rows of superseded history is
+ * the same question left unanswered.
+ *
+ * The collapse itself is not here and is not the view's: `streams.checkout`
+ * answers "which run stands for this checkout, and how many are behind it" on
+ * the catalog's own clock, and this view paints what it is handed. What is left
+ * here is the narrowing a PERSON asked for — the bucket chips, the search box,
+ * History — applied to the run each checkout stands for.
  *
  * Nothing here computes a verdict. Every field is the service's own row; the
- * view collapses, sorts, filters and words it.
+ * view sorts, filters and words it.
  */
 
 import {
-  boardTally,
-  byCheckout,
   isActive,
   isFailing,
   runStatus,
-  type Checkout,
 } from "@odu/service-client/board";
 import { createMemo, createSignal, For, Index, Show, type JSX } from "solid-js";
 import { Button, CommitRef, Hint, Pill } from "./dom";
 import { ago, projectOf, scopeLabel } from "./format";
-import type { RunRow } from "./types";
+import type { CheckoutFrame, RunRow } from "./types";
 
 /** Re-exported so `./board` stays the one import path this app's own modules
  *  use: the readings themselves live in `@odu/service-client/board`, which is
  *  where a second face reads them from too. */
-export { boardTally, byCheckout, isActive, isFailing };
-export type { Checkout };
+export { isActive, isFailing };
+
+/** One painted row: the run it stands for, and how many runs it stands FOR.
+ *  A view shape — in History the two are one run and itself. */
+interface Standing {
+  latest: RunRow;
+  runs: number;
+}
 
 /** What a board can be narrowed to. Deliberately three coarse buckets rather
  *  than a query language: the question a person actually asks of a CI board is
@@ -168,19 +176,24 @@ const [query, setQuery] = createSignal("");
 /**
  * The board.
  *
- * `rows` and `now` are plain values, and they stay live because the compiler
- * turns a dynamic JSX prop into a getter on this component's `props` — see
- * `./dom`'s header. So the ages tick without the rows moving, and a catalog
- * update repaints the cells it changed rather than the list.
+ * `checkouts`, `rows` and `now` are plain values, and they stay live because
+ * the compiler turns a dynamic JSX prop into a getter on this component's
+ * `props` — see `./dom`'s header. So the ages tick without the rows moving, and
+ * a catalog update repaints the cells it changed rather than the list.
  */
 export function Board(props: {
+  /** One frame per checkout on the board, newest checkout first — the service's
+   *  own collapse, which this view paints rather than performs. */
+  checkouts: CheckoutFrame[];
+  /** Every run, newest first. The History list, and nothing else: with the
+   *  collapse off the wire, this is the only thing left that wants them. */
   rows: RunRow[];
   now: number;
   loading: boolean;
   onOpen: (runId: string) => void;
   onCreate: () => void;
 }): JSX.Element {
-  const shown = createMemo<Checkout[]>(() => {
+  const shown = createMemo<Standing[]>(() => {
     const needle = query().trim().toLowerCase();
     const admits = (run: RunRow): boolean =>
       matches(run, filter()) && searched(run, needle);
@@ -191,26 +204,22 @@ export function Board(props: {
         .filter(admits)
         .map((run) => ({ latest: run, runs: 1 }));
     }
-    // THE COLLAPSE COMES FIRST, before the bucket filter and before the search,
-    // and the order is the whole meaning of "needs attention". That bucket is
-    // about what is CURRENTLY wrong with a checkout, and a superseded run's red
-    // is history: filter first and a checkout you fixed an hour ago sits in the
-    // attention bucket forever, because the run that failed is still in the
-    // catalog. Collapse first and the bucket asks the question a person meant.
-    const all = byCheckout(props.rows);
-    // The COUNT, though, is over the rows the filter and the search admit,
-    // because "N earlier" is a promise about what pressing History would
-    // reveal — counting rows the filter excludes makes it a number the button
-    // then contradicts.
-    //
-    // A checkout is shown when the run the collapse kept is admitted, and that
-    // run is then also the newest of the admitted subset — so the two groupings
-    // agree on it by construction, and this identity IS the membership test.
-    // No count to look up, and so nothing to coalesce for a case that cannot
-    // happen.
-    return [...byCheckout(props.rows.filter(admits))]
-      .filter(([repoRoot, group]) => group.latest === all.get(repoRoot)?.latest)
-      .map(([, group]) => group);
+    // THE NARROWING IS ASKED OF THE RUN THE CHECKOUT STANDS FOR, and that is
+    // the whole meaning of "needs attention": the bucket is about what is
+    // CURRENTLY wrong with a checkout, and a superseded run's red is history.
+    // Admitting a checkout because some older run of it failed would leave one
+    // you fixed an hour ago in the attention bucket forever.
+    const out: Standing[] = [];
+    for (const checkout of props.checkouts) {
+      const latest = checkout.latest?.run;
+      // A checkout whose every run aged out of the catalog has nothing to
+      // stand for — no row, rather than an empty one.
+      if (latest === undefined || !admits(latest)) continue;
+      // The count is the catalog's own total, so "N earlier" is a promise
+      // History keeps.
+      out.push({ latest, runs: checkout.total });
+    }
+    return out;
   });
   return (
     <section class="board">

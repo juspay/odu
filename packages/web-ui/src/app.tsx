@@ -36,6 +36,7 @@ import {
   createEffect,
   createMemo,
   createSignal,
+  mapArray,
   Match,
   on,
   onCleanup,
@@ -43,8 +44,12 @@ import {
   Switch,
   type JSX,
 } from "solid-js";
-import { newestFirst } from "@odu/service-client/board";
-import { Board, boardTally } from "./board";
+import {
+  boardTally,
+  checkoutRoots,
+  newestFirst,
+} from "@odu/service-client/board";
+import { Board } from "./board";
 import { Create, type CreateState, type StartForm } from "./create";
 import {
   type ControlState,
@@ -54,7 +59,14 @@ import {
 } from "./detail";
 import { Button } from "./dom";
 import { faviconSvg, wireText } from "./format";
-import type { LogPage, LogTail, NodesFrame, RunNode, RunRow } from "./types";
+import type {
+  CheckoutFrame,
+  LogPage,
+  LogTail,
+  NodesFrame,
+  RunNode,
+  RunRow,
+} from "./types";
 
 type ServiceSpec = (typeof oduServiceSurface)["spec"];
 type Client = SurfaceClient<ServiceSpec>;
@@ -188,6 +200,42 @@ export function App(props: {
     return newestFirst(out);
   });
 
+  // ── one subscription per checkout ──
+  //
+  // The board's rows are checkouts, and what a checkout IS — the run it stands
+  // for, that run's work, how many ran before — is `streams.checkout`'s answer,
+  // folded by the service on the catalog's own clock. This app addresses them
+  // and paints the answers; it does not re-derive any of it from `rows`.
+  //
+  // `mapArray` keys the subscriptions by checkout path, so a new checkout opens
+  // ONE stream and the others are left alone — an `Index`-shaped re-subscribe
+  // on every catalog tick would reopen every one of them four times a second.
+  const checkoutSubs = createMemo(
+    mapArray(
+      () => checkoutRoots(rows()),
+      (repoRoot) => props.client.streams.checkout.use(() => ({ repoRoot })),
+    ),
+  );
+  const checkouts = createMemo<CheckoutFrame[]>(() => {
+    const out: CheckoutFrame[] = [];
+    for (const sub of checkoutSubs()) {
+      const frame = sub();
+      // A checkout whose first frame has not landed yet is not an empty
+      // checkout, so it is absent from the list rather than an empty row.
+      if (frame !== undefined) out.push(frame);
+    }
+    return out;
+  });
+  /** The run each checkout STANDS FOR — what the board shows, and so what the
+   *  tab counts. */
+  const standingFor = createMemo<RunRow[]>(() => {
+    const out: RunRow[] = [];
+    for (const checkout of checkouts()) {
+      if (checkout.latest !== null) out.push(checkout.latest.run);
+    }
+    return out;
+  });
+
   /**
    * THE TAB IS THE AMBIENT MONITOR.
    *
@@ -197,8 +245,8 @@ export function App(props: {
    * they carry the one fact worth interrupting somebody for: is anything broken,
    * and is anything still moving.
    *
-   * Counted over the SAME rows AND through the same predicates the board uses —
-   * `boardTally`, asked of `./board` rather than re-derived here — because a tab
+   * Counted over the runs the board SHOWS — each checkout's own latest, as the
+   * service reports it — and through the same predicates, because a tab
    * claiming three failures over a board showing one is a tab nobody trusts
    * twice, and sharing only the rows left the predicates free to drift.
    *
@@ -217,7 +265,7 @@ export function App(props: {
         null);
   createEffect(() => {
     if (typeof document === "undefined") return;
-    const { failing, active } = boardTally(rows());
+    const { failing, active } = boardTally(standingFor());
     // Broken outranks busy: a run still going is worth a glance, a failure is
     // worth coming back for. And it is a WORD as well as a glyph, because a
     // title read aloud is the only version of this some people get.
@@ -702,6 +750,7 @@ export function App(props: {
       <Switch>
         <Match when={route().at === "board"}>
           <Board
+            checkouts={checkouts()}
             rows={rows()}
             now={now()}
             // The framework's own pending fact: `connecting` with nothing yet is

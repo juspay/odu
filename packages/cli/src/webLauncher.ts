@@ -32,7 +32,7 @@
  * and is refused with the upgrade sentence. `buildId` is MATCH-ONLY — there is
  * no such thing as a newer build — so a differing one is reported and never
  * acted on unless a person asks for an upgrade. That asymmetry is the
- * framework's (`contractIsCompatible` has no `buildIsNewer` beside it) and it
+ * framework's (`admitService` has no `buildIsNewer` beside it) and it
  * is right: versions are a protocol claim, builds are an identity.
  *
  * ## The upgrade is capture → drain → reattach
@@ -51,7 +51,6 @@ import { connect } from "node:net";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import {
-  contractIsCompatible,
   controlCoreSurface,
   type DaemonHomePaths,
   gateIdentity,
@@ -69,7 +68,7 @@ import {
   type ServiceConnection,
 } from "@odu/service-client/dial";
 import {
-  SERVICE_CONTRACT_VERSION,
+  admitService,
   type ServiceBuild,
   type ServiceCell,
 } from "@odu/service-client/surface";
@@ -149,18 +148,16 @@ export async function readService(origin: string): Promise<ServiceCell | null> {
 }
 
 /** The refusal a running service's cell earns, or `null` when this build can
- *  speak to it. ONE decision and ONE sentence, so no adoption site can answer
- *  differently: `contractIsCompatible`'s argument order flips internally, so a
- *  transposed call at a second site would be a silent inversion, and putting
- *  the predicate next to its sentence is what keeps them in step. */
-export function contractVerdict(cell: ServiceCell, origin: string): string | null {
-  const running = cell.identity.protocolVersion;
-  if (contractIsCompatible(SERVICE_CONTRACT_VERSION, running)) return null;
-  return (
-    `odu: the service on ${origin} speaks contract ${running}; this build ` +
-    `speaks ${SERVICE_CONTRACT_VERSION}. Run \`odu web --upgrade\` to drain it ` +
-    "and start this build."
-  );
+ *  speak to it — the surface's own {@link admitService} verdict, projected to
+ *  the shape this launcher branches on. The decision and the sentence live
+ *  with the contract version they are about, so the ws face and every local
+ *  face refuse the same daemon for the same reason, in the same words. */
+export function contractVerdict(
+  cell: ServiceCell,
+  origin: string,
+): string | null {
+  const verdict = admitService(cell, origin);
+  return verdict.kind === "adopt" ? null : verdict.message;
 }
 
 /** How long the handshake waits for the cell. One in-memory snapshot, so the

@@ -119,6 +119,19 @@ const SANCTIONED = new Map<string, string>([
       "runtime. The two are joined here rather than leaking `Effect` into every " +
       "branch of that decision.",
   ],
+  [
+    "packages/service-client/src/socket.ts",
+    "The LOCAL dial, which is Promise-shaped by contract — a link constructor " +
+      "every face awaits — and which now adopts or refuses the daemon it " +
+      "reached before handing the connection over. That handshake is one read " +
+      "of the `service` cell, an Effect, and running it HERE is what removes " +
+      "the comparison from every consumer: the alternative is a dial that " +
+      "answers with an unqualified link and N callers each running that same " +
+      "Effect and each deciding for itself what a skew means. It cannot route " +
+      "through `common/effectEdge.ts`: this package is browser-safe and " +
+      "depends on `@odu/run-client`, `@odu/run-history` and `effect` alone, so " +
+      "an edge in `@odu/execution` would point the dependency backwards.",
+  ],
 ]);
 
 const IDENT = "[A-Za-z_$][A-Za-z0-9_$]*";

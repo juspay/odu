@@ -17,9 +17,12 @@
  *   service.collections.logTails — one attempt's live tail, addressed by log key
  *   service.streams.nodes      — one run's DAG and environment: snapshot, then
  *                                updates
+ *   service.streams.checkout   — one checkout, whole: the run it stands for,
+ *                                that run's work, and what ran before
  *   service.run.start          — start a run, addressed by an explicit checkout
  *   service.run.wait           — bounded, resumable attention on one run
  *   service.run.read           — the same answer, without waiting
+ *   service.run.list           — the board, filtered, in one call
  *   service.run.retry          — live attempt or linked replay; odu decides which
  *   service.run.cancel         — explicit run / node / lane scope
  *   service.log.read           — one attempt's bytes, by offset — and, with
@@ -62,7 +65,11 @@
  * `null` and put a `null` where a key used to be missing.
  */
 
-import { defineSurface, type SurfaceTypes } from "@kolu/surface/define";
+import {
+  defineSurface,
+  isContractVersionCompatible,
+  type SurfaceTypes,
+} from "@kolu/surface/define";
 import { buildSurfaceFace } from "@kolu/surface/client";
 import type { SurfaceDispatch } from "@kolu/surface/link";
 import type { SurfaceClientOf } from "@kolu/surface/project";
@@ -98,7 +105,7 @@ export { STATUS_META, type StatusHue } from "@odu/run-client/surface";
  * still speakable by an older client, and refusing it would make every
  * additive change a flag day.
  */
-export const SERVICE_CONTRACT_VERSION = "1.4";
+export const SERVICE_CONTRACT_VERSION = "1.5";
 
 // ── refusals ────────────────────────────────────────────────────────────────
 
@@ -283,6 +290,54 @@ export const UNKNOWN_SERVICE: ServiceCell = {
   build: { oduVersion: "", commit: null, buildId: null, self: null },
   readiness: { state: "starting", since: 0, reconciled: 0 },
 };
+
+/** The verdict on a daemon that ANSWERED — whether this build can speak to it.
+ *
+ *  THE ONE COMPARISON. A daemon and the client that dialled it are routinely
+ *  different builds, so somebody has to decide whether the two can talk; the
+ *  decision is made here, once, and every face receives it as a VALUE. A
+ *  consumer that compared {@link SERVICE_CONTRACT_VERSION} against the cell
+ *  itself would be a second judge of compatibility — and the second judge is
+ *  the one that gets the direction of the comparison wrong, because "older
+ *  client, newer daemon" is fine and its mirror is not. */
+export type ServiceAdmission =
+  | { kind: "adopt"; identity: ServiceIdentity }
+  | {
+      kind: "refuse";
+      /** The contract the daemon publishes about itself. */
+      speaks: string;
+      /** The contract this build reads. */
+      expected: string;
+      /** The whole sentence, for a face that only has somewhere to print. */
+      message: string;
+    };
+
+/** Read a daemon's own greeting and say whether this build may adopt it.
+ *
+ *  The comparison is the framework's `major.minor` rule and never a string
+ *  equality: a daemon that only ADDED a member is still speakable by an older
+ *  reader, and refusing it would make every additive change a flag day. The
+ *  arguments are ordered REPORTED-then-EXPECTED, which is the direction that
+ *  makes "the daemon is ahead" an adoption and "the daemon is behind" a
+ *  refusal. */
+export function admitService(
+  cell: ServiceCell,
+  where: string,
+): ServiceAdmission {
+  const speaks = cell.identity.protocolVersion;
+  if (isContractVersionCompatible(speaks, SERVICE_CONTRACT_VERSION)) {
+    return { kind: "adopt", identity: cell.identity };
+  }
+  return {
+    kind: "refuse",
+    speaks,
+    expected: SERVICE_CONTRACT_VERSION,
+    message:
+      `the odu service at ${where} speaks contract ${speaks || "nothing"}; ` +
+      `this build reads ${SERVICE_CONTRACT_VERSION} — upgrade the daemon ` +
+      "(`odu web --upgrade`) or this build.",
+  };
+}
 
 // ── the board ───────────────────────────────────────────────────────────────
 
@@ -539,6 +594,75 @@ export const NodesFrameSchema = Schema.Struct({
   done: Schema.Boolean,
 });
 export type NodesFrame = typeof NodesFrameSchema.Type;
+
+// ── one checkout ────────────────────────────────────────────────────────────
+
+/** How many of a checkout's runs a {@link CheckoutFrameSchema} carries. The
+ *  head of the list is the run the checkout STANDS FOR; the rest is the short
+ *  history a reader scans without opening anything. A bound rather than the
+ *  whole catalog, because a checkout accumulates runs forever and a frame that
+ *  grew without limit would make an old repository the expensive one. */
+export const CHECKOUT_RECENT_RUNS = 5;
+
+/**
+ * A frame of `streams.checkout` — EVERYTHING ONE CHECKOUT IS DOING, as one
+ * whole picture.
+ *
+ * This is the question every board asks and no member answered: a checkout is
+ * what a person works in, and "what is my CI doing HERE" needs three facts
+ * that used to be assembled by whoever was asking — which of a checkout's runs
+ * stands for it, what that run's lanes are up to, and what ran before it. The
+ * assembly is the service's, for the reason the registry exists at all: it is
+ * a reading of the catalog on the catalog's own clock, and a consumer folding
+ * it is a consumer that must re-fold on every row delta AND re-open a nodes
+ * subscription every time the latest run swaps under it.
+ *
+ * Like {@link NodesFrameSchema}, every frame is SELF-CONTAINED — a full
+ * replacement, sent only when something actually moved — so a consumer needs
+ * no accumulator and a re-subscribe is a fresh snapshot rather than a delta
+ * appended to a stale one.
+ *
+ * `latest` is null for a checkout with no runs at all, which is the honest
+ * answer for the ordinary case of a repository nobody has run CI in — and the
+ * same answer {@link CHECKOUT_NONE} gives for a service that is not there.
+ */
+export const CheckoutFrameSchema = Schema.Struct({
+  /** The run this checkout stands for — its newest — and that run's work.
+   *  The nodes ride the SAME frame as the run they belong to, for the reason
+   *  `NodesFrameSchema` keeps its `env` on the frame: two subscriptions are two
+   *  readings of one moment, and the moment they straddle is a run swapping. */
+  latest: Schema.NullOr(
+    Schema.Struct({
+      run: RunRowSchema,
+      /** In the run's own scheduling order — the order a dashboard paints. */
+      nodes: Schema.Array(RunNodeSchema),
+    }),
+  ),
+  /** The checkout's runs, newest first, at most {@link CHECKOUT_RECENT_RUNS}
+   *  of them. Its head IS `latest.run`, so a face painting a list does not
+   *  special-case the first row. */
+  recent: Schema.Array(RunRowSchema),
+  /** How many runs this checkout has in the catalog — the whole count, not the
+   *  number that fit in `recent`. A board collapsing a checkout to one row says
+   *  how many it stands for, and a count cut off at the page size would be a
+   *  promise the History button then contradicts. */
+  total: Schema.Int,
+});
+export type CheckoutFrame = typeof CheckoutFrameSchema.Type;
+
+/** What a checkout looks like when there is NOTHING to say about it — no runs,
+ *  or no service to ask.
+ *
+ *  Named here, beside the frame, for the reason {@link UNKNOWN_SERVICE} is: a
+ *  consumer that has to draw "nothing" needs the shape of nothing to come from
+ *  the contract rather than from its own idea of a plausible zero. A relay that
+ *  holds this member open while its upstream is absent sends exactly this, so
+ *  a face clears rather than keeping the last live frame on screen. */
+export const CHECKOUT_NONE: CheckoutFrame = {
+  latest: null,
+  recent: [],
+  total: 0,
+};
 
 // ── log tails ───────────────────────────────────────────────────────────────
 
@@ -1356,6 +1480,14 @@ export const oduServiceSurface = defineSurface({
       inputSchema: Schema.Struct({ runId: Schema.String }),
       outputSchema: NodesFrameSchema,
     },
+    /** ONE CHECKOUT, whole — addressed by the absolute path a run was started
+     *  in. The input is a stable KEY (a path), never a live fact, so a relay
+     *  that re-subscribes after a dropped transport replays an input that is
+     *  still true. */
+    checkout: {
+      inputSchema: Schema.Struct({ repoRoot: Schema.String }),
+      outputSchema: CheckoutFrameSchema,
+    },
   },
   procedures: {
     run: {
@@ -1442,8 +1574,10 @@ export const oduServiceSurface = defineSurface({
 type ServiceSF = SurfaceTypes<typeof oduServiceSurface.spec>;
 export type ServiceSnapshot = ServiceSF["cells"]["service"]["Value"];
 export type NodesStreamInput = ServiceSF["streams"]["nodes"]["InputWire"];
+export type CheckoutStreamInput = ServiceSF["streams"]["checkout"]["InputWire"];
 
-/** The service face — `runs`, `logTails`, `nodes`, and every procedure. */
+/** The service face — `runs`, `logTails`, `nodes`, `checkout`, and every
+ *  procedure. */
 export type OduServiceClient = SurfaceClientOf<typeof oduServiceSurface.spec>;
 
 /** Build the service face over any dispatch. ONE cast, here, so no consumer

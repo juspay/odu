@@ -9,6 +9,7 @@
 
 export type {
   AttentionAnswer,
+  CheckoutFrame,
   LogPage,
   LogTail,
   NodesFrame,
