@@ -126,9 +126,15 @@ describe("the checkout stream", () => {
 
   it("opens with the newest run and that run's work, in one frame", async () => {
     const w = open();
+    // The run clocks are STATED, not taken from `Date.now()` per registration:
+    // on a fast box two of them land in the same millisecond, and the board's
+    // tie-break is then the run id — which would make "the newest run" a fact
+    // about a random identifier rather than about time.
+    const t0 = Date.now();
     const old = registerFixtureRun(w, {
       repoRoot: "/code/app",
       sha: "a".repeat(40),
+      now: t0,
     });
     writeRoster(old.handle, old.token, ["unit@x86_64-linux"]);
     writeNode(w, old.handle, old.token, {
@@ -141,6 +147,7 @@ describe("the checkout stream", () => {
     const latest = registerFixtureRun(w, {
       repoRoot: "/code/app",
       sha: "b".repeat(40),
+      now: t0 + 1_000,
     });
     writeRoster(latest.handle, latest.token, ["fmt@x86_64-linux"]);
     writeNode(w, latest.handle, latest.token, {
@@ -153,6 +160,7 @@ describe("the checkout stream", () => {
     const elsewhere = registerFixtureRun(w, {
       repoRoot: "/code/other",
       sha: "c".repeat(40),
+      now: t0 + 2_000,
     });
     finalizeRun(elsewhere.handle, elsewhere.token, "passed");
 
@@ -171,9 +179,11 @@ describe("the checkout stream", () => {
 
   it("swaps the latest run — and its work — inside one subscription", async () => {
     const w = open();
+    const t0 = Date.now();
     const first = registerFixtureRun(w, {
       repoRoot: "/code/app",
       sha: "a".repeat(40),
+      now: t0,
     });
     writeRoster(first.handle, first.token, ["unit@x86_64-linux"]);
     writeNode(w, first.handle, first.token, {
@@ -197,6 +207,7 @@ describe("the checkout stream", () => {
               const second = registerFixtureRun(w, {
                 repoRoot: "/code/app",
                 sha: "d".repeat(40),
+                now: t0 + 1_000,
               });
               writeRoster(second.handle, second.token, ["e2e@x86_64-linux"]);
               writeNode(w, second.handle, second.token, {
@@ -221,9 +232,11 @@ describe("the checkout stream", () => {
 
   it("says nothing while the checkout is quiet, and speaks when it moves", async () => {
     const w = open();
+    const quietT0 = Date.now();
     const first = registerFixtureRun(w, {
       repoRoot: "/code/app",
       sha: "a".repeat(40),
+      now: quietT0,
     });
     writeRoster(first.handle, first.token, ["unit@x86_64-linux"]);
     writeNode(w, first.handle, first.token, {
@@ -273,6 +286,7 @@ describe("the checkout stream", () => {
     const second = registerFixtureRun(w, {
       repoRoot: "/code/app",
       sha: "d".repeat(40),
+      now: quietT0 + 1_000,
     });
     finalizeRun(second.handle, second.token, "passed");
     const nextFrame = new Promise<void>((resolve) => {
