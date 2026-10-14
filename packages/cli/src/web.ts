@@ -27,7 +27,8 @@
  *
  * One per-user home (`~/.local/state/odu-web/`), one gate file in it, and one
  * fixed origin — and the home is derived FROM the origin, so moving the service
- * with `ODU_WEB_ORIGIN` moves its gate too (see {@link webAppNamespace}).
+ * with `ODU_WEB_ORIGIN` moves its gate too (`@odu/service-client/socket`'s
+ * `webAppNamespace`, which `./webDaemonLaunch` reads its home from).
  * Concurrent launchers converge through the framework's own pid gate: every one
  * of them writes a per-pid temp file and races a single atomic `link(2)`,
  * exactly one wins, and every loser reads the gate, proves the holder is alive,
@@ -488,7 +489,6 @@ export {
   assertPackaged,
   bakedBuild,
   daemonEnv,
-  webAppNamespace,
   webDaemonSpawnConfig,
   webHome,
 } from "./webDaemonLaunch";

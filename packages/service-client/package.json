@@ -12,7 +12,8 @@
     "./verbs": "./src/verbs.ts",
     "./endpoint": "./src/endpoint.ts",
     "./logKey": "./src/logKey.ts",
-    "./dial": "./src/dial.ts"
+    "./dial": "./src/dial.ts",
+    "./socket": "./src/socket.ts"
   },
   "dependencies": {
     "@odu/run-client": "workspace:*",

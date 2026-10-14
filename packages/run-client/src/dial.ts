@@ -61,8 +61,13 @@ const ABSENT_CODES = new Set(["ENOENT", "ECONNREFUSED"]);
 /** Is this dial failure the absence of a server, rather than a server that
  *  refused us? A rejection with no `code` is never absence: the link rejects
  *  with the raw socket error, so anything else came from a connect that had
- *  already succeeded. */
-function isNobodyServing(err: unknown): boolean {
+ *  already succeeded.
+ *
+ *  EXPORTED because the distinction is about unix sockets rather than about
+ *  runs: `@odu/service-client/socket` dials the service over the same
+ *  `unixSocketLink` and owes its callers the same honest answer, and two copies
+ *  of "which errno means nobody is there" is two copies that can drift. */
+export function isNobodyServing(err: unknown): boolean {
   const code: unknown = (err as { code?: unknown } | null)?.code;
   return typeof code === "string" && ABSENT_CODES.has(code);
 }

@@ -16,7 +16,7 @@
  */
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join, relative, sep } from "node:path";
+import { dirname, join, normalize, relative, sep } from "node:path";
 import { describe, expect, it } from "bun:test";
 import ts from "typescript";
 
@@ -41,7 +41,22 @@ const HYDRATED = new Set<string>([
   // hydrates this package hydrates these two directories with it.
   "@kolu/surface",
   "@kolu/surface-app",
+  // The daemon-home algebra `./socket` derives the service's socket path from
+  // (`resolveDaemonHome`) — reached by the node-only half alone.
+  "@kolu/surface-daemon",
 ]);
+
+/**
+ * The NODE-ONLY modules — the platform half, which a browser must never reach.
+ *
+ * `./socket` is the service's LOCAL transport: a unix socket in the daemon's
+ * home, plus the home's name derivation (`node:crypto`) and the path algebra
+ * (`node:path`, via `@kolu/surface-daemon`). There is nowhere else for it to
+ * live that would not make every local client re-derive the daemon's address,
+ * so it lives here and is DECLARED — the wall below stops being a blanket over
+ * the directory and becomes a statement about which modules are the browser's.
+ */
+const NODE_ONLY = new Set(["src/socket.ts"]);
 
 /** Test-only imports — the harness, not the shipped closure. */
 const TEST_ONLY = new Set(["bun:test", "typescript"]);
@@ -157,24 +172,51 @@ describe("@odu/service-client's import closure", () => {
     ).toEqual([]);
   });
 
-  it("never imports a node builtin", () => {
-    // The claim this package makes that its neighbours do not. Every module
-    // here is bundled into a tab; a `node:` import resolves at build time and
-    // is a blank page at runtime.
+  it("never imports a node builtin outside the declared node-only modules", () => {
+    // The claim this package makes that its neighbours do not: every module the
+    // BROWSER reaches is bundled into a tab, where a `node:` import resolves at
+    // build time and is a blank page at runtime. `NODE_ONLY` names the platform
+    // half — the service's local socket transport — so the rule is about which
+    // modules the browser can reach rather than about the whole directory.
     const offenders: string[] = [];
     for (const { rel, specifiers } of sources) {
       // THIS FILE is the exception, and the only one: a closure test reads the
       // directory it polices. It is never bundled — `bun test` runs it — so the
       // rule it enforces does not apply to the enforcer.
-      if (rel.endsWith(".test.ts")) continue;
+      if (rel.endsWith(".test.ts") || NODE_ONLY.has(rel)) continue;
       for (const spec of specifiers) {
         if (spec.startsWith("node:")) offenders.push(`${rel}: ${spec}`);
       }
     }
     expect(
       offenders,
-      `${offenders.join(", ")} imports a node builtin. This package is loaded ` +
-        "into a browser — platform I/O belongs one wall up, in @odu/service.",
+      `${offenders.join(", ")} imports a node builtin. Platform I/O belongs ` +
+        "either one wall up, in @odu/service, or in a module declared in " +
+        "NODE_ONLY — a browser tab reaching it is a blank page.",
+    ).toEqual([]);
+  });
+
+  it("keeps the node-only modules out of a browser's reach", () => {
+    // NODE_ONLY is a claim about what a BUNDLER follows, not about what a file
+    // says: a browser-safe module that imports `./socket` — directly, or
+    // through a re-export — pulls `node:crypto` into the tab regardless. One
+    // hop is enough to catch it, because the set of browser-reachable modules
+    // IS `src` minus NODE_ONLY: the first edge out of that set is the
+    // violation, and a module added to NODE_ONLY is exempt from the rule by
+    // the same declaration the other test reads.
+    const offenders: string[] = [];
+    for (const { rel, specifiers } of sources) {
+      if (rel.endsWith(".test.ts") || NODE_ONLY.has(rel)) continue;
+      for (const spec of specifiers) {
+        const target = normalize(join(dirname(rel), spec));
+        const file = target.endsWith(".ts") ? target : `${target}.ts`;
+        if (NODE_ONLY.has(file)) offenders.push(`${rel}: ${spec}`);
+      }
+    }
+    expect(
+      offenders,
+      `${offenders.join(", ")} reaches a NODE_ONLY module from a module a ` +
+        "browser may import.",
     ).toEqual([]);
   });
 

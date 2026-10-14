@@ -21,12 +21,23 @@ cursor/attempt/node-key spellings a caller echoes back. Never its platform I/O.
 `src/closure.test.ts` walks the import graph and enforces it, along with the
 claim that is this package's own:
 
-> **No `node:` anything.** Every module here is bundled into a browser tab. A
-> filesystem read resolves happily at build time and is a blank page at runtime,
-> and no compiler will say so — so it is said in a test.
+> **No `node:` anything outside the declared node-only modules.** Every module
+> the browser reaches is bundled into a tab. A filesystem read resolves happily
+> at build time and is a blank page at runtime, and no compiler will say so — so
+> it is said in a test.
 
-That refusal is exactly why the service's platform half lives one wall up, in
-`@odu/service`.
+`./socket` is the one declared exception, and it is the service's LOCAL half
+rather than a second contract: the unix socket a face on the same machine dials,
+the home its path is derived from (`webAppNamespace`), and the pure
+`serviceSocketPath`. It has to live beside `./endpoint` because the address and
+the way in are one fact about one daemon — a client that re-derived the home from
+the origin would be one rename away from dialling a socket nobody bound. The
+wall is what keeps it honest: a browser-safe module that imported it would be
+caught, and `dialServiceSocket` answers `{ kind: "absent" }` for a path nobody is
+serving rather than turning a missing daemon into an error.
+
+That refusal is exactly why the service's platform half — the serving, the
+catalog, the coordinator — lives one wall up, in `@odu/service`.
 
 ## What the surface is about
 
