@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # Reproducible terminal evidence for #30: a consumer repo with NO flake (it
-# re-exports nothing) runs odu green, because the lane runner now comes from
-# odu's OWN flake — baked onto the binary as ODU_RUNNER_FLAKE — not the repo
-# under test. Recorded with asciinema, rendered with agg — see dev/skills/pr-evidence/SKILL.md.
+# re-exports nothing) runs odu green, because the lane runner comes from odu's
+# OWN source tree — assembled by default.nix and baked onto the binary as
+# SURFACE_AGENT_FLAKE_REF — not the repo under test. Recorded with asciinema,
+# rendered with agg — see dev/skills/pr-evidence/SKILL.md.
 #
 #   odu=$(nix build .#odu --no-link --print-out-paths)/bin/odu
 #   asciinema rec --headless --window-size 92x24 -i 2 --overwrite \
 #     -c "bash tests/evidence/runner-flake-demo.sh $odu $PWD" /tmp/rf.cast
 #   agg --speed 1.3 --theme asciinema --font-size 22 /tmp/rf.cast rf.gif
 set -u
-ODU="$1"   # path to the odu binary (carries ODU_RUNNER_FLAKE baked in)
+ODU="$1"   # path to the odu binary (carries SURFACE_AGENT_FLAKE_REF baked in)
 WT="$2"    # the odu checkout (source of the fixture justfile)
 
 # Pin this machine's platform to an explicit localhost lane. A bare/empty hosts
@@ -34,7 +35,7 @@ ls -A; sleep 1.6
 say "It re-exports no odu-runner. Before #30 every lane died here at _ci-setup."
 cmd "odu run --no-strict"
 "$ODU" run --no-strict; sleep 2.5
-say "Green — the lane runner came from odu's OWN flake (baked ODU_RUNNER_FLAKE),"
+say "Green — the lane runner came from odu's OWN build (the baked agent source),"
 say "not this repo. A consumer configures nothing."
 sleep 2
 

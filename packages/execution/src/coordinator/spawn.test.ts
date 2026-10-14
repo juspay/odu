@@ -348,7 +348,7 @@ describe("a transient unit is told where odu keeps its things", () => {
         ODU_STATE_DIR: "/state/odu",
         ODU_SNAPSHOT_TRANSPORT: "always",
         ODU_SNAPSHOT_MAX_BYTES: "1024",
-        ODU_RUNNER_FLAKE: "git+file:///src/odu",
+        SURFACE_AGENT_FLAKE_REF: "/nix/store/abc-odu-agent-flake-source",
       },
       ["odu", "run"],
       "odu-run-7",
@@ -359,7 +359,9 @@ describe("a transient unit is told where odu keeps its things", () => {
     expect(args).toContain("ODU_STATE_DIR=/state/odu");
     expect(args).toContain("ODU_SNAPSHOT_TRANSPORT=always");
     expect(args).toContain("ODU_SNAPSHOT_MAX_BYTES=1024");
-    expect(args).toContain("ODU_RUNNER_FLAKE=git+file:///src/odu");
+    expect(args).toContain(
+      "SURFACE_AGENT_FLAKE_REF=/nix/store/abc-odu-agent-flake-source",
+    );
     // The runtime dir decides where a socket may live, so it travels too.
     expect(args).toContain("XDG_RUNTIME_DIR=/run/user/1000");
     // Every `--setenv` precedes the payload.

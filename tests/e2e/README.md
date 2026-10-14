@@ -43,14 +43,16 @@ beside it; the two are one gate with two drivers, which is what the names say.
 ## How a fixture works
 
 A fixture is just a throwaway git repo with a `justfile` — **no flake**. The
-coordinator resolves its lane runner from the `ODU_RUNNER_FLAKE` baked into the
-`.#odu` binary under test (odu's own flake — `packages/execution/src/coordinator/runnerFlake.ts`),
-*not* from the repo under test. So a fixture re-exports nothing: it stands in
-for a real consumer that runs odu without exporting `odu-runner` — exactly the
-cross-repo path [#30](https://github.com/juspay/odu/issues/30) fixed. (Even for
-a localhost lane the realise is a local no-op copy, but the `drvPath` lookup
-still runs — now against odu's flake, a Nix cache hit since the harness builds
-`.#odu-runner` first.)
+coordinator resolves its lane runner from the agent source baked into the
+`.#odu` binary under test (`SURFACE_AGENT_FLAKE_REF` — odu's own tree, assembled
+by `default.nix`; the resolver is
+`packages/execution/src/coordinator/runnerFlake.ts`), *not* from the repo under
+test. So a fixture re-exports nothing: it stands in for a real consumer that
+runs odu without exporting `odu-runner` — exactly the cross-repo path
+[#30](https://github.com/juspay/odu/issues/30) fixed. (Even for a localhost lane
+the realise is a local no-op copy, but the `drvPath` lookup still runs — now
+against the baked source, a Nix cache hit since the harness builds `.#odu`
+first.)
 
 The leaf recipes are pure shell — the fixture's own "CI" is trivial on purpose,
 so the test exercises *odu's* machinery, not a real toolchain.

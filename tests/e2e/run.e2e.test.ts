@@ -76,7 +76,7 @@ describe("odu run (local, black-box)", () => {
     // The fixture is a plain repo with no flake.nix: it re-exports nothing.
     // Before #30's fix the coordinator evaluated `<consumer>#…odu-runner` and
     // every lane died at _ci-setup; now the runner is resolved from the baked
-    // ODU_RUNNER_FLAKE (odu's own flake), so setup succeeds and the run is green.
+    // SURFACE_AGENT_FLAKE_REF (odu's own flake), so setup succeeds and the run is green.
     expect(existsSync(join(dir, "flake.nix"))).toBe(false);
     const { status, events } = oduRun(oduBin, dir);
     expect(shape(terminalStatuses(events).get("_ci-setup")).status).toBe(

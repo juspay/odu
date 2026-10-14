@@ -534,7 +534,7 @@ export function buildOduBinary(): string {
 /**
  * Materialize a fixture into a fresh temp git repo: just the named fixture's
  * `justfile`, with NO flake. The fixture is a plain consumer that never
- * re-exports `odu-runner` — the runner comes from the baked ODU_RUNNER_FLAKE on
+ * re-exports `odu-runner` — the runner comes from the agent source baked onto
  * the `.#odu` binary under test, so this exercises exactly the cross-repo path
  * (coordinator ships its own runner, consumer exports nothing) that issue #30
  * was about. The coordinator reads HEAD, so we commit before returning.

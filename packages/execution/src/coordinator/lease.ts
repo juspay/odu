@@ -954,10 +954,10 @@ export interface LeaseLanesOpts {
   onLine?: (msg: string, platform: string) => void;
   claim?: AcquireFromPoolOpts["claim"];
   /**
-   * Resolve odu-runner drv for a platform (used when `claim` is not
-   * injected). Required for production multi-platform lease.
+   * Resolve the odu-runner derivation for the dialed host (used when `claim`
+   * is not injected). Required for a production multi-platform lease.
    */
-  resolveDrvPath?: (platform: string) => ResolveRunnerDrv;
+  resolveDrvPath?: ResolveRunnerDrv;
   sleep?: AcquireFromPoolOpts["sleep"];
   now?: AcquireFromPoolOpts["now"];
 }
@@ -1250,12 +1250,12 @@ export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
     slot?: HostSlot,
   ) => Promise<ClaimResult>) => {
     if (opts.claim !== undefined) return opts.claim;
-    const resolve = opts.resolveDrvPath?.(platform);
+    const resolve = opts.resolveDrvPath;
     if (resolve === undefined) {
       return async () => ({
         kind: "unreachable",
         error:
-          "odu: leaseLanes needs resolveDrvPath(platform) or an injected claim",
+          "odu: leaseLanes needs resolveDrvPath or an injected claim",
       });
     }
     return (h, id, slot) =>
@@ -1348,7 +1348,7 @@ export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
 export async function probeAllHosts(
   pools: Record<string, HostPool>,
   opts: {
-    resolveDrvPath: (platform: string) => ResolveRunnerDrv;
+    resolveDrvPath: ResolveRunnerDrv;
     onLog?: (line: string) => void;
   },
 ): Promise<{ platform: string; probe: ProbeResult }[]> {
@@ -1359,7 +1359,7 @@ export async function probeAllHosts(
       (pools[platform] ?? []).map(async (entry) => {
         const slot = asHostSlot(entry);
         const probe = await probeHost(slot.host, {
-          resolveDrvPath: opts.resolveDrvPath(platform),
+          resolveDrvPath: opts.resolveDrvPath,
           onLog: opts.onLog,
           slot,
         });

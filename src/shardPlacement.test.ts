@@ -45,9 +45,7 @@ for (const scenario of [
       ODU_HOSTS: join(dir, "hosts.json"),
       ODU_STATE_DIR: catalog,
       ODU_SNAPSHOT_MAX_BYTES: remote ? "67108864" : "1",
-      ODU_RUNNER_FLAKE: "git+file:///nonexistent",
-      ODU_AGENT_SUBSTITUTERS: "https://cache.invalid",
-      ODU_AGENT_TRUSTED_PUBLIC_KEYS: "cache.invalid:0000000000",
+      SURFACE_AGENT_FLAKE_REF: "path:/nonexistent",
     };
     const prior = Object.fromEntries(
       Object.keys(env).map((k) => [k, process.env[k]]),

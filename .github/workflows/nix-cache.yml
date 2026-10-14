@@ -1,0 +1,144 @@
+# Build odu's outputs and push their closures to the shared Attic cache
+# (https://cache.nixos.asia/oss) — and then publish the lane runner
+# CONTENT-ADDRESSED, so a dial from a published revision has the host pull its
+# own build with NO trust (`@kolu/surface-remote`'s `provisionAgent` index step;
+# the publisher is `juspay/kolu`'s `publish-closure` action, pinned to the kolu
+# revision odu pins in `npins/sources.json`).
+#
+# Two jobs, because they are two halves of one question with one ordering:
+# `build-and-push` warms the input-addressed cache a lane host substitutes from,
+# and `publish-closures` then rewrites from that same tree. It must be its OWN
+# job: the action installs the Nix it rewrites with (2.34.8 — see its
+# `action.yml`), which has to be the job's only Nix.
+#
+# `odu`'s `ca-index` branch is born on the first master push. A pull request
+# rewrites, smokes and import-verifies, and writes no index.
+name: nix-cache
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege — only the publish job needs more, and it asks for it itself.
+permissions:
+  contents: read
+
+concurrency:
+  group: nix-cache-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-push:
+    strategy:
+      fail-fast: false
+      matrix:
+        # ubuntu-latest → x86_64-linux; macos-latest → aarch64-darwin. Both are
+        # platforms odu's own required checks (ci::*) run on, so both are
+        # platforms whose closures a lane actually provisions.
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      # `ref:` is LOAD-BEARING on `pull_request`. actions/checkout defaults to
+      # `github.ref`, which for that event is `refs/pull/N/merge` — a synthetic
+      # merge of the PR into its base that NOTHING else ever builds. Developers
+      # and odu's own lanes build the branch head, so warming the merge tree
+      # leaves the tree everybody wants cold. `head.sha` is empty on non-PR
+      # events, where checkout's own default is already the right tree. (This is
+      # kolu#2101 F5(a)'s correction, kept here for the same reason.)
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      # Pinned by commit (CodeQL: unpinned third-party action). v35 → 9f63be7.
+      # Nix 2.34.7 here; the publish job installs 2.34.8 for the rewrite — see
+      # its action. This job only builds and pushes, which either line does.
+      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+        with:
+          nix_conf: |
+            extra-substituters = https://cache.nixos.asia/oss
+            extra-trusted-public-keys = oss:KO872wNJkCDgmGN3xy9dT89WAhvv13EiKncTtHDItVU=
+            accept-flake-config = true
+
+      # ONE step, not a step per branch, so the token is never consulted in an
+      # `if`. A pull request with no token still BUILDS — that is the check this
+      # workflow owes a PR — and pushes nothing. A push with no token FAILS: a
+      # push is where this job is required to publish, and going green having
+      # warmed nothing is precisely the state a cache job exists to make
+      # impossible (kolu's nix-cache.yml states the rule).
+      #
+      # attic is installed from the repo's own npins-pinned nixpkgs, not an
+      # unpinned ref resolved through the GitHub API at run time: that API
+      # returning 503 is a repo-wide failure mode, and the tarball URL
+      # `nix/nixpkgs.nix` already builds from needs no resolution at all.
+      - name: Build odu's outputs, and push their closures
+        env:
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+        run: |
+          set -euo pipefail
+          paths=$(nix build -L --no-link --print-out-paths --accept-flake-config \
+            .#odu .#odu-runner .#web-ui)
+          # A positive assertion, not dressing: a build that produced nothing
+          # would otherwise push nothing and still report success.
+          if [ -z "$paths" ]; then
+            echo "::error::nix build produced no output paths"
+            exit 1
+          fi
+          if [ -z "$ATTIC_TOKEN" ]; then
+            if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+              echo "::error::ATTIC_TOKEN is not set on $GITHUB_REPOSITORY — this push would publish no closure and no ca-index entry. Add the secret (the same attic login juspay/kolu uses)."
+              exit 1
+            fi
+            echo "no ATTIC_TOKEN (a pull request) — built, pushed nothing"
+            exit 0
+          fi
+          nix profile add "$(jq -r .pins.nixpkgs.url npins/sources.json)#attic-client"
+          attic login --set-default oss https://cache.nixos.asia "$ATTIC_TOKEN"
+          # `attic push` defaults to pushing CLOSURES and to skipping what
+          # cache.nixos.org already serves, so the out-paths alone are the
+          # complete instruction and nixpkgs stays out of a project cache.
+          printf '%s\n' "$paths" | attic push --stdin oss
+
+  publish-closures:
+    needs: build-and-push
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    # Writes the `ca-index` branch of this repository.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The same tree `build-and-push` warmed — see its `ref:` note.
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      # attic, for the action's push, from the same pinned nixpkgs the build
+      # job installs it from — one pin, read the same way.
+      - id: inputs
+        run: |
+          echo "nixpkgs=$(jq -r .pins.nixpkgs.url npins/sources.json)" >> "$GITHUB_OUTPUT"
+
+      # odu's declaration is `.#agent-flake-source`'s own sidecar + commit-hash
+      # (the same derivation the `odu` wrapper bakes), so the action reads them
+      # rather than being told. `odu-runner` is the ONE attr a remote resolves.
+      # The smoke runs out of the REWRITTEN closure: `--help` loads the runner's
+      # whole module graph and exits 0 without needing stdin, which `--stdio`
+      # would (it serves until the pipe closes).
+      #
+      # The pin is kolu's merged head, whose `.gitattributes` keeps
+      # `.github/actions` in the archive a remote `uses:` is downloaded from —
+      # before that it was export-ignored, and this step died at job setup with
+      # "Can't find 'action.yml'".
+      - uses: juspay/kolu/.github/actions/publish-closure@5b14790a4eb9c383dfd7fa247bbff1af60f9eb92
+        with:
+          source: .#agent-flake-source
+          installables: odu-runner
+          latest: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+          smoke: |
+            odu-runner=bin/odu-runner --help
+          attic-nixpkgs: ${{ steps.inputs.outputs.nixpkgs }}
+          attic-token: ${{ secrets.ATTIC_TOKEN }}

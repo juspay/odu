@@ -15,7 +15,7 @@
 #     -c "bash tests/evidence/tui-demo.sh $odu $PWD" /tmp/tui.cast
 #   agg --speed 1.3 --theme asciinema --font-size 22 /tmp/tui.cast tui.gif
 set -u
-ODU="$1"   # path to the odu binary (carries ODU_RUNNER_FLAKE baked in)
+ODU="$1"   # path to the odu binary (carries SURFACE_AGENT_FLAKE_REF baked in)
 WT="$2"    # the odu checkout (unused here — the fixture is written inline)
 : "$WT"
 

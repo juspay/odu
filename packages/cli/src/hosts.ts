@@ -17,8 +17,8 @@ import {
   type ProbeResult,
 } from "@odu/execution/coordinator/lease";
 import {
-  resolveRunnerFlake,
-  runnerDrvResolver,
+  laneRunnerDrvPath,
+  requireBakedRunnerSource,
 } from "@odu/execution/coordinator/runnerFlake";
 import type { VenueProbeOutcome, VenueRowFacts } from "@odu/service/ports";
 
@@ -143,9 +143,12 @@ export async function venueInventory(request: {
   const pools = Object.fromEntries(
     platforms.map((platform) => [platform, config.hosts[platform] ?? []]),
   );
-  const runnerFlake = resolveRunnerFlake(process.env);
+  // Refuse a binary with no baked agent source here, once, rather than once per
+  // host: the dial below would otherwise report the same misbuilt-package
+  // fault against every machine in the inventory.
+  requireBakedRunnerSource();
   const probed = await probeAllHosts(pools, {
-    resolveDrvPath: (platform) => runnerDrvResolver(runnerFlake, platform),
+    resolveDrvPath: laneRunnerDrvPath,
   });
   return {
     ok: true,

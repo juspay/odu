@@ -9,7 +9,7 @@ nix_shell_e2e := if env('PLAYWRIGHT_BROWSERS_PATH', '') != '' { '' } else { 'nix
 
 [parallel]
 [metadata("ci")]
-default: typecheck unit fmt nix e2e-cli e2e-web bun-nix-fresh
+default: typecheck unit fmt nix agent-flake-nix e2e-cli e2e-web bun-nix-fresh
 
 install:
     {{ nix_shell }} bun install --frozen-lockfile
@@ -49,7 +49,28 @@ fmt:
     {{ nix_shell }} nixpkgs-fmt --check *.nix nix/*.nix nix/packages/*.nix
 
 nix:
-    nix build .#odu .#odu-runner .#web-ui --no-link
+    nix build .#odu .#odu-runner .#web-ui .#agent-flake-source --no-link
+
+# The AGENT SOURCE a remote dial resolves `odu-runner` from, evaluated exactly
+# the way `@kolu/surface-remote` evaluates it.
+#
+# Load-bearing, not a nicety. `.#agent-flake-source` is ASSEMBLE-ONLY
+# (`mkAgentSourceTree` — odu proves no attr through it), so the `nix` recipe
+# above builds the tree without ever asking whether it exports the runner. What
+# asks is this recipe, and it asks with the dial's own command, on the dial's
+# own store path: a fileset or flake gap that reaches only a REMOTE host fails
+# at `_ci-setup` on somebody's box, minutes into a lane, otherwise. Kolu carries
+# the same guard over its `expose` inventory (`ci::agent-flake-nix`).
+agent-flake-nix: nix
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source="$(nix build .#agent-flake-source --no-link --print-out-paths --accept-flake-config)"
+    system="$(nix eval --impure --raw --expr builtins.currentSystem)"
+    drv="$(nix eval --accept-flake-config --raw "$source#packages.$system.odu-runner.drvPath")"
+    case "$drv" in
+      *.drv) ;;
+      *) echo "odu-runner resolved to '$drv', not a derivation path" >&2; exit 1 ;;
+    esac
 
 # Work around crates.io rejecting the fetchurl User-Agent on cold stores.
 [private]

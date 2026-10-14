@@ -10,7 +10,7 @@
 #     -c "bash tests/evidence/runs-demo.sh $odu $PWD" /tmp/runs.cast
 #   agg --speed 1.3 --theme asciinema --font-size 22 /tmp/runs.cast runs.gif
 set -u
-ODU="$1"   # path to the odu binary (carries ODU_RUNNER_FLAKE baked in)
+ODU="$1"   # path to the odu binary (carries SURFACE_AGENT_FLAKE_REF baked in)
 WT="$2"    # the odu checkout (source of the fixture justfile)
 
 # Pin this machine's platform to an explicit localhost lane. A bare/empty hosts
@@ -19,7 +19,7 @@ export ODU_HOSTS="$(mktemp -d)/hosts.json"
 printf '{"%s":"localhost"}' "$(nix eval --impure --raw --expr builtins.currentSystem)" > "$ODU_HOSTS"
 D=$(mktemp -d /tmp/odu-runs-demo-XXXX)
 # A plain consumer: just a justfile, no flake — the runner comes from the odu
-# binary's baked ODU_RUNNER_FLAKE, not this repo (see issue #30).
+# binary's the baked agent source, not this repo (see issue #30).
 cp "$WT/tests/e2e/fixtures/pass/justfile" "$D/"
 printf '.ci/\n' > "$D/.gitignore"   # so odu's own run output never reads as a dirty tree
 ( cd "$D" && git init -q && git add -A &&

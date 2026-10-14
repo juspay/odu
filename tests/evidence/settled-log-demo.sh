@@ -15,7 +15,7 @@
 # change the log stopped a quarter of the way through the recipe, with no
 # summary and no `[odu] log truncated` notice to say so.
 set -u
-ODU="$1"   # path to the odu binary (carries ODU_RUNNER_FLAKE baked in)
+ODU="$1"   # path to the odu binary (carries SURFACE_AGENT_FLAKE_REF baked in)
 WT="$2"    # the odu checkout (source of the fixture justfile)
 
 # Pin this machine's platform to an explicit localhost lane. A bare/empty hosts
