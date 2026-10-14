@@ -67,6 +67,7 @@ import { Effect } from "effect";
 import { cancelRun } from "./cancel";
 import { importCatalog, pruneCatalog } from "./catalog";
 import { readLog, readTail } from "./logs";
+import { checkoutSource } from "./checkout";
 import { nodesSource } from "./nodes";
 import type { ServicePorts } from "./ports";
 import { reconcileRequests } from "./reconcile";
@@ -256,6 +257,14 @@ export function createOduService(opts: ServiceOptions): OduService {
             // real before the next refresh indexes it, and only the manifest can
             // say so. See `nodesSource`.
             exists: (runId) => readManifest(handleFor(runId, catalog)) !== null,
+          }),
+        },
+        checkout: {
+          source: checkoutSource({
+            registry,
+            // The poller owns the clock here too — one catalog walk per tick,
+            // however many checkouts are being watched.
+            poll: () => {},
           }),
         },
       },

@@ -1,7 +1,6 @@
 /**
  * `@odu/service-client/board` — the READINGS a board performs on the service's
- * own rows: which runs belong to one checkout, which are moving, which are
- * failing, and what a run is called.
+ * own rows: which are moving, which are failing, and what a run is called.
  *
  * It lives here rather than in a face because a board is not one face's idea.
  * `packages/web-ui` is the board today and a terminal dashboard, an agent's
@@ -13,8 +12,15 @@
  * `failed` while the other says `incomplete` — the exact sentence
  * {@link RunOutcomeSchema} spends a paragraph on.
  *
+ * The COLLAPSE is no longer here. "Which run stands for a checkout, and how
+ * many are behind it" was the one reading that had to be re-run on every row
+ * delta and then joined to a second subscription for that run's work — so it
+ * moved to the service, as `streams.checkout`, and every face reads it off the
+ * wire. What is left is addressing ({@link checkoutRoots}) and the words a row
+ * already carries.
+ *
  * NOTHING HERE COMPUTES A VERDICT. Every field is the service's own row; these
- * functions collapse, sort, and pick the word a row already carries. A fold that
+ * functions sort and pick the word a row already carries. A fold that
  * re-derived "is this run red" from anything but `unresolvedFailures` would be a
  * second authority on the question the catalog exists to answer.
  *
@@ -174,61 +180,42 @@ export function newestFirst(rows: Iterable<RunRow>): RunRow[] {
   );
 }
 
-/** ONE checkout's runs, newest first — `repoRoot` is the absolute checkout a run
- *  was started in, and it is what a checkout-scoped reader filters on. */
-export function runsForCheckout(
-  rows: Iterable<RunRow>,
-  checkoutRoot: string,
-): RunRow[] {
-  const mine: RunRow[] = [];
-  for (const row of rows) if (row.repoRoot === checkoutRoot) mine.push(row);
-  return newestFirst(mine);
-}
-
-/** One checkout's runs, collapsed: the newest of them, and how many there were. */
-export interface Checkout {
-  latest: RunRow;
-  runs: number;
-}
-
 /**
- * ONE ROW PER CHECKOUT — the newest run of each, and how many runs it stands
- * for, keyed by the checkout path.
+ * WHICH CHECKOUTS ARE ON THE BOARD, in the order their newest run puts them.
  *
- * ONE walk, so "which row survives" and "how many were folded away" cannot come
- * out of two maps that disagree — and no consumer has to re-join them at a
- * render site with a coalesce for a case that cannot happen.
+ * ADDRESSING, not a reading: it answers "which checkouts do I subscribe to",
+ * and deliberately says nothing about which run stands for one or how many are
+ * behind it. Those are `streams.checkout`'s answer now, folded once by the
+ * service on the catalog's own clock — a face that re-derived them from rows it
+ * happens to hold would be a second answer to the question that stream exists
+ * to give, and would have to re-fold on every row delta.
  *
- * Keyed by `repoRoot` and not by project: two worktrees of one repo share a last
- * path segment and are two different checkouts. The insertion order is the
- * input's, so the caller's sort — newest first — survives the collapse.
+ * Keyed by `repoRoot` and not by project: two worktrees of one repo share a
+ * last path segment and are two different checkouts. `rows` is expected newest
+ * first ({@link newestFirst}), and a `Set` keeps insertion order — so the
+ * checkout whose newest run is newest comes first.
  */
-export function byCheckout(rows: RunRow[]): Map<string, Checkout> {
-  const groups = new Map<string, Checkout>();
-  for (const row of rows) {
-    const held = groups.get(row.repoRoot);
-    if (held === undefined) {
-      groups.set(row.repoRoot, { latest: row, runs: 1 });
-      continue;
-    }
-    held.runs += 1;
-    if (row.createdAt > held.latest.createdAt) held.latest = row;
-  }
-  return groups;
+export function checkoutRoots(rows: Iterable<RunRow>): string[] {
+  const roots = new Set<string>();
+  for (const row of rows) roots.add(row.repoRoot);
+  return [...roots];
 }
 
-/** WHAT THE BOARD IS SAYING, at a glance — the same rows and the same buckets
- *  the board itself uses, so a summary cannot drift from the page under it.
+/** WHAT THE BOARD IS SAYING, at a glance — asked of the runs the checkouts
+ *  STAND FOR (each checkout's newest, as `streams.checkout` reports it), so the
+ *  summary counts what the board shows and cannot drift from the page under it.
  *  `failing` is deliberately narrower than a "needs attention" bucket: an
  *  unposted status is a debt, not a failure, and a summary that cried "failing"
  *  over one would be one people turn off. */
-export function boardTally(rows: RunRow[]): {
+export function boardTally(standingFor: Iterable<RunRow>): {
   failing: number;
   active: number;
 } {
-  const latest = [...byCheckout(rows).values()].map((group) => group.latest);
-  return {
-    failing: latest.filter(isFailing).length,
-    active: latest.filter(isActive).length,
-  };
+  let failing = 0;
+  let active = 0;
+  for (const row of standingFor) {
+    if (isFailing(row)) failing += 1;
+    if (isActive(row)) active += 1;
+  }
+  return { failing, active };
 }

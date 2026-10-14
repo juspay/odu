@@ -27,6 +27,7 @@ import {
 } from "@odu/service-client/surface";
 import type { Stream } from "effect";
 import type { RunRegistry } from "./registry";
+import { abortableSleep } from "./sleep";
 
 /** How often a live run's node list is re-read. The registry's own refresh is
  *  what actually costs anything (a `stat` per run, a fold per changed one);
@@ -54,8 +55,13 @@ export interface NodesDeps {
 }
 
 /** Two node lists, compared as a subscriber would see them. Cheap enough to run
- *  every tick, and what stops an unchanged run from waking every open view. */
-function same(a: readonly RunNode[], b: readonly RunNode[]): boolean {
+ *  every tick, and what stops an unchanged run from waking every open view.
+ *  Exported because `./checkout` carries the same nodes and has to agree with
+ *  this stream about whether they moved. */
+export function sameNodes(
+  a: readonly RunNode[],
+  b: readonly RunNode[],
+): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i += 1) {
     const x = a[i];
@@ -90,8 +96,9 @@ function samePool(a: readonly string[], b: readonly string[]): boolean {
  *
  * **`elapsedMs` is deliberately NOT compared.** It moves on every tick of the
  * clock with nothing about the run having changed, so counting it as news would
- * turn this stream into the four-frames-a-second redraw the whole `same()`
- * comparison exists to prevent. A consumer that wants a ticking clock has the
+ * turn this stream into the four-frames-a-second redraw the whole
+ * `sameNodes()` comparison exists to prevent. A consumer that wants a ticking
+ * clock has the
  * frame's `elapsedMs` and its own `Date.now()`; what it cannot derive locally,
  * and what this therefore treats as news, is a phase changing or a lane landing
  * on a box.
@@ -142,18 +149,6 @@ function sameEnv(a: RunEnv, b: RunEnv): boolean {
   return true;
 }
 
-const defaultSleep = (ms: number, signal: AbortSignal): Promise<void> =>
-  new Promise((resolve) => {
-    const done = (): void => {
-      clearTimeout(timer);
-      signal.removeEventListener("abort", done);
-      resolve();
-    };
-    const timer = setTimeout(done, ms);
-    if (signal.aborted) done();
-    else signal.addEventListener("abort", done, { once: true });
-  });
-
 /**
  * How long to wait for the registry to index a run the CATALOG already has.
  *
@@ -183,7 +178,7 @@ export function nodesSource(
   deps: NodesDeps,
 ): (input: { runId: string }) => Stream.Stream<NodesFrame> {
   const pollMs = deps.pollMs ?? NODES_POLL_MS;
-  const sleep = deps.sleep ?? defaultSleep;
+  const sleep = deps.sleep ?? abortableSleep;
   return ({ runId }) =>
     streamFromAbortableSource<NodesFrame>(async function* (signal) {
       let previous: { nodes: RunNode[]; env: RunEnv } | null = null;
@@ -239,7 +234,7 @@ export function nodesSource(
         // real move, or the terminal, is news.
         if (
           previous === null ||
-          !same(previous.nodes, nodes) ||
+          !sameNodes(previous.nodes, nodes) ||
           !sameEnv(previous.env, env) ||
           done
         ) {

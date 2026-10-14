@@ -35,11 +35,15 @@ import { resolveDaemonHome } from "@kolu/surface-daemon";
 // same socket class needs it for the same reason.
 import "@odu/run-client/asyncConnectError";
 import { isNobodyServing } from "@odu/run-client/dial";
+import { Effect } from "effect";
+import { readServiceCell } from "./dial";
 import { DEFAULT_SERVICE_ORIGIN, SERVICE_APP, serviceOrigin } from "./endpoint";
 import {
+  admitService,
   oduServiceClientOver,
   type OduServiceClient,
   oduServiceSurface,
+  type ServiceAdmission,
 } from "./surface";
 
 /**
@@ -99,7 +103,8 @@ export interface ServiceSocketConnection {
 }
 
 /**
- * Either nobody is serving that socket, or a live service.
+ * Nobody is serving that socket, a service this build cannot speak to, or a
+ * live one — three answers, and the dial is where they are told apart.
  *
  * ABSENCE IS A VALUE here, unlike {@link dialService}'s rejection, and the
  * difference is not a style choice: a websocket dial cannot tell "nothing is
@@ -109,20 +114,39 @@ export interface ServiceSocketConnection {
  * ordinary state (kolu's Inspector draws no chip at all) must be able to receive
  * it as one, and a face that got it wrong would be showing an error about a
  * machine where odu was never installed.
+ *
+ * A REFUSAL is the opposite fact, and carrying it as a third arm is why the
+ * handshake happens HERE: a daemon that answers and speaks a contract this
+ * build cannot read is a loud condition — an install to go and look at, never a
+ * blank — and every consumer that had to compare versions itself was a second
+ * judge of a comparison with a direction that is easy to get backwards
+ * ({@link admitService}).
  */
 export type ServiceSocketDial =
   | { kind: "absent"; socketPath: string }
+  | ({ kind: "refused"; socketPath: string } & Omit<
+      Extract<ServiceAdmission, { kind: "refuse" }>,
+      "kind"
+    >)
   | ({ kind: "connected" } & ServiceSocketConnection);
 
 /**
- * Dial the service's unix socket.
+ * Dial the service's unix socket, and adopt only a service this build can read.
  *
  * Answers `{ kind: "absent" }` when nothing is serving the path — the ordinary
- * state of a machine that has never run `odu web` — and THROWS for everything
+ * state of a machine that has never run `odu web` — `{ kind: "refused" }` for a
+ * daemon whose contract this build cannot speak, and THROWS for everything
  * else: a permission error on a socket somebody IS serving, a path that is not
  * a socket at all, or a link that connected and then could not speak the wire.
  * Those are not absence, and reporting them as absence is how a face comes to
  * say a running odu is not there.
+ *
+ * The handshake is part of the dial rather than a step after it, so there is no
+ * window in which a caller holds a link it has not qualified — the window every
+ * consumer used to fill with its own version comparison. A refusal disposes the
+ * link before answering: a face that drew the refusal and then had to remember
+ * to tear down the connection behind it would leak the dial, ping and response
+ * fibers on exactly the path nobody exercises.
  *
  * It does NOT start the service. Bootstrapping is `odu web`'s job and only
  * `odu web`'s — a face that silently spawned a daemon would make every mistyped
@@ -142,10 +166,26 @@ export async function dialServiceSocket(
     if (isNobodyServing(err)) return { kind: "absent", socketPath };
     throw err;
   }
+  const client = oduServiceClientOver(link.dispatch);
+  let verdict: ServiceAdmission;
+  try {
+    verdict = admitService(
+      await Effect.runPromise(readServiceCell(client)),
+      socketPath,
+    );
+  } catch (err) {
+    // A link nobody will use still holds the dial, ping and response fibers.
+    await link.dispose();
+    throw err;
+  }
+  if (verdict.kind === "refuse") {
+    await link.dispose();
+    return { ...verdict, kind: "refused", socketPath };
+  }
   return {
     kind: "connected",
     socketPath,
-    client: oduServiceClientOver(link.dispatch),
+    client,
     dispatch: link.dispatch,
     dispose: () => link.dispose(),
   };

@@ -34,7 +34,13 @@ the way in are one fact about one daemon — a client that re-derived the home f
 the origin would be one rename away from dialling a socket nobody bound. The
 wall is what keeps it honest: a browser-safe module that imported it would be
 caught, and `dialServiceSocket` answers `{ kind: "absent" }` for a path nobody is
-serving rather than turning a missing daemon into an error.
+serving rather than turning a missing daemon into an error — and
+`{ kind: "refused" }` for a daemon whose contract this build cannot read, so a
+face draws the one as nothing and the other as a sentence. The comparison
+itself is `admitService`, which lives on the surface beside the version it is
+about: no consumer compares contract versions, because the direction of that
+comparison is easy to get backwards and a second judge is how it gets got
+backwards.
 
 That refusal is exactly why the service's platform half — the serving, the
 catalog, the coordinator — lives one wall up, in `@odu/service`.
@@ -42,10 +48,14 @@ catalog, the coordinator — lives one wall up, in `@odu/service`.
 ## The board readings — `./board`
 
 `web-ui` was the board, and the readings a board performs on a row lived inside
-it: which runs belong to one checkout, which are moving, which are failing, and
-what a run is called. A board is not one face's idea — a terminal dashboard or a
-downstream panel is the same board — so they live here now, next to the row
-shape they read, and `web-ui` imports them back.
+it: which runs are moving, which are failing, and what a run is called. A board
+is not one face's idea — a terminal dashboard or a downstream panel is the same
+board — so they live here now, next to the row shape they read, and `web-ui`
+imports them back. The COLLAPSE has since moved further still: "which run
+stands for a checkout, and how many are behind it" is `streams.checkout`'s
+answer, folded once by the service, because a face holding it had to re-fold on
+every row delta and then reopen a second subscription for that run's work every
+time the latest run swapped.
 
 The one worth naming is `runStatus`: a run's board STATE and its OUTCOME each
 had a column in the browser, and each was empty exactly where the other was
@@ -99,6 +109,8 @@ cells        service      who is serving, which build, and is it ready
 collections  runs         the board: every registered run, one row each
              logTails     one attempt's live tail, addressed by log key
 streams      nodes        one run's work, as whole self-contained pictures
+             checkout     one checkout, whole: the run it stands for, that
+                          run's work, and what ran before
 procedures   run.start    start a run, addressed by an explicit checkout
              run.wait     bounded, resumable attention on one run
              run.read     the same answer, without waiting
