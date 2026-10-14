@@ -84,57 +84,74 @@ describe("what a run is called", () => {
 });
 
 describe("a run's scope", () => {
+  /** A scope the way the wire carries one: the optional `--root` absent. */
+  const scope = (
+    over: Partial<RunRow["scope"]> = {},
+  ): RunRow["scope"] => ({
+    selectors: [],
+    platforms: [],
+    noDeps: false,
+    ...over,
+  });
+
   it("says nothing when the run covered the whole pipeline", () => {
-    expect(
-      scopeSuffix({ selectors: [], platforms: [], noDeps: false }),
-    ).toBeNull();
+    expect(scopeSuffix(scope())).toBeNull();
   });
 
   it("names the selection, which is not the whole pipeline", () => {
+    expect(scopeSuffix(scope({ selectors: ["ci::unit"] }))).toBe("ci::unit");
     expect(
-      scopeSuffix({ selectors: ["ci::unit"], platforms: [], noDeps: false }),
-    ).toBe("ci::unit");
-    expect(
-      scopeSuffix({
-        selectors: ["ci::fmt", "ci::nix"],
-        platforms: [],
-        noDeps: false,
-      }),
+      scopeSuffix(scope({ selectors: ["ci::fmt", "ci::nix"] })),
     ).toBe("ci::fmt ci::nix");
   });
 
   it("names a platform slice and --no-deps, alone or together", () => {
+    expect(scopeSuffix(scope({ platforms: ["x86_64-linux"] }))).toBe(
+      "x86_64-linux",
+    );
+    expect(scopeSuffix(scope({ noDeps: true }))).toBe("no deps");
     expect(
-      scopeSuffix({
-        selectors: [],
-        platforms: ["x86_64-linux"],
-        noDeps: false,
-      }),
-    ).toBe("x86_64-linux");
-    expect(
-      scopeSuffix({ selectors: [], platforms: [], noDeps: true }),
-    ).toBe("no deps");
-    expect(
-      scopeSuffix({
-        selectors: ["ci::unit"],
-        platforms: ["x86_64-linux"],
-        noDeps: true,
-      }),
+      scopeSuffix(
+        scope({ selectors: ["ci::unit"], platforms: ["x86_64-linux"], noDeps: true }),
+      ),
     ).toBe("ci::unit · x86_64-linux · no deps");
   });
 
-  it("a board row never renders an empty scope cell", () => {
-    expect(scopeLabel({ selectors: [], platforms: [], noDeps: false })).toBe(
-      "whole pipeline",
+  it("names a --root, which is a scoped run like any other", () => {
+    // A run rooted at a NAMEPATH expanded the DAG under it, so its lanes say
+    // nothing about the rest of the pipeline either — the same misreading a
+    // selection would cause, and the reason the qualifier reads `root` too.
+    expect(scopeSuffix(scope({ root: "ci::install" }))).toBe(
+      "under ci::install",
     );
-    // And where the suffix speaks, the label IS the suffix: one spelling of a
-    // scope, so a row and a qualifier cannot describe the same run differently.
-    for (const scope of [
-      { selectors: ["ci::unit"], platforms: [], noDeps: false },
-      { selectors: [], platforms: ["aarch64-darwin"], noDeps: false },
-      { selectors: [], platforms: [], noDeps: true },
+    expect(scopeSuffix(scope({ root: "ci::install", noDeps: true }))).toBe(
+      "under ci::install · no deps",
+    );
+  });
+
+  it("a board row never renders an empty scope cell", () => {
+    // The row has nothing else to say about what the run covered, so an empty
+    // selector is the WHOLE pipeline and says so — "" would read as a run that
+    // tested nothing.
+    expect(scopeLabel(scope())).toBe("whole pipeline");
+    // And it leads with that even when the rest of the scope is named, which is
+    // where the row and the qualifier deliberately differ.
+    expect(scopeLabel(scope({ platforms: ["x86_64-linux"] }))).toBe(
+      "whole pipeline · x86_64-linux",
+    );
+    expect(scopeLabel(scope({ noDeps: true }))).toBe("whole pipeline · no deps");
+    expect(scopeLabel(scope({ root: "ci::install" }))).toBe(
+      "whole pipeline · under ci::install",
+    );
+  });
+
+  it("the row and the qualifier agree once a SELECTION names the run", () => {
+    for (const scoped of [
+      scope({ selectors: ["ci::unit"] }),
+      scope({ selectors: ["ci::unit"], platforms: ["x86_64-linux"] }),
+      scope({ selectors: ["ci::unit"], noDeps: true }),
     ]) {
-      expect(scopeLabel(scope)).toBe(scopeSuffix(scope) as string);
+      expect(scopeLabel(scoped)).toBe(scopeSuffix(scoped) as string);
     }
   });
 });

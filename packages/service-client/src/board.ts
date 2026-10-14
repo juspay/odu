@@ -91,11 +91,36 @@ export const isActive = (row: RunRow): boolean =>
  *  board under it. */
 export const isFailing = (row: RunRow): boolean => row.unresolvedFailures > 0;
 
-/** The three fields of a scope these readings use — narrowed off the row's own
- *  scope rather than restated, so a fourth field on the wire is one type error
- *  away from a reading that would ignore it, and a caller holding a full
- *  `RunScope` (with its optional `--root`) passes it unchanged. */
-type ScopeShape = Pick<RunRow["scope"], "selectors" | "platforms" | "noDeps">;
+/** The fields of a scope these readings use — narrowed off the row's own scope
+ *  rather than restated, so a field added to the wire is one type error away
+ *  from a reading that would ignore it, and a caller holding a full `RunScope`
+ *  passes it unchanged.
+ *
+ *  `root` is here for the same reason the three flags are: a run rooted at a
+ *  NAMEPATH expanded the DAG under it, so its lanes say nothing about the rest
+ *  of the pipeline either — the misreading this whole reading exists to
+ *  prevent. */
+type ScopeShape = Pick<
+  RunRow["scope"],
+  "selectors" | "platforms" | "root" | "noDeps"
+>;
+
+/**
+ * A scope's parts, in the order a reader meets them — the ONE place the
+ * vocabulary is spelled, so the two renderings below cannot disagree about what
+ * a `--root` or a `--no-deps` is called.
+ *
+ * An empty selector is emphatically NOT a part here: "the whole pipeline" is a
+ * sentence a board cell owes the reader, and a qualifier must not say it — see
+ * {@link scopeLabel} for why the two differ. */
+function scopeParts(scope: ScopeShape): string[] {
+  return [
+    scope.root === undefined ? "" : `under ${scope.root}`,
+    scope.selectors.join(" "),
+    scope.platforms.join(" "),
+    scope.noDeps ? "no deps" : "",
+  ].filter((part) => part !== "");
+}
 
 /**
  * The scope as a QUALIFIER — what a reader appends after the run it belongs to —
@@ -114,19 +139,25 @@ type ScopeShape = Pick<RunRow["scope"], "selectors" | "platforms" | "noDeps">;
  * has been told the wrong thing about what is green.
  */
 export function scopeSuffix(scope: ScopeShape): string | null {
-  const parts = [
-    scope.selectors.join(" "),
-    scope.platforms.join(" "),
-    scope.noDeps ? "no deps" : "",
-  ].filter((part) => part !== "");
+  const parts = scopeParts(scope);
   return parts.length === 0 ? null : parts.join(" · ");
 }
 
 /** What a green here actually covers — the whole reason a scope rides the row.
- *  An empty selection is the WHOLE pipeline and says so, because "" would read
- *  as a run that tested nothing. */
+ *
+ *  The difference from {@link scopeSuffix} is the cell, not the scope: a board
+ *  row has nothing else to say about what the run covered, so an empty selector
+ *  reads as the WHOLE pipeline rather than as an empty cell a reader takes for a
+ *  run that tested nothing. A caller appending the scope to a run it has already
+ *  named has that fact behind it and wants the qualifier or silence. */
 export function scopeLabel(scope: ScopeShape): string {
-  return scopeSuffix(scope) ?? "whole pipeline";
+  const parts = scopeParts(scope).join(" · ");
+  if (parts === "") return "whole pipeline";
+  // An explicit selection names what ran on its own; without one the cell leads
+  // with what the selection WOULD have been.
+  return scope.selectors.length === 0
+    ? `whole pipeline · ${parts}`
+    : parts;
 }
 
 // ── the board, narrowed ─────────────────────────────────────────────────────
