@@ -167,7 +167,10 @@ describe("the board, narrowed", () => {
       row({ runId: "a", createdAt: 5 }),
       row({ runId: "c", createdAt: 9 }),
     ];
-    expect(newestFirst(rows).map((r) => r.runId)).toEqual(["c", "a", "b"]);
+    // The tie runs the catalog's way — later id first — so a board and the
+    // catalog under it never disagree about which of two same-millisecond runs
+    // comes first.
+    expect(newestFirst(rows).map((r) => r.runId)).toEqual(["c", "b", "a"]);
   });
 
   it("names the checkouts on the board, once each, in the rows' order", () => {

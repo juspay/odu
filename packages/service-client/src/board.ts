@@ -173,10 +173,15 @@ export function scopeLabel(scope: ScopeShape): string {
 /** Rows NEWEST `createdAt` first. `runId` breaks a `createdAt` tie, so the order
  *  is TOTAL: two runs registered in the same millisecond must not swap places
  *  between two reads of one board, or a list that reshuffles without anything
- *  having changed reads as activity. */
+ *  having changed reads as activity.
+ *
+ *  The tiebreak runs the SAME WAY the catalog's own id order does — later id
+ *  first — because a run id leads with its start instant. Two ids that tie on
+ *  `createdAt` are then still ordered the way everything else in odu orders
+ *  them, instead of the one list in the system that reads a catalog backwards. */
 export function newestFirst(rows: Iterable<RunRow>): RunRow[] {
   return [...rows].sort(
-    (a, b) => b.createdAt - a.createdAt || (a.runId < b.runId ? -1 : 1),
+    (a, b) => b.createdAt - a.createdAt || (a.runId > b.runId ? -1 : 1),
   );
 }
 
