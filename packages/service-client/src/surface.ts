@@ -307,6 +307,10 @@ export const RunBoardStateSchema = Schema.Literals([
 ]);
 export type RunBoardState = typeof RunBoardStateSchema.Type;
 
+/** The run's terminal word, as a bare union — the non-null half of the row's
+ *  nullable `outcome`, which is what a total label table is written against. */
+export type RunOutcome = typeof RunOutcomeSchema.Type;
+
 /** The run's own terminal word. Beside `passed` rather than derived from it,
  *  for the reason the attention payload gives: `passed: false` covers both a
  *  red node and a run torn down before every node finished, and reporting the

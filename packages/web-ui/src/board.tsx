@@ -23,10 +23,24 @@
  * view collapses, sorts, filters and words it.
  */
 
+import {
+  boardTally,
+  byCheckout,
+  isActive,
+  isFailing,
+  runStatus,
+  type Checkout,
+} from "@odu/service-client/board";
 import { createMemo, createSignal, For, Index, Show, type JSX } from "solid-js";
 import { Button, CommitRef, Hint, Pill } from "./dom";
-import { ago, BOARD_STATE, OUTCOME, projectOf, scopeLabel } from "./format";
+import { ago, projectOf, scopeLabel } from "./format";
 import type { RunRow } from "./types";
+
+/** Re-exported so `./board` stays the one import path this app's own modules
+ *  use: the readings themselves live in `@odu/service-client/board`, which is
+ *  where a second face reads them from too. */
+export { boardTally, byCheckout, isActive, isFailing };
+export type { Checkout };
 
 /** What a board can be narrowed to. Deliberately three coarse buckets rather
  *  than a query language: the question a person actually asks of a CI board is
@@ -40,16 +54,6 @@ const FILTERS: { id: BoardFilter; label: string; hint: string }[] = [
   { id: "all", label: "All", hint: "every run in the catalog" },
 ];
 
-/** A run the machines are still working on. */
-export const isActive = (row: RunRow): boolean =>
-  row.state === "running" || row.state === "provisioning";
-
-/** A run with a failure nobody has resolved — the board's red rail, its failing
- *  pill, and the tab's own count, from one rule. Named once because a second
- *  spelling of it in another module is how a tab starts disagreeing with the
- *  board under it. */
-export const isFailing = (row: RunRow): boolean => row.unresolvedFailures > 0;
-
 function matches(row: RunRow, filter: BoardFilter): boolean {
   switch (filter) {
     case "all":
@@ -59,55 +63,6 @@ function matches(row: RunRow, filter: BoardFilter): boolean {
     case "attention":
       return isFailing(row) || row.reportingDebt > 0;
   }
-}
-
-/** One checkout's runs, collapsed: the newest of them, and how many there
- *  were. */
-export interface Checkout {
-  latest: RunRow;
-  runs: number;
-}
-
-/**
- * ONE ROW PER CHECKOUT — the newest run of each, and how many runs it stands
- * for, keyed by the checkout path.
- *
- * ONE walk, so "which row survives" and "how many were folded away" cannot come
- * out of two maps that disagree — and no consumer has to re-join them at a
- * render site with a coalesce for a case that cannot happen.
- *
- * Keyed by `repoRoot` and not by project: two worktrees of one repo share a
- * last path segment and are two different checkouts. The insertion order is the
- * input's, so the caller's sort — newest first — survives the collapse.
- */
-export function byCheckout(rows: RunRow[]): Map<string, Checkout> {
-  const groups = new Map<string, Checkout>();
-  for (const row of rows) {
-    const held = groups.get(row.repoRoot);
-    if (held === undefined) {
-      groups.set(row.repoRoot, { latest: row, runs: 1 });
-      continue;
-    }
-    held.runs += 1;
-    if (row.createdAt > held.latest.createdAt) held.latest = row;
-  }
-  return groups;
-}
-
-/** WHAT THE BOARD IS SAYING, at a glance — the same rows and the same buckets
- *  the board itself uses, so the tab cannot drift from the page under it.
- *  `failing` is deliberately narrower than the Needs-attention bucket: an
- *  unposted status is a debt, not a failure, and a tab that cried "failing"
- *  over one would be a tab people turn off. */
-export function boardTally(rows: RunRow[]): {
-  failing: number;
-  active: number;
-} {
-  const latest = [...byCheckout(rows).values()].map((group) => group.latest);
-  return {
-    failing: latest.filter(isFailing).length,
-    active: latest.filter(isActive).length,
-  };
 }
 
 /** Does this row answer the search box? Case-insensitive substring, over the
@@ -137,8 +92,7 @@ function Row(props: {
   earlier: number;
   onOpen: (runId: string) => void;
 }): JSX.Element {
-  const state = (): (typeof BOARD_STATE)[RunRow["state"]] =>
-    BOARD_STATE[props.run.state];
+  const status = () => runStatus(props.run);
   return (
     <button
       type="button"
@@ -166,21 +120,11 @@ function Row(props: {
           contentSha={props.run.contentSha}
         />
       </span>
-      {/* ONE status cell, not two. A run's board state and its outcome used to
-          have a column each, and each was empty in exactly the rows where the
-          other one was full: "settled" beside "failed" says nothing "failed"
-          did not already say, and a live run has no outcome to put anywhere.
-          So the cell holds whichever of the two IS the answer — the verdict
-          once there is one, and where the run has got to until then. */}
+      {/* ONE status cell, not two — the fold (verdict once there is one, where
+          the run has got to until then) is `@odu/service-client/board`'s
+          `runStatus`, so every face of a row wears the same word. */}
       <span class="row-status">
-        <Show
-          when={props.run.outcome}
-          fallback={<Pill hue={state().hue}>{state().label}</Pill>}
-        >
-          {(outcome) => (
-            <Pill hue={OUTCOME[outcome()].hue}>{OUTCOME[outcome()].label}</Pill>
-          )}
-        </Show>
+        <Pill hue={status().hue}>{status().label}</Pill>
       </span>
       <span class="row-attention">
         <Show when={isFailing(props.run)}>

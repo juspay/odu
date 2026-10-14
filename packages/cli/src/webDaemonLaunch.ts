@@ -25,7 +25,6 @@
  */
 
 import { join } from "node:path";
-import { createHash } from "node:crypto";
 import { daemonHome } from "@kolu/surface-daemon";
 import { survivableSpawnDriver } from "@kolu/surface-daemon-supervisor";
 import {
@@ -34,11 +33,14 @@ import {
   survivableSpawnPlan,
 } from "@odu/execution/coordinator/spawn";
 import { ODU_VERSION } from "@odu/execution/common/version";
-import {
-  DEFAULT_SERVICE_ORIGIN,
-  SERVICE_APP,
-  serviceOrigin,
-} from "@odu/service-client/endpoint";
+import { serviceOrigin } from "@odu/service-client/endpoint";
+// The namespace rule moved into the contract package, because the launcher is
+// not its only reader: the SOCKET a local client dials sits inside this home,
+// so the daemon and the client must derive the name from one function
+// (`./socket`). This module keeps `webHome` — the home a daemon is CREATED in,
+// which mkdirs — while a client that only wants to ask where the daemon is
+// uses the package's pure `serviceSocketPath`.
+import { webAppNamespace } from "@odu/service-client/socket";
 import type { ServiceBuild } from "@odu/service-client/surface";
 import { Effect } from "effect";
 
@@ -46,27 +48,6 @@ import { Effect } from "effect";
  *  service without a page is a misbuilt package, not a mode ({@link
  *  assertPackaged}). */
 const DIST_ENV = "ODU_WEB_DIST";
-
-/**
- * ONE GATE PER ADDRESS.
- *
- * `ODU_WEB_ORIGIN` is documented as moving the whole service, so a developer
- * can run a second odu against a scratch catalog. It moved the address and not
- * the gate: both services computed `~/.local/state/odu-web/`, so the second one
- * read a live holder there and yielded — to a daemon serving a different port
- * and a different catalog. A singleton is per-address or it is not a singleton,
- * and the two spellings of "which service am I" have to be one.
- *
- * The default origin keeps the plain namespace, so nothing about an ordinary
- * install moves. Any other origin gets its own, named by a digest of the origin
- * rather than by the port alone — `http://127.0.0.1:9000` and
- * `http://[::1]:9000` are two addresses.
- */
-export function webAppNamespace(origin: string): string {
-  if (origin === DEFAULT_SERVICE_ORIGIN) return SERVICE_APP;
-  const digest = createHash("sha256").update(origin).digest("hex").slice(0, 12);
-  return `${SERVICE_APP}-${digest}`;
-}
 
 /** The daemon's own home — the same call the launcher makes, so the two cannot
  *  disagree about where the gate and the control socket are. */
