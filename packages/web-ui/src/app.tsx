@@ -213,16 +213,37 @@ export function App(props: {
   const checkoutSubs = createMemo(
     mapArray(
       () => checkoutRoots(rows()),
-      (repoRoot) => props.client.streams.checkout.use(() => ({ repoRoot })),
+      (repoRoot) => ({
+        repoRoot,
+        sub: props.client.streams.checkout.use(() => ({ repoRoot })),
+      }),
     ),
   );
   const checkouts = createMemo<CheckoutFrame[]>(() => {
     const out: CheckoutFrame[] = [];
-    for (const sub of checkoutSubs()) {
+    for (const { sub } of checkoutSubs()) {
       const frame = sub();
       // A checkout whose first frame has not landed yet is not an empty
       // checkout, so it is absent from the list rather than an empty row.
       if (frame !== undefined) out.push(frame);
+    }
+    return out;
+  });
+  /**
+   * The checkouts the service could not be read for.
+   *
+   * A failed subscription is NOT an absent one. Dropped, a checkout whose
+   * stream died simply leaves the board while its runs are still listed under
+   * History — so the board answers "what is my CI doing here" with silence
+   * about the one checkout it could not answer for. The frame carries no
+   * `repoRoot`, which is why the path is held beside the subscription rather
+   * than recovered from the reading that did not arrive.
+   */
+  const unreadable = createMemo<{ repoRoot: string; message: string }[]>(() => {
+    const out: { repoRoot: string; message: string }[] = [];
+    for (const { repoRoot, sub } of checkoutSubs()) {
+      const failure = sub.error();
+      if (failure !== undefined) out.push({ repoRoot, message: String(failure) });
     }
     return out;
   });
@@ -751,6 +772,7 @@ export function App(props: {
         <Match when={route().at === "board"}>
           <Board
             checkouts={checkouts()}
+            unreadable={unreadable()}
             rows={rows()}
             now={now()}
             // The framework's own pending fact: `connecting` with nothing yet is

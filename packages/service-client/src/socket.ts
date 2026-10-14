@@ -40,9 +40,11 @@ import { readServiceCell } from "./dial";
 import { DEFAULT_SERVICE_ORIGIN, SERVICE_APP, serviceOrigin } from "./endpoint";
 import {
   admitService,
+  handshakeTimedOut,
   oduServiceClientOver,
   type OduServiceClient,
   oduServiceSurface,
+  SERVICE_HANDSHAKE_MS,
   type ServiceAdmission,
 } from "./surface";
 
@@ -151,10 +153,20 @@ export type ServiceSocketDial =
  * It does NOT start the service. Bootstrapping is `odu web`'s job and only
  * `odu web`'s — a face that silently spawned a daemon would make every mistyped
  * invocation a reason to start a second one.
+ *
+ * THE HANDSHAKE IS BOUNDED. A daemon can accept the socket and then publish
+ * nothing — juspay/odu#113's wedged refresh loop is exactly that — and an
+ * unbounded read of its cell turns the three-way answer above into no answer at
+ * all: the caller waits on a promise nothing will settle. The deadline
+ * INTERRUPTS the read rather than racing a timer beside it, so the link is
+ * disposed with no fiber still listening for a frame that is not coming.
+ * `handshakeMs` exists for tests, which cannot wait ten seconds to prove it.
  */
 export async function dialServiceSocket(
   origin: string = serviceOrigin(),
+  opts: { handshakeMs?: number } = {},
 ): Promise<ServiceSocketDial> {
+  const handshakeMs = opts.handshakeMs ?? SERVICE_HANDSHAKE_MS;
   const socketPath = serviceSocketPath(origin);
   let link: WireLink;
   try {
@@ -170,7 +182,13 @@ export async function dialServiceSocket(
   let verdict: ServiceAdmission;
   try {
     verdict = admitService(
-      await Effect.runPromise(readServiceCell(client)),
+      await Effect.runPromise(
+        Effect.timeoutOrElse(readServiceCell(client), {
+          duration: handshakeMs,
+          orElse: () =>
+            Effect.fail(new Error(handshakeTimedOut(socketPath, handshakeMs))),
+        }),
+      ),
       socketPath,
     );
   } catch (err) {

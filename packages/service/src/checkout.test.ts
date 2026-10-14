@@ -14,6 +14,7 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
+import { importedRunId } from "@odu/run-history/import";
 import type { CheckoutFrame } from "@odu/service-client/surface";
 import { Effect, Fiber, Stream } from "effect";
 import { checkoutSource } from "./checkout";
@@ -175,6 +176,48 @@ describe("the checkout stream", () => {
       old.runId,
     ]);
     expect(frame?.total).toBe(2);
+  });
+
+  it("stands for the newest run by its clock, beside an imported one", async () => {
+    const w = open();
+    const t0 = Date.now();
+    // An imported run's id encodes its source instant at EIGHT base36 digits
+    // and a minted one at NINE, so the catalog's directory listing — a string
+    // sort — puts every import above every run started since. A checkout that
+    // read the head of that listing would name a run from last year as what is
+    // happening in this checkout now, and `recent` would disagree with the
+    // history beneath it.
+    const importedAt = t0 - 365 * 24 * 60 * 60 * 1_000;
+    const imported = registerFixtureRun(w, {
+      repoRoot: "/code/app",
+      sha: "a".repeat(40),
+      now: importedAt,
+      runId: importedRunId({
+        repo: "juspay/odu",
+        sha: "a".repeat(40),
+        seq: 1,
+        startedAt: importedAt,
+      }),
+    });
+    finalizeRun(imported.handle, imported.token, "passed");
+
+    const today = registerFixtureRun(w, {
+      repoRoot: "/code/app",
+      sha: "b".repeat(40),
+      now: t0,
+    });
+    finalizeRun(today.handle, today.token, "passed");
+
+    // The premise, stated: without it the assertions below would pass for a
+    // reason that has nothing to do with time.
+    expect(imported.runId > today.runId).toBe(true);
+
+    const [frame] = await take(sourceOver(w), "/code/app", 1);
+    expect(frame?.latest?.run.runId).toBe(today.runId);
+    expect(frame?.recent.map((run) => run.runId)).toEqual([
+      today.runId,
+      imported.runId,
+    ]);
   });
 
   it("swaps the latest run — and its work — inside one subscription", async () => {
