@@ -1231,9 +1231,11 @@
   }
 
   @media (max-width: 44rem) {
-    /* Two columns instead of six. Everything stays on screen; nothing is
+    /* Two columns instead of seven. Everything stays on screen; nothing is
        hidden and nothing scrolls sideways — and the heads go, because a label
-       strip over a reflowed row labels the wrong cells. */
+       strip over a reflowed row labels the wrong cells. The two clocks land as
+       a pair on the last line, which is how they read anyway: how long it took,
+       and how long ago. */
     .row-head { display: none; }
     .row {
       grid-template-columns: minmax(0, 1fr) auto;

@@ -245,9 +245,12 @@ function nodesOf(
 function envOf(
   manifest: RunManifest,
   fold: ReturnType<typeof foldJournal>,
-  /** When the run stopped, from its verdict — or null while it is still going,
-   *  which is what makes `elapsedMs` a live clock rather than a fixed one. */
-  finishedAt: number | null,
+  /** The ROW this environment belongs to, for its clock pair. The row itself
+   *  rather than a `finishedAt` passed alongside, so the elapsed time computed
+   *  here and the one `RunRegistry.env` recomputes on every read subtract from
+   *  ONE object — a pair rebuilt at each site is the second copy of the rule
+   *  that moving it to `runElapsedMs` was meant to retire. */
+  row: RunRow,
   now: number,
 ): RunEnv {
   return {
@@ -258,7 +261,7 @@ function envOf(
     // matched nothing", and inferring it from silence would invent a reason the
     // journal never gave.
     phase: fold.phase ?? fallbackPhase(fold.latest),
-    elapsedMs: runElapsedMs({ createdAt: manifest.createdAt, finishedAt }, now),
+    elapsedMs: runElapsedMs(row, now),
     lanes: lanesOf(fold.lanes),
     hostsSource: fold.hostsSource,
     // `owner/repo` or null — the manifest records the slug the coordinator
@@ -360,45 +363,48 @@ function project(
   );
   const fold = foldJournal(journal.entries);
   const state = boardState(attention.state, fold.latest);
+  const row: RunRow = {
+    runId: handle.runId,
+    repo: manifest.repo,
+    repoRoot: manifest.repoRoot,
+    branch: manifest.branch ?? null,
+    sha: manifest.sha,
+    dirty: manifest.snapshot.dirty,
+    ...(manifest.snapshot.contentSha === undefined ? {} : { contentSha: manifest.snapshot.contentSha }),
+    seq: manifest.seq,
+    pipeline: manifest.pipeline,
+    createdAt: manifest.createdAt,
+    // When the run stopped, from the verdict read once above — null while it
+    // has not. On the ROW rather than held beside it, because how long a run
+    // took is a fact every face needs and only this process could produce:
+    // `RunEnv` carries the elapsed number for the live view, and a board
+    // reading a settled row a week later has no journal to ask.
+    finishedAt: verdict?.finishedAt ?? null,
+    state,
+    settled: attention.settled,
+    passed: attention.passed,
+    outcome: attention.outcome,
+    actionable: attention.actionable,
+    unresolvedFailures: attention.unresolved_failures_total,
+    scope: manifest.scope,
+    reportingDebt: fold.debt.size,
+    endpoint: attention.endpoint,
+    parentRunId: manifest.parentRunId,
+    // The cursor a caller resumes from if it starts watching HERE. The
+    // journal's highest sequence rather than the attention payload's own
+    // cursor: that one advances only through events actually delivered, and
+    // this read delivered none.
+    cursor: formatCursor({ runId: handle.runId, seq: journal.highestSeq }),
+  };
   return {
     fingerprint: stamp,
     owner,
     alive,
-    row: {
-      runId: handle.runId,
-      repo: manifest.repo,
-      repoRoot: manifest.repoRoot,
-      branch: manifest.branch ?? null,
-      sha: manifest.sha,
-      dirty: manifest.snapshot.dirty,
-      ...(manifest.snapshot.contentSha === undefined ? {} : { contentSha: manifest.snapshot.contentSha }),
-      seq: manifest.seq,
-      pipeline: manifest.pipeline,
-      createdAt: manifest.createdAt,
-      // When the run stopped, from the verdict read once above — null while it
-      // has not. On the ROW rather than held beside it, because how long a run
-      // took is a fact every face needs and only this process could produce:
-      // `RunEnv` carries the elapsed number for the live view, and a board
-      // reading a settled row a week later has no journal to ask.
-      finishedAt: verdict?.finishedAt ?? null,
-      state,
-      settled: attention.settled,
-      passed: attention.passed,
-      outcome: attention.outcome,
-      actionable: attention.actionable,
-      unresolvedFailures: attention.unresolved_failures_total,
-      scope: manifest.scope,
-      reportingDebt: fold.debt.size,
-      endpoint: attention.endpoint,
-      parentRunId: manifest.parentRunId,
-      // The cursor a caller resumes from if it starts watching HERE. The
-      // journal's highest sequence rather than the attention payload's own
-      // cursor: that one advances only through events actually delivered, and
-      // this read delivered none.
-      cursor: formatCursor({ runId: handle.runId, seq: journal.highestSeq }),
-    },
+    row,
     nodes: nodesOf(handle.runId, fold.roster, fold.latest),
-    env: envOf(manifest, fold, verdict?.finishedAt ?? null, now),
+    // The ROW just built, so the elapsed time on this frame and the one every
+    // later read recomputes come from one pair.
+    env: envOf(manifest, fold, row, now),
   };
 }
 

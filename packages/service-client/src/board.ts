@@ -124,12 +124,21 @@ export function runElapsedMs(
   return Math.max(0, (run.finishedAt ?? now) - run.createdAt);
 }
 
-/** A duration, at the precision a person reads it — the ONE rendering of a
- *  number of milliseconds, so the browser board, the CLI's listing and a node's
- *  own duration all spell "1m07s" the same way. It sits beside
- *  {@link runElapsedMs} because the rule and its spelling are the same answer
- *  asked twice; it was `web-ui`'s own, which left the CLI with no way to print
- *  a duration but to invent a second one. */
+/** A duration, at the precision a person reads it — the ONE rendering a BOARD
+ *  spells a number of milliseconds with. Three cells share it: a run's `Took`
+ *  on the browser board, a node's own duration in its detail view
+ *  (`web-ui/format` re-exports this one rather than keeping a copy), and the
+ *  duration column of `odu history list`. It sits beside {@link runElapsedMs}
+ *  because the rule and its spelling are the same answer asked twice; it was
+ *  `web-ui`'s own, which left the CLI with no way to print a duration but to
+ *  invent a second one.
+ *
+ *  `formatGoDuration` (`@odu/execution/common/duration`) is NOT a rival: it is
+ *  byte-compatible with the Go `time.Duration` strings justci posted to commit
+ *  statuses, so branch-protection tooling and humans already parse it. The
+ *  terminal live view prints that one for the same reason the status does — a
+ *  wire format, not a reader's preference. A board cell has no such consumer
+ *  and takes the readable spelling. */
 export function duration(ms: number | null): string {
   if (ms === null) return "";
   if (ms < 1000) return `${ms}ms`;
