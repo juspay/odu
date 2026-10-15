@@ -40,6 +40,11 @@ import {
   type JSX,
 } from "solid-js";
 import { ansiSpans } from "./ansi";
+import {
+  type LaneSpan,
+  laneSpan,
+  timelineTicks,
+} from "@odu/service-client/board";
 import { Button, CommitRef, Confirm, Hint, Pill, Receipt } from "./dom";
 import {
   bytes,
@@ -192,6 +197,10 @@ function LaneHead(props: {
 
 function NodeRow(props: {
   node: RunNode;
+  /** WHERE this node sat in its run, from the shared geometry — or `null` for a
+   *  node that has not started, which draws no bar at all. Computed by the
+   *  caller, which is the one place the run and the clock both are. */
+  span: LaneSpan | null;
   selected: string | null;
   onSelect: (node: RunNode) => void;
   controls: DetailControls;
@@ -277,6 +286,42 @@ function NodeRow(props: {
           >
             Cancel node
           </Button>
+        </Show>
+      </span>
+      {/* THE TIMELINE — where this node's latest attempt ran inside the run,
+          not merely how long it took, so parallel work reads as parallel and
+          the critical path is the bar nothing overlaps.
+
+          A CHILD OF THE ROW, not of the button. The button is `flex: 1` beside
+          a controls cell that is empty on a pending row, one button wide on a
+          settled one and another width again on a running one — so a track
+          inside it was a different box on every row, and `left: 50%` meant
+          three different instants down one list. The row's own box does not
+          vary, and neither does the axis's, so one scale is drawn once.
+
+          A bar is skipped only where the span begins AT the track's end: that
+          is the clamp's answer for a lane whose start outran the run, and it
+          has nowhere to be drawn. A zero-WIDTH span is not the same thing — a
+          node that genuinely took no measurable time has `durationMs: 0`, which
+          is the exact case `min-width` on the bar exists for.
+
+          The hue comes from the SAME `hue-*` class the glyph wears, and the
+          hatch from the SAME arm the geometry took (`kind`), so neither can
+          disagree with what the node is doing. */}
+      <span class="node-track">
+        <Show when={props.span}>
+          {(span) => (
+            <Show when={span().left < 1}>
+              <span
+                class={`node-bar hue-${meta().hue}`}
+                classList={{ "node-bar-running": span().kind === "running" }}
+                style={{
+                  left: `${span().left * 100}%`,
+                  width: `${span().width * 100}%`,
+                }}
+              />
+            </Show>
+          )}
         </Show>
       </span>
     </li>
@@ -615,6 +660,10 @@ export function LogPanel(props: {
 export function Detail(props: {
   run: RunRow | undefined;
   frame: NodesFrame | undefined;
+  /** The page's own ticking clock — the SAME one the board's ages read, so a
+   *  live run's timeline grows on one interval rather than this view's second
+   *  idea of now. The run row carries the origin; the clock carries the end. */
+  now: number;
   pending: boolean;
   error: Error | undefined;
   selected: RunNode | null;
@@ -770,6 +819,40 @@ export function Detail(props: {
             </p>
           </Show>
           <ul class="node-list">
+            {/* THE AXIS the bars below are read against — once per list, not
+                once per row, and only where there is a run to measure AND work
+                to measure it against: a provisioning run says "no work yet" in
+                a sentence above, and an axis alone in the card would be four
+                tick labels in a box that `.node-list:empty` exists to hide.
+
+                Ticks come from the same module the bars do, asked with the same
+                run and clock — a hand-rolled scale here would be a second
+                answer to where the middle of a run is. */}
+            <Show when={nodes().length > 0 ? props.run : undefined}>
+              {(run) => (
+                <li class="node-axis" aria-hidden="true">
+                  <span class="node-axis-track">
+                    {/* `Index`, like the node rows below and for the same
+                        reason: these objects are minted afresh every second, so
+                        keying by reference would rebuild four spans a second
+                        for a scale whose POSITIONS never move. */}
+                    <Index each={timelineTicks(run(), props.now)}>
+                      {(tick) => (
+                        <span
+                          class="node-axis-tick"
+                          style={{ left: `${tick().at * 100}%` }}
+                        >
+                          {/* This page's own spelling of a duration, the one
+                              its node rows already print — the axis carries a
+                              position and a number, never a string. */}
+                          {duration(tick().ms)}
+                        </span>
+                      )}
+                    </Index>
+                  </span>
+                </li>
+              )}
+            </Show>
             {/* `For` over the LANES and `Index` over the nodes inside them, and
                 the difference is what each list is. A lane is addressed by its
                 platform name, which is its own identity — equal strings are the
@@ -792,6 +875,14 @@ export function Detail(props: {
                     {(node) => (
                       <NodeRow
                         node={node()}
+                        // No run row, no origin to measure from — and an
+                        // invented one would place every bar wrongly rather
+                        // than not at all.
+                        span={
+                          props.run === undefined
+                            ? null
+                            : laneSpan(node(), props.run, props.now)
+                        }
                         selected={props.selected?.id ?? null}
                         onSelect={props.onSelect}
                         controls={props.controls}

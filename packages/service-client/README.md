@@ -89,6 +89,24 @@ printing two different durations for one run is the same drift `runStatus`
 exists to prevent. The service used to own this subtraction privately, which is
 why a settled run's duration was unreachable from anywhere but the live view.
 
+**WHERE a lane ran inside its run** is `laneSpan`, which answers a `left` and a
+`width` as fractions of the run's own timeline, and `timelineTicks` MARKS the
+axis they are read against — `{ at, ms }`, a position and a number, never a
+string: where a mark sits is geometry and is shared, while how a face spells a
+duration is that face's own vocabulary (`duration` here, `compactPhrase` in
+kolu). A Gantt rather than a row of lengths, because
+lengths say how long each lane took and nothing about what ran beside what —
+and "what was the critical path" is the question a reader opens a run to ask.
+The scale is `runElapsedMs`, so a live run's track stays exactly full as it
+grows; a lane that has not started answers `null` rather than a sliver at the
+origin, because an empty track is itself the signal. Clock skew clamps into the
+track for the reason `runElapsedMs` floors at zero: a lane host behind the
+registrar reports a start before the run began, and that is skew rather than a
+negative offset. odu's own run detail draws it today and kolu's Inspector is next; a face with
+its own subtraction would place the same lane at two different x, and one with
+its own notion of "still arriving" would paint a skipped node as the critical
+path — which is why the span carries its own `kind` and its own milliseconds.
+
 ## The run address — `./routes`
 
 A run, and one attempt's output within it, are LINKABLE: a person pastes

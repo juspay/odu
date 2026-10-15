@@ -628,13 +628,22 @@
 
   .node {
     display: flex;
+    /* WRAPS so the timeline track can take a line of its own below the row's
+       cells — see `.node-track`, which is why the track is a child of THIS box
+       and not of the button inside it. */
+    flex-wrap: wrap;
     align-items: center;
     gap: 0.5rem;
     padding-right: 0.5rem;
-    border-top: 1px solid var(--line);
   }
 
-  .node:first-child { border-top: 0; }
+  /* Between rows rather than on top of each one, and the list has two kinds of
+     row: a node follows another node, or it follows the lane head above it.
+     `:first-child` said this before the axis became the list's first item and
+     stopped matching at all — adjacency says what was always meant, and says it
+     for both neighbours. */
+  .node + .node,
+  .lane + .node { border-top: 1px solid var(--line); }
   .node:hover { background: var(--panel-2); }
 
   .node-open {
@@ -685,6 +694,107 @@
   .node-exit { color: var(--red-ink); }
   .node-controls { display: flex; gap: 0.25rem; flex: none; }
 
+  /* ── the lane timeline ────────────────────────────────────────────────────
+   *
+   * A GANTT across the run: a bar sits WHERE its node ran, so two lanes that
+   * overlap are drawn overlapping and the critical path is the bar nothing is
+   * beside. The geometry is `@odu/service-client/board`'s `laneSpan`; this file
+   * only paints what it is told.
+   *
+   * ONE BOX, and that is the whole rule. The track is a child of `.node` — the
+   * ROW — and takes a line of its own (`flex-basis: 100%`, a late `order`, the
+   * device `.detail-sub` uses). It was a child of `.node-open`, which is
+   * `flex: 1` beside a controls cell that is EMPTY on a pending row, one button
+   * wide on a settled one and wider again on a running one: three track widths
+   * down one list, so `left: 50%` was three different instants and the axis
+   * agreed with none of them.
+   *
+   * The row's own box does not vary, and the axis gets the IDENTICAL inset so
+   * its last tick lands exactly where a full-length bar ends: the row insets
+   * its track by its own `padding-right` plus the track's `margin-left`, and
+   * `.node-axis` spends the same two numbers as padding. `layout_steps.ts`
+   * measures the two boxes rather than trusting this paragraph.
+   */
+  .node-track,
+  .node-axis-track {
+    position: relative;
+    flex-basis: 100%;
+    order: 9;
+    min-width: 0;
+    /* A bar clamped to the track's end still carries `min-width`, and without
+       this it would paint past the edge the axis marks as the run's total. */
+    overflow: hidden;
+  }
+
+  .node-track {
+    height: 0.625rem;
+    margin: 0 0 0.35rem 0.5rem;
+    border-radius: 3px;
+    /* NOT `--panel-2`: that is what `.node:hover` and `.node-current` paint the
+       row with, so an empty track — the signal that a lane never started —
+       disappeared under a pointer and under the selected row. `--line` is
+       structural, owned by no row state. */
+    background: var(--line);
+  }
+
+  /* The hue is the `hue-*` class's own — the SAME pair the glyph beside it
+     wears, so a bar and its glyph can never disagree about what the node is
+     doing. Translucent, because bars sit on a tinted row and a solid fill at
+     this height reads as a block of colour rather than a measurement. A floor
+     on the width keeps a one-second lane in a ten-minute run visible: a bar
+     rounded away to nothing says the node never ran. */
+  .node-bar {
+    position: absolute;
+    inset-block: 0;
+    min-width: 2px;
+    border-radius: 3px;
+    background: var(--hue-ink, var(--muted));
+    opacity: 0.6;
+  }
+
+  /* A node still going has not finished where its bar currently reaches, and a
+     solid fill would claim it had. The whole bar is hatched — not just a tail —
+     because every millisecond of it is provisional: the width is measured
+     against a clock, and the next tick moves it. It grows as the run does. */
+  .node-bar-running {
+    background: repeating-linear-gradient(
+      135deg,
+      var(--hue-ink, var(--muted)) 0 4px,
+      transparent 4px 8px
+    );
+    opacity: 0.75;
+  }
+
+  /* The scale, once per list rather than once per row. `aria-hidden` in the
+     markup: it is the furniture a sighted reader measures bars against, and
+     four bare durations announced before a DAG would be noise — every node row
+     says its own duration in words.
+
+     The padding is the row's inset, spelled as padding because this li has no
+     button to hold it: `0.5rem` each side, matching `.node`'s `padding-right`
+     and `.node-track`'s `margin-left`. */
+  .node-axis {
+    display: flex;
+    padding: 0.2rem 0.5rem 0;
+  }
+
+  .node-axis-track { height: 0.9rem; }
+
+  .node-axis-tick {
+    position: absolute;
+    top: 0;
+    color: var(--quiet);
+    font: 0.65rem var(--mono);
+    white-space: nowrap;
+    /* Each label hangs from its own mark, and the two at the ends would
+       otherwise overflow the panel: the first sits on the origin, the last is
+       pulled back inside the track's right edge. */
+    transform: translateX(-50%);
+  }
+
+  .node-axis-tick:first-child { transform: none; }
+  .node-axis-tick:last-child { transform: translateX(-100%); }
+
   /* A LANE — one platform's worth of the DAG, headed by the machine it is
      running on and the counts of what it has done so far, with the button that
      drops the whole lane at the end. It is a row in the same list as the nodes
@@ -706,7 +816,6 @@
     font: 600 0.8rem var(--mono);
   }
 
-  .lane:first-child { border-top: 0; }
   .lane-platform { color: var(--ink); white-space: nowrap; }
   .lane-host { color: var(--muted); font-weight: 400; }
   /* The counts push everything after them to the right edge, so the lane's
@@ -1243,6 +1352,5 @@
     }
     .row-scope { grid-column: 1 / -1; }
     .row-attention { grid-column: 1 / -1; }
-    .node { flex-wrap: wrap; }
   }
 }

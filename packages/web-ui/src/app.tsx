@@ -795,6 +795,7 @@ export function App(props: {
           <Detail
             run={selectedRun()}
             frame={frame()}
+            now={now()}
             pending={nodesSub.pending()}
             error={nodesSub.error()}
             selected={selected()}
