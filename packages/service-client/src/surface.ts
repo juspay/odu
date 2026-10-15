@@ -432,6 +432,14 @@ export const RunRowSchema = Schema.Struct({
   seq: Schema.NullOr(Schema.Int),
   pipeline: Schema.String,
   createdAt: Schema.Number,
+  /** When the run STOPPED, from its own verdict — null while it has not. On the
+   *  row because how long a run took is a durable fact about it, and the only
+   *  other way to have it was to subtract against `now`: that makes every
+   *  settled row's duration a function of when somebody looked, and a board
+   *  reopened tomorrow would say yesterday's green took a day. Read it through
+   *  `runElapsedMs` (`@odu/service-client/board`), which is the one rule that
+   *  turns this pair into a duration. */
+  finishedAt: Schema.NullOr(Schema.Number),
   state: RunBoardStateSchema,
   settled: Schema.Boolean,
   passed: Schema.Boolean,

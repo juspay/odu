@@ -603,6 +603,7 @@
   .row-project { font-weight: 600; overflow-wrap: anywhere; }
   .row-sha { font-family: var(--mono); font-size: 0.8rem; }
   .row-scope,
+  .row-took,
   .row-age { color: var(--muted); font: 0.8rem/1.4 var(--mono); }
   /* "4 earlier" — how many runs of this checkout the board folded away. It
      rides the age cell because that is what it is about: the older ones, and it
@@ -1121,17 +1122,20 @@
   /* One geometry, two users: the column heads and the rows beneath them. Written
      once so a column cannot drift out from under its own label.
 
-     SIX columns — project, commit, status, attention, scope, age. It was seven:
-     a run's board state and its outcome had a column each, which meant two of
-     the widest columns on the page were empty in every row where the other one
-     was full. One `.row-status` cell carries whichever of the two is the answer.
+     SEVEN columns — project, commit, status, attention, scope, took, age. It was
+     six, and before that seven: a run's board state and its outcome had a column
+     each, which meant two of the widest columns on the page were empty in every
+     row where the other one was full, and one `.row-status` cell now carries
+     whichever of the two is the answer. `took` is the run's own DURATION and
+     `age` is how long ago it started — two different questions, which is why
+     neither cell can answer for the other.
    */
   .row,
   .row-head {
     display: grid;
     grid-template-columns:
       minmax(8rem, 1.4fr) minmax(6rem, 0.7fr) 7.5rem minmax(6rem, 0.8fr)
-      minmax(6rem, 1fr) 5rem;
+      minmax(6rem, 1fr) 4.5rem 5rem;
     gap: 0.5rem;
     align-items: center;
   }
@@ -1227,9 +1231,11 @@
   }
 
   @media (max-width: 44rem) {
-    /* Two columns instead of six. Everything stays on screen; nothing is
+    /* Two columns instead of seven. Everything stays on screen; nothing is
        hidden and nothing scrolls sideways — and the heads go, because a label
-       strip over a reflowed row labels the wrong cells. */
+       strip over a reflowed row labels the wrong cells. The two clocks land as
+       a pair on the last line, which is how they read anyway: how long it took,
+       and how long ago. */
     .row-head { display: none; }
     .row {
       grid-template-columns: minmax(0, 1fr) auto;

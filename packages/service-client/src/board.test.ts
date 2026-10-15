@@ -1,7 +1,7 @@
 /**
  * The board's readings, as readings — the words and the folds every face shares.
  *
- * Two claims are worth executing here rather than asserting in a docstring.
+ * Three claims are worth executing here rather than asserting in a docstring.
  *
  * The first is `runStatus`'s PRECEDENCE: a run that was cancelled or whose
  * coordinator was interrupted settles `passed: false` with `outcome:
@@ -14,15 +14,21 @@
  * therefore has to be about the whole pipeline (nothing to say, `null`) or name
  * the selection — and the one reader that cannot say nothing is a board row,
  * where an empty cell would read as a run that tested nothing.
+ *
+ * The third is that a run's duration STOPS AT ITS VERDICT. Every face reads it
+ * through `runElapsedMs`, and a settled row that counted against `now` would
+ * report how long ago somebody last looked at the board.
  */
 
 import { describe, expect, it } from "bun:test";
 import {
   boardTally,
   checkoutRoots,
+  duration,
   isActive,
   isFailing,
   newestFirst,
+  runElapsedMs,
   runStatus,
   scopeLabel,
   scopeSuffix,
@@ -42,6 +48,7 @@ function row(over: Partial<RunRow> & Pick<RunRow, "runId">): RunRow {
     seq: 1,
     pipeline: "ci",
     createdAt: 0,
+    finishedAt: null,
     state: "settled",
     settled: true,
     passed: true,
@@ -206,5 +213,36 @@ describe("the board, narrowed", () => {
     expect(isActive(row({ runId: "a", state: "settled" }))).toBe(false);
     expect(isFailing(row({ runId: "a", unresolvedFailures: 1 }))).toBe(true);
     expect(isFailing(row({ runId: "a", unresolvedFailures: 0 }))).toBe(false);
+  });
+});
+
+describe("how long a run took", () => {
+  it("stops at the verdict, so a settled row says the same number forever", () => {
+    const settled = row({ runId: "a", createdAt: 1_000, finishedAt: 61_000 });
+    expect(runElapsedMs(settled, 61_000)).toBe(60_000);
+    // A week later, the same answer. This is the whole reason the finish
+    // instant rides the row: a duration read against `now` would tell a reader
+    // how long ago they last looked.
+    expect(runElapsedMs(settled, 61_000 + 7 * 86_400_000)).toBe(60_000);
+  });
+
+  it("ticks while the run has not finished", () => {
+    const running = row({ runId: "a", createdAt: 1_000, finishedAt: null });
+    expect(runElapsedMs(running, 6_000)).toBe(5_000);
+    expect(runElapsedMs(running, 11_000)).toBe(10_000);
+  });
+
+  it("floors at zero when a lane host's clock ran behind the registrar's", () => {
+    // A verdict stamped before the run was registered is clock skew, not a
+    // negative duration — and a negative duration is not a fact about anything.
+    expect(runElapsedMs(row({ runId: "a", createdAt: 5_000, finishedAt: 4_000 }), 9_000))
+      .toBe(0);
+  });
+
+  it("spells one duration the way every face prints it", () => {
+    expect(duration(400)).toBe("400ms");
+    expect(duration(1_500)).toBe("1.5s");
+    expect(duration(67_000)).toBe("1m07s");
+    expect(duration(null)).toBe("");
   });
 });

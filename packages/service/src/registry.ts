@@ -85,7 +85,7 @@ import {
   readVerdict,
   type RunHandle,
 } from "@odu/run-history/store";
-import { newestFirst } from "@odu/service-client/board";
+import { newestFirst, runElapsedMs } from "@odu/service-client/board";
 import { formatLogKey } from "@odu/service-client/logKey";
 import type {
   RunBoardState,
@@ -151,9 +151,6 @@ interface Entry {
    *  readings of one journal, and a caller that got them from two reads could
    *  hold a lane that has landed beside a node that has not started. */
   env: RunEnv;
-  /** When the run stopped, or null while it has not. The ANCHOR the elapsed
-   *  clock is re-read against — see `RunRegistry.env`. */
-  finishedAt: number | null;
 }
 
 /**
@@ -246,11 +243,15 @@ function nodesOf(
  * finished last week, or whose owner was killed, still says where it ran.
  */
 function envOf(
-  manifest: RunManifest,
   fold: ReturnType<typeof foldJournal>,
-  /** When the run stopped, from its verdict — or null while it is still going,
-   *  which is what makes `elapsedMs` a live clock rather than a fixed one. */
-  finishedAt: number | null,
+  /** The ROW this environment belongs to — the ONE source of the run's own
+   *  facts here. Its clock pair is what `runElapsedMs` subtracts, so the
+   *  elapsed time on a projected frame and the one `RunRegistry.env` recomputes
+   *  per read come from one object; and its `repo`/`sha` are the same two the
+   *  manifest carries, so reading them off the row rather than taking the
+   *  manifest alongside leaves nothing here that could describe a different
+   *  run than the row does. */
+  row: RunRow,
   now: number,
 ): RunEnv {
   return {
@@ -261,44 +262,26 @@ function envOf(
     // matched nothing", and inferring it from silence would invent a reason the
     // journal never gave.
     phase: fold.phase ?? fallbackPhase(fold.latest),
-    elapsedMs: elapsedOf(manifest.createdAt, finishedAt, now),
+    elapsedMs: runElapsedMs(row, now),
     lanes: lanesOf(fold.lanes),
     hostsSource: fold.hostsSource,
-    // `owner/repo` or null — the manifest records the slug the coordinator
-    // parsed from the origin, so a checkout with no GitHub remote has no forge
-    // page and says so rather than assembling a URL that 404s.
+    // `owner/repo` or null — the manifest the row was projected from records
+    // the slug the coordinator parsed from the origin, so a checkout with no
+    // GitHub remote has no forge page and says so rather than assembling a URL
+    // that 404s.
     commitUrl:
-      manifest.repo === null
+      row.repo === null
         ? null
-        : `https://github.com/${manifest.repo}/commit/${manifest.sha}`,
+        : `https://github.com/${row.repo}/commit/${row.sha}`,
     // In the journal's own order — the order the posts were attempted — which
     // is the order an operator reads them in. The same debt `reportingDebt`
     // counts: a count says something is wrong, this says which context and why.
-    owed: [...fold.debt.values()].map((row) => ({
-      context: row.context,
-      lastError: row.lastError,
-      attempts: row.attempts,
+    owed: [...fold.debt.values()].map((debt) => ({
+      context: debt.context,
+      lastError: debt.lastError,
+      attempts: debt.attempts,
     })),
   };
-}
-
-/**
- * How long the run has been going, and when that stops.
- *
- * STOPS AT THE VERDICT. An elapsed time that kept counting after a run finished
- * would make every settled row's age a function of when somebody looked at it,
- * which is the one thing a durable record is supposed to be free of.
- *
- * `Math.max` guards the single way this can go backwards: a verdict stamped on
- * a lane host whose clock is behind the one that registered the run. A negative
- * duration is not a fact about anything, and zero is the honest floor.
- */
-function elapsedOf(
-  createdAt: number,
-  finishedAt: number | null,
-  now: number,
-): number {
-  return Math.max(0, (finishedAt ?? now) - createdAt);
 }
 
 /** The phase of a run that never journalled one. One rule, spelled once, and
@@ -382,40 +365,48 @@ function project(
   );
   const fold = foldJournal(journal.entries);
   const state = boardState(attention.state, fold.latest);
+  const row: RunRow = {
+    runId: handle.runId,
+    repo: manifest.repo,
+    repoRoot: manifest.repoRoot,
+    branch: manifest.branch ?? null,
+    sha: manifest.sha,
+    dirty: manifest.snapshot.dirty,
+    ...(manifest.snapshot.contentSha === undefined ? {} : { contentSha: manifest.snapshot.contentSha }),
+    seq: manifest.seq,
+    pipeline: manifest.pipeline,
+    createdAt: manifest.createdAt,
+    // When the run stopped, from the verdict read once above — null while it
+    // has not. On the ROW rather than held beside it, because how long a run
+    // took is a fact every face needs and only this process could produce:
+    // `RunEnv` carries the elapsed number for the live view, and a board
+    // reading a settled row a week later has no journal to ask.
+    finishedAt: verdict?.finishedAt ?? null,
+    state,
+    settled: attention.settled,
+    passed: attention.passed,
+    outcome: attention.outcome,
+    actionable: attention.actionable,
+    unresolvedFailures: attention.unresolved_failures_total,
+    scope: manifest.scope,
+    reportingDebt: fold.debt.size,
+    endpoint: attention.endpoint,
+    parentRunId: manifest.parentRunId,
+    // The cursor a caller resumes from if it starts watching HERE. The
+    // journal's highest sequence rather than the attention payload's own
+    // cursor: that one advances only through events actually delivered, and
+    // this read delivered none.
+    cursor: formatCursor({ runId: handle.runId, seq: journal.highestSeq }),
+  };
   return {
     fingerprint: stamp,
     owner,
     alive,
-    row: {
-      runId: handle.runId,
-      repo: manifest.repo,
-      repoRoot: manifest.repoRoot,
-      branch: manifest.branch ?? null,
-      sha: manifest.sha,
-      dirty: manifest.snapshot.dirty,
-      ...(manifest.snapshot.contentSha === undefined ? {} : { contentSha: manifest.snapshot.contentSha }),
-      seq: manifest.seq,
-      pipeline: manifest.pipeline,
-      createdAt: manifest.createdAt,
-      state,
-      settled: attention.settled,
-      passed: attention.passed,
-      outcome: attention.outcome,
-      actionable: attention.actionable,
-      unresolvedFailures: attention.unresolved_failures_total,
-      scope: manifest.scope,
-      reportingDebt: fold.debt.size,
-      endpoint: attention.endpoint,
-      parentRunId: manifest.parentRunId,
-      // The cursor a caller resumes from if it starts watching HERE. The
-      // journal's highest sequence rather than the attention payload's own
-      // cursor: that one advances only through events actually delivered, and
-      // this read delivered none.
-      cursor: formatCursor({ runId: handle.runId, seq: journal.highestSeq }),
-    },
+    row,
     nodes: nodesOf(handle.runId, fold.roster, fold.latest),
-    env: envOf(manifest, fold, verdict?.finishedAt ?? null, now),
-    finishedAt: verdict?.finishedAt ?? null,
+    // The ROW just built, so the elapsed time on this frame and the one every
+    // later read recomputes come from one pair.
+    env: envOf(fold, row, now),
   };
 }
 
@@ -617,7 +608,7 @@ export function createRegistry(opts: RegistryOptions = {}): RunRegistry {
       if (held === undefined) return undefined;
       return {
         ...held.env,
-        elapsedMs: elapsedOf(held.row.createdAt, held.finishedAt, now),
+        elapsedMs: runElapsedMs(held.row, now),
       };
     },
     select,

@@ -46,6 +46,7 @@
 import { subscribe } from "@odu/execution/common/effectEdge";
 import { progressEvent } from "@odu/execution/common/presentation";
 import { exitCode } from "@odu/execution/common/verdict";
+import { duration, runElapsedMs } from "@odu/service-client/board";
 import type {
   AttentionAnswer,
   NodesFrame,
@@ -613,6 +614,14 @@ export async function listViaService(opts: ListOpts): Promise<number> {
   );
 }
 
+/** One line per run, in the order the service sent them.
+ *
+ *  Two clocks, and they answer different questions: how long the run TOOK
+ *  (`runElapsedMs`, which stops at the verdict and ticks while it has not) and
+ *  how long ago it started. A settled row's duration is the same number
+ *  tomorrow; its age is not. Both readings are `@odu/service-client`'s own, so
+ *  this listing and the browser board cannot print two different durations for
+ *  one run. */
 export function renderRows(rows: readonly RunRow[], now: number): string {
   if (rows.length === 0) return "no runs\n";
   const lines = rows.map((r) => {
@@ -620,7 +629,7 @@ export function renderRows(rows: readonly RunRow[], now: number): string {
     const verdict =
       r.state === "settled" ? (r.outcome ?? (r.passed ? "passed" : "failed")) : r.state;
     const debt = r.reportingDebt > 0 ? `  ⇐${r.reportingDebt}` : "";
-    return `${r.runId}  ${ref}${r.dirty ? "+dirty" : ""}${r.contentSha === undefined ? "" : `→${r.contentSha.slice(0, 7)}`}  ${r.branch ?? "-"}  ${verdict}  ${formatAgo(now - r.createdAt)} ago${debt}`;
+    return `${r.runId}  ${ref}${r.dirty ? "+dirty" : ""}${r.contentSha === undefined ? "" : `→${r.contentSha.slice(0, 7)}`}  ${r.branch ?? "-"}  ${verdict}  ${duration(runElapsedMs(r, now))}  ${formatAgo(now - r.createdAt)} ago${debt}`;
   });
   return `${lines.join("\n")}\n`;
 }
