@@ -66,3 +66,70 @@ Then("the nodes and the output are stacked, not side by side", async function (t
       `y=${nodes.y + nodes.height} — they are side by side`,
   );
 });
+
+/**
+ * ONE TRACK BOX, down the whole list and up to the axis.
+ *
+ * A timeline is a set of bars that share a scale. The share is geometric, not
+ * notional: if two rows' tracks are different widths, `left: 50%` on one is a
+ * different instant from `left: 50%` on the other, and the axis above them
+ * labels neither. That is what shipped before this step existed — the track
+ * lived inside the row's BUTTON, which is `flex: 1` beside a controls cell that
+ * is empty on a pending row, one button wide on a settled one and wider again
+ * on a running one.
+ *
+ * So this measures boxes (the file's doctrine: a rule that stopped applying
+ * leaves every class exactly where it was) and demands the run show all three
+ * row states, because a scenario that happened to hold only settled rows would
+ * pass over the very defect it is here for.
+ */
+Then(
+  "every node's timeline track is the same box as the axis",
+  async function (this: OduWorld) {
+    const axis = await this.page.locator(".node-axis-track").boundingBox();
+    assert.ok(axis !== null, "the timeline axis is not laid out at all");
+
+    const states = await this.page.evaluate(() =>
+      [...document.querySelectorAll("li.node")].map((node) => {
+        const track = node.querySelector(".node-track");
+        const box = track?.getBoundingClientRect();
+        return {
+          id: node.querySelector(".node-id")?.textContent ?? "(unnamed)",
+          // What the row's CONTROLS cell holds — the thing that used to decide
+          // the track's width, read as what it is rather than as a status.
+          controls: (node.querySelector(".node-controls")?.textContent ?? "").trim(),
+          box: box === undefined ? null : { x: box.x, width: box.width },
+        };
+      }),
+    );
+    assert.ok(states.length > 0, "the run listed no nodes, so this asserted nothing");
+
+    // The three row shapes whose controls cell differs — the exact thing that
+    // used to vary the track: nothing (a node that has not started), `Cancel
+    // node` (one still running), `Retry` (one that has stopped). A run holding
+    // only one of them cannot speak to the defect.
+    const shapes: Record<string, (controls: string) => boolean> = {
+      "no controls": (controls) => controls === "",
+      "a running node's Cancel": (controls) => controls.includes("Cancel node"),
+      "a stopped node's Retry": (controls) => controls.includes("Retry"),
+    };
+    for (const [wanted, holds] of Object.entries(shapes)) {
+      assert.ok(
+        states.some((node) => holds(node.controls)),
+        `no row with ${wanted} on this run — rows are ${states
+          .map((node) => `${node.id}:[${node.controls}]`)
+          .join(", ")}`,
+      );
+    }
+
+    for (const node of states) {
+      assert.ok(node.box !== null, `${node.id} has no timeline track`);
+      assert.ok(
+        Math.abs(node.box.x - axis.x) <= 1 &&
+          Math.abs(node.box.width - axis.width) <= 1,
+        `${node.id} has a track at x=${node.box.x} w=${node.box.width}, ` +
+          `but the axis is x=${axis.x} w=${axis.width} — they do not share a scale`,
+      );
+    }
+  },
+);

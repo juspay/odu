@@ -102,9 +102,10 @@ grows; a lane that has not started answers `null` rather than a sliver at the
 origin, because an empty track is itself the signal. Clock skew clamps into the
 track for the reason `runElapsedMs` floors at zero: a lane host behind the
 registrar reports a start before the run began, and that is skew rather than a
-negative offset. Two faces draw this today — odu's own run detail and kolu's
-Inspector — and a face with its own subtraction would place the same lane at
-two different x.
+negative offset. odu's own run detail draws it today and kolu's Inspector is next; a face with
+its own subtraction would place the same lane at two different x, and one with
+its own notion of "still arriving" would paint a skipped node as the critical
+path — which is why the span carries its own `kind` and its own milliseconds.
 
 ## The run address — `./routes`
 

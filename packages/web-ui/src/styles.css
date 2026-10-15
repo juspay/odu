@@ -628,13 +628,20 @@
 
   .node {
     display: flex;
+    /* WRAPS so the timeline track can take a line of its own below the row's
+       cells — see `.node-track`, which is why the track is a child of THIS box
+       and not of the button inside it. */
+    flex-wrap: wrap;
     align-items: center;
     gap: 0.5rem;
     padding-right: 0.5rem;
-    border-top: 1px solid var(--line);
   }
 
-  .node:first-child { border-top: 0; }
+  /* Between rows rather than on top of each one. `:first-child` stopped
+     matching the day the axis became the list's first item, which gave the
+     first node row a hairline nothing else had; adjacency says what was always
+     meant — a rule BETWEEN two rows. */
+  .node + .node { border-top: 1px solid var(--line); }
   .node:hover { background: var(--panel-2); }
 
   .node-open {
@@ -692,13 +699,19 @@
    * beside. The geometry is `@odu/service-client/board`'s `laneSpan`; this file
    * only paints what it is told.
    *
-   * The track takes a LINE OF ITS OWN inside the row — `flex-basis: 100%` with
-   * a late `order`, the same device `.detail-sub` uses — rather than a cell
-   * among the others. `.node-open` wraps on purpose (see its own comment), and
-   * a track sharing a wrapping line would be a different width on every row;
-   * bars that do not share one scale are not a timeline. A full-width track is
-   * the same box on every row, at every viewport, with no second layout to keep
-   * in step.
+   * ONE BOX, and that is the whole rule. The track is a child of `.node` — the
+   * ROW — and takes a line of its own (`flex-basis: 100%`, a late `order`, the
+   * device `.detail-sub` uses). It was a child of `.node-open`, which is
+   * `flex: 1` beside a controls cell that is EMPTY on a pending row, one button
+   * wide on a settled one and wider again on a running one: three track widths
+   * down one list, so `left: 50%` was three different instants and the axis
+   * agreed with none of them.
+   *
+   * The row's own box does not vary, and the axis gets the IDENTICAL inset so
+   * its last tick lands exactly where a full-length bar ends: the row insets
+   * its track by its own `padding-right` plus the track's `margin-left`, and
+   * `.node-axis` spends the same two numbers as padding. `layout_steps.ts`
+   * measures the two boxes rather than trusting this paragraph.
    */
   .node-track,
   .node-axis-track {
@@ -706,12 +719,20 @@
     flex-basis: 100%;
     order: 9;
     min-width: 0;
+    /* A bar clamped to the track's end still carries `min-width`, and without
+       this it would paint past the edge the axis marks as the run's total. */
+    overflow: hidden;
   }
 
   .node-track {
     height: 0.625rem;
+    margin: 0 0 0.35rem 0.5rem;
     border-radius: 3px;
-    background: var(--panel-2);
+    /* NOT `--panel-2`: that is what `.node:hover` and `.node-current` paint the
+       row with, so an empty track — the signal that a lane never started —
+       disappeared under a pointer and under the selected row. `--line` is
+       structural, owned by no row state. */
+    background: var(--line);
   }
 
   /* The hue is the `hue-*` class's own — the SAME pair the glyph beside it
@@ -729,9 +750,10 @@
     opacity: 0.6;
   }
 
-  /* A node still going has not finished at the edge its bar currently reaches,
-     and a solid end would claim it had. The hatch is the "this is still
-     arriving" mark, and it grows with the clock like the bar does. */
+  /* A node still going has not finished where its bar currently reaches, and a
+     solid fill would claim it had. The whole bar is hatched — not just a tail —
+     because every millisecond of it is provisional: the width is measured
+     against a clock, and the next tick moves it. It grows as the run does. */
   .node-bar-running {
     background: repeating-linear-gradient(
       135deg,
@@ -744,11 +766,14 @@
   /* The scale, once per list rather than once per row. `aria-hidden` in the
      markup: it is the furniture a sighted reader measures bars against, and
      four bare durations announced before a DAG would be noise — every node row
-     says its own duration in words. */
+     says its own duration in words.
+
+     The padding is the row's inset, spelled as padding because this li has no
+     button to hold it: `0.5rem` each side, matching `.node`'s `padding-right`
+     and `.node-track`'s `margin-left`. */
   .node-axis {
     display: flex;
     padding: 0.2rem 0.5rem 0;
-    border-top: 0;
   }
 
   .node-axis-track { height: 0.9rem; }

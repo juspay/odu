@@ -149,72 +149,135 @@ export function duration(ms: number | null): string {
   return `${minutes}m${String(Math.round(seconds - minutes * 60)).padStart(2, "0")}s`;
 }
 
-/** WHERE a lane sat in its run, as fractions of the run's own timeline — the
- *  ONE geometry both timeline faces draw from, so odu's run detail and a
- *  downstream panel cannot place the same lane at two different x.
+/** WHERE a lane sat in its run — the ONE geometry both timeline faces draw
+ *  from, so odu's run detail and a downstream panel cannot place the same lane
+ *  at two different x.
  *
- *  A GANTT, not a length: `left` is where the lane STARTED relative to the
+ *  A GANTT, not a length: `left` is where the attempt STARTED relative to the
  *  run's own start, which is the whole reason the picture is worth drawing.
  *  Lengths alone say how long each lane took and nothing about what ran beside
  *  what, and "what was the critical path" is the question a reader opens a run
- *  to answer. */
+ *  to answer.
+ *
+ *  `kind` is the fold's OWN answer to "is this still arriving", carried so a
+ *  face paints the hatch from the arm the geometry actually took. It used to be
+ *  re-derived at each face — odu from `status`, a downstream panel from
+ *  `durationMs` — which is three predicates for one fact and two of them wrong
+ *  for a node that stopped without ever running.
+ *
+ *  The ms facts ride along for the same reason: a tooltip that re-subtracted
+ *  `startedAt - createdAt` would be the one number on the row that skipped the
+ *  clamping, and would print a negative offset for the skewed lane whose bar
+ *  sits at the origin. */
 export interface LaneSpan {
-  /** Fraction of the run elapsed before this lane started. */
+  /** `running` is still arriving; `settled` has its own duration. */
+  kind: "settled" | "running";
+  /** Fraction of the run elapsed before this attempt started. */
   left: number;
-  /** Fraction of the run this lane occupied. */
+  /** Fraction of the run this attempt occupied. */
   width: number;
+  /** `left` in milliseconds — clamped identically, so a caller spelling it
+   *  cannot disagree with where the bar is drawn. */
+  startedAfterMs: number;
+  /** `width` in milliseconds, clamped the same way. */
+  tookMs: number;
 }
 
 /**
- * One lane's bar, or `null` for a lane that has not started.
+ * One lane's bar, or `null` where there is no span to know.
+ *
+ * TWO ways to have no bar, and both are facts rather than gaps. A lane that
+ * never started has no place on the timeline. And a lane that reached a
+ * TERMINAL status without a duration never ran at all — `skipped` because a
+ * dependency failed, or a lane torn down in provisioning (see
+ * `@odu/execution`'s history: a node can reach a terminal status without ever
+ * having run). Inferring "still arriving" from that absent duration is what
+ * painted a skipped node as a nine-minute bar — the longest on the page, the
+ * apparent critical path — beside its own empty duration cell.
+ *
+ * So the arm is a DISCRIMINANT on the status the node actually carries, never
+ * on a null. A running node ends at `run.finishedAt ?? now`, which is what
+ * freezes the picture of a settled run whose journal left a lane open: the
+ * scale stops at the verdict (`runElapsedMs`), and a bar measured against
+ * `now` inside a frozen track would widen for ever.
  *
  * The scale is {@link runElapsedMs} — the run's OWN elapsed — so a live run's
  * track is always exactly full and the bars shrink into it as the run grows,
  * rather than a track that ends wherever the last lane happens to reach.
  *
- * `null` rather than a zero-width bar, because "has not started" and "started
- * and took no time" are different facts and an empty track is itself the
- * signal. A caller renders nothing; it must not invent a sliver.
- *
- * EVERYTHING IS CLAMPED into the track. A lane host whose clock runs behind
- * the registrar's reports a start before the run began — skew, not a negative
- * offset, the same floor `runElapsedMs` applies — and one running ahead would
- * otherwise push a bar past the right edge. A run with no elapsed time yet
- * (the first millisecond, a replayed record) has nothing to divide by, and
- * answers `{left: 0, width: 0}` rather than `NaN`.
+ * EVERYTHING IS CLAMPED ONCE, in milliseconds, before anything is divided. A
+ * lane host whose clock runs behind the registrar's reports a start before the
+ * run began — skew, not a negative offset, the same floor `runElapsedMs`
+ * applies — and one running ahead lands at the track's END rather than being
+ * swept back to the origin. The division is then the only place a zero-length
+ * run is answered, and it answers `0` rather than `NaN`.
  */
 export function laneSpan(
-  lane: Pick<RunNode, "startedAt" | "durationMs">,
+  lane: Pick<RunNode, "status" | "startedAt" | "durationMs">,
   run: Pick<RunRow, "createdAt" | "finishedAt">,
   now: number,
 ): LaneSpan | null {
   const startedAt = lane.startedAt;
   if (startedAt === null) return null;
+  const kind = laneSpanKind(lane);
+  if (kind === null) return null;
+  const endedAt =
+    lane.durationMs === null
+      ? (run.finishedAt ?? now)
+      : startedAt + lane.durationMs;
   const scale = runElapsedMs(run, now);
-  if (scale <= 0) return { left: 0, width: 0 };
-  // A lane still going is measured against the caller's clock, which is what
-  // makes its bar grow — the same arm `runElapsedMs` takes for a live run.
-  const took = lane.durationMs ?? now - startedAt;
-  const left = clampFraction((startedAt - run.createdAt) / scale);
-  return { left, width: Math.min(clampFraction(took / scale), 1 - left) };
+  const startedAfterMs = clampMs(startedAt - run.createdAt, scale);
+  const tookMs = clampMs(endedAt - startedAt, scale - startedAfterMs);
+  return {
+    kind,
+    left: fractionOf(startedAfterMs, scale),
+    width: fractionOf(tookMs, scale),
+    startedAfterMs,
+    tookMs,
+  };
 }
 
-/** Into `[0, 1]`, and never `NaN`. */
-function clampFraction(value: number): number {
-  return Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0;
+/** Which arm a lane's bar is, or `null` for a lane whose span is not knowable:
+ *  a terminal status with no duration never ran, and has no length to draw. */
+function laneSpanKind(
+  lane: Pick<RunNode, "status" | "durationMs">,
+): LaneSpan["kind"] | null {
+  if (lane.durationMs !== null) return "settled";
+  return lane.status === "running" ? "running" : null;
 }
 
-/** The axis under a lane timeline: the run's start, two marks across it, and
- *  the run's own total. Each is a POSITION — a fraction of the track, the same
- *  coordinate {@link laneSpan} answers in, so a tick and a bar are placed by
- *  one rule — and the elapsed time that position stands for.
+/** Into `[0, ceiling]` — the ONE clamp, and it works in MILLISECONDS, before
+ *  anything is divided. That is what retires the non-finite guard the fraction
+ *  form needed: an overflowing offset lands on the ceiling here, where a bar
+ *  that outran its track belongs, instead of dividing to `Infinity` and being
+ *  swept back to the origin — a bar at `left: 0` claims the work began with
+ *  the run, which is the opposite of what happened. */
+function clampMs(value: number, ceiling: number): number {
+  return Math.max(0, Math.min(value, Math.max(0, ceiling)));
+}
+
+/** A clamped millisecond count as a fraction of the track. The one place a run
+ *  with no elapsed time is answered: there is nothing to divide by, and `0` is
+ *  the honest picture of a run that has not taken any time yet. */
+function fractionOf(ms: number, scale: number): number {
+  return scale <= 0 ? 0 : ms / scale;
+}
+
+/** The axis the bars are read against: the run's start, two marks across it,
+ *  and the run's own total. Each is a POSITION — a fraction of the track, the
+ *  same coordinate {@link laneSpan} answers in, so a tick and a bar are placed
+ *  by one rule — and the elapsed time that position stands for.
+ *
+ *  It takes the RUN and the clock, the same pair `laneSpan` takes, rather than
+ *  a pre-derived scale: "the axis the bars are read against" was otherwise a
+ *  convention every face had to keep by spelling `runElapsedMs(run, now)` into
+ *  the call, and a face that passed anything else got an axis that agreed with
+ *  no bar on the page. There is nothing left to guard against, which is why
+ *  the guard is gone.
  *
  *  NO LABEL. Where a mark sits is geometry and is shared; how a face SPELLS a
- *  duration is that face's own vocabulary, and baking one spelling here put an
- *  axis reading `55.4s` over cells reading `55s` in the first consumer that
- *  drew both. So the claim this export makes is about the MARKS — two faces
- *  cannot tick one picture differently — and each face spells `ms` the way the
- *  rest of its rows already do (`duration` here, `compactPhrase` in kolu).
+ *  duration is that face's own vocabulary, and the string is minted in whole
+ *  milliseconds so a three-second run's axis is not `833.3333333333334ms`.
  *
  *  FOUR ticks at fixed positions rather than at a "nice" rounded interval: the
  *  track IS one run, so the marks that matter are its own thirds — and a
@@ -227,11 +290,12 @@ export interface TimelineTick {
   ms: number;
 }
 
-export function timelineTicks(scale: number): TimelineTick[] {
-  return [0, 1 / 3, 2 / 3, 1].map((at) => ({
-    at,
-    ms: Math.max(0, scale) * at,
-  }));
+export function timelineTicks(
+  run: Pick<RunRow, "createdAt" | "finishedAt">,
+  now: number,
+): TimelineTick[] {
+  const scale = runElapsedMs(run, now);
+  return [0, 1 / 3, 2 / 3, 1].map((at) => ({ at, ms: Math.round(scale * at) }));
 }
 
 /** The fields of a scope these readings use — narrowed off the row's own scope

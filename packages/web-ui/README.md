@@ -99,13 +99,16 @@ away every lane at once. The console renders a recipe's own SGR colours through
 here) and says whether it is still following the tail.
 
 **Each node carries a timeline bar** on a line of its own: a Gantt across the
-run, so a bar's POSITION says when that node ran and the picture says what
-overlapped what. The scale is the run's own elapsed — the track is always
-exactly full, growing while the run is live — a running node's bar ends in a
-hatch, and a node that has not started draws no bar, which is how a lane
+run, so a bar's POSITION says where its latest attempt ran — a row carries only
+the newest — and the picture says what overlapped what. The scale is the run's
+own elapsed, so the track is always exactly full and grows while the run is
+live. A node still running is hatched END TO END, because every millisecond of
+that bar is provisional; a node that has not started, or one that stopped
+without ever running (`skipped`), draws no bar at all, which is how a lane
 waiting on a machine looks. The geometry is `laneSpan` in
-[`@odu/service-client/board`](../service-client/README.md), shared with every
-other face that draws one.
+[`@odu/service-client/board`](../service-client/README.md), and the TRACK is
+one box — the row's, which does not vary — measured against the axis by
+`packages/web-acceptance`'s own geometry step rather than asserted here.
 
 **Raw CSS, on purpose.** One stylesheet, in four cascade layers, with a single
 `light-dark()` palette lifted from the website. There is no utility framework

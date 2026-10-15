@@ -43,7 +43,6 @@ import { ansiSpans } from "./ansi";
 import {
   type LaneSpan,
   laneSpan,
-  runElapsedMs,
   timelineTicks,
 } from "@odu/service-client/board";
 import { Button, CommitRef, Confirm, Hint, Pill, Receipt } from "./dom";
@@ -248,33 +247,6 @@ function NodeRow(props: {
         <Show when={props.node.exitCode !== null && props.node.exitCode !== 0}>
           <span class="node-exit">{`exit ${props.node.exitCode ?? 0}`}</span>
         </Show>
-        {/* THE TIMELINE — where this node ran inside the run, not merely how
-            long it took, so parallel work reads as parallel and the critical
-            path is the bar nothing overlaps.
-
-            A LINE OF ITS OWN (`flex-basis: 100%`), not another cell: this row
-            WRAPS on purpose — a namepath-and-platform id in a 26 rem column
-            shatters otherwise — and a track sharing a wrapping line would be a
-            different width on every row, which is the one thing a Gantt cannot
-            survive. Full-width tracks are the same box on every row, so the
-            bars align down the list.
-
-            The hue comes from the SAME `hue-*` class the glyph wears, so a bar
-            and its glyph cannot disagree about what the node is doing. */}
-        <Show when={props.span}>
-          {(span) => (
-            <span class="node-track">
-              <span
-                class={`node-bar hue-${meta().hue}`}
-                classList={{ "node-bar-running": props.node.status === "running" }}
-                style={{
-                  left: `${span().left * 100}%`,
-                  width: `${span().width * 100}%`,
-                }}
-              />
-            </span>
-          )}
-        </Show>
         {/* The drawn half of the `title` above. This control is hand-spelled
             rather than built from `Button` — it is a row of labelled cells —
             and without this it was one of two places on the page still falling
@@ -314,6 +286,40 @@ function NodeRow(props: {
           >
             Cancel node
           </Button>
+        </Show>
+      </span>
+      {/* THE TIMELINE — where this node's latest attempt ran inside the run,
+          not merely how long it took, so parallel work reads as parallel and
+          the critical path is the bar nothing overlaps.
+
+          A CHILD OF THE ROW, not of the button. The button is `flex: 1` beside
+          a controls cell that is empty on a pending row, one button wide on a
+          settled one and another width again on a running one — so a track
+          inside it was a different box on every row, and `left: 50%` meant
+          three different instants down one list. The row's own box does not
+          vary, and neither does the axis's, so one scale is drawn once.
+
+          A bar is rendered only for a span that HAS width: a zero-width span is
+          the clamp's answer for a lane that reached past the track, not a lane
+          worth a sliver of paint.
+
+          The hue comes from the SAME `hue-*` class the glyph wears, and the
+          hatch from the SAME arm the geometry took (`kind`), so neither can
+          disagree with what the node is doing. */}
+      <span class="node-track">
+        <Show when={props.span}>
+          {(span) => (
+            <Show when={span().width > 0}>
+              <span
+                class={`node-bar hue-${meta().hue}`}
+                classList={{ "node-bar-running": span().kind === "running" }}
+                style={{
+                  left: `${span().left * 100}%`,
+                  width: `${span().width * 100}%`,
+                }}
+              />
+            </Show>
+          )}
         </Show>
       </span>
     </li>
@@ -812,28 +818,35 @@ export function Detail(props: {
           </Show>
           <ul class="node-list">
             {/* THE AXIS the bars below are read against — once per list, not
-                once per row, and only where there is a run to measure: the
-                whole track is this run's own elapsed, so its last tick IS the
-                run's duration. Ticks come from the same module the bars do; a
-                hand-rolled scale here would be a second answer to where the
-                middle of a run is. */}
-            <Show when={props.run}>
+                once per row, and only where there is a run to measure AND work
+                to measure it against: a provisioning run says "no work yet" in
+                a sentence above, and an axis alone in the card would be four
+                tick labels in a box that `.node-list:empty` exists to hide.
+
+                Ticks come from the same module the bars do, asked with the same
+                run and clock — a hand-rolled scale here would be a second
+                answer to where the middle of a run is. */}
+            <Show when={nodes().length > 0 ? props.run : undefined}>
               {(run) => (
                 <li class="node-axis" aria-hidden="true">
                   <span class="node-axis-track">
-                    <For each={timelineTicks(runElapsedMs(run(), props.now))}>
+                    {/* `Index`, like the node rows below and for the same
+                        reason: these objects are minted afresh every second, so
+                        keying by reference would rebuild four spans a second
+                        for a scale whose POSITIONS never move. */}
+                    <Index each={timelineTicks(run(), props.now)}>
                       {(tick) => (
                         <span
                           class="node-axis-tick"
-                          style={{ left: `${tick.at * 100}%` }}
+                          style={{ left: `${tick().at * 100}%` }}
                         >
                           {/* This page's own spelling of a duration, the one
                               its node rows already print — the axis carries a
                               position and a number, never a string. */}
-                          {duration(tick.ms)}
+                          {duration(tick().ms)}
                         </span>
                       )}
-                    </For>
+                    </Index>
                   </span>
                 </li>
               )}

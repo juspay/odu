@@ -40,7 +40,7 @@ import {
   scopeSuffix,
   timelineTicks,
 } from "./board";
-import type { RunRow } from "./surface";
+import type { RunNode, RunRow } from "./surface";
 
 /** A row is the wire's own shape, so a reading is exercised against what a
  *  service actually sends rather than against a narrowed stand-in. Only the
@@ -262,66 +262,145 @@ describe("where a lane sat in its run", () => {
     createdAt: 1_000_000,
     finishedAt: 1_000_000 + 600_000,
   });
+  /** A node as the wire sends one, narrowed to what the geometry reads. */
+  const lane = (
+    status: RunNode["status"],
+    startedAt: number | null,
+    durationMs: number | null,
+  ): Pick<RunNode, "status" | "startedAt" | "durationMs"> => ({
+    status,
+    startedAt,
+    durationMs,
+  });
 
   it("places a settled lane by WHERE it ran, not just how long", () => {
     // Started two minutes in, took three: a fifth across, three tenths wide.
-    expect(
-      laneSpan({ startedAt: 1_120_000, durationMs: 180_000 }, run, 9e15),
-    ).toEqual({ left: 0.2, width: 0.3 });
+    expect(laneSpan(lane("ok", 1_120_000, 180_000), run, 9e15)).toEqual({
+      kind: "settled",
+      left: 0.2,
+      width: 0.3,
+      startedAfterMs: 120_000,
+      tookMs: 180_000,
+    });
     // Same LENGTH, later start — the whole point of a Gantt over a bar chart.
-    expect(
-      laneSpan({ startedAt: 1_300_000, durationMs: 180_000 }, run, 9e15),
-    ).toEqual({ left: 0.5, width: 0.3 });
+    expect(laneSpan(lane("ok", 1_300_000, 180_000), run, 9e15)?.left).toBe(0.5);
   });
 
   it("grows a running lane against the clock, inside a track that grows too", () => {
     const live = row({ runId: "a", createdAt: 1_000_000, finishedAt: null });
-    const lane = { startedAt: 1_060_000, durationMs: null };
+    const going = lane("running", 1_060_000, null);
     // Two minutes in: the lane has been going for one of them, and the track
     // is two minutes long — so it occupies the second half of the run.
-    expect(laneSpan(lane, live, 1_120_000)).toEqual({ left: 0.5, width: 0.5 });
+    expect(laneSpan(going, live, 1_120_000)).toEqual({
+      kind: "running",
+      left: 0.5,
+      width: 0.5,
+      startedAfterMs: 60_000,
+      tookMs: 60_000,
+    });
     // Four minutes in, the same lane still going: it started a quarter of the
     // way through what the run has now become.
-    expect(laneSpan(lane, live, 1_240_000)).toEqual({ left: 0.25, width: 0.75 });
+    expect(laneSpan(going, live, 1_240_000)?.left).toBe(0.25);
   });
 
   it("says NOTHING about a lane that has not started", () => {
     // Not a zero-width bar at the origin: a lane waiting for a machine has no
     // place on the timeline, and an empty track is the signal.
-    expect(laneSpan({ startedAt: null, durationMs: null }, run, 9e15)).toBeNull();
+    expect(laneSpan(lane("pending", null, null), run, 9e15)).toBeNull();
   });
 
-  it("clamps a skewed lane host into the track", () => {
+  it("says NOTHING about a lane that stopped without ever running", () => {
+    // `skipped` (a dependency failed) and a lane torn down in provisioning both
+    // carry a start and no duration. Reading "still arriving" off that null
+    // drew a nine-minute bar — the longest on the page, the apparent critical
+    // path — beside the row's own empty duration cell.
+    for (const status of ["skipped", "cancelled", "errored", "failed"] as const) {
+      expect(laneSpan(lane(status, 1_060_000, null), run, 9e15)).toBeNull();
+    }
+  });
+
+  it("freezes a settled run's open lane at the VERDICT, not at now", () => {
+    // A torn journal leaves a lane reading `running` inside a run that has
+    // finished. The scale stopped at the verdict, so a width measured against
+    // `now` would widen the picture of a settled run for ever.
+    const open = laneSpan(lane("running", 1_060_000, null), run, 9e15);
+    expect(open).toEqual({
+      kind: "running",
+      left: 0.1,
+      width: 0.9,
+      startedAfterMs: 60_000,
+      tookMs: 540_000,
+    });
+    // …and it is the same answer a week later, like every other settled fact.
+    expect(laneSpan(lane("running", 1_060_000, null), run, 9e15 + 7 * 86_400_000))
+      .toEqual(open);
+    // The end is the run's VERDICT and not the reader's clock, which only a
+    // clock BEHIND the verdict can tell apart: a browser two minutes behind the
+    // registrar would otherwise draw this lane an eighth of its real length.
+    expect(laneSpan(lane("running", 1_060_000, null), run, 1_120_000)).toEqual(open);
+  });
+
+  it("clamps a skewed lane host into the track, ms and fractions alike", () => {
     // A box whose clock is behind the registrar's reports a start before the
-    // run began. That is skew, not a negative offset.
-    expect(
-      laneSpan({ startedAt: 900_000, durationMs: 60_000 }, run, 9e15),
-    ).toEqual({ left: 0, width: 0.1 });
-    // And one that overruns the run's own end stops at the edge rather than
-    // painting past it: whatever the arithmetic, `left + width` reaches 1 and
-    // goes no further.
-    const over = laneSpan({ startedAt: 1_540_000, durationMs: 600_000 }, run, 9e15);
+    // run began. That is skew, not a negative offset — and the ms a tooltip
+    // spells are clamped with the fraction the bar is drawn at, so the two
+    // cannot tell different stories.
+    expect(laneSpan(lane("ok", 900_000, 60_000), run, 9e15)).toEqual({
+      kind: "settled",
+      left: 0,
+      width: 0.1,
+      startedAfterMs: 0,
+      tookMs: 60_000,
+    });
+    // One that overruns the run's own end stops AT the edge rather than
+    // painting past it.
+    const over = laneSpan(lane("ok", 1_540_000, 600_000), run, 9e15);
     expect(over?.left).toBe(0.9);
     expect((over?.left ?? 0) + (over?.width ?? 0)).toBeCloseTo(1, 10);
+    // And a start past the end lands at the END, not swept back to the origin:
+    // a bar at `left: 0` would say the work began with the run. Clamping in MS
+    // is what makes that true even of an offset that would divide to
+    // `Infinity` — the arithmetic never reaches the division.
+    expect(laneSpan(lane("ok", 9e15, 1_000), run, 9e15)).toEqual({
+      kind: "settled",
+      left: 1,
+      width: 0,
+      startedAfterMs: 600_000,
+      tookMs: 0,
+    });
+    expect(
+      laneSpan(lane("ok", Number.POSITIVE_INFINITY, 1_000), run, 9e15)?.left,
+    ).toBe(1);
   });
 
   it("answers zero rather than NaN for a run with no elapsed time yet", () => {
+    // The ONE place a zero-length track is answered is the division; there is
+    // no second guard upstream to mask it.
     const instant = row({ runId: "a", createdAt: 5_000, finishedAt: 5_000 });
-    expect(laneSpan({ startedAt: 5_000, durationMs: 0 }, instant, 5_000)).toEqual({
+    expect(laneSpan(lane("ok", 5_000, 0), instant, 5_000)).toEqual({
+      kind: "settled",
       left: 0,
       width: 0,
+      startedAfterMs: 0,
+      tookMs: 0,
     });
   });
 
-  it("marks the axis at the track's own thirds, in run time", () => {
-    // POSITIONS and numbers, no strings: how a face spells a duration is its
-    // own vocabulary, and an axis that baked one put `55.4s` over cells that
-    // read `55s` in the first consumer that drew both.
-    expect(timelineTicks(600_000)).toEqual([
+  it("marks the axis against the RUN, in whole milliseconds", () => {
+    // The same pair `laneSpan` takes, so an axis cannot be drawn against a
+    // scale no bar on the page was measured with. POSITIONS and numbers, no
+    // strings: how a face spells a duration is its own vocabulary.
+    expect(timelineTicks(run, 9e15)).toEqual([
       { at: 0, ms: 0 },
       { at: 1 / 3, ms: 200_000 },
       { at: 2 / 3, ms: 400_000 },
       { at: 1, ms: 600_000 },
+    ]);
+    // A live run's axis grows with it — and lands on whole milliseconds, so a
+    // short run's ticks are not `833.3333333333334ms`.
+    const live = row({ runId: "a", createdAt: 1_000, finishedAt: null });
+    expect(timelineTicks(live, 3_500).map((tick) => tick.ms)).toEqual([
+      0, 833, 1_667, 2_500,
     ]);
   });
 });

@@ -23,6 +23,7 @@ import {
   currentNixSystem,
   FAILING,
   FAST_RED,
+  TIMELINE_SHAPES,
   headOf,
   LIVE_BURST,
   LONG_LOG,
@@ -103,6 +104,23 @@ Given(
     // is where the coordinator's progress is supposed to show up. A wait on the
     // wire before opening the page would be this suite checking the service and
     // then hoping the browser agreed.
+  },
+);
+
+Given(
+  "a run of the fixture with a settled, a running and a waiting lane",
+  { timeout: RUN_SETUP_TIMEOUT },
+  async function (this: OduWorld) {
+    const dir = ownFixture(this, TIMELINE_SHAPES);
+    const runId = startRun(this.service, {
+      checkout: dir,
+      expectedSha: headOf(dir),
+      requestId: `wa-timeline-${crypto.randomUUID()}`,
+    });
+    this.ownRuns.push(runId);
+    this.runId = runId;
+    // Not waited on: the three shapes exist only WHILE the run is going, and
+    // the browser is where they are supposed to appear.
   },
 );
 
@@ -228,6 +246,10 @@ Then("the node {string} is failed", async function (this: OduWorld, id: string) 
 
 Then("the node {string} is running", async function (this: OduWorld, id: string) {
   await nodeStatus(this, id, "running");
+});
+
+Then("the node {string} is ok", async function (this: OduWorld, id: string) {
+  await nodeStatus(this, id, "ok");
 });
 
 /** No outcome pill in the header. The detail header renders one only when the

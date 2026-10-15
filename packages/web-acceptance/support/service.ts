@@ -296,6 +296,31 @@ slow: alpha
  *  `tests/e2e/fixtures/fast-red` uses. The two are parallel roots with no
  *  dependency between them, which is what makes the failure observable before
  *  the run is over. */
+/**
+ * THREE ROW SHAPES AT ONCE — one settled, one running, one still waiting.
+ *
+ * The timeline's scale is only testable against a list whose rows differ in the
+ * way that used to break it: a node's CONTROLS cell is empty while it waits,
+ * holds `Cancel node` while it runs and `Retry` once it has stopped, and the
+ * track used to be sized inside the button beside that cell. `fast-red` holds
+ * two of the three (nothing in it ever waits), which is why this fixture exists
+ * rather than another assertion on that one: `last` cannot start until `slow`
+ * stops, and `slow` outlasts any scenario's patience.
+ */
+export const TIMELINE_SHAPES = `[parallel]
+[metadata("ci")]
+default: quick slow last
+
+quick:
+    echo "quick done"
+
+slow:
+    sleep 120
+
+last: slow
+    echo "never reached in a scenario"
+`;
+
 export const FAST_RED = `[parallel]
 [metadata("ci")]
 default: quick slow
