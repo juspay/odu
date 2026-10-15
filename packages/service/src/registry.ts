@@ -243,13 +243,14 @@ function nodesOf(
  * finished last week, or whose owner was killed, still says where it ran.
  */
 function envOf(
-  manifest: RunManifest,
   fold: ReturnType<typeof foldJournal>,
-  /** The ROW this environment belongs to, for its clock pair. The row itself
-   *  rather than a `finishedAt` passed alongside, so the elapsed time computed
-   *  here and the one `RunRegistry.env` recomputes on every read subtract from
-   *  ONE object — a pair rebuilt at each site is the second copy of the rule
-   *  that moving it to `runElapsedMs` was meant to retire. */
+  /** The ROW this environment belongs to — the ONE source of the run's own
+   *  facts here. Its clock pair is what `runElapsedMs` subtracts, so the
+   *  elapsed time on a projected frame and the one `RunRegistry.env` recomputes
+   *  per read come from one object; and its `repo`/`sha` are the same two the
+   *  manifest carries, so reading them off the row rather than taking the
+   *  manifest alongside leaves nothing here that could describe a different
+   *  run than the row does. */
   row: RunRow,
   now: number,
 ): RunEnv {
@@ -264,20 +265,21 @@ function envOf(
     elapsedMs: runElapsedMs(row, now),
     lanes: lanesOf(fold.lanes),
     hostsSource: fold.hostsSource,
-    // `owner/repo` or null — the manifest records the slug the coordinator
-    // parsed from the origin, so a checkout with no GitHub remote has no forge
-    // page and says so rather than assembling a URL that 404s.
+    // `owner/repo` or null — the manifest the row was projected from records
+    // the slug the coordinator parsed from the origin, so a checkout with no
+    // GitHub remote has no forge page and says so rather than assembling a URL
+    // that 404s.
     commitUrl:
-      manifest.repo === null
+      row.repo === null
         ? null
-        : `https://github.com/${manifest.repo}/commit/${manifest.sha}`,
+        : `https://github.com/${row.repo}/commit/${row.sha}`,
     // In the journal's own order — the order the posts were attempted — which
     // is the order an operator reads them in. The same debt `reportingDebt`
     // counts: a count says something is wrong, this says which context and why.
-    owed: [...fold.debt.values()].map((row) => ({
-      context: row.context,
-      lastError: row.lastError,
-      attempts: row.attempts,
+    owed: [...fold.debt.values()].map((debt) => ({
+      context: debt.context,
+      lastError: debt.lastError,
+      attempts: debt.attempts,
     })),
   };
 }
@@ -404,7 +406,7 @@ function project(
     nodes: nodesOf(handle.runId, fold.roster, fold.latest),
     // The ROW just built, so the elapsed time on this frame and the one every
     // later read recomputes come from one pair.
-    env: envOf(manifest, fold, row, now),
+    env: envOf(fold, row, now),
   };
 }
 
