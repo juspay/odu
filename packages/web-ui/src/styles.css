@@ -637,11 +637,13 @@
     padding-right: 0.5rem;
   }
 
-  /* Between rows rather than on top of each one. `:first-child` stopped
-     matching the day the axis became the list's first item, which gave the
-     first node row a hairline nothing else had; adjacency says what was always
-     meant — a rule BETWEEN two rows. */
-  .node + .node { border-top: 1px solid var(--line); }
+  /* Between rows rather than on top of each one, and the list has two kinds of
+     row: a node follows another node, or it follows the lane head above it.
+     `:first-child` said this before the axis became the list's first item and
+     stopped matching at all — adjacency says what was always meant, and says it
+     for both neighbours. */
+  .node + .node,
+  .lane + .node { border-top: 1px solid var(--line); }
   .node:hover { background: var(--panel-2); }
 
   .node-open {
@@ -814,7 +816,6 @@
     font: 600 0.8rem var(--mono);
   }
 
-  .lane:first-child { border-top: 0; }
   .lane-platform { color: var(--ink); white-space: nowrap; }
   .lane-host { color: var(--muted); font-weight: 400; }
   /* The counts push everything after them to the right edge, so the lane's
@@ -1351,6 +1352,5 @@
     }
     .row-scope { grid-column: 1 / -1; }
     .row-attention { grid-column: 1 / -1; }
-    .node { flex-wrap: wrap; }
   }
 }

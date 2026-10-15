@@ -299,9 +299,11 @@ function NodeRow(props: {
           three different instants down one list. The row's own box does not
           vary, and neither does the axis's, so one scale is drawn once.
 
-          A bar is rendered only for a span that HAS width: a zero-width span is
-          the clamp's answer for a lane that reached past the track, not a lane
-          worth a sliver of paint.
+          A bar is skipped only where the span begins AT the track's end: that
+          is the clamp's answer for a lane whose start outran the run, and it
+          has nowhere to be drawn. A zero-WIDTH span is not the same thing — a
+          node that genuinely took no measurable time has `durationMs: 0`, which
+          is the exact case `min-width` on the bar exists for.
 
           The hue comes from the SAME `hue-*` class the glyph wears, and the
           hatch from the SAME arm the geometry took (`kind`), so neither can
@@ -309,7 +311,7 @@ function NodeRow(props: {
       <span class="node-track">
         <Show when={props.span}>
           {(span) => (
-            <Show when={span().width > 0}>
+            <Show when={span().left < 1}>
               <span
                 class={`node-bar hue-${meta().hue}`}
                 classList={{ "node-bar-running": span().kind === "running" }}

@@ -107,6 +107,22 @@ export function projectOf(repoRoot: string): string {
  *  its vocabulary from here. */
 export { duration };
 
+/**
+ * NOT EVERYTHING FROM `board` COMES THROUGH HERE, and the line is what this
+ * module is for.
+ *
+ * This file is the view's VOCABULARY — what a thing is called, what colour it
+ * carries, how a number is spelled. `laneSpan` and `timelineTicks` are
+ * GEOMETRY: fractions of a track, positions to place a box at. `detail.tsx`
+ * imports those straight from `@odu/service-client/board`, as `board.tsx`
+ * already imports `runStatus` and `isActive`, because routing coordinates
+ * through a module about wording would make this file the place two unrelated
+ * questions are asked — and the next reader would look here for the layout.
+ *
+ * What a timeline SAYS does come through here: its axis is spelled with
+ * {@link duration} above, which is the whole reason that re-export exists.
+ */
+
 /** How long ago, coarsely. Coarse on purpose: a board is scanned rather than
  *  read, and "3m ago" is what a scanner needs from a timestamp. */
 export function ago(at: number, now: number): string {

@@ -319,13 +319,14 @@ describe("where a lane sat in its run", () => {
     }
   });
 
-  it("freezes a settled run's open lane at the VERDICT, not at now", () => {
+  it("settles a finished run's open lane at the VERDICT, and stops calling it live", () => {
     // A torn journal leaves a lane reading `running` inside a run that has
     // finished. The scale stopped at the verdict, so a width measured against
-    // `now` would widen the picture of a settled run for ever.
+    // `now` would widen the picture of a settled run for ever — and a hatch
+    // would tell a reader work is still arriving on a run that is over.
     const open = laneSpan(lane("running", 1_060_000, null), run, 9e15);
     expect(open).toEqual({
-      kind: "running",
+      kind: "settled",
       left: 0.1,
       width: 0.9,
       startedAfterMs: 60_000,
@@ -368,9 +369,17 @@ describe("where a lane sat in its run", () => {
       startedAfterMs: 600_000,
       tookMs: 0,
     });
+    // TOTAL over every number on the wire: an instant no arithmetic can
+    // subtract must not reach a style attribute as `width: NaN%`.
     expect(
-      laneSpan(lane("ok", Number.POSITIVE_INFINITY, 1_000), run, 9e15)?.left,
-    ).toBe(1);
+      laneSpan(lane("ok", Number.POSITIVE_INFINITY, 1_000), run, 9e15),
+    ).toEqual({
+      kind: "settled",
+      left: 1,
+      width: 0,
+      startedAfterMs: 600_000,
+      tookMs: 0,
+    });
   });
 
   it("answers zero rather than NaN for a run with no elapsed time yet", () => {

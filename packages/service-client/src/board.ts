@@ -149,9 +149,9 @@ export function duration(ms: number | null): string {
   return `${minutes}m${String(Math.round(seconds - minutes * 60)).padStart(2, "0")}s`;
 }
 
-/** WHERE a lane sat in its run — the ONE geometry both timeline faces draw
- *  from, so odu's run detail and a downstream panel cannot place the same lane
- *  at two different x.
+/** WHERE a lane sat in its run — the ONE geometry a timeline is drawn from, so
+ *  odu's run detail and any downstream panel that grows one cannot place the
+ *  same lane at two different x.
  *
  *  A GANTT, not a length: `left` is where the attempt STARTED relative to the
  *  run's own start, which is the whole reason the picture is worth drawing.
@@ -219,17 +219,13 @@ export function laneSpan(
 ): LaneSpan | null {
   const startedAt = lane.startedAt;
   if (startedAt === null) return null;
-  const kind = laneSpanKind(lane);
-  if (kind === null) return null;
-  const endedAt =
-    lane.durationMs === null
-      ? (run.finishedAt ?? now)
-      : startedAt + lane.durationMs;
+  const stop = laneStop(lane, run, startedAt, now);
+  if (stop === null) return null;
   const scale = runElapsedMs(run, now);
   const startedAfterMs = clampMs(startedAt - run.createdAt, scale);
-  const tookMs = clampMs(endedAt - startedAt, scale - startedAfterMs);
+  const tookMs = clampMs(stop.endedAt - startedAt, scale - startedAfterMs);
   return {
-    kind,
+    kind: stop.kind,
     left: fractionOf(startedAfterMs, scale),
     width: fractionOf(tookMs, scale),
     startedAfterMs,
@@ -237,13 +233,33 @@ export function laneSpan(
   };
 }
 
-/** Which arm a lane's bar is, or `null` for a lane whose span is not knowable:
- *  a terminal status with no duration never ran, and has no length to draw. */
-function laneSpanKind(
+/** HOW A LANE STOPS — which arm its bar is, and where that bar ends. One
+ *  decision, so it is taken once: a lane with its own duration ends at its own
+ *  duration, one still going ends at the clock, and a lane left open on a run
+ *  that has FINISHED ends at the verdict and is settled whatever its journal
+ *  says — a torn journal, a legacy import. Its bar is frozen there either way;
+ *  hatching it as well would tell a reader that work is still arriving on a run
+ *  that is over.
+ *
+ *  `null` is a lane whose span is not knowable: a terminal status with no
+ *  duration never ran, and has no length to draw.
+ *
+ *  `startedAt` arrives as a number because the caller has already answered
+ *  "did this lane start at all" — asking again here would be a second answer
+ *  to it, and a stand-in for the `null` would be a lie about when. */
+function laneStop(
   lane: Pick<RunNode, "status" | "durationMs">,
-): LaneSpan["kind"] | null {
-  if (lane.durationMs !== null) return "settled";
-  return lane.status === "running" ? "running" : null;
+  run: Pick<RunRow, "finishedAt">,
+  startedAt: number,
+  now: number,
+): { kind: LaneSpan["kind"]; endedAt: number } | null {
+  if (lane.durationMs !== null) {
+    return { kind: "settled", endedAt: startedAt + lane.durationMs };
+  }
+  if (lane.status !== "running") return null;
+  return run.finishedAt === null
+    ? { kind: "running", endedAt: now }
+    : { kind: "settled", endedAt: run.finishedAt };
 }
 
 /** Into `[0, ceiling]` — the ONE clamp, and it works in MILLISECONDS, before
@@ -251,9 +267,14 @@ function laneSpanKind(
  *  form needed: an overflowing offset lands on the ceiling here, where a bar
  *  that outran its track belongs, instead of dividing to `Infinity` and being
  *  swept back to the origin — a bar at `left: 0` claims the work began with
- *  the run, which is the opposite of what happened. */
+ *  the run, which is the opposite of what happened.
+ *
+ *  TOTAL over every number, which is why the test is `> 0` rather than a
+ *  `Math.max`: subtracting two infinities is `NaN`, and `Math.max(0, NaN)` is
+ *  `NaN` — one unreadable instant on the wire would otherwise reach a style
+ *  attribute as `width: NaN%`. */
 function clampMs(value: number, ceiling: number): number {
-  return Math.max(0, Math.min(value, Math.max(0, ceiling)));
+  return value > 0 ? Math.min(value, ceiling) : 0;
 }
 
 /** A clamped millisecond count as a fraction of the track. The one place a run
@@ -263,33 +284,33 @@ function fractionOf(ms: number, scale: number): number {
   return scale <= 0 ? 0 : ms / scale;
 }
 
+/** One mark on a timeline's axis. */
+export interface TimelineTick {
+  /** Where the mark sits, `0`–`1` across the track — the same coordinate
+   *  {@link laneSpan} answers in, so a tick and a bar are placed by one rule. */
+  at: number;
+  /** The elapsed time it stands for, for the caller to spell. */
+  ms: number;
+}
+
 /** The axis the bars are read against: the run's start, two marks across it,
- *  and the run's own total. Each is a POSITION — a fraction of the track, the
- *  same coordinate {@link laneSpan} answers in, so a tick and a bar are placed
- *  by one rule — and the elapsed time that position stands for.
+ *  and the run's own total.
  *
- *  It takes the RUN and the clock, the same pair `laneSpan` takes, rather than
- *  a pre-derived scale: "the axis the bars are read against" was otherwise a
- *  convention every face had to keep by spelling `runElapsedMs(run, now)` into
- *  the call, and a face that passed anything else got an axis that agreed with
- *  no bar on the page. There is nothing left to guard against, which is why
- *  the guard is gone.
+ *  It takes the RUN and the clock, the same pair {@link laneSpan} takes, rather
+ *  than a pre-derived scale: "the axis the bars are read against" was otherwise
+ *  a convention every face had to keep by spelling `runElapsedMs(run, now)`
+ *  into the call, and a face that passed anything else got an axis that agreed
+ *  with no bar on the page. There is nothing left to guard against, which is
+ *  why the guard is gone.
  *
  *  NO LABEL. Where a mark sits is geometry and is shared; how a face SPELLS a
- *  duration is that face's own vocabulary, and the string is minted in whole
+ *  duration is that face's own vocabulary, and the number is minted in whole
  *  milliseconds so a three-second run's axis is not `833.3333333333334ms`.
  *
  *  FOUR ticks at fixed positions rather than at a "nice" rounded interval: the
  *  track IS one run, so the marks that matter are its own thirds — and a
  *  rounded interval would leave a final tick somewhere short of the track's
  *  end, which is the one place a reader checks the total. */
-export interface TimelineTick {
-  /** Where the mark sits, `0`–`1` across the track. */
-  at: number;
-  /** The elapsed time it stands for, for the caller to spell. */
-  ms: number;
-}
-
 export function timelineTicks(
   run: Pick<RunRow, "createdAt" | "finishedAt">,
   now: number,

@@ -296,6 +296,18 @@ slow: alpha
  *  `tests/e2e/fixtures/fast-red` uses. The two are parallel roots with no
  *  dependency between them, which is what makes the failure observable before
  *  the run is over. */
+export const FAST_RED = `[parallel]
+[metadata("ci")]
+default: quick slow
+
+quick:
+    echo "BOOM: the quick lane failed"
+    exit 1
+
+slow:
+    sleep 120
+`;
+
 /**
  * THREE ROW SHAPES AT ONCE — one settled, one running, one still waiting.
  *
@@ -319,18 +331,6 @@ slow:
 
 last: slow
     echo "never reached in a scenario"
-`;
-
-export const FAST_RED = `[parallel]
-[metadata("ci")]
-default: quick slow
-
-quick:
-    echo "BOOM: the quick lane failed"
-    exit 1
-
-slow:
-    sleep 120
 `;
 
 /**
