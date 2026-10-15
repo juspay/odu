@@ -98,6 +98,15 @@ away every lane at once. The console renders a recipe's own SGR colours through
 `./src/ansi.ts` (the CLI's palette, so a red in the terminal is the same red
 here) and says whether it is still following the tail.
 
+**Each node carries a timeline bar** on a line of its own: a Gantt across the
+run, so a bar's POSITION says when that node ran and the picture says what
+overlapped what. The scale is the run's own elapsed — the track is always
+exactly full, growing while the run is live — a running node's bar ends in a
+hatch, and a node that has not started draws no bar, which is how a lane
+waiting on a machine looks. The geometry is `laneSpan` in
+[`@odu/service-client/board`](../service-client/README.md), shared with every
+other face that draws one.
+
 **Raw CSS, on purpose.** One stylesheet, in four cascade layers, with a single
 `light-dark()` palette lifted from the website. There is no utility framework
 and no component library: the page has a few dozen class names — every rule

@@ -35,6 +35,7 @@ import { STATUS_META, type StatusHue } from "@odu/run-client/surface";
 export type { StatusHue };
 import type {
   RunBoardState,
+  RunNode,
   RunOutcome,
   RunRow,
 } from "./surface";
@@ -146,6 +147,87 @@ export function duration(ms: number | null): string {
   if (seconds < 60) return `${seconds.toFixed(1)}s`;
   const minutes = Math.floor(seconds / 60);
   return `${minutes}m${String(Math.round(seconds - minutes * 60)).padStart(2, "0")}s`;
+}
+
+/** WHERE a lane sat in its run, as fractions of the run's own timeline — the
+ *  ONE geometry both timeline faces draw from, so odu's run detail and a
+ *  downstream panel cannot place the same lane at two different x.
+ *
+ *  A GANTT, not a length: `left` is where the lane STARTED relative to the
+ *  run's own start, which is the whole reason the picture is worth drawing.
+ *  Lengths alone say how long each lane took and nothing about what ran beside
+ *  what, and "what was the critical path" is the question a reader opens a run
+ *  to answer. */
+export interface LaneSpan {
+  /** Fraction of the run elapsed before this lane started. */
+  left: number;
+  /** Fraction of the run this lane occupied. */
+  width: number;
+}
+
+/**
+ * One lane's bar, or `null` for a lane that has not started.
+ *
+ * The scale is {@link runElapsedMs} — the run's OWN elapsed — so a live run's
+ * track is always exactly full and the bars shrink into it as the run grows,
+ * rather than a track that ends wherever the last lane happens to reach.
+ *
+ * `null` rather than a zero-width bar, because "has not started" and "started
+ * and took no time" are different facts and an empty track is itself the
+ * signal. A caller renders nothing; it must not invent a sliver.
+ *
+ * EVERYTHING IS CLAMPED into the track. A lane host whose clock runs behind
+ * the registrar's reports a start before the run began — skew, not a negative
+ * offset, the same floor `runElapsedMs` applies — and one running ahead would
+ * otherwise push a bar past the right edge. A run with no elapsed time yet
+ * (the first millisecond, a replayed record) has nothing to divide by, and
+ * answers `{left: 0, width: 0}` rather than `NaN`.
+ */
+export function laneSpan(
+  lane: Pick<RunNode, "startedAt" | "durationMs">,
+  run: Pick<RunRow, "createdAt" | "finishedAt">,
+  now: number,
+): LaneSpan | null {
+  const startedAt = lane.startedAt;
+  if (startedAt === null) return null;
+  const scale = runElapsedMs(run, now);
+  if (scale <= 0) return { left: 0, width: 0 };
+  // A lane still going is measured against the caller's clock, which is what
+  // makes its bar grow — the same arm `runElapsedMs` takes for a live run.
+  const took = lane.durationMs ?? now - startedAt;
+  const left = clampFraction((startedAt - run.createdAt) / scale);
+  return { left, width: Math.min(clampFraction(took / scale), 1 - left) };
+}
+
+/** Into `[0, 1]`, and never `NaN`. */
+function clampFraction(value: number): number {
+  return Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0;
+}
+
+/** The axis under a lane timeline: the run's start, two marks across it, and
+ *  the run's own total — each a FRACTION of the track (the same coordinate
+ *  {@link laneSpan} answers in, so a tick and a bar are placed by one rule)
+ *  with the label a reader sees. Exported for the same reason the geometry is:
+ *  two faces drawing one picture must not tick it differently, and a
+ *  hand-rolled axis beside a shared `laneSpan` is exactly the drift this
+ *  module exists to prevent.
+ *
+ *  FOUR ticks at fixed positions rather than at a "nice" rounded interval: the
+ *  track IS one run, so the marks that matter are its own thirds — and a
+ *  rounded interval would leave a final tick somewhere short of the track's
+ *  end, which is the one place a reader checks the total. */
+export interface TimelineTick {
+  /** Where the mark sits, `0`–`1` across the track. */
+  at: number;
+  /** The elapsed time it stands for, spelled by {@link duration}. */
+  label: string;
+}
+
+export function timelineTicks(scale: number): TimelineTick[] {
+  return [0, 1 / 3, 2 / 3, 1].map((at) => ({
+    at,
+    label: duration(Math.max(0, scale) * at),
+  }));
 }
 
 /** The fields of a scope these readings use — narrowed off the row's own scope

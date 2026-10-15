@@ -40,6 +40,12 @@ import {
   type JSX,
 } from "solid-js";
 import { ansiSpans } from "./ansi";
+import {
+  type LaneSpan,
+  laneSpan,
+  runElapsedMs,
+  timelineTicks,
+} from "@odu/service-client/board";
 import { Button, CommitRef, Confirm, Hint, Pill, Receipt } from "./dom";
 import {
   bytes,
@@ -192,6 +198,10 @@ function LaneHead(props: {
 
 function NodeRow(props: {
   node: RunNode;
+  /** WHERE this node sat in its run, from the shared geometry — or `null` for a
+   *  node that has not started, which draws no bar at all. Computed by the
+   *  caller, which is the one place the run and the clock both are. */
+  span: LaneSpan | null;
   selected: string | null;
   onSelect: (node: RunNode) => void;
   controls: DetailControls;
@@ -237,6 +247,33 @@ function NodeRow(props: {
         </Show>
         <Show when={props.node.exitCode !== null && props.node.exitCode !== 0}>
           <span class="node-exit">{`exit ${props.node.exitCode ?? 0}`}</span>
+        </Show>
+        {/* THE TIMELINE — where this node ran inside the run, not merely how
+            long it took, so parallel work reads as parallel and the critical
+            path is the bar nothing overlaps.
+
+            A LINE OF ITS OWN (`flex-basis: 100%`), not another cell: this row
+            WRAPS on purpose — a namepath-and-platform id in a 26 rem column
+            shatters otherwise — and a track sharing a wrapping line would be a
+            different width on every row, which is the one thing a Gantt cannot
+            survive. Full-width tracks are the same box on every row, so the
+            bars align down the list.
+
+            The hue comes from the SAME `hue-*` class the glyph wears, so a bar
+            and its glyph cannot disagree about what the node is doing. */}
+        <Show when={props.span}>
+          {(span) => (
+            <span class="node-track">
+              <span
+                class={`node-bar hue-${meta().hue}`}
+                classList={{ "node-bar-running": props.node.status === "running" }}
+                style={{
+                  left: `${span().left * 100}%`,
+                  width: `${span().width * 100}%`,
+                }}
+              />
+            </span>
+          )}
         </Show>
         {/* The drawn half of the `title` above. This control is hand-spelled
             rather than built from `Button` — it is a row of labelled cells —
@@ -615,6 +652,10 @@ export function LogPanel(props: {
 export function Detail(props: {
   run: RunRow | undefined;
   frame: NodesFrame | undefined;
+  /** The page's own ticking clock — the SAME one the board's ages read, so a
+   *  live run's timeline grows on one interval rather than this view's second
+   *  idea of now. The run row carries the origin; the clock carries the end. */
+  now: number;
   pending: boolean;
   error: Error | undefined;
   selected: RunNode | null;
@@ -770,6 +811,30 @@ export function Detail(props: {
             </p>
           </Show>
           <ul class="node-list">
+            {/* THE AXIS the bars below are read against — once per list, not
+                once per row, and only where there is a run to measure: the
+                whole track is this run's own elapsed, so its last tick IS the
+                run's duration. Ticks come from the same module the bars do; a
+                hand-rolled scale here would be a second answer to where the
+                middle of a run is. */}
+            <Show when={props.run}>
+              {(run) => (
+                <li class="node-axis" aria-hidden="true">
+                  <span class="node-axis-track">
+                    <For each={timelineTicks(runElapsedMs(run(), props.now))}>
+                      {(tick) => (
+                        <span
+                          class="node-axis-tick"
+                          style={{ left: `${tick.at * 100}%` }}
+                        >
+                          {tick.label}
+                        </span>
+                      )}
+                    </For>
+                  </span>
+                </li>
+              )}
+            </Show>
             {/* `For` over the LANES and `Index` over the nodes inside them, and
                 the difference is what each list is. A lane is addressed by its
                 platform name, which is its own identity — equal strings are the
@@ -792,6 +857,14 @@ export function Detail(props: {
                     {(node) => (
                       <NodeRow
                         node={node()}
+                        // No run row, no origin to measure from — and an
+                        // invented one would place every bar wrongly rather
+                        // than not at all.
+                        span={
+                          props.run === undefined
+                            ? null
+                            : laneSpan(node(), props.run, props.now)
+                        }
                         selected={props.selected?.id ?? null}
                         onSelect={props.onSelect}
                         controls={props.controls}
