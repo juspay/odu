@@ -454,6 +454,33 @@ describe("the run environment", () => {
     expect(registry.env(run.runId, at + 9_000_000)?.elapsedMs).toBe(60_000);
   });
 
+  it("puts the finish instant on the ROW, null while the run has not finished", () => {
+    const w = open();
+    const at = 1_700_000_000_000;
+    const run = registerFixtureRun(w, {
+      repoRoot: "/code/app",
+      sha: "b2".repeat(20),
+      now: at,
+    });
+    const registry = createRegistry({ root: w.catalogRoot });
+    registry.refresh(at + 5_000);
+    expect(registry.row(run.runId)?.finishedAt).toBeNull();
+
+    writeRoster(run.handle, run.token, ["unit@x86_64-linux"]);
+    writeNode(w, run.handle, run.token, {
+      id: "unit@x86_64-linux",
+      status: "ok",
+      at: at + 1_000,
+    });
+    finalizeRun(run.handle, run.token, "passed", [], at + 60_000);
+    registry.refresh(at + 90_000);
+
+    // The verdict's own instant, so a face that never dials this service — a
+    // browser board, kolu's inspector — can say how long the run took without
+    // subtracting against its own clock.
+    expect(registry.row(run.runId)?.finishedAt).toBe(at + 60_000);
+  });
+
   it("derives the commit link once, and says null for a local-only checkout", () => {
     const w = open();
     const sha = "c1".repeat(20);

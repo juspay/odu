@@ -41,6 +41,7 @@ function row(over: Partial<RunRow> = {}): RunRow {
     seq: 1,
     pipeline: "ci",
     createdAt: 1_700_000_000_000,
+    finishedAt: 1_700_000_060_000,
     state: "settled",
     settled: true,
     passed: true,

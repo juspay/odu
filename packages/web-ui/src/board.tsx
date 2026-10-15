@@ -31,11 +31,12 @@
 import {
   isActive,
   isFailing,
+  runElapsedMs,
   runStatus,
 } from "@odu/service-client/board";
 import { createMemo, createSignal, For, Index, Show, type JSX } from "solid-js";
 import { Button, CommitRef, Hint, Pill } from "./dom";
-import { ago, projectOf, scopeLabel } from "./format";
+import { ago, duration, projectOf, scopeLabel } from "./format";
 import type { CheckoutFrame, RunRow } from "./types";
 
 /** Re-exported so `./board` stays the one import path this app's own modules
@@ -143,6 +144,11 @@ function Row(props: {
         </Show>
       </span>
       <span class="row-scope">{scopeLabel(props.run.scope)}</span>
+      {/* HOW LONG IT TOOK, beside what it covered — the pair a person reads
+          together. `runElapsedMs` stops at the run's own verdict, so a settled
+          row says the same number tomorrow, and only the live one ticks with
+          `now`. */}
+      <span class="row-took">{duration(runElapsedMs(props.run, props.now))}</span>
       {/* The age, and under it what the collapse hid. It rides the age cell
           because that is what it is about — the OLDER runs of this checkout —
           and it says the number rather than merely hinting there are some, so
@@ -325,6 +331,7 @@ export function Board(props: {
             <span>Status</span>
             <span>Attention</span>
             <span>Scope</span>
+            <span>Took</span>
             <span>Age</span>
           </div>
         </Show>

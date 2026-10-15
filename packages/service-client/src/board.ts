@@ -97,6 +97,48 @@ export const isActive = (row: RunRow): boolean =>
  *  board under it. */
 export const isFailing = (row: RunRow): boolean => row.unresolvedFailures > 0;
 
+/**
+ * HOW LONG THE RUN TOOK, or has taken so far — the ONE elapsed rule, read by
+ * every face that prints a run's duration.
+ *
+ * STOPS AT THE VERDICT. An elapsed time that kept counting after a run finished
+ * would make every settled row's age a function of when somebody looked at it,
+ * which is the one thing a durable record is supposed to be free of. A run
+ * still going has no `finishedAt`, and reads against the caller's clock — which
+ * is what makes the live row tick and the settled ones stand still.
+ *
+ * `Math.max` guards the single way this can go backwards: a verdict stamped on
+ * a lane host whose clock is behind the one that registered the run. A negative
+ * duration is not a fact about anything, and zero is the honest floor.
+ *
+ * It lives here, beside the other readings, rather than in the service that
+ * used to own it: the service had the only copy and the only consumer
+ * (`RunEnv.elapsedMs`), so a board that wanted a settled run's duration could
+ * not have one. A second subtraction in a face would be a second answer to how
+ * long a run took.
+ */
+export function runElapsedMs(
+  run: Pick<RunRow, "createdAt" | "finishedAt">,
+  now: number,
+): number {
+  return Math.max(0, (run.finishedAt ?? now) - run.createdAt);
+}
+
+/** A duration, at the precision a person reads it — the ONE rendering of a
+ *  number of milliseconds, so the browser board, the CLI's listing and a node's
+ *  own duration all spell "1m07s" the same way. It sits beside
+ *  {@link runElapsedMs} because the rule and its spelling are the same answer
+ *  asked twice; it was `web-ui`'s own, which left the CLI with no way to print
+ *  a duration but to invent a second one. */
+export function duration(ms: number | null): string {
+  if (ms === null) return "";
+  if (ms < 1000) return `${ms}ms`;
+  const seconds = ms / 1000;
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}m${String(Math.round(seconds - minutes * 60)).padStart(2, "0")}s`;
+}
+
 /** The fields of a scope these readings use — narrowed off the row's own scope
  *  rather than restated, so a field added to the wire is one type error away
  *  from a reading that would ignore it, and a caller holding a full `RunScope`

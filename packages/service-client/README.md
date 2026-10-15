@@ -78,6 +78,17 @@ lanes under `selectors: ["ci::unit"]` say nothing about the rest of the DAG, and
 `--root NAMEPATH` run is the same kind of subset, which is why the reading names
 both.
 
+**How long a run took** is `runElapsedMs`, and the row carries `finishedAt` so it
+can answer. The subtraction stops at the run's own verdict: a settled row that
+counted against `now` would report how long ago somebody last looked at the
+board, and a run reopened tomorrow would say yesterday's green took a day. Only
+a run still going reads the caller's clock, which is what makes exactly one row
+tick. `duration` is its spelling — `400ms`, `1.5s`, `1m07s` — here rather than in
+a view, because the browser board, `odu history list` and a downstream panel
+printing two different durations for one run is the same drift `runStatus`
+exists to prevent. The service used to own this subtraction privately, which is
+why a settled run's duration was unreachable from anywhere but the live view.
+
 ## The run address — `./routes`
 
 A run, and one attempt's output within it, are LINKABLE: a person pastes

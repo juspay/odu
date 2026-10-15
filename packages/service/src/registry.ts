@@ -85,7 +85,7 @@ import {
   readVerdict,
   type RunHandle,
 } from "@odu/run-history/store";
-import { newestFirst } from "@odu/service-client/board";
+import { newestFirst, runElapsedMs } from "@odu/service-client/board";
 import { formatLogKey } from "@odu/service-client/logKey";
 import type {
   RunBoardState,
@@ -151,9 +151,6 @@ interface Entry {
    *  readings of one journal, and a caller that got them from two reads could
    *  hold a lane that has landed beside a node that has not started. */
   env: RunEnv;
-  /** When the run stopped, or null while it has not. The ANCHOR the elapsed
-   *  clock is re-read against — see `RunRegistry.env`. */
-  finishedAt: number | null;
 }
 
 /**
@@ -261,7 +258,7 @@ function envOf(
     // matched nothing", and inferring it from silence would invent a reason the
     // journal never gave.
     phase: fold.phase ?? fallbackPhase(fold.latest),
-    elapsedMs: elapsedOf(manifest.createdAt, finishedAt, now),
+    elapsedMs: runElapsedMs({ createdAt: manifest.createdAt, finishedAt }, now),
     lanes: lanesOf(fold.lanes),
     hostsSource: fold.hostsSource,
     // `owner/repo` or null — the manifest records the slug the coordinator
@@ -280,25 +277,6 @@ function envOf(
       attempts: row.attempts,
     })),
   };
-}
-
-/**
- * How long the run has been going, and when that stops.
- *
- * STOPS AT THE VERDICT. An elapsed time that kept counting after a run finished
- * would make every settled row's age a function of when somebody looked at it,
- * which is the one thing a durable record is supposed to be free of.
- *
- * `Math.max` guards the single way this can go backwards: a verdict stamped on
- * a lane host whose clock is behind the one that registered the run. A negative
- * duration is not a fact about anything, and zero is the honest floor.
- */
-function elapsedOf(
-  createdAt: number,
-  finishedAt: number | null,
-  now: number,
-): number {
-  return Math.max(0, (finishedAt ?? now) - createdAt);
 }
 
 /** The phase of a run that never journalled one. One rule, spelled once, and
@@ -397,6 +375,12 @@ function project(
       seq: manifest.seq,
       pipeline: manifest.pipeline,
       createdAt: manifest.createdAt,
+      // When the run stopped, from the verdict read once above — null while it
+      // has not. On the ROW rather than held beside it, because how long a run
+      // took is a fact every face needs and only this process could produce:
+      // `RunEnv` carries the elapsed number for the live view, and a board
+      // reading a settled row a week later has no journal to ask.
+      finishedAt: verdict?.finishedAt ?? null,
       state,
       settled: attention.settled,
       passed: attention.passed,
@@ -415,7 +399,6 @@ function project(
     },
     nodes: nodesOf(handle.runId, fold.roster, fold.latest),
     env: envOf(manifest, fold, verdict?.finishedAt ?? null, now),
-    finishedAt: verdict?.finishedAt ?? null,
   };
 }
 
@@ -617,7 +600,7 @@ export function createRegistry(opts: RegistryOptions = {}): RunRegistry {
       if (held === undefined) return undefined;
       return {
         ...held.env,
-        elapsedMs: elapsedOf(held.row.createdAt, held.finishedAt, now),
+        elapsedMs: runElapsedMs(held.row, now),
       };
     },
     select,

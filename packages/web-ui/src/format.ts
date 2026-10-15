@@ -12,6 +12,7 @@
 import type { SurfaceReadout, SurfaceReadoutStatus } from "@kolu/surface/solid";
 import {
   BOARD_STATE,
+  duration,
   OUTCOME,
   scopeLabel,
   type StatusHue,
@@ -100,15 +101,11 @@ export function projectOf(repoRoot: string): string {
   return parts[parts.length - 1] ?? repoRoot;
 }
 
-/** A duration, at the precision a person reads it. */
-export function duration(ms: number | null): string {
-  if (ms === null) return "";
-  if (ms < 1000) return `${ms}ms`;
-  const seconds = ms / 1000;
-  if (seconds < 60) return `${seconds.toFixed(1)}s`;
-  const minutes = Math.floor(seconds / 60);
-  return `${minutes}m${String(Math.round(seconds - minutes * 60)).padStart(2, "0")}s`;
-}
+/** A duration, at the precision a person reads it — `@odu/service-client/board`
+ *  owns it, beside the elapsed rule that produces the numbers it renders, so
+ *  this app and the CLI print one spelling. Re-exported so a view still reads
+ *  its vocabulary from here. */
+export { duration };
 
 /** How long ago, coarsely. Coarse on purpose: a board is scanned rather than
  *  read, and "3m ago" is what a scanner needs from a timestamp. */

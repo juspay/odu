@@ -69,6 +69,10 @@ function sameRow(a: RunRow, b: RunRow): boolean {
     a.settled === b.settled &&
     a.passed === b.passed &&
     a.outcome === b.outcome &&
+    // The instant a subscriber's duration cell stops at. It moves exactly once
+    // and the fields above move with it, but a cell a face PAINTS belongs in
+    // the comparison that decides whether a face is told anything.
+    a.finishedAt === b.finishedAt &&
     a.actionable === b.actionable &&
     a.unresolvedFailures === b.unresolvedFailures &&
     a.reportingDebt === b.reportingDebt &&

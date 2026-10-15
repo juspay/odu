@@ -81,7 +81,10 @@ scrolls sideways.
 each, with `N earlier` under the age and a *History* toggle for the rest —
 because "what is my CI doing" is a question about checkouts, and a superseded
 run's red is history. One status cell per row: the outcome once there is one,
-the board state until then. Three coarse filters plus a text search over
+the board state until then. Two clocks beside it, because they answer different
+questions: *Took* is the run's own duration, which stops at its verdict, and
+*Age* is how long ago it started, which never stops. Three coarse filters plus a
+text search over
 project, branch and path. The tab title and favicon count the same rows the
 board shows by default — how many are failing, how many are still moving — so a
 tab in the background is still a monitor.
