@@ -827,7 +827,10 @@ export function Detail(props: {
                           class="node-axis-tick"
                           style={{ left: `${tick.at * 100}%` }}
                         >
-                          {tick.label}
+                          {/* This page's own spelling of a duration, the one
+                              its node rows already print — the axis carries a
+                              position and a number, never a string. */}
+                          {duration(tick.ms)}
                         </span>
                       )}
                     </For>

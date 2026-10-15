@@ -205,12 +205,16 @@ function clampFraction(value: number): number {
 }
 
 /** The axis under a lane timeline: the run's start, two marks across it, and
- *  the run's own total — each a FRACTION of the track (the same coordinate
- *  {@link laneSpan} answers in, so a tick and a bar are placed by one rule)
- *  with the label a reader sees. Exported for the same reason the geometry is:
- *  two faces drawing one picture must not tick it differently, and a
- *  hand-rolled axis beside a shared `laneSpan` is exactly the drift this
- *  module exists to prevent.
+ *  the run's own total. Each is a POSITION — a fraction of the track, the same
+ *  coordinate {@link laneSpan} answers in, so a tick and a bar are placed by
+ *  one rule — and the elapsed time that position stands for.
+ *
+ *  NO LABEL. Where a mark sits is geometry and is shared; how a face SPELLS a
+ *  duration is that face's own vocabulary, and baking one spelling here put an
+ *  axis reading `55.4s` over cells reading `55s` in the first consumer that
+ *  drew both. So the claim this export makes is about the MARKS — two faces
+ *  cannot tick one picture differently — and each face spells `ms` the way the
+ *  rest of its rows already do (`duration` here, `compactPhrase` in kolu).
  *
  *  FOUR ticks at fixed positions rather than at a "nice" rounded interval: the
  *  track IS one run, so the marks that matter are its own thirds — and a
@@ -219,14 +223,14 @@ function clampFraction(value: number): number {
 export interface TimelineTick {
   /** Where the mark sits, `0`–`1` across the track. */
   at: number;
-  /** The elapsed time it stands for, spelled by {@link duration}. */
-  label: string;
+  /** The elapsed time it stands for, for the caller to spell. */
+  ms: number;
 }
 
 export function timelineTicks(scale: number): TimelineTick[] {
   return [0, 1 / 3, 2 / 3, 1].map((at) => ({
     at,
-    label: duration(Math.max(0, scale) * at),
+    ms: Math.max(0, scale) * at,
   }));
 }
 

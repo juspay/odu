@@ -90,8 +90,11 @@ exists to prevent. The service used to own this subtraction privately, which is
 why a settled run's duration was unreachable from anywhere but the live view.
 
 **WHERE a lane ran inside its run** is `laneSpan`, which answers a `left` and a
-`width` as fractions of the run's own timeline, and `timelineTicks` labels the
-axis they are read against. A Gantt rather than a row of lengths, because
+`width` as fractions of the run's own timeline, and `timelineTicks` MARKS the
+axis they are read against — `{ at, ms }`, a position and a number, never a
+string: where a mark sits is geometry and is shared, while how a face spells a
+duration is that face's own vocabulary (`duration` here, `compactPhrase` in
+kolu). A Gantt rather than a row of lengths, because
 lengths say how long each lane took and nothing about what ran beside what —
 and "what was the critical path" is the question a reader opens a run to ask.
 The scale is `runElapsedMs`, so a live run's track stays exactly full as it

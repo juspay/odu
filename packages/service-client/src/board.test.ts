@@ -313,12 +313,15 @@ describe("where a lane sat in its run", () => {
     });
   });
 
-  it("ticks the axis at the track's own thirds, labelled in run time", () => {
+  it("marks the axis at the track's own thirds, in run time", () => {
+    // POSITIONS and numbers, no strings: how a face spells a duration is its
+    // own vocabulary, and an axis that baked one put `55.4s` over cells that
+    // read `55s` in the first consumer that drew both.
     expect(timelineTicks(600_000)).toEqual([
-      { at: 0, label: "0ms" },
-      { at: 1 / 3, label: "3m20s" },
-      { at: 2 / 3, label: "6m40s" },
-      { at: 1, label: "10m00s" },
+      { at: 0, ms: 0 },
+      { at: 1 / 3, ms: 200_000 },
+      { at: 2 / 3, ms: 400_000 },
+      { at: 1, ms: 600_000 },
     ]);
   });
 });
