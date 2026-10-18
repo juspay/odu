@@ -1,0 +1,6 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "odu-maintainers",
+  "description": "odu maintainers: the published odu plugin, plus maintainer-only guidance",
+  "extensions": { "asia.nixos.agent-distro": { "plugins": ["./agent-plugin", "./dev"] } }
+}
