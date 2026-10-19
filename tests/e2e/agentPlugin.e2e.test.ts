@@ -2,9 +2,10 @@
  * ONE PLUGIN, ONE SKILL, ONE MCP SERVER — asserted against this repo's tree.
  *
  * odu's agent face is an Agent Plugin (https://agent-plugins.org/, spec 1.0.0)
- * rooted at `agent-plugin/`: a `plugin.json`, the `odu` skill under `skills/`,
- * and the `odu` MCP server in `mcp.json`. odu's own `plugin.json` profile
- * loads that very directory rather than a copy of it.
+ * rooted at the repository root: a `plugin.json`, the `odu` skill under
+ * `skills/`, and the `odu` MCP server in `mcp.json`. The same root manifest is
+ * odu's own agent-distro profile, whose extension adds only the maintainer-only
+ * `dev/` plugin.
  *
  * ## What this file checks, and what it deliberately does not
  *
@@ -28,8 +29,8 @@ const repoRoot = join(import.meta.dirname, "..", "..");
 const read = (rel: string): string => readFileSync(join(repoRoot, rel), "utf-8");
 const readJson = <T>(rel: string): T => JSON.parse(read(rel)) as T;
 
-const PLUGIN = "agent-plugin";
-const SKILL = `${PLUGIN}/skills/odu/SKILL.md`;
+const PLUGIN = ".";
+const SKILL = "skills/odu/SKILL.md";
 const SPEC = "https://agent-plugins.org/schemas/1.0.0";
 
 interface McpConfig {
@@ -48,7 +49,7 @@ const ODU_SERVER = {
 };
 
 describe("odu's Agent Plugin", () => {
-  it("has a conformant plugin.json", () => {
+  it("has a conformant plugin.json at the repository root", () => {
     const manifest = readJson<Record<string, unknown>>(`${PLUGIN}/plugin.json`);
     expect(manifest.$schema).toBe(`${SPEC}/plugin.schema.json`);
     expect(manifest.name).toBe("odu");
@@ -85,14 +86,18 @@ describe("odu's Agent Plugin", () => {
     expect(config.mcpServers.odu).toEqual(ODU_SERVER);
   });
 
-  it("is what odu's own profile loads, not a copy of it", () => {
-    // Maintainers get the published plugin exactly as consumers do, plus the
-    // maintainer-only `dev/` plugin — which is its own package, so nothing in it
-    // can ride along into `agent-plugin/`. The root manifest is a plugin too: its
-    // name must not collide with `agent-plugin`'s `odu`.
-    const profile = readJson<{ name: string; extensions: Record<string, { plugins: string[] }> }>("plugin.json");
-    expect(profile.name).toBe("odu-maintainers");
-    expect(profile.extensions["asia.nixos.agent-distro"].plugins).toEqual(["./agent-plugin", "./dev"]);
+  it("is the plugin odu's own profile publishes, with only dev/ added", () => {
+    // The root manifest is BOTH the published plugin and this repository's
+    // agent-distro profile: the extension adds the maintainer-only `dev/`
+    // plugin, and nothing else, so maintainers load exactly what consumers do
+    // plus `dev/`. `dev/` is its own package, so nothing in it can ride along
+    // into the published plugin.
+    const profile = readJson<{
+      name: string;
+      extensions: Record<string, { plugins: string[] }>;
+    }>("plugin.json");
+    expect(profile.name).toBe("odu");
+    expect(profile.extensions["asia.nixos.agent-distro"].plugins).toEqual(["./dev"]);
     const dev = readJson<Record<string, unknown>>("dev/plugin.json");
     expect(dev.$schema).toBe(`${SPEC}/plugin.schema.json`);
     expect(dev.name).toBe("odu-dev");

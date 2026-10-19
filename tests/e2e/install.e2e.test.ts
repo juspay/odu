@@ -3,13 +3,15 @@
  *
  * Every other gate in this suite starts from odu's own checkout. That is not
  * first contact. First contact is a client that has installed odu's Agent
- * Plugin (https://agent-plugins.org/): it has a copy of `agent-plugin/` as a
- * plugin root, reads `mcp.json` there, and spawns what it names — with the
- * plugin root as the working directory and `PLUGIN_ROOT` / `PLUGIN_DATA` in the
- * environment, as the spec requires.
+ * Plugin (https://agent-plugins.org/): the repository root IS the plugin root,
+ * so it reads `plugin.json` and `mcp.json` there and spawns what `mcp.json`
+ * names — with the plugin root as the working directory and `PLUGIN_ROOT` /
+ * `PLUGIN_DATA` in the environment, as the spec requires.
  *
- * This gate does exactly that against the TRACKED contents of `agent-plugin/`,
- * so a file a client would never receive cannot make it pass.
+ * This gate does exactly that against the TRACKED contents a client reading the
+ * root receives — `plugin.json`, `skills/odu` and `mcp.json` (§6.1 fixed
+ * locations) — so a file a client would never receive cannot make it pass, and
+ * a fixed location that went missing cannot hide behind the rest of the repo.
  *
  * ## What the `nix` shim buys, and what it does not
  *
@@ -95,19 +97,22 @@ let origin: string;
 let daemonHome: string | null = null;
 let daemonPid: number | null = null;
 
-/** The plugin's TRACKED files, copied out — what a client actually installs.
+/** The plugin's TRACKED fixed locations, copied out — what a client actually
+ *  installs.
  *
- *  `git ls-files` rather than a recursive copy: it is the set a consumer
- *  receives, it honours `.gitignore`, and it takes the WORKING TREE's contents
- *  — so an uncommitted edit to the plugin under test is still what gets
- *  loaded. */
+ *  The root is the plugin, but not the whole root is the package: §6.1 puts
+ *  skills at `skills/` and MCP at `mcp.json`, beside `plugin.json`, so those
+ *  are the paths exported. `git ls-files` rather than a recursive copy: it is
+ *  the set a consumer receives, it honours `.gitignore`, and it takes the
+ *  WORKING TREE's contents — so an uncommitted edit to the plugin under test is
+ *  still what gets loaded. */
 function installPlugin(): string {
   const dir = scratchDir("odu-e2e-plugin-");
   const copied = spawnSync(
     "sh",
     [
       "-c",
-      `git ls-files -z -- agent-plugin | tar --null -T - -cf - | tar -xf - -C '${dir}' --strip-components=1`,
+      `git ls-files -z -- plugin.json mcp.json skills/odu | tar --null -T - -cf - | tar -xf - -C '${dir}'`,
     ],
     { cwd: repoRoot, encoding: "utf-8", maxBuffer: BIG },
   );
@@ -180,8 +185,15 @@ function mcpConfig(): McpConfig {
 }
 
 describe("a client loading odu's Agent Plugin", () => {
-  it("discovers exactly one skill, byte for byte the authored one", () => {
-    expect(existsSync(join(pluginRoot, "plugin.json"))).toBe(true);
+  it("sees exactly the root fixed locations, and one authored skill", () => {
+    // THE WHOLE PACKAGE A CLIENT READING THE ROOT SEES: the manifest, the
+    // `skills/` fixed location, and `mcp.json`. EQUALITY, because a file that
+    // happens to sit at the root is not part of the plugin unless §6.1 names it.
+    expect(readdirSync(pluginRoot).sort()).toEqual([
+      "mcp.json",
+      "plugin.json",
+      "skills",
+    ]);
     const skills = join(pluginRoot, "skills");
     // EQUALITY. A second skill directory is a second vocabulary — that is what
     // the deleted `odu-mcp` was. "Contains odu" would not have seen it.
@@ -189,7 +201,7 @@ describe("a client loading odu's Agent Plugin", () => {
     // A client that loaded something other than what this repo reviews would
     // be teaching agents an unreviewed skill.
     expect(readFileSync(join(skills, "odu", "SKILL.md"), "utf-8")).toBe(
-      readFileSync(join(repoRoot, "agent-plugin/skills/odu/SKILL.md"), "utf-8"),
+      readFileSync(join(repoRoot, "skills/odu/SKILL.md"), "utf-8"),
     );
   });
 
