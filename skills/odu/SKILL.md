@@ -393,8 +393,9 @@ failing. An agent that conflates them reports a broken test as a broken tool.
 
 ## Wiring the MCP face
 
-This skill ships at the root of odu's [Agent Plugin](https://agent-plugins.org/), whose
-`mcp.json` wires the MCP face beside it — unpinned upstream, over stdio:
+This skill ships in odu's [Agent Plugin](https://agent-plugins.org/) — this
+repository's root — whose `mcp.json` wires the MCP face beside it — unpinned
+upstream, over stdio:
 
 ```json
 {

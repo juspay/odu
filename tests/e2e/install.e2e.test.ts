@@ -100,19 +100,21 @@ let daemonPid: number | null = null;
 /** The plugin's TRACKED fixed locations, copied out — what a client actually
  *  installs.
  *
- *  The root is the plugin, but not the whole root is the package: §6.1 puts
- *  skills at `skills/` and MCP at `mcp.json`, beside `plugin.json`, so those
- *  are the paths exported. `git ls-files` rather than a recursive copy: it is
- *  the set a consumer receives, it honours `.gitignore`, and it takes the
- *  WORKING TREE's contents — so an uncommitted edit to the plugin under test is
- *  still what gets loaded. */
+ *  The root is the plugin, but not the whole root is the package: §6.1 names
+ *  the FIXED LOCATIONS — `skills/` and `mcp.json`, beside `plugin.json` — so
+ *  those are exported, whole. Exporting `skills/odu` by name would filter a
+ *  stray `skills/other/` out of the copy, and the "exactly one skill" equality
+ *  below would then never see what a real client installs. `git ls-files`
+ *  rather than a recursive copy: it is the set a consumer receives, it honours
+ *  `.gitignore`, and it takes the WORKING TREE's contents — so an uncommitted
+ *  edit to the plugin under test is still what gets loaded. */
 function installPlugin(): string {
   const dir = scratchDir("odu-e2e-plugin-");
   const copied = spawnSync(
     "sh",
     [
       "-c",
-      `git ls-files -z -- plugin.json mcp.json skills/odu | tar --null -T - -cf - | tar -xf - -C '${dir}'`,
+      `git ls-files -z -- plugin.json mcp.json skills | tar --null -T - -cf - | tar -xf - -C '${dir}'`,
     ],
     { cwd: repoRoot, encoding: "utf-8", maxBuffer: BIG },
   );
