@@ -9,7 +9,7 @@
  * `PLUGIN_DATA` in the environment, as the spec requires.
  *
  * This gate does exactly that against the TRACKED contents a client reading the
- * root receives — `plugin.json`, `skills/odu` and `mcp.json` (§6.1 fixed
+ * root receives — `plugin.json`, `skills/` and `mcp.json` (§6.1 fixed
  * locations) — so a file a client would never receive cannot make it pass, and
  * a fixed location that went missing cannot hide behind the rest of the repo.
  *
@@ -73,6 +73,11 @@ beta: alpha
     exit 3
 `;
 
+/** The §6.1 fixed locations a client reading the root receives. One list,
+ *  because the export and the equality below must name the same set. */
+const FIXED_LOCATIONS = ["mcp.json", "plugin.json", "skills"] as const;
+const ODU_SKILL = "skills/odu/SKILL.md";
+
 /** The plugin's `mcp.json`, as the spec shapes it. */
 interface McpConfig {
   $schema: string;
@@ -101,20 +106,20 @@ let daemonPid: number | null = null;
  *  installs.
  *
  *  The root is the plugin, but not the whole root is the package: §6.1 names
- *  the FIXED LOCATIONS — `skills/` and `mcp.json`, beside `plugin.json` — so
- *  those are exported, whole. Exporting `skills/odu` by name would filter a
- *  stray `skills/other/` out of the copy, and the "exactly one skill" equality
- *  below would then never see what a real client installs. `git ls-files`
- *  rather than a recursive copy: it is the set a consumer receives, it honours
- *  `.gitignore`, and it takes the WORKING TREE's contents — so an uncommitted
- *  edit to the plugin under test is still what gets loaded. */
+ *  the fixed locations, so those are exported whole. Exporting `skills/odu` by
+ *  name would filter a stray `skills/other/` out of the copy, and the "exactly
+ *  one skill" equality below would then never see what a real client installs.
+ *  `git ls-files` rather than a recursive copy: it is the set a consumer
+ *  receives, it honours `.gitignore`, and it takes the WORKING TREE's contents
+ *  — so an uncommitted edit to the plugin under test is still what gets
+ *  loaded. */
 function installPlugin(): string {
   const dir = scratchDir("odu-e2e-plugin-");
   const copied = spawnSync(
     "sh",
     [
       "-c",
-      `git ls-files -z -- plugin.json mcp.json skills | tar --null -T - -cf - | tar -xf - -C '${dir}'`,
+      `git ls-files -z -- ${FIXED_LOCATIONS.join(" ")} | tar --null -T - -cf - | tar -xf - -C '${dir}'`,
     ],
     { cwd: repoRoot, encoding: "utf-8", maxBuffer: BIG },
   );
@@ -191,19 +196,15 @@ describe("a client loading odu's Agent Plugin", () => {
     // THE WHOLE PACKAGE A CLIENT READING THE ROOT SEES: the manifest, the
     // `skills/` fixed location, and `mcp.json`. EQUALITY, because a file that
     // happens to sit at the root is not part of the plugin unless §6.1 names it.
-    expect(readdirSync(pluginRoot).sort()).toEqual([
-      "mcp.json",
-      "plugin.json",
-      "skills",
-    ]);
+    expect(readdirSync(pluginRoot).sort()).toEqual([...FIXED_LOCATIONS].sort());
     const skills = join(pluginRoot, "skills");
     // EQUALITY. A second skill directory is a second vocabulary — that is what
     // the deleted `odu-mcp` was. "Contains odu" would not have seen it.
     expect(readdirSync(skills).sort()).toEqual(["odu"]);
     // A client that loaded something other than what this repo reviews would
     // be teaching agents an unreviewed skill.
-    expect(readFileSync(join(skills, "odu", "SKILL.md"), "utf-8")).toBe(
-      readFileSync(join(repoRoot, "skills/odu/SKILL.md"), "utf-8"),
+    expect(readFileSync(join(pluginRoot, ODU_SKILL), "utf-8")).toBe(
+      readFileSync(join(repoRoot, ODU_SKILL), "utf-8"),
     );
   });
 
