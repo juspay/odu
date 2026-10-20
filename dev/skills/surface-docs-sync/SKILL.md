@@ -26,7 +26,7 @@ update **all three** in the *same* change:
 
 1. **`README.md`** — the `## CLI` block, the verb table, and the agent-loop prose.
 2. **`website/src/content/docs.md`** — the reference the site publishes.
-3. **`agent-plugin/skills/odu/SKILL.md`** — the single authored skill: the
+3. **`skills/odu/SKILL.md`** — the single authored skill: the
    bootstrap, the loop, and the CLI/MCP guidance, which are one skill because
    CLI and MCP are two faces of one service rather than two adoption paths.
 
