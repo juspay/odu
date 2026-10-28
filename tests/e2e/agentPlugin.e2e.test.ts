@@ -97,7 +97,7 @@ describe("odu's Agent Plugin", () => {
       extensions: Record<string, { plugins: string[] }>;
     }>("plugin.json");
     expect(profile.name).toBe("odu");
-    expect(profile.extensions["asia.nixos.agent-distro"].plugins).toEqual(["./dev"]);
+    expect(profile.extensions["asia.nixos.agent-distro"]?.plugins).toEqual(["./dev"]);
     const dev = readJson<Record<string, unknown>>("dev/plugin.json");
     expect(dev.$schema).toBe(`${SPEC}/plugin.schema.json`);
     expect(dev.name).toBe("odu-dev");
