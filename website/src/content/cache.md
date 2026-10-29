@@ -10,7 +10,7 @@ A bucket is one cache: one substituter URL under the service's origin and one ed
 odu cache create main
 ```
 
-`create` prints the substituter URL and the bucket's public key. `odu cache use main` prints the same as two Nix settings, ready for `nix.conf`:
+`create` prints the substituter URL and the bucket's public key. `odu cache use main` prints the same as two Nix settings, ready for `nix.conf` — and needs no token at all, because a bucket's URL and public key are what it publishes to every client that talks to it:
 
 ```sh
 extra-substituters = http://127.0.0.1:18440/main
@@ -34,6 +34,7 @@ Trust the key, then a build substitutes from the bucket instead of the network. 
 
 ```sh
 odu cache token mint main --write
+odu cache token mint main --write --buckets 'team-*'   # one token, several buckets
 ```
 
 The token is printed once; the server keeps only its hash, in the database described under [Where the data lives](#where-the-data-lives). A token carries a bucket glob, a scope (`--read`, `--write` or `--admin`), an expiry, and its last use. Revoke one without touching the rest:
@@ -82,8 +83,10 @@ Nix reads credentials only from the file named by its `netrc-file` setting (defa
 
 ```sh
 netrc-file = /home/<you>/.netrc
-machine 127.0.0.1 password <token>
+machine 127.0.0.1 password <your-write-token>
 ```
+
+`use` prints the placeholder rather than the token it could read: the block is pasted into a `nix.conf` and a `flake.nix`, which are read by people and committed.
 
 For CI, put the token in the URL instead of provisioning a file:
 
@@ -112,6 +115,8 @@ Until the hook ships, a CI job pushes only the closures it names. Plain `nix cop
 
 A public bucket reads without a token. Reads from a private bucket need the same credential as a write: netrc for `nix copy` and substitution, or `Authorization: Bearer <token>` for HTTP clients. Writes always need a token.
 
+An unauthenticated read of a private bucket answers **404**, not 401: "you need a token" would confirm the bucket exists, and a private name must not be enumerable. A caller who presents a token that is wrong, revoked, expired or scoped elsewhere gets 403.
+
 ## Keep and reclaim
 
 ```sh
@@ -127,6 +132,8 @@ Pins are named and root a closure. Garbage collection applies per-bucket retenti
 The cache keeps no second copy of your builds. The server's own `/nix/store` holds the paths; a bucket is metadata over it.
 
 - A push imports the paths into the server's store through the Nix daemon. Pushing from the machine that built them moves nothing.
+- An upload is accepted only when the bytes are there: the server hashes the NAR it staged against the narinfo's `NarHash` before importing it. `nix copy --from` alone would not do, because it copies nothing and exits 0 for a path the store already has — which on a single machine is the ordinary case.
+- A narinfo whose references are not in the store yet answers **202** and is imported when they arrive; anything else that cannot be imported answers **400** with Nix's own sentence. A reference that `odu cache push` skipped as upstream is never uploaded, so a server whose store does not already hold it will leave the referrer at 202 — push the closure in full, or let the server's store be the machine that built it.
 - A NAR read streams the path out of the store, compressed on the fly.
 - Every path a bucket retains is rooted under odu's state directory, so the machine's own garbage collection never removes what the cache serves. `odu cache gc` drops the roots of what retention has expired and deletes those paths.
 - The database, signing keys, token hashes, narinfo metadata and pins live in one SQLite file:

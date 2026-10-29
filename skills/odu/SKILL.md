@@ -18,7 +18,7 @@ Three faces project the same verbs — and none of them has a verb of its own:
 run_start · run_wait · run_read · run_list · run_retry · run_cancel · log_read
 catalog_import · catalog_prune · pipeline_read
 venue_probe · venue_hold · venue_release · protect_apply
-cache_create · cache_list · cache_tokenMint · cache_tokenList
+cache_create · cache_list · cache_describe · cache_tokenMint · cache_tokenList
 cache_tokenRevoke · cache_pin · cache_gc · cache_stats
 ```
 
@@ -302,7 +302,8 @@ and a browser simply could not do them at all.
 | require odu's checks | `odu surface protect_apply --input '{…}' --json` | `protect_apply` | `checkout`, `branch?`, `platforms?`, `hostsFile?`, `dryRun?`, `create?`, `requestId` | `repo`, `branch`, `contexts[]`, `rulesetId`, `applied`, `created`, `derivedFrom`, `detail`, `replayed` |
 | create a cache bucket | `odu surface cache_create --input '{…}' --json` | `cache_create` | `rootToken`, `name`, `public`, `retentionDays`, `upstreamKeys?` | `name`, `public`, `retentionDays`, `keyName`, `publicKey`, `upstreamKeys[]`, `objects`, `bytes`, `created`, `url` |
 | list buckets | `odu surface cache_list --input '{…}' --json` | `cache_list` | `rootToken` | `buckets[]` (the shape above) |
-| mint a cache token | `odu surface cache_tokenMint --input '{…}' --json` | `cache_tokenMint` | `rootToken`, `bucket`, `scope` (`read`/`write`/`admin`), `expiresDays?` | `token` (plaintext, ONCE), `facts` |
+| one bucket's public identity | `odu surface cache_describe --input '{…}' --json` | `cache_describe` | `bucket` — **no root token** | the shape above; what `odu cache use` needs |
+| mint a cache token | `odu surface cache_tokenMint --input '{…}' --json` | `cache_tokenMint` | `rootToken`, `bucket`, `scope` (`read`/`write`/`admin`), `expiresDays?`, `bucketGlob?` | `token` (plaintext, ONCE), `facts` |
 | list cache tokens | `odu surface cache_tokenList --input '{…}' --json` | `cache_tokenList` | `rootToken`, `bucket?` | `tokens[]` — never a plaintext |
 | revoke a cache token | `odu surface cache_tokenRevoke --input '{…}' --json` | `cache_tokenRevoke` | `rootToken`, `id` | `id`, `revoked` |
 | pin a closure | `odu surface cache_pin --input '{…}' --json` | `cache_pin` | `rootToken`, `bucket`, `name`, `paths[]` | `bucket`, `name`, `rootPaths[]`, `created` |

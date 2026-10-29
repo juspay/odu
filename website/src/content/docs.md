@@ -189,7 +189,7 @@ For agents with an MCP client, odu ships the unified skill and its MCP server to
 
 The stdio bridge bootstraps the service and exposes the same verbs as tools (`run_start`, `run_wait`, `log_read`, and so on). HTTP MCP clients can instead connect to **http://127.0.0.1:18440/mcp** once the service is running; an HTTP connection itself cannot start it.
 
-Other shared verbs: `run_list` (the board filtered by checkout, commit and seq, in one call), `run_cancel`, `pipeline_read`, `venue_probe`, `venue_hold`, `venue_release`, `catalog_import`, `catalog_prune`, `protect_apply`, and the cache's `cache_create`, `cache_list`, `cache_tokenMint`, `cache_tokenList`, `cache_tokenRevoke`, `cache_pin`, `cache_gc` and `cache_stats`. Use `odu surface --help` for their schemas. Every cache verb takes `rootToken`; a service started without `$ODU_ROOT_TOKEN` refuses them all with `no_root_token` while the substituter keeps serving.
+Other shared verbs: `run_list` (the board filtered by checkout, commit and seq, in one call), `run_cancel`, `pipeline_read`, `venue_probe`, `venue_hold`, `venue_release`, `catalog_import`, `catalog_prune`, `protect_apply`, and the cache's `cache_create`, `cache_list`, `cache_describe`, `cache_tokenMint`, `cache_tokenList`, `cache_tokenRevoke`, `cache_pin`, `cache_gc` and `cache_stats`. Use `odu surface --help` for their schemas. Every cache verb but `cache_describe` takes `rootToken`; a service started without `$ODU_ROOT_TOKEN` refuses the rest with `no_root_token` while the substituter keeps serving. `cache_describe` answers a bucket's substituter URL and public key with no credential, which is what `odu cache use` needs.
 
 ## CLI reference
 

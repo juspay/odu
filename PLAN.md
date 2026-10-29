@@ -206,8 +206,9 @@ OAuth users mint and revoke in the UI or CLI. Roles: owner, admin, member.
 A new workspace member `packages/cache` (protocol, blob store, metadata, GC,
 signing, tokens) with its own closure test, importing nothing from
 `execution`. Its routes are a layer merged in `web.ts` (F1). Its admin
-operations (`cache_create`, `cache_token_mint`, `cache_token_revoke`,
-`cache_pin`, `cache_gc`, `cache_stats`) are verbs on the shared surface, so
+operations (`cache_create`, `cache_list`, `cache_describe`, `cache_tokenMint`,
+`cache_tokenRevoke`, `cache_pin`, `cache_gc`, `cache_stats`) are verbs on the
+shared surface, so
 `odu cache …`, the browser and MCP all reach them through the service, which
 is what the authority wall requires (F4). `odu cache push` is the one command
 that is a client of a *different* authority: the cache's HTTP API, with a
@@ -342,8 +343,9 @@ What lands:
 - The protocol routes as one `HttpRouter` layer merged in `web.ts` (F1):
   `nix-cache-info`, narinfo HEAD/GET, NAR GET, PUT for both with Bearer or
   Basic, and the batched missing-paths endpoint.
-- Surface verbs `cache_create`, `cache_list`, `cache_token_mint`,
-  `cache_token_revoke`, `cache_pin`, `cache_gc`, `cache_stats`, authorised
+- Surface verbs `cache_create`, `cache_list`, `cache_describe`,
+  `cache_tokenMint`, `cache_tokenRevoke`, `cache_pin`, `cache_gc`,
+  `cache_stats`, authorised
   by a root token the service reads from its environment, and exposed to
   CLI, MCP and the board's data layer like every other verb (F4).
 - CLI: `odu cache create | list | token | use | pin | gc | stats | push`.
