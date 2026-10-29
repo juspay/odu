@@ -56,6 +56,7 @@ import {
   type ServiceIdentity,
   ServiceRefused,
   UNKNOWN_SERVICE,
+  type CacheBucket,
 } from "@odu/service-client/surface";
 import { RUN_RECORD_FORMAT } from "@odu/run-history/schema";
 import {
@@ -70,7 +71,7 @@ import { readLog, readTail } from "./logs";
 import { checkoutSource } from "./checkout";
 import { nodesSource } from "./nodes";
 import { callerOf } from "./caller";
-import type { ServicePorts } from "./ports";
+import type { CacheBucketFacts, CacheOutcome, ServicePorts } from "./ports";
 import { reconcileRequests } from "./reconcile";
 import { everyAfter, slowTickReporter } from "./poller";
 import { createRegistry, type RunRegistry } from "./registry";
@@ -84,6 +85,10 @@ import { readRun, waitForRun } from "./wait";
  *  enough that a board feels live, slow enough that an idle daemon watching a
  *  thousand settled runs costs four `stat`s each per tick and nothing else. */
 export const REFRESH_MS = 250;
+
+/** The key whose signature makes a path "already upstream" when a caller does
+ *  not name one — nixpkgs', which is what a bucket almost always means. */
+const DEFAULT_UPSTREAM_KEY = "cache.nixos.org-1";
 
 export interface ServiceOptions {
   ports: ServicePorts;
@@ -196,6 +201,30 @@ export function createOduService(opts: ServiceOptions): OduService {
     identity,
     build: opts.build,
     readiness: { state: "starting", since: startedAt, reconciled: 0 },
+  });
+
+  /**
+   * A cache answer, on the surface's error channel. Every cache verb ends here,
+   * so a refusal is the SAME tagged error the rest of the contract raises and a
+   * face branches on it once.
+   */
+  const cacheAnswer = <A, B>(
+    answer: Promise<CacheOutcome<A>>,
+    map: (value: A) => B,
+  ): Effect.Effect<B, ServiceRefused> =>
+    Effect.flatMap(
+      Effect.promise(() => answer),
+      (outcome) =>
+        outcome.ok
+          ? Effect.succeed(map(outcome.value))
+          : Effect.fail(new ServiceRefused({ code: outcome.code, message: outcome.message })),
+    );
+
+  /** The substituter URL a bucket answers on — the origin this daemon is bound
+   *  to, which only the service knows. */
+  const bucketWithUrl = (facts: CacheBucketFacts): CacheBucket => ({
+    ...facts,
+    url: `${opts.origin}/${facts.name}`,
   });
 
   const runtime = implementRootedSurfaces(
@@ -598,6 +627,83 @@ export function createOduService(opts: ServiceOptions): OduService {
                     );
               },
             ),
+        },
+        /**
+         * THE CACHE, administered — eight verbs, one port, and the root token
+         * passed straight through.
+         *
+         * The service does not decide who may administer a bucket: it does not
+         * know what the cache was started with, and a check here would be a
+         * second answer to a question the package holding the secret already
+         * answers. So `rootToken` travels in every input, the cache compares it
+         * in constant time, and a refusal arrives as `no_root_token` — which is
+         * also what a service started without `$ODU_ROOT_TOKEN` answers, while
+         * the substituter routes keep serving.
+         *
+         * `url` is the ONE field the service adds: a bucket's substituter
+         * address is its name under the origin this daemon is actually bound
+         * to, which is the OS's answer rather than anything the cache could
+         * know.
+         */
+        cache: {
+          create: ({ input }) =>
+            cacheAnswer(
+              opts.ports.cache.create({
+                rootToken: input.rootToken,
+                name: input.name,
+                public: input.public,
+                retentionDays: input.retentionDays,
+                upstreamKeys: input.upstreamKeys ?? [DEFAULT_UPSTREAM_KEY],
+              }),
+              bucketWithUrl,
+            ),
+          list: ({ input }) =>
+            cacheAnswer(opts.ports.cache.list({ rootToken: input.rootToken }), (buckets) => ({
+              buckets: buckets.map(bucketWithUrl),
+            })),
+          tokenMint: ({ input }) =>
+            cacheAnswer(
+              opts.ports.cache.tokenMint({
+                rootToken: input.rootToken,
+                bucket: input.bucket,
+                scope: input.scope,
+                expiresDays: input.expiresDays ?? null,
+              }),
+              (minted) => minted,
+            ),
+          tokenList: ({ input }) =>
+            cacheAnswer(
+              opts.ports.cache.tokenList({
+                rootToken: input.rootToken,
+                bucket: input.bucket ?? null,
+              }),
+              (tokens) => ({ tokens }),
+            ),
+          tokenRevoke: ({ input }) =>
+            cacheAnswer(
+              opts.ports.cache.tokenRevoke({ rootToken: input.rootToken, id: input.id }),
+              (revoked) => revoked,
+            ),
+          pin: ({ input }) =>
+            cacheAnswer(
+              opts.ports.cache.pin({
+                rootToken: input.rootToken,
+                bucket: input.bucket,
+                name: input.name,
+                paths: input.paths,
+              }),
+              (pinned) => pinned,
+            ),
+          gc: ({ input }) =>
+            cacheAnswer(
+              opts.ports.cache.gc({ rootToken: input.rootToken, bucket: input.bucket ?? null }),
+              (report) => report,
+            ),
+          stats: ({ input }) =>
+            cacheAnswer(opts.ports.cache.stats({ rootToken: input.rootToken }), (stats) => ({
+              ...stats,
+              buckets: stats.buckets.map(bucketWithUrl),
+            })),
         },
       },
     },

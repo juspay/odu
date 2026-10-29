@@ -412,6 +412,103 @@ export type RulesetWriter = (request: {
   create: boolean;
 }) => Promise<ProtectOutcome>;
 
+// ── the cache ───────────────────────────────────────────────────────────────
+
+/**
+ * A Nix binary cache, administered — the port the service delegates to.
+ *
+ * The service defines the SHAPE and `@odu/cache` implements it structurally;
+ * neither imports the other's module, and that is deliberate. The cache is the
+ * bottom of the graph (it may not import anything of odu's), and the service is
+ * forbidden `@odu/execution`; a port is the one place a signature can be stated
+ * twice without an edge.
+ *
+ * **The root token travels through.** The service does not check it — it does
+ * not know what the cache was started with — it only carries the caller's
+ * `rootToken` into the call, and the cache answers `no_root_token` when the two
+ * do not match. That keeps "who may administer" in the package that holds the
+ * secret, and it is why every input below carries one.
+ */
+export type CacheRefusal = "no_root_token" | "unknown_bucket" | "bucket_exists" | "bad_input";
+
+export type CacheOutcome<T> =
+  | { ok: true; value: T }
+  | { ok: false; code: CacheRefusal; message: string };
+
+export interface CacheBucketFacts {
+  name: string;
+  public: boolean;
+  retentionDays: number;
+  keyName: string;
+  publicKey: string;
+  upstreamKeys: readonly string[];
+  objects: number;
+  bytes: number;
+  created: number;
+}
+
+export type CacheScope = "read" | "write" | "admin";
+
+export interface CacheTokenFacts {
+  id: string;
+  bucketGlob: string;
+  scope: CacheScope;
+  expires: number | null;
+  lastUsed: number | null;
+  revoked: boolean;
+  created: number;
+}
+
+export interface CacheGcReport {
+  buckets: readonly { bucket: string; evicted: number; kept: number; bytes: number }[];
+  evicted: number;
+  kept: number;
+  bytes: number;
+}
+
+export interface CacheAdmin {
+  create(input: {
+    rootToken: string;
+    name: string;
+    public: boolean;
+    retentionDays: number;
+    upstreamKeys: readonly string[];
+  }): Promise<CacheOutcome<CacheBucketFacts>>;
+  list(input: { rootToken: string }): Promise<CacheOutcome<readonly CacheBucketFacts[]>>;
+  tokenMint(input: {
+    rootToken: string;
+    bucket: string;
+    scope: CacheScope;
+    expiresDays: number | null;
+  }): Promise<CacheOutcome<{ token: string; facts: CacheTokenFacts }>>;
+  tokenList(input: {
+    rootToken: string;
+    bucket: string | null;
+  }): Promise<CacheOutcome<readonly CacheTokenFacts[]>>;
+  tokenRevoke(input: {
+    rootToken: string;
+    id: string;
+  }): Promise<CacheOutcome<{ id: string; revoked: boolean }>>;
+  pin(input: {
+    rootToken: string;
+    bucket: string;
+    name: string;
+    paths: readonly string[];
+  }): Promise<
+    CacheOutcome<{ bucket: string; name: string; rootPaths: readonly string[]; created: number }>
+  >;
+  gc(input: { rootToken: string; bucket: string | null }): Promise<CacheOutcome<CacheGcReport>>;
+  stats(input: { rootToken: string }): Promise<
+    CacheOutcome<{
+      buckets: readonly CacheBucketFacts[];
+      objects: number;
+      bytes: number;
+      hits: number;
+      lastAccessed: number | null;
+    }>
+  >;
+}
+
 /** The whole set the composition root binds. One object rather than N
  *  parameters, so adding a port is one edit at the root and one here. */
 export interface ServicePorts {
@@ -424,4 +521,5 @@ export interface ServicePorts {
   holdVenue: VenueHolder;
   releaseVenue: VenueReleaser;
   protect: RulesetWriter;
+  cache: CacheAdmin;
 }

@@ -34,6 +34,14 @@
  *   service.venue.hold         — take a venue across runs
  *   service.venue.release      — drop one
  *   service.protect.apply      — required status checks on a branch
+ *   service.cache.create       — a Nix binary cache bucket, and its key
+ *   service.cache.list         — every bucket, with sizes
+ *   service.cache.tokenMint    — a scoped, expiring, revocable write token
+ *   service.cache.tokenList    — the tokens, never their plaintext
+ *   service.cache.tokenRevoke  — one token, without touching the rest
+ *   service.cache.pin          — keep a closure out of garbage collection
+ *   service.cache.gc           — reclaim what retention, references and pins allow
+ *   service.cache.stats        — storage and reads, per bucket and in total
  *
  * **Every public command is one of these.** Not most of them: the inventory is
  * the contract. A capability odu offers a person that has no operation here
@@ -105,7 +113,7 @@ export { STATUS_META, type StatusHue } from "@odu/run-client/surface";
  * still speakable by an older client, and refusing it would make every
  * additive change a flag day.
  */
-export const SERVICE_CONTRACT_VERSION = "1.5";
+export const SERVICE_CONTRACT_VERSION = "1.6";
 
 // ── refusals ────────────────────────────────────────────────────────────────
 
@@ -165,6 +173,16 @@ export const RefusalCodeSchema = Schema.Literals([
   /** A forge write was asked for and the service has no credential to make it.
    *  Carries the `gh auth login` recovery as `suggestion`, as ARGV. */
   "no_credential",
+  /** A cache administration verb was called without the root token — either the
+   *  service has none configured (`$ODU_ROOT_TOKEN` unset, which is the
+   *  developer's `odu web`), or the one presented is wrong. The protocol routes
+   *  keep serving either way. */
+  "no_root_token",
+  /** No such bucket. */
+  "unknown_bucket",
+  /** The bucket already exists — creating it again would rotate a key out from
+   *  under every client that trusts it. */
+  "bucket_exists",
 ]);
 export type RefusalCode = typeof RefusalCodeSchema.Type;
 
@@ -1489,6 +1507,136 @@ const ProtectOutputSchema = Schema.Struct({
 });
 export type ProtectOutput = typeof ProtectOutputSchema.Type;
 
+// ── cache ───────────────────────────────────────────────────────────────────
+
+/**
+ * ONE BUCKET, as an administrator sees it: the public key a client has to
+ * trust, the substituter URL to put in `nix.conf`, and how much is in it.
+ *
+ * The SECRET key is absent, and that is not an oversight — nothing outside the
+ * cache package ever needs it, and a surface that could carry one would be a
+ * surface whose logs could carry one.
+ */
+export const CacheBucketSchema = Schema.Struct({
+  name: Schema.String,
+  public: Schema.Boolean,
+  /** Days an object survives unread, subject to references and pins. */
+  retentionDays: Schema.Int,
+  keyName: Schema.String,
+  /** `<keyName>:<base64 32>`, ready for `extra-trusted-public-keys`. */
+  publicKey: Schema.String,
+  /** Key names whose signatures make a path "already upstream". */
+  upstreamKeys: Schema.Array(Schema.String),
+  objects: Schema.Int,
+  bytes: Schema.Int,
+  created: Schema.Number,
+  /** `<origin>/<name>` — what `extra-substituters` takes. */
+  url: Schema.String,
+});
+export type CacheBucket = typeof CacheBucketSchema.Type;
+
+const CacheCreateInputSchema = Schema.Struct({
+  rootToken: Schema.String,
+  name: Schema.String.check(Schema.isMinLength(1)),
+  /** A public bucket reads without a token; a private one needs read scope. */
+  public: Schema.Boolean,
+  retentionDays: Schema.Int,
+  /** Defaults to `["cache.nixos.org-1"]` — the filter that keeps nixpkgs out
+   *  of a bucket. An empty list takes everything. */
+  upstreamKeys: Schema.optionalKey(Schema.Array(Schema.String)),
+});
+const CacheListInputSchema = Schema.Struct({ rootToken: Schema.String });
+const CacheListOutputSchema = Schema.Struct({ buckets: Schema.Array(CacheBucketSchema) });
+
+/** The three scopes, ordered: admin covers write covers read. */
+export const CacheScopeSchema = Schema.Literals(["read", "write", "admin"]);
+export type CacheScope = typeof CacheScopeSchema.Type;
+
+/** A token's public half. The plaintext appears exactly once, in the answer
+ *  that minted it. */
+export const CacheTokenSchema = Schema.Struct({
+  id: Schema.String,
+  bucketGlob: Schema.String,
+  scope: CacheScopeSchema,
+  expires: Schema.NullOr(Schema.Number),
+  lastUsed: Schema.NullOr(Schema.Number),
+  revoked: Schema.Boolean,
+  created: Schema.Number,
+});
+export type CacheToken = typeof CacheTokenSchema.Type;
+
+const CacheTokenMintInputSchema = Schema.Struct({
+  rootToken: Schema.String,
+  bucket: Schema.String,
+  scope: CacheScopeSchema,
+  /** Absent means "does not expire" — the shape a CI secret wants. */
+  expiresDays: Schema.optionalKey(Schema.Int),
+});
+const CacheTokenMintOutputSchema = Schema.Struct({
+  /** Shown ONCE. The server keeps a hash. */
+  token: Schema.String,
+  facts: CacheTokenSchema,
+});
+const CacheTokenListInputSchema = Schema.Struct({
+  rootToken: Schema.String,
+  /** Absent lists every token in the service, whatever its bucket. */
+  bucket: Schema.optionalKey(Schema.String),
+});
+const CacheTokenListOutputSchema = Schema.Struct({ tokens: Schema.Array(CacheTokenSchema) });
+const CacheTokenRevokeInputSchema = Schema.Struct({
+  rootToken: Schema.String,
+  id: Schema.String,
+});
+const CacheTokenRevokeOutputSchema = Schema.Struct({
+  id: Schema.String,
+  revoked: Schema.Boolean,
+});
+
+const CachePinInputSchema = Schema.Struct({
+  rootToken: Schema.String,
+  bucket: Schema.String,
+  name: Schema.String.check(Schema.isMinLength(1)),
+  paths: Schema.Array(Schema.String),
+});
+const CachePinOutputSchema = Schema.Struct({
+  bucket: Schema.String,
+  name: Schema.String,
+  /** The closure resolved at pin time. */
+  rootPaths: Schema.Array(Schema.String),
+  created: Schema.Number,
+});
+
+const CacheGcInputSchema = Schema.Struct({
+  rootToken: Schema.String,
+  /** Absent collects every bucket. */
+  bucket: Schema.optionalKey(Schema.String),
+});
+const CacheGcBucketSchema = Schema.Struct({
+  bucket: Schema.String,
+  evicted: Schema.Int,
+  /** Rows dropped whose bytes another root on this machine still holds. */
+  kept: Schema.Int,
+  bytes: Schema.Int,
+});
+const CacheGcOutputSchema = Schema.Struct({
+  buckets: Schema.Array(CacheGcBucketSchema),
+  evicted: Schema.Int,
+  kept: Schema.Int,
+  bytes: Schema.Int,
+});
+export type CacheGcReport = typeof CacheGcOutputSchema.Type;
+
+const CacheStatsInputSchema = Schema.Struct({ rootToken: Schema.String });
+const CacheStatsOutputSchema = Schema.Struct({
+  buckets: Schema.Array(CacheBucketSchema),
+  objects: Schema.Int,
+  bytes: Schema.Int,
+  hits: Schema.Int,
+  /** The newest read across the whole cache; null when it holds nothing. */
+  lastAccessed: Schema.NullOr(Schema.Number),
+});
+export type CacheStats = typeof CacheStatsOutputSchema.Type;
+
 // ── the surface ─────────────────────────────────────────────────────────────
 
 export const oduServiceSurface = defineSurface({
@@ -1600,6 +1748,51 @@ export const oduServiceSurface = defineSurface({
       apply: {
         input: ProtectInputSchema,
         output: ProtectOutputSchema,
+        error: REFUSES,
+      },
+    },
+    /** A Nix binary cache, administered. Every input carries `rootToken` — the
+     *  service only passes it through, and the CACHE decides whether it matches
+     *  what the process was started with (see `@odu/cache`'s `tokens`). */
+    cache: {
+      create: {
+        input: CacheCreateInputSchema,
+        output: CacheBucketSchema,
+        error: REFUSES,
+      },
+      list: {
+        input: CacheListInputSchema,
+        output: CacheListOutputSchema,
+        error: REFUSES,
+      },
+      tokenMint: {
+        input: CacheTokenMintInputSchema,
+        output: CacheTokenMintOutputSchema,
+        error: REFUSES,
+      },
+      tokenList: {
+        input: CacheTokenListInputSchema,
+        output: CacheTokenListOutputSchema,
+        error: REFUSES,
+      },
+      tokenRevoke: {
+        input: CacheTokenRevokeInputSchema,
+        output: CacheTokenRevokeOutputSchema,
+        error: REFUSES,
+      },
+      pin: {
+        input: CachePinInputSchema,
+        output: CachePinOutputSchema,
+        error: REFUSES,
+      },
+      gc: {
+        input: CacheGcInputSchema,
+        output: CacheGcOutputSchema,
+        error: REFUSES,
+      },
+      stats: {
+        input: CacheStatsInputSchema,
+        output: CacheStatsOutputSchema,
         error: REFUSES,
       },
     },
