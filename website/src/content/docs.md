@@ -95,6 +95,130 @@ ODU_WEB_ALLOWED_ORIGINS=https://box.tailnet.ts.net \
 
 This replaces the existing service in the foreground. The setting is read at server startup; separate multiple origins with commas. `ODU_WEB_ORIGIN` instead changes the listener's address and service identity.
 
+### Self-host on NixOS
+
+The board, the CI runs and the cache are one process. Run it as a dedicated user and put a proxy in front.
+
+`odu web` binds the host and port of `ODU_WEB_ORIGIN`, which defaults to `http://127.0.0.1:18440`. Keep it on loopback. **The board and `/mcp` have no authentication in this release**, so only the cache's routes may be reachable from outside; reach the board over a tailnet or an SSH forward to `127.0.0.1:18440`.
+
+The daemon is a per-user process. Give it `/var/lib/odu` (`StateDirectory=odu`, mode 0700) so the SQLite database, the gcroots and the staging directory live there with the modes the code sets, and run it as a system user with no login.
+
+`nix` comes from the host and is deliberately unpinned. The service needs it on `PATH`; add `git` only if this host also runs CI. If other machines will push paths built here-or-there, the `odu` user must be in `nix.settings.trusted-users` — those paths carry no signature your daemon trusts. See [Where the data lives](cache/#where-the-data-lives) on the cache page.
+
+`ODU_ROOT_TOKEN` is read from the daemon's environment. Load it as a systemd credential and export it in the unit's script; never write it in a `.nix` file, where it becomes a world-readable store path and a generation of it.
+
+```nix
+{ config, pkgs, lib, inputs, ... }:
+
+let
+  odu = inputs.odu.packages.${pkgs.system}.default;
+in
+{
+  users.groups.odu = { };
+  users.users.odu = {
+    isSystemUser = true;
+    group = "odu";
+    home = "/var/lib/odu";
+    homeMode = "0700";
+  };
+
+  # Paths built on another machine carry no signature your daemon trusts.
+  nix.settings.trusted-users = [ "odu" ];
+
+  # Any secret file works. agenix is the example.
+  age.secrets.odu-root-token = {
+    file = ./secrets/odu-root-token.age;
+    owner = "odu";
+    group = "odu";
+    mode = "0400";
+  };
+
+  systemd.services.odu-web = {
+    wantedBy = [ "multi-user.target" ];
+    after = [ "network.target" "nix-daemon.service" ];
+    path = [ config.nix.package pkgs.git ];
+    # The token comes from the unit's credential directory, never from the
+    # store: an ODU_ROOT_TOKEN in a .nix file is a secret in the world-readable
+    # Nix store and in every generation of it.
+    script = ''
+      export ODU_ROOT_TOKEN="$(cat "$CREDENTIALS_DIRECTORY/root-token")"
+      exec ${odu}/bin/odu web
+    '';
+    serviceConfig = {
+      User = "odu";
+      Group = "odu";
+      StateDirectory = "odu";
+      StateDirectoryMode = "0700";
+      LoadCredential = "root-token:${config.age.secrets.odu-root-token.path}";
+      Environment = [
+        "ODU_STATE_DIR=/var/lib/odu"
+        "ODU_WEB_ORIGIN=http://127.0.0.1:18440"
+        "ODU_WEB_ALLOWED_ORIGINS=https://cache.example.com"
+      ];
+      Restart = "on-failure";
+    };
+  };
+
+  # ACME needs an address to warn before a certificate expires.
+  security.acme = {
+    acceptTerms = true;
+    defaults.email = "you@example.com";
+  };
+
+  services.nginx = {
+    enable = true;
+    recommendedProxySettings = true;
+    virtualHosts."cache.example.com" = {
+      enableACME = true;
+      forceSSL = true;
+      # Only the cache's own routes. There is no `location /`: the board and
+      # /mcp answer 404 to the public internet, which is what keeps a face
+      # with no authentication at all off it.
+      locations."~ ^/[a-z0-9-]+/" = {
+        proxyPass = "http://127.0.0.1:18440";
+        extraConfig = ''
+          proxy_pass_request_headers on;
+          client_max_body_size 0;
+          proxy_request_buffering off;
+          proxy_buffering off;
+          proxy_read_timeout 3600s;
+        '';
+      };
+      locations."/_odu/v1/buckets/" = {
+        proxyPass = "http://127.0.0.1:18440";
+        extraConfig = ''
+          proxy_pass_request_headers on;
+          client_max_body_size 0;
+          proxy_request_buffering off;
+          proxy_buffering off;
+          proxy_read_timeout 3600s;
+        '';
+      };
+    };
+  };
+}
+```
+
+`client_max_body_size 0` and the two buffering switches are not tuning: a NAR is gigabytes, and a proxy that buffers one holds it in memory or in a temporary file before odu sees a byte. Without `proxy_pass_request_headers on` the `Authorization` header the cache authenticates on never arrives.
+
+The substituter URL `odu cache use` prints carries the service's own origin — the loopback one. Replace the host with the public name in `nix.conf`; a `services.odu` module will set this properly in a later release.
+
+Over the forward, create the bucket, mint a write token, and on a client trust the bucket:
+
+```sh
+odu cache create main
+odu cache token mint main --write
+```
+
+```nix
+{
+  nix.settings = {
+    extra-substituters = [ "https://cache.example.com/cache/main" ];
+    extra-trusted-public-keys = [ "main-1:<public-key>" ];
+  };
+}
+```
+
 ## Daily workflow
 
 ```sh

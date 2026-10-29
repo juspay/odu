@@ -148,7 +148,7 @@ An upload sits in `staging/` until its narinfo arrives; one that never gets it i
 
 `<state>` is `$ODU_STATE_DIR` if set, else `$XDG_STATE_HOME/odu` (`~/.local/state/odu` by default) on Linux and `~/Library/Application Support/odu` on macOS, the same place as the run catalog. Tokens are stored only as hashes, so a copy of the database cannot be used to push. The signing keys are in it, so treat it as a secret. Back up the database; the paths themselves are rebuilt or re-pushed.
 
-Importing paths built on another machine requires the user running `odu web` to be in `nix.settings.trusted-users` on the server, because those paths carry no signature the daemon trusts. Pushing from the same machine needs nothing.
+Importing paths built on another machine requires the user running `odu web` to be in `nix.settings.trusted-users` on the server, because those paths carry no signature the daemon trusts. Pushing from the same machine needs nothing. Running all of this on a NixOS host, with the state under `/var/lib/odu` and nginx in front, is [Self-host on NixOS](../docs/#self-host-on-nixos).
 
 ## Protocol
 
