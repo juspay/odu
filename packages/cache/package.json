@@ -1,0 +1,16 @@
+{
+  "name": "@odu/cache",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "//": "A NIX BINARY CACHE — see README.md. The standard substituter protocol, one bucket per cache, the server's own Nix store as the blob store, SQLite for metadata, per-bucket ed25519 signing on ingest, and hashed opaque tokens. Its routes are one `HttpRouter` layer merged beside the shell (`packages/cli/src/web.ts`); its administration is a set of verbs on the shared service surface, because the authority wall says every public capability is one.",
+  "//dependencies": "ONE entry, and it is the whole claim: this package knows the Nix protocol and nothing about odu's engine. `bun:sqlite` and `node:` builtins are the platform, not installs — `src/closure.test.ts` names the one non-`node:` builtin it uses and refuses @odu/service, @odu/execution, @odu/cli and @odu/run-history by name, so a cache can never become a second path to a run. Nothing here reads `process.env`: the root passes the state directory, the root token and the store URI in.",
+  "sideEffects": false,
+  "exports": {
+    "./*": "./src/*.ts"
+  },
+  "dependencies": {
+    "effect": "4.0.0"
+  }
+}

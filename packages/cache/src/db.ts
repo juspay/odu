@@ -1,0 +1,422 @@
+/**
+ * THE METADATA — SQLite in WAL mode, behind a narrow repository interface.
+ *
+ * This is the first database in the tree (PLAN.md F3, which is why it is worth
+ * a sentence): the run catalog is append-only files, and the cache needs
+ * queries over mutable state — what is this bucket's oldest object, what does
+ * this path reference, which tokens can write here. Files would mean an
+ * index somebody has to keep true.
+ *
+ * **Why a repository interface rather than a store.** PR 12 puts several odu
+ * servers behind one domain, which means Postgres, which means every caller
+ * must stop knowing what SQLite is. The interface below is the whole of that
+ * seam: rows in, rows out, no SQL, no transaction, no `Database` in a
+ * signature. The cost is a handful of near-trivial methods, and the benefit is
+ * that the swap is one file.
+ *
+ * **Why `bun:sqlite`.** It is the runtime's own binding — no native build, no
+ * node-gyp in the Nix sandbox, no ABI to track — and odu already ships on Bun.
+ *
+ * **Migrations are by version.** `PRAGMA user_version` is the schema's own
+ * number and the only place it lives; adding a column is a new entry in
+ * {@link MIGRATIONS} and nothing else. A file written by a newer build is
+ * refused rather than read, because reading it would mean silently dropping
+ * whatever it added.
+ */
+
+import { Database } from "bun:sqlite";
+import { dirname } from "node:path";
+import { mkdirSync } from "node:fs";
+
+/** A bucket: one cache, one substituter URL, one signing keypair. */
+export interface BucketRow {
+  name: string;
+  isPublic: boolean;
+  /** Days an object survives without being read. `0` expires everything that
+   *  is not referenced or pinned, which is what the e2e suite uses to make GC
+   *  deterministic. */
+  retentionDays: number;
+  keyName: string;
+  secretKey: string;
+  publicKey: string;
+  /** Key NAMES whose signatures make a path "already upstream" — the filter
+   *  that keeps nixpkgs out of a bucket. */
+  upstreamKeys: readonly string[];
+  created: number;
+}
+
+export type Scope = "read" | "write" | "admin";
+
+/** A token. The plaintext exists exactly once, in the answer that minted it. */
+export interface TokenRow {
+  id: string;
+  /** sha256 of the token, hex. Never the token. */
+  hash: string;
+  /** A comma-separated list of patterns; `*` is a wildcard. */
+  bucketGlob: string;
+  scope: Scope;
+  expires: number | null;
+  lastUsed: number | null;
+  revoked: boolean;
+  created: number;
+}
+
+/** One store path as this bucket knows it. The bytes are the store's. */
+export interface ObjectRow {
+  bucket: string;
+  storePath: string;
+  /** The store path's hash part — what a narinfo is named for. */
+  hash: string;
+  /** `sha256:<base32>` */
+  narHash: string;
+  narSize: number;
+  references: readonly string[];
+  deriver: string | null;
+  sigs: readonly string[];
+  /** narinfo reads. What `odu cache stats` reports. */
+  hits: number;
+  created: number;
+  lastAccessed: number;
+}
+
+/** A named closure kept out of garbage collection. */
+export interface PinRow {
+  bucket: string;
+  name: string;
+  /** The closure resolved at pin time. GC also walks the bucket's own
+   *  references from these roots, so a path added to the closure later is
+   *  still protected. */
+  rootPaths: readonly string[];
+  created: number;
+}
+
+export interface CacheRepo {
+  putBucket(row: BucketRow): void;
+  bucket(name: string): BucketRow | null;
+  buckets(): BucketRow[];
+  deleteBucket(name: string): void;
+
+  putToken(row: TokenRow): void;
+  tokenByHash(hash: string): TokenRow | null;
+  tokens(): TokenRow[];
+  setTokenRevoked(id: string, revoked: boolean): boolean;
+  touchToken(id: string, at: number): void;
+
+  putObject(row: ObjectRow): void;
+  object(bucket: string, storePath: string): ObjectRow | null;
+  objectByHash(bucket: string, hash: string): ObjectRow | null;
+  objectByNarHash(bucket: string, narHash: string): ObjectRow | null;
+  objects(bucket?: string): ObjectRow[];
+  /** Bump last access and the hit count together — one row write per read. */
+  touchObject(bucket: string, storePath: string, at: number): void;
+  deleteObject(bucket: string, storePath: string): void;
+
+  putPin(row: PinRow): void;
+  pins(bucket?: string): PinRow[];
+  deletePin(bucket: string, name: string): boolean;
+
+  close(): void;
+}
+
+/**
+ * Schema history, one entry per version, applied in order. `user_version` is
+ * the index of the last applied entry, so a fresh file runs all of them and an
+ * existing one runs the tail.
+ */
+const MIGRATIONS: readonly string[] = [
+  `
+  CREATE TABLE bucket (
+    name            TEXT PRIMARY KEY,
+    is_public       INTEGER NOT NULL,
+    retention_days  INTEGER NOT NULL,
+    key_name        TEXT NOT NULL,
+    secret_key      TEXT NOT NULL,
+    public_key      TEXT NOT NULL,
+    upstream_keys   TEXT NOT NULL,
+    created         INTEGER NOT NULL
+  );
+
+  CREATE TABLE token (
+    id          TEXT PRIMARY KEY,
+    hash        TEXT NOT NULL UNIQUE,
+    bucket_glob TEXT NOT NULL,
+    scope       TEXT NOT NULL,
+    expires     INTEGER,
+    last_used   INTEGER,
+    revoked     INTEGER NOT NULL DEFAULT 0,
+    created     INTEGER NOT NULL
+  );
+  CREATE INDEX token_hash ON token (hash);
+
+  CREATE TABLE object (
+    bucket        TEXT NOT NULL,
+    store_path    TEXT NOT NULL,
+    hash          TEXT NOT NULL,
+    nar_hash      TEXT NOT NULL,
+    nar_size      INTEGER NOT NULL,
+    refs          TEXT NOT NULL,
+    deriver       TEXT,
+    sigs          TEXT NOT NULL,
+    hits          INTEGER NOT NULL DEFAULT 0,
+    created       INTEGER NOT NULL,
+    last_accessed INTEGER NOT NULL,
+    PRIMARY KEY (bucket, store_path)
+  );
+  CREATE INDEX object_hash ON object (bucket, hash);
+  CREATE INDEX object_nar_hash ON object (bucket, nar_hash);
+  CREATE INDEX object_accessed ON object (bucket, last_accessed);
+
+  CREATE TABLE pin (
+    bucket     TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    root_paths TEXT NOT NULL,
+    created    INTEGER NOT NULL,
+    PRIMARY KEY (bucket, name)
+  );
+  `,
+];
+
+/** The schema this build writes. A file carrying a HIGHER number was written by
+ *  a newer odu and is refused rather than read. */
+export const CACHE_SCHEMA_VERSION = MIGRATIONS.length;
+
+interface Row {
+  [column: string]: unknown;
+}
+
+const text = (row: Row, column: string): string => String(row[column]);
+const maybeText = (row: Row, column: string): string | null => {
+  const value = row[column];
+  return value === null || value === undefined ? null : String(value);
+};
+const integer = (row: Row, column: string): number => Number(row[column]);
+const list = (row: Row, column: string): string[] => {
+  try {
+    const parsed = JSON.parse(text(row, column)) as unknown;
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    return [];
+  }
+};
+
+const bucketOf = (row: Row): BucketRow => ({
+  name: text(row, "name"),
+  isPublic: integer(row, "is_public") !== 0,
+  retentionDays: integer(row, "retention_days"),
+  keyName: text(row, "key_name"),
+  secretKey: text(row, "secret_key"),
+  publicKey: text(row, "public_key"),
+  upstreamKeys: list(row, "upstream_keys"),
+  created: integer(row, "created"),
+});
+
+const tokenOf = (row: Row): TokenRow => ({
+  id: text(row, "id"),
+  hash: text(row, "hash"),
+  bucketGlob: text(row, "bucket_glob"),
+  scope: text(row, "scope") as Scope,
+  expires: row["expires"] === null ? null : integer(row, "expires"),
+  lastUsed: row["last_used"] === null ? null : integer(row, "last_used"),
+  revoked: integer(row, "revoked") !== 0,
+  created: integer(row, "created"),
+});
+
+const objectOf = (row: Row): ObjectRow => ({
+  bucket: text(row, "bucket"),
+  storePath: text(row, "store_path"),
+  hash: text(row, "hash"),
+  narHash: text(row, "nar_hash"),
+  narSize: integer(row, "nar_size"),
+  references: list(row, "refs"),
+  deriver: maybeText(row, "deriver"),
+  sigs: list(row, "sigs"),
+  hits: integer(row, "hits"),
+  created: integer(row, "created"),
+  lastAccessed: integer(row, "last_accessed"),
+});
+
+const pinOf = (row: Row): PinRow => ({
+  bucket: text(row, "bucket"),
+  name: text(row, "name"),
+  rootPaths: list(row, "root_paths"),
+  created: integer(row, "created"),
+});
+
+/** Open (or create) the cache database. `":memory:"` is what the suite uses. */
+export function openCacheRepo(path: string): CacheRepo {
+  if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+  const db = new Database(path, { create: true });
+  db.exec("PRAGMA journal_mode = WAL;");
+  db.exec("PRAGMA busy_timeout = 5000;");
+  db.exec("PRAGMA foreign_keys = OFF;");
+
+  const current = Number(
+    (db.query("PRAGMA user_version;").get() as Row | null)?.["user_version"] ?? 0,
+  );
+  if (current > CACHE_SCHEMA_VERSION) {
+    throw new Error(
+      `odu: ${path} was written by a newer odu (schema ${current}, this build ` +
+        `reads ${CACHE_SCHEMA_VERSION}) — upgrade odu rather than reading it`,
+    );
+  }
+  for (let version = current; version < CACHE_SCHEMA_VERSION; version++) {
+    db.exec("BEGIN");
+    try {
+      db.exec(MIGRATIONS[version] as string);
+      db.exec(`PRAGMA user_version = ${version + 1};`);
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
+  }
+
+  const all = <T>(sql: string, params: unknown[], map: (row: Row) => T): T[] =>
+    (db.query(sql).all(...(params as never[])) as Row[]).map(map);
+
+  return {
+    putBucket(row) {
+      db.run(
+        `INSERT INTO bucket (name, is_public, retention_days, key_name, secret_key,
+           public_key, upstream_keys, created)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(name) DO UPDATE SET is_public = excluded.is_public,
+           retention_days = excluded.retention_days, key_name = excluded.key_name,
+           secret_key = excluded.secret_key, public_key = excluded.public_key,
+           upstream_keys = excluded.upstream_keys`,
+        [
+          row.name,
+          row.isPublic ? 1 : 0,
+          row.retentionDays,
+          row.keyName,
+          row.secretKey,
+          row.publicKey,
+          JSON.stringify(row.upstreamKeys),
+          row.created,
+        ],
+      );
+    },
+    bucket: (name) => {
+      const row = db.query("SELECT * FROM bucket WHERE name = ?").get(name) as Row | null;
+      return row === null ? null : bucketOf(row);
+    },
+    buckets: () => all("SELECT * FROM bucket ORDER BY name", [], bucketOf),
+    deleteBucket(name) {
+      db.run("DELETE FROM bucket WHERE name = ?", [name]);
+      db.run("DELETE FROM object WHERE bucket = ?", [name]);
+      db.run("DELETE FROM pin WHERE bucket = ?", [name]);
+    },
+
+    putToken(row) {
+      db.run(
+        `INSERT INTO token (id, hash, bucket_glob, scope, expires, last_used, revoked, created)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          row.id,
+          row.hash,
+          row.bucketGlob,
+          row.scope,
+          row.expires,
+          row.lastUsed,
+          row.revoked ? 1 : 0,
+          row.created,
+        ],
+      );
+    },
+    tokenByHash: (hash) => {
+      const row = db.query("SELECT * FROM token WHERE hash = ?").get(hash) as Row | null;
+      return row === null ? null : tokenOf(row);
+    },
+    tokens: () => all("SELECT * FROM token ORDER BY created DESC", [], tokenOf),
+    setTokenRevoked(id, revoked) {
+      const found = db.query("SELECT id FROM token WHERE id = ?").get(id) as Row | null;
+      if (found === null) return false;
+      db.run("UPDATE token SET revoked = ? WHERE id = ?", [revoked ? 1 : 0, id]);
+      return true;
+    },
+    touchToken(id, at) {
+      db.run("UPDATE token SET last_used = ? WHERE id = ?", [at, id]);
+    },
+
+    putObject(row) {
+      db.run(
+        `INSERT INTO object (bucket, store_path, hash, nar_hash, nar_size, refs,
+           deriver, sigs, hits, created, last_accessed)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(bucket, store_path) DO UPDATE SET hash = excluded.hash,
+           nar_hash = excluded.nar_hash, nar_size = excluded.nar_size,
+           refs = excluded.refs, deriver = excluded.deriver,
+           sigs = excluded.sigs`,
+        [
+          row.bucket,
+          row.storePath,
+          row.hash,
+          row.narHash,
+          row.narSize,
+          JSON.stringify(row.references),
+          row.deriver,
+          JSON.stringify(row.sigs),
+          row.hits,
+          row.created,
+          row.lastAccessed,
+        ],
+      );
+    },
+    object: (bucket, storePath) => {
+      const row = db
+        .query("SELECT * FROM object WHERE bucket = ? AND store_path = ?")
+        .get(bucket, storePath) as Row | null;
+      return row === null ? null : objectOf(row);
+    },
+    objectByHash: (bucket, hash) => {
+      const row = db
+        .query("SELECT * FROM object WHERE bucket = ? AND hash = ?")
+        .get(bucket, hash) as Row | null;
+      return row === null ? null : objectOf(row);
+    },
+    objectByNarHash: (bucket, narHash) => {
+      const row = db
+        .query("SELECT * FROM object WHERE bucket = ? AND nar_hash = ?")
+        .get(bucket, narHash) as Row | null;
+      return row === null ? null : objectOf(row);
+    },
+    objects: (bucket) =>
+      bucket === undefined
+        ? all("SELECT * FROM object", [], objectOf)
+        : all("SELECT * FROM object WHERE bucket = ?", [bucket], objectOf),
+    touchObject(bucket, storePath, at) {
+      db.run(
+        "UPDATE object SET last_accessed = ?, hits = hits + 1 WHERE bucket = ? AND store_path = ?",
+        [at, bucket, storePath],
+      );
+    },
+    deleteObject(bucket, storePath) {
+      db.run("DELETE FROM object WHERE bucket = ? AND store_path = ?", [bucket, storePath]);
+    },
+
+    putPin(row) {
+      db.run(
+        `INSERT INTO pin (bucket, name, root_paths, created) VALUES (?, ?, ?, ?)
+         ON CONFLICT(bucket, name) DO UPDATE SET root_paths = excluded.root_paths,
+           created = excluded.created`,
+        [row.bucket, row.name, JSON.stringify(row.rootPaths), row.created],
+      );
+    },
+    pins: (bucket) =>
+      bucket === undefined
+        ? all("SELECT * FROM pin ORDER BY created", [], pinOf)
+        : all("SELECT * FROM pin WHERE bucket = ? ORDER BY created", [bucket], pinOf),
+    deletePin(bucket, name) {
+      const found = db
+        .query("SELECT name FROM pin WHERE bucket = ? AND name = ?")
+        .get(bucket, name) as Row | null;
+      if (found === null) return false;
+      db.run("DELETE FROM pin WHERE bucket = ? AND name = ?", [bucket, name]);
+      return true;
+    },
+
+    close() {
+      db.close();
+    },
+  };
+}
