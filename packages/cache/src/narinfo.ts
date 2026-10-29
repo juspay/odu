@@ -39,6 +39,10 @@ import {
   verify as cryptoVerify,
 } from "node:crypto";
 
+/** The compression and URL extension odu SERVES. Reads are zstd on the fly,
+ *  whatever a client uploaded; writes accept any compression the client sent. */
+export const SERVED_EXTENSION = "nar.zst";
+
 /** Nix's base32 alphabet. NOT RFC 4648: no `e`, `o`, `u` or `t`. */
 const BASE32_ALPHABET = "0123456789abcdfghijklmnpqrsvwxyz";
 
@@ -98,17 +102,23 @@ export function isStorePathHash(value: string): boolean {
   return /^[0-9abcdfghijklmnpqrsvwxyz]{32}$/.test(value);
 }
 
-/** The KEY NAME a signature carries — `cache.nixos.org-1` out of
- *  `cache.nixos.org-1:base64…` — or null when there is no colon at all.
+/** `<name>:<base64>` → its two halves, or null when there is no name.
  *
- *  Shared by every caller that asks "is this signature by that key": a
- *  `slice(0, indexOf(":"))` answers -1 with the whole string minus its last
- *  character, which is a key name that matches nothing and silently defeats the
- *  upstream filter.
+ *  ONE parse for every Nix string in this shape — a public key, a secret key
+ *  and a signature are all spelled the same way — so nothing has to write
+ *  `slice(0, indexOf(":"))` by hand. That spelling is a trap: `indexOf` answers
+ *  -1 with no colon, and the slice then yields the whole string minus its last
+ *  character, which is a key name that matches nothing.
  */
+export function keyParts(value: string): { name: string; payload: string } | null {
+  const at = value.indexOf(":");
+  return at <= 0 ? null : { name: value.slice(0, at), payload: value.slice(at + 1) };
+}
+
+/** The key name a signature carries — `cache.nixos.org-1` out of
+ *  `cache.nixos.org-1:base64…` — or null when it carries none. */
 export function keyNameOf(signature: string): string | null {
-  const at = signature.indexOf(":");
-  return at <= 0 ? null : signature.slice(0, at);
+  return keyParts(signature)?.name ?? null;
 }
 
 /** Is this a file name odu will stage? No leading dot (so `.` and `..` are
@@ -290,27 +300,29 @@ export function generateKeypair(name: string): Keypair {
 
 /** The public half of a secret key, in Nix's spelling. */
 export function publicKeyOf(secretKey: string): string {
-  const at = secretKey.indexOf(":");
-  if (at <= 0) throw new NarinfoError("a secret key is <name>:<base64>");
-  const name = secretKey.slice(0, at);
-  const raw = Buffer.from(secretKey.slice(at + 1), "base64");
+  const parts = keyParts(secretKey);
+  if (parts === null) throw new NarinfoError("a secret key is <name>:<base64>");
+  const raw = Buffer.from(parts.payload, "base64");
   if (raw.length !== 64) {
     throw new NarinfoError(`an ed25519 secret key is 64 bytes, got ${raw.length}`);
   }
-  return `${name}:${raw.subarray(32).toString("base64")}`;
+  return `${parts.name}:${raw.subarray(32).toString("base64")}`;
 }
 
 /** Sign a fingerprint with a secret key, answering `<name>:<base64 64>`. */
 export function signFingerprint(secretKey: string, fingerprint: string): string {
-  const at = secretKey.indexOf(":");
-  if (at <= 0) throw new NarinfoError("a secret key is <name>:<base64>");
-  const name = secretKey.slice(0, at);
-  const raw = Buffer.from(secretKey.slice(at + 1), "base64");
+  const parts = keyParts(secretKey);
+  if (parts === null) throw new NarinfoError("a secret key is <name>:<base64>");
+  const raw = Buffer.from(parts.payload, "base64");
   if (raw.length !== 64) {
     throw new NarinfoError(`an ed25519 secret key is 64 bytes, got ${raw.length}`);
   }
-  const signature = cryptoSign(null, Buffer.from(fingerprint, "utf8"), privateKeyFromSeed(raw.subarray(0, 32)));
-  return `${name}:${signature.toString("base64")}`;
+  const signature = cryptoSign(
+    null,
+    Buffer.from(fingerprint, "utf8"),
+    privateKeyFromSeed(raw.subarray(0, 32)),
+  );
+  return `${parts.name}:${signature.toString("base64")}`;
 }
 
 /** Verify a `<name>:<base64 64>` signature against a `<name>:<base64 32>`
@@ -321,12 +333,11 @@ export function verifySignature(
   fingerprint: string,
   signature: string,
 ): boolean {
-  const keyAt = publicKey.indexOf(":");
-  const sigAt = signature.indexOf(":");
-  if (keyAt <= 0 || sigAt <= 0) return false;
-  if (publicKey.slice(0, keyAt) !== signature.slice(0, sigAt)) return false;
-  const raw = Buffer.from(publicKey.slice(keyAt + 1), "base64");
-  const sig = Buffer.from(signature.slice(sigAt + 1), "base64");
+  const publicParts = keyParts(publicKey);
+  const sigParts = keyParts(signature);
+  if (publicParts === null || sigParts === null || publicParts.name !== sigParts.name) return false;
+  const raw = Buffer.from(publicParts.payload, "base64");
+  const sig = Buffer.from(sigParts.payload, "base64");
   if (raw.length !== 32 || sig.length !== 64) return false;
   try {
     const key = createPublicKey({

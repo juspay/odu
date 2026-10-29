@@ -42,7 +42,8 @@
 
 import { Effect, Layer, Stream } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
-import { type Cache, NIX_CACHE_INFO } from "./cache";
+import { type Cache } from "./cache";
+import { NIX_CACHE_INFO } from "./staging";
 import type { BucketRow, Scope } from "./db";
 import { isStagedFileName, isStorePathHash } from "./narinfo";
 

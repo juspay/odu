@@ -129,8 +129,13 @@ describe("an upload's bytes", () => {
     expect(checked.ok).toBe(true);
     if (checked.ok) expect(checked.narSize).toBe(5);
 
-    expect(await verifyNarFile(path, "lz4")).toMatchObject({ ok: false });
-    expect(await verifyNarFile(join(scratch, "absent"), "none")).toMatchObject({ ok: false });
+    expect(await verifyNarFile(path, "lz4")).toMatchObject({ ok: false, absent: false });
+    // ABSENT is not WRONG: the caller may have another way to prove the same
+    // bytes (a twin object), and a file that is not there has not been judged.
+    expect(await verifyNarFile(join(scratch, "absent"), "none")).toMatchObject({
+      ok: false,
+      absent: true,
+    });
   });
 
   it("decompresses before it hashes, for every Compression a client sends", async () => {

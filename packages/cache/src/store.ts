@@ -413,10 +413,17 @@ export function nixDump(storePath: string, store: string | null): ReadableStream
   });
 }
 
-/** What a staged upload's bytes came to, or why they could not be read. */
+/**
+ * What a staged upload's bytes came to, or why they could not be read.
+ *
+ * `absent` is not a flavour of "wrong": a file that is not there has not been
+ * judged, and the caller may have another way to prove the same bytes. A file
+ * that IS there and hashes to something else has been judged, and is the
+ * client's error.
+ */
 export type NarCheck =
   | { ok: true; narHash: string; narSize: number }
-  | { ok: false; message: string };
+  | { ok: false; absent: boolean; message: string };
 
 /** The decompressor for a narinfo's `Compression`. `none` and an absent field
  *  both mean the NAR is stored raw; anything else is a format odu cannot read
@@ -453,7 +460,7 @@ function decompressorOf(compression: string | null): string[] | null | { error: 
 export async function verifyNarFile(path: string, compression: string | null): Promise<NarCheck> {
   const decompressor = decompressorOf(compression);
   if (decompressor !== null && !Array.isArray(decompressor)) {
-    return { ok: false, message: decompressor.error };
+    return { ok: false, absent: false, message: decompressor.error };
   }
 
   const { promise, resolve } = Promise.withResolvers<NarCheck>();
@@ -469,7 +476,7 @@ export async function verifyNarFile(path: string, compression: string | null): P
     resolve(
       code === 0
         ? { ok: true, narHash: `sha256:${base32(hash.digest())}`, narSize: size }
-        : { ok: false, message: `${decompressor?.[0] ?? "the NAR"} exited ${code}` },
+        : { ok: false, absent: false, message: `${decompressor?.[0] ?? "the NAR"} exited ${code}` },
     );
   };
 
@@ -486,14 +493,14 @@ export async function verifyNarFile(path: string, compression: string | null): P
     child.on("error", (err) => {
       if (settled) return;
       settled = true;
-      resolve({ ok: false, message: `${decompressor[0]}: ${String(err)}` });
+      resolve({ ok: false, absent: false, message: `${decompressor[0]}: ${String(err)}` });
     });
     child.on("close", (exit) => {
       code = exit ?? -1;
       settle();
     });
     if (child.stdout === null) {
-      return { ok: false, message: `${decompressor[0]} produced no output` };
+      return { ok: false, absent: false, message: `${decompressor[0]} produced no output` };
     }
     // EPIPE once the child has had enough is the ordinary end of a pipe.
     child.stdin?.on("error", () => {});
@@ -501,7 +508,14 @@ export async function verifyNarFile(path: string, compression: string | null): P
     file.on("error", (err) => {
       if (settled) return;
       settled = true;
-      resolve({ ok: false, message: String(err) });
+      // The file going away between a `stat` and this open is the ordinary
+      // consequence of a concurrent drain; it is absence, not bad bytes.
+      const code = (err as NodeJS.ErrnoException).code;
+      resolve({
+        ok: false,
+        absent: code === "ENOENT",
+        message: String(err),
+      });
     });
     file.pipe(child.stdin as NodeJS.WritableStream);
     source = child.stdout;
@@ -514,7 +528,8 @@ export async function verifyNarFile(path: string, compression: string | null): P
   source.on("error", (err) => {
     if (settled) return;
     settled = true;
-    resolve({ ok: false, message: String(err) });
+    const code = (err as NodeJS.ErrnoException).code;
+    resolve({ ok: false, absent: code === "ENOENT", message: String(err) });
   });
   source.on("end", () => {
     ended = true;

@@ -20,7 +20,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { HttpRouter } from "effect/http";
 import { base32, storePathHash } from "./narinfo";
-import { type Cache, createCache, NIX_CACHE_INFO } from "./cache";
+import { type Cache, createCache } from "./cache";
+import { NIX_CACHE_INFO } from "./staging";
 import { cacheRoutes } from "./routes";
 import { FakeStore, hashOf } from "../test/fakeStore";
 
@@ -478,6 +479,9 @@ describe("uploading", () => {
 
     const response = await upload(h.fetch, h.tokens.write, priv, payload, { skipNar: true });
     expect(response.status).toBe(400);
+    // The BODY is the contract here, not prose: `odu cache push` reads this
+    // sentence to decide whether to re-send the bytes, so the string is pinned
+    // on purpose and the client's fallback is tested against the same words.
     expect(await response.text()).toContain("never uploaded");
     expect(h.store.calls.filter((call) => call.op === "import")).toHaveLength(1); // the seed only
     await h.dispose();
@@ -494,6 +498,7 @@ describe("uploading", () => {
       narHash: claimed.narHash,
     });
     expect(response.status).toBe(400);
+    // Pinned for the same reason: the 400 body is what a pusher is told.
     expect(await response.text()).toContain("hashes to");
     expect((await h.fetch(`/main/${hashOf(staged)}.narinfo`)).status).toBe(404);
     await h.dispose();
