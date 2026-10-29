@@ -4,7 +4,7 @@
 
 `odu web` also serves Nix binary caches. The same loopback service that runs CI answers the standard Nix HTTP binary cache protocol, so every Nix client works unchanged.
 
-A bucket is one cache: one substituter URL under the service's origin and one ed25519 public key. The server generates the keypair and signs each narinfo on ingest; a pusher never holds a signing key. Client signatures are kept. The cache listens on loopback only, like the board.
+A bucket is one cache: one substituter URL under the service's origin and one ed25519 public key. The server generates the keypair and signs each narinfo on ingest; a pusher never holds a signing key. Client signatures are kept. The cache listens on loopback only, like the board. On a single machine the cache and the store are the same bytes; see [Where the data lives](#where-the-data-lives).
 
 ## Create a bucket
 
@@ -95,6 +95,21 @@ nix copy --to "http://x:$ODU_CACHE_TOKEN@127.0.0.1:18440/main" ./result
 
 The server accepts any username and the token as the password.
 
+### Compared with `cachix push` and `attic push`
+
+| | cachix push | attic push | `odu cache push` |
+| --- | --- | --- | --- |
+| Closure, batched missing query, retries | yes | yes | yes |
+| Skips paths cache.nixos.org already has | yes | yes | yes: the server drops paths signed by an upstream key, `cache.nixos.org-1` by default |
+| Streams NARs, parallel uploads | yes | yes | yes: `nix store dump-path` through zstd, several paths at a time, retry per path |
+| Uploads bypass the server | yes, straight to S3 | no | no; a later release adds it for object storage |
+| Dedup | per NAR | per chunk | per store path |
+| Pushes every build as it happens | `watch-exec`, `watch-store` | `watch-store` | not yet; a later release adds a post-build hook for lane hosts |
+| Client signs with its own key | optional | no | no; the server signs |
+| Client to install | cachix | attic | odu itself, or nothing: use `nix copy` with netrc |
+
+Until the hook ships, a CI job pushes only the closures it names. Plain `nix copy --to` compresses each NAR in memory before uploading and checks the cache one path at a time, which is why `odu cache push` exists; prefer it for large closures.
+
 ## Private buckets
 
 A public bucket reads without a token. Reads from a private bucket need the same credential as a write: netrc for `nix copy` and substitution, or `Authorization: Bearer <token>` for HTTP clients. Writes always need a token.
@@ -111,14 +126,21 @@ Pins are named and root a closure. Garbage collection applies per-bucket retenti
 
 ## Where the data lives
 
-Everything is under odu's state directory, next to the run catalog. That directory is `$ODU_STATE_DIR` if set, else `$XDG_STATE_HOME/odu` (`~/.local/state/odu` by default) on Linux and `~/Library/Application Support/odu` on macOS.
+The cache keeps no second copy of your builds. The server's own `/nix/store` holds the paths; a bucket is metadata over it.
+
+- A push imports the paths into the server's store through the Nix daemon. Pushing from the machine that built them moves nothing.
+- A NAR read streams the path out of the store, compressed on the fly.
+- Every path a bucket retains is rooted under odu's state directory, so the machine's own garbage collection never removes what the cache serves. `odu cache gc` drops the roots of what retention has expired and deletes those paths.
+- The database, signing keys, token hashes, narinfo metadata and pins live in one SQLite file:
 
 ```text
-<state>/cache/cache.sqlite   buckets, signing keys, token hashes, narinfo metadata, pins
-<state>/cache/nar/           NAR blobs by content hash, zstd, shared across buckets
+<state>/cache/cache.sqlite    metadata, bucket signing keys, token hashes, pins
+<state>/cache/gcroots/        one root per retained path, per bucket
 ```
 
-The database is SQLite in WAL mode. Tokens are stored only as hashes, so a copy of the database cannot be used to push. The bucket signing keys are in it, so treat it as a secret. Back up the database and the blob directory together; one without the other is not a cache.
+`<state>` is `$ODU_STATE_DIR` if set, else `$XDG_STATE_HOME/odu` (`~/.local/state/odu` by default) on Linux and `~/Library/Application Support/odu` on macOS, the same place as the run catalog. Tokens are stored only as hashes, so a copy of the database cannot be used to push. The signing keys are in it, so treat it as a secret. Back up the database; the paths themselves are rebuilt or re-pushed.
+
+Importing paths built on another machine requires the user running `odu web` to be in `nix.settings.trusted-users` on the server, because those paths carry no signature the daemon trusts. Pushing from the same machine needs nothing.
 
 ## Protocol
 
@@ -128,7 +150,7 @@ One bucket is one substituter. Point any Nix-compatible tool at these routes:
 GET  /<bucket>/nix-cache-info             StoreDir, WantMassQuery: 1, Priority: 40
 HEAD /<bucket>/<hash>.narinfo
 GET  /<bucket>/<hash>.narinfo
-GET  /<bucket>/nar/<filehash>.nar.zst     stream
+GET  /<bucket>/nar/<filehash>.nar.zst     streamed from the store, compressed on the fly
 PUT  /<bucket>/nar/<filehash>.nar.<ext>   Bearer or Basic; any ext Nix sends
 PUT  /<bucket>/<hash>.narinfo             server re-signs with the bucket key
 POST /_odu/v1/buckets/<bucket>/missing    batch "which of these are you missing"

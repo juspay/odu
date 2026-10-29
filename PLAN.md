@@ -170,23 +170,28 @@ shown on the bucket page (PR 4).
 
 ### Storage
 
-- **Blobs:** NARs keyed by content hash, zstd, shared across buckets
-  (NAR-level dedup across tenants, no chunking). Interface:
-  `put(hash, stream)`, `get(hash) -> stream | redirectUrl`, `stat`, `delete`.
-  Local directory in PR 1; S3-compatible with presigned GET redirects in
-  PR 11.
+- **Blobs:** the server's own Nix store. `put` imports a NAR through the
+  daemon (`nix-store --import` semantics; the service user is a trusted user
+  on the module's machine), `get` streams `nix store dump-path` through zstd,
+  `delete` drops odu's gcroot and runs `nix-store --delete`. Dedup across
+  buckets is by store path, for free. No second copy on a single machine,
+  which is the small-team shape and the developer's laptop. On-the-fly
+  compression costs CPU per cold read; nginx `proxy_cache` (PR 2) absorbs the
+  repeats. S3-compatible storage is the second implementation in PR 11.
 - **Metadata:** SQLite in WAL mode behind a narrow repository layer (first
   database in the tree, F3). Tables: `org`, `bucket`, `token`, `object`
   (bucket, store-path hash, narinfo fields, references, nar id, created,
   last-accessed), `nar` (file hash, size, refcount), `pin`, `audit`.
 - **On disk:** under odu's state directory (`$ODU_STATE_DIR`, else
   `$XDG_STATE_HOME/odu`, else the platform default `run-history/paths.ts`
-  already resolves): `cache/cache.sqlite` and `cache/nar/`. Signing keys live
-  in the database; the database is a secret, and backup is both together.
+  already resolves): `cache/cache.sqlite` and `cache/gcroots/`; the paths
+  themselves are in `/nix/store`. Signing keys live in the database; the
+  database is a secret, and backup is both together.
 - **GC:** per-bucket retention on last access; an object is evicted only when
   nothing retained in the bucket references it and it is not under a pin;
-  nars with zero refs are deleted; blobs last. Pins are named and root a
-  closure. This is the niks3 model and the direct answer to chutney issue 52.
+  a path with no retaining bucket loses its root and is deleted from the
+  store. Pins are named and root a closure. This is the niks3 model and the
+  direct answer to chutney issue 52.
 
 ### Tokens and identity
 
@@ -215,9 +220,17 @@ token, from the machine that holds the paths.
    The credential is the host's own, configured by its owner
    (`services.odu.lane.pushTo`), which keeps F6 intact.
 2. **Explicit (PR 1).** `odu cache push <bucket> <paths…>` from any machine
-   or any CI, including a documented GitHub Actions step. `nix copy --to
-   https://…/<bucket>` with netrc or a token in the URL for people who want
-   nothing odu-specific (see "Credentials on the client").
+   or any CI, including a documented GitHub Actions step. It streams
+   `nix store dump-path` through zstd into the PUT, uploads several paths at
+   a time, retries per path, and asks `missing` first. `missing` drops paths
+   signed by an upstream key (`cache.nixos.org-1` by default, per bucket), so
+   nixpkgs never lands in a bucket; this is attic's upstream filter and the
+   main thing `nix copy` cannot do. `nix copy --to https://…/<bucket>` with
+   netrc or a token in the URL stays for people who want nothing odu-specific
+   (see "Credentials on the client"); it buffers each NAR in memory and
+   probes paths one at a time. Known gaps against cachix and attic, kept
+   deliberately: uploads go through the server until PR 11 adds presigned
+   PUT; dedup is per store path, not per chunk; no watch mode until PR 5.
 3. **Run-scoped (PR 6).** `odu run --push <bucket>`: the runner pushes each
    recipe's `result*` closures after the recipe, using a write-only token
    scoped to that bucket with a lifetime of the run. This is a deliberate,
@@ -321,7 +334,8 @@ next eight PRs plug into exist with one implementation each.
 
 What lands:
 - New workspace member `packages/cache` with its own closure test: narinfo
-  and NAR codec, local blob store, SQLite metadata behind the repository
+  and NAR codec, the Nix-store blob store (import through the daemon, stream
+  on read, gcroots for retention), SQLite metadata behind the repository
   layer, per-bucket ed25519 signing on ingest, hashed opaque tokens with
   scope, expiry and revocation, and GC with retention, references and pins.
 - The protocol routes as one `HttpRouter` layer merged in `web.ts` (F1):
@@ -356,10 +370,11 @@ Prerequisite PR in kolu: `publish-closure` gains a generic push target (a
 cache URL with netrc, or a push command) beside its attic inputs.
 
 What lands:
-- `services.odu` NixOS module: systemd unit under a service user, state and
-  blob directories, root-token secret file, the public key, and an nginx
-  vhost with ACME that proxies **only** `/<bucket>/*` and `/_odu/v1/*`, with
-  `proxy_cache` on NAR reads. The board, websocket and `/mcp` stay on
+- `services.odu` NixOS module: systemd unit under a service user, that
+  service user in `nix.settings.trusted-users`, state and blob directories,
+  root-token secret file, the public key, and an nginx vhost with ACME that
+  proxies **only** `/<bucket>/*` and `/_odu/v1/*`, with `proxy_cache` on NAR
+  reads. The board, websocket and `/mcp` stay on
   loopback (F2). A NixOS VM test exercises the module end to end: create a
   bucket, push, substitute, GC.
 - The dedicated server is deployed from this branch before merge, and the
@@ -512,8 +527,9 @@ out. Nothing else changes.
 > straight from it. `odu cache migrate` moves existing data between local
 > disk and S3 without downtime.
 
-The blob store's S3-compatible implementation with presigned GET redirects,
-selected by the module; a migration verb that moves blobs between stores.
+The blob store's S3-compatible implementation with presigned GET redirects
+and presigned PUT so uploads bypass the server, selected by the module; a
+migration verb that moves blobs between stores.
 
 ### PR 12: Postgres
 
