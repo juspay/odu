@@ -180,8 +180,8 @@ shown on the bucket page (PR 4).
   repeats. S3-compatible storage is the second implementation in PR 11.
 - **Metadata:** SQLite in WAL mode behind a narrow repository layer (first
   database in the tree, F3). Tables: `org`, `bucket`, `token`, `object`
-  (bucket, store-path hash, narinfo fields, references, nar id, created,
-  last-accessed), `nar` (file hash, size, refcount), `pin`, `audit`.
+  (bucket, store path, narinfo fields, references, nar hash and size,
+  created, last-accessed), `pin`, `audit`.
 - **On disk:** under odu's state directory (`$ODU_STATE_DIR`, else
   `$XDG_STATE_HOME/odu`, else the platform default `run-history/paths.ts`
   already resolves): `cache/cache.sqlite` and `cache/gcroots/`; the paths
@@ -372,7 +372,7 @@ cache URL with netrc, or a push command) beside its attic inputs.
 
 What lands:
 - `services.odu` NixOS module: systemd unit under a service user, that
-  service user in `nix.settings.trusted-users`, state and blob directories,
+  service user in `nix.settings.trusted-users`, state directory,
   root-token secret file, the public key, and an nginx vhost with ACME that
   proxies **only** `/<bucket>/*` and `/_odu/v1/*`, with `proxy_cache` on NAR
   reads. The board, websocket and `/mcp` stay on
