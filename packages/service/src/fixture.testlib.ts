@@ -330,8 +330,8 @@ export interface RecordingPorts extends ServicePorts {
   launches: LaunchRequest[];
   retries: RetryRequest[];
   cancels: CancelRequest[];
-  /** Every hold, release and protect the service ASKED FOR. A repeat that
-   *  replays leaves these unchanged, which is the assertion. */
+  /** Every probe, hold, release and protect the service ASKED FOR. A repeat
+   *  that replays leaves these unchanged, which is the assertion. */
   probes: VenueProbeRequest[];
   holds: VenueHoldRequest[];
   releases: VenueReleaseRequest[];

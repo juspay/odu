@@ -44,7 +44,6 @@ import {
 import { projectUnposted, type UnpostedEntry } from "@odu/run-history/legacy/record";
 
 export type { GithubState, OwedStatus, PostingHealth, UnpostedEntry };
-export type { RemoteStatus, StatusPayload };
 
 /** GitHub commit-status `state` values the statuses API accepts. */
 const GITHUB_STATES = new Set<string>([

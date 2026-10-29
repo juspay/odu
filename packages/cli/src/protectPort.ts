@@ -19,14 +19,12 @@ import type { Forge } from "@odu/execution/common/forge";
 import type { RulesetWriter } from "@odu/service/ports";
 
 /** Set a branch's required status checks to exactly the contexts odu posts.
- *  The forge is BOUND by the composition root (`./webPorts`) and handed in:
- *  the engine's one implementation is the same one the coordinator posts
- *  statuses through, and a second construction here would be a second
- *  `$ODU_GH_BIN` seam to keep in step. */
-export const protectBranch: (
-  request: Parameters<RulesetWriter>[0],
-  forge: Forge,
-) => ReturnType<RulesetWriter> = (request, forge) =>
+ *  The forge is BOUND by the composition root (`./webPorts`) and handed in
+ *  once, because it is startup configuration; the returned port is the
+ *  per-call half. The engine's one implementation is the same one the
+ *  coordinator posts statuses through — a second construction here would be a
+ *  second `$ODU_GH_BIN` seam to keep in step. */
+export const protectBranch = (forge: Forge): RulesetWriter => (request) =>
   applyProtection(
     {
       checkout: request.checkout,

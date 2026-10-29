@@ -31,11 +31,7 @@ const STATUS: StatusPayload = {
   description: "Succeeded (1s): .ci/x/y.log",
 };
 
-const STATUS_ROW: RemoteStatus = {
-  context: STATUS.context,
-  state: "success",
-  description: STATUS.description,
-};
+const STATUS_ROW: RemoteStatus = { ...STATUS };
 
 const BRANCH_RULES = [
   {

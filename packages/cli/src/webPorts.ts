@@ -143,7 +143,7 @@ export function webPorts(): ServicePorts {
     probeVenues,
     holdVenue,
     releaseVenue,
-    protect: (request) => protectBranch(request, forge),
+    protect: protectBranch(forge),
   };
 }
 

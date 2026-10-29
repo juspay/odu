@@ -31,12 +31,9 @@
  * proves that much at the root rather than a comment claiming it.
  *
  * **The launch shape differs by exactly the caller.** This package names a
- * {@link Caller}; the engine still carries the caller's `$ODU_HOSTS` as the flat
- * `hostsFile` field it has always taken (see `coordinator/launcher`'s
- * `coordinatorEnv`). Neither package may name the other's type, so the root is
- * the one place both are in scope: `webPorts.ts` strips the `Caller` and hands the
- * engine its own field. That adaptation is the binding — a structural equality
- * would be a second, silently drifting spelling of the same request.
+ * {@link Caller}; the engine still carries the caller's `$ODU_HOSTS` as the
+ * flat `hostsFile` it has always taken. Neither may name the other's type, so
+ * `webPorts.ts` — the one root both are in scope — is where they reconcile.
  */
 
 import type { CatalogOptions } from "@odu/run-history/store";

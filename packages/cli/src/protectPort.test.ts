@@ -26,9 +26,9 @@ import { ghForge } from "@odu/execution/common/forge";
 import { protectBranch } from "./protectPort";
 
 /** The port with the forge every process binds: `ghForge` over the fake
- *  `$ODU_GH_BIN` each case installs. */
-const protect = (request: Parameters<typeof protectBranch>[0]) =>
-  protectBranch(request, ghForge());
+ *  `$ODU_GH_BIN` each case installs. The binary is read at CALL time, so one
+ *  construction serves every case. */
+const protect = protectBranch(ghForge());
 
 const trash: string[] = [];
 const GH_WAS = process.env.ODU_GH_BIN;

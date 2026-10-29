@@ -310,8 +310,6 @@ function waitingMessage(
 export function releaseVenues(opts: {
   platforms: readonly string[];
   repoRoot?: string;
-  /** WHO the release is for — see {@link LeaseOptions}. */
-  caller: Caller;
 }): { results: readonly VenueReleaseResult[] } {
   const repoRoot = opts.repoRoot ?? process.cwd();
   const { record } = reconcileLeaseRecord(repoRoot);

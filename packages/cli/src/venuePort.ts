@@ -48,12 +48,12 @@ export const holdVenue: VenueHolder = (request) =>
   });
 
 /** Drop a checkout's holds. No refusal arm: releasing what is not held is the
- *  outcome `nothing`, which is what makes a lost reply safe to retry. */
+ *  outcome `nothing`, which is what makes a lost reply safe to retry. The
+ *  caller is not consulted — a release works off the checkout's own record. */
 export const releaseVenue: VenueReleaser = (request) =>
   Promise.resolve(
     releaseVenues({
       repoRoot: request.checkout,
       platforms: request.platforms,
-      caller: request.caller,
     }),
   );
