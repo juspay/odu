@@ -36,6 +36,7 @@ import {
   storePathHash,
 } from "./narinfo";
 import { newChain, serial } from "./serial";
+import { CACHE_MOUNT } from "./paths";
 import { createStaging, type NarinfoOutcome, type Upload } from "./staging";
 import {
   globMatches,
@@ -113,6 +114,10 @@ export type CacheOutcome<T> =
 
 /** The admin face, structurally the service's `CacheAdmin` port. */
 export interface CacheAdmin {
+  /** Where the protocol is mounted under the origin — `./paths`, re-exported
+   *  here because this is the object the composition root hands the service,
+   *  and the service is what prefixes a bucket's substituter URL. */
+  readonly mount: string;
   create(input: {
     rootToken: string;
     name: string;
@@ -354,6 +359,7 @@ export function createCache(options: CacheOptions): Cache {
   const staging = createStaging({ repo, blob, dir, now, record });
 
   const admin: CacheAdmin = {
+    mount: CACHE_MOUNT,
     async create(input) {
       const root = requireRoot(input.rootToken);
       if (!root.ok) return root;

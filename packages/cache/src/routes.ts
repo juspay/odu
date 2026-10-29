@@ -43,6 +43,7 @@
 import { Effect, Layer, Stream } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import { type Cache } from "./cache";
+import { CACHE_MOUNT } from "./paths";
 import { NIX_CACHE_INFO } from "./staging";
 import type { BucketRow, Scope } from "./db";
 import { isStagedFileName, isStorePathHash } from "./narinfo";
@@ -78,7 +79,7 @@ const bad = (message: string): HttpServerResponse.HttpServerResponse =>
 export function cacheRoutes(cache: Cache) {
   return Layer.mergeAll(
     /** `nix-cache-info` — the three lines a client reads before anything else. */
-    HttpRouter.add("GET", "/:bucket/nix-cache-info", (request) =>
+    HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket/nix-cache-info`, (request) =>
       Effect.gen(function* () {
         const bucket = yield* param("bucket");
         const admitted = admit(cache, request, bucket, "read");
@@ -93,7 +94,7 @@ export function cacheRoutes(cache: Cache) {
      * suffix" spelling that does not read as a parameter literally named
      * `name.narinfo`.
      */
-    HttpRouter.add("GET", "/:bucket/:name", (request) =>
+    HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket/:name`, (request) =>
       Effect.gen(function* () {
         const name = yield* param("name");
         if (!name.endsWith(NARINFO_SUFFIX)) return HttpServerResponse.empty({ status: 404 });
@@ -114,7 +115,7 @@ export function cacheRoutes(cache: Cache) {
     ),
 
     /** The NAR itself, streamed from the store through zstd. */
-    HttpRouter.add("GET", "/:bucket/nar/:file", (request) =>
+    HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket/nar/:file`, (request) =>
       Effect.gen(function* () {
         const file = yield* param("file");
         if (!isStagedFileName(file)) return bad(`"${file}" is not a NAR file name`);
@@ -134,7 +135,7 @@ export function cacheRoutes(cache: Cache) {
      * through memory — and nothing is imported yet: a NAR with no narinfo names
      * no store path, and the pair is what `nix copy --from` needs.
      */
-    HttpRouter.add("PUT", "/:bucket/nar/:file", (request) =>
+    HttpRouter.add("PUT", `${CACHE_MOUNT}/:bucket/nar/:file`, (request) =>
       Effect.gen(function* () {
         const file = yield* param("file");
         if (!isStagedFileName(file)) return bad(`"${file}" is not a NAR file name`);
@@ -163,7 +164,7 @@ export function cacheRoutes(cache: Cache) {
      * with Nix's own sentence for everything else. A 200 for a path nobody
      * recorded is how a push reports success for bytes the cache does not have.
      */
-    HttpRouter.add("PUT", "/:bucket/:name", (request) =>
+    HttpRouter.add("PUT", `${CACHE_MOUNT}/:bucket/:name`, (request) =>
       Effect.gen(function* () {
         const name = yield* param("name");
         if (!name.endsWith(NARINFO_SUFFIX)) return HttpServerResponse.empty({ status: 404 });

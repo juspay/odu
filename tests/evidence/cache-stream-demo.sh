@@ -100,7 +100,7 @@ echo "  daemon RSS before anything: $BASELINE MiB"; sleep 1
 
 cmd "odu cache create main --retention-days 0"
 "$ODU" cache create main --retention-days 0 2>&1 | head -4; sleep 1
-BUCKET="http://127.0.0.1:$PORT/main"
+BUCKET="http://127.0.0.1:$PORT/cache/main"
 TOKEN=$("$ODU" cache token mint main --write -o json | grep -o '"token": *"[^"]*"' | cut -d'"' -f4)
 
 # One sample a second, into the file of the phase being run, so each phase has

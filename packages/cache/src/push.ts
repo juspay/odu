@@ -30,6 +30,7 @@ import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { narHashBase32, storePathBasename, storePathHash } from "./narinfo";
+import { CACHE_MOUNT } from "./paths";
 import { type PathInfo, nixClosure, nixDump } from "./store";
 
 /** The environment slice this client reads. Passed in rather than reached for:
@@ -237,7 +238,7 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
         `or run \`odu cache login ${resolved.origin}\``,
     );
   }
-  const base = `${resolved.origin}/${resolved.name}`;
+  const base = `${resolved.origin}${CACHE_MOUNT}/${resolved.name}`;
   const headers = { authorization: `Bearer ${token}` };
 
   const platform: PushPlatform = options.platform ?? {

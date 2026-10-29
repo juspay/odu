@@ -21,6 +21,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { HttpRouter } from "effect/http";
 import { base32, storePathHash } from "./narinfo";
 import { type Cache, createCache } from "./cache";
+import { CACHE_MOUNT } from "./paths";
 import { NIX_CACHE_INFO } from "./staging";
 import { cacheRoutes } from "./routes";
 import { FakeStore, hashOf } from "../test/fakeStore";
@@ -40,6 +41,8 @@ interface Harness {
   cache: Cache;
   store: FakeStore;
   fetch: (path: string, init?: RequestInit) => Promise<Response>;
+  /** The same listener without the mount prepended. */
+  raw: (path: string, init?: RequestInit) => Promise<Response>;
   tokens: { read: string; write: string; admin: string };
   root: string;
   staging: string;
@@ -117,7 +120,13 @@ async function harness(publicBucket: boolean): Promise<Harness> {
   const { handler, dispose } = HttpRouter.toWebHandler(cacheRoutes(cache), {
     disableLogger: true,
   });
+  // The tests below name a path as a BUCKET names it (`/main/nix-cache-info`),
+  // and this puts it where the protocol actually is. The mount is pinned on its
+  // own, once, in "the protocol's mount is not the origin's first segment".
   const fetchIt = (path: string, init?: RequestInit): Promise<Response> =>
+    handler(new Request(`http://127.0.0.1:18440${CACHE_MOUNT}${path}`, init));
+  /** The listener as it really is, mount and all — for the one test that asks. */
+  const raw = (path: string, init?: RequestInit): Promise<Response> =>
     handler(new Request(`http://127.0.0.1:18440${path}`, init));
 
   // SEEDED THROUGH THE PROTOCOL, not behind it: an object row exists because a
@@ -128,6 +137,7 @@ async function harness(publicBucket: boolean): Promise<Harness> {
   return {
     cache,
     store,
+    raw,
     tokens,
     root: ROOT,
     staging: join(scratch, "cache", "staging"),
@@ -362,6 +372,29 @@ describe("the auth matrix", () => {
     await h.dispose();
   });
 
+  it("mounts under a literal, so a bucket cannot shadow the board", async () => {
+    const h = await harness(true);
+    // The board serves `/assets/<hashed bundle>` on this same origin, and
+    // `/assets` is a legal bucket name — so a bucket at the origin's first
+    // segment stole the page's own JavaScript and rendered it blank. The
+    // protocol answers under `CACHE_MOUNT` and NOWHERE else.
+    expect(CACHE_MOUNT).toBe("/cache");
+    expect((await h.fetch("/main/nix-cache-info")).status).toBe(200);
+    expect((await h.raw("/main/nix-cache-info")).status).toBe(404);
+    expect((await h.raw("/assets/main-abc123.js")).status).toBe(404);
+    // A bucket NAMED after the mount still lives under it.
+    const created = await h.cache.admin.create({
+      rootToken: ROOT,
+      name: "cache",
+      public: true,
+      retentionDays: 30,
+      upstreamKeys: [],
+    });
+    expect(created.ok).toBe(true);
+    expect((await h.fetch("/cache/nix-cache-info")).status).toBe(200);
+    await h.dispose();
+  });
+
   it("is a 404 for an unknown bucket on every route", async () => {
     const h = await harness(true);
     for (const [path, init] of [
@@ -437,7 +470,7 @@ describe("missing", () => {
   it("drops what the bucket has and what an upstream key signed", async () => {
     const h = await harness(true);
     const other = "/nix/store/00000000000000000000000000000000-unbuilt";
-    const response = await h.fetch("/_odu/v1/buckets/main/missing", {
+    const response = await h.raw("/_odu/v1/buckets/main/missing", {
       ...bearer(h.tokens.write),
       method: "POST",
       headers: { ...bearer(h.tokens.write).headers, "content-type": "application/json" },
@@ -456,10 +489,10 @@ describe("missing", () => {
 
   it("needs write scope, and a body it can read", async () => {
     const h = await harness(true);
-    expect((await h.fetch("/_odu/v1/buckets/main/missing", { method: "POST", body: "{}" })).status).toBe(
+    expect((await h.raw("/_odu/v1/buckets/main/missing", { method: "POST", body: "{}" })).status).toBe(
       401,
     );
-    const bad = await h.fetch("/_odu/v1/buckets/main/missing", {
+    const bad = await h.raw("/_odu/v1/buckets/main/missing", {
       ...bearer(h.tokens.write),
       method: "POST",
       headers: { ...bearer(h.tokens.write).headers, "content-type": "application/json" },

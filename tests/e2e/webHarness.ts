@@ -98,6 +98,15 @@ export interface WebWorld {
  * code under test would agree with a mistake.
  */
 export const SHARED_TOOLS = [
+  "cache_create",
+  "cache_describe",
+  "cache_gc",
+  "cache_list",
+  "cache_pin",
+  "cache_stats",
+  "cache_tokenList",
+  "cache_tokenMint",
+  "cache_tokenRevoke",
   "catalog_import",
   "catalog_prune",
   "log_read",

@@ -475,6 +475,11 @@ export interface CacheGcReport {
 }
 
 export interface CacheAdmin {
+  /** Where the protocol is mounted under the origin. The CACHE owns this — it
+   *  is the path its routes are registered at — and the service only learns it
+   *  so a bucket's substituter URL can be built without a second spelling of
+   *  the same literal. */
+  readonly mount: string;
   create(input: {
     rootToken: string;
     name: string;

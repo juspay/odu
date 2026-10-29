@@ -13,7 +13,7 @@ odu cache create main
 `create` prints the substituter URL and the bucket's public key. `odu cache use main` prints the same as two Nix settings, ready for `nix.conf` — and needs no token at all, because a bucket's URL and public key are what it publishes to every client that talks to it:
 
 ```sh
-extra-substituters = http://127.0.0.1:18440/main
+extra-substituters = http://127.0.0.1:18440/cache/main
 extra-trusted-public-keys = main-1:<public-key>
 ```
 
@@ -22,7 +22,7 @@ and as a `nixConfig` block for `flake.nix`:
 ```nix
 {
   nixConfig = {
-    extra-substituters = [ "http://127.0.0.1:18440/main" ];
+    extra-substituters = [ "http://127.0.0.1:18440/cache/main" ];
     extra-trusted-public-keys = [ "main-1:<public-key>" ];
   };
 }
@@ -76,7 +76,7 @@ ODU_CACHE_TOKEN=... odu cache push main ./result
 Prefer plain Nix? `nix copy --to` works without any odu code on the client:
 
 ```sh
-nix copy --to http://127.0.0.1:18440/main ./result
+nix copy --to http://127.0.0.1:18440/cache/main ./result
 ```
 
 Nix reads credentials only from the file named by its `netrc-file` setting (default `/etc/nix/netrc`), never `~/.netrc` on its own. `odu cache use main` prints a `netrc-file` line pointing at your own file and the credential line to put in it:
@@ -91,7 +91,7 @@ machine 127.0.0.1 password <your-write-token>
 For CI, put the token in the URL instead of provisioning a file:
 
 ```sh
-nix copy --to "http://x:$ODU_CACHE_TOKEN@127.0.0.1:18440/main" ./result
+nix copy --to "http://x:$ODU_CACHE_TOKEN@127.0.0.1:18440/cache/main" ./result
 ```
 
 The server accepts any username and the token as the password.
@@ -155,14 +155,19 @@ Importing paths built on another machine requires the user running `odu web` to 
 One bucket is one substituter. Point any Nix-compatible tool at these routes:
 
 ```text
-GET  /<bucket>/nix-cache-info             StoreDir, WantMassQuery: 1, Priority: 40
-HEAD /<bucket>/<hash>.narinfo
-GET  /<bucket>/<hash>.narinfo
-GET  /<bucket>/nar/<filehash>.nar.zst     streamed from the store, compressed on the fly
-PUT  /<bucket>/nar/<filehash>.nar.<ext>   Bearer or Basic; any ext Nix sends
-PUT  /<bucket>/<hash>.narinfo             server re-signs with the bucket key
-POST /_odu/v1/buckets/<bucket>/missing    batch "which of these are you missing"
+GET  /cache/<bucket>/nix-cache-info             StoreDir, WantMassQuery: 1, Priority: 40
+HEAD /cache/<bucket>/<hash>.narinfo
+GET  /cache/<bucket>/<hash>.narinfo
+GET  /cache/<bucket>/nar/<filehash>.nar.zst     streamed from the store, compressed on the fly
+PUT  /cache/<bucket>/nar/<filehash>.nar.<ext>   Bearer or Basic; any ext Nix sends
+PUT  /cache/<bucket>/<hash>.narinfo             server re-signs with the bucket key
+POST /_odu/v1/buckets/<bucket>/missing          batch "which of these are you missing"
 ```
+
+`/cache` is a literal, and it is load-bearing: the board answers `/assets/<hashed
+bundle>` on the same origin, and a bucket at the origin's first segment would
+shadow the page's own JavaScript. A bucket called `cache` lives at
+`/cache/cache`.
 
 Writes, and reads of private buckets, accept `Authorization: Bearer <token>` or HTTP Basic with any username and the token as the password. Nix uses the second through curl on every request, uploads included. The `missing` route backs `odu cache push`; it is not part of the Nix protocol. It answers `missing` — the paths to send — and `skippedUpstream`, the paths the bucket will never take because an upstream key signed them, so a push can report the two as different things.
 

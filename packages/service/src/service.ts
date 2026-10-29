@@ -224,7 +224,7 @@ export function createOduService(opts: ServiceOptions): OduService {
    *  to, which only the service knows. */
   const bucketWithUrl = (facts: CacheBucketFacts): CacheBucket => ({
     ...facts,
-    url: `${opts.origin}/${facts.name}`,
+    url: `${opts.origin}${opts.ports.cache.mount}/${facts.name}`,
   });
 
   const runtime = implementRootedSurfaces(
@@ -664,7 +664,7 @@ export function createOduService(opts: ServiceOptions): OduService {
           describe: ({ input }) =>
             cacheAnswer(opts.ports.cache.describe({ bucket: input.bucket }), (bucket) => ({
               ...bucket,
-              url: `${opts.origin}/${bucket.name}`,
+              url: `${opts.origin}${opts.ports.cache.mount}/${bucket.name}`,
             })),
           tokenMint: ({ input }) =>
             cacheAnswer(

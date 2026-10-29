@@ -462,6 +462,9 @@ export function recordingPorts(opts: {
     // started without `$ODU_ROOT_TOKEN` would. A suite that is ABOUT the cache
     // verbs binds `opts.cache`.
     cache: opts.cache ?? {
+      // The mount is not a verb, so the stub states the real one: a suite that
+      // reads a bucket's URL should not get a different shape than production.
+      mount: "/cache",
       create: async () => ({ ok: false, code: "no_root_token", message: "the stub has no cache" }),
       list: async () => ({ ok: false, code: "no_root_token", message: "the stub has no cache" }),
       describe: async () => ({ ok: false, code: "unknown_bucket", message: "the stub has no cache" }),

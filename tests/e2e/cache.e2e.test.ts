@@ -203,7 +203,7 @@ describe("odu serves a Nix binary cache", () => {
     expect(created.status).toBe(0);
     main = JSON.parse(created.stdout) as Bucket;
     expect(main.name).toBe("main");
-    expect(main.url).toBe(`${world.origin}/main`);
+    expect(main.url).toBe(`${world.origin}/cache/main`);
     expect(main.keyName).toBe("main-1");
     expect(main.publicKey.startsWith("main-1:")).toBe(true);
 
