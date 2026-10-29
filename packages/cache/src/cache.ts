@@ -27,9 +27,8 @@
  */
 
 import { open, readdir, readFile, rm, stat, unlink, writeFile, mkdir } from "node:fs/promises";
-import { join } from "node:path";
-import type { BlobStore, ImportOutcome, PathInfo } from "./store";
-import { writeStreamToFile } from "./store";
+import { basename, join } from "node:path";
+import { type BlobStore, type ImportOutcome, type PathInfo, nixStore, writeStreamToFile } from "./store";
 import type { BucketRow, CacheRepo, ObjectRow, Scope, TokenRow } from "./db";
 import { openCacheRepo } from "./db";
 import { planGc, runGc, type GcReport } from "./gc";
@@ -49,11 +48,10 @@ import {
   mintToken,
   mintTokenId,
   rootTokenMatches,
+  type TokenFacts,
   tokenFacts,
   verifyToken,
-  type TokenFacts,
 } from "./tokens";
-import { nixStore } from "./store";
 
 /** What a bucket looks like to a caller. No secret key, ever. */
 export interface BucketFacts {
@@ -299,7 +297,8 @@ export function createCache(options: CacheOptions): Cache {
       sigs: sign(bucket, info, [...clientSigs, ...info.sigs]),
       hits: existing?.hits ?? 0,
       created: existing?.created ?? at,
-      lastAccessed: existing?.lastAccessed ?? at,
+      // A re-push is an access: the pusher wants the path to stay.
+      lastAccessed: at,
     });
     // The root is what keeps the machine's own GC from eating a path the cache
     // serves; without it the first `nix-collect-garbage` empties the bucket.
@@ -344,8 +343,10 @@ export function createCache(options: CacheOptions): Cache {
         await record(bucket, info.storePath, info.sigs);
         // The NAR this narinfo named is now inside the store; the staged copy
         // is dead weight. Other staged narinfos naming it are re-imported as
-        // no-ops, so removing it is safe.
-        const stagedNar = join(dirForBucket, info.url);
+        // no-ops, so removing it is safe. BASENAME, because `URL` is the
+        // CLIENT's string: `nar/../../etc/x` must not unlink outside the
+        // staging directory.
+        const stagedNar = join(dirForBucket, "nar", basename(info.url));
         await unlink(stagedNar).catch(() => {});
         await unlink(path).catch(() => {});
         progressed = true;

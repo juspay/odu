@@ -135,6 +135,9 @@ export const PORT_SLOT = {
   dirtyTransport: 14,
   /** `catalog-scale.e2e.test.ts` — a daemon over a thousand-run catalog. */
   catalogScale: 15,
+  /** `cache.e2e.test.ts` — a daemon that also serves a Nix binary cache, with
+   *  its own chroot store and root token. */
+  cache: 16,
 } as const;
 
 /** The port for one named slot in THIS suite's block. */

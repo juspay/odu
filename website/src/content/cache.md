@@ -134,7 +134,10 @@ The cache keeps no second copy of your builds. The server's own `/nix/store` hol
 ```text
 <state>/cache/cache.sqlite    metadata, bucket signing keys, token hashes, pins
 <state>/cache/gcroots/        one root per retained path, per bucket
+<state>/cache/staging/        uploads between their NAR and their narinfo
 ```
+
+An upload sits in `staging/` until its narinfo arrives; one that never gets it is swept after an hour, so a client killed between the two PUTs cannot leak a NAR.
 
 `<state>` is `$ODU_STATE_DIR` if set, else `$XDG_STATE_HOME/odu` (`~/.local/state/odu` by default) on Linux and `~/Library/Application Support/odu` on macOS, the same place as the run catalog. Tokens are stored only as hashes, so a copy of the database cannot be used to push. The signing keys are in it, so treat it as a secret. Back up the database; the paths themselves are rebuilt or re-pushed.
 

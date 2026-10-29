@@ -194,9 +194,23 @@ export async function until<T>(
   }
 }
 
-/** Start a service in a private world and wait for it to say it is ready. */
-export async function startWebService(oduBin: string): Promise<WebWorld> {
-  const { root, origin, env } = privateWorld(suitePortFor("forkedDaemon"));
+/**
+ * Start a service in a private world and wait for it to say it is ready.
+ *
+ * `envOver` is for a suite whose SUBJECT is a service setting — the cache's
+ * `$ODU_ROOT_TOKEN` and `$ODU_CACHE_STORE`, say — and is applied to the daemon
+ * and to the world's clients alike, because a variable that reached only one of
+ * them would be a test of the wrong thing.
+ */
+export async function startWebService(
+  oduBin: string,
+  envOver: NodeJS.ProcessEnv = {},
+  port: number = suitePortFor("forkedDaemon"),
+): Promise<WebWorld> {
+  const world0 = privateWorld(port);
+  const root = world0.root;
+  const origin = world0.origin;
+  const env = { ...world0.env, ...envOver };
   const logPath = join(root, "daemon.log");
   const log = Bun.file(logPath);
   const daemon = spawn(oduBin, ["web-daemon"], {

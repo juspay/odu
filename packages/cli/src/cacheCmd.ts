@@ -62,6 +62,18 @@ const scopeOf = (values: {
   admin?: boolean;
 }): CacheScope => (values.admin === true ? "admin" : values.read === true ? "read" : "write");
 
+/** A flag's whole-number value, or a usage error naming the flag. `Number("")`
+ *  is 0 and `Number(" 5 ")` is 5, so a bare `Number` would read a truncated
+ *  `--retention-days=` as "keep nothing" — which on a cache is a destructive
+ *  reading of a typo. */
+function wholeNumber(flag: string, raw: string): number {
+  const trimmed = raw.trim();
+  if (!/^-?\d+$/.test(trimmed)) {
+    throw new Error(`odu: ${flag} needs a whole number (got "${raw}")`);
+  }
+  return Number(trimmed);
+}
+
 const originOption = { type: "string" } as const;
 const outputOption = { type: "string", short: "o" } as const;
 
@@ -128,7 +140,7 @@ async function createCommand(rest: string[]): Promise<number> {
         retentionDays:
           values["retention-days"] === undefined
             ? 90
-            : Number(values["retention-days"]),
+            : wholeNumber("--retention-days", values["retention-days"]),
         ...(upstream === undefined ? {} : { upstreamKeys: upstream }),
       }),
     );
@@ -244,7 +256,7 @@ async function tokenCommand(rest: string[]): Promise<number> {
             scope: scopeOf(values),
             ...(values["expires-days"] === undefined
               ? {}
-              : { expiresDays: Number(values["expires-days"]) }),
+              : { expiresDays: wholeNumber("--expires-days", values["expires-days"]) }),
           }),
         );
         if (!answer.ok) return reportFailure(answer, json, REFUSED);
@@ -376,7 +388,7 @@ async function pushCommand(rest: string[]): Promise<number> {
       ...(values["token-file"] === undefined ? {} : { tokenFile: values["token-file"] }),
       ...(values.concurrency === undefined
         ? {}
-        : { concurrency: Number(values.concurrency) }),
+        : { concurrency: wholeNumber("--concurrency", values.concurrency) }),
       onLine: (line) => {
         if (!json) process.stderr.write(`${line}\n`);
       },
