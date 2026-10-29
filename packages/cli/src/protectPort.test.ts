@@ -22,7 +22,13 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ghForge } from "@odu/execution/common/forge";
 import { protectBranch } from "./protectPort";
+
+/** The port with the forge every process binds: `ghForge` over the fake
+ *  `$ODU_GH_BIN` each case installs. The binary is read at CALL time, so one
+ *  construction serves every case. */
+const protect = protectBranch(ghForge());
 
 const trash: string[] = [];
 const GH_WAS = process.env.ODU_GH_BIN;
@@ -126,10 +132,10 @@ const LINUX = ["x86_64-linux"];
 describe("protectBranch refusals", () => {
   it("refuses a path that is not a git checkout, naming it", async () => {
     const bare = temp("odu-protect-bare-");
-    const outcome = await protectBranch({
+    const outcome = await protect({
       checkout: bare,
       platforms: LINUX,
-      hostsFile: null,
+      caller: { hostsFile: null },
       dryRun: true,
       create: false,
     });
@@ -143,10 +149,10 @@ describe("protectBranch refusals", () => {
     // `pipeline_refused` and not `checkout_refused`: the directory is fine, the
     // DAG is not — and the required contexts ARE the DAG, so there is nothing
     // to protect against. `just` names the recipe; this layer could not.
-    const outcome = await protectBranch({
+    const outcome = await protect({
       checkout: checkout({ justfile: "alpha:\n    echo hi\n" }),
       platforms: LINUX,
-      hostsFile: null,
+      caller: { hostsFile: null },
       dryRun: true,
       create: false,
     });
@@ -158,10 +164,10 @@ describe("protectBranch refusals", () => {
 
   it("refuses a platform set that resolves to nothing, naming the empty file", async () => {
     const file = hosts({});
-    const outcome = await protectBranch({
+    const outcome = await protect({
       checkout: checkout(),
       platforms: [],
-      hostsFile: null,
+      caller: { hostsFile: null },
       dryRun: true,
       create: false,
     });
@@ -180,10 +186,10 @@ describe("protectBranch refusals", () => {
   });
 
   it("refuses a blank platform instead of fanning out `recipe@` contexts", async () => {
-    const outcome = await protectBranch({
+    const outcome = await protect({
       checkout: checkout(),
       platforms: [""],
-      hostsFile: null,
+      caller: { hostsFile: null },
       dryRun: true,
       create: false,
     });
@@ -197,10 +203,10 @@ describe("protectBranch refusals", () => {
     // so it has no origin to object to and answers happily in a repository
     // hosted anywhere or nowhere. The refusal belongs to the WRITE, which is
     // the only part that needs a GitHub API to exist.
-    const outcome = await protectBranch({
+    const outcome = await protect({
       checkout: checkout({ origin: "git@gitlab.com:someone/thing.git" }),
       platforms: LINUX,
-      hostsFile: null,
+      caller: { hostsFile: null },
       dryRun: false,
       create: false,
     });
@@ -211,10 +217,10 @@ describe("protectBranch refusals", () => {
 
   it("refuses `no_credential` when gh cannot authenticate, with an ARGV recovery", async () => {
     fakeGh("unauthenticated");
-    const outcome = await protectBranch({
+    const outcome = await protect({
       checkout: checkout({ origin: `https://github.com/${SLUG}` }),
       platforms: LINUX,
-      hostsFile: null,
+      caller: { hostsFile: null },
       dryRun: false,
       create: false,
     });
@@ -231,10 +237,10 @@ describe("protectBranch refusals", () => {
     // "this process cannot speak to GitHub as you", and they are told apart by
     // the message rather than by a code nobody would branch on differently.
     fakeGh("absent");
-    const outcome = await protectBranch({
+    const outcome = await protect({
       checkout: checkout({ origin: `https://github.com/${SLUG}` }),
       platforms: LINUX,
-      hostsFile: null,
+      caller: { hostsFile: null },
       dryRun: false,
       create: false,
     });
@@ -246,11 +252,11 @@ describe("protectBranch refusals", () => {
 
   it("refuses an unruled branch unless creating was asked for, and says how", async () => {
     fakeGh("ok", { branchRules: [] });
-    const outcome = await protectBranch({
+    const outcome = await protect({
       checkout: checkout({ origin: `https://github.com/${SLUG}` }),
       branch: "master",
       platforms: LINUX,
-      hostsFile: null,
+      caller: { hostsFile: null },
       dryRun: false,
       create: false,
     });
@@ -302,10 +308,10 @@ describe("protectBranch successes", () => {
     // GitHub remote yet, and what keeps it from spending a network round trip
     // to print a list that would be identical either way.
     const gh = fakeGh("ok");
-    const outcome = await protectBranch({
+    const outcome = await protect({
       checkout: checkout({ origin: `https://github.com/${SLUG}` }),
       platforms: ["x86_64-linux", "aarch64-darwin"],
-      hostsFile: null,
+      caller: { hostsFile: null },
       dryRun: true,
       create: false,
     });
@@ -335,10 +341,10 @@ describe("protectBranch successes", () => {
     // The case the forge round trip used to break, and the one a person is
     // most likely to be in: a repository that is not on GitHub yet.
     fakeGh("ok");
-    const outcome = await protectBranch({
+    const outcome = await protect({
       checkout: checkout({}),
       platforms: ["x86_64-linux"],
-      hostsFile: null,
+      caller: { hostsFile: null },
       dryRun: true,
       create: false,
     });
@@ -355,11 +361,11 @@ describe("protectBranch successes", () => {
     // can refuse a derived set — but only if the answer says it was derived.
     const file = hosts({ "x86_64-linux": "some-box" });
     fakeGh("ok");
-    const outcome = await protectBranch({
+    const outcome = await protect({
       checkout: checkout({ origin: `https://github.com/${SLUG}` }),
       branch: "master",
       platforms: [],
-      hostsFile: null,
+      caller: { hostsFile: null },
       dryRun: true,
       create: false,
     });
@@ -376,11 +382,11 @@ describe("protectBranch successes", () => {
       branchRules: RULES_ON_MASTER,
       ruleset: RULESET,
     });
-    const outcome = await protectBranch({
+    const outcome = await protect({
       checkout: checkout({ origin: `https://github.com/${SLUG}` }),
       branch: "master",
       platforms: LINUX,
-      hostsFile: null,
+      caller: { hostsFile: null },
       dryRun: false,
       create: false,
     });
@@ -395,11 +401,11 @@ describe("protectBranch successes", () => {
 
   it("creates a ruleset when asked, and says a merge gate now exists", async () => {
     const gh = fakeGh("ok", { branchRules: [] });
-    const outcome = await protectBranch({
+    const outcome = await protect({
       checkout: checkout({ origin: `https://github.com/${SLUG}` }),
       branch: "master",
       platforms: LINUX,
-      hostsFile: null,
+      caller: { hostsFile: null },
       dryRun: false,
       create: true,
     });

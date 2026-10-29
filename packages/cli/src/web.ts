@@ -69,7 +69,7 @@ import {
   stderrLogger,
 } from "@kolu/surface-daemon";
 import { parseAllowedOrigins } from "@kolu/surface/ws-origin";
-import { reportSurfaceAppEvent, serveSurfaceApp } from "@kolu/surface-app/serve";
+import { serveSurfaceApp } from "@kolu/surface-app/serve";
 import { runSocketPath } from "@odu/run-client/dial";
 import { gitTopLevel } from "@odu/execution/common/git";
 import { ODU_VERSION } from "@odu/execution/common/version";
@@ -81,6 +81,7 @@ import {
 import { createOduService } from "@odu/service/service";
 import { Effect, Exit, Layer, Scope } from "effect";
 import { readProcessIdentity, selfProcessIdentity } from "./processIdentity";
+import { servingOptions } from "./serving";
 import {
   mcpGetRoute,
   mcpRoute,
@@ -245,33 +246,21 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
   let bound: string;
   try {
     bound = await Effect.runPromise(
-      serveSurfaceApp({
-        // LIVE, read at every accept: the rooted runtime's served set moves when
-        // the control sibling mounts, and a snapshot taken at bind would serve a
-        // roster that no longer matches the handlers.
-        live: () => ({
-          group: service.runtime.group,
-          handlers: service.runtime.handlers,
+      serveSurfaceApp(
+        // The parts and their assembly live in `./serving`: this function owns
+        // the gate, the lifetime and the teardown around the listener.
+        servingOptions({
+          live: () => ({
+            group: service.runtime.group,
+            handlers: service.runtime.handlers,
+          }),
+          dist,
+          host,
+          port,
+          allowedOrigins,
+          routes: Layer.merge(mcpRoute(transport, allowedOrigins), mcpGetRoute()),
         }),
-        // Not optional. `serveSurfaceApp` treats a missing `clientDist` as "no
-        // static route" and a nonexistent one as a 404 — it will not fail for
-        // you — so the packaged contract is asserted before we get here
-        // ({@link assertPackaged}) and this reads a value that is present.
-        clientDist: dist,
-        manifest: { name: "odu", themeColor: "#1f6feb", icons: [] },
-        host,
-        port,
-        // Same-origin is always allowed; anything else must be named. This gate
-        // runs on the RAW pre-upgrade socket, so a cross-site page never gets a
-        // connection. Same-origin means the Origin matches the Host the request
-        // arrived with, whatever that Host is.
-        allowedOrigins,
-        // Two layers merged into one, because `routes` takes one. Merged and
-        // not ordered: `HttpRouter` ranks by specificity, so both literal `/mcp`
-        // routes beat the shell's `GET /*` catch-all either way round.
-        routes: Layer.merge(mcpRoute(transport, allowedOrigins), mcpGetRoute()),
-        onEvent: reportSurfaceAppEvent,
-      }).pipe(Scope.provide(scope)),
+      ).pipe(Scope.provide(scope)),
     );
   } catch (err) {
     await mcp.close();

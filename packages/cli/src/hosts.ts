@@ -20,7 +20,11 @@ import {
   laneRunnerDrvPath,
   requireBakedRunnerSource,
 } from "@odu/execution/coordinator/runnerFlake";
-import type { VenueProbeOutcome, VenueRowFacts } from "@odu/service/ports";
+import type { Caller } from "@odu/service/caller";
+import type {
+  VenueProbeOutcome,
+  VenueRowFacts,
+} from "@odu/service/ports";
 
 /**
  * The wire says `unreachable`; the port says `down`.
@@ -82,12 +86,12 @@ function rowFacts(platform: string, probe: ProbeResult): VenueRowFacts {
  */
 export async function venueInventory(request: {
   platforms: readonly string[];
-  /** The CALLER's `$ODU_HOSTS`. This runs in the service, whose environment is
-   *  a fact about the shell that started it — so without this, `odu hosts`
-   *  reported the daemon's fleet while `odu run` used the caller's. */
-  hostsFile: string | null;
+  /** WHO the caller is. This runs in the service, whose environment is a fact
+   *  about the shell that started it — so without this, `odu hosts` reported
+   *  the daemon's fleet while `odu run` used the caller's. See {@link Caller}. */
+  caller: Caller;
 }): Promise<VenueProbeOutcome> {
-  const config = loadHosts(request.hostsFile ?? undefined);
+  const config = loadHosts(request.caller.hostsFile ?? undefined);
   const configured = Object.keys(config.hosts).sort();
   if (configured.length === 0) {
     return {

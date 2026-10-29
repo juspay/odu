@@ -23,16 +23,22 @@
  *     the engine; `@odu/cli` carries a renderer. A daemon that imported either
  *     would ship both to every browser tab's server.
  *
- * The shapes below are structurally the ones `@odu/execution` already
- * publishes (`LaunchRequest`/`LaunchReceipt` on `coordinator/launcher`,
+ * The shapes below are the ones `@odu/execution` publishes
+ * (`LaunchRequest`/`LaunchReceipt` on `coordinator/launcher`,
  * `RetryInput`/`RetryOutcome` on `coordinator/recovery`), spelled here so the
  * arrow points from the root inward. They are not re-inventions: both sides
  * name the same `RunScope` out of `@odu/run-history/schema`, so the compiler
- * proves the binding at the root rather than a comment claiming it.
+ * proves that much at the root rather than a comment claiming it.
+ *
+ * **The launch shape differs by exactly the caller.** This package names a
+ * {@link Caller}; the engine still carries the caller's `$ODU_HOSTS` as the
+ * flat `hostsFile` it has always taken. Neither may name the other's type, so
+ * `webPorts.ts` — the one root both are in scope — is where they reconcile.
  */
 
 import type { CatalogOptions } from "@odu/run-history/store";
 import type { RunScope } from "@odu/run-history/schema";
+import type { Caller } from "./caller";
 
 // ── starting a run ──────────────────────────────────────────────────────────
 
@@ -54,10 +60,10 @@ export interface LaunchRequest {
   readonly noSnapshot: boolean;
   readonly noPost: boolean;
   readonly hostPins: readonly string[];
-  /** The caller's `$ODU_HOSTS`, or `null` when the caller had none. The
-   *  service is a per-user singleton: its own environment is a fact about the
-   *  shell that started it, never about the person asking for this run. */
-  readonly hostsFile: string | null;
+  /** WHO this run is for. The service carries the caller's `$ODU_HOSTS` rather
+   *  than reading its own: the daemon's environment belongs to the shell that
+   *  started it, never to the person asking for this run. See {@link Caller}. */
+  readonly caller: Caller;
   /** The caller said it really did mean to take this checkout from the run
    *  already in progress there. Carried through rather than consumed here: what
    *  superseding MEANS — cancel the incumbent, confirm it is gone, then claim
@@ -299,11 +305,11 @@ export type VenueProbeOutcome =
  *  `platforms` means every configured one. */
 export type VenueProber = (request: {
   platforms: readonly string[];
-  /** The CALLER's `$ODU_HOSTS`, or `null` for "the caller expressed nothing".
-   *  The inventory is resolved HERE, in a per-user singleton whose environment
-   *  belongs to whoever started it — so without this, `odu hosts` and `odu run`
-   *  can address different fleets from the same shell. */
-  hostsFile: string | null;
+  /** WHO the caller is. The inventory is resolved HERE, in a per-user singleton
+   *  whose environment belongs to whoever started it — so without this,
+   *  `odu hosts` and `odu run` can address different fleets from the same
+   *  shell. See {@link Caller}. */
+  caller: Caller;
 }) => Promise<VenueProbeOutcome>;
 
 export interface VenueHoldResult {
@@ -332,11 +338,11 @@ export type VenueHoldOutcome =
 export type VenueHolder = (request: {
   checkout: string;
   platforms: readonly string[];
-  /** The CALLER's `$ODU_HOSTS`, or `null` for "the caller expressed nothing".
-   *  The inventory is resolved HERE, in a per-user singleton whose environment
-   *  belongs to whoever started it — so without this, `odu hosts` and `odu run`
-   *  can address different fleets from the same shell. */
-  hostsFile: string | null;
+  /** WHO the hold is for. The inventory is resolved HERE, in a per-user
+   *  singleton whose environment belongs to whoever started it — so without
+   *  this, `odu hosts` and `odu run` can address different fleets from the same
+   *  shell. See {@link Caller}. */
+  caller: Caller;
   noWait: boolean;
 }) => Promise<VenueHoldOutcome>;
 
@@ -350,11 +356,11 @@ export interface VenueReleaseResult {
 export type VenueReleaser = (request: {
   checkout: string;
   platforms: readonly string[];
-  /** The CALLER's `$ODU_HOSTS`, or `null` for "the caller expressed nothing".
-   *  The inventory is resolved HERE, in a per-user singleton whose environment
-   *  belongs to whoever started it — so without this, `odu hosts` and `odu run`
-   *  can address different fleets from the same shell. */
-  hostsFile: string | null;
+  /** WHO the release is for. The inventory is resolved HERE, in a per-user
+   *  singleton whose environment belongs to whoever started it — so without
+   *  this, `odu hosts` and `odu run` can address different fleets from the same
+   *  shell. See {@link Caller}. */
+  caller: Caller;
 }) => Promise<{ results: readonly VenueReleaseResult[] }>;
 
 // ── branch protection ───────────────────────────────────────────────────────
@@ -397,11 +403,11 @@ export type RulesetWriter = (request: {
   checkout: string;
   branch?: string;
   platforms: readonly string[];
-  /** The CALLER's `$ODU_HOSTS`, or `null` for "the caller expressed nothing".
-   *  An unsliced `protect` DERIVES its platform set from the hosts file, and
-   *  that derivation runs here — in a per-user singleton whose environment
-   *  belongs to whoever started it, not to whoever asked. */
-  hostsFile: string | null;
+  /** WHO the protection is for. An unsliced `protect` DERIVES its platform set
+   *  from the hosts file, and that derivation runs here — in a per-user
+   *  singleton whose environment belongs to whoever started it, not to whoever
+   *  asked. See {@link Caller}. */
+  caller: Caller;
   dryRun: boolean;
   create: boolean;
 }) => Promise<ProtectOutcome>;

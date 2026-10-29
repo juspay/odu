@@ -41,6 +41,7 @@ import {
   type StartReceipt,
 } from "@odu/service-client/surface";
 import { Effect } from "effect";
+import { callerOf } from "./caller";
 import type { CheckoutProbe, RunLauncher } from "./ports";
 import {
   claimReceipt,
@@ -414,7 +415,7 @@ async function start(input: StartInput, deps: StartDeps): Promise<Outcome> {
     // Absent on the wire means the CALLER had no `$ODU_HOSTS` — which is a
     // fact to carry, not a gap to fill from this process. Filling it is how
     // the daemon's shell came to decide where other people's runs execute.
-    hostsFile: input.hostsFile ?? null,
+    caller: callerOf(input),
     // The caller's explicit "take this checkout". The coordinator does the
     // cancel-then-confirm; this only has to not lose the word.
     supersede: input.supersede ?? false,

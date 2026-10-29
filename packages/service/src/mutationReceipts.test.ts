@@ -337,7 +337,7 @@ describe("a receipt knows which inventory it was for", () => {
     // The port saw the FIRST request and nothing else. A `replayed: true` here
     // would have been the answer to a question nobody asked.
     expect(ports.holds).toHaveLength(1);
-    expect(ports.holds[0]?.hostsFile).toBeNull();
+    expect(ports.holds[0]?.caller.hostsFile).toBeNull();
   });
 
   it("refuses two different explicit inventories under one id", async () => {
@@ -353,7 +353,7 @@ describe("a receipt knows which inventory it was for", () => {
     expect(other.ok).toBe(false);
     if (!other.ok) expect(other.code).toBe("request_conflict");
     expect(ports.holds).toHaveLength(1);
-    expect(ports.holds[0]?.hostsFile).toBe("/fleets/a.json");
+    expect(ports.holds[0]?.caller.hostsFile).toBe("/fleets/a.json");
   });
 
   it("still replays the SAME inventory, however it was spelled", async () => {
@@ -375,7 +375,7 @@ describe("a receipt knows which inventory it was for", () => {
     expect(again.ok).toBe(true);
     if (again.ok) expect(again.value.replayed).toBe(true);
     expect(ports.holds).toHaveLength(1);
-    expect(ports.holds[0]?.hostsFile).toBe("");
+    expect(ports.holds[0]?.caller.hostsFile).toBe("");
   });
 
   it("keeps the distinction ACROSS A RESTART, because the receipt is on disk", async () => {

@@ -32,8 +32,10 @@ import { Result, Schema } from "effect";
 import { fanId } from "@odu/run-client/nodeId";
 import { loadHosts } from "@odu/execution/coordinator/hosts";
 import { parseGithubRemote } from "@odu/execution/coordinator/statuses";
+import type { Forge } from "@odu/execution/common/forge";
 import type { PipelineSpec } from "@odu/execution/common/spec";
 import { laneTasks, loadJustPipeline } from "@odu/execution/just/ingest";
+import type { Caller } from "@odu/service/caller";
 import type { ProtectFacts, ProtectOutcome } from "@odu/service/ports";
 import {
   BranchRulesSchema,
@@ -57,11 +59,11 @@ export interface ProtectArgs {
   /** The checkout to protect. The daemon serves many, so this can no longer be
    *  "wherever the process happens to be standing". */
   checkout: string;
-  /** The CALLER's `$ODU_HOSTS`. The unsliced path DERIVES the platform set
-   *  from the hosts file, and this runs inside the singleton — whose own
-   *  environment belongs to whoever started it, not to whoever asked. `null`
-   *  is a caller that expressed nothing, and gets the service's own. */
-  hostsFile: string | null;
+  /** WHO the protection is for. The unsliced path DERIVES the platform set
+   *  from the caller's hosts file, and this runs inside the singleton — whose
+   *  own environment belongs to whoever started it, not to whoever asked. See
+   *  {@link Caller}. */
+  caller: Caller;
 }
 
 /** The platform set protection covers, as pure data — the decision writes no
@@ -112,25 +114,6 @@ function protectPlatforms(
     return { kind: "none", source: config.source };
   }
   return { kind: "derived", platforms, source: config.source };
-}
-
-type GhResult = { ok: true; stdout: string } | { ok: false; error: string };
-
-/** One `gh` call. Every GitHub read and write protect makes goes through here,
- *  so they share the `$ODU_GH_BIN` seam — the default-branch lookup used to
- *  spawn a hard-coded `gh` while only the write honoured the override, leaving
- *  the command half-fakeable and its worst path (the write) untested. */
-function gh(args: string[], input?: string): GhResult {
-  const res = spawnSync(process.env.ODU_GH_BIN ?? "gh", args, {
-    input,
-    encoding: "utf-8",
-  });
-  if (res.status === 0) return { ok: true, stdout: res.stdout };
-  const error =
-    res.stderr?.trim() ||
-    res.error?.message ||
-    `gh exited ${String(res.status)}`;
-  return { ok: false, error };
 }
 
 /**
@@ -208,6 +191,7 @@ function unreadable(what: string): Extract<ProtectOutcome, { ok: false }> {
  */
 export async function applyProtection(
   args: ProtectArgs,
+  forge: Forge,
 ): Promise<ProtectOutcome> {
   const top = spawnSync("git", ["rev-parse", "--show-toplevel"], {
     cwd: args.checkout,
@@ -238,7 +222,7 @@ export async function applyProtection(
 
   let set: PlatformSet;
   try {
-    set = protectPlatforms(args.platforms, args.hostsFile);
+    set = protectPlatforms(args.platforms, args.caller.hostsFile);
   } catch (err) {
     return { ok: false, code: "bad_input", message: (err as Error).message };
   }
@@ -308,14 +292,14 @@ export async function applyProtection(
 
   let branch = args.branch;
   if (branch === undefined) {
-    // The one `gh` call a `--dry-run` can still make. A preview that cannot
+    // The one forge call a `--dry-run` can still make. A preview that cannot
     // name the branch it would write is not a preview — and passing `--branch`
     // skips it, which is the offline path for anyone who wants one.
-    const head = gh(["api", `repos/${slug}`, "--jq", ".default_branch"]);
+    const head = await forge.defaultBranch(github);
     if (!head.ok) {
       return ghRefusal(`resolve the default branch of ${slug}`, head.error);
     }
-    branch = head.stdout.trim();
+    branch = head.value.trim();
     // An empty answer used to flow on into `branches//protection`, turning a
     // failed lookup into a confusing 404 about the wrong thing.
     if (branch === "") {
@@ -344,11 +328,11 @@ export async function applyProtection(
     ...extra,
   });
 
-  const covering = gh(["api", `repos/${slug}/rules/branches/${branch}`]);
+  const covering = await forge.readRuleset({ ...github, branch });
   if (!covering.ok) {
     return ghRefusal(`read the rules on ${branch}`, covering.error);
   }
-  const branchRules = decode(BranchRulesSchema, covering.stdout);
+  const branchRules = decode(BranchRulesSchema, covering.value);
   if (branchRules === null) return unreadable(`the rules on ${branch}`);
 
   const choice = chooseRuleset(branchRules);
@@ -368,14 +352,18 @@ export async function applyProtection(
           suggestion: ["odu", "protect", "--create"],
         };
       }
-      const made = gh(
-        ["api", "--method", "POST", `repos/${slug}/rulesets`, "--input", "-"],
-        createBody({ branch, isDefault: args.branch === undefined, contexts }),
-      );
+      const made = await forge.createRuleset({
+        ...github,
+        body: createBody({
+          branch,
+          isDefault: args.branch === undefined,
+          contexts,
+        }),
+      });
       if (!made.ok) {
         return ghRefusal(`create a ruleset on ${branch}`, made.error);
       }
-      const id = rulesetId(made.stdout);
+      const id = rulesetId(made.value);
       return {
         ok: true,
         facts: facts({
@@ -420,22 +408,16 @@ export async function applyProtection(
     }
   }
 
-  const read = gh(["api", `repos/${slug}/rulesets/${choice.id}`]);
+  const read = await forge.readRuleset({ ...github, id: choice.id });
   if (!read.ok) return ghRefusal(`read ruleset ${choice.id}`, read.error);
-  const ruleset = decode(RulesetSchema, read.stdout);
+  const ruleset = decode(RulesetSchema, read.value);
   if (ruleset === null) return unreadable(`ruleset ${choice.id}`);
 
-  const write = gh(
-    [
-      "api",
-      "--method",
-      "PUT",
-      `repos/${slug}/rulesets/${ruleset.id}`,
-      "--input",
-      "-",
-    ],
-    updateBody(ruleset, contexts),
-  );
+  const write = await forge.replaceRuleset({
+    ...github,
+    id: ruleset.id,
+    body: updateBody(ruleset, contexts),
+  });
   if (!write.ok) return ghRefusal(`write ruleset ${ruleset.id}`, write.error);
   return {
     ok: true,

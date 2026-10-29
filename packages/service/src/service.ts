@@ -69,6 +69,7 @@ import { importCatalog, pruneCatalog } from "./catalog";
 import { readLog, readTail } from "./logs";
 import { checkoutSource } from "./checkout";
 import { nodesSource } from "./nodes";
+import { callerOf } from "./caller";
 import type { ServicePorts } from "./ports";
 import { reconcileRequests } from "./reconcile";
 import { everyAfter, slowTickReporter } from "./poller";
@@ -403,7 +404,7 @@ export function createOduService(opts: ServiceOptions): OduService {
               Effect.promise(() =>
                 opts.ports.probeVenues({
                   platforms: input.platforms ?? [],
-                  hostsFile: input.hostsFile ?? null,
+                  caller: callerOf(input),
                 }),
               ),
               (outcome) =>
@@ -452,7 +453,7 @@ export function createOduService(opts: ServiceOptions): OduService {
                       opts.ports.holdVenue({
                         checkout: input.checkout,
                         platforms: input.platforms ?? [],
-                        hostsFile: input.hostsFile ?? null,
+                        caller: callerOf(input),
                         noWait: input.noWait ?? false,
                       }),
                   ),
@@ -502,7 +503,7 @@ export function createOduService(opts: ServiceOptions): OduService {
                       opts.ports.releaseVenue({
                         checkout: input.checkout,
                         platforms: input.platforms ?? [],
-                        hostsFile: input.hostsFile ?? null,
+                        caller: callerOf(input),
                       }),
                   ),
                 );
@@ -534,7 +535,7 @@ export function createOduService(opts: ServiceOptions): OduService {
                       checkout: input.checkout,
                       ...(input.branch === undefined ? {} : { branch: input.branch }),
                       platforms: input.platforms ?? [],
-                      hostsFile: input.hostsFile ?? null,
+                      caller: callerOf(input),
                       dryRun: true,
                       create: input.create ?? false,
                     }),
@@ -570,7 +571,7 @@ export function createOduService(opts: ServiceOptions): OduService {
                           ? {}
                           : { branch: input.branch }),
                         platforms: input.platforms ?? [],
-                        hostsFile: input.hostsFile ?? null,
+                        caller: callerOf(input),
                         dryRun: false,
                         create: input.create ?? false,
                       }),
