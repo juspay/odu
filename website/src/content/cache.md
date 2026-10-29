@@ -122,7 +122,7 @@ odu cache gc main
 odu cache stats
 ```
 
-Pins are named and root a closure. Garbage collection applies per-bucket retention on last access: an object is evicted only when nothing retained in the bucket references it and it is not under a pin. NARs with no remaining references are deleted; blobs go last. `odu cache stats` reports sizes and hit counts.
+Pins are named and root a closure. Garbage collection applies per-bucket retention on last access: an object is evicted only when nothing retained in the bucket references it and it is not under a pin. A path no bucket retains loses its root and is deleted from the store. `odu cache stats` reports sizes and hit counts.
 
 ## Where the data lives
 

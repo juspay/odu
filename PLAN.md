@@ -186,7 +186,8 @@ shown on the bucket page (PR 4).
   `$XDG_STATE_HOME/odu`, else the platform default `run-history/paths.ts`
   already resolves): `cache/cache.sqlite` and `cache/gcroots/`; the paths
   themselves are in `/nix/store`. Signing keys live in the database; the
-  database is a secret, and backup is both together.
+  database is a secret, and backup is the database; paths are rebuilt or
+  re-pushed.
 - **GC:** per-bucket retention on last access; an object is evicted only when
   nothing retained in the bucket references it and it is not under a pin;
   a path with no retaining bucket loses its root and is deleted from the
