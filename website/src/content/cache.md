@@ -65,7 +65,7 @@ It reads the token from stdin (or `--token <token>`), and writes one entry per o
 2. `$ODU_CACHE_TOKEN`
 3. the credentials entry for the bucket's origin
 
-The bucket argument is a name resolved against the logged-in origin, or a full `https://<host>/<bucket>` URL. CI exports the secret and never logs in:
+The bucket argument is a name resolved against the logged-in origin, or a full `https://<host>/cache/<bucket>` URL — the substituter URL `odu cache use` prints. CI exports the secret and never logs in:
 
 ```sh
 ODU_CACHE_TOKEN=... odu cache push main ./result

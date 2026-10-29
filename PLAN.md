@@ -128,12 +128,12 @@ Consequences for the split:
 ### Protocol (per bucket, standard Nix)
 
 ```
-GET  /<bucket>/nix-cache-info             StoreDir, WantMassQuery: 1, Priority: 40
-HEAD /<bucket>/<hash>.narinfo
-GET  /<bucket>/<hash>.narinfo
-GET  /<bucket>/nar/<filehash>.nar.zst     stream, or 302 to presigned URL (PR 11)
-PUT  /<bucket>/nar/<filehash>.nar.<ext>   Bearer or Basic; any ext Nix sends (xz by default, zst with ?compression=zstd)
-PUT  /<bucket>/<hash>.narinfo             server re-signs with the bucket key; URL field kept as sent
+GET  /cache/<bucket>/nix-cache-info        StoreDir, WantMassQuery: 1, Priority: 40
+HEAD /cache/<bucket>/<hash>.narinfo
+GET  /cache/<bucket>/<hash>.narinfo
+GET  /cache/<bucket>/nar/<filehash>.nar.zst  stream, or 302 to presigned URL (PR 11)
+PUT  /cache/<bucket>/nar/<filehash>.nar.<ext>  Bearer or Basic; any ext Nix sends (xz by default, zst with ?compression=zstd)
+PUT  /cache/<bucket>/<hash>.narinfo        server re-signs with the bucket key; URL field kept as sent
 POST /_odu/v1/buckets/<bucket>/missing    batch "which of these are you missing" (odu push client)
 ```
 
@@ -227,7 +227,7 @@ token, from the machine that holds the paths.
    a time, retries per path, and asks `missing` first. `missing` drops paths
    signed by an upstream key (`cache.nixos.org-1` by default, per bucket), so
    nixpkgs never lands in a bucket; this is attic's upstream filter and the
-   main thing `nix copy` cannot do. `nix copy --to https://…/<bucket>` with
+   main thing `nix copy` cannot do. `nix copy --to https://…/cache/<bucket>` with
    netrc or a token in the URL stays for people who want nothing odu-specific
    (see "Credentials on the client"); it buffers each NAR in memory and
    probes paths one at a time. Known gaps against cachix and attic, kept
@@ -327,8 +327,8 @@ next eight PRs plug into exist with one implementation each.
 > `odu cache login <origin>`, or export it as `ODU_CACHE_TOKEN` in CI; then
 > `odu cache push <bucket> ./result` pushes only what the bucket is missing.
 > Prefer plain Nix? `odu cache use <bucket>` also prints the two netrc lines,
-> after which `nix copy --to https://<host>/<bucket> ./result` works, or put
-> the token in the URL as `https://x:$TOKEN@<host>/<bucket>`. Revoke tokens
+> after which `nix copy --to https://<host>/cache/<bucket> ./result` works, or put
+> the token in the URL as `https://x:$TOKEN@<host>/cache/<bucket>`. Revoke tokens
 > with `odu cache token revoke`, protect a closure from garbage collection
 > with `odu cache pin`, reclaim space with `odu cache gc`, and see sizes and
 > hit counts with `odu cache stats`. Administration needs the root token in
@@ -382,7 +382,7 @@ What lands:
 - `services.odu` NixOS module: systemd unit under a service user, that
   service user in `nix.settings.trusted-users`, state directory,
   root-token secret file, the public key, and an nginx vhost with ACME that
-  proxies **only** `/<bucket>/*` and `/_odu/v1/*`, with `proxy_cache` on NAR
+  proxies **only** `/cache/*` and `/_odu/v1/*`, with `proxy_cache` on NAR
   reads. The board, websocket and `/mcp` stay on
   loopback (F2). A NixOS VM test exercises the module end to end: create a
   bucket, push, substitute, GC.

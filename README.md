@@ -73,7 +73,7 @@ ODU_CACHE_TOKEN=... odu cache push main ./result
 | `odu cache gc [bucket]` | Evict what retention expired and nothing references or pins |
 | `odu cache stats` | Storage and reads |
 
-`nix copy --to http://127.0.0.1:18440/main ./result` works with no odu code on
+`nix copy --to http://127.0.0.1:18440/cache/main ./result` works with no odu code on
 the client. The [cache page](https://juspay.github.io/odu/cache/) has the
 protocol and the storage model.
 

@@ -103,7 +103,7 @@ The board, the CI runs and the cache are one process. Run it as a dedicated user
 
 The daemon is a per-user process. Give it `/var/lib/odu` (`StateDirectory=odu`, mode 0700) so the SQLite database, the gcroots and the staging directory live there with the modes the code sets, and run it as a system user with no login.
 
-`nix` comes from the host and is deliberately unpinned. The service needs it on `PATH`; add `git` only if this host also runs CI. If other machines will push paths built here-or-there, the `odu` user must be in `nix.settings.trusted-users` — those paths carry no signature your daemon trusts. See [Where the data lives](cache/#where-the-data-lives) on the cache page.
+`nix` comes from the host and is deliberately unpinned. The service needs it on `PATH`; add `git` only if this host also runs CI. If other machines will push paths built on another machine, the `odu` user must be in `nix.settings.trusted-users` — those paths carry no signature your daemon trusts. See [Where the data lives](cache/#where-the-data-lives) on the cache page.
 
 `ODU_ROOT_TOKEN` is read from the daemon's environment. Load it as a systemd credential and export it in the unit's script; never write it in a `.nix` file, where it becomes a world-readable store path and a generation of it.
 
@@ -173,8 +173,9 @@ in
       forceSSL = true;
       # Only the cache's own routes. There is no `location /`: the board and
       # /mcp answer 404 to the public internet, which is what keeps a face
-      # with no authentication at all off it.
-      locations."~ ^/[a-z0-9-]+/" = {
+      # with no authentication at all off it. `/cache/` is the mount, so this
+      # one literal covers every bucket and nothing the board serves.
+      locations."/cache/" = {
         proxyPass = "http://127.0.0.1:18440";
         extraConfig = ''
           proxy_pass_request_headers on;
