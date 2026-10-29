@@ -27,6 +27,7 @@ import {
   BIG,
   buildOduBinary,
   cleanup,
+  currentNixSystem,
   scratchDir,
   suitePortFor,
 } from "./harness";
@@ -45,6 +46,9 @@ let builderStore: string;
 let substituteStore: string;
 
 const dirs: string[] = [];
+
+/** macOS cannot build into a diverted store; Linux can, and does. */
+const HOST_BUILD = currentNixSystem().endsWith("-darwin");
 
 beforeAll(async () => {
   odu = buildOduBinary();
@@ -99,18 +103,42 @@ function nix(argv: string[], env: NodeJS.ProcessEnv = {}): Ran {
  * the cache has never seen.
  */
 function build(name: string): string {
-  const res = nix([
-    "build",
-    "--store",
-    builderStore,
-    "--no-link",
-    "--print-out-paths",
-    "--impure",
-    "--expr",
-    `derivation { name = "${name}"; system = builtins.currentSystem; builder = "/bin/sh"; args = [ "-c" "echo ${name} > $out" ]; }`,
-  ]);
-  if (res.status !== 0) throw new Error(`nix build ${name} failed:\n${res.stderr}`);
-  return res.stdout.trim();
+  return realised(`derivation { name = "${name}"; system = builtins.currentSystem; builder = "/bin/sh"; args = [ "-c" "echo ${name} > $out" ]; }`, name);
+}
+
+/**
+ * Realise a derivation into the BUILDER's store, whichever way this platform
+ * allows.
+ *
+ * On Linux that is one `nix build --store local?root=…`. On macOS it cannot be:
+ * Nix refuses — `building using a diverted store is not supported on this
+ * platform` — and the refusal is about the diverted store, not the sandbox
+ * (`--option sandbox false` says the same thing). So there the path is built in
+ * the HOST store and copied into the builder's, which keeps the reference edges
+ * a plain `nix store add-path` throws away, and is still two store paths the
+ * cache has never seen. The host store is the only thing a macOS run touches
+ * outside its own temp dir, and the paths are bytes long.
+ */
+function realised(expr: string, what: string): string {
+  const args = ["build", "--no-link", "--print-out-paths", "--impure", "--expr", expr];
+  const res = HOST_BUILD
+    ? spawnSync("nix", args, { encoding: "utf-8", maxBuffer: BIG, env: process.env })
+    : nix([...args.slice(0, 1), "--store", builderStore, ...args.slice(1)]);
+  if (res.status !== 0) throw new Error(`nix build ${what} failed:\n${res.stderr}`);
+  const out = res.stdout.trim();
+  if (!HOST_BUILD) return out;
+  // `--no-check-sigs`: a chroot store is not a trusted destination, and these
+  // paths were built on this machine a moment ago. The alternative is signing
+  // fixtures, which buys a test nothing.
+  const copied = spawnSync("nix", ["copy", "--no-check-sigs", "--to", builderStore, out], {
+    encoding: "utf-8",
+    maxBuffer: BIG,
+    env: process.env,
+  });
+  if (copied.status !== 0) {
+    throw new Error(`nix copy ${what} to the builder store failed:\n${copied.stderr}`);
+  }
+  return out;
 }
 
 /**
@@ -132,14 +160,7 @@ function buildPair(name: string): { parent: string; child: string } {
 
   // Building the PARENT builds the child with it, and `--print-out-paths` on a
   // derivation answers its output.
-  const built = nix([
-    "build",
-    "--store",
-    builderStore,
-    "--no-link",
-    "--print-out-paths",
-    "--impure",
-    "--expr",
+  const parent = realised(
     `let child = ${child}; in derivation { name = "${name}-parent"; ` +
       `system = builtins.currentSystem; builder = "/bin/sh"; ` +
       // The child's path is written INTO the output: Nix computes a path's
@@ -147,9 +168,9 @@ function buildPair(name: string): { parent: string; child: string } {
       // reference that appears only in `args` would not survive. `echo` is a
       // shell builtin, which is what a builder with an empty PATH has.
       `args = [ "-c" "echo ${'$'}{child} > $out" ]; }`,
-  ]);
-  if (built.status !== 0) throw new Error(`nix build ${name} failed:\n${built.stderr}`);
-  return { parent: built.stdout.trim(), child: childPath };
+    `${name}-parent`,
+  );
+  return { parent, child: childPath };
 }
 
 /** Every file the daemon has staged, so a refusal can be checked to have
