@@ -37,8 +37,8 @@ import {
   requireBakedRunnerSource,
 } from "@odu/execution/coordinator/runnerFlake";
 import { oduSelfArgv } from "@odu/execution/coordinator/spawn";
+import type { Caller } from "@odu/service/caller";
 import type {
-  Caller,
   VenueHoldOutcome,
   VenueHoldResult,
   VenueReleaseResult,

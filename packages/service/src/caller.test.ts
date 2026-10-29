@@ -25,7 +25,7 @@ import {
   oduServiceSurface,
   type OduServiceClient,
 } from "@odu/service-client/surface";
-import type { Caller } from "./ports";
+import type { Caller } from "./caller";
 import { createOduService } from "./service";
 import {
   makeWorld,
@@ -62,15 +62,11 @@ function serve(ports: RecordingPorts) {
   return { face, close: () => built.close() };
 }
 
-/** Run a procedure and keep success and refusal apart, the way a face does: the
- *  stubs refuse several of these verbs, and a refusal is still proof the port
- *  was reached with a caller. */
-function settle<A>(
-  effect: Effect.Effect<A, unknown>,
-): Promise<{ _tag: "Success" } | { _tag: "Failure" }> {
-  return Effect.runPromise(Effect.result(effect)).then((outcome) => ({
-    _tag: outcome._tag,
-  }));
+/** A procedure whose outcome this suite does not care about — only that it
+ *  reached its port. The stubs refuse several of these verbs on purpose, and a
+ *  refusal is still proof the caller was carried there. */
+function asked<A>(effect: Effect.Effect<A, unknown>): Promise<unknown> {
+  return Effect.runPromise(Effect.result(effect));
 }
 
 /** The field, only when the caller sent one — an explicit `undefined` would be
@@ -109,8 +105,8 @@ describe("the caller is assembled once per call", () => {
       const { face, close } = serve(ports);
       try {
         const field = sent(reading.hostsFile);
-        const [start, probe, hold, release, protect] = await Promise.all([
-          settle(
+        await Promise.all([
+          asked(
             face.surface.run.start({
               checkout: CHECKOUT,
               expectedSha: HEAD,
@@ -118,8 +114,8 @@ describe("the caller is assembled once per call", () => {
               ...field,
             }),
           ),
-          settle(face.surface.venue.probe({ platforms: [], ...field })),
-          settle(
+          asked(face.surface.venue.probe({ platforms: [], ...field })),
+          asked(
             face.surface.venue.hold({
               checkout: CHECKOUT,
               platforms: [PLATFORM],
@@ -127,7 +123,7 @@ describe("the caller is assembled once per call", () => {
               ...field,
             }),
           ),
-          settle(
+          asked(
             face.surface.venue.release({
               checkout: CHECKOUT,
               platforms: [],
@@ -135,7 +131,7 @@ describe("the caller is assembled once per call", () => {
               ...field,
             }),
           ),
-          settle(
+          asked(
             face.surface.protect.apply({
               checkout: CHECKOUT,
               platforms: [PLATFORM],
@@ -145,15 +141,14 @@ describe("the caller is assembled once per call", () => {
             }),
           ),
         ]);
-        // The verbs are allowed to refuse — a stub holds nothing and writes no
-        // ruleset — but each must have REACHED its port with the caller.
-        expect([start, probe, hold, release, protect].map((r) => r._tag)).toEqual([
-          "Success",
-          "Failure",
-          "Failure",
-          "Success",
-          "Failure",
-        ]);
+        // THE claim: one recorded request per port, each carrying the caller.
+        // What the stubs ANSWERED is their own business — asserting a pattern
+        // of successes and refusals here would be testing the stubs.
+        expect(ports.launches).toHaveLength(1);
+        expect(ports.probes).toHaveLength(1);
+        expect(ports.holds).toHaveLength(1);
+        expect(ports.releases).toHaveLength(1);
+        expect(ports.protects).toHaveLength(1);
         expect(ports.launches[0]?.caller).toEqual(reading.expected);
         expect(ports.probes[0]?.caller).toEqual(reading.expected);
         expect(ports.holds[0]?.caller).toEqual(reading.expected);

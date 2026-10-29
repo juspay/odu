@@ -41,7 +41,8 @@ import {
   type StartReceipt,
 } from "@odu/service-client/surface";
 import { Effect } from "effect";
-import { callerOf, type CheckoutProbe, type RunLauncher } from "./ports";
+import { callerOf } from "./caller";
+import type { CheckoutProbe, RunLauncher } from "./ports";
 import {
   claimReceipt,
   completeReceipt,

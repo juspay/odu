@@ -20,8 +20,7 @@ import {
   type ServeSurfaceAppOptions,
 } from "@kolu/surface-app/serve";
 
-type ServeOptions = ServeSurfaceAppOptions;
-type ServeRoutes = NonNullable<ServeOptions["routes"]>;
+type ServeRoutes = NonNullable<ServeSurfaceAppOptions["routes"]>;
 
 /** The parts a listener is built from. Each is supplied by the composition
  *  root; nothing here reads an environment or spawns anything. */
@@ -48,14 +47,14 @@ export interface ServingParts {
 }
 
 /** The shell's fixed identity: what every odu board installs as. */
-const MANIFEST: NonNullable<ServeOptions["manifest"]> = {
+const MANIFEST: NonNullable<ServeSurfaceAppOptions["manifest"]> = {
   name: "odu",
   themeColor: "#1f6feb",
   icons: [],
 };
 
 /** The options `serveSurfaceApp` takes, from the parts above. */
-export function servingOptions(parts: ServingParts): ServeOptions {
+export function servingOptions(parts: ServingParts): ServeSurfaceAppOptions {
   return {
     live: parts.live,
     clientDist: parts.dist,

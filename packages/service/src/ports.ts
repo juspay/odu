@@ -23,57 +23,25 @@
  *     the engine; `@odu/cli` carries a renderer. A daemon that imported either
  *     would ship both to every browser tab's server.
  *
- * The shapes below are structurally the ones `@odu/execution` already
- * publishes (`LaunchRequest`/`LaunchReceipt` on `coordinator/launcher`,
+ * The shapes below are the ones `@odu/execution` publishes
+ * (`LaunchRequest`/`LaunchReceipt` on `coordinator/launcher`,
  * `RetryInput`/`RetryOutcome` on `coordinator/recovery`), spelled here so the
  * arrow points from the root inward. They are not re-inventions: both sides
  * name the same `RunScope` out of `@odu/run-history/schema`, so the compiler
- * proves the binding at the root rather than a comment claiming it.
+ * proves that much at the root rather than a comment claiming it.
+ *
+ * **The launch shape differs by exactly the caller.** This package names a
+ * {@link Caller}; the engine still carries the caller's `$ODU_HOSTS` as the flat
+ * `hostsFile` field it has always taken (see `coordinator/launcher`'s
+ * `coordinatorEnv`). Neither package may name the other's type, so the root is
+ * the one place both are in scope: `webPorts.ts` strips the `Caller` and hands the
+ * engine its own field. That adaptation is the binding — a structural equality
+ * would be a second, silently drifting spelling of the same request.
  */
 
 import type { CatalogOptions } from "@odu/run-history/store";
 import type { RunScope } from "@odu/run-history/schema";
-
-// ── who is asking ───────────────────────────────────────────────────────────
-
-/**
- * WHO the service is doing this for, as far as the work is concerned.
- *
- * The service is a per-user singleton, so its own environment is a fact about
- * the shell that started it — never about the person asking for this run. The
- * one such fact today is `$ODU_HOSTS`: the inventory a launch resolves, the
- * venue verbs probe and hold, and an unsliced protect derives its platform set
- * from. It used to travel as a loose `hostsFile` field on every port signature
- * (and on every adapter behind them), which is one edit per per-caller fact and
- * five places for the next one to be forgotten.
- *
- * It arrives as ONE value instead, assembled per call inside the service from
- * the verb input, and this is the only shape the ports see. Later per-caller
- * facts — a principal, an org — join this type rather than every signature.
- *
- * **Not a wire type.** Verb inputs keep `hostsFile` exactly as they always
- * have: the three readings (a path, `""` for "my shell has none", absent for
- * "I have no shell") are the contract the docs and agents already speak, and
- * {@link callerOf} is where that contract becomes this object.
- */
-export interface Caller {
-  /** The CALLER's `$ODU_HOSTS`, or `null` when the caller expressed nothing. */
-  readonly hostsFile: string | null;
-}
-
-/**
- * Assemble the caller from a verb input.
- *
- * The three readings are kept, not flattened: absent becomes `null` (use the
- * service's own configuration), `""` stays `""` (the caller's shell had none),
- * and a path stays a path. The first two mean opposite things downstream, which
- * is why this is `?? null` and not `?? ""`.
- */
-export function callerOf(input: {
-  readonly hostsFile?: string | undefined;
-}): Caller {
-  return { hostsFile: input.hostsFile ?? null };
-}
+import type { Caller } from "./caller";
 
 // ── starting a run ──────────────────────────────────────────────────────────
 

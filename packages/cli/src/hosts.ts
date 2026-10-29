@@ -20,8 +20,8 @@ import {
   laneRunnerDrvPath,
   requireBakedRunnerSource,
 } from "@odu/execution/coordinator/runnerFlake";
+import type { Caller } from "@odu/service/caller";
 import type {
-  Caller,
   VenueProbeOutcome,
   VenueRowFacts,
 } from "@odu/service/ports";
