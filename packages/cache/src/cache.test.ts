@@ -8,12 +8,14 @@
  * not be one, and the two numbers that turn a typo into data loss.
  */
 
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { base32 } from "./narinfo";
 import { type Cache, createCache } from "./cache";
-import { FakeStore } from "../test/fakeStore";
+import { FakeStore, hashOf } from "../test/fakeStore";
 
 const ROOT = "root-token";
 const NOW = 1_700_000_000_000;
@@ -39,6 +41,47 @@ function cacheWith(rootToken: string | null): Cache {
     now: () => NOW,
   });
 }
+
+/** A body for `acceptNarinfo`, which takes a stream because a real one does. */
+const stream = (text: string): ReadableStream<Uint8Array> =>
+  new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(text));
+      controller.close();
+    },
+  });
+
+/** Bytes, and the NAR hash a narinfo has to claim for them. */
+function nar(text: string): { bytes: Uint8Array; narHash: string } {
+  const bytes = new TextEncoder().encode(text);
+  return {
+    bytes,
+    narHash: `sha256:${base32(createHash("sha256").update(bytes).digest())}`,
+  };
+}
+
+async function putNar(cache: Cache, bucket: string, payload: { bytes: Uint8Array; narHash: string }): Promise<void> {
+  const row = cache.bucket(bucket);
+  if (row === null) throw new Error(`no bucket ${bucket}`);
+  const upload = await cache.beginUpload(row, `${payload.narHash.slice("sha256:".length)}.nar.zst`);
+  await upload.write(payload.bytes);
+  await upload.commit();
+}
+
+const narinfoText = (
+  storePath: string,
+  payload: { narHash: string },
+  references: readonly string[] = [],
+): string =>
+  [
+    `StorePath: ${storePath}`,
+    `URL: nar/${payload.narHash.slice("sha256:".length)}.nar.zst`,
+    "Compression: none",
+    `NarHash: ${payload.narHash}`,
+    `NarSize: 1`,
+    `References: ${references.map((path) => path.slice("/nix/store/".length)).join(" ")}`,
+    "",
+  ].join("\n");
 
 const createInput = {
   rootToken: ROOT,
@@ -143,6 +186,20 @@ describe("describe", () => {
       ok: false,
       code: "unknown_bucket",
     });
+    cache.close();
+  });
+
+  it("answers the substituter's identity and nothing about the operator's cache", async () => {
+    // It takes no credential, so it must not report the object count, the
+    // bytes, the retention or the upstream key names — those are what
+    // `CacheBucket` is for, and `CacheBucket` is the root-token view.
+    const cache = cacheWith(ROOT);
+    await cache.admin.create({ ...createInput, upstreamKeys: ["cache.nixos.org-1"] });
+    const described = await cache.admin.describe({ bucket: "main" });
+    expect(described).toMatchObject({ ok: true });
+    if (described.ok) {
+      expect(Object.keys(described.value).sort()).toEqual(["name", "public", "publicKey"]);
+    }
     cache.close();
   });
 });
@@ -257,6 +314,132 @@ describe("stats", () => {
   });
 });
 
+describe("a restart", () => {
+  it("attempts a narinfo recovered from disk on the next write", async () => {
+    // The uploads that survive a restart have no seed of their own: `drain`
+    // only tries entries its seed names, so without the recovered seed they
+    // would sit until the sweep deleted them an hour later.
+    const first = cacheWith(ROOT);
+    await first.admin.create(createInput);
+    const child = "/nix/store/cccccccccccccccccccccccccccccccc-child";
+    const parent = "/nix/store/pppppppppppppppppppppppppppppppp-parent";
+    const childPayload = nar("child bytes");
+    const parentPayload = nar("parent bytes");
+    store.add({ storePath: child, narHash: childPayload.narHash, narSize: 1, references: [] }, false);
+    store.add(
+      { storePath: parent, narHash: parentPayload.narHash, narSize: 1, references: [child] },
+      false,
+    );
+
+    // The parent arrives first, and cannot import: its reference is not valid.
+    await putNar(first, "main", parentPayload);
+    const early = await first.acceptNarinfo(
+      first.bucket("main") as never,
+      hashOf(parent),
+      stream(narinfoText(parent, parentPayload, [child])),
+    );
+    expect(early).toMatchObject({ ok: true, status: 202 });
+    first.close();
+
+    // A NEW process over the same state root, which has never seen either.
+    const second = createCache({
+      stateRoot: scratch,
+      rootToken: ROOT,
+      store: null,
+      blob: store,
+      now: () => NOW,
+    });
+    await putNar(second, "main", childPayload);
+    const late = await second.acceptNarinfo(
+      second.bucket("main") as never,
+      hashOf(child),
+      stream(narinfoText(child, childPayload)),
+    );
+    expect(late).toMatchObject({ ok: true, status: 200 });
+
+    const stats = await second.admin.stats({ rootToken: ROOT });
+    // Two: the child this call recorded, and the parent the recovered seed
+    // unblocked.
+    expect(stats).toMatchObject({ ok: true, value: { objects: 2 } });
+    second.close();
+  });
+});
+
+describe("gc and pin", () => {
+  it("does not let a collection interleave with a pin that was already running", async () => {
+    // THE WINDOW: `planGc` and the delete are separate awaits. A pin issued
+    // while a collection is in flight must either be in the plan or win
+    // outright — never be promised a path the delete has already taken.
+    const cache = cacheWith(ROOT);
+    await cache.admin.create({ ...createInput, retentionDays: 0 });
+    const target = "/nix/store/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-kept";
+    const payload = nar("kept bytes");
+    store.add({ storePath: target, narHash: payload.narHash, narSize: 1, references: [] }, false);
+    await putNar(cache, "main", payload);
+    const recorded = await cache.acceptNarinfo(
+      cache.bucket("main") as never,
+      hashOf(target),
+      stream(narinfoText(target, payload)),
+    );
+    expect(recorded).toMatchObject({ ok: true, status: 200 });
+
+    // A pin whose closure query is slow, started BEFORE the collection.
+    const gate = Promise.withResolvers<void>();
+    const closure = store.closure.bind(store);
+    store.closure = async (paths) => {
+      await gate.promise;
+      return closure(paths);
+    };
+
+    const pinning = cache.admin.pin({ rootToken: ROOT, bucket: "main", name: "keep", paths: [target] });
+    const collecting = cache.admin.gc({ rootToken: ROOT, bucket: null });
+    gate.resolve();
+    const [pinned, collected] = await Promise.all([pinning, collecting]);
+
+    expect(pinned).toMatchObject({ ok: true });
+    expect(collected).toMatchObject({ ok: true });
+    expect(store.deleted).not.toContain(target);
+    cache.close();
+  });
+});
+
+describe("the wall behind the route", () => {
+  it("refuses a NAR name instead of sanitizing it", async () => {
+    // A sanitizer turns `../..` into a plausible file name, and a caller that
+    // skipped the route would never learn it had.
+    const cache = cacheWith(ROOT);
+    await cache.admin.create(createInput);
+    const bucket = cache.bucket("main");
+    expect(bucket).not.toBeNull();
+    if (bucket === null) return;
+    for (const name of ["../escape.nar.zst", "a/b.nar.zst", ".hidden"]) {
+      await expect(cache.beginUpload(bucket, name)).rejects.toThrow(/not a NAR file name/);
+    }
+    cache.close();
+  });
+});
+
+describe("missing", () => {
+  it("does not read a signature without a colon as an upstream key", async () => {
+    // `sig.slice(0, sig.indexOf(":"))` answers -1 with the whole string minus
+    // its last character — a key name that matches nothing, which silently
+    // defeats the filter.
+    const cache = cacheWith(ROOT);
+    await cache.admin.create({ ...createInput, upstreamKeys: ["cache.nixos.org-1"] });
+    const bucket = cache.bucket("main");
+    if (bucket === null) throw new Error("no bucket");
+    const answer = cache.missing(bucket, [
+      { path: "/nix/store/11111111111111111111111111111111-a", sigs: ["no-colon-here"] },
+      { path: "/nix/store/22222222222222222222222222222222-b", sigs: ["cache.nixos.org-1:AAAA"] },
+    ]);
+    expect(answer).toEqual({
+      missing: ["/nix/store/11111111111111111111111111111111-a"],
+      skipped: ["/nix/store/22222222222222222222222222222222-b"],
+    });
+    cache.close();
+  });
+});
+
 describe("file modes", () => {
   it("keeps the database and its directory private", () => {
     // The database holds every bucket's ed25519 SECRET key and every token
@@ -265,5 +448,17 @@ describe("file modes", () => {
     cache.close();
     expect(statSync(join(scratch, "cache")).mode & 0o777).toBe(0o700);
     expect(statSync(join(scratch, "cache", "cache.sqlite")).mode & 0o777).toBe(0o600);
+  });
+
+  it("closes down the WAL the FIRST run creates, not the next one", async () => {
+    // `-wal` appears on the first write, so a chmod issued right after `new
+    // Database` finds nothing and swallows the error — and the bucket's secret
+    // key sits in a world-readable WAL until the process restarts.
+    const cache = cacheWith(ROOT);
+    await cache.admin.create(createInput);
+    const wal = join(scratch, "cache", "cache.sqlite-wal");
+    expect(existsSync(wal)).toBe(true);
+    expect(statSync(wal).mode & 0o777).toBe(0o600);
+    cache.close();
   });
 });

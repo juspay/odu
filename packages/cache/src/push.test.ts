@@ -71,6 +71,9 @@ interface Server {
   narStatus: Map<string, number>;
   /** Store paths whose narinfo answers 202 the first time it is asked. */
   deferOnce: Set<string>;
+  /** Answer a narinfo PUT that carries no preceding NAR with a 400 saying the
+   *  bytes are gone — what a restarted server says. */
+  narinfoOnlyRefusal: boolean;
   missing: string[];
   skipped: string[];
   stop: () => void;
@@ -83,6 +86,7 @@ function startServer(): Server {
     failNar: new Map(),
     narStatus: new Map(),
     deferOnce: new Set(),
+    narinfoOnlyRefusal: false,
     missing: [LIBC, GLIBC, HELLO],
     skipped: [],
     stop: () => {},
@@ -117,6 +121,12 @@ function startServer(): Server {
         const hash = url.pathname.slice(url.pathname.lastIndexOf("/") + 1, -".narinfo".length);
         if (state.deferOnce.delete(hash)) {
           return new Response("waiting on a reference", { status: 202 });
+        }
+        if (state.narinfoOnlyRefusal) {
+          state.narinfoOnlyRefusal = false;
+          return new Response("the narinfo names nar/x.nar.zst, which was never uploaded", {
+            status: 400,
+          });
         }
         return new Response(null, { status: 200 });
       }
@@ -259,6 +269,36 @@ describe("pushing a closure", () => {
         (seen) => seen.method === "PUT" && seen.path.endsWith(".narinfo"),
       );
       expect(infoPuts).toHaveLength(2);
+      // The repeat is the NARINFO alone: the NAR is still staged on the
+      // server, and re-streaming it to say "try again" is the cost this avoids.
+      const narPuts = server.seen.filter(
+        (seen) => seen.method === "PUT" && seen.path.endsWith(".nar.zst"),
+      );
+      expect(narPuts).toHaveLength(1);
+    } finally {
+      server.stop();
+    }
+  });
+
+  it("sends the pair again when the deferred retry finds the bytes gone", async () => {
+    const server = startServer();
+    try {
+      server.missing = [LIBC];
+      server.deferOnce.add(storePathHash(LIBC));
+      // The narinfo-only repeat is refused as "never uploaded", which is what a
+      // restarted or swept server says — so the client falls back to the pair.
+      server.narinfoOnlyRefusal = true;
+      const summary = await pushToCache({
+        bucket: `${server.origin}/main`,
+        paths: ["."],
+        env: envOf({ ODU_CACHE_TOKEN: "t" }),
+        platform: PLATFORM,
+      });
+      expect(summary).toMatchObject({ pushed: 1, failed: 0 });
+      const narPuts = server.seen.filter(
+        (seen) => seen.method === "PUT" && seen.path.endsWith(".nar.zst"),
+      );
+      expect(narPuts).toHaveLength(2);
     } finally {
       server.stop();
     }

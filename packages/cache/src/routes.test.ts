@@ -555,9 +555,11 @@ describe("uploading", () => {
     await h.dispose();
   });
 
-  it("keeps one NAR file for two paths whose content is identical", async () => {
-    // Two store paths, one NAR: the second upload must not truncate the first,
-    // and the first import must not take the file the second still needs.
+  it("records twins whose NARs both land before either narinfo does", async () => {
+    // THE INTERLEAVING A PUSH PRODUCES: one wave of four sends NAR A, NAR B,
+    // narinfo A, narinfo B. Two store paths with identical content share one
+    // NAR name, so recording A takes the file — and B's narinfo must still be
+    // accepted, proved by the object A wrote and rebuilt from it.
     const h = await harness(true);
     const one = "/nix/store/66666666666666666666666666666666-one";
     const two = "/nix/store/77777777777777777777777777777777-two";
@@ -565,8 +567,28 @@ describe("uploading", () => {
     h.store.add({ storePath: one, narHash: payload.narHash, narSize: 1, references: [] }, false);
     h.store.add({ storePath: two, narHash: payload.narHash, narSize: 1, references: [] }, false);
 
-    expect((await upload(h.fetch, h.tokens.write, one, payload)).status).toBe(200);
-    expect((await upload(h.fetch, h.tokens.write, two, payload)).status).toBe(200);
+    const name = `${payload.narHash.replace(/^sha256:/, "")}.nar.zst`;
+    for (const path of [one, two]) {
+      const put = await h.fetch(`/main/nar/${name}`, {
+        ...bearer(h.tokens.write),
+        method: "PUT",
+        body: body(payload.bytes),
+      });
+      expect({ path, status: put.status }).toEqual({ path, status: 200 });
+    }
+    // ONE staged NAR, not two: both uploads named the same file.
+    expect(stagedFiles().filter((file) => file.includes("/nar/"))).toHaveLength(1);
+
+    const narinfo = (storePath: string): string =>
+      `StorePath: ${storePath}\nURL: nar/${name}\nCompression: none\nNarHash: ${payload.narHash}\nNarSize: 1\nReferences: \n`;
+    for (const path of [one, two]) {
+      const put = await h.fetch(`/main/${hashOf(path)}.narinfo`, {
+        ...bearer(h.tokens.write),
+        method: "PUT",
+        body: narinfo(path),
+      });
+      expect({ path, status: put.status }).toEqual({ path, status: 200 });
+    }
     expect((await h.fetch(`/main/${hashOf(one)}.narinfo`)).status).toBe(200);
     expect((await h.fetch(`/main/${hashOf(two)}.narinfo`)).status).toBe(200);
     await h.dispose();
