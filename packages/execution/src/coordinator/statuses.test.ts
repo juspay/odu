@@ -1,15 +1,55 @@
 import { afterEach, describe, expect, it, jest } from "bun:test";
 import { EMPTY_POSTING } from "@odu/run-client/surface";
+import type {
+  Forge,
+  ForgeResult,
+  RemoteStatus,
+  StatusPayload,
+} from "../common/forge";
 import {
   fetchUrlFor,
   interruptStatus,
   parseGithubRemote,
   postingEqual,
   StatusPoster,
+  type StatusPosterOptions,
   statusFor,
-  type GhSendResult,
-  type StatusPayload,
 } from "./statuses";
+
+/**
+ * The Forge a statuses suite needs: the two status operations, and nothing
+ * else. The other three refuse rather than answering a plausible empty result,
+ * so a suite that reached one by accident says so.
+ */
+function forgeOf(parts: {
+  send?: (payload: StatusPayload) => Promise<ForgeResult>;
+  list?: () => Promise<readonly RemoteStatus[]>;
+} = {}): Forge {
+  return {
+    postStatus: async (request) =>
+      parts.send === undefined ? { ok: true } : parts.send(request.payload),
+    listStatuses: async () =>
+      parts.list === undefined
+        ? { ok: true, value: [] }
+        : { ok: true, value: await parts.list() },
+    defaultBranch: async () => ({ ok: false, error: "not a statuses concern" }),
+    readRuleset: async () => ({ ok: false, error: "not a statuses concern" }),
+    writeRuleset: async () => ({ ok: false, error: "not a statuses concern" }),
+  };
+}
+
+/** A poster whose Forge is built from the status fakes under test. The suite
+ *  says which status operation it is faking; the poster still receives a
+ *  Forge, which is the only seam it knows. */
+function makePoster(
+  opts: Omit<StatusPosterOptions, "forge"> & {
+    send?: (payload: StatusPayload) => Promise<ForgeResult>;
+    list?: () => Promise<readonly RemoteStatus[]>;
+  },
+): StatusPoster {
+  const { send, list, ...rest } = opts;
+  return new StatusPoster({ ...rest, forge: forgeOf({ send, list }) });
+}
 
 /** bun:test's fake timers advance synchronously — there is no
  *  `advanceTimersByTimeAsync`. Drain the microtask queue on both sides of the
@@ -140,20 +180,20 @@ describe("StatusPoster — honest dedup + retry", () => {
 
   it("records confirmed only after a successful send (fails N times then succeeds)", async () => {
     let calls = 0;
-    const sendGh = jest.fn(async (): Promise<GhSendResult> => {
+    const sendGh = jest.fn(async (): Promise<ForgeResult> => {
       calls += 1;
       if (calls < 3) return { ok: false, error: "403 rate limited" };
       return { ok: true };
     });
     const healthSnaps: number[] = [];
-    const poster = new StatusPoster({
+    const poster = makePoster({
       owner: "o",
       repo: "r",
       sha: "abc",
       enabled: true,
       onLine: () => {},
       onHealth: (h) => healthSnaps.push(h.owed.length),
-      sendGh,
+      send: sendGh,
       debounceMs: 0,
       backoffBaseMs: 1,
       backoffCapMs: 1,
@@ -179,17 +219,17 @@ describe("StatusPoster — honest dedup + retry", () => {
   });
 
   it("leaves owed contexts unconfirmed when send never succeeds", async () => {
-    const sendGh = jest.fn(async (): Promise<GhSendResult> => ({
+    const sendGh = jest.fn(async (): Promise<ForgeResult> => ({
       ok: false,
       error: "API down",
     }));
-    const poster = new StatusPoster({
+    const poster = makePoster({
       owner: "o",
       repo: "r",
       sha: "abc",
       enabled: true,
       onLine: () => {},
-      sendGh,
+      send: sendGh,
       debounceMs: 0,
       backoffBaseMs: 60_000, // don't reschedule during the test window
       backoffCapMs: 60_000,
@@ -214,14 +254,14 @@ describe("StatusPoster — honest dedup + retry", () => {
   });
 
   it("pendingContexts lists contexts still desired/confirmed as pending", async () => {
-    const sendGh = jest.fn(async (): Promise<GhSendResult> => ({ ok: true }));
-    const poster = new StatusPoster({
+    const sendGh = jest.fn(async (): Promise<ForgeResult> => ({ ok: true }));
+    const poster = makePoster({
       owner: "o",
       repo: "r",
       sha: "abc",
       enabled: true,
       onLine: () => {},
-      sendGh,
+      send: sendGh,
       debounceMs: 0,
     });
     poster.post(
@@ -241,16 +281,16 @@ describe("StatusPoster — honest dedup + retry", () => {
   });
 
   it("pendingContexts ignores seeded foreign pending contexts", async () => {
-    const sendGh = jest.fn(async (): Promise<GhSendResult> => ({ ok: true }));
-    const poster = new StatusPoster({
+    const sendGh = jest.fn(async (): Promise<ForgeResult> => ({ ok: true }));
+    const poster = makePoster({
       owner: "o",
       repo: "r",
       sha: "abc",
       enabled: true,
       onLine: () => {},
-      sendGh,
+      send: sendGh,
       debounceMs: 0,
-      listStatuses: async () => [
+      list: async () => [
         {
           context: "github-actions/ci",
           state: "pending",
@@ -280,16 +320,16 @@ describe("StatusPoster — honest dedup + retry", () => {
   });
 
   it("seed skips remote states that are not valid GitHub states", async () => {
-    const sendGh = jest.fn(async (): Promise<GhSendResult> => ({ ok: true }));
-    const poster = new StatusPoster({
+    const sendGh = jest.fn(async (): Promise<ForgeResult> => ({ ok: true }));
+    const poster = makePoster({
       owner: "o",
       repo: "r",
       sha: "abc",
       enabled: true,
       onLine: () => {},
-      sendGh,
+      send: sendGh,
       debounceMs: 0,
-      listStatuses: async () => [
+      list: async () => [
         {
           context: "ci::unit@x86_64-linux",
           state: "unexpected",
@@ -311,16 +351,16 @@ describe("StatusPoster — honest dedup + retry", () => {
 
   it("records confirmed even when desired moves mid-flight", async () => {
     jest.useFakeTimers();
-    let release: ((r: GhSendResult) => void) | undefined;
+    let release: ((r: ForgeResult) => void) | undefined;
     const sent: string[] = [];
-    const poster = new StatusPoster({
+    const poster = makePoster({
       owner: "o",
       repo: "r",
       sha: "abc",
       enabled: true,
       onLine: () => {},
       debounceMs: 0,
-      sendGh: (p) => {
+      send: (p) => {
         sent.push(p.state);
         if (p.state === "pending") {
           return new Promise((resolve) => {
@@ -354,7 +394,7 @@ describe("StatusPoster — honest dedup + retry", () => {
   it("times out a hung send and does not block later posts", async () => {
     jest.useFakeTimers();
     const order: string[] = [];
-    const poster = new StatusPoster({
+    const poster = makePoster({
       owner: "o",
       repo: "r",
       sha: "abc",
@@ -363,7 +403,7 @@ describe("StatusPoster — honest dedup + retry", () => {
       debounceMs: 0,
       timeoutMs: 50,
       backoffBaseMs: 60_000,
-      sendGh: (p) => {
+      send: (p) => {
         if (p.context === "hang") {
           // Never resolves — the poster's timeout must free the queue.
           return new Promise(() => {});
@@ -385,16 +425,16 @@ describe("StatusPoster — honest dedup + retry", () => {
   });
 
   it("seed makes an identical post a no-op", async () => {
-    const sendGh = jest.fn(async (): Promise<GhSendResult> => ({ ok: true }));
-    const poster = new StatusPoster({
+    const sendGh = jest.fn(async (): Promise<ForgeResult> => ({ ok: true }));
+    const poster = makePoster({
       owner: "o",
       repo: "r",
       sha: "abc",
       enabled: true,
       onLine: () => {},
-      sendGh,
+      send: sendGh,
       debounceMs: 0,
-      listStatuses: async () => [
+      list: async () => [
         {
           context: "ci::unit@x86_64-linux",
           state: "success",
@@ -430,19 +470,19 @@ describe("StatusPoster — honest dedup + retry", () => {
       state: "success",
       description: "Succeeded (0s): .ci/x/y.log",
     });
-    const poster = new StatusPoster({
+    const poster = makePoster({
       owner: "o",
       repo: "r",
       sha: "abc",
       enabled: true,
       onLine: () => {},
       debounceMs: 20,
-      sendGh: async (p) => {
+      send: async (p) => {
         sent.push(p);
         return { ok: true };
       },
       // The previous run on this same sha left the context green.
-      listStatuses: async () => [
+      list: async () => [
         { context: ctx, state: "success", description: done.description },
       ],
     });
@@ -484,14 +524,14 @@ describe("StatusPoster — honest dedup + retry", () => {
       release = r;
     });
     let gateFirst = true;
-    const poster = new StatusPoster({
+    const poster = makePoster({
       owner: "o",
       repo: "r",
       sha: "abc",
       enabled: true,
       onLine: () => {},
       debounceMs: 0,
-      sendGh: async (p) => {
+      send: async (p) => {
         sent.push(p);
         if (gateFirst) {
           gateFirst = false;
@@ -501,7 +541,7 @@ describe("StatusPoster — honest dedup + retry", () => {
       },
       // The previous run on this sha left the context green with this exact
       // description — a cached recipe reproduces its duration.
-      listStatuses: async () => [
+      list: async () => [
         { context: ctx, state: "success", description: done.description },
       ],
     });
@@ -530,18 +570,18 @@ describe("StatusPoster — honest dedup + retry", () => {
     const sent: string[] = [];
     const ctx = "ci::unit@x86_64-linux";
     const seeded = "Succeeded (1s): .ci/x/y.log";
-    const poster = new StatusPoster({
+    const poster = makePoster({
       owner: "o",
       repo: "r",
       sha: "abc",
       enabled: true,
       onLine: () => {},
       debounceMs: 20,
-      sendGh: async (p) => {
+      send: async (p) => {
         sent.push(p.state);
         return { ok: true };
       },
-      listStatuses: async () => [
+      list: async () => [
         { context: ctx, state: "success", description: seeded },
       ],
     });
@@ -563,14 +603,14 @@ describe("StatusPoster — honest dedup + retry", () => {
     const gate = new Promise<void>((r) => {
       release = r;
     });
-    const poster = new StatusPoster({
+    const poster = makePoster({
       owner: "o",
       repo: "r",
       sha: "abc",
       enabled: true,
       onLine: () => {},
       debounceMs: 0,
-      sendGh: async () => {
+      send: async () => {
         await gate;
         return { ok: true };
       },
@@ -585,14 +625,14 @@ describe("StatusPoster — honest dedup + retry", () => {
   it("coalesces rapid flips to the latest desired state", async () => {
     jest.useFakeTimers();
     const sent: string[] = [];
-    const poster = new StatusPoster({
+    const poster = makePoster({
       owner: "o",
       repo: "r",
       sha: "abc",
       enabled: true,
       onLine: () => {},
       debounceMs: 20,
-      sendGh: async (p) => {
+      send: async (p) => {
         sent.push(`${p.state}:${p.description}`);
         return { ok: true };
       },
@@ -615,18 +655,18 @@ describe("StatusPoster — honest dedup + retry", () => {
   it("post(confirmed) does not drop a different desired still in flight", async () => {
     jest.useFakeTimers();
     const sent: string[] = [];
-    const poster = new StatusPoster({
+    const poster = makePoster({
       owner: "o",
       repo: "r",
       sha: "abc",
       enabled: true,
       onLine: () => {},
       debounceMs: 20,
-      sendGh: async (p) => {
+      send: async (p) => {
         sent.push(p.state);
         return { ok: true };
       },
-      listStatuses: async () => [
+      list: async () => [
         {
           context: "ci::unit@x86_64-linux",
           state: "success",
@@ -657,14 +697,14 @@ describe("StatusPoster — honest dedup + retry", () => {
   it("finalize flushes a pending debounce and attempts the payload", async () => {
     jest.useFakeTimers();
     const sent: string[] = [];
-    const poster = new StatusPoster({
+    const poster = makePoster({
       owner: "o",
       repo: "r",
       sha: "abc",
       enabled: true,
       onLine: () => {},
       debounceMs: 5_000,
-      sendGh: async (p) => {
+      send: async (p) => {
         sent.push(p.context);
         return { ok: true };
       },
@@ -679,15 +719,15 @@ describe("StatusPoster — honest dedup + retry", () => {
 
   it("finalize attempts a post that arrives mid-drain", async () => {
     const sent: string[] = [];
-    let resolveHang: ((r: GhSendResult) => void) | undefined;
-    const poster = new StatusPoster({
+    let resolveHang: ((r: ForgeResult) => void) | undefined;
+    const poster = makePoster({
       owner: "o",
       repo: "r",
       sha: "abc",
       enabled: true,
       onLine: () => {},
       debounceMs: 0,
-      sendGh: (p) => {
+      send: (p) => {
         if (p.context === "first") {
           return new Promise((resolve) => {
             resolveHang = resolve;

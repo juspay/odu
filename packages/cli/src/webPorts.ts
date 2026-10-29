@@ -30,6 +30,7 @@ import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dialRun } from "@odu/run-client/dial";
 import { errorMessage, firstFrame, runUnary } from "@odu/execution/common/effectEdge";
+import { ghForge } from "@odu/execution/common/forge";
 import { packagedLauncher } from "@odu/execution/coordinator/launcher";
 import {
   isSameRun,
@@ -106,8 +107,18 @@ export function probeCheckout(
  *  `@odu/service` does not. */
 export function webPorts(): ServicePorts {
   const launcher = packagedLauncher();
+  // ONE forge for this service's life, and the SAME implementation the
+  // coordinator constructs for its statuses. Two constructions of `gh` in one
+  // product is two places a credential decision would have to be threaded
+  // through, which is exactly what the port exists to stop.
+  const forge = ghForge();
   return {
-    launch: launcher,
+    // The engine's `LaunchRequest` still spells the caller's inventory as the
+    // flat `hostsFile` it has always taken; the port hands it a Caller. The
+    // adaptation belongs HERE, at the root, because `@odu/service` cannot name
+    // the engine's type and `@odu/execution` cannot name the service's.
+    launch: ({ caller, ...request }) =>
+      launcher({ ...request, hostsFile: caller.hostsFile }),
     retry: (request) =>
       retryRecordedRun({
         runId: request.runId,
@@ -126,13 +137,13 @@ export function webPorts(): ServicePorts {
     // The five that made `odu hosts`, `odu lease`, `odu release`, `odu dump`,
     // `odu graph` and `odu protect` clients of the shared authority rather than
     // six programs doing their own work in whatever process the operator typed
-    // in. Bound by reference, not wrapped: a lambda here would be a second
-    // place their contract could drift.
+    // in. Bound by reference where the shape allows it: a lambda here would be
+    // a second place their contract could drift.
     pipeline: readPipeline,
     probeVenues,
     holdVenue,
     releaseVenue,
-    protect: protectBranch,
+    protect: (request) => protectBranch(request, forge),
   };
 }
 

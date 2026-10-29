@@ -15,19 +15,30 @@
  */
 
 import { applyProtection } from "./protect";
+import type { Forge } from "@odu/execution/common/forge";
 import type { RulesetWriter } from "@odu/service/ports";
 
-/** Set a branch's required status checks to exactly the contexts odu posts. */
-export const protectBranch: RulesetWriter = (request) =>
-  applyProtection({
-    checkout: request.checkout,
-    // ABSENT, not `undefined`: `branch` absent means "resolve the repo's default
-    // branch through gh", and that is a different request from one naming a
-    // branch — spelling it `undefined` would read as the second in the shape of
-    // the first.
-    ...(request.branch === undefined ? {} : { branch: request.branch }),
-    platforms: request.platforms,
-    hostsFile: request.hostsFile,
-    dryRun: request.dryRun,
-    create: request.create,
-  });
+/** Set a branch's required status checks to exactly the contexts odu posts.
+ *  The forge is BOUND by the composition root (`./webPorts`) and handed in:
+ *  the engine's one implementation is the same one the coordinator posts
+ *  statuses through, and a second construction here would be a second
+ *  `$ODU_GH_BIN` seam to keep in step. */
+export const protectBranch: (
+  request: Parameters<RulesetWriter>[0],
+  forge: Forge,
+) => ReturnType<RulesetWriter> = (request, forge) =>
+  applyProtection(
+    {
+      checkout: request.checkout,
+      // ABSENT, not `undefined`: `branch` absent means "resolve the repo's
+      // default branch through the forge", and that is a different request from
+      // one naming a branch — spelling it `undefined` would read as the second
+      // in the shape of the first.
+      ...(request.branch === undefined ? {} : { branch: request.branch }),
+      platforms: request.platforms,
+      caller: request.caller,
+      dryRun: request.dryRun,
+      create: request.create,
+    },
+    forge,
+  );

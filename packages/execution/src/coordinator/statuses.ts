@@ -12,19 +12,18 @@
  * infrastructure death — justci's wording for that case was never observed
  * in the wild, so this is a decision, not parity.
  *
- * Posts go through `gh api` (the `$ODU_GH_BIN` override is baked to the
- * pinned gh in the nix wrapper) from the coordinator only — lane hosts never
- * see credentials. Posting is diff-driven off the fan-in state: after any
- * gap, the next snapshot re-derives exactly the transitions that were
- * missed.
+ * Posts go through the {@link Forge} port over `gh api` (the `$ODU_GH_BIN`
+ * override is baked to the pinned gh in the nix wrapper) from the coordinator
+ * only — lane hosts never see credentials. Posting is diff-driven off the
+ * fan-in state: after any gap, the next snapshot re-derives exactly the
+ * transitions that were missed.
  *
  * Dedup is confirm-then-record: `confirmed` updates only after a successful
- * `gh api`, so a failed send is re-derived and retried. Transient failures
- * retry with exponential backoff for the life of the run; the `gh` child is
- * killed after a timeout so one hung TCP can't wedge the post queue.
+ * `postStatus`, so a failed send is re-derived and retried. Transient failures
+ * retry with exponential backoff for the life of the run; the forge kills the
+ * `gh` child after a timeout so one hung TCP can't wedge the post queue.
  */
 
-import { spawn } from "node:child_process";
 import { logPathFor } from "@odu/run-client/nodeId";
 import {
   type GithubState,
@@ -35,9 +34,16 @@ import {
   STATUS_META,
 } from "@odu/run-client/surface";
 import { formatGoDuration } from "../common/duration";
-import { projectUnposted, type UnpostedEntry } from "@odu/run-history/legacy/record";
+import {
+  DEFAULT_GH_TIMEOUT_MS,
+  type Forge,
+  type ForgeResult,
+  type RemoteStatus,
+  type StatusPayload,
+} from "../common/forge";import { projectUnposted, type UnpostedEntry } from "@odu/run-history/legacy/record";
 
 export type { GithubState, OwedStatus, PostingHealth, UnpostedEntry };
+export type { RemoteStatus, StatusPayload };
 
 /** GitHub commit-status `state` values the statuses API accepts. */
 const GITHUB_STATES = new Set<string>([
@@ -53,17 +59,9 @@ function isGithubState(state: string): state is GithubState {
 
 /** Default debounce: rapid pending→failed→pending flips collapse to latest. */
 export const DEFAULT_DEBOUNCE_MS = 1_500;
-/** Kill a hung `gh api` so it can't wedge the serialized post queue. */
-export const DEFAULT_GH_TIMEOUT_MS = 30_000;
 /** First backoff after a failed send; doubles per attempt, capped. */
 export const DEFAULT_BACKOFF_BASE_MS = 5_000;
 export const DEFAULT_BACKOFF_CAP_MS = 60_000;
-
-export interface StatusPayload {
-  state: GithubState;
-  context: string;
-  description: string;
-}
 
 /** Pure structural equality for status payloads. */
 export function payloadEqual(a: StatusPayload, b: StatusPayload): boolean {
@@ -128,18 +126,6 @@ export function interruptStatus(
   };
 }
 
-/** Result of one `gh api` attempt. */
-export type GhSendResult =
-  | { ok: true }
-  | { ok: false; error: string };
-
-/** One remote status as returned by GET …/commits/{sha}/status. */
-export interface RemoteStatus {
-  context: string;
-  state: string;
-  description: string;
-}
-
 export interface StatusPosterOptions {
   owner: string;
   repo: string;
@@ -148,10 +134,10 @@ export interface StatusPosterOptions {
   onLine: (line: string) => void;
   /** Fired whenever posting health changes (owed set / last error / attempts). */
   onHealth?: (health: PostingHealth) => void;
-  /** Injected for tests; defaults to spawning `gh api` with a timeout. */
-  sendGh?: (payload: StatusPayload) => Promise<GhSendResult>;
-  /** Injected for tests; defaults to paginated GET …/statuses/{sha}. */
-  listStatuses?: () => Promise<RemoteStatus[]>;
+  /** WHERE statuses are posted. The coordinator constructs the one `ghForge`
+   *  here; a suite hands in a fake, which is why the poster has no `gh` of its
+   *  own. */
+  forge: Forge;
   debounceMs?: number;
   timeoutMs?: number;
   backoffBaseMs?: number;
@@ -296,14 +282,19 @@ export class StatusPoster {
   async seed(): Promise<void> {
     if (!this.opts.enabled) return;
     try {
-      const list =
-        this.opts.listStatuses !== undefined
-          ? await this.opts.listStatuses()
-          : await defaultListStatuses(this.opts);
+      const listed = await this.opts.forge.listStatuses({
+        owner: this.opts.owner,
+        repo: this.opts.repo,
+        sha: this.opts.sha,
+      });
+      // A failed seed is tolerated the way it always was — continuing with an
+      // empty `confirmed` costs a wave of re-posts, never a lost status — and
+      // the forge's sentence is what gets said.
+      if (!listed.ok) throw new Error(listed.error);
       // GitHub returns newest-first; keep the first sighting per context.
       const seen = new Set<string>();
       let seeded = 0;
-      for (const s of list) {
+      for (const s of listed.value) {
         if (s.context === "" || seen.has(s.context)) continue;
         seen.add(s.context);
         if (!isGithubState(s.state)) continue;
@@ -540,19 +531,22 @@ export class StatusPoster {
   }
 
   /**
-   * One send. Default `gh` path kills the child on timeout; injected `sendGh`
-   * still gets a hang-timeout so a stuck fake can't wedge the queue.
+   * One send, through the forge. The poster still races it against its own
+   * hang-timeout: a fake forge that never answers must not wedge the queue
+   * either.
    */
-  private send(payload: StatusPayload): Promise<GhSendResult> {
+  private send(payload: StatusPayload): Promise<ForgeResult> {
     const timeoutMs = this.opts.timeoutMs ?? DEFAULT_GH_TIMEOUT_MS;
-    if (this.opts.sendGh !== undefined) {
-      return withTimeout(
-        this.opts.sendGh(payload),
-        timeoutMs,
-        `gh timed out after ${timeoutMs}ms`,
-      );
-    }
-    return defaultSendGh(this.opts, payload);
+    return withTimeout(
+      this.opts.forge.postStatus({
+        owner: this.opts.owner,
+        repo: this.opts.repo,
+        sha: this.opts.sha,
+        payload,
+      }),
+      timeoutMs,
+      `gh timed out after ${timeoutMs}ms`,
+    );
   }
 }
 
@@ -561,14 +555,14 @@ function attemptMark(payload: StatusPayload): string {
 }
 
 /** Race a promise against a timeout; does not cancel the underlying work. */
-function withTimeout<T extends GhSendResult>(
+function withTimeout<T extends ForgeResult>(
   attempt: Promise<T>,
   timeoutMs: number,
   error: string,
-): Promise<GhSendResult> {
+): Promise<ForgeResult> {
   return new Promise((resolve) => {
     let settled = false;
-    const done = (r: GhSendResult): void => {
+    const done = (r: ForgeResult): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -587,125 +581,6 @@ function withTimeout<T extends GhSendResult>(
         }),
     );
   });
-}
-
-type GhRunResult =
-  | { ok: true; stdout: string; stderr: string }
-  | { ok: false; error: string };
-
-/**
- * Spawn `gh` with kill-on-timeout. Shared by POST (status) and GET (seed).
- */
-function runGh(
-  args: string[],
-  timeoutMs: number,
-  opts: { captureStdout: boolean },
-): Promise<GhRunResult> {
-  const gh = process.env.ODU_GH_BIN ?? "gh";
-  return new Promise((resolve) => {
-    const child = spawn(gh, args, {
-      stdio: ["ignore", opts.captureStdout ? "pipe" : "ignore", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    if (opts.captureStdout) {
-      child.stdout?.on("data", (c: Buffer) => {
-        stdout += c.toString("utf-8");
-      });
-    }
-    child.stderr?.on("data", (c: Buffer) => {
-      stderr += c.toString("utf-8");
-    });
-    let settled = false;
-    const done = (result: GhRunResult): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(result);
-    };
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      done({ ok: false, error: `gh timed out after ${timeoutMs}ms` });
-    }, timeoutMs);
-    timer.unref?.();
-    child.on("error", (err) => done({ ok: false, error: err.message }));
-    child.on("close", (code) => {
-      if (code === 0) done({ ok: true, stdout, stderr });
-      else done({ ok: false, error: stderr.trim() || `gh exited ${code}` });
-    });
-  });
-}
-
-/** Spawn `gh api` POST for one status; kill after timeout. */
-function defaultSendGh(
-  opts: StatusPosterOptions,
-  payload: StatusPayload,
-): Promise<GhSendResult> {
-  const timeoutMs = opts.timeoutMs ?? DEFAULT_GH_TIMEOUT_MS;
-  return runGh(
-    [
-      "api",
-      `repos/${opts.owner}/${opts.repo}/statuses/${opts.sha}`,
-      "-f",
-      `state=${payload.state}`,
-      "-f",
-      `context=${payload.context}`,
-      "-f",
-      `description=${payload.description}`,
-    ],
-    timeoutMs,
-    { captureStdout: false },
-  ).then((r) => (r.ok ? { ok: true } : { ok: false, error: r.error }));
-}
-
-function remoteStatusFromItem(item: unknown): RemoteStatus | null {
-  if (typeof item !== "object" || item === null) return null;
-  const row = item as Record<string, unknown>;
-  const context = typeof row.context === "string" ? row.context : "";
-  const state = typeof row.state === "string" ? row.state : "";
-  const description =
-    typeof row.description === "string" ? row.description : "";
-  if (context === "") return null;
-  return { context, state, description };
-}
-
-/**
- * Seed source: paginated GET `/repos/{owner}/{repo}/statuses/{sha}` (100/page).
- * Newest-first; first sighting per context is the latest. Separate page
- * requests (no multi-page concat parser). Soft-fail empty seed on non-zero /
- * parse error is handled by {@link StatusPoster.seed}.
- */
-async function defaultListStatuses(
-  opts: StatusPosterOptions,
-): Promise<RemoteStatus[]> {
-  const timeoutMs = opts.timeoutMs ?? DEFAULT_GH_TIMEOUT_MS;
-  const out: RemoteStatus[] = [];
-  const seen = new Set<string>();
-  // Bound pages so a pathological history cannot hang seed forever.
-  const maxPages = 50;
-  for (let page = 1; page <= maxPages; page++) {
-    const result = await runGh(
-      [
-        "api",
-        `repos/${opts.owner}/${opts.repo}/statuses/${opts.sha}?per_page=100&page=${page}`,
-      ],
-      timeoutMs,
-      { captureStdout: true },
-    );
-    if (!result.ok) throw new Error(result.error);
-    const trimmed = result.stdout.trim();
-    if (trimmed === "") break;
-    const parsed: unknown = JSON.parse(trimmed);
-    if (!Array.isArray(parsed) || parsed.length === 0) break;
-    for (const item of parsed) {
-      const row = remoteStatusFromItem(item);
-      if (row === null || seen.has(row.context)) continue;
-      seen.add(row.context);
-      out.push(row);
-    }
-    if (parsed.length < 100) break;
-  }
-  return out;
 }
 
 /** Parse `git remote get-url origin` output into {owner, repo} for the

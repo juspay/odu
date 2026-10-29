@@ -127,6 +127,7 @@ import {
   StatusPoster,
   statusFor,
 } from "./statuses";
+import { ghForge } from "../common/forge";
 import {
   dependencyClosure,
   installShardTopology,
@@ -1500,6 +1501,10 @@ async function orchestrate(
     repo: github?.repo ?? "",
     sha,
     enabled: ctx.posting,
+    // The coordinator's OWN entry binds the forge: it is a separately spawned
+    // process, so the daemon cannot hand it one. Same implementation the
+    // service binds for protect.
+    forge: ghForge(),
     onLine: info,
     onHealth: (health) => {
       const cur = store.get();
