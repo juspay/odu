@@ -5,7 +5,13 @@
  * S3 in PR 11, and THIS in the suite. It records what it was asked to do
  * (`calls`) rather than doing it, because half of what the cache promises is
  * about the CALLS — a retained path is a `retain`, an evicted one is a
- * `release` then a `delete` — and a fake that only held bytes could not say.
+ * `release` then a `delete`, a closure is ONE `closure` — and a fake that only
+ * held bytes could not say.
+ *
+ * It also models the thing that makes the write path interesting: a path whose
+ * references are not VALID yet cannot be imported. That is not a detail of Nix,
+ * it is the ordering fact the whole deferred-upload design exists for, so the
+ * fake says "is not valid" the way Nix does.
  *
  * Deliberately outside `src`: a fake in the shipped directory is a fake a
  * consumer hydrates.
@@ -15,7 +21,7 @@ import type { BlobStore, DeleteOutcome, ImportOutcome, PathInfo, StagedImport } 
 import { canonicalNarHash, narHashBase32, storePathHash } from "../src/narinfo";
 
 export interface RecordedCall {
-  op: "has" | "pathInfo" | "import" | "dump" | "retain" | "release" | "delete";
+  op: "has" | "pathInfo" | "closure" | "import" | "dump" | "retain" | "release" | "delete";
   bucket?: string;
   storePath: string;
 }
@@ -46,7 +52,8 @@ export class FakeStore implements BlobStore {
   readonly deleted: string[] = [];
   /** Paths this store refuses to delete — "another root holds it". */
   readonly immortal = new Set<string>();
-  /** What `import` should answer, by store path. Default: succeed. */
+  /** What `import` should answer, by store path, instead of the reference
+   *  check. */
   readonly importOutcome = new Map<string, ImportOutcome>();
   /** Every staged import attempted, in order. */
   readonly staged: StagedImport[] = [];
@@ -71,16 +78,23 @@ export class FakeStore implements BlobStore {
 
   async pathInfo(storePath: string): Promise<PathInfo | null> {
     this.calls.push({ op: "pathInfo", storePath });
-    const path = this.paths.get(storePath);
-    if (path === undefined || !this.present.has(storePath)) return null;
-    return {
-      storePath,
-      narHash: canonicalNarHash(path.narHash),
-      narSize: path.narSize,
-      references: path.references,
-      deriver: path.deriver ?? null,
-      sigs: path.sigs ?? [],
-    };
+    return this.infoOf(storePath);
+  }
+
+  async closure(paths: readonly string[]): Promise<PathInfo[]> {
+    this.calls.push({ op: "closure", storePath: paths.join(",") });
+    const seen = new Set<string>();
+    const queue = [...paths];
+    while (queue.length > 0) {
+      const path = queue.pop() as string;
+      if (seen.has(path)) continue;
+      seen.add(path);
+      for (const reference of this.paths.get(path)?.references ?? []) queue.push(reference);
+    }
+    return [...seen].flatMap((path) => {
+      const info = this.infoOf(path);
+      return info === null ? [] : [info];
+    });
   }
 
   async import(staged: StagedImport): Promise<ImportOutcome> {
@@ -94,7 +108,7 @@ export class FakeStore implements BlobStore {
       (reference) => reference !== staged.storePath && !this.present.has(reference),
     );
     if (missing.length > 0) {
-      return { ok: false, defer: true, message: `path '${missing[0] as string}' is not valid` };
+      return { ok: false, missing, message: `path '${missing[0] as string}' is not valid` };
     }
     this.present.add(staged.storePath);
     return { ok: true };
@@ -129,12 +143,38 @@ export class FakeStore implements BlobStore {
   }
 
   async delete(storePath: string): Promise<DeleteOutcome> {
-    this.calls.push({ op: "delete", storePath });
-    if (this.immortal.has(storePath)) return "kept";
-    this.deleted.push(storePath);
-    this.paths.delete(storePath);
-    this.present.delete(storePath);
-    return "deleted";
+    const { deleted } = await this.deleteMany([storePath]);
+    return deleted.length > 0 ? "deleted" : "kept";
+  }
+
+  async deleteMany(storePaths: readonly string[]): Promise<{ deleted: string[]; kept: string[] }> {
+    const deleted: string[] = [];
+    const kept: string[] = [];
+    for (const storePath of storePaths) {
+      this.calls.push({ op: "delete", storePath });
+      if (this.immortal.has(storePath) || !this.present.has(storePath)) {
+        kept.push(storePath);
+        continue;
+      }
+      this.deleted.push(storePath);
+      this.paths.delete(storePath);
+      this.present.delete(storePath);
+      deleted.push(storePath);
+    }
+    return { deleted, kept };
+  }
+
+  private infoOf(storePath: string): PathInfo | null {
+    const path = this.paths.get(storePath);
+    if (path === undefined || !this.present.has(storePath)) return null;
+    return {
+      storePath,
+      narHash: canonicalNarHash(path.narHash),
+      narSize: path.narSize,
+      references: path.references,
+      deriver: path.deriver ?? null,
+      sigs: path.sigs ?? [],
+    };
   }
 }
 

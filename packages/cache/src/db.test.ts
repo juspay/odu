@@ -171,6 +171,42 @@ describe("objects", () => {
   });
 });
 
+describe("counting", () => {
+  it("counts objects and bytes per bucket in SQL", () => {
+    const repo = openCacheRepo(":memory:");
+    repo.putObject(object);
+    repo.putObject({
+      ...object,
+      storePath: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-second",
+      hash: "a".repeat(32),
+      narSize: 100,
+    });
+    repo.putObject({ ...object, bucket: "other" });
+    expect(repo.bucketStats()).toEqual(
+      new Map([
+        ["main", { objects: 2, bytes: 279692 }],
+        ["other", { objects: 1, bytes: 279592 }],
+      ]),
+    );
+    // A bucket with nothing in it has no row at all, which the caller reads as
+    // zero rather than as an error.
+    expect(repo.bucketStats().get("empty")).toBeUndefined();
+  });
+
+  it("totals reads and the newest access across every bucket", () => {
+    const repo = openCacheRepo(":memory:");
+    expect(repo.objectTotals()).toEqual({ objects: 0, bytes: 0, hits: 0, lastAccessed: null });
+    repo.putObject(object);
+    repo.putObject({ ...object, bucket: "other", lastAccessed: NOW + 5 });
+    expect(repo.objectTotals()).toEqual({
+      objects: 2,
+      bytes: 559184,
+      hits: object.hits * 2,
+      lastAccessed: NOW + 5,
+    });
+  });
+});
+
 describe("pins", () => {
   it("round-trips a closure, and replaces it by name", () => {
     const repo = openCacheRepo(":memory:");

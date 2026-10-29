@@ -20,7 +20,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import {
@@ -111,6 +111,65 @@ function build(name: string): string {
   ]);
   if (res.status !== 0) throw new Error(`nix build ${name} failed:\n${res.stderr}`);
   return res.stdout.trim();
+}
+
+/**
+ * Two paths where one REFERENCES the other — the shape every real closure has,
+ * and the one the ordering exists for: the parent cannot be imported until the
+ * child is valid, so a push that sent them in the wrong order would defer, and
+ * a server that imported eagerly would fail.
+ */
+function buildPair(name: string): { parent: string; child: string } {
+  const child = `derivation { name = "${name}-child"; system = builtins.currentSystem; ` +
+    `builder = "/bin/sh"; args = [ "-c" "echo child > $out" ]; }`;
+  const evaluated = spawnSync(
+    "nix",
+    ["eval", "--impure", "--raw", "--expr", `let child = ${child}; in "${'$'}{child}"`],
+    { encoding: "utf-8", maxBuffer: BIG },
+  );
+  if (evaluated.status !== 0) throw new Error(`nix eval ${name} failed:\n${evaluated.stderr}`);
+  const childPath = evaluated.stdout.trim();
+
+  // Building the PARENT builds the child with it, and `--print-out-paths` on a
+  // derivation answers its output.
+  const built = nix([
+    "build",
+    "--store",
+    builderStore,
+    "--no-link",
+    "--print-out-paths",
+    "--impure",
+    "--expr",
+    `let child = ${child}; in derivation { name = "${name}-parent"; ` +
+      `system = builtins.currentSystem; builder = "/bin/sh"; ` +
+      // The child's path is written INTO the output: Nix computes a path's
+      // references by scanning its contents for store-path hashes, so a
+      // reference that appears only in `args` would not survive. `echo` is a
+      // shell builtin, which is what a builder with an empty PATH has.
+      `args = [ "-c" "echo ${'$'}{child} > $out" ]; }`,
+  ]);
+  if (built.status !== 0) throw new Error(`nix build ${name} failed:\n${built.stderr}`);
+  return { parent: built.stdout.trim(), child: childPath };
+}
+
+/** Every file the daemon has staged, so a refusal can be checked to have
+ *  written nothing. */
+function stagedFiles(): string[] {
+  const root = join(world.env.ODU_STATE_DIR as string, "cache", "staging");
+  const out: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else out.push(path);
+    }
+  };
+  try {
+    walk(root);
+  } catch {
+    return [];
+  }
+  return out.sort();
 }
 
 /** The 32-character hash a narinfo is named for. */
@@ -244,7 +303,11 @@ describe("odu serves a Nix binary cache", () => {
       "--no-recursive",
       evictable,
     ]);
-    expect(copied.status).toBe(0);
+    // `nix copy` narrates each path on stderr; the exit code is the answer.
+    expect({ status: copied.status, error: copied.stderr.includes("error:") }).toEqual({
+      status: 0,
+      error: false,
+    });
 
     const narinfo = await narinfoOf(main.url, evictable);
     expect(narinfo).toContain(`StorePath: ${evictable}`);
@@ -281,10 +344,15 @@ describe("odu serves a Nix binary cache", () => {
       ODU_CACHE_TOKEN: token,
       NIX_REMOTE: builderStore,
     });
-    expect(pushed.status).toBe(0);
+    // Progress goes to stderr by design; the exit code is the answer.
+    expect({ status: pushed.status, stderr: pushed.stderr.split("\n")[0] }).toEqual({
+      status: 0,
+      stderr: expect.stringContaining("1 paths in the closure"),
+    });
 
+    // 404, not 401: "you need a token" would confirm the bucket exists.
     const anonymous = await fetch(`${priv.url}/${hashOf(secret)}.narinfo`);
-    expect(anonymous.status).toBe(401);
+    expect(anonymous.status).toBe(404);
     const authorised = await fetch(`${priv.url}/${hashOf(secret)}.narinfo`, {
       headers: { authorization: `Basic ${Buffer.from(`anyone:${token}`).toString("base64")}` },
     });
@@ -299,27 +367,137 @@ describe("odu serves a Nix binary cache", () => {
     const read = spawnSync(
       "nix",
       [
-        "copy",
-        "--from",
-        priv.url,
-        "--to",
+        "build",
+        "--store",
         privateStore,
+        "--substituters",
+        priv.url,
+        "--trusted-public-keys",
+        priv.publicKey,
         "--netrc-file",
         netrc,
-        "--no-check-sigs",
+        "--no-link",
         secret,
       ],
       { encoding: "utf-8", maxBuffer: BIG },
     );
+    // The bucket's OWN key, so a private read verifies signatures rather than
+    // skipping them.
+    expect(read.stderr).not.toContain("not signed");
     expect(read.stderr).not.toContain("401");
     expect(read.status).toBe(0);
+  });
+
+  it("pushes a two-path closure in dependency order, and substitutes the top path cold", () => {
+    const { parent, child } = buildPair("odu-cache-e2e-pair");
+    expect(parent).not.toBe("");
+    expect(child).not.toBe("");
+
+    const pushed = cli(["cache", "push", "main", parent], {
+      ODU_CACHE_TOKEN: writeToken,
+      NIX_REMOTE: builderStore,
+    });
+    expect(pushed.status).toBe(0);
+    expect(pushed.stdout).toContain("pushed 2");
+
+    // The TOP path only, into a store that has neither: substitution has to
+    // walk the reference it was given, which is the fingerprint with a
+    // non-empty reference list and the ordering, end to end.
+    const cold = `local?root=${join(storeRoot, "cold")}`;
+    const substituted = nix(
+      [
+        "build",
+        "--store",
+        cold,
+        "--substituters",
+        main.url,
+        "--trusted-public-keys",
+        main.publicKey,
+        "--no-link",
+        parent,
+      ],
+      { NIX_REMOTE: "" },
+    );
+    expect(substituted.status).toBe(0);
+    const present = spawnSync("nix", ["path-info", "--store", cold, child], {
+      encoding: "utf-8",
+    });
+    expect(present.status).toBe(0);
+  });
+
+  it("refuses an upload with no bytes behind it, and one whose hash disagrees", async () => {
+    // THE CROSS-BUCKET HOLE: `private` holds a write token, and `main` holds a
+    // path. A narinfo alone must not be enough to publish it.
+    const created = cli(["cache", "create", "thief", "--private", "-o", "json"]);
+    expect(created.status).toBe(0);
+    const thief = JSON.parse(created.stdout) as Bucket;
+    const minted = cli(["cache", "token", "mint", "thief", "--write", "-o", "json"]);
+    const token = (JSON.parse(minted.stdout) as { token: string }).token;
+    const hash = hashOf(pinned);
+
+    const bare = await fetch(`${thief.url}/${hash}.narinfo`, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${token}` },
+      body: [
+        `StorePath: ${pinned}`,
+        "URL: nar/0b56hsfzp1d4kx9j095zk64b0zmi189s3ih8mk2zyshpi48fgw76.nar.zst",
+        "Compression: zstd",
+        "NarHash: sha256:0b56hsfzp1d4kx9j095zk64b0zmi189s3ih8mk2zyshpi48fgw76",
+        "NarSize: 279592",
+        "References: ",
+        "",
+      ].join("\n"),
+    });
+    expect(bare.status).toBe(400);
+    expect(await bare.text()).toContain("never uploaded");
+    expect(await statusOf(thief.url, pinned)).toBe(404);
+
+    // A NAR whose bytes do not hash to the narinfo's NarHash.
+    const truncated = "0b56hsfzp1d4kx9j095zk64b0zmi189s3ih8mk2zyshpi48fgw76";
+    const put = await fetch(`${thief.url}/nar/${truncated}.nar.zst`, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${token}` },
+      body: new Uint8Array([1, 2, 3]),
+    });
+    expect(put.status).toBe(200);
+    const lying = await fetch(`${thief.url}/${hash}.narinfo`, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${token}` },
+      body: [
+        `StorePath: ${pinned}`,
+        `URL: nar/${truncated}.nar.zst`,
+        // `none`, so the refusal under test is the HASH and not a decompressor
+        // that could not read the frame.
+        "Compression: none",
+        "NarHash: sha256:0b56hsfzp1d4kx9j095zk64b0zmi189s3ih8mk2zyshpi48fgw76",
+        "NarSize: 279592",
+        "References: ",
+        "",
+      ].join("\n"),
+    });
+    expect(lying.status).toBe(400);
+    expect(await lying.text()).toContain("hashes to");
+    expect(await statusOf(thief.url, pinned)).toBe(404);
+  });
+
+  it("refuses a narinfo name that is not a store path hash, and writes nothing", async () => {
+    const before = stagedFiles();
+    for (const name of ["..%2F..%2Fescape.narinfo", "short.narinfo"]) {
+      const response = await fetch(`${main.url}/${name}`, {
+        method: "PUT",
+        headers: { authorization: `Bearer ${writeToken}` },
+        body: "StorePath: /nix/store/x\n",
+      });
+      expect({ name, status: response.status }).toEqual({ name, status: 400 });
+    }
+    expect(stagedFiles()).toEqual(before);
   });
 
   it("keeps a pinned closure and evicts what nothing holds", async () => {
     // Both paths are older than retention 0 the moment they were pushed; the
     // pin is the only thing between `pinned` and the collector.
     const pin = cli(["cache", "pin", "main", "release-1", pinned, "-o", "json"]);
-    expect(pin.status).toBe(0);
+    expect({ status: pin.status, stderr: pin.stderr }).toEqual({ status: 0, stderr: "" });
     expect((JSON.parse(pin.stdout) as { rootPaths: string[] }).rootPaths).toContain(pinned);
 
     const collected = cli(["cache", "gc", "main", "-o", "json"]);
@@ -341,7 +519,11 @@ describe("odu serves a Nix binary cache", () => {
       objects: number;
       hits: number;
     };
-    expect(answer.buckets.map((bucket) => bucket.name).sort()).toEqual(["main", "private"]);
+    expect(answer.buckets.map((bucket) => bucket.name).sort()).toEqual([
+      "main",
+      "private",
+      "thief",
+    ]);
     expect(answer.objects).toBeGreaterThanOrEqual(2);
     // Every read above went through the protocol, so the counter moved.
     expect(answer.hits).toBeGreaterThan(0);

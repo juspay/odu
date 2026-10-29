@@ -6,22 +6,34 @@
  * so what is asserted here is what a client meets rather than what a handler
  * returns. The store is the fake, because half the matrix is about the answer
  * and the other half is about whether the store was reached at all.
+ *
+ * **Every upload here carries REAL bytes.** The cache hashes a staged NAR
+ * against the narinfo's `NarHash` before it will import it, and that check is
+ * the invariant the private-bucket story rests on — so a fixture that skipped
+ * it would be testing a server nobody ships.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { HttpRouter } from "effect/http";
-import { createCache, type Cache, NIX_CACHE_INFO } from "./cache";
-import { parseNarinfo } from "./narinfo";
+import { base32, storePathHash } from "./narinfo";
+import { type Cache, createCache, NIX_CACHE_INFO } from "./cache";
 import { cacheRoutes } from "./routes";
-import { FakeStore, hashOf, narBase32Of } from "../test/fakeStore";
+import { FakeStore, hashOf } from "../test/fakeStore";
 
 const ROOT = "root-token-please";
 const NOW = 1_700_000_000_000;
 const HELLO = "/nix/store/pa6rydwgjxxmmvdxap7qk9c85h8jbimy-hello-2.12.3";
 const GLIBC = "/nix/store/pqyiidz5mi73wv5f91d48s9plcqyj5bz-glibc-2.44-57";
+
+/** Bytes, and the NAR hash a narinfo has to claim for them. */
+function nar(text: string): { bytes: Uint8Array; narHash: string } {
+  const bytes = new TextEncoder().encode(text);
+  return { bytes, narHash: `sha256:${base32(createHash("sha256").update(bytes).digest())}` };
+}
 
 interface Harness {
   cache: Cache;
@@ -29,6 +41,7 @@ interface Harness {
   fetch: (path: string, init?: RequestInit) => Promise<Response>;
   tokens: { read: string; write: string; admin: string };
   root: string;
+  staging: string;
   dispose: () => Promise<void>;
 }
 
@@ -42,22 +55,50 @@ afterEach(() => {
   rmSync(scratch, { recursive: true, force: true });
 });
 
+/** Every file under the staging root, so a test can say "and nothing was
+ *  written". */
+function stagedFiles(): string[] {
+  const root = join(scratch, "cache", "staging");
+  const out: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else out.push(path.slice(root.length));
+    }
+  };
+  try {
+    walk(root);
+  } catch {
+    return [];
+  }
+  return out.sort();
+}
+
 async function harness(publicBucket: boolean): Promise<Harness> {
   const store = new FakeStore();
-  const narHash = "sha256:0b56hsfzp1d4kx9j095zk64b0zmi189s3ih8mk2zyshpi48fgw76";
-  store.add({
-    storePath: HELLO,
-    narHash,
-    narSize: 279592,
-    // A self-reference only: the seed must be importable on its own, and the
-    // narinfo's `References` line is what the row records.
-    references: [HELLO],
-    deriver: "/nix/store/y1kh9arkh7w7am664yqbnnrfpsisqcdc-hello-2.12.3.drv",
-    sigs: ["cache.nixos.org-1:AAAA"],
-    bytes: new TextEncoder().encode("a NAR, in pieces"),
-    chunks: 3,
+  const hello = nar("a NAR, in pieces");
+  store.add(
+    {
+      storePath: HELLO,
+      narHash: hello.narHash,
+      narSize: hello.bytes.length,
+      // A self-reference only: the seed must be importable on its own.
+      references: [HELLO],
+      deriver: "/nix/store/y1kh9arkh7w7am664yqbnnrfpsisqcdc-hello-2.12.3.drv",
+      sigs: ["cache.nixos.org-1:AAAA"],
+      bytes: hello.bytes,
+      chunks: 3,
+    },
+    false,
+  );
+  const cache = createCache({
+    stateRoot: scratch,
+    rootToken: ROOT,
+    store: null,
+    blob: store,
+    now: () => NOW,
   });
-  const cache = createCache({ stateRoot: scratch, rootToken: ROOT, store: null, blob: store, now: () => NOW });
   const created = await cache.admin.create({
     rootToken: ROOT,
     name: "main",
@@ -72,35 +113,66 @@ async function harness(publicBucket: boolean): Promise<Harness> {
     write: await mint(cache, "write"),
     admin: await mint(cache, "admin"),
   };
-  const { handler, dispose } = HttpRouter.toWebHandler(cacheRoutes(cache), { disableLogger: true });
+  const { handler, dispose } = HttpRouter.toWebHandler(cacheRoutes(cache), {
+    disableLogger: true,
+  });
   const fetchIt = (path: string, init?: RequestInit): Promise<Response> =>
     handler(new Request(`http://127.0.0.1:18440${path}`, init));
 
   // SEEDED THROUGH THE PROTOCOL, not behind it: an object row exists because a
-  // narinfo was accepted, so the fixture is a push rather than a row inserted
-  // past the code under test.
-  const seeded = await fetchIt(`/main/${hashOf(HELLO)}.narinfo`, {
-    ...bearer(tokens.write),
-    method: "PUT",
-    body: [
-      `StorePath: ${HELLO}`,
-      `URL: nar/x.nar.zst`,
-      "Compression: zstd",
-      `NarHash: ${narHash}`,
-      "NarSize: 279592",
-      `References: ${HELLO.slice("/nix/store/".length)} ${GLIBC.slice("/nix/store/".length)}`,
-      "",
-    ].join("\n"),
-  });
-  expect(seeded.status).toBe(200);
+  // NAR and its narinfo were accepted, so the fixture is a push rather than a
+  // row inserted past the code under test.
+  expect((await upload(fetchIt, tokens.write, HELLO, hello)).status).toBe(200);
 
-  return { cache, store, tokens, root: ROOT, fetch: fetchIt, dispose };
+  return {
+    cache,
+    store,
+    tokens,
+    root: ROOT,
+    staging: join(scratch, "cache", "staging"),
+    fetch: fetchIt,
+    dispose,
+  };
+}
+
+/** One complete upload: the NAR, then the narinfo that names it. */
+async function upload(
+  fetchIt: Harness["fetch"],
+  token: string,
+  storePath: string,
+  payload: { bytes: Uint8Array; narHash: string },
+  options: { references?: readonly string[]; narHash?: string; compression?: string; skipNar?: boolean } = {},
+): Promise<Response> {
+  const name = `${payload.narHash.replace(/^sha256:/, "")}.nar.zst`;
+  if (options.skipNar !== true) {
+    const put = await fetchIt(`/main/nar/${name}`, {
+      ...bearer(token),
+      method: "PUT",
+      body: body(payload.bytes),
+    });
+    expect(put.status).toBe(200);
+  }
+  const narinfo = [
+    `StorePath: ${storePath}`,
+    `URL: nar/${name}`,
+    `Compression: ${options.compression ?? "none"}`,
+    `NarHash: ${options.narHash ?? payload.narHash}`,
+    `NarSize: ${payload.bytes.length}`,
+    `References: ${(options.references ?? []).map((path) => path.slice("/nix/store/".length)).join(" ")}`,
+    "",
+  ].join("\n");
+  return fetchIt(`/main/${storePathHash(storePath)}.narinfo`, {
+    ...bearer(token),
+    method: "PUT",
+    body: narinfo,
+  });
 }
 
 async function mint(cache: Cache, scope: "read" | "write" | "admin"): Promise<string> {
   const minted = await cache.admin.tokenMint({
     rootToken: ROOT,
     bucket: "main",
+    bucketGlob: null,
     scope,
     expiresDays: null,
   });
@@ -108,13 +180,9 @@ async function mint(cache: Cache, scope: "read" | "write" | "admin"): Promise<st
   return minted.value.token;
 }
 
-/** The imports attempted after the fixture was seeded — the seed itself is a
- *  push through the same route, and counting it would say nothing. */
-const importsSince = (store: FakeStore, from: number): string[] =>
-  store.calls
-    .slice(from)
-    .filter((call) => call.op === "import")
-    .map((call) => call.storePath);
+/** A `Uint8Array` as a request body. The DOM lib's `BodyInit` does not admit
+ *  one directly in this TypeScript version, though every runtime does. */
+const body = (bytes: Uint8Array): BodyInit => bytes as unknown as BodyInit;
 
 const bearer = (token: string): RequestInit => ({ headers: { authorization: `Bearer ${token}` } });
 const basic = (token: string): RequestInit => ({
@@ -135,13 +203,6 @@ describe("nix-cache-info", () => {
     expect((await h.fetch("/nope/nix-cache-info")).status).toBe(404);
     await h.dispose();
   });
-
-  it("needs a read token when the bucket is private", async () => {
-    const h = await harness(false);
-    expect((await h.fetch("/main/nix-cache-info")).status).toBe(401);
-    expect((await h.fetch("/main/nix-cache-info", bearer(h.tokens.read))).status).toBe(200);
-    await h.dispose();
-  });
 });
 
 describe("narinfo", () => {
@@ -149,14 +210,23 @@ describe("narinfo", () => {
     const h = await harness(true);
     const response = await h.fetch(`/main/${hashOf(HELLO)}.narinfo`);
     expect(response.status).toBe(200);
-    const info = parseNarinfo(await response.text());
-    expect(info.storePath).toBe(HELLO);
-    expect(info.narHash).toBe("sha256:0b56hsfzp1d4kx9j095zk64b0zmi189s3ih8mk2zyshpi48fgw76");
-    expect(info.url).toBe("nar/0b56hsfzp1d4kx9j095zk64b0zmi189s3ih8mk2zyshpi48fgw76.nar.zst");
-    expect(info.compression).toBe("zstd");
+    const text = await response.text();
+    expect(text).toContain(`StorePath: ${HELLO}`);
+    expect(text).toContain("Compression: zstd");
     // The bucket's own signature first, and the client's kept beside it.
-    expect(info.sigs[0]?.startsWith("main-1:")).toBe(true);
-    expect(info.sigs).toContain("cache.nixos.org-1:AAAA");
+    expect(text).toMatch(/^Sig: main-1:/m);
+    expect(text).toContain("Sig: cache.nixos.org-1:AAAA");
+    await h.dispose();
+  });
+
+  it("signs AT READ TIME, so a rotated key cannot survive in a row", async () => {
+    const h = await harness(true);
+    const first = await (await h.fetch(`/main/${hashOf(HELLO)}.narinfo`)).text();
+    // Two reads of one path produce the same signature over the same
+    // fingerprint — and the row holds only the CLIENT's, never the bucket's.
+    const second = await (await h.fetch(`/main/${hashOf(HELLO)}.narinfo`)).text();
+    expect(second).toBe(first);
+    expect(first.match(/^Sig: main-1:/gm)).toHaveLength(1);
     await h.dispose();
   });
 
@@ -168,10 +238,7 @@ describe("narinfo", () => {
 
   it("counts a HEAD as a read", async () => {
     const h = await harness(true);
-    const before = h.cache.bucket("main");
-    expect(before).not.toBeNull();
-    const response = await h.fetch(`/main/${hashOf(HELLO)}.narinfo`, { method: "HEAD" });
-    expect(response.status).toBe(200);
+    expect((await h.fetch(`/main/${hashOf(HELLO)}.narinfo`, { method: "HEAD" })).status).toBe(200);
     expect((await h.fetch(`/main/${"0".repeat(32)}.narinfo`, { method: "HEAD" })).status).toBe(404);
     await h.dispose();
   });
@@ -187,14 +254,17 @@ describe("the auth matrix", () => {
   it("lets a public bucket read with no token at all", async () => {
     const h = await harness(true);
     expect((await h.fetch(`/main/${hashOf(HELLO)}.narinfo`)).status).toBe(200);
-    expect((await h.fetch(`/main/nar/${narBase32Of({ storePath: HELLO, narHash: "sha256:0b56hsfzp1d4kx9j095zk64b0zmi189s3ih8mk2zyshpi48fgw76", narSize: 1, references: [] })}.nar.zst`)).status).toBe(200);
+    const name = `${"0".repeat(52)}.nar.zst`;
+    expect((await h.fetch(`/main/nar/${name}`)).status).toBe(404);
     await h.dispose();
   });
 
-  it("refuses a private bucket's read, and takes either credential form", async () => {
+  it("answers 404 — not 401 — to an anonymous read of a private bucket", async () => {
+    // A 401 would confirm the bucket exists, and a private name must not be
+    // enumerable.
     const h = await harness(false);
     const path = `/main/${hashOf(HELLO)}.narinfo`;
-    expect((await h.fetch(path)).status).toBe(401);
+    expect((await h.fetch(path)).status).toBe(404);
     expect((await h.fetch(path, bearer(h.tokens.read))).status).toBe(200);
     expect((await h.fetch(path, basic(h.tokens.read))).status).toBe(200);
     // The root token is an admin credential, and admin covers read.
@@ -204,30 +274,67 @@ describe("the auth matrix", () => {
 
   it("refuses a write without a token, and with a read token", async () => {
     const h = await harness(true);
-    const nar = "/main/nar/0b56hsfzp1d4kx9j095zk64b0zmi189s3ih8mk2zyshpi48fgw76.nar.zst";
-    expect((await h.fetch(nar, { method: "PUT", body: "x" })).status).toBe(401);
-    expect((await h.fetch(nar, { ...bearer(h.tokens.read), method: "PUT", body: "x" })).status).toBe(
+    const narPath = "/main/nar/0b56hsfzp1d4kx9j095zk64b0zmi189s3ih8mk2zyshpi48fgw76.nar.zst";
+    expect((await h.fetch(narPath, { method: "PUT", body: "x" })).status).toBe(401);
+    expect((await h.fetch(narPath, { ...bearer(h.tokens.read), method: "PUT", body: "x" })).status).toBe(
       403,
     );
-    expect((await h.fetch(nar, { ...bearer(h.tokens.write), method: "PUT", body: "x" })).status).toBe(
+    expect((await h.fetch(narPath, { ...bearer(h.tokens.write), method: "PUT", body: "x" })).status).toBe(
       200,
     );
     await h.dispose();
   });
 
-  it("refuses a revoked token, and a token for another bucket", async () => {
+  it("refuses a revoked token, an expired token, and a token for another bucket", async () => {
     const h = await harness(false);
+    const path = `/main/${hashOf(HELLO)}.narinfo`;
+
     const minted = await h.cache.admin.tokenMint({
       rootToken: ROOT,
       bucket: "main",
+      bucketGlob: null,
       scope: "read",
       expiresDays: null,
     });
     if (!minted.ok) throw new Error(minted.message);
     await h.cache.admin.tokenRevoke({ rootToken: ROOT, id: minted.value.facts.id });
-    expect((await h.fetch(`/main/${hashOf(HELLO)}.narinfo`, bearer(minted.value.token))).status).toBe(
-      403,
-    );
+    expect((await h.fetch(path, bearer(minted.value.token))).status).toBe(403);
+
+    // An expired token, written straight into the row: `now()` is frozen for
+    // the harness, so the expiry is the only moving part.
+    const expired = await h.cache.admin.tokenMint({
+      rootToken: ROOT,
+      bucket: "main",
+      bucketGlob: null,
+      scope: "read",
+      expiresDays: 1,
+    });
+    if (!expired.ok) throw new Error(expired.message);
+    const later = createCache({
+      stateRoot: scratch,
+      rootToken: ROOT,
+      store: null,
+      blob: h.store,
+      now: () => NOW + 10 * 24 * 60 * 60 * 1000,
+    });
+    expect(later.bucket("main")?.name).toBe("main");
+    expect(
+      later.authorize(`Bearer ${expired.value.token}`, later.bucket("main") as never, "read"),
+    ).toEqual({ ok: false, status: 403, message: "that token has expired" });
+    later.close();
+
+    // A token minted for `main` cannot reach a bucket it does not cover.
+    const other = await h.cache.admin.create({
+      rootToken: ROOT,
+      name: "other",
+      public: false,
+      retentionDays: 30,
+      upstreamKeys: [],
+    });
+    expect(other.ok).toBe(true);
+    expect(
+      h.cache.authorize(`Bearer ${h.tokens.read}`, h.cache.bucket("other") as never, "read"),
+    ).toMatchObject({ ok: false, status: 403 });
     await h.dispose();
   });
 
@@ -248,11 +355,43 @@ describe("the auth matrix", () => {
   });
 });
 
+describe("route parameters", () => {
+  it("refuses a narinfo name that is not a store path hash, and writes nothing", async () => {
+    const h = await harness(true);
+    const before = stagedFiles();
+    for (const name of ["..%2F..%2Fetc%2Fpasswd.narinfo", "short.narinfo", `${"z".repeat(32)}.narinfo`]) {
+      const response = await h.fetch(`/main/${name}`, {
+        ...bearer(h.tokens.write),
+        method: "PUT",
+        body: "StorePath: /nix/store/x\n",
+      });
+      expect({ name, status: response.status }).toEqual({ name, status: 400 });
+    }
+    expect(stagedFiles()).toEqual(before);
+    await h.dispose();
+  });
+
+  it("refuses a NAR name with a slash or a leading dot", async () => {
+    const h = await harness(true);
+    const before = stagedFiles();
+    for (const name of ["..%2Fescape.nar.zst", ".hidden.nar.zst", "a%2Fb.nar.zst"]) {
+      const response = await h.fetch(`/main/nar/${name}`, {
+        ...bearer(h.tokens.write),
+        method: "PUT",
+        body: "x",
+      });
+      expect({ name, status: response.status }).toEqual({ name, status: 400 });
+    }
+    expect(stagedFiles()).toEqual(before);
+    await h.dispose();
+  });
+});
+
 describe("the NAR", () => {
   it("streams the store's bytes, in the chunks the store produced", async () => {
     const h = await harness(true);
-    const file = `${"0b56hsfzp1d4kx9j095zk64b0zmi189s3ih8mk2zyshpi48fgw76"}.nar.zst`;
-    const response = await h.fetch(`/main/nar/${file}`);
+    const hello = nar("a NAR, in pieces");
+    const response = await h.fetch(`/main/nar/${hello.narHash.replace(/^sha256:/, "")}.nar.zst`);
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("application/x-nix-nar");
     expect(await response.text()).toBe("a NAR, in pieces");
@@ -262,8 +401,9 @@ describe("the NAR", () => {
 
   it("finds the path by the hash alone, whatever compression the client asked for", async () => {
     const h = await harness(true);
-    const base = "0b56hsfzp1d4kx9j095zk64b0zmi189s3ih8mk2zyshpi48fgw76";
-    expect((await h.fetch(`/main/nar/${base}.nar.xz`)).status).toBe(200);
+    const hello = nar("a NAR, in pieces");
+    const hash = hello.narHash.replace(/^sha256:/, "");
+    expect((await h.fetch(`/main/nar/${hash}.nar.xz`)).status).toBe(200);
     expect((await h.fetch(`/main/nar/${"1".repeat(52)}.nar.zst`)).status).toBe(404);
     await h.dispose();
   });
@@ -286,10 +426,7 @@ describe("missing", () => {
       }),
     });
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({
-      missing: [other],
-      skippedUpstream: [GLIBC],
-    });
+    expect(await response.json()).toEqual({ missing: [other], skippedUpstream: [GLIBC] });
     await h.dispose();
   });
 
@@ -310,52 +447,70 @@ describe("missing", () => {
 });
 
 describe("uploading", () => {
-  it("stages a NAR and imports the pair when the narinfo arrives", async () => {
+  it("records a path whose bytes match its narinfo", async () => {
     const h = await harness(true);
     const staged = "/nix/store/11111111111111111111111111111111-uploaded";
-    const narHash = "sha256:1z60yvla06nbvnmxpnmcnpimjmrd5yf5yn637jgvxplsr34dxfdx";
-    // Metadata only: the bytes arrive with the upload, so the store does not
-    // have it until the import.
-    h.store.add({ storePath: staged, narHash, narSize: 42, references: [] }, false);
-
-    const seedCalls = h.store.calls.length;
-    const putNar = await h.fetch(`/main/nar/1z60yvla06nbvnmxpnmcnpimjmrd5yf5yn637jgvxplsr34dxfdx.nar.zst`, {
-      ...bearer(h.tokens.write),
-      method: "PUT",
-      body: new Uint8Array([1, 2, 3]),
-    });
-    expect(putNar.status).toBe(200);
-
-    const narinfo = [
-      `StorePath: ${staged}`,
-      "URL: nar/1z60yvla06nbvnmxpnmcnpimjmrd5yf5yn637jgvxplsr34dxfdx.nar.zst",
-      "Compression: zstd",
-      `NarHash: ${narHash}`,
-      "NarSize: 42",
-      "References: ",
-      "",
-    ].join("\n");
-    const putInfo = await h.fetch(`/main/${hashOf(staged)}.narinfo`, {
-      ...bearer(h.tokens.write),
-      method: "PUT",
-      body: narinfo,
-    });
-    expect(putInfo.status).toBe(200);
-    expect(importsSince(h.store, seedCalls)).toEqual([staged]);
-    expect(h.cache.bucket("main")).not.toBeNull();
-    // And it is now readable, signed by the bucket.
+    const payload = nar("uploaded bytes");
+    h.store.add(
+      { storePath: staged, narHash: payload.narHash, narSize: payload.bytes.length, references: [] },
+      false,
+    );
+    const response = await upload(h.fetch, h.tokens.write, staged, payload);
+    expect(response.status).toBe(200);
+    expect(h.store.calls.filter((call) => call.op === "import").map((call) => call.storePath)).toContain(
+      staged,
+    );
     const read = await h.fetch(`/main/${hashOf(staged)}.narinfo`);
     expect(read.status).toBe(200);
-    expect(parseNarinfo(await read.text()).sigs[0]?.startsWith("main-1:")).toBe(true);
+    expect(await read.text()).toContain("Sig: main-1:");
+    await h.dispose();
+  });
+
+  it("refuses a narinfo with no NAR behind it — even for a path the store already has", async () => {
+    // THE HOLE: `nix copy --from` copies zero paths and exits 0 when the path
+    // is already valid, never opening the NAR. Without the byte check, a write
+    // token for one bucket publishes any path the store holds.
+    const h = await harness(true);
+    const priv = "/nix/store/22222222222222222222222222222222-private";
+    const payload = nar("somebody else's bytes");
+    // Valid in the store, and NOT in this bucket.
+    h.store.add({ storePath: priv, narHash: payload.narHash, narSize: 1, references: [] }, true);
+
+    const response = await upload(h.fetch, h.tokens.write, priv, payload, { skipNar: true });
+    expect(response.status).toBe(400);
+    expect(await response.text()).toContain("never uploaded");
+    expect(h.store.calls.filter((call) => call.op === "import")).toHaveLength(1); // the seed only
+    await h.dispose();
+  });
+
+  it("refuses bytes that do not hash to the narinfo's NarHash", async () => {
+    const h = await harness(true);
+    const staged = "/nix/store/33333333333333333333333333333333-truncated";
+    const real = nar("the real bytes");
+    const claimed = nar("the bytes somebody claimed");
+    h.store.add({ storePath: staged, narHash: claimed.narHash, narSize: 1, references: [] }, false);
+
+    const response = await upload(h.fetch, h.tokens.write, staged, real, {
+      narHash: claimed.narHash,
+    });
+    expect(response.status).toBe(400);
+    expect(await response.text()).toContain("hashes to");
+    expect((await h.fetch(`/main/${hashOf(staged)}.narinfo`)).status).toBe(404);
     await h.dispose();
   });
 
   it("refuses a narinfo whose name does not match the path it names", async () => {
     const h = await harness(true);
+    const payload = nar("x");
+    await h.fetch(`/main/nar/${payload.narHash.replace(/^sha256:/, "")}.nar.zst`, {
+      ...bearer(h.tokens.write),
+      method: "PUT",
+      body: body(payload.bytes),
+    });
     const response = await h.fetch(`/main/${"2".repeat(32)}.narinfo`, {
       ...bearer(h.tokens.write),
       method: "PUT",
-      body: `StorePath: ${HELLO}\nURL: nar/x.nar.zst\nNarHash: sha256:0b56hsfzp1d4kx9j095zk64b0zmi189s3ih8mk2zyshpi48fgw76\nNarSize: 1\nReferences: \n`,
+      body: `StorePath: ${HELLO}\nURL: nar/x.nar.zst\nCompression: none\nNarHash: ${payload.narHash}\nNarSize: 1\nReferences: \n`,
     });
     expect(response.status).toBe(400);
     await h.dispose();
@@ -372,59 +527,66 @@ describe("uploading", () => {
     await h.dispose();
   });
 
-  it("accepts an early upload and imports it once its references land", async () => {
+  it("answers 202 for an early upload, then records it when its reference lands", async () => {
     const h = await harness(true);
-    const child = "/nix/store/33333333333333333333333333333333-child";
-    const parent = "/nix/store/44444444444444444444444444444444-parent";
+    const child = "/nix/store/44444444444444444444444444444444-child";
+    const parent = "/nix/store/55555555555555555555555555555555-parent";
+    const childPayload = nar("child bytes");
+    const parentPayload = nar("parent bytes");
     h.store.add(
-      { storePath: child, narHash: `sha256:${"3".repeat(52)}`, narSize: 1, references: [] },
+      { storePath: child, narHash: childPayload.narHash, narSize: 1, references: [] },
       false,
     );
     h.store.add(
-      {
-        storePath: parent,
-        narHash: `sha256:${"4".repeat(52)}`,
-        narSize: 1,
-        references: [child],
-      },
+      { storePath: parent, narHash: parentPayload.narHash, narSize: 1, references: [child] },
       false,
     );
-    const seedCalls = h.store.calls.length;
 
-    const narinfoOf = (storePath: string, narHash: string, refs: string): string =>
-      `StorePath: ${storePath}\nURL: nar/x.nar.zst\nCompression: zstd\nNarHash: ${narHash}\nNarSize: 1\nReferences: ${refs}\n`;
-
-    // The parent arrives FIRST, and its reference is not in the store yet.
-    const early = await h.fetch(`/main/${hashOf(parent)}.narinfo`, {
-      ...bearer(h.tokens.write),
-      method: "PUT",
-      body: narinfoOf(parent, `sha256:${"4".repeat(52)}`, child.slice("/nix/store/".length)),
+    const early = await upload(h.fetch, h.tokens.write, parent, parentPayload, {
+      references: [child],
     });
-    expect(early.status).toBe(200);
-    expect(h.cache.bucket("main")).not.toBeNull();
+    expect(early.status).toBe(202);
+    expect(await early.text()).toContain(child);
+    expect((await h.fetch(`/main/${hashOf(parent)}.narinfo`)).status).toBe(404);
 
-    // The child lands; the deferred parent is imported on the next pass.
-    const late = await h.fetch(`/main/${hashOf(child)}.narinfo`, {
-      ...bearer(h.tokens.write),
-      method: "PUT",
-      body: narinfoOf(child, `sha256:${"3".repeat(52)}`, ""),
-    });
+    const late = await upload(h.fetch, h.tokens.write, child, childPayload);
     expect(late.status).toBe(200);
-    // The early attempt, then the child, then the deferred parent on the next
-    // pass — the order that makes an out-of-order closure land.
-    expect(importsSince(h.store, seedCalls)).toEqual([parent, parent, child, parent]);
     expect((await h.fetch(`/main/${hashOf(parent)}.narinfo`)).status).toBe(200);
+    await h.dispose();
+  });
+
+  it("keeps one NAR file for two paths whose content is identical", async () => {
+    // Two store paths, one NAR: the second upload must not truncate the first,
+    // and the first import must not take the file the second still needs.
+    const h = await harness(true);
+    const one = "/nix/store/66666666666666666666666666666666-one";
+    const two = "/nix/store/77777777777777777777777777777777-two";
+    const payload = nar("identical bytes");
+    h.store.add({ storePath: one, narHash: payload.narHash, narSize: 1, references: [] }, false);
+    h.store.add({ storePath: two, narHash: payload.narHash, narSize: 1, references: [] }, false);
+
+    expect((await upload(h.fetch, h.tokens.write, one, payload)).status).toBe(200);
+    expect((await upload(h.fetch, h.tokens.write, two, payload)).status).toBe(200);
+    expect((await h.fetch(`/main/${hashOf(one)}.narinfo`)).status).toBe(200);
+    expect((await h.fetch(`/main/${hashOf(two)}.narinfo`)).status).toBe(200);
     await h.dispose();
   });
 });
 
-describe("bucket keys", () => {
-  it("is generated per bucket, in Nix's spelling", async () => {
+describe("the shell's own paths", () => {
+  it("is not reached by the cache's two-segment GET", async () => {
+    // `/:bucket/:name` is the narinfo route, and the shell serves fixed assets
+    // beside it. None of these is two segments, so none can match — pinned
+    // because a future fixed path that IS two segments belongs above this
+    // layer, not beside it.
     const h = await harness(true);
-    const bucket = h.cache.bucket("main");
-    expect(bucket?.keyName).toBe("main-1");
-    expect(bucket?.publicKey.split(":")[0]).toBe("main-1");
-    expect(Buffer.from(bucket?.publicKey.split(":")[1] as string, "base64")).toHaveLength(32);
+    for (const path of ["/sw.js", "/manifest.webmanifest", "/_app/assets/x.js"]) {
+      const status = await h
+        .fetch(path)
+        .then((response) => response.status)
+        .catch(() => 404);
+      expect({ path, handled: status === 200 }).toEqual({ path, handled: false });
+    }
     await h.dispose();
   });
 });

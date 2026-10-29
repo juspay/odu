@@ -125,23 +125,34 @@ describe("planGc", () => {
 });
 
 describe("runGc", () => {
-  const repoWith = (): CacheRepo => {
+  /** The rows AND the bytes: a store that does not have a path cannot delete
+   *  it, and a fixture that only wrote rows would grade the wrong thing. */
+  const repoWith = (): { repo: CacheRepo; store: FakeStore } => {
     const repo = openCacheRepo(":memory:");
+    const store = new FakeStore();
     repo.putBucket(bucket);
-    for (const row of objects) repo.putObject(row);
+    for (const row of objects) {
+      repo.putObject(row);
+      store.add(
+        { storePath: row.storePath, narHash: row.narHash, narSize: row.narSize, references: row.references },
+        true,
+      );
+    }
     for (const pin of pins) repo.putPin(pin);
-    return repo;
+    return { repo, store };
   };
 
   it("releases the root, deletes from the store, and drops the row", async () => {
-    const store = new FakeStore();
-    const repo = repoWith();
+    const { repo, store } = repoWith();
     const report = await runGc(store, repo, planGc({ buckets: [bucket], objects, pins, now: NOW }));
 
     expect(store.calls.filter((call) => call.op === "release").map((call) => call.storePath).sort()).toEqual(
       [C.storePath, E.storePath, F.storePath].sort(),
     );
     expect(store.deleted.sort()).toEqual([C.storePath, E.storePath, F.storePath].sort());
+    // ONE delete call for the set: `nix-store --delete` reports "still alive"
+    // for a path another member references, so path-by-path leaks a closure.
+    expect(store.calls.filter((call) => call.op === "delete")).toHaveLength(3);
     expect(repo.objects("main").map((row) => row.storePath).sort()).toEqual(
       [A.storePath, B.storePath, D.storePath].sort(),
     );
@@ -152,9 +163,8 @@ describe("runGc", () => {
   });
 
   it("counts a path the store will not delete as kept, and still forgets the row", async () => {
-    const store = new FakeStore();
+    const { repo, store } = repoWith();
     store.immortal.add(C.storePath);
-    const repo = repoWith();
     const report = await runGc(store, repo, planGc({ buckets: [bucket], objects, pins, now: NOW }));
 
     expect(report.kept).toBe(1);

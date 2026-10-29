@@ -29,6 +29,7 @@ import {
   type PushEnv,
   type PushPlatform,
 } from "./push";
+import type { PathInfo } from "./store";
 
 const HELLO = "/nix/store/pa6rydwgjxxmmvdxap7qk9c85h8jbimy-hello-2.12.3";
 const GLIBC = "/nix/store/pqyiidz5mi73wv5f91d48s9plcqyj5bz-glibc-2.44-57";
@@ -66,6 +67,10 @@ interface Server {
   seen: Seen[];
   /** How many times each path's nar upload should fail before succeeding. */
   failNar: Map<string, number>;
+  /** Status to answer a nar upload with, before the failure count applies. */
+  narStatus: Map<string, number>;
+  /** Store paths whose narinfo answers 202 the first time it is asked. */
+  deferOnce: Set<string>;
   missing: string[];
   skipped: string[];
   stop: () => void;
@@ -76,6 +81,8 @@ function startServer(): Server {
     origin: "",
     seen: [],
     failNar: new Map(),
+    narStatus: new Map(),
+    deferOnce: new Set(),
     missing: [LIBC, GLIBC, HELLO],
     skipped: [],
     stop: () => {},
@@ -97,6 +104,8 @@ function startServer(): Server {
       }
       if (request.method === "PUT" && url.pathname.includes("/nar/")) {
         const file = url.pathname.slice(url.pathname.lastIndexOf("/") + 1);
+        const forced = state.narStatus.get(file);
+        if (forced !== undefined) return new Response("nope", { status: forced });
         const failures = state.failNar.get(file) ?? 0;
         if (failures > 0) {
           state.failNar.set(file, failures - 1);
@@ -105,6 +114,10 @@ function startServer(): Server {
         return new Response(null, { status: 200 });
       }
       if (request.method === "PUT" && url.pathname.endsWith(".narinfo")) {
+        const hash = url.pathname.slice(url.pathname.lastIndexOf("/") + 1, -".narinfo".length);
+        if (state.deferOnce.delete(hash)) {
+          return new Response("waiting on a reference", { status: 202 });
+        }
         return new Response(null, { status: 200 });
       }
       return new Response("not found", { status: 404 });
@@ -118,7 +131,7 @@ function startServer(): Server {
 /** Every store path is given the same nar hash above, which the fake server
  *  keys on — so the failure counts are per PATH here rather than per file. */
 const PLATFORM: PushPlatform = {
-  closure: async () => CLOSURE,
+  closure: async () => [...CLOSURE.values()] as PathInfo[],
   dump: () => new ReadableStream({ start: (controller) => controller.close() }),
 };
 
@@ -228,6 +241,52 @@ describe("pushing a closure", () => {
     }
   });
 
+  it("repeats an upload the server accepted but could not import yet", async () => {
+    const server = startServer();
+    try {
+      server.missing = [LIBC];
+      // The first narinfo is 202 (a reference had not landed), the second is
+      // 200 — the shape an out-of-order closure produces.
+      server.deferOnce.add(storePathHash(LIBC));
+      const summary = await pushToCache({
+        bucket: `${server.origin}/main`,
+        paths: ["."],
+        env: envOf({ ODU_CACHE_TOKEN: "t" }),
+        platform: PLATFORM,
+      });
+      expect(summary).toMatchObject({ pushed: 1, failed: 0 });
+      const infoPuts = server.seen.filter(
+        (seen) => seen.method === "PUT" && seen.path.endsWith(".narinfo"),
+      );
+      expect(infoPuts).toHaveLength(2);
+    } finally {
+      server.stop();
+    }
+  });
+
+  it("does not repeat a request the server refused outright", async () => {
+    const server = startServer();
+    try {
+      server.missing = [LIBC];
+      // 403 is the TOKEN being wrong. Repeating it streams the whole NAR again
+      // for the same answer.
+      server.narStatus.set(`${storePathHash(LIBC).padEnd(52, "0")}.nar.zst`, 403);
+      const summary = await pushToCache({
+        bucket: `${server.origin}/main`,
+        paths: ["."],
+        env: envOf({ ODU_CACHE_TOKEN: "t" }),
+        platform: PLATFORM,
+        attempts: 3,
+      });
+      expect(summary.failed).toBe(1);
+      expect(
+        server.seen.filter((seen) => seen.method === "PUT" && seen.path.endsWith(".nar.zst")),
+      ).toHaveLength(1);
+    } finally {
+      server.stop();
+    }
+  });
+
   it("reports what the bucket already had, and what it refused as upstream", async () => {
     const server = startServer();
     try {
@@ -327,6 +386,21 @@ describe("resolving the bucket argument", () => {
       name: "main",
     });
     expect(await resolveBucket(env, "https://cache.example.com/")).toHaveProperty("error");
+  });
+
+  it("lets --origin beat a stored credential", async () => {
+    // A machine logged in to one cache must still be able to push to a second.
+    const env = envOf();
+    await saveCredential(env, "http://127.0.0.1:9999", "t");
+    expect(await resolveBucket(env, "main", "http://127.0.0.1:1234")).toEqual({
+      origin: "http://127.0.0.1:1234",
+      name: "main",
+    });
+    // A full URL still names its own origin; the flag cannot move it.
+    expect(await resolveBucket(env, "https://cache.example.com/main", "http://127.0.0.1:1234")).toEqual({
+      origin: "https://cache.example.com",
+      name: "main",
+    });
   });
 
   it("resolves a bare name against the one origin this machine logged in to", async () => {
