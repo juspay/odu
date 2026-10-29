@@ -235,6 +235,18 @@ const WEB_DAEMON_ENV_KEYS = [
   "ODU_WEB_MCP_TOKEN",
   "ODU_COMMIT_HASH",
   "ODU_BUILD_ID",
+  // The cache's two settings, and they belong HERE for the same reason the rest
+  // of this list does: the daemon is where the cache lives, and a `$ODU_ROOT_TOKEN`
+  // that reached the launcher but not the daemon is a service that answers every
+  // admin verb with `no_root_token` for an environment the operator set
+  // correctly. `$ODU_CACHE_STORE` is the `--store` URI the whole cache points at
+  // (the e2e suite's throwaway chroot, a host's real store by default), and it
+  // has to travel with the token or a test that redirects one gets the other.
+  //
+  // NOT in `ODU_CHILD_ENV_KEYS`: a coordinator starts with that list, so the
+  // cache's root token stays in the daemon and out of every run it launches.
+  "ODU_ROOT_TOKEN",
+  "ODU_CACHE_STORE",
 ] as const;
 
 /**
