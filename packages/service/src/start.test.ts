@@ -211,7 +211,7 @@ describe("run.start", () => {
     if (conflict._tag !== "Failure") return;
     expect((conflict.failure as ServiceRefused).code).toBe("request_conflict");
     expect(d.ports.launches).toHaveLength(1);
-    expect(d.ports.launches[0]?.hostsFile).toBe("/fleets/a.json");
+    expect(d.ports.launches[0]?.caller.hostsFile).toBe("/fleets/a.json");
   });
 
   it("refuses an omitted inventory repeated as an explicit empty one", async () => {
@@ -226,7 +226,7 @@ describe("run.start", () => {
     if (conflict._tag !== "Failure") return;
     expect((conflict.failure as ServiceRefused).code).toBe("request_conflict");
     expect(d.ports.launches).toHaveLength(1);
-    expect(d.ports.launches[0]?.hostsFile).toBeNull();
+    expect(d.ports.launches[0]?.caller.hostsFile).toBeNull();
   });
 
   it("refuses a request id outside the grammar", async () => {

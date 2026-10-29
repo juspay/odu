@@ -34,6 +34,47 @@
 import type { CatalogOptions } from "@odu/run-history/store";
 import type { RunScope } from "@odu/run-history/schema";
 
+// ── who is asking ───────────────────────────────────────────────────────────
+
+/**
+ * WHO the service is doing this for, as far as the work is concerned.
+ *
+ * The service is a per-user singleton, so its own environment is a fact about
+ * the shell that started it — never about the person asking for this run. The
+ * one such fact today is `$ODU_HOSTS`: the inventory a launch resolves, the
+ * venue verbs probe and hold, and an unsliced protect derives its platform set
+ * from. It used to travel as a loose `hostsFile` field on every port signature
+ * (and on every adapter behind them), which is one edit per per-caller fact and
+ * five places for the next one to be forgotten.
+ *
+ * It arrives as ONE value instead, assembled per call inside the service from
+ * the verb input, and this is the only shape the ports see. Later per-caller
+ * facts — a principal, an org — join this type rather than every signature.
+ *
+ * **Not a wire type.** Verb inputs keep `hostsFile` exactly as they always
+ * have: the three readings (a path, `""` for "my shell has none", absent for
+ * "I have no shell") are the contract the docs and agents already speak, and
+ * {@link callerOf} is where that contract becomes this object.
+ */
+export interface Caller {
+  /** The CALLER's `$ODU_HOSTS`, or `null` when the caller expressed nothing. */
+  readonly hostsFile: string | null;
+}
+
+/**
+ * Assemble the caller from a verb input.
+ *
+ * The three readings are kept, not flattened: absent becomes `null` (use the
+ * service's own configuration), `""` stays `""` (the caller's shell had none),
+ * and a path stays a path. The first two mean opposite things downstream, which
+ * is why this is `?? null` and not `?? ""`.
+ */
+export function callerOf(input: {
+  readonly hostsFile?: string | undefined;
+}): Caller {
+  return { hostsFile: input.hostsFile ?? null };
+}
+
 // ── starting a run ──────────────────────────────────────────────────────────
 
 /** What the service asks for when it accepts a `run.start`. Every field is
@@ -54,10 +95,10 @@ export interface LaunchRequest {
   readonly noSnapshot: boolean;
   readonly noPost: boolean;
   readonly hostPins: readonly string[];
-  /** The caller's `$ODU_HOSTS`, or `null` when the caller had none. The
-   *  service is a per-user singleton: its own environment is a fact about the
-   *  shell that started it, never about the person asking for this run. */
-  readonly hostsFile: string | null;
+  /** WHO this run is for. The service carries the caller's `$ODU_HOSTS` rather
+   *  than reading its own: the daemon's environment belongs to the shell that
+   *  started it, never to the person asking for this run. See {@link Caller}. */
+  readonly caller: Caller;
   /** The caller said it really did mean to take this checkout from the run
    *  already in progress there. Carried through rather than consumed here: what
    *  superseding MEANS — cancel the incumbent, confirm it is gone, then claim
@@ -299,11 +340,11 @@ export type VenueProbeOutcome =
  *  `platforms` means every configured one. */
 export type VenueProber = (request: {
   platforms: readonly string[];
-  /** The CALLER's `$ODU_HOSTS`, or `null` for "the caller expressed nothing".
-   *  The inventory is resolved HERE, in a per-user singleton whose environment
-   *  belongs to whoever started it — so without this, `odu hosts` and `odu run`
-   *  can address different fleets from the same shell. */
-  hostsFile: string | null;
+  /** WHO the caller is. The inventory is resolved HERE, in a per-user singleton
+   *  whose environment belongs to whoever started it — so without this,
+   *  `odu hosts` and `odu run` can address different fleets from the same
+   *  shell. See {@link Caller}. */
+  caller: Caller;
 }) => Promise<VenueProbeOutcome>;
 
 export interface VenueHoldResult {
@@ -332,11 +373,11 @@ export type VenueHoldOutcome =
 export type VenueHolder = (request: {
   checkout: string;
   platforms: readonly string[];
-  /** The CALLER's `$ODU_HOSTS`, or `null` for "the caller expressed nothing".
-   *  The inventory is resolved HERE, in a per-user singleton whose environment
-   *  belongs to whoever started it — so without this, `odu hosts` and `odu run`
-   *  can address different fleets from the same shell. */
-  hostsFile: string | null;
+  /** WHO the hold is for. The inventory is resolved HERE, in a per-user
+   *  singleton whose environment belongs to whoever started it — so without
+   *  this, `odu hosts` and `odu run` can address different fleets from the same
+   *  shell. See {@link Caller}. */
+  caller: Caller;
   noWait: boolean;
 }) => Promise<VenueHoldOutcome>;
 
@@ -350,11 +391,11 @@ export interface VenueReleaseResult {
 export type VenueReleaser = (request: {
   checkout: string;
   platforms: readonly string[];
-  /** The CALLER's `$ODU_HOSTS`, or `null` for "the caller expressed nothing".
-   *  The inventory is resolved HERE, in a per-user singleton whose environment
-   *  belongs to whoever started it — so without this, `odu hosts` and `odu run`
-   *  can address different fleets from the same shell. */
-  hostsFile: string | null;
+  /** WHO the release is for. The inventory is resolved HERE, in a per-user
+   *  singleton whose environment belongs to whoever started it — so without
+   *  this, `odu hosts` and `odu run` can address different fleets from the same
+   *  shell. See {@link Caller}. */
+  caller: Caller;
 }) => Promise<{ results: readonly VenueReleaseResult[] }>;
 
 // ── branch protection ───────────────────────────────────────────────────────
@@ -397,11 +438,11 @@ export type RulesetWriter = (request: {
   checkout: string;
   branch?: string;
   platforms: readonly string[];
-  /** The CALLER's `$ODU_HOSTS`, or `null` for "the caller expressed nothing".
-   *  An unsliced `protect` DERIVES its platform set from the hosts file, and
-   *  that derivation runs here — in a per-user singleton whose environment
-   *  belongs to whoever started it, not to whoever asked. */
-  hostsFile: string | null;
+  /** WHO the protection is for. An unsliced `protect` DERIVES its platform set
+   *  from the hosts file, and that derivation runs here — in a per-user
+   *  singleton whose environment belongs to whoever started it, not to whoever
+   *  asked. See {@link Caller}. */
+  caller: Caller;
   dryRun: boolean;
   create: boolean;
 }) => Promise<ProtectOutcome>;

@@ -38,6 +38,7 @@ import {
 } from "@odu/execution/coordinator/runnerFlake";
 import { oduSelfArgv } from "@odu/execution/coordinator/spawn";
 import type {
+  Caller,
   VenueHoldOutcome,
   VenueHoldResult,
   VenueReleaseResult,
@@ -171,10 +172,9 @@ function holderFacts(
 
 export interface LeaseOptions {
   platforms: readonly string[];
-  /** The CALLER's `$ODU_HOSTS`. Resolved here, in the service's process, whose
-   *  own environment is a fact about the shell that started it. `null` is a
-   *  caller that expressed nothing. */
-  hostsFile?: string | null;
+  /** WHO the hold is for. Resolved here, in the service's process, whose own
+   *  environment is a fact about the shell that started it. See {@link Caller}. */
+  caller: Caller;
   /** Try once and let the holder exit rather than queueing. The HOLDER's
    *  persistence, not this call's — this call never waits either way. */
   noWait: boolean;
@@ -202,7 +202,7 @@ export async function leaseVenues(
   const repoRoot = opts.repoRoot ?? process.cwd();
   let platforms: string[];
   try {
-    platforms = resolvePlatforms(opts.platforms, opts.hostsFile ?? null);
+    platforms = resolvePlatforms(opts.platforms, opts.caller.hostsFile);
   } catch (err) {
     return { ok: false, message: (err as Error).message };
   }
@@ -245,7 +245,7 @@ export async function leaseVenues(
       platform,
       noWait: opts.noWait,
       repoRoot,
-      hostsFile: opts.hostsFile ?? null,
+      hostsFile: opts.caller.hostsFile,
     });
     upsertPlatformLease(repoRoot, platform, {
       host: null,
@@ -310,8 +310,8 @@ function waitingMessage(
 export function releaseVenues(opts: {
   platforms: readonly string[];
   repoRoot?: string;
-  /** The caller's `$ODU_HOSTS` — see {@link LeaseOptions}. */
-  hostsFile?: string | null;
+  /** WHO the release is for — see {@link LeaseOptions}. */
+  caller: Caller;
 }): { results: readonly VenueReleaseResult[] } {
   const repoRoot = opts.repoRoot ?? process.cwd();
   const { record } = reconcileLeaseRecord(repoRoot);

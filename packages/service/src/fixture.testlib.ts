@@ -332,11 +332,13 @@ export interface RecordingPorts extends ServicePorts {
   cancels: CancelRequest[];
   /** Every hold, release and protect the service ASKED FOR. A repeat that
    *  replays leaves these unchanged, which is the assertion. */
+  probes: VenueProbeRequest[];
   holds: VenueHoldRequest[];
   releases: VenueReleaseRequest[];
   protects: ProtectRequest[];
 }
 
+type VenueProbeRequest = Parameters<ServicePorts["probeVenues"]>[0];
 type VenueHoldRequest = Parameters<ServicePorts["holdVenue"]>[0];
 type VenueReleaseRequest = Parameters<ServicePorts["releaseVenue"]>[0];
 type ProtectRequest = Parameters<ServicePorts["protect"]>[0];
@@ -364,6 +366,7 @@ export function recordingPorts(opts: {
   const launches: LaunchRequest[] = [];
   const retries: RetryRequest[] = [];
   const cancels: CancelRequest[] = [];
+  const probes: VenueProbeRequest[] = [];
   const holds: VenueHoldRequest[] = [];
   const releases: VenueReleaseRequest[] = [];
   const protects: ProtectRequest[] = [];
@@ -371,6 +374,7 @@ export function recordingPorts(opts: {
     launches,
     retries,
     cancels,
+    probes,
     holds,
     releases,
     protects,
@@ -425,7 +429,10 @@ export function recordingPorts(opts: {
     // plausible empty inventory, so a test that reaches one by accident says so
     // instead of asserting against a fiction.
     pipeline: () => ({ ok: false, message: "the stub reads no pipeline" }),
-    probeVenues: async () => ({ ok: false, message: "the stub probes nothing" }),
+    probeVenues: async (request) => {
+      probes.push(request);
+      return { ok: false, message: "the stub probes nothing" };
+    },
     holdVenue: async (request) => {
       holds.push(request);
       return (
