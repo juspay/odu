@@ -311,6 +311,11 @@ let
         pkgs.openssh
         pkgs.bash
         pkgs.coreutils
+        # The cache compresses a NAR on the way out and the push client does
+        # the same on the way in. `nix` itself is deliberately NOT here (the
+        # host that provides the daemon provides the client); `zstd` is odu's
+        # own work, so odu brings it.
+        pkgs.zstd
       ]}
   '';
 in
