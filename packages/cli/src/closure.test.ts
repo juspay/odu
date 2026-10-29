@@ -30,7 +30,7 @@ const DECLARED = Object.keys(MANIFEST.dependencies ?? {});
 
 /** Pinned as a literal set: every entry is a wall this package leans on, and
  *  the renderer/terminal entries are exactly what the engine must not carry. */
-const EXPECTED_DEPENDENCIES = ["@effect/platform-node", "@modelcontextprotocol/sdk", "@odu/execution", "@odu/run-client", "@odu/run-history", "@odu/service", "@odu/service-client", "@opentui/core", "@xterm/headless", "effect"];
+const EXPECTED_DEPENDENCIES = ["@effect/platform-node", "@modelcontextprotocol/sdk", "@odu/cache", "@odu/execution", "@odu/run-client", "@odu/run-history", "@odu/service", "@odu/service-client", "@opentui/core", "@xterm/headless", "effect"];
 
 /** The `@kolu/*` sources hydrated from a Nix pin rather than installed. */
 const HYDRATED = new Set<string>([

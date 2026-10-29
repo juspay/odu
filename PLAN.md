@@ -354,6 +354,9 @@ What lands:
   build` substituting from it with the bucket's key trusted, GC evicting an
   unreferenced path and refusing a pinned closure.
 
+**Exit criterion:** flat server memory over concurrent multi-gigabyte NAR reads
+and pushes, shown by the evidence recording.
+
 State of master after merge: `odu web` on any machine is also a Nix cache on
 loopback, administered by `odu cache` with a root token. Nothing is public.
 
@@ -366,6 +369,9 @@ loopback, administered by `odu cache` with a root token. Nothing is public.
 > `nix.conf` to pull odu and its runners from it. Open-source repos push to
 > a bucket from GitHub Actions with the documented step and an
 > `ODU_CACHE_TOKEN` secret.
+
+The root token comes from `ODU_ROOT_TOKEN`, which the module sets from a secret
+path (agenix-compatible) rather than from anything odu writes.
 
 Prerequisite PR in kolu: `publish-closure` gains a generic push target (a
 cache URL with netrc, or a push command) beside its attic inputs.
@@ -566,6 +572,14 @@ a hosted offering needs.
   and the hook is the recommended path.
 - **No chunking.** Deliberate; chutney showed chunking cost more than it saved
   on S3. Revisit only if storage cost dominates.
+- **Streaming a NAR through Bun's HTTP server.** PR 1 hands the socket the
+  store's `dump-path | zstd` stream and the request's own body stream, so no
+  code path holds a NAR. That is only worth anything if the runtime honours
+  backpressure on both, and Bun's `Bun.serve` is younger than Node's. The exit
+  criterion (flat RSS over concurrent multi-gigabyte reads and pushes, recorded)
+  is the measurement, not the assurance. Escape hatch if it does not hold:
+  nginx `X-Accel-Redirect`, or a sidecar that serves NAR bytes while odu keeps
+  narinfo, auth and signing.
 
 ## Open questions
 

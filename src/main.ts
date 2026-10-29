@@ -76,6 +76,7 @@ import {
   pipelineViaService,
   protectViaService,
 } from "@odu/cli/servicePipeline";
+import { cacheCommand } from "@odu/cli/cacheCmd";
 import { internalCommand } from "@odu/cli/internalCli";
 import { serviceMcpCommand } from "@odu/cli/serviceMcp";
 import { ODU_VERSION } from "@odu/execution/common/version";
@@ -83,7 +84,7 @@ import { surfaceCliMain } from "@odu/cli/serviceCli";
 import { webCommand, webDaemonCommand } from "@odu/cli/web";
 import { errorMessage, errorStack } from "@odu/execution/common/effectEdge";
 
-const USAGE = `usage: odu <run|wait|rerun|cancel|logs|history|status|attach|hosts|lease|release|dump|graph|protect|web|surface|mcp> [args]
+const USAGE = `usage: odu <run|wait|rerun|cancel|logs|history|status|attach|hosts|lease|release|dump|graph|protect|cache|web|surface|mcp> [args]
 
 Every command below is a client of the shared odu service. It is started for you
 if none is running; nothing here runs CI by itself.
@@ -128,6 +129,10 @@ graph [--root NAMEPATH]       # the same DAG, as Mermaid
 protect [--dry-run] [--branch B] [--platform P]… [--create] [-o json]
                               # require exactly the checks odu posts. --create
                               # makes the branch's ruleset if absent
+cache <create|list|use|token|login|push|pin|gc|stats>
+                              # Nix binary cache buckets (odu cache --help).
+                              # Administration needs $ODU_ROOT_TOKEN; push talks
+                              # to the cache directly, from HERE
 web [--background] [--upgrade] [-o json]
                               # the service. Bare: serves in this terminal
                               # until Ctrl-C (runs you start keep going).
@@ -446,6 +451,10 @@ async function dispatch(argv: string[]): Promise<number> {
     case "history": {
       const [sub, ...subRest] = rest;
       return historyCommand(sub, subRest);
+    }
+    case "cache": {
+      const [sub, ...subRest] = rest;
+      return cacheCommand(sub, subRest);
     }
     case "attach": {
       const { values } = parseArgs({

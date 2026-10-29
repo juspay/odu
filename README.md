@@ -48,6 +48,35 @@ Retry unchanged inputs to investigate a flake. Commit a source fix and start a n
 
 A live retry creates a new attempt; a finalized retry creates a linked replay. `run --linger` is supported but is not required for replay.
 
+## Serve a Nix binary cache
+
+The same service is a Nix substituter: one bucket is one cache with its own
+ed25519 key, and the server signs every path on ingest.
+
+```sh
+export ODU_ROOT_TOKEN=...            # administration needs it; reads do not
+odu cache create main                # prints the substituter and the public key
+odu cache use main                   # the nix.conf lines, a nixConfig block, netrc
+odu cache token mint main --write    # printed once; save it with `odu cache login`
+ODU_CACHE_TOKEN=... odu cache push main ./result
+```
+
+| Command | What it does |
+| --- | --- |
+| `odu cache create <bucket>` | Create a bucket; print its substituter URL and public key |
+| `odu cache list` | List buckets, with sizes |
+| `odu cache use <bucket>` | Print the substituter and key settings, a `nixConfig` block, and the netrc lines |
+| `odu cache token mint\|list\|revoke` | Scoped, expiring, revocable tokens; the plaintext is shown once |
+| `odu cache login <origin>` | Save a token for an origin in `~/.config/odu/cache/credentials` |
+| `odu cache push <bucket> <path>…` | Upload only the paths the bucket is missing |
+| `odu cache pin <bucket> <name> <path>…` | Keep a closure out of garbage collection |
+| `odu cache gc [bucket]` | Evict what retention expired and nothing references or pins |
+| `odu cache stats` | Storage and reads |
+
+`nix copy --to http://127.0.0.1:18440/main ./result` works with no odu code on
+the client. The [cache page](https://juspay.github.io/odu/cache/) has the
+protocol and the storage model.
+
 ## Agents and remote access
 
 The [unified skill](skills/odu/SKILL.md) and its MCP server ship together as an [Agent Plugin](https://agent-plugins.org/) at the repository root. With [agent-distro](https://agent-distro.nixos.asia/#profiles), add `"github:juspay/odu"` to your profile's `plugins`. Or configure a stdio MCP server running:

@@ -89,6 +89,7 @@ import {
   serveServiceMcpInProcess,
 } from "./serviceMcp";
 import { webPorts } from "./webPorts";
+import { cacheRoutes } from "@odu/cache/routes";
 import {
   assertPackaged,
   bakedBuild,
@@ -213,8 +214,12 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     stopHandlers.push(() => process.off(signal, onSignal));
   }
 
+  // ONE cache for the tenure: the service administers it through a port, and
+  // the listener serves the protocol through the same object. Two constructions
+  // would be two databases.
+  const { ports, cache } = webPorts();
   const service = createOduService({
-    ports: webPorts(),
+    ports,
     origin,
     home: home.dir,
     build: bakedBuild(),
@@ -258,13 +263,17 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
           host,
           port,
           allowedOrigins,
-          routes: Layer.merge(mcpRoute(transport, allowedOrigins), mcpGetRoute()),
+          routes: Layer.merge(
+            Layer.merge(mcpRoute(transport, allowedOrigins), mcpGetRoute()),
+            cacheRoutes(cache),
+          ),
         }),
       ).pipe(Scope.provide(scope)),
     );
   } catch (err) {
     await mcp.close();
     await service.close();
+    cache.close();
     gate.release();
     process.stderr.write(
       `odu: could not bind ${origin} — ${(err as Error).message}\n` +
@@ -298,6 +307,9 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     await mcp.close();
     await Effect.runPromise(Scope.close(scope, Exit.void));
     await service.close();
+    // The database handle is this process's, and a tenure that ended is a
+    // tenure whose SQLite connection must not outlive it.
+    cache.close();
   }
 }
 

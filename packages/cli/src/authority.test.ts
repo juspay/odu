@@ -46,6 +46,16 @@
  * walks is DERIVED from `src/main.ts`'s own imports, so a command cannot be
  * exempted by forgetting to list it.
  *
+ * ## The one client of another authority
+ *
+ * `odu cache push` is a client of the cache's HTTP API rather than of the
+ * service, and it is admissible here for a reason this wall can check: it
+ * imports none of the three authorities above, and it has to be this way
+ * because the paths live on the machine that built them — a push cannot go
+ * THROUGH the service, which is not where the bytes are. `cacheCmd.ts` is
+ * therefore policed like every other public client, and passes on the same
+ * terms.
+ *
  * The walk is a PARSE rather than a line scan, and TYPE-ONLY EDGES COUNT: a
  * `import type { RunLauncher }` is how a port gets threaded back in one
  * refactor later, and the compiler would not object.
@@ -297,6 +307,7 @@ describe("the authority wall", () => {
       "servicePipeline.ts",
       "serviceCli.ts",
       "serviceMcp.ts",
+      "cacheCmd.ts",
     ]) {
       expect(
         PUBLIC_CLIENTS,

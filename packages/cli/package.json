@@ -14,6 +14,7 @@
   "dependencies": {
     "@effect/platform-node": "4.0.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@odu/cache": "workspace:*",
     "@odu/execution": "workspace:*",
     "@odu/run-client": "workspace:*",
     "@odu/run-history": "workspace:*",
