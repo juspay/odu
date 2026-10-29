@@ -21,6 +21,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -52,7 +53,13 @@ const startedAt = Date.now();
  * machine and least likely to want to sort out what is rubbish.
  */
 export function scratchDir(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
+  // RESOLVED, because a chroot store's root may not pass through a symlink and
+  // `$TMPDIR` is one on macOS (`/var` → `/private/var`, and `/tmp` → `/private/tmp`
+  // where a shell handed us `TMPDIR=/tmp`). Nix refuses with `the path "/tmp" is
+  // a symlink; this is not allowed for the Nix store and its parent directories`
+  // — a sentence about the store's PARENT that reads like a test bug, three
+  // levels below the call that caused it.
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
   fixtures.add(dir);
   return dir;
 }
