@@ -30,7 +30,7 @@
  * upload must not be swept out from under its writer.
  */
 
-import { mkdir, open, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { basename, join } from "node:path";
 import type { BlobStore } from "./store";
@@ -372,26 +372,44 @@ export function createStaging(deps: StagingDeps): Staging {
       }
       const path = join(dirForBucket, "nar", file);
       // A UNIQUE temp name, renamed into place on commit. Two store paths with
-      // identical content share a NAR name, and two `open(path, "w")` handles
-      // on one file truncate each other; the bytes are identical by
-      // construction, so an atomic rename is the whole fix.
+      // identical content share a NAR name, and two writers opening one file
+      // truncate each other; the bytes are identical by construction, so an
+      // atomic rename is the whole fix.
       const part = `${path}.${randomUUID()}.part`;
       openUploads.add(part);
-      const handle = await open(part, "w", 0o600);
+      // BUN'S FILE SINK, and the primitive is the whole of an upload's memory.
+      // The body reaches us with correct backpressure either way — writing
+      // nothing at all leaves a 2 GiB push flat at 295–305 MiB — so the peak is
+      // decided by how the bytes get to the disk. Measured on a 2 GiB push, the
+      // daemon's RSS sampled every 0.5 s, idle 227 MiB:
+      //
+      //   `FileHandle.write` per chunk      324–1366 MiB   (Node's `fs` shim)
+      //   `createWriteStream` + `pipeline`  379–1328 MiB   (the same shim)
+      //   `writeSync` on a raw descriptor   304–325 MiB    (blocks the loop)
+      //   **`Bun.file(part).writer()`**     299–316 MiB    (this, and 289 at 256 MiB)
+      //
+      // Node's `fs` shim leaves each chunk buffer to the collector, so the
+      // peak is whatever the collector happened not to reclaim: the same 2 GiB
+      // upload peaked at 324 in one run and 1366 in another, and forcing
+      // `Bun.gc(false)` every 256 MiB merely bounded it to 360–486. The sink
+      // owns the buffer, so the number stops depending on the collector's mood.
+      // The descriptor sink is the fallback if this runtime's writer ever goes
+      // away: it measures the same, at the cost of a stalled event loop.
+      const sink = Bun.file(part).writer({ highWaterMark: 1 << 20 });
       const release = (): void => {
         openUploads.delete(part);
       };
       return {
         async write(chunk) {
-          await handle.write(chunk);
+          await sink.write(chunk);
         },
         async commit() {
-          await handle.close();
+          await sink.end();
           await rename(part, path);
           release();
         },
         async discard() {
-          await handle.close().catch(() => {});
+          await Promise.resolve(sink.end()).catch(() => {});
           await rm(part, { force: true }).catch(() => {});
           release();
         },

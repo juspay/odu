@@ -339,6 +339,29 @@ describe("the auth matrix", () => {
     await h.dispose();
   });
 
+  it("reads a credential without backtracking on the header", async () => {
+    const h = await harness(true);
+    // A header is the one string on this face that arrives before anything is
+    // authenticated, and it is somebody else's input. Ten thousand spaces is
+    // the shape that made `/^Bearer\\s+(.+)$/i` try every split of `\\s+`
+    // against `(.+)$`; the parse is one left-to-right scan, so this is linear
+    // and the bound below is generous by three orders of magnitude.
+    const spaces = `Bearer${" ".repeat(10_000)}`;
+    const started = performance.now();
+    const verdict = h.cache.authorize(spaces, h.cache.bucket("main") as never, "read");
+    expect(performance.now() - started).toBeLessThan(250);
+    // A wholesale-whitespace payload is still a PRESENTED credential: it is
+    // refused as a token this service never minted (403), not as an absent one
+    // (401) — the distinction costs an attacker nothing and keeps the answer
+    // identical to the one the regex gave.
+    expect(verdict).toMatchObject({ ok: false, status: 403 });
+    // The same header with a failing tail: the case that actually backtracks,
+    // because `$` cannot match before a trailing newline.
+    const tail = h.cache.authorize(`${spaces}x\n`, h.cache.bucket("main") as never, "read");
+    expect(tail).toMatchObject({ ok: false, status: 403 });
+    await h.dispose();
+  });
+
   it("is a 404 for an unknown bucket on every route", async () => {
     const h = await harness(true);
     for (const [path, init] of [

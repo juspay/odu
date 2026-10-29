@@ -646,20 +646,38 @@ export function createCache(options: CacheOptions): Cache {
  * cache that accepted only Bearer would be a cache no Nix client could write
  * to.
  */
+/** Is this the whitespace a header can hold? Space and tab, and nothing else:
+ *  a field value cannot contain CR or LF (RFC 9110 §5.5, and Node's parser
+ *  rejects it before a route sees it), so the rest of `\s` is unreachable
+ *  input and treating it as part of the scheme is the safe reading. */
+const headerSpace = (ch: string): boolean => ch === " " || ch === "\t";
+
+/**
+ * The credential in an `Authorization` header, or null.
+ *
+ * Parsed by hand rather than with `/^Bearer\s+(.+)$/i`. Two adjacent
+ * quantifiers over a header we do not control is a polynomial backtracking
+ * hazard — a header of ten thousand spaces makes the engine try every split of
+ * `\s+` against `(.+)$` — and the header is the one string on this face that
+ * arrives before anything has been authenticated.
+ */
 function credentialOf(header: string | undefined): string | null {
   if (header === undefined) return null;
-  const bearer = /^Bearer\s+(.+)$/i.exec(header);
-  if (bearer !== null) return (bearer[1] as string).trim();
-  const basic = /^Basic\s+(.+)$/i.exec(header);
-  if (basic !== null) {
-    let decoded: string;
-    try {
-      decoded = Buffer.from((basic[1] as string).trim(), "base64").toString("utf8");
-    } catch {
-      return null;
-    }
-    const at = decoded.indexOf(":");
-    return at === -1 ? null : decoded.slice(at + 1);
+  let at = 0;
+  while (at < header.length && !headerSpace(header[at] as string)) at++;
+  const scheme = header.slice(0, at).toLowerCase();
+  if (at === header.length) return null; // a scheme with no whitespace after it
+  let payloadAt = at;
+  while (payloadAt < header.length && headerSpace(header[payloadAt] as string)) payloadAt++;
+  const payload = header.slice(payloadAt).trim();
+  if (scheme === "bearer") return payload;
+  if (scheme !== "basic") return null;
+  let decoded: string;
+  try {
+    decoded = Buffer.from(payload, "base64").toString("utf8");
+  } catch {
+    return null;
   }
-  return null;
+  const colon = decoded.indexOf(":");
+  return colon === -1 ? null : decoded.slice(colon + 1);
 }
