@@ -6,18 +6,32 @@
  * ranks by specificity, so these literal and prefixed paths beat the shell's
  * `GET /*` catch-all whichever way round they go in.
  *
- * **Nothing here holds a NAR.** A read hands the socket the store's
- * `dump-path | zstd` stream; an upload hands the store the request's own body
- * stream. The two places a multi-gigabyte NAR could be materialised are exactly
- * the two places that do not: `HttpServerRequest.stream` in,
- * `HttpServerResponse.stream` out.
+ * **The cache owns every two-segment GET on the listener.** `GET /:bucket/:name`
+ * is the narinfo route, and a bucket named `sw.js` would shadow the shell's own
+ * `/sw.js` — which it cannot, because a bucket name is a lowercase label and
+ * the shell's fixed paths are not, and because `/:bucket/nix-cache-info` and
+ * `/:bucket/nar/:file` rank above it. The one path this file DOES claim is any
+ * two-segment GET, so a future fixed asset with a two-segment path belongs
+ * above this layer, not beside it. `routes.test.ts` pins the shell's three.
+ *
+ * **Nothing here holds a NAR.** A read hands the socket
+ * `HttpServerResponse.stream` of the store's own pipeline; an upload hands the
+ * store the request's body stream. The two places a multi-gigabyte NAR could be
+ * materialised are exactly the two places that do not.
+ *
+ * **Every route parameter is validated before it reaches the filesystem.** The
+ * router DECODES `%2F`, so a `:name` of `..%2F..%2Fx` would otherwise be a path
+ * segment in a `join()`. A narinfo hash is 32 characters of Nix base32 and a NAR
+ * file name is a plain file name; anything else is a 400 and nothing is
+ * written.
  *
  * **Authentication is per request and per bucket.** A public bucket reads
  * without a token; a private one needs read scope; a write always needs write
  * scope. `Authorization: Bearer` and HTTP Basic are both accepted — Basic with
  * any username and the token as the password is what `nix copy --to` sends
  * through curl, so a cache that spoke only Bearer would be a cache no Nix
- * client could write to.
+ * client could write to. An anonymous read of a PRIVATE bucket is a 404, not a
+ * 401: "you need a token" confirms the bucket exists.
  *
  * **`HEAD` is served by the `GET` route.** `find-my-way` falls back from HEAD
  * to GET, and `HttpRouter.add` cannot even register a HEAD, so the narinfo
@@ -30,6 +44,7 @@ import { Effect, Layer, Stream } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import { type Cache, NIX_CACHE_INFO } from "./cache";
 import type { BucketRow, Scope } from "./db";
+import { isStagedFileName, isStorePathHash } from "./narinfo";
 
 /** A bucket by name, and a credential that may do `need` with it — or the
  *  response that says why not. Every protocol route starts here, so "unknown
@@ -56,6 +71,9 @@ function admit(
 
 const NARINFO_SUFFIX = ".narinfo";
 
+const bad = (message: string): HttpServerResponse.HttpServerResponse =>
+  HttpServerResponse.text(message, { status: 400 });
+
 export function cacheRoutes(cache: Cache) {
   return Layer.mergeAll(
     /** `nix-cache-info` — the three lines a client reads before anything else. */
@@ -79,6 +97,7 @@ export function cacheRoutes(cache: Cache) {
         const name = yield* param("name");
         if (!name.endsWith(NARINFO_SUFFIX)) return HttpServerResponse.empty({ status: 404 });
         const hash = name.slice(0, -NARINFO_SUFFIX.length);
+        if (!isStorePathHash(hash)) return bad(`"${hash}" is not a store path hash`);
         const admitted = admit(cache, request, yield* param("bucket"), "read");
         if (!admitted.ok) return admitted.response;
         const text = cache.narinfoText(admitted.bucket, hash);
@@ -96,9 +115,10 @@ export function cacheRoutes(cache: Cache) {
     /** The NAR itself, streamed from the store through zstd. */
     HttpRouter.add("GET", "/:bucket/nar/:file", (request) =>
       Effect.gen(function* () {
+        const file = yield* param("file");
+        if (!isStagedFileName(file)) return bad(`"${file}" is not a NAR file name`);
         const admitted = admit(cache, request, yield* param("bucket"), "read");
         if (!admitted.ok) return admitted.response;
-        const file = yield* param("file");
         const stream = yield* Effect.promise(() => cache.narStream(admitted.bucket, file));
         if (stream === null) return HttpServerResponse.empty({ status: 404 });
         return HttpServerResponse.stream(
@@ -115,9 +135,10 @@ export function cacheRoutes(cache: Cache) {
      */
     HttpRouter.add("PUT", "/:bucket/nar/:file", (request) =>
       Effect.gen(function* () {
+        const file = yield* param("file");
+        if (!isStagedFileName(file)) return bad(`"${file}" is not a NAR file name`);
         const admitted = admit(cache, request, yield* param("bucket"), "write");
         if (!admitted.ok) return admitted.response;
-        const file = yield* param("file");
         const upload = yield* Effect.promise(() => cache.beginUpload(admitted.bucket, file));
         const written = yield* Effect.exit(
           Stream.runForEach(request.stream, (chunk) =>
@@ -133,28 +154,38 @@ export function cacheRoutes(cache: Cache) {
     ),
 
     /**
-     * The narinfo that completes an upload. The server parses it, imports the
-     * staged pair through the store (Nix verifies the NarHash, so a mismatched
-     * upload is this client's 400), re-signs with the bucket key, and records
-     * the object. An upload whose references have not arrived is accepted and
-     * deferred — the client is early, not wrong.
+     * The narinfo that completes an upload.
+     *
+     * The answer is the OUTCOME, not an acknowledgement: 200 when the path is
+     * recorded, 202 when it is waiting on a reference that has not arrived (an
+     * ordering fact — `nix copy --to` may send a closure in any order), and 400
+     * with Nix's own sentence for everything else. A 200 for a path nobody
+     * recorded is how a push reports success for bytes the cache does not have.
      */
     HttpRouter.add("PUT", "/:bucket/:name", (request) =>
       Effect.gen(function* () {
         const name = yield* param("name");
         if (!name.endsWith(NARINFO_SUFFIX)) return HttpServerResponse.empty({ status: 404 });
+        const hash = name.slice(0, -NARINFO_SUFFIX.length);
+        if (!isStorePathHash(hash)) return bad(`"${hash}" is not a store path hash`);
         const admitted = admit(cache, request, yield* param("bucket"), "write");
         if (!admitted.ok) return admitted.response;
         const outcome = yield* Effect.promise(() =>
           cache.acceptNarinfo(
             admitted.bucket,
-            name.slice(0, -NARINFO_SUFFIX.length),
+            hash,
             Stream.toReadableStream(request.stream),
           ),
         );
-        return outcome.ok
-          ? HttpServerResponse.empty({ status: 200 })
-          : HttpServerResponse.text(outcome.message, { status: outcome.status });
+        if (outcome.ok) {
+          return outcome.status === 200
+            ? HttpServerResponse.empty({ status: 200 })
+            : HttpServerResponse.text(
+                `waiting on ${outcome.missing.join(", ")} — upload them and repeat this narinfo`,
+                { status: 202 },
+              );
+        }
+        return HttpServerResponse.text(outcome.message, { status: outcome.status });
       }),
     ),
 
@@ -171,10 +202,7 @@ export function cacheRoutes(cache: Cache) {
         const body = yield* request.json;
         const paths = missingRequestOf(body);
         if (paths === null) {
-          return HttpServerResponse.text(
-            'expected {"paths": [{"path": "/nix/store/…", "sigs": […]}]}',
-            { status: 400 },
-          );
+          return bad('expected {"paths": [{"path": "/nix/store/…", "sigs": […]}]}');
         }
         const answer = cache.missing(admitted.bucket, paths);
         return HttpServerResponse.jsonUnsafe({

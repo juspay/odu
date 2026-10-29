@@ -26,7 +26,7 @@
 
 import { Database } from "bun:sqlite";
 import { dirname } from "node:path";
-import { mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync } from "node:fs";
 
 /** A bucket: one cache, one substituter URL, one signing keypair. */
 export interface BucketRow {
@@ -114,6 +114,17 @@ export interface CacheRepo {
   putPin(row: PinRow): void;
   pins(bucket?: string): PinRow[];
   deletePin(bucket: string, name: string): boolean;
+
+  /** Object count and nar bytes per bucket, COUNTED BY SQL. A cache with a
+   *  hundred thousand objects must not answer "how big am I" by loading them. */
+  bucketStats(): Map<string, { objects: number; bytes: number }>;
+  /** The same, over every bucket, plus reads and the newest access. */
+  objectTotals(): {
+    objects: number;
+    bytes: number;
+    hits: number;
+    lastAccessed: number | null;
+  };
 
   close(): void;
 }
@@ -242,10 +253,38 @@ const pinOf = (row: Row): PinRow => ({
   created: integer(row, "created"),
 });
 
-/** Open (or create) the cache database. `":memory:"` is what the suite uses. */
+/** Open (or create) the cache database. `":memory:"` is what the suite uses.
+ *
+ * **Modes matter here.** The database holds every bucket's ed25519 SECRET key
+ * and every token hash, so it is a secret: the directory is 0700 and the file —
+ * plus the `-wal` and `-shm` siblings SQLite creates beside it — is 0600.
+ * `Database` creates with the process umask, which on a default machine is
+ * world-readable, so the mode is set here rather than left to whoever started
+ * the process.
+ */
 export function openCacheRepo(path: string): CacheRepo {
-  if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+  if (path !== ":memory:") {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    // `mkdirSync`'s mode is honoured only for directories it CREATES; an
+    // existing state root keeps whatever it had.
+    try {
+      chmodSync(dirname(path), 0o700);
+    } catch {
+      // A state root somebody else owns is theirs to fix; the file modes below
+      // still apply to what this process creates.
+    }
+  }
   const db = new Database(path, { create: true });
+  if (path !== ":memory:") {
+    for (const file of [path, `${path}-wal`, `${path}-shm`]) {
+      try {
+        chmodSync(file, 0o600);
+      } catch {
+        // The `-wal`/`-shm` files appear lazily; whichever exist are closed
+        // down on the next open.
+      }
+    }
+  }
   db.exec("PRAGMA journal_mode = WAL;");
   db.exec("PRAGMA busy_timeout = 5000;");
   db.exec("PRAGMA foreign_keys = OFF;");
@@ -406,6 +445,37 @@ export function openCacheRepo(path: string): CacheRepo {
       bucket === undefined
         ? all("SELECT * FROM pin ORDER BY created", [], pinOf)
         : all("SELECT * FROM pin WHERE bucket = ? ORDER BY created", [bucket], pinOf),
+    bucketStats() {
+      const rows = db
+        .query(
+          "SELECT bucket, COUNT(*) AS objects, COALESCE(SUM(nar_size), 0) AS bytes " +
+            "FROM object GROUP BY bucket",
+        )
+        .all() as Row[];
+      return new Map(
+        rows.map((row) => [
+          text(row, "bucket"),
+          { objects: integer(row, "objects"), bytes: integer(row, "bytes") },
+        ]),
+      );
+    },
+    objectTotals() {
+      const row = db
+        .query(
+          "SELECT COUNT(*) AS objects, COALESCE(SUM(nar_size), 0) AS bytes, " +
+            "COALESCE(SUM(hits), 0) AS hits, MAX(last_accessed) AS last " +
+            "FROM object",
+        )
+        .get() as Row;
+      const last = row["last"];
+      return {
+        objects: integer(row, "objects"),
+        bytes: integer(row, "bytes"),
+        hits: integer(row, "hits"),
+        lastAccessed: last === null || last === undefined ? null : Number(last),
+      };
+    },
+
     deletePin(bucket, name) {
       const found = db
         .query("SELECT name FROM pin WHERE bucket = ? AND name = ?")

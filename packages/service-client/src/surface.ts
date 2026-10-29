@@ -36,6 +36,7 @@
  *   service.protect.apply      — required status checks on a branch
  *   service.cache.create       — a Nix binary cache bucket, and its key
  *   service.cache.list         — every bucket, with sizes
+ *   service.cache.describe     — one bucket's public identity, no root token
  *   service.cache.tokenMint    — a scoped, expiring, revocable write token
  *   service.cache.tokenList    — the tokens, never their plaintext
  *   service.cache.tokenRevoke  — one token, without touching the rest
@@ -1548,6 +1549,19 @@ const CacheCreateInputSchema = Schema.Struct({
 const CacheListInputSchema = Schema.Struct({ rootToken: Schema.String });
 const CacheListOutputSchema = Schema.Struct({ buckets: Schema.Array(CacheBucketSchema) });
 
+/**
+ * One bucket's PUBLIC identity, and NO root token.
+ *
+ * A bucket's substituter URL and public key are what it publishes to every
+ * client that talks to it, so demanding the operator's credential for them
+ * would make `odu cache use` — a read-only question a developer asks — an
+ * administrative act. The NAME is the capability, exactly as it is in the
+ * substituter URL.
+ */
+const CacheDescribeInputSchema = Schema.Struct({
+  bucket: Schema.String.check(Schema.isMinLength(1)),
+});
+
 /** The three scopes, ordered: admin covers write covers read. */
 export const CacheScopeSchema = Schema.Literals(["read", "write", "admin"]);
 export type CacheScope = typeof CacheScopeSchema.Type;
@@ -1568,6 +1582,8 @@ export type CacheToken = typeof CacheTokenSchema.Type;
 const CacheTokenMintInputSchema = Schema.Struct({
   rootToken: Schema.String,
   bucket: Schema.String,
+  /** A bucket GLOB, so one token can cover `team-*`. Absent means the bucket. */
+  bucketGlob: Schema.optionalKey(Schema.String),
   scope: CacheScopeSchema,
   /** Absent means "does not expire" — the shape a CI secret wants. */
   expiresDays: Schema.optionalKey(Schema.Int),
@@ -1763,6 +1779,11 @@ export const oduServiceSurface = defineSurface({
       list: {
         input: CacheListInputSchema,
         output: CacheListOutputSchema,
+        error: REFUSES,
+      },
+      describe: {
+        input: CacheDescribeInputSchema,
+        output: CacheBucketSchema,
         error: REFUSES,
       },
       tokenMint: {

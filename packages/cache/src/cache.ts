@@ -12,23 +12,37 @@
  * file on disk and no "first run mints one": a cache that administers itself on
  * first contact is a cache anybody on the machine can create buckets in.
  *
- * **Staging is a `file://` cache, byte for byte.** An upload is written under
- * `<state>/cache/staging/<bucket>/` as `nar/<file>` and `<hash>.narinfo` — the
- * exact layout the client would have written — and then imported with
- * `nix copy --from file://<that dir>`. Nix verifies the NarHash against the
- * bytes, so a mismatched upload is a 400 and never a corrupt store path. An
- * upload whose references have not arrived yet is DEFERRED rather than refused:
- * `nix copy --to` is free to send a closure in any order, and a server that
- * insisted on one would refuse a client it had no business refusing.
+ * **An upload is PROVED before it is believed.** The staged pair is a
+ * `file://` cache — `nar/<file>` and `<hash>.narinfo`, the layout the client
+ * would have written — and `nix copy --from file://<dir>` imports it. But Nix
+ * only verifies the NarHash when it actually fetches, and it fetches NOTHING
+ * when the path is already valid in the destination store: it copies zero
+ * paths and exits 0. On a single machine — where the cache's store is the
+ * host's — that is the normal case, so "Nix verified it" is true exactly when
+ * it does not matter. So {@link verifyNarFile} hashes the uploaded NAR against
+ * the narinfo's `NarHash` BEFORE any import is attempted. Without that, a
+ * write token for any bucket could publish any path the store happens to hold,
+ * including another bucket's private ones, with a narinfo alone.
  *
- * **An upload that never gets its narinfo is swept after an hour.** Without
- * that, a client killed between the two PUTs leaves a NAR on disk that nothing
- * will ever name — the cheapest possible disk leak, and the easiest to close.
+ * **A failed import is not a 200.** The narinfo PUT answers 200 only when the
+ * path is recorded, 202 when it is waiting on a reference that has not arrived
+ * (an ordering fact, not an error — `nix copy --to` may send a closure in any
+ * order), and 400 with Nix's own sentence for everything else.
+ *
+ * **Staging is swept by FILE, and only when nothing is writing.** A client
+ * killed between the two PUTs leaves a NAR that nothing will name; an in-flight
+ * upload must not be swept out from under its writer.
  */
 
-import { open, readdir, readFile, rm, stat, unlink, writeFile, mkdir } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, open, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
-import { type BlobStore, type ImportOutcome, type PathInfo, nixStore, writeStreamToFile } from "./store";
+import {
+  type BlobStore,
+  nixStore,
+  verifyNarFile,
+  writeStreamToFile,
+} from "./store";
 import type { BucketRow, CacheRepo, ObjectRow, Scope, TokenRow } from "./db";
 import { openCacheRepo } from "./db";
 import { planGc, runGc, type GcReport } from "./gc";
@@ -36,11 +50,12 @@ import {
   fingerprintOf,
   formatNarinfo,
   generateKeypair,
-  NarinfoError,
+  isStagedFileName,
+  isStorePathHash,
+  type NarInfo,
   parseNarinfo,
   signFingerprint,
   storePathHash,
-  type NarInfo,
 } from "./narinfo";
 import {
   globMatches,
@@ -109,9 +124,22 @@ export interface CacheAdmin {
     upstreamKeys: readonly string[];
   }): Promise<CacheOutcome<BucketFacts>>;
   list(input: { rootToken: string }): Promise<CacheOutcome<readonly BucketFacts[]>>;
+  /**
+   * One bucket's PUBLIC identity — its URL and the key a client has to trust —
+   * with no root token.
+   *
+   * `odu cache use` needs exactly this, and nothing else: the substituter
+   * address and the public key are what a bucket publishes to every client
+   * that talks to it, so demanding the operator's root token for them would
+   * make a read-only question into an administrative one. The NAME is the
+   * capability, the same way it is in the substituter URL.
+   */
+  describe(input: { bucket: string }): Promise<CacheOutcome<BucketFacts>>;
   tokenMint(input: {
     rootToken: string;
     bucket: string;
+    /** A glob, so one token can cover `team-*`. Absent means the bucket. */
+    bucketGlob: string | null;
     scope: Scope;
     expiresDays: number | null;
   }): Promise<CacheOutcome<TokenMinted>>;
@@ -134,18 +162,26 @@ export interface CacheAdmin {
 }
 
 /** The verdict on a presented credential. `status` is what the route answers
- *  with: 401 for "who are you", 403 for "not with that token". */
-export type AuthVerdict = { ok: true } | { ok: false; status: 401 | 403; message: string };
+ *  with: 401 for "who are you", 403 for "not with that token", and 404 for an
+ *  anonymous read of a PRIVATE bucket — a 401 there would confirm the bucket
+ *  exists, which is exactly what a private name must not leak. */
+export type AuthVerdict = { ok: true } | { ok: false; status: 401 | 403 | 404; message: string };
 
-/** A write in progress. `commit` closes the file; `discard` removes it. */
+/** A write in progress. `commit` publishes it under the name the narinfo will
+ *  name; `discard` removes it. */
 export interface Upload {
   write(chunk: Uint8Array): Promise<void>;
   commit(): Promise<void>;
   discard(): Promise<void>;
 }
 
+/** What a narinfo PUT came to. `status` is the answer the route sends. */
 export type NarinfoOutcome =
-  | { ok: true; storePath: string; deferred: boolean }
+  /** Recorded: the bucket serves this path. */
+  | { ok: true; status: 200; storePath: string }
+  /** Accepted, but waiting on references that are not in the store yet. */
+  | { ok: true; status: 202; storePath: string; missing: readonly string[] }
+  /** Refused, with the sentence to put in the body. */
   | { ok: false; status: 400; message: string };
 
 export interface Cache {
@@ -188,14 +224,26 @@ export const NIX_CACHE_INFO = "StoreDir: /nix/store\nWantMassQuery: 1\nPriority:
 /** A bucket name is a path segment on the wire, so it is a DNS-ish label and
  *  nothing else: lowercase, digits, dashes. A name with a `/` in it would be a
  *  second route, and one with a `.` would collide with `<hash>.narinfo`. */
-const BUCKET_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
+export const BUCKET_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
 /** How long a staged upload nobody finished survives. */
 const STAGE_TTL_MS = 60 * 60 * 1000;
 
+/** How often the staging directory is swept. Sweeping on every upload would be
+ *  a readdir of every bucket on every PUT. */
+const SWEEP_EVERY_MS = 60 * 1000;
+
 /** The narinfo `Compression` and URL extension odu serves. Reads are zstd on
  *  the fly; writes accept whatever a client sent. */
 const SERVED_EXTENSION = "nar.zst";
+
+/** One staged narinfo waiting for its turn, and what it is waiting on. */
+interface Pending {
+  hash: string;
+  info: NarInfo;
+  /** References Nix said were not valid. Empty means "not attempted yet". */
+  waitingOn: readonly string[];
+}
 
 export function createCache(options: CacheOptions): Cache {
   const now = options.now ?? (() => Date.now());
@@ -207,6 +255,16 @@ export function createCache(options: CacheOptions): Cache {
     nixStore({ gcrootsRoot: join(dir, "gcroots"), store: options.store });
 
   const stagedDir = (bucket: string): string => join(stagingRoot, bucket);
+
+  /** Uploads with an open file handle, by absolute path. The sweep must not
+   *  delete one, and `commit` must not lose one. */
+  const openUploads = new Set<string>();
+  /** One drain at a time per bucket: two narinfo PUTs for one bucket must not
+   *  import, unlink and record the same staged pair concurrently. */
+  const drains = new Map<string, Promise<void>>();
+  /** The staged narinfos this process knows about, by bucket then by hash. */
+  const pending = new Map<string, Map<string, Pending>>();
+  let lastSweep = 0;
 
   function requireRoot(rootToken: string): CacheOutcome<null> {
     if (!rootTokenMatches(options.rootToken, rootToken)) {
@@ -223,8 +281,11 @@ export function createCache(options: CacheOptions): Cache {
     return { ok: true, value: null };
   }
 
-  function factsOf(bucket: BucketRow): BucketFacts {
-    const objects = repo.objects(bucket.name);
+  function factsOf(
+    bucket: BucketRow,
+    counted: Map<string, { objects: number; bytes: number }> = repo.bucketStats(),
+  ): BucketFacts {
+    const counts = counted.get(bucket.name);
     return {
       name: bucket.name,
       public: bucket.isPublic,
@@ -232,15 +293,29 @@ export function createCache(options: CacheOptions): Cache {
       keyName: bucket.keyName,
       publicKey: bucket.publicKey,
       upstreamKeys: bucket.upstreamKeys,
-      objects: objects.length,
-      bytes: objects.reduce((sum, row) => sum + row.narSize, 0),
+      objects: counts?.objects ?? 0,
+      bytes: counts?.bytes ?? 0,
       created: bucket.created,
     };
   }
 
-  /** The narinfo a client reads, built from the row: the URL names the NAR by
-   *  its hash, the signature is the bucket's, and the client's own signatures
-   *  ride along so a path signed by a lane stays verifiable there. */
+  /** The bucket's signature over one path, computed AT READ TIME. A stored
+   *  signature would silently survive a rotated key; one ed25519 sign per
+   *  narinfo GET is nothing. */
+  function signatureOf(bucket: BucketRow, row: ObjectRow): string {
+    return signFingerprint(
+      bucket.secretKey,
+      fingerprintOf({
+        storePath: row.storePath,
+        narHash: row.narHash,
+        narSize: row.narSize,
+        references: row.references,
+      }),
+    );
+  }
+
+  /** The narinfo a client reads: the bucket's signature first, then the
+   *  client's own, so a path signed on a lane stays verifiable there. */
   function narinfoFor(bucket: BucketRow, row: ObjectRow): string {
     const info: NarInfo = {
       storePath: row.storePath,
@@ -252,40 +327,42 @@ export function createCache(options: CacheOptions): Cache {
       narSize: row.narSize,
       references: row.references,
       deriver: row.deriver,
-      sigs: row.sigs,
+      sigs: [signatureOf(bucket, row), ...row.sigs],
     };
     return formatNarinfo(info);
   }
 
-  /** The bucket's signature over the path, computed now rather than stored:
-   *  the fingerprint is a fact about the path, and a stored signature would
-   *  silently survive a rotated key. */
-  function sign(bucket: BucketRow, info: PathInfo, clientSigs: readonly string[]): string[] {
-    const signature = signFingerprint(
-      bucket.secretKey,
-      fingerprintOf({
-        storePath: info.storePath,
-        narHash: info.narHash,
-        narSize: info.narSize,
-        references: info.references,
-      }),
-    );
-    return [signature, ...clientSigs.filter((sig) => sig.split(":")[0] !== bucket.keyName)];
-  }
-
   /** Record an imported path. Idempotent: a re-pushed path refreshes its row
-   *  rather than duplicating, and keeps its hit count. */
+   *  rather than duplicating, and keeps its hit count.
+   *
+   * The signature the BUCKET made is not stored — it is computed at read — so
+   * the row holds only the CLIENT's signatures, deduplicated by full
+   * `name:base64` string: Nix hands the same signature back from
+   * `path-info` that it took from the narinfo, and a row with it twice would
+   * put it twice in every answer.
+   */
   async function record(
     bucket: BucketRow,
     storePath: string,
+    expectedNarHash: string,
     clientSigs: readonly string[],
-  ): Promise<void> {
+  ): Promise<boolean> {
     const info = await blob.pathInfo(storePath);
     if (info === null) {
       throw new Error(`imported ${storePath} but the store does not know it`);
     }
+    // Defence in depth: the bytes were hashed before the import, and this is
+    // the store agreeing afterwards.
+    if (info.narHash !== expectedNarHash) {
+      throw new Error(
+        `${storePath} is ${info.narHash} in the store but the narinfo said ${expectedNarHash}`,
+      );
+    }
     const existing = repo.object(bucket.name, storePath);
     const at = now();
+    const sigs = [...new Set([...clientSigs, ...info.sigs])].filter(
+      (sig) => sig.slice(0, sig.indexOf(":")) !== bucket.keyName,
+    );
     repo.putObject({
       bucket: bucket.name,
       storePath,
@@ -294,7 +371,7 @@ export function createCache(options: CacheOptions): Cache {
       narSize: info.narSize,
       references: info.references,
       deriver: info.deriver,
-      sigs: sign(bucket, info, [...clientSigs, ...info.sigs]),
+      sigs,
       hits: existing?.hits ?? 0,
       created: existing?.created ?? at,
       // A re-push is an access: the pusher wants the path to stay.
@@ -303,89 +380,187 @@ export function createCache(options: CacheOptions): Cache {
     // The root is what keeps the machine's own GC from eating a path the cache
     // serves; without it the first `nix-collect-garbage` empties the bucket.
     await blob.retain(bucket.name, storePath);
+    return true;
   }
 
   /**
-   * Import everything staged that can be imported now, in as many passes as it
-   * takes. Each pass makes progress or stops: a path whose references are
-   * still missing stays staged for the next narinfo that arrives.
+   * THE INVARIANT THE PRIVATE-BUCKET STORY RESTS ON: a narinfo is imported
+   * only when the NAR it names is present in THIS bucket's staging directory
+   * and hashes to the `NarHash` it claims.
+   *
+   * Without it, `nix copy --from` answers "0 paths copied, exit 0" for a path
+   * already valid in the destination store — never opening the NAR — so a
+   * token for one bucket could publish any path the server's store holds.
    */
-  async function drainStaged(bucket: BucketRow): Promise<void> {
+  async function provedStagedNar(
+    dirForBucket: string,
+    info: NarInfo,
+  ): Promise<{ ok: true } | { ok: false; message: string }> {
+    const name = basename(info.url);
+    if (!isStagedFileName(name)) {
+      return { ok: false, message: `narinfo names ${info.url}, which is not a NAR this cache staged` };
+    }
+    const path = join(dirForBucket, "nar", name);
+    const present = await stat(path).catch(() => null);
+    if (present === null) {
+      return {
+        ok: false,
+        message: `the narinfo names ${info.url}, which was never uploaded to this bucket`,
+      };
+    }
+    const checked = await verifyNarFile(path, info.compression);
+    if (!checked.ok) {
+      return { ok: false, message: `${info.url}: ${checked.message}` };
+    }
+    if (checked.narHash !== info.narHash) {
+      return {
+        ok: false,
+        message:
+          `${info.url} hashes to ${checked.narHash} but the narinfo says ` +
+          `${info.narHash} — the upload was truncated or corrupted`,
+      };
+    }
+    return { ok: true };
+  }
+
+  /** The staged narinfos this process knows about, loaded once from disk. A
+   *  restart must not lose an upload that was merely early. */
+  async function ensurePending(bucket: BucketRow): Promise<Map<string, Pending>> {
+    const known = pending.get(bucket.name);
+    if (known !== undefined) return known;
+    const map = new Map<string, Pending>();
+    pending.set(bucket.name, map);
     const dirForBucket = stagedDir(bucket.name);
+    for (const file of await readdir(dirForBucket).catch(() => [] as string[])) {
+      if (!file.endsWith(".narinfo")) continue;
+      const hash = file.slice(0, -".narinfo".length);
+      try {
+        const info = parseNarinfo(await readFile(join(dirForBucket, file), "utf8"));
+        // `waitingOn: []` means "never attempted", which is exactly right for a
+        // narinfo this process did not see arrive.
+        map.set(hash, { hash, info, waitingOn: [] });
+      } catch {
+        await unlink(join(dirForBucket, file)).catch(() => {});
+      }
+    }
+    return map;
+  }
+
+  /** One import, and the row that follows it. */
+  async function attempt(
+    bucket: BucketRow,
+    dirForBucket: string,
+    entry: Pending,
+  ): Promise<"recorded" | { missing: readonly string[] } | { failed: string }> {
+    const proved = await provedStagedNar(dirForBucket, entry.info);
+    if (!proved.ok) return { failed: proved.message };
+    const outcome = await blob.import({ dir: dirForBucket, storePath: entry.info.storePath });
+    if (!outcome.ok) {
+      return outcome.missing.length > 0 ? { missing: outcome.missing } : { failed: outcome.message };
+    }
+    await record(bucket, entry.info.storePath, entry.info.narHash, entry.info.sigs);
+    return "recorded";
+  }
+
+  /** Is the staged NAR named by `url` still wanted by some OTHER staged
+   *  narinfo? Two store paths with identical content share one NAR file, so
+   *  the first import must not take the file the second still needs. */
+  function narStillWanted(map: Map<string, Pending>, url: string, except: string): boolean {
+    const name = basename(url);
+    for (const [hash, entry] of map) {
+      if (hash === except) continue;
+      if (basename(entry.info.url) === name) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Import what can be imported, ONE AT A TIME per bucket, and only the
+   * narinfos a newly-valid path can unblock.
+   *
+   * `seed` names the store paths whose validity just changed. A pass imports
+   * those, then anything that was waiting on a path that pass recorded, until
+   * nothing new becomes importable — so a closure arriving out of order
+   * settles in one call and costs one `nix copy` per path, not one per path
+   * per PUT.
+   */
+  async function drain(bucket: BucketRow, seed: readonly string[]): Promise<void> {
+    const map = await ensurePending(bucket);
+    const dirForBucket = stagedDir(bucket.name);
+    await mkdir(dirForBucket, { recursive: true, mode: 0o700 });
     await writeFile(join(dirForBucket, "nix-cache-info"), NIX_CACHE_INFO).catch(() => {});
-    const files = (await readdir(dirForBucket).catch(() => [] as string[])).filter((file) =>
-      file.endsWith(".narinfo"),
+
+    let changed = [...seed];
+    while (changed.length > 0) {
+      const candidates = [...map.values()].filter((entry) =>
+        entry.waitingOn.length === 0
+          ? changed.includes(entry.info.storePath) || seed.includes(entry.info.storePath)
+          : entry.waitingOn.some((reference) => changed.includes(reference)),
+      );
+      if (candidates.length === 0) return;
+      const recorded: string[] = [];
+      for (const entry of candidates) {
+        const result = await attempt(bucket, dirForBucket, entry);
+        if (result === "recorded") {
+          map.delete(entry.hash);
+          const staged = join(dirForBucket, "nar", basename(entry.info.url));
+          if (!narStillWanted(map, entry.info.url, entry.hash)) {
+            await unlink(staged).catch(() => {});
+          }
+          await unlink(join(dirForBucket, `${entry.hash}.narinfo`)).catch(() => {});
+          recorded.push(entry.info.storePath);
+          continue;
+        }
+        if ("missing" in result) {
+          entry.waitingOn = result.missing;
+          continue;
+        }
+        // A refusal is the client's: the bytes never came, or they were wrong.
+        // Drop it so it cannot be retried forever, and let the PUT answer 400.
+        map.delete(entry.hash);
+        await unlink(join(dirForBucket, `${entry.hash}.narinfo`)).catch(() => {});
+      }
+      changed = recorded;
+    }
+  }
+
+  /** One drain at a time per bucket. */
+  function queuedDrain(bucket: BucketRow, seed: readonly string[]): Promise<void> {
+    const previous = drains.get(bucket.name) ?? Promise.resolve();
+    const next = previous.then(
+      () => drain(bucket, seed),
+      () => drain(bucket, seed),
     );
-    let progressed = files.length > 0;
-    while (progressed) {
-      progressed = false;
-      for (const file of files) {
-        const path = join(dirForBucket, file);
-        let info: NarInfo;
-        try {
-          info = parseNarinfo(await readFile(path, "utf8"));
-        } catch {
-          await unlink(path).catch(() => {});
-          continue;
-        }
-        if (repo.object(bucket.name, info.storePath) !== null) {
-          await unlink(path).catch(() => {});
-          continue;
-        }
-        const outcome: ImportOutcome = await blob.import({
-          dir: dirForBucket,
-          storePath: info.storePath,
-        });
-        if (!outcome.ok) {
-          if (!outcome.defer) await unlink(path).catch(() => {});
-          continue;
-        }
-        await record(bucket, info.storePath, info.sigs);
-        // The NAR this narinfo named is now inside the store; the staged copy
-        // is dead weight. Other staged narinfos naming it are re-imported as
-        // no-ops, so removing it is safe. BASENAME, because `URL` is the
-        // CLIENT's string: `nar/../../etc/x` must not unlink outside the
-        // staging directory.
-        const stagedNar = join(dirForBucket, "nar", basename(info.url));
-        await unlink(stagedNar).catch(() => {});
-        await unlink(path).catch(() => {});
-        progressed = true;
-      }
-    }
+    drains.set(
+      bucket.name,
+      next.catch(() => {}),
+    );
+    return next;
   }
 
-  /** Remove uploads older than an hour — a client that died between the NAR PUT
-   *  and the narinfo PUT leaves one behind every time. */
+  /** Remove staged FILES older than an hour — a client that died between the
+   *  NAR PUT and the narinfo PUT leaves one behind every time.
+   *
+   * Per file, not per directory: `nar/` is a directory whose own mtime says
+   * nothing about the uploads inside it, and removing it would take an upload
+   * in progress with it. Open uploads are skipped outright. */
   async function sweepStaging(): Promise<void> {
-    const buckets = await readdir(stagingRoot).catch(() => [] as string[]);
+    if (now() - lastSweep < SWEEP_EVERY_MS) return;
+    lastSweep = now();
     const cutoff = now() - STAGE_TTL_MS;
-    for (const bucket of buckets) {
+    for (const bucket of await readdir(stagingRoot).catch(() => [] as string[])) {
       const dirForBucket = join(stagingRoot, bucket);
-      for (const entry of await readdir(dirForBucket).catch(() => [] as string[])) {
-        const path = join(dirForBucket, entry);
-        const info = await stat(path).catch(() => null);
-        if (info !== null && info.mtimeMs < cutoff) {
-          await rm(path, { force: true, recursive: true }).catch(() => {});
+      for (const sub of ["", "nar"]) {
+        const at = sub === "" ? dirForBucket : join(dirForBucket, sub);
+        for (const entry of await readdir(at).catch(() => [] as string[])) {
+          const path = join(at, entry);
+          if (openUploads.has(path)) continue;
+          const info = await stat(path).catch(() => null);
+          if (info === null || !info.isFile() || info.mtimeMs >= cutoff) continue;
+          await rm(path, { force: true }).catch(() => {});
         }
       }
     }
-  }
-
-  /** A bucket's full closure as the store sees it, resolved at pin time. */
-  async function resolveClosure(paths: readonly string[]): Promise<string[]> {
-    const seen = new Set<string>();
-    const queue = [...paths];
-    while (queue.length > 0) {
-      const path = queue.pop() as string;
-      if (seen.has(path)) continue;
-      seen.add(path);
-      const info = await blob.pathInfo(path);
-      if (info === null) {
-        throw new NarinfoError(`no such path in the store: ${path}`);
-      }
-      for (const reference of info.references) queue.push(reference);
-    }
-    return [...seen];
   }
 
   const admin: CacheAdmin = {
@@ -397,6 +572,13 @@ export function createCache(options: CacheOptions): Cache {
           ok: false,
           code: "bad_input",
           message: `"${input.name}" is not a bucket name — lowercase letters, digits and dashes`,
+        };
+      }
+      if (!Number.isSafeInteger(input.retentionDays) || input.retentionDays < 0) {
+        return {
+          ok: false,
+          code: "bad_input",
+          message: "retention must be a whole number of days, zero or more",
         };
       }
       if (repo.bucket(input.name) !== null) {
@@ -420,7 +602,17 @@ export function createCache(options: CacheOptions): Cache {
     async list(input) {
       const root = requireRoot(input.rootToken);
       if (!root.ok) return root;
-      return { ok: true, value: repo.buckets().map(factsOf) };
+      // ONE count query for every bucket, not one per bucket.
+      const counted = repo.bucketStats();
+      return { ok: true, value: repo.buckets().map((bucket) => factsOf(bucket, counted)) };
+    },
+
+    async describe(input) {
+      const bucket = repo.bucket(input.bucket);
+      if (bucket === null) {
+        return { ok: false, code: "unknown_bucket", message: `no bucket "${input.bucket}"` };
+      }
+      return { ok: true, value: factsOf(bucket) };
     },
 
     async tokenMint(input) {
@@ -430,11 +622,26 @@ export function createCache(options: CacheOptions): Cache {
       if (bucket === null) {
         return { ok: false, code: "unknown_bucket", message: `no bucket "${input.bucket}"` };
       }
+      if (input.expiresDays !== null && (!Number.isSafeInteger(input.expiresDays) || input.expiresDays <= 0)) {
+        return {
+          ok: false,
+          code: "bad_input",
+          message: "an expiry must be a whole number of days, one or more",
+        };
+      }
+      const glob = input.bucketGlob ?? bucket.name;
+      if (!/^[a-z0-9*-]+(,[a-z0-9*-]+)*$/.test(glob)) {
+        return {
+          ok: false,
+          code: "bad_input",
+          message: `"${glob}" is not a bucket glob — names, dashes and \`*\`, comma-separated`,
+        };
+      }
       const token = mintToken();
       const row: TokenRow = {
         id: mintTokenId(),
         hash: hashToken(token),
-        bucketGlob: bucket.name,
+        bucketGlob: glob,
         scope: input.scope,
         expires: input.expiresDays === null ? null : now() + input.expiresDays * 24 * 60 * 60 * 1000,
         lastUsed: null,
@@ -477,24 +684,30 @@ export function createCache(options: CacheOptions): Cache {
       if (input.paths.length === 0) {
         return { ok: false, code: "bad_input", message: "a pin needs at least one path" };
       }
-      let closure: string[];
-      try {
-        closure = await resolveClosure(input.paths);
-      } catch (err) {
+      // ONE `nix path-info -r` for the whole closure, not one process per path.
+      const closure = await blob.closure(input.paths);
+      const reached = new Set(closure.map((info) => info.storePath));
+      const absent = input.paths.filter((path) => !reached.has(path));
+      if (absent.length > 0) {
         return {
           ok: false,
           code: "bad_input",
-          message: err instanceof Error ? err.message : String(err),
+          message: `no such path in the store: ${absent.join(", ")}`,
         };
       }
       const created = now();
-      repo.putPin({ bucket: bucket.name, name: input.name, rootPaths: closure, created });
+      repo.putPin({
+        bucket: bucket.name,
+        name: input.name,
+        rootPaths: [...reached],
+        created,
+      });
       // Every path a pin holds must be rooted in the store, or the machine's
       // own GC deletes the pin out from under the cache.
-      for (const path of closure) await blob.retain(bucket.name, path);
+      for (const path of reached) await blob.retain(bucket.name, path);
       return {
         ok: true,
-        value: { bucket: bucket.name, name: input.name, rootPaths: closure, created },
+        value: { bucket: bucket.name, name: input.name, rootPaths: [...reached], created },
       };
     },
 
@@ -502,9 +715,9 @@ export function createCache(options: CacheOptions): Cache {
       const root = requireRoot(input.rootToken);
       if (!root.ok) return root;
       const buckets =
-        input.bucket === null ? repo.buckets() : [repo.bucket(input.bucket)].filter(
-            (row): row is BucketRow => row !== null,
-          );
+        input.bucket === null
+          ? repo.buckets()
+          : [repo.bucket(input.bucket)].filter((row): row is BucketRow => row !== null);
       if (input.bucket !== null && buckets.length === 0) {
         return { ok: false, code: "unknown_bucket", message: `no bucket "${input.bucket}"` };
       }
@@ -514,25 +727,19 @@ export function createCache(options: CacheOptions): Cache {
         pins: repo.pins(),
         now: now(),
       });
-      return { ok: true, value: await runGc(blob, repo, plan) };
+      return { ok: true, value: await runGc(blob, repo, plan, now()) };
     },
 
     async stats(input) {
       const root = requireRoot(input.rootToken);
       if (!root.ok) return root;
-      const buckets = repo.buckets();
-      const objects = repo.objects();
+      // ONE count query for every bucket, not one per bucket.
+      const counted = repo.bucketStats();
       return {
         ok: true,
         value: {
-          buckets: buckets.map(factsOf),
-          objects: objects.length,
-          bytes: objects.reduce((sum, row) => sum + row.narSize, 0),
-          hits: objects.reduce((sum, row) => sum + row.hits, 0),
-          lastAccessed:
-            objects.length === 0
-              ? null
-              : objects.reduce((newest, row) => Math.max(newest, row.lastAccessed), 0),
+          buckets: repo.buckets().map((bucket) => factsOf(bucket, counted)),
+          ...repo.objectTotals(),
         },
       };
     },
@@ -545,7 +752,15 @@ export function createCache(options: CacheOptions): Cache {
       const presented = credentialOf(header);
       if (presented === null) {
         if (need === "read" && bucket.isPublic) return { ok: true };
-        return { ok: false, status: 401, message: "this bucket needs a token" };
+        // NOT a 401 for a private bucket: "you need a token" confirms the
+        // bucket exists, and a private name must not be enumerable. A caller
+        // who HAS a token and is refused gets 403, which leaks nothing it did
+        // not already know.
+        return {
+          ok: false,
+          status: bucket.isPublic ? 401 : 404,
+          message: bucket.isPublic ? "this bucket needs a token" : "no such bucket",
+        };
       }
       if (rootTokenMatches(options.rootToken, presented)) return { ok: true };
       const verdict = verifyToken(repo, presented, bucket.name, need, now());
@@ -561,11 +776,13 @@ export function createCache(options: CacheOptions): Cache {
     },
 
     narinfoText(bucket, hash) {
+      if (!isStorePathHash(hash)) return null;
       const row = repo.objectByHash(bucket.name, hash);
       return row === null ? null : narinfoFor(bucket, row);
     },
 
     touch(bucket, hash) {
+      if (!isStorePathHash(hash)) return;
       const row = repo.objectByHash(bucket.name, hash);
       if (row !== null) repo.touchObject(bucket.name, row.storePath, now());
     },
@@ -575,37 +792,52 @@ export function createCache(options: CacheOptions): Cache {
       // extension is the CLIENT's compression choice and odu always serves
       // zstd, so only the hash part is looked up.
       const at = file.indexOf(".nar");
-      const base32 = at === -1 ? file : file.slice(0, at);
-      const row = repo.objectByNarHash(bucket.name, `sha256:${base32}`);
+      const hash = at === -1 ? file : file.slice(0, at);
+      const row = repo.objectByNarHash(bucket.name, `sha256:${hash}`);
       return row === null ? null : blob.dump(row.storePath);
     },
 
     async beginUpload(bucket, file) {
       await sweepStaging();
       const dirForBucket = stagedDir(bucket.name);
-      await mkdir(join(dirForBucket, "nar"), { recursive: true });
-      // The file name is the client's, and a `..` in it would write outside the
-      // staging directory. Nix never sends one; nothing else may.
-      const name = file.replace(/[^A-Za-z0-9._-]/g, "_");
+      await mkdir(join(dirForBucket, "nar"), { recursive: true, mode: 0o700 });
+      // The route has already refused a name it does not recognise; this is the
+      // wall behind that one, because a `..` here would write outside staging.
+      const name = isStagedFileName(file) ? file : file.replace(/[^A-Za-z0-9._-]/g, "_");
       const path = join(dirForBucket, "nar", name);
-      const handle = await open(path, "w");
+      // A UNIQUE temp name, renamed into place on commit. Two store paths with
+      // identical content share a NAR name, and two `open(path, "w")` handles
+      // on one file truncate each other; the bytes are identical by
+      // construction, so an atomic rename is the whole fix.
+      const part = `${path}.${randomUUID()}.part`;
+      openUploads.add(part);
+      const handle = await open(part, "w", 0o600);
+      const release = (): void => {
+        openUploads.delete(part);
+      };
       return {
         async write(chunk) {
           await handle.write(chunk);
         },
         async commit() {
           await handle.close();
+          await rename(part, path);
+          release();
         },
         async discard() {
           await handle.close().catch(() => {});
-          await rm(path, { force: true }).catch(() => {});
+          await rm(part, { force: true }).catch(() => {});
+          release();
         },
       };
     },
 
     async acceptNarinfo(bucket, hash, body) {
+      if (!isStorePathHash(hash)) {
+        return { ok: false, status: 400, message: `"${hash}" is not a store path hash` };
+      }
       const dirForBucket = stagedDir(bucket.name);
-      await mkdir(dirForBucket, { recursive: true });
+      await mkdir(dirForBucket, { recursive: true, mode: 0o700 });
       const path = join(dirForBucket, `${hash}.narinfo`);
       await writeStreamToFile(body, path);
       let info: NarInfo;
@@ -627,9 +859,32 @@ export function createCache(options: CacheOptions): Cache {
           message: `narinfo names ${info.storePath}, which is not ${hash}.narinfo`,
         };
       }
-      await drainStaged(bucket);
-      const recorded = repo.object(bucket.name, info.storePath) !== null;
-      return { ok: true, storePath: info.storePath, deferred: !recorded };
+
+      // The bytes are proved BEFORE the narinfo is queued, so a narinfo with no
+      // NAR behind it can never be imported by a later drain.
+      const proved = await provedStagedNar(dirForBucket, info);
+      if (!proved.ok) {
+        await unlink(path).catch(() => {});
+        return { ok: false, status: 400, message: proved.message };
+      }
+
+      const map = await ensurePending(bucket);
+      const entry: Pending = { hash, info, waitingOn: [] };
+      map.set(hash, entry);
+      await queuedDrain(bucket, [info.storePath]);
+
+      if (repo.object(bucket.name, info.storePath) !== null) {
+        return { ok: true, status: 200, storePath: info.storePath };
+      }
+      const still = map.get(hash);
+      if (still !== undefined && still.waitingOn.length > 0) {
+        return { ok: true, status: 202, storePath: info.storePath, missing: still.waitingOn };
+      }
+      return {
+        ok: false,
+        status: 400,
+        message: `${info.storePath} could not be imported: the upload was refused`,
+      };
     },
 
     missing(bucket, paths) {

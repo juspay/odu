@@ -15,7 +15,7 @@
  *   run_start · run_wait · run_read · run_list · run_retry · run_cancel · log_read
  *   catalog_import · catalog_prune · pipeline_read
  *   venue_probe · venue_hold · venue_release · protect_apply
- *   cache_create · cache_list · cache_tokenMint · cache_tokenList
+ *   cache_create · cache_list · cache_describe · cache_tokenMint · cache_tokenList
  *   cache_tokenRevoke · cache_pin · cache_gc · cache_stats
  *
  * spelled identically as an MCP tool, as `odu surface run_start`, and as the
@@ -92,6 +92,7 @@ export const ODU_SERVICE_EXPOSE = {
   "protect.apply": { tool: { mutates: true } },
   "cache.create": { tool: { mutates: true } },
   "cache.list": { tool: { mutates: false } },
+  "cache.describe": { tool: { mutates: false } },
   "cache.tokenMint": { tool: { mutates: true } },
   "cache.tokenList": { tool: { mutates: false } },
   "cache.tokenRevoke": { tool: { mutates: true } },
@@ -146,7 +147,9 @@ export const ODU_SERVICE_MCP_INSTRUCTIONS = [
   "The cache verbs administer Nix binary cache buckets served by the same",
   "service. Every one takes `rootToken` — the service passes it through and the",
   "cache decides, so a service started without `$ODU_ROOT_TOKEN` refuses all of",
-  "them with `no_root_token` while the substituter keeps serving. `cache_create`",
+  "them with `no_root_token` while the substituter keeps serving. `cache_describe`",
+  "is the exception and takes no root token: a bucket's substituter URL and",
+  "public key are what it publishes to every client anyway. `cache_create`",
   "answers a substituter URL and a public key; `cache_tokenMint` answers a",
   "plaintext token ONCE (only its hash is kept) and is the credential a pusher",
   "uses; `cache_pin` keeps a closure out of `cache_gc`, which evicts only what",

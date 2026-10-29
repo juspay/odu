@@ -311,11 +311,14 @@ let
         pkgs.openssh
         pkgs.bash
         pkgs.coreutils
-        # The cache compresses a NAR on the way out and the push client does
-        # the same on the way in. `nix` itself is deliberately NOT here (the
-        # host that provides the daemon provides the client); `zstd` is odu's
-        # own work, so odu brings it.
+        # The cache compresses a NAR on the way out, decompresses what a client
+        # uploaded, and the push client compresses on the way in. `nix` itself
+        # is deliberately NOT here (the host that provides the daemon provides
+        # the client); the compressors are odu's own work, so odu brings them —
+        # `xz` and `bzip2` because that is what `nix copy --to` still sends.
         pkgs.zstd
+        pkgs.xz
+        pkgs.bzip2
       ]}
   '';
 in

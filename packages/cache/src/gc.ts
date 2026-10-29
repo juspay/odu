@@ -20,6 +20,15 @@
  * ALSO walks the bucket's own references from those roots, so a path added to
  * the closure later is protected too. Either alone is a hole: the first misses
  * new members, the second misses members whose linking object was evicted.
+ *
+ * **Deletion is one call for the whole set.** `nix-store --delete` reports
+ * "still alive" for a path that another path in the set references, so
+ * deleting a closure one path at a time leaks every path in the middle of it
+ * while reporting success. One call lets Nix order the set itself.
+ *
+ * **And the premises are re-checked.** A pin or a re-push can land between the
+ * plan and the delete; a path that is no longer evictable gets its root back
+ * rather than being deleted under a promise made a moment ago.
  */
 
 import type { BucketRow, CacheRepo, ObjectRow, PinRow } from "./db";
@@ -103,33 +112,71 @@ export interface GcReport {
 }
 
 /**
- * Do the plan. A store that refuses to delete is not an error: the path is
- * somebody else's too, and the answer is `kept` — the row still goes, because
- * this bucket no longer retains it.
+ * Do the plan.
+ *
+ * Release every root FIRST (the roots are what make `nix-store --delete` say
+ * "still alive"), then delete the whole set in one call, then re-read the
+ * world: a path that a pin or a re-push claimed in between gets its root back
+ * and its row kept. A delete that throws re-roots everything it can before
+ * failing — a root lost to an exception is a path the machine's own GC eats.
  */
 export async function runGc(
   store: BlobStore,
   repo: CacheRepo,
   plan: readonly GcBucketPlan[],
+  now: number = Date.now(),
 ): Promise<GcReport> {
-  const buckets: GcBucketReport[] = [];
-  for (const entry of plan) {
-    let evicted = 0;
-    let kept = 0;
-    let bytes = 0;
-    for (const row of entry.evict) {
-      await store.release(entry.bucket, row.storePath);
-      const outcome = await store.delete(row.storePath);
-      if (outcome === "deleted") {
-        evicted += 1;
-        bytes += row.narSize;
-      } else {
-        kept += 1;
-      }
-      repo.deleteObject(entry.bucket, row.storePath);
+  const planned = plan.flatMap((entry) => entry.evict.map((row) => ({ ...row, bucket: entry.bucket })));
+  const bytesOf = new Map(planned.map((row) => [`${row.bucket}\u0000${row.storePath}`, row.narSize]));
+
+  for (const row of planned) await store.release(row.bucket, row.storePath);
+
+  let deleted: string[] = [];
+  try {
+    const outcome = await store.deleteMany(planned.map((row) => row.storePath));
+    deleted = outcome.deleted;
+  } catch (err) {
+    for (const row of planned) {
+      if (await store.has(row.storePath)) await store.retain(row.bucket, row.storePath);
     }
-    buckets.push({ bucket: entry.bucket, evicted, kept, bytes });
+    throw err;
   }
+
+  // THE PREMISES, RE-CHECKED. `planGc` ran before an await; a pin or a re-push
+  // could have landed since.
+  const fresh = new Set(
+    planGc({
+      buckets: repo.buckets(),
+      objects: repo.objects(),
+      pins: repo.pins(),
+      now,
+    }).flatMap((entry) => entry.evict.map((row) => row.storePath)),
+  );
+
+  const deletedSet = new Set(deleted);
+  const perBucket = new Map<string, GcBucketReport>(
+    plan.map((entry) => [entry.bucket, { bucket: entry.bucket, evicted: 0, kept: 0, bytes: 0 }]),
+  );
+
+  for (const row of planned) {
+    const report = perBucket.get(row.bucket);
+    if (report === undefined) continue;
+    if (!fresh.has(row.storePath)) {
+      // Something claimed it while the delete was in flight. Put the root back
+      // and leave the row alone.
+      if (await store.has(row.storePath)) await store.retain(row.bucket, row.storePath);
+      continue;
+    }
+    repo.deleteObject(row.bucket, row.storePath);
+    if (deletedSet.has(row.storePath)) {
+      report.evicted += 1;
+      report.bytes += bytesOf.get(`${row.bucket}\u0000${row.storePath}`) ?? 0;
+    } else {
+      report.kept += 1;
+    }
+  }
+
+  const buckets = [...perBucket.values()];
   return {
     buckets,
     evicted: buckets.reduce((sum, bucket) => sum + bucket.evicted, 0),

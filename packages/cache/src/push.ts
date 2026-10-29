@@ -26,12 +26,11 @@
  * multi-gigabyte closure on a laptop.
  */
 
-import { spawn } from "node:child_process";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { canonicalNarHash, narHashBase32, storePathBasename, storePathHash } from "./narinfo";
-import { nixDump } from "./store";
+import { narHashBase32, storePathBasename, storePathHash } from "./narinfo";
+import { type PathInfo, nixClosure, nixDump } from "./store";
 
 /** The environment slice this client reads. Passed in rather than reached for:
  *  the package reads no environment of its own. */
@@ -113,12 +112,19 @@ export interface ResolvedBucket {
 export async function resolveBucket(
   env: PushEnv,
   argument: string,
+  /** `--origin`, which BEATS everything stored. A machine logged in to one
+   *  cache must still be able to push to a second without logging out of the
+   *  first, so the explicit flag is the first answer and not the last. */
+  explicitOrigin?: string,
 ): Promise<ResolvedBucket | { error: string }> {
   if (/^https?:\/\//i.test(argument)) {
     const url = new URL(argument);
     const name = url.pathname.split("/").filter((part) => part !== "").pop() ?? "";
     if (name === "") return { error: `${argument} names no bucket` };
     return { origin: normalizeOrigin(`${url.protocol}//${url.host}`), name };
+  }
+  if (explicitOrigin !== undefined && explicitOrigin.trim() !== "") {
+    return { origin: normalizeOrigin(explicitOrigin.trim()), name: argument };
   }
   const loggedIn = Object.keys(await readCredentials(env));
   if (loggedIn.length === 1) {
@@ -156,74 +162,10 @@ export async function resolveToken(
   return entries[normalizeOrigin(origin)] ?? null;
 }
 
-/** One path as `nix path-info -r --json` reports it. */
-export interface ClosureEntry {
-  storePath: string;
-  narHash: string;
-  narSize: number;
-  references: readonly string[];
-  deriver: string | null;
-  sigs: readonly string[];
-}
-
-function nixPathInfo(paths: readonly string[]): Promise<Map<string, ClosureEntry>> {
-  const { promise, resolve, reject } = Promise.withResolvers<Map<string, ClosureEntry>>();
-  const attempt = (args: string[]): void => {
-    const child = spawn("nix", ["path-info", ...args, ...paths], {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString("utf8")));
-    child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString("utf8")));
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code !== 0) {
-        // A Nix old enough not to know `--json-format` gets one retry without
-        // it; anything else is a real failure and says so.
-        if (
-          args.includes("--json-format") &&
-          /unrecognised flag|unrecognized option|unknown flag/i.test(stderr)
-        ) {
-          attempt(["--json", "-r"]);
-          return;
-        }
-        reject(new Error(stderr.trim() || `nix path-info exited ${String(code)}`));
-        return;
-      }
-      try {
-        resolve(parseClosure(stdout));
-      } catch (err) {
-        reject(err instanceof Error ? err : new Error(String(err)));
-      }
-    });
-  };
-  attempt(["--json", "--json-format", "1", "-r"]);
-  return promise;
-}
-
-function parseClosure(stdout: string): Map<string, ClosureEntry> {
-  const parsed: unknown = JSON.parse(stdout);
-  if (parsed === null || typeof parsed !== "object") {
-    throw new Error("nix path-info answered something that is not an object");
-  }
-  const outer = parsed as Record<string, unknown>;
-  const table = (outer["info"] ?? outer) as Record<string, unknown>;
-  const out = new Map<string, ClosureEntry>();
-  for (const [storePath, raw] of Object.entries(table)) {
-    if (raw === null || typeof raw !== "object") continue;
-    const entry = raw as Record<string, unknown>;
-    out.set(storePath, {
-      storePath,
-      narHash: canonicalNarHash(String(entry["narHash"])),
-      narSize: Number(entry["narSize"]),
-      references: (entry["references"] as string[] | undefined) ?? [],
-      deriver: (entry["deriver"] as string | null | undefined) ?? null,
-      sigs: (entry["signatures"] as string[] | undefined) ?? [],
-    });
-  }
-  return out;
-}
+/** The closure this client uploads. Named for what the caller means; the shape
+ *  is the store's, and the parser behind it is the store's too — one answer to
+ *  "what did `nix path-info` say", for the pusher and for a pin. */
+export type ClosureEntry = PathInfo;
 
 export interface PushSummary {
   pushed: number;
@@ -245,7 +187,7 @@ export interface PushSummary {
  * gives `gh` and the clock.
  */
 export interface PushPlatform {
-  closure(paths: readonly string[]): Promise<Map<string, ClosureEntry>>;
+  closure(paths: readonly string[]): Promise<PathInfo[]>;
   dump(storePath: string): ReadableStream<Uint8Array>;
 }
 
@@ -255,6 +197,8 @@ export interface PushOptions {
   /** Installables or store paths, as `nix path-info` takes them. */
   paths: readonly string[];
   env: PushEnv;
+  /** `--origin`, which beats a stored credential. */
+  origin?: string;
   tokenFile?: string;
   /** Uploads in flight WITHIN one dependency depth. */
   concurrency?: number;
@@ -270,9 +214,21 @@ export interface PushOptions {
 const DEFAULT_CONCURRENCY = 4;
 const DEFAULT_ATTEMPTS = 3;
 
+/** How many times a deferred upload is repeated after the waves that could
+ *  unblock it. Two is enough for any closure a real store produces — the
+ *  depth of the graph, not its size. */
+const DEFERRED_ROUNDS = 2;
+
+/** Which answers are worth another attempt. A 4xx is the REQUEST being wrong —
+ *  a bad token, a bad narinfo — and repeating it streams the whole NAR again
+ *  for the same answer. */
+function worthRetrying(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
 export async function pushToCache(options: PushOptions): Promise<PushSummary> {
   const say = options.onLine ?? (() => {});
-  const resolved = await resolveBucket(options.env, options.bucket);
+  const resolved = await resolveBucket(options.env, options.bucket, options.origin);
   if ("error" in resolved) throw new Error(resolved.error);
   const token = await resolveToken(options.env, resolved.origin, options.tokenFile);
   if (token === null) {
@@ -285,10 +241,10 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
   const headers = { authorization: `Bearer ${token}` };
 
   const platform: PushPlatform = options.platform ?? {
-    closure: nixPathInfo,
+    closure: (paths) => nixClosure(paths, null),
     dump: (storePath) => nixDump(storePath, null),
   };
-  const closure = await platform.closure(options.paths);
+  const closure = new Map((await platform.closure(options.paths)).map((info) => [info.storePath, info]));
   const answer = await askMissing(resolved, headers, closure);
   const present = closure.size - answer.missing.length;
   say(
@@ -297,26 +253,51 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
   );
 
   const failed: { path: string; message: string }[] = [];
-  for (const wave of orderByDepth(closure, new Set(answer.missing))) {
+  const attempts = options.attempts ?? DEFAULT_ATTEMPTS;
+  const width = options.concurrency ?? DEFAULT_CONCURRENCY;
+
+  /** Upload one wave, answering the paths the server accepted but is still
+   *  waiting on — a reference of theirs was skipped as upstream, or arrived
+   *  out of order. */
+  const runWave = async (wave: readonly string[]): Promise<string[]> => {
     const queue = [...wave];
+    const deferred: string[] = [];
     const worker = async (): Promise<void> => {
       for (;;) {
         const storePath = queue.shift();
         if (storePath === undefined) return;
         const entry = closure.get(storePath);
         if (entry === undefined) continue;
-        const outcome = await uploadOne(
-          base,
-          headers,
-          entry,
-          platform,
-          options.attempts ?? DEFAULT_ATTEMPTS,
-        );
-        if (!outcome.ok) failed.push({ path: storePath, message: outcome.message });
+        const outcome = await uploadOne(base, headers, entry, platform, attempts);
+        if (outcome.ok === "deferred") deferred.push(storePath);
+        else if (!outcome.ok) failed.push({ path: storePath, message: outcome.message });
       }
     };
-    const width = Math.max(1, Math.min(options.concurrency ?? DEFAULT_CONCURRENCY, queue.length));
-    await Promise.all(Array.from({ length: width }, worker));
+    await Promise.all(Array.from({ length: Math.max(1, Math.min(width, queue.length)) }, worker));
+    return deferred;
+  };
+
+  let deferred: string[] = [];
+  for (const wave of orderByDepth(closure, new Set(answer.missing))) {
+    deferred.push(...(await runWave(wave)));
+  }
+
+  // A DEFERRED path is one the server accepted and could not import yet: its
+  // references had not landed when it arrived. They have now, so the same
+  // upload is repeated — a bounded number of times, because a reference the
+  // pusher skipped as upstream will never arrive from here.
+  for (let round = 0; deferred.length > 0 && round < DEFERRED_ROUNDS; round++) {
+    const retrying = [...deferred];
+    deferred = await runWave(retrying);
+    if (deferred.length === retrying.length) break;
+  }
+  for (const storePath of deferred) {
+    failed.push({
+      path: storePath,
+      message:
+        "accepted, but still waiting on references the bucket does not have — " +
+        "a reference signed by an upstream key is not uploaded by this push",
+    });
   }
 
   return {
@@ -406,30 +387,43 @@ function asError(err: unknown): Error {
   return err instanceof Error ? err : new Error(String(err));
 }
 
+type UploadOutcome =
+  | { ok: true }
+  /** The server took it and cannot import it yet — a reference has not landed. */
+  | { ok: "deferred" }
+  | { ok: false; message: string };
+
 async function uploadOne(
   base: string,
   headers: Record<string, string>,
   entry: ClosureEntry,
   platform: PushPlatform,
   attempts: number,
-): Promise<{ ok: true } | { ok: false; message: string }> {
+): Promise<UploadOutcome> {
   let lastMessage = "no attempt was made";
   for (let attempt = 0; attempt < attempts; attempt++) {
     const narName = `${narHashBase32(entry.narHash)}.nar.zst`;
+    // The body is held so it can be CANCELLED: a refused upload that leaves
+    // `nix store dump-path | zstd` writing into a full pipe holds both
+    // processes for as long as the socket lives.
+    const body = platform.dump(entry.storePath);
     const narResponse = await fetch(`${base}/nar/${narName}`, {
       method: "PUT",
       headers: { ...headers, "content-type": "application/x-nix-nar" },
-      body: platform.dump(entry.storePath),
+      body,
       // A streamed body has no length; Node's fetch demands this and Bun
       // ignores it, so it is set for both rather than special-cased.
       duplex: "half",
     } as RequestInit).catch(asError);
     if (narResponse instanceof Error) {
+      void body.cancel().catch(() => {});
       lastMessage = narResponse.message;
       continue;
     }
     if (!narResponse.ok) {
+      void body.cancel().catch(() => {});
       lastMessage = `nar upload answered ${narResponse.status}`;
+      if (!worthRetrying(narResponse.status)) break;
       continue;
     }
     const infoResponse = await fetch(`${base}/${storePathHash(entry.storePath)}.narinfo`, {
@@ -441,8 +435,10 @@ async function uploadOne(
       lastMessage = infoResponse.message;
       continue;
     }
+    if (infoResponse.status === 202) return { ok: "deferred" };
     if (infoResponse.ok) return { ok: true };
     lastMessage = `narinfo upload answered ${infoResponse.status}: ${await infoResponse.text()}`;
+    if (!worthRetrying(infoResponse.status)) break;
   }
   return { ok: false, message: lastMessage };
 }

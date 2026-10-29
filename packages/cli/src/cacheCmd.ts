@@ -19,7 +19,7 @@
  */
 
 import { parseArgs } from "node:util";
-import { pushToCache, resolveToken, saveCredential } from "@odu/cache/push";
+import { pushToCache, saveCredential } from "@odu/cache/push";
 import type { CacheScope, CacheToken } from "@odu/service-client/surface";
 import { call, emitJson, reportFailure, withService } from "./serviceFace";
 
@@ -28,10 +28,11 @@ export const CACHE_USAGE = `usage: odu cache <create|list|use|token|login|push|p
 create <bucket> [--private] [--retention-days N] [--upstream-key K]…
                               create a bucket; print its substituter URL and
                               public key. Needs $ODU_ROOT_TOKEN
-list [-o json]                buckets, with sizes
+list [-o json]                buckets, with sizes. Needs $ODU_ROOT_TOKEN
 use <bucket>                  the nix.conf settings, the nixConfig block and the
-                              netrc lines for a bucket
-token mint <bucket> [--read|--write|--admin] [--expires-days N] [-o json]
+                              netrc lines for a bucket. Needs NO token: a
+                              bucket's URL and public key are public
+token mint <bucket> [--read|--write|--admin] [--expires-days N] [--buckets GLOB]
                               mint a token. It is printed ONCE; only its hash
                               is kept
 token list [bucket] [-o json] tokens with scope, expiry and last use
@@ -46,7 +47,11 @@ gc [bucket] [-o json]         evict what retention expired and nothing holds
 stats [-o json]               storage and reads
 
 --origin URL is accepted by every admin command (default $ODU_WEB_ORIGIN or
-http://127.0.0.1:18440).
+http://127.0.0.1:18440), and by \`push\`, where it BEATS a stored credential - a
+machine logged in to one cache can still push to a second.
+
+Token resolution for \`push\`: --token-file, then $ODU_CACHE_TOKEN, then the
+credentials entry for the bucket's origin.
 `;
 
 /** What every admin command exits with when the service refuses it: 1. The
@@ -200,15 +205,16 @@ async function useCommand(rest: string[]): Promise<number> {
     return 1;
   }
   return withService(values.origin, async (client) => {
-    const answer = await call(client.surface.cache.list({ rootToken: rootToken() }));
+    // NO ROOT TOKEN: a bucket's substituter URL and public key are what it
+    // publishes to every client that talks to it, so asking the operator's
+    // credential for them would turn a read-only question into an
+    // administrative act.
+    const answer = await call(client.surface.cache.describe({ bucket: name }));
     if (!answer.ok) return reportFailure(answer, false, REFUSED);
-    const bucket = answer.value.buckets.find((candidate) => candidate.name === name);
-    if (bucket === undefined) {
-      process.stderr.write(`odu: no bucket "${name}"\n`);
-      return 1;
-    }
+    const bucket = answer.value;
     const url = new URL(bucket.url);
-    const token = await resolveToken(process.env, url.origin, undefined);
+    // A PLACEHOLDER, never a live token: this output is pasted into a
+    // `flake.nix` and a `nix.conf`, which are read by people and committed.
     process.stdout.write(
       `# nix.conf\n` +
         `extra-substituters = ${bucket.url}\n` +
@@ -220,7 +226,7 @@ async function useCommand(rest: string[]): Promise<number> {
         `  };\n}\n\n` +
         `# netrc — Nix reads only the file named by netrc-file, never ~/.netrc\n` +
         `netrc-file = ${process.env.HOME ?? "~"}/.netrc\n` +
-        `machine ${url.hostname} password ${token ?? "<your-write-token>"}\n`,
+        `machine ${url.hostname} password <your-write-token>\n`,
     );
     return 0;
   });
@@ -238,6 +244,7 @@ async function tokenCommand(rest: string[]): Promise<number> {
           write: { type: "boolean" },
           admin: { type: "boolean" },
           "expires-days": { type: "string" },
+          buckets: { type: "string" },
           origin: originOption,
           output: outputOption,
         },
@@ -253,6 +260,7 @@ async function tokenCommand(rest: string[]): Promise<number> {
           client.surface.cache.tokenMint({
             rootToken: rootToken(),
             bucket,
+            ...(values.buckets === undefined ? {} : { bucketGlob: values.buckets }),
             scope: scopeOf(values),
             ...(values["expires-days"] === undefined
               ? {}
@@ -381,10 +389,10 @@ async function pushCommand(rest: string[]): Promise<number> {
     const summary = await pushToCache({
       bucket,
       paths,
-      env: {
-        ...process.env,
-        ...(values.origin === undefined ? {} : { ODU_WEB_ORIGIN: values.origin }),
-      },
+      env: process.env,
+      // An EXPLICIT origin, which beats a stored credential: a machine logged
+      // in to one cache must still be able to push to a second.
+      ...(values.origin === undefined ? {} : { origin: values.origin }),
       ...(values["token-file"] === undefined ? {} : { tokenFile: values["token-file"] }),
       ...(values.concurrency === undefined
         ? {}

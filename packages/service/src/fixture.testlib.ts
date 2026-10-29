@@ -464,6 +464,7 @@ export function recordingPorts(opts: {
     cache: opts.cache ?? {
       create: async () => ({ ok: false, code: "no_root_token", message: "the stub has no cache" }),
       list: async () => ({ ok: false, code: "no_root_token", message: "the stub has no cache" }),
+      describe: async () => ({ ok: false, code: "unknown_bucket", message: "the stub has no cache" }),
       tokenMint: async () => ({ ok: false, code: "no_root_token", message: "the stub has no cache" }),
       tokenList: async () => ({ ok: false, code: "no_root_token", message: "the stub has no cache" }),
       tokenRevoke: async () => ({ ok: false, code: "no_root_token", message: "the stub has no cache" }),

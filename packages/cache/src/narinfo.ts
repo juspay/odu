@@ -91,12 +91,26 @@ export function canonicalNarHash(hash: string): string {
   return `sha256:${narHashBase32(hash)}`;
 }
 
+/** Is this the 32-character hash a narinfo is named for? The alphabet is Nix's,
+ *  so this refuses `..`, `%2F` and everything else a route parameter can be
+ *  decoded into — it is the wall in front of every `join()` in the cache. */
+export function isStorePathHash(value: string): boolean {
+  return /^[0-9abcdfghijklmnpqrsvwxyz]{32}$/.test(value);
+}
+
+/** Is this a file name odu will stage? No leading dot (so `.` and `..` are
+ *  refused), no slash, no percent — a NAR's name comes from a URL the CLIENT
+ *  chose. */
+export function isStagedFileName(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value) && !value.includes("..");
+}
+
 /** A store path's hash part — the 32 characters after `/nix/store/`, which is
  *  what a narinfo is named for and what a bucket indexes a path by. */
 export function storePathHash(storePath: string): string {
   const base = storePath.slice(storePath.lastIndexOf("/") + 1);
   const hash = base.slice(0, 32);
-  if (!/^[0-9abcdfghijklmnpqrsvwxyz]{32}$/.test(hash)) {
+  if (!isStorePathHash(hash)) {
     throw new NarinfoError(`not a store path: ${storePath}`);
   }
   return hash;

@@ -661,11 +661,17 @@ export function createOduService(opts: ServiceOptions): OduService {
             cacheAnswer(opts.ports.cache.list({ rootToken: input.rootToken }), (buckets) => ({
               buckets: buckets.map(bucketWithUrl),
             })),
+          describe: ({ input }) =>
+            cacheAnswer(
+              opts.ports.cache.describe({ bucket: input.bucket }),
+              (bucket) => bucketWithUrl(bucket),
+            ),
           tokenMint: ({ input }) =>
             cacheAnswer(
               opts.ports.cache.tokenMint({
                 rootToken: input.rootToken,
                 bucket: input.bucket,
+                bucketGlob: input.bucketGlob ?? null,
                 scope: input.scope,
                 expiresDays: input.expiresDays ?? null,
               }),

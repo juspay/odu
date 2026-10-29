@@ -475,9 +475,13 @@ export interface CacheAdmin {
     upstreamKeys: readonly string[];
   }): Promise<CacheOutcome<CacheBucketFacts>>;
   list(input: { rootToken: string }): Promise<CacheOutcome<readonly CacheBucketFacts[]>>;
+  /** One bucket's public identity — URL and public key — with no root token. */
+  describe(input: { bucket: string }): Promise<CacheOutcome<CacheBucketFacts>>;
   tokenMint(input: {
     rootToken: string;
     bucket: string;
+    /** A glob; absent means the bucket. */
+    bucketGlob: string | null;
     scope: CacheScope;
     expiresDays: number | null;
   }): Promise<CacheOutcome<{ token: string; facts: CacheTokenFacts }>>;
