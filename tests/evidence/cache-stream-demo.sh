@@ -118,9 +118,12 @@ say "PUSH: the NAR is streamed through the daemon, never held. Watch RSS, not th
 phase push
 cmd "odu cache push main $BIG"
 watch_rss
+# The push's own lines are collected and printed AFTER the live line is put to
+# rest: two writers on one terminal row shred each other.
 NIX_REMOTE="$BUILDER" ODU_CACHE_TOKEN="$TOKEN" \
-  "$ODU" cache push main "$BIG" 2>&1 | grep -vE "^$" | tail -4
+  "$ODU" cache push main "$BIG" > "$ROOT/push.log" 2>&1
 unwatch
+grep -vE "^$" "$ROOT/push.log" | tail -3
 PUSH_PEAK=$(peak); sleep 1
 
 HASH=$(basename "$BIG" | cut -c1-32)
