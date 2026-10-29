@@ -93,15 +93,25 @@ export interface Forge {
   readRuleset(
     request: ForgeRepo & RulesetRef,
   ): Promise<ForgeOutcome<string>>;
-  /** Create a ruleset (`id: null`) or replace one (`id` present); the raw JSON
-   *  of the created ruleset on a create, and the call's own body otherwise. */
-  writeRuleset(
-    request: ForgeRepo & { id: number | null; body: string },
+  /** Create a ruleset, answering its raw JSON. */
+  createRuleset(
+    request: ForgeRepo & { body: string },
   ): Promise<ForgeOutcome<string>>;
+  /** Replace a ruleset wholesale. Nothing above reads the answer: the write is
+   *  the outcome, and a value here would invite a reader that does not exist. */
+  replaceRuleset(
+    request: ForgeRepo & { id: number; body: string },
+  ): Promise<ForgeResult>;
 }
 
-/** The forge every odu process gets today: the user's `gh`. */
-export function ghForge(): Forge {
+/** The forge every odu process gets today: the user's `gh`.
+ *
+ *  `timeoutMs` is the ONE owner of the kill. A caller that wants to give up
+ *  sooner does so around the call (the status poster's own race against a fake
+ *  that never answers); it does not shorten the child's life, because a killed
+ *  subprocess is the forge's fact, not its caller's. */
+export function ghForge(opts: { timeoutMs?: number } = {}): Forge {
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_GH_TIMEOUT_MS;
   return {
     postStatus: (request) =>
       runGh(
@@ -115,7 +125,7 @@ export function ghForge(): Forge {
           "-f",
           `description=${request.payload.description}`,
         ],
-        { captureStdout: false },
+        { captureStdout: false, timeoutMs },
       ).then((result) => (result.ok ? { ok: true } : result)),
 
     listStatuses: async (request) => {
@@ -129,7 +139,7 @@ export function ghForge(): Forge {
             "api",
             `${repoArg(request)}/statuses/${request.sha}?per_page=100&page=${page}`,
           ],
-          { captureStdout: true },
+          { captureStdout: true, timeoutMs },
         );
         if (!result.ok) return { ok: false, error: result.error };
         const trimmed = result.stdout.trim();
@@ -158,7 +168,7 @@ export function ghForge(): Forge {
     defaultBranch: async (request) => {
       const result = await runGh(
         ["api", repoArg(request), "--jq", ".default_branch"],
-        { captureStdout: true },
+        { captureStdout: true, timeoutMs },
       );
       return result.ok
         ? { ok: true, value: result.stdout.trim() }
@@ -170,30 +180,34 @@ export function ghForge(): Forge {
         "branch" in request
           ? `${repoArg(request)}/rules/branches/${request.branch}`
           : `${repoArg(request)}/rulesets/${request.id}`;
-      const result = await runGh(["api", path], { captureStdout: true });
+      const result = await runGh(["api", path], { captureStdout: true, timeoutMs });
       return result.ok
         ? { ok: true, value: result.stdout }
         : { ok: false, error: result.error };
     },
 
-    writeRuleset: async (request) => {
+    createRuleset: async (request) => {
       const result = await runGh(
-        request.id === null
-          ? ["api", "--method", "POST", `${repoArg(request)}/rulesets`, "--input", "-"]
-          : [
-              "api",
-              "--method",
-              "PUT",
-              `${repoArg(request)}/rulesets/${request.id}`,
-              "--input",
-              "-",
-            ],
-        { captureStdout: true, input: request.body },
+        ["api", "--method", "POST", `${repoArg(request)}/rulesets`, "--input", "-"],
+        { captureStdout: true, input: request.body, timeoutMs },
       );
       return result.ok
         ? { ok: true, value: result.stdout }
         : { ok: false, error: result.error };
     },
+
+    replaceRuleset: (request) =>
+      runGh(
+        [
+          "api",
+          "--method",
+          "PUT",
+          `${repoArg(request)}/rulesets/${request.id}`,
+          "--input",
+          "-",
+        ],
+        { captureStdout: false, input: request.body, timeoutMs },
+      ).then((result) => (result.ok ? { ok: true } : result)),
   };
 }
 
@@ -210,7 +224,7 @@ type GhRunResult =
  *  swaps the binary between two calls is not looking at a captured value. */
 function runGh(
   args: string[],
-  opts: { captureStdout: boolean; input?: string },
+  opts: { captureStdout: boolean; input?: string; timeoutMs: number },
 ): Promise<GhRunResult> {
   const gh = process.env.ODU_GH_BIN ?? "gh";
   return new Promise((resolve) => {
@@ -243,8 +257,8 @@ function runGh(
     };
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
-      done({ ok: false, error: `gh timed out after ${DEFAULT_GH_TIMEOUT_MS}ms` });
-    }, DEFAULT_GH_TIMEOUT_MS);
+      done({ ok: false, error: `gh timed out after ${opts.timeoutMs}ms` });
+    }, opts.timeoutMs);
     timer.unref?.();
     child.on("error", (err) => done({ ok: false, error: err.message }));
     child.on("close", (code) => {

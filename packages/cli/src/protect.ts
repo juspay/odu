@@ -35,7 +35,8 @@ import { parseGithubRemote } from "@odu/execution/coordinator/statuses";
 import type { Forge } from "@odu/execution/common/forge";
 import type { PipelineSpec } from "@odu/execution/common/spec";
 import { laneTasks, loadJustPipeline } from "@odu/execution/just/ingest";
-import type { Caller, ProtectFacts, ProtectOutcome } from "@odu/service/ports";
+import type { Caller } from "@odu/service/caller";
+import type { ProtectFacts, ProtectOutcome } from "@odu/service/ports";
 import {
   BranchRulesSchema,
   chooseRuleset,
@@ -351,9 +352,8 @@ export async function applyProtection(
           suggestion: ["odu", "protect", "--create"],
         };
       }
-      const made = await forge.writeRuleset({
+      const made = await forge.createRuleset({
         ...github,
-        id: null,
         body: createBody({
           branch,
           isDefault: args.branch === undefined,
@@ -413,7 +413,7 @@ export async function applyProtection(
   const ruleset = decode(RulesetSchema, read.value);
   if (ruleset === null) return unreadable(`ruleset ${choice.id}`);
 
-  const write = await forge.writeRuleset({
+  const write = await forge.replaceRuleset({
     ...github,
     id: ruleset.id,
     body: updateBody(ruleset, contexts),

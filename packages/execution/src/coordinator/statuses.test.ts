@@ -34,7 +34,8 @@ function forgeOf(parts: {
         : { ok: true, value: await parts.list() },
     defaultBranch: async () => ({ ok: false, error: "not a statuses concern" }),
     readRuleset: async () => ({ ok: false, error: "not a statuses concern" }),
-    writeRuleset: async () => ({ ok: false, error: "not a statuses concern" }),
+    createRuleset: async () => ({ ok: false, error: "not a statuses concern" }),
+    replaceRuleset: async () => ({ ok: false, error: "not a statuses concern" }),
   };
 }
 

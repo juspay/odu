@@ -110,10 +110,11 @@ function memoryForge(): Forge {
         "branch" in request ? BRANCH_RULES : RULESET,
       ),
     }),
-    writeRuleset: async (request) => ({
+    createRuleset: async () => ({
       ok: true,
-      value: JSON.stringify(request.id === null ? { ...RULESET, id: 777 } : {}),
+      value: JSON.stringify({ ...RULESET, id: 777 }),
     }),
+    replaceRuleset: async () => ({ ok: true }),
   };
 }
 
@@ -171,11 +172,10 @@ function contract(label: string, make: () => Forge): void {
       expect(JSON.parse(ruleset.value) as unknown).toEqual(RULESET);
     });
 
-    it("creates a ruleset when no id is named", async () => {
-      const made = await make().writeRuleset({
+    it("creates a ruleset", async () => {
+      const made = await make().createRuleset({
         owner: "o",
         repo: "r",
-        id: null,
         body: "{}",
       });
       expect(made.ok).toBe(true);
@@ -183,15 +183,15 @@ function contract(label: string, make: () => Forge): void {
       expect((JSON.parse(made.value) as { id: number }).id).toBe(777);
     });
 
-    it("replaces a ruleset when an id is named", async () => {
+    it("replaces a ruleset and says it worked", async () => {
       expect(
-        await make().writeRuleset({
+        await make().replaceRuleset({
           owner: "o",
           repo: "r",
           id: 7,
           body: "{}",
         }),
-      ).toEqual({ ok: true, value: "{}" });
+      ).toEqual({ ok: true });
     });
   });
 }

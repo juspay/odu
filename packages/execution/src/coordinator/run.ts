@@ -127,7 +127,7 @@ import {
   StatusPoster,
   statusFor,
 } from "./statuses";
-import { ghForge } from "../common/forge";
+import { ghForge, type Forge } from "../common/forge";
 import {
   dependencyClosure,
   installShardTopology,
@@ -505,6 +505,7 @@ export async function runCommand(
         sha,
         sha7,
         posting,
+        forge: ghForge(),
         treeMode,
         snapshot,
         dirty,
@@ -537,6 +538,11 @@ interface RunContext {
   sha: string;
   sha7: string;
   posting: boolean;
+  /** WHERE this run's commit statuses go. Bound by {@link runCommand} — the
+   *  coordinator's ENTRY — because PR 8's choice of forge is configuration read
+   *  at startup, and that decision changes at a different rate than the
+   *  orchestration below it. `orchestrate` only carries it. */
+  forge: Forge;
   treeMode: ReturnType<typeof treeModeFor>;
   snapshot: WorkingTreeSnapshot | null;
   /** The captured or in-place tree differs from the base commit. */
@@ -1501,10 +1507,9 @@ async function orchestrate(
     repo: github?.repo ?? "",
     sha,
     enabled: ctx.posting,
-    // The coordinator's OWN entry binds the forge: it is a separately spawned
-    // process, so the daemon cannot hand it one. Same implementation the
-    // service binds for protect.
-    forge: ghForge(),
+    // Carried from `runCommand`, which bound it: this function orchestrates a
+    // run, and which forge a coordinator speaks to is startup configuration.
+    forge: ctx.forge,
     onLine: info,
     onHealth: (health) => {
       const cur = store.get();

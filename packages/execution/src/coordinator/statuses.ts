@@ -40,7 +40,8 @@ import {
   type ForgeResult,
   type RemoteStatus,
   type StatusPayload,
-} from "../common/forge";import { projectUnposted, type UnpostedEntry } from "@odu/run-history/legacy/record";
+} from "../common/forge";
+import { projectUnposted, type UnpostedEntry } from "@odu/run-history/legacy/record";
 
 export type { GithubState, OwedStatus, PostingHealth, UnpostedEntry };
 export type { RemoteStatus, StatusPayload };
@@ -531,9 +532,11 @@ export class StatusPoster {
   }
 
   /**
-   * One send, through the forge. The poster still races it against its own
-   * hang-timeout: a fake forge that never answers must not wedge the queue
-   * either.
+   * One send, through the forge. The forge owns the KILL — its `ghForge` bound
+   * has the timeout, and a poster-configured number must not shorten a child
+   * some other caller handed it. This race stays only as a guard against a fake
+   * that never answers (`$ODU_GH_BIN` in a suite), so one stuck promise cannot
+   * wedge the serialized queue.
    */
   private send(payload: StatusPayload): Promise<ForgeResult> {
     const timeoutMs = this.opts.timeoutMs ?? DEFAULT_GH_TIMEOUT_MS;
