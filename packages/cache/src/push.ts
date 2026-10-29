@@ -259,7 +259,7 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
   /** Upload one wave, answering the paths the server accepted but is still
    *  waiting on — a reference of theirs was skipped as upstream, or arrived
    *  out of order. */
-  const runWave = async (wave: readonly string[]): Promise<string[]> => {
+  const runWave = async (wave: readonly string[], narinfoOnly = false): Promise<string[]> => {
     const queue = [...wave];
     const deferred: string[] = [];
     const worker = async (): Promise<void> => {
@@ -268,7 +268,7 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
         if (storePath === undefined) return;
         const entry = closure.get(storePath);
         if (entry === undefined) continue;
-        const outcome = await uploadOne(base, headers, entry, platform, attempts);
+        const outcome = await uploadOne(base, headers, entry, platform, attempts, { narinfoOnly });
         if (outcome.ok === "deferred") deferred.push(storePath);
         else if (!outcome.ok) failed.push({ path: storePath, message: outcome.message });
       }
@@ -288,7 +288,11 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
   // pusher skipped as upstream will never arrive from here.
   for (let round = 0; deferred.length > 0 && round < DEFERRED_ROUNDS; round++) {
     const retrying = [...deferred];
-    deferred = await runWave(retrying);
+    // The NAR is still staged on the server (a 202 keeps it), so the repeat is
+    // the narinfo alone — re-streaming a multi-gigabyte NAR to say "try again"
+    // is the cost this avoids. A 400 that says the bytes are gone falls back to
+    // the full pair inside `uploadOne`.
+    deferred = await runWave(retrying, true);
     if (deferred.length === retrying.length) break;
   }
   for (const storePath of deferred) {
@@ -399,32 +403,36 @@ async function uploadOne(
   entry: ClosureEntry,
   platform: PushPlatform,
   attempts: number,
+  options: { narinfoOnly?: boolean } = {},
 ): Promise<UploadOutcome> {
   let lastMessage = "no attempt was made";
+  let narinfoOnly = options.narinfoOnly === true;
+  const narName = `${narHashBase32(entry.narHash)}.nar.zst`;
   for (let attempt = 0; attempt < attempts; attempt++) {
-    const narName = `${narHashBase32(entry.narHash)}.nar.zst`;
-    // The body is held so it can be CANCELLED: a refused upload that leaves
-    // `nix store dump-path | zstd` writing into a full pipe holds both
-    // processes for as long as the socket lives.
-    const body = platform.dump(entry.storePath);
-    const narResponse = await fetch(`${base}/nar/${narName}`, {
-      method: "PUT",
-      headers: { ...headers, "content-type": "application/x-nix-nar" },
-      body,
-      // A streamed body has no length; Node's fetch demands this and Bun
-      // ignores it, so it is set for both rather than special-cased.
-      duplex: "half",
-    } as RequestInit).catch(asError);
-    if (narResponse instanceof Error) {
-      void body.cancel().catch(() => {});
-      lastMessage = narResponse.message;
-      continue;
-    }
-    if (!narResponse.ok) {
-      void body.cancel().catch(() => {});
-      lastMessage = `nar upload answered ${narResponse.status}`;
-      if (!worthRetrying(narResponse.status)) break;
-      continue;
+    if (!narinfoOnly) {
+      // The body is held so it can be CANCELLED: a refused upload that leaves
+      // `nix store dump-path | zstd` writing into a full pipe holds both
+      // processes for as long as the socket lives.
+      const body = platform.dump(entry.storePath);
+      const narResponse = await fetch(`${base}/nar/${narName}`, {
+        method: "PUT",
+        headers: { ...headers, "content-type": "application/x-nix-nar" },
+        body,
+        // A streamed body has no length; Node's fetch demands this and Bun
+        // ignores it, so it is set for both rather than special-cased.
+        duplex: "half",
+      } as RequestInit).catch(asError);
+      if (narResponse instanceof Error) {
+        void body.cancel().catch(() => {});
+        lastMessage = narResponse.message;
+        continue;
+      }
+      if (!narResponse.ok) {
+        void body.cancel().catch(() => {});
+        lastMessage = `nar upload answered ${narResponse.status}`;
+        if (!worthRetrying(narResponse.status)) break;
+        continue;
+      }
     }
     const infoResponse = await fetch(`${base}/${storePathHash(entry.storePath)}.narinfo`, {
       method: "PUT",
@@ -437,7 +445,14 @@ async function uploadOne(
     }
     if (infoResponse.status === 202) return { ok: "deferred" };
     if (infoResponse.ok) return { ok: true };
-    lastMessage = `narinfo upload answered ${infoResponse.status}: ${await infoResponse.text()}`;
+    const said = await infoResponse.text();
+    lastMessage = `narinfo upload answered ${infoResponse.status}: ${said}`;
+    if (narinfoOnly && infoResponse.status === 400 && said.includes("never uploaded")) {
+      // The server no longer has the bytes — a restart, or a sweep. Send the
+      // pair rather than asking again.
+      narinfoOnly = false;
+      continue;
+    }
     if (!worthRetrying(infoResponse.status)) break;
   }
   return { ok: false, message: lastMessage };

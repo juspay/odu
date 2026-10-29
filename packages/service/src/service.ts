@@ -662,10 +662,10 @@ export function createOduService(opts: ServiceOptions): OduService {
               buckets: buckets.map(bucketWithUrl),
             })),
           describe: ({ input }) =>
-            cacheAnswer(
-              opts.ports.cache.describe({ bucket: input.bucket }),
-              (bucket) => bucketWithUrl(bucket),
-            ),
+            cacheAnswer(opts.ports.cache.describe({ bucket: input.bucket }), (bucket) => ({
+              ...bucket,
+              url: `${opts.origin}/${bucket.name}`,
+            })),
           tokenMint: ({ input }) =>
             cacheAnswer(
               opts.ports.cache.tokenMint({

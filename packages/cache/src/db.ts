@@ -275,16 +275,6 @@ export function openCacheRepo(path: string): CacheRepo {
     }
   }
   const db = new Database(path, { create: true });
-  if (path !== ":memory:") {
-    for (const file of [path, `${path}-wal`, `${path}-shm`]) {
-      try {
-        chmodSync(file, 0o600);
-      } catch {
-        // The `-wal`/`-shm` files appear lazily; whichever exist are closed
-        // down on the next open.
-      }
-    }
-  }
   db.exec("PRAGMA journal_mode = WAL;");
   db.exec("PRAGMA busy_timeout = 5000;");
   db.exec("PRAGMA foreign_keys = OFF;");
@@ -307,6 +297,20 @@ export function openCacheRepo(path: string): CacheRepo {
     } catch (err) {
       db.exec("ROLLBACK");
       throw err;
+    }
+  }
+
+  // AFTER the migrations, not before: `-wal` and `-shm` are created by the
+  // first write, so a chmod run immediately after `new Database` finds neither
+  // of them and swallows the error — and the first run's WAL, which holds the
+  // bucket's secret key, is world-readable until the next restart.
+  if (path !== ":memory:") {
+    for (const file of [path, `${path}-wal`, `${path}-shm`]) {
+      try {
+        chmodSync(file, 0o600);
+      } catch {
+        // `-shm` is absent outside WAL mode; the rest are here by now.
+      }
     }
   }
 

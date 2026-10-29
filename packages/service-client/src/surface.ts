@@ -1557,10 +1557,28 @@ const CacheListOutputSchema = Schema.Struct({ buckets: Schema.Array(CacheBucketS
  * would make `odu cache use` — a read-only question a developer asks — an
  * administrative act. The NAME is the capability, exactly as it is in the
  * substituter URL.
+ *
+ * **The output is narrower than `CacheBucket` on purpose.** `CacheBucket` is
+ * the operator's view — object count, bytes, retention, upstream key names —
+ * and it belongs to the verbs that carry `rootToken`. This answers the three
+ * facts a substituter publishes: its name, whether it is public, and the key.
+ * It does still answer whether a PRIVATE bucket exists, which is why PR 2
+ * gates this verb for a private bucket behind a login; the service is
+ * loopback-only today, so this is a contract decision rather than an exposure.
  */
 const CacheDescribeInputSchema = Schema.Struct({
   bucket: Schema.String.check(Schema.isMinLength(1)),
 });
+
+export const CacheBucketIdentitySchema = Schema.Struct({
+  name: Schema.String,
+  public: Schema.Boolean,
+  /** `<keyName>:<base64 32>`, ready for `extra-trusted-public-keys`. */
+  publicKey: Schema.String,
+  /** `<origin>/<name>` — what `extra-substituters` takes. */
+  url: Schema.String,
+});
+export type CacheBucketIdentity = typeof CacheBucketIdentitySchema.Type;
 
 /** The three scopes, ordered: admin covers write covers read. */
 export const CacheScopeSchema = Schema.Literals(["read", "write", "admin"]);
@@ -1783,7 +1801,7 @@ export const oduServiceSurface = defineSurface({
       },
       describe: {
         input: CacheDescribeInputSchema,
-        output: CacheBucketSchema,
+        output: CacheBucketIdentitySchema,
         error: REFUSES,
       },
       tokenMint: {

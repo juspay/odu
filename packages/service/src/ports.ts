@@ -449,6 +449,14 @@ export interface CacheBucketFacts {
 
 export type CacheScope = "read" | "write" | "admin";
 
+/** What `describe` answers: the substituter's own identity, and nothing an
+ *  operator would call a fact about their cache. */
+export interface CacheBucketIdentity {
+  name: string;
+  public: boolean;
+  publicKey: string;
+}
+
 export interface CacheTokenFacts {
   id: string;
   bucketGlob: string;
@@ -475,8 +483,16 @@ export interface CacheAdmin {
     upstreamKeys: readonly string[];
   }): Promise<CacheOutcome<CacheBucketFacts>>;
   list(input: { rootToken: string }): Promise<CacheOutcome<readonly CacheBucketFacts[]>>;
-  /** One bucket's public identity — URL and public key — with no root token. */
-  describe(input: { bucket: string }): Promise<CacheOutcome<CacheBucketFacts>>;
+  /**
+   * One bucket's public identity — its name, whether it is public, and the key
+   * a client trusts — with no root token.
+   *
+   * Deliberately NOT `CacheBucketFacts`: the object count, the bytes, the
+   * retention and the upstream key names are the operator's, and this verb
+   * takes no credential. The service adds `url`, which is the origin it is
+   * bound to.
+   */
+  describe(input: { bucket: string }): Promise<CacheOutcome<CacheBucketIdentity>>;
   tokenMint(input: {
     rootToken: string;
     bucket: string;

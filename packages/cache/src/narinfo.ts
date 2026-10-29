@@ -98,6 +98,19 @@ export function isStorePathHash(value: string): boolean {
   return /^[0-9abcdfghijklmnpqrsvwxyz]{32}$/.test(value);
 }
 
+/** The KEY NAME a signature carries — `cache.nixos.org-1` out of
+ *  `cache.nixos.org-1:base64…` — or null when there is no colon at all.
+ *
+ *  Shared by every caller that asks "is this signature by that key": a
+ *  `slice(0, indexOf(":"))` answers -1 with the whole string minus its last
+ *  character, which is a key name that matches nothing and silently defeats the
+ *  upstream filter.
+ */
+export function keyNameOf(signature: string): string | null {
+  const at = signature.indexOf(":");
+  return at <= 0 ? null : signature.slice(0, at);
+}
+
 /** Is this a file name odu will stage? No leading dot (so `.` and `..` are
  *  refused), no slash, no percent — a NAR's name comes from a URL the CLIENT
  *  chose. */

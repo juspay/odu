@@ -52,6 +52,7 @@ import {
   generateKeypair,
   isStagedFileName,
   isStorePathHash,
+  keyNameOf,
   type NarInfo,
   parseNarinfo,
   signFingerprint,
@@ -79,6 +80,23 @@ export interface BucketFacts {
   objects: number;
   bytes: number;
   created: number;
+}
+
+/**
+ * What `describe` answers: a bucket's PUBLIC identity and nothing else.
+ *
+ * Not `BucketFacts`. `describe` takes no credential, and a bucket's object
+ * count, byte total, retention and upstream key names are facts about the
+ * operator's cache rather than about the substituter a client is pointed at.
+ * `odu cache use` needs the URL and the key; a private bucket's EXISTENCE is
+ * still something this answers, which is why PR 2 gates `describe` for a
+ * private bucket behind a login — the contract must not inherit a leak the
+ * route layer was careful to close.
+ */
+export interface BucketIdentity {
+  name: string;
+  public: boolean;
+  publicKey: string;
 }
 
 export interface TokenMinted {
@@ -134,7 +152,7 @@ export interface CacheAdmin {
    * make a read-only question into an administrative one. The NAME is the
    * capability, the same way it is in the substituter URL.
    */
-  describe(input: { bucket: string }): Promise<CacheOutcome<BucketFacts>>;
+  describe(input: { bucket: string }): Promise<CacheOutcome<BucketIdentity>>;
   tokenMint(input: {
     rootToken: string;
     bucket: string;
@@ -243,6 +261,15 @@ interface Pending {
   info: NarInfo;
   /** References Nix said were not valid. Empty means "not attempted yet". */
   waitingOn: readonly string[];
+  /**
+   * The bytes were hashed by THIS process, either when the narinfo arrived or
+   * by an attempt that got as far as Nix. An entry recovered from disk after a
+   * restart is `false` and is proved on its first attempt.
+   *
+   * Without this the same 2 GiB upload is decompressed and hashed twice by odu
+   * before Nix hashes it a third time.
+   */
+  proved: boolean;
 }
 
 export function createCache(options: CacheOptions): Cache {
@@ -264,7 +291,30 @@ export function createCache(options: CacheOptions): Cache {
   const drains = new Map<string, Promise<void>>();
   /** The staged narinfos this process knows about, by bucket then by hash. */
   const pending = new Map<string, Map<string, Pending>>();
+  /** Store paths recovered from disk on a bucket's first load, waiting to be
+   *  handed to the first drain. */
+  const recoveredSeeds = new Map<string, string[]>();
   let lastSweep = 0;
+
+  /**
+   * ONE writer at a time, across `record`, `pin` and `gc`.
+   *
+   * Those three are the only things that change what is retained, and they are
+   * the three that must not interleave: a collection that planned while a pin
+   * was in flight would delete the path the pin had just promised to keep, and
+   * a `record` between a plan and a delete is the same race from the other
+   * side. The lock is taken for the whole of each, so the loser sees the
+   * winner's result rather than a half-applied one.
+   */
+  let writeLock: Promise<void> = Promise.resolve();
+  function withWriteLock<T>(work: () => Promise<T>): Promise<T> {
+    const run = writeLock.then(work, work);
+    writeLock = run.then(
+      () => {},
+      () => {},
+    );
+    return run;
+  }
 
   function requireRoot(rootToken: string): CacheOutcome<null> {
     if (!rootTokenMatches(options.rootToken, rootToken)) {
@@ -341,7 +391,16 @@ export function createCache(options: CacheOptions): Cache {
    * `path-info` that it took from the narinfo, and a row with it twice would
    * put it twice in every answer.
    */
-  async function record(
+  function record(
+    bucket: BucketRow,
+    storePath: string,
+    expectedNarHash: string,
+    clientSigs: readonly string[],
+  ): Promise<boolean> {
+    return withWriteLock(() => recordNow(bucket, storePath, expectedNarHash, clientSigs));
+  }
+
+  async function recordNow(
     bucket: BucketRow,
     storePath: string,
     expectedNarHash: string,
@@ -361,7 +420,7 @@ export function createCache(options: CacheOptions): Cache {
     const existing = repo.object(bucket.name, storePath);
     const at = now();
     const sigs = [...new Set([...clientSigs, ...info.sigs])].filter(
-      (sig) => sig.slice(0, sig.indexOf(":")) !== bucket.keyName,
+      (sig) => keyNameOf(sig) !== bucket.keyName,
     );
     repo.putObject({
       bucket: bucket.name,
@@ -393,34 +452,71 @@ export function createCache(options: CacheOptions): Cache {
    * token for one bucket could publish any path the server's store holds.
    */
   async function provedStagedNar(
+    bucket: BucketRow,
     dirForBucket: string,
     info: NarInfo,
-  ): Promise<{ ok: true } | { ok: false; message: string }> {
+  ): Promise<{ ok: true; info: NarInfo } | { ok: false; message: string }> {
     const name = basename(info.url);
     if (!isStagedFileName(name)) {
       return { ok: false, message: `narinfo names ${info.url}, which is not a NAR this cache staged` };
     }
     const path = join(dirForBucket, "nar", name);
     const present = await stat(path).catch(() => null);
-    if (present === null) {
+    if (present !== null) {
+      const checked = await verifyNarFile(path, info.compression);
+      if (!checked.ok) {
+        return { ok: false, message: `${info.url}: ${checked.message}` };
+      }
+      if (checked.narHash !== info.narHash) {
+        return {
+          ok: false,
+          message:
+            `${info.url} hashes to ${checked.narHash} but the narinfo says ` +
+            `${info.narHash} — the upload was truncated or corrupted`,
+        };
+      }
+      return { ok: true, info };
+    }
+
+    // THE SECOND PROOF OF POSSESSION. Two store paths with identical content
+    // share a `NarHash`, and the first to be recorded takes the staged NAR
+    // with it — so a twin's narinfo can arrive to find the file gone. The
+    // bucket has still proved these bytes: an object with that hash is a row
+    // this cache wrote after hashing an upload. Rebuild the file from it, so
+    // the import that follows has something to read.
+    const twin = repo.objectByNarHash(bucket.name, info.narHash);
+    if (twin === null) {
       return {
         ok: false,
         message: `the narinfo names ${info.url}, which was never uploaded to this bucket`,
       };
     }
-    const checked = await verifyNarFile(path, info.compression);
-    if (!checked.ok) {
-      return { ok: false, message: `${info.url}: ${checked.message}` };
-    }
-    if (checked.narHash !== info.narHash) {
-      return {
-        ok: false,
-        message:
-          `${info.url} hashes to ${checked.narHash} but the narinfo says ` +
-          `${info.narHash} — the upload was truncated or corrupted`,
-      };
-    }
-    return { ok: true };
+    return { ok: true, info: await materialise(dirForBucket, info, twin.storePath) };
+  }
+
+  /** Rebuild a staged NAR from a path the bucket already holds with the same
+   *  bytes, and rewrite the staged narinfo to name it. */
+  async function materialise(
+    dirForBucket: string,
+    info: NarInfo,
+    twinPath: string,
+  ): Promise<NarInfo> {
+    const name = `${info.narHash.replace(/^sha256:/, "")}.${SERVED_EXTENSION}`;
+    await writeStreamToFile(blob.dump(twinPath), join(dirForBucket, "nar", name));
+    const rewritten: NarInfo = {
+      ...info,
+      url: `nar/${name}`,
+      compression: "zstd",
+      fileHash: null,
+      fileSize: null,
+    };
+    // ON DISK too: a restart re-parses this file, and a narinfo naming a URL
+    // that is not there would be refused by its own proof.
+    await writeFile(
+      join(dirForBucket, `${storePathHash(info.storePath)}.narinfo`),
+      formatNarinfo(rewritten),
+    );
+    return rewritten;
   }
 
   /** The staged narinfos this process knows about, loaded once from disk. A
@@ -436,13 +532,18 @@ export function createCache(options: CacheOptions): Cache {
       const hash = file.slice(0, -".narinfo".length);
       try {
         const info = parseNarinfo(await readFile(join(dirForBucket, file), "utf8"));
-        // `waitingOn: []` means "never attempted", which is exactly right for a
-        // narinfo this process did not see arrive.
-        map.set(hash, { hash, info, waitingOn: [] });
+        // `waitingOn: []` means "never attempted" and `proved: false` means
+        // "this process has not hashed it", which are both exactly right for a
+        // narinfo recovered from disk.
+        map.set(hash, { hash, info, waitingOn: [], proved: false });
       } catch {
         await unlink(join(dirForBucket, file)).catch(() => {});
       }
     }
+    // A RECOVERED NARINFO MUST BE ATTEMPTED. `drain` only tries entries its
+    // `seed` names, and a restart has no seed — so without this the uploads
+    // that survived the restart sit until the sweep deletes them an hour later.
+    recoveredSeeds.set(bucket.name, [...map.values()].map((entry) => entry.info.storePath));
     return map;
   }
 
@@ -452,26 +553,18 @@ export function createCache(options: CacheOptions): Cache {
     dirForBucket: string,
     entry: Pending,
   ): Promise<"recorded" | { missing: readonly string[] } | { failed: string }> {
-    const proved = await provedStagedNar(dirForBucket, entry.info);
-    if (!proved.ok) return { failed: proved.message };
+    if (!entry.proved) {
+      const proved = await provedStagedNar(bucket, dirForBucket, entry.info);
+      if (!proved.ok) return { failed: proved.message };
+      entry.info = proved.info;
+      entry.proved = true;
+    }
     const outcome = await blob.import({ dir: dirForBucket, storePath: entry.info.storePath });
     if (!outcome.ok) {
       return outcome.missing.length > 0 ? { missing: outcome.missing } : { failed: outcome.message };
     }
     await record(bucket, entry.info.storePath, entry.info.narHash, entry.info.sigs);
     return "recorded";
-  }
-
-  /** Is the staged NAR named by `url` still wanted by some OTHER staged
-   *  narinfo? Two store paths with identical content share one NAR file, so
-   *  the first import must not take the file the second still needs. */
-  function narStillWanted(map: Map<string, Pending>, url: string, except: string): boolean {
-    const name = basename(url);
-    for (const [hash, entry] of map) {
-      if (hash === except) continue;
-      if (basename(entry.info.url) === name) return true;
-    }
-    return false;
   }
 
   /**
@@ -486,15 +579,18 @@ export function createCache(options: CacheOptions): Cache {
    */
   async function drain(bucket: BucketRow, seed: readonly string[]): Promise<void> {
     const map = await ensurePending(bucket);
+    const recovered = recoveredSeeds.get(bucket.name) ?? [];
+    recoveredSeeds.delete(bucket.name);
+    const seeds = [...new Set([...seed, ...recovered])];
     const dirForBucket = stagedDir(bucket.name);
     await mkdir(dirForBucket, { recursive: true, mode: 0o700 });
     await writeFile(join(dirForBucket, "nix-cache-info"), NIX_CACHE_INFO).catch(() => {});
 
-    let changed = [...seed];
+    let changed = [...seeds];
     while (changed.length > 0) {
       const candidates = [...map.values()].filter((entry) =>
         entry.waitingOn.length === 0
-          ? changed.includes(entry.info.storePath) || seed.includes(entry.info.storePath)
+          ? seeds.includes(entry.info.storePath)
           : entry.waitingOn.some((reference) => changed.includes(reference)),
       );
       if (candidates.length === 0) return;
@@ -503,10 +599,9 @@ export function createCache(options: CacheOptions): Cache {
         const result = await attempt(bucket, dirForBucket, entry);
         if (result === "recorded") {
           map.delete(entry.hash);
-          const staged = join(dirForBucket, "nar", basename(entry.info.url));
-          if (!narStillWanted(map, entry.info.url, entry.hash)) {
-            await unlink(staged).catch(() => {});
-          }
+          // Always safe: a twin whose narinfo has not arrived yet is proved by
+          // the object this record just wrote, and rebuilt from it.
+          await unlink(join(dirForBucket, "nar", basename(entry.info.url))).catch(() => {});
           await unlink(join(dirForBucket, `${entry.hash}.narinfo`)).catch(() => {});
           recorded.push(entry.info.storePath);
           continue;
@@ -558,6 +653,11 @@ export function createCache(options: CacheOptions): Cache {
           const info = await stat(path).catch(() => null);
           if (info === null || !info.isFile() || info.mtimeMs >= cutoff) continue;
           await rm(path, { force: true }).catch(() => {});
+          // A swept narinfo is not pending any more; leaving it in the map
+          // grows it by one per abandoned upload for the life of the process.
+          if (entry.endsWith(".narinfo")) {
+            pending.get(bucket)?.delete(entry.slice(0, -".narinfo".length));
+          }
         }
       }
     }
@@ -612,7 +712,18 @@ export function createCache(options: CacheOptions): Cache {
       if (bucket === null) {
         return { ok: false, code: "unknown_bucket", message: `no bucket "${input.bucket}"` };
       }
-      return { ok: true, value: factsOf(bucket) };
+      // The substituter's own identity: its name, whether it is public, and the
+      // key a client trusts. Not the object count, the bytes, the retention or
+      // the upstream key names — those are the operator's, and this verb takes
+      // no credential.
+      return {
+        ok: true,
+        value: {
+          name: bucket.name,
+          public: bucket.isPublic,
+          publicKey: bucket.publicKey,
+        },
+      };
     },
 
     async tokenMint(input) {
@@ -684,31 +795,7 @@ export function createCache(options: CacheOptions): Cache {
       if (input.paths.length === 0) {
         return { ok: false, code: "bad_input", message: "a pin needs at least one path" };
       }
-      // ONE `nix path-info -r` for the whole closure, not one process per path.
-      const closure = await blob.closure(input.paths);
-      const reached = new Set(closure.map((info) => info.storePath));
-      const absent = input.paths.filter((path) => !reached.has(path));
-      if (absent.length > 0) {
-        return {
-          ok: false,
-          code: "bad_input",
-          message: `no such path in the store: ${absent.join(", ")}`,
-        };
-      }
-      const created = now();
-      repo.putPin({
-        bucket: bucket.name,
-        name: input.name,
-        rootPaths: [...reached],
-        created,
-      });
-      // Every path a pin holds must be rooted in the store, or the machine's
-      // own GC deletes the pin out from under the cache.
-      for (const path of reached) await blob.retain(bucket.name, path);
-      return {
-        ok: true,
-        value: { bucket: bucket.name, name: input.name, rootPaths: [...reached], created },
-      };
+      return withWriteLock(() => pinNow(bucket, input));
     },
 
     async gc(input) {
@@ -721,13 +808,18 @@ export function createCache(options: CacheOptions): Cache {
       if (input.bucket !== null && buckets.length === 0) {
         return { ok: false, code: "unknown_bucket", message: `no bucket "${input.bucket}"` };
       }
-      const plan = planGc({
-        buckets,
-        objects: repo.objects(),
-        pins: repo.pins(),
-        now: now(),
+      // The whole collection — plan, release, delete — under the one write
+      // lock, so a pin or a re-push cannot land between the plan and the
+      // delete and lose a path it had just promised to keep.
+      return withWriteLock(async () => {
+        const plan = planGc({
+          buckets,
+          objects: repo.objects(),
+          pins: repo.pins(),
+          now: now(),
+        });
+        return { ok: true as const, value: await runGc(blob, repo, plan) };
       });
-      return { ok: true, value: await runGc(blob, repo, plan, now()) };
     },
 
     async stats(input) {
@@ -744,6 +836,37 @@ export function createCache(options: CacheOptions): Cache {
       };
     },
   };
+
+  async function pinNow(
+    bucket: BucketRow,
+    input: { name: string; paths: readonly string[] },
+  ): Promise<CacheOutcome<PinFacts>> {
+    // ONE `nix path-info -r` for the whole closure, not one process per path.
+    const closure = await blob.closure(input.paths);
+    const reached = new Set(closure.map((info) => info.storePath));
+    const absent = input.paths.filter((path) => !reached.has(path));
+    if (absent.length > 0) {
+      return {
+        ok: false,
+        code: "bad_input",
+        message: `no such path in the store: ${absent.join(", ")}`,
+      };
+    }
+    const created = now();
+    repo.putPin({
+      bucket: bucket.name,
+      name: input.name,
+      rootPaths: [...reached],
+      created,
+    });
+    // Every path a pin holds must be rooted in the store, or the machine's own
+    // GC deletes the pin out from under the cache.
+    for (const path of reached) await blob.retain(bucket.name, path);
+    return {
+      ok: true,
+      value: { bucket: bucket.name, name: input.name, rootPaths: [...reached], created },
+    };
+  }
 
   return {
     bucket: (name) => repo.bucket(name),
@@ -801,10 +924,14 @@ export function createCache(options: CacheOptions): Cache {
       await sweepStaging();
       const dirForBucket = stagedDir(bucket.name);
       await mkdir(join(dirForBucket, "nar"), { recursive: true, mode: 0o700 });
-      // The route has already refused a name it does not recognise; this is the
-      // wall behind that one, because a `..` here would write outside staging.
-      const name = isStagedFileName(file) ? file : file.replace(/[^A-Za-z0-9._-]/g, "_");
-      const path = join(dirForBucket, "nar", name);
+      // The route has already refused a name it does not recognise, and this
+      // is the wall behind that one: it REFUSES too, rather than sanitizing,
+      // because a sanitizer turns `../..` into a plausible file name and a
+      // caller that skipped the route would never learn it had.
+      if (!isStagedFileName(file)) {
+        throw new Error(`"${file}" is not a NAR file name`);
+      }
+      const path = join(dirForBucket, "nar", file);
       // A UNIQUE temp name, renamed into place on commit. Two store paths with
       // identical content share a NAR name, and two `open(path, "w")` handles
       // on one file truncate each other; the bytes are identical by
@@ -861,15 +988,16 @@ export function createCache(options: CacheOptions): Cache {
       }
 
       // The bytes are proved BEFORE the narinfo is queued, so a narinfo with no
-      // NAR behind it can never be imported by a later drain.
-      const proved = await provedStagedNar(dirForBucket, info);
+      // NAR behind it can never be imported by a later drain. The proof is
+      // carried on the entry, so the drain does not hash the same 2 GiB again.
+      const proved = await provedStagedNar(bucket, dirForBucket, info);
       if (!proved.ok) {
         await unlink(path).catch(() => {});
         return { ok: false, status: 400, message: proved.message };
       }
 
       const map = await ensurePending(bucket);
-      const entry: Pending = { hash, info, waitingOn: [] };
+      const entry: Pending = { hash, info: proved.info, waitingOn: [], proved: true };
       map.set(hash, entry);
       await queuedDrain(bucket, [info.storePath]);
 
@@ -892,9 +1020,10 @@ export function createCache(options: CacheOptions): Cache {
       const skipped: string[] = [];
       for (const { path, sigs } of paths) {
         if (repo.object(bucket.name, path) !== null) continue;
-        const upstream = (sigs ?? []).some((sig) =>
-          bucket.upstreamKeys.includes(sig.slice(0, sig.indexOf(":"))),
-        );
+        const upstream = (sigs ?? []).some((sig) => {
+          const key = keyNameOf(sig);
+          return key !== null && bucket.upstreamKeys.includes(key);
+        });
         (upstream ? skipped : missing).push(path);
       }
       return { missing, skipped };

@@ -26,9 +26,14 @@
  * deleting a closure one path at a time leaks every path in the middle of it
  * while reporting success. One call lets Nix order the set itself.
  *
- * **And the premises are re-checked.** A pin or a re-push can land between the
- * plan and the delete; a path that is no longer evictable gets its root back
- * rather than being deleted under a promise made a moment ago.
+ * **And nothing can land in between.** `planGc` and the delete are separate
+ * awaits, so a pin or a re-push issued while a collection is in flight would
+ * find its path already gone — the "put the root back" branch would do nothing,
+ * because the bytes are deleted. The cache therefore holds ONE async mutex over
+ * `record`, `pin` and `gc`: a collection plans, releases and deletes with no
+ * writer able to interleave, and a pin that arrived first is already in the
+ * plan. That is why there is no re-plan here — there is nothing that could have
+ * changed.
  */
 
 import type { BucketRow, CacheRepo, ObjectRow, PinRow } from "./db";
@@ -124,7 +129,6 @@ export async function runGc(
   store: BlobStore,
   repo: CacheRepo,
   plan: readonly GcBucketPlan[],
-  now: number = Date.now(),
 ): Promise<GcReport> {
   const planned = plan.flatMap((entry) => entry.evict.map((row) => ({ ...row, bucket: entry.bucket })));
   const bytesOf = new Map(planned.map((row) => [`${row.bucket}\u0000${row.storePath}`, row.narSize]));
@@ -142,17 +146,8 @@ export async function runGc(
     throw err;
   }
 
-  // THE PREMISES, RE-CHECKED. `planGc` ran before an await; a pin or a re-push
-  // could have landed since.
-  const fresh = new Set(
-    planGc({
-      buckets: repo.buckets(),
-      objects: repo.objects(),
-      pins: repo.pins(),
-      now,
-    }).flatMap((entry) => entry.evict.map((row) => row.storePath)),
-  );
-
+  // No re-plan: the caller holds the cache's write mutex across the whole
+  // collection, so nothing a pin or a re-push could have changed has changed.
   const deletedSet = new Set(deleted);
   const perBucket = new Map<string, GcBucketReport>(
     plan.map((entry) => [entry.bucket, { bucket: entry.bucket, evicted: 0, kept: 0, bytes: 0 }]),
@@ -161,12 +156,6 @@ export async function runGc(
   for (const row of planned) {
     const report = perBucket.get(row.bucket);
     if (report === undefined) continue;
-    if (!fresh.has(row.storePath)) {
-      // Something claimed it while the delete was in flight. Put the root back
-      // and leave the row alone.
-      if (await store.has(row.storePath)) await store.retain(row.bucket, row.storePath);
-      continue;
-    }
     repo.deleteObject(row.bucket, row.storePath);
     if (deletedSet.has(row.storePath)) {
       report.evicted += 1;
