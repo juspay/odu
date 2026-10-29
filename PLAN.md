@@ -179,6 +179,10 @@ shown on the bucket page (PR 4).
   database in the tree, F3). Tables: `org`, `bucket`, `token`, `object`
   (bucket, store-path hash, narinfo fields, references, nar id, created,
   last-accessed), `nar` (file hash, size, refcount), `pin`, `audit`.
+- **On disk:** under odu's state directory (`$ODU_STATE_DIR`, else
+  `$XDG_STATE_HOME/odu`, else the platform default `run-history/paths.ts`
+  already resolves): `cache/cache.sqlite` and `cache/nar/`. Signing keys live
+  in the database; the database is a secret, and backup is both together.
 - **GC:** per-bucket retention on last access; an object is evicted only when
   nothing retained in the bucket references it and it is not under a pin;
   nars with zero refs are deleted; blobs last. Pins are named and root a

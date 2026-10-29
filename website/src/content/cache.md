@@ -38,7 +38,7 @@ Trust the key, then a build substitutes from the bucket instead of the network. 
 odu cache token mint main --write
 ```
 
-The token is printed once and stored hashed. A token carries a bucket glob, a scope (`--read`, `--write` or `--admin`), an expiry, and its last use. Revoke one without touching the rest:
+The token is printed once; the server keeps only its hash, in the database described under [Where the data lives](#where-the-data-lives). A token carries a bucket glob, a scope (`--read`, `--write` or `--admin`), an expiry, and its last use. Revoke one without touching the rest:
 
 ```sh
 odu cache token list
@@ -80,10 +80,10 @@ Prefer plain Nix? `nix copy --to` works without any odu code on the client:
 nix copy --to http://127.0.0.1:18440/main ./result
 ```
 
-Nix reads credentials only from the file named by its `netrc-file` setting, by default `/etc/nix/netrc` — never `~/.netrc`. `odu cache use main` prints that line and the credential line together:
+Nix reads credentials only from the file named by its `netrc-file` setting (default `/etc/nix/netrc`), never `~/.netrc` on its own. `odu cache use main` prints a `netrc-file` line pointing at your own file and the credential line to put in it:
 
 ```sh
-netrc-file = /etc/nix/netrc
+netrc-file = /home/<you>/.netrc
 machine 127.0.0.1 password <token>
 ```
 
@@ -109,6 +109,17 @@ odu cache stats
 
 Pins are named and root a closure. Garbage collection applies per-bucket retention on last access: an object is evicted only when nothing retained in the bucket references it and it is not under a pin. NARs with no remaining references are deleted; blobs go last. `odu cache stats` reports sizes and hit counts.
 
+## Where the data lives
+
+Everything is under odu's state directory, next to the run catalog. That directory is `$ODU_STATE_DIR` if set, else `$XDG_STATE_HOME/odu` (`~/.local/state/odu` by default) on Linux and `~/Library/Application Support/odu` on macOS.
+
+```text
+<state>/cache/cache.sqlite   buckets, signing keys, token hashes, narinfo metadata, pins
+<state>/cache/nar/           NAR blobs by content hash, zstd, shared across buckets
+```
+
+The database is SQLite in WAL mode. Tokens are stored only as hashes, so a copy of the database cannot be used to push. The bucket signing keys are in it, so treat it as a secret. Back up the database and the blob directory together; one without the other is not a cache.
+
 ## Protocol
 
 One bucket is one substituter. Point any Nix-compatible tool at these routes:
@@ -117,7 +128,7 @@ One bucket is one substituter. Point any Nix-compatible tool at these routes:
 GET  /<bucket>/nix-cache-info             StoreDir, WantMassQuery: 1, Priority: 40
 HEAD /<bucket>/<hash>.narinfo
 GET  /<bucket>/<hash>.narinfo
-GET  /<bucket>/nar/<filehash>.nar.zst     stream, or 302 to a presigned URL
+GET  /<bucket>/nar/<filehash>.nar.zst     stream
 PUT  /<bucket>/nar/<filehash>.nar.<ext>   Bearer or Basic; any ext Nix sends
 PUT  /<bucket>/<hash>.narinfo             server re-signs with the bucket key
 POST /_odu/v1/buckets/<bucket>/missing    batch "which of these are you missing"
