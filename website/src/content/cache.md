@@ -10,7 +10,7 @@ A bucket is one cache: one substituter URL under the service's origin and one ed
 odu cache create main
 ```
 
-`create` prints the substituter URL and the bucket's public key. `odu cache use main` prints the same as two Nix settings, ready for `nix.conf` — and needs no token at all, because a bucket's URL and public key are what it publishes to every client that talks to it:
+`create` prints the substituter URL and the bucket's public key. Behind a proxy that URL is the address you published the service at, not the loopback one — `$ODU_PUBLIC_ORIGIN`, which the NixOS module derives for you. `odu cache use main` prints the same as two Nix settings, ready for `nix.conf` — and needs no token at all, because a bucket's URL and public key are what it publishes to every client that talks to it:
 
 ```sh
 extra-substituters = http://127.0.0.1:18440/cache/main
