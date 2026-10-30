@@ -35,11 +35,19 @@
  *   service.venue.release      — drop one
  *   service.protect.apply      — required status checks on a branch
  *
- * **...and the cache is NOT one of them any more.** A bucket is a row of this
- * board, served by its own surface ( `@odu/cache/surface` ) beside this one, so
+ * **...and the cache's verbs are NOT here any more.** A bucket is a row of this
+ * board, served by its own surface (`@odu/cache/surface`) beside this one, so
  * `cache_bucket_create` and its neighbours are the cache's verbs rather than
  * this contract's. The cut is the point: the cache owns its contract, its
  * refusals and its URLs, and this file stops spelling a bucket at all.
+ *
+ * **BUT THE VERSION HERE STILL COVERS IT.** {@link SERVICE_CONTRACT_VERSION} is
+ * the version of the COMPOSED WIRE — this surface and every row served beside
+ * it — because that is what one daemon speaks on one connection and what one
+ * client is admitted against. So a change to `@odu/cache/surface` bumps THIS
+ * number, exactly as a change here does: the alternative is a second version
+ * nothing enforces, and a stale tab talking to a daemon whose cache verbs it
+ * does not read.
  *
  * **Every public command is one of these.** Not most of them: the inventory is
  * the contract. A capability odu offers a person that has no operation here
@@ -110,6 +118,13 @@ export { STATUS_META, type StatusHue } from "@odu/run-client/surface";
  * (major.minor), never a string equality: a build that only ADDED a member is
  * still speakable by an older client, and refusing it would make every
  * additive change a flag day.
+ *
+ * **IT VERSIONS THE COMPOSED WIRE, not this file.** The daemon serves this
+ * surface as the wire's ROOT and every row beside it as a sibling — the cache,
+ * today — over ONE connection, and a client is admitted against this number
+ * before it reads anything. So a change to `@odu/cache/surface` bumps THIS
+ * number too. A row must not keep a version of its own: nothing would enforce
+ * it, and a stale tab would talk to a daemon whose members it cannot decode.
  */
 export const SERVICE_CONTRACT_VERSION = "2.0";
 

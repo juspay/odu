@@ -15,12 +15,13 @@ packages/web-ui/   board ──┘            @odu/service-client · @odu/execut
                                 └──▶  cache  @odu/cache
 ```
 
-**Host is the REGISTRY: it names every row and belongs to none.** That is the
-fence's rule (`packages/host/src/fence.test.ts`), and it is the reason a row may
-not import this package: a face that reached the host to bootstrap would carry
-every row's server to reach the code that starts one. The vocabulary the two
-sides SHARE — the service tags, the row record, the composed-wire helpers — lives
-in `@odu/cordis`, which belongs to neither.
+**Host names every row and belongs to none.** Its roster is `src/web.ts`, which
+is a ROOT file, and the fence treats "a consumer that mounts rows from a root
+file alone" as a state rather than a defect. What that buys is the reason a row
+may not import this package: a face that reached the host to bootstrap would
+carry every row's server to reach the code that starts one. The vocabulary the
+two sides SHARE — the service tags, the row record, the composed-wire helpers —
+lives in `@odu/cordis`, which belongs to neither.
 
 ## What the host owns
 
@@ -35,8 +36,9 @@ volatility rather than the tenure's:
 
 | moved | to | why |
 | --- | --- | --- |
-| `webPorts.ts`, `protect*`, `pipelinePort`, `venue*`, `leaseVenues` | `@odu/cli/ci` | the port bindings change when the ENGINE changes, not when the tenure does |
-| the runs' row (`createCiBundle`) | `@odu/cli/ci` | a row's wiring belongs to its row |
+| `webPorts.ts`, `protect*`, `pipelinePort`, `venue*`, `leaseVenues` | `@odu/ci` | the port bindings change when the ENGINE changes, not when the tenure does |
+| the runs' row (`ciRow`) | `@odu/ci` | a row's wiring belongs to its row |
+| the run views (board, create, detail, dom, format, ansi, types) | `@odu/ci/face` | a view that renders a row's contract lives in that row's package |
 | the cache's row | `@odu/cache/server` (`cacheRow`) | likewise — and it mounts itself |
 | `webLauncher.ts`, `webDaemonLaunch.ts`, `processIdentity.ts` | `@odu/launch` | how a CLIENT converges on the singleton, which a row needs and the registry cannot supply |
 | the service tags, the row record, `composedWire` | `@odu/cordis` | the vocabulary both sides speak |

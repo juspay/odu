@@ -77,14 +77,15 @@ scrolls sideways.
 
 ## How the two pages use a screen
 
-**The board is TWO ROWS.** The header offers *Runs* and *Cache*, and they are
-two STATES of one page rather than a menu — `aria-pressed` says which is
-showing. The cache's view is not written here: it is `@odu/cache/face`, a row's
-own face, and this package's closure test holds the split (only `app.tsx` opens
-it, and `main.tsx` is the only file that names the cache's surface, because the
-root dials both rows through `connectSurfaces`). What the shell does is hand the
-Cache view the CACHE's client and the run views the runs' — a view that held the
-other row's client could do the other row's job.
+**The board is TWO ROWS, and this package is the SHELL.** The header offers
+*Runs* and *Cache*, two STATES of one page rather than a menu — `aria-pressed`
+says which. The views themselves are not written here: the runs are
+`@odu/ci/face` and the buckets are `@odu/cache/face`, each in the package that
+owns the row it draws. The shell owns the hash router, the wire indicator, the
+switch, the tab, the clock, and the page's single `Effect.runPromise` — handed
+to both faces as `call`. `src/closure.test.ts` holds the split: only `app.tsx`
+opens either face, and `main.tsx` is the only file that names a row's SURFACE,
+because the root dials both through `connectSurfaces`.
 
 **The board is scanned.** One row per checkout by default — the latest run of
 each, with `N earlier` under the age and a *History* toggle for the rest —

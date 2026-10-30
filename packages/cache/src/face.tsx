@@ -226,6 +226,20 @@ function BucketPage(props: {
   onCleanup(() => {
     if (pending !== undefined) clearTimeout(pending);
   });
+  // A FILTER IS ABOUT ONE BUCKET. Opening another one starts with an empty box
+  // and an empty query, or the second bucket is read through the first one's
+  // words and shows nothing.
+  createEffect(
+    on(
+      () => props.name,
+      () => {
+        if (pending !== undefined) clearTimeout(pending);
+        setTyped("");
+        setFilter("");
+      },
+      { defer: true },
+    ),
+  );
 
   /** A "more" page, appended to the first. Cleared whenever the QUERY changes,
    *  because a cursor belongs to the filter that minted it. */
@@ -243,12 +257,43 @@ function BucketPage(props: {
    * the answers happened to arrive. Its `onCleanup` is the resource's own, so a
    * page that navigates away mid-read leaves nothing running.
    */
-  const [first] = createResource(
+  /**
+   * EVERY READ CARRIES THE QUERY IT BELONGS TO.
+   *
+   * A keystroke supersedes the read before it, and a "more" page is a click on
+   * a list that a keystroke can replace while the page is in flight. So each
+   * read tags itself with a GENERATION, and an answer whose generation is no
+   * longer current is DROPPED rather than painted into a list it does not
+   * describe. `onCleanup` retires the page's generation on unmount, so a read
+   * that lands after the page is gone writes nothing at all.
+   */
+  let generation = 0;
+  const current = (): number => generation;
+  const supersede = (): number => {
+    generation += 1;
+    return generation;
+  };
+  onCleanup(() => {
+    supersede();
+  });
+
+  /**
+   * THE FIRST PAGE, AS A RESOURCE KEYED ON `[name, filter]`.
+   *
+   * `createResource` is what makes the filter safe: a keystroke supersedes the
+   * read before it, and a superseded answer is discarded rather than painted
+   * over a newer one — which is what a bare promise chain did, in whatever
+   * order the answers happened to arrive.
+   */
+  const [first, { refetch }] = createResource(
     () => [props.name, filter()] as const,
     async ([name, needle]) => {
       setAppended([]);
       setExtra(null);
       setFailure(null);
+      setLoadingMore(false);
+      // A NEW QUERY RETIRES EVERY PAGE READ AGAINST THE OLD ONE.
+      supersede();
       return props.call(
         props.client.procedures.bucket.paths({
           bucket: name,
@@ -259,8 +304,10 @@ function BucketPage(props: {
   );
 
   /** A later page. Not a resource: it is a click, and it appends to what the
-   *  resource already answered for the SAME query. */
+   *  resource already answered for the SAME query — which is exactly why it
+   *  carries the generation it was asked under. */
   const more = (after: string): void => {
+    const asked = current();
     setLoadingMore(true);
     void props
       .call(
@@ -272,11 +319,13 @@ function BucketPage(props: {
       )
       .then(
         (answer) => {
+          if (asked !== current()) return; // the query moved on
           setLoadingMore(false);
           setAppended([...appended(), ...answer.paths]);
           setExtra(answer.next ?? null);
         },
         (err: unknown) => {
+          if (asked !== current()) return;
           setLoadingMore(false);
           setFailure(err instanceof Error ? err.message : String(err));
         },
@@ -328,7 +377,7 @@ function BucketPage(props: {
                 prints it with — the page cannot know a home directory, so it
                 names `~`. */}
             <pre class="use-block">
-              {useBlock({ url: row().url, publicKey: row().publicKey, home: "~" })}
+              {useBlock({ url: row().url, publicKey: row().publicKey, home: null })}
             </pre>
           </>
         )}
@@ -344,7 +393,22 @@ function BucketPage(props: {
             onInput={(event) => setTyped(event.currentTarget.value)}
           />
         </label>
+        {/* THE FIRST PAGE'S OWN REFUSAL. A resource's value throws when it is
+            read (`read()` rethrows), so a refused read has to be drawn from
+            `first.error` — and `first()` is never touched on that path. */}
+        <Show when={first.error}>
+          {(err) => (
+            <p class="refused">
+              {err() instanceof Error ? err().message : String(err())}
+            </p>
+          )}
+        </Show>
         <Show when={failure()}>{(message) => <p class="refused">{message()}</p>}</Show>
+        <Show when={first.error !== undefined}>
+          <button type="button" class="link" onClick={() => refetch()}>
+            try again
+          </button>
+        </Show>
         <Show
           when={paths().length > 0}
           fallback={

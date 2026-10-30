@@ -106,6 +106,16 @@ When("I open that bucket", async function (this: OduWorld) {
 When("I open a bucket the cache does not have", async function (this: OduWorld) {
   await this.open("#/cache/wa-no-such-bucket");
   await this.page.getByRole("heading", { name: "wa-no-such-bucket", exact: true }).waitFor();
+  // THE PAGE HAS TO HAVE ANSWERED before "no page errors" is worth asserting:
+  // the paths read is refused (`unknown_bucket`), and a check that ran before
+  // that refusal settled would grade a page that had not asked yet. The view
+  // draws the refusal and offers a retry, so the refusal itself is what this
+  // waits for.
+  await this.page
+    .getByRole("button", { name: "try again" })
+    .or(this.page.locator("p.refused"))
+    .first()
+    .waitFor({ timeout: 30_000 });
 });
 
 When("I filter the paths by {string}", async function (this: OduWorld, text: string) {

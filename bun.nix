@@ -225,6 +225,7 @@
     hash = "sha512-xKd8OIzlqNzcqcNumGAa6g+PW2kjD5vrpcKOnfldAUPP3j7lnqMPwlTXQm8gF+UwH72z0lqaRbjr9hqGz0eITA==";
   };
   "@odu/cache" = copyPathToStore ./packages/cache;
+  "@odu/ci" = copyPathToStore ./packages/ci;
   "@odu/cli" = copyPathToStore ./packages/cli;
   "@odu/cordis" = copyPathToStore ./packages/cordis;
   "@odu/execution" = copyPathToStore ./packages/execution;

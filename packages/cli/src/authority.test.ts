@@ -278,7 +278,9 @@ function specifiersIn(source: string, fileName: string): string[] {
  *  authority anyway, which is the whole trick this has to survive. */
 function closureOf(entries: readonly string[]): Map<string, string[]> {
   const seen = new Map<string, string[]>();
-  const queue = entries.map((file) => `${SELF}/src/${file}`);
+  // Entries arrive in two spellings: a bare `foo.ts` from this package's own
+  // derivation, and a repo path from a cross-package one.
+  const queue = entries.map((file) => (file.includes("/") ? file : `${SELF}/src/${file}`));
   while (queue.length > 0) {
     const file = queue.shift() as string;
     if (seen.has(file)) continue;
@@ -351,7 +353,27 @@ function firstOf(candidates: readonly string[]): string | null {
 }
 
 describe("the authority wall", () => {
-  const closure = closureOf(PUBLIC_CLIENTS);
+  /**
+   * THE WALK STARTS AT EVERY `@odu/*` SPECIFIER IN `main.ts`, not only this
+   * package's.
+   *
+   * `odu cache` is `@odu/cache/cli`'s and the bootstrap is `@odu/launch`'s; both
+   * are reached from `main.ts` and neither is in this package, so an entry set
+   * of `@odu/cli/*` alone would give `cache/src/cli.ts` a shallow check through
+   * main's own specifier list and never walk ITS closure — the very hole the
+   * comment above `reachedFromMain` says the derivation exists to close.
+   */
+  const crossPackageEntries = new Set(
+    mainImports
+      .filter((s) => s.startsWith("@odu/"))
+      // ...EXCEPT THE SERVICE ROOTS: `run-coordinator` and `lease-hold` ARE the
+      // engine's argv workers, and walking into them would police the engine's
+      // own imports as if they were a client's.
+      .filter((s) => !SERVICE_ROOTS.some((root) => s === `@odu/cli/${root.slice(0, -3)}`))
+      .map((s) => localFile(s, "src/main.ts"))
+      .filter((file): file is string => file !== null),
+  );
+  const closure = closureOf([...PUBLIC_CLIENTS, ...crossPackageEntries]);
   // THE ROOT IS POLICED TOO. `src/main.ts` seeds the derivation, so it was
   // never a member of the closure and its own imports were never checked —
   // and it is the single likeliest site for the regression this file exists
@@ -457,13 +479,11 @@ describe("the authority wall", () => {
   });
 
   it("allows one specifier, in one file, and nothing else", () => {
-    // The spawn allowance lived here, per-file AND per-specifier, and it is
-    // gone with the file it was about: `webDaemonLaunch.ts` is `@odu/host`'s
-    // now, and `@odu/execution/coordinator` is not reachable from anything
-    // `src/main.ts` imports. An EMPTY map is the honest answer, and pinning it
-    // empty is what stops a future "just this one" from being added in passing:
-    // every public client here reaches the engine through the service, and none
-    // of them by naming a coordinator module.
+    // THE ONE ALLOWANCE, and it is a file the walk REACHES: `main.ts` bootstraps
+    // the singleton through `@odu/launch/webLauncher`, which imports
+    // `@odu/launch/webDaemonLaunch`, which names `coordinator/spawn` — the pure
+    // description of HOW a child is started, which starts nothing. Pinning the
+    // map here is what stops a second one being added in passing.
     expect(
       ALLOWED,
       "an allowance was added into the public CLI. The daemon's spawn machinery " +

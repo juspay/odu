@@ -359,15 +359,17 @@ export const cacheRow = definePlugin({
     // collected by a host that has to know what a row is.
     routes.add(cacheRoutes(cache));
 
+    // FINALIZERS RUN IN REVERSE, so the MOUNT is dropped FIRST: this one is
+    // registered second and therefore runs before the cache's own cleanup — the
+    // safe order, because a subscriber must stop hearing about a database
+    // before the database goes.
+    yield* Effect.addFinalizer(() => Effect.promise(() => mounted.drop()));
     yield* Effect.addFinalizer(() =>
       Effect.sync(() => {
         server.detach();
         cache.close();
       }),
     );
-    // The MOUNT is dropped after the cache's own close has run, so nothing
-    // publishes into a database that has already gone.
-    yield* Effect.addFinalizer(() => Effect.promise(() => mounted.drop()));
 
     log.info(
       { mount: CACHE_MOUNT, buckets: cache.snapshot().length },

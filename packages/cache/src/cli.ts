@@ -351,7 +351,7 @@ async function useCommand(rest: string[], ports: CacheCliPorts): Promise<number>
       useBlock({
         url: bucket.url,
         publicKey: bucket.publicKey,
-        home: process.env.HOME ?? "~",
+        home: process.env.HOME ?? null,
       }),
     );
     return 0;

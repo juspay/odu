@@ -11,17 +11,16 @@ Part of the odu repo — `"@odu/cache": "workspace:*"`.
 
 | door | what it is | browser-safe |
 | --- | --- | --- |
-| `./surface` | the CONTRACT: a bucket's shape, the verbs that administer it, `CACHE_CONTRACT_VERSION`, the tagged refusal, and the expose map both the terminal and an agent read | ✅ |
-| `./server` | implements it — a bucket's rows published as they move, and every `url` built from the origin the row was constructed with | ❌ |
+| `./surface` | the CONTRACT: a bucket's shape, the verbs that administer it, the tagged refusal, `useBlock`, and the expose map both the terminal and an agent read | ✅ |
+| `./server` | implements it and exports `cacheRow` — the plugin the daemon mounts, which mounts ITSELF on the runs' bundle and closes its own database | ❌ |
 | `./cli` | `odu cache …`, the argv face: `create`, `list`, `use`, `token`, `login`, `push`, `pin`, `gc`, `stats` | ❌ |
 | `./face` | the board's Cache view | ✅ (draws) |
 
-Behind them, for the two consumers that need them: `./cache` (the engine: the
-repository, the blob store, signing, GC — what the host's cache row
-constructs), `./routes` (the protocol, as one `HttpRouter` layer), `./paths`
-(where it is mounted) and `./push` (the client of the cache's own HTTP API, which
-is what `odu cache push` is from a machine that has neither a daemon nor a
-database).
+That is the whole package: the engine, the protocol route and the mount path are
+its own business rather than doors, because the row that uses them is inside it.
+One extra export sits apart: `./push`, which is not a door ONTO this package but
+a CLIENT of the cache's own HTTP API — the reason `odu cache push` runs on a
+machine with no daemon and no database.
 
 ## The wall this package is
 
@@ -33,7 +32,8 @@ The BOTTOM of odu's graph: nothing above it may appear below it, and
 `src/closure.test.ts` refuses `@odu/service`, `@odu/execution`, `@odu/cli`,
 `@odu/run-history` and `@odu/service-client` by name. A cache that could reach
 the coordinator would be a second way to start a run; one that reached the
-catalog a second history.
+catalog a second history. The one `@odu/*` it does name is `@odu/cordis` — the
+vocabulary the daemon and its rows share, which names no row either.
 
 **It reads no environment** — the state root, the root token and the store URI
 arrive as arguments, because the one variable that must never be found by

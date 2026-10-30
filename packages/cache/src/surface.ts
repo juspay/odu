@@ -275,15 +275,20 @@ export const PATH_PAGE_SIZE = 100;
  * THE BLOCK A CLIENT PASTES, for one bucket — `odu cache use`'s output and the
  * bucket page's, from one function.
  *
- * `home` is the caller's: the CLI knows the person's `$HOME`, a page does not,
- * so it passes `~`. Everything else is the bucket's own facts, which is what
- * keeps the two faces from drifting the way they had (`~/.netrc` on one,
- * `$HOME/.netrc` on the other, and a `flake.nix` block on only one).
+ * `home` is the caller's ABSOLUTE home directory, or `null` when it has none to
+ * offer. It cannot be `~`: Nix expands no tilde here — `--netrc-file ~/.netrc`
+ * fails with `not an absolute path` — so a block printed with one is a block
+ * that silently does nothing when pasted. The CLI knows `$HOME`; the page does
+ * not, and prints a placeholder that says so.
+ *
+ * Everything else is the bucket's own facts, which is what keeps the two faces
+ * from drifting the way they had (`~/.netrc` on one and `$HOME/.netrc` on the
+ * other, and a `flake.nix` block on only one).
  */
 export function useBlock(input: {
   readonly url: string;
   readonly publicKey: string;
-  readonly home: string;
+  readonly home: string | null;
 }): string {
   const authority = ((): string => {
     try {
@@ -304,8 +309,12 @@ extra-trusted-public-keys = ${input.publicKey}
   };
 }
 
-# netrc — Nix reads only the file named by netrc-file, never ~/.netrc
-netrc-file = ${input.home}/.netrc
+# netrc — Nix reads only the file named by netrc-file, never ~/.netrc,
+# and it does NOT expand ~ there: give it an absolute path.${
+    input.home === null
+      ? "\n# (replace <home> below with yours — a page cannot know it)\nnetrc-file = <home>/.netrc"
+      : `\nnetrc-file = ${input.home}/.netrc`
+  }
 machine ${authority} password <your-write-token>
 `;
 }
@@ -321,10 +330,16 @@ machine ${authority} password <your-write-token>
  * per-second problem the runs board already solved this way.
  *
  * No cells: a bucket is not a singleton fact, and nothing else about the cache
- * is a value on the wire. **No version either** — this surface used to carry a
- * `CACHE_CONTRACT_VERSION` and nothing read it. The daemon's own cell carries
- * the contract version of the wire it serves, these verbs left that contract in
- * 2.0, and a second version nobody enforces is a promise without a mechanism.
+ * is a value on the wire.
+ *
+ * **AND NO VERSION OF ITS OWN.** This surface used to carry a
+ * `CACHE_CONTRACT_VERSION` that nothing read; the version it belongs to is
+ * `@odu/service-client/surface`'s `SERVICE_CONTRACT_VERSION`, which covers the
+ * COMPOSED WIRE — the runs' root surface and every row served beside it, over
+ * one connection, admitted once. So **any change to this file bumps that
+ * number**: adding a verb is a minor bump, changing a shape is a major one. A
+ * row-local version would be a promise nothing enforces, and the failure it
+ * would hide is a stale tab calling a member the daemon no longer serves.
  */
 export const oduCacheSurface = defineSurface({
   collections: {

@@ -86,21 +86,14 @@ in
   # One (src, dest) pair, in the shape `hydrate-kolu-packages.sh` takes.
   hydrateArgs = "${core} cordis";
 
-  # The pin's own runtime dependencies, for a check that wants to hold them —
-  # the UNION over the four hydrated packages, because all four resolve their
-  # externals by walking up into the one root node_modules and a check that
-  # asked only about the core would be green while the loader's `cosmokit` or
-  # include's js-yaml was missing.
+  # The pin's own runtime dependencies, for a check that wants to hold them:
+  # whatever the CORE imports, because the core is the only package hydrated.
   #
-  # Peers are deliberately NOT folded in: every peer the four declare is
-  # ANOTHER OF THE FOUR, plus `node-addon-require-builtin`, which is optional
-  # and is the Node-internals route the loader takes when it can — under Bun it
-  # cannot. None of those is an npm external the root could declare without
-  # inventing a second copy of a pin.
-  externals =
-    (manifestOf "core").dependencies
-    // (manifestOf "loader").dependencies
-    // (manifestOf "include").dependencies;
+  # Peers are deliberately NOT folded in: every peer the core declares is one of
+  # the packages behind `./loader`, which odu does not open, plus
+  # `node-addon-require-builtin` — optional, and none of them is an npm external
+  # the root could declare without inventing a second copy of a pin.
+  externals = (manifestOf "core").dependencies;
 
   revision = npins.cordis.revision;
 }
