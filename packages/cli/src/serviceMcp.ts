@@ -18,7 +18,7 @@ import {
   type ServedSurfaceMcp,
   type SurfaceClientCallable,
 } from "@kolu/surface-mcp";
-import { ODU_CACHE_EXPOSE, oduCacheSurface } from "@odu/cache/surface";
+import { CACHE_AGENT, CACHE_KEY } from "@odu/cache/surface";
 import { buildSurfaceFace } from "@kolu/surface/client";
 import { composedClients } from "@odu/cordis/compose";
 import { SERVICE_SIBLINGS, SERVICE_WIRE_GROUP } from "./wire";
@@ -68,7 +68,7 @@ export async function serveServiceMcpOverStdio(opts: {
     // THE CACHE IS A SIBLING on the same wire, so an agent reaches its verbs
     // through this bridge too — `cache_bucket_create` and its neighbours, under
     // the key the daemon mounts the row at.
-    surfaces: { cache: { surface: oduCacheSurface, expose: ODU_CACHE_EXPOSE } },
+    surfaces: { [CACHE_KEY]: CACHE_AGENT },
     client: async () => {
       const connection = await connectOrStart(origin, { group: SERVICE_WIRE_GROUP });
       held = connection;
@@ -84,7 +84,12 @@ export async function serveServiceMcpOverStdio(opts: {
     // thing being served rather than a transport detail: the daemon's own `/mcp`
     // route answers with the same pair.
     serverInfo: { name: "odu", version: opts.version },
-    instructions: ODU_SERVICE_MCP_INSTRUCTIONS,
+    // THE PARAGRAPHS BOTH DOORS TEACH, composed exactly as the daemon's `/mcp`
+    // route composes them (core first, then each sibling). This bridge used to
+    // pass the core's alone, which was true while the cache's paragraph was
+    // folded into that constant — so splitting it out made two doors teach
+    // different things about the same verbs, in principle and then in fact.
+    instructions: [ODU_SERVICE_MCP_INSTRUCTIONS, CACHE_AGENT.instructions].join("\n\n"),
     ...(opts.transport === undefined ? {} : { transport: opts.transport }),
   });
   return {

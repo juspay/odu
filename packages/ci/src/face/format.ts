@@ -85,19 +85,6 @@ export { duration };
  * {@link duration} above, which is the whole reason that re-export exists.
  */
 
-/** How long ago, coarsely. Coarse on purpose: a board is scanned rather than
- *  read, and "3m ago" is what a scanner needs from a timestamp. */
-export function ago(at: number, now: number): string {
-  const ms = Math.max(0, now - at);
-  const seconds = Math.round(ms / 1000);
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 48) return `${hours}h ago`;
-  return `${Math.round(hours / 24)}d ago`;
-}
-
 /** What a green here actually covers — the whole reason a scope rides the row.
  *  odu's own reading, because what a run COVERED is a fact about the run and not
  *  one face's idea of it (`@odu/service-client/board` owns it, beside the other
@@ -126,8 +113,3 @@ export { scopeLabel };
  * the encoding lives in one place — `#` in an unencoded SVG would truncate the
  * URI at the first colour.
  */
-export function bytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MiB`;
-}

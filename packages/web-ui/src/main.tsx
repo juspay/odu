@@ -19,7 +19,7 @@
 
 import { reloadForUpdate } from "@kolu/surface-app/lifecycle";
 import { connectSurfaces } from "@kolu/surface-app/solid";
-import { oduCacheSurface } from "@odu/cache/surface";
+import { CACHE_KEY, oduCacheSurface } from "@odu/cache/surface";
 import { oduServiceSurface } from "@odu/service-client/surface";
 import { render } from "solid-js/web";
 import { App } from "./app";
@@ -32,7 +32,7 @@ if (root === null) {
 const connection = await connectSurfaces({
   // The rows. `cache` is the key the daemon mounts that row at, so the client
   // this bundle hands back addresses `surface/cache/…` without a second dial.
-  surfaces: { cache: oduCacheSurface },
+  surfaces: { [CACHE_KEY]: oduCacheSurface },
   core: { surface: oduServiceSurface, name: "ci" },
   retired: reloadForUpdate,
 });

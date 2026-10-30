@@ -25,7 +25,7 @@
 
 import { composedWire } from "@odu/cordis/compose";
 import { oduServiceSurface } from "@odu/service-client/surface";
-import { oduCacheSurface } from "@odu/cache/surface";
+import { CACHE_KEY, oduCacheSurface } from "@odu/cache/surface";
 
 /**
  * ONE FLAT GROUP: the runs' bare tags plus each sibling's prefixed ones,
@@ -33,9 +33,10 @@ import { oduCacheSurface } from "@odu/cache/surface";
  * is a boot-time error naming both, rather than a last-writer-wins map that
  * drops one in silence.
  */
-export const SERVICE_WIRE_GROUP = composedWire(oduServiceSurface, {
-  cache: oduCacheSurface,
-});
+export const SERVICE_SIBLINGS = { [CACHE_KEY]: oduCacheSurface } as const;
 
-/** The rows this face names, for the projections that take a `surfaces` map. */
-export const SERVICE_SIBLINGS = { cache: oduCacheSurface } as const;
+/** The same map, as the group a link encodes against. Derived from
+ *  {@link SERVICE_SIBLINGS} rather than beside it: two spellings of one row set,
+ *  four lines apart, is a row that can be added to one and forgotten in the
+ *  other. */
+export const SERVICE_WIRE_GROUP = composedWire(oduServiceSurface, SERVICE_SIBLINGS);

@@ -272,7 +272,7 @@ export function serveServiceMcpInProcess(opts: {
     keys.map((key) => [key, opts.siblings[key]!.surface]),
   );
   // ONE builder for the sibling client map, shared with every other face
-  // (`@odu/service-client/compose`): a second derivation of the tag prefix is a
+  // (`@odu/cordis/compose`): a second derivation of the tag prefix is a
   // second thing that can be wrong.
   const clients = composedClients(surfaces, dispatch);
   return serveSurfaceAsMcp({

@@ -30,6 +30,7 @@
  * read it — so a view can ask them without holding an operator's secret.
  */
 
+import { ago, bytes } from "@odu/cordis/format";
 import type { SurfaceClient } from "@kolu/surface/solid";
 import type { Effect } from "effect";
 import {
@@ -75,33 +76,6 @@ export interface CacheFaceProps {
    *  hands it the description and never runs one itself: two edges in one
    *  bundle would be two answers to what a refusal means. */
   call: <A>(effect: Effect.Effect<A, unknown>) => Promise<A>;
-}
-
-/** How many paths one page carries. The contract's own page size, repeated here
- *  because the view has to know when to offer "more". */
-const PAGE = 100;
-
-/** Bytes as a person reads them — binary units, because a store is. */
-function bytes(count: number): string {
-  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
-  let value = count;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit] as string}`;
-}
-
-/** How long ago, in the words a board uses for a run's age. */
-function ago(at: number, now: number): string {
-  const seconds = Math.max(0, Math.round((now - at) / 1000));
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.round(hours / 24)}d ago`;
 }
 
 export function CacheFace(props: CacheFaceProps): JSX.Element {
@@ -177,7 +151,7 @@ function BucketList(props: {
                   <span class="bucket-name">
                     {bucket.name}
                     <Show when={!bucket.public}>
-                      <span class="pill">private</span>
+                      <span class="pill hue-grey">private</span>
                     </Show>
                   </span>
                   <span class="bucket-facts">
@@ -395,7 +369,7 @@ function BucketPage(props: {
       <h2>
         {props.name}
         <Show when={bucket() !== undefined && !bucket()!.public}>
-          <span class="pill">private</span>
+          <span class="pill hue-grey">private</span>
         </Show>
       </h2>
       <Show when={bucket()} fallback={<p class="hint">This bucket is not on the board — it may have been removed.</p>}>
@@ -436,10 +410,10 @@ function BucketPage(props: {
         </label>
         {/* THE FIRST PAGE'S OWN REFUSAL, from the resource's VALUE — see the
             fetcher: a rejection would be an unhandled one. */}
-        <Show when={refusal()}>{(message) => <p class="refused">{message()}</p>}</Show>
-        <Show when={failure()}>{(message) => <p class="refused">{message()}</p>}</Show>
+        <Show when={refusal()}>{(message) => <p class="fault">{message()}</p>}</Show>
+        <Show when={failure()}>{(message) => <p class="fault">{message()}</p>}</Show>
         <Show when={refusal() !== null || failure() !== null}>
-          <button type="button" class="link" onClick={() => refetch()}>
+          <button type="button" class="text-action" onClick={() => refetch()}>
             try again
           </button>
         </Show>
@@ -476,7 +450,7 @@ function BucketPage(props: {
           {(after) => (
             <button
               type="button"
-              class="link"
+              class="text-action"
               disabled={loadingMore() || first.loading}
               onClick={() => more(after())}
             >

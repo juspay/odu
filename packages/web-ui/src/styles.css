@@ -989,6 +989,20 @@
 
   .fault { color: var(--red-ink); }
 
+  /* AN ACTION THAT READS AS TEXT — "try again", "more". The crumb trail's own
+     rule was this one with a parent, so a control outside a crumb had no rule at
+     all and drew as browser chrome. */
+  .text-action {
+    padding: 0;
+    background: none;
+    border: 0;
+    color: var(--accent);
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .text-action:disabled { color: var(--muted); cursor: default; }
+
   /* ── the form ────────────────────────────────────────────────────────────── */
 
   .create-form { display: grid; gap: 1.1rem; max-width: 40rem; }

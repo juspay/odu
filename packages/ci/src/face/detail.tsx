@@ -46,14 +46,8 @@ import {
   timelineTicks,
 } from "@odu/service-client/board";
 import { Button, CommitRef, Confirm, Hint, Pill, Receipt } from "./dom";
-import {
-  bytes,
-  duration,
-  NODE_STATUS,
-  OUTCOME,
-  projectOf,
-  scopeLabel,
-} from "./format";
+import { bytes } from "@odu/cordis/format";
+import { duration, NODE_STATUS, OUTCOME, projectOf, scopeLabel } from "./format";
 import type {
   LogPage,
   LogTail,

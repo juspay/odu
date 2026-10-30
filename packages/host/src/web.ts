@@ -90,18 +90,20 @@ import { readProcessIdentity, selfProcessIdentity } from "@odu/launch/processIde
 import { mcpGetRoute, mcpRoute, RouteTransport, serveServiceMcpInProcess } from "./mcpRoute";
 import { SERVICE_MCP_PATH } from "@odu/service-client/endpoint";
 import { servingOptions } from "./serving";
-import { CI_AGENT, ciRow } from "@odu/ci/row";
-import { CACHE_AGENT, CACHE_KEY, cacheRow } from "@odu/cache/server";
+import { CI_AGENT, ciRow, CI_KEY } from "@odu/ci/row";
+import { cacheRow } from "@odu/cache/server";
+import { CACHE_AGENT, CACHE_KEY } from "@odu/cache/surface";
 import type { RootedSurfacesRuntime } from "@kolu/surface/server";
 import {
   BoundOrigin,
   Build,
   Bundle,
-  createRoutes,
   DaemonHome,
   Log,
+  type HttpRoutes,
   type Row,
   type RowAgent,
+  type RowRoutes,
   NixStore,
   PublicOrigin,
   RootToken,
@@ -254,11 +256,12 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
   // EVERY ROW, NAMED ONCE, HERE — and this file is a root, which is what makes
   // that legal: a root names every row, a row names only itself, and the host
   // is the one package that composes them. A row record carries the word its
-  // surface is served under and what an agent is told about it; the runs' row
-  // has no plugin because the runs are the wire's ROOT and a root is a
-  // constructor argument, not a sibling.
+  // surface is served under, the plugin it mounts, and what an agent is told
+  // about it. The runs' row is a plugin like any other — `ciRow` builds the
+  // rooted bundle in its own `apply` and OFFERS it, which is why `key` is null
+  // (its members keep the bare `surface/runs/...` tags) while `plugin` is not.
   const ROWS: ReadonlyArray<Row> = [
-    { name: "ci", key: null, plugin: ciRow, agent: CI_AGENT },
+    { name: CI_KEY, key: null, plugin: ciRow, agent: CI_AGENT },
     {
       name: CACHE_KEY,
       key: CACHE_KEY,
@@ -266,7 +269,14 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
       agent: CACHE_AGENT,
     },
   ];
-  const coreAgent = (): RowAgent => ROWS[0]!.agent;
+  // THE ROOT ROW, read off its own record rather than off its POSITION: `key:
+  // null` is what makes a row the root, and a roster that grew a row above this
+  // one would otherwise hand the `/mcp` door the wrong surface as its core.
+  const coreAgent = (): RowAgent => {
+    const root = ROWS.find((row) => row.key === null);
+    if (root === undefined) throw new Error("odu: the roster has no root row");
+    return root.agent;
+  };
 
   // ── THE HOST ────────────────────────────────────────────────────────────
   //
@@ -278,7 +288,18 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
   const run = standing();
   const host = await run(openHost);
   const build = bakedBuild();
-  const routes = createRoutes();
+  // THE ROUTE LAYERS, collected for this tenure and read once, at bind, so
+  // `layers` is this list and dies with the tenure. The LIST is here rather than
+  // in `@odu/cordis` for the same reason the roster is: the tag and the
+  // interface a row registers into are shared vocabulary, a mutable list is one
+  // daemon's.
+  const layers: RowRoutes[] = [];
+  const routes: HttpRoutes = {
+    add: (layer) => {
+      layers.push(layer);
+    },
+    layers: () => layers,
+  };
   /** The `/mcp` adapter, once the rows are composed; `null` before that, and on
    *  every path that never reached a listener. */
   let mcp: Awaited<ReturnType<typeof serveServiceMcpInProcess>> | null = null;

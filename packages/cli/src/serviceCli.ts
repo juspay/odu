@@ -52,7 +52,7 @@ import {
 import { ODU_VERSION } from "@odu/execution/common/version";
 import { serviceOrigin } from "@odu/service-client/endpoint";
 import { connectOrStart } from "@odu/launch/webLauncher";
-import { ODU_CACHE_EXPOSE, oduCacheSurface } from "@odu/cache/surface";
+import { CACHE_AGENT, CACHE_KEY } from "@odu/cache/surface";
 import { composedClients } from "@odu/cordis/compose";
 import { SERVICE_SIBLINGS, SERVICE_WIRE_GROUP } from "./wire";
 import { oduServiceSurface } from "@odu/service-client/surface";
@@ -159,10 +159,10 @@ const projection = {
   // THE CACHE IS A SIBLING, so its verbs mount under its own word
   // (`odu surface cache bucket_create`) rather than vanishing from this face.
   // The framework names a sibling's commands from the SAME key the wire mounts
-  // it at, which is why this word and the MCP tools' prefix are one word.
-  surfaces: {
-    cache: { surface: oduCacheSurface, expose: ODU_CACHE_EXPOSE },
-  },
+  // it at, which is why this word and the MCP tools' prefix are one word — and
+  // why the entry is the ROW's own record rather than a second spelling of its
+  // surface, its exposure map and its key.
+  surfaces: { [CACHE_KEY]: CACHE_AGENT },
   endpoint,
   help,
   info: { name: "odu" },

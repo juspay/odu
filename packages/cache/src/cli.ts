@@ -32,15 +32,17 @@ import { parseArgs } from "node:util";
 import { buildSurfaceFace } from "@kolu/surface/client";
 import type { SurfaceClientOf } from "@kolu/surface/project";
 import { composedClients } from "@odu/cordis/compose";
+import { bytes } from "@odu/cordis/format";
 import type { SurfaceDispatch } from "@kolu/surface/link";
 import { Effect } from "effect";
 import { pushToCache, saveCredential } from "./push";
 import {
+  CACHE_KEY,
   type CacheScope,
   type CacheToken,
-  useBlock,
   CacheRefused,
   oduCacheSurface,
+  useBlock,
 } from "./surface";
 
 /** THE CACHE'S CLIENT, over a dispatch the caller already holds. One
@@ -56,7 +58,10 @@ function cacheClientOver(dispatch: SurfaceDispatch): CacheClient {
   // ONE builder for every sibling client in the tree (`@odu/service-client`'s
   // `./compose`), so this face addresses the tags the daemon mounts the row at
   // without a second derivation of the prefix.
-  return composedClients({ cache: oduCacheSurface }, dispatch).cache as unknown as CacheClient;
+  return composedClients(
+    { [CACHE_KEY]: oduCacheSurface },
+    dispatch,
+  ).cache as unknown as CacheClient;
 }
 
 /** What the root hands this face: the way in, and nothing else. */
@@ -651,13 +656,3 @@ function printToken(token: CacheToken): void {
 }
 
 /** Bytes as a person reads them. Binary units, because a store is. */
-function bytes(count: number): string {
-  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
-  let value = count;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit] as string}`;
-}

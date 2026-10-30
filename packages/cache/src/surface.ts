@@ -30,6 +30,7 @@
  * without holding a database.
  */
 
+import type { RowAgent } from "@odu/cordis/services";
 import { Schema } from "effect";
 import { defineSurface } from "@kolu/surface/define";
 import type { ExposeMap } from "@kolu/surface/expose";
@@ -443,3 +444,32 @@ export const ODU_CACHE_MCP_INSTRUCTIONS = [
   "holds. `cache_bucket_paths` pages a bucket's paths newest first, and takes a",
   "substring `filter` and the `after` cursor it returned.",
 ].join("\n");
+
+// ── the row ─────────────────────────────────────────────────────────────────
+
+/**
+ * The word this row is served under — the sibling segment on the wire, the
+ * subcommand in argv, and the word a browser folds its health under.
+ *
+ * HERE, in the browser-safe contract, rather than beside the plugin: five faces
+ * spell it (the host's roster, the browser's `connectSurfaces`, the argv
+ * projection, the stdio bridge and this package's own client) and four of them
+ * cannot open `./server`. A constant behind a door they may not use is a literal
+ * they each retype, which is how a page connects to a row nothing serves.
+ */
+export const CACHE_KEY = "cache";
+
+/**
+ * WHAT AN AGENT IS TOLD about the cache: its surface, its exposure policy and
+ * the paragraph taught at `initialize`.
+ *
+ * Here for the same reason as the key, and for one more: BOTH dispatch points
+ * read it — the daemon's `/mcp` route and the stdio bridge `odu mcp` serves — so
+ * a record that lived beside the row would be re-spelled by the bridge, and the
+ * two doors would teach different things about the same verbs.
+ */
+export const CACHE_AGENT: RowAgent = {
+  surface: oduCacheSurface,
+  expose: ODU_CACHE_EXPOSE,
+  instructions: ODU_CACHE_MCP_INSTRUCTIONS,
+};

@@ -102,18 +102,12 @@ export interface HttpRoutes {
   layers(): ReadonlyArray<RowRoutes>;
 }
 
+/** ONE PER TENURE, made by whoever owns the tenure — `@odu/host`'s `web.ts`, and
+ *  nothing else. The INTERFACE is the vocabulary a row needs (it is what a row
+ *  registers into); the FACTORY is a bag of live state, and this package is a
+ *  contract: eleven tags, four types and two pure helpers, with no state to
+ *  outlive a call. */
 export const Routes = serviceTag<HttpRoutes>("odu:httpRoutes");
-
-/** One, fresh per tenure. */
-export function createRoutes(): HttpRoutes {
-  const layers: RowRoutes[] = [];
-  return {
-    add: (routes) => {
-      layers.push(routes);
-    },
-    layers: () => layers,
-  };
-}
 
 // ── what a row is ───────────────────────────────────────────────────────────
 

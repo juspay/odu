@@ -39,14 +39,21 @@
  * PASSED IN to the host's route rather than imported by it. Those were the only
  * files the host-package rule was catching.
  *
- * `prove(declaration).ok` is the stronger self-check and is not asserted yet:
- * see `docs` on the door's `live-state` mutation.
+ * ## The green report is PROVEN, not asserted
+ *
+ * `prove(declaration)` breaks a copy of this tree once per claim and reports
+ * whether the claim that names the defect refused it — and whether it refused
+ * ONLY that one. It is asserted below, because a green report is worth exactly
+ * what its machinery is worth: a sweep whose pattern stopped matching, whose
+ * corpus came back short, or whose resolver walked one file is every one of
+ * them green, and `0 findings` cannot tell a fence that is holding from a fence
+ * that is not running.
  */
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "bun:test";
-import { fence, rowsFromManifests } from "@olai/effect-cordis/fence";
+import { fence, prove, rowsFromManifests } from "@olai/effect-cordis/fence";
 
 /** The workspace root: the directory whose `package.json` carries the
  *  `workspaces` globs. */
@@ -77,8 +84,8 @@ const declaration = {
   // acceptance suite's fixtures, a bucket's class names).
   collisions: {
     cache: {
-      "packages/cli/src/serviceCli.ts": 3,
-      "packages/cli/src/serviceMcp.ts": 3,
+      "packages/cli/src/serviceCli.ts": 4,
+      "packages/cli/src/serviceMcp.ts": 5,
       "packages/cli/src/wire.ts": 2,
       "packages/execution/src/coordinator/spawn.ts": 1,
       "packages/execution/src/runner/workspace.ts": 22,
@@ -102,6 +109,13 @@ const declaration = {
   },
 } as const;
 
+/** `prove` copies the tree once per claim and runs the fence over each copy, so
+ *  this is the slowest test in the tree by an order of magnitude — ~20s alone,
+ *  and over a minute when the rest of the suite is competing for the machine.
+ *  The bound is generous because it exists to turn a HANG into a failure, not to
+ *  police a runner's speed. */
+const PROVE_TIMEOUT_MS = 240_000;
+
 describe("the fence over this repo", () => {
   it("is green, every claim", () => {
     const report = fence(declaration);
@@ -120,100 +134,91 @@ describe("the fence over this repo", () => {
     expect(fence(declaration).reading.registry).toBeUndefined();
   });
 
-  // A GREEN REPORT IS ONLY EVIDENCE IF IT WOULD GO RED, so each lever this
-  // declaration pulls is pulled the wrong way once. No temp tree and no copy:
-  // the claims are functions of the DECLARATION, so a wrong declaration over
-  // the same sources is the defect, and a reviewer can read it.
-  it("goes red when a row the packages declare is not in the roster", () => {
-    const { cache: _dropped, ...rest } = FENCE_ROWS;
-    const report = fence({ ...declaration, rows: rest });
-    expect(report.red("registry").join("\n")).toContain("cache");
-  });
-
-  it("goes red when a collision is not recorded", () => {
-    const report = fence({ ...declaration, collisions: {} });
-    expect(report.red("names").length).toBeGreaterThan(0);
-  });
-
-  it("goes red when an allowance is withdrawn", () => {
-    const report = fence({ ...declaration, allowances: {} });
-    expect(report.red("live-state").join("\n")).toContain("liveRuns");
-  });
+  // A GREEN REPORT IS ONLY EVIDENCE IF IT WOULD GO RED. `prove` is the door's
+  // own answer to that: it copies this tree, plants one defect per claim, and
+  // requires each one to be caught BY ITS OWN CLAIM and to spill into none of
+  // the others. Hand-written wrong declarations were what stood here before,
+  // and they proved less — three levers out of six, over one claim's edges,
+  // with nothing saying the other three were still turning.
+  it("proves every claim, on a broken copy of this tree", () => {
+    const proof = prove(declaration);
+    expect(
+      proof.ok,
+      proof.baseline.length > 0
+        ? `the baseline is red: ${proof.baseline.map((one) => `${one.claim}: ${one.said}`).join("; ")}`
+        : proof.mutations
+            .filter((one) => !one.caught || one.spill.length > 0)
+            .map(
+              (one) =>
+                `${one.claim}: ${one.caught ? "caught" : "NOT caught"}` +
+                (one.spill.length === 0 ? "" : ` and spilled into ${one.spill.join(", ")}`) +
+                ` (${one.what})`,
+            )
+            .join("; "),
+    ).toBe(true);
+  }, PROVE_TIMEOUT_MS);
 });
 
 /**
  * THE ONE CLAIM THE FRAMEWORK CANNOT MAKE, because it is about call sites rather
- * than about a package graph: **the word a row is mounted under and the word
- * every client builds its face from are one word.**
+ * than about a package graph: **the word a row is mounted under, and the word
+ * every face spells, are one constant.**
  *
  * The mount happens in the row's own `apply` (`bundle.mount(...)`), the roster
- * repeats the key, and three faces read it: the browser's `connectSurfaces`, the
- * argv projection's `surfaces`, and the stdio bridge's `surfaces`. A mismatch is
- * the quietest failure the bundle has — the page connects, the health fold is
- * green, and every call into that row answers "unknown member" — so this parses
- * those five call sites instead of trusting a name to stay put.
+ * names it, and four faces build their view of the wire from it: the browser's
+ * `connectSurfaces`, the argv projection, the stdio bridge and the cache's own
+ * client. A mismatch is the quietest failure the bundle has — the page connects,
+ * the health fold is green, and every call into that row answers "unknown
+ * member" — and a LITERAL at five sites is how the mismatch happens. So the
+ * claim is not "these five strings are equal" (the type system stopped needing
+ * that the day the constant existed) but "these five sites use the constant, and
+ * it is declared once, behind a door all five may open".
  */
-describe("the word the rows are mounted under", () => {
-  /** A key as a call site spells it: a literal, or an identifier resolved
-   *  through the cache's own constants (the one module that exports them). */
-  const resolve = (spelling: string): string | null => {
-    // `null` is the ROOT row: its members keep the bare tags, so there is no
-    // sibling word to agree on.
-    if (spelling === "null") return null;
-    const literal = /^"([a-z]+)"$/.exec(spelling);
-    if (literal !== null) return literal[1] as string;
-    const found = new RegExp(`export const ${spelling} = "([a-z]+)"`).exec(
-      source("packages/cache/src/server.ts"),
-    );
-    expect(found, `${spelling} is not defined where the exports are`).not.toBeNull();
-    return found?.[1] as string;
-  };
+describe("the row's word", () => {
+  /** The contract, which is the browser-safe door every face can open. */
+  const CONTRACT = source("packages/cache/src/surface.ts");
+  const value = /export const CACHE_KEY = "([a-z0-9-]+)"/.exec(CONTRACT)?.[1];
 
-  /** `bundle.mount(KEY, …)` — the row mounting ITSELF. */
-  const mounted = resolve(
-    /bundle\.mount\((\w+),/.exec(source("packages/cache/src/server.ts"))?.[1] ?? "(none)",
-  ) as string;
+  /** Every place that has to know it. */
+  const FACES = [
+    "packages/host/src/web.ts",
+    "packages/web-ui/src/main.tsx",
+    "packages/cli/src/serviceCli.ts",
+    "packages/cli/src/serviceMcp.ts",
+    "packages/cli/src/wire.ts",
+    "packages/cache/src/cli.ts",
+  ];
 
-  /** The roster's sibling entries: `{ name: X, key: Y, … }`. */
-  const roster = [
-    ...source("packages/host/src/web.ts").matchAll(
-      /\{\s*name:\s*([\w$]+|\"[a-z]+\"),\s*key:\s*(null|[\w$]+|\"[a-z]+\")/g,
-    ),
-  ].map((found) => ({ name: found[1] as string, key: found[2] as string }));
-
-  it("reads the call sites it thinks it is reading", () => {
+  it("reads the constant it thinks it is reading", () => {
     // The non-vacuity floor: a pattern that stopped matching would make every
-    // assertion below true of an empty list.
-    expect(mounted).not.toBe("(none)");
-    expect(roster.length).toBeGreaterThanOrEqual(2);
-    expect(roster.map((row) => row.key)).toContain("null");
+    // assertion below true of `undefined`.
+    expect(value).toBeDefined();
+  });
+
+  it("is declared once, in the contract both sides may open", () => {
+    expect(CONTRACT).toContain(`export const CACHE_KEY = "${value as string}"`);
+    // Not beside the plugin: `./server` is a door four of the five faces cannot
+    // open, and a constant behind it is a literal they each retype.
+    expect(source("packages/cache/src/server.ts")).not.toMatch(/export const CACHE_KEY/);
+  });
+
+  it("is the word the row mounts itself at", () => {
+    expect(source("packages/cache/src/server.ts")).toMatch(/bundle\.mount\(CACHE_KEY,/);
+  });
+
+  it("is the word every face spells", () => {
+    for (const file of FACES) {
+      expect(source(file), `${file} does not name CACHE_KEY`).toContain("CACHE_KEY");
+      // …and none of them spells the word itself as a sibling key.
+      expect(source(file), `${file} spells the row's word`).not.toMatch(
+        new RegExp(`\\b${value as string}:`),
+      );
+    }
   });
 
   it("is the key the roster serves it under", () => {
-    expect(roster.map((row) => resolve(row.key)).filter((key) => key !== null)).toContain(
-      mounted,
-    );
-  });
-
-  it("is the sibling the browser dials, and the core's name", () => {
-    const text = source("packages/web-ui/src/main.tsx");
-    const keys = [...text.matchAll(/(\w+):\s*odu[A-Z]\w*Surface/g)].map((one) => one[1]);
-    expect(keys).toContain(mounted);
-    expect(text).toMatch(/core:\s*\{\s*surface:\s*oduServiceSurface,\s*name:\s*"ci"/);
-  });
-
-  it("is the sibling both projections mount", () => {
-    for (const file of ["packages/cli/src/serviceCli.ts", "packages/cli/src/serviceMcp.ts"]) {
-      const text = source(file);
-      // `surfaces: { cache: { surface: oduCacheSurface, expose: … } }` — the
-      // entry the projection takes, whichever way the object is laid out.
-      expect(text, `${file} does not mount "${mounted}"`).toMatch(
-        new RegExp(`surfaces:[\\s\\S]{0,120}\\b${mounted}:`) as never,
-      );
-      // ...and the argv face builds its client from the same map.
-      expect(text, `${file} builds no client for "${mounted}"`).toMatch(
-        new RegExp(`\\b${mounted}\\b`) as never,
-      );
-    }
+    const roster = source("packages/host/src/web.ts");
+    expect(roster).toMatch(/\{\s*name:\s*CI_KEY,\s*key:\s*null,/);
+    expect(roster).toMatch(/\{\s*name:\s*CACHE_KEY,\s*key:\s*CACHE_KEY,/);
   });
 });

@@ -3,7 +3,7 @@
  * has that is not a client.
  *
  * It is an argv entry point a launcher types and a person never does: the daemon
- * spawns it (see `@odu/host/leaseVenues`), and its output is a log file nobody
+ * spawns it (see `@odu/ci/venuePort`), and its output is a log file nobody
  * reads unless a hold went wrong. Everything else this file used to hold —
  * resolving a platform set, spawning holders, releasing them — moved to the
  * daemon with the two commands that now ask it, because `odu lease` and
