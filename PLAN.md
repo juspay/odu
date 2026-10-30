@@ -375,11 +375,16 @@ loopback, administered by `odu cache` with a root token. Nothing is public.
 > **Docs:** The board has a Cache view. Open the page and the header offers
 > **Runs** and **Cache**: buckets with their sizes, their last push and their
 > read counts, and one bucket's public key, substituter URL, the block
-> `odu cache use` prints, and its paths newest first with a filter box. Nothing
-> else changes for a user — every command, verb, flag and URL behaves as it did,
-> and the one name that moves is a cache tool's: `cache_create` is
-> `cache_bucket_create`, because the cache is now a row of its own and its names
-> carry its word.
+> `odu cache use` prints, and its paths newest first with a filter box. Every
+> `odu` command, flag and URL behaves as it did. The CACHE'S VERBS ARE RENAMED,
+> because they are a row of their own now and their names carry its word:
+> `cache_create` → `cache_bucket_create`, `cache_list` → `cache_bucket_list`,
+> `cache_describe` → `cache_bucket_describe`, `cache_tokenMint` →
+> `cache_token_mint`, `cache_tokenList` → `cache_token_list`, `cache_tokenRevoke`
+> → `cache_token_revoke`, `cache_pin` → `cache_pin_create`, `cache_gc` →
+> `cache_gc_run`, `cache_stats` → `cache_stats_read`, plus a new
+> `cache_bucket_paths`; `odu surface` mounts them under the row's word
+> (`odu surface cache bucket_create`).
 
 PR 1 left the cache's DATA PLANE clean — ten files in `packages/cache` that
 depend on Effect and nothing else — and braided everything above it into the CI
@@ -428,6 +433,13 @@ What lands:
   the header, `connectSurfaces({ ci, cache })` at the browser root, and one
   client per row: the run views hold the runs' and the Cache view holds the
   cache's alone.
+- **`@odu/launch`.** How a client converges on the singleton — the launch facts,
+  the gate's process reader, adopt/spawn/refuse — in a package that names no row,
+  so a face can bootstrap without importing the daemon.
+- **The fence.** `packages/host/src/fence.test.ts` declares this repo to
+  `@olai/effect-cordis/fence`: roots, rows from the manifests, the collision
+  table, one argued allowance — and one odu-specific claim beside it, that the
+  word a row is mounted under is the word every client builds its face from.
 
 State of master after merge: `odu web` serves two rows over one wire and one
 page; the cache is a package that declares its own contract and serves itself,

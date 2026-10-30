@@ -155,7 +155,7 @@ On a client, trust the bucket — the key `create` printed:
 
 `ODU_PUBLIC_ORIGIN` is the setting behind that URL: it names the address a bucket is published under when a proxy stands in front, and defaults to what `cache.domain` and `cache.enableACME` imply. The module requires a loopback `listen`, because a public board is PR 3's (server mode) answer rather than a flag to flip today.
 
-**Without the module.** A container or any non-systemd host runs the same one process from the environment the module sets, and needs nothing else. `ODU_STATE_DIR` holds everything — the run catalog, the cache, and now the daemon's own gate and socket, which is what a read-only `$HOME` otherwise breaks. `ODU_WEB_ORIGIN` is the address it binds, `ODU_PUBLIC_ORIGIN` the one a bucket's URL is published at, and `ODU_ROOT_TOKEN` the administration secret. `ODU_CACHE_STORE=local?root=<dir>` gives the cache a store of its own on a volume; a store that is not the machine that built the paths never holds nixpkgs, so create its buckets with `odu cache create <bucket> --no-upstream` or every referrer sits at 202. It needs `nix` on `PATH` (deliberately not in the wrapper) and a `$HOME` that `nix` itself can write under. One process, one replica: there is no second daemon to elect. The module's nginx is what publishes the **cache** — it proxies `/cache/*` and `/_odu/v1/*` and nothing else — so a host that serves no bucket publicly needs no proxy at all, and the board, the websocket and `/mcp` stay on loopback until server mode.
+**Without the module.** A container or any non-systemd host runs the same one process from the environment the module sets, and needs nothing else. `ODU_STATE_DIR` holds everything — the run catalog, the cache, and now the daemon's own gate and socket, which is what a read-only `$HOME` otherwise breaks. `ODU_WEB_ORIGIN` is the address it binds, `ODU_PUBLIC_ORIGIN` the one a bucket's URL is published at, and `ODU_ROOT_TOKEN` the administration secret. `ODU_CACHE_STORE=local?root=<dir>` gives the cache a store of its own on a volume; a store that is not the machine that built the paths never holds nixpkgs, so create its buckets with `odu cache create <bucket> --no-upstream` or every referrer sits at 202. It needs `nix` on `PATH` (deliberately not in the wrapper) and a `$HOME` that `nix` itself can write under. One process, one replica: there is no second daemon to elect. **The module's nginx proxies `/cache/*` and `/_odu/v1/*` and nothing else**, so a host that serves no bucket publicly needs no proxy at all — but a container must bind a non-loopback origin for any ingress to reach the cache, and then the board, the websocket and `/mcp` are reachable on that origin too: the network policy, not the listener, is the boundary until server mode.
 
 ## Daily workflow
 
@@ -251,7 +251,24 @@ For agents with an MCP client, odu ships the unified skill and its MCP server to
 
 The stdio bridge bootstraps the service and exposes the same verbs as tools (`run_start`, `run_wait`, `log_read`, and so on). HTTP MCP clients can instead connect to **http://127.0.0.1:18440/mcp** once the service is running; an HTTP connection itself cannot start it.
 
-Other shared verbs: `run_list` (the board filtered by checkout, commit and seq, in one call), `run_cancel`, `pipeline_read`, `venue_probe`, `venue_hold`, `venue_release`, `catalog_import`, `catalog_prune`, `protect_apply`, and the cache's `cache_create`, `cache_list`, `cache_describe`, `cache_tokenMint`, `cache_tokenList`, `cache_tokenRevoke`, `cache_pin`, `cache_gc` and `cache_stats`. Use `odu surface --help` for their schemas. Every cache verb but `cache_describe` takes `rootToken`; a service started without `$ODU_ROOT_TOKEN` refuses the rest with `no_root_token` while the substituter keeps serving. `cache_describe` answers a bucket's substituter URL and public key with no credential, which is what `odu cache use` needs.
+Other shared verbs: `run_list` (the board filtered by checkout, commit and seq, in one call), `run_cancel`, `pipeline_read`, `venue_probe`, `venue_hold`, `venue_release`, `catalog_import`, `catalog_prune` and `protect_apply`. Use `odu surface --help` for their schemas.
+
+**The cache's verbs are a row of their own**, and their names carry its word — `cache_` — then the thing and the act. Every one was renamed when the cache became a surface served beside the runs rather than behind the service, so a script written against odu 1.5 needs this table:
+
+| was | now | takes `rootToken` |
+| --- | --- | --- |
+| `cache_create` | `cache_bucket_create` | yes |
+| `cache_list` | `cache_bucket_list` | yes |
+| `cache_describe` | `cache_bucket_describe` | no |
+| — | `cache_bucket_paths` | no |
+| `cache_tokenMint` | `cache_token_mint` | yes |
+| `cache_tokenList` | `cache_token_list` | yes |
+| `cache_tokenRevoke` | `cache_token_revoke` | yes |
+| `cache_pin` | `cache_pin_create` | yes |
+| `cache_gc` | `cache_gc_run` | yes |
+| `cache_stats` | `cache_stats_read` | yes |
+
+The same rename reaches argv: `odu surface cache_create …` is `odu surface cache bucket_create …`, because a sibling's commands mount under its key. `odu cache …` — the commands a person actually types — is unchanged. A service started without `$ODU_ROOT_TOKEN` refuses the token-taking verbs with `no_root_token` while the substituter keeps serving; `cache_bucket_describe` and `cache_bucket_paths` take no credential at all, because a bucket's URL, its key and its path list are what it publishes to every client that can read it.
 
 ## CLI reference
 

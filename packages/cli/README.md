@@ -36,7 +36,8 @@ direction lands on one of them.
 | `src/serviceFace.ts` | the plumbing every public command shares: the connection, the three-way outcome (answer / refusal / dead link), and the one exit table. Four command modules import it — `serviceCommands`, `serviceStatus`, `serviceVenue`, `servicePipeline` — which are four SUBJECTS, not four authorities |
 | `src/internalCli.ts` | `run-coordinator` and `lease-hold`: the argv workers a launcher types and a person never does. Out of `main.ts` so the wall's derivation starts at a root that is itself clean |
 | `src/serviceCli.ts`, `src/serviceMcp.ts` | the two non-browser faces of the shared service: the same contract projected as argv and as MCP, neither holding a verb of its own |
-| (moved) `web.ts`, `webLauncher.ts`, `webPorts.ts`, `serving.ts`, `webDaemonLaunch.ts` | the daemon — its listener, its singleton gate, how a client converges on it, and the one place the engine is bound — is `@odu/host` now. The faces here import `connectOrStart` back from it, because a public command on a cold machine has to start the service it cannot find |
+| `src/ci/` | **the ci row's wiring**: `webPorts.ts` binds the service's ports to the engine, and the adapters beside it are the pipeline, the venues, the leases and the forge. It lives HERE rather than in the daemon because it moves when the engine moves. `bundle.ts` is the runs' runtime, which the host builds |
+| (moved) `web.ts`, `serving.ts`, `webDaemonLaunch.ts` | the daemon — its listener, its singleton gate, the launch facts — is `@odu/host` and `@odu/launch` now. The faces here import `connectOrStart` from `@odu/launch`, because a public command on a cold machine has to start the service it cannot find |
 
 ## The line between the faces
 
@@ -51,6 +52,7 @@ Neither holds run authority. Every mutation crosses the wire to the singleton
 daemon, so two agents driving two bridges are two clients of one truth rather
 than two opinions about it — and the public CLI cannot spawn a coordinator,
 dial a checkout's socket, or write the catalog. The one legitimate binding of
-the engine is `@odu/host`'s `src/webPorts.ts`, on the daemon's side of that
-wall — and the arrow runs `cli → host → rows`, never back, which is why this
-manifest names `@odu/host` and the host's manifest names no face.
+the engine is `src/ci/webPorts.ts`, in THIS package but reached only from the
+daemon — and the arrow runs `host → rows`, never back, which is why this
+manifest names `@odu/host` (for the daemon's entry points) and the host names
+this package only from its roster.

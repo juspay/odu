@@ -457,7 +457,7 @@ async function dispatch(argv: string[]): Promise<number> {
     case "cache": {
       const [sub, ...subRest] = rest;
       // THE ONE PORT this face takes: the way to the daemon. The bootstrap is
-      // `@odu/host`'s — starting a service is not a row's business — so the
+      // `@odu/launch`'s — starting a service is not a row's business — so the
       // root binds it, and `@odu/cache/cli` stays a client that names no host.
       return cacheCommand(sub, subRest, {
         connect: (origin) => connectOrStart(origin, { group: SERVICE_WIRE_GROUP }),

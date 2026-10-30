@@ -1,50 +1,64 @@
 # @odu/host
 
-**The daemon.** One listener, one singleton gate, one process that serves every
-row's surface and binds their ports to the engine. Where a row is a capability
-that could be served by anything, this is the thing that serves it.
+**The daemon.** One listener, one Cordis host, one process that serves every
+row's surface — and the one file that names which rows there are.
 
 Part of the odu repo — `"@odu/host": "workspace:*"`.
 
 ## The arrow
 
 ```text
-src/main.ts  ─┐
-              ├─→  @odu/host  ─→  ci     (@odu/service · @odu/service-client ·
-packages/      │                          @odu/execution · @odu/run-history ·
-web-ui/        │                          @odu/run-client)
-              │        └──────→  cache  (@odu/cache)
-              └─→  the rows' FACES
+src/main.ts         CLI  ─┐
+packages/host/     daemon ─┼──▶  ci     @odu/cli · @odu/launch · @odu/service ·
+packages/web-ui/   board ──┘            @odu/service-client · @odu/execution ·
+                                        @odu/run-history · @odu/run-client
+                                └──▶  cache  @odu/cache
 ```
 
-Host is **not a row**: it names the rows and is never named by one.
-`src/closure.test.ts` states that half — importing `@odu/cli` or `@odu/web-ui`
-from here is a failure, because a daemon that carried a renderer, an argv
-projection or a page's routing would ship a face to every browser tab's server.
-The other half is the arrow itself: a row's manifest names rows, and this
-package is not among them, so the dependency cannot come back.
+**Host is the REGISTRY: it names every row and belongs to none.** That is the
+fence's rule (`packages/host/src/fence.test.ts`), and it is the reason a row may
+not import this package: a face that reached the host to bootstrap would carry
+every row's server to reach the code that starts one. The vocabulary the two
+sides SHARE — the service tags, the row record, the composed-wire helpers — lives
+in `@odu/cordis`, which belongs to neither.
 
 ## What the host owns
 
 | | |
 | --- | --- |
-| `src/web.ts` | **the tenure.** `odu web` in the foreground, `odu web --background`, and the quiet `web-daemon` the second one spawns. It claims the gate BEFORE anything is bound, asserts the package is complete before it serves, and owns the teardown — every row's resources released in reverse order, so a daemon restart cannot leave a database handle or a timer behind |
+| `src/web.ts` | **the tenure, and the roster.** `odu web` in the foreground, `odu web --background`, and the quiet `web-daemon` the second one spawns. It claims the gate BEFORE anything is bound, provides the facts every row needs, builds the runs' root bundle, mounts the sibling rows, and serves the one flat group. Teardown is Cordis's: the listener first, then every row in reverse |
 | `src/serving.ts` | **the listener's parts, assembled.** kolu's `serveSurfaceApp` options — the live generation, the built bundle, the `/mcp` routes, the Origin allowlist — as one object built from named parts, so adding a route or a middleware is adding a part rather than editing the gate-claim ordering that must not move |
-| `src/mcpRoute.ts` | the `/mcp` door: a conformant Streamable HTTP endpoint whose adapter is **in-process** with the surface it serves, gated on the same Origin decision as the websocket upgrade plus the JSON content type an HTTP method needs |
-| `src/webPorts.ts` | **the composition.** The service's ports bound to their implementations: launch, retry, cancel, the checkout probe, the pipeline reader, the venues, the forge — and, since PR 1.5, no cache: that row publishes itself. The ONE file that may name the engine's launcher and retry policy, because a second one would be a second scheduler |
-| `src/pipelinePort.ts`, `src/venuePort.ts`, `src/protectPort.ts` | the adapters behind those three ports, each next door to what it binds because each moves when a different piece of the engine does |
-| `src/venueInventory.ts`, `src/leaseVenues.ts` | the inventory `odu hosts` reads and the hold/release `odu lease` and `odu release` ask for — engine-side now, because the callers are clients of this daemon and the machines are its to reach |
-| `src/webLauncher.ts` | **how a client converges on the singleton**, and how a person replaces one. Adopt a live holder, spawn a daemon and verify it answers, or refuse — three outcomes, one of which must never be "quietly do the work locally" |
-| `src/webDaemonLaunch.ts` | the launch *facts*: where the home is, which application this is, whether the package is complete at all, the environment a daemon runs with, and how to start one that outlives its caller |
+| `src/mcpRoute.ts` | the `/mcp` door: a conformant Streamable HTTP endpoint over the COMPOSED bundle — the runs as the unprefixed core, every sibling under its key — whose adapter is in-process with the surface it serves, gated on the same Origin decision as the websocket upgrade plus the JSON content type an HTTP method needs |
+
+That is the whole package. Everything else that used to live here was a row's
+volatility rather than the tenure's:
+
+| moved | to | why |
+| --- | --- | --- |
+| `webPorts.ts`, `protect*`, `pipelinePort`, `venue*`, `leaseVenues` | `@odu/cli/ci` | the port bindings change when the ENGINE changes, not when the tenure does |
+| the runs' row (`createCiBundle`) | `@odu/cli/ci` | a row's wiring belongs to its row |
+| the cache's row | `@odu/cache/server` (`cacheRow`) | likewise — and it mounts itself |
+| `webLauncher.ts`, `webDaemonLaunch.ts`, `processIdentity.ts` | `@odu/launch` | how a CLIENT converges on the singleton, which a row needs and the registry cannot supply |
+| the service tags, the row record, `composedWire` | `@odu/cordis` | the vocabulary both sides speak |
+
+## How a row joins
+
+The runs are the wire's ROOT: their tags are the bare `surface/runs/get` every
+face was published against, and a root is a constructor argument rather than a
+sibling. The host builds it (`createCiBundle`) and provides it as `Bundle`.
+
+Every other row is a `definePlugin` mounted by the host, and it declares what it
+needs: the facts above, `Bundle` to mount itself on, `Routes` for its own HTTP
+layer. It mounts in its own `apply` and drops the mount in its finalizer — no
+table, no callback after the plugins settle, no live state across a package
+boundary outside a declared service.
 
 ## What it never does
 
-- **No run logic.** The host starts, retries and cancels runs *through ports*;
-  what a retry MEANS is `@odu/execution`'s, and a second opinion here would be a
-  second scheduler. The one place the engine's launcher is named is
-  `webPorts.ts`, and the closure test holds it to one place.
-- **No cache logic.** The cache is a row: its protocol routes, its surface, its
-  own administration. The host mounts them and knows nothing about narinfos.
+- **No run logic.** The host composes ports; what a run MEANS is
+  `@odu/execution`'s.
+- **No cache logic.** The cache is a row: its surface, its protocol routes, its
+  database. The host mounts them and knows nothing about narinfos.
 - **No rendering.** The board is `@odu/web-ui`, the terminal and argv faces are
   `@odu/cli`, and both are clients of this process.
 - **No environment of its own beyond the boot.** `ODU_WEB_ORIGIN`,
@@ -69,6 +83,6 @@ address.
 
 ## Docs
 
+- The vocabulary it shares with the rows: `@odu/cordis` (`src/services.ts`)
 - The contract it serves: [`packages/service-client/README.md`](../service-client/README.md)
-- The authority behind it: [`packages/service/README.md`](../service/README.md)
 - The browser on top of it: [`packages/web-ui/README.md`](../web-ui/README.md)
