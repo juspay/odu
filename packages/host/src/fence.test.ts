@@ -109,12 +109,12 @@ const declaration = {
   },
 } as const;
 
-/** `prove` copies the tree once per claim and runs the fence over each copy, so
- *  this is the slowest test in the tree by an order of magnitude — ~20s alone,
- *  and over a minute when the rest of the suite is competing for the machine.
+/** The door READS AND PARSES the tree, and `prove` copies it once per claim, so
+ *  these are the slowest tests in the tree by an order of magnitude — seconds
+ *  alone, and over a minute when the rest of the suite competes for the machine.
  *  The bound is generous because it exists to turn a HANG into a failure, not to
  *  police a runner's speed. */
-const PROVE_TIMEOUT_MS = 240_000;
+const FENCE_TIMEOUT_MS = 240_000;
 
 describe("the fence over this repo", () => {
   it("is green, every claim", () => {
@@ -123,7 +123,7 @@ describe("the fence over this repo", () => {
       report.findings,
       report.findings.map((one) => `${one.claim}: ${one.said}`).join("\n"),
     ).toEqual([]);
-  });
+  }, FENCE_TIMEOUT_MS);
 
   it("has no registry, and needs none", () => {
     // The roster is in `packages/host/src/web.ts`, which is a ROOT file. The
@@ -156,7 +156,7 @@ describe("the fence over this repo", () => {
             )
             .join("; "),
     ).toBe(true);
-  }, PROVE_TIMEOUT_MS);
+  }, FENCE_TIMEOUT_MS);
 });
 
 /**
