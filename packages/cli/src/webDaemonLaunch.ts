@@ -40,7 +40,7 @@ import { serviceOrigin } from "@odu/service-client/endpoint";
 // (`./socket`). This module keeps `webHome` — the home a daemon is CREATED in,
 // which mkdirs — while a client that only wants to ask where the daemon is
 // uses the package's pure `serviceSocketPath`.
-import { webAppNamespace } from "@odu/service-client/socket";
+import { webAppNamespace, webHomeOptions } from "@odu/service-client/socket";
 import type { ServiceBuild } from "@odu/service-client/surface";
 import { Effect } from "effect";
 
@@ -53,8 +53,13 @@ const DIST_ENV = "ODU_WEB_DIST";
  *  disagree about where the gate and the control socket are. */
 export function webHome(
   origin: string = serviceOrigin(),
+  env: Record<string, string | undefined> = process.env,
 ): ReturnType<typeof daemonHome> {
-  return daemonHome({ app: webAppNamespace(origin), placement: "state" });
+  // The SAME function the client dials through (`serviceSocketPath`), so the
+  // daemon cannot bind a socket under a home its clients do not ask about —
+  // and so `$ODU_STATE_DIR`, which already holds the catalog and the cache,
+  // holds the gate and the socket too.
+  return daemonHome(webHomeOptions(origin, env));
 }
 
 /**

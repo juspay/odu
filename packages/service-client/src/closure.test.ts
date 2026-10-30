@@ -220,6 +220,28 @@ describe("@odu/service-client's import closure", () => {
     ).toEqual([]);
   });
 
+  it("reaches run-history's portable half, plus the state root from the node-only module", () => {
+    // The manifest says "the PORTABLE half alone — `./schema` and `./ids`".
+    // `./paths` is `node:path`/`node:os`, so it is allowed from exactly one
+    // module: the declared node-only one, where the daemon's home and the
+    // client's dial have to agree about `$ODU_STATE_DIR`.
+    const portable = new Set(["@odu/run-history/schema", "@odu/run-history/ids"]);
+    const offenders: string[] = [];
+    for (const { rel, specifiers } of sources) {
+      for (const spec of specifiers) {
+        if (packageOf(spec) !== "@odu/run-history") continue;
+        if (portable.has(spec)) continue;
+        if (spec === "@odu/run-history/paths" && NODE_ONLY.has(rel)) continue;
+        offenders.push(`${rel}: ${spec}`);
+      }
+    }
+    expect(
+      offenders,
+      `${offenders.join(", ")} reaches a platform subpath of @odu/run-history. ` +
+        "Only ./schema and ./ids are portable; ./paths is for src/socket.ts alone.",
+    ).toEqual([]);
+  });
+
   it("does not import the service or the engine", () => {
     const forbidden = new Set(["@odu/service", "@odu/execution", "@odu/cli"]);
     const offenders: string[] = [];

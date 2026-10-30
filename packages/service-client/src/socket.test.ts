@@ -74,7 +74,10 @@ describe("webAppNamespace", () => {
 
 describe("serviceSocketPath", () => {
   it("names the socket inside the daemon's own home", () => {
-    const path = serviceSocketPath(DEFAULT_SERVICE_ORIGIN);
+    // `{}`, not the ambient environment: what this pins is the DEFAULT placement
+    // (kolu's `~/.local/state/<app>`), and a machine or a test runner with
+    // `$ODU_STATE_DIR` set would otherwise be pinning something else.
+    const path = serviceSocketPath(DEFAULT_SERVICE_ORIGIN, {});
     expect(path.endsWith(`${SERVICE_APP}.sock`)).toBe(true);
     // …and that home is named by the namespace rule, which is the whole reason
     // the daemon and a local client can derive the same path.
@@ -83,12 +86,49 @@ describe("serviceSocketPath", () => {
     );
   });
 
+  it("follows $ODU_STATE_DIR, which already holds the catalog and the cache", () => {
+    // A container has no writable $HOME for two files, and odu already has the
+    // explicit knob: one state directory for the catalog, the cache, the gate
+    // and the socket. kolu's home algebra takes this as a `socketOverride`,
+    // which puts the socket where it is told and the gate beside it.
+    const env = { ODU_STATE_DIR: "/data/odu" };
+    const path = serviceSocketPath(DEFAULT_SERVICE_ORIGIN, env);
+    expect(path).toBe(join("/data/odu", SERVICE_APP, `${SERVICE_APP}.sock`));
+    // A non-default origin keeps its own namespace under the same directory,
+    // and a socket FILE name to match — one directory, two services, no path
+    // shared between them.
+    const other = serviceSocketPath(UNUSED_ORIGIN, env);
+    const namespace = webAppNamespace(UNUSED_ORIGIN);
+    expect(other).toBe(join("/data/odu", namespace, `${namespace}.sock`));
+    expect(other).not.toBe(path);
+  });
+
+  it("ignores $XDG_STATE_HOME, which is kolu's rule and not ours to break", () => {
+    // `$XDG_STATE_HOME` moves with the launch context; a home that moves is a
+    // daemon whose clients dial a path nobody bound. `$ODU_STATE_DIR` is the
+    // deliberate spelling of "move it", and it is the only one honoured.
+    const withXdg = serviceSocketPath(DEFAULT_SERVICE_ORIGIN, {
+      XDG_STATE_HOME: "/tmp/xdg-state",
+      HOME: "/home/someone",
+    });
+    expect(withXdg).toBe(serviceSocketPath(DEFAULT_SERVICE_ORIGIN, { HOME: "/home/someone" }));
+    expect(withXdg.startsWith("/tmp/xdg-state")).toBe(false);
+  });
+
+  it("treats an empty $ODU_STATE_DIR as unset", () => {
+    // A blank variable is the same absence as no variable at all; reading it as
+    // a directory would put the socket at `/odu-web/…` relative to the cwd.
+    expect(serviceSocketPath(DEFAULT_SERVICE_ORIGIN, { ODU_STATE_DIR: "  " })).toBe(
+      serviceSocketPath(DEFAULT_SERVICE_ORIGIN, {}),
+    );
+  });
+
   it("creates nothing — asking where a daemon is must not make its home", () => {
     // The purity claim: `daemonHome` (what the LAUNCHER uses) makes and verifies
     // the directory; a client that only wants to dial must not. A client that
     // created the home would be the second thing in the tree that decides a
     // daemon exists.
-    const path = serviceSocketPath(UNUSED_ORIGIN);
+    const path = serviceSocketPath(UNUSED_ORIGIN, {});
     expect(existsSync(dirname(path))).toBe(false);
   });
 });

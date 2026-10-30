@@ -25,6 +25,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { join } from "node:path";
 import type { SurfaceDispatch } from "@kolu/surface/link";
 import { unixSocketLink } from "@kolu/surface/links/unix-socket";
 import type { WireLink } from "@kolu/surface/links/wire";
@@ -35,6 +36,7 @@ import { resolveDaemonHome } from "@kolu/surface-daemon";
 // same socket class needs it for the same reason.
 import "@odu/run-client/asyncConnectError";
 import { isNobodyServing } from "@odu/run-client/dial";
+import { stateRoot } from "@odu/run-history/paths";
 import { Effect } from "effect";
 import { readServiceCell } from "./dial";
 import { DEFAULT_SERVICE_ORIGIN, SERVICE_APP, serviceOrigin } from "./endpoint";
@@ -75,6 +77,38 @@ export function webAppNamespace(origin: string): string {
 }
 
 /**
+ * WHERE THE DAEMON'S HOME IS — the one answer, for the daemon and for every
+ * client that has to dial it.
+ *
+ * kolu derives a home from `$HOME` (`~/.local/state/<app>`) and nothing else,
+ * because `$XDG_STATE_HOME` varies by launch context while `$HOME` does not. A
+ * container has neither: a busybox rootfs with a read-only store and an empty
+ * `$HOME` can write nowhere the daemon needs. odu already has the explicit,
+ * stable knob for this — `$ODU_STATE_DIR`, which the run catalog and the cache
+ * both honour — so a home under it is what makes the whole process's state one
+ * directory, and kolu's `socketOverride` is the seam for it: it puts the socket
+ * where it is told and the gate BESIDE it, skipping placement entirely.
+ *
+ * `$XDG_STATE_HOME` is deliberately NOT honoured here. kolu's reasoning stands
+ * (a home that moves with the launch context splits one daemon's identity), and
+ * `$ODU_STATE_DIR` is the deliberate spelling of the same intent.
+ */
+export function webHomeOptions(
+  origin: string,
+  env: Record<string, string | undefined> = process.env,
+): { app: string; placement: "state"; socketOverride?: string } {
+  const app = webAppNamespace(origin);
+  const explicit = env.ODU_STATE_DIR?.trim();
+  if (explicit === undefined || explicit === "") {
+    return { app, placement: "state" };
+  }
+  // `${app}.sock`, not a fixed name: two origins sharing one state directory
+  // already get two namespaces, and a fixed socket name would put them back on
+  // one path — the collision `webAppNamespace` exists to prevent.
+  return { app, placement: "state", socketOverride: join(stateRoot(env), app, `${app}.sock`) };
+}
+
+/**
  * The socket the service serves on for `origin` — PURE path algebra, and the
  * purity is the point: a client asking where a daemon would be must not bring
  * one into being, so this goes through `resolveDaemonHome` (which creates
@@ -83,11 +117,11 @@ export function webAppNamespace(origin: string): string {
  *
  * A path it returns is a live service only if {@link dialServiceSocket} says so.
  */
-export function serviceSocketPath(origin: string = serviceOrigin()): string {
-  return resolveDaemonHome({
-    app: webAppNamespace(origin),
-    placement: "state",
-  }).socketPath;
+export function serviceSocketPath(
+  origin: string = serviceOrigin(),
+  env: Record<string, string | undefined> = process.env,
+): string {
+  return resolveDaemonHome(webHomeOptions(origin, env)).socketPath;
 }
 
 /** A service dialled over its socket: the same face and the same teardown

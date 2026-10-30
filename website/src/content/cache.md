@@ -139,6 +139,7 @@ The cache keeps no second copy of your builds. The server's own `/nix/store` hol
 - The database, signing keys, token hashes, narinfo metadata and pins live in one SQLite file:
 
 ```text
+<state>/odu-web*/             the daemon's gate and control socket
 <state>/cache/cache.sqlite    metadata, bucket signing keys, token hashes, pins
 <state>/cache/gcroots/        one root per retained path, per bucket
 <state>/cache/staging/        uploads between their NAR and their narinfo
