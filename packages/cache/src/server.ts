@@ -24,21 +24,43 @@
  * because every upsert wakes every subscriber and a cache being read from moves
  * a counter once a second.
  *
- * ## `attach`, and why the server does not mount itself
+ * ## `row` — the plugin, and where the mounting happens
  *
- * A sibling's publishing handle comes from the composed bundle's own `mount`, and
- * the HOST is what composes. So the row hands the server the handle once it is
- * mounted (`attach`) and the server publishes through it from then on. Before
- * `attach` there is nothing to publish to, and nothing has happened yet either:
- * the rows are read from the database, not held in memory.
+ * A row is a `definePlugin`: it names what it needs, builds its share of the
+ * daemon while that scope is open, and has everything it registered unwound when
+ * the scope closes. This module ships {@link cacheRow}, which MOUNTS ITSELF on
+ * the composed bundle — the framework's transactional `mount`, called inside the
+ * row's own `apply` — and drops that mount in its finalizer. Nothing outside
+ * this package mounts it, spreads a table, or holds a callback called after the
+ * plugins settle.
+ *
+ * The facts arrive as Cordis services (`@odu/cordis/services`): the state root,
+ * the root token, the store URI, the bound and public origins, the logger, the
+ * bundle to mount on, and the router mount for the protocol routes.
  */
 
 import { Effect } from "effect";
+import { definePlugin } from "@olai/effect-cordis";
 import type { ImplementSurfaceDeps } from "@kolu/surface/server";
-import type { BucketFacts, Cache, CacheOutcome } from "./cache";
+import {
+  BoundOrigin,
+  Bundle,
+  type RowAgent,
+  Log,
+  NixStore,
+  PublicOrigin,
+  RootToken,
+  Routes,
+  StateDir,
+} from "@odu/cordis/services";
+import { createCache, type BucketFacts, type Cache, type CacheOutcome } from "./cache";
+import { CACHE_MOUNT } from "./paths";
+import { cacheRoutes } from "./routes";
 import {
   type CacheBucket,
   CacheRefused,
+  ODU_CACHE_EXPOSE,
+  ODU_CACHE_MCP_INSTRUCTIONS,
   oduCacheSurface,
 } from "./surface";
 
@@ -67,7 +89,8 @@ export interface CacheServerOptions {
 export interface CacheServer {
   readonly surface: typeof oduCacheSurface;
   readonly deps: CacheSurfaceDeps;
-  /** Hand over the publishing half once the sibling is mounted. */
+  /** Hand over the publishing half once the sibling is mounted. Called by the
+   *  row, with the `ctx` its own `mount` returned. */
   readonly attach: (publisher: CachePublisher) => void;
   /** Republish every changed row now. Called by `attach` and by `onChange`. */
   readonly publish: () => void;
@@ -272,3 +295,83 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
     detach,
   };
 }
+
+// ── the row ─────────────────────────────────────────────────────────────────
+
+/** The word this row is served under — the sibling segment on the wire, the
+ *  subcommand in argv, and the word a browser folds its health under. ONE
+ *  spelling: the host's roster reads `key` off {@link cacheRow}, and the plugin
+ *  below mounts at the same constant. */
+export const CACHE_KEY = "cache";
+
+/**
+ * WHAT AN AGENT IS TOLD about the cache: its surface, its exposure policy and
+ * the paragraph taught at `initialize`. Beside the row, because it is the row's
+ * vocabulary.
+ */
+export const CACHE_AGENT: RowAgent = {
+  surface: oduCacheSurface,
+  expose: ODU_CACHE_EXPOSE,
+  instructions: ODU_CACHE_MCP_INSTRUCTIONS,
+};
+
+/**
+ * THE ROW AS A PLUGIN — mounted by the host with the rest of the roster, and
+ * mounting ITSELF on the composed bundle.
+ *
+ * The order inside `apply` is the order it has to be: the cache exists before
+ * the surface that serves it, the mount happens before anything can address it,
+ * and every one of those is undone in reverse when the scope closes.
+ */
+export const cacheRow = definePlugin({
+  name: CACHE_KEY,
+  needs: [Bundle, Routes, StateDir, RootToken, NixStore, BoundOrigin, PublicOrigin, Log],
+  apply: Effect.gen(function* () {
+    const bundle = yield* Bundle;
+    const routes = yield* Routes;
+    const stateDir = yield* StateDir;
+    const rootToken = yield* RootToken;
+    const store = yield* NixStore;
+    const boundOrigin = yield* BoundOrigin;
+    const publicOrigin = yield* PublicOrigin;
+    const log = yield* Log;
+
+    const cache = createCache({ stateRoot: stateDir, rootToken, store });
+    const server = cacheServer({
+      cache,
+      // The address a client must be told: the proxy's when one stands in
+      // front, the bound one otherwise. A loopback URL in a `nix.conf` is a
+      // substituter that works for nobody.
+      publicOrigin: publicOrigin ?? boundOrigin,
+      mount: CACHE_MOUNT,
+    });
+
+    // THE MOUNT, in the activation. The framework walks the arriving surface,
+    // proves the whole route set disjoint across root and siblings, and hands
+    // back the `ctx` this row publishes through.
+    const mounted = bundle.mount(CACHE_KEY, server.surface, server.deps);
+    server.attach({
+      upsert: (key, row) => mounted.ctx.collections.buckets.upsert(key, row),
+      remove: (key) => mounted.ctx.collections.buckets.remove(key),
+    });
+
+    // The Nix protocol, registered where the row activates rather than
+    // collected by a host that has to know what a row is.
+    routes.add(cacheRoutes(cache));
+
+    yield* Effect.addFinalizer(() =>
+      Effect.sync(() => {
+        server.detach();
+        cache.close();
+      }),
+    );
+    // The MOUNT is dropped after the cache's own close has run, so nothing
+    // publishes into a database that has already gone.
+    yield* Effect.addFinalizer(() => Effect.promise(() => mounted.drop()));
+
+    log.info(
+      { mount: CACHE_MOUNT, buckets: cache.snapshot().length },
+      "odu web: the cache row is serving",
+    );
+  }),
+});

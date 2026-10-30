@@ -47,13 +47,19 @@ const DECLARED = Object.keys(MANIFEST.dependencies ?? {});
  *  cost, and the reason the face is a separate DOOR rather than a module the
  *  server could reach. `@kolu/surface` is HYDRATED from a Nix pin and so is
  *  absent here by design. */
-const EXPECTED_DEPENDENCIES = ["effect", "solid-js"];
+const EXPECTED_DEPENDENCIES = ["@odu/cordis", "effect", "solid-js"];
 
 /** The `@kolu/*` sources hydrated from a Nix pin rather than installed. Four
  *  doors of this package open the framework: the surface (`/define`,
  *  `/expose`), the server (`/server`), and the CLI face's client
  *  (`/client`, `/project`, `/link`). */
-const HYDRATED = new Set<string>(["@kolu/surface"]);
+const HYDRATED = new Set<string>([
+  "@kolu/surface",
+  // The row IS a `definePlugin`: `./server` is mounted by the host as one of
+  // its rows, so the plugin runtime's root door is part of this package's
+  // closure. (`./loader` — a file off a disk, a YAML parser — is not.)
+  "@olai/effect-cordis",
+]);
 
 /** The non-`node:` builtins this package may reach. Named, never prefix-matched:
  *  a prefix would let `bun:ffi` in with `bun:sqlite`. */

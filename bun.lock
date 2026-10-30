@@ -10,6 +10,7 @@
         "@modelcontextprotocol/sdk": "^1.29.0",
         "@odu/cache": "workspace:*",
         "@odu/cli": "workspace:*",
+        "@odu/cordis": "workspace:*",
         "@odu/execution": "workspace:*",
         "@odu/host": "workspace:*",
         "@odu/launch": "workspace:*",
@@ -49,6 +50,7 @@
       "name": "@odu/cache",
       "version": "0.1.0",
       "dependencies": {
+        "@odu/cordis": "workspace:*",
         "effect": "4.0.0",
         "solid-js": "^1.9.15",
       },
@@ -60,6 +62,7 @@
         "@effect/platform-node": "4.0.0",
         "@modelcontextprotocol/sdk": "^1.29.0",
         "@odu/cache": "workspace:*",
+        "@odu/cordis": "workspace:*",
         "@odu/execution": "workspace:*",
         "@odu/host": "workspace:*",
         "@odu/launch": "workspace:*",
@@ -69,6 +72,13 @@
         "@odu/service-client": "workspace:*",
         "@opentui/core": "^0.4.5",
         "@xterm/headless": "^6.0.0",
+        "effect": "4.0.0",
+      },
+    },
+    "packages/cordis": {
+      "name": "@odu/cordis",
+      "version": "0.1.0",
+      "dependencies": {
         "effect": "4.0.0",
       },
     },
@@ -87,6 +97,8 @@
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.29.0",
         "@odu/cache": "workspace:*",
+        "@odu/cli": "workspace:*",
+        "@odu/cordis": "workspace:*",
         "@odu/execution": "workspace:*",
         "@odu/launch": "workspace:*",
         "@odu/run-client": "workspace:*",
@@ -271,6 +283,8 @@
     "@odu/cache": ["@odu/cache@workspace:packages/cache"],
 
     "@odu/cli": ["@odu/cli@workspace:packages/cli"],
+
+    "@odu/cordis": ["@odu/cordis@workspace:packages/cordis"],
 
     "@odu/execution": ["@odu/execution@workspace:packages/execution"],
 

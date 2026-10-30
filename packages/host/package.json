@@ -4,10 +4,8 @@
   "private": true,
   "license": "AGPL-3.0-or-later",
   "type": "module",
-  "//cordis": "THE ROW this package belongs to, read by the fence. Two kinds exist — a ROW, which is a capability the daemon serves, and the REGISTRY, which names every row and is exactly one package. `@odu/host` is the registry, so it belongs to a row too: what stays outside rows is nothing, and that is the fence's rule rather than a choice. The cache is the row that can be lifted out whole; `ci` is everything the runs are.",
-  "cordis": { "row": "ci" },
-  "//": "THE HOST — see README.md. The daemon's tenure, its transport, how a client converges on the singleton, and the composition root that binds the service's ports to the engine. It is not a ROW: rows carry surfaces and name only each other; this package serves them and names them.",
-  "//dependencies": "Every @odu/* entry here is a row member or a row's contract — `@odu/service` implements the ci surface, `@odu/service-client` IS that surface, `@odu/execution`, `@odu/run-history` and `@odu/run-client` are the engine the ports bind, and `@odu/cache` is the other row (its protocol routes are merged beside the shell and, after PR 1.5, its surface is composed beside the ci one). `@odu/cli` is deliberately ABSENT: a row never names the host, and the host never names a row's faces — `src/closure.test.ts` holds both halves.",
+  "//": "THE HOST — see README.md. The daemon's tenure, the listener's parts, the `/mcp` door, and the roster: the one file that NAMES every row. It carries no row of its own, which is what `packages/host/src/fence.test.ts` holds — the fence's registry is a package in no row, and this is it.",
+  "//dependencies": "Every @odu/* entry is a ROW the roster names (`@odu/cli` for the runs' bundle and its port bindings, `@odu/cache` for the other row) or the vocabulary both sides speak (`@odu/cordis`). `@odu/launch` is the bootstrap it shares with its clients. Nothing here is a renderer, a catalog writer or a coordinator: the host composes, it does not run.",
   "sideEffects": false,
   "exports": {
     "./*": "./src/*.ts"
@@ -15,6 +13,8 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@odu/cache": "workspace:*",
+    "@odu/cli": "workspace:*",
+    "@odu/cordis": "workspace:*",
     "@odu/execution": "workspace:*",
     "@odu/launch": "workspace:*",
     "@odu/run-client": "workspace:*",

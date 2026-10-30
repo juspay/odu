@@ -92,22 +92,30 @@ import {
 import { readProcessIdentity, selfProcessIdentity } from "@odu/launch/processIdentity";
 import { mcpGetRoute, mcpRoute, RouteTransport, serveServiceMcpInProcess } from "./mcpRoute";
 import { servingOptions } from "./serving";
-import { configured } from "./webPorts";
-import { composeRows, ROWS, type Composed } from "./roster";
+import { createCiBundle, type CiBundle } from "@odu/cli/ci/bundle";
+// The runs' runtime, named for the one variable that holds it: the host OWNS
+// the bundle's lifetime (it builds it and closes it), so it names the type.
+import type { OduService } from "@odu/service/service";
+import { CACHE_AGENT, CACHE_KEY, cacheRow } from "@odu/cache/server";
+import { CI_AGENT } from "@odu/cli/ci/bundle";
+import type { RootedSurfacesRuntime } from "@kolu/surface/server";
+import type { Plugin } from "@olai/effect-cordis";
 import {
-  AllowedOrigins,
   BoundOrigin,
   Build,
-  createRowTable,
+  Bundle,
+  createRoutes,
   DaemonHome,
   Log,
+  type Row,
+  type RowAgent,
   NixStore,
   PublicOrigin,
   RootToken,
-  Rows,
+  Routes,
   Shutdown,
   StateDir,
-} from "./services";
+} from "@odu/cordis/services";
 import {
   assertPackaged,
   bakedBuild,
@@ -204,6 +212,13 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
   // here rather than in `@odu/service` because this is the one place that reads
   // an environment, and refused HERE rather than concatenated there: a value
   // with a path would build a substituter URL nobody asked for.
+  /** An environment variable's value, or `null` when it is unset or blank. A
+   *  blank `$ODU_ROOT_TOKEN=` is the same absence as no variable at all, and
+   *  reading it as a real token would make an empty string a credential. */
+  const configured = (value: string | undefined): string | null => {
+    const trimmed = value?.trim();
+    return trimmed === undefined || trimmed === "" ? null : trimmed;
+  };
   const published = readPublicOrigin(process.env);
   if (!published.ok) {
     process.stderr.write(`odu: ${published.message}\n`);
@@ -241,16 +256,36 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     stopHandlers.push(() => process.off(signal, onSignal));
   }
 
+  // ── THE ROSTER ──────────────────────────────────────────────────────────
+  //
+  // EVERY ROW, NAMED ONCE, HERE — and this file is a root, which is what makes
+  // that legal: a root names every row, a row names only itself, and the host
+  // is the one package that composes them. A row record carries the word its
+  // surface is served under and what an agent is told about it; the runs' row
+  // has no plugin because the runs are the wire's ROOT and a root is a
+  // constructor argument, not a sibling.
+  const ROWS: ReadonlyArray<Row> = [
+    { name: "ci", key: null, plugin: null, agent: CI_AGENT },
+    {
+      name: CACHE_KEY,
+      key: CACHE_KEY,
+      plugin: cacheRow,
+      agent: CACHE_AGENT,
+    },
+  ];
+  const coreAgent = (): RowAgent => ROWS[0]!.agent;
+
   // ── THE HOST ────────────────────────────────────────────────────────────
   //
   // One Cordis context for the tenure, and the rows mounted on it. The host
   // PROVIDES the facts — the state root, the bound and public origins, the
-  // build, the logger, the Origin allowlist, the store URI, the way to end —
-  // and each row is a plugin that names what it needs. Nothing below this line
-  // reads an environment.
+  // build, the logger, the store URI, the way to end, the composed bundle and
+  // the router mount — and each SIBLING row is a plugin that names what it
+  // needs. Nothing below this line reads an environment.
   const run = standing();
   const host = await run(openHost);
-  const rows = createRowTable();
+  const build = bakedBuild();
+  const routes = createRoutes();
   /** The `/mcp` adapter, once the rows are composed; `null` before that, and on
    *  every path that never reached a listener. */
   let mcp: Awaited<ReturnType<typeof serveServiceMcpInProcess>> | null = null;
@@ -263,25 +298,52 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
 
   const scope = Scope.makeUnsafe();
   try {
-    await run(provide(host, Rows, () => rows));
     await run(provide(host, StateDir, () => stateRoot(process.env)));
     await run(provide(host, RootToken, () => configured(process.env.ODU_ROOT_TOKEN)));
     await run(provide(host, NixStore, () => configured(process.env.ODU_CACHE_STORE)));
     await run(provide(host, DaemonHome, () => home.dir));
     await run(provide(host, BoundOrigin, () => origin));
     await run(provide(host, PublicOrigin, () => published.origin));
-    await run(provide(host, AllowedOrigins, () => allowedOrigins));
-    const build = bakedBuild();
     await run(provide(host, Build, () => build));
     await run(provide(host, Log, () => log));
     await run(provide(host, Shutdown, () => () => controller.abort()));
+    await run(provide(host, Routes, () => routes));
 
-    for (const row of ROWS) await run(mountPlugin(host, row.plugin));
+    // THE RUNS ARE THE ROOT, and a root is a constructor argument rather than a
+    // sibling: `implementRootedSurfaces` takes it, and every other row mounts
+    // BESIDE it. So this row is built here and the bundle it built is provided
+    // as the service the sibling rows mount on.
+    let ci: CiBundle | null = null;
+    try {
+      ci = createCiBundle({
+        origin,
+        home: home.dir,
+        build,
+        log,
+        shutdown: () => controller.abort(),
+      });
+    } catch (err) {
+      process.stderr.write(`odu: the ci row did not start — ${(err as Error).message}\n`);
+      return 1;
+    }
+    const service: OduService = ci.service;
+    const runtime = service.runtime;
+    await run(provide(host, Bundle, () => runtime as unknown as RootedSurfacesRuntime<never>));
+
+    // A runtime that has faulted answers nothing while the process stays alive
+    // and the socket stays open — the documented zombie. Observed and fatal.
+    service.done.catch((err: unknown) => {
+      log.error({ err: String(err) }, "odu web: surface runtime faulted");
+      process.exit(1);
+    });
+
+    const siblings = ROWS.filter((row) => row.plugin !== null);
+    for (const row of siblings) await run(mountPlugin(host, row.plugin as Plugin));
     // SETTLED, not merely mounted: a row provides services its siblings may
     // name, and mounting returns as soon as a fibre exists rather than once its
     // `apply` has finished.
-    await run(settled(host, ROWS.map((row) => row.name)));
-    const report = await run(rowReport(host, ROWS.map((row) => row.name)));
+    await run(settled(host, siblings.map((row) => row.name)));
+    const report = await run(rowReport(host, siblings.map((row) => row.name)));
     const broken = [...report].filter(([, row]) => row.state !== "running");
     if (broken.length > 0) {
       process.stderr.write(
@@ -303,18 +365,6 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
       return 1;
     }
 
-    // THE ONE FLAT GROUP, composed from the rows' own surfaces and served as
-    // one generation — read as a PAIR in one synchronous turn, because a
-    // runtime whose served set moves hands back two readings that must agree.
-    let composed: Composed;
-    try {
-      composed = composeRows(rows.read());
-    } catch (err) {
-      process.stderr.write(`odu: ${(err as Error).message}\n`);
-      return 1;
-    }
-    const runtime = composed.runtime;
-
     // THE `/mcp` DOOR — the composed bundle's, so it is the TRANSPORT's and is
     // built here rather than by any one row: an adapter that served one row
     // would have to be told what the others are. The adapter and its transport
@@ -326,21 +376,13 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
       handlers: runtime.handlers,
       version: build.oduVersion,
       transport,
-      core: composed.core,
-      siblings: composed.siblings,
+      core: coreAgent(),
+      siblings: Object.fromEntries(
+        ROWS.filter((row) => row.key !== null).map((row) => [row.key as string, row.agent]),
+      ),
     });
     const agentRoutes = Layer.merge(mcpRoute(transport, allowedOrigins), mcpGetRoute());
-    const routes =
-      composed.routes === null ? agentRoutes : Layer.merge(composed.routes, agentRoutes);
-
-    // A runtime that has faulted answers nothing while the process stays alive
-    // and the socket stays open — the documented zombie. Observed and fatal.
-    for (const [, contribution] of rows.read()) {
-      contribution.done?.catch((err: unknown) => {
-        log.error({ err: String(err) }, "odu web: surface runtime faulted");
-        process.exit(1);
-      });
-    }
+    const composed = routes.layers().reduce((all, one) => Layer.merge(all, one), agentRoutes);
 
     let bound: string;
     try {
@@ -354,7 +396,7 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
             host: bindHost,
             port,
             allowedOrigins,
-            routes,
+            routes: composed,
           }),
         ).pipe(Scope.provide(scope)),
       );

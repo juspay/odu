@@ -16,6 +16,7 @@
   "dependencies": {
     "@odu/cache": "workspace:*",
     "@odu/cli": "workspace:*",
+    "@odu/cordis": "workspace:*",
     "@odu/execution": "workspace:*",
     "@odu/host": "workspace:*",
     "@odu/launch": "workspace:*",
