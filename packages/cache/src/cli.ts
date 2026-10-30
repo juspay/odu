@@ -31,13 +31,14 @@
 import { parseArgs } from "node:util";
 import { buildSurfaceFace } from "@kolu/surface/client";
 import type { SurfaceClientOf } from "@kolu/surface/project";
-import { composeSurfaceContracts } from "@kolu/surface/define";
+import { composedClients } from "@odu/cordis/compose";
 import type { SurfaceDispatch } from "@kolu/surface/link";
 import { Effect } from "effect";
 import { pushToCache, saveCredential } from "./push";
 import {
   type CacheScope,
   type CacheToken,
+  useBlock,
   CacheRefused,
   oduCacheSurface,
 } from "./surface";
@@ -52,8 +53,10 @@ function cacheClientOver(dispatch: SurfaceDispatch): CacheClient {
   // The SIBLING, not the surface: `composeSurfaceContracts` re-walks the spec
   // with the `surface/cache/` prefix, and the face is built over the same
   // dispatch the ci client is, so one connection answers both.
-  const sibling = composeSurfaceContracts({ cache: oduCacheSurface }).siblings.cache;
-  return buildSurfaceFace(sibling, dispatch) as unknown as CacheClient;
+  // ONE builder for every sibling client in the tree (`@odu/service-client`'s
+  // `./compose`), so this face addresses the tags the daemon mounts the row at
+  // without a second derivation of the prefix.
+  return composedClients({ cache: oduCacheSurface }, dispatch).cache as unknown as CacheClient;
 }
 
 /** What the root hands this face: the way in, and nothing else. */
@@ -341,21 +344,15 @@ async function useCommand(rest: string[], ports: CacheCliPorts): Promise<number>
     const answer = await call(client.surface.bucket.describe({ bucket: name }));
     if (!answer.ok) return reportFailure(answer, false, REFUSED);
     const bucket = answer.value;
-    const url = new URL(bucket.url);
-    // A PLACEHOLDER, never a live token: this output is pasted into a
-    // `flake.nix` and a `nix.conf`, which are read by people and committed.
+    // ONE spelling of the block, in `./surface`, because the bucket page prints
+    // it too — and the two had already drifted (`~/.netrc` here, `$HOME/.netrc`
+    // there, and a `flake.nix` block on only one).
     process.stdout.write(
-      `# nix.conf\n` +
-        `extra-substituters = ${bucket.url}\n` +
-        `extra-trusted-public-keys = ${bucket.publicKey}\n\n` +
-        `# flake.nix\n` +
-        `{\n  nixConfig = {\n` +
-        `    extra-substituters = [ "${bucket.url}" ];\n` +
-        `    extra-trusted-public-keys = [ "${bucket.publicKey}" ];\n` +
-        `  };\n}\n\n` +
-        `# netrc — Nix reads only the file named by netrc-file, never ~/.netrc\n` +
-        `netrc-file = ${process.env.HOME ?? "~"}/.netrc\n` +
-        `machine ${url.hostname} password <your-write-token>\n`,
+      useBlock({
+        url: bucket.url,
+        publicKey: bucket.publicKey,
+        home: process.env.HOME ?? "~",
+      }),
     );
     return 0;
   });

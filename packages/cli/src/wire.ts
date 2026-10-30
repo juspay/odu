@@ -23,12 +23,7 @@
  * allowed to address.
  */
 
-import {
-  composeSurfaceContracts,
-  mergeDisjointGroups,
-} from "@kolu/surface/define";
-import type { RpcGroup } from "effect/rpc";
-import type { Rpc } from "effect/rpc";
+import { composedWire } from "@odu/cordis/compose";
 import { oduServiceSurface } from "@odu/service-client/surface";
 import { oduCacheSurface } from "@odu/cache/surface";
 
@@ -38,7 +33,9 @@ import { oduCacheSurface } from "@odu/cache/surface";
  * is a boot-time error naming both, rather than a last-writer-wins map that
  * drops one in silence.
  */
-export const SERVICE_WIRE_GROUP: RpcGroup.RpcGroup<Rpc.Any> = mergeDisjointGroups({
-  core: oduServiceSurface.group,
-  cache: composeSurfaceContracts({ cache: oduCacheSurface }).siblings.cache.group,
+export const SERVICE_WIRE_GROUP = composedWire(oduServiceSurface, {
+  cache: oduCacheSurface,
 });
+
+/** The rows this face names, for the projections that take a `surfaces` map. */
+export const SERVICE_SIBLINGS = { cache: oduCacheSurface } as const;

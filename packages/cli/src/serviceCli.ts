@@ -52,9 +52,9 @@ import {
 import { ODU_VERSION } from "@odu/execution/common/version";
 import { serviceOrigin } from "@odu/service-client/endpoint";
 import { connectOrStart } from "@odu/launch/webLauncher";
-import { SERVICE_WIRE_GROUP } from "./wire";
 import { ODU_CACHE_EXPOSE, oduCacheSurface } from "@odu/cache/surface";
-import { composeSurfaceContracts } from "@kolu/surface/define";
+import { composedClients } from "@odu/cordis/compose";
+import { SERVICE_SIBLINGS, SERVICE_WIRE_GROUP } from "./wire";
 import { oduServiceSurface } from "@odu/service-client/surface";
 import { ODU_SERVICE_EXPOSE } from "@odu/service-client/verbs";
 import { Effect } from "effect";
@@ -99,12 +99,7 @@ const endpoint: EndpointSeam<typeof endpointFlags> = {
               oduServiceSurface,
               connection.dispatch,
             ) as unknown as SurfaceClientCallable,
-            clients: {
-              cache: buildSurfaceFace(
-                composeSurfaceContracts({ cache: oduCacheSurface }).siblings.cache,
-                connection.dispatch,
-              ) as unknown as SurfaceClientCallable,
-            },
+            clients: composedClients(SERVICE_SIBLINGS, connection.dispatch),
           },
           // Required, not optional: a CLI dials, does one thing and exits, and
           // the one failure that costs a user something is a socket left open
@@ -165,7 +160,9 @@ const projection = {
   // (`odu surface cache bucket_create`) rather than vanishing from this face.
   // The framework names a sibling's commands from the SAME key the wire mounts
   // it at, which is why this word and the MCP tools' prefix are one word.
-  surfaces: { cache: { surface: oduCacheSurface, expose: ODU_CACHE_EXPOSE } },
+  surfaces: {
+    cache: { surface: oduCacheSurface, expose: ODU_CACHE_EXPOSE },
+  },
   endpoint,
   help,
   info: { name: "odu" },

@@ -76,9 +76,9 @@ const declaration = {
   // acceptance suite's fixtures, a bucket's class names).
   collisions: {
     cache: {
-      "packages/cli/src/serviceCli.ts": 6,
-      "packages/cli/src/serviceMcp.ts": 6,
-      "packages/cli/src/wire.ts": 3,
+      "packages/cli/src/serviceCli.ts": 3,
+      "packages/cli/src/serviceMcp.ts": 3,
+      "packages/cli/src/wire.ts": 2,
       "packages/execution/src/coordinator/spawn.ts": 1,
       "packages/execution/src/runner/workspace.ts": 22,
       "packages/launch/src/webDaemonLaunch.ts": 1,
@@ -232,8 +232,15 @@ describe("the word the rows are mounted under", () => {
   it("is the sibling both projections mount", () => {
     for (const file of ["packages/cli/src/serviceCli.ts", "packages/cli/src/serviceMcp.ts"]) {
       const text = source(file);
-      expect(text, `${file} does not mount "${mounted}"`).toContain(`surfaces: { ${mounted}:`);
-      expect(text, `${file} builds no client for "${mounted}"`).toContain(`${mounted}:`);
+      // `surfaces: { cache: { surface: oduCacheSurface, expose: … } }` — the
+      // entry the projection takes, whichever way the object is laid out.
+      expect(text, `${file} does not mount "${mounted}"`).toMatch(
+        new RegExp(`surfaces:[\\s\\S]{0,120}\\b${mounted}:`) as never,
+      );
+      // ...and the argv face builds its client from the same map.
+      expect(text, `${file} builds no client for "${mounted}"`).toMatch(
+        new RegExp(`\\b${mounted}\\b`) as never,
+      );
     }
   });
 });

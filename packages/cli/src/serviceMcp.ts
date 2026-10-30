@@ -20,9 +20,9 @@ import {
 } from "@kolu/surface-mcp";
 import { ODU_CACHE_EXPOSE, oduCacheSurface } from "@odu/cache/surface";
 import { buildSurfaceFace } from "@kolu/surface/client";
-import { composeSurfaceContracts } from "@kolu/surface/define";
+import { composedClients } from "@odu/cordis/compose";
+import { SERVICE_SIBLINGS, SERVICE_WIRE_GROUP } from "./wire";
 import { connectOrStart } from "@odu/launch/webLauncher";
-import { SERVICE_WIRE_GROUP } from "./wire";
 import { serviceOrigin } from "@odu/service-client/endpoint";
 import { oduServiceSurface } from "@odu/service-client/surface";
 import {
@@ -75,12 +75,7 @@ export async function serveServiceMcpOverStdio(opts: {
       return {
         client: {
           core: connection.client as unknown as SurfaceClientCallable,
-          clients: {
-            cache: buildSurfaceFace(
-              composeSurfaceContracts({ cache: oduCacheSurface }).siblings.cache,
-              connection.dispatch,
-            ) as unknown as SurfaceClientCallable,
-          },
+          clients: composedClients(SERVICE_SIBLINGS, connection.dispatch),
         },
         dispose: () => connection.dispose(),
       };

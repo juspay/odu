@@ -37,6 +37,7 @@ import {
 } from "./narinfo";
 import { newChain, serial } from "./serial";
 import { CACHE_MOUNT } from "./paths";
+import { PATH_PAGE_SIZE } from "./surface";
 import { createStaging, type NarinfoOutcome, type Upload } from "./staging";
 import {
   globMatches,
@@ -252,11 +253,6 @@ export interface CacheOptions {
   now?: () => number;
 }
 
-/** How many paths one `paths` page carries. A hundred is what the board's list
- *  renders without a scroll, and what a person reading a bucket's contents wants
- *  before deciding to filter. */
-export const PATH_PAGE_SIZE = 100;
-
 /** The floor between two READ-driven publications. Reads are the only change
  *  that arrives thousands of times a minute, and a hit count that moved a second
  *  ago is as true for a reader as one that moved a millisecond ago. */
@@ -425,19 +421,35 @@ export function createCache(options: CacheOptions): Cache {
   // ONE listener: the row that publishes `buckets` to whatever is watching. The
   // cache knows when a push lands, when a bucket appears and when reads
   // accumulate — and nothing outside it does — so the notification is emitted
-  // here rather than polled for. Reads are throttled: a bucket being fetched
-  // from moves a counter thousands of times a minute, and a publish per read
-  // would be a broadcast storm dressed as freshness.
+  // here rather than polled for.
+  //
+  // READS ARE THROTTLED, and with a TRAILING edge. A bucket being fetched from
+  // moves a counter thousands of times a minute, so a publish per read is a
+  // broadcast storm dressed as freshness — but a leading edge alone drops the
+  // reads after the first of each window, and a burst that then stops leaves the
+  // board showing a number that never existed. So the first read of a window
+  // publishes, a read at the end of it ARMS a timer, and the timer fires once
+  // the burst has been quiet for a window. The timer is the cache's, and
+  // `close()` clears it: nothing outlives the activation.
   const listeners = new Set<() => void>();
   let lastReadNotify = Number.NEGATIVE_INFINITY;
+  let trailing: ReturnType<typeof setTimeout> | null = null;
   const notify = (): void => {
     for (const listener of listeners) listener();
   };
   const notifyReaders = (): void => {
     const at = now();
-    if (at - lastReadNotify < HITS_REFRESH_MS) return;
-    lastReadNotify = at;
-    notify();
+    if (at - lastReadNotify >= HITS_REFRESH_MS) {
+      lastReadNotify = at;
+      notify();
+      return;
+    }
+    if (trailing !== null) return;
+    trailing = setTimeout(() => {
+      trailing = null;
+      lastReadNotify = now();
+      notify();
+    }, HITS_REFRESH_MS);
   };
 
   const admin: CacheAdmin = {
@@ -758,7 +770,13 @@ export function createCache(options: CacheOptions): Cache {
 
     admin,
 
-    snapshot: () => repo.buckets().map((bucket) => factsOf(bucket)),
+    // ONE `bucketStats()` for the whole snapshot: the query is a GROUP BY over
+    // every object, and the default parameter would run it once per bucket — so
+    // a push into a cache with B buckets would cost B full scans per publish.
+    snapshot: () => {
+      const counted = repo.bucketStats();
+      return repo.buckets().map((bucket) => factsOf(bucket, counted));
+    },
 
     onChange(listener) {
       listeners.add(listener);
@@ -768,6 +786,10 @@ export function createCache(options: CacheOptions): Cache {
     },
 
     close() {
+      // The trailing-edge timer is the cache's, so the cache ends it. A timer
+      // that outlived `close()` would publish into a closed database.
+      if (trailing !== null) clearTimeout(trailing);
+      trailing = null;
       listeners.clear();
       repo.close();
     },

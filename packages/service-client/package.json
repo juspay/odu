@@ -17,6 +17,7 @@
     "./dial": "./src/dial.ts",
     "./socket": "./src/socket.ts",
     "./board": "./src/board.ts",
+    "./compose": "./src/compose.ts",
     "./routes": "./src/routes.ts"
   },
   "dependencies": {

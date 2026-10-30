@@ -32,8 +32,24 @@
 
 import type { SurfaceClient } from "@kolu/surface/solid";
 import type { Effect } from "effect";
-import { createEffect, createMemo, createSignal, For, on, Show, type JSX } from "solid-js";
-import type { CacheBucket, CachePath, oduCacheSurface } from "./surface";
+import {
+  createEffect,
+  createMemo,
+  createResource,
+  createSignal,
+  For,
+  on,
+  onCleanup,
+  Show,
+  type JSX,
+} from "solid-js";
+import {
+  type CacheBucket,
+  type CachePath,
+  oduCacheSurface,
+  PATH_PAGE_SIZE,
+  useBlock,
+} from "./surface";
 
 type CacheSpec = (typeof oduCacheSurface)["spec"];
 
@@ -89,20 +105,8 @@ function ago(at: number, now: number): string {
 }
 
 export function CacheFace(props: CacheFaceProps): JSX.Element {
-  // ── the list ──
-  const buckets = props.client.collections.buckets.use();
-  const rows = createMemo<CacheBucket[]>(() => {
-    const out: CacheBucket[] = [];
-    for (const key of buckets.keys()) {
-      const row = buckets.byKey(key)?.();
-      if (row !== undefined) out.push(row);
-    }
-    // By name, because a bucket list is a directory rather than a timeline.
-    return out.sort((left, right) => left.name.localeCompare(right.name));
-  });
-
   return (
-    <Show when={props.bucket} fallback={<BucketList rows={rows()} now={props.now} onOpen={props.onOpen} />}>
+    <Show when={props.bucket} fallback={<BucketList client={props.client} now={props.now} onOpen={props.onOpen} />}>
       {(name) => (
         <BucketPage
           client={props.client}
@@ -116,16 +120,47 @@ export function CacheFace(props: CacheFaceProps): JSX.Element {
   );
 }
 
+/**
+ * ROWS THAT KEEP THEIR IDENTITY ACROSS A PUBLISH.
+ *
+ * `<For>` keys by the row VALUE, so a publish that re-creates every row object
+ * disposes and re-inserts every row — and the button a person was tabbing to,
+ * or had focused, is gone. So a row whose facts did not change is handed back as
+ * the SAME object: the cache publishes a bundle's counters every second, and a
+ * keyboard user should not pay for it.
+ */
+function keepIdentity<T extends { readonly name: string }>(): (row: T) => T {
+  const held = new Map<string, { readonly row: T; readonly encoded: string }>();
+  return (row) => {
+    const encoded = JSON.stringify(row);
+    const seen = held.get(row.name);
+    if (seen !== undefined && seen.encoded === encoded) return seen.row;
+    held.set(row.name, { row, encoded });
+    return row;
+  };
+}
+
 function BucketList(props: {
-  rows: CacheBucket[];
+  client: CacheClient;
   now: number;
   onOpen: (bucket: string | null) => void;
 }): JSX.Element {
+  const held = props.client.collections.buckets.use();
+  const stable = keepIdentity<CacheBucket>();
+  const rows = createMemo<CacheBucket[]>(() => {
+    const out: CacheBucket[] = [];
+    for (const key of held.keys()) {
+      const row = held.byKey(key)?.();
+      if (row !== undefined) out.push(stable(row));
+    }
+    // By name, because a bucket list is a directory rather than a timeline.
+    return out.sort((left, right) => left.name.localeCompare(right.name));
+  });
   return (
     <section class="cache" aria-label="buckets">
       <h2>Buckets</h2>
       <Show
-        when={props.rows.length > 0}
+        when={rows().length > 0}
         fallback={
           <p class="hint">
             No buckets yet — <code>odu cache create &lt;bucket&gt;</code> makes one.
@@ -133,7 +168,7 @@ function BucketList(props: {
         }
       >
         <ul class="buckets">
-          <For each={props.rows}>
+          <For each={rows()}>
             {(bucket) => (
               <li>
                 {/* A real button: reachable by Tab, fired by Enter and Space,
@@ -165,6 +200,11 @@ function BucketList(props: {
   );
 }
 
+/** How long the filter waits for the typing to stop before it asks. Short
+ *  enough that a pause reads as an answer, long enough that a word typed at
+ *  speed is one query rather than six. */
+const FILTER_DEBOUNCE_MS = 200;
+
 function BucketPage(props: {
   client: CacheClient;
   call: <A>(effect: Effect.Effect<A, unknown>) => Promise<A>;
@@ -172,44 +212,86 @@ function BucketPage(props: {
   now: number;
   onOpen: (bucket: string | null) => void;
 }): JSX.Element {
+  /** What the person typed, and what the query is allowed to see. Two signals:
+   *  the box must track every keystroke, and the request must not. */
+  const [typed, setTyped] = createSignal("");
   const [filter, setFilter] = createSignal("");
-  const [pages, setPages] = createSignal<CachePath[]>([]);
-  const [next, setNext] = createSignal<string | null>(null);
-  const [failure, setFailure] = createSignal<string | null>(null);
-  const [loading, setLoading] = createSignal(false);
+  let pending: ReturnType<typeof setTimeout> | undefined;
+  createEffect(
+    on(typed, (value) => {
+      if (pending !== undefined) clearTimeout(pending);
+      pending = setTimeout(() => setFilter(value), FILTER_DEBOUNCE_MS);
+    }),
+  );
+  onCleanup(() => {
+    if (pending !== undefined) clearTimeout(pending);
+  });
 
-  /** One read of a page. `after` is the cursor the answer handed back, so a
-   *  second page is a POSITION rather than an offset: a push landing between
-   *  two reads shifts nothing the reader is about to see. */
-  const read = (after: string | null, append: boolean): void => {
-    setLoading(true);
-    void props.call(
-      props.client.procedures.bucket.paths({
-        bucket: props.name,
-        ...(filter() === "" ? {} : { filter: filter() }),
-        ...(after === null ? {} : { after }),
-      }),
-    ).then(
-      (answer) => {
-        setLoading(false);
-        setFailure(null);
-        setPages(append ? [...pages(), ...answer.paths] : [...answer.paths]);
-        setNext(answer.next ?? null);
-      },
-      (err: unknown) => {
-        setLoading(false);
-        setFailure(err instanceof Error ? err.message : String(err));
-      },
-    );
+  /** A "more" page, appended to the first. Cleared whenever the QUERY changes,
+   *  because a cursor belongs to the filter that minted it. */
+  const [appended, setAppended] = createSignal<CachePath[]>([]);
+  const [extra, setExtra] = createSignal<string | null>(null);
+  const [failure, setFailure] = createSignal<string | null>(null);
+  const [loadingMore, setLoadingMore] = createSignal(false);
+
+  /**
+   * THE FIRST PAGE, AS A RESOURCE KEYED ON `[name, filter]`.
+   *
+   * `createResource` is what makes the filter safe: a keystroke supersedes the
+   * read before it, and a superseded answer is DISCARDED rather than painted
+   * over a newer one — which is what a bare promise chain did, in whatever order
+   * the answers happened to arrive. Its `onCleanup` is the resource's own, so a
+   * page that navigates away mid-read leaves nothing running.
+   */
+  const [first] = createResource(
+    () => [props.name, filter()] as const,
+    async ([name, needle]) => {
+      setAppended([]);
+      setExtra(null);
+      setFailure(null);
+      return props.call(
+        props.client.procedures.bucket.paths({
+          bucket: name,
+          ...(needle === "" ? {} : { filter: needle }),
+        }),
+      );
+    },
+  );
+
+  /** A later page. Not a resource: it is a click, and it appends to what the
+   *  resource already answered for the SAME query. */
+  const more = (after: string): void => {
+    setLoadingMore(true);
+    void props
+      .call(
+        props.client.procedures.bucket.paths({
+          bucket: props.name,
+          ...(filter() === "" ? {} : { filter: filter() }),
+          after,
+        }),
+      )
+      .then(
+        (answer) => {
+          setLoadingMore(false);
+          setAppended([...appended(), ...answer.paths]);
+          setExtra(answer.next ?? null);
+        },
+        (err: unknown) => {
+          setLoadingMore(false);
+          setFailure(err instanceof Error ? err.message : String(err));
+        },
+      );
   };
 
-  // A NEW BUCKET OR A NEW FILTER IS A NEW QUERY, from the first page. `on`
-  // rather than a bare effect so the read does not run again on every unrelated
-  // repaint of the page.
-  createEffect(on(() => [props.name, filter()] as const, () => read(null, false)));
+  const stable = keepIdentity<CachePath & { readonly name: string }>();
+  const paths = createMemo<Array<CachePath & { readonly name: string }>>(() =>
+    [...(first()?.paths ?? []), ...appended()].map((path) =>
+      stable({ ...path, name: path.storePath }),
+    ),
+  );
+  const next = createMemo<string | null>(() => extra() ?? first()?.next ?? null);
 
-  /** The bucket's row, from the same subscription the list reads — so the key,
-  *  the URL and the counts on this page move when the cache publishes them. */
+  /** The bucket's row, from the same subscription the list reads. */
   const held = props.client.collections.buckets.use();
   const bucket = createMemo<CacheBucket | undefined>(() => held.byKey(props.name)?.());
 
@@ -233,23 +315,21 @@ function BucketPage(props: {
               <span>{row().objects} paths</span>
               <span>{bytes(row().bytes)}</span>
               <span>
-                {row().lastPush === null ? "nothing pushed" : `pushed ${ago(row().lastPush ?? 0, props.now)}`}
+                {row().lastPush === null
+                  ? "nothing pushed"
+                  : `pushed ${ago(row().lastPush ?? 0, props.now)}`}
               </span>
               <span>{row().hits} reads</span>
               <Show when={row().retentionDays > 0}>
                 <span>{row().retentionDays}d retention</span>
               </Show>
             </p>
-            {/* THE BLOCK A PERSON PASTES. `odu cache use` prints the same three
-                things, and a page that printed them differently would be a
-                second answer to "how do I use this bucket". */}
-            <pre class="use-block">{`# nix.conf
-extra-substituters = ${row().url}
-extra-trusted-public-keys = ${row().publicKey}
-
-# netrc — Nix reads only the file named by netrc-file, never ~/.netrc
-netrc-file = ~/.netrc
-machine ${hostOf(row().url)} password <your-write-token>`}</pre>
+            {/* THE BLOCK A PERSON PASTES, from the same function `odu cache use`
+                prints it with — the page cannot know a home directory, so it
+                names `~`. */}
+            <pre class="use-block">
+              {useBlock({ url: row().url, publicKey: row().publicKey, home: "~" })}
+            </pre>
           </>
         )}
       </Show>
@@ -260,21 +340,25 @@ machine ${hostOf(row().url)} password <your-write-token>`}</pre>
           <input
             type="search"
             placeholder="filter by path, e.g. openssl"
-            value={filter()}
-            onInput={(event) => setFilter(event.currentTarget.value)}
+            value={typed()}
+            onInput={(event) => setTyped(event.currentTarget.value)}
           />
         </label>
         <Show when={failure()}>{(message) => <p class="refused">{message()}</p>}</Show>
         <Show
-          when={pages().length > 0}
+          when={paths().length > 0}
           fallback={
             <p class="hint">
-              {loading() ? "reading…" : filter() === "" ? "Nothing pushed to this bucket yet." : "No path matches that filter."}
+              {first.loading
+                ? "reading…"
+                : filter() === ""
+                  ? "Nothing pushed to this bucket yet."
+                  : "No path matches that filter."}
             </p>
           }
         >
           <ol class="paths">
-            <For each={pages()}>
+            <For each={paths()}>
               {(path) => (
                 <li>
                   <code class="path">{path.storePath}</code>
@@ -290,21 +374,17 @@ machine ${hostOf(row().url)} password <your-write-token>`}</pre>
         </Show>
         <Show when={next()}>
           {(after) => (
-            <button type="button" class="link" disabled={loading()} onClick={() => read(after(), true)}>
-              {loading() ? "reading…" : `more (${PAGE} newer first)`}
+            <button
+              type="button"
+              class="link"
+              disabled={loadingMore() || first.loading}
+              onClick={() => more(after())}
+            >
+              {loadingMore() ? "reading…" : `more (${PATH_PAGE_SIZE} newer first)`}
             </button>
           )}
         </Show>
       </div>
     </section>
   );
-}
-
-/** The authority of a substituter URL, for the netrc line. */
-function hostOf(url: string): string {
-  try {
-    return new URL(url).host;
-  } catch {
-    return url;
-  }
 }

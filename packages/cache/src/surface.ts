@@ -34,11 +34,6 @@ import { Schema } from "effect";
 import { defineSurface } from "@kolu/surface/define";
 import type { ExposeMap } from "@kolu/surface/expose";
 
-/** The cache's half of the wire's contract version. Bumped with
- *  `SERVICE_CONTRACT_VERSION` when the two move together, and on its own when
- *  only a bucket's shape moves. */
-export const CACHE_CONTRACT_VERSION = "1.0.0";
-
 // ── the row ─────────────────────────────────────────────────────────────────
 
 /**
@@ -269,6 +264,52 @@ const PathsOutputSchema = Schema.Struct({
 });
 export type CachePaths = typeof PathsOutputSchema.Type;
 
+// ── what both faces print ───────────────────────────────────────────────────
+
+/** How many paths one `cache.paths` page carries: what the board's list renders
+ *  without a scroll, and what a person reading a bucket wants before deciding to
+ *  filter. Here because the VERB's page and the VIEW's page are one number. */
+export const PATH_PAGE_SIZE = 100;
+
+/**
+ * THE BLOCK A CLIENT PASTES, for one bucket — `odu cache use`'s output and the
+ * bucket page's, from one function.
+ *
+ * `home` is the caller's: the CLI knows the person's `$HOME`, a page does not,
+ * so it passes `~`. Everything else is the bucket's own facts, which is what
+ * keeps the two faces from drifting the way they had (`~/.netrc` on one,
+ * `$HOME/.netrc` on the other, and a `flake.nix` block on only one).
+ */
+export function useBlock(input: {
+  readonly url: string;
+  readonly publicKey: string;
+  readonly home: string;
+}): string {
+  const authority = ((): string => {
+    try {
+      return new URL(input.url).host;
+    } catch {
+      return input.url;
+    }
+  })();
+  return `# nix.conf
+extra-substituters = ${input.url}
+extra-trusted-public-keys = ${input.publicKey}
+
+# flake.nix
+{
+  nixConfig = {
+    extra-substituters = [ "${input.url}" ];
+    extra-trusted-public-keys = [ "${input.publicKey}" ];
+  };
+}
+
+# netrc — Nix reads only the file named by netrc-file, never ~/.netrc
+netrc-file = ${input.home}/.netrc
+machine ${authority} password <your-write-token>
+`;
+}
+
 // ── the surface ─────────────────────────────────────────────────────────────
 
 /**
@@ -279,16 +320,23 @@ export type CachePaths = typeof PathsOutputSchema.Type;
  * that had to re-read every bucket to notice one moved would be the two-RPCs-
  * per-second problem the runs board already solved this way.
  *
- * No cells: a bucket is not a singleton fact, and the cache's own identity
- * (`CACHE_CONTRACT_VERSION`) is a build constant rather than a value on the
- * wire.
+ * No cells: a bucket is not a singleton fact, and nothing else about the cache
+ * is a value on the wire. **No version either** — this surface used to carry a
+ * `CACHE_CONTRACT_VERSION` and nothing read it. The daemon's own cell carries
+ * the contract version of the wire it serves, these verbs left that contract in
+ * 2.0, and a second version nobody enforces is a promise without a mechanism.
  */
 export const oduCacheSurface = defineSurface({
   collections: {
     buckets: {
       keySchema: Schema.String,
       schema: CacheBucketSchema,
-      verbs: ["keys", "get", "upsert", "delete", "deltas"],
+      // READ-ONLY ON THE WIRE. A subscriber follows the rows; it does not write
+      // them, and `upsert`/`delete` would have been two unauthenticated members
+      // whose only effect is to disagree with the database until the next
+      // publish. The row fills them through the sibling's own `ctx`, which is
+      // not a wire member.
+      verbs: ["keys", "get", "deltas"],
     },
   },
   procedures: {
