@@ -54,6 +54,25 @@
           # regenerates the lockfile-derived nix expression.
           bun2nix = b2n.bun2nix;
         });
+      # THE NIXOS MODULE, for a host that runs the board, its CI and its cache
+      # as one service. `odu` is an alias of `default` because a flake input
+      # reads better spelled either way and there is exactly one module.
+      nixosModules = {
+        default = import ./nix/module.nix { inherit self; };
+        odu = self.nixosModules.default;
+      };
+
+      # The VM test that proves the module: two machines, a real nginx, a real
+      # `nix copy` through it, and the board answering 404 from outside. Linux
+      # only — it boots a VM, and the module is for servers.
+      checks.x86_64-linux =
+        let
+          pkgs = import ./nix/nixpkgs.nix { system = "x86_64-linux"; };
+        in
+        {
+          nixos-module = pkgs.testers.nixosTest (import ./nix/tests/module.nix { inherit self; });
+        };
+
       # Two shells, and the second IS the first plus browsers. Playwright's
       # browser set is a large closure every non-browser leg would realise for
       # nothing, so `just e2e-web` enters `.#e2e` and everything else

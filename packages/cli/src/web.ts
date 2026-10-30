@@ -74,6 +74,7 @@ import { runSocketPath } from "@odu/run-client/dial";
 import { gitTopLevel } from "@odu/execution/common/git";
 import { ODU_VERSION } from "@odu/execution/common/version";
 import {
+  readPublicOrigin,
   serviceBind,
   serviceMcpUrl,
   serviceOrigin,
@@ -182,6 +183,15 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
   // whatever name it is reached by (an SSH forward, a tailnet name, a proxy),
   // and the Origin check compares a browser's Origin against that same Host.
   const allowedOrigins = parseAllowedOrigins(process.env.ODU_WEB_ALLOWED_ORIGINS);
+  // The address a BUCKET is published at, when a proxy stands in front. Read
+  // here rather than in `@odu/service` because this is the one place that reads
+  // an environment, and refused HERE rather than concatenated there: a value
+  // with a path would build a substituter URL nobody asked for.
+  const published = readPublicOrigin(process.env);
+  if (!published.ok) {
+    process.stderr.write(`odu: ${published.message}\n`);
+    return 1;
+  }
 
   // Claimed FIRST, so a launcher that lost the race never binds the port. The
   // framework's own gate: one atomic link, a liveness-proved holder, and a
@@ -221,6 +231,7 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
   const service = createOduService({
     ports,
     origin,
+    ...(published.origin === null ? {} : { publicOrigin: published.origin }),
     home: home.dir,
     build: bakedBuild(),
     // A refresh tick that outran its interval is logged here, rate-limited —

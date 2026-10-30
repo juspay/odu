@@ -9,7 +9,7 @@ nix_shell_e2e := if env('PLAYWRIGHT_BROWSERS_PATH', '') != '' { '' } else { 'nix
 
 [parallel]
 [metadata("ci")]
-default: typecheck unit fmt nix agent-flake-nix e2e-cli e2e-web bun-nix-fresh
+default: typecheck unit fmt nix agent-flake-nix e2e-cli e2e-web bun-nix-fresh nixos-module
 
 install:
     {{ nix_shell }} bun install --frozen-lockfile
@@ -44,6 +44,17 @@ e2e-web: install nix
     nix build .#odu-runner --no-link --accept-flake-config
     cd packages/web-acceptance
     ODU_BIN="$odu" {{ nix_shell_e2e }} bun run test
+
+# THE NIXOS MODULE, booted: two VMs, a real nginx, a real `nix copy` through it.
+#
+# `[linux]` because it boots a VM and the module is for servers. The
+# x86_64-linux lane host has `/dev/kvm`, where this takes ~41 s warm and ~63 s
+# when the VM image has to be built; without KVM the same test runs under TCG
+# and takes many minutes, which is why the number is here rather than in a
+# timeout.
+[linux]
+nixos-module:
+    nix build .#checks.x86_64-linux.nixos-module --no-link --accept-flake-config
 
 fmt:
     {{ nix_shell }} nixpkgs-fmt --check *.nix nix/*.nix nix/packages/*.nix

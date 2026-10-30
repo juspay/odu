@@ -16,6 +16,7 @@ import {
   serviceMcpUrl,
   serviceOrigin,
   serviceWsUrl,
+  readPublicOrigin,
 } from "./endpoint";
 
 describe("the service origin", () => {
@@ -70,5 +71,45 @@ describe("derivations from an origin", () => {
     expect(serviceMcpUrl("http://127.0.0.1:18440")).toBe(
       "http://127.0.0.1:18440/mcp",
     );
+  });
+});
+
+describe("the origin a bucket is published under", () => {
+  it("is absent unless asked for, so a loopback service keeps its own address", () => {
+    expect(readPublicOrigin({})).toEqual({ ok: true, origin: null });
+    expect(readPublicOrigin({ ODU_PUBLIC_ORIGIN: "  " })).toEqual({ ok: true, origin: null });
+  });
+
+  it("takes a scheme, a host and a port — and trims a trailing slash", () => {
+    expect(readPublicOrigin({ ODU_PUBLIC_ORIGIN: "https://cache.example.com" })).toEqual({
+      ok: true,
+      origin: "https://cache.example.com",
+    });
+    expect(readPublicOrigin({ ODU_PUBLIC_ORIGIN: "https://cache.example.com:8443/" })).toEqual({
+      ok: true,
+      origin: "https://cache.example.com:8443",
+    });
+  });
+
+  it("refuses a path, a query or a fragment instead of rewriting it", () => {
+    // odu appends `/cache/<bucket>` to whatever this is. A path here would be
+    // concatenated into a URL the operator never asked for, and the failure it
+    // causes — a substituter that 404s for every client — names nothing.
+    for (const value of [
+      "https://cache.example.com/nix",
+      "https://cache.example.com?x=1",
+      "https://cache.example.com#frag",
+    ]) {
+      const reading = readPublicOrigin({ ODU_PUBLIC_ORIGIN: value });
+      expect(reading.ok).toBe(false);
+      if (!reading.ok) expect(reading.message).toContain("names more than an origin");
+    }
+  });
+
+  it("refuses a scheme that is not http or https", () => {
+    const reading = readPublicOrigin({ ODU_PUBLIC_ORIGIN: "ftp://cache.example.com" });
+    expect(reading.ok).toBe(false);
+    if (!reading.ok) expect(reading.message).toContain("is not http or https");
+    expect(readPublicOrigin({ ODU_PUBLIC_ORIGIN: "not a url" }).ok).toBe(false);
   });
 });

@@ -85,9 +85,13 @@ describe("the daemon's environment", () => {
     const env = daemonEnv({
       ODU_ROOT_TOKEN: "root-secret",
       ODU_CACHE_STORE: "local?root=/tmp/chroot",
+      ODU_PUBLIC_ORIGIN: "https://cache.example.com",
     });
     expect(env.ODU_ROOT_TOKEN).toBe("root-secret");
     expect(env.ODU_CACHE_STORE).toBe("local?root=/tmp/chroot");
+    // The daemon is what builds a bucket's substituter URL, so the address it
+    // is published under has to travel with it.
+    expect(env.ODU_PUBLIC_ORIGIN).toBe("https://cache.example.com");
     // A BLANK token is the same absence as no variable at all — the reading
     // `webPorts` does — so forwarding `ODU_ROOT_TOKEN=` would make an empty
     // string a credential.

@@ -95,6 +95,11 @@ export interface ServiceOptions {
   /** WHERE the daemon is bound — the OS's answer, not the request, so a
    *  caller reading the identity cell learns the address that actually works. */
   origin: string;
+  /** The address a BUCKET is reachable at from outside, when a proxy stands in
+   *  front. Only substituter URLs use it; the board, the identity cell and the
+   *  websocket stay on `origin`, because those are addresses THIS process has
+   *  to be reachable at to serve at all. */
+  publicOrigin?: string;
   /** The daemon's on-disk home (gate + control socket live under it). */
   home: string;
   build: ServiceBuild;
@@ -220,11 +225,16 @@ export function createOduService(opts: ServiceOptions): OduService {
           : Effect.fail(new ServiceRefused({ code: outcome.code, message: outcome.message })),
     );
 
-  /** The substituter URL a bucket answers on — the origin this daemon is bound
-   *  to, which only the service knows. */
+  /** The substituter URL a bucket answers on.
+   *
+   *  The PUBLIC origin when one is configured, and the bound origin otherwise:
+   *  behind a proxy the bound one is loopback, and a URL no client can reach is
+   *  worse than no URL at all, because `odu cache use` prints it into a
+   *  `nix.conf`. */
+  const substituterOrigin = opts.publicOrigin ?? opts.origin;
   const bucketWithUrl = (facts: CacheBucketFacts): CacheBucket => ({
     ...facts,
-    url: `${opts.origin}${opts.ports.cache.mount}/${facts.name}`,
+    url: `${substituterOrigin}${opts.ports.cache.mount}/${facts.name}`,
   });
 
   const runtime = implementRootedSurfaces(
@@ -664,7 +674,7 @@ export function createOduService(opts: ServiceOptions): OduService {
           describe: ({ input }) =>
             cacheAnswer(opts.ports.cache.describe({ bucket: input.bucket }), (bucket) => ({
               ...bucket,
-              url: `${opts.origin}${opts.ports.cache.mount}/${bucket.name}`,
+              url: `${substituterOrigin}${opts.ports.cache.mount}/${bucket.name}`,
             })),
           tokenMint: ({ input }) =>
             cacheAnswer(
