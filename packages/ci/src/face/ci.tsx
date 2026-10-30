@@ -83,9 +83,9 @@ function refusalText(err: unknown): string {
   const message =
     typeof value?.message === "string" ? value.message : String(err);
   const suggestion = Array.isArray(value?.suggestion)
-    ? (value.suggestion as unknown[]).map(String).join(" ")
+    ? ` Try: ${(value.suggestion as unknown[]).map(String).join(" ")}`
     : "";
-  return suggestion === "" ? message : `${message} — ${suggestion}`;
+  return `${message}${suggestion}`;
 }
 
 /**
@@ -95,7 +95,8 @@ function refusalText(err: unknown): string {
  */
 const TERMINAL_READ_REFUSALS = new Set([
   "unknown_run",
-  "bad_cursor",
+  "expired",
+  "bad_input",
   "checkout_refused",
 ]);
 
@@ -615,7 +616,6 @@ export function CiFace(props: CiFaceProps): JSX.Element {
 
   return (
     <Switch>
-      <Switch>
         <Match when={route().at === "board"}>
           <Board
             checkouts={checkouts()}
@@ -670,7 +670,6 @@ export function CiFace(props: CiFaceProps): JSX.Element {
             onBack={() => props.onRoute({ at: "board" })}
           />
         </Match>
-      </Switch>
     </Switch>
   );
 }
