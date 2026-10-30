@@ -9,7 +9,7 @@ nix_shell_e2e := if env('PLAYWRIGHT_BROWSERS_PATH', '') != '' { '' } else { 'nix
 
 [parallel]
 [metadata("ci")]
-default: typecheck unit fmt nix agent-flake-nix e2e-cli e2e-web bun-nix-fresh
+default: typecheck unit fmt nix agent-flake-nix e2e-cli e2e-web bun-nix-fresh nixos-module
 
 install:
     {{ nix_shell }} bun install --frozen-lockfile
@@ -44,6 +44,26 @@ e2e-web: install nix
     nix build .#odu-runner --no-link --accept-flake-config
     cd packages/web-acceptance
     ODU_BIN="$odu" {{ nix_shell_e2e }} bun run test
+
+# THE NIXOS MODULE, booted: two VMs, a real nginx, a real `nix copy` through it.
+#
+# NOT `[linux]`, and that is a correction the darwin lane made: `just` EXCLUDES a
+# recipe whose OS attribute does not match the host, and `default` depends on
+# this one, so `[linux]` made every darwin node fail before it started with
+# "recipe `default` has unknown dependency `nixos-module`". The attribute is a
+# runtime check instead, which keeps the dependency resolvable everywhere and
+# makes the skip a line in the lane's log rather than a silent green.
+#
+# On x86_64-linux the host has `/dev/kvm`: ~41 s warm, ~63 s when the VM image
+# has to be built. Without KVM the same test runs under TCG and takes minutes.
+nixos-module:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ "$(uname -s)" != Linux ]; then
+      echo "nixos-module: linux only — this lane is $(uname -s), nothing to boot"
+      exit 0
+    fi
+    nix build .#checks.x86_64-linux.nixos-module --no-link --accept-flake-config
 
 fmt:
     {{ nix_shell }} nixpkgs-fmt --check *.nix nix/*.nix nix/packages/*.nix

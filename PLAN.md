@@ -128,12 +128,12 @@ Consequences for the split:
 ### Protocol (per bucket, standard Nix)
 
 ```
-GET  /<bucket>/nix-cache-info             StoreDir, WantMassQuery: 1, Priority: 40
-HEAD /<bucket>/<hash>.narinfo
-GET  /<bucket>/<hash>.narinfo
-GET  /<bucket>/nar/<filehash>.nar.zst     stream, or 302 to presigned URL (PR 11)
-PUT  /<bucket>/nar/<filehash>.nar.<ext>   Bearer or Basic; any ext Nix sends (xz by default, zst with ?compression=zstd)
-PUT  /<bucket>/<hash>.narinfo             server re-signs with the bucket key; URL field kept as sent
+GET  /cache/<bucket>/nix-cache-info        StoreDir, WantMassQuery: 1, Priority: 40
+HEAD /cache/<bucket>/<hash>.narinfo
+GET  /cache/<bucket>/<hash>.narinfo
+GET  /cache/<bucket>/nar/<filehash>.nar.zst  stream, or 302 to presigned URL (PR 11)
+PUT  /cache/<bucket>/nar/<filehash>.nar.<ext>  Bearer or Basic; any ext Nix sends (xz by default, zst with ?compression=zstd)
+PUT  /cache/<bucket>/<hash>.narinfo        server re-signs with the bucket key; URL field kept as sent
 POST /_odu/v1/buckets/<bucket>/missing    batch "which of these are you missing" (odu push client)
 ```
 
@@ -206,8 +206,9 @@ OAuth users mint and revoke in the UI or CLI. Roles: owner, admin, member.
 A new workspace member `packages/cache` (protocol, blob store, metadata, GC,
 signing, tokens) with its own closure test, importing nothing from
 `execution`. Its routes are a layer merged in `web.ts` (F1). Its admin
-operations (`cache_create`, `cache_token_mint`, `cache_token_revoke`,
-`cache_pin`, `cache_gc`, `cache_stats`) are verbs on the shared surface, so
+operations (`cache_create`, `cache_list`, `cache_describe`, `cache_tokenMint`,
+`cache_tokenRevoke`, `cache_pin`, `cache_gc`, `cache_stats`) are verbs on the
+shared surface, so
 `odu cache …`, the browser and MCP all reach them through the service, which
 is what the authority wall requires (F4). `odu cache push` is the one command
 that is a client of a *different* authority: the cache's HTTP API, with a
@@ -226,7 +227,7 @@ token, from the machine that holds the paths.
    a time, retries per path, and asks `missing` first. `missing` drops paths
    signed by an upstream key (`cache.nixos.org-1` by default, per bucket), so
    nixpkgs never lands in a bucket; this is attic's upstream filter and the
-   main thing `nix copy` cannot do. `nix copy --to https://…/<bucket>` with
+   main thing `nix copy` cannot do. `nix copy --to https://…/cache/<bucket>` with
    netrc or a token in the URL stays for people who want nothing odu-specific
    (see "Credentials on the client"); it buffers each NAR in memory and
    probes paths one at a time. Known gaps against cachix and attic, kept
@@ -326,8 +327,8 @@ next eight PRs plug into exist with one implementation each.
 > `odu cache login <origin>`, or export it as `ODU_CACHE_TOKEN` in CI; then
 > `odu cache push <bucket> ./result` pushes only what the bucket is missing.
 > Prefer plain Nix? `odu cache use <bucket>` also prints the two netrc lines,
-> after which `nix copy --to https://<host>/<bucket> ./result` works, or put
-> the token in the URL as `https://x:$TOKEN@<host>/<bucket>`. Revoke tokens
+> after which `nix copy --to https://<host>/cache/<bucket> ./result` works, or put
+> the token in the URL as `https://x:$TOKEN@<host>/cache/<bucket>`. Revoke tokens
 > with `odu cache token revoke`, protect a closure from garbage collection
 > with `odu cache pin`, reclaim space with `odu cache gc`, and see sizes and
 > hit counts with `odu cache stats`. Administration needs the root token in
@@ -342,8 +343,9 @@ What lands:
 - The protocol routes as one `HttpRouter` layer merged in `web.ts` (F1):
   `nix-cache-info`, narinfo HEAD/GET, NAR GET, PUT for both with Bearer or
   Basic, and the batched missing-paths endpoint.
-- Surface verbs `cache_create`, `cache_list`, `cache_token_mint`,
-  `cache_token_revoke`, `cache_pin`, `cache_gc`, `cache_stats`, authorised
+- Surface verbs `cache_create`, `cache_list`, `cache_describe`,
+  `cache_tokenMint`, `cache_tokenRevoke`, `cache_pin`, `cache_gc`,
+  `cache_stats`, authorised
   by a root token the service reads from its environment, and exposed to
   CLI, MCP and the board's data layer like every other verb (F4).
 - CLI: `odu cache create | list | token | use | pin | gc | stats | push`.
@@ -353,6 +355,17 @@ What lands:
   docs-sync rule), and e2e coverage: `nix copy --to` into a bucket, `nix
   build` substituting from it with the bucket's key trusted, GC evicting an
   unreferenced path and refusing a pinned closure.
+- `services.odu` NixOS module: systemd unit under a service user, that service
+  user in `nix.settings.trusted-users`, state directory, root-token secret
+  file, the public key, and an nginx vhost with ACME that proxies **only**
+  `/cache/*` and `/_odu/v1/*`. The board, websocket and `/mcp` stay on loopback
+  (F2). `ODU_PUBLIC_ORIGIN` makes the substituter URL a bucket publishes the
+  proxied one. A NixOS VM test exercises the module end to end — create a
+  bucket, push, substitute, GC — as a `[linux]` lane. It lands here rather than
+  in PR 2 because the server is deployed from this branch.
+
+**Exit criterion:** flat server memory over concurrent multi-gigabyte NAR reads
+and pushes, shown by the evidence recording.
 
 State of master after merge: `odu web` on any machine is also a Nix cache on
 loopback, administered by `odu cache` with a root token. Nothing is public.
@@ -367,19 +380,21 @@ loopback, administered by `odu cache` with a root token. Nothing is public.
 > a bucket from GitHub Actions with the documented step and an
 > `ODU_CACHE_TOKEN` secret.
 
+The root token comes from `ODU_ROOT_TOKEN`, which the module sets from a secret
+path (agenix-compatible) rather than from anything odu writes.
+
 Prerequisite PR in kolu: `publish-closure` gains a generic push target (a
 cache URL with netrc, or a push command) beside its attic inputs.
 
 What lands:
-- `services.odu` NixOS module: systemd unit under a service user, that
-  service user in `nix.settings.trusted-users`, state directory,
-  root-token secret file, the public key, and an nginx vhost with ACME that
-  proxies **only** `/<bucket>/*` and `/_odu/v1/*`, with `proxy_cache` on NAR
-  reads. The board, websocket and `/mcp` stay on
-  loopback (F2). A NixOS VM test exercises the module end to end: create a
-  bucket, push, substitute, GC.
-- The dedicated server is deployed from this branch before merge, and the
-  PR's evidence shows it.
+- On top of PR 1's module: a `proxy_cache` on the NAR reads, and the
+  dedicated server deployed from this branch before merge — the PR's evidence
+  shows it.
+- The server substitutes a referrer's upstream-signed references into its OWN
+  store (`nix-store -r --store … --option substituters …`) before the narinfo
+  is imported, so a store that is not the builder's can keep the upstream skip
+  and still import referrers. Today the answer for such a store is
+  `odu cache create --no-upstream`, which takes everything and pays the bytes.
 - The dogfood switch (F9, F11): `flake.nix` `nixConfig` names the bucket;
   `nix-cache.yml` substitutes from it and pushes with `odu cache push` (or
   `nix copy` with netrc at bootstrap) using an `ODU_CACHE_TOKEN` secret, and
@@ -566,6 +581,14 @@ a hosted offering needs.
   and the hook is the recommended path.
 - **No chunking.** Deliberate; chutney showed chunking cost more than it saved
   on S3. Revisit only if storage cost dominates.
+- **Streaming a NAR through Bun's HTTP server.** PR 1 hands the socket the
+  store's `dump-path | zstd` stream and the request's own body stream, so no
+  code path holds a NAR. That is only worth anything if the runtime honours
+  backpressure on both, and Bun's `Bun.serve` is younger than Node's. The exit
+  criterion (flat RSS over concurrent multi-gigabyte reads and pushes, recorded)
+  is the measurement, not the assurance. Escape hatch if it does not hold:
+  nginx `X-Accel-Redirect`, or a sidecar that serves NAR bytes while odu keeps
+  narinfo, auth and signing.
 
 ## Open questions
 

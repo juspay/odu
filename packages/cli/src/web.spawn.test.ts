@@ -78,6 +78,26 @@ describe("the daemon's environment", () => {
     });
   });
 
+  it("carries the cache's two settings, and no further", () => {
+    // The cache lives in the daemon, so its settings must reach it: a launcher
+    // that kept `$ODU_ROOT_TOKEN` for itself served a service that refused
+    // every admin verb for an environment the operator had set correctly.
+    const env = daemonEnv({
+      ODU_ROOT_TOKEN: "root-secret",
+      ODU_CACHE_STORE: "local?root=/tmp/chroot",
+      ODU_PUBLIC_ORIGIN: "https://cache.example.com",
+    });
+    expect(env.ODU_ROOT_TOKEN).toBe("root-secret");
+    expect(env.ODU_CACHE_STORE).toBe("local?root=/tmp/chroot");
+    // The daemon is what builds a bucket's substituter URL, so the address it
+    // is published under has to travel with it.
+    expect(env.ODU_PUBLIC_ORIGIN).toBe("https://cache.example.com");
+    // A BLANK token is the same absence as no variable at all — the reading
+    // `webPorts` does — so forwarding `ODU_ROOT_TOKEN=` would make an empty
+    // string a credential.
+    expect(daemonEnv({ ODU_ROOT_TOKEN: "" }).ODU_ROOT_TOKEN).toBeUndefined();
+  });
+
   it("carries what a COORDINATOR it starts will need", () => {
     // The daemon's whole job includes spawning coordinators that shell out to
     // nix and git. On the detached branch this list is the complete child

@@ -11,13 +11,15 @@ commit status per `<recipe>@<platform>`, and keeps every run in a per-user
 catalog.
 
 **There is one shared service and one vocabulary.** A per-user singleton
-(`http://127.0.0.1:18440`) owns every run. Three faces project the same
-fourteen verbs — and none of them has a verb of its own:
+(`http://127.0.0.1:18440`) owns every run and every Nix binary cache bucket.
+Three faces project the same verbs — and none of them has a verb of its own:
 
 ```
 run_start · run_wait · run_read · run_list · run_retry · run_cancel · log_read
 catalog_import · catalog_prune · pipeline_read
 venue_probe · venue_hold · venue_release · protect_apply
+cache_create · cache_list · cache_describe · cache_tokenMint · cache_tokenList
+cache_tokenRevoke · cache_pin · cache_gc · cache_stats
 ```
 
 | Face | Spelling | Who uses it |
@@ -298,6 +300,15 @@ and a browser simply could not do them at all.
 | import old runs | `odu surface catalog_import --input '{…}' --json` | `catalog_import` | `checkout`, `dryRun?`, `requestId` | `imported[]`, `skipped[]`, `catalog` |
 | expire old runs | `odu surface catalog_prune --input '{…}' --json` | `catalog_prune` | `retentionDays?`, `dryRun?`, `requestId` | `expired[]`, `kept[]`, `retentionDays`, `dryRun`, `replayed` |
 | require odu's checks | `odu surface protect_apply --input '{…}' --json` | `protect_apply` | `checkout`, `branch?`, `platforms?`, `hostsFile?`, `dryRun?`, `create?`, `requestId` | `repo`, `branch`, `contexts[]`, `rulesetId`, `applied`, `created`, `derivedFrom`, `detail`, `replayed` |
+| create a cache bucket | `odu surface cache_create --input '{…}' --json` | `cache_create` | `rootToken`, `name`, `public`, `retentionDays`, `upstreamKeys?` | `name`, `public`, `retentionDays`, `keyName`, `publicKey`, `upstreamKeys[]`, `objects`, `bytes`, `created`, `url` |
+| list buckets | `odu surface cache_list --input '{…}' --json` | `cache_list` | `rootToken` | `buckets[]` (the shape above) |
+| one bucket's public identity | `odu surface cache_describe --input '{…}' --json` | `cache_describe` | `bucket` — **no root token** | `name`, `public`, `publicKey`, `url` only — the substituter's identity, not the operator's counts |
+| mint a cache token | `odu surface cache_tokenMint --input '{…}' --json` | `cache_tokenMint` | `rootToken`, `bucket`, `scope` (`read`/`write`/`admin`), `expiresDays?`, `bucketGlob?` | `token` (plaintext, ONCE), `facts` |
+| list cache tokens | `odu surface cache_tokenList --input '{…}' --json` | `cache_tokenList` | `rootToken`, `bucket?` | `tokens[]` — never a plaintext |
+| revoke a cache token | `odu surface cache_tokenRevoke --input '{…}' --json` | `cache_tokenRevoke` | `rootToken`, `id` | `id`, `revoked` |
+| pin a closure | `odu surface cache_pin --input '{…}' --json` | `cache_pin` | `rootToken`, `bucket`, `name`, `paths[]` | `bucket`, `name`, `rootPaths[]`, `created` |
+| reclaim cache space | `odu surface cache_gc --input '{…}' --json` | `cache_gc` | `rootToken`, `bucket?` | `buckets[]` (`evicted`, `kept`, `bytes`), `evicted`, `kept`, `bytes` |
+| cache sizes and reads | `odu surface cache_stats --input '{…}' --json` | `cache_stats` | `rootToken` | `buckets[]`, `objects`, `bytes`, `hits`, `lastAccessed` |
 
 - **`requestId` is an idempotency key on these three too.** A repeat with the
   same id replays the recorded answer and performs nothing — which is what
@@ -363,6 +374,8 @@ error. `code` is what you branch on; `message` is for the human; `resync` and
 | `pipeline_refused` | The checkout's `justfile` could not be resolved into a DAG; the message says what broke. |
 | `no_venue` | No lane matched — the hosts file configures none for that platform. Read `venue_probe`. |
 | `no_credential` | The serving process has no usable `gh`. Authenticate it, or use `dryRun`. |
+| `no_root_token` | The service has no `$ODU_ROOT_TOKEN`, or yours is wrong. Cache administration needs it; the substituter keeps serving without it. |
+| `unknown_bucket` / `bucket_exists` | No such bucket, or one already exists — creating it again would rotate a key out from under every client that trusts it. |
 
 ## Exits — two vocabularies, and `1` means opposite things
 

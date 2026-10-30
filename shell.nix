@@ -9,6 +9,12 @@ pkgs.mkShell ({
     bun
     nodejs # for npm: `just website` builds website/, a standalone npm project
     nixpkgs-fmt
+    # What the cache shells out to. `nix` comes from the host on purpose (see
+    # default.nix); compressing and decompressing a NAR is odu's own work, so
+    # the shell provides what the package bakes onto its PATH.
+    zstd
+    xz
+    bzip2
   ];
 
   # The browsers come from nixpkgs, and only in the `e2e` shell (flake.nix) — so

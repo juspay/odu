@@ -4,7 +4,7 @@
   "private": true,
   "license": "AGPL-3.0-or-later",
   "type": "module",
-  "//workspaces": "Each member is a WALL, not a folder, and the walls run ONE WAY: cli → execution → run-history → run-client. run-client is the half of odu a client of a LIVE run holds; run-history is everything that OUTLIVES a coordinator (the per-user catalog, the journal, per-attempt evidence, and the checkout-scoped ledger as its legacy half); execution is everything that DOES a run; cli is the two ways of WATCHING one (the native CLI/TUI and the MCP surface). PR 2 adds three more, and the arrow still runs one way: service-client is the CONTRACT the web service serves (browser-safe by construction — its closure test refuses a `node:` import); service is what IMPLEMENTS it, and it cannot import execution, so the three things it must cause — launch, retry, cancel — arrive as ports the root binds; web-ui is the browser, which holds views and no domain logic at all. What is left in src/ is the composition roots — main.ts and runner-main.ts — the only place the faces and the engine are wired to each other. Each member's src/closure.test.ts walks its own import graph, so the direction is physics rather than discipline. Every member is also listed in `dependencies` below: the isolated linker symlinks only the root package's DIRECT dependencies into the root node_modules, so without those entries `@odu/*` would not resolve from src/.",
+  "//workspaces": "Each member is a WALL, not a folder, and the walls run ONE WAY: cli → execution → run-history → run-client. run-client is the half of odu a client of a LIVE run holds; run-history is everything that OUTLIVES a coordinator (the per-user catalog, the journal, per-attempt evidence, and the checkout-scoped ledger as its legacy half); execution is everything that DOES a run; cli is the two ways of WATCHING one (the native CLI/TUI and the MCP surface). PR 2 adds three more, and the arrow still runs one way: service-client is the CONTRACT the web service serves (browser-safe by construction — its closure test refuses a `node:` import); service is what IMPLEMENTS it, and it cannot import execution, so the three things it must cause — launch, retry, cancel — arrive as ports the root binds; web-ui is the browser, which holds views and no domain logic at all. cache is the fourth: a Nix binary cache whose bottom-of-the-graph position is the point — it imports nothing of odu, reads no environment, and is handed its state directory, its root token and its store URI by the root that serves it. What is left in src/ is the composition roots — main.ts and runner-main.ts — the only place the faces and the engine are wired to each other. Each member's src/closure.test.ts walks its own import graph, so the direction is physics rather than discipline. Every member is also listed in `dependencies` below: the isolated linker symlinks only the root package's DIRECT dependencies into the root node_modules, so without those entries `@odu/*` would not resolve from src/.",
   "workspaces": [
     "packages/*"
   ],
@@ -14,6 +14,7 @@
     "test:e2e-cli": "bun test ./tests/e2e"
   },
   "dependencies": {
+    "@odu/cache": "workspace:*",
     "@odu/cli": "workspace:*",
     "@odu/execution": "workspace:*",
     "@odu/run-client": "workspace:*",

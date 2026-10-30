@@ -40,7 +40,7 @@ import { serviceOrigin } from "@odu/service-client/endpoint";
 // (`./socket`). This module keeps `webHome` — the home a daemon is CREATED in,
 // which mkdirs — while a client that only wants to ask where the daemon is
 // uses the package's pure `serviceSocketPath`.
-import { webAppNamespace } from "@odu/service-client/socket";
+import { webAppNamespace, webHomeOptions } from "@odu/service-client/socket";
 import type { ServiceBuild } from "@odu/service-client/surface";
 import { Effect } from "effect";
 
@@ -53,8 +53,13 @@ const DIST_ENV = "ODU_WEB_DIST";
  *  disagree about where the gate and the control socket are. */
 export function webHome(
   origin: string = serviceOrigin(),
+  env: Record<string, string | undefined> = process.env,
 ): ReturnType<typeof daemonHome> {
-  return daemonHome({ app: webAppNamespace(origin), placement: "state" });
+  // The SAME function the client dials through (`serviceSocketPath`), so the
+  // daemon cannot bind a socket under a home its clients do not ask about —
+  // and so `$ODU_STATE_DIR`, which already holds the catalog and the cache,
+  // holds the gate and the socket too.
+  return daemonHome(webHomeOptions(origin, env));
 }
 
 /**
@@ -235,6 +240,23 @@ const WEB_DAEMON_ENV_KEYS = [
   "ODU_WEB_MCP_TOKEN",
   "ODU_COMMIT_HASH",
   "ODU_BUILD_ID",
+  // The cache's two settings, and they belong HERE for the same reason the rest
+  // of this list does: the daemon is where the cache lives, and a `$ODU_ROOT_TOKEN`
+  // that reached the launcher but not the daemon is a service that answers every
+  // admin verb with `no_root_token` for an environment the operator set
+  // correctly. `$ODU_CACHE_STORE` is the `--store` URI the whole cache points at
+  // (the e2e suite's throwaway chroot, a host's real store by default), and it
+  // has to travel with the token or a test that redirects one gets the other.
+  //
+  // NOT in `ODU_CHILD_ENV_KEYS`: a coordinator starts with that list, so the
+  // cache's root token stays in the daemon and out of every run it launches.
+  "ODU_ROOT_TOKEN",
+  "ODU_CACHE_STORE",
+  // What a bucket's substituter URL is published under. Same reason as the two
+  // above — the daemon is what builds that URL — and the same reason it stays
+  // out of `ODU_CHILD_ENV_KEYS`: a run has no business naming the cache's
+  // public face.
+  "ODU_PUBLIC_ORIGIN",
 ] as const;
 
 /**

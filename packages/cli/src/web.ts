@@ -74,6 +74,7 @@ import { runSocketPath } from "@odu/run-client/dial";
 import { gitTopLevel } from "@odu/execution/common/git";
 import { ODU_VERSION } from "@odu/execution/common/version";
 import {
+  readPublicOrigin,
   serviceBind,
   serviceMcpUrl,
   serviceOrigin,
@@ -89,6 +90,7 @@ import {
   serveServiceMcpInProcess,
 } from "./serviceMcp";
 import { webPorts } from "./webPorts";
+import { cacheRoutes } from "@odu/cache/routes";
 import {
   assertPackaged,
   bakedBuild,
@@ -181,6 +183,15 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
   // whatever name it is reached by (an SSH forward, a tailnet name, a proxy),
   // and the Origin check compares a browser's Origin against that same Host.
   const allowedOrigins = parseAllowedOrigins(process.env.ODU_WEB_ALLOWED_ORIGINS);
+  // The address a BUCKET is published at, when a proxy stands in front. Read
+  // here rather than in `@odu/service` because this is the one place that reads
+  // an environment, and refused HERE rather than concatenated there: a value
+  // with a path would build a substituter URL nobody asked for.
+  const published = readPublicOrigin(process.env);
+  if (!published.ok) {
+    process.stderr.write(`odu: ${published.message}\n`);
+    return 1;
+  }
 
   // Claimed FIRST, so a launcher that lost the race never binds the port. The
   // framework's own gate: one atomic link, a liveness-proved holder, and a
@@ -213,9 +224,14 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     stopHandlers.push(() => process.off(signal, onSignal));
   }
 
+  // ONE cache for the tenure: the service administers it through a port, and
+  // the listener serves the protocol through the same object. Two constructions
+  // would be two databases.
+  const { ports, cache } = webPorts();
   const service = createOduService({
-    ports: webPorts(),
+    ports,
     origin,
+    ...(published.origin === null ? {} : { publicOrigin: published.origin }),
     home: home.dir,
     build: bakedBuild(),
     // A refresh tick that outran its interval is logged here, rate-limited —
@@ -258,13 +274,17 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
           host,
           port,
           allowedOrigins,
-          routes: Layer.merge(mcpRoute(transport, allowedOrigins), mcpGetRoute()),
+          routes: Layer.merge(
+            Layer.merge(mcpRoute(transport, allowedOrigins), mcpGetRoute()),
+            cacheRoutes(cache),
+          ),
         }),
       ).pipe(Scope.provide(scope)),
     );
   } catch (err) {
     await mcp.close();
     await service.close();
+    cache.close();
     gate.release();
     process.stderr.write(
       `odu: could not bind ${origin} — ${(err as Error).message}\n` +
@@ -298,6 +318,9 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     await mcp.close();
     await Effect.runPromise(Scope.close(scope, Exit.void));
     await service.close();
+    // The database handle is this process's, and a tenure that ended is a
+    // tenure whose SQLite connection must not outlive it.
+    cache.close();
   }
 }
 

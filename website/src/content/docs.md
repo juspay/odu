@@ -86,14 +86,76 @@ The board lists runs across repositories. Open a run to inspect nodes, follow lo
 
 Configure forwarding separately; Odu can keep listening on loopback. The service answers to whatever name it is reached by, so an SSH forward, a Tailscale name, or a proxy that passes the Host header through needs no configuration. Anyone who can reach the forwarded address can control CI.
 
-A proxy that rewrites Host sends a browser Origin that no longer matches it. Admit that origin when starting the service:
+A proxy that rewrites Host sends a browser Origin that no longer matches it. Admit that origin when starting the service — `services.odu.allowedOrigins` is the module's spelling of the same setting:
 
 ```sh
 ODU_WEB_ALLOWED_ORIGINS=https://box.tailnet.ts.net \
   nix run github:juspay/odu -- web --upgrade
 ```
 
-This replaces the existing service in the foreground. The setting is read at server startup; separate multiple origins with commas. `ODU_WEB_ORIGIN` instead changes the listener's address and service identity.
+This replaces the existing service in the foreground. The setting is read at server startup; separate multiple origins with commas. `ODU_WEB_ORIGIN` instead changes the listener's address and service identity, and `ODU_PUBLIC_ORIGIN` names the address a bucket is published under when a proxy stands in front — see [Self-host on NixOS](#self-host-on-nixos).
+
+### Self-host on NixOS
+
+The board, the CI runs and the cache are one process, so the flake ships a NixOS module for all three. Add the flake and import it:
+
+```nix
+{
+  inputs.odu.url = "github:juspay/odu";
+}
+```
+
+```nix
+{ config, inputs, ... }:
+{
+  imports = [ inputs.odu.nixosModules.default ];
+
+  # `cache.enableACME` is on by default, and Let's Encrypt wants both of these.
+  # Accepting the terms is your act, not the module's.
+  security.acme = {
+    acceptTerms = true;
+    defaults.email = "you@example.com";
+  };
+
+  # Any secret file works. agenix is the example.
+  age.secrets.odu-root-token = {
+    file = ./secrets/odu-root-token.age;
+    owner = "odu";
+    mode = "0400";
+  };
+
+  services.odu = {
+    enable = true;
+    cache.domain = "cache.example.com";
+    rootTokenFile = config.age.secrets.odu-root-token.path;
+    openFirewall = true;
+  };
+}
+```
+
+What that does, in five sentences. The daemon binds loopback and runs as the `odu` system user, with its state in `/var/lib/odu` at mode 0700 — the cache's signing keys are in there. That user is added to `nix.settings.trusted-users`, because a cache server imports paths built on other machines and those carry no signature your daemon trusts. The root token arrives as a systemd credential and is exported into the unit's environment, never written into the Nix store. nginx serves one virtual host that proxies `/cache/` and `/_odu/v1/` and answers 404 to everything else, so **the board and `/mcp`, which have no authentication in this release, stay off the public internet**. `cache.domain` also sets the origin a bucket publishes, so the URL `odu cache use` prints is the one your clients can reach.
+
+Reach the board over a tailnet or an SSH forward to `127.0.0.1:18440`, then create the bucket and mint a token:
+
+```sh
+odu cache create main
+odu cache token mint main --write
+```
+
+On a client, trust the bucket — the key `create` printed:
+
+```nix
+{
+  nix.settings = {
+    extra-substituters = [ "https://cache.example.com/cache/main" ];
+    extra-trusted-public-keys = [ "main-1:<public-key>" ];
+  };
+}
+```
+
+`ODU_PUBLIC_ORIGIN` is the setting behind that URL: it names the address a bucket is published under when a proxy stands in front, and defaults to what `cache.domain` and `cache.enableACME` imply. The module requires a loopback `listen`, because a public board is PR 3's (server mode) answer rather than a flag to flip today.
+
+**Without the module.** A container or any non-systemd host runs the same one process from the environment the module sets, and needs nothing else. `ODU_STATE_DIR` holds everything — the run catalog, the cache, and now the daemon's own gate and socket, which is what a read-only `$HOME` otherwise breaks. `ODU_WEB_ORIGIN` is the address it binds, `ODU_PUBLIC_ORIGIN` the one a bucket's URL is published at, and `ODU_ROOT_TOKEN` the administration secret. `ODU_CACHE_STORE=local?root=<dir>` gives the cache a store of its own on a volume; a store that is not the machine that built the paths never holds nixpkgs, so create its buckets with `odu cache create <bucket> --no-upstream` or every referrer sits at 202. It needs `nix` on `PATH` (deliberately not in the wrapper) and a `$HOME` that `nix` itself can write under. One process, one replica: there is no second daemon to elect, and the module's nginx is only needed if you want the board reachable from outside the pod.
 
 ## Daily workflow
 
@@ -189,7 +251,7 @@ For agents with an MCP client, odu ships the unified skill and its MCP server to
 
 The stdio bridge bootstraps the service and exposes the same verbs as tools (`run_start`, `run_wait`, `log_read`, and so on). HTTP MCP clients can instead connect to **http://127.0.0.1:18440/mcp** once the service is running; an HTTP connection itself cannot start it.
 
-Other shared verbs: `run_list` (the board filtered by checkout, commit and seq, in one call), `run_cancel`, `pipeline_read`, `venue_probe`, `venue_hold`, `venue_release`, `catalog_import`, `catalog_prune`, and `protect_apply`. Use `odu surface --help` for their schemas.
+Other shared verbs: `run_list` (the board filtered by checkout, commit and seq, in one call), `run_cancel`, `pipeline_read`, `venue_probe`, `venue_hold`, `venue_release`, `catalog_import`, `catalog_prune`, `protect_apply`, and the cache's `cache_create`, `cache_list`, `cache_describe`, `cache_tokenMint`, `cache_tokenList`, `cache_tokenRevoke`, `cache_pin`, `cache_gc` and `cache_stats`. Use `odu surface --help` for their schemas. Every cache verb but `cache_describe` takes `rootToken`; a service started without `$ODU_ROOT_TOKEN` refuses the rest with `no_root_token` while the substituter keeps serving. `cache_describe` answers a bucket's substituter URL and public key with no credential, which is what `odu cache use` needs.
 
 ## CLI reference
 
@@ -205,6 +267,11 @@ Other shared verbs: `run_list` (the board filtered by checkout, commit and seq, 
 | `hosts`, `lease`, `release` | Inspect and manage venue capacity |
 | `dump`, `graph` | Inspect the resolved pipeline |
 | `protect` | Configure GitHub required checks; preview with `--dry-run` |
+| `cache create/list/use` | Create a bucket, list buckets, print the nix.conf settings for one |
+| `cache token mint/list/revoke` | Mint a scoped token (shown once), list tokens, revoke one |
+| `cache login <origin>` | Save a token for an origin in `~/.config/odu/cache/credentials` |
+| `cache push <bucket> <path>…` | Upload only what the bucket is missing; talks to the cache directly |
+| `cache pin/gc/stats` | Pin a closure, reclaim what retention allows, show sizes and reads |
 | `web`, `surface`, `mcp` | Browser server, generated CLI, agent transport |
 
 For `wait`, `rerun`, and `cancel`, omitted `--run` means `latest` in this checkout. Run addresses also accept a run ID or `<sha7>#<seq>`. `odu runs` has been replaced by `history list`.

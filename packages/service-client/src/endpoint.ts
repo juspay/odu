@@ -69,6 +69,54 @@ export function serviceOrigin(
   return withoutTrailingSlashes(origin);
 }
 
+/** The env var naming the address a BUCKET is reachable at from outside, when
+ *  that is not the address this process binds — a proxy, in other words. */
+export const PUBLIC_ORIGIN_ENV = "ODU_PUBLIC_ORIGIN";
+
+/** What `$ODU_PUBLIC_ORIGIN` came to: absent, an origin, or the reason it is
+ *  not one. */
+export type PublicOriginReading =
+  | { ok: true; origin: string | null }
+  | { ok: false; message: string };
+
+/**
+ * The origin a bucket's substituter URL is published under, or the reason the
+ * setting is unusable.
+ *
+ * It is an ORIGIN and nothing else: `<scheme>://<host>[:port]`. A path here
+ * would be concatenated into `<origin>/cache/<bucket>` and silently mean
+ * something else than the operator wrote — the one kind of mistake a person
+ * cannot see by reading their own config — so a path, a query or a fragment is
+ * a refusal with a sentence rather than a rewrite.
+ */
+export function readPublicOrigin(
+  env: Record<string, string | undefined> = process.env,
+): PublicOriginReading {
+  const raw = env[PUBLIC_ORIGIN_ENV]?.trim();
+  if (raw === undefined || raw === "") return { ok: true, origin: null };
+  let url: URL;
+  try {
+    url = new URL(withoutTrailingSlashes(raw));
+  } catch {
+    return { ok: false, message: `$${PUBLIC_ORIGIN_ENV}=${raw} is not a URL` };
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    return {
+      ok: false,
+      message: `$${PUBLIC_ORIGIN_ENV}=${raw} is not http or https`,
+    };
+  }
+  if (url.pathname !== "/" || url.search !== "" || url.hash !== "") {
+    return {
+      ok: false,
+      message:
+        `$${PUBLIC_ORIGIN_ENV}=${raw} names more than an origin — scheme, host ` +
+        "and port only, because odu appends the bucket's own path to it",
+    };
+  }
+  return { ok: true, origin: `${url.protocol}//${url.host}` };
+}
+
 /** The host and port a listener binds, parsed out of an origin. Returned as a
  *  pair rather than as a URL because `server.listen` takes two arguments and a
  *  caller that re-parsed the string would be the second parser of one fact. */
