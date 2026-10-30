@@ -200,6 +200,28 @@ function BucketList(props: {
   );
 }
 
+/** What a read of one bucket answered: the page, or the sentence explaining why
+ *  there is none. A refusal is an ANSWER (`CacheRefused` is a typed failure),
+ *  not an outage, so it travels as the value rather than as a resource error. */
+type FirstPage =
+  | {
+      readonly ok: true;
+      readonly page: { readonly paths: readonly CachePath[]; readonly next?: string };
+    }
+  | { readonly ok: false; readonly message: string };
+
+/** A refusal as a sentence. The service's refusals are already written for a
+ *  person; this only adds the recovery when the error carries one. */
+function refusalText(err: unknown): string {
+  const value = err as { message?: unknown; suggestion?: unknown };
+  const message =
+    typeof value?.message === "string" ? value.message : String(err);
+  const suggestion = Array.isArray(value?.suggestion)
+    ? ` Try: ${(value.suggestion as unknown[]).map(String).join(" ")}`
+    : "";
+  return `${message}${suggestion}`;
+}
+
 /** How long the filter waits for the typing to stop before it asks. Short
  *  enough that a pause reads as an answer, long enough that a word typed at
  *  speed is one query rather than six. */
@@ -249,15 +271,6 @@ function BucketPage(props: {
   const [loadingMore, setLoadingMore] = createSignal(false);
 
   /**
-   * THE FIRST PAGE, AS A RESOURCE KEYED ON `[name, filter]`.
-   *
-   * `createResource` is what makes the filter safe: a keystroke supersedes the
-   * read before it, and a superseded answer is DISCARDED rather than painted
-   * over a newer one — which is what a bare promise chain did, in whatever order
-   * the answers happened to arrive. Its `onCleanup` is the resource's own, so a
-   * page that navigates away mid-read leaves nothing running.
-   */
-  /**
    * EVERY READ CARRIES THE QUERY IT BELONGS TO.
    *
    * A keystroke supersedes the read before it, and a "more" page is a click on
@@ -281,25 +294,42 @@ function BucketPage(props: {
    * THE FIRST PAGE, AS A RESOURCE KEYED ON `[name, filter]`.
    *
    * `createResource` is what makes the filter safe: a keystroke supersedes the
-   * read before it, and a superseded answer is discarded rather than painted
-   * over a newer one — which is what a bare promise chain did, in whatever
-   * order the answers happened to arrive.
+   * read before it, and a superseded answer is DISCARDED rather than painted
+   * over a newer one — which is what a bare promise chain did, in whatever order
+   * the answers happened to arrive. Its `onCleanup` is the resource's own, so a
+   * page that navigates away mid-read leaves nothing running.
+   *
+   * THE ANSWER IS A VALUE, REFUSALS INCLUDED. A resource whose fetch REJECTS
+   * holds the error in `error`, and `read()` rethrows it at whoever touches the
+   * value — so every reader would have to remember not to. Worse, a rejected
+   * fetch on this page left the resource pending and the rejection unhandled:
+   * the refusal then rendered as "reading…" forever, which is precisely the
+   * page-not-error confusion this screen exists to avoid. A refusal here is
+   * not an outage to retry into the void; it is a sentence somebody reads, so
+   * it comes back as the value like every other answer.
    */
   const [first, { refetch }] = createResource(
     () => [props.name, filter()] as const,
-    async ([name, needle]) => {
+    async ([name, needle]): Promise<FirstPage> => {
       setAppended([]);
       setExtra(null);
       setFailure(null);
       setLoadingMore(false);
       // A NEW QUERY RETIRES EVERY PAGE READ AGAINST THE OLD ONE.
       supersede();
-      return props.call(
-        props.client.procedures.bucket.paths({
-          bucket: name,
-          ...(needle === "" ? {} : { filter: needle }),
-        }),
-      );
+      try {
+        return {
+          ok: true,
+          page: await props.call(
+            props.client.procedures.bucket.paths({
+              bucket: name,
+              ...(needle === "" ? {} : { filter: needle }),
+            }),
+          ),
+        };
+      } catch (err) {
+        return { ok: false, message: refusalText(err) };
+      }
     },
   );
 
@@ -327,18 +357,29 @@ function BucketPage(props: {
         (err: unknown) => {
           if (asked !== current()) return;
           setLoadingMore(false);
-          setFailure(err instanceof Error ? err.message : String(err));
+          setFailure(refusalText(err));
         },
       );
   };
 
+  const refusal = createMemo<string | null>(() => {
+    const answer = first();
+    return answer === undefined || answer.ok ? null : answer.message;
+  });
+
   const stable = keepIdentity<CachePath & { readonly name: string }>();
-  const paths = createMemo<Array<CachePath & { readonly name: string }>>(() =>
-    [...(first()?.paths ?? []), ...appended()].map((path) =>
+  const paths = createMemo<Array<CachePath & { readonly name: string }>>(() => {
+    const answer = first();
+    if (answer === undefined || !answer.ok) return [];
+    return [...answer.page.paths, ...appended()].map((path) =>
       stable({ ...path, name: path.storePath }),
-    ),
-  );
-  const next = createMemo<string | null>(() => extra() ?? first()?.next ?? null);
+    );
+  });
+  const next = createMemo<string | null>(() => {
+    const answer = first();
+    if (extra() !== null) return extra();
+    return answer !== undefined && answer.ok ? (answer.page.next ?? null) : null;
+  });
 
   /** The bucket's row, from the same subscription the list reads. */
   const held = props.client.collections.buckets.use();
@@ -393,18 +434,11 @@ function BucketPage(props: {
             onInput={(event) => setTyped(event.currentTarget.value)}
           />
         </label>
-        {/* THE FIRST PAGE'S OWN REFUSAL. A resource's value throws when it is
-            read (`read()` rethrows), so a refused read has to be drawn from
-            `first.error` — and `first()` is never touched on that path. */}
-        <Show when={first.error}>
-          {(err) => (
-            <p class="refused">
-              {err() instanceof Error ? err().message : String(err())}
-            </p>
-          )}
-        </Show>
+        {/* THE FIRST PAGE'S OWN REFUSAL, from the resource's VALUE — see the
+            fetcher: a rejection would be an unhandled one. */}
+        <Show when={refusal()}>{(message) => <p class="refused">{message()}</p>}</Show>
         <Show when={failure()}>{(message) => <p class="refused">{message()}</p>}</Show>
-        <Show when={first.error !== undefined}>
+        <Show when={refusal() !== null || failure() !== null}>
           <button type="button" class="link" onClick={() => refetch()}>
             try again
           </button>
@@ -412,13 +446,15 @@ function BucketPage(props: {
         <Show
           when={paths().length > 0}
           fallback={
-            <p class="hint">
-              {first.loading
-                ? "reading…"
-                : filter() === ""
-                  ? "Nothing pushed to this bucket yet."
-                  : "No path matches that filter."}
-            </p>
+            <Show when={refusal() === null && failure() === null}>
+              <p class="hint">
+                {first.loading
+                  ? "reading…"
+                  : filter() === ""
+                    ? "Nothing pushed to this bucket yet."
+                    : "No path matches that filter."}
+              </p>
+            </Show>
           }
         >
           <ol class="paths">
