@@ -390,6 +390,11 @@ What lands:
 - On top of PR 1's module: a `proxy_cache` on the NAR reads, and the
   dedicated server deployed from this branch before merge — the PR's evidence
   shows it.
+- The server substitutes a referrer's upstream-signed references into its OWN
+  store (`nix-store -r --store … --option substituters …`) before the narinfo
+  is imported, so a store that is not the builder's can keep the upstream skip
+  and still import referrers. Today the answer for such a store is
+  `odu cache create --no-upstream`, which takes everything and pays the bytes.
 - The dogfood switch (F9, F11): `flake.nix` `nixConfig` names the bucket;
   `nix-cache.yml` substitutes from it and pushes with `odu cache push` (or
   `nix copy` with netrc at bootstrap) using an `ODU_CACHE_TOKEN` secret, and

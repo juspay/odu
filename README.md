@@ -63,7 +63,7 @@ ODU_CACHE_TOKEN=... odu cache push main ./result
 
 | Command | What it does |
 | --- | --- |
-| `odu cache create <bucket>` | Create a bucket; print its substituter URL and public key |
+| `odu cache create <bucket>` | Create a bucket; print its substituter URL and public key. `--no-upstream` takes everything, for a store that is not the builder's |
 | `odu cache list` | List buckets, with sizes |
 | `odu cache use <bucket>` | Print the substituter and key settings, a `nixConfig` block, and the netrc lines |
 | `odu cache token mint\|list\|revoke` | Scoped, expiring, revocable tokens; the plaintext is shown once |

@@ -25,9 +25,11 @@ import { call, emitJson, reportFailure, withService } from "./serviceFace";
 
 export const CACHE_USAGE = `usage: odu cache <create|list|use|token|login|push|pin|gc|stats> [args]
 
-create <bucket> [--private] [--retention-days N] [--upstream-key K]…
+create <bucket> [--private] [--retention-days N] [--upstream-key K]… | --no-upstream
                               create a bucket; print its substituter URL and
-                              public key. Needs $ODU_ROOT_TOKEN
+                              public key. Needs $ODU_ROOT_TOKEN.
+                              --no-upstream takes everything: for a server whose
+                              store is not the machine that built the paths
 list [-o json]                buckets, with sizes. Needs $ODU_ROOT_TOKEN
 use <bucket>                  the nix.conf settings, the nixConfig block and the
                               netrc lines for a bucket. Needs NO token: a
@@ -125,6 +127,7 @@ async function createCommand(rest: string[]): Promise<number> {
       private: { type: "boolean" },
       "retention-days": { type: "string" },
       "upstream-key": { type: "string", multiple: true },
+      "no-upstream": { type: "boolean" },
       origin: originOption,
       output: outputOption,
     },
@@ -136,6 +139,16 @@ async function createCommand(rest: string[]): Promise<number> {
   }
   const json = values.output === "json";
   const upstream = values["upstream-key"];
+  // BOTH is a contradiction with a one-sentence answer, not a merge rule: "take
+  // nothing from upstream" and "take what these names signed" cannot both hold.
+  if (values["no-upstream"] === true && upstream !== undefined) {
+    process.stderr.write(
+      "odu: --no-upstream and --upstream-key are opposites — a bucket either " +
+        "takes paths an upstream key signed or it takes everything\n",
+    );
+    return 1;
+  }
+  const upstreamKeys = values["no-upstream"] === true ? [] : upstream;
   return withService(values.origin, async (client) => {
     const answer = await call(
       client.surface.cache.create({
@@ -146,7 +159,7 @@ async function createCommand(rest: string[]): Promise<number> {
           values["retention-days"] === undefined
             ? 90
             : wholeNumber("--retention-days", values["retention-days"]),
-        ...(upstream === undefined ? {} : { upstreamKeys: upstream }),
+        ...(upstreamKeys === undefined ? {} : { upstreamKeys }),
       }),
     );
     if (!answer.ok) return reportFailure(answer, json, REFUSED);

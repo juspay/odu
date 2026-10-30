@@ -487,6 +487,43 @@ describe("missing", () => {
     await h.dispose();
   });
 
+  it("takes everything when the bucket has no upstream keys", async () => {
+    // A server whose store is not the machine that built the paths — a chroot
+    // store on a volume, a fresh host — never holds nixpkgs, so a bucket that
+    // skips upstream-signed paths leaves every referrer at 202 for ever. An
+    // EMPTY list is the answer the surface already documents ("takes
+    // everything"); this pins that the skip really is off, not just unused.
+    const h = await harness(true);
+    const created = await h.cache.admin.create({
+      rootToken: ROOT,
+      name: "everything",
+      public: true,
+      retentionDays: 30,
+      upstreamKeys: [],
+    });
+    expect(created.ok).toBe(true);
+    // A token minted for `main` cannot ask about this bucket, so mint one that
+    // can: the point of the test is the upstream rule, not the scope rule.
+    const scoped = await h.cache.admin.tokenMint({
+      rootToken: ROOT,
+      bucket: "everything",
+      bucketGlob: null,
+      scope: "write",
+      expiresDays: null,
+    });
+    if (!scoped.ok) throw new Error(scoped.message);
+    const write = bearer(scoped.value.token);
+    const response = await h.raw("/_odu/v1/buckets/everything/missing", {
+      ...write,
+      method: "POST",
+      headers: { ...write.headers, "content-type": "application/json" },
+      body: JSON.stringify({ paths: [{ path: GLIBC, sigs: ["cache.nixos.org-1:AAAA"] }] }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ missing: [GLIBC], skippedUpstream: [] });
+    await h.dispose();
+  });
+
   it("needs write scope, and a body it can read", async () => {
     const h = await harness(true);
     expect((await h.raw("/_odu/v1/buckets/main/missing", { method: "POST", body: "{}" })).status).toBe(

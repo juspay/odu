@@ -202,6 +202,7 @@ interface Bucket {
   url: string;
   publicKey: string;
   keyName: string;
+  upstreamKeys: string[];
 }
 
 let main: Bucket;
@@ -352,6 +353,52 @@ describe("odu serves a Nix binary cache", () => {
       { NIX_REMOTE: "" },
     );
     expect(substituted.status).toBe(0);
+  });
+
+  it("takes what an upstream key signed when the bucket names no upstream", async () => {
+    // A path carrying a `cache.nixos.org-1` signature is what a lane host that
+    // built against nixpkgs produces. `main` skips it as upstream — the whole
+    // point of the default — and a server whose store is NOT the builder's has
+    // nothing to fall back on, so its referrers would sit at 202 for ever. The
+    // escape is a bucket with no upstream keys at all.
+    const within = build("odu-cache-e2e-upstream");
+    const keyFile = join(storeRoot, "nixos-key");
+    const generated = spawnSync(
+      "nix",
+      ["key", "generate-secret", "--key-name", "cache.nixos.org-1"],
+      { encoding: "utf-8" },
+    );
+    expect(generated.status).toBe(0);
+    writeFileSync(keyFile, generated.stdout, { mode: 0o600 });
+    expect(nix(["store", "sign", "--store", builderStore, "--key-file", keyFile, within]).status).toBe(0);
+
+    const skipped = cli(["cache", "push", "main", within], {
+      ODU_CACHE_TOKEN: writeToken,
+      NIX_REMOTE: builderStore,
+    });
+    expect(skipped.status).toBe(0);
+    expect(skipped.stdout).toContain("skipped-upstream 1");
+
+    const created = cli(["cache", "create", "everything", "--no-upstream", "-o", "json"]);
+    expect(created.status).toBe(0);
+    const everything = JSON.parse(created.stdout) as Bucket;
+    expect(everything.upstreamKeys).toEqual([]);
+    const minted = cli(["cache", "token", "mint", "everything", "--write", "-o", "json"]);
+    expect(minted.status).toBe(0);
+    const token = (JSON.parse(minted.stdout) as { token: string }).token;
+
+    const pushed = cli(["cache", "push", "everything", within], {
+      NIX_REMOTE: builderStore,
+      ODU_CACHE_TOKEN: token,
+    });
+    expect(pushed.status).toBe(0);
+    expect(pushed.stdout).toContain("pushed 1");
+    expect(pushed.stdout).toContain("skipped-upstream 0");
+
+    // And the flag has an opposite: naming both is refused, not merged.
+    const both = cli(["cache", "create", "nope", "--no-upstream", "--upstream-key", "x-1"]);
+    expect(both.status).toBe(1);
+    expect(both.stderr).toContain("opposites");
   });
 
   it("refuses an unauthenticated read of a private bucket, and serves with netrc", async () => {
@@ -541,6 +588,7 @@ describe("odu serves a Nix binary cache", () => {
       hits: number;
     };
     expect(answer.buckets.map((bucket) => bucket.name).sort()).toEqual([
+      "everything",
       "main",
       "private",
       "thief",

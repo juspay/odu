@@ -101,7 +101,7 @@ The server accepts any username and the token as the password.
 | | cachix push | attic push | `odu cache push` |
 | --- | --- | --- | --- |
 | Closure, batched missing query, retries | yes | yes | yes |
-| Skips paths cache.nixos.org already has | yes | yes | yes: the server drops paths signed by an upstream key, `cache.nixos.org-1` by default |
+| Skips paths cache.nixos.org already has | yes | yes | yes: the server drops paths signed by an upstream key, `cache.nixos.org-1` by default — or nothing, with `--no-upstream` |
 | Streams NARs, parallel uploads | yes | yes | yes: `nix store dump-path` through zstd, several paths at a time, retry per path |
 | Uploads bypass the server | yes, straight to S3 | no | no; a later release adds it for object storage |
 | Dedup | per NAR | per chunk | per store path |
@@ -133,7 +133,7 @@ The cache keeps no second copy of your builds. The server's own `/nix/store` hol
 
 - A push imports the paths into the server's store through the Nix daemon. Pushing from the machine that built them moves nothing.
 - An upload is accepted only when the bytes are there: the server hashes the NAR it staged against the narinfo's `NarHash` before importing it. `nix copy --from` alone would not do, because it copies nothing and exits 0 for a path the store already has — which on a single machine is the ordinary case.
-- A narinfo whose references are not in the store yet answers **202** and is imported when they arrive; anything else that cannot be imported answers **400** with Nix's own sentence. A reference that `odu cache push` skipped as upstream is never uploaded, so a server whose store does not already hold it will leave the referrer at 202 — push the closure in full, or let the server's store be the machine that built it.
+- A narinfo whose references are not in the store yet answers **202** and is imported when they arrive; anything else that cannot be imported answers **400** with Nix's own sentence. A reference that `odu cache push` skipped as upstream is never uploaded, so a server whose store does not already hold it will leave the referrer at 202 — either let the server's store be the machine that built it, or create the bucket with `--no-upstream` and push the closure in full.
 - A NAR read streams the path out of the store, compressed on the fly.
 - Every path a bucket retains is rooted under odu's state directory, so the machine's own garbage collection never removes what the cache serves. `odu cache gc` drops the roots of what retention has expired and deletes those paths.
 - The database, signing keys, token hashes, narinfo metadata and pins live in one SQLite file:
@@ -175,7 +175,7 @@ Writes, and reads of private buckets, accept `Authorization: Bearer <token>` or 
 
 | Command | What it does |
 | --- | --- |
-| `odu cache create <bucket>` | Create a bucket; print its substituter URL and public key |
+| `odu cache create <bucket> [--no-upstream]` | Create a bucket; print its substituter URL and public key. `--no-upstream` takes everything, for a store that is not the builder's |
 | `odu cache list` | List buckets |
 | `odu cache use <bucket>` | Print the substituter and key settings, the `nixConfig` block, and the netrc lines |
 | `odu cache token mint <bucket> --write\|--read\|--admin` | Mint a token, printed once |
