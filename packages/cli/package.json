@@ -16,6 +16,7 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@odu/cache": "workspace:*",
     "@odu/execution": "workspace:*",
+    "@odu/host": "workspace:*",
     "@odu/run-client": "workspace:*",
     "@odu/run-history": "workspace:*",
     "@odu/service": "workspace:*",

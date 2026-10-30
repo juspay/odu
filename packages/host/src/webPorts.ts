@@ -44,7 +44,6 @@ import {
 } from "@odu/execution/coordinator/recovery";
 import { gitBranch } from "@odu/execution/common/git";
 import { type CatalogOptions, listRuns } from "@odu/run-history/store";
-import { stateRoot } from "@odu/run-history/paths";
 import { type Cache, createCache } from "@odu/cache/cache";
 import { readPipeline } from "./pipelinePort";
 import { holdVenue, probeVenues, releaseVenue } from "./venuePort";
@@ -120,9 +119,19 @@ export interface WebPorts {
 /** An environment variable's value, or `null` when it is unset or blank. A
  *  blank `$ODU_ROOT_TOKEN=` is the same absence as no variable at all, and
  *  reading it as a real token would make an empty string a credential. */
-function configured(value: string | undefined): string | null {
+export function configured(value: string | undefined): string | null {
   const trimmed = value?.trim();
   return trimmed === undefined || trimmed === "" ? null : trimmed;
+}
+
+/** What the composition is handed, rather than reading for itself: the state
+ *  root, the operator's root token and the store URI are the HOST's facts (it
+ *  is the one place that reads an environment), and a port adapter that read
+ *  them again would be a second reading of them. */
+export interface WebPortFacts {
+  readonly stateDir: string;
+  readonly rootToken: string | null;
+  readonly store: string | null;
 }
 
 /**
@@ -137,11 +146,11 @@ function configured(value: string | undefined): string | null {
  * `$ODU_CACHE_STORE` is an optional `--store` URI, which is how the e2e suite
  * points the whole cache at a throwaway chroot store.
  */
-export function webPorts(env: NodeJS.ProcessEnv = process.env): WebPorts {
+export function webPorts(facts: WebPortFacts): WebPorts {
   const cache = createCache({
-    stateRoot: stateRoot(env),
-    rootToken: configured(env.ODU_ROOT_TOKEN),
-    store: configured(env.ODU_CACHE_STORE),
+    stateRoot: facts.stateDir,
+    rootToken: facts.rootToken,
+    store: facts.store,
   });
   const launcher = packagedLauncher();
   // ONE forge for this service's life, and the SAME implementation the

@@ -57,7 +57,7 @@ import type {
 } from "@odu/service-client/surface";
 import { isCommitPrefix, ServiceRefused } from "@odu/service-client/surface";
 import { Effect, type Stream } from "effect";
-import { connectOrStart } from "./webLauncher";
+import { connectOrStart } from "@odu/host/webLauncher";
 
 // ── exits ───────────────────────────────────────────────────────────────────
 

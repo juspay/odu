@@ -106,10 +106,6 @@ const reachedFromMain = mainImports
  * belonging to neither is a failure rather than a silent exemption.
  */
 const SERVICE_ROOTS: readonly string[] = [
-  // The daemon itself: it binds the listener, builds the service and BINDS THE
-  // PORTS. Reaching the engine is its entire job — `odu web` is how the
-  // authority comes into existence, not a face onto it.
-  "web.ts",
   // `run-coordinator` and `lease-hold`: argv entry points a launcher types,
   // never a person. `run-coordinator` IS the coordinator. See `./internalCli`
   // on why these moved out of `main.ts` — it was so that this derivation could
@@ -137,19 +133,22 @@ const FORBIDDEN: readonly { prefix: string; authority: string }[] = [
 ];
 
 /**
- * The ONE exception, named with its reason.
+ * There is no allowance any more, and the reason it left is worth keeping.
  *
  * A daemon launcher has to know odu's own re-invocation argv and which
  * environment a child needs, and both live with the spawn machinery in
- * `@odu/execution/coordinator/spawn`. That module starts nothing by itself —
- * it is the pure description of HOW something would be started — and the thing
- * `webDaemonLaunch` starts is the service, not a run. Allowing the whole
- * `coordinator` prefix for this one file would allow the launcher and the retry
- * policy with it, so the exception is per-file AND per-specifier.
+ * `@odu/execution/coordinator/spawn`. That exception was per-file AND
+ * per-specifier, held for `webDaemonLaunch.ts` alone.
+ *
+ * `webDaemonLaunch.ts` is not in this package any more: the daemon's whole
+ * root — the tenure, the listener's parts, how a client converges on the
+ * singleton, and the composition root that binds the ports — is `@odu/host`,
+ * and that package's own `src/closure.test.ts` states the exception where it
+ * now lives. What this file still owes is the derivation: `main.ts` no longer
+ * imports `@odu/cli/web`, so nothing about the engine reaches a public client
+ * through it, and `SERVICE_ROOTS` above is what is left.
  */
-const ALLOWED: Readonly<Record<string, readonly string[]>> = {
-  "webDaemonLaunch.ts": ["@odu/execution/coordinator/spawn"],
-};
+const ALLOWED: Readonly<Record<string, readonly string[]>> = {};
 
 /** Every module specifier a consumer's compiler would have to resolve: static
  *  imports and re-exports (`import type` included), `import x = require("…")`,
@@ -259,7 +258,7 @@ describe("the authority wall", () => {
     expect(reachedFromMain.length).toBeGreaterThan(5);
   });
 
-  it("keeps the exempt set exactly these two, and no more", () => {
+  it("keeps the exempt set exactly this one, and no more", () => {
     // THE PRESSURE IS ON THE EXEMPTIONS, and it took a review to see that.
     //
     // This assertion used to compare `[...PUBLIC_CLIENTS, ...SERVICE_ROOTS]`
@@ -278,9 +277,12 @@ describe("the authority wall", () => {
       [...SERVICE_ROOTS].sort(),
       "SERVICE_ROOTS changed. Every name here is a module the wall STOPS " +
         "walking, so adding one removes it and everything it imports from the " +
-        "policed set. That is occasionally right — `web.ts` IS the service — " +
-        "and it is never something to do in passing.",
-    ).toEqual(["internalCli.ts", "web.ts"]);
+        "policed set. That is occasionally right — `internalCli.ts` really is " +
+        "the coordinator and its holder — and it is never something to do in " +
+        "passing. The daemon root used to be the other one; it left this " +
+        "package for `@odu/host`, together with the spawn allowance that stood " +
+        "beside it, so neither is this file's to name any more.",
+    ).toEqual(["internalCli.ts"]);
   });
 
   it("names no service root that main.ts has stopped importing", () => {
@@ -339,23 +341,19 @@ describe("the authority wall", () => {
     ).toEqual([]);
   });
 
-  it("keeps the one allowance per-file AND per-specifier", () => {
-    // The daemon launcher may name odu's own re-invocation argv. It may not
-    // reach the run launcher standing beside it in the same directory.
-    const launcher = closure.get("webDaemonLaunch.ts") ?? [];
-    expect(launcher).toContain("@odu/execution/coordinator/spawn");
-    expect(launcher).not.toContain("@odu/execution/coordinator/launcher");
-    expect(launcher).not.toContain("@odu/execution/coordinator/recovery");
-  });
-
-  it("does not let the allowance travel to another file", () => {
-    for (const [file, specifiers] of policed) {
-      if (file === "webDaemonLaunch.ts") continue;
-      expect(
-        specifiers.filter((s) => s.startsWith("@odu/execution/coordinator")),
-        `${file} reaches the coordinator. Only webDaemonLaunch.ts may, and ` +
-          "only for the spawn description it needs to start the SERVICE.",
-      ).toEqual([]);
-    }
+  it("allows nothing, and says so rather than leaving an empty map to guess at", () => {
+    // The spawn allowance lived here, per-file AND per-specifier, and it is
+    // gone with the file it was about: `webDaemonLaunch.ts` is `@odu/host`'s
+    // now, and `@odu/execution/coordinator` is not reachable from anything
+    // `src/main.ts` imports. An EMPTY map is the honest answer, and pinning it
+    // empty is what stops a future "just this one" from being added in passing:
+    // every public client here reaches the engine through the service, and none
+    // of them by naming a coordinator module.
+    expect(
+      ALLOWED,
+      "an allowance was added back into the public CLI. The daemon's spawn " +
+        "machinery lives in @odu/host; a client that needs a coordinator module " +
+        "is a client holding authority the service owns.",
+    ).toEqual({});
   });
 });

@@ -36,8 +36,12 @@ export interface ServingParts {
   dist: string;
   /** The app's own routes, merged alongside the shell. MERGED, not ordered:
    *  `HttpRouter` ranks by specificity, so a literal `/mcp` route beats the
-   *  shell's `GET /*` catch-all either way round. */
-  routes: ServeRoutes;
+   *  shell's `GET /*` catch-all either way round.
+   *
+   *  ABSENT when no row owns a route — which is what the rows' own composition
+   *  answers when it has nothing to merge, rather than an empty layer standing
+   *  for "no routes". */
+  routes?: ServeRoutes;
   /** Browser origins allowed beyond same-origin. Same-origin is always
    *  allowed; anything else must be named. The gate runs on the RAW
    *  pre-upgrade socket, so a cross-site page never gets a connection. */
@@ -62,7 +66,7 @@ export function servingOptions(parts: ServingParts): ServeSurfaceAppOptions {
     host: parts.host,
     port: parts.port,
     allowedOrigins: parts.allowedOrigins,
-    routes: parts.routes,
+    ...(parts.routes === undefined ? {} : { routes: parts.routes }),
     onEvent: reportSurfaceAppEvent,
   };
 }

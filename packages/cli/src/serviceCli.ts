@@ -51,7 +51,7 @@ import {
 } from "@kolu/surface-cli";
 import { ODU_VERSION } from "@odu/execution/common/version";
 import { serviceOrigin } from "@odu/service-client/endpoint";
-import { connectOrStart } from "./webLauncher";
+import { connectOrStart } from "@odu/host/webLauncher";
 import { oduServiceSurface } from "@odu/service-client/surface";
 import { ODU_SERVICE_EXPOSE } from "@odu/service-client/verbs";
 import { Effect } from "effect";

@@ -13,8 +13,8 @@
  * {@link holdVenue}, and `spawnLeaseHold`'s note on whose child a holder now is.
  */
 
-import { venueInventory } from "./hosts";
-import { leaseVenues, releaseVenues } from "./leaseCmd";
+import { venueInventory } from "./venueInventory";
+import { leaseVenues, releaseVenues } from "./leaseVenues";
 import type {
   VenueHolder,
   VenueProber,

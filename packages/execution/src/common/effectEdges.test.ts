@@ -80,7 +80,7 @@ const SANCTIONED = new Map<string, string>([
       "construction.",
   ],
   [
-    "packages/cli/src/web.ts",
+    "packages/host/src/web.ts",
     "The web daemon's COMPOSITION ROOT. `serveSurfaceApp` is an Effect over a " +
       "Scope — the listener's whole teardown hangs off it — and the survivable " +
       "spawn driver is an Effect value, while `daemonMain` and odu's own argv " +
@@ -112,7 +112,7 @@ const SANCTIONED = new Map<string, string>([
       "what a refusal means.",
   ],
   [
-    "packages/cli/src/webLauncher.ts",
+    "packages/host/src/webLauncher.ts",
     "Converging on the singleton. Reading the service cell and asking a running " +
       "daemon to drain are Effects; everything that decides between adopt, " +
       "spawn and refuse is ordinary Promise code a test drives without a " +

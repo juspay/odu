@@ -72,25 +72,41 @@ import { parseAllowedOrigins } from "@kolu/surface/ws-origin";
 import { serveSurfaceApp } from "@kolu/surface-app/serve";
 import { runSocketPath } from "@odu/run-client/dial";
 import { gitTopLevel } from "@odu/execution/common/git";
-import { ODU_VERSION } from "@odu/execution/common/version";
 import {
   readPublicOrigin,
   serviceBind,
   serviceMcpUrl,
   serviceOrigin,
 } from "@odu/service-client/endpoint";
-import { createOduService } from "@odu/service/service";
-import { Effect, Exit, Layer, Scope } from "effect";
+import { stateRoot } from "@odu/run-history/paths";
+import { Effect, Exit, Scope } from "effect";
+import {
+  closeHost,
+  mountPlugin,
+  openHost,
+  provide,
+  rowReport,
+  settled,
+  standing,
+} from "@olai/effect-cordis";
 import { readProcessIdentity, selfProcessIdentity } from "./processIdentity";
 import { servingOptions } from "./serving";
+import { configured } from "./webPorts";
+import { composeRows, ROWS, type Composed } from "./rows";
 import {
-  mcpGetRoute,
-  mcpRoute,
-  RouteTransport,
-  serveServiceMcpInProcess,
-} from "./serviceMcp";
-import { webPorts } from "./webPorts";
-import { cacheRoutes } from "@odu/cache/routes";
+  AllowedOrigins,
+  BoundOrigin,
+  Build,
+  createRowTable,
+  DaemonHome,
+  Log,
+  NixStore,
+  PublicOrigin,
+  RootToken,
+  Rows,
+  Shutdown,
+  StateDir,
+} from "./services";
 import {
   assertPackaged,
   bakedBuild,
@@ -175,7 +191,7 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
   // gate, and never two readings of `ODU_WEB_ORIGIN` that could disagree.
   const origin = serviceOrigin();
   const home = webHome(origin);
-  const { host, port } = serviceBind(origin);
+  const { host: bindHost, port } = serviceBind(origin);
   const log = tenure.log;
   const controller = new AbortController();
   // ONE Origin allowlist, read once, applied at both doors — the websocket and
@@ -224,77 +240,110 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     stopHandlers.push(() => process.off(signal, onSignal));
   }
 
-  // ONE cache for the tenure: the service administers it through a port, and
-  // the listener serves the protocol through the same object. Two constructions
-  // would be two databases.
-  const { ports, cache } = webPorts();
-  const service = createOduService({
-    ports,
-    origin,
-    ...(published.origin === null ? {} : { publicOrigin: published.origin }),
-    home: home.dir,
-    build: bakedBuild(),
-    // A refresh tick that outran its interval is logged here, rate-limited —
-    // the one line that connects "the service is slow" to "the catalog is big".
-    log,
-    // The frozen control fragment's `drain`, wired to this process's own stop.
-    // A supervisor asks; the daemon decides how it ends.
-    onDrain: () => controller.abort(),
-  });
-  // A runtime that has faulted answers nothing while the process stays alive
-  // and the socket stays open — the documented zombie. Observed and fatal.
-  service.done.catch((err: unknown) => {
-    log.error({ err: String(err) }, "odu web: surface runtime faulted");
-    process.exit(1);
-  });
-
-  // The adapter and its transport are one pair for the listener's life: an MCP
-  // `Server` binds exactly one transport, and re-making them per request would
-  // rebuild the expose walk and the resource pusher on every call.
-  const transport = new RouteTransport();
-  const mcp = await serveServiceMcpInProcess({
-    handlers: service.runtime.handlers,
-    version: ODU_VERSION,
-    transport,
-  });
+  // ── THE HOST ────────────────────────────────────────────────────────────
+  //
+  // One Cordis context for the tenure, and the rows mounted on it. The host
+  // PROVIDES the facts — the state root, the bound and public origins, the
+  // build, the logger, the Origin allowlist, the store URI, the way to end —
+  // and each row is a plugin that names what it needs. Nothing below this line
+  // reads an environment.
+  const run = standing();
+  const host = await run(openHost);
+  const rows = createRowTable();
+  let closed = false;
+  const closeHostOnce = async (): Promise<void> => {
+    if (closed) return;
+    closed = true;
+    await run(closeHost(host));
+  };
 
   const scope = Scope.makeUnsafe();
-  let bound: string;
   try {
-    bound = await Effect.runPromise(
-      serveSurfaceApp(
-        // The parts and their assembly live in `./serving`: this function owns
-        // the gate, the lifetime and the teardown around the listener.
-        servingOptions({
-          live: () => ({
-            group: service.runtime.group,
-            handlers: service.runtime.handlers,
-          }),
-          dist,
-          host,
-          port,
-          allowedOrigins,
-          routes: Layer.merge(
-            Layer.merge(mcpRoute(transport, allowedOrigins), mcpGetRoute()),
-            cacheRoutes(cache),
-          ),
-        }),
-      ).pipe(Scope.provide(scope)),
-    );
-  } catch (err) {
-    await mcp.close();
-    await service.close();
-    cache.close();
-    gate.release();
-    process.stderr.write(
-      `odu: could not bind ${origin} — ${(err as Error).message}\n` +
-        "Another program is on that port. odu's web service has ONE address so " +
-        "every face can find it; it will not move to a random one.\n",
-    );
-    return 1;
-  }
+    await run(provide(host, Rows, () => rows));
+    await run(provide(host, StateDir, () => stateRoot(process.env)));
+    await run(provide(host, RootToken, () => configured(process.env.ODU_ROOT_TOKEN)));
+    await run(provide(host, NixStore, () => configured(process.env.ODU_CACHE_STORE)));
+    await run(provide(host, DaemonHome, () => home.dir));
+    await run(provide(host, BoundOrigin, () => origin));
+    await run(provide(host, PublicOrigin, () => published.origin));
+    await run(provide(host, AllowedOrigins, () => allowedOrigins));
+    await run(provide(host, Build, () => bakedBuild()));
+    await run(provide(host, Log, () => log));
+    await run(provide(host, Shutdown, () => () => controller.abort()));
 
-  try {
+    for (const row of ROWS) await run(mountPlugin(host, row.plugin));
+    // SETTLED, not merely mounted: a row provides services its siblings may
+    // name, and mounting returns as soon as a fibre exists rather than once its
+    // `apply` has finished.
+    await run(settled(host, ROWS.map((row) => row.name)));
+    const report = await run(rowReport(host, ROWS.map((row) => row.name)));
+    const broken = [...report].filter(([, row]) => row.state !== "running");
+    if (broken.length > 0) {
+      process.stderr.write(
+        `odu: ${broken
+          .map(([name, row]) =>
+            row.state === "failed"
+              ? `the "${name}" row failed to start${row.fault === undefined ? "" : `: ${row.fault}`}`
+              : `the "${name}" row is ${row.state}${
+                  row.state === "waiting" && row.missing !== undefined
+                    ? ` on ${row.missing.join(", ")}`
+                    : ""
+                }`,
+          )
+          .join("; ")}.\n` +
+          "odu: refusing to serve half a surface — a missing row answers " +
+          "`unknown verb` to every member it owns, which reads as a build skew " +
+          "rather than as the fault it is.\n",
+      );
+      return 1;
+    }
+
+    // THE ONE FLAT GROUP, composed from the rows' own surfaces and served as
+    // one generation — read as a PAIR in one synchronous turn, because a
+    // runtime whose served set moves hands back two readings that must agree.
+    let composed: Composed;
+    try {
+      composed = composeRows(rows.read());
+    } catch (err) {
+      process.stderr.write(`odu: ${(err as Error).message}\n`);
+      return 1;
+    }
+    const runtime = composed.runtime;
+
+    // A runtime that has faulted answers nothing while the process stays alive
+    // and the socket stays open — the documented zombie. Observed and fatal.
+    for (const [, contribution] of rows.read()) {
+      contribution.done?.catch((err: unknown) => {
+        log.error({ err: String(err) }, "odu web: surface runtime faulted");
+        process.exit(1);
+      });
+    }
+
+    let bound: string;
+    try {
+      bound = await Effect.runPromise(
+        serveSurfaceApp(
+          // The parts and their assembly live in `./serving`: this function owns
+          // the gate, the lifetime and the teardown around the listener.
+          servingOptions({
+            live: () => ({ group: runtime.group, handlers: runtime.handlers }),
+            dist,
+            host: bindHost,
+            port,
+            allowedOrigins,
+            ...(composed.routes === null ? {} : { routes: composed.routes }),
+          }),
+        ).pipe(Scope.provide(scope)),
+      );
+    } catch (err) {
+      process.stderr.write(
+        `odu: could not bind ${origin} — ${(err as Error).message}\n` +
+          "Another program is on that port. odu's web service has ONE address so " +
+          "every face can find it; it will not move to a random one.\n",
+      );
+      return 1;
+    }
+
     const exit = await daemonMain({
       home,
       // Pre-claimed above, so the spine adopts this claim rather than racing for
@@ -302,8 +351,8 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
       gate,
       processIdentity: selfProcessIdentity(),
       readProcessIdentity,
-      group: service.runtime.group,
-      handlers: service.runtime.handlers,
+      group: runtime.group,
+      handlers: runtime.handlers,
       lifetime: { kind: "forever" },
       log,
       signal: controller.signal,
@@ -315,12 +364,12 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     return exitCodeOf(exit);
   } finally {
     for (const stop of stopHandlers) stop();
-    await mcp.close();
+    // THE LISTENER FIRST, THEN THE ROWS: a row's cleanup closes a database and
+    // stops a poller, and doing that under a listener still accepting would
+    // answer a call out of a runtime nobody drives any more.
     await Effect.runPromise(Scope.close(scope, Exit.void));
-    await service.close();
-    // The database handle is this process's, and a tenure that ended is a
-    // tenure whose SQLite connection must not outlive it.
-    cache.close();
+    await closeHostOnce();
+    gate.release();
   }
 }
 

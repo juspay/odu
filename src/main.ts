@@ -81,7 +81,7 @@ import { internalCommand } from "@odu/cli/internalCli";
 import { serviceMcpCommand } from "@odu/cli/serviceMcp";
 import { ODU_VERSION } from "@odu/execution/common/version";
 import { surfaceCliMain } from "@odu/cli/serviceCli";
-import { webCommand, webDaemonCommand } from "@odu/cli/web";
+import { webCommand, webDaemonCommand } from "@odu/host/web";
 import { errorMessage, errorStack } from "@odu/execution/common/effectEdge";
 
 const USAGE = `usage: odu <run|wait|rerun|cancel|logs|history|status|attach|hosts|lease|release|dump|graph|protect|cache|web|surface|mcp> [args]

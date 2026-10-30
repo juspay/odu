@@ -32,7 +32,9 @@ install:
       "$ODU_KOLU_LOG" @kolu/log \
       "$ODU_KOLU_SURFACE_DAEMON_SUPERVISOR" @kolu/surface-daemon-supervisor \
       "$ODU_KOLU_SURFACE_DAEMON" @kolu/surface-daemon \
-      "$ODU_OSFACTS_CLIENT" osfacts-client'
+      "$ODU_OSFACTS_CLIENT" osfacts-client \
+      "$ODU_OLAI_EFFECT_CORDIS" @olai/effect-cordis \
+      $ODU_CORDIS_HYDRATE'
 
 # TypeScript type checking
 typecheck: install

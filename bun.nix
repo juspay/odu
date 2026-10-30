@@ -227,6 +227,7 @@
   "@odu/cache" = copyPathToStore ./packages/cache;
   "@odu/cli" = copyPathToStore ./packages/cli;
   "@odu/execution" = copyPathToStore ./packages/execution;
+  "@odu/host" = copyPathToStore ./packages/host;
   "@odu/run-client" = copyPathToStore ./packages/run-client;
   "@odu/run-history" = copyPathToStore ./packages/run-history;
   "@odu/service" = copyPathToStore ./packages/service;
@@ -309,6 +310,10 @@
     url = "https://registry.npmjs.org/@solid-primitives/utils/-/utils-6.4.1.tgz";
     hash = "sha512-ISSB5QX1qP2ynrheIpYwc4oKR5Ny4siNuUyf1qZniy+Il+p/PtDB0QK1Dnle8noiHpwRD3gpPdubOC3qI/Zamg==";
   };
+  "@standard-schema/spec@1.1.0" = fetchurl {
+    url = "https://registry.npmjs.org/@standard-schema/spec/-/spec-1.1.0.tgz";
+    hash = "sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==";
+  };
   "@teppeis/multimaps@3.0.0" = fetchurl {
     url = "https://registry.npmjs.org/@teppeis/multimaps/-/multimaps-3.0.0.tgz";
     hash = "sha512-ID7fosbc50TbT0MK0EG12O+gAP3W3Aa/Pz4DaTtQtEvlc9Odaqi0de+xuZ7Li2GtK4HzEX7IuRWS/JmZLksR3Q==";
@@ -372,6 +377,10 @@
   "any-promise@1.3.0" = fetchurl {
     url = "https://registry.npmjs.org/any-promise/-/any-promise-1.3.0.tgz";
     hash = "sha512-7UvmKalWRt1wgjL1RrGxoSJW/0QZFIegpeGvZG9kjp8vrRu55XTHbwnqq2GpXm9uLbcuhxm3IqX9OB4MZR1b2A==";
+  };
+  "argparse@2.0.1" = fetchurl {
+    url = "https://registry.npmjs.org/argparse/-/argparse-2.0.1.tgz";
+    hash = "sha512-8+9WqebbFzpX9OR+Wa6O29asIogeRMzcGtAINdpMHHyAg10f05aSFVBbcEqGf/PXw1EjAZ+q2/bEBg3DvurK3Q==";
   };
   "assertion-error-formatter@3.0.0" = fetchurl {
     url = "https://registry.npmjs.org/assertion-error-formatter/-/assertion-error-formatter-3.0.0.tgz";
@@ -500,6 +509,10 @@
   "cors@2.8.6" = fetchurl {
     url = "https://registry.npmjs.org/cors/-/cors-2.8.6.tgz";
     hash = "sha512-tJtZBBHA6vjIAaF6EnIaq6laBBP9aq/Y3ouVJjEfoHbRBcHBAHYcMh/w8LDrk2PvIMMq8gmopa5D4V8RmbrxGw==";
+  };
+  "cosmokit@1.8.1" = fetchurl {
+    url = "https://registry.npmjs.org/cosmokit/-/cosmokit-1.8.1.tgz";
+    hash = "sha512-PDBv4l90xZKrUsZ0vtoycgZpO/j4iFsqJXrAxsyBDsnQRI7ZMJXIjgDJsKNjd5L8jnVnnlrDCdhkFbTncgCVjQ==";
   };
   "cross-spawn@7.0.6" = fetchurl {
     url = "https://registry.npmjs.org/cross-spawn/-/cross-spawn-7.0.6.tgz";
@@ -764,6 +777,10 @@
   "js-tokens@4.0.0" = fetchurl {
     url = "https://registry.npmjs.org/js-tokens/-/js-tokens-4.0.0.tgz";
     hash = "sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ==";
+  };
+  "js-yaml@4.3.2" = fetchurl {
+    url = "https://registry.npmjs.org/js-yaml/-/js-yaml-4.3.2.tgz";
+    hash = "sha512-SFNOvSJ+Dgf/9An904Yx+CgSlIPCkIpao4qo51lpee25TIRejdH3rhR4EZMGoNx3/TP3O+wzWuiTFl4sqbltzA==";
   };
   "jsesc@3.1.0" = fetchurl {
     url = "https://registry.npmjs.org/jsesc/-/jsesc-3.1.0.tgz";
