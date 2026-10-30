@@ -29,20 +29,25 @@ function unique(what: string): string {
  *  opens the page (the page is then read as it stands), and one that opens the
  *  page FIRST and pushes into it — which is the scenario that grades the
  *  property the row exists for, a push arriving with no reload. */
-function arrangePush(world: OduWorld): void {
+function arrangePush(world: OduWorld, howMany = 1): void {
   const bucket = unique("bucket");
-  // ONE FILE, added straight to the store: a leaf path, so the narinfo needs no
-  // referrers and the import cannot sit at 202 waiting for them.
-  const name = unique("path");
+  // LEAF FILES, added straight to the store: a path with no references, so the
+  // narinfo needs no referrers and the import cannot sit at 202 waiting for
+  // them. More than one when the scenario is about NARROWING a list.
+  const paths: string[] = [];
   const dir = mkdtempSync(join(tmpdir(), "odu-wa-cache-"));
-  const file = join(dir, name);
-  writeFileSync(file, `odu web acceptance: ${name}\n`);
-  const added = spawnSync("nix", ["store", "add-file", file], {
-    env: world.service.env,
-    encoding: "utf-8",
-  });
-  assert.strictEqual(added.status, 0, `nix store add-file failed: ${added.stderr}`);
-  const path = added.stdout.trim();
+  for (let index = 0; index < howMany; index += 1) {
+    const name = unique(index === 0 ? "path" : `path-${index}`);
+    const file = join(dir, name);
+    writeFileSync(file, `odu web acceptance: ${name}\n`);
+    const added = spawnSync("nix", ["store", "add-file", file], {
+      env: world.service.env,
+      encoding: "utf-8",
+    });
+    assert.strictEqual(added.status, 0, `nix store add-file failed: ${added.stderr}`);
+    paths.push(added.stdout.trim());
+  }
+  const path = paths[0] as string;
 
   const created = oduCli(world.service, ["cache", "create", bucket, "-o", "json"]);
   assert.strictEqual(
@@ -59,7 +64,7 @@ function arrangePush(world: OduWorld): void {
   assert.strictEqual(minted.status, 0, `odu cache token mint failed: ${minted.stderr}`);
   const token = (JSON.parse(minted.stdout) as { token: string }).token;
 
-  const pushed = oduCli(world.service, ["cache", "push", bucket, path, "-o", "json"], {
+  const pushed = oduCli(world.service, ["cache", "push", bucket, ...paths, "-o", "json"], {
     ODU_CACHE_TOKEN: token,
   });
   assert.strictEqual(pushed.status, 0, `odu cache push failed: ${pushed.stderr}`);
@@ -68,10 +73,18 @@ function arrangePush(world: OduWorld): void {
   world.cachePath = path;
   // The store path's own base name — what a person types into the filter box.
   world.cachePathName = path.split("/").pop()?.replace(/^[a-z0-9]{32}-/, "") ?? "";
+  world.cachePaths = paths;
+  world.cachePathNames = paths.map(
+    (one) => one.split("/").pop()?.replace(/^[a-z0-9]{32}-/, "") ?? "",
+  );
 }
 
 Given("a bucket with one path pushed from the CLI", function (this: OduWorld) {
   arrangePush(this);
+});
+
+Given("a bucket with two paths pushed from the CLI", function (this: OduWorld) {
+  arrangePush(this, 2);
 });
 
 When("a bucket with one path is pushed from the CLI", function (this: OduWorld) {
@@ -100,10 +113,31 @@ When("I filter the paths by {string}", async function (this: OduWorld, text: str
   await box.fill(text);
 });
 
-When("I filter the paths by the pushed path's name", async function (this: OduWorld) {
-  const name = this.cachePathName;
+When("I filter the paths by the first path's name", async function (this: OduWorld) {
+  const name = this.cachePathNames?.[0];
   assert.ok(name !== undefined && name !== "", "no path was arranged");
   await this.page.getByRole("searchbox", { name: "filter paths" }).fill(name);
+});
+
+Then("both pushed paths are listed", async function (this: OduWorld) {
+  for (const name of this.cachePathNames ?? []) {
+    await this.page.locator("ol.paths li", { hasText: name }).first().waitFor({ timeout: 30_000 });
+  }
+});
+
+Then("the first path is listed", async function (this: OduWorld) {
+  const name = this.cachePathNames?.[0];
+  assert.ok(name !== undefined, "no path was arranged");
+  await this.page.locator("ol.paths li", { hasText: name }).first().waitFor({ timeout: 30_000 });
+});
+
+Then("the second path is not listed", async function (this: OduWorld) {
+  const name = this.cachePathNames?.[1];
+  assert.ok(name !== undefined, "no second path was arranged");
+  await this.waitUntil(
+    async () => (await this.page.locator("ol.paths li", { hasText: name }).count()) === 0,
+    "the second path to disappear",
+  );
 });
 
 Then("a bucket row names it", async function (this: OduWorld) {

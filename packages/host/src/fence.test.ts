@@ -82,9 +82,9 @@ const declaration = {
       "packages/execution/src/coordinator/spawn.ts": 1,
       "packages/execution/src/runner/workspace.ts": 22,
       "packages/launch/src/webDaemonLaunch.ts": 1,
-      "packages/web-acceptance/step_definitions/cache_steps.ts": 27,
+      "packages/web-acceptance/step_definitions/cache_steps.ts": 32,
       "packages/web-acceptance/support/corpus.ts": 5,
-      "packages/web-acceptance/support/world.ts": 3,
+      "packages/web-acceptance/support/world.ts": 5,
     },
     ci: {
       "packages/web-acceptance/support/service.ts": 7,

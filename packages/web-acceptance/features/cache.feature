@@ -28,15 +28,18 @@ Feature: The cache is a row of the board
     And there should be no page errors
 
   Scenario: The filter narrows a bucket's paths
-    Given a bucket with one path pushed from the CLI
+    # TWO paths, so this shows NARROWING rather than show-and-hide: one filter
+    # leaves both, another leaves exactly one.
+    Given a bucket with two paths pushed from the CLI
     When I open that bucket
-    Then the pushed path is listed
+    Then both pushed paths are listed
+    When I filter the paths by the first path's name
+    Then the first path is listed
+    And the second path is not listed
+    And there should be no page errors
     When I filter the paths by "nothing-matches-this"
     Then no path is listed
     And the page says nothing matches
-    When I filter the paths by the pushed path's name
-    Then the pushed path is listed
-    And there should be no page errors
 
   Scenario: A bucket that does not exist is not a page error
     Given a bucket with one path pushed from the CLI

@@ -70,23 +70,21 @@ let
       done
     '';
 
-  member = dir: asTypescript "cordis-${dir}-src" "${npins.cordis}/packages/${dir}";
-
-  core = member "core";
-  loader = member "loader";
-  include = member "include";
-  group = member "group";
-
   manifestOf = dir:
     builtins.fromJSON (builtins.readFile "${npins.cordis}/packages/${dir}/package.json");
+
+  # ONE PACKAGE, because odu opens ONE DOOR. `@olai/effect-cordis`'s root door
+  # imports `cordis` and nothing else — the loader, the include tree and the
+  # group builtin are behind its `./loader` door, which odu does not open (rows
+  # are fixed at boot, never read from a file).
+  #
+  # The pin's three siblings are still there in the source; they are simply not
+  # hydrated, so nothing in this tree can reach them by accident either.
+  core = asTypescript "cordis-core-src" "${npins.cordis}/packages/core";
 in
 {
-  # Four (src, dest) pairs, in the shape `hydrate-kolu-packages.sh` takes.
-  hydrateArgs =
-    "${core} cordis "
-    + "${loader} @cordisjs/plugin-loader "
-    + "${include} @cordisjs/plugin-include "
-    + "${group} @cordisjs/plugin-group";
+  # One (src, dest) pair, in the shape `hydrate-kolu-packages.sh` takes.
+  hydrateArgs = "${core} cordis";
 
   # The pin's own runtime dependencies, for a check that wants to hold them —
   # the UNION over the four hydrated packages, because all four resolve their

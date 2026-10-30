@@ -58,20 +58,16 @@
  * dialling the successor.
  */
 
-import { hostname } from "node:os";
 import { spawnSync } from "node:child_process";
 import {
   claimPidGate,
   daemonMain,
   type DaemonExit,
-  gateIdentity,
   type Logger,
   stderrLogger,
 } from "@kolu/surface-daemon";
 import { parseAllowedOrigins } from "@kolu/surface/ws-origin";
 import { serveSurfaceApp } from "@kolu/surface-app/serve";
-import { runSocketPath } from "@odu/run-client/dial";
-import { gitTopLevel } from "@odu/execution/common/git";
 import {
   readPublicOrigin,
   serviceBind,
@@ -611,14 +607,6 @@ function describe(outcome: Extract<EnsureOutcome, { ok: true }>): string {
 /** Re-exported so a caller that wants the gate's current holder — or any of the
  *  launch facts that now live in `./webDaemonLaunch` — does not learn a second
  *  import path for something it already reaches `./web` for. */
-export { gateIdentity, runSocketPath, gitTopLevel, hostname };
-export {
-  assertPackaged,
-  bakedBuild,
-  daemonEnv,
-  webDaemonSpawnConfig,
-  webHome,
-} from "@odu/launch/webDaemonLaunch";
 
 /**
  * LET GO OF WHOEVER'S DIRECTORY THIS WAS.
