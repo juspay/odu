@@ -112,6 +112,16 @@ const SANCTIONED = new Map<string, string>([
       "what a refusal means.",
   ],
   [
+    "packages/cache/src/cli.ts",
+    "A FACE's edge, and the cache's only one. Every `odu cache` admin command " +
+      "ends with a surface procedure — an `Effect` carrying a declared " +
+      "`CacheRefused` channel — becoming a number for `process.exit`, and the " +
+      "three outcomes a caller must keep apart (answered / refused / dead link) " +
+      "cannot be told apart without running it. The row's own doors take the " +
+      "edge's place in production: `./server` is a handler table, and the " +
+      "daemon runs it.",
+  ],
+  [
     "packages/host/src/webLauncher.ts",
     "Converging on the singleton. Reading the service cell and asking a running " +
       "daemon to drain are Effects; everything that decides between adopt, " +

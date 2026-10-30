@@ -1,17 +1,27 @@
 /**
- * `odu cache` — the bucket commands.
+ * `odu cache` — the bucket commands, in the package that owns the buckets.
  *
  * Two kinds of client in one command, and the split is the interesting part:
  *
  *   - **administration** (`create`, `list`, `use`, `token`, `pin`, `gc`,
- *     `stats`) is a thin client of the shared service, like every other public
- *     verb. The buckets, their keys and their tokens live in the service's
- *     database, and a second reader would be a second answer.
+ *     `stats`) is a client of the cache's own surface — the row served beside
+ *     the runs on the same daemon. The buckets, their keys and their tokens
+ *     live in the cache's database, and this module reaches them through the
+ *     row's contract rather than through `@odu/service`'s.
  *   - **`push` and `login`** are clients of the cache's HTTP API, from the
- *     machine that holds the paths. They import `@odu/cache/push` and nothing
- *     else of odu — no service, no catalog, no engine — which is exactly the
- *     argument `authority.test.ts`'s header makes for why they are admissible
- *     under a wall that forbids every public client the engine.
+ *     machine that holds the paths. They import `./push` and nothing else —
+ *     no service, no catalog, no engine — which is the argument
+ *     `@odu/cli`'s `authority.test.ts` makes for why they are admissible under
+ *     a wall that forbids every public client the engine.
+ *
+ * ## The dial is a PORT, bound by the root
+ *
+ * This module is a FACE, and a face dials the daemon. The bootstrap — "start
+ * one if nothing is serving" — belongs to `@odu/host`, and a ROW never names the
+ * host: that is the arrow backwards. So the root binds a `connect` here
+ * (`src/main.ts`), and the same `SurfaceDispatch` the ci client is built over
+ * gives this face its CACHE client — one connection, two views, which is what
+ * `ServiceConnection.dispatch` is published for.
  *
  * The root token comes from `$ODU_ROOT_TOKEN` and is passed straight through:
  * the CLI does not decide who may administer a bucket, and neither does the
@@ -19,9 +29,43 @@
  */
 
 import { parseArgs } from "node:util";
-import { pushToCache, saveCredential } from "@odu/cache/push";
-import type { CacheScope, CacheToken } from "@odu/service-client/surface";
-import { call, emitJson, reportFailure, withService } from "./serviceFace";
+import { buildSurfaceFace } from "@kolu/surface/client";
+import type { SurfaceClientOf } from "@kolu/surface/project";
+import { composeSurfaceContracts } from "@kolu/surface/define";
+import type { SurfaceDispatch } from "@kolu/surface/link";
+import { Effect } from "effect";
+import { pushToCache, saveCredential } from "./push";
+import {
+  type CacheScope,
+  type CacheToken,
+  CacheRefused,
+  oduCacheSurface,
+} from "./surface";
+
+/** THE CACHE'S CLIENT, over a dispatch the caller already holds. One
+ *  connection to the daemon serves every row; this is the cache's typed view of
+ *  it, minted through the framework's own sibling composition so the tags it
+ *  addresses are the ones the sibling is mounted at. */
+export type CacheClient = SurfaceClientOf<(typeof oduCacheSurface)["spec"]>;
+
+function cacheClientOver(dispatch: SurfaceDispatch): CacheClient {
+  // The SIBLING, not the surface: `composeSurfaceContracts` re-walks the spec
+  // with the `surface/cache/` prefix, and the face is built over the same
+  // dispatch the ci client is, so one connection answers both.
+  const sibling = composeSurfaceContracts({ cache: oduCacheSurface }).siblings.cache;
+  return buildSurfaceFace(sibling, dispatch) as unknown as CacheClient;
+}
+
+/** What the root hands this face: the way in, and nothing else. */
+export interface CacheCliPorts {
+  /** Reach the daemon — starting it when nothing is serving and the origin is
+   *  this install's own. Bound at the composition root, because the bootstrap is
+   *  `@odu/host`'s and a row never names the host. */
+  connect(origin: string | undefined): Promise<{
+    dispatch: SurfaceDispatch;
+    dispose: () => Promise<void>;
+  }>;
+}
 
 export const CACHE_USAGE = `usage: odu cache <create|list|use|token|login|push|pin|gc|stats> [args]
 
@@ -69,6 +113,77 @@ const scopeOf = (values: {
   admin?: boolean;
 }): CacheScope => (values.admin === true ? "admin" : values.read === true ? "read" : "write");
 
+
+// ── the face's plumbing ─────────────────────────────────────────────────────
+
+/** Reach the daemon and hand the caller the cache's client, or report that
+ *  nothing is serving and exit. */
+async function withService(
+  ports: CacheCliPorts,
+  origin: string | undefined,
+  use: (client: CacheClient) => Promise<number>,
+): Promise<number> {
+  let connection: Awaited<ReturnType<CacheCliPorts["connect"]>>;
+  try {
+    connection = await ports.connect(origin);
+  } catch (err) {
+    process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+    return REFUSED;
+  }
+  try {
+    return await use(cacheClientOver(connection.dispatch));
+  } finally {
+    await connection.dispose();
+  }
+}
+
+/** One procedure call, keeping the cache's REFUSAL apart from a dead link. */
+async function call<A>(
+  effect: Effect.Effect<A, unknown>,
+): Promise<
+  | { ok: true; value: A }
+  | { ok: false; refusal: CacheRefused }
+  | { ok: false; refusal: null; error: unknown }
+> {
+  const outcome = await Effect.runPromise(Effect.result(effect));
+  if (outcome._tag === "Success") return { ok: true, value: outcome.success };
+  const failure = outcome.failure;
+  return failure instanceof CacheRefused
+    ? { ok: false, refusal: failure }
+    : { ok: false, refusal: null, error: failure };
+}
+
+/** A refusal, or a failed call, as the exit code and the sentence a person
+ *  reads. */
+function reportFailure(
+  answer: { refusal: CacheRefused | null; error?: unknown },
+  json: boolean,
+  code: number,
+): number {
+  const message =
+    answer.refusal !== null
+      ? `odu: ${answer.refusal.message}`
+      : `odu: the call did not complete — ${String(answer.error)}`;
+  if (json) {
+    process.stdout.write(
+      `${JSON.stringify(
+        answer.refusal === null
+          ? { ok: false, error: message }
+          : { ok: false, code: answer.refusal.code, message: answer.refusal.message },
+        null,
+        2,
+      )}\n`,
+    );
+    return code;
+  }
+  process.stderr.write(`${message}\n`);
+  return code;
+}
+
+function emitJson(value: unknown): void {
+  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+}
+
 /** A flag's whole-number value, or a usage error naming the flag. `Number("")`
  *  is 0 and `Number(" 5 ")` is 5, so a bare `Number` would read a truncated
  *  `--retention-days=` as "keep nothing" — which on a cache is a destructive
@@ -87,26 +202,27 @@ const outputOption = { type: "string", short: "o" } as const;
 export async function cacheCommand(
   sub: string | undefined,
   rest: string[],
+  ports: CacheCliPorts,
 ): Promise<number> {
   switch (sub) {
     case "create":
-      return createCommand(rest);
+      return createCommand(rest, ports);
     case "list":
-      return listCommand(rest);
+      return listCommand(rest, ports);
     case "use":
-      return useCommand(rest);
+      return useCommand(rest, ports);
     case "token":
-      return tokenCommand(rest);
+      return tokenCommand(rest, ports);
     case "login":
       return loginCommand(rest);
     case "push":
       return pushCommand(rest);
     case "pin":
-      return pinCommand(rest);
+      return pinCommand(rest, ports);
     case "gc":
-      return gcCommand(rest);
+      return gcCommand(rest, ports);
     case "stats":
-      return statsCommand(rest);
+      return statsCommand(rest, ports);
     case undefined:
     case "help":
     case "--help":
@@ -119,7 +235,7 @@ export async function cacheCommand(
   }
 }
 
-async function createCommand(rest: string[]): Promise<number> {
+async function createCommand(rest: string[], ports: CacheCliPorts): Promise<number> {
   const { values, positionals } = parseArgs({
     args: rest,
     allowPositionals: true,
@@ -149,9 +265,9 @@ async function createCommand(rest: string[]): Promise<number> {
     return 1;
   }
   const upstreamKeys = values["no-upstream"] === true ? [] : upstream;
-  return withService(values.origin, async (client) => {
+  return withService(ports, values.origin, async (client) => {
     const answer = await call(
-      client.surface.cache.create({
+      client.surface.bucket.create({
         rootToken: rootToken(),
         name,
         public: values.private !== true,
@@ -178,14 +294,14 @@ async function createCommand(rest: string[]): Promise<number> {
   });
 }
 
-async function listCommand(rest: string[]): Promise<number> {
+async function listCommand(rest: string[], ports: CacheCliPorts): Promise<number> {
   const { values } = parseArgs({
     args: rest,
     options: { origin: originOption, output: outputOption },
   });
   const json = values.output === "json";
-  return withService(values.origin, async (client) => {
-    const answer = await call(client.surface.cache.list({ rootToken: rootToken() }));
+  return withService(ports, values.origin, async (client) => {
+    const answer = await call(client.surface.bucket.list({ rootToken: rootToken() }));
     if (!answer.ok) return reportFailure(answer, json, REFUSED);
     if (json) {
       emitJson(answer.value);
@@ -206,7 +322,7 @@ async function listCommand(rest: string[]): Promise<number> {
   });
 }
 
-async function useCommand(rest: string[]): Promise<number> {
+async function useCommand(rest: string[], ports: CacheCliPorts): Promise<number> {
   const { values, positionals } = parseArgs({
     args: rest,
     allowPositionals: true,
@@ -217,12 +333,12 @@ async function useCommand(rest: string[]): Promise<number> {
     process.stderr.write(`odu: cache use needs a bucket name\n${CACHE_USAGE}`);
     return 1;
   }
-  return withService(values.origin, async (client) => {
+  return withService(ports, values.origin, async (client) => {
     // NO ROOT TOKEN: a bucket's substituter URL and public key are what it
     // publishes to every client that talks to it, so asking the operator's
     // credential for them would turn a read-only question into an
     // administrative act.
-    const answer = await call(client.surface.cache.describe({ bucket: name }));
+    const answer = await call(client.surface.bucket.describe({ bucket: name }));
     if (!answer.ok) return reportFailure(answer, false, REFUSED);
     const bucket = answer.value;
     const url = new URL(bucket.url);
@@ -245,7 +361,7 @@ async function useCommand(rest: string[]): Promise<number> {
   });
 }
 
-async function tokenCommand(rest: string[]): Promise<number> {
+async function tokenCommand(rest: string[], ports: CacheCliPorts): Promise<number> {
   const [sub, ...args] = rest;
   switch (sub) {
     case "mint": {
@@ -268,9 +384,9 @@ async function tokenCommand(rest: string[]): Promise<number> {
         return 1;
       }
       const json = values.output === "json";
-      return withService(values.origin, async (client) => {
+      return withService(ports, values.origin, async (client) => {
         const answer = await call(
-          client.surface.cache.tokenMint({
+          client.surface.token.mint({
             rootToken: rootToken(),
             bucket,
             ...(values.buckets === undefined ? {} : { bucketGlob: values.buckets }),
@@ -300,9 +416,9 @@ async function tokenCommand(rest: string[]): Promise<number> {
       });
       const bucket = positionals[0];
       const json = values.output === "json";
-      return withService(values.origin, async (client) => {
+      return withService(ports, values.origin, async (client) => {
         const answer = await call(
-          client.surface.cache.tokenList({
+          client.surface.token.list({
             rootToken: rootToken(),
             ...(bucket === undefined ? {} : { bucket }),
           }),
@@ -329,9 +445,9 @@ async function tokenCommand(rest: string[]): Promise<number> {
         return 1;
       }
       const json = values.output === "json";
-      return withService(values.origin, async (client) => {
+      return withService(ports, values.origin, async (client) => {
         const answer = await call(
-          client.surface.cache.tokenRevoke({ rootToken: rootToken(), id }),
+          client.surface.token.revoke({ rootToken: rootToken(), id }),
         );
         if (!answer.ok) return reportFailure(answer, json, REFUSED);
         if (json) emitJson(answer.value);
@@ -432,7 +548,7 @@ async function pushCommand(rest: string[]): Promise<number> {
   }
 }
 
-async function pinCommand(rest: string[]): Promise<number> {
+async function pinCommand(rest: string[], ports: CacheCliPorts): Promise<number> {
   const { values, positionals } = parseArgs({
     args: rest,
     allowPositionals: true,
@@ -446,9 +562,9 @@ async function pinCommand(rest: string[]): Promise<number> {
     return 1;
   }
   const json = values.output === "json";
-  return withService(values.origin, async (client) => {
+  return withService(ports, values.origin, async (client) => {
     const answer = await call(
-      client.surface.cache.pin({ rootToken: rootToken(), bucket, name, paths }),
+      client.surface.pin.create({ rootToken: rootToken(), bucket, name, paths }),
     );
     if (!answer.ok) return reportFailure(answer, json, REFUSED);
     if (json) {
@@ -463,7 +579,7 @@ async function pinCommand(rest: string[]): Promise<number> {
   });
 }
 
-async function gcCommand(rest: string[]): Promise<number> {
+async function gcCommand(rest: string[], ports: CacheCliPorts): Promise<number> {
   const { values, positionals } = parseArgs({
     args: rest,
     allowPositionals: true,
@@ -471,9 +587,9 @@ async function gcCommand(rest: string[]): Promise<number> {
   });
   const bucket = positionals[0];
   const json = values.output === "json";
-  return withService(values.origin, async (client) => {
+  return withService(ports, values.origin, async (client) => {
     const answer = await call(
-      client.surface.cache.gc({
+      client.surface.gc.run({
         rootToken: rootToken(),
         ...(bucket === undefined ? {} : { bucket }),
       }),
@@ -496,14 +612,14 @@ async function gcCommand(rest: string[]): Promise<number> {
   });
 }
 
-async function statsCommand(rest: string[]): Promise<number> {
+async function statsCommand(rest: string[], ports: CacheCliPorts): Promise<number> {
   const { values } = parseArgs({
     args: rest,
     options: { origin: originOption, output: outputOption },
   });
   const json = values.output === "json";
-  return withService(values.origin, async (client) => {
-    const answer = await call(client.surface.cache.stats({ rootToken: rootToken() }));
+  return withService(ports, values.origin, async (client) => {
+    const answer = await call(client.surface.stats.read({ rootToken: rootToken() }));
     if (!answer.ok) return reportFailure(answer, json, REFUSED);
     if (json) {
       emitJson(answer.value);

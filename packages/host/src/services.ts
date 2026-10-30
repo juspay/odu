@@ -23,6 +23,8 @@
  */
 
 import type { ServeSurfaceAppOptions } from "@kolu/surface-app/serve";
+import type { Surface, SurfaceSpec } from "@kolu/surface/define";
+import type { ExposeMap } from "@kolu/surface/expose";
 import type { RootedSurfacesRuntime } from "@kolu/surface/server";
 import type { ServiceBuild } from "@odu/service-client/surface";
 import type { Logger } from "@kolu/surface-daemon";
@@ -100,8 +102,16 @@ export type RowRoutes = NonNullable<ServeSurfaceAppOptions["routes"]>;
  */
 export interface RowContribution {
   readonly runtime: RootedSurfacesRuntime<never> | null;
-  readonly mount: MountRequest | null;
+  /** Join the composed bundle — the ROOTed runtime the runs row brought. A row
+   *  that IS the root has nothing to attach: its surface is the bundle. */
+  readonly attach: ((root: RootedSurfacesRuntime<never>) => void) | null;
   readonly routes: RowRoutes | null;
+  /** What an AGENT is told about this row: its surface, its own exposure
+   *  policy, and the paragraph it wants taught at `initialize`.
+   *
+   *  On the row rather than in the transport, because it is the row's
+   *  vocabulary: the transport composes them and knows what none of them mean. */
+  readonly agent: RowAgent | null;
   /** The row's own wiring death, if it has one — a runtime that has faulted
    *  answers nothing while the process stays alive and the socket stays open,
    *  which is the documented zombie. The host observes it and treats it as
@@ -115,16 +125,11 @@ export interface RowContribution {
   readonly done: Promise<void> | null;
 }
 
-/** A row's sibling surface, handed to the rooted bundle's `mount`.
- *
- *  Typed as the framework's own erasure: `mount` is generic in the surface's
- *  spec, and a table of rows cannot be — each row's deps are its own. The
- *  erasure is spent HERE, once, at the one place a heterogeneous set of rows
- *  becomes a homogeneous one. */
-export interface MountRequest {
-  readonly key: string;
-  readonly surface: Parameters<RootedSurfacesRuntime<never>["mount"]>[1];
-  readonly deps: Parameters<RootedSurfacesRuntime<never>["mount"]>[2];
+/** One row's contribution to the agent-facing door. */
+export interface RowAgent {
+  readonly surface: Surface<SurfaceSpec>;
+  readonly expose: ExposeMap<SurfaceSpec>;
+  readonly instructions: string;
 }
 
 /** THE ROW TABLE — how a mounted row hands the host what it built.

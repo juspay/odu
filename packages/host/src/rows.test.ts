@@ -20,21 +20,26 @@ import type { RowContribution } from "./services";
 
 /** A contribution that says nothing and serves no routes — enough for the
  *  composition's own checks, and deliberately not a runtime. */
-const nothing: RowContribution = { runtime: null, mount: null, routes: null, done: null };
+const nothing: RowContribution = {
+  runtime: null,
+  attach: null,
+  routes: null,
+  agent: null,
+  done: null,
+};
 
-/** A contribution standing in for the ROOTED bundle: `mount` is the only verb
- *  the composition spends on a sibling. */
-function rootWith(mounted: string[]): RowContribution {
-  // ONE CAST, because the composition only ever spends `mount` on a sibling:
-  // the rest of a rooted bundle is what a row built, and none of it is this
-  // test's subject.
-  const runtime = {
-    mount: (key: string) => {
-      mounted.push(key);
-      return {};
-    },
-  } as unknown as NonNullable<RowContribution["runtime"]>;
+/** A contribution standing in for the ROOTED bundle. */
+function rootWith(): RowContribution {
+  // ONE CAST, because the composition only ever hands a sibling the runtime:
+  // the rest of a rooted bundle is what the runs row built, and none of it is
+  // this test's subject.
+  const runtime = {} as unknown as NonNullable<RowContribution["runtime"]>;
   return { ...nothing, runtime };
+}
+
+/** A sibling that records the fact that the composition attached it. */
+function siblingWith(attached: string[], key: string): RowContribution {
+  return { ...nothing, attach: () => attached.push(key) };
 }
 
 /** Two rows, one of them a sibling — the shape this build has once the cache is
@@ -46,50 +51,23 @@ const TWO_ROWS: ReadonlyArray<Row> = [
 
 describe("composing the rows", () => {
   it("refuses to serve when a row published nothing", () => {
-    expect(() =>
-      composeRows([["ci", rootWith([])]], TWO_ROWS),
-    ).toThrow(/cache/);
+    expect(() => composeRows([["ci", rootWith()]], TWO_ROWS)).toThrow(/cache/);
   });
 
-  it("refuses a sibling that mounted itself under another name", () => {
-    const mounted: string[] = [];
+  it("refuses a sibling that asked for no attach", () => {
     expect(() =>
-      composeRows(
-        [
-          ["ci", rootWith(mounted)],
-          [
-            "cache",
-            {
-              ...nothing,
-              mount: { key: "caches", surface: {}, deps: {} } as unknown as NonNullable<
-                RowContribution["mount"]
-              >,
-            },
-          ],
-        ],
-        TWO_ROWS,
-      ),
-    ).toThrow(/"cache" mounted itself as "caches"/);
+      composeRows([["ci", rootWith()], ["cache", nothing]], TWO_ROWS),
+    ).toThrow(/"cache" is a sibling but asked for no attach/);
   });
 
-  it("mounts every sibling on the root's bundle, and only those", () => {
-    const mounted: string[] = [];
+  it("attaches every sibling to the root's bundle, and only those", () => {
+    const attached: string[] = [];
     const composed = composeRows(
-      [
-        ["ci", rootWith(mounted)],
-        [
-          "cache",
-          {
-            ...nothing,
-            mount: { key: "cache", surface: {}, deps: {} } as unknown as NonNullable<
-              RowContribution["mount"]
-            >,
-          },
-        ],
-      ],
+      [["ci", rootWith()], ["cache", siblingWith(attached, "cache")]],
       TWO_ROWS,
     );
-    expect(mounted).toEqual(["cache"]);
+    expect(attached).toEqual(["cache"]);
     expect(composed.routes).toBeNull();
+    expect(composed.siblings).toEqual({});
   });
 });

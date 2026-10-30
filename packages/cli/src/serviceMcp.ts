@@ -19,6 +19,9 @@ import {
   type SurfaceClientCallable,
 } from "@kolu/surface-mcp";
 import { mcpServerInfo } from "@odu/host/mcpRoute";
+import { ODU_CACHE_EXPOSE, oduCacheSurface } from "@odu/cache/surface";
+import { buildSurfaceFace } from "@kolu/surface/client";
+import { composeSurfaceContracts } from "@kolu/surface/define";
 import { connectOrStart } from "@odu/host/webLauncher";
 import { serviceOrigin } from "@odu/service-client/endpoint";
 import { oduServiceSurface } from "@odu/service-client/surface";
@@ -62,12 +65,22 @@ export async function serveServiceMcpOverStdio(opts: {
   let held: Awaited<ReturnType<typeof connectOrStart>> | null = null;
   const served = await serveSurfaceAsMcp({
     core: { surface: oduServiceSurface, expose: ODU_SERVICE_EXPOSE },
+    // THE CACHE IS A SIBLING on the same wire, so an agent reaches its verbs
+    // through this bridge too — `cache_bucket_create` and its neighbours, under
+    // the key the daemon mounts the row at.
+    surfaces: { cache: { surface: oduCacheSurface, expose: ODU_CACHE_EXPOSE } },
     client: async () => {
       const connection = await connectOrStart(origin);
       held = connection;
       return {
         client: {
           core: connection.client as unknown as SurfaceClientCallable,
+          clients: {
+            cache: buildSurfaceFace(
+              composeSurfaceContracts({ cache: oduCacheSurface }).siblings.cache,
+              connection.dispatch,
+            ) as unknown as SurfaceClientCallable,
+          },
         },
         dispose: () => connection.dispose(),
       };

@@ -79,7 +79,7 @@ import {
   serviceOrigin,
 } from "@odu/service-client/endpoint";
 import { stateRoot } from "@odu/run-history/paths";
-import { Effect, Exit, Scope } from "effect";
+import { Effect, Exit, Layer, Scope } from "effect";
 import {
   closeHost,
   mountPlugin,
@@ -90,6 +90,7 @@ import {
   standing,
 } from "@olai/effect-cordis";
 import { readProcessIdentity, selfProcessIdentity } from "./processIdentity";
+import { mcpGetRoute, mcpRoute, RouteTransport, serveServiceMcpInProcess } from "./mcpRoute";
 import { servingOptions } from "./serving";
 import { configured } from "./webPorts";
 import { composeRows, ROWS, type Composed } from "./rows";
@@ -250,6 +251,9 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
   const run = standing();
   const host = await run(openHost);
   const rows = createRowTable();
+  /** The `/mcp` adapter, once the rows are composed; `null` before that, and on
+   *  every path that never reached a listener. */
+  let mcp: Awaited<ReturnType<typeof serveServiceMcpInProcess>> | null = null;
   let closed = false;
   const closeHostOnce = async (): Promise<void> => {
     if (closed) return;
@@ -267,7 +271,8 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     await run(provide(host, BoundOrigin, () => origin));
     await run(provide(host, PublicOrigin, () => published.origin));
     await run(provide(host, AllowedOrigins, () => allowedOrigins));
-    await run(provide(host, Build, () => bakedBuild()));
+    const build = bakedBuild();
+    await run(provide(host, Build, () => build));
     await run(provide(host, Log, () => log));
     await run(provide(host, Shutdown, () => () => controller.abort()));
 
@@ -310,6 +315,24 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     }
     const runtime = composed.runtime;
 
+    // THE `/mcp` DOOR — the composed bundle's, so it is the TRANSPORT's and is
+    // built here rather than by any one row: an adapter that served one row
+    // would have to be told what the others are. The adapter and its transport
+    // are one pair for the listener's life (an MCP `Server` binds exactly one
+    // transport, and re-making them per request would rebuild the expose walk
+    // and the resource pusher on every call).
+    const transport = new RouteTransport();
+    mcp = await serveServiceMcpInProcess({
+      handlers: runtime.handlers,
+      version: build.oduVersion,
+      transport,
+      core: composed.core,
+      siblings: composed.siblings,
+    });
+    const agentRoutes = Layer.merge(mcpRoute(transport, allowedOrigins), mcpGetRoute());
+    const routes =
+      composed.routes === null ? agentRoutes : Layer.merge(composed.routes, agentRoutes);
+
     // A runtime that has faulted answers nothing while the process stays alive
     // and the socket stays open — the documented zombie. Observed and fatal.
     for (const [, contribution] of rows.read()) {
@@ -331,7 +354,7 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
             host: bindHost,
             port,
             allowedOrigins,
-            ...(composed.routes === null ? {} : { routes: composed.routes }),
+            routes,
           }),
         ).pipe(Scope.provide(scope)),
       );
@@ -367,6 +390,7 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     // THE LISTENER FIRST, THEN THE ROWS: a row's cleanup closes a database and
     // stops a poller, and doing that under a listener still accepting would
     // answer a call out of a runtime nobody drives any more.
+    await mcp?.close();
     await Effect.runPromise(Scope.close(scope, Exit.void));
     await closeHostOnce();
     gate.release();

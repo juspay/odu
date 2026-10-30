@@ -88,6 +88,7 @@ import {
   webStderrLog,
 } from "./webDaemonLaunch";
 import { serviceBind, serviceOrigin } from "@odu/service-client/endpoint";
+import { SERVICE_WIRE_GROUP } from "./wire";
 
 /** The composed contract a control dial speaks: the frozen fragment under the
  *  sibling key the daemon mounts it at, which is also where the framework's own
@@ -133,7 +134,7 @@ export interface EnsureOptions {
 export async function readService(origin: string): Promise<ServiceCell | null> {
   let connection: Awaited<ReturnType<typeof dialService>>;
   try {
-    connection = await dialService(origin);
+    connection = await dialService(origin, { group: SERVICE_WIRE_GROUP });
   } catch {
     return null;
   }
@@ -609,7 +610,10 @@ export async function connectOrStart(
   // even the one `ensureService` produced after its own contract check, so
   // "adopted" means "read its cell and this build can speak to it" by
   // construction rather than by argument.
-  return adoptOrRefuse(await dialService(outcome.origin), outcome.origin);
+  return adoptOrRefuse(
+    await dialService(outcome.origin, { group: SERVICE_WIRE_GROUP }),
+    outcome.origin,
+  );
 }
 
 /**
@@ -633,9 +637,14 @@ async function dialExisting(
   allowStart: boolean,
 ): Promise<ServiceConnection | null> {
   try {
-    return await dialService(origin, { readyMs: ABSENCE_PROBE_MS });
+    return await dialService(origin, {
+      readyMs: ABSENCE_PROBE_MS,
+      group: SERVICE_WIRE_GROUP,
+    });
   } catch (err) {
-    if ((await whoeverIsListening(origin)) !== null) return await dialService(origin);
+    if ((await whoeverIsListening(origin)) !== null) {
+      return await dialService(origin, { group: SERVICE_WIRE_GROUP });
+    }
     // Nothing is accepting. That is absence — an answer only a caller allowed
     // to bootstrap can act on; anyone else gets the dial's own sentence.
     if (!allowStart) throw err;

@@ -172,7 +172,7 @@ describe("objects", () => {
 });
 
 describe("counting", () => {
-  it("counts objects and bytes per bucket in SQL", () => {
+  it("counts objects, bytes and reads per bucket in SQL", () => {
     const repo = openCacheRepo(":memory:");
     repo.putObject(object);
     repo.putObject({
@@ -182,10 +182,12 @@ describe("counting", () => {
       narSize: 100,
     });
     repo.putObject({ ...object, bucket: "other" });
+    // `lastPush` is the newest narinfo's `created`, and `hits` the sum — the two
+    // facts a board paints per bucket, counted here rather than loaded as rows.
     expect(repo.bucketStats()).toEqual(
       new Map([
-        ["main", { objects: 2, bytes: 279692 }],
-        ["other", { objects: 1, bytes: 279592 }],
+        ["main", { objects: 2, bytes: 279692, hits: 6, lastPush: NOW }],
+        ["other", { objects: 1, bytes: 279592, hits: 3, lastPush: NOW }],
       ]),
     );
     // A bucket with nothing in it has no row at all, which the caller reads as

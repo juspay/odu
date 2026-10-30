@@ -19,6 +19,9 @@
  *     directory, the root token and the store URI in. A cache that read
  *     `process.env` itself would have a second, invisible configuration — and
  *     the one variable that must never be found by accident is a root token.
+ *     The ONE exception is `./cli`, and it is not the engine: a face IS a
+ *     process, and a process reads its own environment (which token to present
+ *     is the caller's, not the daemon's).
  *   - **its platform is `node:` builtins and one Bun builtin.** `bun:sqlite` is
  *     named here rather than admitted by a prefix, so the day a second Bun
  *     builtin appears is a day this file changes.
@@ -40,9 +43,16 @@ const MANIFEST = JSON.parse(
 
 const DECLARED = Object.keys(MANIFEST.dependencies ?? {});
 
-/** Pinned as a literal set: `effect` is the whole install, and the one entry is
- *  the claim that a substituter costs nothing else. */
+/** Pinned as a literal set: `effect` and the browser-safe half of the surface
+ *  framework are the whole install — `@kolu/surface` is HYDRATED from a Nix pin
+ *  and so is absent here by design, and nothing else is a bucket's business. */
 const EXPECTED_DEPENDENCIES = ["effect"];
+
+/** The `@kolu/*` sources hydrated from a Nix pin rather than installed. Four
+ *  doors of this package open the framework: the surface (`/define`,
+ *  `/expose`), the server (`/server`), and the CLI face's client
+ *  (`/client`, `/project`, `/link`). */
+const HYDRATED = new Set<string>(["@kolu/surface"]);
 
 /** The non-`node:` builtins this package may reach. Named, never prefix-matched:
  *  a prefix would let `bun:ffi` in with `bun:sqlite`. */
@@ -187,7 +197,7 @@ describe("@odu/cache's import closure", () => {
         if (spec.startsWith(".") || spec.startsWith("node:")) continue;
         if (BUN_BUILTINS.has(spec)) continue;
         const pkg = packageOf(spec);
-        if (declared.has(pkg)) continue;
+        if (declared.has(pkg) || HYDRATED.has(pkg)) continue;
         if (isTest && TEST_ONLY.has(pkg)) continue;
         offenders.push(`${rel}: ${spec}`);
       }
@@ -226,6 +236,10 @@ describe("@odu/cache's import closure", () => {
     // takes its configuration as arguments is not a read of it.
     const offenders = sources
       .filter(({ rel }) => !rel.endsWith(".test.ts"))
+      // `./cli` is a FACE and lives in a process: which root token to present,
+      // and where `~` is, are its caller's facts. Everything the ENGINE does
+      // takes them as arguments.
+      .filter(({ rel }) => rel !== "src/cli.ts")
       .filter(({ source, rel }) => readsProcessEnv(source, rel))
       .map(({ rel }) => rel);
     expect(

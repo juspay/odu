@@ -22,11 +22,9 @@
  * ones: this file moves when the engine's contract does, that one when the
  * daemon's does.
  *
- * It is also where the CACHE is constructed: `createCache` wants a state
- * directory, a root token and a store URI, and the composition root is the only
- * place that reads an environment. The cache is returned beside the ports
- * because `web.ts` needs it twice — as the service's admin port and as the
- * `HttpRouter` layer merged beside the shell.
+ * It is NOT where the cache is constructed any more: the cache is a row, it
+ * constructs itself from the services the host provides, and the engine this
+ * file binds has never heard of a bucket.
  *
  * The interesting half is `cancel`, and the note on {@link cancelThroughSocket}
  * is why.
@@ -44,7 +42,6 @@ import {
 } from "@odu/execution/coordinator/recovery";
 import { gitBranch } from "@odu/execution/common/git";
 import { type CatalogOptions, listRuns } from "@odu/run-history/store";
-import { type Cache, createCache } from "@odu/cache/cache";
 import { readPipeline } from "./pipelinePort";
 import { holdVenue, probeVenues, releaseVenue } from "./venuePort";
 import { protectBranch } from "./protectPort";
@@ -109,11 +106,10 @@ export function probeCheckout(
   };
 }
 
-/** What the web face needs from its root: the ports, and the cache the listener
- *  serves and the service administers. */
+/** What the web face needs from its root: the ports, and nothing else — the
+ *  cache is a row that constructs itself. */
 export interface WebPorts {
   ports: ServicePorts;
-  cache: Cache;
 }
 
 /** An environment variable's value, or `null` when it is unset or blank. A
@@ -124,34 +120,15 @@ export function configured(value: string | undefined): string | null {
   return trimmed === undefined || trimmed === "" ? null : trimmed;
 }
 
-/** What the composition is handed, rather than reading for itself: the state
- *  root, the operator's root token and the store URI are the HOST's facts (it
- *  is the one place that reads an environment), and a port adapter that read
- *  them again would be a second reading of them. */
-export interface WebPortFacts {
-  readonly stateDir: string;
-  readonly rootToken: string | null;
-  readonly store: string | null;
-}
-
 /**
  * The ports the service is bound to — the ONE place the web face is wired to
  * the engine. Everything below this line knows what a coordinator is;
  * `@odu/service` does not.
  *
- * The cache's three settings are read HERE and nowhere else: its state lives
- * under the same per-user root as the run catalog (`<state>/cache`), the root
- * token comes from `$ODU_ROOT_TOKEN` and may be absent — every admin verb then
- * refuses with `no_root_token` while the substituter keeps serving — and
- * `$ODU_CACHE_STORE` is an optional `--store` URI, which is how the e2e suite
- * points the whole cache at a throwaway chroot store.
+ * Nothing is read from the environment here: every fact the ports need arrives
+ * from the host, which is the one place that reads one.
  */
-export function webPorts(facts: WebPortFacts): WebPorts {
-  const cache = createCache({
-    stateRoot: facts.stateDir,
-    rootToken: facts.rootToken,
-    store: facts.store,
-  });
+export function webPorts(): WebPorts {
   const launcher = packagedLauncher();
   // ONE forge for this service's life, and the SAME implementation the
   // coordinator constructs for its statuses. Two constructions of `gh` in one
@@ -190,11 +167,8 @@ export function webPorts(facts: WebPortFacts): WebPorts {
     holdVenue,
     releaseVenue,
     protect: protectBranch(forge),
-    // Bound by REFERENCE: the cache implements the port structurally, and a
-    // lambda here would be a second place its contract could drift.
-    cache: cache.admin,
   };
-  return { ports, cache };
+  return { ports };
 }
 
 /** How long a whole-run cancel waits for the socket to go away before it says

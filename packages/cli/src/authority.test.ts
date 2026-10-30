@@ -309,7 +309,6 @@ describe("the authority wall", () => {
       "servicePipeline.ts",
       "serviceCli.ts",
       "serviceMcp.ts",
-      "cacheCmd.ts",
     ]) {
       expect(
         PUBLIC_CLIENTS,

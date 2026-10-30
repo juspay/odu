@@ -15,8 +15,10 @@
  *   run_start · run_wait · run_read · run_list · run_retry · run_cancel · log_read
  *   catalog_import · catalog_prune · pipeline_read
  *   venue_probe · venue_hold · venue_release · protect_apply
- *   cache_create · cache_list · cache_describe · cache_tokenMint · cache_tokenList
- *   cache_tokenRevoke · cache_pin · cache_gc · cache_stats
+ *
+ * The cache's verbs are NOT here: they are `@odu/cache/surface`'s own expose
+ * map (`cache_bucket_create` and its neighbours), because the cache is a row of
+ * its own. One policy per row is what keeps a row's vocabulary its own business.
  *
  * spelled identically as an MCP tool, as `odu surface run_start`, and as the
  * procedure `run.start` on the wire. Nothing here renames anything.
@@ -36,12 +38,12 @@
  * would have given the browser and the terminal a follow and left an agent
  * with the one-page read.
  *
- * **The cache's verbs are here for the same reason the run verbs are.** A
- * bucket is created, a token is minted and revoked, a closure is pinned and
- * collected — all of it from the browser, from a terminal and from an agent,
- * against the ONE service that owns the database. `odu cache push` is the
- * exception and stays one: it is a client of the cache's HTTP API, from the
- * machine that holds the paths.
+ * **The cache's verbs used to be here and are not any more.** They were, for
+ * exactly the reason the run verbs are — one service, one implementation, every
+ * face — and they left when the cache became a row: the same argument applied
+ * one level down, and a surface that spells another row's nouns is the
+ * braiding this cut undoes. `odu cache push` stays the exception it always was:
+ * a client of the cache's HTTP API, from the machine that holds the paths.
  *
  * **`mutates` is a safety default, not a label.** The framework treats an
  * unannotated procedure as MUTATING, because `readOnlyHint: true` lets an MCP
@@ -90,15 +92,6 @@ export const ODU_SERVICE_EXPOSE = {
   "venue.hold": { tool: { mutates: true } },
   "venue.release": { tool: { mutates: true } },
   "protect.apply": { tool: { mutates: true } },
-  "cache.create": { tool: { mutates: true } },
-  "cache.list": { tool: { mutates: false } },
-  "cache.describe": { tool: { mutates: false } },
-  "cache.tokenMint": { tool: { mutates: true } },
-  "cache.tokenList": { tool: { mutates: false } },
-  "cache.tokenRevoke": { tool: { mutates: true } },
-  "cache.pin": { tool: { mutates: true } },
-  "cache.gc": { tool: { mutates: true } },
-  "cache.stats": { tool: { mutates: false } },
 } as const satisfies ExposeMap<ServiceSpec>;
 
 /** The `instructions` an MCP host is handed at `initialize` — where the domain
@@ -143,15 +136,5 @@ export const ODU_SERVICE_MCP_INSTRUCTIONS = [
   "outlives your session. `catalog_import` / `catalog_prune` maintain the run",
   "catalog. `protect_apply` sets a branch's required status checks to exactly",
   "the contexts odu posts — use `dryRun` first and read `contexts`.",
-  "",
-  "The cache verbs administer Nix binary cache buckets served by the same",
-  "service. Every one takes `rootToken` — the service passes it through and the",
-  "cache decides, so a service started without `$ODU_ROOT_TOKEN` refuses all of",
-  "them with `no_root_token` while the substituter keeps serving. `cache_describe`",
-  "is the exception and takes no root token: a bucket's substituter URL and",
-  "public key are what it publishes to every client anyway. `cache_create`",
-  "answers a substituter URL and a public key; `cache_tokenMint` answers a",
-  "plaintext token ONCE (only its hash is kept) and is the credential a pusher",
-  "uses; `cache_pin` keeps a closure out of `cache_gc`, which evicts only what",
-  "retention has expired AND nothing retained references AND no pin holds.",
+  ""
 ].join("\n");

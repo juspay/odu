@@ -18,9 +18,13 @@ Three faces project the same verbs — and none of them has a verb of its own:
 run_start · run_wait · run_read · run_list · run_retry · run_cancel · log_read
 catalog_import · catalog_prune · pipeline_read
 venue_probe · venue_hold · venue_release · protect_apply
-cache_create · cache_list · cache_describe · cache_tokenMint · cache_tokenList
-cache_tokenRevoke · cache_pin · cache_gc · cache_stats
+cache_bucket_create · cache_bucket_list · cache_bucket_describe · cache_bucket_paths
+cache_token_mint · cache_token_list · cache_token_revoke
+cache_pin_create · cache_gc_run · cache_stats_read
 ```
+
+The cache's verbs are a ROW of their own — the daemon serves it beside the runs
+— so their names carry its word (`cache_`) and then the thing and the act.
 
 | Face | Spelling | Who uses it |
 | --- | --- | --- |
@@ -300,15 +304,17 @@ and a browser simply could not do them at all.
 | import old runs | `odu surface catalog_import --input '{…}' --json` | `catalog_import` | `checkout`, `dryRun?`, `requestId` | `imported[]`, `skipped[]`, `catalog` |
 | expire old runs | `odu surface catalog_prune --input '{…}' --json` | `catalog_prune` | `retentionDays?`, `dryRun?`, `requestId` | `expired[]`, `kept[]`, `retentionDays`, `dryRun`, `replayed` |
 | require odu's checks | `odu surface protect_apply --input '{…}' --json` | `protect_apply` | `checkout`, `branch?`, `platforms?`, `hostsFile?`, `dryRun?`, `create?`, `requestId` | `repo`, `branch`, `contexts[]`, `rulesetId`, `applied`, `created`, `derivedFrom`, `detail`, `replayed` |
-| create a cache bucket | `odu surface cache_create --input '{…}' --json` | `cache_create` | `rootToken`, `name`, `public`, `retentionDays`, `upstreamKeys?` | `name`, `public`, `retentionDays`, `keyName`, `publicKey`, `upstreamKeys[]`, `objects`, `bytes`, `created`, `url` |
-| list buckets | `odu surface cache_list --input '{…}' --json` | `cache_list` | `rootToken` | `buckets[]` (the shape above) |
-| one bucket's public identity | `odu surface cache_describe --input '{…}' --json` | `cache_describe` | `bucket` — **no root token** | `name`, `public`, `publicKey`, `url` only — the substituter's identity, not the operator's counts |
-| mint a cache token | `odu surface cache_tokenMint --input '{…}' --json` | `cache_tokenMint` | `rootToken`, `bucket`, `scope` (`read`/`write`/`admin`), `expiresDays?`, `bucketGlob?` | `token` (plaintext, ONCE), `facts` |
-| list cache tokens | `odu surface cache_tokenList --input '{…}' --json` | `cache_tokenList` | `rootToken`, `bucket?` | `tokens[]` — never a plaintext |
-| revoke a cache token | `odu surface cache_tokenRevoke --input '{…}' --json` | `cache_tokenRevoke` | `rootToken`, `id` | `id`, `revoked` |
-| pin a closure | `odu surface cache_pin --input '{…}' --json` | `cache_pin` | `rootToken`, `bucket`, `name`, `paths[]` | `bucket`, `name`, `rootPaths[]`, `created` |
-| reclaim cache space | `odu surface cache_gc --input '{…}' --json` | `cache_gc` | `rootToken`, `bucket?` | `buckets[]` (`evicted`, `kept`, `bytes`), `evicted`, `kept`, `bytes` |
-| cache sizes and reads | `odu surface cache_stats --input '{…}' --json` | `cache_stats` | `rootToken` | `buckets[]`, `objects`, `bytes`, `hits`, `lastAccessed` |
+| create a cache bucket | `odu surface cache bucket_create --input '{…}' --json` | `cache_bucket_create` | `rootToken`, `name`, `public`, `retentionDays`, `upstreamKeys?` | `name`, `public`, `retentionDays`, `keyName`, `publicKey`, `upstreamKeys[]`, `objects`, `bytes`, `created`, `url` |
+| list buckets | `odu surface cache bucket_list --input '{…}' --json` | `cache_bucket_list` | `rootToken` | `buckets[]` (the shape above) |
+| one bucket's public identity | `odu surface cache bucket_describe --input '{…}' --json` | `cache_bucket_describe` | `bucket` — **no root token** | `name`, `public`, `publicKey`, `url` only — the substituter's identity, not the operator's counts |
+| one bucket's paths | `odu surface cache bucket_paths --input '{…}' --json` | `cache_bucket_paths` | `bucket`, `filter?`, `after?` — **no root token** | `paths[]` (`storePath`, `narSize`, `created`, `hits`, `lastAccessed`), `next?` — newest first, 100 a page |
+| the rows a board follows | `odu surface watch cache buckets` | the `buckets` resource | *(none)* | `name`, `public`, `retentionDays`, `keyName`, `publicKey`, `upstreamKeys[]`, `objects`, `bytes`, `created`, `url`, `lastPush`, `hits` — one row per bucket, published as it moves |
+| mint a cache token | `odu surface cache token_mint --input '{…}' --json` | `cache_token_mint` | `rootToken`, `bucket`, `scope` (`read`/`write`/`admin`), `expiresDays?`, `bucketGlob?` | `token` (plaintext, ONCE), `facts` |
+| list cache tokens | `odu surface cache token_list --input '{…}' --json` | `cache_token_list` | `rootToken`, `bucket?` | `tokens[]` — never a plaintext |
+| revoke a cache token | `odu surface cache token_revoke --input '{…}' --json` | `cache_token_revoke` | `rootToken`, `id` | `id`, `revoked` |
+| pin a closure | `odu surface cache pin_create --input '{…}' --json` | `cache_pin_create` | `rootToken`, `bucket`, `name`, `paths[]` | `bucket`, `name`, `rootPaths[]`, `created` |
+| reclaim cache space | `odu surface cache gc_run --input '{…}' --json` | `cache_gc_run` | `rootToken`, `bucket?` | `buckets[]` (`evicted`, `kept`, `bytes`), `evicted`, `kept`, `bytes` |
+| cache sizes and reads | `odu surface cache stats_read --input '{…}' --json` | `cache_stats_read` | `rootToken` | `buckets[]`, `objects`, `bytes`, `hits`, `lastAccessed` |
 
 - **`requestId` is an idempotency key on these three too.** A repeat with the
   same id replays the recorded answer and performs nothing — which is what

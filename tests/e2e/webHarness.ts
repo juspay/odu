@@ -92,21 +92,23 @@ export interface WebWorld {
  * declares (`install.e2e.test.ts`). Two copies would drift, and the drift would
  * be invisible — each file would still pass against its own stale list.
  *
- * Derived from `packages/service-client/src/verbs.ts`'s `ODU_SERVICE_EXPOSE` by
- * the framework's own `toolName(ns, verb)` = `<ns>_<verb>`. It is deliberately
- * NOT imported from there: this suite is black-box, and a list imported from the
- * code under test would agree with a mistake.
+ * Derived from TWO expose maps by the framework's own naming rule — `<key>_<ns>_<verb>`
+ * for a row served as a sibling, `<ns>_<verb>` for the runs' core
+ * (`packages/service-client/src/verbs.ts` and `packages/cache/src/surface.ts`).
+ * It is deliberately NOT imported from either: this suite is black-box, and a
+ * list imported from the code under test would agree with a mistake.
  */
 export const SHARED_TOOLS = [
-  "cache_create",
-  "cache_describe",
-  "cache_gc",
-  "cache_list",
-  "cache_pin",
-  "cache_stats",
-  "cache_tokenList",
-  "cache_tokenMint",
-  "cache_tokenRevoke",
+  "cache_bucket_create",
+  "cache_bucket_describe",
+  "cache_bucket_list",
+  "cache_bucket_paths",
+  "cache_gc_run",
+  "cache_pin_create",
+  "cache_stats_read",
+  "cache_token_list",
+  "cache_token_mint",
+  "cache_token_revoke",
   "catalog_import",
   "catalog_prune",
   "log_read",

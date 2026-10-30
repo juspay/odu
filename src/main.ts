@@ -76,12 +76,13 @@ import {
   pipelineViaService,
   protectViaService,
 } from "@odu/cli/servicePipeline";
-import { cacheCommand } from "@odu/cli/cacheCmd";
+import { cacheCommand } from "@odu/cache/cli";
 import { internalCommand } from "@odu/cli/internalCli";
 import { serviceMcpCommand } from "@odu/cli/serviceMcp";
 import { ODU_VERSION } from "@odu/execution/common/version";
 import { surfaceCliMain } from "@odu/cli/serviceCli";
 import { webCommand, webDaemonCommand } from "@odu/host/web";
+import { connectOrStart } from "@odu/host/webLauncher";
 import { errorMessage, errorStack } from "@odu/execution/common/effectEdge";
 
 const USAGE = `usage: odu <run|wait|rerun|cancel|logs|history|status|attach|hosts|lease|release|dump|graph|protect|cache|web|surface|mcp> [args]
@@ -454,7 +455,10 @@ async function dispatch(argv: string[]): Promise<number> {
     }
     case "cache": {
       const [sub, ...subRest] = rest;
-      return cacheCommand(sub, subRest);
+      // THE ONE PORT this face takes: the way to the daemon. The bootstrap is
+      // `@odu/host`'s — starting a service is not a row's business — so the
+      // root binds it, and `@odu/cache/cli` stays a client that names no host.
+      return cacheCommand(sub, subRest, { connect: connectOrStart });
     }
     case "attach": {
       const { values } = parseArgs({

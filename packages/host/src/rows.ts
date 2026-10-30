@@ -1,13 +1,6 @@
 /**
  * THE ROWS, FIXED AT BOOT.
  *
- * Three lines of data and the composition they feed, and both halves are
- * deliberate. **Fixed**, because a daemon whose served set can move is a
- * daemon whose every client has to re-dial on a roster change — kolu's
- * rooted-bundle door supports it, and odu has no product reason to want it:
- * `odu web` serves the runs and the cache, and which of those exists is a fact
- * about the BINARY rather than about the machine or the request.
- *
  * A row is named ONCE, here, and the name is three things: the plugin's `name`
  * (what the runtime binds its fibre under and what `settled` waits on), the
  * SIBLING KEY its surface is served under (or `ci`, which is the wire's
@@ -15,19 +8,24 @@
  * under. `rows.test.ts` holds the first two together, because a row whose three
  * names disagree is a row a client cannot address.
  *
+ * **Fixed**, because a daemon whose served set can move is a daemon whose every
+ * client has to re-dial on a roster change — kolu's rooted-bundle door supports
+ * it, and odu has no product reason to want it: `odu web` serves the runs and
+ * the cache, and which of those exists is a fact about the BINARY rather than
+ * about the machine or the request.
+ *
  * ## Composition is the framework's, not this file's
  *
- * The runs row brings the ROOTED bundle — the service runtime, with the
- * frozen `control` fragment already mounted on it. Every other row brings a
- * SURFACE and asks to be mounted as a sibling through that bundle's own
- * transactional `mount`, which walks the arriving surface, proves the whole
- * route set disjoint across root and siblings, and commits nothing if it fails
- * — so a collision names the row that caused it instead of silently dropping a
- * member.
+ * The runs row brings the ROOTED bundle — the service runtime, with the frozen
+ * `control` fragment already mounted on it. Every other row brings a SURFACE and
+ * joins that bundle through its own transactional `mount`, which walks the
+ * arriving surface, proves the whole route set disjoint across root and
+ * siblings, and commits nothing if it fails — so a collision names the row that
+ * caused it instead of silently dropping a member.
  *
- * That is the shape `@olai/effect-cordis`'s host describes (a root, rows
- * beside it, teardown in reverse) and the one kolu's own composer uses, arrived
- * at from this side: composing by hand would be a second implementation of
+ * That is the shape `@olai/effect-cordis`'s host describes (a root, rows beside
+ * it, teardown in reverse) and the one kolu's own composer uses, arrived at from
+ * this side: composing by hand would be a second implementation of
  * `mergeDisjointGroups` with none of its proof.
  */
 
@@ -35,7 +33,8 @@ import { Layer } from "effect";
 import type { Plugin } from "@olai/effect-cordis";
 import type { RootedSurfacesRuntime } from "@kolu/surface/server";
 import { ciRow } from "./rows/ci";
-import type { RowContribution, RowRoutes } from "./services";
+import { cacheRow } from "./rows/cache";
+import type { RowAgent, RowContribution, RowRoutes } from "./services";
 
 /** One row's identity: the word the runtime binds it under, and the slot its
  *  surface occupies in the composed wire. */
@@ -50,13 +49,21 @@ export const ROWS: ReadonlyArray<Row> = [
   // The runs. The ROOT, because the wire is ABOUT them: its members are the
   // bare tags every face was published against.
   { name: "ci", key: null, plugin: ciRow },
+  // The cache. A SIBLING, so its members gain the `cache` segment — which is
+  // what makes `cache_bucket_create` a name a client can address.
+  { name: "cache", key: "cache", plugin: cacheRow },
 ];
 
-/** What the rows composed into: one live generation, and the routes beside it. */
+/** What the rows composed into: one live generation, the routes beside it, and
+ *  what an agent is told. */
 export interface Composed {
   readonly runtime: RootedSurfacesRuntime<never>;
   /** Every row's routes, merged — `null` when no row owns any. */
   readonly routes: RowRoutes | null;
+  /** The runs' row: the wire's unprefixed floor, and its agent paragraph. */
+  readonly core: RowAgent | null;
+  /** Every sibling's, by the SAME key its surface is mounted under. */
+  readonly siblings: Readonly<Record<string, RowAgent>>;
 }
 
 /**
@@ -67,12 +74,13 @@ export interface Composed {
  * a face reports as "this build is too old for that service" — and the daemon
  * would look healthy. So every missing or doubled row is a REFUSAL here, at
  * boot, with the row named.
+ *
+ * The row SET is a parameter rather than a closed-over `ROWS` so a suite can
+ * compose a two-row daemon without a second row existing in this build: the
+ * refusals below are about the composition, not about which rows ship.
  */
 export function composeRows(
   settledRows: ReadonlyArray<readonly [string, RowContribution]>,
-  // The row SET is a parameter rather than a closed-over `ROWS` so a suite can
-  // compose a two-row daemon without a second row existing in this build — the
-  // refusals below are about the composition, not about which rows ship.
   rows: ReadonlyArray<Row> = ROWS,
 ): Composed {
   const byName = new Map(settledRows);
@@ -96,28 +104,31 @@ export function composeRows(
   const runtime = rootContribution.runtime;
 
   const routes: RowRoutes[] = [];
+  const siblings: Record<string, RowAgent> = {};
+  let core: RowAgent | null = null;
   for (const row of rows) {
     const contribution = byName.get(row.name) as RowContribution;
     if (contribution.routes !== null) routes.push(contribution.routes);
-    // The root's own surface is already in `runtime`; every OTHER row joins it
-    // through the bundle's transactional door.
-    if (row.key !== null) {
-      const mount = contribution.mount;
-      if (mount === null) {
-        throw new Error(`odu: the row "${row.name}" is a sibling but asked for no mount`);
-      }
-      if (mount.key !== row.key) {
-        throw new Error(
-          `odu: the row "${row.name}" mounted itself as "${mount.key}" — a ` +
-            "row's name and its sibling key are one name, because that is what " +
-            "a client folds its health under",
-        );
-      }
-      runtime.mount(mount.key, mount.surface, mount.deps);
+    if (row.key === null) {
+      // The root's surface is already the bundle; only its agent paragraph and
+      // exposure travel from here.
+      core = contribution.agent;
+      continue;
     }
+    if (contribution.attach === null) {
+      throw new Error(`odu: the row "${row.name}" is a sibling but asked for no attach`);
+    }
+    contribution.attach(runtime);
+    if (contribution.agent !== null) siblings[row.key] = contribution.agent;
   }
+
   // MERGED, not ordered: `HttpRouter` ranks by specificity, so a literal
   // `/mcp` or `/:bucket/nix-cache-info` beats the shell's `GET /*` catch-all
   // whichever order the rows were mounted in.
-  return { runtime, routes: routes.length === 0 ? null : routes.reduce((all, one) => Layer.merge(all, one)) };
+  return {
+    runtime,
+    routes: routes.length === 0 ? null : routes.reduce((all, one) => Layer.merge(all, one)),
+    core,
+    siblings,
+  };
 }

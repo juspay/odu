@@ -5,11 +5,19 @@ deleted, the only one.** Everything the singleton web service owns: the
 registry projection every face reads the board from, the durable request
 receipts that make a lost reply reconcilable, and the handlers behind
 `@odu/service-client`'s procedures — `run_start`, `run_wait`, `run_read`, `run_list`,
-`run_retry`, `run_cancel`, `log_read`, and the rest. The browser, `odu surface` and `odu mcp` are three
-projections of that one contract; none of them adds a verb, and every one of
-their mutations lands here.
+`run_retry`, `run_cancel`, `log_read`, and the rest. Not the cache's: those are
+a row beside this one. The browser, `odu surface` and `odu mcp` are three
+projections of that contract; none of them adds a verb, and every one of their
+mutations lands here.
 
-What it deliberately does **not** own is a run.
+What it deliberately does **not** own is a run — and, since PR 1.5, not the
+cache either. A bucket's shape, its verbs, its refusals and its URLs are
+`@odu/cache`'s, served beside this surface as a row of its own; the eight cache
+verbs that used to be dispatched from here contributed a `url` and delegated
+the rest. The sentence in this file's title is true again because of that cut,
+not in spite of it: "cross-run authority" said nothing about binary caches, and
+a service that carried them was an authority over something it had never looked
+at.
 
 ## The wall, and the one claim behind it
 
