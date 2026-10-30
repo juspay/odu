@@ -18,9 +18,15 @@
  * - **Rows from manifests.** Every package says `"cordis": { "row": … }`; the
  *   fence resolves them itself, so a new package that forgets to say which row
  *   it is behind is a finding rather than a silent member of nothing.
- * - **`@odu/host` is the REGISTRY** — the one package in no row that names every
- *   row, which is why its own imports of the rows are legal while a row's
- *   import of IT would be the cycle the manifests cannot express.
+ * - **No package is the registry, and none is needed.** The door's registry is
+ *   "the one package in no row that names every row"; this repo's roster is
+ *   `packages/host/src/web.ts`, which is a ROOT file, and the door treats "a
+ *   consumer that mounts rows from a root file alone" as a state rather than a
+ *   defect (`fence.ts` ~1266). Rows are fixed at boot and named in one root, so
+ *   there is no second place a row could be added and forgotten. What still
+ *   holds is the reason a row may not import `@odu/host`: a face that reached it
+ *   to bootstrap would carry every row's server to reach the code that starts
+ *   one — which is what `@odu/cordis` exists to avoid.
  * - **The collision table** names the files where a row's word appears outside
  *   its own packages and outside the roots, with the count each one carries.
  *   Growing it is a diff somebody agrees to.

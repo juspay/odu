@@ -9,9 +9,9 @@ Part of the odu repo — `"@odu/host": "workspace:*"`.
 
 ```text
 src/main.ts         CLI  ─┐
-packages/host/     daemon ─┼──▶  ci     @odu/cli · @odu/launch · @odu/service ·
-packages/web-ui/   board ──┘            @odu/service-client · @odu/execution ·
-                                        @odu/run-history · @odu/run-client
+packages/host/     daemon ─┼──▶  ci     @odu/ci (the row: row.ts · face/) and the
+packages/web-ui/   board ──┘            engine it binds — service, execution,
+                                        run-history, run-client, launch, cli
                                 └──▶  cache  @odu/cache
 ```
 

@@ -7,12 +7,11 @@
  * mounts the rows — and no row reads an environment, a global, or a module the
  * host happens to have imported.
  *
- * **Why this is a package of its own.** `@odu/host` is the REGISTRY: it names
- * every row, and a row may not import the registry (the fence's rule, and it is
- * a real cycle — a face importing the host would carry every row's server to
- * reach the code that starts one). A row's own package cannot hold the tags the
- * OTHER rows need either. So the vocabulary sits in a module that belongs to
- * neither side, and both name it.
+ * **Why this is a package of its own.** `@odu/host` names every row and belongs
+ * to none of them, and a row may not import it: a face that reached the host to
+ * bootstrap would carry every row's server to reach the code that starts one. A
+ * row's own package cannot hold the tags the OTHER rows need either. So the
+ * vocabulary sits in a module that belongs to neither side, and both name it.
  *
  * The keys are minted with `serviceTag`, which is ONE declaration spoken in both
  * vocabularies: the string is what the row's `inject` names to Cordis and the
