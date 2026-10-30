@@ -22,7 +22,7 @@
  */
 
 import type { SurfaceReadout } from "@kolu/surface/solid";
-import { CiFace, type CiClient, type CiRoute } from "@odu/ci/face";
+import { CiFace, ciAmbient, type CiClient, type CiRoute } from "@odu/ci/face";
 import { CacheFace, type CacheClient } from "@odu/cache/face";
 import { Effect } from "effect";
 import { createEffect, createMemo, createSignal, onCleanup, Show, type JSX } from "solid-js";
@@ -103,14 +103,17 @@ export function App(props: {
 
   // ── the tab ──
   //
-  // THE TAB IS THE AMBIENT MONITOR, and the COUNTS ARE THE RUNS FACE'S: it owns
-  // the board's rows, so it reads them and reports up. A page left open is a
-  // page nobody is looking at, and a title and a favicon are the two pixels
-  // that stay visible from another window. Broken outranks busy: a run still
-  // going is worth a glance, a failure is worth coming back for — and it is a
-  // WORD as well as a glyph, because a title read aloud is the only version of
-  // this some people get.
-  const [tally, setTally] = createSignal({ failing: 0, active: 0 });
+  // THE TAB IS THE AMBIENT MONITOR, and the counts are the RUNS' — the board's
+  // rows, folded by `@odu/ci/face`. What they must NOT be is the runs' FACE's:
+  // a face unmounts when another row is on screen, and a run that fails while
+  // somebody reads buckets is exactly the fact the tab exists to carry. So the
+  // shell owns the subscription once, here, and the face is handed the same
+  // reading when it is drawn. A page left open is a page nobody is looking at,
+  // and a title and a favicon are the two pixels that stay visible from another
+  // window. Broken outranks busy: a run still going is worth a glance, a
+  // failure is worth coming back for — and it is a WORD as well as a glyph,
+  // because a title read aloud is the only version of this some people get.
+  const ambient = ciAmbient(props.client);
   const restingIcon =
     typeof document === "undefined"
       ? null
@@ -118,7 +121,7 @@ export function App(props: {
         null);
   createEffect(() => {
     if (typeof document === "undefined") return;
-    const { failing, active } = tally();
+    const { failing, active } = ambient.tally();
     document.title =
       failing > 0
         ? `✗ ${failing} failing · odu`
@@ -233,7 +236,7 @@ export function App(props: {
           now={now()}
           call={(effect) => Effect.runPromise(effect)}
           onRoute={(next) => go(next)}
-          onTally={(next) => setTally(next)}
+          ambient={ambient}
           connecting={props.readout.status === "connecting"}
         />
       </Show>

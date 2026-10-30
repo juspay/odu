@@ -17,6 +17,15 @@ Feature: The cache is a row of the board
     And that row shows a recent push
     And there should be no page errors
 
+  # The board has two rows and ONE tab. What is graded here is that switching
+  # rows does not switch off the ambient monitor: the counts are the runs', and
+  # they must keep arriving while the cache is the row on screen.
+  Scenario: The tab keeps counting runs while the cache is on screen
+    Given a settled red run of the failing fixture
+    When I open the cache
+    Then the tab counts the failing run
+    And there should be no page errors
+
   Scenario: A bucket opens, and answers what a client has to trust
     Given a bucket with one path pushed from the CLI
     And I open the cache

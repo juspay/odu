@@ -25,7 +25,7 @@ machine with no daemon and no database.
 ## The wall this package is
 
 ```
-@odu/cache  ─→  nothing of odu
+@odu/cache  ─→  @odu/cordis  ─→  nothing of odu
 ```
 
 The BOTTOM of odu's graph: nothing above it may appear below it, and
@@ -33,7 +33,9 @@ The BOTTOM of odu's graph: nothing above it may appear below it, and
 `@odu/run-history` and `@odu/service-client` by name. A cache that could reach
 the coordinator would be a second way to start a run; one that reached the
 catalog a second history. The one `@odu/*` it does name is `@odu/cordis` — the
-vocabulary the daemon and its rows share, which names no row either.
+service tags and composition helpers the daemon and its rows share, which name
+no row either — and it names it because this package IS a row: `./server` is a
+`definePlugin`, and the tags are how it says what it needs.
 
 **It reads no environment** — the state root, the root token and the store URI
 arrive as arguments, because the one variable that must never be found by

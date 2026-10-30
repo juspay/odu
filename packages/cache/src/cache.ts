@@ -683,6 +683,10 @@ export function createCache(options: CacheOptions): Cache {
     // Every path a pin holds must be rooted in the store, or the machine's own
     // GC deletes the pin out from under the cache.
     for (const path of reached) await blob.retain(bucket.name, path);
+    // A pin changes `pinnedPaths`, which is a column of the bucket's row — so
+    // this is the third mutator that NOTIFIES, beside create and gc, rather
+    // than one the surface has to remember to publish for.
+    notify();
     return {
       ok: true,
       value: { bucket: bucket.name, name: input.name, rootPaths: [...reached], created },

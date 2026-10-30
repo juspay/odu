@@ -85,6 +85,10 @@ const TEST_ONLY = new Set([
   "@babel/core",
   "@babel/preset-typescript",
   "babel-preset-solid",
+  // `teardown.test.ts` hands the row a `Log` and so names the daemon's `Logger`
+  // type. A type-only import of a hydrated pin, used by one test and by nothing
+  // the package ships.
+  "@kolu/surface-daemon",
 ]);
 
 function tsFilesUnder(dir: string): string[] {

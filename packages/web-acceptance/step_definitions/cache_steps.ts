@@ -150,6 +150,21 @@ Then("the second path is not listed", async function (this: OduWorld) {
   );
 });
 
+/**
+ * The TAB, while another row is on screen.
+ *
+ * The title is the page's ambient monitor: it counts runs whether or not they
+ * are being drawn. A second row must not switch it off — a run that fails while
+ * somebody reads buckets is exactly the fact a title bar exists to carry — so
+ * this is asserted from the cache's own scenario rather than the board's.
+ */
+Then("the tab counts the failing run", async function (this: OduWorld) {
+  await this.waitUntil(
+    async () => (await this.page.title()) === "✗ 1 failing · odu",
+    `the tab to read "✗ 1 failing · odu" (it read ${JSON.stringify(await this.page.title())})`,
+  );
+});
+
 Then("a bucket row names it", async function (this: OduWorld) {
   const name = this.cacheBucket;
   assert.ok(name !== undefined, "no bucket was arranged");

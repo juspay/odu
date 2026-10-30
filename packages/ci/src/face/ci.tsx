@@ -30,6 +30,7 @@ import {
   onCleanup,
   Show,
   Switch,
+  type Accessor,
   type JSX,
 } from "solid-js";
 import { Board } from "./board";
@@ -60,8 +61,9 @@ export interface CiFaceProps {
   call: <A>(effect: Effect.Effect<A, unknown>) => Promise<A>;
   /** Move the address. The shell owns the router, so the face asks. */
   onRoute: (next: CiRoute) => void;
-  /** The tab's counts, for the shell to draw. */
-  onTally: (tally: { failing: number; active: number }) => void;
+  /** The board's facts, built once by the shell so the tab keeps counting while
+   *  another row is on screen. */
+  ambient: CiAmbient;
   /** The wire has not answered yet — the board's empty state is "arriving",
    *  not "nothing ran". */
   connecting: boolean;
@@ -111,13 +113,31 @@ function isTerminalReadRefusal(err: unknown): boolean {
 const FOLLOW_RETRY_MS = 1_500;
 const FOLLOW_RETRY_LIMIT = 20;
 
-export function CiFace(props: CiFaceProps): JSX.Element {
-  const route = (): CiRoute => props.route;
-  const now = (): number => props.now;
-  const go = (next: CiRoute): void => props.onRoute(next);
+/** WHAT THE PAGE KNOWS ABOUT THE RUNS WHETHER OR NOT IT IS DRAWING THEM.
+ *
+ * The board's rows are a collection plus one stream per checkout, and the tab's
+ * counts are folded from them. All of that has to outlive the face: a person
+ * reading buckets still has a title bar, and a run that fails while they are
+ * there is exactly the fact that bar exists to carry. So the facts are built
+ * HERE, once, by whoever owns the page — the shell — and handed to the face it
+ * draws. A face that built them itself would unmount them with itself, which is
+ * the bug this shape removes.
+ */
+export interface CiAmbient {
+  /** The board's rows, newest first. */
+  readonly rows: Accessor<RunRow[]>;
+  /** One frame per checkout, in the order the roots arrived. */
+  readonly checkouts: Accessor<CheckoutFrame[]>;
+  /** The checkouts the service could not be read for. */
+  readonly unreadable: Accessor<{ repoRoot: string; message: string }[]>;
+  /** How many runs are failing and how many are going — the tab's two numbers. */
+  readonly tally: Accessor<{ failing: number; active: number }>;
+  /** One run by id, or nothing while it is not in the collection. */
+  readonly rowOf: (runId: string) => RunRow | undefined;
+}
 
-  // ── the board ──
-  const runs = props.client.collections.runs.use();
+export function ciAmbient(client: CiClient): CiAmbient {
+  const runs = client.collections.runs.use();
   const rows = createMemo<RunRow[]>(() => {
     const out: RunRow[] = [];
     for (const key of runs.keys()) {
@@ -146,7 +166,7 @@ export function CiFace(props: CiFaceProps): JSX.Element {
       () => checkoutRoots(rows()),
       (repoRoot) => ({
         repoRoot,
-        sub: props.client.streams.checkout.use(() => ({ repoRoot })),
+        sub: client.streams.checkout.use(() => ({ repoRoot })),
       }),
     ),
   );
@@ -188,18 +208,26 @@ export function CiFace(props: CiFaceProps): JSX.Element {
     return out;
   });
 
-  /**
-   * THE TAB IS THE AMBIENT MONITOR, and the SHELL wears it.
-   *
-   * The counts are this face's — it owns the board's rows — and the two pixels
-   * that stay visible from another window are the document's, so the reading
-   * goes UP through `onTally` and the shell draws it. Splitting it that way is
-   * what lets the shell serve two rows: the tab counts runs, and only this face
-   * knows what a run is.
-   */
-  createEffect(() => {
-    props.onTally(boardTally(standingFor()));
-  });
+  return {
+    rows,
+    checkouts,
+    unreadable,
+    tally: createMemo(() => boardTally(standingFor())),
+    rowOf: (runId) => runs.byKey(runId)?.(),
+  };
+}
+
+export function CiFace(props: CiFaceProps): JSX.Element {
+  const route = (): CiRoute => props.route;
+  const now = (): number => props.now;
+  const go = (next: CiRoute): void => props.onRoute(next);
+
+  // ── the board ──
+  //
+  // BUILT ELSEWHERE, because the page needs these facts whether or not it is
+  // drawing them: the tab counts runs while a person reads buckets. See
+  // `ciAmbient` above.
+  const { rows, checkouts, unreadable } = props.ambient;
 
   // ── the selected run ──
   const runId = createMemo(() => {
@@ -208,7 +236,7 @@ export function CiFace(props: CiFaceProps): JSX.Element {
   });
   const selectedRun = createMemo<RunRow | undefined>(() => {
     const id = runId();
-    return id === null ? undefined : runs.byKey(id)?.();
+    return id === null ? undefined : props.ambient.rowOf(id);
   });
   const nodesSub = props.client.streams.nodes.use(() => {
     const id = runId();

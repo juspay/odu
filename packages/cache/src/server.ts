@@ -45,7 +45,6 @@ import type { ImplementSurfaceDeps } from "@kolu/surface/server";
 import {
   BoundOrigin,
   Bundle,
-  type RowAgent,
   Log,
   NixStore,
   PublicOrigin,
@@ -58,9 +57,8 @@ import { CACHE_MOUNT } from "./paths";
 import { cacheRoutes } from "./routes";
 import {
   type CacheBucket,
+  CACHE_KEY,
   CacheRefused,
-  ODU_CACHE_EXPOSE,
-  ODU_CACHE_MCP_INSTRUCTIONS,
   oduCacheSurface,
 } from "./surface";
 
@@ -92,7 +90,9 @@ export interface CacheServer {
   /** Hand over the publishing half once the sibling is mounted. Called by the
    *  row, with the `ctx` its own `mount` returned. */
   readonly attach: (publisher: CachePublisher) => void;
-  /** Republish every changed row now. Called by `attach` and by `onChange`. */
+  /** Republish every changed row now. Called by `attach` and by the CACHE's own
+   *  change notification — never by a verb, because a verb cannot know whether
+   *  the row it touched is the one that moved. */
   readonly publish: () => void;
   /** Stop listening. The activation's cleanup, alongside the cache's own. */
   readonly detach: () => void;
@@ -110,10 +110,16 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
 
   /** A bucket's row: the cache's own facts plus the one thing the cache cannot
    *  know — where it is reachable from. */
+  /** WHERE THIS BUCKET IS REACHABLE — the one string a person pastes into a
+   *  `nix.conf`, built once. The board's row and `bucket.describe` both answer
+   *  it, and two builders were two chances for them to disagree about the
+   *  address the cache is actually served at. */
+  const urlOf = (name: string): string => `${opts.publicOrigin}${opts.mount}/${name}`;
+
   const rowOf = (facts: BucketFacts): CacheBucket => ({
     ...facts,
     upstreamKeys: [...facts.upstreamKeys],
-    url: `${opts.publicOrigin}${opts.mount}/${facts.name}`,
+    url: urlOf(facts.name),
   });
 
   const publish = (): void => {
@@ -168,26 +174,19 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
     procedures: {
       bucket: {
         create: ({ input }) =>
-          Effect.tap(
-            answer(
-              () =>
-                cache.admin.create({
-                  rootToken: input.rootToken,
-                  name: input.name,
-                  public: input.public,
-                  retentionDays: input.retentionDays,
-                  // The default lives where the filter is EXPLAINED, in the
-                  // contract's own doc: an absent list means nixpkgs' key, the
-                  // filter that keeps an upstream closure out of a bucket.
-                  upstreamKeys: input.upstreamKeys ?? [DEFAULT_UPSTREAM_KEY],
-                }),
-              (facts) => rowOf(facts),
-            ),
-            // The bucket must be on the board before the answer leaves: a CLI
-            // that creates one and a browser that is watching are the same
-            // moment, and "I just made it and it is not there" is the one thing
-            // a projection must never say.
-            () => Effect.sync(publish),
+          answer(
+            () =>
+              cache.admin.create({
+                rootToken: input.rootToken,
+                name: input.name,
+                public: input.public,
+                retentionDays: input.retentionDays,
+                // The default lives where the filter is EXPLAINED, in the
+                // contract's own doc: an absent list means nixpkgs' key, the
+                // filter that keeps an upstream closure out of a bucket.
+                upstreamKeys: input.upstreamKeys ?? [DEFAULT_UPSTREAM_KEY],
+              }),
+            (facts) => rowOf(facts),
           ),
         list: ({ input }) =>
           answer(
@@ -199,7 +198,7 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
         describe: ({ input }) =>
           answer(() => cache.admin.describe(input), (identity) => ({
             ...identity,
-            url: `${opts.publicOrigin}${opts.mount}/${identity.name}`,
+            url: urlOf(identity.name),
           })),
         paths: ({ input }) =>
           answer(
@@ -241,32 +240,26 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
       },
       pin: {
         create: ({ input }) =>
-          Effect.tap(
-            answer(
-              () =>
-                cache.admin.pin({
-                  rootToken: input.rootToken,
-                  bucket: input.bucket,
-                  name: input.name,
-                  paths: input.paths,
-                }),
-              (facts) => ({ ...facts, rootPaths: [...facts.rootPaths] }),
-            ),
-            () => Effect.sync(publish),
+          answer(
+            () =>
+              cache.admin.pin({
+                rootToken: input.rootToken,
+                bucket: input.bucket,
+                name: input.name,
+                paths: input.paths,
+              }),
+            (facts) => ({ ...facts, rootPaths: [...facts.rootPaths] }),
           ),
       },
       gc: {
         run: ({ input }) =>
-          Effect.tap(
-            answer(
-              () =>
-                cache.admin.gc({
-                  rootToken: input.rootToken,
-                  bucket: input.bucket ?? null,
-                }),
-              (report) => report,
-            ),
-            () => Effect.sync(publish),
+          answer(
+            () =>
+              cache.admin.gc({
+                rootToken: input.rootToken,
+                bucket: input.bucket ?? null,
+              }),
+            (report) => report,
           ),
       },
       stats: {
@@ -297,23 +290,6 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
 }
 
 // ── the row ─────────────────────────────────────────────────────────────────
-
-/** The word this row is served under — the sibling segment on the wire, the
- *  subcommand in argv, and the word a browser folds its health under. ONE
- *  spelling: the host's roster reads `key` off {@link cacheRow}, and the plugin
- *  below mounts at the same constant. */
-export const CACHE_KEY = "cache";
-
-/**
- * WHAT AN AGENT IS TOLD about the cache: its surface, its exposure policy and
- * the paragraph taught at `initialize`. Beside the row, because it is the row's
- * vocabulary.
- */
-export const CACHE_AGENT: RowAgent = {
-  surface: oduCacheSurface,
-  expose: ODU_CACHE_EXPOSE,
-  instructions: ODU_CACHE_MCP_INSTRUCTIONS,
-};
 
 /**
  * THE ROW AS A PLUGIN — mounted by the host with the rest of the roster, and
@@ -359,17 +335,20 @@ export const cacheRow = definePlugin({
     // collected by a host that has to know what a row is.
     routes.add(cacheRoutes(cache));
 
-    // FINALIZERS RUN IN REVERSE, so the MOUNT is dropped FIRST: this one is
-    // registered second and therefore runs before the cache's own cleanup — the
-    // safe order, because a subscriber must stop hearing about a database
-    // before the database goes.
-    yield* Effect.addFinalizer(() => Effect.promise(() => mounted.drop()));
+    // FINALIZERS RUN IN REVERSE, so the one registered SECOND runs FIRST, and
+    // the safe order is: the mount goes, THEN the database. A publish that
+    // landed on a mount still standing while its database had closed would read
+    // a torn-down cache; a mount dropped while the cache is open still is the
+    // ask it was built for. So the cleanup is registered first and the drop
+    // second, and `teardown.test.ts` closes a two-row host and proves it by
+    // probing the cache from inside the drop.
     yield* Effect.addFinalizer(() =>
       Effect.sync(() => {
         server.detach();
         cache.close();
       }),
     );
+    yield* Effect.addFinalizer(() => Effect.promise(() => mounted.drop()));
 
     log.info(
       { mount: CACHE_MOUNT, buckets: cache.snapshot().length },
