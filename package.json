@@ -18,6 +18,7 @@
     "@odu/cli": "workspace:*",
     "@odu/execution": "workspace:*",
     "@odu/host": "workspace:*",
+    "@odu/launch": "workspace:*",
     "@odu/run-client": "workspace:*",
     "@odu/run-history": "workspace:*",
     "@odu/service": "workspace:*",

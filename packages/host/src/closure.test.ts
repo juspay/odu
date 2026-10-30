@@ -41,7 +41,7 @@ const DECLARED = Object.keys(MANIFEST.dependencies ?? {});
 
 /** Pinned as a literal set: every entry is an install a consumer pays for, and
  *  `@odu/cli`'s absence is the wall this package exists to state. */
-const EXPECTED_DEPENDENCIES = ["@modelcontextprotocol/sdk", "@odu/cache", "@odu/execution", "@odu/run-client", "@odu/run-history", "@odu/service", "@odu/service-client", "effect"];
+const EXPECTED_DEPENDENCIES = ["@modelcontextprotocol/sdk", "@odu/cache", "@odu/execution", "@odu/launch", "@odu/run-client", "@odu/run-history", "@odu/service", "@odu/service-client", "effect"];
 
 /** The `@kolu/*` sources hydrated from a Nix pin rather than installed, plus
  *  the one graft that is not a kolu workspace directory at all. */

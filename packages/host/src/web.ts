@@ -89,11 +89,11 @@ import {
   settled,
   standing,
 } from "@olai/effect-cordis";
-import { readProcessIdentity, selfProcessIdentity } from "./processIdentity";
+import { readProcessIdentity, selfProcessIdentity } from "@odu/launch/processIdentity";
 import { mcpGetRoute, mcpRoute, RouteTransport, serveServiceMcpInProcess } from "./mcpRoute";
 import { servingOptions } from "./serving";
 import { configured } from "./webPorts";
-import { composeRows, ROWS, type Composed } from "./rows";
+import { composeRows, ROWS, type Composed } from "./roster";
 import {
   AllowedOrigins,
   BoundOrigin,
@@ -113,13 +113,13 @@ import {
   bakedBuild,
   spawnWebDaemon,
   webHome,
-} from "./webDaemonLaunch";
+} from "@odu/launch/webDaemonLaunch";
 import {
   clearTheGate,
   ensureService,
   type EnsureOutcome,
   readService,
-} from "./webLauncher";
+} from "@odu/launch/webLauncher";
 
 
 
@@ -576,7 +576,7 @@ export {
   daemonEnv,
   webDaemonSpawnConfig,
   webHome,
-} from "./webDaemonLaunch";
+} from "@odu/launch/webDaemonLaunch";
 
 /**
  * LET GO OF WHOEVER'S DIRECTORY THIS WAS.

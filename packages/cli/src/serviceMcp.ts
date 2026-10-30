@@ -18,11 +18,11 @@ import {
   type ServedSurfaceMcp,
   type SurfaceClientCallable,
 } from "@kolu/surface-mcp";
-import { mcpServerInfo } from "@odu/host/mcpRoute";
 import { ODU_CACHE_EXPOSE, oduCacheSurface } from "@odu/cache/surface";
 import { buildSurfaceFace } from "@kolu/surface/client";
 import { composeSurfaceContracts } from "@kolu/surface/define";
-import { connectOrStart } from "@odu/host/webLauncher";
+import { connectOrStart } from "@odu/launch/webLauncher";
+import { SERVICE_WIRE_GROUP } from "./wire";
 import { serviceOrigin } from "@odu/service-client/endpoint";
 import { oduServiceSurface } from "@odu/service-client/surface";
 import {
@@ -70,7 +70,7 @@ export async function serveServiceMcpOverStdio(opts: {
     // the key the daemon mounts the row at.
     surfaces: { cache: { surface: oduCacheSurface, expose: ODU_CACHE_EXPOSE } },
     client: async () => {
-      const connection = await connectOrStart(origin);
+      const connection = await connectOrStart(origin, { group: SERVICE_WIRE_GROUP });
       held = connection;
       return {
         client: {
@@ -85,7 +85,10 @@ export async function serveServiceMcpOverStdio(opts: {
         dispose: () => connection.dispose(),
       };
     },
-    serverInfo: mcpServerInfo(opts.version),
+    // The name an MCP host sees. ONE spelling, and it is the identity of the
+    // thing being served rather than a transport detail: the daemon's own `/mcp`
+    // route answers with the same pair.
+    serverInfo: { name: "odu", version: opts.version },
     instructions: ODU_SERVICE_MCP_INSTRUCTIONS,
     ...(opts.transport === undefined ? {} : { transport: opts.transport }),
   });

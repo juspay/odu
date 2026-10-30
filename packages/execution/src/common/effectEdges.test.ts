@@ -122,7 +122,7 @@ const SANCTIONED = new Map<string, string>([
       "daemon runs it.",
   ],
   [
-    "packages/host/src/webLauncher.ts",
+    "packages/launch/src/webLauncher.ts",
     "Converging on the singleton. Reading the service cell and asking a running " +
       "daemon to drain are Effects; everything that decides between adopt, " +
       "spawn and refuse is ordinary Promise code a test drives without a " +

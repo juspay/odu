@@ -9,9 +9,11 @@
  * ## Why this is a module and not a line in the dial
  *
  * `@odu/service-client`'s dial is browser-safe and knows only the core. The
- * siblings' contracts belong to their own packages, so the composition is the
- * ROOT's — this package — and it is the same list as {@link ROWS}: a row that
- * adds a surface adds it here, and the fence (phase 5) asserts the two agree.
+ * siblings' contracts belong to their own packages, and this package is a ROW:
+ * it names the cache's SURFACE — a declared door of another row, which is what
+ * the fence allows — and nothing of that row's server. A row that adds a surface
+ * adds it here; `packages/host/src/fence.test.ts` asserts that the keys the
+ * browser, this argv face and the daemon's roster all use are one word.
  *
  * ## What it is NOT
  *

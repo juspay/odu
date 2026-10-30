@@ -57,7 +57,8 @@ import type {
 } from "@odu/service-client/surface";
 import { isCommitPrefix, ServiceRefused } from "@odu/service-client/surface";
 import { Effect, type Stream } from "effect";
-import { connectOrStart } from "@odu/host/webLauncher";
+import { connectOrStart } from "@odu/launch/webLauncher";
+import { SERVICE_WIRE_GROUP } from "./wire";
 
 // ── exits ───────────────────────────────────────────────────────────────────
 
@@ -160,7 +161,7 @@ async function dial(
   origin: string | undefined,
 ): Promise<ServiceConnection | number> {
   try {
-    return await connectOrStart(origin ?? serviceOrigin());
+    return await connectOrStart(origin ?? serviceOrigin(), { group: SERVICE_WIRE_GROUP });
   } catch (err) {
     process.stderr.write(`${errorMessage(err)}\n`);
     return WAIT_EXITS.ownerLost;

@@ -88,7 +88,7 @@ import {
   webStderrLog,
 } from "./webDaemonLaunch";
 import { serviceBind, serviceOrigin } from "@odu/service-client/endpoint";
-import { SERVICE_WIRE_GROUP } from "./wire";
+import type { Rpc, RpcGroup } from "effect/rpc";
 
 /** The composed contract a control dial speaks: the frozen fragment under the
  *  sibling key the daemon mounts it at, which is also where the framework's own
@@ -131,10 +131,13 @@ export interface EnsureOptions {
  *  too, because the caller tells the two apart by the GATE, which a foreign
  *  program does not hold. The dial path wants the opposite answer and gets it
  *  from {@link adoptOrRefuse}, which throws. */
-export async function readService(origin: string): Promise<ServiceCell | null> {
+export async function readService(
+  origin: string,
+  group?: RpcGroup.RpcGroup<Rpc.Any>,
+): Promise<ServiceCell | null> {
   let connection: Awaited<ReturnType<typeof dialService>>;
   try {
-    connection = await dialService(origin, { group: SERVICE_WIRE_GROUP });
+    connection = await dialService(origin, dialGroup(group));
   } catch {
     return null;
   }
@@ -588,10 +591,23 @@ async function untilValue<T>(
  */
 export async function connectOrStart(
   origin: string = serviceOrigin(),
-  opts: { allowStart?: boolean } = {},
+  opts: {
+    allowStart?: boolean;
+    /**
+     * EVERY TAG THIS CLIENT MAY SEND — the composed wire, when the daemon
+     * serves more than one row.
+     *
+     * A link encodes each request from the `Rpc` it looks up by tag, so a face
+     * that addressed a SIBLING's member through a core-only link would find no
+     * descriptor for it. The composition lives where the rows are NAMED, which
+     * is a row's own package (or a root) — never here: this package names no
+     * row, which is what lets a row import it.
+     */
+    group?: RpcGroup.RpcGroup<Rpc.Any>;
+  } = {},
 ): Promise<ServiceConnection> {
   const allowStart = opts.allowStart ?? origin === serviceOrigin();
-  const existing = await dialExisting(origin, allowStart);
+  const existing = await dialExisting(origin, allowStart, opts.group);
   if (existing !== null) return adoptOrRefuse(existing, origin);
   const outcome = await ensureService({
     origin,
@@ -610,10 +626,7 @@ export async function connectOrStart(
   // even the one `ensureService` produced after its own contract check, so
   // "adopted" means "read its cell and this build can speak to it" by
   // construction rather than by argument.
-  return adoptOrRefuse(
-    await dialService(outcome.origin, { group: SERVICE_WIRE_GROUP }),
-    outcome.origin,
-  );
+  return adoptOrRefuse(await dialService(outcome.origin, dialOptions(opts.group)), outcome.origin);
 }
 
 /**
@@ -635,15 +648,13 @@ export async function connectOrStart(
 async function dialExisting(
   origin: string,
   allowStart: boolean,
+  group?: RpcGroup.RpcGroup<Rpc.Any>,
 ): Promise<ServiceConnection | null> {
   try {
-    return await dialService(origin, {
-      readyMs: ABSENCE_PROBE_MS,
-      group: SERVICE_WIRE_GROUP,
-    });
+    return await dialService(origin, { readyMs: ABSENCE_PROBE_MS, ...dialGroup(group) });
   } catch (err) {
     if ((await whoeverIsListening(origin)) !== null) {
-      return await dialService(origin, { group: SERVICE_WIRE_GROUP });
+      return await dialService(origin, dialGroup(group));
     }
     // Nothing is accepting. That is absence — an answer only a caller allowed
     // to bootstrap can act on; anyone else gets the dial's own sentence.
@@ -661,3 +672,18 @@ async function dialExisting(
  * machine. Loopback answers in microseconds when anything is listening.
  */
 const ABSENCE_PROBE_MS = 300;
+
+/** The group a dial is built over, as an option object — `{}` when the caller
+ *  named none, which leaves the dial on the core's tags alone. */
+function dialGroup(group: RpcGroup.RpcGroup<Rpc.Any> | undefined): {
+  group?: RpcGroup.RpcGroup<Rpc.Any>;
+} {
+  return group === undefined ? {} : { group };
+}
+
+/** The same, for a dial that carries other options too. */
+function dialOptions(group: RpcGroup.RpcGroup<Rpc.Any> | undefined): {
+  group?: RpcGroup.RpcGroup<Rpc.Any>;
+} {
+  return dialGroup(group);
+}

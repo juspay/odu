@@ -12,6 +12,7 @@
         "@odu/cli": "workspace:*",
         "@odu/execution": "workspace:*",
         "@odu/host": "workspace:*",
+        "@odu/launch": "workspace:*",
         "@odu/run-client": "workspace:*",
         "@odu/run-history": "workspace:*",
         "@odu/service": "workspace:*",
@@ -61,6 +62,7 @@
         "@odu/cache": "workspace:*",
         "@odu/execution": "workspace:*",
         "@odu/host": "workspace:*",
+        "@odu/launch": "workspace:*",
         "@odu/run-client": "workspace:*",
         "@odu/run-history": "workspace:*",
         "@odu/service": "workspace:*",
@@ -86,9 +88,19 @@
         "@modelcontextprotocol/sdk": "^1.29.0",
         "@odu/cache": "workspace:*",
         "@odu/execution": "workspace:*",
+        "@odu/launch": "workspace:*",
         "@odu/run-client": "workspace:*",
         "@odu/run-history": "workspace:*",
         "@odu/service": "workspace:*",
+        "@odu/service-client": "workspace:*",
+        "effect": "4.0.0",
+      },
+    },
+    "packages/launch": {
+      "name": "@odu/launch",
+      "version": "0.1.0",
+      "dependencies": {
+        "@odu/execution": "workspace:*",
         "@odu/service-client": "workspace:*",
         "effect": "4.0.0",
       },
@@ -263,6 +275,8 @@
     "@odu/execution": ["@odu/execution@workspace:packages/execution"],
 
     "@odu/host": ["@odu/host@workspace:packages/host"],
+
+    "@odu/launch": ["@odu/launch@workspace:packages/launch"],
 
     "@odu/run-client": ["@odu/run-client@workspace:packages/run-client"],
 

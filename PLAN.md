@@ -56,7 +56,7 @@ a monthly price.
 Each item names where it is checked.
 
 - **F1. HTTP server.** `odu web` serves through kolu's `serveSurfaceApp`
-  (`packages/cli/src/web.ts`). App routes are one Effect `HttpRouter` layer
+  (`packages/host/src/web.ts`). App routes are one Effect `HttpRouter` layer
   merged beside the shell (`routes: Layer.merge(mcpRoute, mcpGetRoute)`),
   and the framework exposes an HTTP `middleware` seam, a `tls` option, an
   `upgradeHeaders` allowlist, and a `services(connection)` seam that provides
@@ -370,6 +370,69 @@ and pushes, shown by the evidence recording.
 State of master after merge: `odu web` on any machine is also a Nix cache on
 loopback, administered by `odu cache` with a root token. Nothing is public.
 
+### PR 1.5: a host and two rows, the cache cut free
+
+> **Docs:** The board has a Cache view. Open the page and the header offers
+> **Runs** and **Cache**: buckets with their sizes, their last push and their
+> read counts, and one bucket's public key, substituter URL, the block
+> `odu cache use` prints, and its paths newest first with a filter box. Nothing
+> else changes for a user — every command, verb, flag and URL behaves as it did,
+> and the one name that moves is a cache tool's: `cache_create` is
+> `cache_bucket_create`, because the cache is now a row of its own and its names
+> carry its word.
+
+PR 1 left the cache's DATA PLANE clean — ten files in `packages/cache` that
+depend on Effect and nothing else — and braided everything above it into the CI
+feature: a bucket was spelled three times (`@odu/cache`'s own facts,
+`@odu/service`'s `CacheAdmin` port, the CI surface's `CacheBucketSchema`), the
+service — "the cross-run authority" — dispatched eight cache verbs whose only
+contribution was a `url`, both features shared one contract version, the word
+`cache` was in six files of `@odu/cli`, and the board knew nothing of any of it.
+Both review lenses agree on the cut: **the cache owns its contract.** The
+product is "one board, runs and cache", so the cut pays for the view.
+
+The shape after this PR:
+
+```text
+roots (name every row)                        rows (name only themselves)
+src/main.ts              CLI                   ci     = @odu/cli · @odu/service · @odu/service-client
+packages/host/src/web.ts daemon  ───────▶               @odu/execution · @odu/run-history · @odu/run-client
+packages/web-ui/src/app.tsx route table        cache  = @odu/cache  (surface · server · cli · face)
+host (no row): @odu/host, @odu/web-ui — daemon tenure, transport, launch, board shell
+```
+
+What lands:
+- **`@odu/host`.** The daemon root leaves `@odu/cli`: the tenure, the listener's
+  parts, the singleton gate, how a client converges on it, the `/mcp` door, and
+  the composition root that binds the service's ports to the engine. The arrow is
+  `root → host → rows` and never back, and the host's closure test refuses
+  `@odu/cli` and `@odu/web-ui`.
+- **Cordis on the daemon.** One host for the tenure; the facts a row needs —
+  state root, home, bound and public origin, build, logger, the Origin
+  allowlist, the store, the way to end — are Effect services; a row is a
+  `definePlugin` whose registrations ARE its teardown. Rows are fixed at boot,
+  the host composes their surfaces into one flat group through the framework's
+  own transactional mount, and refuses to serve half a surface. `@olai/effect-cordis`
+  and the four `cordis` packages are pinned in npins and hydrated like the
+  `@kolu/*` libraries.
+- **The cache row.** `@odu/cache` grows four doors — `./surface` (the contract,
+  browser-safe), `./server` (implements it, and builds its own `url`s from the
+  origin it was constructed with), `./cli` (`odu cache …`), `./face` (the view).
+  `CacheAdmin` and the cache types leave `service/ports.ts`, the dispatch leaves
+  `service/service.ts`, `createCache` leaves the composition root, and
+  `SERVICE_CONTRACT_VERSION` goes to 2.0 because the surface LOST members. The
+  cache publishes a `buckets` collection itself — on create, import, pin and gc,
+  with reads folded in at most once a second — so the board follows it and
+  nothing polls.
+- **The Cache view.** `#/cache` and `#/cache/<bucket>`, a Runs / Cache switch in
+  the header, `connectSurfaces({ ci, cache })` at the browser root, and one
+  client per row: the run views hold the runs' and the Cache view holds the
+  cache's alone.
+
+State of master after merge: `odu web` serves two rows over one wire and one
+page; the cache is a package that declares its own contract and serves itself,
+and the service is the cross-run authority it says it is.
+
 ### PR 2: odu runs its own cache
 
 > **Docs:** Run odu as a public cache on NixOS with `services.odu.enable =
@@ -435,16 +498,18 @@ and controllable by its admins.
 > **Docs:** Teams are organisations. An org owner creates it, adds members
 > from a GitHub org or team or by invite, and assigns owner, admin or member
 > roles. Each org owns any number of buckets, public or private; a private
-> bucket is read with a token in your `netrc`. The bucket page shows paths,
-> usage against the org's quota, and the tokens that can write to it, with
-> one-click revocation. Every admin action is in the org's audit log.
+> bucket is read with a token in your `netrc`. The bucket page shows usage
+> against the org's quota and the tokens that can write to it, with one-click
+> revocation. Every admin action is in the org's audit log.
 
 What lands:
 - Orgs, membership from GitHub org or team or by invite, roles (owner,
   admin, member); many buckets per org; private buckets with netrc reads;
   org field on runs and buckets so the catalog filters per org (F3).
-- Bucket pages, token management with revocation in the UI, per-org usage
-  and quotas, audit log.
+- Token management with revocation in the UI, per-org usage and quotas, audit
+  log. The bucket page itself is NOT here: PR 1.5 built it (a bucket's key,
+  substituter URL, use block and paged paths), so this PR adds the org's facts
+  to a page that exists rather than shipping one.
 
 State of master after merge: an internal team self-serves a private bucket,
 mints and revokes tokens, and sees its usage, without the operator.

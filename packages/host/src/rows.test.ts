@@ -15,7 +15,7 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import { composeRows, type Row } from "./rows";
+import { composeRows, type Row } from "./roster";
 import type { RowContribution } from "./services";
 
 /** A contribution that says nothing and serves no routes — enough for the

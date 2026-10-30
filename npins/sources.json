@@ -59,11 +59,11 @@
         "owner": "juspay",
         "repo": "olai"
       },
-      "branch": "master",
+      "branch": "cordis-fence",
       "submodules": false,
-      "revision": "d9cf945206c0c4f4a16d9017f791d02d20044fe4",
-      "url": "https://github.com/juspay/olai/archive/d9cf945206c0c4f4a16d9017f791d02d20044fe4.tar.gz",
-      "hash": "sha256-Hth0/p1UFUb9hRGnVhaR7G0Yx+m9wZt/xDvf+ttof/g="
+      "revision": "5f86a8c1a33f39e1c90a9cb86279e38855bee6d6",
+      "url": "https://github.com/juspay/olai/archive/5f86a8c1a33f39e1c90a9cb86279e38855bee6d6.tar.gz",
+      "hash": "sha256-Vl49kE+SiT2zef3DvySdfp+p67S+qGiXx4uLzZhNFv4="
     }
   },
   "version": 7

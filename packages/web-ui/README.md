@@ -77,6 +77,15 @@ scrolls sideways.
 
 ## How the two pages use a screen
 
+**The board is TWO ROWS.** The header offers *Runs* and *Cache*, and they are
+two STATES of one page rather than a menu — `aria-pressed` says which is
+showing. The cache's view is not written here: it is `@odu/cache/face`, a row's
+own face, and this package's closure test holds the split (only `app.tsx` opens
+it, and `main.tsx` is the only file that names the cache's surface, because the
+root dials both rows through `connectSurfaces`). What the shell does is hand the
+Cache view the CACHE's client and the run views the runs' — a view that held the
+other row's client could do the other row's job.
+
 **The board is scanned.** One row per checkout by default — the latest run of
 each, with `N earlier` under the age and a *History* toggle for the rest —
 because "what is my CI doing" is a question about checkouts, and a superseded
