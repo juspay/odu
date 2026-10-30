@@ -355,6 +355,14 @@ What lands:
   docs-sync rule), and e2e coverage: `nix copy --to` into a bucket, `nix
   build` substituting from it with the bucket's key trusted, GC evicting an
   unreferenced path and refusing a pinned closure.
+- `services.odu` NixOS module: systemd unit under a service user, that service
+  user in `nix.settings.trusted-users`, state directory, root-token secret
+  file, the public key, and an nginx vhost with ACME that proxies **only**
+  `/cache/*` and `/_odu/v1/*`. The board, websocket and `/mcp` stay on loopback
+  (F2). `ODU_PUBLIC_ORIGIN` makes the substituter URL a bucket publishes the
+  proxied one. A NixOS VM test exercises the module end to end — create a
+  bucket, push, substitute, GC — as a `[linux]` lane. It lands here rather than
+  in PR 2 because the server is deployed from this branch.
 
 **Exit criterion:** flat server memory over concurrent multi-gigabyte NAR reads
 and pushes, shown by the evidence recording.
@@ -379,15 +387,9 @@ Prerequisite PR in kolu: `publish-closure` gains a generic push target (a
 cache URL with netrc, or a push command) beside its attic inputs.
 
 What lands:
-- `services.odu` NixOS module: systemd unit under a service user, that
-  service user in `nix.settings.trusted-users`, state directory,
-  root-token secret file, the public key, and an nginx vhost with ACME that
-  proxies **only** `/cache/*` and `/_odu/v1/*`, with `proxy_cache` on NAR
-  reads. The board, websocket and `/mcp` stay on
-  loopback (F2). A NixOS VM test exercises the module end to end: create a
-  bucket, push, substitute, GC.
-- The dedicated server is deployed from this branch before merge, and the
-  PR's evidence shows it.
+- On top of PR 1's module: a `proxy_cache` on the NAR reads, and the
+  dedicated server deployed from this branch before merge — the PR's evidence
+  shows it.
 - The dogfood switch (F9, F11): `flake.nix` `nixConfig` names the bucket;
   `nix-cache.yml` substitutes from it and pushes with `odu cache push` (or
   `nix copy` with netrc at bootstrap) using an `ODU_CACHE_TOKEN` secret, and

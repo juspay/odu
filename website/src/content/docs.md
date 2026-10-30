@@ -86,7 +86,7 @@ The board lists runs across repositories. Open a run to inspect nodes, follow lo
 
 Configure forwarding separately; Odu can keep listening on loopback. The service answers to whatever name it is reached by, so an SSH forward, a Tailscale name, or a proxy that passes the Host header through needs no configuration. Anyone who can reach the forwarded address can control CI.
 
-A proxy that rewrites Host sends a browser Origin that no longer matches it. Admit that origin when starting the service:
+A proxy that rewrites Host sends a browser Origin that no longer matches it. Admit that origin when starting the service — `services.odu.allowedOrigins` is the module's spelling of the same setting:
 
 ```sh
 ODU_WEB_ALLOWED_ORIGINS=https://box.tailnet.ts.net \
@@ -106,9 +106,16 @@ The board, the CI runs and the cache are one process, so the flake ships a NixOS
 ```
 
 ```nix
-{ inputs, ... }:
+{ config, inputs, ... }:
 {
   imports = [ inputs.odu.nixosModules.default ];
+
+  # `cache.enableACME` is on by default, and Let's Encrypt wants both of these.
+  # Accepting the terms is your act, not the module's.
+  security.acme = {
+    acceptTerms = true;
+    defaults.email = "you@example.com";
+  };
 
   # Any secret file works. agenix is the example.
   age.secrets.odu-root-token = {
