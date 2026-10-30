@@ -31,7 +31,7 @@ const DECLARED = Object.keys(MANIFEST.dependencies ?? {});
 /** What a consumer must satisfy, pinned as a literal set. Growing it is a
  *  decision every downstream pays for, so it is written down rather than
  *  derived from whatever the manifest happens to say today. */
-const EXPECTED_DEPENDENCIES = ["@odu/service-client", "effect", "solid-js"];
+const EXPECTED_DEPENDENCIES = ["@odu/cache", "@odu/service-client", "effect", "solid-js"];
 
 /** The `@kolu/*` sources a consumer must hydrate alongside this package. */
 const HYDRATED = new Set<string>([
@@ -195,6 +195,34 @@ describe("@odu/web-ui's import closure", () => {
       offenders,
       `${offenders.join(", ")} would give the browser a second way to reach a ` +
         "run. Everything it knows arrives over @odu/service-client's surface.",
+    ).toEqual([]);
+  });
+
+  it("keeps the cache's view to ONE importer, and the run views out of it", () => {
+    // THE ROWS ARE DISJOINT AT THE FACE, and this is where that is stated.
+    // `#/cache` is `@odu/cache`'s own view over the CACHE's client; a board row
+    // that imported it would be a run view holding a bucket's client, and a
+    // cache view that imported `./board` would be one that could paint runs.
+    // The only file that may open `@odu/cache/face` is the shell, because the
+    // shell is the route table.
+    const offenders: string[] = [];
+    for (const { rel, specifiers } of sources) {
+      for (const spec of specifiers) {
+        if (!spec.startsWith("@odu/cache")) continue;
+        if (rel === "src/main.tsx") {
+          // The ROOT dials both rows: `connectSurfaces` needs both surfaces.
+          if (spec !== "@odu/cache/surface") offenders.push(`${rel}: ${spec} (the root mounts surfaces only)`);
+          continue;
+        }
+        if (rel !== "src/app.tsx") offenders.push(`${rel}: ${spec}`);
+        else if (spec !== "@odu/cache/face") offenders.push(`${rel}: ${spec} (the shell opens the view, not the contract)`);
+      }
+    }
+    expect(
+      offenders,
+      `${offenders.join(", ")} reaches the cache from a place that is not the ` +
+        "shell. The run views hold the runs' client and the cache view holds " +
+        "the cache's; `app.tsx` is the ONE place that wires both.",
     ).toEqual([]);
   });
 

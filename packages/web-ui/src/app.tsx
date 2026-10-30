@@ -49,6 +49,8 @@ import {
   checkoutRoots,
   newestFirst,
 } from "@odu/service-client/board";
+import { CacheFace } from "@odu/cache/face";
+import type { CacheClient } from "@odu/cache/face";
 import { Board } from "./board";
 import { Create, type CreateState, type StartForm } from "./create";
 import {
@@ -88,12 +90,23 @@ type Client = SurfaceClient<ServiceSpec>;
 type Route =
   | { at: "board" }
   | { at: "run"; runId: string; log: string | null }
-  | { at: "new" };
+  | { at: "new" }
+  | { at: "cache"; bucket: string | null };
 
 function routeOf(hash: string): Route {
   const run = parseRunHash(hash);
   if (run !== null) return { at: "run", ...run };
-  return hash.replace(/^#\/?/, "") === "new" ? { at: "new" } : { at: "board" };
+  const rest = hash.replace(/^#\/?/, "");
+  if (rest === "new") return { at: "new" };
+  // THE CACHE'S ADDRESS. `#/cache` is the list and `#/cache/<bucket>` is one
+  // bucket — a bucket NAME is a lowercase label, so it needs no escaping and
+  // the two segments are one `split`.
+  if (rest === "cache") return { at: "cache", bucket: null };
+  if (rest.startsWith("cache/")) {
+    const name = decodeURIComponent(rest.slice("cache/".length));
+    return { at: "cache", bucket: name === "" ? null : name };
+  }
+  return { at: "board" };
 }
 
 function hashOf(route: Route): string {
@@ -104,6 +117,8 @@ function hashOf(route: Route): string {
       return "#/new";
     case "run":
       return route.log === null ? runHash(route.runId) : logHash(route.log);
+    case "cache":
+      return route.bucket === null ? "#/cache" : `#/cache/${encodeURIComponent(route.bucket)}`;
   }
 }
 
@@ -157,6 +172,10 @@ const FOLLOW_RETRY_LIMIT = 20;
 
 export function App(props: {
   client: Client;
+  /** THE CACHE'S CLIENT — a different row, handed to the one view that renders
+   *  it and to nothing else. A run view that held it could administer a bucket;
+   *  a cache view that held the runs' client could start a run. */
+  cache: CacheClient;
   readout: SurfaceReadout;
   onReload: () => void;
 }): JSX.Element {
@@ -720,6 +739,19 @@ export function App(props: {
     });
   };
 
+  // ── the cache ──
+  //
+  // Two facts about ONE route, read where the switch needs them: whether the
+  // page is the cache at all, and which bucket it names. A `Match` narrows
+  // nothing into its children (they are built on entry, not called with the
+  // value), so the readings are memos rather than a discriminated `route()`
+  // read inside the JSX.
+  const atCache = createMemo(() => route().at === "cache");
+  const openBucket = createMemo<string | null>(() => {
+    const here = route();
+    return here.at === "cache" ? here.bucket : null;
+  });
+
   // ── the shell ──
   /** What the connection indicator says, and in which hue — one call, because
    *  the sentence and the colour are two halves of one answer. */
@@ -747,6 +779,25 @@ export function App(props: {
           <span class="brand-sigil" aria-hidden="true">$</span>
           <span class="brand-name">odu</span>
         </span>
+        {/* THE BOARD IS TWO ROWS NOW — runs and cache — and this is the switch
+            between them. Two buttons rather than a link list because they are
+            two STATES of one page: `aria-pressed` says which, and a person
+            arriving with a screen reader hears "Runs, pressed" rather than a
+            navigation menu's worth of ceremony. */}
+        <nav class="rows" aria-label="board rows">
+          <Button
+            pressed={route().at !== "cache"}
+            onClick={() => go({ at: "board" })}
+          >
+            Runs
+          </Button>
+          <Button
+            pressed={route().at === "cache"}
+            onClick={() => go({ at: "cache", bucket: null })}
+          >
+            Cache
+          </Button>
+        </nav>
         {/* The words AND the hue come from `format.ts`'s `CONNECTION`, so the
             shell names no status class of its own: which colour "reconnecting"
             carries is an assignment of meaning, and it belongs in the table
@@ -789,6 +840,15 @@ export function App(props: {
             onStart={start}
             onOpen={(id) => go({ at: "run", runId: id, log: null })}
             onBack={() => go({ at: "board" })}
+          />
+        </Match>
+        <Match when={atCache()}>
+          <CacheFace
+            client={props.cache}
+            bucket={openBucket()}
+            now={now()}
+            call={(effect) => Effect.runPromise(effect)}
+            onOpen={(bucket) => go({ at: "cache", bucket })}
           />
         </Match>
         <Match when={route().at === "run"}>

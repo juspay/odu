@@ -43,10 +43,11 @@ const MANIFEST = JSON.parse(
 
 const DECLARED = Object.keys(MANIFEST.dependencies ?? {});
 
-/** Pinned as a literal set: `effect` and the browser-safe half of the surface
- *  framework are the whole install — `@kolu/surface` is HYDRATED from a Nix pin
- *  and so is absent here by design, and nothing else is a bucket's business. */
-const EXPECTED_DEPENDENCIES = ["effect"];
+/** Pinned as a literal set: `effect` and `solid-js` — the second is `./face`'s
+ *  cost, and the reason the face is a separate DOOR rather than a module the
+ *  server could reach. `@kolu/surface` is HYDRATED from a Nix pin and so is
+ *  absent here by design. */
+const EXPECTED_DEPENDENCIES = ["effect", "solid-js"];
 
 /** The `@kolu/*` sources hydrated from a Nix pin rather than installed. Four
  *  doors of this package open the framework: the surface (`/define`,
@@ -69,7 +70,16 @@ const FORBIDDEN = new Set([
 ]);
 
 /** Test-only imports — the harness, not the shipped closure. */
-const TEST_ONLY = new Set(["bun:test", "typescript"]);
+const TEST_ONLY = new Set([
+  "bun:test",
+  "typescript",
+  // `face.test.ts` compiles the view with the app's own compiler; the presets
+  // are the ROOT's build toolchain (see the root manifest), never a runtime
+  // dependency — nothing a consumer installs includes them.
+  "@babel/core",
+  "@babel/preset-typescript",
+  "babel-preset-solid",
+]);
 
 function tsFilesUnder(dir: string): string[] {
   const out: string[] = [];
@@ -80,7 +90,10 @@ function tsFilesUnder(dir: string): string[] {
       out.push(...tsFilesUnder(path));
       continue;
     }
-    if (entry.endsWith(".ts")) out.push(path);
+    // `.tsx` INCLUDED: `./face` is Solid JSX, and a walker that only knew about
+    // `.ts` would have quietly stopped policing it the day it was written —
+    // the failure `@odu/web-ui`'s twin records having had.
+    if (entry.endsWith(".ts") || entry.endsWith(".tsx")) out.push(path);
   }
   return out;
 }
@@ -94,7 +107,11 @@ function specifiersIn(source: string, fileName: string): string[] {
     source,
     ts.ScriptTarget.Latest,
     /* setParentNodes */ false,
-    ts.ScriptKind.TS,
+    // TSX or TS by extension. TypeScript's parser resolves `<T>(x) => x` one way
+    // in a `.ts` and another in a `.tsx`, so a JSX file parsed as TS produces a
+    // tree with the imports still in it and the markup mangled — a policing
+    // test that keeps passing while seeing less than it thinks.
+    fileName.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
   );
   const out: string[] = [];
   const literal = (node: ts.Node | undefined): void => {
@@ -130,7 +147,11 @@ function readsProcessEnv(source: string, fileName: string): boolean {
     source,
     ts.ScriptTarget.Latest,
     /* setParentNodes */ false,
-    ts.ScriptKind.TS,
+    // TSX or TS by extension. TypeScript's parser resolves `<T>(x) => x` one way
+    // in a `.ts` and another in a `.tsx`, so a JSX file parsed as TS produces a
+    // tree with the imports still in it and the markup mangled — a policing
+    // test that keeps passing while seeing less than it thinks.
+    fileName.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
   );
   let found = false;
   const walk = (node: ts.Node): void => {
