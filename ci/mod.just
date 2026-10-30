@@ -47,13 +47,22 @@ e2e-web: install nix
 
 # THE NIXOS MODULE, booted: two VMs, a real nginx, a real `nix copy` through it.
 #
-# `[linux]` because it boots a VM and the module is for servers. The
-# x86_64-linux lane host has `/dev/kvm`, where this takes ~41 s warm and ~63 s
-# when the VM image has to be built; without KVM the same test runs under TCG
-# and takes many minutes, which is why the number is here rather than in a
-# timeout.
-[linux]
+# NOT `[linux]`, and that is a correction the darwin lane made: `just` EXCLUDES a
+# recipe whose OS attribute does not match the host, and `default` depends on
+# this one, so `[linux]` made every darwin node fail before it started with
+# "recipe `default` has unknown dependency `nixos-module`". The attribute is a
+# runtime check instead, which keeps the dependency resolvable everywhere and
+# makes the skip a line in the lane's log rather than a silent green.
+#
+# On x86_64-linux the host has `/dev/kvm`: ~41 s warm, ~63 s when the VM image
+# has to be built. Without KVM the same test runs under TCG and takes minutes.
 nixos-module:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ "$(uname -s)" != Linux ]; then
+      echo "nixos-module: linux only — this lane is $(uname -s), nothing to boot"
+      exit 0
+    fi
     nix build .#checks.x86_64-linux.nixos-module --no-link --accept-flake-config
 
 fmt:
