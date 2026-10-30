@@ -24,6 +24,11 @@
  *   3. a `<Show>`'s children compile to a getter — the compiler's answer to the
  *      dead-node bug `./dom.tsx`'s header records.
  *
+ * The RUN VIEWS live in `@odu/ci` now (they are the `ci` row's face), so this
+ * list follows them; `@odu/web-ui`'s twin checks the shell's own views. Both
+ * compile with the same pinned presets, and the two lists together are every
+ * `.tsx` the bundle carries.
+ *
  * The presets are reached through `createRequire` because neither ships type
  * declarations, and a `.d.ts` shim in this package would be a shipped-looking
  * file that is really a build-tool detail. They are the ROOT's build-time
@@ -69,7 +74,13 @@ function compile(source: string, filename: string): string {
 /** Every view this package ships. Listed rather than globbed: a file that stops
  *  being a `.tsx` should be a decision somebody made here, not a silent drop
  *  from the set this test polices. */
-const VIEWS = ["main.tsx", "app.tsx", "board.tsx", "create.tsx", "detail.tsx", "dom.tsx"];
+const VIEWS = ["ci.tsx", "board.tsx", "create.tsx", "detail.tsx", "dom.tsx"];
+
+/** The views that carry markup of their own. `ci.tsx` composes other components
+ *  and renders no element itself, so its compiled output has no template to
+ *  clone — the signature of the Solid transform there is `createComponent`
+ *  imported from `solid-js/web`, which the shared assertions below check. */
+const MARKUP = new Set(["board.tsx", "create.tsx", "detail.tsx", "dom.tsx"]);
 
 describe("the Solid compiler that builds this app", () => {
   it.each(VIEWS)("compiles %s to cloned templates, not to component calls", (view) => {
@@ -77,10 +88,10 @@ describe("the Solid compiler that builds this app", () => {
     // `template` is dom-expressions' clone-a-parsed-fragment helper. Its
     // presence is the signature of the DOM-mode Solid transform; its absence
     // means some other transform ran.
-    expect(code, `${view} compiled without a solid-js/web template`).toContain(
+    expect(code, `${view} compiled without a solid-js/web import`).toContain(
       'from "solid-js/web"',
     );
-    expect(code).toContain("_$template(");
+    if (MARKUP.has(view)) expect(code).toContain("_$template(");
     // The tell of a generic React-shaped transform. It would bundle and render;
     // it would not be Solid.
     expect(code, `${view} was compiled by a jsx-runtime transform`).not.toContain(

@@ -31,7 +31,7 @@ const DECLARED = Object.keys(MANIFEST.dependencies ?? {});
 /** What a consumer must satisfy, pinned as a literal set. Growing it is a
  *  decision every downstream pays for, so it is written down rather than
  *  derived from whatever the manifest happens to say today. */
-const EXPECTED_DEPENDENCIES = ["@odu/cache", "@odu/service-client", "effect", "solid-js"];
+const EXPECTED_DEPENDENCIES = ["@odu/cache", "@odu/ci", "@odu/service-client", "effect", "solid-js"];
 
 /** The `@kolu/*` sources a consumer must hydrate alongside this package. */
 const HYDRATED = new Set<string>([

@@ -153,7 +153,11 @@ function exportedFile(member: string, sub: string): string | null {
   const key = sub === "" ? "." : `./${sub}`;
   const literal = exports[key] ?? exports["./*"];
   if (typeof literal !== "string") return null;
-  return join(dir, sub === "" ? literal : literal.replace("*", sub));
+  // EVERY `*`, because that is what an npm `exports` wildcard means: all
+  // instances on the right-hand side are replaced. (`String.prototype.replace`
+  // with a string pattern replaces the first only, which a scanner flags and a
+  // two-star pattern would honour half of.)
+  return join(dir, sub === "" ? literal : literal.replace(/\*/g, sub));
 }
 
 /**

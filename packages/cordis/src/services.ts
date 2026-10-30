@@ -25,7 +25,7 @@ import type { Surface, SurfaceSpec } from "@kolu/surface/define";
 import type { ExposeMap } from "@kolu/surface/expose";
 import type { RootedSurfacesRuntime } from "@kolu/surface/server";
 import type { ServeSurfaceAppOptions } from "@kolu/surface-app/serve";
-import { serviceTag } from "@olai/effect-cordis";
+import { type Plugin, serviceTag } from "@olai/effect-cordis";
 
 // ── what the host provides ──────────────────────────────────────────────────
 
@@ -136,13 +136,14 @@ export interface RowAgent {
  *  wire, the subcommand in argv, and the word a browser folds its health under.
  *  `null` for the ROOT row, whose members keep the bare tags.
  *
- *  `plugin` is the `definePlugin` a SIBLING row is mounted as. The ROOT row has
- *  none: the host builds it (`implementRootedSurfaces` takes the root surface as
- *  a constructor argument, not as a sibling), which is what makes it the bundle
- *  every sibling mounts on. */
+ *  `plugin` is the `definePlugin` this row is mounted as — EVERY row is one,
+ *  including the runs': a plugin can build a rooted bundle inside its own
+ *  `apply` and `offer` it, so the runs' row owns its runtime and closes it.
+ *  `key` null means "the wire's ROOT": the row that offers `Bundle`, which the
+ *  siblings mount on. */
 export interface Row {
   readonly name: string;
   readonly key: string | null;
-  readonly plugin: import("@olai/effect-cordis").Plugin | null;
+  readonly plugin: Plugin;
   readonly agent: RowAgent;
 }

@@ -25,21 +25,16 @@
  *   its own packages and outside the roots, with the count each one carries.
  *   Growing it is a diff somebody agrees to.
  *
- * ## Two door defects this declaration is waiting on
+ * ## What it costs to be green
  *
- * `juspay/olai#676` is in flight and its fence door is pinned at the branch
- * head; until it lands, two defects keep the report from being what it should
- * be, and this file says so rather than working around them:
+ * Two shape changes, both made in round 2/3 rather than declared away: the run
+ * views moved into `@odu/ci/face` (a row's face, in the row's package) so the
+ * board shell holds no row contract outside a root, and the `/mcp` path is
+ * PASSED IN to the host's route rather than imported by it. Those were the only
+ * files the host-package rule was catching.
  *
- *   (a) registry CANDIDATES are computed from `tree.sources`, which includes
- *       tests and every string literal — so a closure test that merely LISTS the
- *       packages it refuses can make its package look like a roster;
- *   (b) the candidate test asks whether a package names every row PACKAGE, when
- *       a roster names every row — `@odu/host` names `@odu/cli` for the runs'
- *       bundle, so today it happens to satisfy (b) anyway.
- *
- * When the door is re-pinned, the three wrong-declaration tests below are
- * replaced by `expect(prove(declaration).ok)`.
+ * `prove(declaration).ok` is the stronger self-check and is not asserted yet:
+ * see `docs` on the door's `live-state` mutation.
  */
 
 import { readFileSync } from "node:fs";
@@ -88,7 +83,6 @@ const declaration = {
     },
     ci: {
       "packages/web-acceptance/support/service.ts": 7,
-      "packages/web-ui/src/create.tsx": 1,
     },
   },
   // A MODULE THAT HOLDS LIVE STATE BEHIND A DOOR, and why: the spawn module's
@@ -102,45 +96,21 @@ const declaration = {
   },
 } as const;
 
-/**
- * THE REDS THIS ROUND IS WAITING ON — door defects, not this repo's.
- *
- * `juspay/olai#676`'s fence computes its registry CANDIDATES from every source a
- * member has (tests and string literals included) and asks whether one names
- * every row PACKAGE. Fixed, the candidates are exactly `packages/host` and the
- * registry is found; today it is `undefined`, so the host's own rows imports are
- * judged by the host-package rule and come back red, as do the board's views.
- *
- * These six are what that costs. They are PINNED rather than declared away: a
- * seventh is a finding, and a fix to the door makes this list wrong on purpose
- * — the assertion below is what tells you to switch to `prove(declaration).ok`.
- */
-const KNOWN_RED_IMPORTS = [
-  "packages/host/src/mcpRoute.ts",
-  "packages/web-ui/src/board.tsx",
-  "packages/web-ui/src/detail.tsx",
-  "packages/web-ui/src/format.ts",
-  "packages/web-ui/src/types.ts",
-];
-
 describe("the fence over this repo", () => {
-  it("is green on everything the door can see today", () => {
+  it("is green, every claim", () => {
     const report = fence(declaration);
-    for (const claim of ["door-graphs", "names", "live-state", "registry"] as const) {
-      expect(report.red(claim), `${claim}:\n${report.red(claim).join("\n")}`).toEqual([]);
-    }
-    // The three faults the door still has are all in ONE claim, and the distinct
-    // FILES they name are the whole of it.
-    const files = [...new Set(report.red("imports").map((said) => said.split(":")[0] as string))];
-    expect(files.sort()).toEqual(KNOWN_RED_IMPORTS);
+    expect(
+      report.findings,
+      report.findings.map((one) => `${one.claim}: ${one.said}`).join("\n"),
+    ).toEqual([]);
   });
 
-  it("finds no registry yet, and that is the door's defect", () => {
-    // `packages/host` names every row (it imports the runs' bundle, their
-    // runtime's type, the cache's row and launch), which is what a roster is.
-    // The door cannot see it: its candidates are drawn from a member's non-root
-    // sources only, and it asks for every row PACKAGE. When #676 lands this
-    // assertion fails, and the six names above become `prove(declaration).ok`.
+  it("has no registry, and needs none", () => {
+    // The roster is in `packages/host/src/web.ts`, which is a ROOT file. The
+    // door treats "a consumer that mounts rows from a root file alone" as a
+    // STATE rather than a defect (`fence.ts` ~1266), and it is the truth here:
+    // this repo's rows are fixed at boot and named in one root, so there is no
+    // second place a row could be added and forgotten.
     expect(fence(declaration).reading.registry).toBeUndefined();
   });
 
@@ -148,9 +118,6 @@ describe("the fence over this repo", () => {
   // declaration pulls is pulled the wrong way once. No temp tree and no copy:
   // the claims are functions of the DECLARATION, so a wrong declaration over
   // the same sources is the defect, and a reviewer can read it.
-  //
-  // (`prove(declaration).ok` replaces these three when olai#676 lands — see the
-  // header on defects (a) and (b).)
   it("goes red when a row the packages declare is not in the roster", () => {
     const { cache: _dropped, ...rest } = FENCE_ROWS;
     const report = fence({ ...declaration, rows: rest });

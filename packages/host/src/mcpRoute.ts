@@ -65,11 +65,13 @@ import {
 } from "@kolu/surface-mcp";
 import type { SurfaceHandlers } from "@kolu/surface/server";
 import { isAllowedWsOrigin } from "@kolu/surface/ws-origin";
-import { SERVICE_MCP_PATH } from "@odu/service-client/endpoint";
 import type { RowAgent } from "@odu/cordis/services";
 import { Effect } from "effect";
 import { HttpRouter, HttpServerResponse } from "effect/http";
 import type { HttpServerRequest } from "effect/http";
+// The router's own path type (`/${string}` | "*"), so the parameter cannot be
+// handed something the router would refuse.
+import type { PathInput } from "effect/http/FindMyWay";
 
 interface Message {
   jsonrpc?: unknown;
@@ -255,6 +257,10 @@ export function serveServiceMcpInProcess(opts: {
   handlers: SurfaceHandlers;
   version: string;
   transport: Transport;
+  /** WHERE the endpoint is mounted. The HOST passes it, because this package
+   *  names no row: the constant lives in the contract the runs are, and a
+   *  no-row package that imported it would be importing a row outside a root. */
+  path: PathInput;
   /** The wire's unprefixed floor. */
   core: RowAgent | null;
   /** Every sibling, keyed by the segment its names take. */
@@ -389,10 +395,11 @@ export function gateMcpRequest(
 export function mcpRoute(
   transport: RouteTransport,
   allowedOrigins: readonly string[],
+  path: PathInput,
 ) {
   return HttpRouter.add(
     "POST",
-    SERVICE_MCP_PATH,
+    path,
     (request: HttpServerRequest.HttpServerRequest) =>
       Effect.gen(function* () {
         const gate = gateMcpRequest(request.headers, allowedOrigins);
@@ -470,10 +477,10 @@ export function mcpRoute(
 
 /** `GET /mcp` — this server pushes nothing, and says so rather than opening a
  *  stream that would never carry a frame. */
-export function mcpGetRoute() {
+export function mcpGetRoute(path: PathInput) {
   return HttpRouter.add(
     "GET",
-    SERVICE_MCP_PATH,
+    path,
     Effect.sync(() =>
       HttpServerResponse.text(
         "odu's MCP endpoint answers POSTed JSON-RPC and pushes nothing — " +

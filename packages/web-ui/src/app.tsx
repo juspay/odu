@@ -1,77 +1,34 @@
 /**
- * THE SHELL — routing, the connection indicator, and the one place a view meets
- * the wire.
+ * THE SHELL — the address bar's router, the wire indicator, the rows switch, and
+ * the tab. It renders no run and no bucket: those are `@odu/ci/face` and
+ * `@odu/cache/face`, each in the package that owns the row it draws.
  *
- * Everything reactive is bound here and handed to the views as ordinary props,
- * so a view holds no client and cannot invent a second way to reach the
- * service. That is not tidiness: it is what makes "the browser has no execution
- * or retry logic of its own" a thing you can check by reading one file.
+ * **Two rows, two faces, one page.** The header's switch is two STATES of this
+ * page rather than a menu; the route decides which face is mounted, and each
+ * face gets the client of its own row and the route's slice of the address. A
+ * face cannot reach across — the runs' views hold the runs' client, the cache's
+ * holds the cache's — and the shell is the one file that wires both.
+ *
+ * **THE UI EDGE IS HERE, once.** A procedure is an `Effect` — a description —
+ * and a click is the moment one becomes execution. `call` below is that
+ * crossing for BOTH faces (`props.call`), so "a control's whole story" has one
+ * home and two views cannot disagree about what a refusal means.
  *
  * **The connection is drawn, not hidden.** The readout is the framework's own
  * five-state fact — connecting, live, degraded, reconnecting, retired — and
- * each is a state a person can be in and needs to know about. `reconnecting`
- * in particular is the honest one: the page keeps showing the last thing the
- * service said, and it says so rather than letting stale rows look live.
- *
- * **A procedure call runs at the UI edge.** Every control is an `Effect`, and
- * `call` below is that edge — the one place a control crosses from description
- * to execution and the one place a thrown refusal becomes a sentence, so a
- * control's whole story (pending → receipt or refusal) is in one function
- * rather than scattered per button. The followed read is the one exception,
- * because it retries, and it says so where it runs.
+ * each is a state a person can be in and needs to know about. `reconnecting` is
+ * the honest one: the page keeps showing the last thing the service said, and
+ * says so rather than letting stale rows look live.
  */
 
-import type { SurfaceClient } from "@kolu/surface/solid";
 import type { SurfaceReadout } from "@kolu/surface/solid";
-import { formatLogKey, parseLogKey } from "@odu/service-client/logKey";
-import {
-  logHash,
-  parseRunHash,
-  runHash,
-} from "@odu/service-client/routes";
-import { logHasMore, LOG_TAIL_BYTES } from "@odu/service-client/surface";
-import type { oduServiceSurface } from "@odu/service-client/surface";
+import { CiFace, type CiClient, type CiRoute } from "@odu/ci/face";
+import { CacheFace, type CacheClient } from "@odu/cache/face";
 import { Effect } from "effect";
-import {
-  createEffect,
-  createMemo,
-  createSignal,
-  mapArray,
-  Match,
-  on,
-  onCleanup,
-  Show,
-  Switch,
-  type JSX,
-} from "solid-js";
-import {
-  boardTally,
-  checkoutRoots,
-  newestFirst,
-} from "@odu/service-client/board";
-import { CacheFace } from "@odu/cache/face";
-import type { CacheClient } from "@odu/cache/face";
-import { Board } from "./board";
-import { Create, type CreateState, type StartForm } from "./create";
-import {
-  type ControlState,
-  Detail,
-  LOG_PAGE_BYTES,
-  LogPanel,
-} from "./detail";
-import { Button } from "./dom";
+import { createEffect, createMemo, createSignal, onCleanup, Show, type JSX } from "solid-js";
+import { parseRunHash, runHash, logHash } from "@odu/service-client/routes";
+import { Button } from "@odu/ci/face";
 import { faviconSvg, wireText } from "./format";
-import type {
-  CheckoutFrame,
-  LogPage,
-  LogTail,
-  NodesFrame,
-  RunNode,
-  RunRow,
-} from "./types";
-
-type ServiceSpec = (typeof oduServiceSurface)["spec"];
-type Client = SurfaceClient<ServiceSpec>;
 
 /**
  * Where the page is, in the URL hash.
@@ -80,27 +37,16 @@ type Client = SurfaceClient<ServiceSpec>;
  * node's output within it linkable — is `@odu/service-client/routes`, minted and
  * read there because a link is minted by whoever holds the run (an editor, a
  * terminal, another app's panel) and opened here. What stays local is the rest of
- * this page's states: `#/` for the board and `#/new` for the create form, which
- * are this app's own navigation rather than addresses anything links to.
- *
- * The selected node is part of the ROUTE rather than a signal beside it: one
- * source of truth, so Back works through a log the same way it works through a
- * run.
+ * this page's states: `#/` for the runs, `#/new` for the create form and
+ * `#/cache[/<bucket>]` for the other row.
  */
-type Route =
-  | { at: "board" }
-  | { at: "run"; runId: string; log: string | null }
-  | { at: "new" }
-  | { at: "cache"; bucket: string | null };
+type Route = CiRoute | { at: "cache"; bucket: string | null };
 
 function routeOf(hash: string): Route {
   const run = parseRunHash(hash);
   if (run !== null) return { at: "run", ...run };
   const rest = hash.replace(/^#\/?/, "");
   if (rest === "new") return { at: "new" };
-  // THE CACHE'S ADDRESS. `#/cache` is the list and `#/cache/<bucket>` is one
-  // bucket — a bucket NAME is a lowercase label, so it needs no escaping and
-  // the two segments are one `split`.
   if (rest === "cache") return { at: "cache", bucket: null };
   if (rest.startsWith("cache/")) {
     const name = decodeURIComponent(rest.slice("cache/".length));
@@ -122,59 +68,10 @@ function hashOf(route: Route): string {
   }
 }
 
-/** A request id a repeat of this page's own click cannot duplicate. The service
- *  makes a request id mandatory precisely so a lost reply is reconcilable, and
- *  a browser that reused one would replay its previous answer rather than doing
- *  what the person just asked for. */
-function requestId(what: string): string {
-  return `web-${what}-${crypto.randomUUID()}`;
-}
-
-/** The message a refusal becomes. The service's refusals are already sentences
- *  written for a person; this only adds the recovery when there is one. */
-function refusalText(err: unknown): string {
-  const value = err as { message?: unknown; suggestion?: unknown };
-  const message =
-    typeof value?.message === "string" ? value.message : String(err);
-  const suggestion = Array.isArray(value?.suggestion)
-    ? ` Try: ${(value.suggestion as string[]).join(" ")}`
-    : "";
-  return `${message}${suggestion}`;
-}
-
-/**
- * A read that will never succeed, however many times it is tried.
- *
- * `log.read` REFUSES a key it cannot address — an expired run, an attempt that
- * never ran, a malformed key — and those are answers, not outages. Retrying one
- * is a spinner over a sentence somebody should be reading instead. Everything
- * else (a dropped socket, a service mid-upgrade) is transient by default, which
- * is the safe direction: a follow that resumes too eagerly costs a request, one
- * that gives up too eagerly costs somebody the rest of their log.
- */
-const TERMINAL_READ_REFUSALS = new Set([
-  "unknown_run",
-  "expired",
-  "bad_input",
-  "checkout_refused",
-]);
-
-function isTerminalReadRefusal(err: unknown): boolean {
-  const code = (err as { code?: unknown })?.code;
-  return typeof code === "string" && TERMINAL_READ_REFUSALS.has(code);
-}
-
-/** How long to wait before resuming a follow whose read did not answer, and
- *  how many times. Twenty attempts at a second and a half covers a service
- *  restart and an upgrade; past that, saying so beats spinning. */
-const FOLLOW_RETRY_MS = 1_500;
-const FOLLOW_RETRY_LIMIT = 20;
-
 export function App(props: {
-  client: Client;
-  /** THE CACHE'S CLIENT — a different row, handed to the one view that renders
-   *  it and to nothing else. A run view that held it could administer a bucket;
-   *  a cache view that held the runs' client could start a run. */
+  client: CiClient;
+  /** THE CACHE'S CLIENT — a different row, handed to the one face that renders
+   *  it and to nothing else. */
   cache: CacheClient;
   readout: SurfaceReadout;
   onReload: () => void;
@@ -204,100 +101,16 @@ export function App(props: {
   const clock = setInterval(() => setNow(Date.now()), 1000);
   onCleanup(() => clearInterval(clock));
 
-  // ── the board ──
-  const runs = props.client.collections.runs.use();
-  const rows = createMemo<RunRow[]>(() => {
-    const out: RunRow[] = [];
-    for (const key of runs.keys()) {
-      const row = runs.byKey(key)?.();
-      if (row !== undefined) out.push(row);
-    }
-    // Newest first. Sorted HERE rather than trusted from the wire: under batched
-    // delivery `keys()` is arrival order, which the framework's own contract
-    // says to treat as a set rather than a list. The order itself is
-    // `@odu/service-client/board`'s, so every reader of a board sorts alike.
-    return newestFirst(out);
-  });
-
-  // ── one subscription per checkout ──
+  // ── the tab ──
   //
-  // The board's rows are checkouts, and what a checkout IS — the run it stands
-  // for, that run's work, how many ran before — is `streams.checkout`'s answer,
-  // folded by the service on the catalog's own clock. This app addresses them
-  // and paints the answers; it does not re-derive any of it from `rows`.
-  //
-  // `mapArray` keys the subscriptions by checkout path, so a new checkout opens
-  // ONE stream and the others are left alone — an `Index`-shaped re-subscribe
-  // on every catalog tick would reopen every one of them four times a second.
-  const checkoutSubs = createMemo(
-    mapArray(
-      () => checkoutRoots(rows()),
-      (repoRoot) => ({
-        repoRoot,
-        sub: props.client.streams.checkout.use(() => ({ repoRoot })),
-      }),
-    ),
-  );
-  const checkouts = createMemo<CheckoutFrame[]>(() => {
-    const out: CheckoutFrame[] = [];
-    for (const { sub } of checkoutSubs()) {
-      const frame = sub();
-      // A checkout whose first frame has not landed yet is not an empty
-      // checkout, so it is absent from the list rather than an empty row.
-      if (frame !== undefined) out.push(frame);
-    }
-    return out;
-  });
-  /**
-   * The checkouts the service could not be read for.
-   *
-   * A failed subscription is NOT an absent one. Dropped, a checkout whose
-   * stream died simply leaves the board while its runs are still listed under
-   * History — so the board answers "what is my CI doing here" with silence
-   * about the one checkout it could not answer for. The frame carries no
-   * `repoRoot`, which is why the path is held beside the subscription rather
-   * than recovered from the reading that did not arrive.
-   */
-  const unreadable = createMemo<{ repoRoot: string; message: string }[]>(() => {
-    const out: { repoRoot: string; message: string }[] = [];
-    for (const { repoRoot, sub } of checkoutSubs()) {
-      const failure = sub.error();
-      if (failure !== undefined) out.push({ repoRoot, message: String(failure) });
-    }
-    return out;
-  });
-  /** The run each checkout STANDS FOR — what the board shows, and so what the
-   *  tab counts. */
-  const standingFor = createMemo<RunRow[]>(() => {
-    const out: RunRow[] = [];
-    for (const checkout of checkouts()) {
-      if (checkout.latest !== null) out.push(checkout.latest.run);
-    }
-    return out;
-  });
-
-  /**
-   * THE TAB IS THE AMBIENT MONITOR.
-   *
-   * The whole point of a browser board is that it can be left open, and a page
-   * that is left open is a page nobody is looking at. A tab title and a favicon
-   * are the two pixels of this app that stay visible from another window, so
-   * they carry the one fact worth interrupting somebody for: is anything broken,
-   * and is anything still moving.
-   *
-   * Counted over the runs the board SHOWS — each checkout's own latest, as the
-   * service reports it — and through the same predicates, because a tab
-   * claiming three failures over a board showing one is a tab nobody trusts
-   * twice, and sharing only the rows left the predicates free to drift.
-   *
-   * `document` is guarded because these modules are also loaded outside a
-   * browser: `compile.test.ts` runs them through bun to check what the compiler
-   * emitted.
-   */
-  /** The build hashes the logo's filename, so the resting icon is a URL only the
-   *  document knows. Read ONCE, up front, rather than remembered from inside the
-   *  effect on whichever branch happened to run first — a value, not a memory of
-   *  what the first repaint found. */
+  // THE TAB IS THE AMBIENT MONITOR, and the COUNTS ARE THE RUNS FACE'S: it owns
+  // the board's rows, so it reads them and reports up. A page left open is a
+  // page nobody is looking at, and a title and a favicon are the two pixels
+  // that stay visible from another window. Broken outranks busy: a run still
+  // going is worth a glance, a failure is worth coming back for — and it is a
+  // WORD as well as a glyph, because a title read aloud is the only version of
+  // this some people get.
+  const [tally, setTally] = createSignal({ failing: 0, active: 0 });
   const restingIcon =
     typeof document === "undefined"
       ? null
@@ -305,10 +118,7 @@ export function App(props: {
         null);
   createEffect(() => {
     if (typeof document === "undefined") return;
-    const { failing, active } = boardTally(standingFor());
-    // Broken outranks busy: a run still going is worth a glance, a failure is
-    // worth coming back for. And it is a WORD as well as a glyph, because a
-    // title read aloud is the only version of this some people get.
+    const { failing, active } = tally();
     document.title =
       failing > 0
         ? `✗ ${failing} failing · odu`
@@ -328,428 +138,20 @@ export function App(props: {
             (restingIcon ?? link.href);
   });
 
-  // ── the selected run ──
-  const runId = createMemo(() => {
-    const at = route();
-    return at.at === "run" ? at.runId : null;
-  });
-  const selectedRun = createMemo<RunRow | undefined>(() => {
-    const id = runId();
-    return id === null ? undefined : runs.byKey(id)?.();
-  });
-  const nodesSub = props.client.streams.nodes.use(() => {
-    const id = runId();
-    return id === null ? null : { runId: id };
-  });
-  const frame = createMemo<NodesFrame | undefined>(() => nodesSub());
-
-  // ── the selected node's log ──
-  //
-  // Derived from the ROUTE, not held beside it. One source of truth means Back
-  // moves through logs as well as runs, and a pasted address opens on the same
-  // failure the sender was looking at.
-  const logKey = createMemo<string | null>(() => {
-    const at = route();
-    return at.at === "run" ? at.log : null;
-  });
-  /** THE ADDRESS, taken apart ONCE. The node and the attempt are two halves of
-   *  one key, and they used to be two memos each parsing the same string and
-   *  keeping half the answer. */
-  const address = createMemo(() => {
-    const key = logKey();
-    return key === null ? null : parseLogKey(key);
-  });
-  const selected = createMemo<RunNode | null>(() => {
-    const at = address();
-    if (at === null) return null;
-    // Matched on the node ID ALONE, and the attempt is carried beside it below.
-    // `RunNode.attempt` is the HIGHEST attempt the run recorded, while the
-    // address may name an older one — which is the whole point of the attempt
-    // picker, and is also what a link pasted before a retry becomes. Matching on
-    // both fields resolved every one of those to `null`, so the panel closed on
-    // exactly the person who had asked to read an earlier failure.
-    return frame()?.nodes.find((node) => node.id === at.node) ?? null;
-  });
-  /** WHICH attempt the address names — read off the key rather than off the
-   *  node, for the reason above: they differ, and the difference is the thing
-   *  the picker exists to express. */
-  const selectedAttempt = createMemo<number | null>(
-    () => address()?.attempt ?? null,
-  );
-  // The whole-log page is cleared whenever the address moves: a panel left
-  // showing the previous node's output under a new heading is the worst kind of
-  // stale. The dependency is SAID rather than left to a bare `logKey();`
-  // statement that reads as dead code to everything but Solid.
-  createEffect(on(logKey, () => setPage(null)));
-  const tails = props.client.collections.logTails.use({
-    keys: () => {
-      const key = logKey();
-      return key === null ? [] : [key];
-    },
-  });
-  const tail = createMemo<LogTail | undefined>(() => {
-    const key = logKey();
-    return key === null ? undefined : tails.byKey(key)?.();
-  });
-  const tailPending = createMemo(() => {
-    const key = logKey();
-    return key === null ? false : (tails.byKey(key)?.pending() ?? true);
-  });
-  const tailError = createMemo(() => {
-    const key = logKey();
-    return key === null ? undefined : tails.byKey(key)?.error();
-  });
-
-  // A WINDOW of the log, on request. Separate from the tail because they answer
-  // different questions — see `@odu/service`'s `logs.ts` — and held as the
-  // verb's whole answer rather than just its text, because `offset`,
-  // `nextOffset`, `size` and `eof` are what let the panel say where the window
-  // is and whether there is another one.
-  const [page, setPage] = createSignal<LogPage | null>(null);
-
-  // ── controls ──
-  const [control, setControl] = createSignal<ControlState>({ kind: "idle" });
-  const [creating, setCreating] = createSignal<CreateState>({ kind: "idle" });
-
-  /**
-   * THE UI EDGE: the one place a description becomes execution, and the one
-   * place a thrown refusal becomes a sentence.
-   *
-   * Every caller below says only what it does with the two answers. There used
-   * to be four `Effect.runPromise` call sites under a header claiming one, and
-   * three of them re-spelled the refusal branch by hand.
-   */
-  const call = <A,>(
-    effect: Effect.Effect<A, unknown>,
-    onOk: (value: A) => void,
-    onRefused: (message: string) => void,
-  ): void => {
-    void Effect.runPromise(effect).then(onOk, (err: unknown) =>
-      onRefused(refusalText(err)),
-    );
-  };
-
-  /** A CONTROL's whole story, through that edge: pending, then a receipt or a
-   *  refusal, in the one state the run view draws. */
-  const run = <A,>(
-    what: string,
-    effect: Effect.Effect<A, unknown>,
-    onOk: (value: A) => string,
-  ): void => {
-    setControl({ kind: "pending", what });
-    call(
-      effect,
-      (value) => setControl({ kind: "ok", message: onOk(value) }),
-      (message) => setControl({ kind: "refused", message }),
-    );
-  };
-
-  const controls = {
-    retryNode: (node: string, attempt: number): void => {
-      const id = runId();
-      if (id === null) return;
-      run(
-        `retrying ${node}`,
-        props.client.procedures.run.retry({
-          runId: id,
-          selector: node,
-          requestId: requestId("retry"),
-          // The optimistic-concurrency guard, carried to the process that can
-          // enforce it. A person clicks on a reading of the page; if the node
-          // has moved on since that reading, the retry is refused rather than
-          // landing on an attempt they never saw.
-          expectAttempt: { node, attempt },
-        }),
-        (receipt) =>
-          receipt.mode === "live"
-            ? `Reset ${receipt.roots.join(", ")} on this run${
-                receipt.resetDependants.length === 0
-                  ? ""
-                  : ` (and ${receipt.resetDependants.length} dependant${receipt.resetDependants.length === 1 ? "" : "s"})`
-              }.`
-            : `This run had finished, so odu started a linked replay: ${receipt.effectiveRun}.`,
-      );
-    },
-    cancelRun: (): void => {
-      const id = runId();
-      if (id === null) return;
-      run(
-        "cancelling the run",
-        props.client.procedures.run.cancel({
-          runId: id,
-          scope: { kind: "run" },
-          requestId: requestId("cancel"),
-        }),
-        (result) =>
-          result.effective === "nothing"
-            ? `Nothing was cancelled — ${result.detail ?? "there was nothing to stop"}.`
-            : "Told the coordinator to stop.",
-      );
-    },
-    cancelNode: (node: string): void => {
-      const id = runId();
-      if (id === null) return;
-      run(
-        `cancelling ${node}`,
-        props.client.procedures.run.cancel({
-          runId: id,
-          scope: { kind: "node", node },
-          requestId: requestId("cancel-node"),
-        }),
-        (result) =>
-          result.effective === "nothing"
-            ? `Nothing was cancelled — ${result.detail ?? "there was nothing to stop"}.`
-            : `Stopped ${node}.`,
-      );
-    },
-    cancelLane: (platform: string): void => {
-      const id = runId();
-      if (id === null) return;
-      run(
-        `dropping the ${platform} lane`,
-        props.client.procedures.run.cancel({
-          runId: id,
-          scope: { kind: "lane", platform },
-          requestId: requestId("cancel-lane"),
-        }),
-        (result) =>
-          result.effective === "nothing"
-            ? `Nothing was cancelled — ${result.detail ?? "there was nothing to stop"}.`
-            : `Dropped the ${platform} lane; the rest of the run continues.`,
-      );
-    },
-    runAgain: (): void => {
-      const current = selectedRun();
-      if (current === undefined) return;
-      run(
-        "starting a new run",
-        props.client.procedures.run.start({
-          checkout: current.repoRoot,
-          expectedSha: current.sha,
-          requestId: requestId("again"),
-          selectors: [...current.scope.selectors],
-          platforms: [...current.scope.platforms],
-          noDeps: current.scope.noDeps,
-          // A checkout with no GitHub origin cannot post commit statuses, and
-          // the coordinator REFUSES a posting run there rather than quietly
-          // dropping the reporting. That refusal is right for `odu run`, where a
-          // person may simply not have configured a remote yet. It is wrong
-          // HERE: this button repeats a run that already ran in this checkout,
-          // which means it ran with posting off — so asking for it with posting
-          // on is not repeating it, it is asking for something odu will decline
-          // for a reason nobody can act on from this page. `repo` is the row's
-          // own word for "this checkout has a GitHub origin", so the browser
-          // says what it is already holding rather than finding out.
-          ...(current.repo === null ? { noPost: true } : {}),
-        }),
-        (receipt) =>
-          receipt.accepted
-            ? `Started ${receipt.runId}.`
-            : `That checkout already has a live run: ${receipt.runId}.`,
-      );
-    },
-    // The receipt has been read. Back to `idle` is the same state every control
-    // above starts from, so a dismissal is the one control here that needs no
-    // wire at all.
-    dismiss: (): void => {
-      setControl({ kind: "idle" });
-    },
-  };
-
-  /**
-   * THE LIVE LOG, FOLLOWED BYTE-EXACTLY — parity with `odu attach`.
-   *
-   * `logTails` streams, and for a long time that was the whole of the browser's
-   * live view. But a tail is the last {@link LOG_TAIL_BYTES} re-sent WHOLE on
-   * every change, with no cursor: a recipe that outruns the service's 250 ms
-   * tick by more than 64 KiB has the excess silently dropped, and the page
-   * shows less than happened with nothing to say so. The terminal's log pane
-   * does not lose those bytes, and a browser that does is not the same
-   * application.
-   *
-   * So the live pane is a CURSORED follow — the same `log.read` + `waitMs` loop
-   * `odu logs -f` and the attach TUI run, holding `nextOffset` and appending.
-   * One mechanism, three faces, and no face that quietly sees less.
-   *
-   * `logTails` stays for the header's `totalBytes` / `complete`, which are
-   * facts about the whole file rather than about what has been read.
-   */
-  /** One followed read's deadline. `run_wait`'s, deliberately — a longer one
-   *  holds a request open past what a proxy between a tab and the service will
-   *  tolerate, and the loop re-issues anyway. */
-  const FOLLOW_WAIT_MS = 30_000;
-  const [followed, setFollowed] = createSignal<string | null>(null);
-  /** Why this log could not be READ — a refused page, or a follow that gave up.
-   *  ONE destination for one event class: the two read paths used to report the
-   *  same refusal in two widgets, the follow's beside the pane it is about and
-   *  a button's as a receipt at the top of the run view, chosen by nothing but
-   *  which function happened to make the call. Shown rather than swallowed,
-   *  because a pane that has quietly stopped updating looks exactly like a log
-   *  that has quietly stopped growing. */
-  const [logFault, setLogFault] = createSignal<string | null>(null);
-  createEffect(() => {
-    const key = logKey();
-    setFollowed(null);
-    setLogFault(null);
-    if (key === null) return;
-    let live = true;
-    // The tab moved on — a new node, a new run, or the view closed. The loop
-    // notices at its next answer and stops appending into a pane that is now
-    // showing something else.
-    onCleanup(() => {
-      live = false;
-    });
-    void (async () => {
-      let cursor: number | undefined;
-      let text = "";
-      // How many reads in a row have failed. A dropped connection is the
-      // ordinary case in a browser — a laptop lid, a sleeping tab, a service
-      // being upgraded — and it is not a reason to stop watching a log that is
-      // still being written. Reset by any answer, so this bounds a service that
-      // is GONE rather than one that hiccuped.
-      let refusals = 0;
-      while (live) {
-        let page: LogPage;
-        try {
-          // NOT through `call`: this one crossing needs the `try`/`continue`
-          // below, because a dropped read here is resumed from the cursor
-          // rather than reported and abandoned. It is the one exception the
-          // module header names.
-          page = await Effect.runPromise(
-            props.client.procedures.log.read({
-              key,
-              ...(cursor === undefined ? { offset: -LOG_TAIL_BYTES } : { offset: cursor }),
-              limit: LOG_PAGE_BYTES,
-              waitMs: FOLLOW_WAIT_MS,
-            }),
-          );
-        } catch (err) {
-          // RESUMED FROM THE CURSOR, not abandoned. This used to `return`, and
-          // the effect is keyed on the log key — so a reader who lost their
-          // connection and got it back, without changing node, watched a frozen
-          // pane for as long as they cared to look, while the header and the
-          // board recovered around it.
-          //
-          // A REFUSAL is different from a dropped read and says so. `log.read`
-          // refuses a key that is not addressable — an expired run, an attempt
-          // that never ran — and retrying that forever would be a spinner over
-          // an answer nobody is going to change.
-          if (!live) return;
-          if (isTerminalReadRefusal(err)) {
-            setLogFault(refusalText(err));
-            return;
-          }
-          refusals += 1;
-          if (refusals > FOLLOW_RETRY_LIMIT) {
-            setLogFault(
-              "odu: lost contact with the service while following this log",
-            );
-            return;
-          }
-          await new Promise((resolve) => setTimeout(resolve, FOLLOW_RETRY_MS));
-          continue;
-        }
-        if (!live) return;
-        refusals = 0;
-        setLogFault(null);
-        // The attempt was re-run underneath us and its log rewritten in place,
-        // so the file is shorter than the cursor. Start over rather than show
-        // the tail of a different attempt as a continuation of this one.
-        if (cursor !== undefined && cursor > 0 && page.offset < cursor) {
-          cursor = 0;
-          text = "";
-          setFollowed("");
-          continue;
-        }
-        cursor = page.nextOffset;
-        if (page.text !== "") {
-          text += page.text;
-          setFollowed(text);
-        }
-        // `logHasMore`'s rule, shared with the CLI and the TUI. Stopping on
-        // `!open` alone dropped whatever the closing page carried — a producer
-        // that finishes after appending more than one page leaves an unread
-        // remainder behind that flag, and the pane lost the end of the output.
-        if (!logHasMore(page)) return;
-      }
-    })();
-  });
-
-  const readLogPage = (offset: number): void => {
-    const key = logKey();
-    if (key === null) return;
-    call(
-      // ALWAYS bounded. The verb will happily return a whole log, and this used
-      // to ask for one — a request whose cost is set by whatever the recipe
-      // printed, which is not a thing a browser may bet a tab on.
-      props.client.procedures.log.read({ key, offset, limit: LOG_PAGE_BYTES }),
-      (answer) => setPage(answer),
-      // Beside the pane, not in the receipt channel over the node list: this is
-      // the same fact the follow reports, and a refusal that landed in one of
-      // two widgets depending on which read asked for it was one event class
-      // with two homes.
-      setLogFault,
-    );
-  };
-
-  const start = (form: StartForm): void => {
-    setCreating({ kind: "starting" });
-    call(
-      props.client.procedures.run.start({
-        checkout: form.checkout,
-        expectedSha: form.expectedSha,
-        requestId: requestId("start"),
-        // ABSENT rather than empty: the wire's optional keys mean "not said",
-        // and an empty array is a caller asserting a choice they did not make.
-        ...(form.selectors.length === 0 ? {} : { selectors: form.selectors }),
-        ...(form.platforms.length === 0 ? {} : { platforms: form.platforms }),
-        ...(form.hostPins.length === 0 ? {} : { hostPins: form.hostPins }),
-        ...(form.noStrict ? { noStrict: true, noSnapshot: true } : {}),
-        ...(form.noPost ? { noPost: true } : {}),
-        ...(form.supersede ? { supersede: true } : {}),
-      }),
-      (receipt) => {
-        if (receipt.accepted) {
-          setCreating({ kind: "started", runId: receipt.runId });
-          go({ at: "run", runId: receipt.runId, log: null });
-          return;
-        }
-        setCreating({
-          kind: "existing",
-          runId: receipt.runId,
-          sha: receipt.existing?.sha ?? receipt.sha,
-        });
-      },
-      (message) => setCreating({ kind: "refused", message }),
-    );
-  };
-
-  /** MOVE THE ADDRESS, never a signal beside it — the rule the node selection
-   *  and the attempt picker both keep, so an earlier attempt is a link like any
-   *  other view here, Back walks out of it, and the tail subscription follows
-   *  because it is keyed by the log key. One mint, because the two callers
-   *  differed only in where the node and the attempt came from. */
-  const goToLog = (node: string | null, attempt: number): void => {
-    const id = runId();
-    if (id === null) return;
-    go({
-      at: "run",
-      runId: id,
-      log: node === null ? null : formatLogKey({ runId: id, node, attempt }),
-    });
-  };
-
-  // ── the cache ──
+  // ── the cache's route slice ──
   //
   // Two facts about ONE route, read where the switch needs them: whether the
   // page is the cache at all, and which bucket it names. A `Match` narrows
-  // nothing into its children (they are built on entry, not called with the
-  // value), so the readings are memos rather than a discriminated `route()`
-  // read inside the JSX.
+  // nothing into its children, so the readings are memos rather than a
+  // discriminated `route()` read inside the JSX.
   const atCache = createMemo(() => route().at === "cache");
   const openBucket = createMemo<string | null>(() => {
     const here = route();
     return here.at === "cache" ? here.bucket : null;
+  });
+  const ciRoute = createMemo<CiRoute>(() => {
+    const here = route();
+    return here.at === "cache" ? { at: "board" } : here;
   });
 
   // ── the shell ──
@@ -779,26 +181,23 @@ export function App(props: {
           <span class="brand-sigil" aria-hidden="true">$</span>
           <span class="brand-name">odu</span>
         </span>
-        {/* THE BOARD IS TWO ROWS NOW — runs and cache — and this is the switch
+        {/* THE BOARD IS TWO ROWS — runs and cache — and this is the switch
             between them. Two buttons rather than a link list because they are
             two STATES of one page: `aria-pressed` says which, and a person
             arriving with a screen reader hears "Runs, pressed" rather than a
             navigation menu's worth of ceremony. */}
         <nav class="rows" aria-label="board rows">
-          <Button
-            pressed={route().at !== "cache"}
-            onClick={() => go({ at: "board" })}
-          >
+          <Button pressed={!atCache()} onClick={() => go({ at: "board" })}>
             Runs
           </Button>
           <Button
-            pressed={route().at === "cache"}
+            pressed={atCache()}
             onClick={() => go({ at: "cache", bucket: null })}
           >
             Cache
           </Button>
         </nav>
-        {/* The words AND the hue come from `format.ts`'s `CONNECTION`, so the
+        {/* The words AND the hue come from `./format`'s `CONNECTION`, so the
             shell names no status class of its own: which colour "reconnecting"
             carries is an assignment of meaning, and it belongs in the table
             with the words rather than in a selector list. */}
@@ -813,77 +212,31 @@ export function App(props: {
           </Show>
         </div>
       </header>
-      {/* THE ROUTER. `Switch` rather than three independent `Show`s because the
-          three are exclusive, and each branch is BUILT ON ENTRY: the compiler
-          turns a `Match`'s children into a getter, so leaving a run and coming
-          back mints a fresh view rather than re-inserting the one that was
-          disposed on the way out — see `./dom`'s header for the failure that
-          taught us to care. */}
-      <Switch>
-        <Match when={route().at === "board"}>
-          <Board
-            checkouts={checkouts()}
-            unreadable={unreadable()}
-            rows={rows()}
-            now={now()}
-            // The framework's own pending fact: `connecting` with nothing yet is
-            // a catalog that has not arrived, which is a different thing from a
-            // catalog with no runs in it.
-            loading={props.readout.status === "connecting" && rows().length === 0}
-            onOpen={(id) => go({ at: "run", runId: id, log: null })}
-            onCreate={() => go({ at: "new" })}
-          />
-        </Match>
-        <Match when={route().at === "new"}>
-          <Create
-            state={creating()}
-            onStart={start}
-            onOpen={(id) => go({ at: "run", runId: id, log: null })}
-            onBack={() => go({ at: "board" })}
-          />
-        </Match>
-        <Match when={atCache()}>
-          <CacheFace
-            client={props.cache}
-            bucket={openBucket()}
-            now={now()}
-            call={(effect) => Effect.runPromise(effect)}
-            onOpen={(bucket) => go({ at: "cache", bucket })}
-          />
-        </Match>
-        <Match when={route().at === "run"}>
-          <Detail
-            run={selectedRun()}
-            frame={frame()}
-            now={now()}
-            pending={nodesSub.pending()}
-            error={nodesSub.error()}
-            selected={selected()}
-            onSelect={(node) => goToLog(node?.id ?? null, node?.attempt ?? 0)}
-            // THE LOG PANE, built here where the wire already is rather than
-            // threaded through `Detail` as nine props it never reads.
-            log={
-              <LogPanel
-                node={selected()}
-                attempt={selectedAttempt()}
-                onAttempt={(attempt) =>
-                  goToLog(selected()?.id ?? null, attempt)
-                }
-                tail={tail()}
-                followed={followed()}
-                logFault={logFault()}
-                pending={tailPending()}
-                error={tailError()}
-                page={page()}
-                onPage={readLogPage}
-              />
-            }
-            control={control()}
-            controls={controls}
-            onBack={() => go({ at: "board" })}
-          />
-        </Match>
-      </Switch>
+      {/* ONE FACE AT A TIME, and each is BUILT ON ENTRY: the compiler turns a
+          `Show`'s children into a getter, so leaving a run and coming back
+          mints a fresh view rather than re-inserting the one that was disposed
+          on the way out — see `@odu/ci/face`'s `dom` header for the failure
+          that taught us to care. */}
+      <Show when={atCache()}>
+        <CacheFace
+          client={props.cache}
+          bucket={openBucket()}
+          now={now()}
+          call={(effect) => Effect.runPromise(effect)}
+          onOpen={(bucket) => go({ at: "cache", bucket })}
+        />
+      </Show>
+      <Show when={!atCache()}>
+        <CiFace
+          client={props.client}
+          route={ciRoute()}
+          now={now()}
+          call={(effect) => Effect.runPromise(effect)}
+          onRoute={(next) => go(next)}
+          onTally={(next) => setTally(next)}
+          connecting={props.readout.status === "connecting"}
+        />
+      </Show>
     </div>
   );
 }

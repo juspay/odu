@@ -19,7 +19,7 @@
 
 import { afterEach, describe, expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ghForge } from "@odu/execution/common/forge";
@@ -121,7 +121,7 @@ esac`;
   process.env.ODU_GH_BIN = bin;
   return {
     calls: () =>
-      execFileSync("cat", [at("calls.txt")], { encoding: "utf-8" })
+      readFileSync(at("calls.txt"), "utf-8")
         .split("\n")
         .filter((l) => l !== ""),
   };

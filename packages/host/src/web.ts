@@ -79,6 +79,7 @@ import { Effect, Exit, Layer, Scope } from "effect";
 import {
   closeHost,
   mountPlugin,
+  offered,
   openHost,
   provide,
   rowReport,
@@ -87,15 +88,11 @@ import {
 } from "@olai/effect-cordis";
 import { readProcessIdentity, selfProcessIdentity } from "@odu/launch/processIdentity";
 import { mcpGetRoute, mcpRoute, RouteTransport, serveServiceMcpInProcess } from "./mcpRoute";
+import { SERVICE_MCP_PATH } from "@odu/service-client/endpoint";
 import { servingOptions } from "./serving";
-import { createCiBundle, type CiBundle } from "@odu/cli/ci/bundle";
-// The runs' runtime, named for the one variable that holds it: the host OWNS
-// the bundle's lifetime (it builds it and closes it), so it names the type.
-import type { OduService } from "@odu/service/service";
+import { CI_AGENT, ciRow } from "@odu/ci/row";
 import { CACHE_AGENT, CACHE_KEY, cacheRow } from "@odu/cache/server";
-import { CI_AGENT } from "@odu/cli/ci/bundle";
 import type { RootedSurfacesRuntime } from "@kolu/surface/server";
-import type { Plugin } from "@olai/effect-cordis";
 import {
   BoundOrigin,
   Build,
@@ -261,7 +258,7 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
   // has no plugin because the runs are the wire's ROOT and a root is a
   // constructor argument, not a sibling.
   const ROWS: ReadonlyArray<Row> = [
-    { name: "ci", key: null, plugin: null, agent: CI_AGENT },
+    { name: "ci", key: null, plugin: ciRow, agent: CI_AGENT },
     {
       name: CACHE_KEY,
       key: CACHE_KEY,
@@ -305,41 +302,18 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     await run(provide(host, Shutdown, () => () => controller.abort()));
     await run(provide(host, Routes, () => routes));
 
-    // THE RUNS ARE THE ROOT, and a root is a constructor argument rather than a
-    // sibling: `implementRootedSurfaces` takes it, and every other row mounts
-    // BESIDE it. So this row is built here and the bundle it built is provided
-    // as the service the sibling rows mount on.
-    let ci: CiBundle | null = null;
-    try {
-      ci = createCiBundle({
-        origin,
-        home: home.dir,
-        build,
-        log,
-        shutdown: () => controller.abort(),
-      });
-    } catch (err) {
-      process.stderr.write(`odu: the ci row did not start — ${(err as Error).message}\n`);
-      return 1;
-    }
-    const service: OduService = ci.service;
-    const runtime = service.runtime;
-    await run(provide(host, Bundle, () => runtime as unknown as RootedSurfacesRuntime<never>));
-
-    // A runtime that has faulted answers nothing while the process stays alive
-    // and the socket stays open — the documented zombie. Observed and fatal.
-    service.done.catch((err: unknown) => {
-      log.error({ err: String(err) }, "odu web: surface runtime faulted");
-      process.exit(1);
-    });
-
-    const siblings = ROWS.filter((row) => row.plugin !== null);
-    for (const row of siblings) await run(mountPlugin(host, row.plugin as Plugin));
+    // EVERY ROW IS A PLUGIN, and the runs' row OWNS ITS BUNDLE: its `apply`
+    // builds the runtime and `offer`s it, the cache row is held PENDING on that
+    // offer until it arrives, and mounting both + `settled` is the whole boot.
+    // The host neither constructs a row nor closes one — a bundle built here
+    // would be a runtime with no owner to tear it down, which is the bug this
+    // shape removes.
+    for (const row of ROWS) await run(mountPlugin(host, row.plugin));
     // SETTLED, not merely mounted: a row provides services its siblings may
     // name, and mounting returns as soon as a fibre exists rather than once its
     // `apply` has finished.
-    await run(settled(host, siblings.map((row) => row.name)));
-    const report = await run(rowReport(host, siblings.map((row) => row.name)));
+    await run(settled(host, ROWS.map((row) => row.name)));
+    const report = await run(rowReport(host, ROWS.map((row) => row.name)));
     const broken = [...report].filter(([, row]) => row.state !== "running");
     if (broken.length > 0) {
       process.stderr.write(
@@ -361,6 +335,14 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
       return 1;
     }
 
+    // The runtime the runs' row offered, read once the rows have settled. A
+    // host that is not a plugin reads a service with `offered`.
+    const runtime = offered(host, Bundle);
+    if (runtime === undefined) {
+      process.stderr.write("odu: the ci row offered no runtime — refusing to serve\n");
+      return 1;
+    }
+
     // THE `/mcp` DOOR — the composed bundle's, so it is the TRANSPORT's and is
     // built here rather than by any one row: an adapter that served one row
     // would have to be told what the others are. The adapter and its transport
@@ -369,6 +351,7 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     // and the resource pusher on every call).
     const transport = new RouteTransport();
     mcp = await serveServiceMcpInProcess({
+      path: SERVICE_MCP_PATH,
       handlers: runtime.handlers,
       version: build.oduVersion,
       transport,
@@ -377,7 +360,10 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
         ROWS.filter((row) => row.key !== null).map((row) => [row.key as string, row.agent]),
       ),
     });
-    const agentRoutes = Layer.merge(mcpRoute(transport, allowedOrigins), mcpGetRoute());
+    const agentRoutes = Layer.merge(
+      mcpRoute(transport, allowedOrigins, SERVICE_MCP_PATH),
+      mcpGetRoute(SERVICE_MCP_PATH),
+    );
     const composed = routes.layers().reduce((all, one) => Layer.merge(all, one), agentRoutes);
 
     let bound: string;

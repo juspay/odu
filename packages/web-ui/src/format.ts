@@ -1,55 +1,24 @@
 /**
- * The words and the shapes — everything a view renders that is not itself a
- * value on the wire.
+ * THE SHELL'S OWN READINGS — the connection indicator's words, and the favicon.
  *
- * Kept apart from the views for the reason the framework keeps its readout
- * states apart from their labels: the framework decides WHICH state is true and
- * the app decides what it is CALLED, and a table is the only spelling of that
- * which a compiler can check. Every mapping below is a total `Record`, so a new
- * state on the wire is a type error here rather than a blank cell in a browser.
+ * These two are the page's CHROME rather than a row's view: every face is drawn
+ * under the same wire indicator, and the tab's icon answers "is anything
+ * broken" for the whole document. Everything a RUN is painted from lives in
+ * `@odu/ci/face`, with the run views — so this module names no row, and the
+ * shell can be read without one.
  */
 
 import type { SurfaceReadout, SurfaceReadoutStatus } from "@kolu/surface/solid";
-import {
-  BOARD_STATE,
-  duration,
-  OUTCOME,
-  scopeLabel,
-  type StatusHue,
-} from "@odu/service-client/board";
-import { STATUS_META } from "@odu/service-client/surface";
-
-/** The five semantic hues, from the contract module rather than spelled again
- *  here — so the one place a hue is consumed is a place the compiler can check
- *  and a reader can look up. */
-export type { StatusHue };
-
-/** What a run is called, and what colour it carries. Not this app's assignment:
- *  `@odu/service-client/board` owns it, because a board is not one face's idea
- *  and a second copy of "what is this run called" is how two faces come to
- *  disagree. Re-exported so a view still reads its vocabulary from here. */
-export { BOARD_STATE, OUTCOME };
-
-/** The node glyphs and hues are not this app's to assign: `STATUS_META` is the
- *  wire's own table, and its doc says no face keeps a second one. Re-exported
- *  under this module's name so a view still reads its vocabulary from here, and
- *  so a glyph changed for the TUI changes here in the same edit. */
-export const NODE_STATUS = STATUS_META;
-
-/**
- * What the connection indicator says.
+/** The five semantic hues, spelled here rather than imported.
  *
- * `degraded` is the one the transport cannot see — a live socket over a
- * subscription that has stopped — and it NAMES what stopped, so the sentence
- * can never come out with a hole in it. The framework decides which state is
- * true; these are odu's words for them.
- *
- * The HUE rides the table beside the words, for the reason every other mapping
- * here does: which colour "reconnecting" carries is an assignment of meaning,
- * and a total `Record` is the only spelling of it a compiler can check. It used
- * to be a list of `.wire-*` selectors in the stylesheet, where a sixth readout
- * state would have been a colourless sentence rather than a type error.
- */
+ *  The canonical union is `@odu/run-client/surface`'s (re-exported by the ci
+ *  row's `board` module), and this is a no-row package: a file that is not a
+ *  root may not import a row, which the fence checks. What keeps the two
+ *  spellings equal is the STYLESHEET — every hue here is a `hue-*` class in
+ *  `styles.css`, and `./palette.test.ts` reads that file — so a renamed hue is
+ *  one failing suite away from being noticed rather than silently colourless. */
+type StatusHue = "grey" | "amber" | "green" | "red" | "violet";
+
 export const CONNECTION: Record<
   SurfaceReadoutStatus,
   { label: string; hue: StatusHue }
@@ -86,84 +55,6 @@ export function wireText(readout: SurfaceReadout): {
   };
 }
 
-/** `<sha7>#<seq>`, the ref every odu face already prints, or the sha7 alone for
- *  a run that reserved no ordinal. */
-export function runRef(sha: string, seq: number | null): string {
-  const sha7 = sha.slice(0, 7);
-  return seq === null ? sha7 : `${sha7}#${seq}`;
-}
-
-/** The last path segment of a checkout — what a person calls the project. The
- *  whole path stays on the row as a title, because two worktrees of one repo
- *  have the same last segment and the difference matters. */
-export function projectOf(repoRoot: string): string {
-  const parts = repoRoot.split("/").filter((p) => p !== "");
-  return parts[parts.length - 1] ?? repoRoot;
-}
-
-/** A duration, at the precision a person reads it — `@odu/service-client/board`
- *  owns it, beside the elapsed rule that produces the numbers it renders, so
- *  this app and the CLI print one spelling. Re-exported so a view still reads
- *  its vocabulary from here. */
-export { duration };
-
-/**
- * NOT EVERYTHING FROM `board` COMES THROUGH HERE, and the line is what this
- * module is for.
- *
- * This file is the view's VOCABULARY — what a thing is called, what colour it
- * carries, how a number is spelled. `laneSpan` and `timelineTicks` are
- * GEOMETRY: fractions of a track, positions to place a box at. `detail.tsx`
- * imports those straight from `@odu/service-client/board`, as `board.tsx`
- * already imports `runStatus` and `isActive`, because routing coordinates
- * through a module about wording would make this file the place two unrelated
- * questions are asked — and the next reader would look here for the layout.
- *
- * What a timeline SAYS does come through here: its axis is spelled with
- * {@link duration} above, which is the whole reason that re-export exists.
- */
-
-/** How long ago, coarsely. Coarse on purpose: a board is scanned rather than
- *  read, and "3m ago" is what a scanner needs from a timestamp. */
-export function ago(at: number, now: number): string {
-  const ms = Math.max(0, now - at);
-  const seconds = Math.round(ms / 1000);
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 48) return `${hours}h ago`;
-  return `${Math.round(hours / 24)}d ago`;
-}
-
-/** What a green here actually covers — the whole reason a scope rides the row.
- *  odu's own reading, because what a run COVERED is a fact about the run and not
- *  one face's idea of it (`@odu/service-client/board` owns it, beside the other
- *  board readings). Re-exported so a view still reads its vocabulary from here,
- *  and so a link that hands somebody else's board a qualifier spells the scope
- *  the same way this one does. */
-export { scopeLabel };
-
-/**
- * THE TAB'S OWN ICON, drawn — the one place this app draws a picture.
- *
- * Everywhere else a status is words and a shape, because that is the only
- * spelling a colour-blind reader, a screen reader and a test can all read. A
- * browser tab is the one surface with room for none of those: it is sixteen
- * pixels of icon and a title that is usually clipped, and it is also where a
- * person looks when this page is NOT the page they are on. So the tab is the
- * ambient monitor — a dot on the mark, said again in words in `document.title`
- * beside it, which is what keeps the rule above intact.
- *
- * The mark is `logo.svg`'s own idea rather than a second drawing of it: a slate
- * `$` on a dark rounded square, because odu is a shell prompt you attach to. It
- * is built here rather than shipped as two more assets because the hue is a
- * function of live state, and a build cannot know which of them is true.
- *
- * Returns the whole `data:` URI, ready to assign to a `<link rel="icon">`, so
- * the encoding lives in one place — `#` in an unencoded SVG would truncate the
- * URI at the first colour.
- */
 export function faviconSvg(hue: "red" | "amber"): string {
   const dot = hue === "red" ? "#ff7d74" : "#f5c451";
   const svg =
@@ -177,8 +68,3 @@ export function faviconSvg(hue: "red" | "amber"): string {
 }
 
 /** A byte count, at the precision a log page needs. */
-export function bytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MiB`;
-}
