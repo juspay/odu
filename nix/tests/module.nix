@@ -76,10 +76,16 @@
     # ── the daemon is the service user, and its state is nobody else's ──────
     server.succeed("test \"$(systemctl show -p User --value odu-web)\" = odu")
     # The unit is `active` before the daemon has claimed its gate and opened the
-    # database, so this waits for the FILE rather than for systemd's opinion.
-    server.wait_until_succeeds("test -e /var/lib/odu/cache/cache.sqlite")
+    # database, and the MODES are set after the FILE exists: `-wal` is created by
+    # the first write, so the chmod follows the migrations. Wait for the
+    # invariant, not for the file — waiting for `test -e` and then asserting
+    # raced the chmod on a loaded CI lane, and passed locally, which is the
+    # wrong way round. A mode that is wrong for good never settles, so this
+    # still fails; it just fails on the fact rather than on the timing.
     server.succeed("stat -c '%a' /var/lib/odu | grep -qx 700")
-    server.succeed("stat -c '%a' /var/lib/odu/cache/cache.sqlite | grep -qx 600")
+    server.wait_until_succeeds(
+        "stat -c '%a' /var/lib/odu/cache/cache.sqlite 2>/dev/null | grep -qx 600"
+    )
 
     # ── the URL a bucket publishes is the PUBLIC one ────────────────────────
     # `ODU_PUBLIC_ORIGIN` is the module's doing; without it this URL is the
