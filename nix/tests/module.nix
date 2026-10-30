@@ -84,7 +84,14 @@
     # ── the URL a bucket publishes is the PUBLIC one ────────────────────────
     # `ODU_PUBLIC_ORIGIN` is the module's doing; without it this URL is the
     # loopback address the daemon is bound to, which no client can reach.
-    admin = "runuser -u odu -- env ODU_ROOT_TOKEN=test-root-token ODU_WEB_ORIGIN=http://127.0.0.1:18440"
+    # The CLI reaches the daemon by ORIGIN, not by state directory — that is
+    # what `$ODU_WEB_ORIGIN` is for, and it is how a person with a forward runs
+    # these commands. `HOME` is set to the unit's so this is the same
+    # environment the daemon has, rather than root's inherited through `runuser`.
+    admin = (
+        "runuser -u odu -- env ODU_ROOT_TOKEN=test-root-token"
+        " ODU_WEB_ORIGIN=http://127.0.0.1:18440 HOME=/var/lib/odu"
+    )
     odu = "${self.packages.x86_64-linux.odu}/bin/odu"
     created = json.loads(server.succeed(f"{admin} {odu} cache create main -o json"))
     assert created["url"] == "http://cache.test/cache/main", created["url"]

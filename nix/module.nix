@@ -54,8 +54,14 @@ let
     proxy_read_timeout 3600s;
   '';
 
+  # NO trailing slash. `proxy_pass http://host:port/` carries a URI part, and
+  # nginx then REPLACES the matched location prefix with it — `/cache/main/…`
+  # would reach the daemon as `/main/…`. odu strips a trailing slash for itself
+  # when it parses an origin; nginx does not, so the module does it here.
+  daemonUrl = lib.removeSuffix "/" cfg.listen;
+
   proxyLocation = {
-    proxyPass = cfg.listen;
+    proxyPass = daemonUrl;
     extraConfig = proxyRules;
   };
 in
@@ -141,6 +147,23 @@ in
       '';
     };
 
+    allowedOrigins = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "https://box.tailnet.ts.net" ];
+      description = ''
+        Extra browser origins the websocket and `/mcp` admit, beyond
+        same-origin. It is `$ODU_WEB_ALLOWED_ORIGINS` with commas: needed only
+        when a proxy REWRITES the Host header, which makes the browser's Origin
+        disagree with it — a tailnet name or a proxy that passes Host through
+        needs nothing here. See "Access through Tailscale or a proxy" in the
+        docs.
+
+        `cache.domain` is deliberately not added: the virtual host answers 404
+        at `/`, so no browser ever loads the board from that name.
+      '';
+    };
+
     publicOrigin = mkOption {
       type = types.nullOr types.str;
       # The scheme follows `cache.enableACME`, because that is the scheme the
@@ -157,9 +180,9 @@ in
         The origin a bucket's substituter URL is published under, when a proxy
         stands in front. `odu cache use` prints this, so it has to be the
         address a client can actually reach — behind nginx the bound address is
-        loopback and a URL no client can reach is worse than none. It is also
-        admitted as a browser origin, since that is the address the board is
-        reached by. The board's own identity stays on `listen`.
+        loopback and a URL no client can reach is worse than none. The board's
+        own identity stays on `listen`, and nothing about the board's origins
+        follows from this: see `allowedOrigins`.
 
         The default follows `cache.domain` and `cache.enableACME`, so it names
         the scheme the module's own virtual host serves. A host that terminates
@@ -258,9 +281,9 @@ in
         ]
         ++ optionals (cfg.publicOrigin != null) [
           "ODU_PUBLIC_ORIGIN=${cfg.publicOrigin}"
-          # The board is reached at the public name, so a browser there sends an
-          # Origin the listener has to admit.
-          "ODU_WEB_ALLOWED_ORIGINS=${cfg.publicOrigin}"
+        ]
+        ++ optionals (cfg.allowedOrigins != [ ]) [
+          "ODU_WEB_ALLOWED_ORIGINS=${builtins.concatStringsSep "," cfg.allowedOrigins}"
         ];
         Restart = "on-failure";
       } // optionalAttrs (cfg.rootTokenFile != null) {
