@@ -401,6 +401,95 @@ Then("the push block still names the bucket's path", async function (this: OduWo
   );
 });
 
+When("the CLI creates a private bucket as this person", function (this: OduWorld) {
+  assert.ok(this.mintedToken !== undefined, "no token was minted for this scenario");
+  const name = unique("private");
+  this.cacheBucket = name;
+  this.cliAnswer = oduCli(this.service, ["cache", "create", name, "--private", "-o", "json"], {
+    ODU_TOKEN: this.mintedToken,
+  });
+  assert.strictEqual(this.cliAnswer.status, 0, `create failed: ${this.cliAnswer.stderr}`);
+});
+
+When("the CLI reads the bucket's facts with no account", function (this: OduWorld) {
+  const name = this.cacheBucket;
+  assert.ok(name !== undefined, "no bucket was arranged");
+  // NO ODU_TOKEN, NO ROOT TOKEN: the substituter URL is what a person with a
+  // browser and a terminal has before signing in.
+  this.cliAnswer = oduCli(this.service, ["cache", "use", name, "--origin", this.service.origin], {
+    ODU_TOKEN: "",
+    ODU_ROOT_TOKEN: "",
+  });
+});
+
+Then("it prints the bucket's public key", function (this: OduWorld) {
+  const name = this.cacheBucket;
+  assert.ok(name !== undefined, "no bucket was arranged");
+  assert.ok(this.cliAnswer !== undefined, "no CLI call was made");
+  assert.strictEqual(this.cliAnswer.status, 0, `use failed: ${this.cliAnswer.stderr}`);
+  assert.match(this.cliAnswer.stdout, new RegExp(`${name}-1:`));
+  assert.ok(this.cliAnswer.stdout.includes("extra-substituters"));
+});
+
+Then("an anonymous HTTP GET of the bucket's page shows the key", async function (this: OduWorld) {
+  const name = this.cacheBucket;
+  assert.ok(name !== undefined, "no bucket was arranged");
+  const response = await fetch(`${this.service.origin}/cache/${name}`);
+  assert.strictEqual(response.status, 200);
+  const body = await response.text();
+  assert.match(body, new RegExp(`${name}-1:`), "the page does not show the public key");
+});
+
+Then("it is refused as private", function (this: OduWorld) {
+  assert.ok(this.cliAnswer !== undefined, "no CLI call was made");
+  assert.strictEqual(this.cliAnswer.status, 1);
+  assert.ok(
+    this.cliAnswer.stderr.includes("if it is private"),
+    `the refusal does not name privacy: ${this.cliAnswer.stderr}`,
+  );
+});
+
+When("I open the bucket's substituter URL in a browser", async function (this: OduWorld) {
+  const name = this.cacheBucket;
+  assert.ok(name !== undefined, "no bucket was arranged");
+  const response = await this.page.goto(`${this.service.origin}/cache/${name}`);
+  this.visited = { status: response?.status() ?? null, body: await this.page.content() };
+});
+
+Then("the page is the bucket's public page", function (this: OduWorld) {
+  const visited = this.visited;
+  assert.ok(visited !== undefined, "no page was opened");
+  assert.strictEqual(visited.status, 200, "the substituter URL did not answer 200");
+  assert.ok(visited.body.includes("extra-substituters"), "the page carries no nix.conf lines");
+  assert.ok(visited.body.includes("odu cache use "), "the page carries no `odu cache use` line");
+  // NOT THE BOARD: the SPA shell has the board's row buttons; this page has a
+  // sentence and a pre block.
+  assert.ok(!visited.body.includes('aria-label="board rows"'), "the board's SPA answered");
+});
+
+Then("the page names the bucket's public key", function (this: OduWorld) {
+  const name = this.cacheBucket;
+  assert.ok(name !== undefined, "no bucket was arranged");
+  const visited = this.visited;
+  assert.ok(visited !== undefined, "no page was opened");
+  assert.match(visited.body, new RegExp(`${name}-1:`), "the page does not name the public key");
+});
+
+When("I open a path under the cache that names nothing", async function (this: OduWorld) {
+  const name = this.cacheBucket;
+  assert.ok(name !== undefined, "no bucket was arranged");
+  const response = await this.page.goto(`${this.service.origin}/cache/${name}/nope`);
+  this.visited = { status: response?.status() ?? null, body: await this.page.content() };
+});
+
+Then("the cache answers it as its own 404", function (this: OduWorld) {
+  const visited = this.visited;
+  assert.ok(visited !== undefined, "no page was opened");
+  assert.strictEqual(visited.status, 404);
+  assert.ok(visited.body.includes("no such cache path"), "the 404 is not the cache row's");
+  assert.ok(!visited.body.includes('aria-label="board rows"'), "the board's SPA answered a cache path");
+});
+
 When("I open the tunnel", async function (this: OduWorld) {
   await this.open("#/tunnel");
   await this.page.getByRole("heading", { name: "Tunnel", exact: true }).waitFor();

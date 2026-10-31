@@ -70,6 +70,9 @@ export class OduWorld extends World {
   /** The last `odu …` answer a scenario arranged with, so the next step can
    *  assert on the receipt rather than re-running the call. */
   cliAnswer?: { status: number | null; stdout: string; stderr: string };
+  /** The last non-board navigation: a bucket's public page, or the cache's own
+   *  404. Its status and body are what those steps assert on. */
+  visited?: { status: number | null; body: string };
   /** A second tab, for the scenario where signing out of one closes the other. */
   second?: Page;
   /** This worker's GitHub stub — a scenario changes what it claims when the

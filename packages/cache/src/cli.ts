@@ -32,10 +32,12 @@ import { parseArgs } from "node:util";
 import { buildSurfaceFace } from "@kolu/surface/client";
 import type { SurfaceClientOf } from "@kolu/surface/project";
 import { composedClients } from "@odu/cordis/compose";
+import { readDoor } from "@odu/cordis/services";
 import { bytes } from "@odu/cordis/format";
 import type { SurfaceDispatch } from "@kolu/surface/link";
 import { Effect } from "effect";
-import { pushToCache, saveCredential } from "./push";
+import { CACHE_MOUNT } from "./paths";
+import { normalizeOrigin, pushToCache, saveCredential } from "./push";
 import {
   CACHE_KEY,
   type CacheScope,
@@ -351,13 +353,64 @@ async function useCommand(rest: string[], ports: CacheCliPorts): Promise<number>
     process.stderr.write(`odu: cache use needs a bucket name\n${CACHE_USAGE}`);
     return 1;
   }
+  // A PUBLIC BUCKET'S FACTS COME OFF THE PROTOCOL, not the surface: on a
+  // daemon with a door an anonymous connection is refused before a public
+  // read can be answered, and "use needs no token" has to be true of a person
+  // who has not signed in. The protocol's own path answers a public bucket with
+  // no account — the same facts the page shows, JSON for a terminal.
+  const origin = normalizeOrigin(
+    values.origin ?? process.env.ODU_WEB_ORIGIN?.trim() ?? "http://127.0.0.1:18440",
+  );
+  const personal = process.env.ODU_TOKEN?.trim() || process.env.ODU_CACHE_TOKEN?.trim() || null;
+  const publicFacts = await fetch(`${origin}${CACHE_MOUNT}/${name}/`, {
+    headers: {
+      accept: "application/json",
+      ...(personal === null ? {} : { authorization: `Bearer ${personal}` }),
+    },
+    signal: AbortSignal.timeout(5_000),
+  }).catch(() => null);
+  if (publicFacts !== null && publicFacts.ok) {
+    const facts = (await publicFacts.json()) as { url?: unknown; publicKey?: unknown };
+    if (typeof facts.url === "string" && typeof facts.publicKey === "string") {
+      process.stdout.write(
+        useBlock({
+          url: facts.url,
+          publicKey: facts.publicKey,
+          home: process.env.HOME ?? null,
+        }),
+      );
+      return 0;
+    }
+  }
+
+  // A PRIVATE BUCKET ON A DAEMON WITH A DOOR is not readable without a
+  // session, and asking the surface would be an anonymous connection refused
+  // for the wrong reason. The door fact says which sentence a person needs.
+  if ((await readDoor(origin)) === true) {
+    process.stderr.write(
+      `odu: no public bucket "${name}" on ${origin} — if it is private, sign in ` +
+        `(\`odu auth login\`) or set $ODU_TOKEN to a read token\n`,
+    );
+    return REFUSED;
+  }
+
   return withService(ports, values.origin, async (client) => {
-    // NO ROOT TOKEN: a bucket's substituter URL and public key are what it
-    // publishes to every client that talks to it, so asking the operator's
-    // credential for them would turn a read-only question into an
-    // administrative act.
+    // THE FALLBACK IS A PRIVATE BUCKET ON A DAEMON WITH NO DOOR, and an unknown
+    // bucket there; the surface answers both without a credential, as it always
+    // did.
     const answer = await call(client.surface.bucket.describe({ bucket: name }));
-    if (!answer.ok) return reportFailure(answer, false, REFUSED);
+    if (!answer.ok) {
+      if (answer.refusal !== null) return reportFailure(answer, false, REFUSED);
+      const said = String(answer.error);
+      if (/no principal/i.test(said)) {
+        process.stderr.write(
+          `odu: "${name}" is not publicly readable — if it is private, sign in ` +
+            `(\`odu auth login\`) or set $ODU_TOKEN to a read token\n`,
+        );
+        return REFUSED;
+      }
+      return reportFailure(answer, false, REFUSED);
+    }
     const bucket = answer.value;
     // ONE spelling of the block, in `./surface`, because the bucket page prints
     // it too — and the two had already drifted (`~/.netrc` here, `$HOME/.netrc`

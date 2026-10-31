@@ -46,6 +46,25 @@ Feature: An admin administers the cache from the board
     And the push block still names the bucket's path
     And there should be no page errors
 
+  # A PUBLIC BUCKET'S FACTS NEED NO ACCOUNT, and that is a PROTOCOL read: the
+  # anonymous CLI works before anybody signs in, and a cURL sees the key.
+  @signed-in:admin
+  Scenario: A public bucket's facts are read with no account
+    Given the CLI creates a bucket as this person
+    When the CLI reads the bucket's facts with no account
+    Then it prints the bucket's public key
+    And an anonymous HTTP GET of the bucket's page shows the key
+    And there should be no page errors
+
+  @signed-in:admin
+  Scenario: A private bucket's facts need a reader
+    Given I open the profile
+    And I create a token named "cli"
+    When the CLI creates a private bucket as this person
+    And the CLI reads the bucket's facts with no account
+    Then it is refused as private
+    And there should be no page errors
+
   @signed-in:admin
   Scenario: A bucket is created from the board with the upstream switch off
     Given I open the cache

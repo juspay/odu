@@ -201,6 +201,50 @@ const basic = (token: string): RequestInit => ({
   headers: { authorization: `Basic ${Buffer.from(`anyone:${token}`).toString("base64")}` },
 });
 
+describe("a bucket's consumer facts", () => {
+  it("answers a PUBLIC bucket with no credential, and a private one only to a reader", async () => {
+    const h = await harness(true);
+    const json = await h.fetch("/main/", { headers: { accept: "application/json" } });
+    expect(json.status).toBe(200);
+    const facts = (await json.json()) as {
+      name: string;
+      url: string;
+      publicKey: string;
+      upstreamKeys: string[];
+      use: string;
+    };
+    expect(facts).toMatchObject({ name: "main", publicKey: expect.stringContaining("main-1:") });
+    expect(facts.url).toContain("/cache/main");
+    expect(facts.upstreamKeys).toEqual(["cache.nixos.org-1"]);
+    expect(facts.use).toContain("extra-substituters");
+    // The SAME PAGE WITHOUT THE SLASH: the substituter URL a person pastes
+    // into a browser is `…/cache/main`, and it must not fall to the shell.
+    const bare = await h.fetch("/main");
+    expect(bare.status).toBe(200);
+    expect((await bare.text()).includes("extra-substituters")).toBe(true);
+    // The PAGE is the same facts for a person with curl, and the key is in it.
+    const page = await h.fetch("/main/");
+    expect(page.status).toBe(200);
+    // The PAGE carries the key too. (Checked as a substring of the key, not
+    // of `facts`: a matcher with an asymmetric expectation can rewrite the
+    // object it matched.)
+    expect((await page.text()).includes("main-1:")).toBe(true);
+    await h.dispose();
+  });
+
+  it("does not leak a private bucket's existence to an anonymous reader", async () => {
+    const h = await harness(false);
+    expect((await h.fetch("/main/")).status).toBe(404);
+    // A reader with a read token is answered.
+    const withToken = await h.fetch("/main/", {
+      ...bearer(h.tokens.read),
+      headers: { ...(bearer(h.tokens.read).headers as Record<string, string>), accept: "application/json" },
+    });
+    expect(withToken.status).toBe(200);
+    await h.dispose();
+  });
+});
+
 describe("nix-cache-info", () => {
   it("answers the three lines a client reads first", async () => {
     const h = await harness(true);

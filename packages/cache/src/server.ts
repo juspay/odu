@@ -109,6 +109,9 @@ export interface CacheServer {
   readonly publish: () => void;
   /** Stop listening. The activation's cleanup, alongside the cache's own. */
   readonly detach: () => void;
+  /** The substituter URL for one bucket, as the cache row publishes it — the
+   *  same string the board's row carries, for a route that takes no root token. */
+  readonly substituterUrl: (name: string) => string;
 }
 
 export function cacheServer(opts: CacheServerOptions): CacheServer {
@@ -441,6 +444,10 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
     },
     publish,
     detach,
+    substituterUrl: (name) => {
+      const bucket = cache.bucket(name);
+      return urlOf({ name, domain: bucket?.domain ?? null });
+    },
   };
 }
 
@@ -506,8 +513,16 @@ export const cacheRow = definePlugin({
     });
 
     // The Nix protocol, registered where the row activates rather than
-    // collected by a host that has to know what a row is.
-    routes.add(cacheRoutes(cache));
+    // collected by a host that has to know what a row is. The row answers a
+    // bucket's anonymous consumer facts from the same URL builder the board's
+    // row uses, so the page and a cURL cannot disagree about the address.
+    routes.add(
+      cacheRoutes(
+        cache,
+        (name) => server.substituterUrl(name),
+        publicOrigin ?? boundOrigin,
+      ),
+    );
 
     // FINALIZERS RUN IN REVERSE, so the one registered SECOND runs FIRST, and
     // the safe order is: the mount goes, THEN the database. A publish that

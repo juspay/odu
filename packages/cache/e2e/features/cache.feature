@@ -50,6 +50,20 @@ Feature: The cache is a row of the board
     Then no path is listed
     And the page says nothing matches
 
+  # THE SUBSTITUTER URL IN A BROWSER. It used to render the board's Runs view —
+  # the SPA shell at a path it was never routed for — because a bucket's page is
+  # server-rendered and `/cache/<bucket>` matched no protocol file. It is the
+  # cache row's page now, and a path under that prefix that names nothing is the
+  # row's text 404, never the shell.
+  Scenario: The substituter URL in a browser is the bucket's page
+    Given a bucket with one path pushed from the CLI
+    When I open the bucket's substituter URL in a browser
+    Then the page is the bucket's public page
+    And the page names the bucket's public key
+    When I open a path under the cache that names nothing
+    Then the cache answers it as its own 404
+    And there should be no page errors
+
   Scenario: A bucket that does not exist is not a page error
     Given a bucket with one path pushed from the CLI
     When I open a bucket the cache does not have

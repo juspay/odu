@@ -48,7 +48,13 @@ import { CACHE_MOUNT } from "./paths";
 import { NIX_CACHE_INFO } from "./staging";
 import type { BucketRow, Scope } from "./db";
 import { isStagedFileName, isStorePathHash } from "./narinfo";
-import { heldReason, MAX_NAR_PART_BYTES } from "./surface";
+import {
+  heldReason,
+  MAX_NAR_PART_BYTES,
+  useBlock,
+  useCommand,
+  type CacheBucketIdentity,
+} from "./surface";
 
 /** A bucket by name, and a credential that may do `need` with it — or the
  *  response that says why not. Every protocol route starts here, so "unknown
@@ -157,12 +163,112 @@ export const CACHE_ROUTE_PATHS: ReadonlyArray<string> = [
   `~^/${HASH_PATTERN}\\.narinfo$`,
 ];
 
-export function cacheRoutes(cache: Cache): ClaimedRoutes<ReturnType<typeof cacheLayer>> {
-  return { layer: cacheLayer(cache), paths: CACHE_ROUTE_PATHS };
+/**
+ * WHAT A BUCKET PUBLISHES TO ITS CONSUMERS: the substituter URL, the key, the
+ * upstream key names, and the block every face prints.
+ *
+ * A PUBLIC bucket's consumer facts are as public as the NARs it serves, so they
+ * are answered with NO credential — that is what lets `odu cache use` work
+ * before anybody has signed in, and what makes the page a cURL away. A private
+ * bucket answers them only to a reader, through the same per-bucket rule the
+ * protocol's reads use.
+ */
+export interface ConsumerFacts extends CacheBucketIdentity {
+  readonly upstreamKeys: readonly string[];
+  /** The `nix.conf` / `flake.nix` / netrc block, `home` unpinned: the page
+   *  cannot know a reader's home, and `useBlock` says so. */
+  readonly use: string;
+  /** The command that prints the block in a terminal. */
+  readonly command: string;
+  /** Where the board is, for a person who arrived by the substituter URL. */
+  readonly board: string;
 }
 
-function cacheLayer(cache: Cache) {
+/** The HTML a person reads; `use` is text and is escaped here, once. */
+function consumerPage(facts: ConsumerFacts): string {
+  const escape = (text: string): string =>
+    text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>${escape(facts.name)} — an odu bucket</title>
+<style>body{font:15px system-ui;max-width:52rem;margin:3rem auto;padding:0 1rem;line-height:1.5}
+pre{background:#f4f4f4;padding:1rem;overflow:auto}code{font-size:.95em}</style></head>
+<body>
+<h1>${escape(facts.name)}</h1>
+<p>${facts.public ? "A public bucket." : "A private bucket — this page was answered to a reader."}</p>
+<dl>
+<dt>Substituter</dt><dd><code>${escape(facts.url)}</code></dd>
+<dt>Public key</dt><dd><code>${escape(facts.publicKey)}</code></dd>
+<dt>Upstream keys</dt><dd><code>${escape(facts.upstreamKeys.join(" ") || "(none)")}</code></dd>
+</dl>
+<h2>Use it</h2>
+<p>In a terminal: <code>${escape(facts.command)}</code></p>
+<pre>${escape(facts.use)}</pre>
+<p><a href="${escape(facts.board)}">Open the board</a></p>
+</body></html>
+`;
+}
+
+export function cacheRoutes(
+  cache: Cache,
+  /** The substituter URL a bucket publishes. The ROW knows the deployment's
+   *  public origin; a route suite that does not passes the path form. */
+  urlFor: (name: string) => string = (name) => `${CACHE_MOUNT}/${name}`,
+  /** Where the board is, for the public page's one link. */
+  boardUrl: string = "/",
+): ClaimedRoutes<ReturnType<typeof cacheLayer>> {
+  return { layer: cacheLayer(cache, urlFor, boardUrl), paths: CACHE_ROUTE_PATHS };
+}
+
+function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: string) {
+  /** The public page and its JSON form — one handler for both spellings. */
+  const consumerFacts = (request: HttpServerRequest.HttpServerRequest) =>
+    Effect.gen(function* () {
+      const name = yield* param("bucket");
+      const bucket = cache.bucket(name);
+      if (bucket === null) return HttpServerResponse.empty({ status: 404 });
+      const verdict = cache.authorize(request.headers["authorization"], bucket, "read");
+      if (!verdict.ok) {
+        return HttpServerResponse.text(verdict.message, { status: verdict.status });
+      }
+      const url = urlFor(bucket.name);
+      const facts: ConsumerFacts = {
+        name: bucket.name,
+        public: bucket.isPublic,
+        publicKey: bucket.publicKey,
+        domain: bucket.domain,
+        url,
+        upstreamKeys: [...bucket.upstreamKeys],
+        use: useBlock({ url, publicKey: bucket.publicKey, home: null }),
+        command: useCommand(bucket.name),
+        board: boardUrl,
+      };
+      if ((request.headers["accept"] ?? "").includes("application/json")) {
+        return HttpServerResponse.jsonUnsafe(facts);
+      }
+      return request.method === "HEAD"
+        ? HttpServerResponse.empty({ status: 200 })
+        : HttpServerResponse.text(consumerPage(facts), {
+            contentType: "text/html; charset=utf-8",
+          });
+    });
+
   return Layer.mergeAll(
+    /**
+     * WHAT TO PASTE INTO A CLIENT — a bucket's consumer facts, with no account
+     * for a public bucket.
+     *
+     * The CLI's "use needs no token" was only true of the SURFACE, where a door
+     * refuses an anonymous connection before a public read can be answered.
+     * These facts are as public as the NARs, so the protocol path answers them
+     * anonymously; JSON for a terminal, a small page for `curl`.
+     */
+    // BOTH SPELLINGS ARE ONE ROUTE: this router normalises a trailing slash in
+    // the PATTERN, so `/cache/:bucket/` and `/cache/:bucket` are the same
+    // registration (a second one is a duplicate-route error), and the handler
+    // answers both requests.
+    HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket`, consumerFacts),
+
     /** `nix-cache-info` — the three lines a client reads before anything else. */
     HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket/nix-cache-info`, (request) =>
       Effect.gen(function* () {
@@ -461,7 +567,28 @@ function cacheLayer(cache: Cache) {
         });
       }),
     ),
+
+    /**
+     * A CLAIMED PREFIX MEANS "MINE". Anything under one of this row's paths
+     * that matched no protocol file is the CACHE's 404 — text, never the
+     * shell's catch-all. Without these, `…/cache/kolu/nope` met the board's
+     * SPA, which is a page at a path the board never routed for and reads as
+     * a broken board rather than as a missing file.
+     */
+    HttpRouter.add("GET", `${CACHE_MOUNT}/*`, () =>
+      Effect.succeed(missingRoute()),
+    ),
+    HttpRouter.add("GET", "/nar/*", () => Effect.succeed(missingRoute())),
+    HttpRouter.add("GET", `${PUSH_API}/*`, () => Effect.succeed(missingRoute())),
   );
+}
+
+/** The row's own 404: a sentence, not a bundle. */
+function missingRoute(): HttpServerResponse.HttpServerResponse {
+  return HttpServerResponse.text("no such cache path\n", {
+    status: 404,
+    contentType: "text/plain; charset=utf-8",
+  });
 }
 
 /** One route parameter, as an Effect so it can be yielded beside the handler's

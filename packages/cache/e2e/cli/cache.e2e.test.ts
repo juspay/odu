@@ -236,6 +236,26 @@ describe("odu serves a Nix binary cache", () => {
     ]);
   });
 
+  it("serves a public bucket's facts with no account", async () => {
+    // THE PROTOCOL PATH, not the surface: anonymous `cache use` did not work on
+    // a daemon with a door because the connection was refused first. The
+    // consumer facts are as public as the NARs.
+    const response = await fetch(`${world.origin}/cache/main`, {
+      headers: { accept: "application/json" },
+    });
+    expect(response.status).toBe(200);
+    const facts = (await response.json()) as { publicKey: string; url: string };
+    expect(facts.publicKey).toBe(main.publicKey);
+    expect(facts.url).toBe(`${world.origin}/cache/main`);
+
+    const used = cli(["cache", "use", "main", "--origin", world.origin], {
+      ODU_ROOT_TOKEN: "",
+      ODU_TOKEN: "",
+    });
+    expect({ status: used.status, stderr: used.stderr }).toMatchObject({ status: 0 });
+    expect(used.stdout).toContain(main.publicKey);
+  });
+
   it("refuses administration without the root token", () => {
     const refused = cli(["cache", "create", "other"], { ODU_ROOT_TOKEN: "wrong" });
     expect(refused.status).toBe(1);

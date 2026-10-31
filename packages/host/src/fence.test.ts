@@ -112,6 +112,8 @@ const declaration = {
     // "does this daemon have a door" so a browser knows whether to sign in.
     auth: {
       "packages/cache/src/cache.ts": 2,
+      // The refusal a private bucket gets names the command that fixes it.
+      "packages/cache/src/cli.ts": 2,
       "packages/ci/src/protect.ts": 2,
       "packages/cli/src/serviceMcp.ts": 4,
       "packages/cli/src/wire.ts": 2,
