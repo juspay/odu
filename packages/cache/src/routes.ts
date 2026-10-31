@@ -54,8 +54,14 @@ import { NIX_CACHE_INFO } from "./staging";
 import type { BucketRow, Scope } from "./db";
 import { isStagedFileName, isStorePathHash } from "./narinfo";
 import {
+  actionsBlock,
+  flakeBlock,
   heldReason,
   MAX_NAR_PART_BYTES,
+  netrcBlock,
+  nixConfBlock,
+  nixOsBlock,
+  pushBlock,
   useBlock,
   useCommand,
   type CacheBucketIdentity,
@@ -173,31 +179,71 @@ export interface ConsumerFacts extends CacheBucketIdentity {
   readonly use: string;
   /** The command that prints the block in a terminal. */
   readonly command: string;
-  /** Where the board is, for a person who arrived by the substituter URL. */
+  /** The daemon's PUBLIC ORIGIN — where THIS INSTANCE is. The push's `see`
+   *  link is built from it; the page's own link is attribution to the PRODUCT
+   *  (`served by odu`), a fixed site, never a call to action. */
   readonly board: string;
 }
 
-/** The HTML a person reads; `use` is text and is escaped here, once. */
+/** The HTML a person reads; every block is text and is escaped here, once. */
 function consumerPage(facts: ConsumerFacts): string {
   const escape = (text: string): string =>
     text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  // ONE BLOCK PER THING A PERSON PASTES SOMEWHERE. netrc only when reading
+  // needs a credential: a public bucket is read with no account at all.
+  const blocks: ReadonlyArray<readonly [string, string]> = [
+    ["nix.conf", nixConfBlock(facts)],
+    ["NixOS / nix-darwin", nixOsBlock(facts)],
+    ["flake.nix", flakeBlock(facts)],
+    ["GitHub Actions", actionsBlock(facts)],
+    ...(facts.public
+      ? []
+      : [["netrc", netrcBlock({ url: facts.url, home: null })] as const]),
+  ];
+  const block = (title: string, text: string): string =>
+    `<h3>${escape(title)}</h3>
+<div class="block"><button type="button" data-copy>copy</button><pre>${escape(text)}</pre></div>`;
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <title>${escape(facts.name)} — an odu bucket</title>
 <style>body{font:15px system-ui;max-width:52rem;margin:3rem auto;padding:0 1rem;line-height:1.5}
-pre{background:#f4f4f4;padding:1rem;overflow:auto}code{font-size:.95em}</style></head>
+pre{background:#f4f4f4;padding:1rem;overflow:auto}code{font-size:.95em}
+h3{margin:1.4rem 0 .3rem;font-size:1rem}
+.block{position:relative;margin:.4rem 0 1rem}
+.block pre{margin:0;padding:2.2rem 1rem 1rem}
+.block button{position:absolute;top:.5rem;right:.5rem;font:inherit;font-size:.8rem;padding:.2rem .55rem;cursor:pointer}
+.served{color:#666;font-size:.9em}</style></head>
 <body>
 <h1>${escape(facts.name)}</h1>
 <p>${facts.public ? "A public bucket." : "A private bucket — this page was answered to a reader."}</p>
 <dl>
-<dt>Substituter</dt><dd><code>${escape(facts.url)}</code></dd>
+<dt>Substituter</dt><dd><code>${escape(facts.url)}</code> · <a href="${escape(
+    `${facts.url.replace(/\/$/, "")}/nix-cache-info`,
+  )}">nix-cache-info</a></dd>
 <dt>Public key</dt><dd><code>${escape(facts.publicKey)}</code></dd>
 <dt>Upstream keys</dt><dd><code>${escape(facts.upstreamKeys.join(" ") || "(none)")}</code></dd>
 </dl>
 <h2>Use it</h2>
-<p>In a terminal: <code>${escape(facts.command)}</code></p>
-<pre>${escape(facts.use)}</pre>
-<p><a href="${escape(facts.board)}">Open the board</a></p>
+${blocks.map(([title, text]) => block(title, text)).join("\n")}
+<p class="hint">Or let a terminal print them: <code>${escape(facts.command)}</code></p>
+<h2>Push to it</h2>
+<p class="hint">A write token comes from this bucket's page on the board — an admin mints one. The push exports it where the build runs.</p>
+${block(
+  "push",
+  pushBlock({ origin: facts.board, bucket: facts.name, token: null }),
+)}
+<script>
+document.addEventListener("click", function (event) {
+  var button = event.target.closest("[data-copy]");
+  if (!button) return;
+  var pre = button.parentElement.querySelector("pre");
+  navigator.clipboard.writeText(pre.textContent).then(function () {
+    button.textContent = "copied";
+    setTimeout(function () { button.textContent = "copy"; }, 1200);
+  });
+});
+</script>
+<p class="served">served by <a href="https://odu.kolu.dev/">odu</a></p>
 </body></html>
 `;
 }

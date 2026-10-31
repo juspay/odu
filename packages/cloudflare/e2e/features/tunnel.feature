@@ -5,12 +5,21 @@ Feature: A bucket's own name, through a tunnel
   # route's state is the row's own fact, not a log line.
 
   @tunnel
+  Scenario: Before any name, the tunnel is idle rather than stopped
+    Given I open the cache
+    When I open the tunnel
+    Then the tunnel says it is idle
+    And the tunnel shows no connector state
+    And there should be no page errors
+
+  @tunnel
   Scenario: A bucket's name becomes a live route through the tunnel
     Given I open the cache
     When I type the root token
     And I name a new bucket
     And I press "Create bucket"
     And I name the bucket "cache.tunnel.test"
+    Then the domain answer says "The tunnel row is wiring its route."
     When I open the tunnel
     Then the tunnel panel shows "cache.tunnel.test" as "live"
     When I open that bucket

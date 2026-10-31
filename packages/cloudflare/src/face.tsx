@@ -79,24 +79,53 @@ export function TunnelFace(props: CloudflareFaceProps): JSX.Element {
           </p>
         }
       >
-        <p class="bucket-facts">
-          <span class={`pill ${tunnelOf().state === "failed" ? "hue-red" : "hue-grey"}`}>
-            connector {tunnelOf().state}
-          </span>
-          <Show when={tunnelOf().name}>{(name) => <span>{name()}</span>}</Show>
-          <Show when={tunnelOf().id}>{(id) => <code>{id()}</code>}</Show>
-        </p>
-        <Show when={tunnelOf().reason}>
-          {(reason) => <p class="fault">{reason()}</p>}
-        </Show>
-        <p class="hint">
-          One tunnel for this server, made the first time a name was set. The
-          connector is a child of the daemon; when the last name goes, it stops.
-        </p>
         <Show
           when={routes().length > 0}
-          fallback={<p class="hint">No name is routed yet — set one on a bucket.</p>}
+          fallback={
+            <>
+              {/* NO NAME EVER SET IS IDLE, not a stopped connector: `stopped`
+                  is what a connector says AFTER carrying names. A tunnel that
+                  HAS existed keeps its state — clearing the last name really
+                  does stop it. */}
+              <Show when={tunnelOf().id !== null || tunnelOf().name !== null}>
+                <p class="bucket-facts">
+                  <span
+                    class={`pill ${tunnelOf().state === "failed" ? "hue-red" : "hue-grey"}`}
+                  >
+                    connector {tunnelOf().state}
+                  </span>
+                  <Show when={tunnelOf().name}>{(name) => <span>{name()}</span>}</Show>
+                  <Show when={tunnelOf().id}>{(id) => <code>{id()}</code>}</Show>
+                </p>
+                <Show when={tunnelOf().reason}>
+                  {(reason) => <p class="fault">{reason()}</p>}
+                </Show>
+                <p class="hint">
+                  One tunnel for this server, made the first time a name was set. The
+                  connector is a child of the daemon; when the last name goes, it stops.
+                </p>
+              </Show>
+              <p class="hint">
+                The tunnel is idle — no name is routed. Set one on a bucket page, under
+                “A name of its own”.
+              </p>
+            </>
+          }
         >
+          <p class="bucket-facts">
+            <span class={`pill ${tunnelOf().state === "failed" ? "hue-red" : "hue-grey"}`}>
+              connector {tunnelOf().state}
+            </span>
+            <Show when={tunnelOf().name}>{(name) => <span>{name()}</span>}</Show>
+            <Show when={tunnelOf().id}>{(id) => <code>{id()}</code>}</Show>
+          </p>
+          <Show when={tunnelOf().reason}>
+            {(reason) => <p class="fault">{reason()}</p>}
+          </Show>
+          <p class="hint">
+            One tunnel for this server, made the first time a name was set. The
+            connector is a child of the daemon; when the last name goes, it stops.
+          </p>
           <ol class="paths">
             <For each={routes()}>
               {(route) => (
@@ -140,13 +169,24 @@ export function BucketRoute(props: {
   return (
     <Show when={route()}>
       {(row) => (
-        <p class="bucket-facts" aria-label="domain route">
-          <span class={`pill ${row().state === "failed" ? "hue-red" : "hue-grey"}`}>
-            {routeText(row())}
-          </span>
-          <span>{row().domain}</span>
-          <span>{ago(row().updated, props.now)}</span>
-        </p>
+        <>
+          <p class="bucket-facts" aria-label="domain route">
+            <span class={`pill ${row().state === "failed" ? "hue-red" : "hue-grey"}`}>
+              {row().state}
+            </span>
+            <span>{row().domain}</span>
+            <span>{ago(row().updated, props.now)}</span>
+          </p>
+          <p class="hint">
+            {row().state === "wiring"
+              ? `The tunnel row is wiring ${row().domain}'s DNS record.`
+              : row().state === "live"
+                ? `The tunnel row says ${row().domain} is live.`
+                : `The tunnel row could not route ${row().domain}${
+                    row().reason === null ? "." : `: ${row().reason}`
+                  }`}
+          </p>
+        </>
       )}
     </Show>
   );

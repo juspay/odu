@@ -17,6 +17,21 @@ When("I open the tunnel", async function (this: OduWorld) {
   await this.page.getByRole("heading", { name: "Tunnel", exact: true }).waitFor();
 });
 
+Then("the tunnel says it is idle", async function (this: OduWorld) {
+  const section = this.page.locator('section[aria-label="tunnel"]');
+  await until("the tunnel to say it is idle", async () =>
+    (await section.innerText()).includes("The tunnel is idle — no name is routed") ? true : null,
+  );
+});
+
+Then("the tunnel shows no connector state", async function (this: OduWorld) {
+  const section = this.page.locator('section[aria-label="tunnel"]');
+  assert.ok(
+    !(await section.innerText()).includes("connector "),
+    "the idle tunnel read as a stopped connector",
+  );
+});
+
 Then(
   "the tunnel panel shows {string} as {string}",
   async function (this: OduWorld, domain: string, state: string) {

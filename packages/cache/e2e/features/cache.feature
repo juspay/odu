@@ -59,9 +59,22 @@ Feature: The cache is a row of the board
     Given a bucket with one path pushed from the CLI
     When I open the bucket's substituter URL in a browser
     Then the page is the bucket's public page
+    And the page has the four blocks a person pastes
+    And the page carries no netrc block
+    And the page links its substituter's health file
+    And the page credits odu at https://odu.kolu.dev/
     And the page names the bucket's public key
     When I open a path under the cache that names nothing
     Then the cache answers it as its own 404
+    And there should be no page errors
+
+  # A PRIVATE BUCKET'S READER NEEDS A CREDENTIAL, so its page — and only its
+  # page — carries the netrc block.
+  Scenario: A private bucket's page carries the netrc block
+    Given a bucket with one path pushed from the CLI
+    When the CLI makes a private bucket and mints a read token
+    And I open that bucket's page as its reader
+    Then the page has the netrc block
     And there should be no page errors
 
   # A CONTROL FOR A ROW THAT IS NOT MOUNTED opens a subscription nothing

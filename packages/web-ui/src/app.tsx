@@ -494,6 +494,7 @@ export function App(props: {
             bucket={openBucket()}
             canAdminister={holdsFloor("admin")}
             local={principal()?.kind === "local"}
+            tunnelRow={tunnelRow()}
             now={now()}
             call={(effect) => Effect.runPromise(effect)}
             onOpen={(bucket) => go({ at: "cache", bucket })}

@@ -80,7 +80,10 @@ function stagedFiles(): string[] {
   return out.sort();
 }
 
-async function harness(publicBucket: boolean): Promise<Harness> {
+async function harness(
+  publicBucket: boolean,
+  boardOrigin = "https://odu.example.org",
+): Promise<Harness> {
   const store = new FakeStore();
   const hello = nar("a NAR, in pieces");
   store.add(
@@ -118,9 +121,10 @@ async function harness(publicBucket: boolean): Promise<Harness> {
     write: await mint(cache, "write"),
     admin: await mint(cache, "admin"),
   };
-  const { handler, dispose } = HttpRouter.toWebHandler(cacheRoutes(cache).layer, {
-    disableLogger: true,
-  });
+  const { handler, dispose } = HttpRouter.toWebHandler(
+    cacheRoutes(cache, (name) => `${CACHE_MOUNT}/${name}`, boardOrigin).layer,
+    { disableLogger: true },
+  );
   // The tests below name a path as a BUCKET names it (`/main/nix-cache-info`),
   // and this puts it where the protocol actually is. The mount is pinned on its
   // own, once, in "the protocol's mount is not the origin's first segment".
@@ -212,8 +216,15 @@ describe("a bucket's consumer facts", () => {
       publicKey: string;
       upstreamKeys: string[];
       use: string;
+      board: string;
     };
-    expect(facts).toMatchObject({ name: "main", publicKey: expect.stringContaining("main-1:") });
+    expect(facts).toMatchObject({
+      name: "main",
+      publicKey: expect.stringContaining("main-1:"),
+      // THE INSTANCE'S OWN ADDRESS, not the bucket's name: the push's `see`
+      // link and anything else that needs the board read it from here.
+      board: "https://odu.example.org",
+    });
     expect(facts.url).toContain("/cache/main");
     expect(facts.upstreamKeys).toEqual(["cache.nixos.org-1"]);
     expect(facts.use).toContain("extra-substituters");
@@ -228,7 +239,26 @@ describe("a bucket's consumer facts", () => {
     // The PAGE carries the key too. (Checked as a substring of the key, not
     // of `facts`: a matcher with an asymmetric expectation can rewrite the
     // object it matched.)
-    expect((await page.text()).includes("main-1:")).toBe(true);
+    const body = await page.text();
+    expect(body.includes("main-1:")).toBe(true);
+    // ONE BLOCK PER THING A PERSON PASTES SOMEWHERE, each with a copy button.
+    for (const title of ["nix.conf", "NixOS / nix-darwin", "flake.nix", "GitHub Actions"]) {
+      expect({ title, heading: body.includes(`<h3>${title}</h3>`) }).toEqual({
+        title,
+        heading: true,
+      });
+    }
+    expect(body.split(`<button type="button" data-copy>`).length - 1).toBe(5);
+    // A PUBLIC BUCKET IS READ WITH NO CREDENTIAL, so netrc is not on its page.
+    expect(body.includes("netrc-file")).toBe(false);
+    // THE HEALTH FILE, at the substituter's root, as a link a person clicks.
+    expect(body).toContain(
+      `<a href="/cache/main/nix-cache-info">nix-cache-info</a>`,
+    );
+    // ATTRIBUTION TO THE PRODUCT, a fixed site — never the instance's board.
+    expect(body).toContain(
+      `<p class="served">served by <a href="https://odu.kolu.dev/">odu</a></p>`,
+    );
     await h.dispose();
   });
 
@@ -241,6 +271,14 @@ describe("a bucket's consumer facts", () => {
       headers: { ...(bearer(h.tokens.read).headers as Record<string, string>), accept: "application/json" },
     });
     expect(withToken.status).toBe(200);
+    // The PAGE, not the JSON: the blocks are what a reader pastes.
+    const page = await h.fetch("/main/", bearer(h.tokens.read));
+    expect(page.status).toBe(200);
+    const body = await page.text();
+    // READING THIS BUCKET NEEDS A CREDENTIAL, so its page carries the netrc
+    // block — and only a private bucket's does.
+    expect(body).toContain("<h3>netrc</h3>");
+    expect(body).toContain("netrc-file");
     await h.dispose();
   });
 });

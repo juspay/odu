@@ -376,6 +376,14 @@ When("I name the bucket {string}", async function (this: OduWorld, domain: strin
   );
 });
 
+Then("the domain answer says {string}", async function (this: OduWorld, text: string) {
+  const answer = this.page.locator("p.hint.done", { hasText: "Named this bucket" });
+  await answer.waitFor({ timeout: 30_000 });
+  await until(`the domain answer to say ${text}`, async () =>
+    (await answer.innerText()).includes(text) ? true : null,
+  );
+});
+
 Then("the page's substituter URL is {string}", async function (this: OduWorld, host: string) {
   const text = await this.page.locator("pre.consume-block").innerText();
   assert.match(
@@ -465,6 +473,81 @@ Then("the page is the bucket's public page", function (this: OduWorld) {
   // NOT THE BOARD: the SPA shell has the board's row buttons; this page has a
   // sentence and a pre block.
   assert.ok(!visited.body.includes('aria-label="board rows"'), "the board's SPA answered");
+});
+
+Then("the page has the four blocks a person pastes", function (this: OduWorld) {
+  const visited = this.visited;
+  assert.ok(visited !== undefined, "no page was opened");
+  for (const title of ["nix.conf", "NixOS / nix-darwin", "flake.nix", "GitHub Actions"]) {
+    assert.ok(
+      visited.body.includes(`<h3>${title}</h3>`),
+      `the page has no ${title} block`,
+    );
+  }
+  assert.strictEqual(
+    visited.body.split('<button type="button" data-copy>').length - 1,
+    5,
+    "the page does not offer a copy button per block (four use blocks and the push)",
+  );
+});
+
+Then("the page carries no netrc block", function (this: OduWorld) {
+  const visited = this.visited;
+  assert.ok(visited !== undefined, "no page was opened");
+  assert.ok(
+    !visited.body.includes("netrc-file"),
+    "a public bucket's page carries netrc, which reading it does not need",
+  );
+});
+
+Then("the page links its substituter's health file", function (this: OduWorld) {
+  const name = this.cacheBucket;
+  assert.ok(name !== undefined, "no bucket was arranged");
+  const visited = this.visited;
+  assert.ok(visited !== undefined, "no page was opened");
+  assert.ok(
+    visited.body.includes(
+      `<a href="${this.service.origin}/cache/${name}/nix-cache-info">nix-cache-info</a>`,
+    ),
+    "the page does not link the substituter's nix-cache-info",
+  );
+});
+
+Then("the page credits odu at {string}", function (this: OduWorld, site: string) {
+  const visited = this.visited;
+  assert.ok(visited !== undefined, "no page was opened");
+  assert.ok(
+    visited.body.includes(`served by <a href="${site}">odu</a>`),
+    `the page does not credit odu at ${site}`,
+  );
+});
+
+When("the CLI makes a private bucket and mints a read token", function (this: OduWorld) {
+  const name = unique("private");
+  this.cacheBucket = name;
+  const created = oduCli(this.service, ["cache", "create", name, "--private", "-o", "json"]);
+  assert.strictEqual(created.status, 0, `create failed: ${created.stderr}`);
+  const minted = oduCli(this.service, ["cache", "token", "mint", name, "--read", "-o", "json"]);
+  assert.strictEqual(minted.status, 0, `token mint failed: ${minted.stderr}`);
+  this.rowState.set("cache.readToken", (JSON.parse(minted.stdout) as { token: string }).token);
+});
+
+When("I open that bucket's page as its reader", async function (this: OduWorld) {
+  const name = this.cacheBucket;
+  const token = this.rowState.get("cache.readToken") as string | undefined;
+  assert.ok(name !== undefined && token !== undefined, "no private bucket was arranged");
+  const response = await fetch(`${this.service.origin}/cache/${name}`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  this.visited = { status: response.status, body: await response.text() };
+});
+
+Then("the page has the netrc block", function (this: OduWorld) {
+  const visited = this.visited;
+  assert.ok(visited !== undefined, "no page was opened");
+  assert.strictEqual(visited.status, 200, "the private page was not answered to its reader");
+  assert.ok(visited.body.includes("<h3>netrc</h3>"), "the private page has no netrc block");
+  assert.ok(visited.body.includes("netrc-file"), "the netrc block names no netrc-file");
 });
 
 Then("the page names the bucket's public key", function (this: OduWorld) {

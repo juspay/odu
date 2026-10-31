@@ -371,23 +371,51 @@ export const MAX_NAR_PART_BYTES = 96 * 1024 * 1024;
  *  prints — the netrc line and the push block say the same thing. */
 export const WRITE_TOKEN_PLACEHOLDER = "<your-write-token>";
 
+/** What stands where a READ token goes: the netrc line of a private bucket. */
+export const READ_TOKEN_PLACEHOLDER = "<your-read-token>";
+
+/** The `nix.conf` pair — the two `extra-` lines a Nix client reads. */
+export function nixConfBlock(input: { readonly url: string; readonly publicKey: string }): string {
+  return `extra-substituters = ${input.url}
+extra-trusted-public-keys = ${input.publicKey}`;
+}
+
+/** The same pair as a NixOS / nix-darwin attrset. */
+export function nixOsBlock(input: { readonly url: string; readonly publicKey: string }): string {
+  return `nix.settings = {
+  extra-substituters = [ "${input.url}" ];
+  extra-trusted-public-keys = [ "${input.publicKey}" ];
+};`;
+}
+
+/** The same pair as a flake's `nixConfig`. */
+export function flakeBlock(input: { readonly url: string; readonly publicKey: string }): string {
+  return `{
+  nixConfig = {
+    extra-substituters = [ "${input.url}" ];
+    extra-trusted-public-keys = [ "${input.publicKey}" ];
+  };
+}`;
+}
+
+/** The same pair inside a workflow's install-nix step. */
+export function actionsBlock(input: { readonly url: string; readonly publicKey: string }): string {
+  return `extra_nix_config: |
+  extra-substituters = ${input.url}
+  extra-trusted-public-keys = ${input.publicKey}`;
+}
+
 /**
- * THE BLOCK A CLIENT PASTES, for one bucket — `odu cache use`'s output and the
- * bucket page's, from one function.
+ * THE CREDENTIAL LINES, for a PRIVATE bucket only: reading it needs a token.
  *
  * `home` is the caller's ABSOLUTE home directory, or `null` when it has none to
  * offer. It cannot be `~`: Nix expands no tilde here — `--netrc-file ~/.netrc`
  * fails with `not an absolute path` — so a block printed with one is a block
  * that silently does nothing when pasted. The CLI knows `$HOME`; the page does
  * not, and prints a placeholder that says so.
- *
- * Everything else is the bucket's own facts, which is what keeps the two faces
- * from drifting the way they had (`~/.netrc` on one and `$HOME/.netrc` on the
- * other, and a `flake.nix` block on only one).
  */
-export function useBlock(input: {
+export function netrcBlock(input: {
   readonly url: string;
-  readonly publicKey: string;
   readonly home: string | null;
 }): string {
   const authority = ((): string => {
@@ -397,26 +425,32 @@ export function useBlock(input: {
       return input.url;
     }
   })();
-  return `# nix.conf
-extra-substituters = ${input.url}
-extra-trusted-public-keys = ${input.publicKey}
-
-# flake.nix
-{
-  nixConfig = {
-    extra-substituters = [ "${input.url}" ];
-    extra-trusted-public-keys = [ "${input.publicKey}" ];
-  };
-}
-
-# netrc — Nix reads only the file named by netrc-file, never ~/.netrc,
+  return `# netrc — Nix reads only the file named by netrc-file, never ~/.netrc,
 # and it does NOT expand ~ there: give it an absolute path.${
     input.home === null
       ? "\n# (replace <home> below with yours — a page cannot know it)\nnetrc-file = <home>/.netrc"
       : `\nnetrc-file = ${input.home}/.netrc`
   }
-machine ${authority} password ${WRITE_TOKEN_PLACEHOLDER}
-`;
+machine ${authority} password ${READ_TOKEN_PLACEHOLDER}`;
+}
+
+/**
+ * EVERY BLOCK A CLIENT PASTES, from one function each — the page renders them
+ * as separate titled blocks, `odu cache use` prints them one after another, and
+ * the docs quote the same strings (`useCopy.test.ts` holds them together).
+ */
+export function useBlock(input: {
+  readonly url: string;
+  readonly publicKey: string;
+  readonly home: string | null;
+}): string {
+  return [
+    `# nix.conf\n${nixConfBlock(input)}`,
+    `# NixOS / nix-darwin\n${nixOsBlock(input)}`,
+    `# flake.nix\n${flakeBlock(input)}`,
+    `# GitHub Actions\n${actionsBlock(input)}`,
+    netrcBlock(input),
+  ].join("\n\n");
 }
 
 /** The one line that prints {@link useBlock} for a bucket, from a terminal. */
@@ -429,15 +463,21 @@ export function useCommand(bucket: string): string {
  * example, from one function (the docs quote it; `useCopy.test.ts` holds the
  * two together).
  *
- * The bucket is named by its full URL, so the command works on a build box
- * that never ran `odu cache login`. `token` is the JUST-MINTED write token
- * while the page can still show it — the once-shown moment is exactly when a
- * person pastes it into a CI secret — and `null` (the placeholder) otherwise.
+ * The bucket is named, and the ORIGIN is the daemon's public origin, so the
+ * command works on a build box that never ran `odu cache login` and through a
+ * bucket's domain or the instance's own name alike. `token` is the JUST-MINTED
+ * write token while the page can still show it — the once-shown moment is
+ * exactly when a person pastes it into a CI secret — and `null` (the
+ * placeholder) otherwise.
  */
-export function pushBlock(input: { readonly url: string; readonly token: string | null }): string {
+export function pushBlock(input: {
+  readonly origin: string;
+  readonly bucket: string;
+  readonly token: string | null;
+}): string {
   return `# push — a write token, exported where the build runs (a build secret)
 export ODU_CACHE_TOKEN=${input.token ?? WRITE_TOKEN_PLACEHOLDER}
-odu cache push ${input.url} ./result
+odu cache push ${input.bucket} <paths> --origin ${input.origin.replace(/\/$/, "")}
 `;
 }
 

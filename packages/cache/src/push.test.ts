@@ -64,6 +64,8 @@ interface Seen {
 
 interface Server {
   origin: string;
+  /** The instance's public origin, as its consumer facts publish it. */
+  board: string;
   seen: Seen[];
   /** How many times each path's nar upload should fail before succeeding. */
   failNar: Map<string, number>;
@@ -94,6 +96,7 @@ interface Server {
 function startServer(): Server {
   const state: Server = {
     origin: "",
+    board: "https://board.example.org",
     seen: [],
     failNar: new Map(),
     narStatus: new Map(),
@@ -121,6 +124,11 @@ function startServer(): Server {
         authorization: request.headers.get("authorization"),
         body,
       });
+      if (request.method === "GET" && url.pathname === "/cache/main") {
+        // THE BUCKET'S CONSUMER FACTS: the push asks where THIS INSTANCE is,
+        // rather than guessing from its own environment.
+        return Response.json({ board: state.board });
+      }
       if (url.pathname.endsWith("/missing")) {
         state.missingCalls += 1;
         if (state.missingOnlyFor !== undefined && state.missingCalls > state.missingOnlyFor) {
@@ -478,13 +486,7 @@ describe("pushing a closure", () => {
       const summary = await pushToCache({
         bucket: `${server.origin}/main`,
         paths: ["."],
-        env: envOf({
-          ODU_CACHE_TOKEN: "t",
-          // THE BOARD, on the daemon's own name — the push was told the bucket
-          // by URL, and its `see` line must still point at the page that
-          // lists the hold, not at the substituter's root.
-          ODU_WEB_ORIGIN: "https://board.example.org",
-        }),
+        env: envOf({ ODU_CACHE_TOKEN: "t" }),
         platform: PLATFORM,
         onLine: (line) => lines.push(line),
       });

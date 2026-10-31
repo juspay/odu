@@ -235,6 +235,24 @@ function worthRetrying(status: number): boolean {
   return status === 429 || status >= 500;
 }
 
+/** THE INSTANCE'S PUBLIC ORIGIN, from the bucket's own consumer facts. */
+async function boardOf(
+  resolved: ResolvedBucket,
+  headers: Record<string, string>,
+): Promise<string | null> {
+  try {
+    const response = await fetch(
+      `${resolved.origin}${CACHE_MOUNT}/${encodeURIComponent(resolved.name)}`,
+      { headers: { ...headers, accept: "application/json" } },
+    );
+    if (!response.ok) return null;
+    const facts = (await response.json()) as { board?: unknown };
+    return typeof facts.board === "string" && facts.board !== "" ? facts.board : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function pushToCache(options: PushOptions): Promise<PushSummary> {
   const say = options.onLine ?? (() => {});
   const resolved = await resolveBucket(options.env, options.bucket, options.origin);
@@ -357,14 +375,11 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
 
   // THE BOARD, not the substituter. A push may name a bucket's domain as its
   // origin, and that name serves only the bucket — its `/` is the public page,
-  // which does not know what is held. The held list lives on the daemon's own
-  // origin, which is `ODU_WEB_ORIGIN` when a lane sets one.
-  const board = (() => {
-    const configured = options.env.ODU_WEB_ORIGIN?.trim();
-    return configured === undefined || configured === ""
-      ? resolved.origin
-      : normalizeOrigin(configured);
-  })();
+  // which does not know what is held. The daemon publishes its own PUBLIC
+  // ORIGIN in the bucket's consumer facts (`ODU_PUBLIC_ORIGIN`), so the client
+  // asks rather than guessing from its own environment; a failed ask falls
+  // back to the origin it talked to.
+  const board = held.length === 0 ? resolved.origin : ((await boardOf(resolved, headers)) ?? resolved.origin);
   return {
     pushed,
     skippedUpstream: answer.skippedUpstream.length,
@@ -372,7 +387,7 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
     held,
     failed: failures.length,
     failures,
-    pageUrl: `${board}/#/cache/${encodeURIComponent(resolved.name)}`,
+    pageUrl: `${board.replace(/\/$/, "")}/#/cache/${encodeURIComponent(resolved.name)}`,
   };
 }
 

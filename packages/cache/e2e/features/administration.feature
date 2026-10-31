@@ -26,6 +26,7 @@ Feature: An admin administers the cache from the board
     Given a bucket created from the board
     When I name the bucket "cache.e2e.test"
     Then the page's substituter URL is "cache.e2e.test"
+    And the domain answer says "Point its DNS record here."
     And the page's netrc block names "cache.e2e.test"
     And the push block still names the bucket's path
     And there should be no page errors

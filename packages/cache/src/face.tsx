@@ -88,6 +88,10 @@ export interface CacheFaceProps {
    *  `no_root_token`): two independent checks, because a hidden button is not a
    *  permission and a drawn one is not a grant. */
   canAdminister: boolean;
+  /** DOES THE SHELL MOUNT THE TUNNEL ROW? With it, a bucket's name is routed
+   *  by that row and the page must not tell the operator to make the record;
+   *  without it, pointing the record is exactly the operator's next step. */
+  tunnelRow: boolean;
   /** IS THIS PERSON THE DAEMON'S LOCAL OWNER — a daemon with no door? Then the
    *  row's rule for administration is the operator's ROOT TOKEN rather than a
    *  role, so the page asks for it once (the same secret `odu cache` reads from
@@ -161,6 +165,7 @@ export function CacheFace(props: CacheFaceProps): JSX.Element {
             now={props.now}
             onOpen={props.onOpen}
             canAdminister={props.canAdminister}
+            tunnelRow={props.tunnelRow}
           />
         )}
       </Show>
@@ -369,6 +374,7 @@ function BucketPage(
     now: number;
     onOpen: (bucket: string | null) => void;
     canAdminister: boolean;
+    tunnelRow: boolean;
   },
 ): JSX.Element {
   /** What the person typed, and what the query is allowed to see. Two signals:
@@ -629,7 +635,14 @@ function BucketPage(
             </p>
             <pre class="use-block push-block">
               {pushBlock({
-                url: row().pushUrl,
+                origin: (() => {
+                  try {
+                    return new URL(row().pushUrl).origin;
+                  } catch {
+                    return row().pushUrl;
+                  }
+                })(),
+                bucket: props.name,
                 token: minted()?.scope === "write" ? (minted()?.token ?? null) : null,
               })}
             </pre>
@@ -650,6 +663,7 @@ function BucketPage(
               rootToken={props.rootToken}
               name={name}
               domain={bucket()?.domain ?? null}
+              tunnelRow={props.tunnelRow}
             />
             <BucketAdmin
               client={props.client}
@@ -797,12 +811,13 @@ function BucketAdmin(props: TokenProps): JSX.Element {
  * THE NAME A BUCKET IS SERVED AT — a domain, or a path under the origin.
  *
  * A NAME BELONGS TO THE BUCKET, not to the page: setting it changes the
- * substituted URL, the `nix.conf` block above and the push's address, and the
- * NixOS module must already have a vhost for it. A domain with no DNS record
- * is the operator's next step, which is why the field says what it needs.
+ * substituted URL, the `nix.conf` block above and the push's address. WHO
+ * creates the DNS record is the deployment's: with a tunnel row mounted, the
+ * row does and the strip beside this page carries its state; without one, the
+ * operator points the record, and the answer says so.
  */
 function BucketDomain(
-  props: AdminProps & { name: string; domain: string | null },
+  props: AdminProps & { name: string; domain: string | null; tunnelRow: boolean },
 ): JSX.Element {
   const [typed, setTyped] = createSignal(props.domain ?? "");
   createEffect(on(() => props.domain, (domain) => setTyped(domain ?? ""), { defer: true }));
@@ -817,7 +832,12 @@ function BucketDomain(
       (row) =>
         row.domain === null
           ? `Cleared the name; ${props.name} is served under /cache/${props.name}.`
-          : `Named this bucket ${row.domain}. Point its DNS record here.`,
+          : props.tunnelRow
+            // THE RECORD IS THE TUNNEL ROW'S JOB. Its state is on the strip
+            // beside this page (wiring / live / failed: reason); claiming a
+            // manual step here would be the stale instruction this replaced.
+            ? `Named this bucket ${row.domain}. The tunnel row is wiring its route.`
+            : `Named this bucket ${row.domain}. Point its DNS record here.`,
     );
   };
   return (

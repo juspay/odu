@@ -12,12 +12,27 @@ odu cache create main
 
 On the board: the Cache view's **Create bucket** form, with the same upstream switch. `create` prints the substituter URL and the bucket's public key. Behind a proxy that URL is the address you published the service at, not the loopback one — `$ODU_PUBLIC_ORIGIN`, which the NixOS module derives for you. `odu cache use main` prints the same as two Nix settings, ready for `nix.conf` — and needs no token at all, because a bucket's URL and public key are what it publishes to every client that talks to it. On a server with a door that is a PROTOCOL read, not a session: `GET /cache/<bucket>/` answers a public bucket's facts with no account (a small page for `curl`, add `Accept: application/json` for a terminal). A private bucket's facts need a reader, and `odu cache use` says so:
 
+## Use it
+
+The bucket's page shows these as separate, titled blocks — one per thing you paste somewhere. Trust the key, then a build substitutes from the bucket instead of the network.
+
+`nix.conf`:
+
 ```sh
 extra-substituters = http://127.0.0.1:18440/cache/main
 extra-trusted-public-keys = main-1:<public-key>
 ```
 
-and as a `nixConfig` block for `flake.nix`:
+NixOS / nix-darwin:
+
+```nix
+nix.settings = {
+  extra-substituters = [ "http://127.0.0.1:18440/cache/main" ];
+  extra-trusted-public-keys = [ "main-1:<public-key>" ];
+};
+```
+
+`flake.nix`:
 
 ```nix
 {
@@ -28,7 +43,25 @@ and as a `nixConfig` block for `flake.nix`:
 }
 ```
 
-Trust the key, then a build substitutes from the bucket instead of the network. `odu cache use` also prints the two netrc lines described under [Push](#push).
+GitHub Actions — inside the step that installs Nix:
+
+```yaml
+extra_nix_config: |
+  extra-substituters = http://127.0.0.1:18440/cache/main
+  extra-trusted-public-keys = main-1:<public-key>
+```
+
+A **private** bucket's page also carries the netrc block, because reading it needs a credential:
+
+```sh
+# netrc — Nix reads only the file named by netrc-file, never ~/.netrc,
+# and it does NOT expand ~ there: give it an absolute path.
+# (replace <home> below with yours — a page cannot know it)
+netrc-file = <home>/.netrc
+machine 127.0.0.1:18440 password <your-read-token>
+```
+
+Or let a terminal print them: `odu cache use main`.
 
 ## Tokens
 
@@ -79,7 +112,7 @@ The bucket argument is a name resolved against the logged-in origin, or a full `
 ```sh
 # push — a write token, exported where the build runs (a build secret)
 export ODU_CACHE_TOKEN=<your-write-token>
-odu cache push https://odu.example.com/cache/main ./result
+odu cache push main <paths> --origin https://odu.example.com
 ```
 
 What it says while it works — one preamble, then one line per path as the bucket answers:
@@ -108,8 +141,6 @@ A GitHub Actions step, with the token as a secret:
       cache push kolu --origin https://cache.kolu.dev $paths
   env:
     ODU_CACHE_TOKEN: ${{ secrets.ODU_CACHE_TOKEN }}
-    # THE BOARD'S origin — the held list lives there, not on the bucket's name.
-    ODU_WEB_ORIGIN: https://odu.example.com
 ```
 
 Prefer plain Nix? `nix copy --to` works without any odu code on the client:
