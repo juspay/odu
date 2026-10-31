@@ -21,7 +21,7 @@ import { reloadForUpdate } from "@kolu/surface-app/lifecycle";
 import { connectSurfaces } from "@kolu/surface-app/solid";
 import { AUTH_KEY, oduAuthSurface } from "@odu/auth/surface";
 import { CACHE_KEY, oduCacheSurface } from "@odu/cache/surface";
-import { SERVICE_DOOR_PATH } from "@odu/cordis/services";
+import { readDoor } from "@odu/cordis/services";
 import { oduServiceSurface } from "@odu/service-client/surface";
 import { createSignal } from "solid-js";
 import { render } from "solid-js/web";
@@ -36,33 +36,12 @@ if (root === null) {
  * DOES THIS SERVER HAVE A DOOR? Asked of the HOST before anything is drawn, and
  * asked again whenever the shell sees the wire come alive.
  *
- * It used to ride the runs' service cell, which meant the shell opened the
- * board and subscribed to `runs` before it knew the answer — on a server with a
- * door, every one of those subscriptions is refused. The fact is the host's
- * (it changes with `auth`, not with the runs), so the host answers it on its own
- * route, and a page that gets the answer first never draws the wrong board.
- * An unreachable answer is `null` — UNKNOWN, not "no door". A page that assumed
- * a loopback daemon would draw every run control for a server that never
- * answered; the wire indicator is the honest state, and nothing privileged is
- * drawn until the question has an answer.
+ * The question itself is `@odu/cordis/services`'s `readDoor` — the same one the
+ * CLI's MCP bridge asks, so the page and an agent cannot disagree about which
+ * board a daemon serves. An unreachable answer is `null`: UNKNOWN, not "no
+ * door", and a known door survives a failed re-ask (`doorAfterAnswer`).
  */
-async function doorMounted(): Promise<boolean | null> {
-  try {
-    // A `cache-control` header rather than fetch's cache option: the fence
-    // refuses a sibling key spelled with the row's word in any face, and a
-    // request option that happens to share a row's name is not a composition.
-    const response = await fetch(SERVICE_DOOR_PATH, {
-      headers: { "cache-control": "no-cache" },
-    });
-    if (!response.ok) return null;
-    const body = (await response.json()) as { door?: unknown };
-    return body.door === true;
-  } catch {
-    return null;
-  }
-}
-
-const [door, setDoor] = createSignal<DoorState>(await doorMounted());
+const [door, setDoor] = createSignal<DoorState>(await readDoor(window.location.origin));
 
 const connection = await connectSurfaces({
   // The rows. `cache` and `auth` are the keys the daemon mounts those rows at,
@@ -88,7 +67,7 @@ render(
           // A failed re-ask keeps the door the page already knows: an
           // unreachable host is the wire indicator's news, not a reason to
           // take the board away.
-          void doorMounted().then((answer) => {
+          void readDoor(window.location.origin).then((answer) => {
             setDoor((known) => doorAfterAnswer(known, answer));
           });
         }}

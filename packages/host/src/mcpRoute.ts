@@ -66,7 +66,7 @@ import {
 } from "@kolu/surface-mcp";
 import type { SurfaceDispatch } from "@kolu/surface/link";
 import { isAllowedWsOrigin } from "@kolu/surface/ws-origin";
-import type { RowAgent } from "@odu/cordis/services";
+import { agentInstructions, type RowAgent } from "@odu/cordis/services";
 import { requestAdmission, type PrincipalBroker } from "@odu/cordis/principal";
 import type { AdmissionStore } from "./principal";
 import { Effect } from "effect";
@@ -310,11 +310,9 @@ export function serveServiceMcpInProcess(opts: {
     serverInfo: mcpServerInfo(opts.version),
     // Each row's own words, composed at the moment a host asks — a paragraph a
     // missing row contributed would be a sentence about a surface this serve
-    // does not carry.
-    instructions: () =>
-      [opts.core?.instructions, ...keys.map((key) => opts.siblings[key]!.instructions)]
-        .filter((text): text is string => text !== undefined && text !== "")
-        .join("\n\n"),
+    // does not carry. ONE composer, shared with the stdio bridge: the two doors
+    // had already drifted by a paragraph once.
+    instructions: () => agentInstructions(opts.core, opts.siblings),
     transport: opts.transport,
   });
 }

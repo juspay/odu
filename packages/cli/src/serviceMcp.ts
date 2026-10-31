@@ -19,7 +19,7 @@ import {
   type SurfaceClientCallable,
 } from "@kolu/surface-mcp";
 import { AUTH_AGENT, AUTH_KEY } from "@odu/auth/surface";
-import { SERVICE_DOOR_PATH } from "@odu/cordis/services";
+import { agentInstructions, readDoor, type RowAgent } from "@odu/cordis/services";
 import { CACHE_AGENT, CACHE_KEY } from "@odu/cache/surface";
 import { buildSurfaceFace } from "@kolu/surface/client";
 import { composedClients } from "@odu/cordis/compose";
@@ -64,84 +64,90 @@ export async function serveServiceMcpOverStdio(opts: {
   //
   // It never recovers a failed dial by executing locally. There is nothing here
   // to execute with: this face holds no run authority at all.
-  let held: ServiceConnection | null = null;
-  // THE DOOR IS THE DAEMON'S COMPOSITION, NOT THIS FACE'S. The auth row is
-  // mounted only on a daemon with a door; a bridge that advertised its seven
-  // verbs everywhere would hand an agent tools the server it is talking to does
-  // not have — and the two doors are supposed to offer ONE vocabulary. So dial
-  // first (the dial is what ensures the singleton exists), ask the host's own
-  // door route, then compose. A daemon that cannot answer is composed without
-  // the row: the conservative reading, and the one that never overstates.
-  //
-  // ASKED ONCE, AND NOT BY DIALLING. A dial here would be a second connection
-  // owner — and on an occupied port it would hang where the adapter has a
-  // sentence that names the port in a second. So the question is a plain GET,
-  // and an unreadable answer composes the CONSERVATIVE set: a daemon that was
-  // not yet running when this bridge started is composed without the door's
-  // verbs for the life of the process, which costs an agent seven tools in the
-  // case where it could not have used them yet anyway.
-  const door = await doorMounted(origin);
-  const served = await serveSurfaceAsMcp({
+  // EVERY DIAL OWNS ITS CONNECTION. `client()` is the adapter's REDIAL FACTORY:
+  // a dropped transport disposes the connection and calls it again, the resource
+  // pusher dials its own, and `reroster` re-invokes it too. A cached connection
+  // here would hand a redial the one that was just closed — a bridge that
+  // outlives a daemon restart or an upgrade would stay dead, and the reader and
+  // the pusher would cut each other's socket. So each call opens one and returns
+  // the `dispose` that closes THAT one; the set is only for `close()`.
+  const opened = new Set<ServiceConnection>();
+
+  // THE DOOR IS THE DAEMON'S COMPOSITION, NOT THIS FACE'S, AND IT MOVES. The
+  // auth row is mounted only on a daemon with a door; a bridge that advertised
+  // its seven verbs everywhere would hand an agent tools the server it is
+  // talking to does not have. So the roster starts CONSERVATIVE and is asked
+  // again on every dial — which is what makes a bridge that STARTS the daemon
+  // right: the first dial boots it, and the answer arrives a moment later.
+  let door: boolean | null = null;
+  const siblingsFor = (hasDoor: boolean | null): Record<string, RowAgent> => ({
+    [CACHE_KEY]: CACHE_AGENT,
+    ...(hasDoor === true ? { [AUTH_KEY]: AUTH_AGENT } : {}),
+  });
+  let served: ServedSurfaceMcp | null = null;
+  const askDoor = async (): Promise<void> => {
+    const answer = await readDoor(origin);
+    if (answer === null || answer === door) return;
+    door = answer;
+    // The move, not a second serve: the adapter re-invokes `client()` for the
+    // new roster, and this call answers with a fresh connection like any other.
+    await served?.reroster(surfacesOf(siblingsFor(door)));
+  };
+  const surfacesOf = (siblings: Record<string, RowAgent>) =>
+    Object.fromEntries(
+      Object.entries(siblings).map(([key, row]) => [
+        key,
+        { surface: row.surface, expose: row.expose },
+      ]),
+    );
+
+  served = await serveSurfaceAsMcp({
     core: { surface: oduServiceSurface, expose: ODU_SERVICE_EXPOSE },
     // THE SIBLINGS ARE ON THE SAME WIRE, so an agent reaches their verbs through
     // this bridge too — `cache_bucket_create` and its neighbours, and the door's
     // own verbs when the daemon has a door, under the keys the daemon mounts the
     // rows at. The rules are the rows': this face adds no authority, it forwards
     // a call.
-    surfaces: {
-      [CACHE_KEY]: CACHE_AGENT,
-      ...(door === true ? { [AUTH_KEY]: AUTH_AGENT } : {}),
-    },
+    surfaces: surfacesOf(siblingsFor(door)),
     client: async () => {
-      const connection = held ?? (await connectToService(origin));
-      held = connection;
+      const connection = await connectToService(origin);
+      opened.add(connection);
+      // ASKED PER DIAL, after it: the dial is the one thing that guarantees
+      // there is a daemon to ask.
+      await askDoor();
       return {
         client: {
           core: connection.client as unknown as SurfaceClientCallable,
           clients: composedClients(SERVICE_SIBLINGS, connection.dispatch),
         },
-        dispose: () => connection.dispose(),
+        dispose: () => {
+          opened.delete(connection);
+          connection.dispose();
+        },
       };
     },
     // The name an MCP host sees. ONE spelling, and it is the identity of the
     // thing being served rather than a transport detail: the daemon's own `/mcp`
     // route answers with the same pair.
     serverInfo: { name: "odu", version: opts.version },
-    // THE PARAGRAPHS BOTH DOORS TEACH, composed exactly as the daemon's `/mcp`
-    // route composes them (core first, then each sibling). This bridge used to
-    // pass the core's alone, which was true while the cache's paragraph was
-    // folded into that constant — so splitting it out made two doors teach
-    // different things about the same verbs, in principle and then in fact.
-    instructions: [ODU_SERVICE_MCP_INSTRUCTIONS, CACHE_AGENT.instructions].join("\n\n"),
+    // THE PARAGRAPHS BOTH DOORS TEACH, from the ONE composer the daemon's `/mcp`
+    // route uses, read at each `initialize` so a host that connects after a
+    // re-roster is told the rows it actually gets.
+    instructions: () =>
+      agentInstructions(
+        { surface: oduServiceSurface, expose: ODU_SERVICE_EXPOSE, instructions: ODU_SERVICE_MCP_INSTRUCTIONS },
+        siblingsFor(door),
+      ),
     ...(opts.transport === undefined ? {} : { transport: opts.transport }),
   });
   return {
     served,
     close: async () => {
       await served.close();
-      await held?.dispose();
+      for (const connection of opened) connection.dispose();
+      opened.clear();
     },
   };
-}
-
-/** Does the daemon this bridge is attached to have a door? Asked of the HOST's
- *  own route — the fact that changes with `auth` — and `null` when the answer
- *  cannot be read. */
-async function doorMounted(origin: string): Promise<boolean | null> {
-  try {
-    const response = await fetch(new URL(SERVICE_DOOR_PATH, origin), {
-      headers: { "cache-control": "no-cache" },
-      // BOUNDED: a foreign program that accepts the socket and says nothing
-      // would otherwise hold this question (and the whole bridge) open, which
-      // is exactly the hang the adapter's own dial has a sentence for.
-      signal: AbortSignal.timeout(2_000),
-    });
-    if (!response.ok) return null;
-    const body = (await response.json()) as { door?: unknown };
-    return body.door === true;
-  } catch {
-    return null;
-  }
 }
 
 /**

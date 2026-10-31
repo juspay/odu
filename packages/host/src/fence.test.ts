@@ -85,12 +85,14 @@ const declaration = {
   collisions: {
     cache: {
       "packages/cli/src/serviceCli.ts": 4,
-      "packages/cli/src/serviceMcp.ts": 7,
+      "packages/cli/src/serviceMcp.ts": 4,
       "packages/cli/src/wire.ts": 2,
       "packages/execution/src/coordinator/spawn.ts": 1,
       "packages/execution/src/runner/workspace.ts": 22,
       // `cache-control` on two responses — an HTTP header, not a bucket.
       "packages/host/src/principal.ts": 2,
+      // The same header, on the shared door reader's one request.
+      "packages/cordis/src/services.ts": 2,
       "packages/launch/src/webDaemonLaunch.ts": 1,
       "packages/web-acceptance/support/corpus.ts": 5,
       "packages/web-acceptance/support/world.ts": 5,

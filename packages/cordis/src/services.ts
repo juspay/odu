@@ -93,6 +93,58 @@ export const Bundle = serviceTag<RootedSurfacesRuntime<never>>("odu:bundle");
  *  only the contracts. */
 export const SERVICE_DOOR_PATH = "/_odu/door";
 
+/**
+ * ASK A DAEMON WHETHER IT HAS A DOOR — the ONE spelling of the question.
+ *
+ * Two faces ask it: the browser, before it draws anything, and the CLI's MCP
+ * bridge, before it advertises the door's verbs. A second copy is a second
+ * parse of the same body, and the two answers decide different things (a board
+ * or a sign-in page; a tool list), so they must agree.
+ *
+ * `null` is UNKNOWN — the host did not answer — and it is deliberately not
+ * `false`: a caller that treats an outage as "loopback" draws controls for a
+ * server that is not there. The caller decides what an unknown answer means;
+ * the answer itself says only what was read.
+ *
+ * The request is BOUNDED because this runs where a foreign process may hold the
+ * socket: a program that accepts and says nothing would otherwise hold a
+ * browser's first paint, or a bridge's whole startup, open.
+ */
+export async function readDoor(
+  origin: string,
+  ask: typeof fetch = fetch,
+): Promise<boolean | null> {
+  try {
+    const response = await ask(new URL(SERVICE_DOOR_PATH, origin), {
+      headers: { "cache-control": "no-cache" },
+      signal: AbortSignal.timeout(2_000),
+    });
+    if (!response.ok) return null;
+    const body = (await response.json()) as { door?: unknown };
+    return body.door === true;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * THE PARAGRAPHS AN AGENT IS TAUGHT, composed from the rows STANDING — core
+ * first, then each sibling.
+ *
+ * One function because two doors teach it: the daemon's `/mcp` route and the
+ * CLI's stdio bridge. They are the same vocabulary reached two ways, and a
+ * bridge that composed its own list taught one sentence less the moment a row
+ * was added (which is what happened to the door's paragraph).
+ */
+export function agentInstructions(
+  core: RowAgent | null,
+  siblings: Readonly<Record<string, RowAgent>>,
+): string {
+  return [core?.instructions, ...Object.values(siblings).map((row) => row.instructions)]
+    .filter((text): text is string => text !== undefined && text !== "")
+    .join("\n\n");
+}
+
 /** The route layer a row owns, typed as the seam that consumes it. */
 export type RowRoutes = NonNullable<ServeSurfaceAppOptions["routes"]>;
 
