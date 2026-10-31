@@ -76,22 +76,38 @@ export async function serveServiceMcpOverStdio(opts: {
   // THE DOOR IS THE DAEMON'S COMPOSITION, NOT THIS FACE'S, AND IT MOVES. The
   // auth row is mounted only on a daemon with a door; a bridge that advertised
   // its seven verbs everywhere would hand an agent tools the server it is
-  // talking to does not have. So the roster starts CONSERVATIVE and is asked
-  // again on every dial — which is what makes a bridge that STARTS the daemon
+  // talking to does not have. So it is asked BEFORE serving — a daemon that is
+  // already running is answered exactly, which is the ordinary case — and again
+  // after every dial, which is what makes a bridge that STARTS the daemon
   // right: the first dial boots it, and the answer arrives a moment later.
-  let door: boolean | null = null;
+  let door: boolean | null = await readDoor(origin);
   const siblingsFor = (hasDoor: boolean | null): Record<string, RowAgent> => ({
     [CACHE_KEY]: CACHE_AGENT,
     ...(hasDoor === true ? { [AUTH_KEY]: AUTH_AGENT } : {}),
   });
   let served: ServedSurfaceMcp | null = null;
+  let asking = false;
   const askDoor = async (): Promise<void> => {
-    const answer = await readDoor(origin);
-    if (answer === null || answer === door) return;
-    door = answer;
-    // The move, not a second serve: the adapter re-invokes `client()` for the
-    // new roster, and this call answers with a fresh connection like any other.
-    await served?.reroster(surfacesOf(siblingsFor(door)));
+    // One question at a time: two dials that both notice a fresh answer would
+    // otherwise reroster each other for the same fact.
+    if (asking) return;
+    asking = true;
+    try {
+      const answer = await readDoor(origin);
+      if (answer === null || answer === door) return;
+      // ONLY A ROSTER THAT MOVES IS MOVED. `null → false` changes the ANSWER
+      // and not the tools, and a reroster for it would invite the framework's
+      // one-generation rule for nothing.
+      const moves = Object.keys(siblingsFor(answer)).length !== Object.keys(siblingsFor(door)).length;
+      door = answer;
+      if (!moves) return;
+      // The move, not a second serve: the adapter re-invokes `client()` for the
+      // new roster, and this call answers with a fresh connection like any
+      // other.
+      await served?.reroster(surfacesOf(siblingsFor(door)));
+    } finally {
+      asking = false;
+    }
   };
   const surfacesOf = (siblings: Record<string, RowAgent>) =>
     Object.fromEntries(
@@ -112,9 +128,14 @@ export async function serveServiceMcpOverStdio(opts: {
     client: async () => {
       const connection = await connectToService(origin);
       opened.add(connection);
-      // ASKED PER DIAL, after it: the dial is the one thing that guarantees
-      // there is a daemon to ask.
-      await askDoor();
+      // ASKED PER DIAL, AND NOT INSIDE IT. The dial is the one thing that
+      // guarantees there is a daemon to ask — but `reroster` from inside this
+      // factory moves the roster while the dial that answers it is still being
+      // taken, and the framework (rightly) refuses every request against the
+      // two generations it then straddles. So the question is fired and not
+      // awaited: the answer lands after this connection is in service, and the
+      // framework re-dials for the roster it carries.
+      void askDoor();
       return {
         client: {
           core: connection.client as unknown as SurfaceClientCallable,
