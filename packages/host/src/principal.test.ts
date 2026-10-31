@@ -184,6 +184,7 @@ async function through(
     broker,
     mcpPath: "/mcp",
     signInPage: () => "<title>Sign in to odu</title>",
+    reservedPaths: ["/mcp", "/cache/*", "/auth/*", "/assets/*"],
   });
   return Effect.runPromise(
     Effect.provideService(
@@ -289,16 +290,14 @@ describe("the HTTP legs", () => {
     ).toBe(299);
   });
 
-  it("answers an anonymous browser with the sign-in page on EVERY path the shell serves", async () => {
-    // THE PATH IS NOT THE GATE'S FACT: the serving layer's catch-all decides
-    // what is the shell, and the gate replaces an HTML 200 wherever it lands.
-    // `/`, `/index.html` and every path only the client's router knows are the
-    // same request from here on.
+  it("answers an anonymous browser with the sign-in page wherever the shell would be served", async () => {
+    // A LIST, and it is the INVERSE of the daemon's own routes: everything odu
+    // did not reserve is the shell, so everything odu did not reserve is the
+    // page a signed-out person meets. `#/runs` is the client's route and never
+    // reaches here; `/runs` (no hash) is the shell's.
     const broker = doorWithSession("s3cret");
-    for (const url of ["/", "/index.html", "/runs", "/nope", "/cache/"]) {
+    for (const url of ["/", "/index.html", "/runs", "/nope", "/cache"]) {
       const answer = await through(broker, {}, url, SHELL);
-      // Not the shell it was handed, and carrying the sign-in page's own
-      // `no-store`: the replacement is the assertion, not the status.
       expect(answer, url).not.toBe(SHELL);
       expect(answer.status, url).toBe(200);
       expect(answer.headers["cache-control"], url).toBe("no-store");
@@ -314,6 +313,14 @@ describe("the HTTP legs", () => {
     );
     // THE VERY RESPONSE the serving layer built — not a copy, not a re-render.
     expect(answer).toBe(SHELL);
+  });
+
+  it("leaves every path odu's own routes claim untouched", async () => {
+    const broker = doorWithSession("s3cret");
+    for (const url of ["/cache/main/nix-cache-info", "/assets/app.js", "/auth/github"]) {
+      // Not the sign-in page's `no-store`, and not this gate's answer at all.
+      expect(await statusThrough(broker, {}, url), url).toBe(299);
+    }
   });
 
   it("refuses a shell path on a door daemon whose row is not registered", async () => {

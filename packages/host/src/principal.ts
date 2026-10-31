@@ -273,6 +273,9 @@ export interface DoorGateOptions {
   readonly mcpPath: string;
   /** That page, as the row renders it. */
   readonly signInPage: () => string;
+  /** The paths odu's own routes claim. Everything else is the shell, and the
+   *  shell is not a thing an anonymous connection may see. */
+  readonly reservedPaths: ReadonlyArray<string>;
 }
 
 /**
@@ -331,21 +334,34 @@ export function doorGate(options: DoorGateOptions): SurfaceAppHttpMiddleware {
           status: 200,
           headers: { "cache-control": "no-store" },
         });
-      // RUN IT, THEN LOOK AT WHAT THE SERVING LAYER ANSWERED. The shell is the
-      // one 200 that is HTML; a protocol answer (JSON, text, a NAR stream), a
-      // redirect, and every non-200 are passed through untouched. The check is
-      // the response's own content type rather than a path prefix, because the
-      // catch-all's RULE is the thing being honoured.
-      return Effect.map(httpApp, (response) =>
-        response.status === 200 && isHtml(response) ? signIn() : response,
-      );
+      // EVERYTHING THE DAEMON DOES NOT RESERVE IS THE SHELL, so for an
+      // anonymous connection it is the page the server renders. The reserved
+      // set is the routes odu composes — the protocol walks, the row's sign-in
+      // flow, the assets, the worker and the manifest — and it lives in
+      // `web.ts`, beside those routes, because that is where a new one is
+      // added.
+      //
+      // WHY A LIST AND NOT "REPLACE THE SHELL'S ANSWER": the middleware seam
+      // runs the app and may REPLACE its response only by NOT running it. The
+      // static layer writes its own answer, so a mapped replacement is ignored
+      // (measured: a debug build logged the replaced response and the shell
+      // still went out). A short-circuit is the one mechanism the seam has, so
+      // the gate must know the boundary before the request is made.
+      if (isReserved(path, options.reservedPaths)) return httpApp;
+      return Effect.succeed(signIn());
     });
 }
 
-/** Is this response the shell's HTML? The serving layer's catch-all is the
- *  only route that answers `text/html` with a 200 on a door daemon. */
-function isHtml(response: HttpServerResponse.HttpServerResponse): boolean {
-  return (response.headers["content-type"] ?? "").toLowerCase().startsWith("text/html");
+/** Does a path belong to a route odu itself composed? An entry ending in `*` is
+ *  a WALK — one or more segments after the prefix, so `/cache/` itself is not
+ *  the cache's (`/cache/nix-cache-info` is not a route either, and the shell
+ *  answering it is the shell answering a typo). Everything else is exact. */
+function isReserved(path: string, reserved: ReadonlyArray<string>): boolean {
+  return reserved.some((one) => {
+    if (!one.endsWith("*")) return path === one;
+    const prefix = one.slice(0, -1);
+    return path.length > prefix.length && path.startsWith(prefix);
+  });
 }
 
 // ── the door fact, on its own route ─────────────────────────────────────────
