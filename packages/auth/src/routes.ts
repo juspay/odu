@@ -39,6 +39,7 @@ import {
   AUTH_CALLBACK_PATH,
   AUTH_SIGN_IN_PATH,
   AUTH_SIGN_OUT_PATH,
+  SIGN_IN_COPY,
 } from "./surface";
 
 /** The three paths, declared in the browser-safe contract because the sign-in
@@ -47,6 +48,7 @@ export {
   AUTH_CALLBACK_PATH,
   AUTH_SIGN_IN_PATH,
   AUTH_SIGN_OUT_PATH,
+  SIGN_IN_COPY,
 } from "./surface";
 
 /** The CSRF nonce's cookie. HttpOnly, same-site, ten minutes. */
@@ -121,7 +123,7 @@ export function signInPageHtml(): string {
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width">
     <meta name="odu-door" content="1">
-    <title>Sign in · odu</title>
+    <title>${SIGN_IN_COPY.title} · odu</title>
     <style>
       :root { color-scheme: light dark; }
       body { margin: 0; min-height: 100vh; display: grid; place-items: center;
@@ -135,9 +137,9 @@ export function signInPageHtml(): string {
   </head>
   <body>
     <main>
-      <h1>Sign in to odu</h1>
-      <p class="hint">This server answers only to people its operator has allowed in.</p>
-      <a class="action" href="${AUTH_SIGN_IN_PATH}">Sign in with GitHub</a>
+      <h1>${SIGN_IN_COPY.title}</h1>
+      <p class="hint">${SIGN_IN_COPY.hint}</p>
+      <a class="action" href="${AUTH_SIGN_IN_PATH}">${SIGN_IN_COPY.action}</a>
     </main>
   </body>
 </html>

@@ -30,11 +30,8 @@ const cliHasFeatureArgs = process.argv
 // finding this package exists to close — so the default expression exists only
 // so the knob has a shape a person can extend.
 //
-// `@seam` is NOT a skip: it marks a scenario whose promise needs kolu's
-// `SurfaceAppConnection.close` to be live (PR #2330 — odu calls it already and
-// needs the re-pin). The TODO is in `packages/host/src/principal.ts`, the e2e
-// README and PLAN.md, and the scenario itself is complete — remove the tag at
-// the re-pin.
+// `@seam` marks a scenario asserting a promise the current build cannot keep
+// yet; the tag is the marker, and removing it is how the promise lands.
 const tags = process.env.CUCUMBER_TAGS || "not @skip and not @seam";
 
 // Scenario retry budget. OFF by default, and off in CI too unless somebody sets

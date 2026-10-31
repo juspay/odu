@@ -325,11 +325,10 @@ Ownership, by the Cordis rules (olai `docs/architecture/cordis.md`):
   socket, redials with the dead cookie, is refused at the upgrade, and comes
   back anonymous. Every later call on the old connection is refused and every
   open subscription is interrupted at the instant it ends. No revocation list
-  is polled. **TODO(re-pin):** the socket itself is closed by
-  `SurfaceAppConnection.close(code?, reason?)` (kolu PR #2330). odu's lease
-  watch calls it — guarded, because the pinned kolu predates it — so the re-pin
-  is the one change that makes the server cut the connection rather than the
-  client's next load.
+  is polled. The socket is closed by `SurfaceAppConnection.close(code?,
+  reason?)`, kolu #2330's addition, which the lease watch calls; the kolu this
+  release pins predates it, so the cut lands on the client's next load until the
+  re-pin.
 - **Roles are each row's rule.** `ci` decides what a `member` may start,
   `cache` what an `admin` may mint; `@odu/cordis` carries only the `Role`
   type. The root token stays what it is, the operator's bootstrap, and gains

@@ -35,6 +35,7 @@ import {
 import {
   AUTH_SIGN_IN_PATH,
   AUTH_SIGN_OUT_PATH,
+  SIGN_IN_COPY,
   type AuthSession,
   type AuthToken,
   oduAuthSurface,
@@ -54,12 +55,12 @@ export type AuthClient = SurfaceClient<AuthSpec>;
 export function SignIn(): JSX.Element {
   return (
     <section class="signin" aria-label="sign in">
-      <h1 class="signin-title">Sign in to odu</h1>
-      <p class="hint">This server answers only to people its operator has allowed in.</p>
+      <h1 class="signin-title">{SIGN_IN_COPY.title}</h1>
+      <p class="hint">{SIGN_IN_COPY.hint}</p>
       {/* A link, not a button: GitHub's authorisation page is the form, and a
           person may want to open it in a new tab. */}
       <a class="signin-action" href={AUTH_SIGN_IN_PATH}>
-        Sign in with GitHub
+        {SIGN_IN_COPY.action}
       </a>
     </section>
   );

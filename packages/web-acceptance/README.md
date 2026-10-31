@@ -107,12 +107,6 @@ pins.test.ts              the playwright pin is exact and matches nixpkgs
 ../auth/e2e/              the door's scenarios, and its CLI/MCP test
 ```
 
-**`@seam` is not a skip.** It marks a scenario whose promise needs
-`SurfaceAppConnection.close` to be live — kolu PR #2330 has it, and odu's lease
-release already calls it, so the tag comes off with the re-pin. The scenario is
-complete and stays in the tree; the default tag expression excludes it until
-then.
-
 **Scenarios declare their world by tag.** No tag is today's loopback daemon;
 `@anonymous` and `@signed-in:owner|admin|member` run against a SECOND daemon per
 worker, configured against the GitHub stub, with the role granted and the sign-in

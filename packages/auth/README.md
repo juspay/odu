@@ -73,11 +73,6 @@ sweep and a role change all end them, and an ended lease stops that connection
 receiving anything — every later call is refused and every open subscription is
 interrupted. No revocation list is polled.
 
-The lease's watch also CLOSES the socket: `connection.close(1000, "the session
-ended")`, kolu PR #2330's addition to `SurfaceAppConnection`. odu calls it
-already; until kolu is re-pinned the field is absent at runtime, so the call is
-guarded and the re-pin is what turns it on. See the module header of
-`packages/host/src/principal.ts`.
 
 What the row stores is **not** a set of credentials: a session is keyed by the
 SHA-256 of its cookie value and a token by the SHA-256 of its secret, in

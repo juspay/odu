@@ -35,6 +35,16 @@ import { Schema } from "effect";
  *  subcommand in argv, and the word the browser folds its health under. */
 export const AUTH_KEY = "auth";
 
+/** THE SIGN-IN PAGE'S WORDS, once — the server-rendered page (`./routes`) and
+ *  the browser's own copy (`./face`) say the same three things, and a page an
+ *  operator meets before JavaScript must not read differently from the one a
+ *  tab draws a moment later. */
+export const SIGN_IN_COPY = {
+  title: "Sign in to odu",
+  hint: "This server answers only to people its operator has allowed in.",
+  action: "Sign in with GitHub",
+} as const;
+
 /** Where a person starts a sign-in — the link the sign-in page renders. */
 export const AUTH_SIGN_IN_PATH = "/auth/github";
 /** Where GitHub sends them back. Registered on the App, byte for byte. */
