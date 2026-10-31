@@ -157,9 +157,15 @@ const REFUSES = CacheRefused;
 
 // ── inputs and outputs ──────────────────────────────────────────────────────
 
+/** A name the ROW checks (the bucket-name pattern, a pin's non-empty name), not
+ *  the schema: a schema check dies as a `SchemaError` before the row can say
+ *  why, and the board sends the field as typed so the person reads the row's
+ *  sentence. */
+const CheckedName = Schema.String;
+
 const CreateInputSchema = Schema.Struct({
   rootToken: Schema.String,
-  name: Schema.String.check(Schema.isMinLength(1)),
+  name: CheckedName,
   /** A public bucket reads without a token; a private one needs read scope. */
   public: Schema.Boolean,
   retentionDays: Schema.Int,
@@ -206,7 +212,7 @@ const TokenRevokeOutputSchema = Schema.Struct({
 const PinInputSchema = Schema.Struct({
   rootToken: Schema.String,
   bucket: Schema.String,
-  name: Schema.String.check(Schema.isMinLength(1)),
+  name: CheckedName,
   paths: Schema.Array(Schema.String),
 });
 const PinOutputSchema = Schema.Struct({
@@ -276,6 +282,10 @@ export type CachePaths = typeof PathsOutputSchema.Type;
  *  filter. Here because the VERB's page and the VIEW's page are one number. */
 export const PATH_PAGE_SIZE = 100;
 
+/** What stands where a write token goes, in every block a page or a doc
+ *  prints — the netrc line and the push block say the same thing. */
+export const WRITE_TOKEN_PLACEHOLDER = "<your-write-token>";
+
 /**
  * THE BLOCK A CLIENT PASTES, for one bucket — `odu cache use`'s output and the
  * bucket page's, from one function.
@@ -320,7 +330,29 @@ extra-trusted-public-keys = ${input.publicKey}
       ? "\n# (replace <home> below with yours — a page cannot know it)\nnetrc-file = <home>/.netrc"
       : `\nnetrc-file = ${input.home}/.netrc`
   }
-machine ${authority} password <your-write-token>
+machine ${authority} password ${WRITE_TOKEN_PLACEHOLDER}
+`;
+}
+
+/** The one line that prints {@link useBlock} for a bucket, from a terminal. */
+export function useCommand(bucket: string): string {
+  return `odu cache use ${bucket}`;
+}
+
+/**
+ * THE PUSH, for one bucket — the bucket page's block and the docs' Push
+ * example, from one function (the docs quote it; `useCopy.test.ts` holds the
+ * two together).
+ *
+ * The bucket is named by its full URL, so the command works on a build box
+ * that never ran `odu cache login`. `token` is the JUST-MINTED write token
+ * while the page can still show it — the once-shown moment is exactly when a
+ * person pastes it into a CI secret — and `null` (the placeholder) otherwise.
+ */
+export function pushBlock(input: { readonly url: string; readonly token: string | null }): string {
+  return `# push — a write token, exported where the build runs (a build secret)
+export ODU_CACHE_TOKEN=${input.token ?? WRITE_TOKEN_PLACEHOLDER}
+odu cache push ${input.url} ./result
 `;
 }
 

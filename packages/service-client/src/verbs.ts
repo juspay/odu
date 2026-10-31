@@ -66,7 +66,8 @@ type ServiceSpec = (typeof oduServiceSurface)["spec"];
  *
  * `service` is a resource because "which build am I talking to" is a question
  * an agent has to be able to ask before it trusts an answer, and a browser has
- * to be able to draw. `runs` and `logTails` are the board and the live tail.
+ * to be able to draw. `venues` is the last probe's answer, kept — what a page
+ * reads instead of dialling every machine. `runs` and `logTails` are the board and the live tail.
  * `nodes` and `checkout` are deliberately ABSENT: both are streams whose input
  * is an address (a run id, a checkout path), and a stream that requires an
  * input cannot be a static MCP resource — the DAG and the checkout are reached
@@ -76,6 +77,7 @@ type ServiceSpec = (typeof oduServiceSurface)["spec"];
  */
 export const ODU_SERVICE_EXPOSE = {
   service: "resource",
+  venues: "resource",
   runs: "resource",
   logTails: "resource",
   "run.start": { tool: { mutates: true } },

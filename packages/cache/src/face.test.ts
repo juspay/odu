@@ -53,3 +53,30 @@ describe("the Solid compiler that builds the Cache view", () => {
     expect(code).not.toContain("jsx-runtime");
   });
 });
+
+/**
+ * WHAT AN EMPTY CACHE SAYS DEPENDS ON WHO IS LOOKING — and a mistake here is a
+ * sentence pointing a member at a form they cannot see, or an admin at a CLI
+ * they do not need. Pure, so it is pinned here rather than in a browser.
+ */
+describe("the empty state names what this person can do", () => {
+  it("points an admin at the form above it", async () => {
+    const { emptyBucketsText } = await import("./face");
+    expect(emptyBucketsText({ canAdminister: true, local: false })).toContain("form above");
+    expect(emptyBucketsText({ canAdminister: true, local: false })).not.toContain("odu cache");
+  });
+
+  it("tells a member only that there are none", async () => {
+    const { emptyBucketsText } = await import("./face");
+    expect(emptyBucketsText({ canAdminister: false, local: false })).toBe(
+      "There are no buckets yet.",
+    );
+  });
+
+  it("keeps the CLI hint only for a daemon with no door", async () => {
+    const { emptyBucketsText } = await import("./face");
+    expect(emptyBucketsText({ canAdminister: true, local: true })).toContain(
+      "odu cache create",
+    );
+  });
+});

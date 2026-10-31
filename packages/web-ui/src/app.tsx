@@ -32,6 +32,7 @@ import {
 import { CacheFace, type CacheClient } from "@odu/cache/face";
 import { LOCAL_OWNER, may, type Principal, type Role } from "@odu/cordis/principal";
 import {
+  PeopleFace,
   ProfileFace,
   SignIn,
   SignedInHeader,
@@ -62,10 +63,15 @@ import { faviconSvg, wireText } from "./format";
  * read there because a link is minted by whoever holds the run (an editor, a
  * terminal, another app's panel) and opened here. What stays local is the rest of
  * this page's states: `#/` for the runs, `#/new` for the create form,
- * `#/cache[/<bucket>]` for the other row, and `#/profile` for the signed-in
- * person's sessions and tokens.
+ * `#/machines` and `#/maintain` for the runs' operations,
+ * `#/cache[/<bucket>]` for the other row, `#/profile` for the signed-in
+ * person's sessions and tokens, and `#/people` for an owner's role table.
  */
-type Route = CiRoute | { at: "cache"; bucket: string | null } | { at: "profile" };
+type Route =
+  | CiRoute
+  | { at: "cache"; bucket: string | null }
+  | { at: "profile" }
+  | { at: "people" };
 
 /**
  * DOES THIS DAEMON HAVE A DOOR? `null` when the answer could not be fetched
@@ -117,7 +123,10 @@ function routeOf(hash: string): Route {
   if (run !== null) return { at: "run", ...run };
   const rest = hash.replace(/^#\/?/, "");
   if (rest === "new") return { at: "new" };
+  if (rest === "machines") return { at: "machines" };
+  if (rest === "maintain") return { at: "maintain" };
   if (rest === "profile") return { at: "profile" };
+  if (rest === "people") return { at: "people" };
   if (rest === "cache") return { at: "cache", bucket: null };
   if (rest.startsWith("cache/")) {
     const name = decodeURIComponent(rest.slice("cache/".length));
@@ -132,8 +141,14 @@ function hashOf(route: Route): string {
       return "#/";
     case "new":
       return "#/new";
+    case "machines":
+      return "#/machines";
+    case "maintain":
+      return "#/maintain";
     case "profile":
       return "#/profile";
+    case "people":
+      return "#/people";
     case "run":
       return route.log === null ? runHash(route.runId) : logHash(route.log);
     case "cache":
@@ -316,6 +331,10 @@ export function App(props: {
   // discriminated `route()` read inside the JSX.
   const atCache = createMemo(() => route().at === "cache");
   const atProfile = createMemo(() => route().at === "profile");
+  const atPeople = createMemo(() => route().at === "people");
+  /** THE PEOPLE PAGE IS AN OWNER'S, drawn for a signed-in owner only: a local
+   *  owner has no door, so there is no role table to read. */
+  const canGrant = createMemo(() => who()?.kind === "user" && holdsFloor("owner"));
   const openBucket = createMemo<string | null>(() => {
     const here = route();
     return here.at === "cache" ? here.bucket : null;
@@ -323,7 +342,9 @@ export function App(props: {
   const anonymous = createMemo(() => props.door === true && who()?.kind === "anonymous");
   const ciRoute = createMemo<CiRoute>(() => {
     const here = route();
-    return here.at === "cache" || here.at === "profile" ? { at: "board" } : here;
+    return here.at === "cache" || here.at === "profile" || here.at === "people"
+      ? { at: "board" }
+      : here;
   });
 
   // ── the shell ──
@@ -359,7 +380,10 @@ export function App(props: {
             arriving with a screen reader hears "Runs, pressed" rather than a
             navigation menu's worth of ceremony. */}
         <nav class="rows" aria-label="board rows" hidden={anonymous()}>
-          <Button pressed={!atCache() && !atProfile()} onClick={() => go({ at: "board" })}>
+          <Button
+            pressed={!atCache() && !atProfile() && !atPeople()}
+            onClick={() => go({ at: "board" })}
+          >
             Runs
           </Button>
           <Button
@@ -378,6 +402,9 @@ export function App(props: {
               who={held()}
               atProfile={atProfile()}
               onProfile={() => go({ at: "profile" })}
+              canGrant={canGrant()}
+              atPeople={atPeople()}
+              onPeople={() => go({ at: "people" })}
             />
           )}
         </Show>
@@ -422,17 +449,29 @@ export function App(props: {
             mints a fresh view rather than re-inserting the one that was disposed
             on the way out — see `@odu/ci/face`'s `dom` header for the failure
             that taught us to care. */}
+        {/* DRAWN for an owner; the row refuses `grant.list` and `user.grant`
+            to anyone else on its own. A non-owner who types the address meets
+            nothing rather than a page of refusals. */}
+        <Show when={atPeople() && canGrant()}>
+          <PeopleFace
+            client={props.auth}
+            call={(effect) => Effect.runPromise(effect)}
+            now={now()}
+            onClose={() => go({ at: "board" })}
+          />
+        </Show>
         <Show when={atCache()}>
           <CacheFace
             client={props.cache}
             bucket={openBucket()}
             canAdminister={holdsFloor("admin")}
+            local={principal()?.kind === "local"}
             now={now()}
             call={(effect) => Effect.runPromise(effect)}
             onOpen={(bucket) => go({ at: "cache", bucket })}
           />
         </Show>
-        <Show when={!atCache() && !atProfile() ? ambient() : null}>
+        <Show when={!atCache() && !atProfile() && !atPeople() ? ambient() : null}>
           {(held) => (
             <CiFace
               client={props.client}
@@ -442,6 +481,7 @@ export function App(props: {
               onRoute={(next) => go(next)}
               ambient={held()}
               canRun={holdsFloor("member")}
+              canAdminister={holdsFloor("admin")}
               connecting={props.readout.status === "connecting"}
             />
           )}

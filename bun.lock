@@ -14,6 +14,7 @@
         "@odu/cli": "workspace:*",
         "@odu/cordis": "workspace:*",
         "@odu/execution": "workspace:*",
+        "@odu/face": "workspace:*",
         "@odu/host": "workspace:*",
         "@odu/launch": "workspace:*",
         "@odu/run-client": "workspace:*",
@@ -53,6 +54,7 @@
       "dependencies": {
         "@odu/cordis": "workspace:*",
         "@odu/credentials": "workspace:*",
+        "@odu/face": "workspace:*",
         "effect": "4.0.0",
         "solid-js": "^1.9.15",
       },
@@ -67,6 +69,7 @@
       "dependencies": {
         "@odu/cordis": "workspace:*",
         "@odu/credentials": "workspace:*",
+        "@odu/face": "workspace:*",
         "effect": "4.0.0",
         "solid-js": "^1.9.15",
       },
@@ -81,6 +84,7 @@
       "dependencies": {
         "@odu/cordis": "workspace:*",
         "@odu/execution": "workspace:*",
+        "@odu/face": "workspace:*",
         "@odu/run-client": "workspace:*",
         "@odu/run-history": "workspace:*",
         "@odu/service": "workspace:*",
@@ -131,6 +135,14 @@
         "@odu/run-client": "workspace:*",
         "@odu/run-history": "workspace:*",
         "effect": "4.0.0",
+      },
+    },
+    "packages/face": {
+      "name": "@odu/face",
+      "version": "0.1.0",
+      "dependencies": {
+        "effect": "4.0.0",
+        "solid-js": "^1.9.15",
       },
     },
     "packages/host": {
@@ -337,6 +349,8 @@
     "@odu/credentials": ["@odu/credentials@workspace:packages/credentials"],
 
     "@odu/execution": ["@odu/execution@workspace:packages/execution"],
+
+    "@odu/face": ["@odu/face@workspace:packages/face"],
 
     "@odu/host": ["@odu/host@workspace:packages/host"],
 

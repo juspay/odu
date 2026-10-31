@@ -487,13 +487,13 @@ decision above makes:
    without it, a bucket created from the web on the pod makes every push wait
    at the 202 until PR 3.
 
-Then the gap the rule names, by row — the verbs the face cannot reach today:
+Then the gap the rule names, by row — closed:
 
-| row | verbs with no web control today |
-| --- | --- |
-| cache | `token.mint`, `token.list`, `token.revoke` (per bucket, write/read scope), `pin.create`, `gc.run`, `stats.read`, and `bucket.create`'s upstream switch |
-| auth | `user.grant` — roles are granted only from the CLI; the face needs a people page an owner sees (who is in, their role, grant and change it) |
-| ci | audit `packages/ci` the same way and list what the board cannot do that `odu` can |
+| row | verbs that had no web control | closed by |
+| --- | --- | --- |
+| cache | `token.mint`, `token.list`, `token.revoke` (per bucket, write/read scope), `pin.create`, `gc.run`, `stats.read`, and `bucket.create`'s upstream switch | a bucket page's Tokens, Pin a closure, Run GC and Stats; Create bucket's upstream switch |
+| auth | `user.grant` — roles were granted only from the CLI | `grant.list` (+ `odu auth people`) and an owner's People page |
+| ci | `pipeline.read`, `venue.probe`/`hold`/`release`, `catalog.import`/`prune`, `protect.apply`, and `run.start`'s root, hosts file, no-deps and linger | New run's options and Preview pipeline; Machines; Maintenance |
 
 **Evidence:** each row's e2e has a scenario per verb through the face, and the
 list above is empty for every row in it.
@@ -517,6 +517,47 @@ What lands:
   is imported, so a chroot store (F12) keeps the upstream skip and still
   imports referrers. `--no-upstream` stays as the explicit choice it already
   is.
+- **The push says what the server is doing.** On the pod `odu cache push`
+  printed "118 paths in the closure, 6 missing, 112 already there or upstream"
+  and then hung, silent: the server deferred each import at 202 for want of
+  upstream references, and the client waited on a state the person cannot
+  affect and was never told about.
+
+  What the other pushers do. **attic**: the client computes the closure, drops
+  every path signed by a key in the cache's `upstream_cache_key_names`
+  (default `cache.nixos.org-1`), asks the server which of the rest are missing
+  and uploads only those — one preamble, `⚙️ Pushing N paths to <cache> on
+  <server> (A already cached, U in upstream)...`, then one line per path,
+  `✅ <path> (<speed>)` or `❌ <path>: <error>`; a failed path does not stop
+  the run, the exit is non-zero if any failed, and the SERVER STORES EVERY
+  NARINFO AS IT ARRIVES, never holding a path for its references.
+  **cachix**: a bulk narinfo query for what the cache already has, `Pushing N
+  paths (M are already present) using zstd to cache X`, one line or bar per
+  path, `All done.`; no upstream filter at all (cache.nixos.org paths are
+  pushed unless the user filters them), and the server stores as it arrives.
+  **`nix copy`**: dependencies first; the destination stores as it arrives.
+
+  The conclusion: a reference signed by one of the bucket's upstream keys
+  counts as SATISFIED, and it is satisfied BY THE SERVER SUBSTITUTING IT AT
+  IMPORT. Unlike attic's, odu's blobs are the server's own Nix store, which
+  will not import a path whose references are missing — that refusal is the
+  202 today. So this PR's first bullet (the server substitutes upstream
+  references into its own store) stays, and is what makes "satisfied" true:
+  the push skips an upstream path, and the server fetches it from upstream
+  rather than holding the referrer. Today the push skips 112 upstream paths
+  and the server then holds 4 paths for those same references — the
+  contradiction the first owner hit. Holding remains only for a reference
+  that is neither in the bucket nor upstream-signed, and even then the push
+  REPORTS it and returns.
+
+  What odu's push does, in attic's voice: (a) one preamble, then one line per
+  path as it uploads and as the server answers — stored, deferred (waiting for
+  N references that are neither here nor upstream), or refused (why); (b) a
+  deferral is reported and the command returns, pointing at the bucket page
+  where the pending paths and their reason are listed — it never blocks on the
+  server's pending state (`--wait` opts in); (c) `-o json` carries the same
+  facts for CI. The bucket page shows pending paths with that reason — the
+  row's fact, the same one the CLI prints.
 - The dogfood switch (F9, F11): `flake.nix` `nixConfig` names the pod's
   bucket; `nix-cache.yml` substitutes from it and pushes with `odu cache push`
   under an `ODU_CACHE_TOKEN` secret, its publish job uses the new kolu push

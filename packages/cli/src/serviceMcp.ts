@@ -123,6 +123,10 @@ export async function serveServiceMcpOverStdio(opts: {
       ]),
     );
 
+  /** The daemon instances this bridge has already told the agent's host are
+   *  behind it — see `adoptOrRefuse`. Owned here, for this bridge's life. */
+  const warned = new Set<string>();
+
   served = await serveSurfaceAsMcp({
     core: { surface: oduServiceSurface, expose: ODU_SERVICE_EXPOSE },
     // THE SIBLINGS ARE ON THE SAME WIRE, so an agent reaches their verbs through
@@ -132,7 +136,8 @@ export async function serveServiceMcpOverStdio(opts: {
     // a call.
     surfaces: surfacesOf(siblingsFor(door)),
     client: async () => {
-      const connection = await connectToService(origin);
+      // ONE skew note per daemon for the bridge's life, not one per redial.
+      const connection = await connectToService(origin, { warned });
       opened.add(connection);
       // ASKED PER DIAL, AND NOT INSIDE IT. The dial is the one thing that
       // guarantees there is a daemon to ask — but `reroster` from inside this

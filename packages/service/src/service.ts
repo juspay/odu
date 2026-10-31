@@ -56,6 +56,7 @@ import {
   type ServiceIdentity,
   ServiceRefused,
   UNKNOWN_SERVICE,
+  type VenueReading,
 } from "@odu/service-client/surface";
 import { RUN_RECORD_FORMAT } from "@odu/run-history/schema";
 import {
@@ -226,11 +227,14 @@ export function createOduService(opts: ServiceOptions): OduService {
     readiness: { state: "starting", since: startedAt, reconciled: 0 },
   });
 
+  /** The last probe's answer — see `VenueReadingSchema`. */
+  const venueStore = inMemoryStore<VenueReading>(null);
+
   const runtime = implementRootedSurfaces(
     oduServiceSurface,
     {},
     {
-      cells: { service: { store: serviceStore } },
+      cells: { service: { store: serviceStore }, venues: { store: venueStore } },
       collections: {
         runs: {
           readAll: () => rows,
@@ -442,20 +446,38 @@ export function createOduService(opts: ServiceOptions): OduService {
                     caller: callerOf(input, principal),
                   }),
                 ),
-                (outcome) =>
-                  outcome.ok
-                    ? Effect.succeed({
-                        source: outcome.source,
-                        warnings: outcome.warnings,
-                        rows: outcome.rows,
-                      })
-                    : Effect.fail(
-                        new ServiceRefused({
-                          code: "no_venue",
-                          message: outcome.message,
-                          suggestion: ["odu", "hosts"],
-                        }),
-                      ),
+                (outcome) => {
+                  if (!outcome.ok) {
+                    return Effect.fail(
+                      new ServiceRefused({
+                        code: "no_venue",
+                        message: outcome.message,
+                        suggestion: ["odu", "hosts"],
+                      }),
+                    );
+                  }
+                  const answer = {
+                    source: outcome.source,
+                    warnings: outcome.warnings,
+                    rows: outcome.rows,
+                  };
+                  // KEPT, so the next reader — a page opening Machines — reads
+                  // this answer rather than dialling every machine again. Only
+                  // a probe of the SERVICE'S OWN fleet: a caller's `hostsFile`
+                  // (`odu hosts` forwards its shell's `$ODU_HOSTS`) names that
+                  // person's machines, and keeping it would show every reader
+                  // someone else's fleet and someone else's file path.
+                  if (input.hostsFile === undefined) {
+                    const reading: VenueReading = {
+                      at: now(),
+                      platforms: [...(input.platforms ?? [])],
+                      ...answer,
+                    };
+                    venueStore.set(reading);
+                    runtime.ctx.cells.venues.set(reading);
+                  }
+                  return Effect.succeed(answer);
+                },
               ),
             ),
           hold: ({ input }) =>

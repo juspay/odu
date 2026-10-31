@@ -81,7 +81,6 @@
 
 import {
   defineSurface,
-  isContractVersionCompatible,
   type SurfaceTypes,
 } from "@kolu/surface/define";
 import { buildSurfaceFace } from "@kolu/surface/client";
@@ -114,19 +113,34 @@ export { STATUS_META, type StatusHue } from "@odu/run-client/surface";
  * A daemon and the client that dialled it are routinely DIFFERENT BUILDS — the
  * whole point of a singleton is that it outlives the process that started it,
  * including across an upgrade — so the two have to be able to discover they
- * disagree. Compared with the framework's `isContractVersionCompatible`
- * (major.minor), never a string equality: a build that only ADDED a member is
- * still speakable by an older client, and refusing it would make every
- * additive change a flag day.
+ * disagree. {@link admitService} is the one judge, and its rule is ADDITIVE:
+ *
+ *   - **the MINOR moves when the wire only GROWS** — a new verb, a new row
+ *     member, a new optional input key, a new output field a reader may
+ *     ignore. Every reader on the same major is adopted, in BOTH directions: an
+ *     older reader never names the new member, and a newer reader that calls
+ *     one an older daemon lacks is refused at that one control (an unknown
+ *     tag), not stranded at the handshake.
+ *   - **the MAJOR moves when something a reader already uses CHANGES** — a verb
+ *     removed or renamed, a required input added, an output field removed or
+ *     retyped, a refusal code a reader branches on taken away. A different
+ *     major is refused, with a sentence.
  *
  * **IT VERSIONS THE COMPOSED WIRE, not this file.** The daemon serves this
- * surface as the wire's ROOT and every row beside it as a sibling — the cache,
- * today — over ONE connection, and a client is admitted against this number
- * before it reads anything. So a change to `@odu/cache/surface` bumps THIS
- * number too. A row must not keep a version of its own: nothing would enforce
- * it, and a stale tab would talk to a daemon whose members it cannot decode.
+ * surface as the wire's ROOT and every row beside it as a sibling — the cache
+ * and the door — over ONE connection, and a client is admitted against this
+ * number before it reads anything. So a change to `@odu/cache/surface` or
+ * `@odu/auth/surface` bumps THIS number too. A row must not keep a version of
+ * its own: nothing would enforce it.
+ *
+ * 2.2: `auth.grant.list` — the people page's verb — and the `venues` cell, the
+ * last probe as a fact (PR 2.5); and six kinds of input
+ * LOOSENED so the verb, not the schema, refuses an empty field (a checkout
+ * path, prune's retention, a bucket's and a pin's name, a grant's login, a
+ * personal token's name).
+ * Additive: every input 2.1 accepted, 2.2 accepts.
  */
-export const SERVICE_CONTRACT_VERSION = "2.1";
+export const SERVICE_CONTRACT_VERSION = "2.2";
 
 // ── refusals ────────────────────────────────────────────────────────────────
 
@@ -338,20 +352,29 @@ export type ServiceAdmission =
       message: string;
     };
 
+/** `major.minor` (an optional patch or prerelease suffix allowed), or null —
+ *  the framework's grammar, so `2.1garbage` is not read as 2.1. */
+function contractMajor(version: string): number | null {
+  const match = /^(\d+)\.(\d+)(?:\.\d+)?(?:-[0-9A-Za-z.-]+)?$/.exec(version);
+  return match === null ? null : Number(match[1]);
+}
+
 /** Read a daemon's own greeting and say whether this build may adopt it.
  *
- *  The comparison is the framework's `major.minor` rule and never a string
- *  equality: a daemon that only ADDED a member is still speakable by an older
- *  reader, and refusing it would make every additive change a flag day. The
- *  arguments are ordered REPORTED-then-EXPECTED, which is the direction that
- *  makes "the daemon is ahead" an adoption and "the daemon is behind" a
- *  refusal. */
+ *  THE ADDITIVE RULE (see {@link SERVICE_CONTRACT_VERSION}): the same MAJOR is
+ *  adopted whatever the minors, and a different one is refused. Not the
+ *  framework's `isContractVersionCompatible`, which also refuses a daemon
+ *  whose minor is behind — that made every added verb a flag day for every
+ *  reader built after it, kolu's included (it defers to THIS verdict and never
+ *  compares versions itself). A malformed or empty version is refused: a
+ *  daemon that has said nothing about itself is not a compatible one. */
 export function admitService(
   cell: ServiceCell,
   where: string,
 ): ServiceAdmission {
   const speaks = cell.identity.protocolVersion;
-  if (isContractVersionCompatible(speaks, SERVICE_CONTRACT_VERSION)) {
+  const theirs = contractMajor(speaks);
+  if (theirs !== null && theirs === contractMajor(SERVICE_CONTRACT_VERSION)) {
     return { kind: "adopt", identity: cell.identity };
   }
   return {
@@ -363,6 +386,26 @@ export function admitService(
       `this build reads ${SERVICE_CONTRACT_VERSION} — upgrade the daemon ` +
       "(`odu web --upgrade`) or this build.",
   };
+}
+
+/** THE ONE COST OF THE ADDITIVE RULE, said where it can be acted on: a daemon
+ *  ADOPTED on the same major whose minor is behind this build lacks the verbs
+ *  added since, and calling one answers "unknown" from inside the RPC layer. A
+ *  face that adopted such a daemon prints this once, so that answer arrives
+ *  already explained. `null` when the daemon is level or ahead. */
+export function skewNote(cell: ServiceCell, where: string): string | null {
+  const minor = (version: string): number | null => {
+    const match = /^(\d+)\.(\d+)/.exec(version);
+    return match === null ? null : Number(match[2]);
+  };
+  const theirs = minor(cell.identity.protocolVersion);
+  const ours = minor(SERVICE_CONTRACT_VERSION);
+  if (theirs === null || ours === null || theirs >= ours) return null;
+  return (
+    `odu: the service at ${where} speaks contract ${cell.identity.protocolVersion}, ` +
+    `this build ${SERVICE_CONTRACT_VERSION} — a verb added since answers as unknown; ` +
+    "`odu web --upgrade` replaces the daemon."
+  );
 }
 
 /**
@@ -796,6 +839,19 @@ export function logHasMore(page: Pick<LogPage, "open" | "eof">): boolean {
  *  be told what happened to it. */
 const RequestId = Schema.String.check(Schema.isMinLength(1));
 
+/**
+ * A checkout's path, as the verbs that take one OUTSIDE `run.start` declare it:
+ * a plain string, with the rule (absolute, therefore non-empty) checked by the
+ * VERB — `notAbsolute` / the catalog's own guard — rather than by the schema.
+ *
+ * Because a schema check is not a refusal. It fails the decode as a
+ * `SchemaError` before any handler runs, so the caller is told nothing a person
+ * can act on, and the board — which sends an empty field rather than greying a
+ * button out — would show a defect where the row has a sentence. Loosening an
+ * input is additive (2.2).
+ */
+const CheckoutPath = Schema.String;
+
 const StartInputSchema = Schema.Struct({
   /** ABSOLUTE path of the checkout to run in. Explicit, never the caller's
    *  cwd: an MCP host's cwd is not a fact about what the user meant. */
@@ -1214,7 +1270,7 @@ export type LogPage = typeof LogPageSchema.Type;
 const CatalogImportInputSchema = Schema.Struct({
   /** ABSOLUTE path of the checkout whose legacy `.ci` records to bring in.
    *  Explicit, never the caller's cwd — the same rule `run.start` keeps. */
-  checkout: Schema.String.check(Schema.isMinLength(1)),
+  checkout: CheckoutPath,
   dryRun: Schema.optionalKey(Schema.Boolean),
   requestId: RequestId,
 });
@@ -1240,7 +1296,8 @@ const CatalogImportReportSchema = Schema.Struct({
 export type CatalogImportReport = typeof CatalogImportReportSchema.Type;
 
 const CatalogPruneInputSchema = Schema.Struct({
-  retentionDays: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0))),
+  /** Positive whole days. Checked by the VERB, not here — see {@link CheckoutPath}. */
+  retentionDays: Schema.optionalKey(Schema.Number),
   dryRun: Schema.optionalKey(Schema.Boolean),
   requestId: RequestId,
 });
@@ -1284,7 +1341,7 @@ export const TaskRowSchema = Schema.Struct({
 export type TaskRow = typeof TaskRowSchema.Type;
 
 const PipelineReadInputSchema = Schema.Struct({
-  checkout: Schema.String.check(Schema.isMinLength(1)),
+  checkout: CheckoutPath,
   root: Schema.optionalKey(Schema.String),
 });
 export type PipelineReadInput = typeof PipelineReadInputSchema.Encoded;
@@ -1371,12 +1428,37 @@ const VenueProbeOutputSchema = Schema.Struct({
   warnings: Schema.Array(Schema.String),
   rows: Schema.Array(VenueRowSchema),
 });
+
+/**
+ * THE LAST PROBE, as a FACT — what the Machines page reads on open.
+ *
+ * A probe SSH-dials every machine it is asked about, so a page that fired one
+ * per open would cost a fleet's worth of connections per glance, and wait on
+ * the slowest unreachable box. So the service keeps the answer of the most
+ * recent `venue.probe` of ITS OWN fleet — a probe with no caller `hostsFile`;
+ * one naming a caller's file is that person's machines and is answered but not
+ * kept — on this cell, with WHEN and FOR WHICH platforms, and the page draws
+ * that with its age and offers "probe now". `null` until the first probe since the daemon
+ * started. Read-only on the wire: the service is its one writer.
+ */
+export const VenueReadingSchema = Schema.NullOr(
+  Schema.Struct({
+    /** When the probe answered. */
+    at: Schema.Number,
+    /** The platforms it was narrowed to; empty means every configured one. */
+    platforms: Schema.Array(Schema.String),
+    source: Schema.NullOr(Schema.String),
+    warnings: Schema.Array(Schema.String),
+    rows: Schema.Array(VenueRowSchema),
+  }),
+);
+export type VenueReading = typeof VenueReadingSchema.Type;
 export type VenueProbeOutput = typeof VenueProbeOutputSchema.Type;
 
 const VenueHoldInputSchema = Schema.Struct({
   /** The checkout the hold is FOR. A lease is recorded per checkout because
    *  that is what a subsequent `odu run` there consults. */
-  checkout: Schema.String.check(Schema.isMinLength(1)),
+  checkout: CheckoutPath,
   /** Empty means every configured platform. */
   platforms: Schema.optionalKey(Schema.Array(Schema.String)),
   /**
@@ -1428,7 +1510,7 @@ const VenueHoldOutputSchema = Schema.Struct({
 export type VenueHoldOutput = typeof VenueHoldOutputSchema.Type;
 
 const VenueReleaseInputSchema = Schema.Struct({
-  checkout: Schema.String.check(Schema.isMinLength(1)),
+  checkout: CheckoutPath,
   platforms: Schema.optionalKey(Schema.Array(Schema.String)),
   /** The caller's `$ODU_HOSTS` — see `venue.hold`. A release resolves the same
    *  inventory a hold did, and the two disagreeing about which fleet a platform
@@ -1461,7 +1543,7 @@ export type VenueReleaseOutput = typeof VenueReleaseOutputSchema.Type;
 // ── branch protection ───────────────────────────────────────────────────────
 
 const ProtectInputSchema = Schema.Struct({
-  checkout: Schema.String.check(Schema.isMinLength(1)),
+  checkout: CheckoutPath,
   /** The branch to protect. Absent means the repository's default branch,
    *  which the service resolves from the forge. */
   branch: Schema.optionalKey(Schema.String),
@@ -1520,6 +1602,7 @@ export type ProtectOutput = typeof ProtectOutputSchema.Type;
 export const oduServiceSurface = defineSurface({
   cells: {
     service: { schema: ServiceCellSchema, default: UNKNOWN_SERVICE },
+    venues: { schema: VenueReadingSchema, default: null, verbs: ["get"] },
   },
   collections: {
     runs: {

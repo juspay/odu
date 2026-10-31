@@ -48,6 +48,8 @@ Retry unchanged inputs to investigate a flake. Commit a source fix and start a n
 
 A live retry creates a new attempt; a finalized retry creates a linked replay. `run --linger` is supported but is not required for replay.
 
+**The board does everything `odu` does.** Every command above has a control at **http://127.0.0.1:18440** — a run's page, **New run** (every option, and **Preview pipeline**), **Machines** (`hosts`/`lease`/`release`), **Maintenance** (`history import`/`prune`, `protect`), the Cache view, and an owner's **People**. The [docs](https://odu.kolu.dev/docs/#the-board-does-everything-odu-does) map each command to its control.
+
 ## Serve a Nix binary cache
 
 The same service is a Nix substituter: one bucket is one cache with its own
@@ -61,17 +63,17 @@ odu cache token mint main --write    # printed once; save it with `odu cache log
 ODU_CACHE_TOKEN=... odu cache push main ./result
 ```
 
-| Command | What it does |
-| --- | --- |
-| `odu cache create <bucket>` | Create a bucket; print its substituter URL and public key. `--no-upstream` takes everything, for a store that is not the builder's |
-| `odu cache list` | List buckets, with sizes |
-| `odu cache use <bucket>` | Print the substituter and key settings, a `nixConfig` block, and the netrc lines |
-| `odu cache token mint\|list\|revoke` | Scoped, expiring, revocable tokens; the plaintext is shown once |
-| `odu cache login <origin>` | Save a token for an origin in `~/.config/odu/cache/credentials` |
-| `odu cache push <bucket> <path>…` | Upload only the paths the bucket is missing |
-| `odu cache pin <bucket> <name> <path>…` | Keep a closure out of garbage collection |
-| `odu cache gc [bucket]` | Evict what retention expired and nothing references or pins |
-| `odu cache stats` | Storage and reads |
+| Command | What it does | On the board |
+| --- | --- | --- |
+| `odu cache create <bucket>` | Create a bucket; print its substituter URL and public key. `--no-upstream` takes everything, for a store that is not the builder's | Cache → **Create bucket** |
+| `odu cache list` | List buckets, with sizes | Cache |
+| `odu cache use <bucket>` | Print the substituter and key settings, a `nixConfig` block, and the netrc lines | a bucket's page |
+| `odu cache token mint\|list\|revoke` | Scoped, expiring, revocable tokens; the plaintext is shown once | a bucket's **Tokens** |
+| `odu cache login <origin>` | Save a token for an origin in `~/.config/odu/cache/credentials` | — |
+| `odu cache push <bucket> <path>…` | Upload only the paths the bucket is missing | — |
+| `odu cache pin <bucket> <name> <path>…` | Keep a closure out of garbage collection | a bucket's **Pin closure** |
+| `odu cache gc [bucket]` | Evict what retention expired and nothing references or pins | a bucket's **Run GC** |
+| `odu cache stats` | Storage and reads | a bucket's **Stats** |
 
 `nix copy --to http://127.0.0.1:18440/cache/main ./result` works with no odu code on
 the client. The [cache page](https://odu.kolu.dev/docs/cache/) has the

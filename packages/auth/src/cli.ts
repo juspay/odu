@@ -3,8 +3,8 @@
  *
  * Three kinds of command, and the split is the same one the cache's CLI keeps:
  *
- *   - **administration** (`whoami`, `token …`, `grant`) is a client of the auth
- *     ROW's surface over the same connection every other command uses;
+ *   - **administration** (`whoami`, `token …`, `grant`, `people`) is a client
+ *     of the auth ROW's surface over the same connection every other command uses;
  *   - **`login`** writes a credential for an origin to this machine's disk and
  *     touches the service not at all — it is how a person who was given a token
  *     by the profile page (or by an admin) hands it to every other command;
@@ -24,7 +24,13 @@ import { composedClients } from "@odu/cordis/compose";
 import { Effect } from "effect";
 import { readAuthToken, saveAuthToken } from "./credentials";
 import { serviceOrigin } from "@odu/service-client/endpoint";
-import { AUTH_KEY, AuthRefused, oduAuthSurface, type AuthToken } from "./surface";
+import {
+  AUTH_KEY,
+  AuthRefused,
+  oduAuthSurface,
+  type AuthPerson,
+  type AuthToken,
+} from "./surface";
 
 /** The credential store, for the root that dials on this machine's behalf. */
 export {
@@ -52,7 +58,7 @@ export interface AuthCliPorts {
   }>;
 }
 
-export const AUTH_USAGE = `usage: odu auth <login|whoami|token|grant> [args]
+export const AUTH_USAGE = `usage: odu auth <login|whoami|token|grant|people> [args]
 
 login <origin> [--token T]    save this machine's personal access token for an
                               origin, in ~/.config/odu/auth/credentials (0600).
@@ -67,7 +73,11 @@ token revoke <id>             revoke one token, ending its connections at once
 grant <login> <owner|admin|member>
                               set a person's role. An owner's verb — or the
                               operator's root token ($ODU_ROOT_TOKEN) on a
-                              daemon with no owner yet, which is its one job
+                              daemon with no owner yet, which is its one job.
+                              The board's people page is the same control
+people [-o json]              who is in: every grant, and every login that has
+                              ever signed in, with the role each holds. An owner's
+                              verb — the board's people page reads the same list
 
 These verbs exist ONLY on a daemon with a door (\`ODU_GITHUB_*\` configured); with
 none there is no auth row to call, and every caller is the daemon's local owner.
@@ -173,6 +183,8 @@ export async function authCommand(
       return tokenCommand(rest, ports);
     case "grant":
       return grantCommand(rest, ports);
+    case "people":
+      return peopleCommand(rest, ports);
     case undefined:
     case "help":
     case "--help":
@@ -351,6 +363,35 @@ async function grantCommand(rest: string[], ports: AuthCliPorts): Promise<number
     process.stdout.write(`${answer.value.login} is now ${answer.value.role}\n`);
     return 0;
   });
+}
+
+async function peopleCommand(rest: string[], ports: AuthCliPorts): Promise<number> {
+  const { values } = parseArgs({
+    args: rest,
+    options: { origin: originOption, output: outputOption },
+  });
+  const json = values.output === "json";
+  return withService(ports, values.origin, async (client) => {
+    const answer = await call(client.surface.grant.list());
+    if (!answer.ok) return reportFailure(answer, json);
+    if (json) {
+      emitJson(answer.value);
+      return 0;
+    }
+    if (answer.value.people.length === 0) process.stdout.write("nobody is in yet\n");
+    for (const person of answer.value.people) printPerson(person);
+    return 0;
+  });
+}
+
+function printPerson(person: AuthPerson): void {
+  process.stdout.write(
+    `${person.login}  ${person.role}${person.granted ? "" : " (default)"}  ${
+      person.lastSeen === null
+        ? "never signed in"
+        : `last seen ${new Date(person.lastSeen).toISOString().slice(0, 16)}`
+    }\n`,
+  );
 }
 
 function printToken(token: AuthToken): void {

@@ -91,13 +91,19 @@ export class OduWorld extends World {
   cacheBucket?: string;
   cachePath?: string;
   cachePathName?: string;
-  /** The bucket token a door scenario pushed with — the push's whole
-   *  credential, and the one it reads the narinfo back under. */
-  cacheToken?: string;
   /** Every path the scenario pushed, in order, and their store-path names —
    *  what a filter scenario narrows between. */
   cachePaths?: string[];
   cachePathNames?: string[];
+  /**
+   * A ROW'S OWN SCENARIO STATE, which the harness carries and does not read.
+   *
+   * The fields above are the harness's shared vocabulary; a row's steps that
+   * need a fact of their own keep it HERE, under a key their package spells,
+   * behind a typed accessor in their own steps file. One bag, so the harness
+   * names no row's nouns — the coupling the fence counts.
+   */
+  readonly rowState = new Map<string, unknown>();
 
   /** Checkouts this scenario created and must remove. A SHARED fixture is not
    *  in here — it belongs to the worker, not the scenario. */

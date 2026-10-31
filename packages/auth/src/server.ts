@@ -66,6 +66,7 @@ import {
   AuthRefused,
   DEFAULT_ROLE,
   oduAuthSurface,
+  type AuthPerson,
   type AuthSession,
   type AuthToken,
   type Who,
@@ -247,6 +248,7 @@ export function authServer(opts: AuthServerOptions): AuthServer {
       return null;
     }
     repo.touchSession(row.id, now());
+    repo.touchPerson(row.login, now());
     return row;
   };
 
@@ -255,6 +257,7 @@ export function authServer(opts: AuthServerOptions): AuthServer {
     if (row === null || row.revoked) return null;
     if (row.expires !== null && row.expires <= now()) return null;
     repo.touchToken(row.id, now());
+    repo.touchPerson(row.login, now());
     return row;
   };
 
@@ -348,6 +351,27 @@ export function authServer(opts: AuthServerOptions): AuthServer {
               );
             }
             const login = normalizeLogin(input.login);
+            if (login === "") {
+              return Effect.fail(
+                new AuthRefused({
+                  code: "bad_input",
+                  message: "odu: a grant needs a GitHub login, e.g. octocat",
+                }),
+              );
+            }
+            // THE LAST OWNER STAYS ONE. Demoting them would leave a daemon
+            // nobody can grant on, recoverable only by the root token's
+            // re-bootstrap — so the row refuses it, whoever asks, and the
+            // people page shows this sentence rather than guarding a select.
+            const current = owners();
+            if (input.role !== "owner" && current.length === 1 && current[0] === login) {
+              return Effect.fail(
+                notPermitted(
+                  `this would leave the daemon with no owner — ${login} is the only one; ` +
+                    "grant another owner first",
+                ),
+              );
+            }
             repo.setGrant({ login, role: input.role, created: now() });
             // The role is read at the upgrade, so a change takes effect at the
             // NEXT connection: the open ones are ended, the clients redial, and
@@ -357,15 +381,59 @@ export function authServer(opts: AuthServerOptions): AuthServer {
           }),
       },
 
+      grant: {
+        // WHO IS IN — an owner's read, by the same rule as the write it serves:
+        // the people page lists these and calls `user.grant` on one. Not the
+        // root token's: that secret bootstraps the first owner and has no
+        // business reading the role table after.
+        list: () =>
+          Effect.flatMap(signedIn(), ({ login, role }) => {
+            if (role !== "owner") {
+              return Effect.fail(
+                notPermitted(`listing who is in is an owner's verb — ${login} is a ${role}`),
+              );
+            }
+            const people = new Map<string, AuthPerson>();
+            for (const grant of repo.grants()) {
+              people.set(grant.login, {
+                login: grant.login,
+                role: grant.role,
+                granted: true,
+                lastSeen: null,
+              });
+            }
+            for (const seen of repo.people()) {
+              const granted = people.get(seen.login);
+              people.set(seen.login, {
+                login: seen.login,
+                role: granted?.role ?? DEFAULT_ROLE,
+                granted: granted !== undefined,
+                lastSeen: seen.lastSeen,
+              });
+            }
+            return Effect.succeed({
+              people: [...people.values()].sort((a, b) => a.login.localeCompare(b.login)),
+            });
+          }),
+      },
+
       token: {
         create: ({ input }) =>
           Effect.flatMap(signedIn(), ({ login }) => {
+            if (input.name.trim() === "") {
+              return Effect.fail(
+                new AuthRefused({
+                  code: "bad_input",
+                  message: "odu: a token needs a name — what it is for, e.g. laptop",
+                }),
+              );
+            }
             const token = `odu_${randomBytes(32).toString("base64url")}`;
             const row: TokenRow = {
               id: randomBytes(9).toString("hex"),
               hash: sha256(token),
               login,
-              name: input.name,
+              name: input.name.trim(),
               created: now(),
               lastUsed: null,
               expires: null,
@@ -431,6 +499,7 @@ export function authServer(opts: AuthServerOptions): AuthServer {
       agent,
     };
     repo.putSession(session);
+    repo.touchPerson(login, at);
     return { cookie, session };
   };
 

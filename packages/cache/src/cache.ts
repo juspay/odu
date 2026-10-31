@@ -501,7 +501,10 @@ export function createCache(options: CacheOptions): Cache {
         return {
           ok: false,
           code: "bad_input",
-          message: `"${input.name}" is not a bucket name — lowercase letters, digits and dashes`,
+          message:
+            input.name === ""
+              ? "a bucket needs a name — lowercase letters, digits and dashes, e.g. my-project"
+              : `"${input.name}" is not a bucket name — lowercase letters, digits and dashes`,
         };
       }
       if (!Number.isSafeInteger(input.retentionDays) || input.retentionDays < 0) {
@@ -623,6 +626,9 @@ export function createCache(options: CacheOptions): Cache {
       const bucket = repo.bucket(input.bucket);
       if (bucket === null) {
         return { ok: false, code: "unknown_bucket", message: `no bucket "${input.bucket}"` };
+      }
+      if (input.name.trim() === "") {
+        return { ok: false, code: "bad_input", message: "a pin needs a name, e.g. release-1.2" };
       }
       if (input.paths.length === 0) {
         return { ok: false, code: "bad_input", message: "a pin needs at least one path" };

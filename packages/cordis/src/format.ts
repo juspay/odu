@@ -11,7 +11,7 @@
  * They are here rather than in a face because they are not one row's idea of
  * anything: a run's age and a bucket's age are the same question, and every row
  * in the tree already depends on this package. It names no row, so the fence
- * stays green, and it is a leaf — two pure functions, no state, no imports.
+ * stays green, and it is a leaf — pure functions, no state, no imports.
  */
 
 /** How long ago, coarsely. Coarse on purpose: a board is scanned rather than
@@ -41,3 +41,4 @@ export function bytes(count: number): string {
   }
   return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit] as string}`;
 }
+

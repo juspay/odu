@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { Given, Then, When } from "@cucumber/cucumber";
-import { oduCli } from "../../../web-acceptance/support/service.ts";
+import { oduCli, ROOT_TOKEN } from "../../../web-acceptance/support/service.ts";
 import type { OduWorld } from "../../../web-acceptance/support/world.ts";
 
 function unique(what: string): string {
@@ -102,13 +102,13 @@ When(
     // The person mints the bucket's write token through `/mcp` (their own
     // credential); the PUSH then speaks only the cache's HTTP protocol, with
     // that bucket token and no cookie — the shape a CI job on a door has.
-    const minted = oduCli(
+    const mint = oduCli(
       this.service,
       ["cache", "token", "mint", bucket, "--write", "-o", "json"],
       { ODU_TOKEN: this.mintedToken },
     );
-    assert.strictEqual(minted.status, 0, `odu cache token mint failed: ${minted.stderr}`);
-    const token = (JSON.parse(minted.stdout) as { token: string }).token;
+    assert.strictEqual(mint.status, 0, `odu cache token mint failed: ${mint.stderr}`);
+    const token = (JSON.parse(mint.stdout) as { token: string }).token;
     const path = addLeafPath(this);
     const pushed = oduCli(this.service, ["cache", "push", bucket, path, "-o", "json"], {
       ODU_CACHE_TOKEN: token,
@@ -119,7 +119,7 @@ When(
       `odu cache push through the door failed: ${pushed.stderr}${pushed.stdout}`,
     );
     this.cachePath = path;
-    this.cacheToken = token;
+    minted(this).token = token;
   },
 );
 
@@ -129,7 +129,7 @@ Then("the bucket serves that path's narinfo to the token", async function (this:
   const hash = (path.split("/").pop() ?? "").slice(0, 32);
   const answer = await fetch(
     new URL(`/cache/${this.cacheBucket}/${hash}.narinfo`, this.service.origin),
-    { headers: { authorization: `Bearer ${this.cacheToken}` } },
+    { headers: { authorization: `Bearer ${minted(this).token}` } },
   );
   const body = await answer.text();
   assert.strictEqual(answer.status, 200, `the narinfo answered ${answer.status}: ${body}`);
@@ -300,4 +300,143 @@ Then("the page says that bucket is not there", async function (this: OduWorld) {
     "the bucket page",
     "This bucket is not on the board",
   );
+});
+
+// ── administration, through the page ────────────────────────────────────────
+
+/** The bucket token this scenario minted — on a bucket page (its one showing,
+ *  and the id its list row carries) or through the CLI for a door push. The
+ *  cache's own state, in the harness's row bag. */
+interface MintedHere {
+  token?: string;
+  id?: string;
+}
+function minted(world: OduWorld): MintedHere {
+  let held = world.rowState.get("cache.minted") as MintedHere | undefined;
+  if (held === undefined) {
+    held = {};
+    world.rowState.set("cache.minted", held);
+  }
+  return held;
+}
+
+Then("the cache says {string}", async function (this: OduWorld, text: string) {
+  await this.saysThat(this.page.locator(".cache"), "the cache view", text);
+});
+
+When("I name a new bucket", async function (this: OduWorld) {
+  const name = unique("board");
+  this.cacheBucket = name;
+  await this.page.getByPlaceholder("new bucket name").fill(name);
+});
+
+/** `uncheck()`, not a click: it asserts the box ended up clear, so a switch
+ *  whose label stopped naming it fails here instead of creating a bucket with
+ *  the filter nobody meant. */
+When("I untick {string}", async function (this: OduWorld, label: string) {
+  await this.page.getByLabel(label, { exact: true }).uncheck();
+});
+
+Then("the page opens that bucket", async function (this: OduWorld) {
+  const name = this.cacheBucket;
+  assert.ok(name !== undefined, "no bucket was named");
+  await this.page.getByRole("heading", { name, exact: true }).waitFor({ timeout: 30_000 });
+});
+
+Given("a bucket created from the board", async function (this: OduWorld) {
+  await this.open("#/cache");
+  await this.page.getByRole("heading", { name: "Buckets", exact: true }).waitFor();
+  const name = unique("board");
+  this.cacheBucket = name;
+  await this.page.getByPlaceholder("new bucket name").fill(name);
+  await this.page.getByRole("button", { name: "Create bucket", exact: true }).click();
+  await this.page.getByRole("heading", { name, exact: true }).waitFor({ timeout: 30_000 });
+});
+
+When("I mint a {string} token", async function (this: OduWorld, scope: string) {
+  await this.page.getByLabel("token scope").selectOption(scope);
+  await this.page.getByRole("button", { name: "Mint token", exact: true }).click();
+  const block = this.page.locator("pre.minted-token");
+  await block.waitFor({ timeout: 30_000 });
+  minted(this).token = (await block.innerText()).trim();
+  // The id is read off the LIST, where the row the mint just added says so —
+  // the plaintext and the id are two halves the page shows in two places.
+  const row = this.page.locator("ul.tokens li", { hasText: "just minted" });
+  await row.waitFor({ timeout: 30_000 });
+  minted(this).id = (await row.locator("code").first().innerText()).trim();
+});
+
+Then("the page shows the cache token once", function (this: OduWorld) {
+  const token = minted(this).token;
+  assert.ok(
+    token !== undefined && token.length > 16,
+    `no token was shown: ${JSON.stringify(token)}`,
+  );
+});
+
+Then("the minted token is listed as {string}", async function (this: OduWorld, word: string) {
+  const id = minted(this).id;
+  assert.ok(id !== undefined, "no token was minted");
+  await this.saysThat(
+    this.page.locator("ul.tokens li", { hasText: id }),
+    "the token's row",
+    word,
+  );
+});
+
+When("I revoke the minted token", async function (this: OduWorld) {
+  const id = minted(this).id;
+  assert.ok(id !== undefined, "no token was minted");
+  await this.page.getByRole("button", { name: `revoke ${id}`, exact: true }).click();
+});
+
+When("a path is pushed with that token from the CLI", function (this: OduWorld) {
+  const bucket = this.cacheBucket;
+  const token = minted(this).token;
+  assert.ok(bucket !== undefined && token !== undefined, "no bucket or token");
+  const dir = mkdtempSync(join(tmpdir(), "odu-wa-cache-"));
+  const name = unique("pinned");
+  const file = join(dir, name);
+  writeFileSync(file, `odu web acceptance: ${name}\n`);
+  const added = spawnSync("nix", ["store", "add-file", file], {
+    env: this.service.env,
+    encoding: "utf-8",
+  });
+  assert.strictEqual(added.status, 0, `nix store add-file failed: ${added.stderr}`);
+  const path = added.stdout.trim();
+  // THE PAGE'S TOKEN, and only it: the push talks to the cache's HTTP API with
+  // a bucket credential, so a token the page minted wrongly fails right here.
+  const pushed = oduCli(this.service, ["cache", "push", bucket, path, "-o", "json"], {
+    ODU_CACHE_TOKEN: token,
+  });
+  assert.strictEqual(pushed.status, 0, `odu cache push failed: ${pushed.stderr}`);
+  this.cachePath = path;
+});
+
+When("I pin that path as {string}", async function (this: OduWorld, name: string) {
+  const path = this.cachePath;
+  assert.ok(path !== undefined, "no path was pushed");
+  await this.page.getByLabel("pin name", { exact: true }).fill(name);
+  await this.page.getByLabel("store paths to pin", { exact: true }).fill(path);
+  await this.page.getByRole("button", { name: "Pin closure", exact: true }).click();
+});
+
+Then("the stats say {string}", async function (this: OduWorld, text: string) {
+  await this.saysThat(this.page.locator("dl.stats"), "the stats", text);
+});
+
+Then("the push block names the minted token", async function (this: OduWorld) {
+  const token = minted(this).token;
+  assert.ok(token !== undefined, "no token was minted");
+  // The once-shown moment is when a person pastes it into a CI secret, so the
+  // push block carries it while the page can still show it.
+  await this.saysThat(this.page.locator("pre.push-block"), "the push block", token);
+});
+
+When("I type the root token", async function (this: OduWorld) {
+  await this.page.getByLabel("root token", { exact: true }).fill(ROOT_TOKEN);
+});
+
+When("I type a wrong root token", async function (this: OduWorld) {
+  await this.page.getByLabel("root token", { exact: true }).fill("not-the-root-token");
 });

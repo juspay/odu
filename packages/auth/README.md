@@ -32,9 +32,9 @@ principal through the `Caller`, never from input.
 
 **Names are `row_noun_verb`.** The framework derives an MCP tool name as
 `<sibling>_<namespace>_<verb>`, so the row's verbs are `auth_user_whoami`,
-`auth_user_grant`, `auth_token_create`, `auth_token_list`, `auth_token_revoke`,
-`auth_session_list` and `auth_session_end`. The argv face keeps the short
-spelling — `odu auth whoami`, `odu auth grant <login> <role>` — because it is
+`auth_user_grant`, `auth_grant_list`, `auth_token_create`, `auth_token_list`,
+`auth_token_revoke`, `auth_session_list` and `auth_session_end`. The argv face keeps the short
+spelling — `odu auth whoami`, `odu auth grant <login> <role>`, `odu auth people` — because it is
 hand-written grammar rather than a derivation.
 
 ## A GitHub App, and the PR 2 shape
@@ -86,6 +86,15 @@ browser; a token's plaintext exists only in the answer that minted it.
 for `owner`. Once the first owner exists it is refused, an owner's session
 grants everything after that, and it is never a principal — it cannot start a
 run or read a bucket.
+
+## Who is in, and what is never pruned
+
+`grant.list` (the People page, `odu auth people`) folds the grants with the
+`person` table — every login that has ever signed in, written at sign-in and
+touched on each session or token use, and never deleted by sign-out or expiry.
+**Nothing prunes it yet**: a login removed from `ODU_GITHUB_ALLOW` can no longer
+sign in, but stays on the People page with its last-seen age. The row also
+refuses a grant that would leave the daemon with no owner.
 
 ## Docs
 

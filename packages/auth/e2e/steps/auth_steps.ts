@@ -2,9 +2,9 @@
  * THE DOOR'S STEPS — the sign-in page, the header, the two credentials.
  *
  * The arrange half is a person's route wherever one exists: the sign-in is the
- * link on the page, a token is the profile's form, and only a grant (which has
- * no control yet — it is the operator's bootstrap) goes through the CLI with the
- * root token. The assert half is the page, by role and accessible name.
+ * link on the page, a token is the profile's form, a grant is the people page —
+ * and only the FIRST owner (the operator's bootstrap, which has no session to
+ * draw a page for) goes through the CLI with the root token. The assert half is the page, by role and accessible name.
  *
  * `mintToken` is the one helper several scenarios share: a member's and an
  * admin's CLI credential is minted on the profile page exactly as a person would
@@ -207,4 +207,82 @@ Then("the second tab meets the sign-in page", async function (this: OduWorld) {
     120_000,
     500,
   );
+});
+
+// ── the people page ─────────────────────────────────────────────────────────
+
+/** The login this scenario granted on the people page — the door's own state,
+ *  in the harness's row bag. */
+const GRANTED = "auth.granted";
+function grantedLogin(world: OduWorld): string | undefined {
+  return world.rowState.get(GRANTED) as string | undefined;
+}
+
+When("I open the people page", async function (this: OduWorld) {
+  // Through the header's control, not the address: the control being DRAWN for
+  // an owner is half of what this page promises.
+  await this.open("#/");
+  await this.page.getByRole("button", { name: "People", exact: true }).click();
+  await this.page.getByRole("heading", { name: "People", exact: true }).waitFor({
+    timeout: 30_000,
+  });
+});
+
+Then("the people page says {string}", async function (this: OduWorld, text: string) {
+  await this.saysThat(this.page.locator(".people-page"), "the people page", text);
+});
+
+/** A person's role is the VALUE of their row's select — what a reader reads and
+ *  what the next change starts from. */
+async function roleShown(world: OduWorld, login: string, role: string): Promise<void> {
+  const select = world.page.getByLabel(`role of ${login}`, { exact: true });
+  await world.waitUntil(
+    async () => (await select.count()) > 0 && (await select.inputValue()) === role,
+    `the people list to show ${login} as ${role}`,
+  );
+}
+
+Then(
+  "the people list shows {string} as {string}",
+  async function (this: OduWorld, login: string, role: string) {
+    await roleShown(this, login, role);
+  },
+);
+
+When("I grant a new login the role {string}", async function (this: OduWorld, role: string) {
+  const login = `wa-${Math.random().toString(36).slice(2, 10)}`;
+  this.rowState.set(GRANTED, login);
+  await this.page.getByPlaceholder("GitHub login, e.g. octocat").fill(login);
+  await this.page.getByLabel("role to grant", { exact: true }).selectOption(role);
+  await this.page.getByRole("button", { name: "Grant", exact: true }).click();
+});
+
+Then("the people list shows the new login as {string}", async function (this: OduWorld, role: string) {
+  const login = grantedLogin(this);
+  assert.ok(login !== undefined, "no login was granted");
+  await roleShown(this, login, role);
+});
+
+When("I change the new login's role to {string}", async function (this: OduWorld, role: string) {
+  const login = grantedLogin(this);
+  assert.ok(login !== undefined, "no login was granted");
+  await this.page
+    .getByLabel(`role of ${login}`, { exact: true })
+    .selectOption(role);
+});
+
+Then("the header offers no People control", async function (this: OduWorld) {
+  // Asked once the header has drawn the person, so "absent" is an answer and
+  // not a page that has not finished arriving.
+  await this.page.locator(".account-name").waitFor({ timeout: 30_000 });
+  const controls = await this.page.getByRole("button", { name: "People", exact: true }).count();
+  assert.strictEqual(controls, 0, "a non-owner was drawn the People control");
+});
+
+Then("the CLI refuses the people list as not permitted", async function (this: OduWorld) {
+  await mintToken(this, "people");
+  const answer = asPerson(this, ["auth", "people", "-o", "json"]);
+  assert.strictEqual(answer.status, 1, `expected a refusal, got ${answer.stdout}`);
+  const refused = JSON.parse(answer.stdout) as { code?: string };
+  assert.strictEqual(refused.code, "not_permitted");
 });

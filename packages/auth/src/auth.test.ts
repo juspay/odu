@@ -432,6 +432,102 @@ describe("the row's authority", () => {
     expect(answer.value.who).toEqual({ kind: "anonymous" });
   });
 
+  it("grant.list answers who is in — grants AND signed-in logins — to an owner", async () => {
+    const { client, server } = row({ rootToken: "operator" });
+    await as(
+      client.surface.user.grant({ login: "srid", role: "owner", rootToken: "operator" }),
+      admissionFor(null),
+    );
+    await as(
+      client.surface.user.grant({ login: "alice", role: "admin", rootToken: "" }),
+      admit("srid", "owner"),
+    );
+    // Allowed in by GitHub, never granted: the person an owner opens the page
+    // to promote, and the reason this is not just the grant table.
+    server.signIn({ login: "bob", agent: null });
+    server.signIn({ login: "srid", agent: null });
+
+    const answer = await as(client.surface.grant.list(), admit("srid", "owner"));
+    expect(answer.ok).toBe(true);
+    if (!answer.ok) return;
+    expect(answer.value.people.map(({ login, role, granted }) => ({ login, role, granted }))).toEqual([
+      { login: "alice", role: "admin", granted: true },
+      { login: "bob", role: "member", granted: false },
+      { login: "srid", role: "owner", granted: true },
+    ]);
+    expect(answer.value.people.find((one) => one.login === "alice")?.lastSeen).toBeNull();
+    expect(answer.value.people.find((one) => one.login === "bob")?.lastSeen).toBeNumber();
+  });
+
+  it("grant.list keeps a person who signed out — the record outlives the session", async () => {
+    const { client, server } = row({ rootToken: "operator" });
+    await as(
+      client.surface.user.grant({ login: "srid", role: "owner", rootToken: "operator" }),
+      admissionFor(null),
+    );
+    // Allowed in, never granted, and then gone: exactly the person the page
+    // exists to promote. Sign-out deletes the SESSION row, not the person.
+    const { cookie } = server.signIn({ login: "carol", agent: null });
+    expect(server.signOut(cookie)).toBe(true);
+
+    const answer = await as(client.surface.grant.list(), admit("srid", "owner"));
+    expect(answer.ok).toBe(true);
+    if (!answer.ok) return;
+    const carol = answer.value.people.find((one) => one.login === "carol");
+    expect(carol).toMatchObject({ login: "carol", role: "member", granted: false });
+    expect(carol?.lastSeen).toBeNumber();
+  });
+
+  it("refuses a grant with no login, in the row's words", async () => {
+    const { client } = row();
+    const answer = await as(
+      client.surface.user.grant({ login: "  ", role: "admin", rootToken: "" }),
+      admit("srid", "owner"),
+    );
+    expect(answer.ok).toBe(false);
+    if (answer.ok) return;
+    expect(refusal(answer.error).code).toBe("bad_input");
+    expect(refusal(answer.error).message).toContain("a grant needs a GitHub login");
+  });
+
+  it("refuses to demote the last owner, and allows it once there is another", async () => {
+    const { client } = row({ rootToken: "operator" });
+    await as(
+      client.surface.user.grant({ login: "srid", role: "owner", rootToken: "operator" }),
+      admissionFor(null),
+    );
+    const alone = await as(
+      client.surface.user.grant({ login: "srid", role: "member", rootToken: "" }),
+      admit("srid", "owner"),
+    );
+    expect(alone.ok).toBe(false);
+    if (alone.ok) return;
+    expect(refusal(alone.error).message).toContain("would leave the daemon with no owner");
+
+    await as(
+      client.surface.user.grant({ login: "alice", role: "owner", rootToken: "" }),
+      admit("srid", "owner"),
+    );
+    const shared = await as(
+      client.surface.user.grant({ login: "srid", role: "member", rootToken: "" }),
+      admit("srid", "owner"),
+    );
+    expect(shared.ok).toBe(true);
+  });
+
+  it("grant.list refuses an admin, and a connection with no session", async () => {
+    const { client } = row({ rootToken: "operator" });
+    const admin = await as(client.surface.grant.list(), admit("alice", "admin"));
+    expect(admin.ok).toBe(false);
+    if (admin.ok) return;
+    expect(refusal(admin.error).code).toBe("not_permitted");
+
+    const nobody = await as(client.surface.grant.list(), admissionFor(null));
+    expect(nobody.ok).toBe(false);
+    if (nobody.ok) return;
+    expect(refusal(nobody.error).code).toBe("unauthenticated");
+  });
+
   it("a member may list and revoke only their own tokens", async () => {
     const { client } = row();
     const first = await as(client.surface.token.create({ name: "a" }), admit("srid", "member"));

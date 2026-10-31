@@ -25,11 +25,11 @@
  *
  * ## Compatibility is TWO axes, and only one of them is ordered
  *
- * `protocolVersion` is `major.minor` and it is ORDERED, and the order runs
- * ONE way: a running service at the same major and an equal-or-higher minor
- * speaks everything this build knows how to ask, so it is adopted. A service
- * BEHIND this build does not — the predicate is `running.minor >= mine.minor` —
- * and is refused with the upgrade sentence. `buildId` is MATCH-ONLY — there is
+ * `protocolVersion` is `major.minor`, and the rule is ADDITIVE
+ * (`admitService`'s): a running service at the same major is adopted whatever
+ * the minors — a minor only ever ADDS members, so the worst a skew costs is one
+ * control answering "unknown verb" — and a different major is refused with the
+ * upgrade sentence. `buildId` is MATCH-ONLY — there is
  * no such thing as a newer build — so a differing one is reported and never
  * acted on unless a person asks for an upgrade. That asymmetry is the
  * framework's (`admitService` has no `buildIsNewer` beside it) and it
@@ -69,6 +69,7 @@ import {
 } from "@odu/service-client/dial";
 import {
   admitService,
+  skewNote,
   handshakeTimedOut,
   SERVICE_HANDSHAKE_MS,
   type ServiceBuild,
@@ -177,7 +178,14 @@ export function contractVerdict(
 export async function adoptOrRefuse<C extends Pick<ServiceConnection, "client" | "dispose">>(
   connection: C,
   origin: string,
-  opts: { handshakeMs?: number } = {},
+  opts: {
+    handshakeMs?: number;
+    warn?: (line: string) => void;
+    /** Daemon instances this caller already warned about — owned by a caller
+     *  that dials more than once (the stdio bridge redials per connection), so
+     *  the skew note is said once per daemon rather than once per redial. */
+    warned?: Set<string>;
+  } = {},
 ): Promise<C> {
   const handshakeMs = opts.handshakeMs ?? SERVICE_HANDSHAKE_MS;
   let cell: ServiceCell | undefined;
@@ -210,6 +218,15 @@ export async function adoptOrRefuse<C extends Pick<ServiceConnection, "client" |
     // connection, so nothing can leak the link's dial, ping and response fibers.
     await connection.dispose();
     throw new Error(refusal);
+  }
+  // ADOPTED BEHIND: said once, on stderr, so stdout and `-o json` are the
+  // command's alone — and the "unknown" a newer verb would meet is explained
+  // before it arrives.
+  const note = skewNote(cell, origin);
+  const instance = `${cell.identity.pid}:${cell.identity.startedAt}`;
+  if (note !== null && opts.warned?.has(instance) !== true) {
+    opts.warned?.add(instance);
+    (opts.warn ?? ((line) => process.stderr.write(`${line}\n`)))(note);
   }
   return connection;
 }
@@ -615,12 +632,15 @@ export async function connectOrStart(
      * which is loopback and is unconditional there.
      */
     authorization?: (origin: string) => Promise<Record<string, string>>;
+    /** See {@link adoptOrRefuse}: the daemons already warned about. */
+    warned?: Set<string>;
   } = {},
 ): Promise<ServiceConnection> {
   const allowStart = opts.allowStart ?? origin === serviceOrigin();
   const headers = opts.authorization === undefined ? {} : await opts.authorization(origin);
   const existing = await dialExisting(origin, allowStart, opts.group, headers);
-  if (existing !== null) return adoptOrRefuse(existing, origin);
+  const adopt = { ...(opts.warned === undefined ? {} : { warned: opts.warned }) };
+  if (existing !== null) return adoptOrRefuse(existing, origin, adopt);
   const outcome = await ensureService({
     origin,
     home: webHome(origin),
@@ -641,6 +661,7 @@ export async function connectOrStart(
   return adoptOrRefuse(
     await dialService(outcome.origin, dialOptions(opts.group, headers)),
     outcome.origin,
+    adopt,
   );
 }
 

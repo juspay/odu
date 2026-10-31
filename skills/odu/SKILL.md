@@ -21,7 +21,7 @@ venue_probe · venue_hold · venue_release · protect_apply
 cache_bucket_create · cache_bucket_list · cache_bucket_describe · cache_bucket_paths
 cache_token_mint · cache_token_list · cache_token_revoke
 cache_pin_create · cache_gc_run · cache_stats_read
-auth_user_whoami · auth_user_grant
+auth_user_whoami · auth_user_grant · auth_grant_list
 auth_token_create · auth_token_list · auth_token_revoke
 auth_session_list · auth_session_end
 ```
@@ -297,7 +297,10 @@ And say `passed` only from `settled: true`.
 
 The same vocabulary reaches everything else odu does. These used to be local
 commands that each did their own work in your process — which meant an agent
-and a browser simply could not do them at all.
+and a browser simply could not do them at all. Now every one of them also has a
+board control (Machines, Maintenance, New run's Preview pipeline, the Cache
+view, People), so a person you hand the result to can repeat it without a
+terminal.
 
 | Verb | argv | MCP tool | Input | Answers |
 | --- | --- | --- | --- | --- |
@@ -313,6 +316,7 @@ and a browser simply could not do them at all.
 | list buckets | `odu surface cache bucket_list --input '{…}' --json` | `cache_bucket_list` | `rootToken` | `buckets[]` (the shape above) |
 | one bucket's public identity | `odu surface cache bucket_describe --input '{…}' --json` | `cache_bucket_describe` | `bucket` — **no root token** | `name`, `public`, `publicKey`, `url` only — the substituter's identity, not the operator's counts |
 | one bucket's paths | `odu surface cache bucket_paths --input '{…}' --json` | `cache_bucket_paths` | `bucket`, `filter?`, `after?` — **no root token** | `paths[]` (`storePath`, `narSize`, `created`, `hits`, `lastAccessed`), `next?` — newest first, 100 a page |
+| the last venue probe, kept | `odu surface get venues` | the `venues` resource | *(none)* | `null`, or `at`, `platforms[]`, `source`, `warnings[]`, `rows[]` — what `venue_probe` last answered for the service's own fleet (a probe naming your own `hostsFile` is answered, not kept), so a reader need not dial every machine again |
 | the rows a board follows | `odu surface watch cache buckets` | the `buckets` resource | *(none)* | `name`, `public`, `retentionDays`, `keyName`, `publicKey`, `upstreamKeys[]`, `objects`, `bytes`, `created`, `url`, `lastPush`, `hits` — one row per bucket, published as it moves |
 | mint a cache token | `odu surface cache token_mint --input '{…}' --json` | `cache_token_mint` | `rootToken`, `bucket`, `scope` (`read`/`write`/`admin`), `expiresDays?`, `bucketGlob?` | `token` (plaintext, ONCE), `facts` |
 | list cache tokens | `odu surface cache token_list --input '{…}' --json` | `cache_token_list` | `rootToken`, `bucket?` | `tokens[]` — never a plaintext |
@@ -327,6 +331,7 @@ and a browser simply could not do them at all.
 | my sessions | `odu surface auth session_list --input '{}' --json` | `auth_session_list` | *(none)* | `sessions[]` (`id`, `created`, `lastSeen`, `expires`, `agent`) |
 | end a session | `odu surface auth session_end --input '{…}' --json` | `auth_session_end` | `id` | `id`, `ended` |
 | set a role | `odu auth grant <login> <owner\|admin\|member>` | `auth_user_grant` | `login`, `role`, `rootToken` (only when no session authorises it) | `login`, `role` |
+| who is in | `odu auth people -o json` | `auth_grant_list` | *(none)* — an owner's verb | `people[]` (`login`, `role`, `granted`, `lastSeen`) |
 
 - **`requestId` is an idempotency key on these three too.** A repeat with the
   same id replays the recorded answer and performs nothing — which is what

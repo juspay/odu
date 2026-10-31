@@ -14,10 +14,12 @@ export type {
   LogTail,
   NodesFrame,
   NodeStatus,
+  Pipeline,
   RunBoardState,
   RunNode,
   RunOutcome,
   RunRow,
   ServiceCell,
   StartReceipt,
+  VenueRow,
 } from "@odu/service-client/surface";

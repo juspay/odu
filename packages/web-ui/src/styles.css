@@ -996,7 +996,7 @@
     padding: 0;
     background: none;
     border: 0;
-    color: var(--accent);
+    color: var(--green-ink);
     font: inherit;
     cursor: pointer;
   }
@@ -1021,6 +1021,9 @@
   .field label { font: 600 0.8rem var(--mono); }
   .hint { margin: 0; color: var(--muted); font-size: 0.8rem; line-height: 1.5; }
 
+  /* THE BOARD'S ONE FIELD STYLE — every input, textarea and select on every
+     row's face wears it: a visible edge and fill in both schemes, a placeholder
+     lighter than typed text, and the global :focus-visible ring. */
   .input {
     font: 0.82rem var(--mono);
     padding: 0.4rem 0.55rem;
@@ -1031,7 +1034,8 @@
   }
 
   .input::placeholder { color: var(--quiet); }
-  .input:hover { border-color: var(--green); }
+  /* The selection hue, not a status one: green on a field read as "passed". */
+  .input:hover { border-color: var(--select); }
 
   .toggles {
     display: grid;
@@ -1365,7 +1369,7 @@
   }
 
   .buckets li + li,
-  .paths li + li { border-top: 1px solid var(--border); }
+  .paths li + li { border-top: 1px solid var(--line); }
 
   .bucket {
     display: flex;
@@ -1380,8 +1384,8 @@
     cursor: pointer;
   }
 
-  .bucket:hover { background: var(--surface); }
-  .bucket:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .bucket:hover { background: var(--panel-2); }
+  .bucket:focus-visible { outline: 2px solid var(--select); outline-offset: -2px; }
 
   .bucket-name {
     display: flex;
@@ -1405,24 +1409,19 @@
     margin: 0.5rem 0 1rem;
     padding: 0.75rem;
     overflow-x: auto;
-    background: var(--surface);
-    border: 1px solid var(--border);
+    background: var(--panel);
+    border: 1px solid var(--line);
     border-radius: 6px;
     font: 0.8rem/1.5 var(--mono);
   }
 
   .cache-paths { margin-top: 0.5rem; }
 
-  .cache .search input {
-    width: 100%;
-    padding: 0.45rem 0.6rem;
-    margin: 0.5rem 0;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    color: inherit;
-    font: inherit;
-  }
+  /* A field that fills its row — the search boxes, a bucket's name, a pin's
+     paths. The LOOK is `.input`'s, the board's one field style; this only
+     sizes it. */
+  .search { display: block; }
+  .search .input { width: 100%; margin: 0.25rem 0; }
 
   .paths li {
     display: flex;
@@ -1435,12 +1434,45 @@
      line, which is the one place this page allows a sideways scroll. */
   .paths .path { overflow-x: auto; white-space: nowrap; font-size: 0.8rem; }
 
+  /* A ROW'S ADMINISTRATION — the controls a role draws below what everyone
+     reads. One grammar for every section (a bucket's tokens, pin, GC and stats;
+     the people page; the runs' machines and maintenance): a small heading, the
+     fields, one button, and the answer under it. */
+  .cache-create,
+  .admin-section {
+    display: grid;
+    gap: 0.4rem;
+    margin: 0.5rem 0 1rem;
+    max-width: 40rem;
+  }
+  .admin-section h3 { margin: 0.5rem 0 0; font-size: 0.95rem; }
+  .bucket-admin { border-top: 1px solid var(--line); margin-top: 0.75rem; }
+  .cache-create button,
+  .admin-section > button { justify-self: start; }
+  .control-row { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+  .field-inline { display: flex; align-items: center; gap: 0.5rem; font: 0.85rem var(--mono); }
+  .tokens,
+  .people { list-style: none; margin: 0; padding: 0; }
+  .tokens li,
+  .people li {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.4rem 0;
+    border-top: 1px solid var(--line);
+  }
+  .stats { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 0.75rem; margin: 0; }
+  .stats dt { font: 600 0.8rem var(--mono); }
+  .stats dd { margin: 0; }
+
   .crumbs { margin: 0.25rem 0 0; }
   .crumbs .link {
     padding: 0;
     background: none;
     border: 0;
-    color: var(--accent);
+    color: var(--green-ink);
     font: inherit;
     cursor: pointer;
   }

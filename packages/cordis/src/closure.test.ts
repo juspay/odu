@@ -28,6 +28,13 @@ const DECLARED = Object.keys(MANIFEST.dependencies ?? {});
 /** Pinned: one install, and no `@odu/*` at all. */
 const EXPECTED_DEPENDENCIES = ["effect"];
 
+/** UI RUNTIMES, refused by name beside the `node:` rule. This package is the
+ *  contract every server-side row and the host load; a reactive UI helper is
+ *  not vocabulary they share, and putting one here put a UI runtime in every
+ *  server's manifest (review 2 of PR 2.5). A face's shared helpers live in
+ *  `@odu/face`. */
+const UI_RUNTIMES = new Set(["solid-js", "react", "react-dom", "preact", "vue", "svelte", "@solid-primitives"]);
+
 /** The `@kolu/*` sources hydrated from a Nix pin rather than installed. */
 const HYDRATED = new Set<string>([
   "@kolu/surface",
@@ -139,6 +146,16 @@ describe("@odu/cordis's import closure", () => {
           continue;
         }
         const pkg = packageOf(spec);
+        // The surface framework's Solid binding is a UI runtime too, under a
+        // hydrated package whose other doors this module may open.
+        if (
+          UI_RUNTIMES.has(pkg) ||
+          UI_RUNTIMES.has(pkg.split("/")[0] ?? pkg) ||
+          spec.endsWith("/solid")
+        ) {
+          offenders.push(`${rel}: ${spec} (a UI runtime — it belongs in @odu/face)`);
+          continue;
+        }
         if (declared.has(pkg) || HYDRATED.has(pkg)) continue;
         if (isTest && TEST_ONLY.has(pkg)) continue;
         offenders.push(`${rel}: ${spec}`);
@@ -148,6 +165,17 @@ describe("@odu/cordis's import closure", () => {
       offenders,
       `${offenders.join(", ")} is in neither this package's manifest nor the ` +
         "hydrated set.",
+    ).toEqual([]);
+  });
+
+  it("declares no UI runtime", () => {
+    const offenders = DECLARED.filter(
+      (pkg) => UI_RUNTIMES.has(pkg) || UI_RUNTIMES.has(pkg.split("/")[0] ?? pkg),
+    );
+    expect(
+      offenders,
+      `${offenders.join(", ")} is a UI runtime in the contract's manifest — every ` +
+        "server-side row would carry it. A face's shared helper belongs in @odu/face.",
     ).toEqual([]);
   });
 

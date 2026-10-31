@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@odu/cordis": "workspace:*",
+    "@odu/face": "workspace:*",
     "@odu/credentials": "workspace:*",
     "effect": "4.0.0",
     "solid-js": "^1.9.15"
