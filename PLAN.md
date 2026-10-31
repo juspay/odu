@@ -326,9 +326,9 @@ Ownership, by the Cordis rules (olai `docs/architecture/cordis.md`):
   back anonymous. Every later call on the old connection is refused and every
   open subscription is interrupted at the instant it ends. No revocation list
   is polled. The socket is closed by `SurfaceAppConnection.close(code?,
-  reason?)`, kolu #2330's addition, which the lease watch calls; the kolu this
-  release pins predates it, so the cut lands on the client's next load until the
-  re-pin.
+  reason?)`, kolu #2330's addition, which the lease watch calls; the pin carries
+  it, so an ended session cuts the connection rather than waiting for the
+  client's next load.
 - **Roles are each row's rule.** `ci` decides what a `member` may start,
   `cache` what an `admin` may mint; `@odu/cordis` carries only the `Role`
   type. The root token stays what it is, the operator's bootstrap, and gains

@@ -58,7 +58,6 @@ Feature: The door — sign in, and what a role may do
     And the CLI lists buckets with that token
     And there should be no page errors
 
-  @seam
   @signed-in:member
   Scenario: Signing out in one tab closes the other tab
     Given I open a second tab on the board

@@ -29,10 +29,7 @@ const cliHasFeatureArgs = process.argv
 // no `@skip` in this suite — a browser gate that can be marked away is the
 // finding this package exists to close — so the default expression exists only
 // so the knob has a shape a person can extend.
-//
-// `@seam` marks a scenario asserting a promise the current build cannot keep
-// yet; the tag is the marker, and removing it is how the promise lands.
-const tags = process.env.CUCUMBER_TAGS || "not @skip and not @seam";
+const tags = process.env.CUCUMBER_TAGS || "not @skip";
 
 // Scenario retry budget. OFF by default, and off in CI too unless somebody sets
 // it: a retry that hides a reproducible failure is worse than a red run, and

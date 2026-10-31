@@ -20,18 +20,16 @@
  *     a browser running the bundle). The MCP door's per-request admission rides
  *     an async context, because that adapter is Promise-shaped.
  *
- * ## The lease ends the CONNECTION (TODO: re-pin kolu)
+ * ## The lease ends the CONNECTION
  *
  * A session that ends must close the socket it was on — "the lease's end ends
- * what the lease admitted". `serveSurfaceApp` now hands the app a
+ * what the lease admitted". `serveSurfaceApp` hands the app a
  * `SurfaceAppConnection` whose `close(code?, reason?)` is that call (kolu
- * PR #2330); the lease's watch calls it, once, before releasing.
+ * PR #2330, pinned); the lease's watch calls it, once, before releasing.
  *
- * Until odu re-pins kolu, the field is ABSENT at runtime — the type here says
- * optional and the call is `connection.close?.(…)` — so nothing is closed yet
- * and the re-pin is the one line that turns it on. Everything else about an
- * ended lease is already true: every member is refused, and every open
- * subscription is interrupted at the instant it ends.
+ * The close is a NORMAL one, with a reason the peer can read, so the client
+ * redials, presents the dead cookie, and lands on the sign-in page. The client
+ * never learns from a stale socket: the server says so.
  *
  * What is deliberately NOT done instead: refusing the reserved heartbeat so the
  * client's watchdog cuts the socket. `heartbeat.ts` (kolu `@kolu/surface`)
@@ -93,11 +91,9 @@ export const IDENTITY_TAGS: Readonly<Record<string, true>> = {
 export const UPGRADE_HEADERS = ["cookie", "authorization"] as const;
 export type UpgradeHeader = (typeof UPGRADE_HEADERS)[number];
 
-/** A connection the host may close — `close()` is kolu #2330's. Optional because
- *  the pinned kolu predates it; see this module's header. */
-export type DoorConnection = SurfaceAppConnection<UpgradeHeader> & {
-  readonly close?: (code?: number, reason?: string) => void;
-};
+/** A connection the host may close — `close()` is kolu #2330's, and the pin
+ *  carries it; see this module's header. */
+export type DoorConnection = SurfaceAppConnection<UpgradeHeader>;
 
 /** A normal closure, with a reason the peer can read. Not kolu's stale-process
  *  code (4001), which RETIRES the link: a session that ended should make the
@@ -125,7 +121,7 @@ export function connectionLayer(
           const lease = broker.acquire(connection.headers);
           const watched = lease?.watch(() => {
             // THE LEASE'S END CLOSES WHAT IT ADMITTED — see the header.
-            connection.close?.(CLOSE_SESSION_ENDED, "the session ended");
+            connection.close(CLOSE_SESSION_ENDED, "the session ended");
           });
           return {
             admission: admissionFor(lease),
