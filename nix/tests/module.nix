@@ -205,9 +205,14 @@
     # AND THE CACHE PROTOCOL IS STILL PROXIED. A bucket nobody created answers
     # the DAEMON's empty 404 rather than nginx's HTML page, which is what says
     # the route reached odu rather than the vhost's own handler.
-    cache_code, cache_body = client.succeed(
+    # TRAILING newlines off, then split: `succeed` hands a command's output back
+    # with one on the end, so splitting first read the code as "" — an assertion
+    # that never ran until this test could reach it. Only the END is trimmed:
+    # the 404 body is EMPTY, so the code sits after the very first newline.
+    answer = client.succeed(
         "curl -sS -w '\\n%{http_code}' http://door.test/cache/main/nix-cache-info"
-    ).rsplit("\n", 1)
+    ).rstrip("\n")
+    cache_body, cache_code = answer.rsplit("\n", 1)
     assert cache_code.strip() == "404", cache_code
     assert "<html" not in cache_body.lower(), cache_body[:200]
   '';
