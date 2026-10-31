@@ -574,6 +574,13 @@ function BucketPage(
               <Show when={row().retentionDays > 0}>
                 <span>{row().retentionDays}d retention</span>
               </Show>
+              {/* The creation fact the upstream switch set, said back: a
+                  bucket that takes every path is a choice worth seeing. */}
+              <span>
+                {row().upstreamKeys.length === 0
+                  ? "no upstream filter"
+                  : `skips ${row().upstreamKeys.join(", ")}`}
+              </span>
             </p>
             {/* THE BLOCK A PERSON PASTES, from the same function `odu cache use`
                 prints it with — the page cannot know a home directory, so it
@@ -857,6 +864,9 @@ function BucketTokens(props: AdminProps & { name: string; now: number }): JSX.El
               <li>
                 <span>
                   <code>{token.id}</code> <span class="pill hue-grey">{token.scope}</span>
+                  <Show when={token.id === minted()?.id}>
+                    <span class="pill hue-amber">just minted</span>
+                  </Show>
                   <Show when={token.bucketGlob !== props.name}>
                     <span class="pill hue-grey">{token.bucketGlob}</span>
                   </Show>

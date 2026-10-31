@@ -359,7 +359,7 @@ function CatalogImport(props: { client: CiClient; call: Call }): JSX.Element {
     <section class="admin-section" aria-label="import">
       <h3>Import a checkout's records</h3>
       <p class="hint">Brings a checkout's legacy .ci records into the catalog (odu history import).</p>
-      <Field id="import-checkout" label="Checkout">
+      <Field id="import-checkout" label="Checkout to import">
         <TextInput id="import-checkout" value={checkout()} placeholder="/code/app" onValue={setCheckout} />
       </Field>
       <Check id="import-dry" checked={dryRun()} onChecked={setDryRun}>
@@ -446,7 +446,7 @@ function Protect(props: { client: CiClient; call: Call }): JSX.Element {
     <section class="admin-section" aria-label="protect">
       <h3>Require odu's checks on a branch</h3>
       <p class="hint">Sets the branch's required status checks to exactly the contexts odu posts (odu protect).</p>
-      <Field id="protect-checkout" label="Checkout">
+      <Field id="protect-checkout" label="Checkout to protect">
         <TextInput id="protect-checkout" value={checkout()} placeholder="/code/app" onValue={setCheckout} />
       </Field>
       <Field id="protect-branch" label="Branch" hint="Empty means the repository's default branch.">

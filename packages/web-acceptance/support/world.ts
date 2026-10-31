@@ -98,6 +98,11 @@ export class OduWorld extends World {
    *  what a filter scenario narrows between. */
   cachePaths?: string[];
   cachePathNames?: string[];
+  /** A bucket token minted on a bucket page — its ONE showing — and its id. */
+  bucketToken?: string;
+  bucketTokenId?: string;
+  /** A login the people page granted a role in this scenario. */
+  grantedLogin?: string;
 
   /** Checkouts this scenario created and must remove. A SHARED fixture is not
    *  in here — it belongs to the worker, not the scenario. */

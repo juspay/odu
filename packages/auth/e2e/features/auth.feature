@@ -70,3 +70,33 @@ Feature: The door — sign in, and what a role may do
     When I sign out
     Then the second tab meets the sign-in page
     And there should be no page errors
+
+  # THE PEOPLE PAGE: who is in, and a role granted or changed without a
+  # terminal. Drawn for an owner by the shell, refused by the row for anyone
+  # else — so the admin's half asserts the control is not drawn, and the CLI
+  # refusal is the row's half.
+
+  @signed-in:owner
+  Scenario: An owner sees who is in, grants a role and changes it
+    When I open the people page
+    Then the people list shows "odu-e2e" as "owner"
+    When I grant a new login the role "admin"
+    Then the people page says "is now admin"
+    And the people list shows the new login as "admin"
+    When I change the new login's role to "member"
+    Then the people list shows the new login as "member"
+    And there should be no page errors
+
+  @signed-in:owner
+  Scenario: An empty login is refused on click, in words
+    When I open the people page
+    And I press "Grant"
+    Then the people page says "a grant needs a GitHub login"
+    And there should be no page errors
+
+  @signed-in:admin
+  Scenario: An admin is offered no people page, and the row refuses the list
+    Given I open the board
+    Then the header offers no People control
+    And the CLI refuses the people list as not permitted
+    And there should be no page errors
