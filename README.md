@@ -2,7 +2,7 @@
 
 Live CI for `just` pipelines. Watch every run in a browser, attach from a terminal, or let an agent diagnose failures while other jobs continue.
 
-[Website](https://juspay.github.io/odu/) · [Documentation](https://juspay.github.io/odu/docs/) · [Agent skill](skills/odu/SKILL.md)
+[Website](https://odu.kolu.dev/) · [Documentation](https://odu.kolu.dev/docs/) · [Agent skill](skills/odu/SKILL.md)
 
 ## Start
 
@@ -74,7 +74,7 @@ ODU_CACHE_TOKEN=... odu cache push main ./result
 | `odu cache stats` | Storage and reads |
 
 `nix copy --to http://127.0.0.1:18440/cache/main ./result` works with no odu code on
-the client. The [cache page](https://juspay.github.io/odu/cache/) has the
+the client. The [cache page](https://odu.kolu.dev/docs/cache/) has the
 protocol and the storage model.
 
 ## Agents and remote access
@@ -87,7 +87,7 @@ nix run --accept-flake-config github:juspay/odu -- mcp
 
 MCP, `odu surface`, and the browser use the same local service. The agent loop is `run_start` → `run_wait` → `log_read` → `run_retry` or a new-SHA `run_start`. `run_list` finds run ids by checkout, commit and seq in one call.
 
-The listener stays on loopback. An SSH forward, a Tailscale name or a proxy that keeps the Host header works with no configuration: the service answers to whatever name it is reached by. Anyone who can reach that name can control CI. Only a proxy that rewrites Host needs its browser origin admitted with `ODU_WEB_ALLOWED_ORIGINS`. See the [access guide](https://juspay.github.io/odu/docs/#access-through-tailscale-or-a-proxy).
+The listener stays on loopback. An SSH forward, a Tailscale name or a proxy that keeps the Host header works with no configuration: the service answers to whatever name it is reached by. Anyone who can reach that name can control CI. Only a proxy that rewrites Host needs its browser origin admitted with `ODU_WEB_ALLOWED_ORIGINS`. See the [access guide](https://odu.kolu.dev/docs/#access-through-tailscale-or-a-proxy).
 
 ## Develop
 
