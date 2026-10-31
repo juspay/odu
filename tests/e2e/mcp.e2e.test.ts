@@ -558,25 +558,40 @@ describe("odu mcp — the bridge redials", () => {
         world.adopt(cell.identity.pid);
         daemonHome = cell.identity.home;
         killDaemon(cell.identity.pid);
+        // THE PORT, FIRST. A bridge that dials while the dying daemon still
+        // holds the socket fails a dial it would have won a moment later, and
+        // the test would blame the redial for the kill's timing.
+        await until(
+          "the killed daemon's port to close",
+          async () => ((await tcpListening(world.origin)) ? null : true),
+          30_000,
+        );
 
         // THE SECOND CALL IS THE PROPERTY. A bounded poll rather than one call,
         // because the framework drops the dead connection and redials on its own
-        // schedule; a bridge that hands the redial a CLOSED connection never
-        // answers, so this still fails, with the sentence naming what it waited
-        // on.
+        // schedule. Every failure is REMEMBERED and named in the deadline's
+        // sentence: a red that says only "did not happen" hides which dial
+        // failed and why, which is the one thing the next reader needs.
+        let last = "no answer at all";
         const answered = await until(
           "a run_list answered after the daemon was killed",
           async () => {
             try {
               const again = await client.callTool({ name: "run_list", arguments: {} });
-              if (again.isError === true) return null;
+              if (again.isError === true) {
+                last = String((again.content as { text?: string }[] | undefined)?.[0]?.text ?? "");
+                return null;
+              }
               return JSON.parse(payload(again, "run_list"));
-            } catch {
+            } catch (err) {
+              last = String(err);
               return null;
             }
           },
           60_000,
-        );
+        ).catch((err: unknown) => {
+          throw new Error(`${String(err)}\nlast answer: ${last}`);
+        });
         expect(answered).toHaveProperty("rows");
 
         // The replacement is the daemon this process started, so teardown must
