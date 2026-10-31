@@ -243,6 +243,29 @@ describe("odu mcp inherits the credential", () => {
     }
   });
 
+  it("advertises the door's seven verbs beside the shared ones", async () => {
+    // A DAEMON WITH A DOOR composes this row and the `/mcp` door advertises its
+    // expose map beside the runs' and the cache's. The bridge ASKS the daemon
+    // (`/_odu/door`) before it composes, so a loopback daemon's bridge does not
+    // offer these seven — which is why this assertion lives here, at the door,
+    // and not in the loopback suites.
+    const client = await bridge({ ...world.env, ODU_TOKEN: token });
+    try {
+      const names = (await client.listTools()).tools.map((tool) => tool.name);
+      expect(names.filter((name) => name.startsWith("auth_")).sort()).toEqual([
+        "auth_session_end",
+        "auth_session_list",
+        "auth_token_create",
+        "auth_token_list",
+        "auth_token_revoke",
+        "auth_user_grant",
+        "auth_user_whoami",
+      ]);
+    } finally {
+      await client.close();
+    }
+  });
+
   it("refuses a tool call when it is not", async () => {
     const client = await bridge(world.env);
     try {
