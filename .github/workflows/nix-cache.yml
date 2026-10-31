@@ -9,9 +9,9 @@
 # Two jobs, because they are two halves of one question with one ordering:
 # `build-and-push` warms the input-addressed cache a lane host substitutes from
 # (odu's own, with `odu cache push`), and `publish-closures` then rewrites from
-# that same tree. The publish job still pushes through kolu's attic-shaped
-# action: switching it to this cache is kolu's generic push target, landing in
-# parallel. Until then only `build-and-push` is odu's own. It must be its OWN
+# that same tree and pushes to the SAME bucket: the agent source bakes
+# `pusher = { kind = "odu"; bucket = "kolu"; }` (kolu#2334), so the action runs
+# `odu cache push` under `ODU_CACHE_TOKEN` rather than attic. It must be its OWN
 # job: the action installs the Nix it rewrites with (2.34.8 — see its
 # `action.yml`), which has to be the job's only Nix.
 #
@@ -118,8 +118,8 @@ jobs:
           # The same tree `build-and-push` warmed — see its `ref:` note.
           ref: ${{ github.event.pull_request.head.sha }}
 
-      # attic, for the action's push, from the same pinned nixpkgs the build
-      # job installs it from — one pin, read the same way.
+      # The action still takes a pinned nixpkgs for the client it may install;
+      # the declaration's `pusher` chooses which client pushes.
       - id: inputs
         run: |
           echo "nixpkgs=$(jq -r .pins.nixpkgs.url npins/sources.json)" >> "$GITHUB_OUTPUT"
@@ -131,11 +131,10 @@ jobs:
       # whole module graph and exits 0 without needing stdin, which `--stdio`
       # would (it serves until the pipe closes).
       #
-      # The pin is kolu's merged head, whose `.gitattributes` keeps
-      # `.github/actions` in the archive a remote `uses:` is downloaded from —
-      # before that it was export-ignored, and this step died at job setup with
-      # "Can't find 'action.yml'".
-      - uses: juspay/kolu/.github/actions/publish-closure@5b14790a4eb9c383dfd7fa247bbff1af60f9eb92
+      # The pin is kolu's merged head, which carries the `pusher` field the
+      # declaration now bakes (kolu#2334): the action pushes with
+      # `odu cache push kolu` when the declaration says `{ kind = "odu"; … }`.
+      - uses: juspay/kolu/.github/actions/publish-closure@fd831bb1c03db83dccebea90edff3d1fecf386e8
         with:
           source: .#agent-flake-source
           installables: odu-runner
@@ -143,4 +142,4 @@ jobs:
           smoke: |
             odu-runner=bin/odu-runner --help
           attic-nixpkgs: ${{ steps.inputs.outputs.nixpkgs }}
-          attic-token: ${{ secrets.ATTIC_TOKEN }}
+          odu-cache-token: ${{ secrets.ODU_CACHE_TOKEN }}
