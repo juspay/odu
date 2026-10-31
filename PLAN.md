@@ -520,15 +520,38 @@ What lands:
 - **The push says what the server is doing.** On the pod `odu cache push`
   printed "118 paths in the closure, 6 missing, 112 already there or upstream"
   and then hung, silent: the server deferred each import at 202 for want of
-  upstream references (the chroot-store limit the bullet above removes), and
-  the client waited on a state the person cannot affect and was never told
-  about. The push now (a) prints one line per path as it uploads and as the
-  server answers — stored, deferred (waiting for N upstream references), or
-  refused (why); (b) REPORTS a deferral and returns, pointing at the bucket
-  page where the pending paths and their reason are listed, never blocking on
-  the server's pending state (`--wait` opts in); (c) carries the same facts in
-  `-o json` for CI. The bucket page shows pending paths with that reason — the
-  row's fact, the same one the CLI prints.
+  upstream references, and the client waited on a state the person cannot
+  affect and was never told about. What the other pushers do:
+  - **attic:** the client computes the closure, drops every path signed by a
+    key in the cache's `upstream_cache_key_names` (default
+    `cache.nixos.org-1`), asks the server which of the rest are missing and
+    uploads only those. One preamble — `⚙️ Pushing N paths to <cache> on
+    <server> (A already cached, U in upstream)...` — then one line per path,
+    `✅ <path> (<speed>)` or `❌ <path>: <error>`. A failed path does not stop
+    the run; the exit is non-zero if any failed. The SERVER STORES EVERY
+    NARINFO AS IT ARRIVES and never holds a path for its references.
+  - **cachix:** a bulk narinfo query for what the cache already has, `Pushing
+    N paths (M are already present) using zstd to cache X`, one line or bar
+    per path, `All done.` No upstream filter at all (cache.nixos.org paths are
+    pushed unless the user filters them); the server stores as it arrives.
+  - **`nix copy`:** dependencies first; the destination stores as it arrives.
+
+  The conclusion: a Nix binary cache is a flat set of narinfos, and a missing
+  reference is the READER's substituter chain's problem. So a reference signed
+  by one of the bucket's upstream keys counts as SATISFIED — the reader gets it
+  from cache.nixos.org, which is what "upstream" declares — and is never held.
+  Today the push skips 112 upstream paths and the server then holds 4 paths
+  for those same references: that is the contradiction the first owner hit.
+  Holding remains only for a reference that is neither in the bucket nor
+  upstream-signed, and even then the push REPORTS it and returns. The push,
+  in attic's voice: (a) one preamble, then one line per path as it uploads
+  and as the server answers — stored, deferred (waiting for N references that
+  are neither here nor upstream), or refused (why); (b) a deferral is reported
+  and the command returns, pointing at the bucket page where the pending
+  paths and their reason are listed — it never blocks on the server's pending
+  state (`--wait` opts in); (c) `-o json` carries the same facts for CI. The
+  bucket page shows pending paths with that reason — the row's fact, the same
+  one the CLI prints.
 - The dogfood switch (F9, F11): `flake.nix` `nixConfig` names the pod's
   bucket; `nix-cache.yml` substitutes from it and pushes with `odu cache push`
   under an `ODU_CACHE_TOKEN` secret, its publish job uses the new kolu push
