@@ -87,6 +87,15 @@ for `owner`. Once the first owner exists it is refused, an owner's session
 grants everything after that, and it is never a principal — it cannot start a
 run or read a bucket.
 
+## Who is in, and what is never pruned
+
+`grant.list` (the People page, `odu auth people`) folds the grants with the
+`person` table — every login that has ever signed in, written at sign-in and
+touched on each session or token use, and never deleted by sign-out or expiry.
+**Nothing prunes it yet**: a login removed from `ODU_GITHUB_ALLOW` can no longer
+sign in, but stays on the People page with its last-seen age. The row also
+refuses a grant that would leave the daemon with no owner.
+
 ## Docs
 
 - The door from the operator's side: [`website/src/content/docs.md`](../../website/src/content/docs.md) ("Server mode")

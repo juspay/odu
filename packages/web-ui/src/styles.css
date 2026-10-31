@@ -1034,7 +1034,8 @@
   }
 
   .input::placeholder { color: var(--quiet); }
-  .input:hover { border-color: var(--green); }
+  /* The selection hue, not a status one: green on a field read as "passed". */
+  .input:hover { border-color: var(--select); }
 
   .toggles {
     display: grid;

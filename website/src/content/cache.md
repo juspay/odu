@@ -82,7 +82,7 @@ export ODU_CACHE_TOKEN=<your-write-token>
 odu cache push https://odu.example.com/cache/main ./result
 ```
 
-A GitHub Actions step comes with PR 3.
+A ready-made GitHub Actions step is planned.
 
 `push` asks the bucket which paths it is missing, then uploads only those, with retries. It talks to the cache's HTTP API directly, so it runs on the machine that holds the paths.
 
