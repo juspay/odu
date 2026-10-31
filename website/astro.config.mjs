@@ -1,8 +1,7 @@
 import { defineConfig } from "astro/config";
 
 export default defineConfig({
-  site: "https://juspay.github.io",
-  base: "/odu",
+  site: "https://odu.kolu.dev",
   trailingSlash: "always",
   vite: {
     server: { allowedHosts: true },
