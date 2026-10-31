@@ -533,6 +533,27 @@ What lands:
   anonymous on a public bucket, so a domain is a stable name for a bucket, not
   read access control; reading a bucket with a token (a private bucket) is its
   own item, listed with teams in PR 4.
+
+  **On the pod it is Cloudflare's.** `cache.kolu.dev` points at the `kolu`
+  bucket, and the record is made with Cloudflare's `cf` CLI
+  (https://developers.cloudflare.com/cf/ — DNS and zone settings from a
+  command line, agent-usable, API-token auth in CI), so the module emits
+  nothing for it. Two shapes are possible, and the fact that separates them is
+  where TLS and `Host` are decided:
+
+  - **Cloudflare proxies the name to the pod's public hostname** (the Funnel
+    name, `odu-k3s.rooster-blues.ts.net`). Cloudflare terminates TLS for
+    `cache.kolu.dev`; the origin presents a certificate for the `.ts.net` name
+    only and Funnel routes by that name, so an origin rule rewrites the origin
+    `Host` — and odu must then read the ORIGINAL name (`X-Forwarded-Host`, or
+    Cloudflare's header) to answer by bucket domain. The `Host` half of this
+    design reads the forwarded name, not only `Host`.
+  - **A `cloudflared` tunnel beside the pod**, pointed at the odu Service: no
+    Funnel in the path, `Host` arrives as `cache.kolu.dev`, no rewrite — one
+    more process on the cluster.
+
+  The implementor picks, with evidence, when PR 3 is built; the plan records
+  the fork and the fact that decides it.
 - **Evidence:** a CI run of odu whose lanes substitute odu's runner from the
   pod, and the workflow's push landing in the bucket.
 
