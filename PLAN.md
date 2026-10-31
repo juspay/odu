@@ -483,6 +483,15 @@ What lands:
   `ATTIC_TOKEN` job, red on every commit today, is gone.
 - The module's nginx gains a `proxy_cache` on `/cache/*/nar/*`; the pod has no
   nginx and gets its read cache in PR 11.
+- **A domain per bucket.** A bucket may carry a `domain` (`cache.kolu.dev` for
+  the `kolu` bucket), the way every public cache a person has met today is
+  named: the cache row answers by `Host` as well as by `/cache/<name>`, the
+  bucket's advertised substituter URL and the board's netrc block use that
+  domain when it is set, and the module emits one nginx vhost — with its
+  certificate — per bucket domain. What it does NOT change: a read stays
+  anonymous on a public bucket, so a domain is a stable name for a bucket, not
+  read access control; reading a bucket with a token (a private bucket) is its
+  own item, listed with teams in PR 4.
 - **Evidence:** a CI run of odu whose lanes substitute odu's runner from the
   pod, and the workflow's push landing in the bucket.
 
