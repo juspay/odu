@@ -536,14 +536,18 @@ What lands:
     pushed unless the user filters them); the server stores as it arrives.
   - **`nix copy`:** dependencies first; the destination stores as it arrives.
 
-  The conclusion: a Nix binary cache is a flat set of narinfos, and a missing
-  reference is the READER's substituter chain's problem. So a reference signed
-  by one of the bucket's upstream keys counts as SATISFIED — the reader gets it
-  from cache.nixos.org, which is what "upstream" declares — and is never held.
-  Today the push skips 112 upstream paths and the server then holds 4 paths
-  for those same references: that is the contradiction the first owner hit.
-  Holding remains only for a reference that is neither in the bucket nor
-  upstream-signed, and even then the push REPORTS it and returns. The push,
+  The conclusion: a reference signed by one of the bucket's upstream keys
+  counts as SATISFIED, and it is satisfied BY THE SERVER SUBSTITUTING IT AT
+  IMPORT. Unlike attic's, odu's blobs are the server's own Nix store, which
+  will not import a path whose references are missing — that refusal is the
+  202 today. So this PR's first bullet (the server substitutes upstream
+  references into its own store) stays, and is what makes "satisfied" true:
+  the push skips an upstream path, and the server fetches it from upstream
+  rather than holding the referrer. Today the push skips 112 upstream paths
+  and the server then holds 4 paths for those same references — the
+  contradiction the first owner hit. Holding remains only for a reference
+  that is neither in the bucket nor upstream-signed, and even then the push
+  REPORTS it and returns. The push,
   in attic's voice: (a) one preamble, then one line per path as it uploads
   and as the server answers — stored, deferred (waiting for N references that
   are neither here nor upstream), or refused (why); (b) a deferral is reported
