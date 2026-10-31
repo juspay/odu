@@ -408,6 +408,18 @@ What lands:
   controls the role cannot use. With no `auth` row the header is as today.
 - **The fence** gains a third row and the broker key's single-owner claim is
   tested: a second resolver is refused and installs nothing.
+- **A row owns its promises.** As in olai (`packages/tests/cucumber.js`: "a
+  feature is a promise, and a promise has an owner"), each row keeps its own
+  `e2e/`: the cache's five browser scenarios and twelve CLI tests move from
+  `packages/web-acceptance` and `tests/e2e` to `packages/cache/e2e`, the run
+  views' to `packages/ci/e2e`, and `auth` arrives with its own; the two
+  central places keep the harness (world, hooks, the service under test) and
+  the shell's own features. One cucumber and one `bun test` still run it all.
+  Scenarios declare their world by tag (`@signed-in:admin`, `@anonymous`, no
+  tag means loopback), and the new promises are tested end to end: sign-in
+  through a stubbed GitHub, an anonymous board meeting the sign-in page, a
+  member refused a cache verb, a token minted on the profile page driving
+  `odu --origin`, logout closing an open tab's socket, revocation and expiry.
 - **Deployment, both shapes.** The module gains `services.odu.github.*` and
   exposes the board, websocket and `/mcp` through nginx. For the pod,
   nixos-config switches the ingress from `tailscale serve` to Funnel and
