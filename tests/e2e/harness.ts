@@ -149,6 +149,8 @@ export const PORT_SLOT = {
    *  OAuth flow is pointed at. */
   authCli: 17,
   authStub: 18,
+  /** `mcp.e2e.test.ts` — a daemon killed under a live bridge, redialled. */
+  bridgeRedial: 19,
 } as const;
 
 /** The port for one named slot in THIS suite's block. */

@@ -49,11 +49,6 @@ export async function serveServiceMcpOverStdio(opts: {
   transport?: Transport;
 }): Promise<{ served: ServedSurfaceMcp; close: () => Promise<void> }> {
   const origin = opts.origin ?? serviceOrigin();
-  // ONE dial, held for the adapter's life, and re-made by the adapter's own
-  // retry after a drop — `client()` is re-invoked, so a service that was
-  // upgraded underneath this bridge is picked up on the next call rather than
-  // leaving the bridge talking to a corpse.
-  //
   // And it BOOTSTRAPS. An MCP host launches this bridge on a machine where
   // nothing has ever run odu — that is the ordinary first contact, not an edge
   // case — and a bridge that could only report "nothing is serving" would put
@@ -64,6 +59,7 @@ export async function serveServiceMcpOverStdio(opts: {
   //
   // It never recovers a failed dial by executing locally. There is nothing here
   // to execute with: this face holds no run authority at all.
+  //
   // EVERY DIAL OWNS ITS CONNECTION. `client()` is the adapter's REDIAL FACTORY:
   // a dropped transport disposes the connection and calls it again, the resource
   // pusher dials its own, and `reroster` re-invokes it too. A cached connection
@@ -97,14 +93,24 @@ export async function serveServiceMcpOverStdio(opts: {
       if (answer === null || answer === door) return;
       // ONLY A ROSTER THAT MOVES IS MOVED. `null → false` changes the ANSWER
       // and not the tools, and a reroster for it would invite the framework's
-      // one-generation rule for nothing.
-      const moves = Object.keys(siblingsFor(answer)).length !== Object.keys(siblingsFor(door)).length;
+      // one-generation rule for nothing. The comparison is the KEY SETS, not
+      // their sizes: the day a second door-dependent row swaps one sibling for
+      // another, two keys with the same count is still a move.
+      const before = Object.keys(siblingsFor(door)).sort().join("\n");
+      const after = Object.keys(siblingsFor(answer)).sort().join("\n");
       door = answer;
-      if (!moves) return;
+      if (before === after) return;
       // The move, not a second serve: the adapter re-invokes `client()` for the
       // new roster, and this call answers with a fresh connection like any
-      // other.
-      await served?.reroster(surfacesOf(siblingsFor(door)));
+      // other. The caller is a `void`, so a refusal here is LOGGED rather than
+      // left to become an unhandled rejection in a process whose only job is to
+      // stay alive: `reroster` re-makes every refusal the boot composition
+      // owes, and one of those can reject.
+      try {
+        await served?.reroster(surfacesOf(siblingsFor(door)));
+      } catch (err) {
+        process.stderr.write(`odu mcp: could not move the roster: ${String(err)}\n`);
+      }
     } finally {
       asking = false;
     }
