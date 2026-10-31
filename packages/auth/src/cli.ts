@@ -57,7 +57,10 @@ export const AUTH_USAGE = `usage: odu auth <login|whoami|token|grant> [args]
 login <origin> [--token T]    save this machine's personal access token for an
                               origin, in ~/.config/odu/auth/credentials (0600).
                               Reads the token from stdin when --token is absent
-whoami [-o json]              who this machine is, as this daemon sees it
+whoami [-o json]              who this machine is, as this daemon sees it.
+                              Prints the answer and exits 1 when it is
+                              \`anonymous\`: exit 0 would read as "you have a
+                              session"
 token create <name>           mint a personal access token. Shown ONCE
 token list [-o json]          the tokens this machine's login owns
 token revoke <id>             revoke one token, ending its connections at once
@@ -65,6 +68,9 @@ grant <login> <owner|admin|member>
                               set a person's role. An owner's verb — or the
                               operator's root token ($ODU_ROOT_TOKEN) on a
                               daemon with no owner yet, which is its one job
+
+These verbs exist ONLY on a daemon with a door (\`ODU_GITHUB_*\` configured); with
+none there is no auth row to call, and every caller is the daemon's local owner.
 
 --origin URL names the server (default $ODU_WEB_ORIGIN or http://127.0.0.1:18440).
 A token for that origin, or $ODU_TOKEN, is sent as \\\`Authorization: Bearer\\\` on

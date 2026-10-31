@@ -320,7 +320,7 @@ and a browser simply could not do them at all.
 | pin a closure | `odu surface cache pin_create --input '{…}' --json` | `cache_pin_create` | `rootToken`, `bucket`, `name`, `paths[]` | `bucket`, `name`, `rootPaths[]`, `created` |
 | reclaim cache space | `odu surface cache gc_run --input '{…}' --json` | `cache_gc_run` | `rootToken`, `bucket?` | `buckets[]` (`evicted`, `kept`, `bytes`), `evicted`, `kept`, `bytes` |
 | cache sizes and reads | `odu surface cache stats_read --input '{…}' --json` | `cache_stats_read` | `rootToken` | `buckets[]`, `objects`, `bytes`, `hits`, `lastAccessed` |
-| who am I | `odu auth whoami -o json` | `auth_user_whoami` | *(none)* | `who` — a `user` with a `login` and `role`, `local` on a daemon with no door, or `anonymous` |
+| who am I | `odu auth whoami -o json` | `auth_user_whoami` | *(none)* | `who` — a `user` with a `login` and `role`, or `anonymous`. Exits **1** when the answer is `anonymous`, even though the answer is printed: exit 0 would read as "you have a session" |
 | mint a personal token | `odu surface auth token_create --input '{…}' --json` | `auth_token_create` | `name` | `token` (plaintext, ONCE), `facts` |
 | my tokens | `odu auth token list -o json` | `auth_token_list` | *(none)* | `tokens[]` — never a plaintext |
 | revoke a token | `odu auth token revoke <id>` | `auth_token_revoke` | `id` | `id`, `revoked` |
@@ -367,9 +367,11 @@ told because two things change for an agent.
   daemon with a door the ROOT TOKEN is not an administrator — it bootstraps the
   first owner (`odu auth grant <login> owner`) and nothing else.
 
-On a local daemon with no door (no `ODU_GITHUB_*`), `auth_user_whoami` answers
-`{ "kind": "local" }` and nothing is refused — that is the loopback shape, and
-it is unchanged.
+**The `auth_*` verbs exist only on a daemon with a door.** With no
+`ODU_GITHUB_*` configured the auth row is not mounted: `odu auth whoami` has no
+verb to call, and the MCP bridge does not advertise the seven. That is the
+loopback shape and it is unchanged — the daemon is nobody's to authenticate,
+every caller is its local owner, and the runs answer without a credential.
 
 Reading state without a verb — the same three resources on both faces:
 

@@ -238,10 +238,12 @@ export const AUTH_ANONYMOUS_TAGS: Readonly<Record<string, true>> = {
 
 /** What an agent is told about this row. */
 export const ODU_AUTH_MCP_INSTRUCTIONS = [
-  "The auth verbs are this daemon's door, as their own row. `auth_user_whoami`",
-  "answers who this connection is — a `local` owner when the daemon has no",
-  "sign-in configured, a `user` with a role, or `anonymous` when the connection",
-  "has no session (that is a page before it signs in, not an error).",
+  "The auth verbs are this daemon's door, as their own row — they exist ONLY",
+  "on a daemon with a door, which is exactly the daemon that serves them.",
+  "`auth_user_whoami` answers who this connection is: a `user` with a role, or",
+  "`anonymous` when the connection has no session (that is a page before it",
+  "signs in, not an error). `odu auth whoami` exits 1 on `anonymous` — the",
+  "answer is printed, and the exit code says whether it is a person.",
   "`auth_token_create` mints a personal access token and answers it ONCE (only",
   "its hash is kept); `odu auth login <origin>` stores it, and every face then",
   "reaches this server with `--origin`. `auth_token_revoke` and",
