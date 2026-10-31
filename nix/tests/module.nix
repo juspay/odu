@@ -50,7 +50,10 @@
     # name in sorted order — `client`, `server`, `zdoor` — and the script
     # asserts that below, so a machine added to this file breaks the assertion
     # instead of the `nix copy` four steps later.
-    networking.extraHosts = "192.168.1.2 cache.test 192.168.1.3 door.test";
+    # TWO LINES, not one: `/etc/hosts` is `IP name [aliases…]`, so the one-line
+    # form made `door.test` an ALIAS of 192.168.1.2 — the loopback machine —
+    # and every door assertion then read nginx's 404 from the wrong vhost.
+    networking.extraHosts = "192.168.1.2 cache.test\n192.168.1.3 door.test";
     nix.settings = {
       experimental-features = [ "nix-command" "flakes" ];
       # No substituters: the point is that the only source is the cache under
@@ -101,6 +104,10 @@
     server_ip = server.succeed("hostname -I | cut -d' ' -f1").strip()
     assert server_ip == "192.168.1.2", f"the driver moved the server to {server_ip}; fix nodes.client's extraHosts"
     assert "cache.test" in client.succeed("cat /etc/hosts")
+    # The door is a DIFFERENT machine, and the name has to say so: `extraHosts`
+    # is one `IP name [aliases…]` per line, and a shared line made door.test an
+    # alias of the loopback node — which answered 404 from the wrong vhost.
+    assert client.succeed("getent hosts door.test").split()[0] == "192.168.1.3"
 
     # ── the daemon is the service user, and its state is nobody else's ──────
     server.succeed("test \"$(systemctl show -p User --value odu-web)\" = odu")
