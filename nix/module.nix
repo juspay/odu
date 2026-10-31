@@ -70,6 +70,34 @@ let
     extraConfig = proxyRules;
   };
 
+  # THE READ CACHE IS FOR NARS, and only for NARs. A narinfo is a few hundred
+  # bytes and its hit count is a fact the bucket publishes, so it must reach
+  # odu; a NAR is the gigabytes, and a second fetch of the same one is the
+  # commonest thing a build farm does. `$host$request_uri` keys the two forms
+  # of the same object apart: a bucket domain and the path form are different
+  # names for the same bytes, and a cache that merged them would answer one
+  # name with the other's header.
+  narLocation = {
+    proxyPass = daemonUrl;
+    # THE SAME STREAMING RULES, EXCEPT BUFFERING: `proxyRules` turns response
+    # buffering off so odu streams a NAR straight to the socket, and a cached
+    # NAR is the opposite trade — one copy on disk that every later reader
+    # shares. `proxy_buffering on` is therefore stated here instead, not added
+    # to a rules string that already says off (nginx refuses the duplicate).
+    extraConfig = ''
+      proxy_pass_request_headers on;
+      client_max_body_size 0;
+      proxy_request_buffering off;
+      proxy_read_timeout 3600s;
+      proxy_buffering on;
+      proxy_cache odu_nar;
+      proxy_cache_lock on;
+      proxy_cache_valid 200 1h;
+      proxy_cache_key "$host$request_uri";
+      add_header X-Cache-Status $upstream_cache_status always;
+    '';
+  };
+
   # THE NIX PROTOCOL'S WHOLE FOOTPRINT AT A BUCKET'S OWN NAME. A bucket domain
   # answers at `/`, so the vhost proxies exactly the paths the cache claims —
   # and NOT `/`, which is the board's and stays on `cache.domain`.
@@ -463,6 +491,12 @@ in
     services.nginx = mkIf (cfg.cache.domain != null || cfg.cache.bucketDomains != [ ]) {
       enable = true;
       recommendedProxySettings = true;
+      # The zone lives here rather than in a vhost: both vhost shapes read from
+      # it, and one declaration is one place for its size to be argued about.
+      appendHttpConfig = ''
+        proxy_cache_path /var/cache/nginx/odu-nar levels=1:2 keys_zone=odu_nar:10m
+          max_size=10g inactive=7d use_temp_path=off;
+      '';
       virtualHosts =
         lib.optionalAttrs (cfg.cache.domain != null) {
           ${cfg.cache.domain} = {
@@ -490,6 +524,10 @@ in
                 };
                 "/" = proxyLocation;
               } else {
+                # The NAR paths are regexes so they win over the `/cache/`
+                # prefix beside them; everything else under `/cache/` is a
+                # narinfo or the push API, which must not be cached.
+                "~ ^/cache/[a-z0-9-]+/nar/" = narLocation;
                 "/cache/" = proxyLocation;
                 "/_odu/v1/" = proxyLocation;
                 "/" = { return = "404"; };
@@ -503,7 +541,9 @@ in
           map (domain: lib.nameValuePair domain {
             enableACME = cfg.cache.enableACME;
             forceSSL = cfg.cache.enableACME;
-            locations = cacheLocations;
+            locations = cacheLocations // {
+              "~ ^/nar/" = narLocation;
+            };
           }) cfg.cache.bucketDomains
         );
     };

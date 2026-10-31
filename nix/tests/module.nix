@@ -155,6 +155,23 @@
         f" ODU_CACHE_TOKEN={token} {odu} cache push main {path}"
     )
 
+    # ── THE READ CACHE WAS EARNED, not assumed ─────────────────────────────
+    # The proxy caches a NAR and NOT its narinfo: the second GET of the same
+    # object is `HIT`, which is the whole point of the module's `proxy_cache`.
+    nar_file = client.succeed(
+        "curl -sS http://cache.test/cache/main/%s.narinfo"
+        " | sed -n 's|^URL: nar/||p'"
+        % path.split("/")[-1][:32]
+    ).strip()
+    first = client.succeed(
+        f"curl -sS -D - -o /dev/null http://cache.test/cache/main/nar/{nar_file}"
+    )
+    assert "X-Cache-Status: MISS" in first, first
+    second = client.succeed(
+        f"curl -sS -D - -o /dev/null http://cache.test/cache/main/nar/{nar_file}"
+    )
+    assert "X-Cache-Status: HIT" in second, second
+
     # ── A BUCKET'S OWN NAME ─────────────────────────────────────────────────
     # The name is a fact of the bucket; nginx needs a vhost for it (eval time),
     # and the daemon answers by `Host` — no rewrite, no bucket in the path.
