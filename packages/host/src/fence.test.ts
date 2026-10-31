@@ -85,7 +85,7 @@ const declaration = {
   collisions: {
     cache: {
       "packages/cli/src/serviceCli.ts": 4,
-      "packages/cli/src/serviceMcp.ts": 5,
+      "packages/cli/src/serviceMcp.ts": 7,
       "packages/cli/src/wire.ts": 2,
       "packages/execution/src/coordinator/spawn.ts": 1,
       "packages/execution/src/runner/workspace.ts": 22,

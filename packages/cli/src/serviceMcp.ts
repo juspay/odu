@@ -19,6 +19,7 @@ import {
   type SurfaceClientCallable,
 } from "@kolu/surface-mcp";
 import { AUTH_AGENT, AUTH_KEY } from "@odu/auth/surface";
+import { SERVICE_DOOR_PATH } from "@odu/cordis/services";
 import { CACHE_AGENT, CACHE_KEY } from "@odu/cache/surface";
 import { buildSurfaceFace } from "@kolu/surface/client";
 import { composedClients } from "@odu/cordis/compose";
@@ -64,15 +65,35 @@ export async function serveServiceMcpOverStdio(opts: {
   // It never recovers a failed dial by executing locally. There is nothing here
   // to execute with: this face holds no run authority at all.
   let held: ServiceConnection | null = null;
+  // THE DOOR IS THE DAEMON'S COMPOSITION, NOT THIS FACE'S. The auth row is
+  // mounted only on a daemon with a door; a bridge that advertised its seven
+  // verbs everywhere would hand an agent tools the server it is talking to does
+  // not have — and the two doors are supposed to offer ONE vocabulary. So dial
+  // first (the dial is what ensures the singleton exists), ask the host's own
+  // door route, then compose. A daemon that cannot answer is composed without
+  // the row: the conservative reading, and the one that never overstates.
+  //
+  // ASKED ONCE, AND NOT BY DIALLING. A dial here would be a second connection
+  // owner — and on an occupied port it would hang where the adapter has a
+  // sentence that names the port in a second. So the question is a plain GET,
+  // and an unreadable answer composes the CONSERVATIVE set: a daemon that was
+  // not yet running when this bridge started is composed without the door's
+  // verbs for the life of the process, which costs an agent seven tools in the
+  // case where it could not have used them yet anyway.
+  const door = await doorMounted(origin);
   const served = await serveSurfaceAsMcp({
     core: { surface: oduServiceSurface, expose: ODU_SERVICE_EXPOSE },
     // THE SIBLINGS ARE ON THE SAME WIRE, so an agent reaches their verbs through
     // this bridge too — `cache_bucket_create` and its neighbours, and the door's
-    // own verbs, under the keys the daemon mounts the rows at. The rules are the
-    // rows': this face adds no authority, it forwards a call.
-    surfaces: { [CACHE_KEY]: CACHE_AGENT, [AUTH_KEY]: AUTH_AGENT },
+    // own verbs when the daemon has a door, under the keys the daemon mounts the
+    // rows at. The rules are the rows': this face adds no authority, it forwards
+    // a call.
+    surfaces: {
+      [CACHE_KEY]: CACHE_AGENT,
+      ...(door === true ? { [AUTH_KEY]: AUTH_AGENT } : {}),
+    },
     client: async () => {
-      const connection = await connectToService(origin);
+      const connection = held ?? (await connectToService(origin));
       held = connection;
       return {
         client: {
@@ -101,6 +122,26 @@ export async function serveServiceMcpOverStdio(opts: {
       await held?.dispose();
     },
   };
+}
+
+/** Does the daemon this bridge is attached to have a door? Asked of the HOST's
+ *  own route — the fact that changes with `auth` — and `null` when the answer
+ *  cannot be read. */
+async function doorMounted(origin: string): Promise<boolean | null> {
+  try {
+    const response = await fetch(new URL(SERVICE_DOOR_PATH, origin), {
+      headers: { "cache-control": "no-cache" },
+      // BOUNDED: a foreign program that accepts the socket and says nothing
+      // would otherwise hold this question (and the whole bridge) open, which
+      // is exactly the hang the adapter's own dial has a sentence for.
+      signal: AbortSignal.timeout(2_000),
+    });
+    if (!response.ok) return null;
+    const body = (await response.json()) as { door?: unknown };
+    return body.door === true;
+  } catch {
+    return null;
+  }
 }
 
 /**
