@@ -487,13 +487,13 @@ decision above makes:
    without it, a bucket created from the web on the pod makes every push wait
    at the 202 until PR 3.
 
-Then the gap the rule names, by row — the verbs the face cannot reach today:
+Then the gap the rule names, by row — closed:
 
-| row | verbs with no web control today |
-| --- | --- |
-| cache | `token.mint`, `token.list`, `token.revoke` (per bucket, write/read scope), `pin.create`, `gc.run`, `stats.read`, and `bucket.create`'s upstream switch |
-| auth | `user.grant` — roles are granted only from the CLI; the face needs a people page an owner sees (who is in, their role, grant and change it) |
-| ci | audit `packages/ci` the same way and list what the board cannot do that `odu` can |
+| row | verbs that had no web control | closed by |
+| --- | --- | --- |
+| cache | `token.mint`, `token.list`, `token.revoke` (per bucket, write/read scope), `pin.create`, `gc.run`, `stats.read`, and `bucket.create`'s upstream switch | a bucket page's Tokens, Pin a closure, Run GC and Stats; Create bucket's upstream switch |
+| auth | `user.grant` — roles were granted only from the CLI | `grant.list` (+ `odu auth people`) and an owner's People page |
+| ci | `pipeline.read`, `venue.probe`/`hold`/`release`, `catalog.import`/`prune`, `protect.apply`, and `run.start`'s root, hosts file, no-deps and linger | New run's options and Preview pipeline; Machines; Maintenance |
 
 **Evidence:** each row's e2e has a scenario per verb through the face, and the
 list above is empty for every row in it.
