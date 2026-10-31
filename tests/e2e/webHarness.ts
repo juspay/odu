@@ -99,6 +99,15 @@ export interface WebWorld {
  * list imported from the code under test would agree with a mistake.
  */
 export const SHARED_TOOLS = [
+  // THE DOOR'S SEVEN, served under the row's own word — the auth row owns its
+  // vocabulary, and the door composes the rows' expose maps beside the runs'.
+  "auth_session_end",
+  "auth_session_list",
+  "auth_token_create",
+  "auth_token_list",
+  "auth_token_revoke",
+  "auth_user_grant",
+  "auth_user_whoami",
   "cache_bucket_create",
   "cache_bucket_describe",
   "cache_bucket_list",
