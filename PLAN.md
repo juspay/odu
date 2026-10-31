@@ -517,6 +517,18 @@ What lands:
   is imported, so a chroot store (F12) keeps the upstream skip and still
   imports referrers. `--no-upstream` stays as the explicit choice it already
   is.
+- **The push says what the server is doing.** On the pod `odu cache push`
+  printed "118 paths in the closure, 6 missing, 112 already there or upstream"
+  and then hung, silent: the server deferred each import at 202 for want of
+  upstream references (the chroot-store limit the bullet above removes), and
+  the client waited on a state the person cannot affect and was never told
+  about. The push now (a) prints one line per path as it uploads and as the
+  server answers — stored, deferred (waiting for N upstream references), or
+  refused (why); (b) REPORTS a deferral and returns, pointing at the bucket
+  page where the pending paths and their reason are listed, never blocking on
+  the server's pending state (`--wait` opts in); (c) carries the same facts in
+  `-o json` for CI. The bucket page shows pending paths with that reason — the
+  row's fact, the same one the CLI prints.
 - The dogfood switch (F9, F11): `flake.nix` `nixConfig` names the pod's
   bucket; `nix-cache.yml` substitutes from it and pushes with `odu cache push`
   under an `ODU_CACHE_TOKEN` secret, its publish job uses the new kolu push
