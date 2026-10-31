@@ -313,7 +313,18 @@ export function createCache(options: CacheOptions): Cache {
    * root token is the rule, which is loopback mode and the operator's bootstrap.
    */
   function requireRoot(input: { authority: Authority }): CacheOutcome<null> {
-    if (input.authority.kind === "role") return { ok: true, value: null };
+    if (input.authority.kind === "role") {
+      // THE SEAL, not the word: `kind` is a string a cast can write, and the
+      // symbol is not obtainable outside this module.
+      if (roleSeal in input.authority && input.authority[roleSeal] === true) {
+        return { ok: true, value: null };
+      }
+      return {
+        ok: false,
+        code: "no_root_token",
+        message: "this authority was not minted by the cache row",
+      };
+    }
     if (!rootTokenMatches(options.rootToken, input.authority.rootToken)) {
       return {
         ok: false,

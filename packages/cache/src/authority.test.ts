@@ -144,6 +144,29 @@ describe("loopback: the root token is still the rule", () => {
 });
 
 describe("signed in: the role is the rule", () => {
+  it("refuses a role authority the row did not mint", async () => {
+    // THE SEAL, not the discriminant: `kind: "role"` is a string any in-package
+    // caller can write, and the engine must not take the word for the thing.
+    // (`Authority` never crosses the surface — this is the engine's own
+    // boundary, which is exactly where the seal has to hold.)
+    const cache = createCache({ stateRoot: scratch, rootToken: null, store: null });
+    try {
+      const forged = { kind: "role", login: "srid" } as unknown as Parameters<
+        typeof cache.admin.create
+      >[0]["authority"];
+      const answer = await cache.admin.create({
+        ...bucketInput,
+        upstreamKeys: [],
+        authority: forged,
+      });
+      expect(answer.ok).toBe(false);
+      if (answer.ok) return;
+      expect(answer.code).toBe("no_root_token");
+    } finally {
+      cache.close();
+    }
+  });
+
   it("refuses a member, naming the role", async () => {
     // NO ROOT TOKEN AT ALL: with an identity provider mounted the daemon need
     // not have one, so a role-authorised call cannot be a token in disguise.
