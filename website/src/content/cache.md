@@ -74,11 +74,15 @@ It reads the token from stdin (or `--token <token>`), and writes one entry per o
 2. `$ODU_CACHE_TOKEN`
 3. the credentials entry for the bucket's origin
 
-The bucket argument is a name resolved against the logged-in origin, or a full `https://<host>/cache/<bucket>` URL — the substituter URL `odu cache use` prints. CI exports the secret and never logs in:
+The bucket argument is a name resolved against the logged-in origin, or a full `https://<host>/cache/<bucket>` URL — the substituter URL `odu cache use` prints. CI exports the secret and never logs in — this is the block a bucket's page shows under **Push to it**, with the token filled in the moment you mint one there:
 
 ```sh
-ODU_CACHE_TOKEN=... odu cache push main ./result
+# push — a write token, exported where the build runs (a build secret)
+export ODU_CACHE_TOKEN=<your-write-token>
+odu cache push https://odu.example.com/cache/main ./result
 ```
+
+A GitHub Actions step comes with PR 3.
 
 `push` asks the bucket which paths it is missing, then uploads only those, with retries. It talks to the cache's HTTP API directly, so it runs on the machine that holds the paths.
 

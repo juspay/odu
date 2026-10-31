@@ -42,7 +42,7 @@ A remote pool leases one available machine per platform. Builders need SSH acces
 
 Hosts are read from the first existing file: `$ODU_HOSTS`, `~/.config/odu/hosts.json`, then the legacy `~/.config/justci/hosts.json`. No configured host means a refusal, never an implicit local build.
 
-On the board: **Machines** probes the same inventory, narrowed by platform if you name one.
+On the board: **Machines** shows the service's last probe of the same inventory and its age — opening the page dials nothing — and **Probe machines** takes a fresh one, narrowed by platform if you name one.
 
 ```sh
 odu hosts
@@ -289,7 +289,7 @@ odu auth login https://odu.example.com        # paste the owner's personal token
 odu auth grant alice admin --origin https://odu.example.com   # or People on the board
 ```
 
-Or from the board: an owner's header has **People**, which lists who is in — every grant, and every login that has signed in, with its role — and grants or changes a role from a select. `odu auth people` prints the same list.
+Or from the board: an owner's header has **People**, which lists who is in — every grant, and every login that has ever signed in (signing out does not remove you), with its role — and grants or changes a role from a select. `odu auth people` prints the same list. The row refuses a grant that would leave the daemon with no owner: grant a second owner before stepping down.
 
 That is the root token's only job on a daemon with a door: it is not a principal, and it cannot start a run or read a bucket.
 
