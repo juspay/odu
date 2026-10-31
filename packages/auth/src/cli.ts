@@ -76,7 +76,7 @@ grant <login> <owner|admin|member>
                               daemon with no owner yet, which is its one job.
                               The board's people page is the same control
 people [-o json]              who is in: every grant, and every login that has
-                              signed in, with the role each holds. An owner's
+                              ever signed in, with the role each holds. An owner's
                               verb — the board's people page reads the same list
 
 These verbs exist ONLY on a daemon with a door (\`ODU_GITHUB_*\` configured); with

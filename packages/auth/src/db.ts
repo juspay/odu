@@ -45,6 +45,12 @@ export interface TokenRow {
   revoked: boolean;
 }
 
+export interface PersonRow {
+  login: string;
+  firstSeen: number;
+  lastSeen: number;
+}
+
 export interface GrantRow {
   login: string;
   role: Role;
@@ -72,11 +78,13 @@ export interface AuthRepo {
   grant(login: string): GrantRow | null;
   setGrant(row: GrantRow): void;
   grants(): GrantRow[];
-  /** Every login with a live session row, and its latest activity — who has
-   *  come IN, granted or not. A login allowed by GitHub and never granted
-   *  holds {@link DEFAULT_ROLE}, and an owner must be able to see them to
-   *  change that. */
-  seen(): Array<{ login: string; lastSeen: number }>;
+  /** WHO HAS COME IN, durably: a login is recorded at its first sign-in and
+   *  touched whenever a session or a personal token of theirs is used — and,
+   *  unlike a session row, never deleted by sign-out or expiry. A login allowed
+   *  by GitHub and never granted holds {@link DEFAULT_ROLE}, and an owner must
+   *  be able to see them to change that. */
+  touchPerson(login: string, at: number): void;
+  people(): PersonRow[];
 
   close(): void;
 }
@@ -113,6 +121,18 @@ const MIGRATIONS: readonly string[] = [
     role    TEXT NOT NULL,
     created INTEGER NOT NULL
   );
+  `,
+  // 2 — WHO HAS SIGNED IN, kept. The session table holds LIVE sessions only
+  // (sign-out, session end and expiry delete from it), so it cannot answer the
+  // people page's question. Backfilled from whatever sessions survive.
+  `
+  CREATE TABLE person (
+    login      TEXT PRIMARY KEY,
+    first_seen INTEGER NOT NULL,
+    last_seen  INTEGER NOT NULL
+  );
+  INSERT INTO person (login, first_seen, last_seen)
+    SELECT login, MIN(created), MAX(last_seen) FROM session GROUP BY login;
   `,
 ];
 
@@ -301,12 +321,18 @@ export function openAuthRepo(path: string): AuthRepo {
       (db.query("SELECT * FROM grant_row ORDER BY login").all() as GrantDb[]).map(
         (row) => ({ ...row, role: row.role as Role }),
       ),
-    seen: () =>
+    touchPerson: (login, at) => {
+      db.query(
+        `INSERT INTO person (login, first_seen, last_seen) VALUES (?1, ?2, ?2)
+         ON CONFLICT(login) DO UPDATE SET last_seen = MAX(last_seen, excluded.last_seen)`,
+      ).run(lower(login), at);
+    },
+    people: () =>
       db
         .query(
-          "SELECT login, MAX(last_seen) AS lastSeen FROM session GROUP BY login ORDER BY login",
+          "SELECT login, first_seen AS firstSeen, last_seen AS lastSeen FROM person ORDER BY login",
         )
-        .all() as Array<{ login: string; lastSeen: number }>,
+        .all() as PersonRow[],
 
     close: () => db.close(),
   };

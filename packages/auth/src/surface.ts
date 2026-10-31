@@ -135,7 +135,8 @@ const REFUSES = AuthRefused;
 const WhoamiOutputSchema = Schema.Struct({ who: WhoSchema });
 
 const TokenCreateInputSchema = Schema.Struct({
-  name: Schema.String.check(Schema.isMinLength(1)),
+  /** Checked by the ROW (non-empty), not the schema — see `GrantInputSchema`. */
+  name: Schema.String,
 });
 const TokenCreateOutputSchema = Schema.Struct({
   /** Shown ONCE. The row keeps a hash. */
@@ -151,7 +152,9 @@ const SessionEndInputSchema = Schema.Struct({ id: Schema.String });
 const SessionEndOutputSchema = Schema.Struct({ id: Schema.String, ended: Schema.Boolean });
 
 const GrantInputSchema = Schema.Struct({
-  login: Schema.String.check(Schema.isMinLength(1)),
+  /** Checked by the ROW (non-empty), not the schema: a schema check dies before
+   *  the row can say why, and the people page sends the field as typed. */
+  login: Schema.String,
   role: RoleSchema,
   /** The operator's bootstrap. Compared only when the caller has no session;
    *  ignored otherwise, because a signed-in owner already carries authority. */
@@ -166,7 +169,8 @@ const GrantOutputSchema = Schema.Struct({
  * ONE PERSON WHO IS IN, as an owner sees them on the people page.
  *
  * Two sources, folded: the GRANTS (a role somebody set) and the logins that
- * have SIGNED IN (GitHub let them through; with no grant they hold
+ * have EVER signed in — the row's durable `person` record, which sign-out and
+ * expiry do not touch (GitHub let them through; with no grant they hold
  * {@link DEFAULT_ROLE}). The second set is why this is not just the grant
  * table — a person allowed in and never granted anything is exactly who an
  * owner opens this page to promote.
@@ -281,8 +285,9 @@ export const ODU_AUTH_MCP_INSTRUCTIONS = [
   "stops being served. `auth_user_grant` sets a login's role and is an owner's",
   "verb; on a daemon with no owner yet the operator's root token may set the",
   "FIRST owner with it, and that is that token's only job. `auth_grant_list`",
-  "answers who is in — every grant and every login that has signed in, with",
-  "the role each holds — and is an owner's verb too.",
+  "answers who is in — every grant and every login that has ever signed in,",
+  "with the role each holds — and is an owner's verb too. A grant that would",
+  "leave the daemon with no owner is refused.",
 ].join("\n");
 
 export const AUTH_AGENT: RowAgent = {
