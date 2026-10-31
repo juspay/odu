@@ -251,11 +251,19 @@ ODU_GITHUB_ALLOW='org:juspay,srid'             # any rule may let you in
 
 Open the board. It is the sign-in page; **Sign in with GitHub** authorises the App and lands you on the runs. A person the allow-list refuses sees a page saying so, quoting the list — not a redirect and not an empty board.
 
-Everyone starts as a **member**: they see every run and bucket and may start, retry and cancel runs. An **admin** may also create buckets, mint and revoke cache tokens, pin and collect. An **owner** grants roles. Roles are odu's, not GitHub's, and their one bootstrap is the operator's root token:
+Everyone starts as a **member**: they see every run and every bucket, may start, retry and cancel runs, and may read the cache. An **admin** may also create buckets, mint and revoke cache tokens, pin and collect, and write branch protection. An **owner** grants roles. Roles are odu's, not GitHub's.
+
+**The root token creates the FIRST owner, and only that.** On a fresh daemon, once:
 
 ```sh
-# On the server, once, with $ODU_ROOT_TOKEN set in its environment.
+# On the server, with $ODU_ROOT_TOKEN set in its environment.
 odu auth grant srid owner --origin https://odu.example.com
+```
+
+After that the root token is spent — a second grant made with it is refused, whatever the role — and every further grant is an owner's, through that owner's own token:
+
+```sh
+odu auth login https://odu.example.com        # paste the owner's personal token
 odu auth grant alice admin --origin https://odu.example.com
 ```
 
@@ -274,9 +282,11 @@ odu cache list --origin https://odu.example.com
 ODU_TOKEN=odu_... odu mcp --origin https://odu.example.com
 ```
 
-Every `odu` command, and the MCP bridge, send the token as `Authorization: Bearer` on the connection they open. `ODU_TOKEN` wins over a stored credential, so one shell can be somebody else. Revoking a token on the profile page, signing out, or a session expiring ends those connections at once — an open browser tab stops answering and comes back to the sign-in page.
+Every `odu` command, and the MCP bridge, send the token as `Authorization: Bearer` on the connection they open. `ODU_TOKEN` wins over a stored credential, so one shell can be somebody else.
 
-Sessions last 30 days from a use. The cache protocol does not change: public buckets are read without an account, and pushes carry a bucket token as before.
+Revoking a token on the profile page, signing out, or a session expiring ends every connection that credential opened: nothing further is served on it, and an open board tab stops receiving. <!-- TODO(seam): the socket itself is cut by kolu once it offers a close; today the tab comes back to the sign-in page on its next page load. -->
+
+Sessions last 30 days from the sign-in; using one does not extend it. The cache protocol does not change: public buckets are read without an account, and pushes carry a bucket token as before.
 
 ### Two instances
 
