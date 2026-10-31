@@ -19,7 +19,7 @@ Feature: The door — sign in, and what a role may do
   @signed-in:member
   Scenario: Signing in lands on the board with the header
     Given I open the board
-    Then the header names odu-e2e as member
+    Then the header names "odu-e2e" as "member"
     And the page offers the board rows
     And there should be no page errors
 
