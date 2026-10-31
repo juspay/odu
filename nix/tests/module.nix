@@ -30,6 +30,9 @@
       enable = true;
       rootTokenFile = "/etc/odu-root-token";
       cache.domain = "cache.test";
+      # A BUCKET'S OWN NAME, with its own vhost: `main.test` answers the Nix
+      # protocol at `/`, and the daemon decides which bucket from the `Host`.
+      cache.bucketDomains = [ "main.test" ];
       cache.enableACME = false;
     };
 
@@ -53,7 +56,7 @@
     # TWO LINES, not one: `/etc/hosts` is `IP name [aliases…]`, so the one-line
     # form made `door.test` an ALIAS of 192.168.1.2 — the loopback machine —
     # and every door assertion then read nginx's 404 from the wrong vhost.
-    networking.extraHosts = "192.168.1.2 cache.test\n192.168.1.3 door.test";
+    networking.extraHosts = "192.168.1.2 cache.test main.test\n192.168.1.3 door.test";
     nix.settings = {
       experimental-features = [ "nix-command" "flakes" ];
       # No substituters: the point is that the only source is the cache under
@@ -152,6 +155,13 @@
         f" ODU_CACHE_TOKEN={token} {odu} cache push main {path}"
     )
 
+    # ── A BUCKET'S OWN NAME ─────────────────────────────────────────────────
+    # The name is a fact of the bucket; nginx needs a vhost for it (eval time),
+    # and the daemon answers by `Host` — no rewrite, no bucket in the path.
+    server.succeed(f"{admin} {odu} cache domain main main.test")
+    info = client.succeed("curl -sS http://main.test/nix-cache-info")
+    assert "WantMassQuery: 1" in info, info
+
     # ── the client substitutes it back, trusting only the bucket's key ──────
     copied = client.execute(
         f"nix copy --from http://cache.test/cache/main --to local?root=/tmp/sub"
@@ -163,6 +173,19 @@
     # client did not build is untrusted until somebody it trusts signed it.
     client.succeed(
         f"NIX_REMOTE=local?root=/tmp/sub nix store verify {path}"
+        f" --option trusted-public-keys '{key}'"
+    )
+
+    # AND THE SAME PATH THROUGH THE BUCKET'S OWN NAME, at the root of it: the
+    # made-up address is the one `odu cache use` prints now.
+    by_name = client.execute(
+        f"nix copy --from http://main.test --to local?root=/tmp/sub-name"
+        f" --option trusted-public-keys '{key}' {path}"
+    )
+    print(by_name)
+    assert by_name[0] == 0, by_name
+    client.succeed(
+        f"NIX_REMOTE=local?root=/tmp/sub-name nix store verify {path}"
         f" --option trusted-public-keys '{key}'"
     )
 

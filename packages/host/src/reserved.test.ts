@@ -37,9 +37,16 @@ async function registered(layer: RowRoutes): Promise<string[]> {
   return paths;
 }
 
-/** A route pattern as a request would spell it: each `:param` a value. */
+/** A route pattern as a request would spell it. A plain `:param` is a value; a
+ *  regex-constrained one is rendered into something its grammar accepts — the
+ *  cache's `:hash(...)` takes a 32-character base32 hash, so a run of `a`s
+ *  matches it. */
 const concrete = (pattern: string): string =>
-  pattern.replace(/:[^/]+/g, "value");
+  pattern
+    .replace(/:([A-Za-z][A-Za-z0-9]*)\([^)]*\)/g, (_match, name: string) =>
+      name === "hash" ? "a".repeat(32) : "value",
+    )
+    .replace(/:[^/]+/g, "value");
 
 // The handlers close over these and never run; only the layer's shape is read.
 const ROWS: ReadonlyArray<readonly [string, ClaimedRoutes]> = [
@@ -70,6 +77,21 @@ describe("the door gate's reserved set", () => {
 
   it("claims the cache's push API — the route the hand-kept list forgot", () => {
     expect(isReserved("/_odu/v1/buckets/test/missing", reserved)).toBe(true);
+  });
+
+  it("claims a bucket domain's root-level protocol paths", () => {
+    // A bucket's own name serves the Nix protocol at `/`. The narinfo claim is
+    // a REGEX because its shape cannot be a prefix, and a prefix that took
+    // every one-segment path would shadow the shell.
+    for (const path of [
+      "/nix-cache-info",
+      "/nar/abc.nar.zst",
+      `/${"a".repeat(32)}.narinfo`,
+    ]) {
+      expect({ path, claimed: isReserved(path, reserved) }).toEqual({ path, claimed: true });
+    }
+    // And the shape is not the whole one-segment space.
+    expect(isReserved("/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.narinfo", reserved)).toBe(false);
   });
 
   it("leaves everything unclaimed to the shell", () => {

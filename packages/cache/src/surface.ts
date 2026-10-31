@@ -60,11 +60,19 @@ export const CacheBucketSchema = Schema.Struct({
   publicKey: Schema.String,
   /** Key names whose signatures make a path "already upstream". */
   upstreamKeys: Schema.Array(Schema.String),
+  /** The name this bucket is served at, when it has one. Set it and the
+   *  advertised URL is that name instead of a path under this origin. */
+  domain: Schema.NullOr(Schema.String),
   objects: Schema.Int,
   bytes: Schema.Int,
   created: Schema.Number,
-  /** `<origin>/<name>` — what `extra-substituters` takes. */
+  /** The substituter URL — the bucket's domain when it has one, otherwise
+   *  `<origin>/<name>`. What `extra-substituters` takes. */
   url: Schema.String,
+  /** WHERE A PUSH ADDRESSES THIS BUCKET: always `<origin>/cache/<name>`, so the
+   *  push API works through a bucket domain without the domain needing to name
+   *  a bucket in its path. The page's push block and the docs use this. */
+  pushUrl: Schema.String,
   /** When the last narinfo landed here; `null` for a bucket nothing has been
    *  pushed to. */
   lastPush: Schema.NullOr(Schema.Number),
@@ -87,7 +95,9 @@ export const CacheBucketIdentitySchema = Schema.Struct({
   public: Schema.Boolean,
   /** `<keyName>:<base64 32>`, ready for `extra-trusted-public-keys`. */
   publicKey: Schema.String,
-  /** `<origin>/<name>` — what `extra-substituters` takes. */
+  /** The name the bucket is served at, or `null` for the path form. */
+  domain: Schema.NullOr(Schema.String),
+  /** The substituter URL — the domain when it has one. */
   url: Schema.String,
 });
 export type CacheBucketIdentity = typeof CacheBucketIdentitySchema.Type;
@@ -213,6 +223,13 @@ const ListOutputSchema = Schema.Struct({ buckets: Schema.Array(CacheBucketSchema
 
 const DescribeInputSchema = Schema.Struct({
   bucket: Schema.String.check(Schema.isMinLength(1)),
+});
+
+const DomainInputSchema = Schema.Struct({
+  rootToken: Schema.String,
+  bucket: Schema.String,
+  /** A DNS name, or absent/blank to take the name away. */
+  domain: Schema.optionalKey(Schema.String),
 });
 
 const TokenMintInputSchema = Schema.Struct({
@@ -463,6 +480,7 @@ export const oduCacheSurface = defineSurface({
         output: CacheBucketIdentitySchema,
         error: REFUSES,
       },
+      domain: { input: DomainInputSchema, output: CacheBucketSchema, error: REFUSES },
       paths: { input: PathsInputSchema, output: PathsOutputSchema, error: REFUSES },
     },
     token: {
@@ -516,6 +534,7 @@ export const ODU_CACHE_EXPOSE = {
   "bucket.create": { tool: { mutates: true } },
   "bucket.list": { tool: { mutates: false } },
   "bucket.describe": { tool: { mutates: false } },
+  "bucket.domain": { tool: { mutates: true } },
   "bucket.paths": { tool: { mutates: false } },
   "token.mint": { tool: { mutates: true } },
   "token.list": { tool: { mutates: false } },
@@ -542,7 +561,11 @@ export const ODU_CACHE_MCP_INSTRUCTIONS = [
   "uses; `cache_pin_create` keeps a closure out of `cache_gc_run`, which evicts",
   "only what retention has expired AND nothing retained references AND no pin",
   "holds. `cache_bucket_paths` pages a bucket's paths newest first, and takes a",
-  "substring `filter` and the `after` cursor it returned.",
+  "substring `filter` and the `after` cursor it returned. `cache_bucket_domain`",
+  "gives a bucket a DNS name of its own (clear it with no `domain`); the",
+  "advertised `url` becomes that name while `pushUrl` keeps the path the push",
+  "API needs. `held` is a resource of the paths a bucket accepted but is",
+  "waiting on references for.",
 ].join("\n");
 
 // ── the row ─────────────────────────────────────────────────────────────────

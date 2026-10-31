@@ -301,6 +301,42 @@ describe("odu serves a Nix binary cache", () => {
     expect(verified.status).toBe(0);
   });
 
+  it("pushes a NAR in parts, and substitutes the joined path", () => {
+    // TWO MEGABYTES OF RANDOM BYTES: the NAR's compressed stream cannot fit one
+    // part at `--part-size 1`, which is the shape Cloudflare forces on a real
+    // closure. A part is an overwrite by index, so this is also the protocol's
+    // retry story in miniature.
+    const big = realised(
+      `derivation { name = "odu-cache-e2e-chunked"; system = builtins.currentSystem; builder = "/bin/sh"; args = [ "-c" "dd if=/dev/urandom of=$out bs=1048576 count=2 2>/dev/null" ]; }`,
+      "odu-cache-e2e-chunked",
+    );
+    const pushed = cli(["cache", "push", "main", big, "--part-size", "1"], {
+      ODU_CACHE_TOKEN: writeToken,
+      NIX_REMOTE: builderStore,
+    });
+    expect({ status: pushed.status, stderr: pushed.stderr }).toMatchObject({ status: 0 });
+    // The voice names the parts, so a large push is not silent.
+    expect(pushed.stderr).toContain("part 2");
+    expect(pushed.stdout).toContain("pushed 1");
+
+    const substituted = nix(
+      [
+        "build",
+        "--store",
+        substituteStore,
+        "--substituters",
+        main.url,
+        "--trusted-public-keys",
+        main.publicKey,
+        "--no-link",
+        big,
+      ],
+      { NIX_REMOTE: "" },
+    );
+    expect(substituted.stderr).not.toContain("not signed");
+    expect(substituted.status).toBe(0);
+  });
+
   it("takes a path `nix copy --to` uploads, and keeps the client's signature", async () => {
     evictable = build("odu-cache-e2e-evictable");
 

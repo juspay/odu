@@ -99,4 +99,29 @@ describe("the substituter URL a bucket publishes", () => {
     expect([...published.keys()]).toEqual(["early"]);
     expect(published.get("early")?.url).toBe(`${PUBLIC}/cache/early`);
   });
+
+  it("is the bucket's own domain when it has one, while push keeps the path", async () => {
+    const { cache, published, publish } = await row("https://odu.example");
+    await cache.admin.create({
+      ...asRoot("root-token"),
+      name: "kolu",
+      public: true,
+      retentionDays: 30,
+      upstreamKeys: [],
+    });
+    const named = await cache.admin.domain({
+      ...asRoot("root-token"),
+      bucket: "kolu",
+      domain: "cache.kolu.dev",
+    });
+    expect(named).toMatchObject({ ok: true, value: { domain: "cache.kolu.dev" } });
+    publish();
+    // A NAME is the whole substituter address. The push API still needs the
+    // bucket in its path, so `pushUrl` does not move — and the advertised
+    // scheme follows the deployment's public origin (here, TLS).
+    expect(published.get("kolu")?.url).toBe("https://cache.kolu.dev");
+    expect(published.get("kolu")?.pushUrl).toBe("https://odu.example/cache/kolu");
+    const described = await cache.admin.describe({ bucket: "kolu" });
+    expect(described).toMatchObject({ ok: true, value: { domain: "cache.kolu.dev" } });
+  });
 });

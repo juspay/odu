@@ -43,6 +43,10 @@ export interface BucketRow {
    *  that keeps nixpkgs out of a bucket. */
   upstreamKeys: readonly string[];
   created: number;
+  /** THE NAME A BUCKET IS SERVED AT, when it has one (`cache.kolu.dev`). The
+   *  row answers by `Host` as well as by `/cache/<name>`, and the advertised
+   *  substituter URL becomes this name. `null` means the path form. */
+  domain: string | null;
 }
 
 export type Scope = "read" | "write" | "admin";
@@ -123,6 +127,9 @@ export interface PinRow {
 export interface CacheRepo {
   putBucket(row: BucketRow): void;
   bucket(name: string): BucketRow | null;
+  /** The bucket a `Host` names, if one has claimed it. The caller normalizes
+   *  the header (lowercase, no port); the domain is stored that way. */
+  bucketByDomain(domain: string): BucketRow | null;
   buckets(): BucketRow[];
   deleteBucket(name: string): void;
 
@@ -252,6 +259,12 @@ const MIGRATIONS: readonly string[] = [
     PRIMARY KEY (bucket, store_path)
   );
   `,
+  // v3 — A NAME PER BUCKET. One domain, one bucket: the partial unique index is
+  // the rule, not a check in a verb that another caller could skip.
+  `
+  ALTER TABLE bucket ADD COLUMN domain TEXT;
+  CREATE UNIQUE INDEX bucket_domain ON bucket (domain) WHERE domain IS NOT NULL;
+  `,
 ];
 
 /** The schema this build writes. A file carrying a HIGHER number was written by
@@ -306,6 +319,7 @@ const bucketOf = (row: Row): BucketRow => ({
   publicKey: text(row, "public_key"),
   upstreamKeys: list(row, "upstream_keys"),
   created: integer(row, "created"),
+  domain: maybeText(row, "domain"),
 });
 
 const tokenOf = (row: Row): TokenRow => ({
@@ -415,12 +429,12 @@ export function openCacheRepo(path: string): CacheRepo {
     putBucket(row) {
       db.run(
         `INSERT INTO bucket (name, is_public, retention_days, key_name, secret_key,
-           public_key, upstream_keys, created)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           public_key, upstream_keys, created, domain)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET is_public = excluded.is_public,
            retention_days = excluded.retention_days, key_name = excluded.key_name,
            secret_key = excluded.secret_key, public_key = excluded.public_key,
-           upstream_keys = excluded.upstream_keys`,
+           upstream_keys = excluded.upstream_keys, domain = excluded.domain`,
         [
           row.name,
           row.isPublic ? 1 : 0,
@@ -430,11 +444,16 @@ export function openCacheRepo(path: string): CacheRepo {
           row.publicKey,
           JSON.stringify(row.upstreamKeys),
           row.created,
+          row.domain,
         ],
       );
     },
     bucket: (name) => {
       const row = db.query("SELECT * FROM bucket WHERE name = ?").get(name) as Row | null;
+      return row === null ? null : bucketOf(row);
+    },
+    bucketByDomain: (domain) => {
+      const row = db.query("SELECT * FROM bucket WHERE domain = ?").get(domain) as Row | null;
       return row === null ? null : bucketOf(row);
     },
     buckets: () => all("SELECT * FROM bucket ORDER BY name", [], bucketOf),

@@ -629,7 +629,7 @@ function BucketPage(
             </p>
             <pre class="use-block push-block">
               {pushBlock({
-                url: row().url,
+                url: row().pushUrl,
                 token: minted()?.scope === "write" ? (minted()?.token ?? null) : null,
               })}
             </pre>
@@ -643,15 +643,24 @@ function BucketPage(
           carrying a secret across. */}
       <Show when={props.canAdminister && bucket() !== undefined ? props.name : null} keyed>
         {(name) => (
-          <BucketAdmin
-            client={props.client}
-            call={props.call}
-            rootToken={props.rootToken}
-            minted={minted()}
-            onMinted={setMinted}
-            name={name}
-            now={props.now}
-          />
+          <>
+            <BucketDomain
+              client={props.client}
+              call={props.call}
+              rootToken={props.rootToken}
+              name={name}
+              domain={bucket()?.domain ?? null}
+            />
+            <BucketAdmin
+              client={props.client}
+              call={props.call}
+              rootToken={props.rootToken}
+              minted={minted()}
+              onMinted={setMinted}
+              name={name}
+              now={props.now}
+            />
+          </>
         )}
       </Show>
 
@@ -781,6 +790,77 @@ function BucketAdmin(props: TokenProps): JSX.Element {
       <BucketGc {...props} />
       <BucketStats {...props} />
     </div>
+  );
+}
+
+/**
+ * THE NAME A BUCKET IS SERVED AT — a domain, or a path under the origin.
+ *
+ * A NAME BELONGS TO THE BUCKET, not to the page: setting it changes the
+ * substituted URL, the `nix.conf` block above and the push's address, and the
+ * NixOS module must already have a vhost for it. A domain with no DNS record
+ * is the operator's next step, which is why the field says what it needs.
+ */
+function BucketDomain(
+  props: AdminProps & { name: string; domain: string | null },
+): JSX.Element {
+  const [typed, setTyped] = createSignal(props.domain ?? "");
+  createEffect(on(() => props.domain, (domain) => setTyped(domain ?? ""), { defer: true }));
+  const action = createControl(props.call);
+  const apply = (domain: string | null): void => {
+    action.run(
+      props.client.procedures.bucket.domain({
+        rootToken: props.rootToken(),
+        bucket: props.name,
+        ...(domain === null ? {} : { domain }),
+      }),
+      (row) =>
+        row.domain === null
+          ? `Cleared the name; ${props.name} is served under /cache/${props.name}.`
+          : `Named this bucket ${row.domain}. Point its DNS record here.`,
+    );
+  };
+  return (
+    <section class="admin-section" aria-label="domain">
+      <h3>A name of its own</h3>
+      <p class="hint">
+        A DNS name for this bucket, with no scheme and no port. When it is set,
+        the substituter URL, the netrc block and the push block use it. The
+        NixOS module needs a virtual host for the same name; a bucket on the
+        public pod gets one through the Cloudflare row.
+      </p>
+      <label class="search">
+        <span class="sr-only">bucket domain</span>
+        <input
+          type="text"
+          class="input"
+          placeholder="cache.example.org"
+          value={typed()}
+          onInput={(event) => setTyped(event.currentTarget.value)}
+        />
+      </label>
+      <div class="cache-create">
+        <button
+          type="button"
+          class="btn btn-primary"
+          disabled={action.busy()}
+          onClick={() => apply(typed().trim())}
+        >
+          {action.busy() ? "working…" : "Set domain"}
+        </button>
+        <Show when={props.domain !== null}>
+          <button
+            type="button"
+            class="btn"
+            disabled={action.busy()}
+            onClick={() => apply(null)}
+          >
+            Clear domain
+          </button>
+        </Show>
+      </div>
+      <Answer control={action} />
+    </section>
   );
 }
 

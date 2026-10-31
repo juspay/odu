@@ -745,6 +745,42 @@ describe("uploading", () => {
   });
 });
 
+describe("a bucket's domain", () => {
+  it("answers the Nix protocol at the root of its name, and 404s another name", async () => {
+    const h = await harness(true);
+    const named = await h.cache.admin.domain({
+      ...asRoot(ROOT),
+      bucket: "main",
+      domain: "cache.example.org",
+    });
+    expect(named.ok).toBe(true);
+    const host = (path: string, init: RequestInit = {}): Promise<Response> =>
+      h.raw(path, {
+        ...init,
+        headers: { ...(init.headers as Record<string, string>), host: "cache.example.org" },
+      });
+
+    const info = await host("/nix-cache-info");
+    expect(info.status).toBe(200);
+    expect(await info.text()).toContain("WantMassQuery");
+
+    const narinfo = await host(`/${hashOf(HELLO)}.narinfo`);
+    expect(narinfo.status).toBe(200);
+    const text = await narinfo.text();
+    expect(text).toContain("Sig: main-1:");
+    const nar = await host(`/${text.split("\n").find((line) => line.startsWith("URL: "))!.slice(5)}`);
+    expect(nar.status).toBe(200);
+
+    // THE WRONG NAME IS A 404, not the path form and not the shell.
+    expect(
+      (await h.raw("/nix-cache-info", { headers: { host: "other.example.org" } })).status,
+    ).toBe(404);
+    // And the claim is the hash's shape, not every one-segment path.
+    expect((await host("/sw.js")).status).toBe(404);
+    await h.dispose();
+  });
+});
+
 describe("the shell's own paths", () => {
   it("is not reached by the cache's two-segment GET", async () => {
     // `/:bucket/:name` is the narinfo route, and the shell serves fixed assets

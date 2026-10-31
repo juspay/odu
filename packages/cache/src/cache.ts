@@ -58,6 +58,8 @@ export interface BucketFacts {
   keyName: string;
   publicKey: string;
   upstreamKeys: readonly string[];
+  /** The name this bucket is served at, when it has one. */
+  domain: string | null;
   objects: number;
   bytes: number;
   created: number;
@@ -83,6 +85,8 @@ export interface BucketIdentity {
   name: string;
   public: boolean;
   publicKey: string;
+  /** The name a client substitutes from, when the bucket has one. */
+  domain: string | null;
 }
 
 export interface TokenMinted {
@@ -166,6 +170,15 @@ export interface CacheAdmin {
    * capability, the same way it is in the substituter URL.
    */
   describe(input: { bucket: string }): Promise<CacheOutcome<BucketIdentity>>;
+  /**
+   * GIVE A BUCKET A NAME, or take it away (`null`). One domain, one bucket;
+   * the row answers by that `Host` and the substituter URL becomes the name.
+   */
+  domain(input: {
+    authority: Authority;
+    bucket: string;
+    domain: string | null;
+  }): Promise<CacheOutcome<BucketFacts>>;
   tokenMint(input: { authority: Authority;
     bucket: string;
     /** A glob, so one token can cover `team-*`. Absent means the bucket. */
@@ -219,6 +232,9 @@ export type AuthVerdict = { ok: true } | { ok: false; status: 401 | 403 | 404; m
 export interface Cache {
   /** The protocol face. */
   bucket(name: string): BucketRow | null;
+  /** The bucket a HOST names, or null. The caller lowercases and strips the
+   *  port; a domain is stored as the name a client types. */
+  bucketByDomain(host: string): BucketRow | null;
   authorize(header: string | undefined, bucket: BucketRow, need: Scope): AuthVerdict;
   narinfoText(bucket: BucketRow, hash: string): string | null;
   touch(bucket: BucketRow, hash: string): void;
@@ -302,6 +318,11 @@ export const HITS_REFRESH_MS = 1000;
  *  second route, and one with a `.` would collide with `<hash>.narinfo`. */
 const BUCKET_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
+/** A bucket's public NAME: a lowercase DNS hostname, no scheme, no port. The
+ *  last label is alphanumeric so `cache.` and `-x` are refused. */
+const DOMAIN =
+  /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
 export function createCache(options: CacheOptions): Cache {
   const now = options.now ?? (() => Date.now());
   const dir = join(options.stateRoot, "cache");
@@ -371,6 +392,7 @@ export function createCache(options: CacheOptions): Cache {
       keyName: bucket.keyName,
       publicKey: bucket.publicKey,
       upstreamKeys: bucket.upstreamKeys,
+      domain: bucket.domain,
       objects: counts?.objects ?? 0,
       bytes: counts?.bytes ?? 0,
       created: bucket.created,
@@ -547,6 +569,7 @@ export function createCache(options: CacheOptions): Cache {
         publicKey: keypair.publicKey,
         upstreamKeys: input.upstreamKeys,
         created: now(),
+        domain: null,
       };
       repo.putBucket(bucket);
       // A bucket that appeared is a row that appeared.
@@ -577,8 +600,42 @@ export function createCache(options: CacheOptions): Cache {
           name: bucket.name,
           public: bucket.isPublic,
           publicKey: bucket.publicKey,
+          domain: bucket.domain,
         },
       };
+    },
+
+    async domain(input) {
+      const root = requireRoot(input);
+      if (!root.ok) return root;
+      const bucket = repo.bucket(input.bucket);
+      if (bucket === null) {
+        return { ok: false, code: "unknown_bucket", message: `no bucket "${input.bucket}"` };
+      }
+      const domain = input.domain === null ? null : input.domain.trim().toLowerCase();
+      if (domain !== null && !DOMAIN.test(domain)) {
+        return {
+          ok: false,
+          code: "bad_input",
+          message:
+            `"${input.domain}" is not a domain name — a lowercase DNS name ` +
+            "like cache.example.org, with no scheme and no port",
+        };
+      }
+      if (domain !== null) {
+        const holder = repo.bucketByDomain(domain);
+        if (holder !== null && holder.name !== bucket.name) {
+          return {
+            ok: false,
+            code: "bad_input",
+            message: `"${domain}" already names the bucket "${holder.name}"`,
+          };
+        }
+      }
+      const next: BucketRow = { ...bucket, domain };
+      repo.putBucket(next);
+      notify();
+      return { ok: true, value: factsOf(next) };
     },
 
     async tokenMint(input) {
@@ -761,6 +818,8 @@ export function createCache(options: CacheOptions): Cache {
 
   return {
     bucket: (name) => repo.bucket(name),
+
+    bucketByDomain: (host) => repo.bucketByDomain(host),
 
     authorize(header, bucket, need) {
       const presented = credentialOf(header);

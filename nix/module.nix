@@ -70,6 +70,18 @@ let
     extraConfig = proxyRules;
   };
 
+  # THE NIX PROTOCOL'S WHOLE FOOTPRINT AT A BUCKET'S OWN NAME. A bucket domain
+  # answers at `/`, so the vhost proxies exactly the paths the cache claims —
+  # and NOT `/`, which is the board's and stays on `cache.domain`.
+  cacheLocations = {
+    "/nix-cache-info" = proxyLocation;
+    "/nar/" = proxyLocation;
+    "/cache/" = proxyLocation;
+    "/_odu/v1/" = proxyLocation;
+    "~ ^/[0-9abcdfghijklmnpqrsvwxyz]{32}\\.narinfo$" = proxyLocation;
+    "/" = { return = "404"; };
+  };
+
   # IS THIS A SERVER MODE DEPLOYMENT? All three `github` options set; the
   # assertion above refuses a partial one.
   serverMode = cfg.github.clientId != null;
@@ -211,10 +223,31 @@ in
       type = types.nullOr types.str;
       default = null;
       description = ''
-        The public hostname a bucket is served at — and, with `github` set, the
-        board's as well. Setting it turns on nginx with one virtual host that
+        The public hostname this SERVICE is served at — and, with `github` set,
+        the board's as well. Setting it turns on nginx with one virtual host that
         proxies the cache's route families (and, in server mode, the board, the
         websocket and `/mcp`) and makes `publicOrigin` `https://<domain>`.
+
+        A bucket's OWN name is `cache.bucketDomains`, not this: this one carries
+        the board, and a bucket domain answers only the Nix protocol.
+      '';
+    };
+
+    cache.bucketDomains = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "cache.example.org" ];
+      description = ''
+        DNS names that belong to BUCKETS, each getting its own virtual host with
+        its certificate and exactly the Nix protocol's paths at `/`. The daemon
+        answers a name by its `Host`, so the same name must also be set on the
+        bucket itself (`odu cache domain <bucket> <name>`, or the bucket page's
+        Domain field); this option is what puts nginx and a certificate in
+        front of it.
+
+        A bucket domain is a NAME, not read access control: a public bucket
+        stays readable without a token, and the board is not served on these
+        names.
       '';
     };
 
@@ -310,6 +343,19 @@ in
           its owner; with all three it is a server that asks who you are.
         '';
       }
+      {
+        # ONE NAME, ONE VHOST. A duplicate in the list would silently pick one
+        # entry, and `cache.domain` already owns the board's vhost — a bucket
+        # domain there would replace it rather than add to it.
+        assertion =
+          builtins.length (lib.unique cfg.cache.bucketDomains) == builtins.length cfg.cache.bucketDomains
+          && !(builtins.elem cfg.cache.domain cfg.cache.bucketDomains);
+        message = ''
+          services.odu.cache.bucketDomains must be distinct, and must not
+          repeat services.odu.cache.domain: the board's vhost and a bucket's
+          would collide, and one of them would answer for the other.
+        '';
+      }
     ];
 
     users.groups.${cfg.group} = { };
@@ -379,40 +425,58 @@ in
       };
     };
 
-    services.nginx = mkIf (cfg.cache.domain != null) {
+    services.nginx = mkIf (cfg.cache.domain != null || cfg.cache.bucketDomains != [ ]) {
       enable = true;
       recommendedProxySettings = true;
-      virtualHosts.${cfg.cache.domain} = {
-        enableACME = cfg.cache.enableACME;
-        forceSSL = cfg.cache.enableACME;
-        # TWO SETS OF LOCATIONS, one per shape.
-        #
-        # WITHOUT a door: the cache's protocol and its admin API, and NOTHING
-        # else. `/` is an explicit 404 rather than an absent location: with no
-        # `location /` and no `root`, nginx falls back to its own
-        # `html/index.html` and answers "Welcome to nginx" with a 200 — which is
-        # not the board, but is not the 404 this module promised either.
-        #
-        # WITH one: everything the daemon serves, because the door is what makes
-        # it safe to. `/rpc/ws` carries the websocket upgrade; `/` carries the
-        # board and every static asset; `/mcp` an agent's endpoint. `/auth/…`
-        # rides `/` — the OAuth redirect and the callback are ordinary requests.
-        locations =
-          if serverMode then {
-            "/rpc/ws" = {
-              proxyPass = daemonUrl;
-              extraConfig = websocketRules;
-            };
-            "/" = proxyLocation;
-          } else {
-            "/cache/" = proxyLocation;
-            "/_odu/v1/" = proxyLocation;
-            "/" = { return = "404"; };
+      virtualHosts =
+        lib.optionalAttrs (cfg.cache.domain != null) {
+          ${cfg.cache.domain} = {
+            enableACME = cfg.cache.enableACME;
+            forceSSL = cfg.cache.enableACME;
+            # TWO SETS OF LOCATIONS, one per shape.
+            #
+            # WITHOUT a door: the cache's protocol and its admin API, and
+            # NOTHING else. `/` is an explicit 404 rather than an absent
+            # location: with no `location /` and no `root`, nginx falls back to
+            # its own `html/index.html` and answers "Welcome to nginx" with a
+            # 200 — which is not the board, but is not the 404 this module
+            # promised either.
+            #
+            # WITH one: everything the daemon serves, because the door is what
+            # makes it safe to. `/rpc/ws` carries the websocket upgrade; `/`
+            # carries the board and every static asset; `/mcp` an agent's
+            # endpoint. `/auth/…` rides `/` — the OAuth redirect and the
+            # callback are ordinary requests.
+            locations =
+              if serverMode then {
+                "/rpc/ws" = {
+                  proxyPass = daemonUrl;
+                  extraConfig = websocketRules;
+                };
+                "/" = proxyLocation;
+              } else {
+                "/cache/" = proxyLocation;
+                "/_odu/v1/" = proxyLocation;
+                "/" = { return = "404"; };
+              };
           };
-      };
+        }
+        # ONE VHOST PER BUCKET NAME, each with its own certificate and exactly
+        # the Nix protocol's paths. The daemon decides WHICH bucket a `Host`
+        # names; nginx only has to let the request through.
+        // lib.listToAttrs (
+          map (domain: lib.nameValuePair domain {
+            enableACME = cfg.cache.enableACME;
+            forceSSL = cfg.cache.enableACME;
+            locations = cacheLocations;
+          }) cfg.cache.bucketDomains
+        );
     };
 
     networking.firewall.allowedTCPPorts =
-      optionals (cfg.cache.domain != null && cfg.openFirewall) [ 80 443 ];
+      optionals ((cfg.cache.domain != null || cfg.cache.bucketDomains != [ ]) && cfg.openFirewall) [
+        80
+        443
+      ];
   };
 }

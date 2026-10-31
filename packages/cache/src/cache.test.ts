@@ -200,8 +200,56 @@ describe("describe", () => {
     const described = await cache.admin.describe({ bucket: "main" });
     expect(described).toMatchObject({ ok: true });
     if (described.ok) {
-      expect(Object.keys(described.value).sort()).toEqual(["name", "public", "publicKey"]);
+      expect(Object.keys(described.value).sort()).toEqual([
+        "domain",
+        "name",
+        "public",
+        "publicKey",
+      ]);
     }
+    cache.close();
+  });
+});
+
+describe("a bucket's domain", () => {
+  it("sets, normalizes and clears a name, and one name belongs to one bucket", async () => {
+    const cache = cacheWith(ROOT);
+    await cache.admin.create(createInput);
+    await cache.admin.create({ ...createInput, name: "other" });
+
+    const named = await cache.admin.domain({
+      ...asRoot(ROOT),
+      bucket: "main",
+      domain: "Cache.Example.ORG",
+    });
+    expect(named).toMatchObject({ ok: true, value: { domain: "cache.example.org" } });
+    expect(cache.bucketByDomain("cache.example.org")?.name).toBe("main");
+
+    const taken = await cache.admin.domain({
+      ...asRoot(ROOT),
+      bucket: "other",
+      domain: "cache.example.org",
+    });
+    expect(taken).toMatchObject({ ok: false, code: "bad_input" });
+    if (!taken.ok) expect(taken.message).toContain('"main"');
+
+    // A SCHEME IS NOT A NAME: the substituter URL adds it, and a stored
+    // `https://…` would be a host header no request carries.
+    expect(
+      await cache.admin.domain({
+        ...asRoot(ROOT),
+        bucket: "main",
+        domain: "https://cache.example.org",
+      }),
+    ).toMatchObject({ ok: false, code: "bad_input" });
+
+    const cleared = await cache.admin.domain({
+      ...asRoot(ROOT),
+      bucket: "main",
+      domain: null,
+    });
+    expect(cleared).toMatchObject({ ok: true, value: { domain: null } });
+    expect(cache.bucketByDomain("cache.example.org")).toBeNull();
     cache.close();
   });
 });

@@ -75,7 +75,7 @@ export interface CacheCliPorts {
   }>;
 }
 
-export const CACHE_USAGE = `usage: odu cache <create|list|use|token|login|push|pin|gc|stats> [args]
+export const CACHE_USAGE = `usage: odu cache <create|list|use|domain|token|login|push|pin|gc|stats> [args]
 
 create <bucket> [--private] [--retention-days N] [--upstream-key K]… | --no-upstream
                               create a bucket; print its substituter URL and
@@ -86,6 +86,9 @@ list [-o json]                buckets, with sizes. Needs $ODU_ROOT_TOKEN
 use <bucket>                  the nix.conf settings, the nixConfig block and the
                               netrc lines for a bucket. Needs NO token: a
                               bucket's URL and public key are public
+domain <bucket> <name>|--none give a bucket a DNS name of its own (the
+                              substituter URL becomes that name), or take it
+                              away. Needs $ODU_ROOT_TOKEN
 token mint <bucket> [--read|--write|--admin] [--expires-days N|--no-expiry] [--buckets GLOB]
                               mint a token. It is printed ONCE; only its hash
                               is kept. Expires in 90 days unless --expires-days
@@ -224,6 +227,8 @@ export async function cacheCommand(
       return listCommand(rest, ports);
     case "use":
       return useCommand(rest, ports);
+    case "domain":
+      return domainCommand(rest, ports);
     case "token":
       return tokenCommand(rest, ports);
     case "login":
@@ -363,6 +368,42 @@ async function useCommand(rest: string[], ports: CacheCliPorts): Promise<number>
         publicKey: bucket.publicKey,
         home: process.env.HOME ?? null,
       }),
+    );
+    return 0;
+  });
+}
+
+async function domainCommand(rest: string[], ports: CacheCliPorts): Promise<number> {
+  const { values, positionals } = parseArgs({
+    args: rest,
+    allowPositionals: true,
+    options: { none: { type: "boolean" }, origin: originOption, output: outputOption },
+  });
+  const [bucket, domain] = positionals;
+  if (bucket === undefined || (values.none === true) === (domain !== undefined)) {
+    process.stderr.write(
+      `odu: cache domain needs a bucket and a name, or --none to clear it\n${CACHE_USAGE}`,
+    );
+    return 1;
+  }
+  const json = values.output === "json";
+  return withService(ports, values.origin, async (client) => {
+    const answer = await call(
+      client.surface.bucket.domain({
+        rootToken: rootToken(),
+        bucket,
+        ...(values.none === true ? {} : { domain }),
+      }),
+    );
+    if (!answer.ok) return reportFailure(answer, json, REFUSED);
+    if (json) {
+      emitJson(answer.value);
+      return 0;
+    }
+    process.stdout.write(
+      answer.value.domain === null
+        ? `cleared the name; ${bucket} is served under /cache/${bucket}\n`
+        : `named ${bucket} ${answer.value.domain}\n  substituter: ${answer.value.url}\n`,
     );
     return 0;
   });

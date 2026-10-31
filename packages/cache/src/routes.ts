@@ -63,6 +63,41 @@ function admit(
   if (bucket === null) {
     return { ok: false, response: HttpServerResponse.empty({ status: 404 }) };
   }
+  return authorize(cache, request, bucket, need);
+}
+
+/** The `Host` a request arrived under, lowercased and without its port. A
+ *  bucket's domain is stored that way, and the header is the only name a
+ *  domain-routed request carries. */
+function hostOf(request: HttpServerRequest.HttpServerRequest): string {
+  const raw = (request.headers["host"] ?? "").trim().toLowerCase();
+  const colon = raw.indexOf(":");
+  return colon === -1 ? raw : raw.slice(0, colon);
+}
+
+/**
+ * THE BUCKET A REQUEST'S `HOST` NAMES. A bucket with a domain is served at the
+ * ROOT of that name — `/nix-cache-info`, `/<hash>.narinfo`, `/nar/<file>` — the
+ * way every public binary cache is; no `Host` match is the path form's business.
+ */
+function admitByHost(
+  cache: Cache,
+  request: HttpServerRequest.HttpServerRequest,
+  need: Scope,
+): { ok: true; bucket: BucketRow } | { ok: false; response: HttpServerResponse.HttpServerResponse } {
+  const bucket = cache.bucketByDomain(hostOf(request));
+  if (bucket === null) {
+    return { ok: false, response: HttpServerResponse.empty({ status: 404 }) };
+  }
+  return authorize(cache, request, bucket, need);
+}
+
+function authorize(
+  cache: Cache,
+  request: HttpServerRequest.HttpServerRequest,
+  bucket: BucketRow,
+  need: Scope,
+): { ok: true; bucket: BucketRow } | { ok: false; response: HttpServerResponse.HttpServerResponse } {
   const verdict = cache.authorize(request.headers["authorization"], bucket, need);
   if (!verdict.ok) {
     return {
@@ -73,6 +108,24 @@ function admit(
   return { ok: true, bucket };
 }
 
+/** The two root-level narinfo routes share one body: a client that substitutes
+ *  from a bucket's DOMAIN asks for `/<hash>.narinfo`, not `/cache/<name>/…`. */
+function narinfoRoot(cache: Cache) {
+  return (request: HttpServerRequest.HttpServerRequest) =>
+    Effect.gen(function* () {
+      const hash = yield* param("hash");
+      if (!isStorePathHash(hash)) return bad(`"${hash}" is not a store path hash`);
+      const admitted = admitByHost(cache, request, "read");
+      if (!admitted.ok) return admitted.response;
+      const text = cache.narinfoText(admitted.bucket, hash);
+      if (text === null) return HttpServerResponse.empty({ status: 404 });
+      cache.touch(admitted.bucket, hash);
+      return request.method === "HEAD"
+        ? HttpServerResponse.empty({ status: 200 })
+        : HttpServerResponse.text(text, { contentType: "text/x-nix-narinfo" });
+    });
+}
+
 const NARINFO_SUFFIX = ".narinfo";
 
 const bad = (message: string): HttpServerResponse.HttpServerResponse =>
@@ -81,6 +134,11 @@ const bad = (message: string): HttpServerResponse.HttpServerResponse =>
 /** Where the push API lives — odu's own, beside the Nix protocol's mount. */
 const PUSH_API = "/_odu/v1";
 
+/** Nix's base32, as a route fragment: a narinfo is named for its 32-character
+ *  store-path hash, and a DOMAIN's root route has no bucket segment to make the
+ *  route unambiguous. */
+const HASH_PATTERN = "[0-9abcdfghijklmnpqrsvwxyz]{32}";
+
 /**
  * THE PATHS THESE ROUTES ANSWER, beside the routes: the Nix protocol under
  * {@link CACHE_MOUNT} and the push API under {@link PUSH_API}. Both carry their
@@ -88,7 +146,16 @@ const PUSH_API = "/_odu/v1";
  * through to them — and a route added below outside both prefixes is caught by
  * `@odu/host`'s `reserved.test.ts`, which records what this layer registers.
  */
-export const CACHE_ROUTE_PATHS: ReadonlyArray<string> = [`${CACHE_MOUNT}/*`, `${PUSH_API}/*`];
+export const CACHE_ROUTE_PATHS: ReadonlyArray<string> = [
+  `${CACHE_MOUNT}/*`,
+  `${PUSH_API}/*`,
+  // A BUCKET DOMAIN ANSWERS AT THE ROOT of its name. The three paths are the
+  // Nix protocol's whole footprint there; the regex is a claim form the door
+  // gate reads (`~` is an anchored regular expression).
+  "/nix-cache-info",
+  "/nar/*",
+  `~^/${HASH_PATTERN}\\.narinfo$`,
+];
 
 export function cacheRoutes(cache: Cache): ClaimedRoutes<ReturnType<typeof cacheLayer>> {
   return { layer: cacheLayer(cache), paths: CACHE_ROUTE_PATHS };
@@ -196,6 +263,85 @@ function cacheLayer(cache: Cache) {
             hash,
             Stream.toReadableStream(request.stream),
           ),
+        );
+        if (outcome.ok) {
+          return outcome.status === 200
+            ? HttpServerResponse.empty({ status: 200 })
+            : HttpServerResponse.text(
+                `${heldReason(outcome.missing)}: ${outcome.missing.join(" ")}`,
+                { status: 202 },
+              );
+        }
+        return HttpServerResponse.text(outcome.message, { status: outcome.status });
+      }),
+    ),
+
+    // ── A BUCKET'S OWN NAME ──────────────────────────────────────────────
+    //
+    // A domain is a STABLE NAME FOR A BUCKET, not a prefix: the same four
+    // protocol paths sit at the root of it, and the request's `Host` — not a
+    // path segment — says which bucket. The routes are registered always; a
+    // request whose `Host` names no bucket is a plain 404, which is exactly
+    // what a wrong name deserves.
+
+    /** `nix-cache-info` at a bucket's domain. */
+    HttpRouter.add("GET", "/nix-cache-info", (request) =>
+      Effect.gen(function* () {
+        const admitted = admitByHost(cache, request, "read");
+        if (!admitted.ok) return admitted.response;
+        return HttpServerResponse.text(NIX_CACHE_INFO, { contentType: "text/plain" });
+      }),
+    ),
+
+    /** `<hash>.narinfo` at a bucket's domain. The hash is the route's only
+     *  parameter; the suffix is static, so a shell path cannot match it. */
+    HttpRouter.add("GET", `/:hash(${HASH_PATTERN}).narinfo`, narinfoRoot(cache)),
+
+    /** The NAR at a bucket's domain, streamed from the store. */
+    HttpRouter.add("GET", "/nar/:file", (request) =>
+      Effect.gen(function* () {
+        const file = yield* param("file");
+        if (!isStagedFileName(file)) return bad(`"${file}" is not a NAR file name`);
+        const admitted = admitByHost(cache, request, "read");
+        if (!admitted.ok) return admitted.response;
+        const stream = yield* Effect.promise(() => cache.narStream(admitted.bucket, file));
+        if (stream === null) return HttpServerResponse.empty({ status: 404 });
+        return HttpServerResponse.stream(
+          Stream.fromReadableStream({ evaluate: () => stream, onError: (err) => err }),
+          { contentType: "application/x-nix-nar" },
+        );
+      }),
+    ),
+
+    /** A `nix copy --to https://<domain>` uploads at the root too. */
+    HttpRouter.add("PUT", "/nar/:file", (request) =>
+      Effect.gen(function* () {
+        const file = yield* param("file");
+        if (!isStagedFileName(file)) return bad(`"${file}" is not a NAR file name`);
+        const admitted = admitByHost(cache, request, "write");
+        if (!admitted.ok) return admitted.response;
+        const upload = yield* Effect.promise(() => cache.beginUpload(admitted.bucket, file));
+        const written = yield* Effect.exit(
+          Stream.runForEach(request.stream, (chunk) =>
+            Effect.promise(() => upload.write(chunk)),
+          ).pipe(Effect.andThen(Effect.promise(() => upload.commit()))),
+        );
+        if (written._tag === "Failure") {
+          yield* Effect.promise(() => upload.discard());
+          return HttpServerResponse.text("the upload did not complete", { status: 400 });
+        }
+        return HttpServerResponse.empty({ status: 200 });
+      }),
+    ),
+
+    HttpRouter.add("PUT", `/:hash(${HASH_PATTERN}).narinfo`, (request) =>
+      Effect.gen(function* () {
+        const hash = yield* param("hash");
+        if (!isStorePathHash(hash)) return bad(`"${hash}" is not a store path hash`);
+        const admitted = admitByHost(cache, request, "write");
+        if (!admitted.ok) return admitted.response;
+        const outcome = yield* Effect.promise(() =>
+          cache.acceptNarinfo(admitted.bucket, hash, Stream.toReadableStream(request.stream)),
         );
         if (outcome.ok) {
           return outcome.status === 200

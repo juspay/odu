@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { Given, Then, When } from "@cucumber/cucumber";
-import { oduCli, ROOT_TOKEN } from "../../../web-acceptance/support/service.ts";
+import { oduCli, ROOT_TOKEN, until } from "../../../web-acceptance/support/service.ts";
 import type { OduWorld } from "../../../web-acceptance/support/world.ts";
 
 function unique(what: string): string {
@@ -364,6 +364,41 @@ When("I mint a {string} token", async function (this: OduWorld, scope: string) {
   const row = this.page.locator("ul.tokens li", { hasText: "just minted" });
   await row.waitFor({ timeout: 30_000 });
   minted(this).id = (await row.locator("code").first().innerText()).trim();
+});
+
+When("I name the bucket {string}", async function (this: OduWorld, domain: string) {
+  await this.page.getByPlaceholder("cache.example.org").fill(domain);
+  await this.page.getByRole("button", { name: "Set domain", exact: true }).click();
+  // The USE BLOCK is the proof the row accepted it: it is redrawn from the
+  // published bucket row, not from the field that was typed.
+  await until(`the substituter block to name ${domain}`, async () =>
+    (await this.page.locator("pre.consume-block").innerText()).includes(domain) ? true : null,
+  );
+});
+
+Then("the page's substituter URL is {string}", async function (this: OduWorld, host: string) {
+  const text = await this.page.locator("pre.consume-block").innerText();
+  assert.match(
+    text,
+    new RegExp(`extra-substituters = \\S*${host.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
+    `the substituter URL does not name ${host}: ${text}`,
+  );
+});
+
+Then("the page's netrc block names {string}", async function (this: OduWorld, host: string) {
+  const text = await this.page.locator("pre.consume-block").innerText();
+  assert.ok(
+    text.includes(`machine ${host} password`),
+    `the netrc block does not name ${host}: ${text}`,
+  );
+});
+
+Then("the push block still names the bucket's path", async function (this: OduWorld) {
+  const text = await this.page.locator("pre.push-block").innerText();
+  assert.ok(
+    text.includes(`/cache/${this.cacheBucket}`),
+    `the push block lost the bucket's path: ${text}`,
+  );
 });
 
 Then("the token form defaults to 90 days", async function (this: OduWorld) {

@@ -32,6 +32,7 @@ const bucket: BucketRow = {
   publicKey: "main-1:cHVibGlj",
   upstreamKeys: ["cache.nixos.org-1"],
   created: NOW,
+  domain: null,
 };
 
 const token: TokenRow = {
@@ -93,6 +94,24 @@ describe("buckets", () => {
     expect(repo.bucket("main")).toEqual(bucket);
     expect(repo.bucket("absent")).toBeNull();
     expect(repo.buckets().map((row) => row.name)).toEqual(["main"]);
+  });
+
+  it("finds a bucket by the domain it claimed", () => {
+    const repo = openCacheRepo(":memory:");
+    repo.putBucket({ ...bucket, domain: "cache.example.org" });
+    expect(repo.bucketByDomain("cache.example.org")?.name).toBe("main");
+    expect(repo.bucketByDomain("other.example.org")).toBeNull();
+    // A-TO-B: the upsert moves the name rather than keeping the old one.
+    repo.putBucket({ ...bucket, domain: null });
+    expect(repo.bucketByDomain("cache.example.org")).toBeNull();
+  });
+
+  it("refuses two buckets with one domain", () => {
+    const repo = openCacheRepo(":memory:");
+    repo.putBucket({ ...bucket, domain: "cache.example.org" });
+    expect(() =>
+      repo.putBucket({ ...bucket, name: "other", domain: "cache.example.org" }),
+    ).toThrow();
   });
 
   it("updates a bucket in place rather than duplicating it", () => {

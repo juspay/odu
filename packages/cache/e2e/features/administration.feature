@@ -19,6 +19,18 @@ Feature: An admin administers the cache from the board
     And there should be no page errors
 
   @signed-in:admin
+  Scenario: A bucket gets a name of its own from its page
+    # THE NAME CHANGES WHAT THE PAGE SHOWS A CLIENT, and nothing else on this
+    # page moved: the substituter URL, the nix.conf block and the netrc machine
+    # are the domain, while the push block keeps the path the API addresses.
+    Given a bucket created from the board
+    When I name the bucket "cache.e2e.test"
+    Then the page's substituter URL is "cache.e2e.test"
+    And the page's netrc block names "cache.e2e.test"
+    And the push block still names the bucket's path
+    And there should be no page errors
+
+  @signed-in:admin
   Scenario: A bucket is created from the board with the upstream switch off
     Given I open the cache
     When I name a new bucket

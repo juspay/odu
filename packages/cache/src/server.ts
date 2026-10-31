@@ -128,12 +128,36 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
    *  `nix.conf`, built once. The board's row and `bucket.describe` both answer
    *  it, and two builders were two chances for them to disagree about the
    *  address the cache is actually served at. */
-  const urlOf = (name: string): string => `${opts.publicOrigin}${opts.mount}/${name}`;
+  /** The SCHEME the deployment's public origin uses — a bucket's domain is
+   *  reached over the same TLS story, and the module's test vhost is plain
+   *  HTTP. */
+  const scheme = ((): string => {
+    try {
+      return new URL(opts.publicOrigin).protocol;
+    } catch {
+      return "https:";
+    }
+  })();
+
+  /**
+   * WHERE A CLIENT SUBSTITUTES THIS BUCKET FROM. A domain is the whole
+   * address (that is what "a name of its own" means); otherwise the bucket is a
+   * path under the origin.
+   */
+  const urlOf = (facts: { name: string; domain: string | null }): string =>
+    facts.domain === null
+      ? `${opts.publicOrigin}${opts.mount}/${facts.name}`
+      : `${scheme}//${facts.domain}`;
+
+  /** WHERE A PUSH ADDRESSES IT. Always the path form: the push API needs the
+   *  bucket's name, and a domain host answers `/cache/<name>` too. */
+  const pushUrlOf = (name: string): string => `${opts.publicOrigin}${opts.mount}/${name}`;
 
   const rowOf = (facts: BucketFacts): CacheBucket => ({
     ...facts,
     upstreamKeys: [...facts.upstreamKeys],
-    url: urlOf(facts.name),
+    url: urlOf(facts),
+    pushUrl: pushUrlOf(facts.name),
   });
 
   const publish = (): void => {
@@ -303,8 +327,22 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
         describe: ({ input }) =>
           answer(() => cache.admin.describe(input), (identity) => ({
             ...identity,
-            url: urlOf(identity.name),
+            url: urlOf(identity),
           })),
+        domain: ({ input }) =>
+          admin(
+            input,
+            (authority) =>
+              cache.admin.domain({
+                authority,
+                bucket: input.bucket,
+                domain:
+                  input.domain === undefined || input.domain.trim() === ""
+                    ? null
+                    : input.domain,
+              }),
+            (facts) => rowOf(facts),
+          ),
         paths: ({ input }) =>
           answer(
             () =>
