@@ -36,7 +36,7 @@ import {
   readGithubConfig,
   type GithubConfig,
 } from "./github";
-import { authServer, SESSION_COOKIE, type AuthServer } from "./server";
+import { authServer, bearerValue, SESSION_COOKIE, type AuthServer } from "./server";
 import { AuthRefused, oduAuthSurface } from "./surface";
 
 type AuthClient = SurfaceClientOf<(typeof oduAuthSurface)["spec"]>;
@@ -100,6 +100,27 @@ const refusal = (error: unknown): AuthRefused => {
 };
 
 // ── the environment ─────────────────────────────────────────────────────────
+
+describe("the authorization header", () => {
+  // THE PARSER DECIDES WHETHER A REQUEST IS SIGNED IN, so its edges are
+  // promises: the scheme is case-insensitive, the gap is one or more spaces
+  // (a proxy may re-fold them), and anything else is nobody.
+  it("takes the token after the scheme, whatever the spacing", () => {
+    expect(bearerValue("Bearer abc")).toBe("abc");
+    expect(bearerValue("bearer abc")).toBe("abc");
+    expect(bearerValue("Bearer    abc")).toBe("abc");
+    expect(bearerValue("Bearer\tabc")).toBe("abc");
+    expect(bearerValue("  Bearer abc  ")).toBe("abc");
+  });
+
+  it("answers null for anything that is not a bearer token", () => {
+    expect(bearerValue(undefined)).toBeNull();
+    expect(bearerValue("")).toBeNull();
+    expect(bearerValue("Bearer")).toBeNull();
+    expect(bearerValue("Bearerabc")).toBeNull();
+    expect(bearerValue("Basic abc")).toBeNull();
+  });
+});
 
 describe("the door's configuration", () => {
   const origins = { publicOrigin: "https://odu.test", boundOrigin: "http://127.0.0.1:18440" };

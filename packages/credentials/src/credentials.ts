@@ -45,9 +45,15 @@ export function credentialsPath(env: CredentialEnv, store: string): string {
   return join(configBase(env), "odu", store, "credentials");
 }
 
-/** `/`-trimmed, so a token saved by one spelling is found by the other. */
+/** `/`-trimmed, so a token saved by one spelling is found by the other.
+ *
+ *  A loop, not `replace(/\/+$/)`: an origin is library input, and the
+ *  expression backtracks quadratically over a long run of slashes (CodeQL, and
+ *  the finding is right even where the input is a user's own `--origin`). */
 export function normalizeOrigin(origin: string): string {
-  return origin.replace(/\/+$/, "");
+  let end = origin.length;
+  while (end > 0 && origin[end - 1] === "/") end--;
+  return origin.slice(0, end);
 }
 
 /** The map as it is on disk; an absent or unreadable file is EMPTY, because CI

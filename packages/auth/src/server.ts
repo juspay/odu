@@ -101,11 +101,29 @@ export function cookieValue(header: string | undefined, name: string): string | 
   return null;
 }
 
-/** The token out of an `Authorization:` header, or null. */
+/** The token out of an `Authorization:` header, or null.
+ *
+ *  Parsed by index rather than by expression: the header is attacker-controlled,
+ *  and `^Bearer\s+(.+)$` backtracks quadratically over a run of spaces (CodeQL
+ *  said so, correctly). This walk is linear whatever the header holds. */
 export function bearerValue(header: string | undefined): string | null {
   if (header === undefined) return null;
-  const match = /^Bearer\s+(.+)$/i.exec(header.trim());
-  return match === null ? null : (match[1] as string).trim();
+  const trimmed = header.trim();
+  const scheme = "bearer";
+  if (trimmed.length <= scheme.length) return null;
+  if (trimmed.slice(0, scheme.length).toLowerCase() !== scheme) return null;
+  let at = scheme.length;
+  while (at < trimmed.length && isSpace(trimmed[at] as string)) at++;
+  // At least one space between the scheme and the token, and a token after it.
+  if (at === scheme.length) return null;
+  const token = trimmed.slice(at);
+  return token === "" ? null : token;
+}
+
+/** The whitespace a header's field-content may carry between two words — the
+ *  RFC's OWS plus the line folds a proxy may have removed. */
+function isSpace(character: string): boolean {
+  return character === " " || character === "\t" || character === "\r" || character === "\n";
 }
 
 export interface AuthServerOptions {
