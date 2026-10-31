@@ -96,6 +96,16 @@ describe("adoptOrRefuse", () => {
     expect(warned[0]).toContain("odu web --upgrade");
   });
 
+  it("says it once per daemon to a caller that redials", async () => {
+    const warned: string[] = [];
+    const seen = new Set<string>();
+    for (let dial = 0; dial < 3; dial += 1) {
+      const { connection } = scripted(() => Stream.make(cell(minorStep(-1))));
+      await adoptOrRefuse(connection, ORIGIN, { warn: (line) => warned.push(line), warned: seen });
+    }
+    expect(warned).toHaveLength(1);
+  });
+
   it("says nothing when the service is level or ahead", async () => {
     const warned: string[] = [];
     for (const version of [SERVICE_CONTRACT_VERSION, minorStep(1)]) {

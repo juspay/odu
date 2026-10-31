@@ -57,9 +57,13 @@ export const SERVICE_WIRE_GROUP = composedWire(oduServiceSurface, SERVICE_SIBLIN
  * no data rather than like a refusal. `$ODU_TOKEN` first, then the entry
  * `odu auth login` wrote for that origin — the same order the docs promise.
  */
-export function connectToService(origin?: string): Promise<ServiceConnection> {
+export function connectToService(
+  origin?: string,
+  opts: { warned?: Set<string> } = {},
+): Promise<ServiceConnection> {
   return connectOrStart(origin, {
     group: SERVICE_WIRE_GROUP,
     authorization: (resolved) => authorizationHeaders(process.env, resolved),
+    ...opts,
   });
 }

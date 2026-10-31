@@ -178,7 +178,14 @@ export function contractVerdict(
 export async function adoptOrRefuse<C extends Pick<ServiceConnection, "client" | "dispose">>(
   connection: C,
   origin: string,
-  opts: { handshakeMs?: number; warn?: (line: string) => void } = {},
+  opts: {
+    handshakeMs?: number;
+    warn?: (line: string) => void;
+    /** Daemon instances this caller already warned about — owned by a caller
+     *  that dials more than once (the stdio bridge redials per connection), so
+     *  the skew note is said once per daemon rather than once per redial. */
+    warned?: Set<string>;
+  } = {},
 ): Promise<C> {
   const handshakeMs = opts.handshakeMs ?? SERVICE_HANDSHAKE_MS;
   let cell: ServiceCell | undefined;
@@ -216,7 +223,11 @@ export async function adoptOrRefuse<C extends Pick<ServiceConnection, "client" |
   // command's alone — and the "unknown" a newer verb would meet is explained
   // before it arrives.
   const note = skewNote(cell, origin);
-  if (note !== null) (opts.warn ?? ((line) => process.stderr.write(`${line}\n`)))(note);
+  const instance = `${cell.identity.pid}:${cell.identity.startedAt}`;
+  if (note !== null && opts.warned?.has(instance) !== true) {
+    opts.warned?.add(instance);
+    (opts.warn ?? ((line) => process.stderr.write(`${line}\n`)))(note);
+  }
   return connection;
 }
 
@@ -621,12 +632,15 @@ export async function connectOrStart(
      * which is loopback and is unconditional there.
      */
     authorization?: (origin: string) => Promise<Record<string, string>>;
+    /** See {@link adoptOrRefuse}: the daemons already warned about. */
+    warned?: Set<string>;
   } = {},
 ): Promise<ServiceConnection> {
   const allowStart = opts.allowStart ?? origin === serviceOrigin();
   const headers = opts.authorization === undefined ? {} : await opts.authorization(origin);
   const existing = await dialExisting(origin, allowStart, opts.group, headers);
-  if (existing !== null) return adoptOrRefuse(existing, origin);
+  const adopt = { ...(opts.warned === undefined ? {} : { warned: opts.warned }) };
+  if (existing !== null) return adoptOrRefuse(existing, origin, adopt);
   const outcome = await ensureService({
     origin,
     home: webHome(origin),
@@ -647,6 +661,7 @@ export async function connectOrStart(
   return adoptOrRefuse(
     await dialService(outcome.origin, dialOptions(opts.group, headers)),
     outcome.origin,
+    adopt,
   );
 }
 
