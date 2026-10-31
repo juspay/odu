@@ -219,6 +219,18 @@
     cache_body, cache_code = answer.rsplit("\n", 1)
     assert cache_code.strip() == "404", cache_code
     assert "<html" not in cache_body.lower(), cache_body[:200]
+
+    # AND SO IS THE PUSH API. The gate once claimed `/cache/*` but not
+    # `/_odu/v1/*`, so an anonymous push met the sign-in page (200, HTML) and
+    # `odu cache push` failed to parse it. The daemon's own answer for a bucket
+    # nobody created is an empty 404 — anything but the shell.
+    answer = client.succeed(
+        "curl -sS -w '\\n%{http_code}' -X POST -H 'content-type: application/json'"
+        " -d '{\"paths\":[]}' http://door.test/_odu/v1/buckets/main/missing"
+    ).rstrip("\n")
+    push_body, push_code = answer.rsplit("\n", 1)
+    assert push_code.strip() == "404", f"the push API answered {push_code}: {push_body[:200]!r}"
+    assert "<html" not in push_body.lower(), push_body[:200]
   '';
 }
 
