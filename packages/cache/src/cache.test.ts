@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { asRoot } from "./testlib";
 import { base32 } from "./narinfo";
 import { type Cache, createCache } from "./cache";
+import type { NarinfoOutcome } from "./staging";
 import { FakeStore, hashOf } from "../test/fakeStore";
 
 const ROOT = "root-token";
@@ -362,6 +363,89 @@ describe("a restart", () => {
     // Two: the child this call recorded, and the parent the recovered seed
     // unblocked.
     expect(stats).toMatchObject({ ok: true, value: { objects: 2 } });
+    second.close();
+  });
+});
+
+describe("upstream references", () => {
+  const child = "/nix/store/cccccccccccccccccccccccccccccccc-child";
+  const parent = "/nix/store/pppppppppppppppppppppppppppppppp-parent";
+
+  /** A parent whose only reference is absent from this store. */
+  async function parentWaitingOnChild(
+    upstreamKeys: readonly string[],
+  ): Promise<{ cache: Cache; outcome: NarinfoOutcome }> {
+    const cache = cacheWith(ROOT);
+    await cache.admin.create({ ...createInput, upstreamKeys });
+    const childPayload = nar("child bytes");
+    const parentPayload = nar("parent bytes");
+    store.upstream.set(child, {
+      storePath: child,
+      narHash: childPayload.narHash,
+      narSize: 1,
+      references: [],
+      // Signed by the key the bucket trusts — and therefore fetchable.
+      sigs: ["cache.nixos.org-1:c2ln"],
+    });
+    store.add(
+      { storePath: parent, narHash: parentPayload.narHash, narSize: 1, references: [child] },
+      false,
+    );
+    await putNar(cache, "main", parentPayload);
+    const outcome = await cache.acceptNarinfo(
+      cache.bucket("main") as never,
+      hashOf(parent),
+      stream(narinfoText(parent, parentPayload, [child])),
+    );
+    return { cache, outcome };
+  }
+
+  it("fetches a reference upstream signed, then imports the referrer", async () => {
+    const { cache, outcome } = await parentWaitingOnChild(["cache.nixos.org-1"]);
+    expect(outcome).toMatchObject({ ok: true, status: 200 });
+    // Scoped to the BUCKET's key: the fetch trusts what the bucket trusts and
+    // nothing else.
+    expect(store.substituted).toEqual([
+      { paths: [child], keyNames: ["cache.nixos.org-1"] },
+    ]);
+    expect(cache.held()).toEqual([]);
+    expect(store.present.has(child)).toBe(true);
+    cache.close();
+  });
+
+  it("holds a reference that is neither here nor upstream, and publishes it", async () => {
+    // The upstream has the path, but signed by a key this bucket does not
+    // trust — so it is not "upstream" for this bucket, and the referrer is held.
+    const { cache, outcome } = await parentWaitingOnChild(["some-other-key"]);
+    expect(outcome).toMatchObject({ ok: true, status: 202 });
+    if (outcome.ok) expect(outcome.missing).toEqual([child]);
+    expect(cache.held()).toMatchObject([
+      { bucket: "main", storePath: parent, missing: [child] },
+    ]);
+    cache.close();
+  });
+
+  it("fetches nothing for a --no-upstream bucket", async () => {
+    const { cache, outcome } = await parentWaitingOnChild([]);
+    expect(outcome).toMatchObject({ ok: true, status: 202 });
+    expect(store.substituted).toEqual([]);
+    expect(cache.held()).toHaveLength(1);
+    cache.close();
+  });
+
+  it("keeps the held row across a restart", async () => {
+    const { cache } = await parentWaitingOnChild(["some-other-key"]);
+    cache.close();
+    const second = createCache({
+      stateRoot: scratch,
+      rootToken: ROOT,
+      store: null,
+      blob: store,
+      now: () => NOW,
+    });
+    // The reason is a ROW, not a drain's memory: a new process reads it before
+    // it has attempted anything.
+    expect(second.held()).toMatchObject([{ bucket: "main", storePath: parent, missing: [child] }]);
     second.close();
   });
 });

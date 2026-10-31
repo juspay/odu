@@ -21,7 +21,7 @@
 
 import { join } from "node:path";
 import { type BlobStore, nixStore } from "./store";
-import type { BucketRow, BucketTotals, ObjectRow, Scope, TokenRow } from "./db";
+import type { BucketRow, BucketTotals, HeldRow, ObjectRow, Scope, TokenRow } from "./db";
 import { cursorFor, openCacheRepo } from "./db";
 import { planGc, runGc, type GcReport } from "./gc";
 import {
@@ -242,6 +242,15 @@ export interface Cache {
    * no more.
    */
   snapshot(): readonly BucketFacts[];
+  /**
+   * WHAT THE BUCKETS ARE HOLDING FOR REFERENCES — a row per path, with the
+   * references Nix named.
+   *
+   * Not a log line and not staging's memory: the reason a push stopped is a
+   * fact the bucket publishes, so the board lists it and a restart does not
+   * make a pending upload look like one that never arrived.
+   */
+  held(): readonly HeldRow[];
   /**
    * SOMETHING A SUBSCRIBER WOULD SEE MOVED — a narinfo landed, a bucket was
    * created, a closure was pinned or collected, or reads accumulated.
@@ -798,9 +807,11 @@ export function createCache(options: CacheOptions): Cache {
     beginUpload: (bucket, file) => staging.beginUpload(bucket, file),
     async acceptNarinfo(bucket, hash, body) {
       const outcome = await staging.acceptNarinfo(bucket, hash, body);
-      // A PUSH LANDED — the one change nobody outside the cache can see, and
-      // the reason this listener exists at all.
-      if (outcome.ok) notify();
+      // A PUSH LANDED, OR A HELD PATH BECAME (OR STOPPED BEING) HELD — the
+      // changes nobody outside the cache can see, and the reason this
+      // listener exists at all. The publisher diffs, so a refusal that changed
+      // nothing costs one comparison.
+      notify();
       return outcome;
     },
 
@@ -827,6 +838,8 @@ export function createCache(options: CacheOptions): Cache {
       const counted = repo.bucketStats();
       return repo.buckets().map((bucket) => factsOf(bucket, counted));
     },
+
+    held: () => repo.held(),
 
     onChange(listener) {
       listeners.add(listener);

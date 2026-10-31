@@ -48,6 +48,7 @@ import { CACHE_MOUNT } from "./paths";
 import { NIX_CACHE_INFO } from "./staging";
 import type { BucketRow, Scope } from "./db";
 import { isStagedFileName, isStorePathHash } from "./narinfo";
+import { heldReason } from "./surface";
 
 /** A bucket by name, and a credential that may do `need` with it — or the
  *  response that says why not. Every protocol route starts here, so "unknown
@@ -200,7 +201,7 @@ function cacheLayer(cache: Cache) {
           return outcome.status === 200
             ? HttpServerResponse.empty({ status: 200 })
             : HttpServerResponse.text(
-                `waiting on ${outcome.missing.join(", ")} — upload them and repeat this narinfo`,
+                `${heldReason(outcome.missing)}: ${outcome.missing.join(" ")}`,
                 { status: 202 },
               );
         }

@@ -91,6 +91,24 @@ export interface BucketTotals {
   lastPush: number | null;
 }
 
+/**
+ * AN UPLOAD THE BUCKET TOOK BUT CANNOT SERVE YET — a narinfo whose references
+ * are not in the store.
+ *
+ * It is a ROW rather than a line of staging's memory because it is a fact the
+ * bucket publishes: the board lists the paths a push is holding and why, and a
+ * restart must not make a pending upload look like one that never arrived. The
+ * staged narinfo itself stays on disk (staging's), so the row only names the
+ * position and the reason.
+ */
+export interface HeldRow {
+  bucket: string;
+  storePath: string;
+  /** References the store says are not valid, as Nix named them. */
+  missing: readonly string[];
+  created: number;
+}
+
 /** A named closure kept out of garbage collection. */
 export interface PinRow {
   bucket: string;
@@ -126,6 +144,15 @@ export interface CacheRepo {
   putPin(row: PinRow): void;
   pins(bucket?: string): PinRow[];
   deletePin(bucket: string, name: string): boolean;
+
+  /**
+   * The uploads a bucket is holding for references. `put` refreshes the
+   * REASON when a drain says something different, so a row's `since` stays
+   * the moment the path first arrived.
+   */
+  putHeld(row: HeldRow): void;
+  held(bucket?: string): HeldRow[];
+  deleteHeld(bucket: string, storePath: string): void;
 
   /** Object count, nar bytes, reads and the newest push per bucket, COUNTED BY
    *  SQL. A cache with a hundred thousand objects must not answer "how big am
@@ -213,6 +240,18 @@ const MIGRATIONS: readonly string[] = [
     PRIMARY KEY (bucket, name)
   );
   `,
+  // v2 — WHAT A BUCKET IS HOLDING FOR REFERENCES. Before this the reason lived
+  // only in a drain's memory and died with the process, so a person looking at
+  // a stalled push saw nothing until the next drain happened to run.
+  `
+  CREATE TABLE held (
+    bucket     TEXT NOT NULL,
+    store_path TEXT NOT NULL,
+    missing    TEXT NOT NULL,
+    created    INTEGER NOT NULL,
+    PRIMARY KEY (bucket, store_path)
+  );
+  `,
 ];
 
 /** The schema this build writes. A file carrying a HIGHER number was written by
@@ -298,6 +337,13 @@ const pinOf = (row: Row): PinRow => ({
   bucket: text(row, "bucket"),
   name: text(row, "name"),
   rootPaths: list(row, "root_paths"),
+  created: integer(row, "created"),
+});
+
+const heldOf = (row: Row): HeldRow => ({
+  bucket: text(row, "bucket"),
+  storePath: text(row, "store_path"),
+  missing: list(row, "missing"),
   created: integer(row, "created"),
 });
 
@@ -396,6 +442,7 @@ export function openCacheRepo(path: string): CacheRepo {
       db.run("DELETE FROM bucket WHERE name = ?", [name]);
       db.run("DELETE FROM object WHERE bucket = ?", [name]);
       db.run("DELETE FROM pin WHERE bucket = ?", [name]);
+      db.run("DELETE FROM held WHERE bucket = ?", [name]);
     },
 
     putToken(row) {
@@ -569,6 +616,24 @@ export function openCacheRepo(path: string): CacheRepo {
       if (found === null) return false;
       db.run("DELETE FROM pin WHERE bucket = ? AND name = ?", [bucket, name]);
       return true;
+    },
+
+    putHeld(row) {
+      // `created` is NOT overwritten: it is when the path first arrived, which
+      // is what the board's "waiting since" means. A later drain with the same
+      // or a shorter list of missing references refreshes the REASON only.
+      db.run(
+        `INSERT INTO held (bucket, store_path, missing, created) VALUES (?, ?, ?, ?)
+         ON CONFLICT(bucket, store_path) DO UPDATE SET missing = excluded.missing`,
+        [row.bucket, row.storePath, JSON.stringify(row.missing), row.created],
+      );
+    },
+    held: (bucket) =>
+      bucket === undefined
+        ? all("SELECT * FROM held ORDER BY created", [], heldOf)
+        : all("SELECT * FROM held WHERE bucket = ? ORDER BY created", [bucket], heldOf),
+    deleteHeld(bucket, storePath) {
+      db.run("DELETE FROM held WHERE bucket = ? AND store_path = ?", [bucket, storePath]);
     },
 
     close() {

@@ -120,6 +120,41 @@ export const CachePathSchema = Schema.Struct({
 });
 export type CachePath = typeof CachePathSchema.Type;
 
+/**
+ * ONE UPLOAD THE BUCKET TOOK BUT CANNOT SERVE YET, as every face reads it.
+ *
+ * `reason` is computed HERE rather than in each face: the CLI's line, the
+ * server's 202 body and the board's pending list are one sentence about one
+ * fact, and the day that sentence changes it changes once.
+ */
+export const CacheHeldSchema = Schema.Struct({
+  bucket: Schema.String,
+  storePath: Schema.String,
+  /** {@link heldReason} of `missing` — the words, not a second computation. */
+  reason: Schema.String,
+  /** The references Nix says are not valid, in its own spelling. */
+  missing: Schema.Array(Schema.String),
+  /** When the path first arrived; a later drain does not move it. */
+  since: Schema.Number,
+});
+export type CacheHeld = typeof CacheHeldSchema.Type;
+
+/** The key a held row is published under — the bucket, then the path. A store
+ *  path cannot contain `|`, so the key parses. */
+export const heldKey = (held: { bucket: string; storePath: string }): string =>
+  `${held.bucket}|${held.storePath}`;
+
+/**
+ * WHY A PATH IS HELD, in the one sentence the push, the server and the board
+ * say — PLAN.md's wording: a reference that is neither here nor upstream.
+ */
+export function heldReason(missing: readonly string[]): string {
+  const n = missing.length;
+  return `waiting for ${n} reference${n === 1 ? "" : "s"} that ${
+    n === 1 ? "is" : "are"
+  } neither here nor upstream`;
+}
+
 // ── the refusal ─────────────────────────────────────────────────────────────
 
 /**
@@ -390,6 +425,21 @@ export const oduCacheSurface = defineSurface({
       // not a wire member.
       verbs: ["keys", "get", "deltas"],
     },
+    /**
+     * THE UPLOADS A BUCKET IS HOLDING FOR REFERENCES.
+     *
+     * A collection rather than a field on `CacheBucket`: a held path is a set
+     * whose size the bucket does not bound, and a bucket row carrying every
+     * pending path would put a push's backlog in every publish. The board
+     * filters this by bucket; the READ is public, like a bucket's path list —
+     * the path and its missing references are what the substituter is already
+     * telling its clients.
+     */
+    held: {
+      keySchema: Schema.String,
+      schema: CacheHeldSchema,
+      verbs: ["keys", "get", "deltas"],
+    },
   },
   procedures: {
     bucket: {
@@ -449,6 +499,7 @@ export type OduCacheSurface = typeof oduCacheSurface;
  */
 export const ODU_CACHE_EXPOSE = {
   buckets: "resource",
+  held: "resource",
   "bucket.create": { tool: { mutates: true } },
   "bucket.list": { tool: { mutates: false } },
   "bucket.describe": { tool: { mutates: false } },

@@ -58,8 +58,11 @@ import { CACHE_MOUNT } from "./paths";
 import { cacheRoutes } from "./routes";
 import {
   type CacheBucket,
+  type CacheHeld,
   CACHE_KEY,
   CacheRefused,
+  heldKey,
+  heldReason,
   oduCacheSurface,
 } from "./surface";
 
@@ -70,10 +73,17 @@ type CacheSpec = (typeof oduCacheSurface)["spec"];
 const DEFAULT_UPSTREAM_KEY = "cache.nixos.org-1";
 export type CacheSurfaceDeps = ImplementSurfaceDeps<CacheSpec>;
 
-/** The sibling's publishing half, as the composed bundle hands it over. */
+/** The sibling's publishing half, as the composed bundle hands it over — the
+ *  two collections this row owns, each with its own key type. */
 export interface CachePublisher {
-  upsert(key: string, row: CacheBucket): void;
-  remove(key: string): void;
+  readonly buckets: {
+    upsert(key: string, row: CacheBucket): void;
+    remove(key: string): void;
+  };
+  readonly held: {
+    upsert(key: string, row: CacheHeld): void;
+    remove(key: string): void;
+  };
 }
 
 export interface CacheServerOptions {
@@ -107,6 +117,9 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
    *  filled by the framework from the same `upsert`s a publish performs, so the
    *  two cannot disagree. */
   const rows = new Map<string, CacheBucket>();
+  /** The same pair for the held collection — keyed `${bucket}|${storePath}`. */
+  const publishedHeld = new Map<string, string>();
+  const rowsHeld = new Map<string, CacheHeld>();
   let publisher: CachePublisher | null = null;
 
   /** A bucket's row: the cache's own facts plus the one thing the cache cannot
@@ -133,7 +146,7 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
       if (published.get(row.name) === encoded) continue;
       published.set(row.name, encoded);
       rows.set(row.name, row);
-      publisher.upsert(row.name, row);
+      publisher.buckets.upsert(row.name, row);
     }
     // A bucket that went away — `odu cache` has no delete yet, but a row left
     // behind by one would be a row nobody can open.
@@ -141,7 +154,33 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
       if (next.has(name)) continue;
       published.delete(name);
       rows.delete(name);
-      publisher.remove(name);
+      publisher.buckets.remove(name);
+    }
+
+    const nextHeld = new Map<string, string>();
+    for (const facts of cache.held()) {
+      const key = heldKey(facts);
+      const row: CacheHeld = {
+        bucket: facts.bucket,
+        storePath: facts.storePath,
+        reason: heldReason(facts.missing),
+        missing: [...facts.missing],
+        since: facts.created,
+      };
+      const encoded = JSON.stringify(row);
+      nextHeld.set(key, encoded);
+      // THE REASON IS PART OF THE ROW, so a drain that narrows the missing list
+      // republishes even though the path itself has not moved.
+      if (publishedHeld.get(key) === encoded) continue;
+      publishedHeld.set(key, encoded);
+      rowsHeld.set(key, row);
+      publisher.held.upsert(key, row);
+    }
+    for (const key of [...publishedHeld.keys()]) {
+      if (nextHeld.has(key)) continue;
+      publishedHeld.delete(key);
+      rowsHeld.delete(key);
+      publisher.held.remove(key);
     }
   };
 
@@ -223,6 +262,15 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
         },
         remove: (key) => {
           rows.delete(key);
+        },
+      },
+      held: {
+        readAll: () => rowsHeld,
+        upsert: (key, row) => {
+          rowsHeld.set(key, row);
+        },
+        remove: (key) => {
+          rowsHeld.delete(key);
         },
       },
     },
@@ -394,8 +442,14 @@ export const cacheRow = definePlugin({
     // back the `ctx` this row publishes through.
     const mounted = bundle.mount(CACHE_KEY, server.surface, server.deps);
     server.attach({
-      upsert: (key, row) => mounted.ctx.collections.buckets.upsert(key, row),
-      remove: (key) => mounted.ctx.collections.buckets.remove(key),
+      buckets: {
+        upsert: (key, row) => mounted.ctx.collections.buckets.upsert(key, row),
+        remove: (key) => mounted.ctx.collections.buckets.remove(key),
+      },
+      held: {
+        upsert: (key, row) => mounted.ctx.collections.held.upsert(key, row),
+        remove: (key) => mounted.ctx.collections.held.remove(key),
+      },
     });
 
     // The Nix protocol, registered where the row activates rather than

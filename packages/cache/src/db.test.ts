@@ -104,6 +104,46 @@ describe("buckets", () => {
   });
 });
 
+describe("held uploads", () => {
+  it("round-trips the reason and keeps the arrival time on a refresh", () => {
+    const repo = openCacheRepo(":memory:");
+    repo.putHeld({
+      bucket: "main",
+      storePath: "/nix/store/parent",
+      missing: ["/nix/store/child"],
+      created: NOW,
+    });
+    // A later drain narrowed the reason; the row's `since` is when the path
+    // first arrived and must not move.
+    repo.putHeld({
+      bucket: "main",
+      storePath: "/nix/store/parent",
+      missing: [],
+      created: NOW + 5000,
+    });
+    expect(repo.held()).toEqual([
+      { bucket: "main", storePath: "/nix/store/parent", missing: [], created: NOW },
+    ]);
+    expect(repo.held("main")).toHaveLength(1);
+    expect(repo.held("other")).toEqual([]);
+    repo.deleteHeld("main", "/nix/store/parent");
+    expect(repo.held()).toEqual([]);
+  });
+
+  it("goes with its bucket", () => {
+    const repo = openCacheRepo(":memory:");
+    repo.putBucket(bucket);
+    repo.putHeld({
+      bucket: "main",
+      storePath: "/nix/store/parent",
+      missing: ["/nix/store/child"],
+      created: NOW,
+    });
+    repo.deleteBucket("main");
+    expect(repo.held()).toEqual([]);
+  });
+});
+
 describe("tokens", () => {
   it("round-trips and finds by hash", () => {
     const repo = openCacheRepo(":memory:");

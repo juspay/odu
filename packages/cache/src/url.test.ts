@@ -49,11 +49,17 @@ async function row(publicOrigin: string): Promise<{
   const server = cacheServer({ cache, publicOrigin, mount: "/cache" });
   const published = new Map<string, CacheBucket>();
   server.attach({
-    upsert: (key, value) => {
-      published.set(key, value);
+    buckets: {
+      upsert: (key, value) => {
+        published.set(key, value);
+      },
+      remove: (key) => {
+        published.delete(key);
+      },
     },
-    remove: (key) => {
-      published.delete(key);
+    held: {
+      upsert: () => {},
+      remove: () => {},
     },
   });
   return { cache, published, publish: server.publish };

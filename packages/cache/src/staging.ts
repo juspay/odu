@@ -34,7 +34,7 @@ import { mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from "n
 import { randomUUID } from "node:crypto";
 import { basename, join } from "node:path";
 import type { BlobStore } from "./store";
-import { verifyNarFile, writeStreamToFile } from "./store";
+import { upstreamFor, verifyNarFile, writeStreamToFile } from "./store";
 import type { BucketRow, CacheRepo } from "./db";
 import {
   formatNarinfo,
@@ -258,11 +258,34 @@ export function createStaging(deps: StagingDeps): Staging {
       entry.info = staged.info;
       entry.proved = true;
     }
-    const outcome = await blob.import({ dir: dirForBucket, storePath: entry.info.storePath });
+    const upstreams = upstreamFor(bucket.upstreamKeys);
+    let outcome = await blob.import({ dir: dirForBucket, storePath: entry.info.storePath });
+    // THE REFERENCE THE PUSHER SKIPPED IS THE SERVER'S TO FETCH. A push drops
+    // paths an upstream key signed, so without this every referrer of one is
+    // held for ever — the contradiction the first owner hit. Substituting into
+    // this store first makes "satisfied by upstream" true for the import too.
+    // The second attempt is the only retry: if the references are still
+    // missing, they are genuinely neither here nor upstream and the path is
+    // held with that reason.
+    if (!outcome.ok && outcome.missing.length > 0 && upstreams.length > 0) {
+      await blob.substitute(outcome.missing, upstreams);
+      outcome = await blob.import({ dir: dirForBucket, storePath: entry.info.storePath });
+    }
     if (!outcome.ok) {
-      return outcome.missing.length > 0 ? { missing: outcome.missing } : { failed: outcome.message };
+      if (outcome.missing.length > 0) {
+        repo.putHeld({
+          bucket: bucket.name,
+          storePath: entry.info.storePath,
+          missing: outcome.missing,
+          created: now(),
+        });
+        return { missing: outcome.missing };
+      }
+      repo.deleteHeld(bucket.name, entry.info.storePath);
+      return { failed: outcome.message };
     }
     await record(bucket, entry.info.storePath, entry.info.narHash, entry.info.sigs);
+    repo.deleteHeld(bucket.name, entry.info.storePath);
     return "recorded";
   }
 
@@ -351,7 +374,10 @@ export function createStaging(deps: StagingDeps): Staging {
           // A swept narinfo is not pending any more; leaving it in the map
           // grows it by one per abandoned upload for the life of the process.
           if (entry.endsWith(".narinfo")) {
-            pending.get(bucket)?.delete(entry.slice(0, -".narinfo".length));
+            const hash = entry.slice(0, -".narinfo".length);
+            const held = pending.get(bucket)?.get(hash);
+            if (held !== undefined) repo.deleteHeld(bucket, held.info.storePath);
+            pending.get(bucket)?.delete(hash);
           }
         }
       }

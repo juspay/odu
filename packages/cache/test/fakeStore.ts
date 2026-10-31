@@ -17,11 +17,18 @@
  * consumer hydrates.
  */
 
-import type { BlobStore, DeleteOutcome, ImportOutcome, PathInfo, StagedImport } from "../src/store";
+import type {
+  BlobStore,
+  DeleteOutcome,
+  ImportOutcome,
+  PathInfo,
+  StagedImport,
+  UpstreamCache,
+} from "../src/store";
 import { canonicalNarHash, narHashBase32, storePathHash } from "../src/narinfo";
 
 export interface RecordedCall {
-  op: "has" | "pathInfo" | "closure" | "import" | "dump" | "retain" | "release" | "delete";
+  op: "has" | "pathInfo" | "closure" | "import" | "dump" | "retain" | "release" | "delete" | "substitute";
   bucket?: string;
   storePath: string;
 }
@@ -57,6 +64,16 @@ export class FakeStore implements BlobStore {
   readonly importOutcome = new Map<string, ImportOutcome>();
   /** Every staged import attempted, in order. */
   readonly staged: StagedImport[] = [];
+  /** Paths an UPSTREAM cache could serve, with the signatures they carry. A
+   *  path here becomes valid after `substitute`, the way `nix-store -r` would
+   *  make it. */
+  readonly upstream = new Map<string, FakePath>();
+  /** The upstreams `substitute` was offered, per call — the key names a bucket
+   *  asked for, which is what a test asserts the fetch was scoped to. */
+  readonly substituted: {
+    readonly paths: readonly string[];
+    readonly keyNames: readonly string[];
+  }[] = [];
 
   /** Register metadata, and say whether the store already HAS the bytes. */
   add(path: FakePath, present = true): FakePath {
@@ -130,6 +147,28 @@ export class FakeStore implements BlobStore {
         at += 1;
       },
     });
+  }
+
+  async substitute(paths: readonly string[], upstreams: readonly UpstreamCache[]): Promise<void> {
+    for (const storePath of paths) this.calls.push({ op: "substitute", storePath });
+    this.substituted.push({
+      paths: [...paths],
+      keyNames: upstreams.map((cache) => cache.keyName),
+    });
+    const trusted = new Set(upstreams.map((cache) => cache.keyName));
+    for (const storePath of paths) {
+      const candidate = this.upstream.get(storePath);
+      if (candidate === undefined) continue;
+      const signed = (candidate.sigs ?? []).some((sig) => {
+        const at = sig.indexOf(":");
+        return at > 0 && trusted.has(sig.slice(0, at));
+      });
+      // The fake verifies like Nix: a path signed by a key the caller did not
+      // trust is not fetched, and the referrer stays held.
+      if (!signed) continue;
+      if (!this.paths.has(storePath)) this.paths.set(storePath, candidate);
+      this.present.add(storePath);
+    }
   }
 
   async retain(bucket: string, storePath: string): Promise<void> {
