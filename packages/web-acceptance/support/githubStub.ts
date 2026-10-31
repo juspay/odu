@@ -45,7 +45,9 @@ export interface GithubStub {
   close(): Promise<void>;
 }
 
-const DEFAULT_MODE: StubMode = {
+/** What a plain GitHub says, before any scenario arranges otherwise — and what
+ *  the harness resets to between scenarios, because the stub outlives them. */
+export const DEFAULT_STUB_MODE: StubMode = {
   login: "odu-e2e",
   orgMember: true,
   teamMember: true,
@@ -56,7 +58,7 @@ const DEFAULT_MODE: StubMode = {
 export async function startGithubStub(port: number): Promise<GithubStub> {
   const stub: GithubStub = {
     origin: `http://127.0.0.1:${port}`,
-    mode: { ...DEFAULT_MODE },
+    mode: { ...DEFAULT_STUB_MODE },
     lastAuthorize: null,
     close: async () => {},
   };

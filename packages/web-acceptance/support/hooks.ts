@@ -48,8 +48,10 @@ import { join } from "node:path";
 import { BROWSER_ARGS } from "./browser.ts";
 import { clearCorpus } from "./corpus.ts";
 import { doorEnv, identityOf, OPERATOR_LOGIN, signIn, STUB_LOGIN } from "./authWorld.ts";
-import { startGithubStub, type GithubStub } from "./githubStub.ts";
+import { DEFAULT_STUB_MODE, startGithubStub, type GithubStub } from "./githubStub.ts";
 import {
+  activeRunsOf,
+  cancelRun,
   doorPort,
   oduCli,
   readOduBin,
@@ -136,8 +138,12 @@ async function operator(odu: string, world: Service): Promise<string> {
         `${bootstrapped.stderr}\n--- daemon log ---\n${readFileSync(world.logPath, "utf-8").slice(-4000)}`,
     );
   }
-  const previous = github.mode.login;
-  github.mode = { ...github.mode, login: OPERATOR_LOGIN };
+  // THE WHOLE MODE, not just the login: a scenario may have left the stub
+  // refusing this organisation (that is what "a login outside the allow-list is
+  // refused" arranges), and the harness's own bootstrap must not depend on what
+  // the previous scenario was proving. Restored whole, afterwards.
+  const previous = { ...github.mode };
+  github.mode = { ...DEFAULT_STUB_MODE, login: OPERATOR_LOGIN };
   const context = await browser.newContext({ baseURL: world.origin });
   try {
     const page = await context.newPage();
@@ -153,7 +159,7 @@ async function operator(odu: string, world: Service): Promise<string> {
     operatorToken = (await block.innerText()).trim();
   } finally {
     await context.close();
-    github.mode = { ...github.mode, login: previous };
+    github.mode = previous;
   }
   return operatorToken;
 }
@@ -324,16 +330,33 @@ After({ timeout: RUN_SETUP_TIMEOUT }, async function (this: OduWorld, scenario) 
   // The CONTEXT, not the browser — see this file's header.
   if (this.context !== undefined) await this.context.close();
 
+  // A scenario's stub mode is that scenario's, and the STUB OUTLIVES it (one per
+  // worker). "A login outside the allow-list is refused" sets a refusing mode;
+  // left standing it refuses the NEXT scenario's sign-in, including the
+  // harness's own operator mint. Reset to what a plain GitHub says.
+  if (github !== undefined) github.mode = { ...DEFAULT_STUB_MODE };
+
   // A private run goes down before its checkout does: `SLOW` and `FAST_RED` both
   // sleep for minutes, and a coordinator left running holds a core and a lock on
   // a directory this is about to remove.
-  for (const runId of this.ownRuns) {
-    verb(this.service, "run_cancel", {
-      runId,
-      scope: { kind: "run" },
-      requestId: `wa-teardown-${crypto.randomUUID()}`,
-    });
+  //
+  // TWO SOURCES, because one is not enough. `ownRuns` is what the steps noticed
+  // — "the address names a run" registers a run the page navigated to — and it
+  // misses the run a BUTTON starts: "Run again" is a new run at the same commit
+  // and the page never moves, so nothing names it. The world is shared by every
+  // scenario a worker runs, so a run missing from that list sits on the next
+  // scenario's board and outlives the checkout it needs. The second source is
+  // the SERVICE: every run of a fixture this scenario made that is still
+  // active, by the board's own definition of active.
+  const stopped = new Set(this.ownRuns);
+  for (const dir of this.ownFixtures) {
+    try {
+      for (const runId of activeRunsOf(this.service, dir)) stopped.add(runId);
+    } catch (cause) {
+      process.stderr.write(`web-acceptance: could not list a fixture's runs: ${String(cause)}\n`);
+    }
   }
+  for (const runId of stopped) cancelRun(this.service, runId);
   for (const dir of this.ownFixtures) removeFixture(dir);
 });
 

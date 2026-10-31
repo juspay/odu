@@ -301,6 +301,38 @@ export function surfaceCall(
  * cancelled a run through this instead of through the button would be asserting
  * on the service and calling it browser coverage.
  */
+/** EVERY RUN OF THIS CHECKOUT THAT IS STILL GOING, asked of the service rather
+ *  than trusted from the ids a scenario happened to write down.
+ *
+ *  A run a BUTTON started — "Run again" is a new run at the same commit — is
+ *  never named in the address, so nothing registers it in `ownRuns`, and a live
+ *  run whose checkout is then deleted holds a lane for minutes.
+ *
+ *  `settled` is the SERVICE's own answer, read off `run_list`; the row's
+ *  `isActive` predicate is not imported here, because this is a host package and
+ *  the fence lets it reach the ci row only through a root file. */
+export function activeRunsOf(service: Service, checkout: string): string[] {
+  const answer = verb(service, "run_list", { checkout });
+  if (answer.status !== 0) {
+    throw new Error(
+      `web-acceptance: run_list refused (exit ${answer.status})\n${answer.stderr}`,
+    );
+  }
+  const rows =
+    (answer.json as { rows?: Array<{ runId: string; settled: boolean }> } | null)?.rows ?? [];
+  return rows.filter((row) => !row.settled).map((row) => row.runId);
+}
+
+/** Ask the service to stop one run, and answer whether the request was taken. */
+export function cancelRun(service: Service, runId: string): boolean {
+  const answer = verb(service, "run_cancel", {
+    runId,
+    scope: { kind: "run" },
+    requestId: `wa-teardown-${crypto.randomUUID()}`,
+  });
+  return answer.status === 0;
+}
+
 export function verb(
   service: Service,
   name: string,
