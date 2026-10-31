@@ -15,15 +15,9 @@
 
 import { afterEach, describe, expect, it } from "bun:test";
 import { createCache, type Cache } from "./cache";
+import { asRoot } from "./testlib";
 import { cacheServer } from "./server";
 import type { CacheBucket } from "./surface";
-
-/** An admin call authorised by the OPERATOR'S ROOT TOKEN — the arm a loopback
- *  daemon uses. The engine takes an `Authority`, so every test call names which
- *  arm it means. */
-const asRoot = (rootToken: string) => ({
-  authority: { kind: "root" as const, rootToken },
-});
 
 const BOUND = "http://127.0.0.1:18440";
 const PUBLIC = "https://cache.example.com";

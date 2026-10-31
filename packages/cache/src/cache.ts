@@ -123,14 +123,24 @@ export type CacheOutcome<T> =
  *
  * The row builds it, once, from the caller's principal: an operator's ROOT
  * TOKEN, or a signed-in person whose ROLE the row already checked. The engine
- * cannot mistake one for the other and cannot be handed a flag that says "trust
- * me": `role` is a different arm, and a caller that is not the row has no way to
- * *be* a role. The engine does not know what a role means — `cache` decides what
- * an `admin` may do, and this is that decision's arrival at the data.
+ * does not know what a role means — this package's row decides what an `admin`
+ * may do, and this is that decision's arrival at the data.
+ *
+ * THE ROLE ARM IS SEALED. It carries a key of a symbol this module does not
+ * export, so no code outside this package can word-process one: the only way to
+ * obtain the arm is {@link roleAuthority}, which nothing but the row calls. A
+ * boolean a caller could set would be a claim the engine cannot check.
  */
+const roleSeal: unique symbol = Symbol("odu:cache/role");
+
 export type Authority =
   | { readonly kind: "root"; readonly rootToken: string }
-  | { readonly kind: "role"; readonly login: string };
+  | { readonly kind: "role"; readonly login: string; readonly [roleSeal]: true };
+
+/** The ROLE arm — minted here and nowhere else, because `roleSeal` is private. */
+export function roleAuthority(login: string): Authority {
+  return { kind: "role", login, [roleSeal]: true };
+}
 
 /** The admin face, structurally the service's `CacheAdmin` port. */
 export interface CacheAdmin {

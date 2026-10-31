@@ -52,7 +52,7 @@ import {
   Routes,
   StateDir,
 } from "@odu/cordis/services";
-import { createCache, type Authority, type BucketFacts, type Cache, type CacheOutcome } from "./cache";
+import { createCache, roleAuthority, type Authority, type BucketFacts, type Cache, type CacheOutcome } from "./cache";
 import { may, principalOf, type Principal } from "@odu/cordis/principal";
 import { CACHE_MOUNT } from "./paths";
 import { cacheRoutes } from "./routes";
@@ -170,7 +170,7 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
     input: { rootToken: string },
   ): Authority =>
     principal.kind === "user"
-      ? { kind: "role", login: principal.login }
+      ? roleAuthority(principal.login)
       : { kind: "root", rootToken: input.rootToken };
 
   /** One answer, with this ROW's authority rule applied first.

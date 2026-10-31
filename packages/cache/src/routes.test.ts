@@ -18,6 +18,7 @@ import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { asRoot } from "./testlib";
 import { HttpRouter } from "effect/http";
 import { base32, storePathHash } from "./narinfo";
 import { type Cache, createCache } from "./cache";
@@ -25,13 +26,6 @@ import { CACHE_MOUNT } from "./paths";
 import { NIX_CACHE_INFO } from "./staging";
 import { cacheRoutes } from "./routes";
 import { FakeStore, hashOf } from "../test/fakeStore";
-
-/** An admin call authorised by the OPERATOR'S ROOT TOKEN — the arm a loopback
- *  daemon uses. The engine takes an `Authority`, so every test call names which
- *  arm it means. */
-const asRoot = (rootToken: string) => ({
-  authority: { kind: "root" as const, rootToken },
-});
 
 const ROOT = "root-token-please";
 const NOW = 1_700_000_000_000;
