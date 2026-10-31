@@ -85,14 +85,13 @@ export const Shutdown = serviceTag<() => void>("odu:shutdown");
  */
 export const Bundle = serviceTag<RootedSurfacesRuntime<never>>("odu:bundle");
 
-/** Does this daemon have a door? `true` when an identity provider's row is
- *  mounted, decided by the host when it reads the one environment it reads.
+/** WHERE THE HOST ANSWERS "do you have a door?" — one path, spoken by the
+ *  listener that serves it and the page that asks before it draws.
  *
- *  Provided BEFORE any row mounts, because the runs' row publishes it on the
- *  service cell and cannot learn it from the broker: the row that registers a
- *  resolver is waiting for the bundle the runs offer, so at the runs' own
- *  `apply` time that registration has not happened. */
-export const AuthDoor = serviceTag<boolean>("odu:authDoor");
+ *  Here rather than beside the door's row because the HOST serves it and the
+ *  BROWSER asks it: a host package may not import a row, and the browser holds
+ *  only the contracts. */
+export const SERVICE_DOOR_PATH = "/_odu/door";
 
 /** The route layer a row owns, typed as the seam that consumes it. */
 export type RowRoutes = NonNullable<ServeSurfaceAppOptions["routes"]>;
@@ -101,12 +100,18 @@ export type RowRoutes = NonNullable<ServeSurfaceAppOptions["routes"]>;
  * THE HTTP ROUTER MOUNT — the one listener's app routes, which a row adds its
  * own layer to.
  *
- * A row with protocol routes (the cache's Nix API) registers them where it
- * activates, so the layer arrives with the row rather than being collected by a
- * host that has to know what the row is.
+ * A row with protocol routes (the cache's Nix API, the door's sign-in flow)
+ * registers them where it activates, so the layer arrives with the row rather
+ * than being collected by a host that has to know what the row is.
+ *
+ * `add` returns the WITHDRAWAL, and that is not bookkeeping: a row whose `apply`
+ * fails after it registered its routes would otherwise leave them answering on a
+ * listener whose row has gone — and, for the door, calling into a closed
+ * database. The host applies the layers it is holding at each bind.
  */
 export interface HttpRoutes {
-  add(routes: RowRoutes): void;
+  /** Add a layer. The returned function removes THAT layer and no other. */
+  add(routes: RowRoutes): () => void;
   /** Every layer registered so far, in registration order. Read once, at bind. */
   layers(): ReadonlyArray<RowRoutes>;
 }

@@ -267,19 +267,36 @@ export interface PrincipalResolver {
  * and installs nothing, and the withdrawal that `register` returns removes only
  * the resolver that installed it — so a row that unloads cannot clear a
  * successor's registration.
+ *
+ * ## The absence behaviour, stated (it is the whole safety of the switch)
+ *
+ * | this daemon | no resolver installed | what a caller is |
+ * | --- | --- | --- |
+ * | NO door configured | every connection | the LOCAL OWNER — loopback mode |
+ * | a door configured (`ODU_GITHUB_CLIENT_ID` read at boot) | NOBODY | anonymous, and the gate refuses everything |
+ *
+ * The second row is the one that matters: a daemon whose identity row stops, or
+ * is re-offering its bundle, must not fall back to "everyone is the owner". It
+ * FAILS CLOSED. `door` is the host's boot-time fact and is passed to
+ * {@link localBroker}; nothing else in this package needs to know what a door is.
  */
 export interface PrincipalBroker {
   /** Install a resolver. Returns its withdrawal. Throws
    *  {@link PrincipalClaimRefused} if one is already installed. */
   register(resolver: PrincipalResolver): () => void;
   /** The lease a websocket upgrade carries — the local owner's when no resolver
-   *  is installed. */
+   *  is installed and this daemon has no door; `null` (nobody) when it has one. */
   acquire(headers: Readonly<Record<string, string | undefined>>): Lease | null;
-  /** The principal a Bearer credential names — the local owner's when no
-   *  resolver is installed. */
+  /** The principal a Bearer credential names — the local owner's or nobody, by
+   *  the same rule. */
   authorize(authorization: string | undefined): Principal | null;
-  /** Is an identity provider mounted? The gate's one question about mode. */
+  /** Is an identity provider mounted? A RUNNING fact — false while the door's
+   *  row is starting, stopping, or has failed. */
   mounted(): boolean;
+  /** DOES THIS DAEMON HAVE A DOOR? A BOOT fact: true when the host read the
+   *  door's configuration, whatever the row is doing right now. The gate asks
+   *  THIS one — a door whose row is down must refuse, not fall open. */
+  hasDoor(): boolean;
 }
 
 /** A second resolver claimed the broker. A distinct class so a row's `apply`
@@ -297,9 +314,10 @@ export class PrincipalClaimRefused extends Error {
 /** The host's broker. ONE per daemon, made by whoever owns the tenure. */
 export const PrincipalBroker = serviceTag<PrincipalBroker>("odu:principal");
 
-/** A broker with no resolver: every connection is the local owner, which is
- *  loopback mode. Made once per daemon by the host. */
-export function localBroker(): PrincipalBroker {
+/** A broker with no resolver. `door` decides what absence MEANS, and it is the
+ *  host's boot-time fact — see {@link PrincipalBroker}. Made once per daemon. */
+export function localBroker(options: { readonly door?: boolean } = {}): PrincipalBroker {
+  const door = options.door === true;
   // A CLAIM, not the resolver: two registrations of the SAME resolver object
   // are still two claims, and a withdrawal that compared values could clear a
   // successor's slot. The token is what a withdrawal compares.
@@ -314,13 +332,21 @@ export function localBroker(): PrincipalBroker {
       };
     },
     acquire(headers) {
-      return installed === null
-        ? makeLease(LOCAL_OWNER).lease
-        : installed.resolver.acquire(headers);
+      if (installed !== null) return installed.resolver.acquire(headers);
+      return door ? null : makeLease(LOCAL_OWNER).lease;
     },
     authorize(authorization) {
-      return installed === null ? LOCAL_OWNER : installed.resolver.authorize(authorization);
+      if (installed !== null) return installed.resolver.authorize(authorization);
+      return door ? null : LOCAL_OWNER;
     },
     mounted: () => installed !== null,
+    hasDoor: () => door,
   };
+}
+
+/** The admission a request-shaped call runs under — one it carries for its own
+ *  duration and nothing longer. The MCP door and a test's in-process dispatch
+ *  both mean exactly this. */
+export function requestAdmission(principal: Principal): Admission {
+  return { principal, live: () => true, ended: Effect.never };
 }
