@@ -64,6 +64,12 @@ When("I tab to the {string} filter", async function (this: OduWorld, label: stri
 });
 
 When("I tab to the first run row", async function (this: OduWorld) {
+  // THE ROW MUST EXIST BEFORE THE TAB LOOP STARTS. The board's rows arrive on
+  // the wire a moment after the heading, and a fixed press budget spent before
+  // they do ends on the last filter button — a red that says nothing about
+  // keyboard order. DETERMINISTIC tab order is what this scenario grades; the
+  // arrival of a row is not.
+  await this.page.locator("tbody tr.row, .row").first().waitFor({ timeout: 30_000 });
   await tabUntil(
     this,
     async () =>
