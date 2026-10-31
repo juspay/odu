@@ -21,5 +21,5 @@ Feature: A daemon with no door keeps every run control
     And I open that run
     Then the run page offers "Run again"
     And the run page offers "Cancel run"
-    And the run page offers a Retry control
+    And the run page offers "Retry"
     And there should be no page errors
