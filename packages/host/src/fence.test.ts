@@ -90,7 +90,6 @@ const declaration = {
       "packages/execution/src/coordinator/spawn.ts": 1,
       "packages/execution/src/runner/workspace.ts": 22,
       "packages/launch/src/webDaemonLaunch.ts": 1,
-      "packages/web-acceptance/step_definitions/cache_steps.ts": 32,
       "packages/web-acceptance/support/corpus.ts": 5,
       "packages/web-acceptance/support/world.ts": 5,
     },
@@ -112,6 +111,10 @@ const declaration = {
       "packages/host/src/principal.ts": 1,
       "packages/service-client/src/surface.ts": 2,
       "packages/service/src/service.ts": 4,
+      // The harness names the row's world: a scenario's tags say whether the
+      // browser meets a door, and the stub's environment is the door's.
+      "packages/web-acceptance/support/authWorld.ts": 1,
+      "packages/web-acceptance/support/hooks.ts": 1,
     },
   },
   // A MODULE THAT HOLDS LIVE STATE BEHIND A DOOR, and why: the spawn module's

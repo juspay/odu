@@ -18,7 +18,7 @@
 import * as assert from "node:assert";
 import { basename } from "node:path";
 import { Given, Then, When } from "@cucumber/cucumber";
-import { sharedRun } from "../support/corpus.ts";
+import { sharedRun } from "../../../web-acceptance/support/corpus.ts";
 import {
   currentNixSystem,
   FAILING,
@@ -31,8 +31,8 @@ import {
   SLOW,
   startRun,
   waitSettled,
-} from "../support/service.ts";
-import { RUN_SETUP_TIMEOUT, type OduWorld } from "../support/world.ts";
+} from "../../../web-acceptance/support/service.ts";
+import { RUN_SETUP_TIMEOUT, type OduWorld } from "../../../web-acceptance/support/world.ts";
 
 /** A private fixture, remembered so `After` removes it. */
 function ownFixture(world: OduWorld, justfile: string): string {

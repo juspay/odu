@@ -30,8 +30,8 @@ import {
   currentNixSystem,
   scratchDir,
   suitePortFor,
-} from "./harness";
-import { type WebWorld, startWebService } from "./webHarness";
+} from "../../../../tests/e2e/harness";
+import { type WebWorld, startWebService } from "../../../../tests/e2e/webHarness";
 
 /** The root token this world's daemon was started with. Administration needs
  *  it; reads of a public bucket do not. */

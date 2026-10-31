@@ -113,6 +113,25 @@ export function workerPort(): number {
   return 19500 + worker * 100 + (process.pid % 100);
 }
 
+/** THE DOOR'S WORLD, beside the loopback one.
+ *
+ * Two services per worker, because the two worlds cannot share one: a daemon
+ * with `ODU_GITHUB_*` set HAS a door, and a scenario tagged with no world at all
+ * asserts today's loopback page — which that daemon would refuse to draw. The
+ * offsets are inside the worker's own hundred (see `workerPort`) so two workers
+ * still cannot collide. */
+export const DOOR_PORT_OFFSET = 40;
+/** The GitHub stub both origins point at. */
+export const STUB_PORT_OFFSET = 45;
+
+export function doorPort(): number {
+  return workerPort() + DOOR_PORT_OFFSET;
+}
+
+export function stubPort(): number {
+  return workerPort() + STUB_PORT_OFFSET;
+}
+
 /** Poll until `ask` answers, or fail with a sentence naming what was waited on. */
 export async function until<T>(
   what: string,
@@ -144,7 +163,11 @@ export function daemonLog(service: Pick<Service, "logPath">): string {
 /** Start a service in a private world and wait for it to SAY it is ready.
  *  Readiness is asked for, never slept on: the service publishes its own state
  *  and this reads it. */
-export async function startService(odu: string, port: number): Promise<Service> {
+export async function startService(
+  odu: string,
+  port: number,
+  extraEnv: NodeJS.ProcessEnv = {},
+): Promise<Service> {
   const root = mkdtempSync(join(tmpdir(), "odu-wa-"));
   const state = join(root, "state");
   mkdirSync(state, { recursive: true });
@@ -173,6 +196,10 @@ export async function startService(odu: string, port: number): Promise<Service> 
     // refuse `no_root_token` and the substituter still serves, which is the
     // behaviour `odu cache` documents rather than a mode this suite wants.
     ODU_ROOT_TOKEN: ROOT_TOKEN,
+    // AND THE DOOR, when a caller has one: `ODU_GITHUB_*` plus the public
+    // origin a browser reaches this daemon at. Absent (the ordinary loopback
+    // world) the auth row is not mounted and nothing asks who anybody is.
+    ...extraEnv,
   };
 
   const logPath = join(root, "daemon.log");

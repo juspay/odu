@@ -5,7 +5,9 @@
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "//cordis": "THE ROW this package belongs to, read by the fence. A row is a capability the daemon serves — `ci` for the runs, `cache` for the buckets — and a package says which one it is behind so that nobody has to keep a second list.",
-  "cordis": { "row": "cache" },
+  "cordis": {
+    "row": "cache"
+  },
   "//": "A NIX BINARY CACHE — see README.md. The standard substituter protocol, one bucket per cache, the server's own Nix store as the blob store, SQLite for metadata, per-bucket ed25519 signing on ingest, and hashed opaque tokens. Since PR 1.5 it is a ROW of the board rather than a capability of the CI feature: it declares its own surface, implements it, projects it as argv, and renders it — so the service stopped spelling a bucket at all.",
   "//exports": "FOUR DOORS, and they are four graphs — and since the row mounts ITSELF (`./server` exports `cacheRow`), these four are the whole of the package: the engine, the protocol routes and the mount path are its own business, not doors. `./push` is the one extra, and it is not a door ONTO this package either — it is a client of the cache's HTTP API, for a machine that has no daemon (the reason `odu cache push` can run on a laptop with none of odu). The first sentence of this paragraph, before the move: `./surface` is the CONTRACT and it is browser-safe: schemas, a contract version, a tagged refusal and the expose map — what the board and a client hold, and nothing that could open a database. `./server` implements it against a `Cache` and the facts the composition hand it (the public origin, the mount). `./cli` is `odu cache`, a face: it needs a dispatch and a way to dial, and it imports neither the daemon nor the engine. `./face` is the board's Cache view and is the only one of the four that draws. The rest are the cache's INTERNALS for the one consumer that constructs it — the host's cache row (`./cache`, `./routes`, `./paths`) and `odu cache push`, which is a client of the cache's HTTP API from a machine that has neither (`./push`).",
   "//dependencies": "`effect` and `solid-js`, and the second is `./face`'s whole cost — the board's Cache view is Solid JSX, so a consumer that renders it hydrates the compiler's runtime. `./server` never imports the face (the closure test says so); a server-side consumer of this package pays `effect` alone at RUNTIME, but the manifest is what a hydrating consumer pays for. The claim that matters is unchanged: this package knows the Nix protocol and nothing about odu's engine. `bun:sqlite` and `node:` builtins are the platform, not installs — `src/closure.test.ts` names the one non-`node:` builtin it uses and refuses @odu/service, @odu/execution, @odu/cli, @odu/run-history and @odu/service-client by name, so a cache can never become a second path to a run. The ENGINE reads no environment: the root passes the state directory, the root token and the store URI in. The one exception is `./cli`, which is a process. `@kolu/surface` is hydrated from a Nix pin and so is absent here by design — see the closure test's HYDRATED set.",
@@ -21,5 +23,10 @@
     "@odu/cordis": "workspace:*",
     "effect": "4.0.0",
     "solid-js": "^1.9.15"
+  },
+  "//devDependencies": "The browser suite's toolchain, for the features and steps this row OWNS: a row keeps its promises under its own `e2e/`, and cucumber and playwright are what runs them. Dev-only — the shipped closure is unchanged.",
+  "devDependencies": {
+    "@cucumber/cucumber": "^12.8.1",
+    "playwright": "1.61.1"
   }
 }

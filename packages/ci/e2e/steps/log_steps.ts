@@ -13,7 +13,7 @@
 import * as assert from "node:assert";
 import { Then, When } from "@cucumber/cucumber";
 import type { Locator } from "playwright";
-import type { OduWorld } from "../support/world.ts";
+import type { OduWorld } from "../../../web-acceptance/support/world.ts";
 
 function attemptButton(world: OduWorld, label: string): Locator {
   return world.page

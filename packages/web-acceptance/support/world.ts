@@ -17,6 +17,7 @@
 import { setWorldConstructor, World } from "@cucumber/cucumber";
 import type { Browser, BrowserContext, Locator, Page } from "playwright";
 import type { Service } from "./service.ts";
+import type { GithubStub } from "./githubStub.ts";
 
 /**
  * How long a scenario may spend ARRANGING a run before its first assertion.
@@ -34,12 +35,43 @@ export const RUN_SETUP_TIMEOUT = 600_000;
  *  stuck scenario reports rather than holds the leg open. */
 export const STEP_TIMEOUT = 120_000;
 
+/**
+ * WHO THE SCENARIO'S BROWSER IS, as its tags declared.
+ *
+ * `loopback` is today's world: a daemon with no identity provider, where every
+ * caller is its owner. The other two are the door's — the same daemon
+ * configured against the GitHub stub, with a browser that either never signed
+ * in or completed the flow as the role named.
+ */
+export type Identity =
+  | { readonly kind: "loopback" }
+  | { readonly kind: "anonymous" }
+  | { readonly kind: "signed-in"; readonly role: "owner" | "admin" | "member" };
+
 export class OduWorld extends World {
   /** Set in `Before`; a step that runs without them is a hook that threw. */
   browser!: Browser;
   context!: BrowserContext;
   page!: Page;
   service!: Service;
+
+  /** WHICH WORLD THE TAGS ASKED FOR — today's loopback daemon (no tag), one
+   *  with a door and a browser that never signed in (`@anonymous`), or one with
+   *  a door and a session (`@signed-in:<role>`). `Before` has already started
+   *  the right daemon and, for a session, granted the role and signed in. */
+  identity: Identity = { kind: "loopback" };
+  /** The login the GitHub stub claims, and the one a grant names. */
+  signInLogin = "";
+  /** A token the profile page minted — the value exists once, here. */
+  mintedToken?: string;
+  /** The last `odu …` answer a scenario arranged with, so the next step can
+   *  assert on the receipt rather than re-running the call. */
+  cliAnswer?: { status: number | null; stdout: string; stderr: string };
+  /** A second tab, for the scenario where signing out of one closes the other. */
+  second?: Page;
+  /** This worker's GitHub stub — a scenario changes what it claims when the
+   *  promise is about a refusal. */
+  stub!: GithubStub;
 
   /** This scenario's name, copied off the pickle in `Before`. Cucumber does not
    *  put it on the World, and `support/corpus.ts`'s guard is only as useful as

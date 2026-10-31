@@ -69,6 +69,19 @@ export const IDENTITY_TAGS: Readonly<Record<string, true>> = {
   // The frozen control fragment's `hello`: the supervisor's probe, and the
   // ONE control member that is safe to answer anonymously. `drain` is not.
   "surface/control/hello": true,
+  // THE FRAMEWORK'S THREE RESERVED MEMBERS, and the first one is load-bearing:
+  //
+  //   - `system/live` is the HEARTBEAT. Serving it to an anonymous connection
+  //     is what keeps a sign-in page from flapping (its watchdog would sever a
+  //     socket it believes dead); refusing it on a connection whose session
+  //     ENDED is what severs that socket at all — the client's watchdog forces
+  //     a reconnect, the upgrade presents the dead cookie, and the page meets
+  //     the sign-in form. That is the closest thing to "closing the connection"
+  //     the listener seam allows, and it is the client doing it.
+  //   - `system/identity` and `system/clockNow` are the framework's own reads.
+  "surface/system/live": true,
+  "surface/system/identity": true,
+  "surface/system/clockNow": true,
 };
 
 /** The request headers a websocket connection is read under, named here because
@@ -99,8 +112,15 @@ export function connectionLayer(
   );
 }
 
-/** Does this admission let the call through? `allowed` names the tags a
- *  connection with NO principal may still ask. */
+/** Does this admission let the call through?
+ *
+ *  Two arms, and they are not symmetric:
+ *
+ *   - a connection with NO principal is answered the identity reads (and the
+ *     framework's reserved members, the heartbeat among them);
+ *   - a connection with a principal that has ENDED is refused EVERYTHING — the
+ *     reserved members included, deliberately: a heartbeat that fails is what
+ *     makes the client's watchdog sever a socket the server cannot close. */
 function serves(admission: Admission, allowed: boolean): boolean {
   if (admission.principal === null) return allowed;
   return admission.live();

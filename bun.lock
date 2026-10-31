@@ -55,6 +55,10 @@
         "effect": "4.0.0",
         "solid-js": "^1.9.15",
       },
+      "devDependencies": {
+        "@cucumber/cucumber": "^12.8.1",
+        "playwright": "1.61.1",
+      },
     },
     "packages/cache": {
       "name": "@odu/cache",
@@ -63,6 +67,10 @@
         "@odu/cordis": "workspace:*",
         "effect": "4.0.0",
         "solid-js": "^1.9.15",
+      },
+      "devDependencies": {
+        "@cucumber/cucumber": "^12.8.1",
+        "playwright": "1.61.1",
       },
     },
     "packages/ci": {
@@ -77,6 +85,10 @@
         "@odu/service-client": "workspace:*",
         "effect": "4.0.0",
         "solid-js": "^1.9.15",
+      },
+      "devDependencies": {
+        "@cucumber/cucumber": "^12.8.1",
+        "playwright": "1.61.1",
       },
     },
     "packages/cli": {

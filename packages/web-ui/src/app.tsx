@@ -33,7 +33,7 @@ import {
 } from "@odu/auth/face";
 
 import { Effect } from "effect";
-import { createEffect, createMemo, createSignal, onCleanup, Show, type JSX } from "solid-js";
+import { createEffect, createMemo, createSignal, on, onCleanup, Show, type JSX } from "solid-js";
 import { parseRunHash, runHash, logHash } from "@odu/service-client/routes";
 import { Button } from "@odu/ci/face";
 import { faviconSvg, wireText } from "./format";
@@ -167,6 +167,21 @@ export function App(props: {
   const cell = props.client.cells.service.use().value;
   const door = createMemo(() => cell()?.auth === true);
   const [who, setWho] = createSignal<Who | null>(null);
+
+  // A SESSION QUESTION IS A QUESTION PER CONNECTION. Signing out in one tab, a
+  // revocation and an expiry all end the lease; the tab holding it is severed
+  // and redials, and what comes back is a NEW connection that may well be
+  // nobody. So every transition back to `live` asks again — which is also why
+  // the second tab of "sign out in one tab" ends up on the sign-in page.
+  createEffect(
+    on(
+      () => props.readout.status,
+      (status, previous) => {
+        if (status === "live" && previous !== undefined && previous !== "live") setWho(null);
+      },
+    ),
+  );
+
   createEffect(() => {
     if (!door() || who() !== null) return;
     void Effect.runPromise(props.auth.procedures.user.whoami({})).then(

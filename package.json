@@ -10,8 +10,9 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test:unit": "bun test ./src ./packages",
-    "test:e2e-cli": "bun test ./tests/e2e"
+    "//test:unit": "TWO GLOBS, not `./packages`: a row keeps its CLI e2e tests under `packages/<row>/e2e/cli`, and the unit runner must not reach them — they build the nix binary and drive a real daemon. `packages/*/src` is every row's unit tests; `packages/web-acceptance/*.test.ts` are the suite's own (the playwright pin and the runner).",
+    "test:unit": "bun test ./src ./packages/*/src ./packages/web-acceptance/*.test.ts",
+    "test:e2e-cli": "bun test ./tests/e2e ./packages/*/e2e/cli"
   },
   "dependencies": {
     "@odu/auth": "workspace:*",

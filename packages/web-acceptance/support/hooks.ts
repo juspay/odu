@@ -42,15 +42,22 @@
 import { After, AfterAll, Before, BeforeAll, setDefaultTimeout, Status } from "@cucumber/cucumber";
 import { chromium, type Browser } from "playwright";
 import { createRequire } from "node:module";
-import { mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BROWSER_ARGS } from "./browser.ts";
 import { clearCorpus } from "./corpus.ts";
+import { doorEnv, identityOf, signIn, STUB_LOGIN } from "./authWorld.ts";
+import { startGithubStub, type GithubStub } from "./githubStub.ts";
 import {
+  doorPort,
+  oduCli,
   readOduBin,
   removeFixture,
+  ROOT_TOKEN,
   startService,
   stopService,
+  stubPort,
   verb,
   workerPort,
   type Service,
@@ -71,7 +78,45 @@ const DESKTOP = { width: 1280, height: 900 } as const;
 const NARROW = { width: 380, height: 720 } as const;
 
 let browser: Browser | undefined;
+/** TODAY'S WORLD, and THE DOOR'S — two daemons per worker, started on demand.
+ *  `service` is whichever the running scenario's tags named. */
+let loopback: Service | undefined;
+let door: Service | undefined;
 let service: Service | undefined;
+let github: GithubStub | undefined;
+/** Where the App's client secret file lives for this worker. */
+let secretDir: string | undefined;
+
+/** The loopback world: unchanged from what every scenario has always used. */
+async function loopbackService(odu: string): Promise<Service> {
+  loopback ??= await startService(odu, workerPort());
+  return loopback;
+}
+
+/** The door's world: the same daemon, configured against the stub. */
+async function doorService(odu: string): Promise<Service> {
+  if (door !== undefined) return door;
+  if (github === undefined) throw new Error("web-acceptance: the GitHub stub never started");
+  secretDir = mkdtempSync(join(tmpdir(), "odu-wa-secret-"));
+  const secretFile = join(secretDir, "client-secret");
+  writeFileSync(secretFile, "stub-client-secret\n", { mode: 0o600 });
+  door = await startService(
+    odu,
+    doorPort(),
+    doorEnv({
+      origin: `http://127.0.0.1:${doorPort()}`,
+      stubOrigin: github.origin,
+      secretFile,
+    }),
+  );
+  return door;
+}
+
+/** Whichever world a scenario's tags named, started if this worker has not
+ *  needed it yet. */
+async function worldFor(odu: string, identity: ReturnType<typeof identityOf>): Promise<Service> {
+  return identity.kind === "loopback" ? loopbackService(odu) : doorService(odu);
+}
 
 /** What the npm `playwright` in THIS tree says its version is. Read from the
  *  installed manifest rather than from our own `devDependencies`, because the
@@ -129,21 +174,53 @@ BeforeAll({ timeout: RUN_SETUP_TIMEOUT }, async () => {
     headless: process.env.HEADLESS !== "false",
     args: [...BROWSER_ARGS],
   });
-  service = await startService(odu, workerPort());
+  // THE STUB STANDS BESIDE EVERY WORKER, whether or not this worker's features
+  // ever sign in: it is one tiny HTTP server, and starting it lazily would put
+  // its port inside a scenario's first step. The loopback world is unchanged by
+  // it — only a door world points at it.
+  github = await startGithubStub(stubPort());
+  // Started eagerly for the suite that has always run against it; the door's
+  // world is the one started on demand, because most scenarios never need it.
+  service = await loopbackService(odu);
 });
 
 Before({ timeout: RUN_SETUP_TIMEOUT }, async function (this: OduWorld, scenario) {
-  if (browser === undefined || service === undefined) {
+  if (browser === undefined || github === undefined) {
     throw new Error("web-acceptance: BeforeAll did not complete, so there is nothing to drive");
   }
+  const odu = readOduBin();
+  // THE WORLD IS THE TAGS' — a daemon with a door or today's loopback one, and
+  // for a signed-in scenario the role granted BEFORE the session exists (a
+  // grant ends the login's connections, so doing it after would sign the page
+  // out).
+  const identity = identityOf(scenario.pickle.tags);
+  const world = await worldFor(odu, identity);
+  this.identity = identity;
+  this.signInLogin = STUB_LOGIN;
+  if (identity.kind === "signed-in") {
+    const granted = oduCli(world, ["auth", "grant", STUB_LOGIN, identity.role], {
+      ODU_ROOT_TOKEN: ROOT_TOKEN,
+    });
+    if (granted.status !== 0) {
+      throw new Error(
+        `web-acceptance: could not grant ${STUB_LOGIN} ${identity.role}\n` +
+          `${granted.stderr}\n--- daemon log ---\n${readFileSync(world.logPath, "utf-8").slice(-4000)}`,
+      );
+    }
+  }
   this.browser = browser;
-  this.service = service;
+  // A stub answers ONE scenario at a time (a worker runs one at a time), and
+  // every scenario starts from the default account: the refusal scenario is the
+  // one that changes it, and a mode that survived it would fail the next.
+  this.stub = github;
+  github.mode = { login: STUB_LOGIN, orgMember: true, teamMember: true, expires: false };
+  this.service = world;
   this.scenarioName = scenario.pickle.name;
 
   const narrow = scenario.pickle.tags.some((tag) => tag.name === "@narrow");
   this.context = await browser.newContext({
     viewport: narrow ? { ...NARROW } : { ...DESKTOP },
-    baseURL: service.origin,
+    baseURL: world.origin,
   });
   this.page = await this.context.newPage();
 
@@ -165,6 +242,10 @@ Before({ timeout: RUN_SETUP_TIMEOUT }, async function (this: OduWorld, scenario)
   this.page.on("request", (request) => {
     this.requests.push(request.url());
   });
+
+  // AND LAST, so the sign-in's own navigation is one of the requests and its
+  // own page errors are this scenario's.
+  if (identity.kind === "signed-in") await signIn(this);
 });
 
 After({ timeout: RUN_SETUP_TIMEOUT }, async function (this: OduWorld, scenario) {
@@ -209,9 +290,20 @@ After({ timeout: RUN_SETUP_TIMEOUT }, async function (this: OduWorld, scenario) 
 
 AfterAll({ timeout: RUN_SETUP_TIMEOUT }, async () => {
   await clearCorpus();
-  if (service !== undefined) {
-    stopService(service);
-    service = undefined;
+  for (const world of [service, loopback, door]) {
+    if (world === undefined) continue;
+    stopService(world);
+  }
+  service = undefined;
+  loopback = undefined;
+  door = undefined;
+  if (github !== undefined) {
+    await github.close();
+    github = undefined;
+  }
+  if (secretDir !== undefined) {
+    rmSync(secretDir, { recursive: true, force: true });
+    secretDir = undefined;
   }
   if (browser !== undefined) {
     await browser.close();

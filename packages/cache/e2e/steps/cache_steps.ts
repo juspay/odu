@@ -18,8 +18,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { Given, Then, When } from "@cucumber/cucumber";
-import { oduCli } from "../support/service.ts";
-import type { OduWorld } from "../support/world.ts";
+import { oduCli } from "../../../web-acceptance/support/service.ts";
+import type { OduWorld } from "../../../web-acceptance/support/world.ts";
 
 function unique(what: string): string {
   return `wa-${what}-${Math.random().toString(36).slice(2, 10)}`;
