@@ -35,6 +35,7 @@ import {
 } from "@odu/credentials";
 import { narHashBase32, storePathBasename, storePathHash } from "./narinfo";
 import { CACHE_MOUNT } from "./paths";
+import { DEFAULT_NAR_PART_BYTES, MAX_NAR_PART_BYTES } from "./surface";
 import { type PathInfo, nixClosure, nixDump } from "./store";
 
 /** The environment slice this client reads. Passed in rather than reached for:
@@ -182,6 +183,12 @@ export interface PushOptions {
   tokenFile?: string;
   /** Uploads in flight WITHIN one dependency depth. */
   concurrency?: number;
+  /**
+   * HOW LARGE ONE REQUEST MAY BE. A NAR bigger than this is sent in parts, each
+   * retried on its own. The default is under Cloudflare's 100 MB proxied-body
+   * cap; the server's ceiling is {@link MAX_NAR_PART_BYTES}.
+   */
+  partSize?: number;
   /** Attempts per path. */
   attempts?: number;
   /**
@@ -260,6 +267,12 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
   const failures: { path: string; message: string }[] = [];
   const attempts = options.attempts ?? DEFAULT_ATTEMPTS;
   const width = options.concurrency ?? DEFAULT_CONCURRENCY;
+  const partSize = options.partSize ?? DEFAULT_NAR_PART_BYTES;
+  if (!Number.isSafeInteger(partSize) || partSize < 1 || partSize > MAX_NAR_PART_BYTES) {
+    throw new Error(
+      `a part must be between 1 and ${MAX_NAR_PART_BYTES} bytes (got ${partSize})`,
+    );
+  }
   let pushed = 0;
 
   /**
@@ -279,7 +292,10 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
         if (storePath === undefined) return;
         const entry = closure.get(storePath);
         if (entry === undefined) continue;
-        const outcome = await uploadOne(base, headers, entry, platform, attempts, { narinfoOnly });
+        const outcome = await uploadOne(base, headers, entry, platform, attempts, say, {
+          narinfoOnly,
+          partSize,
+        });
         if (outcome.ok === "held") {
           held.push({ path: storePath, reason: outcome.reason });
           continue;
@@ -439,40 +455,215 @@ type UploadOutcome =
   | { ok: "held"; reason: string }
   | { ok: false; message: string };
 
+type NarUpload =
+  | { ok: true }
+  | { ok: false; message: string; retry: boolean };
+
+/**
+ * SLICE A NAR INTO REQUESTS UNDER THE PROXY'S CEILING.
+ *
+ * The parts are byte ranges of the COMPRESSED stream, so joining them in order
+ * reproduces the exact bytes the single-request upload would have sent — and
+ * the server's existing proof (decompress, hash, compare with the narinfo)
+ * still decides. A part is held in memory only while it is written; the stream
+ * is read with backpressure.
+ */
+async function* narParts(
+  stream: ReadableStream<Uint8Array>,
+  size: number,
+): AsyncGenerator<Uint8Array> {
+  const reader = stream.getReader();
+  const pending: Uint8Array[] = [];
+  let pendingBytes = 0;
+  let done = false;
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.value !== undefined && next.value.length > 0) {
+        pending.push(next.value);
+        pendingBytes += next.value.length;
+      }
+      while (pendingBytes >= size) {
+        const out = new Uint8Array(size);
+        let at = 0;
+        while (at < size) {
+          const head = pending[0] as Uint8Array;
+          const want = size - at;
+          if (head.length <= want) {
+            out.set(head, at);
+            at += head.length;
+            pending.shift();
+          } else {
+            out.set(head.subarray(0, want), at);
+            pending[0] = head.subarray(want);
+            at = size;
+          }
+        }
+        pendingBytes -= size;
+        yield out;
+      }
+      if (next.done) {
+        done = true;
+        break;
+      }
+    }
+    if (pendingBytes > 0) {
+      const out = new Uint8Array(pendingBytes);
+      let at = 0;
+      for (const part of pending) {
+        out.set(part, at);
+        at += part.length;
+      }
+      yield out;
+    }
+  } finally {
+    // A path abandoned mid-stream must stop `nix store dump-path | zstd`,
+    // not leave both writing into a pipe nobody reads.
+    if (!done) await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+
+/** One part, retried on its own. `index` makes the retry an overwrite, so the
+ *  server never has to know which attempt it is. */
+async function putPart(
+  base: string,
+  headers: Record<string, string>,
+  narName: string,
+  index: number,
+  part: Uint8Array,
+  attempts: number,
+  say: (line: string) => void,
+  storePath: string,
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  let lastMessage = "no attempt was made";
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (attempt > 0) say(`↻ ${storePath} part ${index + 1} (retry ${attempt})`);
+    const response = await fetch(`${base}/nar/${narName}/parts/${index}`, {
+      method: "PUT",
+      headers: { ...headers, "content-type": "application/x-nix-nar" },
+      // Bun's fetch takes the bytes; the DOM `BodyInit` the type names does
+      // not include this `Uint8Array` spelling.
+      body: part as unknown as BodyInit,
+    }).catch(asError);
+    if (response instanceof Error) {
+      lastMessage = response.message;
+      continue;
+    }
+    if (response.ok) return { ok: true };
+    lastMessage = `part ${index + 1} answered ${response.status}: ${(await response.text()).trim()}`;
+    if (!worthRetrying(response.status)) break;
+  }
+  return { ok: false, message: lastMessage };
+}
+
+/**
+ * THE NAR ITSELF, one request or several.
+ *
+ * A closure that fits in one part keeps the plain NAR route every Nix client
+ * speaks; a larger one is split, each part retried alone, and joined by the
+ * server before the narinfo is sent. The stream is inspected one part ahead,
+ * so the choice costs one buffered part rather than the whole NAR.
+ */
+async function uploadNar(
+  base: string,
+  headers: Record<string, string>,
+  entry: ClosureEntry,
+  platform: PushPlatform,
+  attempts: number,
+  say: (line: string) => void,
+  partSize: number,
+): Promise<NarUpload> {
+  const narName = `${narHashBase32(entry.narHash)}.nar.zst`;
+  const parts = narParts(platform.dump(entry.storePath), partSize);
+  const first = await parts.next();
+  const second = await parts.next();
+
+  if (second.done) {
+    const body = first.done ? new Uint8Array(0) : first.value;
+    const response = await fetch(`${base}/nar/${narName}`, {
+      method: "PUT",
+      headers: { ...headers, "content-type": "application/x-nix-nar" },
+      // Same spelling as the part upload: Bun takes the bytes.
+      body: body as unknown as BodyInit,
+    }).catch(asError);
+    if (response instanceof Error) return { ok: false, message: response.message, retry: true };
+    if (response.ok) return { ok: true };
+    return {
+      ok: false,
+      message: `nar upload answered ${response.status}`,
+      retry: worthRetrying(response.status),
+    };
+  }
+
+  let index = 0;
+  let current = first.value as Uint8Array;
+  let ahead: IteratorResult<Uint8Array> = second;
+  for (;;) {
+    const sent = await putPart(
+      base,
+      headers,
+      narName,
+      index,
+      current,
+      attempts,
+      say,
+      entry.storePath,
+    );
+    if (!sent.ok) {
+      await parts.return(undefined as never);
+      return { ok: false, message: sent.message, retry: true };
+    }
+    // PROGRESS for a large path: one line per part, so a slow upload reads as
+    // work rather than as the old silence.
+    say(`⏳ ${entry.storePath} part ${index + 1}`);
+    index += 1;
+    if (ahead.done) break;
+    current = ahead.value;
+    ahead = await parts.next();
+  }
+
+  const joined = await fetch(`${base}/nar/${narName}/complete`, {
+    method: "POST",
+    headers: { ...headers, "x-odu-parts": String(index) },
+  }).catch(asError);
+  if (joined instanceof Error) return { ok: false, message: joined.message, retry: true };
+  if (!joined.ok) {
+    return {
+      ok: false,
+      message: `joining ${index} parts answered ${joined.status}: ${(await joined.text()).trim()}`,
+      retry: worthRetrying(joined.status),
+    };
+  }
+  return { ok: true };
+}
+
 async function uploadOne(
   base: string,
   headers: Record<string, string>,
   entry: ClosureEntry,
   platform: PushPlatform,
   attempts: number,
-  options: { narinfoOnly?: boolean } = {},
+  say: (line: string) => void,
+  options: { narinfoOnly?: boolean; partSize: number },
 ): Promise<UploadOutcome> {
   let lastMessage = "no attempt was made";
   let narinfoOnly = options.narinfoOnly === true;
   const narName = `${narHashBase32(entry.narHash)}.nar.zst`;
   for (let attempt = 0; attempt < attempts; attempt++) {
     if (!narinfoOnly) {
-      // The body is held so it can be CANCELLED: a refused upload that leaves
-      // `nix store dump-path | zstd` writing into a full pipe holds both
-      // processes for as long as the socket lives.
-      const body = platform.dump(entry.storePath);
-      const narResponse = await fetch(`${base}/nar/${narName}`, {
-        method: "PUT",
-        headers: { ...headers, "content-type": "application/x-nix-nar" },
-        body,
-        // A streamed body has no length; Node's fetch demands this and Bun
-        // ignores it, so it is set for both rather than special-cased.
-        duplex: "half",
-      } as RequestInit).catch(asError);
-      if (narResponse instanceof Error) {
-        void body.cancel().catch(() => {});
-        lastMessage = narResponse.message;
-        continue;
-      }
-      if (!narResponse.ok) {
-        void body.cancel().catch(() => {});
-        lastMessage = `nar upload answered ${narResponse.status}`;
-        if (!worthRetrying(narResponse.status)) break;
+      const uploaded = await uploadNar(
+        base,
+        headers,
+        entry,
+        platform,
+        attempts,
+        say,
+        options.partSize,
+      );
+      if (!uploaded.ok) {
+        lastMessage = uploaded.message;
+        if (!uploaded.retry) break;
         continue;
       }
     }

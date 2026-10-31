@@ -38,7 +38,7 @@ import {
 import { newChain, serial } from "./serial";
 import { CACHE_MOUNT } from "./paths";
 import { PATH_PAGE_SIZE } from "./surface";
-import { createStaging, type NarinfoOutcome, type Upload } from "./staging";
+import { createStaging, type CompleteUpload, type NarinfoOutcome, type Upload } from "./staging";
 import {
   globMatches,
   hashToken,
@@ -224,6 +224,17 @@ export interface Cache {
   touch(bucket: BucketRow, hash: string): void;
   narStream(bucket: BucketRow, file: string): Promise<ReadableStream<Uint8Array> | null>;
   beginUpload(bucket: BucketRow, file: string): Promise<Upload>;
+  /** One part of a chunked NAR, under the part ceiling. A retry overwrites the
+   *  same index, so a dropped request costs one part. */
+  beginPart(
+    bucket: BucketRow,
+    file: string,
+    index: number,
+    limit: number,
+  ): Promise<Upload>;
+  /** Join the parts into the NAR the narinfo will name. `missing` non-empty
+   *  means the client's count is ahead of what arrived. */
+  completeUpload(bucket: BucketRow, file: string, total: number): Promise<CompleteUpload>;
   acceptNarinfo(bucket: BucketRow, hash: string, body: ReadableStream<Uint8Array>): Promise<NarinfoOutcome>;
   /** Which of `paths` the bucket needs. `skipped` is the subset it will never
    *  take because an upstream key signed it — reported separately so `odu cache
@@ -807,6 +818,8 @@ export function createCache(options: CacheOptions): Cache {
     // The write path is `./staging`'s; this face is the one the routes speak,
     // and it is the same object either way.
     beginUpload: (bucket, file) => staging.beginUpload(bucket, file),
+    beginPart: (bucket, file, index, limit) => staging.beginPart(bucket, file, index, limit),
+    completeUpload: (bucket, file, total) => staging.completeUpload(bucket, file, total),
     async acceptNarinfo(bucket, hash, body) {
       const outcome = await staging.acceptNarinfo(bucket, hash, body);
       // A PUSH LANDED, OR A HELD PATH BECAME (OR STOPPED BEING) HELD — the

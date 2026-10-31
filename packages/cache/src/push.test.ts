@@ -17,7 +17,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
-import { storePathHash } from "./narinfo";
+import { narHashBase32, storePathHash } from "./narinfo";
 import {
   credentialsPath,
   type ClosureEntry,
@@ -73,6 +73,12 @@ interface Server {
   deferOnce: Set<string>;
   /** Store paths whose narinfo answers 202 every time — a hold nobody fixes. */
   alwaysDefer: Set<string>;
+  /** Parts received, keyed `${file}:${index}`. */
+  parts: Map<string, string>;
+  /** How many times a part answers 500 before succeeding, keyed the same. */
+  partFailures: Map<string, number>;
+  /** Every completed join, in order. */
+  completed: { file: string; total: number }[];
   /** How many `/missing` calls still answer the current list; `undefined`
    *  means every call does. */
   missingCalls: number;
@@ -93,6 +99,9 @@ function startServer(): Server {
     narStatus: new Map(),
     deferOnce: new Set(),
     alwaysDefer: new Set(),
+    parts: new Map(),
+    partFailures: new Map(),
+    completed: [],
     missingCalls: 0,
     missingOnlyFor: undefined,
     narinfoOnlyRefusal: false,
@@ -118,6 +127,29 @@ function startServer(): Server {
           return Response.json({ missing: [], skippedUpstream: [] });
         }
         return Response.json({ missing: state.missing, skippedUpstream: state.skipped });
+      }
+      if (request.method === "PUT" && url.pathname.includes("/parts/")) {
+        const index = url.pathname.slice(url.pathname.lastIndexOf("/") + 1);
+        const file = url.pathname.slice(url.pathname.lastIndexOf("/nar/") + 5, -`/parts/${index}`.length);
+        const key = `${file}:${index}`;
+        const failures = state.partFailures.get(key) ?? 0;
+        if (failures > 0) {
+          state.partFailures.set(key, failures - 1);
+          return new Response("nope", { status: 500 });
+        }
+        state.parts.set(key, body);
+        return new Response(null, { status: 204 });
+      }
+      if (request.method === "POST" && url.pathname.endsWith("/complete")) {
+        const file = url.pathname.slice(url.pathname.lastIndexOf("/nar/") + 5, -"/complete".length);
+        const total = Number(request.headers.get("x-odu-parts"));
+        const missing: number[] = [];
+        for (let index = 0; index < total; index++) {
+          if (!state.parts.has(`${file}:${index}`)) missing.push(index);
+        }
+        if (missing.length > 0) return Response.json({ missing }, { status: 409 });
+        state.completed.push({ file, total });
+        return Response.json({ parts: total });
       }
       if (request.method === "PUT" && url.pathname.includes("/nar/")) {
         const file = url.pathname.slice(url.pathname.lastIndexOf("/") + 1);
@@ -242,6 +274,83 @@ describe("pushing a closure", () => {
         (seen) => seen.method === "PUT" && seen.path.endsWith(".narinfo"),
       );
       expect(infoPuts).toHaveLength(1);
+    } finally {
+      server.stop();
+    }
+  });
+
+  it("splits a large NAR into parts, retries one part, and joins them", async () => {
+    const server = startServer();
+    try {
+      server.missing = [LIBC];
+      const bytes = new TextEncoder().encode("0123456789");
+      const narName = `${narHashBase32(entry(LIBC).narHash)}.nar.zst`;
+      // The MIDDLE part fails once: a retry costs that part, not the path.
+      server.partFailures.set(`${narName}:1`, 1);
+      const lines: string[] = [];
+      const summary = await pushToCache({
+        bucket: `${server.origin}/main`,
+        paths: ["."],
+        env: envOf({ ODU_CACHE_TOKEN: "t" }),
+        platform: {
+          closure: async () => [entry(LIBC)],
+          dump: () =>
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(bytes);
+                controller.close();
+              },
+            }),
+        },
+        // Four bytes a part: ten bytes become three requests, which is the
+        // whole point — Cloudflare refuses one hundred megabytes, not ten.
+        partSize: 4,
+        onLine: (line) => lines.push(line),
+      });
+      expect(summary).toMatchObject({ pushed: 1, failed: 0, held: [] });
+      const parts = server.seen
+        .filter((seen) => seen.method === "PUT" && seen.path.includes("/parts/"))
+        .map((seen) => Number(seen.path.slice(seen.path.lastIndexOf("/") + 1)));
+      expect(parts).toEqual([0, 1, 1, 2]);
+      expect(server.completed).toEqual([{ file: narName, total: 3 }]);
+      expect(server.seen.some((seen) => seen.method === "PUT" && seen.path.endsWith(".nar.zst"))).toBe(
+        false,
+      );
+      // ONE LINE PER PART, and the retry names itself.
+      expect(lines).toContain(`⏳ ${LIBC} part 1`);
+      expect(lines).toContain(`↻ ${LIBC} part 2 (retry 1)`);
+      expect(lines).toContain(`⏳ ${LIBC} part 3`);
+      expect(lines).toContain(`✅ ${LIBC} stored`);
+    } finally {
+      server.stop();
+    }
+  });
+
+  it("sends a NAR under the part size as one request", async () => {
+    const server = startServer();
+    try {
+      server.missing = [LIBC];
+      await pushToCache({
+        bucket: `${server.origin}/main`,
+        paths: ["."],
+        env: envOf({ ODU_CACHE_TOKEN: "t" }),
+        platform: {
+          closure: async () => [entry(LIBC)],
+          dump: () =>
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(new TextEncoder().encode("small"));
+                controller.close();
+              },
+            }),
+        },
+        partSize: 64,
+      });
+      expect(server.parts.size).toBe(0);
+      expect(server.completed).toEqual([]);
+      expect(
+        server.seen.filter((seen) => seen.method === "PUT" && seen.path.endsWith(".nar.zst")),
+      ).toHaveLength(1);
     } finally {
       server.stop();
     }

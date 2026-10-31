@@ -696,6 +696,53 @@ describe("uploading", () => {
     expect((await h.fetch(`/main/${hashOf(two)}.narinfo`)).status).toBe(200);
     await h.dispose();
   });
+
+  it("reassembles a chunked NAR, refusing a gap", async () => {
+    const h = await harness(true);
+    const staged = "/nix/store/88888888888888888888888888888888-chunked";
+    const payload = nar("bytes that arrive in pieces");
+    h.store.add(
+      { storePath: staged, narHash: payload.narHash, narSize: payload.bytes.length, references: [] },
+      false,
+    );
+    const name = `${payload.narHash.replace(/^sha256:/, "")}.nar.zst`;
+    const split = [payload.bytes.subarray(0, 5), payload.bytes.subarray(5)];
+    const part = (index: number) =>
+      h.raw(`/_odu/v1/buckets/main/nar/${name}/parts/${index}`, {
+        ...bearer(h.tokens.write),
+        method: "PUT",
+        body: body(split[index] as Uint8Array),
+      });
+    const complete = () =>
+      h.raw(`/_odu/v1/buckets/main/nar/${name}/complete`, {
+        ...bearer(h.tokens.write),
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${h.tokens.write}`,
+          "x-odu-parts": "2",
+        },
+      });
+
+    expect((await part(0)).status).toBe(204);
+    // A GAP IS THE CLIENT'S TO FILL: the answer names the index, not a
+    // half-assembled NAR.
+    const gap = await complete();
+    expect(gap.status).toBe(409);
+    expect(await gap.json()).toEqual({ missing: [1] });
+
+    expect((await part(1)).status).toBe(204);
+    expect((await complete()).status).toBe(200);
+    // The narinfo then proves the joined bytes exactly as it would a single
+    // request — the chunking is invisible to the proof.
+    const narinfo = await h.fetch(`/main/${hashOf(staged)}.narinfo`, {
+      ...bearer(h.tokens.write),
+      method: "PUT",
+      body: `StorePath: ${staged}\nURL: nar/${name}\nCompression: none\nNarHash: ${payload.narHash}\nNarSize: ${payload.bytes.length}\nReferences: \n`,
+    });
+    expect(narinfo.status).toBe(200);
+    expect((await h.fetch(`/main/${hashOf(staged)}.narinfo`)).status).toBe(200);
+    await h.dispose();
+  });
 });
 
 describe("the shell's own paths", () => {

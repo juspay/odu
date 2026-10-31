@@ -317,6 +317,19 @@ export type CachePaths = typeof PathsOutputSchema.Type;
  *  filter. Here because the VERB's page and the VIEW's page are one number. */
 export const PATH_PAGE_SIZE = 100;
 
+/**
+ * HOW BIG ONE UPLOAD REQUEST MAY BE.
+ *
+ * Cloudflare caps a proxied request body at 100 MB (Free and Pro, tunnels
+ * included), and a NAR is routinely larger, so `odu cache push` splits its
+ * stream into parts under that ceiling. 64 MiB is the default — comfortably
+ * under the cap, and few enough parts that a 2 GiB closure is 32 requests.
+ * The ceiling odu itself accepts is 96 MiB: the same limit with headroom for
+ * headers, so a part that works through Cloudflare also works directly.
+ */
+export const DEFAULT_NAR_PART_BYTES = 64 * 1024 * 1024;
+export const MAX_NAR_PART_BYTES = 96 * 1024 * 1024;
+
 /** What stands where a write token goes, in every block a page or a doc
  *  prints — the netrc line and the push block say the same thing. */
 export const WRITE_TOKEN_PLACEHOLDER = "<your-write-token>";

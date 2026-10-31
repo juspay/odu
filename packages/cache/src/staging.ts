@@ -31,7 +31,9 @@
  */
 
 import { mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { createReadStream, createWriteStream } from "node:fs";
 import { randomUUID } from "node:crypto";
+import { once } from "node:events";
 import { basename, join } from "node:path";
 import type { BlobStore } from "./store";
 import { upstreamFor, verifyNarFile, writeStreamToFile } from "./store";
@@ -50,7 +52,7 @@ import { newChain, type Chain, serial } from "./serial";
 /** A write in progress. `commit` publishes it under the name the narinfo will
  *  name; `discard` removes it. */
 export interface Upload {
-  write(chunk: Uint8Array): Promise<void>;
+  write(chunk: Uint8Array): Promise<UploadWrite>;
   commit(): Promise<void>;
   discard(): Promise<void>;
 }
@@ -63,6 +65,19 @@ export type NarinfoOutcome =
   | { ok: true; status: 202; storePath: string; missing: readonly string[] }
   /** Refused, with the sentence to put in the body. */
   | { ok: false; status: 400; message: string };
+
+/**
+ * A PART THAT WENT OVER THE CEILING is answered by {@link Upload.write}
+ * returning `"too-large"` rather than throwing: the route's refusal is an HTTP
+ * status about the protocol, and a sentinel is one branch rather than an error
+ * class crossing a stream boundary.
+ */
+export type UploadWrite = "ok" | "too-large";
+
+/** What `completeUpload` came to: every part present, or which indexes are not. */
+export type CompleteUpload =
+  | { ok: true; parts: number }
+  | { ok: false; missing: readonly number[] };
 
 /** What a staged `file://` cache contains, and the first thing a client reads
  *  from a real one. */
@@ -114,6 +129,23 @@ export interface StagingDeps {
 
 export interface Staging {
   beginUpload(bucket: BucketRow, file: string): Promise<Upload>;
+  /**
+   * STAGE ONE PART of a NAR too large for one request. `index` is the part's
+   * position; a retry overwrites the same file, so a dropped part is retried
+   * on its own rather than restarting the path.
+   */
+  beginPart(
+    bucket: BucketRow,
+    file: string,
+    index: number,
+    limit: number,
+  ): Promise<Upload>;
+  /**
+   * JOIN the parts into the NAR the narinfo will name, then drop them. `total`
+   * is the client's count; a gap is answered with the missing indexes rather
+   * than a half-assembled file.
+   */
+  completeUpload(bucket: BucketRow, file: string, total: number): Promise<CompleteUpload>;
   acceptNarinfo(
     bucket: BucketRow,
     hash: string,
@@ -384,6 +416,52 @@ export function createStaging(deps: StagingDeps): Staging {
     }
   }
 
+  /** How many parts one NAR may have. A 2 GiB NAR at 64 MiB is 32; the ceiling
+   *  is for the protocol, not for a real closure. */
+  const MAX_PARTS = 10_000;
+
+  /**
+   * A WRITER AT ONE PATH: a unique temp file, renamed into place on commit, and
+   * an optional byte cap that refuses a part the proxy would have refused
+   * anyway.
+   *
+   * BUN'S FILE SINK is the primitive here, and it is the whole of an upload's
+   * memory. Measured on a 2 GiB push, daemon RSS sampled every 0.5 s, idle
+   * 227 MiB: `FileHandle.write` per chunk 324–1366 MiB (Node's `fs` shim);
+   * `createWriteStream` + `pipeline` 379–1328 MiB (the same shim);
+   * `writeSync` on a raw descriptor 304–325 MiB (blocks the loop);
+   * `Bun.file(part).writer()` 299–316 MiB (this). The shim leaves each chunk
+   * to the collector, so the peak is whatever was not reclaimed; the sink owns
+   * the buffer, so the number stops depending on the collector's mood.
+   */
+  function openAt(path: string, limit: number | null): Upload {
+    const part = `${path}.${randomUUID()}.part`;
+    openUploads.add(part);
+    const sink = Bun.file(part).writer({ highWaterMark: 1 << 20 });
+    let written = 0;
+    const release = (): void => {
+      openUploads.delete(part);
+    };
+    return {
+      async write(chunk) {
+        written += chunk.length;
+        if (limit !== null && written > limit) return "too-large";
+        await sink.write(chunk);
+        return "ok";
+      },
+      async commit() {
+        await sink.end();
+        await rename(part, path);
+        release();
+      },
+      async discard() {
+        await Promise.resolve(sink.end()).catch(() => {});
+        await rm(part, { force: true }).catch(() => {});
+        release();
+      },
+    };
+  }
+
   return {
     async beginUpload(bucket, file) {
       await sweep();
@@ -396,50 +474,68 @@ export function createStaging(deps: StagingDeps): Staging {
       if (!isStagedFileName(file)) {
         throw new Error(`"${file}" is not a NAR file name`);
       }
-      const path = join(dirForBucket, "nar", file);
-      // A UNIQUE temp name, renamed into place on commit. Two store paths with
-      // identical content share a NAR name, and two writers opening one file
-      // truncate each other; the bytes are identical by construction, so an
-      // atomic rename is the whole fix.
-      const part = `${path}.${randomUUID()}.part`;
-      openUploads.add(part);
-      // BUN'S FILE SINK, and the primitive is the whole of an upload's memory.
-      // The body reaches us with correct backpressure either way — writing
-      // nothing at all leaves a 2 GiB push flat at 295–305 MiB — so the peak is
-      // decided by how the bytes get to the disk. Measured on a 2 GiB push, the
-      // daemon's RSS sampled every 0.5 s, idle 227 MiB:
-      //
-      //   `FileHandle.write` per chunk      324–1366 MiB   (Node's `fs` shim)
-      //   `createWriteStream` + `pipeline`  379–1328 MiB   (the same shim)
-      //   `writeSync` on a raw descriptor   304–325 MiB    (blocks the loop)
-      //   **`Bun.file(part).writer()`**     299–316 MiB    (this, and 289 at 256 MiB)
-      //
-      // Node's `fs` shim leaves each chunk buffer to the collector, so the
-      // peak is whatever the collector happened not to reclaim: the same 2 GiB
-      // upload peaked at 324 in one run and 1366 in another, and forcing
-      // `Bun.gc(false)` every 256 MiB merely bounded it to 360–486. The sink
-      // owns the buffer, so the number stops depending on the collector's mood.
-      // The descriptor sink is the fallback if this runtime's writer ever goes
-      // away: it measures the same, at the cost of a stalled event loop.
-      const sink = Bun.file(part).writer({ highWaterMark: 1 << 20 });
-      const release = (): void => {
-        openUploads.delete(part);
-      };
-      return {
-        async write(chunk) {
-          await sink.write(chunk);
-        },
-        async commit() {
-          await sink.end();
-          await rename(part, path);
-          release();
-        },
-        async discard() {
-          await Promise.resolve(sink.end()).catch(() => {});
-          await rm(part, { force: true }).catch(() => {});
-          release();
-        },
-      };
+      return openAt(join(dirForBucket, "nar", file), null);
+    },
+
+    async beginPart(bucket, file, index, limit) {
+      if (!isStagedFileName(file)) {
+        throw new Error(`"${file}" is not a NAR file name`);
+      }
+      if (!Number.isSafeInteger(index) || index < 0 || index >= MAX_PARTS) {
+        throw new Error(`"${index}" is not a part index`);
+      }
+      const dirForBucket = stagedDir(bucket.name);
+      await mkdir(join(dirForBucket, "nar"), { recursive: true, mode: 0o700 });
+      return openAt(join(dirForBucket, "nar", `${file}.part-${index}`), limit);
+    },
+
+    async completeUpload(bucket, file, total) {
+      if (!isStagedFileName(file)) {
+        throw new Error(`"${file}" is not a NAR file name`);
+      }
+      if (!Number.isSafeInteger(total) || total < 1 || total > MAX_PARTS) {
+        throw new Error(`"${total}" is not a part count`);
+      }
+      const dirForBucket = stagedDir(bucket.name);
+      const partPath = (index: number): string =>
+        join(dirForBucket, "nar", `${file}.part-${index}`);
+      const missing: number[] = [];
+      for (let index = 0; index < total; index++) {
+        const info = await stat(partPath(index)).catch(() => null);
+        if (info === null || !info.isFile()) missing.push(index);
+      }
+      if (missing.length > 0) return { ok: false, missing };
+
+      // JOIN, never buffer: one read stream at a time, appended in order into a
+      // temp file, then renamed. A client's dropped POST costs a rename, not a
+      // second upload.
+      const target = join(dirForBucket, "nar", file);
+      const assembling = `${target}.${randomUUID()}.assembling`;
+      openUploads.add(assembling);
+      try {
+        const out = createWriteStream(assembling);
+        try {
+          for (let index = 0; index < total; index++) {
+            for await (const chunk of createReadStream(partPath(index))) {
+              if (!out.write(chunk as Uint8Array)) await once(out, "drain");
+            }
+          }
+          await new Promise<void>((resolve, reject) => {
+            out.once("error", reject);
+            out.end(resolve);
+          });
+        } finally {
+          out.destroy();
+        }
+        await rename(assembling, target);
+      } finally {
+        openUploads.delete(assembling);
+        await rm(assembling, { force: true }).catch(() => {});
+      }
+      for (let index = 0; index < total; index++) {
+        await unlink(partPath(index)).catch(() => {});
+      }
+      return { ok: true, parts: total };
     },
 
     async acceptNarinfo(bucket, hash, body) {

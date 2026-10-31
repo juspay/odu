@@ -9,7 +9,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
@@ -364,6 +364,44 @@ describe("a restart", () => {
     // unblocked.
     expect(stats).toMatchObject({ ok: true, value: { objects: 2 } });
     second.close();
+  });
+});
+
+describe("chunked uploads", () => {
+  it("refuses an oversized part, joins the rest, and names a gap", async () => {
+    const cache = cacheWith(ROOT);
+    await cache.admin.create(createInput);
+    const bucket = cache.bucket("main") as never;
+    const file = "abc.nar.zst";
+
+    const big = await cache.beginPart(bucket, file, 0, 4);
+    expect(await big.write(new Uint8Array(5))).toBe("too-large");
+    await big.discard();
+
+    for (const [index, bytes] of [
+      [0, new Uint8Array([1, 2, 3, 4])],
+      [1, new Uint8Array([5, 6, 7])],
+    ] as const) {
+      const part = await cache.beginPart(bucket, file, index, 4);
+      expect(await part.write(bytes)).toBe("ok");
+      await part.commit();
+    }
+    expect(await cache.completeUpload(bucket, file, 3)).toEqual({
+      ok: false,
+      missing: [2],
+    });
+    expect(await cache.completeUpload(bucket, file, 2)).toEqual({ ok: true, parts: 2 });
+    // The joined bytes are the parts in order, and the narinfo's own proof is
+    // what turns them into a stored path.
+    expect(
+      readFileSync(join(scratch, "cache", "staging", "main", "nar", file)),
+    ).toEqual(Buffer.from([1, 2, 3, 4, 5, 6, 7]));
+    expect(
+      readdirSync(join(scratch, "cache", "staging", "main", "nar")).filter((name) =>
+        name.includes(".part-"),
+      ),
+    ).toEqual([]);
+    cache.close();
   });
 });
 
