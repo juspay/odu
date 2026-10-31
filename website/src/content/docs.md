@@ -284,7 +284,7 @@ ODU_TOKEN=odu_... odu mcp --origin https://odu.example.com
 
 Every `odu` command, and the MCP bridge, send the token as `Authorization: Bearer` on the connection they open. `ODU_TOKEN` wins over a stored credential, so one shell can be somebody else.
 
-Revoking a token on the profile page, signing out, or a session expiring ends every connection that credential opened: nothing further is served on it, and an open board tab stops receiving. <!-- TODO(seam): the socket itself is cut by kolu once it offers a close; today the tab comes back to the sign-in page on its next page load. -->
+Revoking a token on the profile page, signing out, or a session expiring ends every connection that credential opened: nothing further is served on it, and an open board tab stops receiving. <!-- TODO(re-pin): the socket itself is cut by `SurfaceAppConnection.close` (kolu PR #2330), which the lease's release already calls; until odu re-pins kolu the tab meets the sign-in page on its next load. -->
 
 Sessions last 30 days from the sign-in; using one does not extend it. The cache protocol does not change: public buckets are read without an account, and pushes carry a bucket token as before.
 

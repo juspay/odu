@@ -30,10 +30,11 @@ const cliHasFeatureArgs = process.argv
 // finding this package exists to close — so the default expression exists only
 // so the knob has a shape a person can extend.
 //
-// `@seam` is NOT a skip: it marks a scenario whose promise needs a kolu seam
-// that does not exist yet (one call to close a connection from the server). Its
-// TODO is in `packages/host/src/principal.ts`, the e2e README and PLAN.md, and
-// the scenario itself is complete — remove the tag when the seam lands.
+// `@seam` is NOT a skip: it marks a scenario whose promise needs kolu's
+// `SurfaceAppConnection.close` to be live (PR #2330 — odu calls it already and
+// needs the re-pin). The TODO is in `packages/host/src/principal.ts`, the e2e
+// README and PLAN.md, and the scenario itself is complete — remove the tag at
+// the re-pin.
 const tags = process.env.CUCUMBER_TAGS || "not @skip and not @seam";
 
 // Scenario retry budget. OFF by default, and off in CI too unless somebody sets

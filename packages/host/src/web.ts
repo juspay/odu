@@ -492,7 +492,7 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
             routes: composed,
             // THE DOOR ITSELF. `cookie` and `authorization` are the two headers a
             // connection is read under; the per-connection services provide the
-            // principal its lease admits (and ask the closer to end it); the
+            // principal its lease admits (and close the socket when it ends); the
             // middleware answers an anonymous `/mcp` with 401 and an anonymous
             // browser with the server-rendered sign-in page.
             upgradeHeaders: UPGRADE_HEADERS,

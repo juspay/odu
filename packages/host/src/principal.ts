@@ -20,22 +20,18 @@
  *     a browser running the bundle). The MCP door's per-request admission rides
  *     an async context, because that adapter is Promise-shaped.
  *
- * ## The one seam kolu does not have (TODO(seam))
+ * ## The lease ends the CONNECTION (TODO: re-pin kolu)
  *
- * `serveSurfaceApp` accepts a socket and only then asks the app for its
- * per-connection services; it hands the app a `SurfaceAppConnection` — an id,
- * a URL, a peer address and the named headers — and nothing that can close the
- * socket. `SurfaceSocketServing.close()` (kolu `surface-app/server.ts`) does
- * exactly what a lease needs, but the listener keeps those handles in a local
- * set (kolu `surface-app/serve.ts`, the `servings` set) and drains them only at
- * shutdown.
+ * A session that ends must close the socket it was on — "the lease's end ends
+ * what the lease admitted". `serveSurfaceApp` now hands the app a
+ * `SurfaceAppConnection` whose `close(code?, reason?)` is that call (kolu
+ * PR #2330); the lease's watch calls it, once, before releasing.
  *
- * So the lease's release calls {@link ConnectionCloser.close} — one call, shaped
- * for the seam — and the host passes {@link NOT_CLOSABLE} until kolu offers one
- * of: a `connections` registry option, a `close()` on the connection record, or
- * the serving handle on `Connected`. Everything else about an ended lease is
- * already true: every member is refused, and every open subscription is
- * interrupted at the instant it ends.
+ * Until odu re-pins kolu, the field is ABSENT at runtime — the type here says
+ * optional and the call is `connection.close?.(…)` — so nothing is closed yet
+ * and the re-pin is the one line that turns it on. Everything else about an
+ * ended lease is already true: every member is refused, and every open
+ * subscription is interrupted at the instant it ends.
  *
  * What is deliberately NOT done instead: refusing the reserved heartbeat so the
  * client's watchdog cuts the socket. `heartbeat.ts` (kolu `@kolu/surface`)
@@ -98,19 +94,22 @@ export const UPGRADE_HEADERS = ["cookie", "authorization"] as const;
 export type UpgradeHeader = (typeof UPGRADE_HEADERS)[number];
 
 /**
- * HOW THE HOST ENDS ONE CONNECTION — the shape the kolu seam will fill.
+ * A CONNECTION THE HOST MAY CLOSE.
  *
- * TODO(seam): kolu exposes no close on a live connection (see this module's
- * header). When it does, the host's implementation is one lookup by
- * `connection.id` and this interface does not change.
+ * `close(code?, reason?)` is kolu PR #2330's addition to
+ * `SurfaceAppConnection`. It is OPTIONAL here for one reason only: until odu
+ * re-pins kolu the field is not on the record at runtime, and a required field
+ * would be a lie the compiler could not catch. The re-pin makes it present and
+ * the same call starts closing sockets.
  */
-export interface ConnectionCloser {
-  close(connection: SurfaceAppConnection<UpgradeHeader>): void;
-}
+export type DoorConnection = SurfaceAppConnection<UpgradeHeader> & {
+  readonly close?: (code?: number, reason?: string) => void;
+};
 
-/** The closer a daemon without the seam has: it ends nothing. Named rather than
- *  inlined so the one place to change is one identifier. */
-export const NOT_CLOSABLE: ConnectionCloser = { close: () => {} };
+/** A normal closure, with a reason the peer can read. Not kolu's stale-process
+ *  code (4001), which RETIRES the link: a session that ended should make the
+ *  client redial, present the dead cookie, and land on the sign-in page. */
+const CLOSE_SESSION_ENDED = 1000;
 
 /** The admission a connection runs under, from the broker's lease.
  *
@@ -123,8 +122,7 @@ export const NOT_CLOSABLE: ConnectionCloser = { close: () => {} };
  *  is over. */
 export function connectionLayer(
   broker: PrincipalBroker,
-  connection: SurfaceAppConnection<UpgradeHeader>,
-  closer: ConnectionCloser = NOT_CLOSABLE,
+  connection: DoorConnection,
 ): Layer.Layer<CurrentPrincipal> {
   return Layer.effect(
     CurrentPrincipal,
@@ -133,7 +131,10 @@ export function connectionLayer(
         Effect.sync(() => {
           const lease = broker.acquire(connection.headers);
           const watched = lease?.watch(() => {
-            closer.close(connection);
+            // THE LEASE'S END CLOSES WHAT IT ADMITTED. One call, on the
+            // connection the host was handed; a no-op until kolu's close is
+            // re-pinned in (see this module's header).
+            connection.close?.(CLOSE_SESSION_ENDED, "the session ended");
           });
           return {
             admission: admissionFor(lease),
