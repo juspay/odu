@@ -16,42 +16,25 @@
  * and the browser cannot.
  */
 
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import {
+  credentialsPath as sharedCredentialsPath,
+  normalizeOrigin,
+  readCredentials as sharedReadCredentials,
+  saveCredential as sharedSaveCredential,
+} from "@odu/credentials";
 
 /** `$ODU_TOKEN` — a personal access token for the command line and agents. */
 export const TOKEN_ENV = "ODU_TOKEN";
 
+/** THIS ROW'S STORE — the one word that differs from the cache's file. */
+const STORE = "auth";
+
 export function authCredentialsPath(env: Record<string, string | undefined>): string {
-  const config = env.XDG_CONFIG_HOME?.trim();
-  const home = env.HOME?.trim();
-  const base =
-    config !== undefined && config !== ""
-      ? config
-      : join(home !== undefined && home !== "" ? home : homedir(), ".config");
-  return join(base, "odu", "auth", "credentials");
+  return sharedCredentialsPath(env, STORE);
 }
 
-/** `/`-trimmed, so a token saved by one spelling is found by the other. */
-export function normalizeOrigin(origin: string): string {
-  return origin.replace(/\/+$/, "");
-}
-
-async function readCredentials(env: Record<string, string | undefined>): Promise<Record<string, string>> {
-  try {
-    const parsed: unknown = JSON.parse(await readFile(authCredentialsPath(env), "utf8"));
-    if (parsed === null || typeof parsed !== "object") return {};
-    return Object.fromEntries(
-      Object.entries(parsed as Record<string, unknown>).filter(
-        (entry): entry is [string, string] => typeof entry[1] === "string",
-      ),
-    );
-  } catch {
-    // Absent is the ordinary case: CI sets `$ODU_TOKEN` and never logs in.
-    return {};
-  }
-}
+const readCredentials = (env: Record<string, string | undefined>) =>
+  sharedReadCredentials(env, STORE);
 
 /** Save a token for an origin. Answers the path it wrote. */
 export async function saveAuthToken(
@@ -59,15 +42,7 @@ export async function saveAuthToken(
   origin: string,
   token: string,
 ): Promise<string> {
-  const path = authCredentialsPath(env);
-  const entries = await readCredentials(env);
-  entries[normalizeOrigin(origin)] = token;
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  await writeFile(path, `${JSON.stringify(entries, null, 2)}\n`, { mode: 0o600 });
-  // `writeFile`'s mode only applies on create; an existing file keeps its own,
-  // and a world-readable token file is the one mistake this must not make.
-  await chmod(path, 0o600);
-  return path;
+  return sharedSaveCredential(env, STORE, origin, token);
 }
 
 /** The token for an origin, in the documented order. */

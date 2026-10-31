@@ -44,12 +44,7 @@ import {
 
 /** The three paths, declared in the browser-safe contract because the sign-in
  *  page renders two of them. */
-export {
-  AUTH_CALLBACK_PATH,
-  AUTH_SIGN_IN_PATH,
-  AUTH_SIGN_OUT_PATH,
-  SIGN_IN_COPY,
-} from "./surface";
+export { AUTH_CALLBACK_PATH, AUTH_SIGN_IN_PATH, AUTH_SIGN_OUT_PATH } from "./surface";
 
 /** The CSRF nonce's cookie. HttpOnly, same-site, ten minutes. */
 export const STATE_COOKIE = "odu_oauth_state";
@@ -123,7 +118,7 @@ export function signInPageHtml(): string {
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width">
     <meta name="odu-door" content="1">
-    <title>${SIGN_IN_COPY.title} · odu</title>
+    <title>${escapeHtml(SIGN_IN_COPY.title)}</title>
     <style>
       :root { color-scheme: light dark; }
       body { margin: 0; min-height: 100vh; display: grid; place-items: center;
@@ -137,9 +132,9 @@ export function signInPageHtml(): string {
   </head>
   <body>
     <main>
-      <h1>${SIGN_IN_COPY.title}</h1>
-      <p class="hint">${SIGN_IN_COPY.hint}</p>
-      <a class="action" href="${AUTH_SIGN_IN_PATH}">${SIGN_IN_COPY.action}</a>
+      <h1>${escapeHtml(SIGN_IN_COPY.title)}</h1>
+      <p class="hint">${escapeHtml(SIGN_IN_COPY.hint)}</p>
+      <a class="action" href="${escapeHtml(AUTH_SIGN_IN_PATH)}">${escapeHtml(SIGN_IN_COPY.action)}</a>
     </main>
   </body>
 </html>

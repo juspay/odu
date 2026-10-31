@@ -38,7 +38,8 @@ export const AUTH_KEY = "auth";
 /** THE SIGN-IN PAGE'S WORDS, once — the server-rendered page (`./routes`) and
  *  the browser's own copy (`./face`) say the same three things, and a page an
  *  operator meets before JavaScript must not read differently from the one a
- *  tab draws a moment later. */
+ *  tab draws a moment later. `title` is the heading AND the tab: spelling it
+ *  once is what keeps a document called "Sign in to odu · odu". */
 export const SIGN_IN_COPY = {
   title: "Sign in to odu",
   hint: "This server answers only to people its operator has allowed in.",
