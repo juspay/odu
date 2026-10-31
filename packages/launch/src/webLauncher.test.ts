@@ -86,10 +86,23 @@ describe("adoptOrRefuse", () => {
     // A minor only ADDS members, so a reader built after the daemon is
     // stranded by nothing but the one new control it calls. Refusing it at the
     // handshake made every added verb a flag day for every newer reader.
+    const warned: string[] = [];
     const { connection, disposed } = scripted(() => Stream.make(cell(minorStep(-1))));
-    const result = await adoptOrRefuse(connection, ORIGIN);
+    const result = await adoptOrRefuse(connection, ORIGIN, { warn: (line) => warned.push(line) });
     expect(result).toBe(connection);
     expect(disposed()).toBe(0);
+    // …and says, once, what a newer verb's "unknown" will mean and what fixes it.
+    expect(warned).toHaveLength(1);
+    expect(warned[0]).toContain("odu web --upgrade");
+  });
+
+  it("says nothing when the service is level or ahead", async () => {
+    const warned: string[] = [];
+    for (const version of [SERVICE_CONTRACT_VERSION, minorStep(1)]) {
+      const { connection } = scripted(() => Stream.make(cell(version)));
+      await adoptOrRefuse(connection, ORIGIN, { warn: (line) => warned.push(line) });
+    }
+    expect(warned).toEqual([]);
   });
 
   it("adopts a service whose minor is AHEAD of this build, without disposing", async () => {

@@ -69,6 +69,7 @@ import {
 } from "@odu/service-client/dial";
 import {
   admitService,
+  skewNote,
   handshakeTimedOut,
   SERVICE_HANDSHAKE_MS,
   type ServiceBuild,
@@ -177,7 +178,7 @@ export function contractVerdict(
 export async function adoptOrRefuse<C extends Pick<ServiceConnection, "client" | "dispose">>(
   connection: C,
   origin: string,
-  opts: { handshakeMs?: number } = {},
+  opts: { handshakeMs?: number; warn?: (line: string) => void } = {},
 ): Promise<C> {
   const handshakeMs = opts.handshakeMs ?? SERVICE_HANDSHAKE_MS;
   let cell: ServiceCell | undefined;
@@ -211,6 +212,11 @@ export async function adoptOrRefuse<C extends Pick<ServiceConnection, "client" |
     await connection.dispose();
     throw new Error(refusal);
   }
+  // ADOPTED BEHIND: said once, on stderr, so stdout and `-o json` are the
+  // command's alone — and the "unknown" a newer verb would meet is explained
+  // before it arrives.
+  const note = skewNote(cell, origin);
+  if (note !== null) (opts.warn ?? ((line) => process.stderr.write(`${line}\n`)))(note);
   return connection;
 }
 
