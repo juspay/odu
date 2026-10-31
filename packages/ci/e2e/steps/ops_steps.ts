@@ -37,9 +37,13 @@ Then("the pipeline preview names {string}", async function (this: OduWorld, reci
 });
 
 Then("the machines page lists this machine's platform", async function (this: OduWorld) {
-  // The probe runs when the page opens; the harness's hosts file pins this
-  // platform to a localhost lane, so its row is the answer.
+  // The harness's hosts file pins this platform to a localhost lane, so its
+  // row is the answer the kept probe draws.
   await this.saysThat(this.page.locator("ul.venues"), "the venue list", currentNixSystem());
+});
+
+Then("the machines page says how old its reading is", async function (this: OduWorld) {
+  await this.saysThat(this.page.locator(".venue-age"), "the probe's age", "Probed ");
 });
 
 /** A hold's answer depends on the lane (a localhost lane takes no remote lock),

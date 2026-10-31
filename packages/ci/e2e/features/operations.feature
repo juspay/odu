@@ -19,10 +19,11 @@ Feature: The board does everything odu does for runs
     And the pipeline preview names "beta"
     And there should be no page errors
 
-  Scenario: Preview pipeline with no checkout is refused, in words
+  # The empty field is SENT; the sentence is the service's own guard.
+  Scenario: Preview pipeline with no checkout is refused by the service
     Given I open the create form
     When I press "Preview pipeline"
-    Then an alert reads "a pipeline is read off a checkout"
+    Then an alert reads "is not an absolute path"
 
   Scenario: The form starts a run with only the named recipe (--no-deps)
     Given a fixture checkout whose pipeline fails
@@ -37,9 +38,13 @@ Feature: The board does everything odu does for runs
     And the run detail shows the node "beta@"
     And there should be no page errors
 
-  Scenario: The machines page probes the venues
+  Scenario: The machines page reads the last probe, and probes on request
+    # Opening the page dials nothing — it reads the probe the service kept.
+    # The button is what dials, and the page redraws from the kept answer.
     Given I open the machines page
+    When I press "Probe machines"
     Then the machines page lists this machine's platform
+    And the machines page says how old its reading is
     And there should be no page errors
 
   Scenario: A hold is taken and released from the machines page
@@ -60,9 +65,9 @@ Feature: The board does everything odu does for runs
     Then a status reads "Would expire"
     And there should be no page errors
 
-  Scenario: A retention that is not a number is refused on click
+  Scenario: A retention of zero days is refused by the service
     Given I open the maintenance page
-    When I fill "Retention (days)" with "soon"
+    When I fill "Retention (days)" with "0"
     And I press "Prune"
     Then an alert reads "positive whole number of days"
 

@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { Given, Then, When } from "@cucumber/cucumber";
-import { oduCli } from "../../../web-acceptance/support/service.ts";
+import { oduCli, ROOT_TOKEN } from "../../../web-acceptance/support/service.ts";
 import type { OduWorld } from "../../../web-acceptance/support/world.ts";
 
 function unique(what: string): string {
@@ -304,6 +304,21 @@ Then("the page says that bucket is not there", async function (this: OduWorld) {
 
 // ── administration, through the page ────────────────────────────────────────
 
+/** The token a bucket page minted in this scenario — its one showing, and the
+ *  id its list row carries. The cache's own state, in the harness's row bag. */
+interface MintedHere {
+  token?: string;
+  id?: string;
+}
+function minted(world: OduWorld): MintedHere {
+  let held = world.rowState.get("cache.minted") as MintedHere | undefined;
+  if (held === undefined) {
+    held = {};
+    world.rowState.set("cache.minted", held);
+  }
+  return held;
+}
+
 Then("the cache says {string}", async function (this: OduWorld, text: string) {
   await this.saysThat(this.page.locator(".cache"), "the cache view", text);
 });
@@ -342,23 +357,24 @@ When("I mint a {string} token", async function (this: OduWorld, scope: string) {
   await this.page.getByRole("button", { name: "Mint token", exact: true }).click();
   const block = this.page.locator("pre.minted-token");
   await block.waitFor({ timeout: 30_000 });
-  this.bucketToken = (await block.innerText()).trim();
+  minted(this).token = (await block.innerText()).trim();
   // The id is read off the LIST, where the row the mint just added says so —
   // the plaintext and the id are two halves the page shows in two places.
   const row = this.page.locator("ul.tokens li", { hasText: "just minted" });
   await row.waitFor({ timeout: 30_000 });
-  this.bucketTokenId = (await row.locator("code").first().innerText()).trim();
+  minted(this).id = (await row.locator("code").first().innerText()).trim();
 });
 
 Then("the page shows the cache token once", function (this: OduWorld) {
+  const token = minted(this).token;
   assert.ok(
-    this.bucketToken !== undefined && this.bucketToken.length > 16,
-    `no token was shown: ${JSON.stringify(this.bucketToken)}`,
+    token !== undefined && token.length > 16,
+    `no token was shown: ${JSON.stringify(token)}`,
   );
 });
 
 Then("the minted token is listed as {string}", async function (this: OduWorld, word: string) {
-  const id = this.bucketTokenId;
+  const id = minted(this).id;
   assert.ok(id !== undefined, "no token was minted");
   await this.saysThat(
     this.page.locator("ul.tokens li", { hasText: id }),
@@ -368,14 +384,14 @@ Then("the minted token is listed as {string}", async function (this: OduWorld, w
 });
 
 When("I revoke the minted token", async function (this: OduWorld) {
-  const id = this.bucketTokenId;
+  const id = minted(this).id;
   assert.ok(id !== undefined, "no token was minted");
   await this.page.getByRole("button", { name: `revoke ${id}`, exact: true }).click();
 });
 
 When("a path is pushed with that token from the CLI", function (this: OduWorld) {
   const bucket = this.cacheBucket;
-  const token = this.bucketToken;
+  const token = minted(this).token;
   assert.ok(bucket !== undefined && token !== undefined, "no bucket or token");
   const dir = mkdtempSync(join(tmpdir(), "odu-wa-cache-"));
   const name = unique("pinned");
@@ -406,4 +422,20 @@ When("I pin that path as {string}", async function (this: OduWorld, name: string
 
 Then("the stats say {string}", async function (this: OduWorld, text: string) {
   await this.saysThat(this.page.locator("dl.stats"), "the stats", text);
+});
+
+Then("the push block names the minted token", async function (this: OduWorld) {
+  const token = minted(this).token;
+  assert.ok(token !== undefined, "no token was minted");
+  // The once-shown moment is when a person pastes it into a CI secret, so the
+  // push block carries it while the page can still show it.
+  await this.saysThat(this.page.locator("pre.push-block"), "the push block", token);
+});
+
+When("I type the root token", async function (this: OduWorld) {
+  await this.page.getByLabel("root token", { exact: true }).fill(ROOT_TOKEN);
+});
+
+When("I type a wrong root token", async function (this: OduWorld) {
+  await this.page.getByLabel("root token", { exact: true }).fill("not-the-root-token");
 });

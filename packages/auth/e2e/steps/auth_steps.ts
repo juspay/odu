@@ -211,6 +211,13 @@ Then("the second tab meets the sign-in page", async function (this: OduWorld) {
 
 // ── the people page ─────────────────────────────────────────────────────────
 
+/** The login this scenario granted on the people page — the door's own state,
+ *  in the harness's row bag. */
+const GRANTED = "auth.granted";
+function grantedLogin(world: OduWorld): string | undefined {
+  return world.rowState.get(GRANTED) as string | undefined;
+}
+
 When("I open the people page", async function (this: OduWorld) {
   // Through the header's control, not the address: the control being DRAWN for
   // an owner is half of what this page promises.
@@ -244,21 +251,23 @@ Then(
 
 When("I grant a new login the role {string}", async function (this: OduWorld, role: string) {
   const login = `wa-${Math.random().toString(36).slice(2, 10)}`;
-  this.grantedLogin = login;
+  this.rowState.set(GRANTED, login);
   await this.page.getByPlaceholder("GitHub login, e.g. octocat").fill(login);
   await this.page.getByLabel("role to grant", { exact: true }).selectOption(role);
   await this.page.getByRole("button", { name: "Grant", exact: true }).click();
 });
 
 Then("the people list shows the new login as {string}", async function (this: OduWorld, role: string) {
-  assert.ok(this.grantedLogin !== undefined, "no login was granted");
-  await roleShown(this, this.grantedLogin, role);
+  const login = grantedLogin(this);
+  assert.ok(login !== undefined, "no login was granted");
+  await roleShown(this, login, role);
 });
 
 When("I change the new login's role to {string}", async function (this: OduWorld, role: string) {
-  assert.ok(this.grantedLogin !== undefined, "no login was granted");
+  const login = grantedLogin(this);
+  assert.ok(login !== undefined, "no login was granted");
   await this.page
-    .getByLabel(`role of ${this.grantedLogin}`, { exact: true })
+    .getByLabel(`role of ${login}`, { exact: true })
     .selectOption(role);
 });
 

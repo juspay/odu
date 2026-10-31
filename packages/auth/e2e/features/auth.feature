@@ -87,8 +87,9 @@ Feature: The door — sign in, and what a role may do
     Then the people list shows the new login as "member"
     And there should be no page errors
 
+  # SENT, not greyed out: the sentence is the auth row's.
   @signed-in:owner
-  Scenario: An empty login is refused on click, in words
+  Scenario: An empty login is refused by the row, in its words
     When I open the people page
     And I press "Grant"
     Then the people page says "a grant needs a GitHub login"
