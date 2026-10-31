@@ -53,6 +53,16 @@ export interface ServiceConnection {
   dispatch: SurfaceDispatch;
   /** The URL that was dialled, for an error message that has to name it. */
   url: string;
+  /**
+   * Subscribe to this connection's transport LEAVING `open` — a daemon that
+   * died, was upgraded, or dropped the socket. The MCP adapter's redial is
+   * built on exactly this announcement (`OwnedSurfaceConnection.onClose`):
+   * without it the adapter keeps handing out a connection that is already
+   * dead, and every later call fails on it forever. The link RECONNECTS on its
+   * own, and that is the face's business — the announcement says only that
+   * what this connection WAS is gone.
+   */
+  onClose: (cb: () => void) => () => void;
   dispose: () => Promise<void>;
 }
 
@@ -171,6 +181,12 @@ export async function dialService(
     client: oduServiceClientOver(link.dispatch),
     dispatch: link.dispatch,
     url,
+    onClose: (cb) =>
+      link.wire.onStatus((status) => {
+        // `connecting` is a RE-dial in progress, not a loss: the link owns the
+        // retry, and announcing it would make every redial look like a death.
+        if (status === "closed" || status === "retired") cb();
+      }),
     dispose: () => link.dispose(),
   };
 }

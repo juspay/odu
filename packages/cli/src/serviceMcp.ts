@@ -147,6 +147,12 @@ export async function serveServiceMcpOverStdio(opts: {
           core: connection.client as unknown as SurfaceClientCallable,
           clients: composedClients(SERVICE_SIBLINGS, connection.dispatch),
         },
+        // THE ANNOUNCEMENT the adapter builds its redial on: a daemon that died
+        // or was upgraded tells this connection's transport, the adapter drops
+        // the slot, and the NEXT call dials a fresh one. Without it the slot
+        // stays "live" holding a dead socket, and every later call fails on it
+        // — which is what the redial e2e found, with `SocketCloseError: 1000`.
+        onClose: connection.onClose,
         dispose: () => {
           opened.delete(connection);
           connection.dispose();
