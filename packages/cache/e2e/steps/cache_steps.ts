@@ -102,13 +102,13 @@ When(
     // The person mints the bucket's write token through `/mcp` (their own
     // credential); the PUSH then speaks only the cache's HTTP protocol, with
     // that bucket token and no cookie — the shape a CI job on a door has.
-    const minted = oduCli(
+    const mint = oduCli(
       this.service,
       ["cache", "token", "mint", bucket, "--write", "-o", "json"],
       { ODU_TOKEN: this.mintedToken },
     );
-    assert.strictEqual(minted.status, 0, `odu cache token mint failed: ${minted.stderr}`);
-    const token = (JSON.parse(minted.stdout) as { token: string }).token;
+    assert.strictEqual(mint.status, 0, `odu cache token mint failed: ${mint.stderr}`);
+    const token = (JSON.parse(mint.stdout) as { token: string }).token;
     const path = addLeafPath(this);
     const pushed = oduCli(this.service, ["cache", "push", bucket, path, "-o", "json"], {
       ODU_CACHE_TOKEN: token,
@@ -119,7 +119,7 @@ When(
       `odu cache push through the door failed: ${pushed.stderr}${pushed.stdout}`,
     );
     this.cachePath = path;
-    this.cacheToken = token;
+    minted(this).token = token;
   },
 );
 
@@ -129,7 +129,7 @@ Then("the bucket serves that path's narinfo to the token", async function (this:
   const hash = (path.split("/").pop() ?? "").slice(0, 32);
   const answer = await fetch(
     new URL(`/cache/${this.cacheBucket}/${hash}.narinfo`, this.service.origin),
-    { headers: { authorization: `Bearer ${this.cacheToken}` } },
+    { headers: { authorization: `Bearer ${minted(this).token}` } },
   );
   const body = await answer.text();
   assert.strictEqual(answer.status, 200, `the narinfo answered ${answer.status}: ${body}`);
@@ -304,8 +304,9 @@ Then("the page says that bucket is not there", async function (this: OduWorld) {
 
 // ── administration, through the page ────────────────────────────────────────
 
-/** The token a bucket page minted in this scenario — its one showing, and the
- *  id its list row carries. The cache's own state, in the harness's row bag. */
+/** The bucket token this scenario minted — on a bucket page (its one showing,
+ *  and the id its list row carries) or through the CLI for a door push. The
+ *  cache's own state, in the harness's row bag. */
 interface MintedHere {
   token?: string;
   id?: string;
