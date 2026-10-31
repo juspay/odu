@@ -175,6 +175,30 @@ describe("odu auth login stores the token, and --origin uses it", () => {
   });
 });
 
+describe("the door's HTTP legs", () => {
+  it("answers an anonymous browser with the sign-in page on every shell path", async () => {
+    // THE SERVING LAYER owns "which requests are the shell" (a `GET /*`
+    // catch-all), so the gate no longer keeps its own two paths. What proves
+    // the door over HTTP is therefore every path the shell would answer —
+    // including the ones only the client's router knows (`/runs`) and a typo.
+    for (const path of ["/", "/index.html", "/runs", "/cache/", "/no-such-page"]) {
+      const response = await fetch(new URL(path, world.origin));
+      expect(response.status, path).toBe(200);
+      const body = await response.text();
+      expect(body, path).toContain("Sign in to odu");
+      expect(body, path).not.toContain("/assets/");
+    }
+  });
+
+  it("still answers the cache's protocol paths as the protocol, not as the page", async () => {
+    const response = await fetch(new URL("/cache/main/nix-cache-info", world.origin));
+    // No bucket `main` on this daemon: the DAEMON's empty 404, untouched by the
+    // door — the gate replaces an HTML 200 and nothing else.
+    expect(response.status).toBe(404);
+    expect(await response.text()).not.toContain("Sign in to odu");
+  });
+});
+
 describe("the MCP door", () => {
   const initialize = {
     jsonrpc: "2.0",

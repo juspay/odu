@@ -104,7 +104,6 @@ import {
   doorRoute,
   gatedHandlers,
   liveDispatch,
-  SHELL_PATHS,
   UPGRADE_HEADERS,
 } from "./principal";
 import type { SurfaceHandlers } from "@kolu/surface/server";
@@ -503,7 +502,6 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
             middleware: doorGate({
               broker: principals,
               mcpPath: SERVICE_MCP_PATH,
-              shellPaths: SHELL_PATHS,
               signInPage: () =>
                 signInPageHtml(),
             }),

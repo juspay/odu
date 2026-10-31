@@ -156,27 +156,52 @@ describe("the absence rule", () => {
 const request = (headers: Record<string, string>, url: string) =>
   ({ headers, url }) as unknown as HttpServerRequest.HttpServerRequest;
 
-/** Run an app through the middleware and read its status. The app answers 299 —
- *  a status nothing else uses — so "the middleware intervened" and "the app was
- *  reached" cannot be confused. */
+/** What the SERVING LAYER answers for the shell: `index.html`, HTML and 200. */
+const SHELL = HttpServerResponse.text("<!doctype html><title>odu</title>", {
+  status: 200,
+  contentType: "text/html; charset=utf-8",
+});
+
+/** A protocol answer — not the shell. 299 is a status nothing else uses, so
+ *  "the app was reached" and "the middleware replaced it" cannot be confused. */
+const PROTOCOL = HttpServerResponse.text("served", { status: 299 });
+
+/**
+ * Run one request through the middleware.
+ *
+ * The app answers what the SERVING LAYER would: `SHELL` for a path its `GET /*`
+ * catch-all serves, `PROTOCOL` for everything else. The gate keeps no list of
+ * shell paths any more, so this is the only way the two rules can be told
+ * apart — and `throughPage` reads the BODY, which is what a person sees.
+ */
 async function through(
   broker: PrincipalBroker,
   headers: Record<string, string>,
   url = "/",
-): Promise<number> {
-  const app = Effect.succeed(HttpServerResponse.text("served", { status: 299 }));
+  app: HttpServerResponse.HttpServerResponse = PROTOCOL,
+): Promise<HttpServerResponse.HttpServerResponse> {
   const gate = doorGate({
     broker,
     mcpPath: "/mcp",
-    shellPaths: ["/", "/index.html"],
     signInPage: () => "<title>Sign in to odu</title>",
   });
   return Effect.runPromise(
-    Effect.map(
-      Effect.provideService(gate(app), HttpServerRequest.HttpServerRequest, request(headers, url)),
-      (response) => response.status,
+    Effect.provideService(
+      gate(Effect.succeed(app)),
+      HttpServerRequest.HttpServerRequest,
+      request(headers, url),
     ),
   );
+}
+
+/** The status of one request through the middleware. */
+async function statusThrough(
+  broker: PrincipalBroker,
+  headers: Record<string, string>,
+  url = "/",
+  app: HttpServerResponse.HttpServerResponse = PROTOCOL,
+): Promise<number> {
+  return (await through(broker, headers, url, app)).status;
 }
 
 describe("the connection layer", () => {
@@ -247,46 +272,61 @@ function doorWithSession(cookie: string): PrincipalBroker {
 
 describe("the HTTP legs", () => {
   it("asks nothing at all in loopback mode", async () => {
-    expect(await through(localBroker(), {}, "/")).toBe(299);
-    expect(await through(localBroker(), {}, "/mcp")).toBe(299);
+    expect(await statusThrough(localBroker(), {}, "/", SHELL)).toBe(200);
+    expect(await statusThrough(localBroker(), {}, "/mcp")).toBe(299);
   });
 
   it("refuses an anonymous /mcp POST once a door is configured", async () => {
-    expect(await through(doorWithSession("s3cret"), {}, "/mcp")).toBe(401);
-    expect(await through(doorWithSession("s3cret"), { authorization: "Bearer nope" }, "/mcp")).toBe(
-      401,
-    );
+    expect(await statusThrough(doorWithSession("s3cret"), {}, "/mcp")).toBe(401);
+    expect(
+      await statusThrough(doorWithSession("s3cret"), { authorization: "Bearer nope" }, "/mcp"),
+    ).toBe(401);
   });
 
   it("admits a Bearer the resolver recognises", async () => {
     expect(
-      await through(doorWithSession("s3cret"), { authorization: "Bearer good" }, "/mcp"),
+      await statusThrough(doorWithSession("s3cret"), { authorization: "Bearer good" }, "/mcp"),
     ).toBe(299);
   });
 
-  it("answers an anonymous browser with the server-rendered sign-in page", async () => {
-    // 200 is the PAGE's status; the app's 299 is what a served shell answers.
-    expect(await through(doorWithSession("s3cret"), {}, "/")).toBe(200);
-    expect(await through(doorWithSession("s3cret"), {}, "/index.html")).toBe(200);
+  it("answers an anonymous browser with the sign-in page on EVERY path the shell serves", async () => {
+    // THE PATH IS NOT THE GATE'S FACT: the serving layer's catch-all decides
+    // what is the shell, and the gate replaces an HTML 200 wherever it lands.
+    // `/`, `/index.html` and every path only the client's router knows are the
+    // same request from here on.
+    const broker = doorWithSession("s3cret");
+    for (const url of ["/", "/index.html", "/runs", "/nope", "/cache/"]) {
+      const answer = await through(broker, {}, url, SHELL);
+      // Not the shell it was handed, and carrying the sign-in page's own
+      // `no-store`: the replacement is the assertion, not the status.
+      expect(answer, url).not.toBe(SHELL);
+      expect(answer.status, url).toBe(200);
+      expect(answer.headers["cache-control"], url).toBe("no-store");
+    }
   });
 
-  it("serves the shell to a live session", async () => {
-    expect(await through(doorWithSession("s3cret"), { cookie: "odu_session=s3cret" }, "/")).toBe(
-      299,
+  it("serves the shell itself to a live session", async () => {
+    const answer = await through(
+      doorWithSession("s3cret"),
+      { cookie: "odu_session=s3cret" },
+      "/runs",
+      SHELL,
     );
+    // THE VERY RESPONSE the serving layer built — not a copy, not a re-render.
+    expect(answer).toBe(SHELL);
   });
 
   it("refuses a shell path on a door daemon whose row is not registered", async () => {
     // The case the review called failing-open: configured, no resolver.
-    expect(await through(localBroker({ door: true }), {}, "/")).toBe(200);
-    expect(await through(localBroker({ door: true }), {}, "/mcp")).toBe(401);
+    expect(await statusThrough(localBroker({ door: true }), {}, "/", SHELL)).toBe(200);
+    expect(await statusThrough(localBroker({ door: true }), {}, "/mcp")).toBe(401);
   });
 
   it("does not touch the cache's paths or the sign-in routes", async () => {
     const broker = doorWithSession("s3cret");
-    expect(await through(broker, {}, "/cache/main/nix-cache-info")).toBe(299);
-    expect(await through(broker, {}, "/auth/github")).toBe(299);
-    expect(await through(broker, {}, "/assets/app.js")).toBe(299);
+    expect(await statusThrough(broker, {}, "/cache/main/nix-cache-info")).toBe(299);
+    expect(await statusThrough(broker, {}, "/auth/github")).toBe(299);
+    expect(await statusThrough(broker, {}, "/assets/app.js")).toBe(299);
   });
 });
 

@@ -271,9 +271,6 @@ export interface DoorGateOptions {
   readonly broker: PrincipalBroker;
   /** Where the MCP endpoint is mounted. */
   readonly mcpPath: string;
-  /** The paths that serve the SHELL. A browser arriving at one of these with no
-   *  session meets the server-rendered sign-in page. */
-  readonly shellPaths: ReadonlyArray<string>;
   /** That page, as the row renders it. */
   readonly signInPage: () => string;
 }
@@ -287,12 +284,21 @@ export interface DoorGateOptions {
  *     entered (the route resolves the same header again for its dispatch —
  *     one resolver, two readers, because a middleware cannot hand a service to
  *     a handler);
- *   - a SHELL path, with no live session, is the sign-in page the SERVER renders
- *     — which is what makes `curl /` prove the door, rather than only a browser
- *     running the bundle;
+ *   - an answer that IS the shell, with no live session, is the sign-in page the
+ *     SERVER renders — which is what makes `curl /anything` prove the door,
+ *     rather than only a browser running the bundle;
  *   - everything else (assets, `/auth/…`, the cache's paths) is untouched: the
  *     sign-in page needs no bundle, and the cache's protocol has its own
  *     per-bucket credentials.
+ *
+ * WHICH REQUESTS ARE THE SHELL IS THE SERVING LAYER'S FACT, NOT A LIST HERE.
+ * `serveSurfaceApp` answers the bundle's `index.html` from a `GET /*` catch-all,
+ * so a gate keeping its own list of shell paths (`/`, `/index.html`) was a
+ * second owner of that fact — and it disagreed on every other path: an
+ * anonymous browser met the sign-in page at `/` and the BUNDLE everywhere else
+ * (`/cache/`, `/runs`, a typo), which is a door proved only by one URL. The gate
+ * decides only what an anonymous connection sees when the answer IS the shell,
+ * so it runs the request and replaces an HTML 200.
  *
  * With no door configured this middleware does nothing at all.
  */
@@ -311,7 +317,6 @@ export function doorGate(options: DoorGateOptions): SurfaceAppHttpMiddleware {
           ),
         );
       }
-      if (!options.shellPaths.includes(path)) return httpApp;
       // THE RAW HEADER, untouched: the cookie's NAME and its grammar are the
       // auth row's, and its resolver parses them. The host asks "does this
       // connection carry a session" and never learns what a cookie is called.
@@ -320,21 +325,30 @@ export function doorGate(options: DoorGateOptions): SurfaceAppHttpMiddleware {
         lease.release();
         return httpApp;
       }
-      return Effect.succeed(
+      const signIn = (): HttpServerResponse.HttpServerResponse =>
         HttpServerResponse.text(options.signInPage(), {
           contentType: "text/html; charset=utf-8",
           status: 200,
           headers: { "cache-control": "no-store" },
-        }),
+        });
+      // RUN IT, THEN LOOK AT WHAT THE SERVING LAYER ANSWERED. The shell is the
+      // one 200 that is HTML; a protocol answer (JSON, text, a NAR stream), a
+      // redirect, and every non-200 are passed through untouched. The check is
+      // the response's own content type rather than a path prefix, because the
+      // catch-all's RULE is the thing being honoured.
+      return Effect.map(httpApp, (response) =>
+        response.status === 200 && isHtml(response) ? signIn() : response,
       );
     });
 }
 
-// ── the door fact, on its own route ─────────────────────────────────────────
+/** Is this response the shell's HTML? The serving layer's catch-all is the
+ *  only route that answers `text/html` with a 200 on a door daemon. */
+function isHtml(response: HttpServerResponse.HttpServerResponse): boolean {
+  return (response.headers["content-type"] ?? "").toLowerCase().startsWith("text/html");
+}
 
-/** The paths that serve the SHELL. The SPA is hash-routed, so these two are all
- *  a browser navigates to; the bundle's assets ride under `/assets/`. */
-export const SHELL_PATHS: ReadonlyArray<string> = ["/", "/index.html"];
+// ── the door fact, on its own route ─────────────────────────────────────────
 
 /**
  * WHETHER THIS DAEMON HAS A DOOR — the HOST'S OWN fact.

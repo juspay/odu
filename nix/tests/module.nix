@@ -187,10 +187,14 @@
         f" {odu} auth grant srid owner"
     )
 
-    # ANONYMOUS `GET /` IS THE SIGN-IN PAGE, not the board and not nginx.
+    # ANONYMOUS `GET /` IS THE SIGN-IN PAGE, not the board and not nginx — and
+    # so is EVERY path the shell's catch-all would answer: the gate no longer
+    # keeps its own list of shell paths, so a typo is the sign-in page too.
     root = client.succeed("curl -sS http://door.test/")
     assert "Sign in to odu" in root, root[:400]
     assert "Sign in with GitHub" in root, root[:400]
+    stray = client.succeed("curl -sS http://door.test/no-such-page")
+    assert "Sign in to odu" in stray, stray[:400]
 
     # `/mcp` WITHOUT A BEARER IS 401 — the door's second lock, refused before
     # the adapter is entered.
