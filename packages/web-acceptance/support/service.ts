@@ -292,15 +292,6 @@ export function surfaceCall(
   return { status: res.status, stdout: res.stdout, stderr: res.stderr };
 }
 
-/**
- * A verb call with a JSON input, answered as JSON.
- *
- * Used ONLY to arrange a scenario (start the run a feature is then about) and to
- * read facts a browser cannot be asked for (which node the coordinator called
- * `quick@…`). Never to ACT where the scenario is about a control: a feature that
- * cancelled a run through this instead of through the button would be asserting
- * on the service and calling it browser coverage.
- */
 /** EVERY RUN OF THIS CHECKOUT THAT IS STILL GOING, asked of the service rather
  *  than trusted from the ids a scenario happened to write down.
  *
@@ -309,8 +300,9 @@ export function surfaceCall(
  *  run whose checkout is then deleted holds a lane for minutes.
  *
  *  `settled` is the SERVICE's own answer, read off `run_list`; the row's
- *  `isActive` predicate is not imported here, because this is a host package and
- *  the fence lets it reach the ci row only through a root file. */
+ *  `isActive` predicate is not imported here, because this is the acceptance
+ *  HARNESS and the fence lets a harness reach the ci row only through a root
+ *  file — so the row's own field is read instead of the row's own function. */
 export function activeRunsOf(service: Service, checkout: string): string[] {
   const answer = verb(service, "run_list", { checkout });
   if (answer.status !== 0) {
@@ -333,6 +325,15 @@ export function cancelRun(service: Service, runId: string): boolean {
   return answer.status === 0;
 }
 
+/**
+ * A verb call with a JSON input, answered as JSON.
+ *
+ * Used ONLY to arrange a scenario (start the run a feature is then about) and to
+ * read facts a browser cannot be asked for (which node the coordinator called
+ * `quick@…`). Never to ACT where the scenario is about a control: a feature that
+ * cancelled a run through this instead of through the button would be asserting
+ * on the service and calling it browser coverage.
+ */
 export function verb(
   service: Service,
   name: string,

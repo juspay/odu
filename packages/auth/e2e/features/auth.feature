@@ -27,13 +27,13 @@ Feature: The door — sign in, and what a role may do
 
   @anonymous
   Scenario: A login outside the allow-list is refused with a reason
-    # NO "no page errors" HERE, deliberately: the refusal IS a 403 document,
-    # and a browser logs a refused navigation as a failed resource. The
-    # assertion that matters is the sentence the server wrote, which the step
-    # above holds.
+    # The refusal IS a 403 document, so the browser logs that one navigation as
+    # a failed resource. The check stays and exactly that entry is filtered: a
+    # script error on the refusal page still fails.
     Given the stub says this account is not in the organisation
     When I start a sign-in
     Then the page refuses the sign-in naming the allow-list
+    And the page reports no errors other than the refused sign-in
 
   @signed-in:member
   Scenario: A member may read the board and may not administer buckets

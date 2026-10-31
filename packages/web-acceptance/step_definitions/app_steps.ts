@@ -123,3 +123,22 @@ Then("there should be no page errors", function (this: OduWorld) {
     `the page reported ${this.errors.length} error(s):\n${this.errors.join("\n---\n")}`,
   );
 });
+
+/**
+ * The same assertion, minus the ONE entry a scenario is about.
+ *
+ * A refused sign-in is a 403 DOCUMENT: the browser logs the navigation itself
+ * as a failed resource, and that line is the answer, not a fault. Dropping the
+ * whole check for such a scenario (which this suite did once) stops catching a
+ * genuine script error on the very page a person meets when they are turned
+ * away — so the check stays and exactly its own 403 is filtered. The filter is
+ * a message this scenario produced, not a category: any OTHER error still fails.
+ */
+Then("the page reports no errors other than the refused sign-in", function (this: OduWorld) {
+  const others = this.errors.filter((one) => !one.includes("403 (Forbidden)"));
+  assert.deepStrictEqual(
+    others,
+    [],
+    `the page reported ${others.length} error(s) besides the 403:\n${others.join("\n---\n")}`,
+  );
+});
