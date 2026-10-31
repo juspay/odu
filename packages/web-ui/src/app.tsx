@@ -135,6 +135,10 @@ function hashOf(route: Route): string {
 
 export function App(props: {
   client: CiClient;
+  /** ASKS THE HOST WHETHER IT HAS A DOOR, once more — `main.tsx` owns the
+   *  request (it is a host route, and the fence keeps host routes to the entry),
+   *  and this component owns the moment to make it. */
+  redialDoor: () => void;
   /** THE CACHE'S CLIENT — a different row, handed to the one face that renders
    *  it and to nothing else. */
   cache: CacheClient;
@@ -235,16 +239,25 @@ export function App(props: {
   // exactly today's.
   const [who, setWho] = createSignal<Who | null>(null);
 
-  // A SESSION QUESTION IS A QUESTION PER CONNECTION. Signing out in one tab, a
-  // revocation and an expiry all end the lease; the tab holding it is severed
-  // and redials, and what comes back is a NEW connection that may well be
-  // nobody. So every transition back to `live` asks again — which is also why
-  // the second tab of "sign out in one tab" ends up on the sign-in page.
+  // A LIVE WIRE RE-ASKS WHAT AN OUTAGE MADE STALE. Two questions ride the same
+  // event, so they are one effect:
+  //
+  //   - THE DOOR, always. The ask before the first render can fail while the
+  //     wire is still redialling, and an unknown door draws the header and
+  //     nothing else; the shell owns the connection, so the shell owns the
+  //     retry. No timer — a timer would be a second opinion about the wire.
+  //   - THE PERSON, on a transition back to live. Signing out in one tab, a
+  //     revocation and an expiry all end the lease; the tab holding it is
+  //     severed and redials, and what comes back is a NEW connection that may
+  //     well be nobody — which is also why the second tab of "sign out in one
+  //     tab" ends up on the sign-in page.
   createEffect(
     on(
       () => props.readout.status,
       (status, previous) => {
-        if (status === "live" && previous !== undefined && previous !== "live") setWho(null);
+        if (status !== "live") return;
+        props.redialDoor();
+        if (previous !== undefined && previous !== "live") setWho(null);
       },
     ),
   );

@@ -23,8 +23,9 @@ import { AUTH_KEY, oduAuthSurface } from "@odu/auth/surface";
 import { CACHE_KEY, oduCacheSurface } from "@odu/cache/surface";
 import { SERVICE_DOOR_PATH } from "@odu/cordis/services";
 import { oduServiceSurface } from "@odu/service-client/surface";
+import { createSignal } from "solid-js";
 import { render } from "solid-js/web";
-import { App } from "./app";
+import { App, type DoorState } from "./app";
 
 const root = document.getElementById("odu");
 if (root === null) {
@@ -32,8 +33,8 @@ if (root === null) {
 }
 
 /**
- * DOES THIS SERVER HAVE A DOOR? Asked of the HOST, once, before anything is
- * drawn.
+ * DOES THIS SERVER HAVE A DOOR? Asked of the HOST before anything is drawn, and
+ * asked again whenever the shell sees the wire come alive.
  *
  * It used to ride the runs' service cell, which meant the shell opened the
  * board and subscribed to `runs` before it knew the answer — on a server with a
@@ -61,7 +62,7 @@ async function doorMounted(): Promise<boolean | null> {
   }
 }
 
-const door = await doorMounted();
+const [door, setDoor] = createSignal<DoorState>(await doorMounted());
 
 const connection = await connectSurfaces({
   // The rows. `cache` and `auth` are the keys the daemon mounts those rows at,
@@ -80,7 +81,12 @@ render(
         client={connection.core}
         cache={connection.clients.cache}
         auth={connection.clients.auth}
-        door={door}
+        door={door()}
+        // The shell decides WHEN (a live wire); this file answers HOW (a host
+        // route, which the fence keeps out of every other file).
+        redialDoor={() => {
+          void doorMounted().then(setDoor);
+        }}
         // The framework's readout is an accessor; read HERE, inside the render
         // root, so the compiler makes it a getter on `App`'s props and the
         // indicator keeps moving. Reading it into a `const` would freeze the
