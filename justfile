@@ -15,24 +15,13 @@ mod ci 'ci/mod.just'
 default:
     @just --list
 
-# Install deps (bun) and hydrate the @kolu/* surface libraries from the
-# npins kolu pin (sh -c so $ODU_KOLU_* expand inside the dev shell that
-# exports them).
+# Install deps (bun) and hydrate every npins-pinned package — the @kolu/* surface
+# libraries and @olai/effect-cordis — from one list, `scripts/hydrate-pins.sh`,
+# which `ci/mod.just` calls too. (Two copies of that list is how the lane ended
+# up without the plugin runtime while the developer's shell had it.)
 install:
     {{ nix_shell }} bun install --frozen-lockfile
-    {{ nix_shell }} sh -c 'sh scripts/hydrate-kolu-packages.sh \
-      "$ODU_KOLU_SURFACE" @kolu/surface \
-      "$ODU_KOLU_SURFACE_MCP" @kolu/surface-mcp \
-      "$ODU_KOLU_SURFACE_APP" @kolu/surface-app \
-      "$ODU_KOLU_SURFACE_CLI" @kolu/surface-cli \
-      "$ODU_KOLU_URL_SHAPE" @kolu/url-shape \
-      "$ODU_KOLU_SURFACE_REMOTE" @kolu/surface-remote \
-      "$ODU_KOLU_SHELL_QUOTE" @kolu/shell-quote \
-      "$ODU_KOLU_SURFACE_MAP" @kolu/surface-map \
-      "$ODU_KOLU_LOG" @kolu/log \
-      "$ODU_KOLU_SURFACE_DAEMON_SUPERVISOR" @kolu/surface-daemon-supervisor \
-      "$ODU_KOLU_SURFACE_DAEMON" @kolu/surface-daemon \
-      "$ODU_OSFACTS_CLIENT" osfacts-client'
+    {{ nix_shell }} sh scripts/hydrate-pins.sh
 
 # TypeScript type checking
 typecheck: install

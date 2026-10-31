@@ -16,7 +16,7 @@
 
 import { describe, expect, it } from "bun:test";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
-import { gateMcpRequest, RouteTransport } from "./serviceMcp";
+import { gateMcpRequest, RouteTransport } from "./mcpRoute";
 
 const ORIGIN = "http://127.0.0.1:18440";
 

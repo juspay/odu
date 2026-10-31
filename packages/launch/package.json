@@ -1,0 +1,22 @@
+{
+  "name": "@odu/launch",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "//cordis": "THE ROW this package belongs to, read by the fence. A row is a capability the daemon serves — `ci` for the runs and the machinery around them, `cache` for the buckets. This package is in `ci` because a face needs it to converge on the singleton; `@odu/host` is the roster and belongs to no row, which is what lets it name them all.",
+  "//": "HOW A CLIENT CONVERGES ON THE SINGLETON — the launch facts, the gate's identity reader, and adopt/spawn/refuse. See README.md. It is in the `ci` row because it binds the engine's spawn plan (`@odu/execution`) and the dial (`@odu/service-client`): the door refuses a no-row package that imports a row, and it is right to — this is a corner of how a RUNNING daemon is started, not a vocabulary the cache also needs. What it is NOT is a corner of `@odu/host`: the host names every row and belongs to none, so a face that reached the host for the bootstrap would carry every row's server to reach the code that starts one. The boot facts it reads (`ODU_ROOT_TOKEN`, `ODU_CACHE_STORE`, `ODU_PUBLIC_ORIGIN`) are the PROCESS's, read to hand to the process it spawns; no row reads an environment.",
+  "//dependencies": "`@odu/service-client` for the contract, its dial and its socket path; `@odu/execution` for the spawn description a daemon is launched with and the one Effect edge; two @kolu daemon packages for the pid gate and the survivable spawn; `osfacts-client` for the gate's process reader. `@odu/host`, `@odu/cli`, `@odu/cache` and `@odu/web-ui` are ABSENT: this package is what makes rows and the registry able to share one bootstrap, so it may name no row. `@odu/execution` is the one edge up the wall it does take — the spawn plan — and it was weighed against a second spelling of the same argv.",
+  "sideEffects": false,
+  "exports": {
+    "./*": "./src/*.ts"
+  },
+  "dependencies": {
+    "@odu/execution": "workspace:*",
+    "@odu/service-client": "workspace:*",
+    "effect": "4.0.0"
+  },
+  "cordis": {
+    "row": "ci"
+  }
+}

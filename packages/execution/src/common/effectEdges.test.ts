@@ -80,7 +80,7 @@ const SANCTIONED = new Map<string, string>([
       "construction.",
   ],
   [
-    "packages/cli/src/web.ts",
+    "packages/host/src/web.ts",
     "The web daemon's COMPOSITION ROOT. `serveSurfaceApp` is an Effect over a " +
       "Scope — the listener's whole teardown hangs off it — and the survivable " +
       "spawn driver is an Effect value, while `daemonMain` and odu's own argv " +
@@ -112,7 +112,17 @@ const SANCTIONED = new Map<string, string>([
       "what a refusal means.",
   ],
   [
-    "packages/cli/src/webLauncher.ts",
+    "packages/cache/src/cli.ts",
+    "A FACE's edge, and the cache's only one. Every `odu cache` admin command " +
+      "ends with a surface procedure — an `Effect` carrying a declared " +
+      "`CacheRefused` channel — becoming a number for `process.exit`, and the " +
+      "three outcomes a caller must keep apart (answered / refused / dead link) " +
+      "cannot be told apart without running it. The row's own doors take the " +
+      "edge's place in production: `./server` is a handler table, and the " +
+      "daemon runs it.",
+  ],
+  [
+    "packages/launch/src/webLauncher.ts",
     "Converging on the singleton. Reading the service cell and asking a running " +
       "daemon to drain are Effects; everything that decides between adopt, " +
       "spawn and refuse is ordinary Promise code a test drives without a " +

@@ -51,7 +51,10 @@ import {
 } from "@kolu/surface-cli";
 import { ODU_VERSION } from "@odu/execution/common/version";
 import { serviceOrigin } from "@odu/service-client/endpoint";
-import { connectOrStart } from "./webLauncher";
+import { connectOrStart } from "@odu/launch/webLauncher";
+import { CACHE_AGENT, CACHE_KEY } from "@odu/cache/surface";
+import { composedClients } from "@odu/cordis/compose";
+import { SERVICE_SIBLINGS, SERVICE_WIRE_GROUP } from "./wire";
 import { oduServiceSurface } from "@odu/service-client/surface";
 import { ODU_SERVICE_EXPOSE } from "@odu/service-client/verbs";
 import { Effect } from "effect";
@@ -84,19 +87,19 @@ const endpoint: EndpointSeam<typeof endpointFlags> = {
         // nothing for an explicitly named `--origin`, so a typo reports that
         // nothing is serving there rather than spawning a daemon that could not
         // bind the address anyway.
-        const connection = await connectOrStart(values.origin);
+        const connection = await connectOrStart(values.origin, { group: SERVICE_WIRE_GROUP });
         return {
-          // The degenerate rooted bundle: one unprefixed core, no siblings, so
-          // every argv spelling is the bare one.
+          // THE ROOTED BUNDLE, over the one dispatch: the runs as the
+          // unprefixed core and the cache as the sibling its commands mount
+          // under. Both faces are `buildSurfaceFace` over the SAME dispatch —
+          // the projection holds them opaquely, so it wants two differently
+          // typed views of one connection rather than a second connection.
           client: {
-            // Built over the SAME dispatch the typed face is built over. The
-            // projection holds its client opaquely — `SurfaceClientCallable`
-            // types the leaves as callable — so it wants a differently-typed
-            // view of one connection rather than a second connection.
             core: buildSurfaceFace(
               oduServiceSurface,
               connection.dispatch,
             ) as unknown as SurfaceClientCallable,
+            clients: composedClients(SERVICE_SIBLINGS, connection.dispatch),
           },
           // Required, not optional: a CLI dials, does one thing and exits, and
           // the one failure that costs a user something is a socket left open
@@ -153,6 +156,13 @@ const help: SurfaceCliHelp = {
 
 const projection = {
   core: { surface: oduServiceSurface, expose: ODU_SERVICE_EXPOSE },
+  // THE CACHE IS A SIBLING, so its verbs mount under its own word
+  // (`odu surface cache bucket_create`) rather than vanishing from this face.
+  // The framework names a sibling's commands from the SAME key the wire mounts
+  // it at, which is why this word and the MCP tools' prefix are one word — and
+  // why the entry is the ROW's own record rather than a second spelling of its
+  // surface, its exposure map and its key.
+  surfaces: { [CACHE_KEY]: CACHE_AGENT },
   endpoint,
   help,
   info: { name: "odu" },

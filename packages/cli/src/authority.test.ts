@@ -46,6 +46,14 @@
  * walks is DERIVED from `src/main.ts`'s own imports, so a command cannot be
  * exempted by forgetting to list it.
  *
+ * **AND THE WALK LEAVES THIS PACKAGE.** `main.ts` imports `@odu/cache/cli` and
+ * `@odu/launch/webLauncher`, and a wall that stopped at this package's
+ * directories would not police either — it would have declared the spawn
+ * machinery unreachable while `main.ts` reached it through one hop. So a
+ * specifier is resolved through the MEMBER's own `exports` map, wherever the
+ * member is, and every file the walk reaches is policed by the same table. The
+ * one allowance is named below, per file and per specifier.
+ *
  * ## The one client of another authority
  *
  * `odu cache push` is a client of the cache's HTTP API rather than of the
@@ -61,8 +69,8 @@
  * refactor later, and the compiler would not object.
  */
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "bun:test";
 import ts from "typescript";
 
@@ -84,17 +92,73 @@ const srcRoot = join(packageRoot, "src");
  * would make it useless; that stays literal below, and the difference between
  * the two is the whole design.
  */
+/** Every workspace member, by the name its manifest gives it. */
+const MEMBERS: ReadonlyMap<string, string> = (() => {
+  const found = new Map<string, string>();
+  const root = join(packageRoot, "..", "..");
+  for (const entry of readdirSync(join(root, "packages"))) {
+    const dir = join(root, "packages", entry);
+    try {
+      const manifest = JSON.parse(readFileSync(join(dir, "package.json"), "utf-8")) as {
+        name?: string;
+      };
+      if (manifest.name !== undefined) found.set(manifest.name, `packages/${entry}`);
+    } catch {
+      // Not a member (a stray directory). Nothing to police.
+    }
+  }
+  return found;
+})();
+
+/** This package's own name, for the `@odu/cli/x` spelling. */
+const SELF = "packages/cli";
+const REPO = join(packageRoot, "..", "..");
+
+/**
+ * Every `@odu/*` specifier `src/main.ts` names — DERIVED, not listed.
+ *
+ * This used to derive only `@odu/cli/*`, which was true while every face was in
+ * this package. It is not any more: `odu cache` is `@odu/cache/cli`'s and the
+ * bootstrap is `@odu/launch`'s, so a wall that walked only `@odu/cli/` would
+ * have called the spawn machinery unreachable while `main.ts` reached it.
+ */
 const mainImports = specifiersIn(
-  readFileSync(join(packageRoot, "..", "..", "src", "main.ts"), "utf-8"),
-  "main.ts",
+  readFileSync(join(REPO, "src", "main.ts"), "utf-8"),
+  "src/main.ts",
 );
 
-/** `@odu/cli/foo` → `foo.ts`, which is how a specifier becomes a file in this
- *  package. Anything else `main.ts` imports is not ours to walk. */
+/** The modules of THIS package `main.ts` reaches — what the totality assertion
+ *  below classifies. */
 const reachedFromMain = mainImports
   .filter((s) => s.startsWith("@odu/cli/"))
   .map((s) => `${s.slice("@odu/cli/".length)}.ts`)
   .sort();
+
+/**
+ * A MEMBER'S `exports` MAP, honoured rather than guessed: a specifier resolves
+ * to the file the manifest promises, so a door this package does not open is
+ * external (and a door a member stops opening is a missing file, not a silent
+ * pass).
+ */
+function exportedFile(member: string, sub: string): string | null {
+  const dir = MEMBERS.get(member);
+  if (dir === undefined) return null;
+  let manifest: { exports?: Record<string, unknown>; main?: string };
+  try {
+    manifest = JSON.parse(readFileSync(join(REPO, dir, "package.json"), "utf-8"));
+  } catch {
+    return null;
+  }
+  const exports = manifest.exports ?? {};
+  const key = sub === "" ? "." : `./${sub}`;
+  const literal = exports[key] ?? exports["./*"];
+  if (typeof literal !== "string") return null;
+  // EVERY `*`, because that is what an npm `exports` wildcard means: all
+  // instances on the right-hand side are replaced. (`String.prototype.replace`
+  // with a string pattern replaces the first only, which a scanner flags and a
+  // two-star pattern would honour half of.)
+  return join(dir, sub === "" ? literal : literal.replace(/\*/g, sub));
+}
 
 /**
  * The two modules `main.ts` reaches that are NOT clients — with the reason each
@@ -106,16 +170,32 @@ const reachedFromMain = mainImports
  * belonging to neither is a failure rather than a silent exemption.
  */
 const SERVICE_ROOTS: readonly string[] = [
-  // The daemon itself: it binds the listener, builds the service and BINDS THE
-  // PORTS. Reaching the engine is its entire job — `odu web` is how the
-  // authority comes into existence, not a face onto it.
-  "web.ts",
   // `run-coordinator` and `lease-hold`: argv entry points a launcher types,
   // never a person. `run-coordinator` IS the coordinator. See `./internalCli`
   // on why these moved out of `main.ts` — it was so that this derivation could
   // start at a root that is itself clean.
   "internalCli.ts",
 ];
+
+/**
+ * WHICH FILES THE FORBIDDEN TABLE APPLIES TO — the FACES, and not the engine
+ * they call.
+ *
+ * The walk follows a client into the packages it legitimately names (the
+ * bootstrap in `@odu/launch`, the cache's own CLI), so a table applied to every
+ * file it reaches would police the ENGINE's own imports: `coordinator/spawn.ts`
+ * reads the catalog and the checkout dial because it is the thing that starts a
+ * coordinator, and `service-client/socket.ts` dials a socket because that is
+ * what a local client dial is. Those are the authority, not a client holding it.
+ *
+ * So the table applies to a specifier written in a FACE — this package, the
+ * cache's CLI, the bootstrap — and to `main.ts` itself. Everything the walk
+ * reaches from there is fair game.
+ */
+const FACE_PACKAGES = ["packages/cli", "packages/cache", "packages/launch"] as const;
+
+const isFaceFile = (file: string): boolean =>
+  file === "src/main.ts" || FACE_PACKAGES.some((one) => file.startsWith(`${one}/`));
 
 /** What the wall polices: everything `main.ts` reaches that is not the service
  *  itself. */
@@ -137,18 +217,23 @@ const FORBIDDEN: readonly { prefix: string; authority: string }[] = [
 ];
 
 /**
- * The ONE exception, named with its reason.
+ * THE ONE ALLOWANCE, named per-file AND per-specifier, and it is now a file the
+ * walk REACHES rather than one beside it.
  *
- * A daemon launcher has to know odu's own re-invocation argv and which
- * environment a child needs, and both live with the spawn machinery in
- * `@odu/execution/coordinator/spawn`. That module starts nothing by itself —
- * it is the pure description of HOW something would be started — and the thing
- * `webDaemonLaunch` starts is the service, not a run. Allowing the whole
- * `coordinator` prefix for this one file would allow the launcher and the retry
- * policy with it, so the exception is per-file AND per-specifier.
+ * A daemon launcher has to know odu's own re-invocation argv and the environment
+ * a child needs, and both live with the spawn machinery in
+ * `@odu/execution/coordinator/spawn`. That module starts nothing by itself — it
+ * is the pure description of HOW something would be started — and what
+ * `webDaemonLaunch` starts is the SERVICE, not a run. Allowing the whole
+ * `coordinator` prefix would allow the launcher and the retry policy with it.
+ *
+ * **`main.ts` reaches it**: `odu` bootstraps the singleton through
+ * `@odu/launch/webLauncher`, which imports `@odu/launch/webDaemonLaunch`, which
+ * imports the spawn description. Until this round the wall walked only
+ * `@odu/cli/`, so it called that path unreachable and was wrong.
  */
 const ALLOWED: Readonly<Record<string, readonly string[]>> = {
-  "webDaemonLaunch.ts": ["@odu/execution/coordinator/spawn"],
+  "packages/launch/src/webDaemonLaunch.ts": ["@odu/execution/coordinator/spawn"],
 };
 
 /** Every module specifier a consumer's compiler would have to resolve: static
@@ -193,17 +278,16 @@ function specifiersIn(source: string, fileName: string): string[] {
  *  authority anyway, which is the whole trick this has to survive. */
 function closureOf(entries: readonly string[]): Map<string, string[]> {
   const seen = new Map<string, string[]>();
-  const queue = [...entries];
+  // Entries arrive in two spellings: a bare `foo.ts` from this package's own
+  // derivation, and a repo path from a cross-package one.
+  const queue = entries.map((file) => (file.includes("/") ? file : `${SELF}/src/${file}`));
   while (queue.length > 0) {
     const file = queue.shift() as string;
     if (seen.has(file)) continue;
-    const specifiers = specifiersIn(
-      readFileSync(join(srcRoot, file), "utf-8"),
-      file,
-    );
+    const specifiers = specifiersIn(readFileSync(join(REPO, file), "utf-8"), file);
     seen.set(file, specifiers);
     for (const spec of specifiers) {
-      const local = localFile(spec);
+      const local = localFile(spec, file);
       if (local !== null) queue.push(local);
     }
   }
@@ -228,16 +312,68 @@ function closureOf(entries: readonly string[]): Map<string, string[]> {
  * lease machinery, `runCommand` — dropped silently out of the walk. It was
  * demonstrated against this tree: the wall stayed green.
  */
-function localFile(specifier: string): string | null {
-  if (specifier.startsWith("./")) return `${specifier.slice(2)}.ts`;
-  if (specifier.startsWith("@odu/cli/")) {
-    return `${specifier.slice("@odu/cli/".length)}.ts`;
+function localFile(specifier: string, from = "src/main.ts"): string | null {
+  if (specifier.startsWith(".")) {
+    const base = normalize(join(dirname(from), specifier));
+    return firstOf([`${base}.ts`, `${base}.tsx`, `${base}/index.ts`]);
+  }
+  const match = /^(@odu\/[a-z-]+)(?:\/(.*))?$/.exec(specifier);
+  if (match === null) return null;
+  const member = match[1] as string;
+  const file = exportedFile(member, match[2] ?? "");
+  if (file === null) return null;
+  const normalized = normalize(file);
+  // `./*` maps a subpath onto a file; a manifest whose wildcard lands on a
+  // directory is not a spelling this tree uses.
+  return firstOf([normalized, `${normalized}.ts`, `${normalized}.tsx`]);
+}
+
+/** POSIX-normalise and strip the leading `./`, so a key reads as a repo path. */
+function normalize(file: string): string {
+  const parts: string[] = [];
+  for (const part of file.split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") parts.pop();
+    else parts.push(part);
+  }
+  return parts.join("/");
+}
+
+/** The first of these that exists, or `null`. */
+function firstOf(candidates: readonly string[]): string | null {
+  for (const candidate of candidates) {
+    try {
+      readFileSync(join(REPO, candidate), "utf-8");
+      return candidate;
+    } catch {
+      // Try the next spelling.
+    }
   }
   return null;
 }
 
 describe("the authority wall", () => {
-  const closure = closureOf(PUBLIC_CLIENTS);
+  /**
+   * THE WALK STARTS AT EVERY `@odu/*` SPECIFIER IN `main.ts`, not only this
+   * package's.
+   *
+   * `odu cache` is `@odu/cache/cli`'s and the bootstrap is `@odu/launch`'s; both
+   * are reached from `main.ts` and neither is in this package, so an entry set
+   * of `@odu/cli/*` alone would give `cache/src/cli.ts` a shallow check through
+   * main's own specifier list and never walk ITS closure — the very hole the
+   * comment above `reachedFromMain` says the derivation exists to close.
+   */
+  const crossPackageEntries = new Set(
+    mainImports
+      .filter((s) => s.startsWith("@odu/"))
+      // ...EXCEPT THE SERVICE ROOTS: `run-coordinator` and `lease-hold` ARE the
+      // engine's argv workers, and walking into them would police the engine's
+      // own imports as if they were a client's.
+      .filter((s) => !SERVICE_ROOTS.some((root) => s === `@odu/cli/${root.slice(0, -3)}`))
+      .map((s) => localFile(s, "src/main.ts"))
+      .filter((file): file is string => file !== null),
+  );
+  const closure = closureOf([...PUBLIC_CLIENTS, ...crossPackageEntries]);
   // THE ROOT IS POLICED TOO. `src/main.ts` seeds the derivation, so it was
   // never a member of the closure and its own imports were never checked —
   // and it is the single likeliest site for the regression this file exists
@@ -253,13 +389,13 @@ describe("the authority wall", () => {
     // A wall that policed nothing would pass forever. Both halves are asserted:
     // the entry points resolved, and the closure genuinely grew past them.
     expect(closure.size).toBeGreaterThanOrEqual(PUBLIC_CLIENTS.length);
-    expect([...closure.keys()]).toContain("serviceCommands.ts");
+    expect([...closure.keys()]).toContain("packages/cli/src/serviceCommands.ts");
     // And the derivation actually found the tree, rather than reading a
     // `main.ts` that had moved and quietly policing nothing.
     expect(reachedFromMain.length).toBeGreaterThan(5);
   });
 
-  it("keeps the exempt set exactly these two, and no more", () => {
+  it("keeps the exempt set exactly this one, and no more", () => {
     // THE PRESSURE IS ON THE EXEMPTIONS, and it took a review to see that.
     //
     // This assertion used to compare `[...PUBLIC_CLIENTS, ...SERVICE_ROOTS]`
@@ -278,9 +414,12 @@ describe("the authority wall", () => {
       [...SERVICE_ROOTS].sort(),
       "SERVICE_ROOTS changed. Every name here is a module the wall STOPS " +
         "walking, so adding one removes it and everything it imports from the " +
-        "policed set. That is occasionally right — `web.ts` IS the service — " +
-        "and it is never something to do in passing.",
-    ).toEqual(["internalCli.ts", "web.ts"]);
+        "policed set. That is occasionally right — `internalCli.ts` really is " +
+        "the coordinator and its holder — and it is never something to do in " +
+        "passing. The daemon root used to be the other one; it left this " +
+        "package for `@odu/host`, together with the spawn allowance that stood " +
+        "beside it, so neither is this file's to name any more.",
+    ).toEqual(["internalCli.ts"]);
   });
 
   it("names no service root that main.ts has stopped importing", () => {
@@ -307,7 +446,6 @@ describe("the authority wall", () => {
       "servicePipeline.ts",
       "serviceCli.ts",
       "serviceMcp.ts",
-      "cacheCmd.ts",
     ]) {
       expect(
         PUBLIC_CLIENTS,
@@ -319,6 +457,7 @@ describe("the authority wall", () => {
   it("lets no public client reach execution, the catalog, or a checkout dial", () => {
     const offenders: string[] = [];
     for (const [file, specifiers] of policed) {
+      if (!isFaceFile(file)) continue;
       for (const spec of specifiers) {
         const forbidden = FORBIDDEN.find((f) => spec.startsWith(f.prefix));
         if (forbidden === undefined) continue;
@@ -339,23 +478,17 @@ describe("the authority wall", () => {
     ).toEqual([]);
   });
 
-  it("keeps the one allowance per-file AND per-specifier", () => {
-    // The daemon launcher may name odu's own re-invocation argv. It may not
-    // reach the run launcher standing beside it in the same directory.
-    const launcher = closure.get("webDaemonLaunch.ts") ?? [];
-    expect(launcher).toContain("@odu/execution/coordinator/spawn");
-    expect(launcher).not.toContain("@odu/execution/coordinator/launcher");
-    expect(launcher).not.toContain("@odu/execution/coordinator/recovery");
-  });
-
-  it("does not let the allowance travel to another file", () => {
-    for (const [file, specifiers] of policed) {
-      if (file === "webDaemonLaunch.ts") continue;
-      expect(
-        specifiers.filter((s) => s.startsWith("@odu/execution/coordinator")),
-        `${file} reaches the coordinator. Only webDaemonLaunch.ts may, and ` +
-          "only for the spawn description it needs to start the SERVICE.",
-      ).toEqual([]);
-    }
+  it("allows one specifier, in one file, and nothing else", () => {
+    // THE ONE ALLOWANCE, and it is a file the walk REACHES: `main.ts` bootstraps
+    // the singleton through `@odu/launch/webLauncher`, which imports
+    // `@odu/launch/webDaemonLaunch`, which names `coordinator/spawn` — the pure
+    // description of HOW a child is started, which starts nothing. Pinning the
+    // map here is what stops a second one being added in passing.
+    expect(
+      ALLOWED,
+      "an allowance was added into the public CLI. The daemon's spawn machinery " +
+        "lives in @odu/launch; a client that needs a coordinator module is a " +
+        "client holding authority the service owns.",
+    ).toEqual({ "packages/launch/src/webDaemonLaunch.ts": ["@odu/execution/coordinator/spawn"] });
   });
 });

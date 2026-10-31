@@ -9,8 +9,12 @@
         "@effect/platform-node": "4.0.0",
         "@modelcontextprotocol/sdk": "^1.29.0",
         "@odu/cache": "workspace:*",
+        "@odu/ci": "workspace:*",
         "@odu/cli": "workspace:*",
+        "@odu/cordis": "workspace:*",
         "@odu/execution": "workspace:*",
+        "@odu/host": "workspace:*",
+        "@odu/launch": "workspace:*",
         "@odu/run-client": "workspace:*",
         "@odu/run-history": "workspace:*",
         "@odu/service": "workspace:*",
@@ -19,7 +23,9 @@
         "@preact/signals-core": "^1.8.0",
         "@solid-primitives/rootless": "^1.5.3",
         "@solid-primitives/scheduled": "^1.5.3",
+        "@standard-schema/spec": "^1.1.0",
         "@xterm/headless": "^6.0.0",
+        "cosmokit": "^1.8.1",
         "dequal": "^2.0.3",
         "effect": "4.0.0",
         "neverthrow": "^8.2.0",
@@ -44,7 +50,23 @@
       "name": "@odu/cache",
       "version": "0.1.0",
       "dependencies": {
+        "@odu/cordis": "workspace:*",
         "effect": "4.0.0",
+        "solid-js": "^1.9.15",
+      },
+    },
+    "packages/ci": {
+      "name": "@odu/ci",
+      "version": "0.1.0",
+      "dependencies": {
+        "@odu/cordis": "workspace:*",
+        "@odu/execution": "workspace:*",
+        "@odu/run-client": "workspace:*",
+        "@odu/run-history": "workspace:*",
+        "@odu/service": "workspace:*",
+        "@odu/service-client": "workspace:*",
+        "effect": "4.0.0",
+        "solid-js": "^1.9.15",
       },
     },
     "packages/cli": {
@@ -54,7 +76,9 @@
         "@effect/platform-node": "4.0.0",
         "@modelcontextprotocol/sdk": "^1.29.0",
         "@odu/cache": "workspace:*",
+        "@odu/cordis": "workspace:*",
         "@odu/execution": "workspace:*",
+        "@odu/launch": "workspace:*",
         "@odu/run-client": "workspace:*",
         "@odu/run-history": "workspace:*",
         "@odu/service": "workspace:*",
@@ -64,12 +88,42 @@
         "effect": "4.0.0",
       },
     },
+    "packages/cordis": {
+      "name": "@odu/cordis",
+      "version": "0.1.0",
+      "dependencies": {
+        "effect": "4.0.0",
+      },
+    },
     "packages/execution": {
       "name": "@odu/execution",
       "version": "0.1.0",
       "dependencies": {
         "@odu/run-client": "workspace:*",
         "@odu/run-history": "workspace:*",
+        "effect": "4.0.0",
+      },
+    },
+    "packages/host": {
+      "name": "@odu/host",
+      "version": "0.1.0",
+      "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.29.0",
+        "@odu/cache": "workspace:*",
+        "@odu/ci": "workspace:*",
+        "@odu/cordis": "workspace:*",
+        "@odu/launch": "workspace:*",
+        "@odu/run-history": "workspace:*",
+        "@odu/service-client": "workspace:*",
+        "effect": "4.0.0",
+      },
+    },
+    "packages/launch": {
+      "name": "@odu/launch",
+      "version": "0.1.0",
+      "dependencies": {
+        "@odu/execution": "workspace:*",
+        "@odu/service-client": "workspace:*",
         "effect": "4.0.0",
       },
     },
@@ -119,6 +173,8 @@
       "name": "@odu/web-ui",
       "version": "0.1.0",
       "dependencies": {
+        "@odu/cache": "workspace:*",
+        "@odu/ci": "workspace:*",
         "@odu/service-client": "workspace:*",
         "effect": "4.0.0",
         "solid-js": "^1.9.0",
@@ -237,9 +293,17 @@
 
     "@odu/cache": ["@odu/cache@workspace:packages/cache"],
 
+    "@odu/ci": ["@odu/ci@workspace:packages/ci"],
+
     "@odu/cli": ["@odu/cli@workspace:packages/cli"],
 
+    "@odu/cordis": ["@odu/cordis@workspace:packages/cordis"],
+
     "@odu/execution": ["@odu/execution@workspace:packages/execution"],
+
+    "@odu/host": ["@odu/host@workspace:packages/host"],
+
+    "@odu/launch": ["@odu/launch@workspace:packages/launch"],
 
     "@odu/run-client": ["@odu/run-client@workspace:packages/run-client"],
 
@@ -290,6 +354,8 @@
     "@solid-primitives/scheduled": ["@solid-primitives/scheduled@1.5.3", "", { "peerDependencies": { "solid-js": "^1.6.12" } }, "sha512-oNwLE6E6lxJAWrc8QXuwM0k2oU1BnANnkChwMw82aK1j3+mWGJkG1IFe5gCwbV+afYmjI76t9JJV3md/8tLw+g=="],
 
     "@solid-primitives/utils": ["@solid-primitives/utils@6.4.1", "", { "peerDependencies": { "solid-js": "^1.6.12" } }, "sha512-ISSB5QX1qP2ynrheIpYwc4oKR5Ny4siNuUyf1qZniy+Il+p/PtDB0QK1Dnle8noiHpwRD3gpPdubOC3qI/Zamg=="],
+
+    "@standard-schema/spec": ["@standard-schema/spec@1.1.0", "", {}, "sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w=="],
 
     "@teppeis/multimaps": ["@teppeis/multimaps@3.0.0", "", {}, "sha512-ID7fosbc50TbT0MK0EG12O+gAP3W3Aa/Pz4DaTtQtEvlc9Odaqi0de+xuZ7Li2GtK4HzEX7IuRWS/JmZLksR3Q=="],
 
@@ -374,6 +440,8 @@
     "cookie-signature": ["cookie-signature@1.2.2", "", {}, "sha512-D76uU73ulSXrD1UXF4KE2TMxVVwhsnCgfAyTg9k8P6KGZjlXKrOLe4dJQKI3Bxi5wjesZoFXJWElNWBjPZMbhg=="],
 
     "cors": ["cors@2.8.6", "", { "dependencies": { "object-assign": "^4", "vary": "^1" } }, "sha512-tJtZBBHA6vjIAaF6EnIaq6laBBP9aq/Y3ouVJjEfoHbRBcHBAHYcMh/w8LDrk2PvIMMq8gmopa5D4V8RmbrxGw=="],
+
+    "cosmokit": ["cosmokit@1.8.1", "", {}, "sha512-PDBv4l90xZKrUsZ0vtoycgZpO/j4iFsqJXrAxsyBDsnQRI7ZMJXIjgDJsKNjd5L8jnVnnlrDCdhkFbTncgCVjQ=="],
 
     "cross-spawn": ["cross-spawn@7.0.6", "", { "dependencies": { "path-key": "^3.1.0", "shebang-command": "^2.0.0", "which": "^2.0.1" } }, "sha512-uV2QOWP2nWzsy2aMp8aRibhi9dlzF5Hgh5SHaB9OiTGEyDTiJJyx0uy51QXdyWbtAHNua4XJzUKca3OzKUd3vA=="],
 

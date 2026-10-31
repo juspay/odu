@@ -54,6 +54,16 @@ export class OduWorld extends World {
    *  apart on the board. */
   runRef?: string;
 
+  /** This scenario's cache bucket, and the path pushed into it — the names the
+   *  cache steps arrange and then read off the page. */
+  cacheBucket?: string;
+  cachePath?: string;
+  cachePathName?: string;
+  /** Every path the scenario pushed, in order, and their store-path names —
+   *  what a filter scenario narrows between. */
+  cachePaths?: string[];
+  cachePathNames?: string[];
+
   /** Checkouts this scenario created and must remove. A SHARED fixture is not
    *  in here — it belongs to the worker, not the scenario. */
   ownFixtures: string[] = [];

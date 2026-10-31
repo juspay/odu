@@ -14,7 +14,7 @@
 
 import { describe, expect, it } from "bun:test";
 import { survivableSpawnPlan } from "@odu/execution/coordinator/spawn";
-import { assertPackaged, bakedBuild, daemonEnv, webDaemonSpawnConfig } from "./web";
+import { assertPackaged, bakedBuild, daemonEnv, webDaemonSpawnConfig } from "./webDaemonLaunch";
 
 const SELF = "/nix/store/x/bin/odu";
 const HOME_DIR = "/home/dev/.local/state/odu-web";

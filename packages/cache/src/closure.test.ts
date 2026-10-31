@@ -19,6 +19,9 @@
  *     directory, the root token and the store URI in. A cache that read
  *     `process.env` itself would have a second, invisible configuration — and
  *     the one variable that must never be found by accident is a root token.
+ *     The ONE exception is `./cli`, and it is not the engine: a face IS a
+ *     process, and a process reads its own environment (which token to present
+ *     is the caller's, not the daemon's).
  *   - **its platform is `node:` builtins and one Bun builtin.** `bun:sqlite` is
  *     named here rather than admitted by a prefix, so the day a second Bun
  *     builtin appears is a day this file changes.
@@ -40,9 +43,23 @@ const MANIFEST = JSON.parse(
 
 const DECLARED = Object.keys(MANIFEST.dependencies ?? {});
 
-/** Pinned as a literal set: `effect` is the whole install, and the one entry is
- *  the claim that a substituter costs nothing else. */
-const EXPECTED_DEPENDENCIES = ["effect"];
+/** Pinned as a literal set: `effect` and `solid-js` — the second is `./face`'s
+ *  cost, and the reason the face is a separate DOOR rather than a module the
+ *  server could reach. `@kolu/surface` is HYDRATED from a Nix pin and so is
+ *  absent here by design. */
+const EXPECTED_DEPENDENCIES = ["@odu/cordis", "effect", "solid-js"];
+
+/** The `@kolu/*` sources hydrated from a Nix pin rather than installed. Four
+ *  doors of this package open the framework: the surface (`/define`,
+ *  `/expose`), the server (`/server`), and the CLI face's client
+ *  (`/client`, `/project`, `/link`). */
+const HYDRATED = new Set<string>([
+  "@kolu/surface",
+  // The row IS a `definePlugin`: `./server` is mounted by the host as one of
+  // its rows, so the plugin runtime's root door is part of this package's
+  // closure. (`./loader` — a file off a disk, a YAML parser — is not.)
+  "@olai/effect-cordis",
+]);
 
 /** The non-`node:` builtins this package may reach. Named, never prefix-matched:
  *  a prefix would let `bun:ffi` in with `bun:sqlite`. */
@@ -59,7 +76,20 @@ const FORBIDDEN = new Set([
 ]);
 
 /** Test-only imports — the harness, not the shipped closure. */
-const TEST_ONLY = new Set(["bun:test", "typescript"]);
+const TEST_ONLY = new Set([
+  "bun:test",
+  "typescript",
+  // `face.test.ts` compiles the view with the app's own compiler; the presets
+  // are the ROOT's build toolchain (see the root manifest), never a runtime
+  // dependency — nothing a consumer installs includes them.
+  "@babel/core",
+  "@babel/preset-typescript",
+  "babel-preset-solid",
+  // `teardown.test.ts` hands the row a `Log` and so names the daemon's `Logger`
+  // type. A type-only import of a hydrated pin, used by one test and by nothing
+  // the package ships.
+  "@kolu/surface-daemon",
+]);
 
 function tsFilesUnder(dir: string): string[] {
   const out: string[] = [];
@@ -70,7 +100,10 @@ function tsFilesUnder(dir: string): string[] {
       out.push(...tsFilesUnder(path));
       continue;
     }
-    if (entry.endsWith(".ts")) out.push(path);
+    // `.tsx` INCLUDED: `./face` is Solid JSX, and a walker that only knew about
+    // `.ts` would have quietly stopped policing it the day it was written —
+    // the failure `@odu/web-ui`'s twin records having had.
+    if (entry.endsWith(".ts") || entry.endsWith(".tsx")) out.push(path);
   }
   return out;
 }
@@ -84,7 +117,11 @@ function specifiersIn(source: string, fileName: string): string[] {
     source,
     ts.ScriptTarget.Latest,
     /* setParentNodes */ false,
-    ts.ScriptKind.TS,
+    // TSX or TS by extension. TypeScript's parser resolves `<T>(x) => x` one way
+    // in a `.ts` and another in a `.tsx`, so a JSX file parsed as TS produces a
+    // tree with the imports still in it and the markup mangled — a policing
+    // test that keeps passing while seeing less than it thinks.
+    fileName.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
   );
   const out: string[] = [];
   const literal = (node: ts.Node | undefined): void => {
@@ -120,7 +157,11 @@ function readsProcessEnv(source: string, fileName: string): boolean {
     source,
     ts.ScriptTarget.Latest,
     /* setParentNodes */ false,
-    ts.ScriptKind.TS,
+    // TSX or TS by extension. TypeScript's parser resolves `<T>(x) => x` one way
+    // in a `.ts` and another in a `.tsx`, so a JSX file parsed as TS produces a
+    // tree with the imports still in it and the markup mangled — a policing
+    // test that keeps passing while seeing less than it thinks.
+    fileName.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
   );
   let found = false;
   const walk = (node: ts.Node): void => {
@@ -187,7 +228,7 @@ describe("@odu/cache's import closure", () => {
         if (spec.startsWith(".") || spec.startsWith("node:")) continue;
         if (BUN_BUILTINS.has(spec)) continue;
         const pkg = packageOf(spec);
-        if (declared.has(pkg)) continue;
+        if (declared.has(pkg) || HYDRATED.has(pkg)) continue;
         if (isTest && TEST_ONLY.has(pkg)) continue;
         offenders.push(`${rel}: ${spec}`);
       }
@@ -226,6 +267,10 @@ describe("@odu/cache's import closure", () => {
     // takes its configuration as arguments is not a read of it.
     const offenders = sources
       .filter(({ rel }) => !rel.endsWith(".test.ts"))
+      // `./cli` is a FACE and lives in a process: which root token to present,
+      // and where `~` is, are its caller's facts. Everything the ENGINE does
+      // takes them as arguments.
+      .filter(({ rel }) => rel !== "src/cli.ts")
       .filter(({ source, rel }) => readsProcessEnv(source, rel))
       .map(({ rel }) => rel);
     expect(

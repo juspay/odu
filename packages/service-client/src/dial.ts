@@ -96,12 +96,27 @@ export const DIAL_READY_MS = 3_000;
  */
 export async function dialService(
   origin: string = serviceOrigin(),
-  opts: { readyMs?: number } = {},
+  opts: {
+    readyMs?: number;
+    /**
+     * THE TAGS THIS FACE WILL ADDRESS — the composed wire, when the daemon
+     * serves more than one row.
+     *
+     * A link encodes each request from the `Rpc` it looks up by tag, so a
+     * client that addressed a SIBLING's member through a link built from the
+     * core's group alone would find no descriptor for it. This package cannot
+     * compose that group itself — the siblings' contracts belong to their own
+     * packages, and this one is browser-safe and knows only the core — so the
+     * composition root hands it in. Absent means "the core and nothing else",
+     * which is what a single-surface client is.
+     */
+    group?: typeof oduServiceSurface.group;
+  } = {},
 ): Promise<ServiceConnection> {
   const url = serviceWsUrl(origin);
   const ctor = webSocketCtor();
   const link = await websocketLink({
-    group: oduServiceSurface.group,
+    group: opts.group ?? oduServiceSurface.group,
     // A thunk, re-evaluated on every re-dial. The address does not move under
     // this process, but the link's contract is that it asks each time, and a
     // constant that pretended otherwise would be the one place a future

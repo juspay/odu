@@ -2,7 +2,7 @@
 
 `odu web` also serves Nix binary caches. The same loopback service that runs CI answers the standard Nix HTTP binary cache protocol, so every Nix client works unchanged.
 
-A bucket is one cache: one substituter URL under the service's origin and one ed25519 public key. The server generates the keypair and signs each narinfo on ingest; a pusher never holds a signing key. Client signatures are kept. The cache listens on loopback only, like the board. On a single machine the cache and the store are the same bytes; see [Where the data lives](#where-the-data-lives).
+A bucket is one cache: one substituter URL under the service's origin and one ed25519 public key. The server generates the keypair and signs each narinfo on ingest; a pusher never holds a signing key. Client signatures are kept. By default the cache binds loopback, like the board: `$ODU_WEB_ORIGIN` is the address it listens on, and the NixOS module puts nginx in front of the cache's protocol paths only — the board, the websocket and `/mcp` stay private. On a single machine the cache and the store are the same bytes; see [Where the data lives](#where-the-data-lives).
 
 ## Create a bucket
 
@@ -139,7 +139,6 @@ The cache keeps no second copy of your builds. The server's own `/nix/store` hol
 - The database, signing keys, token hashes, narinfo metadata and pins live in one SQLite file:
 
 ```text
-<state>/odu-web*/             the daemon's gate and control socket
 <state>/cache/cache.sqlite    metadata, bucket signing keys, token hashes, pins
 <state>/cache/gcroots/        one root per retained path, per bucket
 <state>/cache/staging/        uploads between their NAR and their narinfo
@@ -149,7 +148,17 @@ An upload sits in `staging/` until its narinfo arrives; one that never gets it i
 
 `<state>` is `$ODU_STATE_DIR` if set, else `$XDG_STATE_HOME/odu` (`~/.local/state/odu` by default) on Linux and `~/Library/Application Support/odu` on macOS, the same place as the run catalog. Tokens are stored only as hashes, so a copy of the database cannot be used to push. The signing keys are in it, so treat it as a secret. Back up the database; the paths themselves are rebuilt or re-pushed.
 
+**The daemon's own home is the one thing that is not under `<state>` by default.** It holds the singleton's gate and control socket, and its name is derived from the origin — `odu-web` at the default origin, `odu-web-<hash>` at any other, so two services cannot share one. Without `$ODU_STATE_DIR` it is `$HOME/.local/state/odu-web*`: a SIBLING of `odu` rather than a child of it, and deliberately not under `$XDG_STATE_HOME` — that variable varies by launch context (a login shell, a bare ssh, a systemd unit), and two contexts computing two "state" homes would split one daemon's identity. Set `$ODU_STATE_DIR` and the home moves inside it, which is what a container with a read-only `$HOME` wants.
+
 Importing paths built on another machine requires the user running `odu web` to be in `nix.settings.trusted-users` on the server, because those paths carry no signature the daemon trusts. Pushing from the same machine needs nothing. Running all of this on a NixOS host, with the state under `/var/lib/odu` and nginx in front, is [Self-host on NixOS](../docs/#self-host-on-nixos).
+
+## The Cache view
+
+`odu web`'s page has **Runs** and **Cache** in the header. `#/cache` lists the buckets — name, public or private, how many paths, how much space, when it last took a push, how many reads — and `#/cache/<bucket>` is one bucket: its substituter URL, its public key, the `nix.conf` / netrc block above ready to copy, and its paths newest first with a filter box.
+
+The page is a reader, not an administrator: it asks `cache_bucket_describe` and `cache_bucket_paths`, which take no root token, because a bucket's URL, its key and its path list are what the substituter already publishes to anyone who can read it. Creating buckets, minting tokens and collecting garbage stay in the CLI and in an agent's hands, where a credential belongs.
+
+The rows arrive over the wire the page already holds, so a path pushed from a build box appears without a reload; reads are folded into a bucket's counters at most once a second rather than once per NAR.
 
 ## Protocol
 

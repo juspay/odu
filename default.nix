@@ -198,7 +198,9 @@ let
             ${pkgs.kolu-log} @kolu/log \
             ${pkgs.kolu-surface-daemon-supervisor} @kolu/surface-daemon-supervisor \
             ${pkgs.kolu-surface-daemon} @kolu/surface-daemon \
-            ${pkgs.osfacts-client} osfacts-client
+            ${pkgs.osfacts-client} osfacts-client \
+            ${pkgs.olai-effect-cordis} @olai/effect-cordis \
+            ${pkgs.cordis.hydrateArgs}
         '';
 
         installPhase = ''

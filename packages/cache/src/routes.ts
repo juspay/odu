@@ -1,7 +1,7 @@
 /**
  * THE PROTOCOL — the standard Nix HTTP binary cache, as one `HttpRouter` layer.
  *
- * Merged beside the shell exactly like `/mcp` (`packages/cli/src/serviceMcp.ts`,
+ * Merged beside the shell exactly like `/mcp` (`packages/host/src/mcpRoute.ts`,
  * and see the comment there on why the return type is INFERRED): `HttpRouter`
  * ranks by specificity, so these literal and prefixed paths beat the shell's
  * `GET /*` catch-all whichever way round they go in.

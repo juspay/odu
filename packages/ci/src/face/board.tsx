@@ -36,7 +36,8 @@ import {
 } from "@odu/service-client/board";
 import { createMemo, createSignal, For, Index, Show, type JSX } from "solid-js";
 import { Button, CommitRef, Hint, Pill } from "./dom";
-import { ago, duration, projectOf, scopeLabel } from "./format";
+import { ago } from "@odu/cordis/format";
+import { duration, projectOf, scopeLabel } from "./format";
 import type { CheckoutFrame, RunRow } from "./types";
 
 /** Re-exported so `./board` stays the one import path this app's own modules

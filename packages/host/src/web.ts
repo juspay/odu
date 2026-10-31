@@ -58,51 +58,71 @@
  * dialling the successor.
  */
 
-import { hostname } from "node:os";
 import { spawnSync } from "node:child_process";
 import {
   claimPidGate,
   daemonMain,
   type DaemonExit,
-  gateIdentity,
   type Logger,
   stderrLogger,
 } from "@kolu/surface-daemon";
 import { parseAllowedOrigins } from "@kolu/surface/ws-origin";
 import { serveSurfaceApp } from "@kolu/surface-app/serve";
-import { runSocketPath } from "@odu/run-client/dial";
-import { gitTopLevel } from "@odu/execution/common/git";
-import { ODU_VERSION } from "@odu/execution/common/version";
 import {
   readPublicOrigin,
   serviceBind,
   serviceMcpUrl,
   serviceOrigin,
 } from "@odu/service-client/endpoint";
-import { createOduService } from "@odu/service/service";
+import { stateRoot } from "@odu/run-history/paths";
 import { Effect, Exit, Layer, Scope } from "effect";
-import { readProcessIdentity, selfProcessIdentity } from "./processIdentity";
-import { servingOptions } from "./serving";
 import {
-  mcpGetRoute,
-  mcpRoute,
-  RouteTransport,
-  serveServiceMcpInProcess,
-} from "./serviceMcp";
-import { webPorts } from "./webPorts";
-import { cacheRoutes } from "@odu/cache/routes";
+  closeHost,
+  mountPlugin,
+  offered,
+  openHost,
+  provide,
+  rowReport,
+  settled,
+  standing,
+} from "@olai/effect-cordis";
+import { readProcessIdentity, selfProcessIdentity } from "@odu/launch/processIdentity";
+import { mcpGetRoute, mcpRoute, RouteTransport, serveServiceMcpInProcess } from "./mcpRoute";
+import { SERVICE_MCP_PATH } from "@odu/service-client/endpoint";
+import { servingOptions } from "./serving";
+import { CI_AGENT, ciRow, CI_KEY } from "@odu/ci/row";
+import { cacheRow } from "@odu/cache/server";
+import { CACHE_AGENT, CACHE_KEY } from "@odu/cache/surface";
+import type { RootedSurfacesRuntime } from "@kolu/surface/server";
+import {
+  BoundOrigin,
+  Build,
+  Bundle,
+  DaemonHome,
+  Log,
+  type HttpRoutes,
+  type Row,
+  type RowAgent,
+  type RowRoutes,
+  NixStore,
+  PublicOrigin,
+  RootToken,
+  Routes,
+  Shutdown,
+  StateDir,
+} from "@odu/cordis/services";
 import {
   assertPackaged,
   bakedBuild,
   spawnWebDaemon,
   webHome,
-} from "./webDaemonLaunch";
+} from "@odu/launch/webDaemonLaunch";
 import {
   clearTheGate,
   ensureService,
   type EnsureOutcome,
   readService,
-} from "./webLauncher";
+} from "@odu/launch/webLauncher";
 
 
 
@@ -175,7 +195,7 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
   // gate, and never two readings of `ODU_WEB_ORIGIN` that could disagree.
   const origin = serviceOrigin();
   const home = webHome(origin);
-  const { host, port } = serviceBind(origin);
+  const { host: bindHost, port } = serviceBind(origin);
   const log = tenure.log;
   const controller = new AbortController();
   // ONE Origin allowlist, read once, applied at both doors — the websocket and
@@ -187,6 +207,13 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
   // here rather than in `@odu/service` because this is the one place that reads
   // an environment, and refused HERE rather than concatenated there: a value
   // with a path would build a substituter URL nobody asked for.
+  /** An environment variable's value, or `null` when it is unset or blank. A
+   *  blank `$ODU_ROOT_TOKEN=` is the same absence as no variable at all, and
+   *  reading it as a real token would make an empty string a credential. */
+  const configured = (value: string | undefined): string | null => {
+    const trimmed = value?.trim();
+    return trimmed === undefined || trimmed === "" ? null : trimmed;
+  };
   const published = readPublicOrigin(process.env);
   if (!published.ok) {
     process.stderr.write(`odu: ${published.message}\n`);
@@ -224,77 +251,167 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     stopHandlers.push(() => process.off(signal, onSignal));
   }
 
-  // ONE cache for the tenure: the service administers it through a port, and
-  // the listener serves the protocol through the same object. Two constructions
-  // would be two databases.
-  const { ports, cache } = webPorts();
-  const service = createOduService({
-    ports,
-    origin,
-    ...(published.origin === null ? {} : { publicOrigin: published.origin }),
-    home: home.dir,
-    build: bakedBuild(),
-    // A refresh tick that outran its interval is logged here, rate-limited —
-    // the one line that connects "the service is slow" to "the catalog is big".
-    log,
-    // The frozen control fragment's `drain`, wired to this process's own stop.
-    // A supervisor asks; the daemon decides how it ends.
-    onDrain: () => controller.abort(),
-  });
-  // A runtime that has faulted answers nothing while the process stays alive
-  // and the socket stays open — the documented zombie. Observed and fatal.
-  service.done.catch((err: unknown) => {
-    log.error({ err: String(err) }, "odu web: surface runtime faulted");
-    process.exit(1);
-  });
+  // ── THE ROSTER ──────────────────────────────────────────────────────────
+  //
+  // EVERY ROW, NAMED ONCE, HERE — and this file is a root, which is what makes
+  // that legal: a root names every row, a row names only itself, and the host
+  // is the one package that composes them. A row record carries the word its
+  // surface is served under, the plugin it mounts, and what an agent is told
+  // about it. The runs' row is a plugin like any other — `ciRow` builds the
+  // rooted bundle in its own `apply` and OFFERS it, which is why `key` is null
+  // (its members keep the bare `surface/runs/...` tags) while `plugin` is not.
+  const ROWS: ReadonlyArray<Row> = [
+    { name: CI_KEY, key: null, plugin: ciRow, agent: CI_AGENT },
+    {
+      name: CACHE_KEY,
+      key: CACHE_KEY,
+      plugin: cacheRow,
+      agent: CACHE_AGENT,
+    },
+  ];
+  // THE ROOT ROW, read off its own record rather than off its POSITION: `key:
+  // null` is what makes a row the root, and a roster that grew a row above this
+  // one would otherwise hand the `/mcp` door the wrong surface as its core.
+  const coreAgent = (): RowAgent => {
+    const root = ROWS.find((row) => row.key === null);
+    if (root === undefined) throw new Error("odu: the roster has no root row");
+    return root.agent;
+  };
 
-  // The adapter and its transport are one pair for the listener's life: an MCP
-  // `Server` binds exactly one transport, and re-making them per request would
-  // rebuild the expose walk and the resource pusher on every call.
-  const transport = new RouteTransport();
-  const mcp = await serveServiceMcpInProcess({
-    handlers: service.runtime.handlers,
-    version: ODU_VERSION,
-    transport,
-  });
+  // ── THE HOST ────────────────────────────────────────────────────────────
+  //
+  // One Cordis context for the tenure, and the rows mounted on it. The host
+  // PROVIDES the facts — the state root, the bound and public origins, the
+  // build, the logger, the store URI, the way to end, the composed bundle and
+  // the router mount — and each SIBLING row is a plugin that names what it
+  // needs. Nothing below this line reads an environment.
+  const run = standing();
+  const host = await run(openHost);
+  const build = bakedBuild();
+  // THE ROUTE LAYERS, collected for this tenure and read once, at bind, so
+  // `layers` is this list and dies with the tenure. The LIST is here rather than
+  // in `@odu/cordis` for the same reason the roster is: the tag and the
+  // interface a row registers into are shared vocabulary, a mutable list is one
+  // daemon's.
+  const layers: RowRoutes[] = [];
+  const routes: HttpRoutes = {
+    add: (layer) => {
+      layers.push(layer);
+    },
+    layers: () => layers,
+  };
+  /** The `/mcp` adapter, once the rows are composed; `null` before that, and on
+   *  every path that never reached a listener. */
+  let mcp: Awaited<ReturnType<typeof serveServiceMcpInProcess>> | null = null;
+  let closed = false;
+  const closeHostOnce = async (): Promise<void> => {
+    if (closed) return;
+    closed = true;
+    await run(closeHost(host));
+  };
 
   const scope = Scope.makeUnsafe();
-  let bound: string;
   try {
-    bound = await Effect.runPromise(
-      serveSurfaceApp(
-        // The parts and their assembly live in `./serving`: this function owns
-        // the gate, the lifetime and the teardown around the listener.
-        servingOptions({
-          live: () => ({
-            group: service.runtime.group,
-            handlers: service.runtime.handlers,
-          }),
-          dist,
-          host,
-          port,
-          allowedOrigins,
-          routes: Layer.merge(
-            Layer.merge(mcpRoute(transport, allowedOrigins), mcpGetRoute()),
-            cacheRoutes(cache),
-          ),
-        }),
-      ).pipe(Scope.provide(scope)),
-    );
-  } catch (err) {
-    await mcp.close();
-    await service.close();
-    cache.close();
-    gate.release();
-    process.stderr.write(
-      `odu: could not bind ${origin} — ${(err as Error).message}\n` +
-        "Another program is on that port. odu's web service has ONE address so " +
-        "every face can find it; it will not move to a random one.\n",
-    );
-    return 1;
-  }
+    await run(provide(host, StateDir, () => stateRoot(process.env)));
+    await run(provide(host, RootToken, () => configured(process.env.ODU_ROOT_TOKEN)));
+    await run(provide(host, NixStore, () => configured(process.env.ODU_CACHE_STORE)));
+    await run(provide(host, DaemonHome, () => home.dir));
+    await run(provide(host, BoundOrigin, () => origin));
+    await run(provide(host, PublicOrigin, () => published.origin));
+    await run(provide(host, Build, () => build));
+    await run(provide(host, Log, () => log));
+    await run(provide(host, Shutdown, () => () => controller.abort()));
+    await run(provide(host, Routes, () => routes));
 
-  try {
+    // EVERY ROW IS A PLUGIN, and the runs' row OWNS ITS BUNDLE: its `apply`
+    // builds the runtime and `offer`s it, the cache row is held PENDING on that
+    // offer until it arrives, and mounting both + `settled` is the whole boot.
+    // The host neither constructs a row nor closes one — a bundle built here
+    // would be a runtime with no owner to tear it down, which is the bug this
+    // shape removes.
+    for (const row of ROWS) await run(mountPlugin(host, row.plugin));
+    // SETTLED, not merely mounted: a row provides services its siblings may
+    // name, and mounting returns as soon as a fibre exists rather than once its
+    // `apply` has finished.
+    await run(settled(host, ROWS.map((row) => row.name)));
+    const report = await run(rowReport(host, ROWS.map((row) => row.name)));
+    const broken = [...report].filter(([, row]) => row.state !== "running");
+    if (broken.length > 0) {
+      process.stderr.write(
+        `odu: ${broken
+          .map(([name, row]) =>
+            row.state === "failed"
+              ? `the "${name}" row failed to start${row.fault === undefined ? "" : `: ${row.fault}`}`
+              : `the "${name}" row is ${row.state}${
+                  row.state === "waiting" && row.missing !== undefined
+                    ? ` on ${row.missing.join(", ")}`
+                    : ""
+                }`,
+          )
+          .join("; ")}.\n` +
+          "odu: refusing to serve half a surface — a missing row answers " +
+          "`unknown verb` to every member it owns, which reads as a build skew " +
+          "rather than as the fault it is.\n",
+      );
+      return 1;
+    }
+
+    // The runtime the runs' row offered, read once the rows have settled. A
+    // host that is not a plugin reads a service with `offered`.
+    const runtime = offered(host, Bundle);
+    if (runtime === undefined) {
+      process.stderr.write("odu: the ci row offered no runtime — refusing to serve\n");
+      return 1;
+    }
+
+    // THE `/mcp` DOOR — the composed bundle's, so it is the TRANSPORT's and is
+    // built here rather than by any one row: an adapter that served one row
+    // would have to be told what the others are. The adapter and its transport
+    // are one pair for the listener's life (an MCP `Server` binds exactly one
+    // transport, and re-making them per request would rebuild the expose walk
+    // and the resource pusher on every call).
+    const transport = new RouteTransport();
+    mcp = await serveServiceMcpInProcess({
+      path: SERVICE_MCP_PATH,
+      handlers: runtime.handlers,
+      version: build.oduVersion,
+      transport,
+      core: coreAgent(),
+      siblings: Object.fromEntries(
+        ROWS.filter((row) => row.key !== null).map((row) => [row.key as string, row.agent]),
+      ),
+    });
+    const agentRoutes = Layer.merge(
+      mcpRoute(transport, allowedOrigins, SERVICE_MCP_PATH),
+      mcpGetRoute(SERVICE_MCP_PATH),
+    );
+    const composed = routes.layers().reduce((all, one) => Layer.merge(all, one), agentRoutes);
+
+    let bound: string;
+    try {
+      bound = await Effect.runPromise(
+        serveSurfaceApp(
+          // The parts and their assembly live in `./serving`: this function owns
+          // the gate, the lifetime and the teardown around the listener.
+          servingOptions({
+            live: () => ({ group: runtime.group, handlers: runtime.handlers }),
+            dist,
+            host: bindHost,
+            port,
+            allowedOrigins,
+            routes: composed,
+          }),
+        ).pipe(Scope.provide(scope)),
+      );
+    } catch (err) {
+      process.stderr.write(
+        `odu: could not bind ${origin} — ${(err as Error).message}\n` +
+          "Another program is on that port. odu's web service has ONE address so " +
+          "every face can find it; it will not move to a random one.\n",
+      );
+      return 1;
+    }
+
     const exit = await daemonMain({
       home,
       // Pre-claimed above, so the spine adopts this claim rather than racing for
@@ -302,8 +419,8 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
       gate,
       processIdentity: selfProcessIdentity(),
       readProcessIdentity,
-      group: service.runtime.group,
-      handlers: service.runtime.handlers,
+      group: runtime.group,
+      handlers: runtime.handlers,
       lifetime: { kind: "forever" },
       log,
       signal: controller.signal,
@@ -315,12 +432,13 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     return exitCodeOf(exit);
   } finally {
     for (const stop of stopHandlers) stop();
-    await mcp.close();
+    // THE LISTENER FIRST, THEN THE ROWS: a row's cleanup closes a database and
+    // stops a poller, and doing that under a listener still accepting would
+    // answer a call out of a runtime nobody drives any more.
+    await mcp?.close();
     await Effect.runPromise(Scope.close(scope, Exit.void));
-    await service.close();
-    // The database handle is this process's, and a tenure that ended is a
-    // tenure whose SQLite connection must not outlive it.
-    cache.close();
+    await closeHostOnce();
+    gate.release();
   }
 }
 
@@ -496,14 +614,6 @@ function describe(outcome: Extract<EnsureOutcome, { ok: true }>): string {
 /** Re-exported so a caller that wants the gate's current holder — or any of the
  *  launch facts that now live in `./webDaemonLaunch` — does not learn a second
  *  import path for something it already reaches `./web` for. */
-export { gateIdentity, runSocketPath, gitTopLevel, hostname };
-export {
-  assertPackaged,
-  bakedBuild,
-  daemonEnv,
-  webDaemonSpawnConfig,
-  webHome,
-} from "./webDaemonLaunch";
 
 /**
  * LET GO OF WHOEVER'S DIRECTORY THIS WAS.

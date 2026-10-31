@@ -21,8 +21,8 @@
 
 import { join } from "node:path";
 import { type BlobStore, nixStore } from "./store";
-import type { BucketRow, ObjectRow, Scope, TokenRow } from "./db";
-import { openCacheRepo } from "./db";
+import type { BucketRow, BucketTotals, ObjectRow, Scope, TokenRow } from "./db";
+import { cursorFor, openCacheRepo } from "./db";
 import { planGc, runGc, type GcReport } from "./gc";
 import {
   fingerprintOf,
@@ -37,6 +37,7 @@ import {
 } from "./narinfo";
 import { newChain, serial } from "./serial";
 import { CACHE_MOUNT } from "./paths";
+import { PATH_PAGE_SIZE } from "./surface";
 import { createStaging, type NarinfoOutcome, type Upload } from "./staging";
 import {
   globMatches,
@@ -60,6 +61,11 @@ export interface BucketFacts {
   objects: number;
   bytes: number;
   created: number;
+  /** When the newest narinfo landed; `null` for a bucket nothing was pushed
+   *  to. */
+  lastPush: number | null;
+  /** narinfo reads, summed over the bucket's objects. */
+  hits: number;
 }
 
 /**
@@ -161,6 +167,28 @@ export interface CacheAdmin {
   }): Promise<CacheOutcome<PinFacts>>;
   gc(input: { rootToken: string; bucket: string | null }): Promise<CacheOutcome<GcReport>>;
   stats(input: { rootToken: string }): Promise<CacheOutcome<CacheStats>>;
+  /**
+   * ONE PAGE of a bucket's stored paths, newest first.
+   *
+   * No root token: the same reasoning as `describe`. A bucket's PATH LIST is
+   * what the substituter already serves one narinfo at a time to anyone who can
+   * read the bucket, so a listing that demanded the operator's secret would be
+   * a credential on a question the protocol answers for free.
+   */
+  paths(input: {
+    bucket: string;
+    filter: string | null;
+    after: string | null;
+  }): Promise<CacheOutcome<{ paths: readonly PathPageRow[]; next: string | null }>>;
+}
+
+/** One stored path, as `paths` lists it. */
+export interface PathPageRow {
+  storePath: string;
+  narSize: number;
+  created: number;
+  hits: number;
+  lastAccessed: number;
 }
 
 /** The verdict on a presented credential. `status` is what the route answers
@@ -185,6 +213,29 @@ export interface Cache {
     bucket: BucketRow,
     paths: readonly { path: string; sigs?: readonly string[] }[],
   ): { missing: readonly string[]; skipped: readonly string[] };
+  /**
+   * EVERY BUCKET'S ROW, without a credential — what a SUBSCRIBER reads.
+   *
+   * The root token guards ADMINISTRATION, not the board: who may subscribe is
+   * the transport's decision (loopback today; a session in PR 3), and demanding
+   * the operator's secret from a reader would make the cache unrenderable
+   * without handing it out. It carries the same facts `admin.list` answers, and
+   * no more.
+   */
+  snapshot(): readonly BucketFacts[];
+  /**
+   * SOMETHING A SUBSCRIBER WOULD SEE MOVED — a narinfo landed, a bucket was
+   * created, a closure was pinned or collected, or reads accumulated.
+   *
+   * Reads are COALESCED here rather than at the subscriber: a bucket being
+   * fetched from is a counter moving thousands of times a minute, and a
+   * publish per read would be a broadcast storm dressed as freshness. At most
+   * one notification a second, and only when the counters actually moved.
+   *
+   * The returned function unsubscribes. There is exactly one subscriber — the
+   * row that publishes `buckets` — so this is a listener and not an emitter.
+   */
+  onChange(listener: () => void): () => void;
   /** The admin face. */
   admin: CacheAdmin;
   close(): void;
@@ -201,6 +252,11 @@ export interface CacheOptions {
   blob?: BlobStore;
   now?: () => number;
 }
+
+/** The floor between two READ-driven publications. Reads are the only change
+ *  that arrives thousands of times a minute, and a hit count that moved a second
+ *  ago is as true for a reader as one that moved a millisecond ago. */
+export const HITS_REFRESH_MS = 1000;
 
 /** A bucket name is a path segment on the wire, so it is a DNS-ish label and
  *  nothing else: lowercase, digits, dashes. A name with a `/` in it would be a
@@ -245,7 +301,7 @@ export function createCache(options: CacheOptions): Cache {
 
   function factsOf(
     bucket: BucketRow,
-    counted: Map<string, { objects: number; bytes: number }> = repo.bucketStats(),
+    counted: Map<string, BucketTotals> = repo.bucketStats(),
   ): BucketFacts {
     const counts = counted.get(bucket.name);
     return {
@@ -258,6 +314,8 @@ export function createCache(options: CacheOptions): Cache {
       objects: counts?.objects ?? 0,
       bytes: counts?.bytes ?? 0,
       created: bucket.created,
+      lastPush: counts?.lastPush ?? null,
+      hits: counts?.hits ?? 0,
     };
   }
 
@@ -358,6 +416,42 @@ export function createCache(options: CacheOptions): Cache {
   // takes, and it is the locked one, so a pin cannot interleave with an import.
   const staging = createStaging({ repo, blob, dir, now, record });
 
+  // ── who hears about a change ──────────────────────────────────────────────
+  //
+  // ONE listener: the row that publishes `buckets` to whatever is watching. The
+  // cache knows when a push lands, when a bucket appears and when reads
+  // accumulate — and nothing outside it does — so the notification is emitted
+  // here rather than polled for.
+  //
+  // READS ARE THROTTLED, and with a TRAILING edge. A bucket being fetched from
+  // moves a counter thousands of times a minute, so a publish per read is a
+  // broadcast storm dressed as freshness — but a leading edge alone drops the
+  // reads after the first of each window, and a burst that then stops leaves the
+  // board showing a number that never existed. So the first read of a window
+  // publishes, a read at the end of it ARMS a timer, and the timer fires once
+  // the burst has been quiet for a window. The timer is the cache's, and
+  // `close()` clears it: nothing outlives the activation.
+  const listeners = new Set<() => void>();
+  let lastReadNotify = Number.NEGATIVE_INFINITY;
+  let trailing: ReturnType<typeof setTimeout> | null = null;
+  const notify = (): void => {
+    for (const listener of listeners) listener();
+  };
+  const notifyReaders = (): void => {
+    const at = now();
+    if (at - lastReadNotify >= HITS_REFRESH_MS) {
+      lastReadNotify = at;
+      notify();
+      return;
+    }
+    if (trailing !== null) return;
+    trailing = setTimeout(() => {
+      trailing = null;
+      lastReadNotify = now();
+      notify();
+    }, HITS_REFRESH_MS);
+  };
+
   const admin: CacheAdmin = {
     mount: CACHE_MOUNT,
     async create(input) {
@@ -392,6 +486,8 @@ export function createCache(options: CacheOptions): Cache {
         created: now(),
       };
       repo.putBucket(bucket);
+      // A bucket that appeared is a row that appeared.
+      notify();
       return { ok: true, value: factsOf(bucket) };
     },
 
@@ -514,8 +610,37 @@ export function createCache(options: CacheOptions): Cache {
           pins: repo.pins(),
           now: now(),
         });
-        return { ok: true as const, value: await runGc(blob, repo, plan) };
+        const report = await runGc(blob, repo, plan);
+        // Every bucket the sweep touched answers a different object count now.
+        notify();
+        return { ok: true as const, value: report };
       });
+    },
+
+    async paths(input) {
+      const bucket = repo.bucket(input.bucket);
+      if (bucket === null) {
+        return { ok: false, code: "unknown_bucket", message: `no bucket "${input.bucket}"` };
+      }
+      const page = repo.objectsPage(bucket.name, {
+        limit: PATH_PAGE_SIZE,
+        after: input.after,
+        filter: input.filter,
+      });
+      const last = page.rows.at(-1);
+      return {
+        ok: true,
+        value: {
+          paths: page.rows.map((row) => ({
+            storePath: row.storePath,
+            narSize: row.narSize,
+            created: row.created,
+            hits: row.hits,
+            lastAccessed: row.lastAccessed,
+          })),
+          next: page.more && last !== undefined ? cursorFor(last) : null,
+        },
+      };
     },
 
     async stats(input) {
@@ -558,6 +683,10 @@ export function createCache(options: CacheOptions): Cache {
     // Every path a pin holds must be rooted in the store, or the machine's own
     // GC deletes the pin out from under the cache.
     for (const path of reached) await blob.retain(bucket.name, path);
+    // A pin changes `pinnedPaths`, which is a column of the bucket's row — so
+    // this is the third mutator that NOTIFIES, beside create and gc, rather
+    // than one the surface has to remember to publish for.
+    notify();
     return {
       ok: true,
       value: { bucket: bucket.name, name: input.name, rootPaths: [...reached], created },
@@ -603,7 +732,9 @@ export function createCache(options: CacheOptions): Cache {
     touch(bucket, hash) {
       if (!isStorePathHash(hash)) return;
       const row = repo.objectByHash(bucket.name, hash);
-      if (row !== null) repo.touchObject(bucket.name, row.storePath, now());
+      if (row === null) return;
+      repo.touchObject(bucket.name, row.storePath, now());
+      notifyReaders();
     },
 
     async narStream(bucket, file) {
@@ -619,7 +750,13 @@ export function createCache(options: CacheOptions): Cache {
     // The write path is `./staging`'s; this face is the one the routes speak,
     // and it is the same object either way.
     beginUpload: (bucket, file) => staging.beginUpload(bucket, file),
-    acceptNarinfo: (bucket, hash, body) => staging.acceptNarinfo(bucket, hash, body),
+    async acceptNarinfo(bucket, hash, body) {
+      const outcome = await staging.acceptNarinfo(bucket, hash, body);
+      // A PUSH LANDED — the one change nobody outside the cache can see, and
+      // the reason this listener exists at all.
+      if (outcome.ok) notify();
+      return outcome;
+    },
 
     missing(bucket, paths) {
       const missing: string[] = [];
@@ -637,7 +774,27 @@ export function createCache(options: CacheOptions): Cache {
 
     admin,
 
+    // ONE `bucketStats()` for the whole snapshot: the query is a GROUP BY over
+    // every object, and the default parameter would run it once per bucket — so
+    // a push into a cache with B buckets would cost B full scans per publish.
+    snapshot: () => {
+      const counted = repo.bucketStats();
+      return repo.buckets().map((bucket) => factsOf(bucket, counted));
+    },
+
+    onChange(listener) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+
     close() {
+      // The trailing-edge timer is the cache's, so the cache ends it. A timer
+      // that outlived `close()` would publish into a closed database.
+      if (trailing !== null) clearTimeout(trailing);
+      trailing = null;
+      listeners.clear();
       repo.close();
     },
   };

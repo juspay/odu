@@ -989,6 +989,20 @@
 
   .fault { color: var(--red-ink); }
 
+  /* AN ACTION THAT READS AS TEXT — "try again", "more". The crumb trail's own
+     rule was this one with a parent, so a control outside a crumb had no rule at
+     all and drew as browser chrome. */
+  .text-action {
+    padding: 0;
+    background: none;
+    border: 0;
+    color: var(--accent);
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .text-action:disabled { color: var(--muted); cursor: default; }
+
   /* ── the form ────────────────────────────────────────────────────────────── */
 
   .create-form { display: grid; gap: 1.1rem; max-width: 40rem; }
@@ -1321,6 +1335,126 @@
 
   .nodes,
   .log { min-width: 0; }
+
+
+  /* ── the rows switch, and the cache ────────────────────────────────────────
+   *
+   * The board is TWO ROWS now — runs and cache — and the switch in the masthead
+   * says which is showing. Two buttons, so `aria-pressed` carries the state:
+   * a person on a screen reader hears "Cache, pressed" rather than a menu.
+   *
+   * The cache's own list borrows the board's grammar: a row is a thing you
+   * choose, its facts are a strip beneath the name, and the whole row is the
+   * control. Bucket pages put the three things a client copies into one <pre>,
+   * because that block IS the answer — a page that spread them over labelled
+   * fields would make a person reassemble what `odu cache use` already prints.
+   */
+  .rows {
+    display: flex;
+    gap: 0.35rem;
+    margin-left: auto;
+  }
+
+  .cache h2 { margin: 0.25rem 0 0.5rem; font-size: 1.1rem; }
+
+  .buckets,
+  .paths {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .buckets li + li,
+  .paths li + li { border-top: 1px solid var(--border); }
+
+  .bucket {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    width: 100%;
+    padding: 0.55rem 0.5rem;
+    background: none;
+    border: 0;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .bucket:hover { background: var(--surface); }
+  .bucket:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+  .bucket-name {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-family: var(--mono);
+    font-weight: 600;
+  }
+
+  .bucket-facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    color: var(--muted);
+    font: 0.8rem var(--mono);
+  }
+
+  /* A bucket's block is COPIED, so it is monospaced, unwrapped only where a URL
+     needs it, and never prettified into a form. */
+  .use-block {
+    margin: 0.5rem 0 1rem;
+    padding: 0.75rem;
+    overflow-x: auto;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font: 0.8rem/1.5 var(--mono);
+  }
+
+  .cache-paths { margin-top: 0.5rem; }
+
+  .cache .search input {
+    width: 100%;
+    padding: 0.45rem 0.6rem;
+    margin: 0.5rem 0;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: inherit;
+    font: inherit;
+  }
+
+  .paths li {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    padding: 0.45rem 0.5rem;
+  }
+
+  /* A store path is a store path: it wraps nowhere and scrolls within its own
+     line, which is the one place this page allows a sideways scroll. */
+  .paths .path { overflow-x: auto; white-space: nowrap; font-size: 0.8rem; }
+
+  .crumbs { margin: 0.25rem 0 0; }
+  .crumbs .link {
+    padding: 0;
+    background: none;
+    border: 0;
+    color: var(--accent);
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
 
   /* ── narrow ──────────────────────────────────────────────────────────────── */
 

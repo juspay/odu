@@ -91,6 +91,10 @@ export interface Service {
   daemonHome: string;
 }
 
+/** The operator token every world's daemon is started with. Not a secret: the
+ *  service is loopback-only and this is a throwaway world. */
+export const ROOT_TOKEN = "acceptance-root-token";
+
 /**
  * A port for THIS worker.
  *
@@ -162,6 +166,13 @@ export async function startService(odu: string, port: number): Promise<Service> 
     // one daemon's identity). Moving the origin is therefore what keeps this
     // worker's gate out of a developer's own.
     ODU_WEB_ORIGIN: origin,
+    // THE CACHE NEEDS AN OPERATOR, and this is the one the browser tests get.
+    // `cache.feature` creates a bucket and pushes a path to it THROUGH the CLI
+    // — a person's route — so the token travels in the world both the daemon
+    // and every `odu` call in it are started with. Without one the bucket verbs
+    // refuse `no_root_token` and the substituter still serves, which is the
+    // behaviour `odu cache` documents rather than a mode this suite wants.
+    ODU_ROOT_TOKEN: ROOT_TOKEN,
   };
 
   const logPath = join(root, "daemon.log");
@@ -221,6 +232,24 @@ export function stopService(service: Service): void {
       process.stderr.write(`web-acceptance: could not remove ${dir}: ${String(err)}\n`);
     }
   }
+}
+
+/**
+ * One `odu …` call against this world's service — the CLI, exactly as a person
+ * would run it. Used by the cache feature, where creating a bucket and pushing
+ * a path are the arrange step rather than the thing under test.
+ */
+export function oduCli(
+  service: Service,
+  argv: string[],
+  env: NodeJS.ProcessEnv = {},
+): { status: number | null; stdout: string; stderr: string } {
+  const answer = spawnSync(service.odu, argv, {
+    env: { ...service.env, ...env },
+    encoding: "utf-8",
+    maxBuffer: BIG,
+  });
+  return { status: answer.status, stdout: answer.stdout, stderr: answer.stderr };
 }
 
 /** One `odu surface …` call against this world's service. */

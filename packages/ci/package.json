@@ -1,0 +1,27 @@
+{
+  "name": "@odu/ci",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "//cordis": "THE ROW this package belongs to, read by the fence.",
+  "cordis": { "row": "ci" },
+  "//": "THE RUNS' ROW — see README.md. Its server side (the ports bound to the engine, and the plugin the daemon mounts), and its face (the board, the DAG, the console). It is a package of its own for the reason `@odu/cache` is: a row owns everything about itself, and the daemon-side composition that binds the engine's launcher must not sit inside the CLI face where only import topology keeps it out of a public client.",
+  "//exports": "TWO DOORS. `./row` is what the daemon mounts — the plugin and its Cordis facts — plus the port bindings behind it; `./face` is the Solid view and the primitives the shell shares with it. The engine imports are behind `./row`, which is why the CLI face's manifest no longer names the launch machinery.",
+  "//dependencies": "`@odu/service` and `@odu/service-client` are the contract and its implementation; `@odu/execution`, `@odu/run-history` and `@odu/run-client` are the engine the ports bind; `@odu/cordis` is the vocabulary the daemon and its rows share; `solid-js` is `./face`'s cost. `@kolu/surface` and `@olai/effect-cordis` are HYDRATED from npins pins and so are absent by design.",
+  "sideEffects": false,
+  "exports": {
+    "./row": "./src/row.ts",
+    "./face": "./src/face/ci.tsx"
+  },
+  "dependencies": {
+    "@odu/cordis": "workspace:*",
+    "@odu/execution": "workspace:*",
+    "@odu/run-client": "workspace:*",
+    "@odu/run-history": "workspace:*",
+    "@odu/service": "workspace:*",
+    "@odu/service-client": "workspace:*",
+    "effect": "4.0.0",
+    "solid-js": "^1.9.15"
+  }
+}

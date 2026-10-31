@@ -46,7 +46,6 @@ import type {
   LaunchRequest,
   RetryOutcome,
   RetryRequest,
-  CacheAdmin,
   ServicePorts,
 } from "./ports";
 
@@ -363,9 +362,6 @@ export function recordingPorts(opts: {
   hold?: (request: VenueHoldRequest) => VenueHoldOutcome;
   release?: (request: VenueReleaseRequest) => { results: readonly VenueReleaseResult[] };
   protect?: (request: ProtectRequest) => ProtectOutcome;
-  /** The cache's admin port, when a suite is about the cache VERBS rather than
-   *  about a run. Absent is a service with no root token. */
-  cache?: CacheAdmin;
 } = {}): RecordingPorts {
   const launches: LaunchRequest[] = [];
   const retries: RetryRequest[] = [];
@@ -456,24 +452,6 @@ export function recordingPorts(opts: {
           message: "the stub writes no rulesets",
         }
       );
-    },
-    // The cache is a wall of its own with its own suite; here it exists so the
-    // service's ports are total, and every verb refuses exactly as a service
-    // started without `$ODU_ROOT_TOKEN` would. A suite that is ABOUT the cache
-    // verbs binds `opts.cache`.
-    cache: opts.cache ?? {
-      // The mount is not a verb, so the stub states the real one: a suite that
-      // reads a bucket's URL should not get a different shape than production.
-      mount: "/cache",
-      create: async () => ({ ok: false, code: "no_root_token", message: "the stub has no cache" }),
-      list: async () => ({ ok: false, code: "no_root_token", message: "the stub has no cache" }),
-      describe: async () => ({ ok: false, code: "unknown_bucket", message: "the stub has no cache" }),
-      tokenMint: async () => ({ ok: false, code: "no_root_token", message: "the stub has no cache" }),
-      tokenList: async () => ({ ok: false, code: "no_root_token", message: "the stub has no cache" }),
-      tokenRevoke: async () => ({ ok: false, code: "no_root_token", message: "the stub has no cache" }),
-      pin: async () => ({ ok: false, code: "no_root_token", message: "the stub has no cache" }),
-      gc: async () => ({ ok: false, code: "no_root_token", message: "the stub has no cache" }),
-      stats: async () => ({ ok: false, code: "no_root_token", message: "the stub has no cache" }),
     },
   };
 }

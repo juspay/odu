@@ -77,6 +77,16 @@ scrolls sideways.
 
 ## How the two pages use a screen
 
+**The board is TWO ROWS, and this package is the SHELL.** The header offers
+*Runs* and *Cache*, two STATES of one page rather than a menu — `aria-pressed`
+says which. The views themselves are not written here: the runs are
+`@odu/ci/face` and the buckets are `@odu/cache/face`, each in the package that
+owns the row it draws. The shell owns the hash router, the wire indicator, the
+switch, the tab, the clock, and the page's single `Effect.runPromise` — handed
+to both faces as `call`. `src/closure.test.ts` holds the split: only `app.tsx`
+opens either face, and `main.tsx` is the only file that names a row's SURFACE,
+because the root dials both through `connectSurfaces`.
+
 **The board is scanned.** One row per checkout by default — the latest run of
 each, with `N earlier` under the age and a *History* toggle for the rest —
 because "what is my CI doing" is a question about checkouts, and a superseded

@@ -3,8 +3,26 @@
 final: _prev:
 let
   mkKoluPackage = import ./packages/kolu-package.nix { pkgs = final; };
+  # The same factory shape over a different pin: `@olai/effect-cordis` is the
+  # plugin runtime the daemon composes its rows with, and it arrives as source
+  # from juspay/olai exactly as the @kolu/* libraries do.
+  mkOlaiPackage = import ./packages/olai-package.nix { pkgs = final; };
+  # Cordis itself — FOUR packages from one pin, rewritten from upstream's
+  # `lib/` emit into the `src/` tree odu runs. Read the derivation's header
+  # before touching it: the rewrite, and the `@ts-nocheck` stamp beside it, are
+  # the whole of what makes the pin usable from a tree with odu's tsconfig.
+  cordis = import ./packages/cordis.nix { pkgs = final; };
 in
 {
+  # `@olai/effect-cordis`: a plugin as an Effect, the host that mounts it, and
+  # the one package in either tree that names `cordis`. Its ROOT door is what
+  # odu opens; `./loader` carries node:url and a YAML parser and is for a
+  # product that mounts rows from a FILE, which odu does not.
+  olai-effect-cordis = mkOlaiPackage "effect-cordis";
+  # ...and the four packages that root door needs behind it, as one attrset
+  # carrying the four (src, dest) hydration pairs and their shared externals.
+  cordis = cordis;
+
   kolu-surface = mkKoluPackage "surface";
   kolu-surface-mcp = mkKoluPackage "surface-mcp";
   # PR 2's three faces. `surface-app` is the browser shell and the one HTTP/WS

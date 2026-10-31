@@ -225,8 +225,12 @@
     hash = "sha512-xKd8OIzlqNzcqcNumGAa6g+PW2kjD5vrpcKOnfldAUPP3j7lnqMPwlTXQm8gF+UwH72z0lqaRbjr9hqGz0eITA==";
   };
   "@odu/cache" = copyPathToStore ./packages/cache;
+  "@odu/ci" = copyPathToStore ./packages/ci;
   "@odu/cli" = copyPathToStore ./packages/cli;
+  "@odu/cordis" = copyPathToStore ./packages/cordis;
   "@odu/execution" = copyPathToStore ./packages/execution;
+  "@odu/host" = copyPathToStore ./packages/host;
+  "@odu/launch" = copyPathToStore ./packages/launch;
   "@odu/run-client" = copyPathToStore ./packages/run-client;
   "@odu/run-history" = copyPathToStore ./packages/run-history;
   "@odu/service" = copyPathToStore ./packages/service;
@@ -308,6 +312,10 @@
   "@solid-primitives/utils@6.4.1" = fetchurl {
     url = "https://registry.npmjs.org/@solid-primitives/utils/-/utils-6.4.1.tgz";
     hash = "sha512-ISSB5QX1qP2ynrheIpYwc4oKR5Ny4siNuUyf1qZniy+Il+p/PtDB0QK1Dnle8noiHpwRD3gpPdubOC3qI/Zamg==";
+  };
+  "@standard-schema/spec@1.1.0" = fetchurl {
+    url = "https://registry.npmjs.org/@standard-schema/spec/-/spec-1.1.0.tgz";
+    hash = "sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==";
   };
   "@teppeis/multimaps@3.0.0" = fetchurl {
     url = "https://registry.npmjs.org/@teppeis/multimaps/-/multimaps-3.0.0.tgz";
@@ -500,6 +508,10 @@
   "cors@2.8.6" = fetchurl {
     url = "https://registry.npmjs.org/cors/-/cors-2.8.6.tgz";
     hash = "sha512-tJtZBBHA6vjIAaF6EnIaq6laBBP9aq/Y3ouVJjEfoHbRBcHBAHYcMh/w8LDrk2PvIMMq8gmopa5D4V8RmbrxGw==";
+  };
+  "cosmokit@1.8.1" = fetchurl {
+    url = "https://registry.npmjs.org/cosmokit/-/cosmokit-1.8.1.tgz";
+    hash = "sha512-PDBv4l90xZKrUsZ0vtoycgZpO/j4iFsqJXrAxsyBDsnQRI7ZMJXIjgDJsKNjd5L8jnVnnlrDCdhkFbTncgCVjQ==";
   };
   "cross-spawn@7.0.6" = fetchurl {
     url = "https://registry.npmjs.org/cross-spawn/-/cross-spawn-7.0.6.tgz";

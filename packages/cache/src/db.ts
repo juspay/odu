@@ -79,6 +79,18 @@ export interface ObjectRow {
   lastAccessed: number;
 }
 
+/** What one bucket's SQL totals say: the row a subscriber sees, minus the
+ *  bucket's own columns. */
+export interface BucketTotals {
+  objects: number;
+  bytes: number;
+  /** narinfo reads, summed over the bucket's objects. */
+  hits: number;
+  /** When the newest narinfo landed; `null` for a bucket nothing was pushed
+   *  to. */
+  lastPush: number | null;
+}
+
 /** A named closure kept out of garbage collection. */
 export interface PinRow {
   bucket: string;
@@ -115,9 +127,25 @@ export interface CacheRepo {
   pins(bucket?: string): PinRow[];
   deletePin(bucket: string, name: string): boolean;
 
-  /** Object count and nar bytes per bucket, COUNTED BY SQL. A cache with a
-   *  hundred thousand objects must not answer "how big am I" by loading them. */
-  bucketStats(): Map<string, { objects: number; bytes: number }>;
+  /** Object count, nar bytes, reads and the newest push per bucket, COUNTED BY
+   *  SQL. A cache with a hundred thousand objects must not answer "how big am
+   *  I" by loading them — and a BOARD asks that question once per bucket per
+   *  publish, which is the same argument one order of magnitude louder. */
+  bucketStats(): Map<string, BucketTotals>;
+
+  /**
+   * ONE PAGE of a bucket's paths, newest first — the keyset page behind
+   * `cache.paths`.
+   *
+   * `after` is a cursor this function minted (`cursorOf`), so a page is a
+   * POSITION in `(created, store_path)` order rather than an offset: a push
+   * landing between two pages shifts nothing the reader is about to read, which
+   * an `OFFSET` would.
+   */
+  objectsPage(
+    bucket: string,
+    page: { limit: number; after: string | null; filter: string | null },
+  ): { rows: ObjectRow[]; more: boolean };
   /** The same, over every bucket, plus reads and the newest access. */
   objectTotals(): {
     objects: number;
@@ -209,6 +237,26 @@ const list = (row: Row, column: string): string[] => {
     return [];
   }
 };
+
+/**
+ * A PAGE CURSOR — `<created>|<storePath>`, the last row of the page just given.
+ *
+ * Opaque to a caller on purpose: it names a POSITION in the page order, and a
+ * caller that could read it would be a caller tempted to mint one. A malformed
+ * cursor is `null` — the first page — rather than an error, because the only
+ * thing a stale cursor can mean is "start again".
+ */
+export const cursorOf = (key: string): { created: number; storePath: string } | null => {
+  const at = key.indexOf("|");
+  if (at <= 0) return null;
+  const created = Number(key.slice(0, at));
+  if (!Number.isFinite(created)) return null;
+  return { created, storePath: key.slice(at + 1) };
+};
+
+/** The cursor for a page's last row. */
+export const cursorFor = (row: { created: number; storePath: string }): string =>
+  `${row.created}|${row.storePath}`;
 
 const bucketOf = (row: Row): BucketRow => ({
   name: text(row, "name"),
@@ -452,16 +500,50 @@ export function openCacheRepo(path: string): CacheRepo {
     bucketStats() {
       const rows = db
         .query(
-          "SELECT bucket, COUNT(*) AS objects, COALESCE(SUM(nar_size), 0) AS bytes " +
+          "SELECT bucket, COUNT(*) AS objects, COALESCE(SUM(nar_size), 0) AS bytes, " +
+            "COALESCE(SUM(hits), 0) AS hits, MAX(created) AS pushed " +
             "FROM object GROUP BY bucket",
         )
         .all() as Row[];
       return new Map(
-        rows.map((row) => [
-          text(row, "bucket"),
-          { objects: integer(row, "objects"), bytes: integer(row, "bytes") },
-        ]),
+        rows.map((row) => {
+          const pushed = row["pushed"];
+          return [
+            text(row, "bucket"),
+            {
+              objects: integer(row, "objects"),
+              bytes: integer(row, "bytes"),
+              hits: integer(row, "hits"),
+              lastPush: pushed === null || pushed === undefined ? null : Number(pushed),
+            },
+          ];
+        }),
       );
+    },
+
+    objectsPage(bucket, page) {
+      const after = page.after === null ? null : cursorOf(page.after);
+      const where = ["bucket = ?"];
+      const params: unknown[] = [bucket];
+      if (page.filter !== null && page.filter !== "") {
+        // `instr` rather than `LIKE`: the filter is a SUBSTRING a person typed,
+        // and `%` or `_` in it would be a wildcard nobody meant.
+        where.push("instr(store_path, ?) > 0");
+        params.push(page.filter);
+      }
+      if (after !== null) {
+        where.push("(created < ? OR (created = ? AND store_path < ?))");
+        params.push(after.created, after.created, after.storePath);
+      }
+      params.push(page.limit + 1);
+      const rows = db
+        .query(
+          `SELECT * FROM object WHERE ${where.join(" AND ")} ` +
+            "ORDER BY created DESC, store_path DESC LIMIT ?",
+        )
+        .all(...(params as never[])) as Row[];
+      const more = rows.length > page.limit;
+      return { rows: (more ? rows.slice(0, page.limit) : rows).map(objectOf), more };
     },
     objectTotals() {
       const row = db
