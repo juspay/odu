@@ -16,6 +16,7 @@
 
 import type { SurfaceClient } from "@kolu/surface/solid";
 import type { SurfaceReadout } from "@kolu/surface/solid";
+import { refusalText } from "@odu/cordis/format";
 import { formatLogKey, parseLogKey } from "@odu/service-client/logKey";
 import { logHasMore, LOG_TAIL_BYTES } from "@odu/service-client/surface";
 import { type oduServiceSurface } from "@odu/service-client/surface";
@@ -35,6 +36,7 @@ import {
   type JSX,
 } from "solid-js";
 import { Board } from "./board";
+import { requestId } from "./format";
 // The shell draws its two switch buttons and its Reload with the SAME control
 // the run views use: one place decides what a control is (`./dom`'s header).
 export { Button } from "./dom";
@@ -81,26 +83,6 @@ export interface CiFaceProps {
   canAdminister: boolean;
 }
 
-
-/** A request id a repeat of this page's own click cannot duplicate. The service
- *  makes a request id mandatory precisely so a lost reply is reconcilable, and
- *  a browser that reused one would replay its previous answer rather than doing
- *  what the person just asked for. */
-function requestId(what: string): string {
-  return `web-${what}-${crypto.randomUUID()}`;
-}
-
-/** The message a refusal becomes. The service's refusals are already sentences
- *  written for a person; this only adds the recovery when there is one. */
-function refusalText(err: unknown): string {
-  const value = err as { message?: unknown; suggestion?: unknown };
-  const message =
-    typeof value?.message === "string" ? value.message : String(err);
-  const suggestion = Array.isArray(value?.suggestion)
-    ? ` Try: ${(value.suggestion as unknown[]).map(String).join(" ")}`
-    : "";
-  return `${message}${suggestion}`;
-}
 
 /**
  * A read that is TERMINAL when refused: the key names nothing, or the service
@@ -644,17 +626,10 @@ export function CiFace(props: CiFaceProps): JSX.Element {
     );
   };
 
-  /** `pipeline.read` — what the create form's checkout would run. An empty
-   *  checkout is refused HERE, in the service's voice, rather than greying the
-   *  button out: the person reads why. */
+  /** `pipeline.read` — what the create form's checkout would run. The
+   *  checkout is sent as typed, empty included: the SERVICE refuses a path that
+   *  is not absolute, and its sentence is what the person reads. */
   const previewPipeline = (checkout: string, root: string): void => {
-    if (checkout === "") {
-      setPreview({
-        kind: "refused",
-        message: "odu: a pipeline is read off a checkout — type its absolute path above",
-      });
-      return;
-    }
     setPreview({ kind: "reading" });
     call(
       props.client.procedures.pipeline.read({ checkout, ...(root === "" ? {} : { root }) }),

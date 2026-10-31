@@ -113,3 +113,11 @@ export { scopeLabel };
  * the encoding lives in one place — `#` in an unencoded SVG would truncate the
  * URI at the first colour.
  */
+
+/** A request id a repeat of this page's own click cannot duplicate. The service
+ *  makes a request id mandatory precisely so a lost reply is reconcilable, and
+ *  a browser that reused one would replay its previous answer rather than doing
+ *  what the person just asked for. One mint for every control in this face. */
+export function requestId(what: string): string {
+  return `web-${what}-${crypto.randomUUID()}`;
+}

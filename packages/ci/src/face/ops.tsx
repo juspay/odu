@@ -5,9 +5,11 @@
  * Two pages, because they answer two questions:
  *
  *   - **Machines** (`#/machines`) — where would a run go, and who holds it?
- *     `venue.probe` on open (it SSH-dials, so it can be narrowed to platforms),
- *     and `venue.hold` / `venue.release` for a checkout, the hold the CLI calls
- *     a lease.
+ *     The service's LAST probe, read off the `venues` cell with its age — a
+ *     probe SSH-dials every machine, so opening the page dials none, and
+ *     **Probe machines** asks for a fresh one (narrowable to platforms). Then
+ *     `venue.hold` / `venue.release` for a checkout, the hold the CLI calls a
+ *     lease.
  *   - **Maintenance** (`#/maintain`) — the catalog and the forge: bring a
  *     checkout's legacy records in, expire finished runs, and require exactly
  *     the checks odu posts on a branch.
@@ -22,64 +24,24 @@
  * service refuses on its own whatever this page draws.
  */
 
-import { createResource, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
+import { createControl, type Control } from "@odu/cordis/control";
+import { ago } from "@odu/cordis/format";
+import { createSignal, For, Show, type JSX } from "solid-js";
 import type { Effect } from "effect";
-import { Button, Field, Receipt } from "./dom";
+import { Button, Field, Receipt, TextInput, Toggle } from "./dom";
+import { requestId } from "./format";
 import type { VenueRow } from "./types";
 import type { CiClient } from "./ci";
 
 type Call = <A>(effect: Effect.Effect<A, unknown>) => Promise<A>;
 
-/** A request id a repeat of this page's own click cannot duplicate — see
- *  `./ci`'s twin for why the service demands one. */
-function requestId(what: string): string {
-  return `web-${what}-${crypto.randomUUID()}`;
-}
-
-function refusalText(err: unknown): string {
-  const value = err as { message?: unknown; suggestion?: unknown };
-  const message = typeof value?.message === "string" ? value.message : String(err);
-  const suggestion = Array.isArray(value?.suggestion)
-    ? ` Try: ${(value.suggestion as unknown[]).map(String).join(" ")}`
-    : "";
-  return `${message}${suggestion}`;
-}
-
 function tokens(raw: string): string[] {
   return raw.split(/\s+/).filter((token) => token !== "");
 }
 
-/** ONE CONTROL'S STORY — pending, then a receipt or a refusal — owned by the
- *  component that made it, so an answer after the page closed writes nowhere. */
-function createControl(call: Call): {
-  readonly state: () => { kind: "idle" } | { kind: "busy" } | { kind: "ok" | "refused"; message: string };
-  readonly refuse: (message: string) => void;
-  readonly run: <A>(effect: Effect.Effect<A, unknown>, ok: (value: A) => string) => void;
-} {
-  type State = { kind: "idle" } | { kind: "busy" } | { kind: "ok" | "refused"; message: string };
-  const [state, setState] = createSignal<State>({ kind: "idle" });
-  let live = true;
-  onCleanup(() => {
-    live = false;
-  });
-  return {
-    state,
-    refuse: (message) => setState({ kind: "refused", message }),
-    run: (effect, ok) => {
-      setState({ kind: "busy" });
-      void call(effect).then(
-        (value) => {
-          if (live) setState({ kind: "ok", message: ok(value) });
-        },
-        (err: unknown) => {
-          if (live) setState({ kind: "refused", message: refusalText(err) });
-        },
-      );
-    },
-  };
-}
-
-function ControlAnswer(props: { control: ReturnType<typeof createControl> }): JSX.Element {
+/** A control's answer, as this face draws every receipt: `Receipt`, whose
+ *  refused tone interrupts and whose answer waits its turn. */
+function ControlAnswer(props: { control: Control }): JSX.Element {
   return (
     <Show
       when={(() => {
@@ -89,49 +51,6 @@ function ControlAnswer(props: { control: ReturnType<typeof createControl> }): JS
     >
       {(answer) => <Receipt tone={answer().kind === "ok" ? "ok" : "refused"}>{answer().message}</Receipt>}
     </Show>
-  );
-}
-
-const busy = (control: ReturnType<typeof createControl>): boolean =>
-  control.state().kind === "busy";
-
-function TextInput(props: {
-  id: string;
-  value: string;
-  placeholder: string;
-  onValue: (value: string) => void;
-}): JSX.Element {
-  return (
-    <input
-      id={props.id}
-      type="text"
-      class="input"
-      value={props.value}
-      placeholder={props.placeholder}
-      spellcheck={false}
-      autocapitalize="off"
-      autocorrect="off"
-      onInput={(event) => props.onValue(event.currentTarget.value)}
-    />
-  );
-}
-
-function Check(props: {
-  id: string;
-  checked: boolean;
-  onChecked: (checked: boolean) => void;
-  children: JSX.Element;
-}): JSX.Element {
-  return (
-    <label class="toggle" for={props.id}>
-      <input
-        id={props.id}
-        type="checkbox"
-        checked={props.checked}
-        onChange={(event) => props.onChecked(event.currentTarget.checked)}
-      />
-      {props.children}
-    </label>
   );
 }
 
@@ -163,39 +82,33 @@ export function Machines(props: {
   onBack: () => void;
 }): JSX.Element {
   const [platforms, setPlatforms] = createSignal("");
-  /** The platforms the PROBE was last asked about — the resource's key, so
-   *  typing in the box dials nothing until the person asks. A fresh object per
-   *  ask, so asking the same thing twice probes twice. Every platform on open. */
-  const [asked, setAsked] = createSignal<{ readonly names: readonly string[] }>({ names: [] });
-  type Probe =
-    | { ok: true; rows: readonly VenueRow[]; source: string | null; warnings: readonly string[] }
-    | { ok: false; message: string };
-  const [probe, { refetch }] = createResource(asked, async ({ names }): Promise<Probe> => {
-    try {
-      const answer = await props.call(
-        props.client.procedures.venue.probe(names.length === 0 ? {} : { platforms: [...names] }),
-      );
-      return { ok: true, rows: answer.rows, source: answer.source, warnings: answer.warnings };
-    } catch (err) {
-      return { ok: false, message: refusalText(err) };
-    }
-  });
+  /** THE LAST PROBE, A FACT THE SERVICE KEEPS — read on open, never fired by
+   *  it. A probe dials every machine it is asked about, so a page that probed
+   *  per visit would cost a fleet of SSH connections per glance and wait on the
+   *  slowest dead box. The person asks for a fresh one with the button; the cell
+   *  moves, and this page (and every other open one) redraws from it. */
+  const reading = props.client.cells.venues.use();
+  const probing = createControl(props.call);
+  const probe = (): void => {
+    const names = tokens(platforms());
+    probing.run(
+      props.client.procedures.venue.probe(names.length === 0 ? {} : { platforms: names }),
+      (answer) => `Probed ${answer.rows.length} venue${answer.rows.length === 1 ? "" : "s"}.`,
+    );
+  };
 
   const [checkout, setCheckout] = createSignal("");
   const [noWait, setNoWait] = createSignal(false);
   const control = createControl(props.call);
-  const scope = (): { checkout: string; platforms?: string[] } | null => {
+  /** The checkout as typed, empty included — the SERVICE refuses a path that
+   *  is not absolute, in its own words. */
+  const scope = (): { checkout: string; platforms?: string[] } => {
     const path = checkout().trim();
-    if (path === "") {
-      control.refuse("odu: a hold is recorded against a checkout — type its absolute path");
-      return null;
-    }
     const names = tokens(platforms());
     return names.length === 0 ? { checkout: path } : { checkout: path, platforms: names };
   };
   const hold = (): void => {
     const target = scope();
-    if (target === null) return;
     control.run(
       props.client.procedures.venue.hold({
         ...target,
@@ -203,18 +116,15 @@ export function Machines(props: {
         requestId: requestId("hold"),
       }),
       (answer) => {
-        void refetch();
         return answer.results.map((one) => one.message).join(" ") || "Nothing to hold.";
       },
     );
   };
   const release = (): void => {
     const target = scope();
-    if (target === null) return;
     control.run(
       props.client.procedures.venue.release({ ...target, requestId: requestId("release") }),
       (answer) => {
-        void refetch();
         return (
           answer.released
             .map((one) =>
@@ -247,18 +157,26 @@ export function Machines(props: {
             onValue={setPlatforms}
           />
         </Field>
-        <Button onClick={() => setAsked({ names: tokens(platforms()) })}>
-          {probe.loading ? "Probing…" : "Probe machines"}
+        <Button disabled={probing.busy()} onClick={probe}>
+          {probing.busy() ? "Probing…" : "Probe machines"}
         </Button>
       </div>
-      <Show when={(() => { const value = probe(); return value !== undefined && !value.ok ? value.message : null; })()}>
-        {(message) => <Receipt tone="refused">{message()}</Receipt>}
-      </Show>
-      <Show when={(() => { const value = probe(); return value !== undefined && value.ok ? value : null; })()}>
+      <Show when={probing.fault()}>{(message) => <Receipt tone="refused">{message()}</Receipt>}</Show>
+      <Show
+        when={reading.value()}
+        fallback={
+          <p class="hint">
+            No probe since this service started — press Probe machines to dial them.
+          </p>
+        }
+      >
         {(answer) => (
           <>
-            <p class="hint">
-              {answer().source === null ? "No hosts file — local lanes only." : `From ${answer().source}.`}
+            <p class="hint venue-age">
+              {`Probed ${ago(answer().at, props.now)}` +
+                (answer().platforms.length === 0 ? ", every platform" : `, for ${answer().platforms.join(" ")}`) +
+                ". " +
+                (answer().source === null ? "No hosts file — local lanes only." : `From ${answer().source}.`)}
             </p>
             <For each={answer().warnings}>{(warning) => <p class="fault">{warning}</p>}</For>
             <ul class="tokens venues">
@@ -290,14 +208,14 @@ export function Machines(props: {
           <Field id="hold-checkout" label="Checkout" hint="The absolute path the hold is for.">
             <TextInput id="hold-checkout" value={checkout()} placeholder="/code/app" onValue={setCheckout} />
           </Field>
-          <Check id="no-wait" checked={noWait()} onChecked={setNoWait}>
+          <Toggle id="no-wait" checked={noWait()} onChecked={setNoWait}>
             Do not queue behind a holder (--no-wait)
-          </Check>
+          </Toggle>
           <div class="control-row">
-            <Button disabled={busy(control)} onClick={hold}>
+            <Button disabled={control.busy()} onClick={hold}>
               Hold
             </Button>
-            <Button disabled={busy(control)} onClick={release}>
+            <Button disabled={control.busy()} onClick={release}>
               Release
             </Button>
           </div>
@@ -342,7 +260,6 @@ function CatalogImport(props: { client: CiClient; call: Call }): JSX.Element {
   const control = createControl(props.call);
   const go = (): void => {
     const path = checkout().trim();
-    if (path === "") return control.refuse("odu: an import reads one checkout — type its absolute path");
     const dry = dryRun();
     control.run(
       props.client.procedures.catalog.import({
@@ -362,10 +279,10 @@ function CatalogImport(props: { client: CiClient; call: Call }): JSX.Element {
       <Field id="import-checkout" label="Checkout to import">
         <TextInput id="import-checkout" value={checkout()} placeholder="/code/app" onValue={setCheckout} />
       </Field>
-      <Check id="import-dry" checked={dryRun()} onChecked={setDryRun}>
+      <Toggle id="import-dry" checked={dryRun()} onChecked={setDryRun}>
         Dry run — report, change nothing
-      </Check>
-      <Button disabled={busy(control)} onClick={go}>
+      </Toggle>
+      <Button disabled={control.busy()} onClick={go}>
         Import
       </Button>
       <ControlAnswer control={control} />
@@ -378,11 +295,10 @@ function CatalogPrune(props: { client: CiClient; call: Call }): JSX.Element {
   const [dryRun, setDryRun] = createSignal(true);
   const control = createControl(props.call);
   const go = (): void => {
+    // Empty is the service's default; anything else is SENT, and the service
+    // refuses a retention that is not a positive whole number in its words.
     const raw = days().trim();
     const n = raw === "" ? null : Number(raw);
-    if (n !== null && (!Number.isInteger(n) || n <= 0)) {
-      return control.refuse(`odu: retention needs a positive whole number of days (got "${raw}")`);
-    }
     const dry = dryRun();
     control.run(
       props.client.procedures.catalog.prune({
@@ -401,12 +317,20 @@ function CatalogPrune(props: { client: CiClient; call: Call }): JSX.Element {
       <h3>Expire old runs</h3>
       <p class="hint">Finished runs past the window leave the catalog; a run with a live owner never does.</p>
       <Field id="prune-days" label="Retention (days)" hint="Empty means the default, 30.">
-        <TextInput id="prune-days" value={days()} placeholder="30" onValue={setDays} />
+        <input
+          id="prune-days"
+          type="number"
+          class="input"
+          step="1"
+          value={days()}
+          placeholder="30"
+          onInput={(event) => setDays(event.currentTarget.value)}
+        />
       </Field>
-      <Check id="prune-dry" checked={dryRun()} onChecked={setDryRun}>
+      <Toggle id="prune-dry" checked={dryRun()} onChecked={setDryRun}>
         Dry run — report, change nothing
-      </Check>
-      <Button disabled={busy(control)} onClick={go}>
+      </Toggle>
+      <Button disabled={control.busy()} onClick={go}>
         Prune
       </Button>
       <ControlAnswer control={control} />
@@ -423,7 +347,6 @@ function Protect(props: { client: CiClient; call: Call }): JSX.Element {
   const control = createControl(props.call);
   const go = (): void => {
     const path = checkout().trim();
-    if (path === "") return control.refuse("odu: protection is read off a checkout — type its absolute path");
     const names = tokens(platforms());
     control.run(
       props.client.procedures.protect.apply({
@@ -455,13 +378,13 @@ function Protect(props: { client: CiClient; call: Call }): JSX.Element {
       <Field id="protect-platforms" label="Platforms" hint="Empty derives them from the service's hosts file.">
         <TextInput id="protect-platforms" value={platforms()} placeholder="x86_64-linux" onValue={setPlatforms} />
       </Field>
-      <Check id="protect-dry" checked={dryRun()} onChecked={setDryRun}>
+      <Toggle id="protect-dry" checked={dryRun()} onChecked={setDryRun}>
         Dry run — show the contexts, write nothing
-      </Check>
-      <Check id="protect-create" checked={create()} onChecked={setCreate}>
+      </Toggle>
+      <Toggle id="protect-create" checked={create()} onChecked={setCreate}>
         Create the ruleset if the branch has none (--create)
-      </Check>
-      <Button disabled={busy(control)} onClick={go}>
+      </Toggle>
+      <Button disabled={control.busy()} onClick={go}>
         Apply protection
       </Button>
       <ControlAnswer control={control} />

@@ -178,6 +178,63 @@ export function Field(props: {
   );
 }
 
+/** One line of free text, bound to a signal. The autofill and autocorrect
+ *  attributes are off because every one of these fields holds a path, a commit
+ *  or a selector — strings a phone keyboard's helpfulness silently corrupts. */
+export function TextInput(props: {
+  id: string;
+  value: string;
+  placeholder: string;
+  onValue: (value: string) => void;
+}): JSX.Element {
+  return (
+    <input
+      id={props.id}
+      type="text"
+      class="input"
+      value={props.value}
+      placeholder={props.placeholder}
+      spellcheck={false}
+      autocapitalize="off"
+      autocorrect="off"
+      onInput={(event) => props.onValue(event.currentTarget.value)}
+    />
+  );
+}
+
+/** A checkbox bound to a signal — `Toggle`'s box, and only that. */
+function CheckInput(props: {
+  id: string;
+  checked: boolean;
+  onChecked: (checked: boolean) => void;
+}): JSX.Element {
+  return (
+    <input
+      id={props.id}
+      type="checkbox"
+      checked={props.checked}
+      onChange={(event) => props.onChecked(event.currentTarget.checked)}
+    />
+  );
+}
+
+/** A labelled checkbox — the box and its words in one `<label for>`, so the
+ *  words toggle it and a screen reader announces them together. The create
+ *  form's options and the operations pages' switches are this one control. */
+export function Toggle(props: {
+  id: string;
+  checked: boolean;
+  onChecked: (checked: boolean) => void;
+  children: JSX.Element;
+}): JSX.Element {
+  return (
+    <label class="toggle" for={props.id}>
+      <CheckInput id={props.id} checked={props.checked} onChecked={props.onChecked} />
+      {props.children}
+    </label>
+  );
+}
+
 /** A coloured pill — a state, a verdict, a count. `hue` is the semantic name,
  *  never a colour: the stylesheet decides what "red" looks like. Typed as
  *  `StatusHue` rather than `string`, because the one place the vocabulary is

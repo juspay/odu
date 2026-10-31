@@ -26,7 +26,7 @@
  */
 
 import { createSignal, For, Show, type JSX } from "solid-js";
-import { Button, Field, Receipt } from "./dom";
+import { Button, Field, Receipt, TextInput, Toggle } from "./dom";
 import type { Pipeline } from "./types";
 
 /** What the caller filled in. Every optional field is left ABSENT rather than
@@ -71,45 +71,6 @@ export type CreateState =
  *  trailing space leaves behind. */
 function tokens(raw: string): string[] {
   return raw.split(/\s+/).filter((token) => token !== "");
-}
-
-/** One line of free text, bound to a signal. The autofill and autocorrect
- *  attributes are off because every one of these fields holds a path, a commit
- *  or a selector — strings a phone keyboard's helpfulness silently corrupts. */
-function TextInput(props: {
-  id: string;
-  value: string;
-  placeholder: string;
-  onValue: (value: string) => void;
-}): JSX.Element {
-  return (
-    <input
-      id={props.id}
-      type="text"
-      class="input"
-      value={props.value}
-      placeholder={props.placeholder}
-      spellcheck={false}
-      autocapitalize="off"
-      autocorrect="off"
-      onInput={(event) => props.onValue(event.currentTarget.value)}
-    />
-  );
-}
-
-function CheckInput(props: {
-  id: string;
-  checked: boolean;
-  onChecked: (checked: boolean) => void;
-}): JSX.Element {
-  return (
-    <input
-      id={props.id}
-      type="checkbox"
-      checked={props.checked}
-      onChange={(event) => props.onChecked(event.currentTarget.checked)}
-    />
-  );
 }
 
 export function Create(props: {
@@ -249,26 +210,21 @@ export function Create(props: {
         </Field>
         <fieldset class="toggles">
           <legend>Options</legend>
-          <label class="toggle" for="no-deps">
-            <CheckInput id="no-deps" checked={noDeps()} onChecked={setNoDeps} />
+          <Toggle id="no-deps" checked={noDeps()} onChecked={setNoDeps}>
             Run only the named recipes, not what they need (--no-deps)
-          </label>
-          <label class="toggle" for="no-strict">
-            <CheckInput id="no-strict" checked={noStrict()} onChecked={setNoStrict} />
+          </Toggle>
+          <Toggle id="no-strict" checked={noStrict()} onChecked={setNoStrict}>
             Run the working tree as it stands (--no-strict)
-          </label>
-          <label class="toggle" for="no-post">
-            <CheckInput id="no-post" checked={noPost()} onChecked={setNoPost} />
+          </Toggle>
+          <Toggle id="no-post" checked={noPost()} onChecked={setNoPost}>
             Do not post GitHub commit statuses (--no-post)
-          </label>
-          <label class="toggle" for="supersede">
-            <CheckInput id="supersede" checked={supersede()} onChecked={setSupersede} />
+          </Toggle>
+          <Toggle id="supersede" checked={supersede()} onChecked={setSupersede}>
             Take the checkout from a run already live in it (--supersede)
-          </label>
-          <label class="toggle" for="linger">
-            <CheckInput id="linger" checked={linger()} onChecked={setLinger} />
+          </Toggle>
+          <Toggle id="linger" checked={linger()} onChecked={setLinger}>
             Keep the run answerable after it settles (linger)
-          </label>
+          </Toggle>
         </fieldset>
         {/* A READ, beside the submit rather than instead of it: what this
             checkout would run, before anything runs. */}

@@ -23,14 +23,14 @@
  *     The shell DRAWS it for an owner; the row REFUSES everyone else on its own.
  */
 
-import { ago } from "@odu/cordis/format";
+import { createControl } from "@odu/cordis/control";
+import { ago, refusalText } from "@odu/cordis/format";
 import type { SurfaceClient } from "@kolu/surface/solid";
 import type { Effect } from "effect";
 import {
   createResource,
   createSignal,
   For,
-  onCleanup,
   Match,
   Show,
   Switch,
@@ -133,11 +133,6 @@ type Readings =
     }
   | { readonly ok: false; readonly message: string };
 
-/** A refusal as a sentence. */
-function refusalText(err: unknown): string {
-  const message = (err as { message?: unknown })?.message;
-  return typeof message === "string" ? message : String(err);
-}
 
 /** How a token's life reads, in one phrase. */
 function tokenLife(token: AuthToken, now: number): string {
@@ -182,48 +177,42 @@ export function ProfileFace(props: ProfileFaceProps): JSX.Element {
   const [mintedId, setMintedId] = createSignal<string | null>(null);
   const [mintedToken, setMintedToken] = createSignal<string | null>(null);
   const [name, setName] = createSignal("");
-  const [busy, setBusy] = createSignal(false);
-  const [failure, setFailure] = createSignal<string | null>(null);
+  const control = createControl(props.call);
 
+  /** The name is sent as typed: the ROW refuses an empty one in its own words
+   *  — a button that greys out says nothing about why. */
   const create = (): void => {
-    const label = name().trim();
-    if (label === "") return;
-    setBusy(true);
-    setFailure(null);
-    void props.call(props.client.procedures.token.create({ name: label })).then(
+    control.run(
+      props.client.procedures.token.create({ name: name().trim() }),
       (answer) => {
-        setBusy(false);
         setName("");
         setMintedId(answer.facts.id);
         setMintedToken(answer.token);
-        void refetch();
+        return `Created ${answer.facts.name}.`;
       },
-      (err: unknown) => {
-        setBusy(false);
-        setFailure(refusalText(err));
-      },
+      () => void refetch(),
     );
   };
 
   const revoke = (id: string): void => {
-    setFailure(null);
-    void props.call(props.client.procedures.token.revoke({ id })).then(
+    control.run(
+      props.client.procedures.token.revoke({ id }),
       () => {
         if (mintedId() === id) {
           setMintedId(null);
           setMintedToken(null);
         }
-        void refetch();
+        return `Revoked ${id}.`;
       },
-      (err: unknown) => setFailure(refusalText(err)),
+      () => void refetch(),
     );
   };
 
   const endSession = (id: string): void => {
-    setFailure(null);
-    void props.call(props.client.procedures.session.end({ id })).then(
+    control.run(
+      props.client.procedures.session.end({ id }),
+      () => "Ended that session — its connections stop being served.",
       () => void refetch(),
-      (err: unknown) => setFailure(refusalText(err)),
     );
   };
 
@@ -254,7 +243,7 @@ export function ProfileFace(props: ProfileFaceProps): JSX.Element {
         </Show>
       </h2>
 
-      <Show when={failure()}>{(message) => <p class="fault">{message()}</p>}</Show>
+      <Show when={control.fault()}>{(message) => <p class="fault">{message()}</p>}</Show>
       <Show when={refusal()}>{(message) => <p class="fault">{message()}</p>}</Show>
 
       <Show when={mintedToken()}>
@@ -278,13 +267,14 @@ export function ProfileFace(props: ProfileFaceProps): JSX.Element {
           <span class="sr-only">token name</span>
           <input
             type="text"
+            class="input"
             placeholder="token name, e.g. laptop"
             value={name()}
             onInput={(event) => setName(event.currentTarget.value)}
           />
         </label>
-        <button type="button" disabled={busy() || name().trim() === ""} onClick={create}>
-          {busy() ? "creating…" : "Create token"}
+        <button type="button" class="btn btn-primary" disabled={control.busy()} onClick={create}>
+          {control.busy() ? "creating…" : "Create token"}
         </button>
       </div>
       <Show when={tokens().length > 0} fallback={<p class="hint">No tokens yet.</p>}>
@@ -353,6 +343,20 @@ function personLife(person: AuthPerson, now: number): string {
     : `${role} · last seen ${ago(person.lastSeen, now)}`;
 }
 
+/** The three roles as options, the held one SELECTED on the option itself —
+ *  so no select's `value` races the options it names. */
+function RoleOptions(props: { held: RoleName }): JSX.Element {
+  return (
+    <For each={ROLES}>
+      {(one) => (
+        <option value={one} selected={one === props.held}>
+          {one}
+        </option>
+      )}
+    </For>
+  );
+}
+
 export interface PeopleFaceProps {
   client: AuthClient;
   call: <A>(effect: Effect.Effect<A, unknown>) => Promise<A>;
@@ -383,49 +387,24 @@ export function PeopleFace(props: PeopleFaceProps): JSX.Element {
 
   const [login, setLogin] = createSignal("");
   const [role, setRole] = createSignal<RoleName>("member");
-  const [busy, setBusy] = createSignal(false);
-  const [failure, setFailure] = createSignal<string | null>(null);
-  const [done, setDone] = createSignal<string | null>(null);
-  // A grant answered after the page closed writes nowhere.
-  let live = true;
-  onCleanup(() => {
-    live = false;
-  });
+  const control = createControl(props.call);
 
+  /** One grant — from the form, or from a row's select. The login is sent as
+   *  typed, empty included: the ROW refuses it (and a demotion of the last
+   *  owner) in its own words, and that sentence is what the page shows. The
+   *  list is re-read on either answer, so a refused change does not leave a
+   *  select showing a role the daemon does not hold. */
   const grant = (who: string, to: RoleName): void => {
-    const name = who.trim();
-    // Refused ON CLICK, in the row's voice — never a dead button.
-    if (name === "") {
-      setDone(null);
-      setFailure("odu: a grant needs a GitHub login — type one in the box");
-      return;
-    }
-    setBusy(true);
-    setFailure(null);
-    setDone(null);
-    void props
+    control.run(
       // `rootToken` is the bootstrap's and is ignored for a signed-in caller:
       // this page is only ever an owner's session.
-      .call(props.client.procedures.user.grant({ login: name, role: to, rootToken: "" }))
-      .then(
-        (answer) => {
-          if (!live) return;
-          setBusy(false);
-          setLogin("");
-          setDone(
-            `${answer.login} is now ${answer.role} — it takes effect at their next connection.`,
-          );
-          void refetch();
-        },
-        (err: unknown) => {
-          if (!live) return;
-          setBusy(false);
-          setFailure(refusalText(err));
-          // A refused change leaves a row's select showing a role the daemon
-          // does not hold: re-read, so every row says what is true.
-          void refetch();
-        },
-      );
+      props.client.procedures.user.grant({ login: who.trim(), role: to, rootToken: "" }),
+      (answer) => {
+        setLogin("");
+        return `${answer.login} is now ${answer.role} — it takes effect at their next connection.`;
+      },
+      () => void refetch(),
+    );
   };
 
   const listed = (): readonly AuthPerson[] => {
@@ -455,6 +434,7 @@ export function PeopleFace(props: PeopleFaceProps): JSX.Element {
           <span class="sr-only">GitHub login</span>
           <input
             type="text"
+            class="input"
             placeholder="GitHub login, e.g. octocat"
             value={login()}
             onInput={(event) => setLogin(event.currentTarget.value)}
@@ -463,25 +443,28 @@ export function PeopleFace(props: PeopleFaceProps): JSX.Element {
         <label class="field-inline">
           <span>role</span>
           <select
+            class="input"
             aria-label="role to grant"
-            value={role()}
             onChange={(event) => {
               const value = event.currentTarget.value;
               if (isRole(value)) setRole(value);
             }}
           >
-            <option value="member">member</option>
-            <option value="admin">admin</option>
-            <option value="owner">owner</option>
+            <RoleOptions held={role()} />
           </select>
         </label>
-        <button type="button" disabled={busy()} onClick={() => grant(login(), role())}>
-          {busy() ? "granting…" : "Grant"}
+        <button
+          type="button"
+          class="btn btn-primary"
+          disabled={control.busy()}
+          onClick={() => grant(login(), role())}
+        >
+          {control.busy() ? "granting…" : "Grant"}
         </button>
       </div>
 
-      <Show when={failure()}>{(message) => <p class="fault">{message()}</p>}</Show>
-      <Show when={done()}>{(message) => <p class="hint done">{message()}</p>}</Show>
+      <Show when={control.fault()}>{(message) => <p class="fault">{message()}</p>}</Show>
+      <Show when={control.done()}>{(message) => <p class="hint done">{message()}</p>}</Show>
       <Show when={refusal()}>{(message) => <p class="fault">{message()}</p>}</Show>
 
       <h3>Who is in</h3>
@@ -505,17 +488,15 @@ export function PeopleFace(props: PeopleFaceProps): JSX.Element {
                     choosing another one grants it at once, and the list is
                     re-read so the row says what the daemon now holds. */}
                 <select
+                  class="input"
                   aria-label={`role of ${person.login}`}
-                  value={person.role}
-                  disabled={busy()}
+                  disabled={control.busy()}
                   onChange={(event) => {
                     const value = event.currentTarget.value;
                     if (isRole(value) && value !== person.role) grant(person.login, value);
                   }}
                 >
-                  <option value="member">member</option>
-            <option value="admin">admin</option>
-            <option value="owner">owner</option>
+                  <RoleOptions held={person.role} />
                 </select>
               </li>
             )}

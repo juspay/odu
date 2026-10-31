@@ -36,7 +36,8 @@
  * the row on its own — never one check standing in for the other.
  */
 
-import { ago, bytes } from "@odu/cordis/format";
+import { createControl, type Control } from "@odu/cordis/control";
+import { ago, bytes, refusalText } from "@odu/cordis/format";
 import type { SurfaceClient } from "@kolu/surface/solid";
 import type { Effect } from "effect";
 import {
@@ -57,7 +58,10 @@ import {
   type CacheToken,
   oduCacheSurface,
   PATH_PAGE_SIZE,
+  pushBlock,
   useBlock,
+  useCommand,
+  type CacheScope,
 } from "./surface";
 
 type CacheSpec = (typeof oduCacheSurface)["spec"];
@@ -128,6 +132,7 @@ export function CacheFace(props: CacheFaceProps): JSX.Element {
           <span class="sr-only">root token</span>
           <input
             type="password"
+            class="input"
             autocomplete="off"
             placeholder="root token ($ODU_ROOT_TOKEN) — what this daemon's administration checks"
             value={rootToken()}
@@ -161,11 +166,6 @@ export function CacheFace(props: CacheFaceProps): JSX.Element {
   );
 }
 
-/** THE SENTENCE AN EMPTY NAME GETS, in the row's own voice. The button is not
- *  greyed out for it: a dead control does not say why, and this does. */
-export const EMPTY_NAME_FAULT =
-  "odu: a bucket needs a name — type one in the box, e.g. my-project";
-
 /** WHY THE UPSTREAM SWITCH EXISTS, in the docs' one line: a store that did not
  *  build the paths never holds nixpkgs, so a bucket that skips upstream paths
  *  makes every push wait at 202 for referrers that will never arrive. */
@@ -179,50 +179,35 @@ export const UPSTREAM_HINT =
  *
  * A name, and the one creation fact a deployment needs — the upstream switch,
  * on by default — beside the two it is created with (public, ninety days of
- * retention). The button is ENABLED whenever this control is drawn: an empty
- * name is refused on click with a `fault` line like every refusal the row
- * sends, because a person reads a reason and cannot read a grey button.
+ * retention). The button is ENABLED whenever this control is drawn: the name
+ * is sent as typed, empty included, and the ROW's refusal is what the person
+ * reads — one rule, in one place, rather than a face's copy of it.
  */
 function CreateBucket(
   props: AdminProps & { onCreated: (bucket: string | null) => void },
 ): JSX.Element {
   const [name, setName] = createSignal("");
   const [upstream, setUpstream] = createSignal(true);
-  const [busy, setBusy] = createSignal(false);
-  const [failure, setFailure] = createSignal<string | null>(null);
+  const control = createControl(props.call);
   const create = (): void => {
-    const bucket = name().trim();
-    if (bucket === "") {
-      setFailure(EMPTY_NAME_FAULT);
-      return;
-    }
-    setBusy(true);
-    setFailure(null);
-    void props
-      .call(
-        props.client.procedures.bucket.create({
-          // The row ignores this for a signed-in admin (its role authorises the
-          // call); only a local owner's token is compared.
-          rootToken: props.rootToken(),
-          name: bucket,
-          public: true,
-          retentionDays: 90,
-          // ON is the row's own default (nixpkgs' key), so it is left ABSENT;
-          // OFF is the empty list, exactly what `--no-upstream` sends.
-          ...(upstream() ? {} : { upstreamKeys: [] }),
-        }),
-      )
-      .then(
-        (created) => {
-          setBusy(false);
-          setName("");
-          props.onCreated(created.name);
-        },
-        (err: unknown) => {
-          setBusy(false);
-          setFailure(refusalText(err));
-        },
-      );
+    control.run(
+      props.client.procedures.bucket.create({
+        // The row ignores this for a signed-in admin (its role authorises the
+        // call); only a local owner's token is compared.
+        rootToken: props.rootToken(),
+        name: name().trim(),
+        public: true,
+        retentionDays: 90,
+        // ON is the row's own default (nixpkgs' key), so it is left ABSENT;
+        // OFF is the empty list, exactly what `--no-upstream` sends.
+        ...(upstream() ? {} : { upstreamKeys: [] }),
+      }),
+      (created) => {
+        setName("");
+        props.onCreated(created.name);
+        return `Created ${created.name}.`;
+      },
+    );
   };
   return (
     <div class="cache-create">
@@ -230,6 +215,7 @@ function CreateBucket(
         <span class="sr-only">new bucket name</span>
         <input
           type="text"
+          class="input"
           placeholder="new bucket name"
           value={name()}
           onInput={(event) => setName(event.currentTarget.value)}
@@ -244,10 +230,10 @@ function CreateBucket(
         Skip upstream paths
       </label>
       <p class="hint">{UPSTREAM_HINT}</p>
-      <button type="button" disabled={busy()} onClick={create}>
-        {busy() ? "creating…" : "Create bucket"}
+      <button type="button" class="btn btn-primary" disabled={control.busy()} onClick={create}>
+        {control.busy() ? "creating…" : "Create bucket"}
       </button>
-      <Show when={failure()}>{(message) => <p class="fault">{message()}</p>}</Show>
+      <Answer control={control} />
     </div>
   );
 }
@@ -369,18 +355,6 @@ type FirstPage =
       readonly page: { readonly paths: readonly CachePath[]; readonly next?: string };
     }
   | { readonly ok: false; readonly message: string };
-
-/** A refusal as a sentence. The service's refusals are already written for a
- *  person; this only adds the recovery when the error carries one. */
-function refusalText(err: unknown): string {
-  const value = err as { message?: unknown; suggestion?: unknown };
-  const message =
-    typeof value?.message === "string" ? value.message : String(err);
-  const suggestion = Array.isArray(value?.suggestion)
-    ? ` Try: ${(value.suggestion as unknown[]).map(String).join(" ")}`
-    : "";
-  return `${message}${suggestion}`;
-}
 
 /** How long the filter waits for the typing to stop before it asks. Short
  *  enough that a pause reads as an answer, long enough that a word typed at
@@ -542,6 +516,12 @@ function BucketPage(
     return answer !== undefined && answer.ok ? (answer.page.next ?? null) : null;
   });
 
+  /** THE TOKEN JUST MINTED HERE, held by the page so the push block can show
+   *  it in its one showing. It belongs to ONE bucket: opening another clears
+   *  it rather than printing this bucket's secret under that one's name. */
+  const [minted, setMinted] = createSignal<Minted | null>(null);
+  createEffect(on(() => props.name, () => setMinted(null), { defer: true }));
+
   /** The bucket's row, from the same subscription the list reads. */
   const held = props.client.collections.buckets.use();
   const bucket = createMemo<CacheBucket | undefined>(() => held.byKey(props.name)?.());
@@ -582,11 +562,33 @@ function BucketPage(
                   : `skips ${row().upstreamKeys.join(", ")}`}
               </span>
             </p>
-            {/* THE BLOCK A PERSON PASTES, from the same function `odu cache use`
-                prints it with — the page cannot know a home directory, so it
-                names `~`. */}
-            <pre class="use-block">
+            {/* HOW TO USE THIS BUCKET, in two blocks a person copies: reading
+                from it, and pushing to it. Both come from the contract's own
+                functions — `odu cache use` prints the first, and the docs quote
+                the second — so the page, the terminal and the docs cannot say
+                three different things. */}
+            <h3>Use it</h3>
+            <p class="hint">
+              The lines for a Nix client — or let a terminal print them:{" "}
+              <code>{useCommand(props.name)}</code>
+            </p>
+            <pre class="use-block consume-block">
               {useBlock({ url: row().url, publicKey: row().publicKey, home: null })}
+            </pre>
+            <h3>Push to it</h3>
+            <p class="hint">
+              {minted()?.scope === "write"
+                ? "With the write token you just minted — paste it into your build's secrets now; it is not shown again."
+                : props.canAdminister
+                  ? "Mint a write token below, and this block fills it in while it can be shown."
+                  : "With a write token an admin of this server mints for you."}{" "}
+              A GitHub Actions step comes with PR 3.
+            </p>
+            <pre class="use-block push-block">
+              {pushBlock({
+                url: row().url,
+                token: minted()?.scope === "write" ? (minted()?.token ?? null) : null,
+              })}
             </pre>
           </>
         )}
@@ -602,6 +604,8 @@ function BucketPage(
             client={props.client}
             call={props.call}
             rootToken={props.rootToken}
+            minted={minted()}
+            onMinted={setMinted}
             name={name}
             now={props.now}
           />
@@ -613,6 +617,7 @@ function BucketPage(
           <span class="sr-only">filter paths</span>
           <input
             type="search"
+            class="input"
             placeholder="filter by path, e.g. openssl"
             value={typed()}
             onInput={(event) => setTyped(event.currentTarget.value)}
@@ -675,59 +680,12 @@ function BucketPage(
 
 // ── a bucket's administration ───────────────────────────────────────────────
 
-/**
- * ONE CONTROL'S STORY: busy, then a receipt or a refusal — and nothing after the
- * control is gone. Owned by the component that made it: `onCleanup` retires it,
- * so an answer that lands after the bucket page closed writes nowhere.
- */
-function createAction(call: AdminProps["call"]): {
-  readonly busy: () => boolean;
-  readonly fault: () => string | null;
-  readonly done: () => string | null;
-  readonly refuse: (message: string) => void;
-  readonly run: <A>(effect: Effect.Effect<A, unknown>, ok: (value: A) => string) => void;
-} {
-  const [busy, setBusy] = createSignal(false);
-  const [fault, setFault] = createSignal<string | null>(null);
-  const [done, setDone] = createSignal<string | null>(null);
-  let live = true;
-  onCleanup(() => {
-    live = false;
-  });
-  return {
-    busy,
-    fault,
-    done,
-    refuse: (message) => {
-      setDone(null);
-      setFault(message);
-    },
-    run: (effect, ok) => {
-      setBusy(true);
-      setFault(null);
-      setDone(null);
-      void call(effect).then(
-        (value) => {
-          if (!live) return;
-          setBusy(false);
-          setDone(ok(value));
-        },
-        (err: unknown) => {
-          if (!live) return;
-          setBusy(false);
-          setFault(refusalText(err));
-        },
-      );
-    },
-  };
-}
-
 /** What a control answered, drawn the one way every answer on this page is. */
-function Answer(props: { action: ReturnType<typeof createAction> }): JSX.Element {
+function Answer(props: { control: Control }): JSX.Element {
   return (
     <>
-      <Show when={props.action.fault()}>{(message) => <p class="fault">{message()}</p>}</Show>
-      <Show when={props.action.done()}>{(message) => <p class="hint done">{message()}</p>}</Show>
+      <Show when={props.control.fault()}>{(message) => <p class="fault">{message()}</p>}</Show>
+      <Show when={props.control.done()}>{(message) => <p class="hint done">{message()}</p>}</Show>
     </>
   );
 }
@@ -753,7 +711,22 @@ function tokenLife(token: CacheToken, now: number): string {
  * on its own; each section reads or writes through the shell's edge and owns
  * its answers, so a refusal in one is not painted over another.
  */
-function BucketAdmin(props: AdminProps & { name: string; now: number }): JSX.Element {
+/** A token minted on this page, while its plaintext can still be shown. */
+interface Minted {
+  readonly id: string;
+  readonly token: string;
+  readonly scope: CacheScope;
+}
+
+type TokenProps = AdminProps & {
+  name: string;
+  now: number;
+  /** Held by the PAGE, so the push block above can fill it in. */
+  minted: Minted | null;
+  onMinted: (minted: Minted | null) => void;
+};
+
+function BucketAdmin(props: TokenProps): JSX.Element {
   return (
     <div class="bucket-admin">
       <BucketTokens {...props} />
@@ -765,11 +738,11 @@ function BucketAdmin(props: AdminProps & { name: string; now: number }): JSX.Ele
 }
 
 /** `token.mint`, `token.list`, `token.revoke` for this bucket. */
-function BucketTokens(props: AdminProps & { name: string; now: number }): JSX.Element {
+function BucketTokens(props: TokenProps): JSX.Element {
   const [scope, setScope] = createSignal<"write" | "read">("write");
-  /** The token just minted — the ONE time its plaintext can be read. */
-  const [minted, setMinted] = createSignal<{ id: string; token: string } | null>(null);
-  const action = createAction(props.call);
+  const minted = (): Minted | null => props.minted;
+  const setMinted = props.onMinted;
+  const action = createControl(props.call);
 
   const [tokens, { refetch }] = createResource(
     () => props.name,
@@ -802,7 +775,7 @@ function BucketTokens(props: AdminProps & { name: string; now: number }): JSX.El
         scope: chosen,
       }),
       (answer) => {
-        setMinted({ id: answer.facts.id, token: answer.token });
+        setMinted({ id: answer.facts.id, token: answer.token, scope: answer.facts.scope });
         void refetch();
         return `Minted a ${chosen} token for ${props.name}.`;
       },
@@ -826,6 +799,7 @@ function BucketTokens(props: AdminProps & { name: string; now: number }): JSX.El
         <label class="field-inline">
           <span>scope</span>
           <select
+            class="input"
             aria-label="token scope"
             value={scope()}
             onChange={(event) => setScope(event.currentTarget.value === "read" ? "read" : "write")}
@@ -834,11 +808,11 @@ function BucketTokens(props: AdminProps & { name: string; now: number }): JSX.El
             <option value="read">read — substitute</option>
           </select>
         </label>
-        <button type="button" disabled={action.busy()} onClick={mint}>
+        <button type="button" class="btn btn-primary" disabled={action.busy()} onClick={mint}>
           {action.busy() ? "working…" : "Mint token"}
         </button>
       </div>
-      <Answer action={action} />
+      <Answer control={action} />
       <Show when={minted()}>
         {(held) => (
           <div class="minted">
@@ -901,15 +875,12 @@ function pathsOf(raw: string): string[] {
 function BucketPin(props: AdminProps & { name: string }): JSX.Element {
   const [pin, setPin] = createSignal("");
   const [paths, setPaths] = createSignal("");
-  const action = createAction(props.call);
+  const action = createControl(props.call);
   const create = (): void => {
+    // Sent as typed, empty included: the ROW refuses a nameless or pathless
+    // pin in its own words, and that is what the person reads.
     const name = pin().trim();
     const roots = pathsOf(paths());
-    // Refused ON CLICK, in the row's voice — the same rule as the bucket form.
-    if (name === "") return action.refuse("odu: a pin needs a name — e.g. release-1.2");
-    if (roots.length === 0) {
-      return action.refuse("odu: a pin needs at least one store path to keep");
-    }
     action.run(
       props.client.procedures.pin.create({
         rootToken: props.rootToken(),
@@ -931,6 +902,7 @@ function BucketPin(props: AdminProps & { name: string }): JSX.Element {
         <span class="sr-only">pin name</span>
         <input
           type="text"
+          class="input"
           placeholder="pin name, e.g. release-1.2"
           value={pin()}
           onInput={(event) => setPin(event.currentTarget.value)}
@@ -939,23 +911,24 @@ function BucketPin(props: AdminProps & { name: string }): JSX.Element {
       <label class="search">
         <span class="sr-only">store paths to pin</span>
         <textarea
+          class="input"
           rows={3}
           placeholder="/nix/store/… — one or more, space or newline separated"
           value={paths()}
           onInput={(event) => setPaths(event.currentTarget.value)}
         />
       </label>
-      <button type="button" disabled={action.busy()} onClick={create}>
+      <button type="button" class="btn btn-primary" disabled={action.busy()} onClick={create}>
         {action.busy() ? "pinning…" : "Pin closure"}
       </button>
-      <Answer action={action} />
+      <Answer control={action} />
     </section>
   );
 }
 
 /** `gc.run`, for this bucket. */
 function BucketGc(props: AdminProps & { name: string }): JSX.Element {
-  const action = createAction(props.call);
+  const action = createControl(props.call);
   const collect = (): void => {
     action.run(
       props.client.procedures.gc.run({ rootToken: props.rootToken(), bucket: props.name }),
@@ -970,10 +943,10 @@ function BucketGc(props: AdminProps & { name: string }): JSX.Element {
       <p class="hint">
         Evicts what retention expired AND nothing retained references AND no pin holds.
       </p>
-      <button type="button" disabled={action.busy()} onClick={collect}>
+      <button type="button" class="btn" disabled={action.busy()} onClick={collect}>
         {action.busy() ? "collecting…" : "Run GC"}
       </button>
-      <Answer action={action} />
+      <Answer control={action} />
     </section>
   );
 }
