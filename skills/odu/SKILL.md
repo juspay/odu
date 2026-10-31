@@ -297,7 +297,10 @@ And say `passed` only from `settled: true`.
 
 The same vocabulary reaches everything else odu does. These used to be local
 commands that each did their own work in your process — which meant an agent
-and a browser simply could not do them at all.
+and a browser simply could not do them at all. Now every one of them also has a
+board control (Machines, Maintenance, New run's Preview pipeline, the Cache
+view, People), so a person you hand the result to can repeat it without a
+terminal.
 
 | Verb | argv | MCP tool | Input | Answers |
 | --- | --- | --- | --- | --- |
