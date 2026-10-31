@@ -188,7 +188,9 @@ On GitHub's **New GitHub App** form, set:
 | **Permissions → Account → Email addresses** | **Read-only** |
 | **Where can this GitHub App be installed?** | **Any account** |
 
-Then **Generate a new client secret** on the App's page. Copy two things: the **Client ID** (top of the page) and the secret (shown once).
+Then **Generate a new client secret** — the App's **Credentials** tab in the left sidebar, section **Client secrets**. Copy two things: the **Client ID** (top of the page) and the secret (shown once).
+
+GitHub's banner also says a **private key** must be generated before the App can be installed. This release does not read that key — only the Client ID and the client secret — so it is needed only when the allow-list has an `org:` or `team:` rule, which requires the App to be installed on that organisation; keep the downloaded `.pem` somewhere safe for later releases.
 
 ### Install it
 
