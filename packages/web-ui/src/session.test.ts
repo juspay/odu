@@ -9,7 +9,7 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import { holds, principalOf, showsBoard } from "./app";
+import { doorAfterAnswer, holds, principalOf, showsBoard } from "./app";
 
 const MEMBER = { kind: "user", login: "srid", role: "member" } as const;
 const ADMIN = { kind: "user", login: "srid", role: "admin" } as const;
@@ -52,6 +52,21 @@ describe("with a door", () => {
 
   it("grants an admin the admin floor", () => {
     expect(holds(principalOf(true, ADMIN), "admin")).toBe(true);
+  });
+});
+
+describe("re-asking the door", () => {
+  it("keeps the door a page already knew when the re-ask fails", () => {
+    // A host that cannot be reached has not answered: the wire says so, and the
+    // board stays. Otherwise a dropped connection removes every run control.
+    expect(doorAfterAnswer(true, null)).toBe(true);
+    expect(doorAfterAnswer(false, null)).toBe(false);
+    expect(doorAfterAnswer(null, null)).toBeNull();
+  });
+
+  it("takes the answer when there is one", () => {
+    expect(doorAfterAnswer(true, false)).toBe(false);
+    expect(doorAfterAnswer(false, true)).toBe(true);
   });
 });
 

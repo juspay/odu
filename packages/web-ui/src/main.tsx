@@ -25,7 +25,7 @@ import { SERVICE_DOOR_PATH } from "@odu/cordis/services";
 import { oduServiceSurface } from "@odu/service-client/surface";
 import { createSignal } from "solid-js";
 import { render } from "solid-js/web";
-import { App, type DoorState } from "./app";
+import { App, doorAfterAnswer, type DoorState } from "./app";
 
 const root = document.getElementById("odu");
 if (root === null) {
@@ -85,7 +85,12 @@ render(
         // The shell decides WHEN (a live wire); this file answers HOW (a host
         // route, which the fence keeps out of every other file).
         redialDoor={() => {
-          void doorMounted().then(setDoor);
+          // A failed re-ask keeps the door the page already knows: an
+          // unreachable host is the wire indicator's news, not a reason to
+          // take the board away.
+          void doorMounted().then((answer) => {
+            setDoor((known) => doorAfterAnswer(known, answer));
+          });
         }}
         // The framework's readout is an accessor; read HERE, inside the render
         // root, so the compiler makes it a getter on `App`'s props and the

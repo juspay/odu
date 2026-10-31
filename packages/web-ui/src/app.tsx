@@ -98,6 +98,14 @@ export function holds(principal: Principal | null, floor: Role): boolean {
 
 /** May the board be drawn? With no door it always may; with one, only for a
  *  person who is not anonymous; with an unknown door, not until it answers. */
+/** THE DOOR AFTER AN ANSWER. A re-ask that could not reach the host is not an
+ *  answer — the wire already says the connection is down — so a door the page
+ *  already knew stays known rather than going back to unknown and taking the
+ *  board with it. */
+export function doorAfterAnswer(known: DoorState, answer: DoorState): DoorState {
+  return answer === null ? known : answer;
+}
+
 export function showsBoard(door: DoorState, who: Who | null): boolean {
   if (door === false) return true;
   if (door === null) return false;
