@@ -1,19 +1,27 @@
-# Build odu's outputs and push their closures to odu's OWN cache
-# (https://cache.kolu.dev, the `kolu` bucket on the public pod) — the cache the
-# flake's `nixConfig` substitutes from — and then publish the lane runner
-# CONTENT-ADDRESSED, so a dial from a published revision has the host pull its
-# own build with NO trust (`@kolu/surface-remote`'s `provisionAgent` index step;
-# the publisher is `juspay/kolu`'s `publish-closure` action, pinned to the kolu
-# revision odu pins in `npins/sources.json`).
+# Build odu's outputs and push their closures to odu's OWN cache bucket, and
+# then publish the lane runner CONTENT-ADDRESSED, so a dial from a published
+# revision has the host pull its own build with NO trust
+# (`@kolu/surface-remote`'s `provisionAgent` index step; the publisher is
+# `juspay/kolu`'s `publish-closure` action, pinned to the kolu revision odu
+# pins in `npins/sources.json`).
+#
+# TWO ORIGINS, ON PURPOSE: the flake ADVERTISES `https://cache.kolu.dev`, and
+# until this PR deploys and that name is set neither job can talk to it. Both
+# jobs therefore PUSH to the pod's live address,
+# `https://odu-k3s.rooster-blues.ts.net` (the same daemon and the same `kolu`
+# bucket, public through Funnel today) — a substituter that does not answer yet
+# is a warning to Nix, not a failure. Two follow-ups, named in the PR: move the
+# push origin back to `cache.kolu.dev` once live, and re-pin kolu's odu so the
+# publish job chunks too. Nothing here depends on either.
 #
 # Two jobs, because they are two halves of one question with one ordering:
 # `build-and-push` warms the input-addressed cache a lane host substitutes from
 # (odu's own, with `odu cache push`), and `publish-closures` then rewrites from
 # that same tree and pushes to the SAME bucket: the agent source bakes
 # `pusher = { kind = "odu"; bucket = "kolu"; }` (kolu#2334), so the action runs
-# `odu cache push` under `ODU_CACHE_TOKEN` rather than attic. It must be its OWN
-# job: the action installs the Nix it rewrites with (2.34.8 — see its
-# `action.yml`), which has to be the job's only Nix.
+# `odu cache push` under `ODU_CACHE_TOKEN` and the checkout's own odu, which
+# chunks. It must be its OWN job: the action installs the Nix it rewrites with
+# (2.34.8 — see its `action.yml`), which has to be the job's only Nix.
 #
 # `odu`'s `ca-index` branch is born on the first master push. A pull request
 # rewrites, smokes and import-verifies, and writes no index.
@@ -75,11 +83,12 @@ jobs:
       # ODU PUSHES TO ITS OWN CACHE. `odu cache push` computes each closure,
       # asks the bucket what it is missing in one query, drops what an upstream
       # key signed (the server fetches those references itself), and chunks a
-      # NAR too large for one request — so this works through cache.kolu.dev's
-      # Cloudflare tunnel, whose proxy caps a body at 100 MB.
+      # NAR too large for one request. The ORIGIN is the pod's live name until
+      # `cache.kolu.dev` answers; the flake still advertises the latter.
       - name: Build odu's outputs, and push their closures
         env:
           ODU_CACHE_TOKEN: ${{ secrets.ODU_CACHE_TOKEN }}
+          PUSH_ORIGIN: https://odu-k3s.rooster-blues.ts.net
         run: |
           set -euo pipefail
           paths=$(nix build -L --no-link --print-out-paths --accept-flake-config \
@@ -100,7 +109,25 @@ jobs:
           fi
           odu="$(nix build .#odu --no-link --print-out-paths --accept-flake-config)/bin/odu"
           # shellcheck disable=SC2086 # the out-paths are a list
-          "$odu" cache push kolu --origin https://cache.kolu.dev $paths
+          "$odu" cache push kolu --origin "$PUSH_ORIGIN" $paths
+
+      - name: Bake the declaration the publisher is handed
+        env:
+          PUSH_ORIGIN: https://odu-k3s.rooster-blues.ts.net
+        run: |
+          set -euo pipefail
+          # THE ONE DECLARATION, with only its FIRST SUBSTITUTER moved: the
+          # action takes the push target from it (kolu#2334), so the live pod
+          # is named here while `flake.nix` keeps advertising `cache.kolu.dev`.
+          source=$(nix build .#agent-flake-source --no-link --print-out-paths --accept-flake-config)
+          mkdir -p "$RUNNER_TEMP/declaration"
+          jq --arg origin "$PUSH_ORIGIN" '.substituters = [$origin]' \
+            "$source/binary-cache.json" > "$RUNNER_TEMP/declaration/binary-cache.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cache-declaration-${{ matrix.os }}
+          path: ${{ runner.temp }}/declaration/binary-cache.json
 
   publish-closures:
     needs: build-and-push
@@ -118,6 +145,15 @@ jobs:
           # The same tree `build-and-push` warmed — see its `ref:` note.
           ref: ${{ github.event.pull_request.head.sha }}
 
+      # The declaration the publisher is handed, built by the job that had a
+      # Nix to bake it: the baked sidecar with its first substituter moved to
+      # the live pod. A sidecar is the action's own second spelling, so the
+      # action still reads one declaration rather than being told a URL.
+      - uses: actions/download-artifact@v4
+        with:
+          name: cache-declaration-${{ matrix.os }}
+          path: ${{ runner.temp }}/declaration
+
       # The action still takes a pinned nixpkgs for the client it may install;
       # the declaration's `pusher` chooses which client pushes.
       - id: inputs
@@ -132,12 +168,14 @@ jobs:
       # would (it serves until the pipe closes).
       #
       # The pin is kolu's merged head, which carries the `pusher` field the
-      # declaration now bakes (kolu#2334): the action pushes with
+      # declaration bakes (kolu#2334): the action pushes with
       # `odu cache push kolu` when the declaration says `{ kind = "odu"; … }`.
+      # WITH `sidecar`, installables are full flake installables, and the
+      # revision the entries are keyed under defaults to the published commit.
       - uses: juspay/kolu/.github/actions/publish-closure@fd831bb1c03db83dccebea90edff3d1fecf386e8
         with:
-          source: .#agent-flake-source
-          installables: odu-runner
+          sidecar: ${{ runner.temp }}/declaration/binary-cache.json
+          installables: .#odu-runner
           latest: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
           smoke: |
             odu-runner=bin/odu-runner --help
