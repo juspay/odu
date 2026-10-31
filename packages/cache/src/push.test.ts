@@ -71,6 +71,12 @@ interface Server {
   narStatus: Map<string, number>;
   /** Store paths whose narinfo answers 202 the first time it is asked. */
   deferOnce: Set<string>;
+  /** Store paths whose narinfo answers 202 every time — a hold nobody fixes. */
+  alwaysDefer: Set<string>;
+  /** How many `/missing` calls still answer the current list; `undefined`
+   *  means every call does. */
+  missingCalls: number;
+  missingOnlyFor: number | undefined;
   /** Answer a narinfo PUT that carries no preceding NAR with a 400 saying the
    *  bytes are gone — what a restarted server says. */
   narinfoOnlyRefusal: boolean;
@@ -86,6 +92,9 @@ function startServer(): Server {
     failNar: new Map(),
     narStatus: new Map(),
     deferOnce: new Set(),
+    alwaysDefer: new Set(),
+    missingCalls: 0,
+    missingOnlyFor: undefined,
     narinfoOnlyRefusal: false,
     missing: [LIBC, GLIBC, HELLO],
     skipped: [],
@@ -104,6 +113,10 @@ function startServer(): Server {
         body,
       });
       if (url.pathname.endsWith("/missing")) {
+        state.missingCalls += 1;
+        if (state.missingOnlyFor !== undefined && state.missingCalls > state.missingOnlyFor) {
+          return Response.json({ missing: [], skippedUpstream: [] });
+        }
         return Response.json({ missing: state.missing, skippedUpstream: state.skipped });
       }
       if (request.method === "PUT" && url.pathname.includes("/nar/")) {
@@ -119,8 +132,11 @@ function startServer(): Server {
       }
       if (request.method === "PUT" && url.pathname.endsWith(".narinfo")) {
         const hash = url.pathname.slice(url.pathname.lastIndexOf("/") + 1, -".narinfo".length);
-        if (state.deferOnce.delete(hash)) {
-          return new Response("waiting on a reference", { status: 202 });
+        if (state.alwaysDefer.has(hash) || state.deferOnce.delete(hash)) {
+          return new Response(
+            `waiting for 1 reference that is neither here nor upstream: ${GLIBC}`,
+            { status: 202 },
+          );
         }
         if (state.narinfoOnlyRefusal) {
           state.narinfoOnlyRefusal = false;
@@ -339,6 +355,67 @@ describe("pushing a closure", () => {
         platform: PLATFORM,
       });
       expect(summary).toMatchObject({ pushed: 1, skippedUpstream: 1, alreadyPresent: 1, failed: 0 });
+    } finally {
+      server.stop();
+    }
+  });
+
+  it("reports a hold in the server's own words, and does not fail", async () => {
+    const server = startServer();
+    try {
+      server.missing = [LIBC];
+      server.alwaysDefer.add(storePathHash(LIBC));
+      const lines: string[] = [];
+      const summary = await pushToCache({
+        bucket: `${server.origin}/main`,
+        paths: ["."],
+        env: envOf({ ODU_CACHE_TOKEN: "t" }),
+        platform: PLATFORM,
+        onLine: (line) => lines.push(line),
+      });
+      // A HOLD IS REPORTED AND THE COMMAND RETURNS: no failure, no hang.
+      expect(summary).toMatchObject({
+        pushed: 0,
+        held: [
+          {
+            path: LIBC,
+            reason: `waiting for 1 reference that is neither here nor upstream: ${GLIBC}`,
+          },
+        ],
+        failed: 0,
+        pageUrl: `${server.origin}/#/cache/main`,
+      });
+      expect(lines[0]).toBe(
+        "3 paths in the closure: 1 to push, 2 already here, 0 upstream",
+      );
+      expect(lines).toContain(`⏸ ${LIBC} held: ${summary.held[0]?.reason}`);
+    } finally {
+      server.stop();
+    }
+  });
+
+  it("--wait stays until the bucket can serve the held path", async () => {
+    const server = startServer();
+    try {
+      server.missing = [LIBC];
+      server.alwaysDefer.add(storePathHash(LIBC));
+      // The first `/missing` says the path is absent; the wait's next question
+      // says it landed (a parallel pusher supplied the reference).
+      server.missingOnlyFor = 1;
+      const summary = await pushToCache({
+        bucket: `${server.origin}/main`,
+        paths: ["."],
+        env: envOf({ ODU_CACHE_TOKEN: "t" }),
+        platform: PLATFORM,
+        wait: true,
+        waitIntervalMs: 1,
+        waitTimeoutMs: 2_000,
+      });
+      expect(summary).toMatchObject({ pushed: 1, held: [], failed: 0 });
+      // The wait asks about the HELD paths, not the whole closure again.
+      const last = server.seen.filter((seen) => seen.path.endsWith("/missing")).at(-1);
+      const asked = JSON.parse(last?.body as string) as { paths: { path: string }[] };
+      expect(asked.paths.map((entry) => entry.path)).toEqual([LIBC]);
     } finally {
       server.stop();
     }

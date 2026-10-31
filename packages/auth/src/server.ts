@@ -428,6 +428,17 @@ export function authServer(opts: AuthServerOptions): AuthServer {
                 }),
               );
             }
+            if (
+              input.expiresDays !== undefined &&
+              (!Number.isSafeInteger(input.expiresDays) || input.expiresDays <= 0)
+            ) {
+              return Effect.fail(
+                new AuthRefused({
+                  code: "bad_input",
+                  message: "odu: an expiry must be a whole number of days, one or more",
+                }),
+              );
+            }
             const token = `odu_${randomBytes(32).toString("base64url")}`;
             const row: TokenRow = {
               id: randomBytes(9).toString("hex"),
@@ -436,7 +447,12 @@ export function authServer(opts: AuthServerOptions): AuthServer {
               name: input.name.trim(),
               created: now(),
               lastUsed: null,
-              expires: null,
+              // Absent is NEVER — the API's rule; a face that wants ninety days
+              // says so, and its form shows the choice.
+              expires:
+                input.expiresDays === undefined
+                  ? null
+                  : now() + input.expiresDays * 24 * 60 * 60 * 1000,
               revoked: false,
             };
             repo.putToken(row);

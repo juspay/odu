@@ -332,7 +332,11 @@ describe("the auth matrix", () => {
     expect(later.bucket("main")?.name).toBe("main");
     expect(
       later.authorize(`Bearer ${expired.value.token}`, later.bucket("main") as never, "read"),
-    ).toEqual({ ok: false, status: 403, message: "that token has expired" });
+    ).toMatchObject({
+      ok: false,
+      status: 403,
+      message: expect.stringContaining("expired on 2023-11-15"),
+    });
     later.close();
 
     // A token minted for `main` cannot reach a bucket it does not cover.

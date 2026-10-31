@@ -54,6 +54,7 @@ import {
 } from "solid-js";
 import {
   type CacheBucket,
+  type CacheHeld,
   type CachePath,
   type CacheStats,
   type CacheToken,
@@ -527,6 +528,19 @@ function BucketPage(
   const held = props.client.collections.buckets.use();
   const bucket = createMemo<CacheBucket | undefined>(() => held.byKey(props.name)?.());
 
+  /** WHAT THE BUCKET IS HOLDING FOR REFERENCES — one of the row's facts, not a
+   *  log line: the same sentence `odu cache push` prints, and the reason a
+   *  large closure stops halfway. */
+  const heldRows = props.client.collections.held.use();
+  const waiting = createMemo<readonly CacheHeld[]>(() => {
+    const out: CacheHeld[] = [];
+    for (const key of heldRows.keys()) {
+      const row = heldRows.byKey(key)?.();
+      if (row !== undefined && row.bucket === props.name) out.push(row);
+    }
+    return out;
+  });
+
   return (
     <section class="cache" aria-label={`bucket ${props.name}`}>
       <p class="crumbs">
@@ -562,7 +576,35 @@ function BucketPage(
                   ? "no upstream filter"
                   : `skips ${row().upstreamKeys.join(", ")}`}
               </span>
+              {/* Waiting for references is a FACT of the bucket — printed with
+                  the same words the push prints, because it is the same fact. */}
+              <Show when={waiting().length > 0}>
+                <span class="pill hue-amber">{waiting().length} waiting</span>
+              </Show>
             </p>
+            <Show when={waiting().length > 0}>
+              <div class="cache-paths" aria-label="pending paths">
+                <h3>Waiting for references</h3>
+                <p class="hint">
+                  Accepted, but not served yet: each path needs a reference that
+                  is neither in this bucket nor upstream. The push that uploaded
+                  it says the same thing.
+                </p>
+                <ol class="paths">
+                  <For each={waiting()}>
+                    {(one) => (
+                      <li>
+                        <code class="path">{one.storePath}</code>
+                        <span class="bucket-facts">
+                          <span>{one.reason}</span>
+                          <span>since {ago(one.since, props.now)}</span>
+                        </span>
+                      </li>
+                    )}
+                  </For>
+                </ol>
+              </div>
+            </Show>
             {/* HOW TO USE THIS BUCKET, in two blocks a person copies: reading
                 from it, and pushing to it. Both come from the contract's own
                 functions — `odu cache use` prints the first, and the docs quote
@@ -700,7 +742,11 @@ function tokenLife(token: CacheToken, now: number): string {
   if (token.revoked) return "revoked";
   const used = token.lastUsed === null ? "never used" : `last used ${ago(token.lastUsed, now)}`;
   const expires =
-    token.expires === null ? "no expiry" : `expires ${new Date(token.expires).toISOString().slice(0, 10)}`;
+    token.expires === null
+      ? "no expiry"
+      : token.expires <= now
+        ? `expired ${new Date(token.expires).toISOString().slice(0, 10)}`
+        : `expires ${new Date(token.expires).toISOString().slice(0, 10)}`;
   return `${used} · ${expires} · created ${ago(token.created, now)}`;
 }
 
@@ -741,6 +787,11 @@ function BucketAdmin(props: TokenProps): JSX.Element {
 /** `token.mint`, `token.list`, `token.revoke` for this bucket. */
 function BucketTokens(props: TokenProps): JSX.Element {
   const [scope, setScope] = createSignal<"write" | "read">("write");
+  // AN EXPIRY IS THE FORM'S DEFAULT, not the row's: a token minted at a
+  // terminal with no `--expires-days` does not expire, and a page must not
+  // silently do what no visible field said. Ninety days is the default the
+  // select shows; "never" is a choice a person makes.
+  const [expiry, setExpiry] = createSignal("90");
   const minted = (): Minted | null => props.minted;
   const setMinted = props.onMinted;
   const action = createControl(props.call);
@@ -774,11 +825,15 @@ function BucketTokens(props: TokenProps): JSX.Element {
         rootToken: props.rootToken(),
         bucket: props.name,
         scope: chosen,
+        // ABSENT is the row's "does not expire"; the form says which it is.
+        ...(expiry() === "never" ? {} : { expiresDays: Number(expiry()) }),
       }),
       (answer) => {
         setMinted({ id: answer.facts.id, token: answer.token, scope: answer.facts.scope });
         void refetch();
-        return `Minted a ${chosen} token for ${props.name}.`;
+        return expiry() === "never"
+          ? `Minted a ${chosen} token for ${props.name}, with no expiry.`
+          : `Minted a ${chosen} token for ${props.name}, expiring in ${expiry()} days.`;
       },
     );
   };
@@ -807,6 +862,20 @@ function BucketTokens(props: TokenProps): JSX.Element {
           >
             <option value="write">write — push</option>
             <option value="read">read — substitute</option>
+          </select>
+        </label>
+        <label class="field-inline">
+          <span>expiry</span>
+          <select
+            class="input"
+            aria-label="token expiry"
+            value={expiry()}
+            onChange={(event) => setExpiry(event.currentTarget.value)}
+          >
+            <option value="30">30 days</option>
+            <option value="90">90 days</option>
+            <option value="365">1 year</option>
+            <option value="never">never</option>
           </select>
         </label>
         <button type="button" class="btn btn-primary" disabled={action.busy()} onClick={mint}>

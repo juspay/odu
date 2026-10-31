@@ -768,13 +768,15 @@ export function createCache(options: CacheOptions): Cache {
       if (rootTokenMatches(options.rootToken, presented)) return { ok: true };
       const verdict = verifyToken(repo, presented, bucket.name, need, now());
       if (verdict.ok) return { ok: true };
-      const message = {
-        unknown: "that token is not one this service minted",
-        revoked: "that token has been revoked",
-        expired: "that token has expired",
-        wrong_bucket: `that token cannot reach "${bucket.name}"`,
-        insufficient: `that token cannot ${need === "read" ? "read" : "write"} here`,
-      }[verdict.reason];
+      const message =
+        verdict.reason === "expired"
+          ? `that token expired on ${new Date(verdict.expiredAt).toISOString().slice(0, 10)}`
+          : {
+              unknown: "that token is not one this service minted",
+              revoked: "that token has been revoked",
+              wrong_bucket: `that token cannot reach "${bucket.name}"`,
+              insufficient: `that token cannot ${need === "read" ? "read" : "write"} here`,
+            }[verdict.reason];
       return { ok: false, status: 403, message };
     },
 

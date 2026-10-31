@@ -144,10 +144,19 @@ export interface PushSummary {
    *  signed them. The server says which is which. */
   skippedUpstream: number;
   alreadyPresent: number;
+  /**
+   * Paths the bucket ACCEPTED and is holding for references that are neither
+   * in it nor upstream-signed. Reported, not failed: the pusher cannot make
+   * the reference appear, and the bucket page says what it waits for.
+   */
+  held: readonly { path: string; reason: string }[];
   failed: number;
   /** One line per failure, for a caller that wants to say which paths did not
    *  make it. */
   failures: readonly { path: string; message: string }[];
+  /** The bucket's page on the daemon that answered — where a person reads the
+   *  held paths and their reason. */
+  pageUrl: string;
 }
 
 /**
@@ -175,6 +184,15 @@ export interface PushOptions {
   concurrency?: number;
   /** Attempts per path. */
   attempts?: number;
+  /**
+   * STAY UNTIL THE BUCKET CAN SERVE THE HELD PATHS. Off by default: a hold is
+   * reported and the command returns, because waiting on a reference the
+   * pusher cannot produce is the silence this voice exists to end.
+   */
+  wait?: boolean;
+  /** How often `--wait` asks again, and how long it is willing to. */
+  waitIntervalMs?: number;
+  waitTimeoutMs?: number;
   onLine?: (line: string) => void;
   platform?: PushPlatform;
 }
@@ -189,6 +207,19 @@ const DEFAULT_ATTEMPTS = 3;
  *  unblock it. Two is enough for any closure a real store produces — the
  *  depth of the graph, not its size. */
 const DEFERRED_ROUNDS = 2;
+
+/** `--wait`: how often the held paths are asked about, and how long the
+ *  command is willing to stay. Ten minutes is long enough for a parallel
+ *  pusher to land the missing reference and short enough that a hold nobody
+ *  will fix is still a prompt answer. */
+const WAIT_INTERVAL_MS = 2_000;
+const WAIT_TIMEOUT_MS = 10 * 60_000;
+
+const sleep = (ms: number): Promise<void> => {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  setTimeout(resolve, ms);
+  return promise;
+};
 
 /** Which answers are worth another attempt. A 4xx is the REQUEST being wrong —
  *  a bad token, a bad narinfo — and repeating it streams the whole NAR again
@@ -218,21 +249,30 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
   const closure = new Map((await platform.closure(options.paths)).map((info) => [info.storePath, info]));
   const answer = await askMissing(resolved, headers, closure);
   const present = closure.size - answer.missing.length;
+  const alreadyPresent = present - answer.skippedUpstream.length;
+  // ONE PREAMBLE, then a line per path: what the closure is, what the bucket
+  // already has, and what it will never take because an upstream key signed it.
   say(
-    `${closure.size} paths in the closure, ${answer.missing.length} missing from ` +
-      `"${resolved.name}", ${present} already there or upstream`,
+    `${closure.size} paths in the closure: ${answer.missing.length} to push, ` +
+      `${alreadyPresent} already here, ${answer.skippedUpstream.length} upstream`,
   );
 
-  const failed: { path: string; message: string }[] = [];
+  const failures: { path: string; message: string }[] = [];
   const attempts = options.attempts ?? DEFAULT_ATTEMPTS;
   const width = options.concurrency ?? DEFAULT_CONCURRENCY;
+  let pushed = 0;
 
-  /** Upload one wave, answering the paths the server accepted but is still
-   *  waiting on — a reference of theirs was skipped as upstream, or arrived
-   *  out of order. */
-  const runWave = async (wave: readonly string[], narinfoOnly = false): Promise<string[]> => {
+  /**
+   * Upload one wave. A path the server ACCEPTED but cannot import yet is
+   * HELD, with the server's own sentence as its reason — the client does not
+   * invent a wording for a fact the bucket owns.
+   */
+  const runWave = async (
+    wave: readonly string[],
+    narinfoOnly = false,
+  ): Promise<{ path: string; reason: string }[]> => {
     const queue = [...wave];
-    const deferred: string[] = [];
+    const held: { path: string; reason: string }[] = [];
     const worker = async (): Promise<void> => {
       for (;;) {
         const storePath = queue.shift();
@@ -240,47 +280,73 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
         const entry = closure.get(storePath);
         if (entry === undefined) continue;
         const outcome = await uploadOne(base, headers, entry, platform, attempts, { narinfoOnly });
-        if (outcome.ok === "deferred") deferred.push(storePath);
-        else if (!outcome.ok) failed.push({ path: storePath, message: outcome.message });
+        if (outcome.ok === "held") {
+          held.push({ path: storePath, reason: outcome.reason });
+          continue;
+        }
+        if (outcome.ok) {
+          pushed += 1;
+          say(`✅ ${storePath} stored`);
+          continue;
+        }
+        failures.push({ path: storePath, message: outcome.message });
+        say(`❌ ${storePath} refused: ${outcome.message}`);
       }
     };
     await Promise.all(Array.from({ length: Math.max(1, Math.min(width, queue.length)) }, worker));
-    return deferred;
+    return held;
   };
 
-  let deferred: string[] = [];
+  let held: { path: string; reason: string }[] = [];
   for (const wave of orderByDepth(closure, new Set(answer.missing))) {
-    deferred.push(...(await runWave(wave)));
+    held.push(...(await runWave(wave)));
   }
 
-  // A DEFERRED path is one the server accepted and could not import yet: its
-  // references had not landed when it arrived. They have now, so the same
-  // upload is repeated — a bounded number of times, because a reference the
-  // pusher skipped as upstream will never arrive from here.
-  for (let round = 0; deferred.length > 0 && round < DEFERRED_ROUNDS; round++) {
-    const retrying = [...deferred];
-    // The NAR is still staged on the server (a 202 keeps it), so the repeat is
-    // the narinfo alone — re-streaming a multi-gigabyte NAR to say "try again"
-    // is the cost this avoids. A 400 that says the bytes are gone falls back to
-    // the full pair inside `uploadOne`.
-    deferred = await runWave(retrying, true);
-    if (deferred.length === retrying.length) break;
+  // A HELD path is still staged on the server: the repeat is the narinfo alone,
+  // never the NAR. Bounded, because a reference the pusher skipped as upstream
+  // will not arrive from here — and when the rounds stop changing anything, the
+  // hold is final and the line at the end says so.
+  for (let round = 0; held.length > 0 && round < DEFERRED_ROUNDS; round++) {
+    const retrying = held.map((one) => one.path);
+    const next = await runWave(retrying, true);
+    if (next.length === retrying.length) {
+      held = next;
+      break;
+    }
+    held = next;
   }
-  for (const storePath of deferred) {
-    failed.push({
-      path: storePath,
-      message:
-        "accepted, but still waiting on references the bucket does not have — " +
-        "a reference signed by an upstream key is not uploaded by this push",
-    });
+
+  // `--wait` is the OPT-IN to the silence: ask the bucket until the held paths
+  // are recorded (a reference landed from somewhere else) or the patience runs
+  // out.
+  if (options.wait === true && held.length > 0) {
+    const interval = options.waitIntervalMs ?? WAIT_INTERVAL_MS;
+    const deadline = Date.now() + (options.waitTimeoutMs ?? WAIT_TIMEOUT_MS);
+    while (held.length > 0 && Date.now() < deadline) {
+      await sleep(interval);
+      const only = new Set(held.map((one) => one.path));
+      const now = await askMissing(resolved, headers, closure, only);
+      const recorded = new Set(held.map((one) => one.path).filter((path) => !now.missing.includes(path)));
+      for (const path of recorded) {
+        pushed += 1;
+        say(`✅ ${path} stored`);
+      }
+      held = held.filter((one) => !recorded.has(one.path));
+    }
   }
+
+  // ONE LINE PER HELD PATH, at the end, with the bucket's latest sentence. A
+  // hold is not a failure: the exit code and `failed` stay about refusals.
+  for (const one of held) say(`⏸ ${one.path} held: ${one.reason}`);
 
   return {
-    pushed: closure.size - present - failed.length,
+    pushed,
     skippedUpstream: answer.skippedUpstream.length,
-    alreadyPresent: present - answer.skippedUpstream.length,
-    failed: failed.length,
-    failures: failed,
+    alreadyPresent,
+    held,
+    failed: failures.length,
+    failures,
+    pageUrl: `${resolved.origin}/#/cache/${encodeURIComponent(resolved.name)}`,
   };
 }
 
@@ -322,14 +388,18 @@ async function askMissing(
   bucket: ResolvedBucket,
   headers: Record<string, string>,
   closure: Map<string, ClosureEntry>,
+  only?: ReadonlySet<string>,
 ): Promise<MissingAnswer> {
+  const sending = only === undefined
+    ? [...closure.values()]
+    : [...closure.values()].filter((entry) => only.has(entry.storePath));
   const response = await fetch(
     `${bucket.origin}/_odu/v1/buckets/${bucket.name}/missing`,
     {
       method: "POST",
       headers: { ...headers, "content-type": "application/json" },
       body: JSON.stringify({
-        paths: [...closure.values()].map((entry) => ({
+        paths: sending.map((entry) => ({
           path: entry.storePath,
           sigs: entry.sigs,
         })),
@@ -364,8 +434,9 @@ function asError(err: unknown): Error {
 
 type UploadOutcome =
   | { ok: true }
-  /** The server took it and cannot import it yet — a reference has not landed. */
-  | { ok: "deferred" }
+  /** The server took it and cannot import it yet — a reference has not landed.
+   *  `reason` is the SERVER's sentence, not this client's. */
+  | { ok: "held"; reason: string }
   | { ok: false; message: string };
 
 async function uploadOne(
@@ -414,7 +485,16 @@ async function uploadOne(
       lastMessage = infoResponse.message;
       continue;
     }
-    if (infoResponse.status === 202) return { ok: "deferred" };
+    if (infoResponse.status === 202) {
+      const said = (await infoResponse.text()).trim();
+      return {
+        ok: "held",
+        reason:
+          said === ""
+            ? "waiting for references that are neither here nor upstream"
+            : said,
+      };
+    }
     if (infoResponse.ok) return { ok: true };
     const said = await infoResponse.text();
     lastMessage = `narinfo upload answered ${infoResponse.status}: ${said}`;

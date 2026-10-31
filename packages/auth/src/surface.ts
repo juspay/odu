@@ -137,6 +137,9 @@ const WhoamiOutputSchema = Schema.Struct({ who: WhoSchema });
 const TokenCreateInputSchema = Schema.Struct({
   /** Checked by the ROW (non-empty), not the schema — see `GrantInputSchema`. */
   name: Schema.String,
+  /** Absent means the token does not expire. The FACES default to ninety days
+   *  and make "never" a visible choice, so a person never gets one by silence. */
+  expiresDays: Schema.optionalKey(Schema.Int),
 });
 const TokenCreateOutputSchema = Schema.Struct({
   /** Shown ONCE. The row keeps a hash. */

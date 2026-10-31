@@ -366,11 +366,30 @@ When("I mint a {string} token", async function (this: OduWorld, scope: string) {
   minted(this).id = (await row.locator("code").first().innerText()).trim();
 });
 
+Then("the token form defaults to 90 days", async function (this: OduWorld) {
+  assert.strictEqual(
+    await this.page.getByLabel("token expiry").inputValue(),
+    "90",
+    "the mint form's expiry is not the ninety-day default",
+  );
+});
+
 Then("the page shows the cache token once", function (this: OduWorld) {
   const token = minted(this).token;
   assert.ok(
     token !== undefined && token.length > 16,
     `no token was shown: ${JSON.stringify(token)}`,
+  );
+});
+
+Then("the minted token shows an expiry", async function (this: OduWorld) {
+  const id = minted(this).id;
+  assert.ok(id !== undefined, "no token was minted");
+  const text = await this.page.locator("ul.tokens li", { hasText: id }).innerText();
+  assert.match(
+    text,
+    /expires \d{4}-\d{2}-\d{2}/,
+    `the minted token's row names no expiry: ${text}`,
   );
 });
 

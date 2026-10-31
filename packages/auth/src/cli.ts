@@ -67,7 +67,9 @@ whoami [-o json]              who this machine is, as this daemon sees it.
                               Prints the answer and exits 1 when it is
                               \`anonymous\`: exit 0 would read as "you have a
                               session"
-token create <name>           mint a personal access token. Shown ONCE
+token create <name> [--expires-days N|--no-expiry]
+                              mint a personal access token, expiring in 90
+                              days unless said otherwise. Shown ONCE
 token list [-o json]          the tokens this machine's login owns
 token revoke <id>             revoke one token, ending its connections at once
 grant <login> <owner|admin|member>
@@ -264,16 +266,47 @@ async function tokenCommand(rest: string[], ports: AuthCliPorts): Promise<number
       const { values, positionals } = parseArgs({
         args,
         allowPositionals: true,
-        options: { origin: originOption, output: outputOption },
+        options: {
+          "expires-days": { type: "string" },
+          "no-expiry": { type: "boolean" },
+          origin: originOption,
+          output: outputOption,
+        },
       });
       const name = positionals[0];
       if (name === undefined) {
         process.stderr.write(`odu: auth token create needs a name\n${AUTH_USAGE}`);
         return 1;
       }
+      if (values["no-expiry"] === true && values["expires-days"] !== undefined) {
+        process.stderr.write(
+          "odu: --no-expiry and --expires-days are opposites — a token either " +
+            "expires or it does not\n",
+        );
+        return 1;
+      }
       const json = values.output === "json";
+      let expiresDays: number | undefined;
+      if (values["no-expiry"] !== true) {
+        const raw = values["expires-days"];
+        if (raw === undefined) {
+          expiresDays = 90;
+        } else if (!/^\d+$/.test(raw.trim()) || Number(raw) <= 0) {
+          process.stderr.write(
+            `odu: --expires-days needs a whole number of days (got "${raw}")\n`,
+          );
+          return 1;
+        } else {
+          expiresDays = Number(raw);
+        }
+      }
       return withService(ports, values.origin, async (client) => {
-        const answer = await call(client.surface.token.create({ name }));
+        const answer = await call(
+          client.surface.token.create({
+            name,
+            ...(expiresDays === undefined ? {} : { expiresDays }),
+          }),
+        );
         if (!answer.ok) return reportFailure(answer, json);
         if (json) {
           emitJson(answer.value);

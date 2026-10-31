@@ -418,7 +418,7 @@ describe("upstream references", () => {
     // trust — so it is not "upstream" for this bucket, and the referrer is held.
     const { cache, outcome } = await parentWaitingOnChild(["some-other-key"]);
     expect(outcome).toMatchObject({ ok: true, status: 202 });
-    if (outcome.ok) expect(outcome.missing).toEqual([child]);
+    if (outcome.ok && outcome.status === 202) expect(outcome.missing).toEqual([child]);
     expect(cache.held()).toMatchObject([
       { bucket: "main", storePath: parent, missing: [child] },
     ]);

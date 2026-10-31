@@ -86,16 +86,19 @@ list [-o json]                buckets, with sizes. Needs $ODU_ROOT_TOKEN
 use <bucket>                  the nix.conf settings, the nixConfig block and the
                               netrc lines for a bucket. Needs NO token: a
                               bucket's URL and public key are public
-token mint <bucket> [--read|--write|--admin] [--expires-days N] [--buckets GLOB]
+token mint <bucket> [--read|--write|--admin] [--expires-days N|--no-expiry] [--buckets GLOB]
                               mint a token. It is printed ONCE; only its hash
-                              is kept
+                              is kept. Expires in 90 days unless --expires-days
+                              says otherwise; --no-expiry is the explicit never
 token list [bucket] [-o json] tokens with scope, expiry and last use
 token revoke <id>             revoke one token, without touching the rest
 login <origin> [--token T]    save a token for an origin in
                               ~/.config/odu/cache/credentials (0600)
-push <bucket> <path>… [--token-file F] [--concurrency N] [-o json]
+push <bucket> <path>… [--token-file F] [--concurrency N] [--wait] [-o json]
                               upload only the paths the bucket is missing.
-                              Talks to the cache directly, from HERE
+                              Talks to the cache directly, from HERE. A path
+                              the bucket holds for references is reported;
+                              --wait stays until the bucket can serve it
 pin <bucket> <name> <path>…   pin a closure against garbage collection
 gc [bucket] [-o json]         evict what retention expired and nothing holds
 stats [-o json]               storage and reads
@@ -375,6 +378,7 @@ async function tokenCommand(rest: string[], ports: CacheCliPorts): Promise<numbe
           write: { type: "boolean" },
           admin: { type: "boolean" },
           "expires-days": { type: "string" },
+          "no-expiry": { type: "boolean" },
           buckets: { type: "string" },
           origin: originOption,
           output: outputOption,
@@ -385,6 +389,13 @@ async function tokenCommand(rest: string[], ports: CacheCliPorts): Promise<numbe
         process.stderr.write(`odu: cache token mint needs a bucket name\n${CACHE_USAGE}`);
         return 1;
       }
+      if (values["no-expiry"] === true && values["expires-days"] !== undefined) {
+        process.stderr.write(
+          "odu: --no-expiry and --expires-days are opposites — a token either " +
+            "expires or it does not\n",
+        );
+        return 1;
+      }
       const json = values.output === "json";
       return withService(ports, values.origin, async (client) => {
         const answer = await call(
@@ -393,9 +404,16 @@ async function tokenCommand(rest: string[], ports: CacheCliPorts): Promise<numbe
             bucket,
             ...(values.buckets === undefined ? {} : { bucketGlob: values.buckets }),
             scope: scopeOf(values),
-            ...(values["expires-days"] === undefined
+            // NINETY DAYS unless said otherwise. "Never" is a choice a person
+            // types, not what happens when they forget a flag.
+            ...(values["no-expiry"] === true
               ? {}
-              : { expiresDays: wholeNumber("--expires-days", values["expires-days"]) }),
+              : {
+                  expiresDays:
+                    values["expires-days"] === undefined
+                      ? 90
+                      : wholeNumber("--expires-days", values["expires-days"]),
+                }),
           }),
         );
         if (!answer.ok) return reportFailure(answer, json, REFUSED);
@@ -506,6 +524,7 @@ async function pushCommand(rest: string[]): Promise<number> {
     options: {
       "token-file": { type: "string" },
       concurrency: { type: "string" },
+      wait: { type: "boolean" },
       origin: originOption,
       output: outputOption,
     },
@@ -528,6 +547,7 @@ async function pushCommand(rest: string[]): Promise<number> {
       ...(values.concurrency === undefined
         ? {}
         : { concurrency: wholeNumber("--concurrency", values.concurrency) }),
+      ...(values.wait === true ? { wait: true } : {}),
       onLine: (line) => {
         if (!json) process.stderr.write(`${line}\n`);
       },
@@ -537,10 +557,20 @@ async function pushCommand(rest: string[]): Promise<number> {
     } else {
       process.stdout.write(
         `pushed ${summary.pushed}, skipped-upstream ${summary.skippedUpstream}, ` +
-          `already-present ${summary.alreadyPresent}, failed ${summary.failed}\n`,
+          `already-present ${summary.alreadyPresent}, held ${summary.held.length}, ` +
+          `failed ${summary.failed}\n`,
       );
       for (const failure of summary.failures) {
         process.stderr.write(`  ${failure.path}: ${failure.message}\n`);
+      }
+      if (summary.held.length > 0) {
+        // A HOLD IS NOT A FAILURE, and the command returns: what could not land
+        // is the bucket's fact, and the page says what it is waiting for.
+        process.stderr.write(
+          `held ${summary.held.length} path${summary.held.length === 1 ? "" : "s"} — ` +
+            `see ${summary.pageUrl}` +
+            (values.wait === true ? "\n" : "; pass --wait to stay until they land\n"),
+        );
       }
     }
     return summary.failed === 0 ? 0 : 1;

@@ -40,6 +40,15 @@ Feature: An admin administers the cache from the board
     And there should be no page errors
 
   @signed-in:admin
+  Scenario: A token minted on the page carries an expiry
+    # THE FORM'S DEFAULT IS NINETY DAYS and "never" is a visible choice, so a
+    # web-minted token is not the one credential on this page that never ends.
+    Given a bucket created from the board
+    Then the token form defaults to 90 days
+    When I mint a "write" token
+    Then the minted token shows an expiry
+    And there should be no page errors
+
   Scenario: A path pushed with a page-minted token is pinned, collected and counted
     Given a bucket created from the board
     And I mint a "write" token

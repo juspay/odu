@@ -139,7 +139,13 @@ type Readings =
 function tokenLife(token: AuthToken, now: number): string {
   if (token.revoked) return "revoked";
   const used = token.lastUsed === null ? "never used" : `last used ${ago(token.lastUsed, now)}`;
-  return `${used} · created ${ago(token.created, now)}`;
+  const expires =
+    token.expires === null
+      ? "no expiry"
+      : token.expires <= now
+        ? `expired ${new Date(token.expires).toISOString().slice(0, 10)}`
+        : `expires ${new Date(token.expires).toISOString().slice(0, 10)}`;
+  return `${used} · ${expires} · created ${ago(token.created, now)}`;
 }
 
 /** How a session's life reads, in one phrase. */
@@ -178,18 +184,26 @@ export function ProfileFace(props: ProfileFaceProps): JSX.Element {
   const [mintedId, setMintedId] = createSignal<string | null>(null);
   const [mintedToken, setMintedToken] = createSignal<string | null>(null);
   const [name, setName] = createSignal("");
+  // NINETY DAYS IS THE FORM'S DEFAULT and "never" is a visible choice; the
+  // row's absent-expiry rule is the API's, not a page's silent behaviour.
+  const [expiry, setExpiry] = createSignal("90");
   const control = createControl(props.call);
 
   /** The name is sent as typed: the ROW refuses an empty one in its own words
    *  — a button that greys out says nothing about why. */
   const create = (): void => {
     control.run(
-      props.client.procedures.token.create({ name: name().trim() }),
+      props.client.procedures.token.create({
+        name: name().trim(),
+        ...(expiry() === "never" ? {} : { expiresDays: Number(expiry()) }),
+      }),
       (answer) => {
         setName("");
         setMintedId(answer.facts.id);
         setMintedToken(answer.token);
-        return `Created ${answer.facts.name}.`;
+        return expiry() === "never"
+          ? `Created ${answer.facts.name}, with no expiry.`
+          : `Created ${answer.facts.name}, expiring in ${expiry()} days.`;
       },
       () => void refetch(),
     );
@@ -273,6 +287,20 @@ export function ProfileFace(props: ProfileFaceProps): JSX.Element {
             value={name()}
             onInput={(event) => setName(event.currentTarget.value)}
           />
+        </label>
+        <label class="field-inline">
+          <span>expiry</span>
+          <select
+            class="input"
+            aria-label="token expiry"
+            value={expiry()}
+            onChange={(event) => setExpiry(event.currentTarget.value)}
+          >
+            <option value="30">30 days</option>
+            <option value="90">90 days</option>
+            <option value="365">1 year</option>
+            <option value="never">never</option>
+          </select>
         </label>
         <button type="button" class="btn btn-primary" disabled={control.busy()} onClick={create}>
           {control.busy() ? "creating…" : "Create token"}
