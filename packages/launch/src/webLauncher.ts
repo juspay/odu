@@ -25,11 +25,11 @@
  *
  * ## Compatibility is TWO axes, and only one of them is ordered
  *
- * `protocolVersion` is `major.minor` and it is ORDERED, and the order runs
- * ONE way: a running service at the same major and an equal-or-higher minor
- * speaks everything this build knows how to ask, so it is adopted. A service
- * BEHIND this build does not — the predicate is `running.minor >= mine.minor` —
- * and is refused with the upgrade sentence. `buildId` is MATCH-ONLY — there is
+ * `protocolVersion` is `major.minor`, and the rule is ADDITIVE
+ * (`admitService`'s): a running service at the same major is adopted whatever
+ * the minors — a minor only ever ADDS members, so the worst a skew costs is one
+ * control answering "unknown verb" — and a different major is refused with the
+ * upgrade sentence. `buildId` is MATCH-ONLY — there is
  * no such thing as a newer build — so a differing one is reported and never
  * acted on unless a person asks for an upgrade. That asymmetry is the
  * framework's (`admitService` has no `buildIsNewer` beside it) and it

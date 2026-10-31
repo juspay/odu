@@ -81,7 +81,6 @@
 
 import {
   defineSurface,
-  isContractVersionCompatible,
   type SurfaceTypes,
 } from "@kolu/surface/define";
 import { buildSurfaceFace } from "@kolu/surface/client";
@@ -114,19 +113,29 @@ export { STATUS_META, type StatusHue } from "@odu/run-client/surface";
  * A daemon and the client that dialled it are routinely DIFFERENT BUILDS — the
  * whole point of a singleton is that it outlives the process that started it,
  * including across an upgrade — so the two have to be able to discover they
- * disagree. Compared with the framework's `isContractVersionCompatible`
- * (major.minor), never a string equality: a build that only ADDED a member is
- * still speakable by an older client, and refusing it would make every
- * additive change a flag day.
+ * disagree. {@link admitService} is the one judge, and its rule is ADDITIVE:
+ *
+ *   - **the MINOR moves when the wire only GROWS** — a new verb, a new row
+ *     member, a new optional input key, a new output field a reader may
+ *     ignore. Every reader on the same major is adopted, in BOTH directions: an
+ *     older reader never names the new member, and a newer reader that calls
+ *     one an older daemon lacks is refused at that one control (an unknown
+ *     tag), not stranded at the handshake.
+ *   - **the MAJOR moves when something a reader already uses CHANGES** — a verb
+ *     removed or renamed, a required input added, an output field removed or
+ *     retyped, a refusal code a reader branches on taken away. A different
+ *     major is refused, with a sentence.
  *
  * **IT VERSIONS THE COMPOSED WIRE, not this file.** The daemon serves this
- * surface as the wire's ROOT and every row beside it as a sibling — the cache,
- * today — over ONE connection, and a client is admitted against this number
- * before it reads anything. So a change to `@odu/cache/surface` bumps THIS
- * number too. A row must not keep a version of its own: nothing would enforce
- * it, and a stale tab would talk to a daemon whose members it cannot decode.
+ * surface as the wire's ROOT and every row beside it as a sibling — the cache
+ * and the door — over ONE connection, and a client is admitted against this
+ * number before it reads anything. So a change to `@odu/cache/surface` or
+ * `@odu/auth/surface` bumps THIS number too. A row must not keep a version of
+ * its own: nothing would enforce it.
+ *
+ * 2.2: `auth.grant.list` — the people page's verb (PR 2.5). Additive.
  */
-export const SERVICE_CONTRACT_VERSION = "2.1";
+export const SERVICE_CONTRACT_VERSION = "2.2";
 
 // ── refusals ────────────────────────────────────────────────────────────────
 
@@ -338,20 +347,29 @@ export type ServiceAdmission =
       message: string;
     };
 
+/** `major.minor` (an optional patch or prerelease suffix allowed), or null —
+ *  the framework's grammar, so `2.1garbage` is not read as 2.1. */
+function contractMajor(version: string): number | null {
+  const match = /^(\d+)\.(\d+)(?:\.\d+)?(?:-[0-9A-Za-z.-]+)?$/.exec(version);
+  return match === null ? null : Number(match[1]);
+}
+
 /** Read a daemon's own greeting and say whether this build may adopt it.
  *
- *  The comparison is the framework's `major.minor` rule and never a string
- *  equality: a daemon that only ADDED a member is still speakable by an older
- *  reader, and refusing it would make every additive change a flag day. The
- *  arguments are ordered REPORTED-then-EXPECTED, which is the direction that
- *  makes "the daemon is ahead" an adoption and "the daemon is behind" a
- *  refusal. */
+ *  THE ADDITIVE RULE (see {@link SERVICE_CONTRACT_VERSION}): the same MAJOR is
+ *  adopted whatever the minors, and a different one is refused. Not the
+ *  framework's `isContractVersionCompatible`, which also refuses a daemon
+ *  whose minor is behind — that made every added verb a flag day for every
+ *  reader built after it, kolu's included (it defers to THIS verdict and never
+ *  compares versions itself). A malformed or empty version is refused: a
+ *  daemon that has said nothing about itself is not a compatible one. */
 export function admitService(
   cell: ServiceCell,
   where: string,
 ): ServiceAdmission {
   const speaks = cell.identity.protocolVersion;
-  if (isContractVersionCompatible(speaks, SERVICE_CONTRACT_VERSION)) {
+  const theirs = contractMajor(speaks);
+  if (theirs !== null && theirs === contractMajor(SERVICE_CONTRACT_VERSION)) {
     return { kind: "adopt", identity: cell.identity };
   }
   return {
