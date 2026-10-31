@@ -222,17 +222,17 @@ export const AUTH_ANONYMOUS_TAGS: Readonly<Record<string, true>> = {
 
 /** What an agent is told about this row. */
 export const ODU_AUTH_MCP_INSTRUCTIONS = [
-  "The auth verbs are this daemon's door, as their own row. `auth_whoami`",
+  "The auth verbs are this daemon's door, as their own row. `auth_user_whoami`",
   "answers who this connection is — a `local` owner when the daemon has no",
   "sign-in configured, a `user` with a role, or `anonymous` when the connection",
   "has no session (that is a page before it signs in, not an error).",
   "`auth_token_create` mints a personal access token and answers it ONCE (only",
   "its hash is kept); `odu auth login <origin>` stores it, and every face then",
   "reaches this server with `--origin`. `auth_token_revoke` and",
-  "`auth_session_end` end a credential everywhere at once — an open tab's socket",
-  "stops receiving anything. `auth_grant` sets a login's role and is an owner's",
-  "verb; on a daemon with no owner yet it takes the operator's root token",
-  "instead, which is that token's one job.",
+  "`auth_session_end` end a credential everywhere at once — an open connection",
+  "stops being served. `auth_user_grant` sets a login's role and is an owner's",
+  "verb; on a daemon with no owner yet the operator's root token may set the",
+  "FIRST owner with it, and that is that token's only job.",
 ].join("\n");
 
 export const AUTH_AGENT: RowAgent = {
@@ -244,6 +244,3 @@ export const AUTH_AGENT: RowAgent = {
 /** The role this daemon gives somebody who is allowed in but has never been
  *  granted anything. */
 export const DEFAULT_ROLE = "member";
-
-/** Maybe a principal — what the resolver answers, and what the profile reads. */
-export type MaybePrincipal = Principal | null;

@@ -118,12 +118,27 @@ Then("the page shows the bucket list", async function (this: OduWorld) {
   });
 });
 
+Then("the page offers a Create bucket control", async function (this: OduWorld) {
+  // The ADMIN's half of the pair: the row's floor is `admin`, and the shell
+  // draws the form only when the person holds it.
+  await this.page
+    .getByRole("button", { name: "Create bucket" })
+    .waitFor({ timeout: 30_000 });
+});
+
 Then("the page offers no Create bucket control", async function (this: OduWorld) {
-  // The cache page has no create control at all yet (a bucket is made with
-  // `odu cache create`), and this is the assertion that says a member is not
-  // shown one when it gains one.
-  const controls = await this.page.getByRole("button", { name: /create bucket/i }).count();
-  assert.strictEqual(controls, 0, "a Create bucket control is reachable");
+  // THE MEMBER's half, and it is the same control the admin scenario presses —
+  // a hidden button is not a permission, so the CLI refusal above is the other
+  // half of the proof.
+  const controls = await this.page.getByRole("button", { name: "Create bucket" }).count();
+  assert.strictEqual(controls, 0, "a member was drawn a Create bucket control");
+});
+
+Then("the CLI lists buckets as this person", function (this: OduWorld) {
+  // A member READS the cache: buckets are rows of the board, and `odu cache
+  // list` is the terminal's view of the same rows.
+  const answer = asPerson(this, ["cache", "list", "-o", "json"]);
+  assert.strictEqual(answer.status, 0, `a member's cache list failed: ${answer.stderr}`);
 });
 
 // ── the profile ─────────────────────────────────────────────────────────────

@@ -34,7 +34,7 @@ import {
   membership,
   type GithubConfig,
 } from "./github";
-import { SESSION_COOKIE, type AuthServer } from "./server";
+import { cookieValue, SESSION_COOKIE, SESSION_DAYS, type AuthServer } from "./server";
 import {
   AUTH_CALLBACK_PATH,
   AUTH_SIGN_IN_PATH,
@@ -63,21 +63,30 @@ export interface AuthRoutesOptions {
   readonly now?: () => number;
 }
 
-/** `nonce.mac` — the nonce is the query value, the mac proves this daemon made
- *  it. */
-function signedState(secret: string): string {
+/** `nonce.issuedAt.mac` — the nonce is the query value, and the MAC proves this
+ *  daemon made it AND WHEN.
+ *
+ *  The timestamp is what makes a captured state/cookie pair stop working: the
+ *  browser clears the cookie on success, but a REFUSAL page used to leave it in
+ *  place, so a pair could be re-presented. Now it is good for
+ *  {@link STATE_MINUTES} from the moment the sign-in started, whatever happened
+ *  to the browser. */
+function signedState(secret: string, at: number): string {
   const nonce = randomBytes(24).toString("base64url");
-  const mac = createHmac("sha256", secret).update(nonce).digest("base64url");
-  return `${nonce}.${mac}`;
+  const mac = createHmac("sha256", secret).update(`${nonce}.${at}`).digest("base64url");
+  return `${nonce}.${at}.${mac}`;
 }
 
-function stateIsOurs(secret: string, value: string): boolean {
-  const at = value.lastIndexOf(".");
-  if (at <= 0) return false;
-  const nonce = value.slice(0, at);
-  const offered = Buffer.from(value.slice(at + 1));
+function stateIsOurs(secret: string, value: string, now: number): boolean {
+  const parts = value.split(".");
+  if (parts.length !== 3) return false;
+  const [nonce, at, mac] = parts as [string, string, string];
+  const issued = Number(at);
+  if (!Number.isSafeInteger(issued)) return false;
+  if (now - issued > STATE_MINUTES * 60_000) return false;
+  const offered = Buffer.from(mac);
   const expected = Buffer.from(
-    createHmac("sha256", secret).update(nonce).digest("base64url"),
+    createHmac("sha256", secret).update(`${nonce}.${at}`).digest("base64url"),
   );
   return offered.length === expected.length && timingSafeEqual(offered, expected);
 }
@@ -89,6 +98,50 @@ function escapeHtml(text: string): string {
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;");
+}
+
+/**
+ * THE SIGN-IN PAGE THE SERVER RENDERS — what `curl /` meets on a daemon with a
+ * door and no session.
+ *
+ * It exists because a door has to be provable without a browser: the shell
+ * bundle draws the same page (see `./face`), but the bundle is a script, and
+ * `curl /` runs none. So the host's middleware answers a shell path with THIS,
+ * and a browser arriving cold reads it before any JavaScript — the VM test's
+ * `GET /` assertion is this function's output, not the bundle's.
+ *
+ * `<meta name="odu-door">` is the machine-readable half of the same claim: an
+ * operator (or a test) can tell a gated daemon from a loopback one by one
+ * tagged response, with no bundle and no cookie.
+ */
+export function signInPageHtml(): string {
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width">
+    <meta name="odu-door" content="1">
+    <title>Sign in · odu</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center;
+             font: 16px/1.5 ui-sans-serif, system-ui, sans-serif; }
+      main { max-width: 26rem; padding: 2rem; text-align: left; }
+      h1 { font-size: 1.5rem; margin: 0 0 0.5rem; }
+      .hint { opacity: 0.75; margin: 0 0 1.5rem; }
+      .action { display: inline-block; padding: 0.6rem 1rem; border-radius: 6px;
+                background: #1f6feb; color: #fff; text-decoration: none; font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Sign in to odu</h1>
+      <p class="hint">This server answers only to people its operator has allowed in.</p>
+      <a class="action" href="${AUTH_SIGN_IN_PATH}">Sign in with GitHub</a>
+    </main>
+  </body>
+</html>
+`;
 }
 
 /** A refusal a person reads, with the way back to try again. */
@@ -131,11 +184,17 @@ function withCookie(
 export function authRoutes(opts: AuthRoutesOptions): RowRoutes {
   const { config, server } = opts;
   const request = opts.request ?? fetch;
+  const now = opts.now ?? Date.now;
   const secure = config.publicOrigin.startsWith("https://");
+  /** The nonce is SPENT on every callback outcome — success, refusal, or a bad
+   *  state — so a captured `state`/cookie pair is good for one presentation and
+   *  only for {@link STATE_MINUTES}. */
+  const spent = (response: HttpServerResponse.HttpServerResponse) =>
+    withCookie(response, STATE_COOKIE, "", { secure, maxAge: "0 minutes" });
 
   const signIn = HttpRouter.add("GET", AUTH_SIGN_IN_PATH, () =>
     Effect.sync(() => {
-      const state = signedState(config.clientSecret);
+      const state = signedState(config.clientSecret, now());
       const response = HttpServerResponse.redirect(authorizeUrl(config, state), { status: 302 });
       return withCookie(response, STATE_COOKIE, state, {
         secure,
@@ -149,37 +208,43 @@ export function authRoutes(opts: AuthRoutesOptions): RowRoutes {
       const url = new URL(incoming.url, "http://odu.invalid");
       const state = url.searchParams.get("state");
       const code = url.searchParams.get("code");
-      const carried = incoming.cookies[STATE_COOKIE] ?? null;
+      const carried = cookieValue(incoming.headers["cookie"], STATE_COOKIE);
       if (state === null || state === "" || carried === null) {
-        return refusalPage(
-          400,
-          "This looks like a callback odu did not start — begin again from the sign-in page.",
+        return spent(
+          refusalPage(
+            400,
+            "This looks like a callback odu did not start — begin again from the sign-in page.",
+          ),
         );
       }
-      if (state !== carried || !stateIsOurs(config.clientSecret, state)) {
-        return refusalPage(
-          400,
-          "The sign-in state did not match this browser's cookie — begin again from the sign-in page.",
+      if (state !== carried || !stateIsOurs(config.clientSecret, state, now())) {
+        return spent(
+          refusalPage(
+            400,
+            "The sign-in state did not match this browser's cookie — begin again from the sign-in page.",
+          ),
         );
       }
       if (code === null || code === "") {
-        return refusalPage(400, "GitHub sent no authorization code — begin again.");
+        return spent(refusalPage(400, "GitHub sent no authorization code — begin again."));
       }
 
       const exchanged = yield* Effect.promise(() => exchangeCode(config, code, request));
-      if (!exchanged.ok) return refusalPage(403, exchanged.message);
+      if (!exchanged.ok) return spent(refusalPage(403, exchanged.message));
 
       const user = yield* Effect.promise(() => fetchLogin(config, exchanged.token, request));
-      if (!user.ok) return refusalPage(403, user.message);
+      if (!user.ok) return spent(refusalPage(403, user.message));
 
       const entitled = yield* Effect.promise(() =>
         membership(config, exchanged.token, user.login, request),
       );
       if (!entitled.ok) {
         opts.log.warn({ login: user.login }, "odu web: a sign-in was refused by the allow-list");
-        return refusalPage(
-          403,
-          `${user.login} is not allowed to sign in to this odu daemon. ${entitled.message}`,
+        return spent(
+          refusalPage(
+            403,
+            `${user.login} is not allowed to sign in to this odu daemon. ${entitled.message}`,
+          ),
         );
       }
 
@@ -191,16 +256,15 @@ export function authRoutes(opts: AuthRoutesOptions): RowRoutes {
       const response = HttpServerResponse.redirect("/", { status: 302 });
       const withSession = withCookie(response, SESSION_COOKIE, session.cookie, {
         secure,
-        maxAge: `${30 * 24 * 60} minutes`,
+        maxAge: `${SESSION_DAYS * 24 * 60} minutes`,
       });
-      // The nonce is spent.
-      return withCookie(withSession, STATE_COOKIE, "", { secure, maxAge: "0 minutes" });
+      return spent(withSession);
     }),
   );
 
   const signOut = HttpRouter.add("POST", AUTH_SIGN_OUT_PATH, (incoming: HttpServerRequest.HttpServerRequest) =>
     Effect.sync(() => {
-      const cookie = incoming.cookies[SESSION_COOKIE] ?? null;
+      const cookie = cookieValue(incoming.headers["cookie"], SESSION_COOKIE);
       const ended = server.signOut(cookie);
       if (cookie !== null) {
         opts.log.warn({ ended }, "odu web: a person signed out");

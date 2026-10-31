@@ -73,6 +73,13 @@ sweep and a role change all end them, and an ended lease stops that connection
 receiving anything — every later call is refused and every open subscription is
 interrupted. No revocation list is polled.
 
+The lease's release also calls the host's `ConnectionCloser`, which is **TODO
+seam**: kolu's `serveSurfaceApp` hands an app no handle that closes a live
+connection (the `SurfaceSocketServing` it holds is listener-local), so the host
+passes a no-op today and the socket is cut as soon as the seam exists. See the
+module header of `packages/host/src/principal.ts` for the three shapes that
+would be enough.
+
 What the row stores is **not** a set of credentials: a session is keyed by the
 SHA-256 of its cookie value and a token by the SHA-256 of its secret, in
 `auth.sqlite` under the state directory. The cookie's value exists only in the
@@ -80,10 +87,11 @@ browser; a token's plaintext exists only in the answer that minted it.
 
 ## The root token, and nothing else
 
-`$ODU_ROOT_TOKEN` is the operator's bootstrap. Its one job here is
-`odu auth grant <login> owner` on a daemon that has no owner yet: with a session
-it is not consulted (an owner's role is), and it is not a principal — it cannot
-start a run or read a bucket.
+`$ODU_ROOT_TOKEN` is the operator's bootstrap, and it does exactly one thing:
+`odu auth grant <login> owner` on a daemon that has **no owner yet**, and only
+for `owner`. Once the first owner exists it is refused, an owner's session
+grants everything after that, and it is never a principal — it cannot start a
+run or read a bucket.
 
 ## Docs
 

@@ -34,20 +34,22 @@ Feature: The door — sign in, and what a role may do
   Scenario: A member may read the board and may not administer buckets
     When the CLI creates a bucket as this person
     Then the CLI refuses it as not permitted
+    And the CLI lists buckets as this person
     And I open the cache
     Then the page shows the bucket list
     And the page offers no Create bucket control
     And there should be no page errors
 
   @signed-in:admin
-  Scenario: An admin creates a bucket from the CLI
+  Scenario: An admin creates a bucket from the CLI, and is offered the control
     When the CLI creates a bucket as this person
     Then the CLI reports the bucket
     And I open the cache
     Then a bucket row names it
+    And the page offers a Create bucket control
     And there should be no page errors
 
-  @signed-in:admin
+  @signed-in:member
   Scenario: A token created on the profile page drives odu --origin
     When I open the profile
     And I create a token named "laptop"
@@ -56,6 +58,7 @@ Feature: The door — sign in, and what a role may do
     And the CLI lists buckets with that token
     And there should be no page errors
 
+  @seam
   @signed-in:member
   Scenario: Signing out in one tab closes the other tab
     Given I open a second tab on the board

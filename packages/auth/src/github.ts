@@ -111,14 +111,9 @@ export function readGithubConfig(
       message: `odu: $${CLIENT_SECRET_FILE}=${secretFile as string} is empty`,
     };
   }
-  const rules = parseAllow(allowText as string);
-  if (rules.length === 0) {
-    return {
-      kind: "refused",
-      message:
-        `odu: $${ALLOW} names nobody — write \`org:<name>\`, ` +
-        "`team:<org>/<slug>` or a comma-separated list of GitHub logins",
-    };
+  const allow = readAllow(allowText as string);
+  if (!allow.ok) {
+    return { kind: "refused", message: `odu: $${ALLOW} ${allow.message}` };
   }
   return {
     kind: "config",
@@ -140,25 +135,76 @@ export type AllowRule =
   | { readonly kind: "team"; readonly org: string; readonly slug: string }
   | { readonly kind: "login"; readonly login: string };
 
-/** `org:juspay`, `team:juspay/platform`, `srid`, comma-separated anywhere. A
- *  malformed entry is kept as a LOGIN rather than dropped: silently ignoring
- *  `org` (a typo for `org:`) would lock everybody out with no sentence saying
- *  why. */
+/**
+ * `org:<name>`, `team:<org>/<slug>`, or a GitHub login, comma-separated
+ * anywhere.
+ *
+ * THE GRAMMAR IS ENFORCED, and a malformed entry is a REFUSAL naming it rather
+ * than a rule that quietly matches nobody. `team:juspay` (no slug), `org:`
+ * (empty) and a typo for `org:juspay` would all otherwise become a login no
+ * GitHub account will ever have — an allow-list that locks everybody out with
+ * nothing in the log to say why.
+ *
+ * GitHub's own grammar is the check: an organisation or login is
+ * `[A-Za-z0-9][A-Za-z0-9-]{0,38}`, a team slug adds dots and underscores.
+ */
+export type AllowReading =
+  | { readonly ok: true; readonly rules: ReadonlyArray<AllowRule> }
+  | { readonly ok: false; readonly message: string };
+
+const ORG = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/;
+const LOGIN = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/;
+const SLUG = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
+
+export function readAllow(spec: string): AllowReading {
+  const rules: AllowRule[] = [];
+  for (const raw of spec.split(",")) {
+    const entry = raw.trim();
+    if (entry === "") continue;
+    const lower = entry.toLowerCase();
+    if (lower.startsWith("org:")) {
+      const org = entry.slice("org:".length).trim();
+      if (!ORG.test(org)) {
+        return {
+          ok: false,
+          message: `"${entry}" is not an organisation rule — write \`org:<name>\` (GitHub's own name grammar: letters, digits, dashes)`,
+        };
+      }
+      rules.push({ kind: "org", org });
+      continue;
+    }
+    if (lower.startsWith("team:")) {
+      const body = entry.slice("team:".length).trim();
+      const parts = body.split("/");
+      const org = parts[0]?.trim() ?? "";
+      const slug = parts[1]?.trim() ?? "";
+      if (parts.length !== 2 || !ORG.test(org) || !SLUG.test(slug)) {
+        return {
+          ok: false,
+          message: `"${entry}" is not a team rule — write \`team:<org>/<slug>\``,
+        };
+      }
+      rules.push({ kind: "team", org, slug });
+      continue;
+    }
+    if (!LOGIN.test(entry)) {
+      return {
+        ok: false,
+        message: `"${entry}" is not a GitHub login, an \`org:<name>\`, or a \`team:<org>/<slug>\``,
+      };
+    }
+    rules.push({ kind: "login", login: entry });
+  }
+  if (rules.length === 0) {
+    return { ok: false, message: "names nobody — write `org:<name>`, `team:<org>/<slug>` or a comma-separated list of logins" };
+  }
+  return { ok: true, rules };
+}
+
+/** `readAllow`, for a caller that has already reported a refusal. */
 export function parseAllow(spec: string): AllowRule[] {
-  return spec
-    .split(",")
-    .map((entry) => entry.trim())
-    .filter((entry) => entry !== "")
-    .map((entry): AllowRule => {
-      if (entry.toLowerCase().startsWith("org:")) {
-        return { kind: "org", org: entry.slice("org:".length).trim() };
-      }
-      if (entry.toLowerCase().startsWith("team:")) {
-        const [org = "", slug = ""] = entry.slice("team:".length).trim().split("/");
-        return { kind: "team", org: org.trim(), slug: slug.trim() };
-      }
-      return { kind: "login", login: entry };
-    });
+  const reading = readAllow(spec);
+  return reading.ok ? [...reading.rules] : [];
 }
 
 /** The same rules, for a sentence a person reads on a refused sign-in. */

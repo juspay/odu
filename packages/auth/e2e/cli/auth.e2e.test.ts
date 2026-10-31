@@ -142,6 +142,39 @@ describe("$ODU_TOKEN drives a command against a server with a door", () => {
   });
 });
 
+describe("odu auth login stores the token, and --origin uses it", () => {
+  it("writes a credential for the origin and reaches the server with it", () => {
+    // A PRIVATE config home, so the run cannot touch the developer's own
+    // `~/.config/odu/auth/credentials`.
+    const configHome = mkdtempSync(join(tmpdir(), "odu-e2e-auth-home-"));
+    const env = { ...world.env, XDG_CONFIG_HOME: configHome };
+    try {
+      const login = Bun.spawnSync([odu, "auth", "login", world.origin], {
+        env: env as Record<string, string>,
+        stdin: Buffer.from(`${token}\n`),
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(login.exitCode, login.stderr.toString()).toBe(0);
+
+      // NO `ODU_TOKEN`: the credential the login wrote is the only thing this
+      // call has, and `--origin` is what picks it.
+      const whoami = Bun.spawnSync(
+        [odu, "auth", "whoami", "--origin", world.origin, "-o", "json"],
+        { env: env as Record<string, string>, stdout: "pipe", stderr: "pipe" },
+      );
+      expect(whoami.exitCode, whoami.stderr.toString()).toBe(0);
+      expect(JSON.parse(whoami.stdout.toString())).toEqual({
+        kind: "user",
+        login: LOGIN,
+        role: "owner",
+      });
+    } finally {
+      rmSync(configHome, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("the MCP door", () => {
   const initialize = {
     jsonrpc: "2.0",

@@ -167,6 +167,10 @@ export function openAuthRepo(path: string): AuthRepo {
     // filesystem that refuses the chmod is not a reason to refuse to serve.
   }
 
+  /** GitHub logins are case-insensitive, and a grant typed `Srid` must find the
+   *  grant written by a sign-in as `srid`. ONE place lowercases. */
+  const lower = (login: string): string => login.trim().toLowerCase();
+
   const sessionOf = (row: SessionDb | null): SessionRow | null =>
     row === null
       ? null
@@ -204,7 +208,7 @@ export function openAuthRepo(path: string): AuthRepo {
          ON CONFLICT(id) DO UPDATE SET
            login = excluded.login, last_seen = excluded.last_seen,
            expires = excluded.expires, agent = excluded.agent`,
-      ).run(row.id, row.login, row.created, row.lastSeen, row.expires, row.agent);
+      ).run(row.id, lower(row.login), row.created, row.lastSeen, row.expires, row.agent);
     },
     touchSession: (id, at) => {
       db.query("UPDATE session SET last_seen = ?2 WHERE id = ?1").run(id, at);
@@ -252,7 +256,7 @@ export function openAuthRepo(path: string): AuthRepo {
       ).run(
         row.id,
         row.hash,
-        row.login,
+        lower(row.login),
         row.name,
         row.created,
         row.lastUsed,
@@ -279,14 +283,14 @@ export function openAuthRepo(path: string): AuthRepo {
     grant: (login) => {
       const row = db
         .query("SELECT * FROM grant_row WHERE login = ?1")
-        .get(login) as GrantDb | null;
+        .get(lower(login)) as GrantDb | null;
       return row === null ? null : { ...row, role: row.role as Role };
     },
     setGrant: (row) => {
       db.query(
         `INSERT INTO grant_row (login, role, created) VALUES (?1, ?2, ?3)
          ON CONFLICT(login) DO UPDATE SET role = excluded.role`,
-      ).run(row.login, row.role, row.created);
+      ).run(lower(row.login), row.role, row.created);
     },
     grants: () =>
       (db.query("SELECT * FROM grant_row ORDER BY login").all() as GrantDb[]).map(

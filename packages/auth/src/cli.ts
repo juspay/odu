@@ -21,14 +21,15 @@ import type { SurfaceClientOf } from "@kolu/surface/project";
 import type { SurfaceDispatch } from "@kolu/surface/link";
 import { composedClients } from "@odu/cordis/compose";
 import { Effect } from "effect";
-import { saveAuthToken } from "./credentials";
+import { readAuthToken, saveAuthToken } from "./credentials";
+import { serviceOrigin } from "@odu/service-client/endpoint";
 import { AUTH_KEY, AuthRefused, oduAuthSurface, type AuthToken } from "./surface";
 
 /** The credential store, for the root that dials on this machine's behalf. */
 export {
   authCredentialsPath,
   authorizationHeaders,
-  readAuthToken,
+
   TOKEN_ENV,
 } from "./credentials";
 
@@ -176,6 +177,15 @@ async function loginCommand(rest: string[]): Promise<number> {
     process.stderr.write(`odu: auth login needs an origin\n${AUTH_USAGE}`);
     return 1;
   }
+  if (values.token !== undefined) {
+    // A token in argv is a token in the shell's history and in every `ps` on
+    // the machine. `--token` stays (a script may have nowhere else to put it),
+    // and it says so once.
+    process.stderr.write(
+      "odu: `--token` puts the token in your shell history — omit it and paste " +
+        "the token on stdin instead\n",
+    );
+  }
   const token = values.token ?? (await readSecret());
   if (token === "") {
     process.stderr.write("odu: no token given\n");
@@ -300,12 +310,17 @@ async function grantCommand(rest: string[], ports: AuthCliPorts): Promise<number
     );
     return 1;
   }
+  // THE ROOT TOKEN TRAVELS ONLY WHEN IT IS THE CREDENTIAL. A caller holding a
+  // personal token is an owner as far as this call is concerned; sending the
+  // operator's secret with it would put the most powerful token on the wire for
+  // no reason.
+  const held = await readAuthToken(process.env, values.origin ?? serviceOrigin());
   return withService(ports, values.origin, async (client) => {
     const answer = await call(
       client.surface.user.grant({
         login,
         role,
-        rootToken: process.env.ODU_ROOT_TOKEN ?? "",
+        rootToken: held === null ? (process.env.ODU_ROOT_TOKEN ?? "") : "",
       }),
     );
     if (!answer.ok) return reportFailure(answer, false);

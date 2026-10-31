@@ -44,6 +44,7 @@ import type { Logger } from "@kolu/surface-daemon";
 import type { Role } from "@odu/cordis/principal";
 import {
   admissionOf,
+  makeLease,
   PrincipalBroker as PrincipalBrokerTag,
   type Lease,
   type Principal,
@@ -76,9 +77,12 @@ export type AuthSurfaceDeps = ImplementSurfaceDeps<AuthSpec>;
 /** The cookie a browser's session rides. */
 export const SESSION_COOKIE = "odu_session";
 
-/** How long a sign-in lasts without being refreshed by a use. Long enough that
- *  a working week does not ask again, short enough that an abandoned laptop's
- *  cookie stops being a session. */
+/** How long a sign-in lasts, measured FROM THE SIGN-IN to its expiry.
+ *
+ *  Using a session records `lastSeen` and does NOT extend it: a session has one
+ *  end, so "signed in on Monday" is a session in four weeks and not a session
+ *  that a tab left open keeps alive forever. The cookie's own `max-age` is this
+ *  same number (`./routes`), so a browser drops it when the row does. */
 export const SESSION_DAYS = 30;
 
 const sha256 = (value: string): string =>
@@ -190,40 +194,28 @@ export function authServer(opts: AuthServerOptions): AuthServer {
     endWhere((entry) => entry.login === login);
   };
 
-  /** One connection's hold on one session. `request` never returns the same
-   *  lease twice, and `watch` fires exactly once — at the end. */
+  /** One connection's hold on one session — the shared lease machine
+   *  (`@odu/cordis/principal`'s {@link makeLease}), plus the row's registry so a
+   *  logout, a revocation, a role change or the sweep can end it. `request`
+   *  never returns the same lease twice, and `watch` fires exactly once. */
   const hold = (owner: { login: string; session?: string; token?: string }): Lease => {
-    const watchers = new Set<() => void>();
-    let ended = false;
-    const entry: Held = {
+    let entry: Held | null = null;
+    const mine = makeLease(principalFor(owner.login), () => {
+      if (entry !== null) held.delete(entry);
+    });
+    entry = {
       login: owner.login,
       session: owner.session ?? null,
       token: owner.token ?? null,
-      end() {
-        if (ended) return;
-        ended = true;
-        held.delete(entry);
-        for (const wake of [...watchers]) wake();
-        watchers.clear();
-      },
+      end: mine.end,
     };
     held.add(entry);
     return {
-      principal: principalFor(owner.login),
-      watch(wake) {
-        if (ended) {
-          wake();
-          return () => {};
-        }
-        watchers.add(wake);
-        return () => {
-          watchers.delete(wake);
-        };
-      },
-      release() {
-        ended = true;
-        held.delete(entry);
-        watchers.clear();
+      principal: mine.lease.principal,
+      watch: mine.lease.watch,
+      release: () => {
+        if (entry !== null) held.delete(entry);
+        mine.lease.release();
       },
     };
   };
@@ -282,6 +274,16 @@ export function authServer(opts: AuthServerOptions): AuthServer {
       return Effect.succeed({ login: who.login, role: who.role });
     });
 
+  /** The root token, compared without leaking its length or contents. */
+  const rootTokenMatches = (offered: string): boolean =>
+    opts.rootToken !== null &&
+    timingSafeEqual(Buffer.from(sha256(offered)), Buffer.from(sha256(opts.rootToken)));
+
+  /** The owners this daemon already has. One is enough to make the root token's
+   *  job done — it bootstraps the FIRST owner and nothing else. */
+  const owners = (): ReadonlyArray<string> =>
+    repo.grants().filter((grant) => grant.role === "owner").map((grant) => grant.login);
+
   const deps: AuthSurfaceDeps = {
     procedures: {
       user: {
@@ -293,17 +295,32 @@ export function authServer(opts: AuthServerOptions): AuthServer {
           Effect.flatMap(admissionOf, (admission) => {
             const who = admission.principal;
             if (who === null) {
-              const byRoot =
-                opts.rootToken !== null &&
-                timingSafeEqual(
-                  Buffer.from(sha256(input.rootToken)),
-                  Buffer.from(sha256(opts.rootToken)),
-                );
-              if (!byRoot) {
+              if (!rootTokenMatches(input.rootToken)) {
                 return Effect.fail(
                   notPermitted(
-                    "granting a role needs the operator's root token on a daemon " +
-                      "with no owner yet — set $ODU_ROOT_TOKEN and pass it",
+                    "granting a role needs a signed-in owner — or, on a daemon with " +
+                      "no owner yet, the operator's root token ($ODU_ROOT_TOKEN)",
+                  ),
+                );
+              }
+              // THE ROOT TOKEN'S ONE JOB, exactly once. It creates the first
+              // owner; after that every grant is an owner's, which is what makes
+              // it a bootstrap rather than a second administrator.
+              const existing = owners();
+              if (existing.length > 0) {
+                return Effect.fail(
+                  notPermitted(
+                    `this daemon already has an owner (${existing.join(", ")}) — the ` +
+                      "root token only bootstraps the first one; sign in as an owner " +
+                      "to grant roles",
+                  ),
+                );
+              }
+              if (input.role !== "owner") {
+                return Effect.fail(
+                  notPermitted(
+                    `the root token bootstraps the first OWNER and nothing else — ` +
+                      `sign in as that owner to grant "${input.role}"`,
                   ),
                 );
               }
@@ -312,12 +329,13 @@ export function authServer(opts: AuthServerOptions): AuthServer {
                 notPermitted(`granting a role is an owner's verb — ${who.login} is a ${who.role}`),
               );
             }
-            repo.setGrant({ login: input.login, role: input.role, created: now() });
+            const login = input.login.trim().toLowerCase();
+            repo.setGrant({ login, role: input.role, created: now() });
             // The role is read at the upgrade, so a change takes effect at the
             // NEXT connection: the open ones are ended, the clients redial, and
             // each arrives with the role it now has.
-            endLogin(input.login);
-            return Effect.succeed({ login: input.login, role: input.role });
+            endLogin(login);
+            return Effect.succeed({ login, role: input.role });
           }),
       },
 
@@ -454,27 +472,43 @@ export const authRow = (config: GithubConfig) =>
       const rootToken = yield* RootToken;
       const broker: PrincipalBroker = yield* PrincipalBrokerTag;
 
+      // ACQUIRE, THEN ARRANGE THE RELEASE — one pair at a time, in this order,
+      // so a failure ANYWHERE below unwinds everything above it. That is what
+      // makes "a refused second claim installs nothing" true at the ROW and not
+      // only at the broker: the mount, the routes and the database all come
+      // after the claim, and the claim's own refusal throws with the database's
+      // release already registered.
+      //
+      // Finalizers run in REVERSE, so they run: stop the sweep, withdraw the
+      // routes, drop the mount, withdraw the resolver, close the database.
       const repo = openAuthRepo(join(stateDir, "auth", "auth.sqlite"));
-      const server = authServer({ config, repo, rootToken, log });
+      // The server owns the last word on its database — it ends every lease
+      // still held before closing it — so the release names the server once it
+      // exists, and the bare database only if the server itself never did.
+      let server: AuthServer | null = null;
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          if (server === null) repo.close();
+          else server.closeDatabase();
+        }),
+      );
 
-      // THE MOUNT, in the activation, exactly as the cache does it.
-      const mounted = bundle.mount(AUTH_KEY, server.surface, server.deps);
-      routes.add(authRoutes({ config, server, log }));
-
+      const auth = authServer({ config, repo, rootToken, log });
+      server = auth;
       // THE CLAIM. A second resolver is refused by the broker and installs
       // nothing; this row failing here is the sentence that says two rows
       // decided they own the door.
-      const withdraw = broker.register(server.resolver);
-
-      const sweep = setInterval(() => server.sweep(), SWEEP_MS);
-      sweep.unref?.();
-
-      // FINALIZERS RUN IN REVERSE, so they are registered in the opposite order
-      // to the one they must run in: stop the sweep, drop the mount, withdraw
-      // the resolver, close the database.
-      yield* Effect.addFinalizer(() => Effect.sync(() => server.closeDatabase()));
+      const withdraw = broker.register(auth.resolver);
       yield* Effect.addFinalizer(() => Effect.sync(withdraw));
+
+      const mounted = bundle.mount(AUTH_KEY, auth.surface, auth.deps);
       yield* Effect.addFinalizer(() => Effect.promise(() => mounted.drop()));
+
+      const deregister = routes.add(authRoutes({ config, server: auth, log }));
+      yield* Effect.addFinalizer(() => Effect.sync(deregister));
+
+      const sweep = setInterval(() => auth.sweep(), SWEEP_MS);
+      sweep.unref?.();
       yield* Effect.addFinalizer(() =>
         Effect.sync(() => {
           clearInterval(sweep);
@@ -494,3 +528,7 @@ export { AUTH_AGENT, AUTH_ANONYMOUS_TAGS, AUTH_KEY } from "./surface";
 /** The environment reader and its outcome, for the host that mounts this row:
  *  the HOST reads the environment, and this is the row's own grammar for it. */
 export { readGithubConfig, type GithubConfig, type GithubConfigReading } from "./github";
+
+/** The page the HOST's middleware renders for an anonymous browser — the door's
+ *  look, owned by the door, rendered without the bundle. */
+export { signInPageHtml } from "./routes";

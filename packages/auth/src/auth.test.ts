@@ -116,6 +116,27 @@ describe("the door's configuration", () => {
     expect(reading.message).toContain("ODU_GITHUB_ALLOW");
   });
 
+  it("refuses a MALFORMED allow entry, naming it", () => {
+    const secret = join(scratch, "secret");
+    writeFileSync(secret, "shhh\n");
+    const read = (allow: string) =>
+      readGithubConfig(
+        {
+          ODU_GITHUB_CLIENT_ID: "id",
+          ODU_GITHUB_CLIENT_SECRET_FILE: secret,
+          ODU_GITHUB_ALLOW: allow,
+        },
+        origins,
+      );
+    for (const bad of ["team:juspay", "org:", "team:/platform", "not a login!"]) {
+      const reading = read(bad);
+      expect(reading.kind, bad).toBe("refused");
+      if (reading.kind !== "refused") continue;
+      expect(reading.message).toContain(bad.split(",")[0] as string);
+    }
+    expect(read("org:juspay,team:juspay/platform,srid").kind).toBe("config");
+  });
+
   it("reads a complete one, with the public origin as the callback's", () => {
     const secret = join(scratch, "secret");
     writeFileSync(secret, "shhh\n");
@@ -302,6 +323,55 @@ describe("the row's authority", () => {
     expect(anonymous.ok).toBe(false);
     if (anonymous.ok) return;
     expect(refusal(anonymous.error).code).toBe("not_permitted");
+  });
+
+  it("refuses the ROOT TOKEN for anything but the first OWNER", async () => {
+    const { client } = row({ rootToken: "operator" });
+
+    // A role that is not `owner`, before anybody owns the daemon.
+    const admin = await as(
+      client.surface.user.grant({ login: "alice", role: "admin", rootToken: "operator" }),
+      admissionFor(null),
+    );
+    expect(admin.ok).toBe(false);
+    if (admin.ok) return;
+    expect(refusal(admin.error).code).toBe("not_permitted");
+    expect(refusal(admin.error).message).toContain("first OWNER");
+
+    // …and once an owner exists, the root token is spent — for an owner grant
+    // too, which is the second grant a bootstrap script is tempted to make.
+    const first = await as(
+      client.surface.user.grant({ login: "srid", role: "owner", rootToken: "operator" }),
+      admissionFor(null),
+    );
+    expect(first.ok).toBe(true);
+    const again = await as(
+      client.surface.user.grant({ login: "alice", role: "owner", rootToken: "operator" }),
+      admissionFor(null),
+    );
+    expect(again.ok).toBe(false);
+    if (again.ok) return;
+    expect(refusal(again.error).message).toContain("already has an owner");
+
+    // An owner's session still grants, which is what the root token handed over.
+    const byOwner = await as(
+      client.surface.user.grant({ login: "alice", role: "admin", rootToken: "" }),
+      admit("srid", "owner"),
+    );
+    expect(byOwner.ok).toBe(true);
+  });
+
+  it("matches a grant however the login is typed", async () => {
+    const { client, server } = row();
+    const granted = await as(
+      client.surface.user.grant({ login: "Srid", role: "member", rootToken: "operator" }),
+      admit("srid", "owner"),
+    );
+    expect(granted.ok && granted.value.login).toBe("srid");
+    const { cookie } = server.signIn({ login: "srid", agent: null });
+    expect(
+      server.resolver.acquire({ cookie: `${SESSION_COOKIE}=${cookie}` })?.principal,
+    ).toEqual({ kind: "user", login: "srid", role: "member" });
   });
 
   it("the ROOT TOKEN bootstraps the first owner, and that is its one job", async () => {
