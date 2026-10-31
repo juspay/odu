@@ -4,21 +4,25 @@
   "private": true,
   "license": "AGPL-3.0-or-later",
   "type": "module",
-  "//workspaces": "Each member is a WALL, not a folder, and the walls run ONE WAY: cli → execution → run-history → run-client. run-client is the half of odu a client of a LIVE run holds; run-history is everything that OUTLIVES a coordinator (the per-user catalog, the journal, per-attempt evidence, and the checkout-scoped ledger as its legacy half); execution is everything that DOES a run; cli is the two ways of WATCHING one (the native CLI/TUI and the MCP surface). PR 2 adds three more, and the arrow still runs one way: service-client is the CONTRACT the web service serves (browser-safe by construction — its closure test refuses a `node:` import); service is what IMPLEMENTS it, and it cannot import execution, so the three things it must cause — launch, retry, cancel — arrive as ports the root binds; web-ui is the browser, which holds views and no domain logic at all. host is the REGISTRY: the daemon — the tenure, the listener, the singleton gate, and the roster — so it names every row and belongs to none, and a row may not import it. What host and rows SHARE (the Cordis service tags, the row record, the composed-wire helpers) is a seventh member, cordis, that belongs to neither. The arrow is host → rows, and launch is the bootstrap a row may import. cache is the fourth: a Nix binary cache whose bottom-of-the-graph position is the point — it imports nothing of odu, reads no environment, and is handed its state directory, its root token and its store URI by the root that serves it. What is left in src/ is the composition roots — main.ts and runner-main.ts — the only place the faces and the engine are wired to each other. Each member's src/closure.test.ts walks its own import graph, so the direction is physics rather than discipline. Every member is also listed in `dependencies` below: the isolated linker symlinks only the root package's DIRECT dependencies into the root node_modules, so without those entries `@odu/*` would not resolve from src/.",
+  "//workspaces": "Each member is a WALL, not a folder, and the walls run ONE WAY: cli \u2192 execution \u2192 run-history \u2192 run-client. run-client is the half of odu a client of a LIVE run holds; run-history is everything that OUTLIVES a coordinator (the per-user catalog, the journal, per-attempt evidence, and the checkout-scoped ledger as its legacy half); execution is everything that DOES a run; cli is the two ways of WATCHING one (the native CLI/TUI and the MCP surface). PR 2 adds three more, and the arrow still runs one way: service-client is the CONTRACT the web service serves (browser-safe by construction \u2014 its closure test refuses a `node:` import); service is what IMPLEMENTS it, and it cannot import execution, so the three things it must cause \u2014 launch, retry, cancel \u2014 arrive as ports the root binds; web-ui is the browser, which holds views and no domain logic at all. host is the REGISTRY: the daemon \u2014 the tenure, the listener, the singleton gate, and the roster \u2014 so it names every row and belongs to none, and a row may not import it. What host and rows SHARE (the Cordis service tags, the row record, the composed-wire helpers) is a seventh member, cordis, that belongs to neither. The arrow is host \u2192 rows, and launch is the bootstrap a row may import. cache is the fourth: a Nix binary cache whose bottom-of-the-graph position is the point \u2014 it imports nothing of odu, reads no environment, and is handed its state directory, its root token and its store URI by the root that serves it. What is left in src/ is the composition roots \u2014 main.ts and runner-main.ts \u2014 the only place the faces and the engine are wired to each other. Each member's src/closure.test.ts walks its own import graph, so the direction is physics rather than discipline. Every member is also listed in `dependencies` below: the isolated linker symlinks only the root package's DIRECT dependencies into the root node_modules, so without those entries `@odu/*` would not resolve from src/.",
   "workspaces": [
     "packages/*"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "//test:unit": "TWO GLOBS, not `./packages`: a row keeps its CLI e2e tests under `packages/<row>/e2e/cli`, and the unit runner must not reach them — they build the nix binary and drive a real daemon. `packages/*/src` is every row's unit tests; `packages/web-acceptance/*.test.ts` are the suite's own (the playwright pin and the runner).",
+    "//test:unit": "TWO GLOBS, not `./packages`: a row keeps its CLI e2e tests under `packages/<row>/e2e/cli`, and the unit runner must not reach them \u2014 they build the nix binary and drive a real daemon. `packages/*/src` is every row's unit tests; `packages/web-acceptance/*.test.ts` are the suite's own (the playwright pin and the runner).",
     "test:unit": "bun test ./src ./packages/*/src ./packages/web-acceptance/*.test.ts",
     "test:e2e-cli": "bun test ./tests/e2e ./packages/*/e2e/cli"
   },
   "dependencies": {
+    "@effect/platform-browser": "4.0.0",
+    "@effect/platform-node": "4.0.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@odu/auth": "workspace:*",
     "@odu/cache": "workspace:*",
     "@odu/ci": "workspace:*",
     "@odu/cli": "workspace:*",
+    "@odu/cloudflare": "workspace:*",
     "@odu/cordis": "workspace:*",
     "@odu/execution": "workspace:*",
     "@odu/face": "workspace:*",
@@ -28,9 +32,6 @@
     "@odu/run-history": "workspace:*",
     "@odu/service": "workspace:*",
     "@odu/service-client": "workspace:*",
-    "@effect/platform-browser": "4.0.0",
-    "@effect/platform-node": "4.0.0",
-    "@modelcontextprotocol/sdk": "^1.29.0",
     "@opentui/core": "^0.4.5",
     "@preact/signals-core": "^1.8.0",
     "@solid-primitives/rootless": "^1.5.3",

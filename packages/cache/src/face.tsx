@@ -827,7 +827,7 @@ function BucketDomain(
         A DNS name for this bucket, with no scheme and no port. When it is set,
         the substituter URL, the netrc block and the push block use it. The
         NixOS module needs a virtual host for the same name; a bucket on the
-        public pod gets one through the Cloudflare row.
+        public pod gets one through a tunnel row.
       </p>
       <label class="search">
         <span class="sr-only">bucket domain</span>

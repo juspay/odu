@@ -58,6 +58,7 @@ export function identityOf(tags: readonly { readonly name: string }[]): Identity
     );
   }
   if (named.includes("@anonymous")) return { kind: "anonymous" };
+  if (named.includes("@tunnel")) return { kind: "tunnel" };
   return { kind: "loopback" };
 }
 

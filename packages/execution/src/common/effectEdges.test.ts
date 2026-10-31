@@ -131,6 +131,15 @@ const SANCTIONED = new Map<string, string>([
       "all: it is the one command here that touches no service.",
   ],
   [
+    "packages/cloudflare/src/cli.ts",
+    "The tunnel row's ARGV EDGE, exactly as the cache's and the door's: " +
+      "`odu cloudflare status` ends with a surface procedure becoming bytes on " +
+      "a stream and a number for `process.exit`, and a refusal cannot be told " +
+      "from a dead link without running it. The row's own doors take the " +
+      "edge's place in production: `./server` is a handler table, and the " +
+      "daemon runs it.",
+  ],
+  [
     "packages/auth/src/routes.ts",
     "The door's HTTP edge, and it is the SIGN-IN FLOW's: `HttpRouter` handlers " +
       "answer with an `Effect` and a `Layer`, and a cookie is set on a response " +

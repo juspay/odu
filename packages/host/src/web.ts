@@ -95,6 +95,8 @@ import {
   PrincipalBroker,
 } from "@odu/cordis/principal";
 import { authRow, readGithubConfig, signInPageHtml } from "@odu/auth/server";
+import { cloudflareRow } from "@odu/cloudflare/server";
+import { CLOUDFLARE_AGENT, CLOUDFLARE_KEY } from "@odu/cloudflare/surface";
 import { AUTH_AGENT, AUTH_ANONYMOUS_TAGS, AUTH_KEY } from "@odu/auth/surface";
 import {
   admissionDispatch,
@@ -108,6 +110,7 @@ import {
 } from "./principal";
 import type { SurfaceHandlers } from "@kolu/surface/server";
 import { SERVICE_MCP_PATH } from "@odu/service-client/endpoint";
+import { readCloudflareConfig } from "./cloudflareConfig";
 import { reservedPaths } from "./reserved";
 import { servingOptions } from "./serving";
 import { CI_AGENT, ciRow, CI_KEY } from "@odu/ci/row";
@@ -252,6 +255,14 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     process.stderr.write(`${github.message}\n`);
     return 1;
   }
+  // THE TUNNEL ROW'S CONFIGURATION — read here for the same reason: this is the
+  // one place that reads an environment, and a half-set file path is refused at
+  // boot rather than as a Tunnel panel that never moves.
+  const cloudflare = readCloudflareConfig(process.env);
+  if (cloudflare.kind === "refused") {
+    process.stderr.write(`${cloudflare.message}\n`);
+    return 1;
+  }
 
   // Claimed FIRST, so a launcher that lost the race never binds the port. The
   // framework's own gate: one atomic link, a liveness-proved holder, and a
@@ -311,6 +322,27 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
             key: AUTH_KEY,
             plugin: authRow(github.config),
             agent: AUTH_AGENT,
+          },
+        ]
+      : []),
+    // THE TUNNEL, when a token file is configured. It reacts to the cache row's
+    // published domains; the roster order is the mount order, so the cache (and
+    // its `CacheDomains` offer) is standing before this row asks for it.
+    ...(cloudflare.kind === "config"
+      ? [
+          {
+            name: CLOUDFLARE_KEY,
+            key: CLOUDFLARE_KEY,
+            plugin: cloudflareRow({
+              token: cloudflare.config.token,
+              ...(cloudflare.config.apiBase === null
+                ? {}
+                : { apiBase: cloudflare.config.apiBase }),
+              ...(cloudflare.config.probeBase === null
+                ? {}
+                : { probeBase: cloudflare.config.probeBase }),
+            }),
+            agent: CLOUDFLARE_AGENT,
           },
         ]
       : []),

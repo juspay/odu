@@ -124,12 +124,21 @@ export const DOOR_PORT_OFFSET = 40;
 /** The GitHub stub both origins point at. */
 export const STUB_PORT_OFFSET = 45;
 
+/** THE TUNNEL'S WORLD — a third daemon, because the cloudflare row mounts only
+ *  when its token file is configured, and the loopback page a scenario without
+ *  that row asserts must stay exactly as it is. */
+export const TUNNEL_PORT_OFFSET = 50;
+
 export function doorPort(): number {
   return workerPort() + DOOR_PORT_OFFSET;
 }
 
 export function stubPort(): number {
   return workerPort() + STUB_PORT_OFFSET;
+}
+
+export function tunnelPort(): number {
+  return workerPort() + TUNNEL_PORT_OFFSET;
 }
 
 /** Poll until `ask` answers, or fail with a sentence naming what was waited on. */

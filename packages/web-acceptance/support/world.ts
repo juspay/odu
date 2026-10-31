@@ -46,6 +46,9 @@ export const STEP_TIMEOUT = 120_000;
 export type Identity =
   | { readonly kind: "loopback" }
   | { readonly kind: "anonymous" }
+  /** Loopback, but with the cloudflare row mounted (a stub API, a fake
+   *  connector): the Tunnel panel and a bucket's route are on the board. */
+  | { readonly kind: "tunnel" }
   | { readonly kind: "signed-in"; readonly role: "owner" | "admin" | "member" };
 
 export class OduWorld extends World {

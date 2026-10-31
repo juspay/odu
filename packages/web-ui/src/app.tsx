@@ -30,6 +30,7 @@ import {
   type CiRoute,
 } from "@odu/ci/face";
 import { CacheFace, type CacheClient } from "@odu/cache/face";
+import { BucketRoute, TunnelFace, type CloudflareClient } from "@odu/cloudflare/face";
 import { LOCAL_OWNER, may, type Principal, type Role } from "@odu/cordis/principal";
 import {
   PeopleFace,
@@ -70,6 +71,7 @@ import { faviconSvg, wireText } from "./format";
 type Route =
   | CiRoute
   | { at: "cache"; bucket: string | null }
+  | { at: "tunnel" }
   | { at: "profile" }
   | { at: "people" };
 
@@ -125,6 +127,7 @@ function routeOf(hash: string): Route {
   if (rest === "new") return { at: "new" };
   if (rest === "machines") return { at: "machines" };
   if (rest === "maintain") return { at: "maintain" };
+  if (rest === "tunnel") return { at: "tunnel" };
   if (rest === "profile") return { at: "profile" };
   if (rest === "people") return { at: "people" };
   if (rest === "cache") return { at: "cache", bucket: null };
@@ -153,6 +156,8 @@ function hashOf(route: Route): string {
       return route.log === null ? runHash(route.runId) : logHash(route.log);
     case "cache":
       return route.bucket === null ? "#/cache" : `#/cache/${encodeURIComponent(route.bucket)}`;
+    case "tunnel":
+      return "#/tunnel";
   }
 }
 
@@ -169,6 +174,9 @@ export function App(props: {
    *  the contract), but the row may not be MOUNTED — `door` is the host's answer
    *  to that question, read before the first render. */
   auth: AuthClient;
+  /** THE TUNNEL'S CLIENT. The row is mounted only on a daemon with a Cloudflare
+   *  token; the page asks its status read and says so when it is absent. */
+  cloudflare: CloudflareClient;
   /** Does this daemon have a DOOR? The host answers `GET /_odu/door` before the
    *  first render; `null` means the answer did not arrive. */
   door: DoorState;
@@ -330,6 +338,7 @@ export function App(props: {
   // nothing into its children, so the readings are memos rather than a
   // discriminated `route()` read inside the JSX.
   const atCache = createMemo(() => route().at === "cache");
+  const atTunnel = createMemo(() => route().at === "tunnel");
   const atProfile = createMemo(() => route().at === "profile");
   const atPeople = createMemo(() => route().at === "people");
   /** THE PEOPLE PAGE IS AN OWNER'S, drawn for a signed-in owner only: a local
@@ -342,7 +351,7 @@ export function App(props: {
   const anonymous = createMemo(() => props.door === true && who()?.kind === "anonymous");
   const ciRoute = createMemo<CiRoute>(() => {
     const here = route();
-    return here.at === "cache" || here.at === "profile" || here.at === "people"
+    return here.at === "cache" || here.at === "tunnel" || here.at === "profile" || here.at === "people"
       ? { at: "board" }
       : here;
   });
@@ -381,7 +390,7 @@ export function App(props: {
             navigation menu's worth of ceremony. */}
         <nav class="rows" aria-label="board rows" hidden={anonymous()}>
           <Button
-            pressed={!atCache() && !atProfile() && !atPeople()}
+            pressed={!atCache() && !atTunnel() && !atProfile() && !atPeople()}
             onClick={() => go({ at: "board" })}
           >
             Runs
@@ -391,6 +400,9 @@ export function App(props: {
             onClick={() => go({ at: "cache", bucket: null })}
           >
             Cache
+          </Button>
+          <Button pressed={atTunnel()} onClick={() => go({ at: "tunnel" })}>
+            Tunnel
           </Button>
         </nav>
         {/* WHO IS SIGNED IN, and the door's two controls. Absent on a daemon
@@ -460,6 +472,13 @@ export function App(props: {
             onClose={() => go({ at: "board" })}
           />
         </Show>
+        <Show when={atTunnel()}>
+          <TunnelFace
+            client={props.cloudflare}
+            now={now()}
+            call={(effect) => Effect.runPromise(effect)}
+          />
+        </Show>
         <Show when={atCache()}>
           <CacheFace
             client={props.cache}
@@ -470,8 +489,16 @@ export function App(props: {
             call={(effect) => Effect.runPromise(effect)}
             onOpen={(bucket) => go({ at: "cache", bucket })}
           />
+          {/* THE ROUTE STRIP: the shell composes the two rows on a bucket page
+              so the domain's state is visible where the name was set, without
+              the cache's face knowing what a tunnel is. */}
+          <Show when={openBucket()}>
+            {(bucket) => (
+              <BucketRoute client={props.cloudflare} bucket={bucket()} now={now()} />
+            )}
+          </Show>
         </Show>
-        <Show when={!atCache() && !atProfile() && !atPeople() ? ambient() : null}>
+        <Show when={!atCache() && !atTunnel() && !atProfile() && !atPeople() ? ambient() : null}>
           {(held) => (
             <CiFace
               client={props.client}

@@ -40,11 +40,13 @@
  */
 
 import { Effect } from "effect";
-import { definePlugin } from "@olai/effect-cordis";
+import { definePlugin, offer } from "@olai/effect-cordis";
 import type { ImplementSurfaceDeps } from "@kolu/surface/server";
 import {
   BoundOrigin,
   Bundle,
+  BucketDomains,
+  type BucketDomains as BucketDomainsFacts,
   Log,
   NixStore,
   PublicOrigin,
@@ -466,6 +468,19 @@ export const cacheRow = definePlugin({
     const log = yield* Log;
 
     const cache = createCache({ stateRoot: stateDir, rootToken, store });
+
+    // THE ROW'S PUBLISHED FACT: the names its buckets carry. A row that routes
+    // those names (the cloudflare row) declares this service; it never opens
+    // this package's database or calls its verbs.
+    const domains: BucketDomainsFacts = {
+      current: () =>
+        cache.snapshot().flatMap((bucket) =>
+          bucket.domain === null ? [] : [{ bucket: bucket.name, domain: bucket.domain }],
+        ),
+      subscribe: (listener) => cache.onChange(listener),
+    };
+    yield* offer(BucketDomains, () => domains);
+
     const server = cacheServer({
       cache,
       // The address a client must be told: the proxy's when one stands in

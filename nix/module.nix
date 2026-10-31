@@ -78,7 +78,9 @@ let
     "/nar/" = proxyLocation;
     "/cache/" = proxyLocation;
     "/_odu/v1/" = proxyLocation;
-    "~ ^/[0-9abcdfghijklmnpqrsvwxyz]{32}\\.narinfo$" = proxyLocation;
+    # nginx parses an unquoted `{32}` in a location regex as a block opener, so
+    # the expression is quoted — and `[.]` avoids a backslash in the spelling.
+    "~ \"^/[0-9abcdfghijklmnpqrsvwxyz]{32}[.]narinfo$\"" = proxyLocation;
     "/" = { return = "404"; };
   };
 
@@ -297,6 +299,30 @@ in
       };
     };
 
+    cloudflare = {
+      apiTokenFile = mkOption {
+        type = types.nullOr types.path;
+        default = null;
+        example = "/run/secrets/cloudflare-api-token";
+        description = ''
+          A file holding a Cloudflare API token. Setting it mounts the
+          `cloudflare` row: it makes ONE tunnel for this server, routes each
+          bucket that has a domain, keeps the proxied DNS record, and runs
+          `cloudflared` as a child of the daemon. The token needs
+          **Zone:DNS:Edit** and **Account:Cloudflare Tunnel:Edit**; a missing or
+          inactive token refuses the row at boot, naming what Cloudflare said.
+
+          This is how `cache.kolu.dev` exists on a host with no public port:
+          the tunnel is outbound, so neither nginx nor the firewall has to
+          expose anything. The same tunnel carries \`publicOrigin\`'s host when
+          the token can edit its zone, which is what lets a Tailscale Funnel
+          retire — and moves the GitHub App's callback URL to that name.
+
+          The token is loaded as a systemd credential, not put in the Nix store.
+        '';
+      };
+    };
+
     cache.enableACME = mkOption {
       type = types.bool;
       default = true;
@@ -412,15 +438,24 @@ in
         ]
         ++ optionals (cfg.allowedOrigins != [ ]) [
           "ODU_WEB_ALLOWED_ORIGINS=${builtins.concatStringsSep "," cfg.allowedOrigins}"
+        ]
+        ++ optionals (cfg.cloudflare.apiTokenFile != null) [
+          # The credential's runtime path: systemd copies the file into a
+          # private directory, and this is the file the daemon reads.
+          "ODU_CLOUDFLARE_API_TOKEN_FILE=%d/cloudflare-api-token"
         ];
         Restart = "on-failure";
-      } // lib.optionalAttrs (cfg.rootTokenFile != null || serverMode) {
+      } // lib.optionalAttrs (
+        cfg.rootTokenFile != null || serverMode || cfg.cloudflare.apiTokenFile != null
+      ) {
         # ONE list: two `//` updates would replace each other, and a missing
         # credential is a daemon that cannot read its own secret.
         LoadCredential = optionals (cfg.rootTokenFile != null) [
           "root-token:${cfg.rootTokenFile}"
         ] ++ optionals serverMode [
           "client-secret:${toString cfg.github.clientSecretFile}"
+        ] ++ optionals (cfg.cloudflare.apiTokenFile != null) [
+          "cloudflare-api-token:${toString cfg.cloudflare.apiTokenFile}"
         ];
       };
     };

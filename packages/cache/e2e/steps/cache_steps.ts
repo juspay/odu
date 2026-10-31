@@ -401,6 +401,30 @@ Then("the push block still names the bucket's path", async function (this: OduWo
   );
 });
 
+When("I open the tunnel", async function (this: OduWorld) {
+  await this.open("#/tunnel");
+  await this.page.getByRole("heading", { name: "Tunnel", exact: true }).waitFor();
+});
+
+Then(
+  "the tunnel panel shows {string} as {string}",
+  async function (this: OduWorld, domain: string, state: string) {
+    const row = this.page.locator("ol.paths li", { hasText: domain });
+    await row.waitFor({ timeout: 30_000 });
+    await until(`the tunnel to report ${domain} ${state}`, async () =>
+      (await row.innerText()).includes(state) ? true : null,
+    );
+  },
+);
+
+Then("the bucket page shows the domain route as {string}", async function (this: OduWorld, state: string) {
+  const strip = this.page.locator('[aria-label="domain route"]');
+  await strip.waitFor({ timeout: 30_000 });
+  await until(`the bucket's route to be ${state}`, async () =>
+    (await strip.innerText()).includes(state) ? true : null,
+  );
+});
+
 Then("the token form defaults to 90 days", async function (this: OduWorld) {
   assert.strictEqual(
     await this.page.getByLabel("token expiry").inputValue(),

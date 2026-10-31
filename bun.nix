@@ -5,11 +5,12 @@
 # Consume this with `fetchBunDeps` (recommended)
 # or `pkgs.callPackage` if you wish to handle
 # it manually.
-{ copyPathToStore
-, fetchFromGitHub
-, fetchgit
-, fetchurl
-, ...
+{
+  copyPathToStore,
+  fetchFromGitHub,
+  fetchgit,
+  fetchurl,
+  ...
 }:
 {
   "@babel/code-frame@7.29.7" = fetchurl {
@@ -228,6 +229,7 @@
   "@odu/cache" = copyPathToStore ./packages/cache;
   "@odu/ci" = copyPathToStore ./packages/ci;
   "@odu/cli" = copyPathToStore ./packages/cli;
+  "@odu/cloudflare" = copyPathToStore ./packages/cloudflare;
   "@odu/cordis" = copyPathToStore ./packages/cordis;
   "@odu/credentials" = copyPathToStore ./packages/credentials;
   "@odu/execution" = copyPathToStore ./packages/execution;

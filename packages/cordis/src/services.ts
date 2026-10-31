@@ -197,6 +197,34 @@ export interface HttpRoutes {
  *  outlive a call. */
 export const Routes = serviceTag<HttpRoutes>("odu:httpRoutes");
 
+// ── what a row publishes ────────────────────────────────────────────────────
+
+/** ONE BUCKET'S OWN NAME, as the cache row publishes it. */
+export interface BucketDomainFact {
+  readonly bucket: string;
+  readonly domain: string;
+}
+
+/**
+ * THE CACHE ROW'S DOMAINS, AS A FACT OTHER ROWS MAY REACT TO.
+ *
+ * The `cloudflare` row watches this to route a bucket's name; it must not import
+ * the cache row's internals (the database, the surface's procedures) to learn a
+ * fact the cache already knows. A service key is the safe import: the cache
+ * offers it in its own activation, the cloudflare row declares it, and the two
+ * never name each other's packages.
+ *
+ * `subscribe` returns the WITHDRAWAL, and the cache ends every listener when it
+ * closes — the same lifetime its own `onChange` has.
+ */
+export interface BucketDomains {
+  /** Every bucket that has a domain, now. */
+  current(): readonly BucketDomainFact[];
+  subscribe(listener: () => void): () => void;
+}
+
+export const BucketDomains = serviceTag<BucketDomains>("odu:bucketDomains");
+
 // ── what a row is ───────────────────────────────────────────────────────────
 
 /** What an AGENT is told about one row: its surface, its own exposure policy,

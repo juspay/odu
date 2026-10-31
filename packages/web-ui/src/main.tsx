@@ -21,6 +21,7 @@ import { reloadForUpdate } from "@kolu/surface-app/lifecycle";
 import { connectSurfaces } from "@kolu/surface-app/solid";
 import { AUTH_KEY, oduAuthSurface } from "@odu/auth/surface";
 import { CACHE_KEY, oduCacheSurface } from "@odu/cache/surface";
+import { CLOUDFLARE_KEY, oduCloudflareSurface } from "@odu/cloudflare/surface";
 import { readDoor } from "@odu/cordis/services";
 import { oduServiceSurface } from "@odu/service-client/surface";
 import { createSignal } from "solid-js";
@@ -48,7 +49,11 @@ const connection = await connectSurfaces({
   // so the clients this bundle hands back address `surface/cache/…` and
   // `surface/auth/…` without a second dial. The auth row may not be mounted at
   // all — the service cell says so, and until it does nothing asks who you are.
-  surfaces: { [CACHE_KEY]: oduCacheSurface, [AUTH_KEY]: oduAuthSurface },
+  surfaces: {
+    [CACHE_KEY]: oduCacheSurface,
+    [AUTH_KEY]: oduAuthSurface,
+    [CLOUDFLARE_KEY]: oduCloudflareSurface,
+  },
   core: { surface: oduServiceSurface, name: "ci" },
   retired: reloadForUpdate,
 });
@@ -60,6 +65,7 @@ render(
         client={connection.core}
         cache={connection.clients.cache}
         auth={connection.clients.auth}
+        cloudflare={connection.clients.cloudflare}
         door={door()}
         // The shell decides WHEN (a live wire); this file answers HOW (a host
         // route, which the fence keeps out of every other file).
