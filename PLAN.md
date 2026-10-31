@@ -43,8 +43,11 @@ a monthly price.
   Not wrapping Attic, celler or niks3.
 - **Push model:** post-build-hook on lane hosts (primary); explicit push as a
   fallback.
-- **Identity:** GitHub login plus admin-issued tokens for the OSS stage;
-  generic OIDC (Google Workspace) for internal teams later.
+- **Identity:** a **GitHub App** installed on the org, through GitHub's
+  authorisation-code flow (the user flow now; installation tokens later —
+  PR 4 and PR 8). Admin-issued personal tokens for anything that is not a
+  person, for the OSS stage; generic OIDC (Google Workspace) for internal
+  teams later.
 - **CI trigger:** GitHub App webhooks, pipelines remain the CI-tagged
   justfile. Bitbucket/Jenkins as later webhook adapters.
 - **v1 hosting:** one process, local disk. Two shapes exist: the
@@ -300,7 +303,8 @@ Ownership, by the Cordis rules (olai `docs/architecture/cordis.md`):
   read `CurrentPrincipal` (a service key, a safe import) and never ask who
   supplies it.
 - **Sign-in is a row.** `auth` (`@odu/auth`, four doors like `cache`) owns
-  GitHub OAuth, the sessions and personal-token tables in its own
+  the GitHub App's authorisation-code flow, the sessions and personal-token
+  tables in its own
   `auth.sqlite`, the sign-in and profile faces, and `odu auth …`. It is
   optional in the doc's second sense: a provider that adds itself to its
   consumer. In its `apply` it registers its resolver on the host's
@@ -376,8 +380,9 @@ odu's own.
 
 What lands:
 - **The `auth` row** (`@odu/auth`, doors `./surface · ./server · ./cli ·
-  ./face`, F13): GitHub OAuth (authorisation code, state cookie, the callback
-  at `/auth/github/callback`), the sign-in page an anonymous browser meets
+  ./face`, F13): the GitHub App's authorisation-code flow (state cookie, the
+  callback at `/auth/github/callback`, no `scope` — the App's permissions are
+  the scope), the sign-in page an anonymous browser meets
   instead of the board, sessions and personal access tokens in `auth.sqlite`
   under the state directory, membership from a GitHub org or team or a list
   of logins, the verbs `auth_whoami`, `auth_token_create`, `auth_token_list`,
@@ -423,8 +428,8 @@ What lands:
 - **Deployment, both shapes.** The module gains `services.odu.github.*` and
   exposes the board, websocket and `/mcp` through nginx. For the pod,
   nixos-config switches the ingress from `tailscale serve` to Funnel and
-  syncs the OAuth secret the same way as the root token; that change is a
-  separate PR there, landed with the evidence below.
+  syncs the GitHub App's client secret the same way as the root token; that
+  change is a separate PR there, landed with the evidence below.
 - **Evidence:** this branch deployed to the pod, a sign-in from a device
   outside the tailnet, a refused run from an anonymous MCP client, a token
   minted on the profile page driving `odu --origin` from a laptop.
@@ -481,6 +486,10 @@ What lands:
 - Orgs, membership from GitHub org or team or by invite, roles (owner,
   admin, member); many buckets per org; private buckets with netrc reads;
   org field on runs and buckets so the catalog filters per org (F3).
+- Membership synced server-side from the App's installation token, so a
+  removal in GitHub is a removal in odu; user-token expiry turned on with
+  refresh tokens stored. PR 2 refuses an expiring user token rather than
+  holding one that dies in eight hours, which is this PR's to fix.
 - Token management with revocation in the UI, per-org usage and quotas, audit
   log. The bucket page itself is NOT here: PR 1.5 built it (a bucket's key,
   substituter URL, use block and paged paths), so this PR adds the org's facts
@@ -548,7 +557,7 @@ State of master after merge: a member starts a run on a registered repo at a
 SHA from the board or `odu run --origin`, on the org's own lanes, with no
 developer checkout involved.
 
-### PR 8: the GitHub App
+### PR 8: webhooks and check runs
 
 > **Docs:** Install the odu GitHub App on a repository and every push and
 > pull request gets odu's checks, with no workflow file. Checks are posted
@@ -556,6 +565,9 @@ developer checkout involved.
 > the same identity. GitHub Actions jobs that still need to push can
 > exchange their OIDC token for a short-lived bucket token instead of
 > storing a secret.
+
+The App already exists — PR 2 created it, because sign-in is its user flow.
+What this PR adds is the installation half.
 
 What lands:
 - Webhook receiver for push, pull_request and check re-run; each starts a
