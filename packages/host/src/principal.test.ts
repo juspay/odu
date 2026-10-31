@@ -14,7 +14,7 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import { Effect, Exit, Option, Stream } from "effect";
+import { Effect, Exit, Layer, Option, Scope, Stream } from "effect";
 import { HttpServerRequest, HttpServerResponse } from "effect/http";
 import type { SurfaceHandler, SurfaceHandlers } from "@kolu/surface/server";
 import {
@@ -29,9 +29,11 @@ import {
 import {
   admissionDispatch,
   admissionStore,
+  connectionLayer,
   doorGate,
   gatedHandlers,
   liveDispatch,
+  type DoorConnection,
 } from "./principal";
 
 const MEMBER = { kind: "user", login: "srid", role: "member" } as const;
@@ -176,6 +178,60 @@ async function through(
     ),
   );
 }
+
+describe("the connection layer", () => {
+  /** One connection, with the close kolu PR #2330 adds. */
+  const connection = (closed: Array<[number | undefined, string | undefined]>): DoorConnection => ({
+    id: 1,
+    url: new URL("http://127.0.0.1:18440/rpc/ws"),
+    remoteAddress: "127.0.0.1",
+    headers: { cookie: "odu_session=s3cret" },
+    close: (code?: number, reason?: string) => {
+      closed.push([code, reason]);
+    },
+  });
+
+  /** The broker and the lease behind it, plus a way to end it. */
+  function leased() {
+    const broker = localBroker({ door: true });
+    const made = makeLease(MEMBER);
+    broker.register({
+      acquire: () => made.lease,
+      authorize: () => MEMBER,
+    });
+    return { broker, end: made.end };
+  }
+
+  it("closes the socket ONCE when the session ends, before the lease is released", async () => {
+    const closed: Array<[number | undefined, string | undefined]> = [];
+    const { broker, end } = leased();
+    const scope = Scope.makeUnsafe();
+    await Effect.runPromise(
+      Scope.provide(Layer.build(connectionLayer(broker, connection(closed))), scope),
+    );
+    expect(closed).toEqual([]);
+
+    end();
+    end();
+    // One close, normal, with the reason a client can read.
+    expect(closed).toEqual([[1000, "the session ended"]]);
+
+    await Effect.runPromise(Scope.close(scope, Exit.void));
+    expect(closed).toHaveLength(1);
+  });
+
+  it("does not close the socket on an ordinary release", async () => {
+    const closed: Array<[number | undefined, string | undefined]> = [];
+    const { broker } = leased();
+    const scope = Scope.makeUnsafe();
+    await Effect.runPromise(
+      Scope.provide(Layer.build(connectionLayer(broker, connection(closed))), scope),
+    );
+    // The CONNECTION went away, not the session: nothing to close.
+    await Effect.runPromise(Scope.close(scope, Exit.void));
+    expect(closed).toEqual([]);
+  });
+});
 
 /** A broker with a door whose resolver answers ONE session cookie. */
 function doorWithSession(cookie: string): PrincipalBroker {

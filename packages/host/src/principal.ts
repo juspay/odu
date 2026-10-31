@@ -93,15 +93,8 @@ export const IDENTITY_TAGS: Readonly<Record<string, true>> = {
 export const UPGRADE_HEADERS = ["cookie", "authorization"] as const;
 export type UpgradeHeader = (typeof UPGRADE_HEADERS)[number];
 
-/**
- * A CONNECTION THE HOST MAY CLOSE.
- *
- * `close(code?, reason?)` is kolu PR #2330's addition to
- * `SurfaceAppConnection`. It is OPTIONAL here for one reason only: until odu
- * re-pins kolu the field is not on the record at runtime, and a required field
- * would be a lie the compiler could not catch. The re-pin makes it present and
- * the same call starts closing sockets.
- */
+/** A connection the host may close — `close()` is kolu #2330's. Optional because
+ *  the pinned kolu predates it; see this module's header. */
 export type DoorConnection = SurfaceAppConnection<UpgradeHeader> & {
   readonly close?: (code?: number, reason?: string) => void;
 };
@@ -131,9 +124,7 @@ export function connectionLayer(
         Effect.sync(() => {
           const lease = broker.acquire(connection.headers);
           const watched = lease?.watch(() => {
-            // THE LEASE'S END CLOSES WHAT IT ADMITTED. One call, on the
-            // connection the host was handed; a no-op until kolu's close is
-            // re-pinned in (see this module's header).
+            // THE LEASE'S END CLOSES WHAT IT ADMITTED — see the header.
             connection.close?.(CLOSE_SESSION_ENDED, "the session ended");
           });
           return {
@@ -280,23 +271,6 @@ export function admissionDispatch(
 
 // ── the HTTP legs ───────────────────────────────────────────────────────────
 
-/** The cookie a browser's session rides — named here because the middleware and
- *  the auth row's resolver must read the same one. */
-export const SESSION_COOKIE = "odu_session";
-
-/** The one cookie's value out of a `Cookie:` header. */
-export function cookieValue(header: string | undefined, name: string): string | null {
-  if (header === undefined) return null;
-  for (const part of header.split(";")) {
-    const at = part.indexOf("=");
-    if (at === -1) continue;
-    if (part.slice(0, at).trim() !== name) continue;
-    const value = part.slice(at + 1).trim();
-    return value === "" ? null : value;
-  }
-  return null;
-}
-
 export interface DoorGateOptions {
   readonly broker: PrincipalBroker;
   /** Where the MCP endpoint is mounted. */
@@ -342,8 +316,10 @@ export function doorGate(options: DoorGateOptions): SurfaceAppHttpMiddleware {
         );
       }
       if (!options.shellPaths.includes(path)) return httpApp;
-      const session = cookieValue(request.headers["cookie"], SESSION_COOKIE);
-      const lease = session === null ? null : options.broker.acquire({ cookie: `odu_session=${session}` });
+      // THE RAW HEADER, untouched: the cookie's NAME and its grammar are the
+      // auth row's, and its resolver parses them. The host asks "does this
+      // connection carry a session" and never learns what a cookie is called.
+      const lease = options.broker.acquire({ cookie: request.headers["cookie"] });
       if (lease !== null) {
         lease.release();
         return httpApp;
@@ -375,10 +351,13 @@ export const SHELL_PATHS: ReadonlyArray<string> = ["/", "/index.html"];
  * `service-client` spell another row's word. It lives here instead, on the
  * listener the host owns, and the browser asks once before it draws anything.
  */
-export function doorRoute(mounted: boolean) {
+export function doorRoute(door: boolean) {
   return HttpRouter.add("GET", SERVICE_DOOR_PATH, () =>
     Effect.orDie(
-      HttpServerResponse.json({ mounted }, { headers: { "cache-control": "no-store" } }),
+      // `door`, not `mounted`: this is the BOOT fact — whether the daemon was
+      // configured with sign-in — and a running row's state is not the page's
+      // question.
+      HttpServerResponse.json({ door }, { headers: { "cache-control": "no-store" } }),
     ),
   );
 }
