@@ -42,6 +42,7 @@
 
 import { Effect, Layer, Stream } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
+import type { ClaimedRoutes } from "@odu/cordis/services";
 import { type Cache } from "./cache";
 import { CACHE_MOUNT } from "./paths";
 import { NIX_CACHE_INFO } from "./staging";
@@ -76,7 +77,23 @@ const NARINFO_SUFFIX = ".narinfo";
 const bad = (message: string): HttpServerResponse.HttpServerResponse =>
   HttpServerResponse.text(message, { status: 400 });
 
-export function cacheRoutes(cache: Cache) {
+/** Where the push API lives — odu's own, beside the Nix protocol's mount. */
+const PUSH_API = "/_odu/v1";
+
+/**
+ * THE PATHS THESE ROUTES ANSWER, beside the routes: the Nix protocol under
+ * {@link CACHE_MOUNT} and the push API under {@link PUSH_API}. Both carry their
+ * own per-bucket credentials, so the door gate lets an anonymous request
+ * through to them — and a route added below outside both prefixes is caught by
+ * `@odu/host`'s `reserved.test.ts`, which records what this layer registers.
+ */
+export const CACHE_ROUTE_PATHS: ReadonlyArray<string> = [`${CACHE_MOUNT}/*`, `${PUSH_API}/*`];
+
+export function cacheRoutes(cache: Cache): ClaimedRoutes<ReturnType<typeof cacheLayer>> {
+  return { layer: cacheLayer(cache), paths: CACHE_ROUTE_PATHS };
+}
+
+function cacheLayer(cache: Cache) {
   return Layer.mergeAll(
     /** `nix-cache-info` — the three lines a client reads before anything else. */
     HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket/nix-cache-info`, (request) =>
@@ -197,7 +214,7 @@ export function cacheRoutes(cache: Cache) {
      * which probes one path at a time. It also drops paths signed by an
      * upstream key, which is how nixpkgs stays out of a bucket.
      */
-    HttpRouter.add("POST", "/_odu/v1/buckets/:bucket/missing", (request) =>
+    HttpRouter.add("POST", `${PUSH_API}/buckets/:bucket/missing`, (request) =>
       Effect.gen(function* () {
         const admitted = admit(cache, request, yield* param("bucket"), "write");
         if (!admitted.ok) return admitted.response;

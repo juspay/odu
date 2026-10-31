@@ -48,6 +48,7 @@ import type {
 } from "@kolu/surface-app/serve";
 import type { SurfaceDispatch } from "@kolu/surface/link";
 import { SERVICE_DOOR_PATH } from "@odu/cordis/services";
+import { isReserved } from "./reserved";
 import type { SurfaceHandler, SurfaceHandlers } from "@kolu/surface/server";
 import {
   admissionFor,
@@ -273,8 +274,9 @@ export interface DoorGateOptions {
   readonly mcpPath: string;
   /** That page, as the row renders it. */
   readonly signInPage: () => string;
-  /** The paths odu's own routes claim. Everything else is the shell, and the
-   *  shell is not a thing an anonymous connection may see. */
+  /** The paths odu's own routes claim (`./reserved`'s composition).
+   *  Everything else is the shell, and the shell is not a thing an anonymous
+   *  connection may see. */
   readonly reservedPaths: ReadonlyArray<string>;
 }
 
@@ -336,10 +338,9 @@ export function doorGate(options: DoorGateOptions): SurfaceAppHttpMiddleware {
         });
       // EVERYTHING THE DAEMON DOES NOT RESERVE IS THE SHELL, so for an
       // anonymous connection it is the page the server renders. The reserved
-      // set is the routes odu composes — the protocol walks, the row's sign-in
-      // flow, the assets, the worker and the manifest — and it lives in
-      // `web.ts`, beside those routes, because that is where a new one is
-      // added.
+      // set is COMPOSED (`./reserved`): the host's own paths plus the claim
+      // each row registers beside its routes, so a new route cannot drift
+      // from the gate.
       //
       // WHY A LIST AND NOT "REPLACE THE SHELL'S ANSWER": the middleware seam
       // runs the app and may REPLACE its response only by NOT running it. The
@@ -350,18 +351,6 @@ export function doorGate(options: DoorGateOptions): SurfaceAppHttpMiddleware {
       if (isReserved(path, options.reservedPaths)) return httpApp;
       return Effect.succeed(signIn());
     });
-}
-
-/** Does a path belong to a route odu itself composed? An entry ending in `*` is
- *  a WALK — one or more segments after the prefix, so `/cache/` itself is not
- *  the cache's (`/cache/nix-cache-info` is not a route either, and the shell
- *  answering it is the shell answering a typo). Everything else is exact. */
-function isReserved(path: string, reserved: ReadonlyArray<string>): boolean {
-  return reserved.some((one) => {
-    if (!one.endsWith("*")) return path === one;
-    const prefix = one.slice(0, -1);
-    return path.length > prefix.length && path.startsWith(prefix);
-  });
 }
 
 // ── the door fact, on its own route ─────────────────────────────────────────

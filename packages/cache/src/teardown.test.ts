@@ -37,7 +37,7 @@ import {
   NixStore,
   PublicOrigin,
   RootToken,
-  type RowRoutes,
+  type ClaimedRoutes,
   Routes,
   StateDir,
 } from "@odu/cordis/services";
@@ -55,7 +55,7 @@ const seen: string[] = [];
 
 /** The routes the rows registered, in registration order — the host's stub of
  *  `HttpRoutes`, which a real daemon hands to its listener. */
-const layers: RowRoutes[] = [];
+const layers: ClaimedRoutes[] = [];
 const routesStub: HttpRoutes = {
   add: (routes) => {
     layers.push(routes);
@@ -73,7 +73,7 @@ const routesStub: HttpRoutes = {
 type CacheRoutes = Parameters<typeof HttpRouter.toWebHandler>[0];
 
 async function cacheAnswers(): Promise<boolean> {
-  const only = layers[0];
+  const only = layers[0]?.layer;
   if (only === undefined) return false;
   // The row registers `cacheRoutes(cache)`; the seam it arrives through is typed
   // for the daemon's composed router, which is broader than one row's layer. The

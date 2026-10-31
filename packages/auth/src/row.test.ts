@@ -35,7 +35,7 @@ import {
   Bundle,
   Log,
   type HttpRoutes,
-  type RowRoutes,
+  type ClaimedRoutes,
   RootToken,
   Routes,
   StateDir,
@@ -75,7 +75,7 @@ describe("the door's row", () => {
   });
 
   it("a refused claim installs no mount, no route, and closes its database", async () => {
-    const layers: RowRoutes[] = [];
+    const layers: ClaimedRoutes[] = [];
     const routes: HttpRoutes = {
       add: (layer) => {
         layers.push(layer);

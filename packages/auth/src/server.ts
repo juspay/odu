@@ -550,3 +550,7 @@ export { readGithubConfig, type GithubConfig, type GithubConfigReading } from ".
 /** The page the HOST's middleware renders for an anonymous browser — the door's
  *  look, owned by the door, rendered without the bundle. */
 export { signInPageHtml } from "./routes";
+
+/** The routes this row registers, with their claim — for the host's gate test,
+ *  which records what the layer registers and checks the claim covers it. */
+export { authRoutes } from "./routes";

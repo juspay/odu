@@ -423,3 +423,7 @@ export const cacheRow = definePlugin({
     );
   }),
 });
+
+/** The routes this row registers, with their claim — for the host's gate test,
+ *  which records what the layer registers and checks the claim covers it. */
+export { cacheRoutes } from "./routes";
