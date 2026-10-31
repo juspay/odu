@@ -184,16 +184,21 @@ const GrantOutputSchema = Schema.Struct({
 export const oduAuthSurface = defineSurface({
   procedures: {
     user: {
-      whoami: { input: Schema.Struct({}), output: WhoamiOutputSchema, error: REFUSES },
+      // NO `input`, not `Schema.Struct({})`: the framework's no-input form is a
+      // `Void` payload. An EMPTY STRUCT is not the same thing to a projection —
+      // an MCP host sends a tool with no declared inputs no arguments at all,
+      // and decoding `undefined` against a struct is "Expected object | array",
+      // which is how `auth_user_whoami` answered every agent as a TOOL ERROR.
+      whoami: { output: WhoamiOutputSchema, error: REFUSES },
       grant: { input: GrantInputSchema, output: GrantOutputSchema, error: REFUSES },
     },
     token: {
       create: { input: TokenCreateInputSchema, output: TokenCreateOutputSchema, error: REFUSES },
-      list: { input: Schema.Struct({}), output: TokenListOutputSchema, error: REFUSES },
+      list: { output: TokenListOutputSchema, error: REFUSES },
       revoke: { input: TokenRevokeInputSchema, output: TokenRevokeOutputSchema, error: REFUSES },
     },
     session: {
-      list: { input: Schema.Struct({}), output: SessionListOutputSchema, error: REFUSES },
+      list: { output: SessionListOutputSchema, error: REFUSES },
       end: { input: SessionEndInputSchema, output: SessionEndOutputSchema, error: REFUSES },
     },
   },

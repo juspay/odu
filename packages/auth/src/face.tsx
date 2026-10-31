@@ -150,8 +150,8 @@ export function ProfileFace(props: ProfileFaceProps): JSX.Element {
   const [readings, { refetch }] = createResource(async (): Promise<Readings> => {
     try {
       const [sessions, tokens] = await Promise.all([
-        props.call(props.client.procedures.session.list({})),
-        props.call(props.client.procedures.token.list({})),
+        props.call(props.client.procedures.session.list()),
+        props.call(props.client.procedures.token.list()),
       ]);
       return { ok: true, sessions: sessions.sessions, tokens: tokens.tokens };
     } catch (err) {

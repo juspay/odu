@@ -272,7 +272,7 @@ export function App(props: {
 
   createEffect(() => {
     if (props.door !== true || who() !== null) return;
-    void Effect.runPromise(props.auth.procedures.user.whoami({})).then(
+    void Effect.runPromise(props.auth.procedures.user.whoami()).then(
       (answer) => setWho(answer.who),
       // A failed whoami on a daemon that says it has a door is a broken
       // connection, not a person: the wire readout already says so, and a

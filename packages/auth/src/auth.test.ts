@@ -426,7 +426,7 @@ describe("the row's authority", () => {
 
   it("whoami answers ANONYMOUS on a connection with no session — not an error", async () => {
     const { client } = row();
-    const answer = await as(client.surface.user.whoami({}), admissionFor(null));
+    const answer = await as(client.surface.user.whoami(), admissionFor(null));
     expect(answer.ok).toBe(true);
     if (!answer.ok) return;
     expect(answer.value.who).toEqual({ kind: "anonymous" });

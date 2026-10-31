@@ -236,7 +236,7 @@ describe("odu mcp inherits the credential", () => {
         name: "auth_user_whoami",
         arguments: {},
       })) as { isError?: boolean; content?: { text?: string }[] };
-      expect(result.isError ?? false).toBe(false);
+      expect(result.isError ?? false, JSON.stringify(result.content)).toBe(false);
       expect(result.content?.[0]?.text ?? "").toContain(LOGIN);
     } finally {
       await client.close();
