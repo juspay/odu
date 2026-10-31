@@ -16,11 +16,24 @@ export class CloudflareApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    /** A REFUSAL is Cloudflare saying no (an inactive token, a missing
+     *  permission, a foreign record). An UNAVAILABLE API is a network error, a
+     *  5xx or a rate limit — a reason to retry, never a reason to take the
+     *  board down. */
+    readonly kind: "refusal" | "unavailable",
   ) {
     super(message);
     this.name = "CloudflareApiError";
   }
 }
+
+/** Is this Cloudflare refusing, rather than being unreachable? */
+export function isRefusal(err: unknown): err is CloudflareApiError {
+  return err instanceof CloudflareApiError && err.kind === "refusal";
+}
+
+const kindOf = (status: number): "refusal" | "unavailable" =>
+  status === 0 || status >= 500 || status === 429 ? "unavailable" : "refusal";
 
 export interface ZoneRef {
   zoneId: string;
@@ -50,9 +63,23 @@ export interface CloudflareApi {
     tunnelId: string,
     ingress: readonly IngressRule[],
   ): Promise<void>;
-  /** Make or update the proxied CNAME to the tunnel; answers the record id. */
-  ensureRecord(zoneId: string, host: string, tunnelId: string): Promise<string>;
-  deleteRecord(zoneId: string, recordId: string): Promise<void>;
+  /**
+   * THE RECORD FOR THIS NAME, AND ONLY IF IT IS ODU'S.
+   *
+   * `knownId` is the record this row already made (from its own database). A
+   * record is adopted when its id is known or its content already points at
+   * this tunnel; anything else is SOMEONE ELSE'S, and the row refuses rather
+   * than rewriting an operator's A/CNAME — which `unwire` would later delete.
+   */
+  ensureRecord(
+    zoneId: string,
+    host: string,
+    tunnelId: string,
+    knownId: string | null,
+  ): Promise<string>;
+  /** Delete one record — after checking it still points at this tunnel, so a
+   *  record somebody else repointed is left alone. */
+  deleteRecord(zoneId: string, recordId: string, tunnelId: string): Promise<void>;
 }
 
 export interface CloudflareApiOptions {
@@ -102,6 +129,7 @@ export function cloudflareApi(options: CloudflareApiOptions): CloudflareApi {
       throw new CloudflareApiError(
         `the Cloudflare API could not be reached: ${err instanceof Error ? err.message : String(err)}`,
         0,
+        "unavailable",
       );
     }
     let envelope: Envelope;
@@ -111,10 +139,15 @@ export function cloudflareApi(options: CloudflareApiOptions): CloudflareApi {
       throw new CloudflareApiError(
         `the Cloudflare API answered ${response.status} without a JSON envelope`,
         response.status,
+        kindOf(response.status),
       );
     }
     if (!response.ok || envelope.success !== true) {
-      throw new CloudflareApiError(messagesOf(envelope), response.status);
+      throw new CloudflareApiError(
+        messagesOf(envelope),
+        response.status,
+        kindOf(response.status),
+      );
     }
     return envelope.result as T;
   }
@@ -127,6 +160,7 @@ export function cloudflareApi(options: CloudflareApiOptions): CloudflareApi {
           `the API token is ${result.status ?? "not active"} — make a token that is ` +
             "active, with Zone:DNS:Edit and Account:Cloudflare Tunnel:Edit",
           200,
+          "refusal",
         );
       }
     },
@@ -160,6 +194,7 @@ export function cloudflareApi(options: CloudflareApiOptions): CloudflareApi {
           "Cloudflare created a tunnel but returned no token — a locally-managed " +
             "tunnel cannot be run from this daemon",
           200,
+          "refusal",
         );
       }
       return result;
@@ -171,39 +206,58 @@ export function cloudflareApi(options: CloudflareApiOptions): CloudflareApi {
       });
     },
 
-    async ensureRecord(zoneId, host, tunnelId) {
+    async ensureRecord(zoneId, host, tunnelId, knownId) {
       const content = `${tunnelId}.cfargotunnel.com`;
       const existing = await call<
         ReadonlyArray<{ id: string; content?: string }>
       >("GET", `/zones/${encodeURIComponent(zoneId)}/dns_records?name=${encodeURIComponent(host)}`);
       const found = existing[0];
-      if (found !== undefined) {
-        if (found.content !== content) {
-          await call("PUT", `/zones/${encodeURIComponent(zoneId)}/dns_records/${encodeURIComponent(found.id)}`, {
-            type: "CNAME",
-            name: host,
-            content,
-            proxied: true,
-          });
-        }
+      if (found === undefined) {
+        const created = await call<{ id: string }>(
+          "POST",
+          `/zones/${encodeURIComponent(zoneId)}/dns_records`,
+          { type: "CNAME", name: host, content, proxied: true },
+        );
+        return created.id;
+      }
+      if (found.content === content) return found.id;
+      if (knownId !== null && found.id === knownId) {
+        // THIS ROW MADE IT and something repointed it; putting it back is the
+        // row keeping its own promise.
+        await call("PUT", `/zones/${encodeURIComponent(zoneId)}/dns_records/${encodeURIComponent(found.id)}`, {
+          type: "CNAME",
+          name: host,
+          content,
+          proxied: true,
+        });
         return found.id;
       }
-      const created = await call<{ id: string }>(
-        "POST",
-        `/zones/${encodeURIComponent(zoneId)}/dns_records`,
-        { type: "CNAME", name: host, content, proxied: true },
+      throw new CloudflareApiError(
+        `a DNS record for ${host} already exists and is not odu's — ` +
+          "remove it or choose another name",
+        409,
+        "refusal",
       );
-      return created.id;
     },
 
-    async deleteRecord(zoneId, recordId) {
-      try {
-        await call("DELETE", `/zones/${encodeURIComponent(zoneId)}/dns_records/${encodeURIComponent(recordId)}`);
-      } catch (err) {
-        // ALREADY GONE is the state the caller wanted; anything else is real.
-        if (err instanceof CloudflareApiError && err.status === 404) return;
+    async deleteRecord(zoneId, recordId, tunnelId) {
+      const before = await call<{ id: string; content?: string }>(
+        "GET",
+        `/zones/${encodeURIComponent(zoneId)}/dns_records/${encodeURIComponent(recordId)}`,
+      ).catch((err: unknown) => {
+        // ALREADY GONE is the state the caller wanted.
+        if (err instanceof CloudflareApiError && err.status === 404) return null;
         throw err;
+      });
+      if (before === null) return;
+      if (before.content !== `${tunnelId}.cfargotunnel.com`) {
+        throw new CloudflareApiError(
+          `the DNS record for ${recordId} was changed by someone else; leaving it`,
+          409,
+          "refusal",
+        );
       }
+      await call("DELETE", `/zones/${encodeURIComponent(zoneId)}/dns_records/${encodeURIComponent(recordId)}`);
     },
   };
 }

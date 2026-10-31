@@ -56,7 +56,7 @@ import {
 } from "@odu/cordis/services";
 import { createCache, roleAuthority, type Authority, type BucketFacts, type Cache, type CacheOutcome } from "./cache";
 import { may, principalOf, type Principal } from "@odu/cordis/principal";
-import { CACHE_MOUNT } from "./paths";
+import { CACHE_MOUNT, CACHE_ROUTE_PATHS } from "./paths";
 import { cacheRoutes } from "./routes";
 import {
   type CacheBucket,
@@ -192,8 +192,9 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
       const row: CacheHeld = {
         bucket: facts.bucket,
         storePath: facts.storePath,
-        reason: heldReason(facts.missing),
+        reason: heldReason(facts.missing, facts.fetching),
         missing: [...facts.missing],
+        fetching: facts.fetching,
         since: facts.created,
       };
       const encoded = JSON.stringify(row);
@@ -485,6 +486,10 @@ export const cacheRow = definePlugin({
           bucket.domain === null ? [] : [{ bucket: bucket.name, domain: bucket.domain }],
         ),
       subscribe: (listener) => cache.onChange(listener),
+      // The paths this row answers. A bucket DOMAIN forwards every path of its
+      // name to the daemon; the host's gate keeps everything outside this list
+      // (the board, `/mcp`, `/auth`, the websocket) off that name.
+      paths: CACHE_ROUTE_PATHS,
     };
     yield* offer(BucketDomains, () => domains);
 

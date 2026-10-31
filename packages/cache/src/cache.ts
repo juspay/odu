@@ -496,7 +496,7 @@ export function createCache(options: CacheOptions): Cache {
 
   // The write path, wired to the ONE lock: `record` is the dependency staging
   // takes, and it is the locked one, so a pin cannot interleave with an import.
-  const staging = createStaging({ repo, blob, dir, now, record });
+  const staging = createStaging({ repo, blob, dir, now, record, changed: () => notify() });
 
   // ── who hears about a change ──────────────────────────────────────────────
   //
@@ -927,6 +927,10 @@ export function createCache(options: CacheOptions): Cache {
       // that outlived `close()` would publish into a closed database.
       if (trailing !== null) clearTimeout(trailing);
       trailing = null;
+      // The write path's background fetches stop taking work BEFORE the
+      // database closes; a fetch already in `nix-store -r` sees `closed` when
+      // it resumes and writes nothing.
+      staging.close();
       listeners.clear();
       repo.close();
     },

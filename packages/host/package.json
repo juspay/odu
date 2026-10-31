@@ -4,7 +4,7 @@
   "private": true,
   "license": "AGPL-3.0-or-later",
   "type": "module",
-  "//": "THE HOST \u2014 see README.md. The daemon's tenure, the listener's parts, the `/mcp` door, and the roster: the one file that NAMES every row. It carries no row of its own, and it is why no registry PACKAGE exists here: the roster is a root file, so the fence treats it as a state rather than a registry (`packages/host/src/fence.test.ts`).",
+  "//": "THE HOST — see README.md. The daemon's tenure, the listener's parts, the `/mcp` door, and the roster: the one file that NAMES every row. It carries no row of its own, and it is why no registry PACKAGE exists here: the roster is a root file, so the fence treats it as a state rather than a registry (`packages/host/src/fence.test.ts`).",
   "//dependencies": "Every @odu/* entry is a ROW the roster names (`@odu/cli` for the runs' bundle and its port bindings, `@odu/cache` for the other row) or the vocabulary both sides speak (`@odu/cordis`). `@odu/launch` is the bootstrap it shares with its clients. Nothing here is a renderer, a catalog writer or a coordinator: the host composes, it does not run.",
   "sideEffects": false,
   "exports": {

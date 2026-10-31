@@ -20,3 +20,27 @@
  * (`./push`) both need it, and the client must not import the router.
  */
 export const CACHE_MOUNT = "/cache";
+
+/** Where the push API lives — odu's own, beside the Nix protocol's mount. */
+export const PUSH_API = "/_odu/v1";
+
+/** Nix's base32, as a route fragment: a narinfo is named for its 32-character
+ *  store-path hash, and a DOMAIN's root route has no bucket segment to make the
+ *  route unambiguous. */
+export const HASH_PATTERN = "[0-9abcdfghijklmnpqrsvwxyz]{32}";
+
+/**
+ * THE PATHS THE CACHE ROW CLAIMS, beside the routes it registers.
+ *
+ * A bucket DOMAIN forwards every path of its hostname to the daemon, and the
+ * host's gate uses this list (through `BucketDomains.paths`) to keep the board,
+ * `/mcp`, `/auth` and the websocket off that name. The claim is also what the
+ * door gate composes for `/cache/*` and `/_odu/v1/*`.
+ */
+export const CACHE_ROUTE_PATHS: ReadonlyArray<string> = [
+  `${CACHE_MOUNT}/*`,
+  `${PUSH_API}/*`,
+  "/nix-cache-info",
+  "/nar/*",
+  `~^/${HASH_PATTERN}\\.narinfo$`,
+];

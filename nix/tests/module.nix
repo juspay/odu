@@ -172,12 +172,58 @@
     )
     assert "X-Cache-Status: HIT" in second, second
 
+    # ── A PRIVATE BUCKET IS NOT IN THE SHARED NAR CACHE ────────────────────
+    # A request that carries a credential bypasses the cache and is never
+    # stored (`proxy_cache_bypass`/`proxy_no_cache`), and the daemon says
+    # `Cache-Control: private, no-store` besides. An anonymous fetch of the
+    # same NAR must be refused, and must not be a HIT.
+    server.succeed(f"{admin} {odu} cache create secret --private")
+    secret_token = json.loads(
+        server.succeed(f"{admin} {odu} cache token mint secret --write -o json")
+    )["token"]
+    server.succeed(
+        f"runuser -u odu -- env ODU_WEB_ORIGIN=http://127.0.0.1:18440"
+        f" ODU_CACHE_TOKEN={secret_token} {odu} cache push secret {path}"
+    )
+    secret_file = client.succeed(
+        "curl -sS -H 'Authorization: Bearer %s'"
+        " http://cache.test/cache/secret/%s.narinfo"
+        " | sed -n 's|^URL: nar/||p'"
+        % (secret_token, path.split("/")[-1][:32])
+    ).strip()
+    authorized = client.succeed(
+        f"curl -sS -D - -o /dev/null -H 'Authorization: Bearer {secret_token}'"
+        f" http://cache.test/cache/secret/nar/{secret_file}"
+    )
+    assert "Cache-Control: private, no-store" in authorized.lower() or "cache-control: private, no-store" in authorized.lower(), authorized
+    anonymous = client.succeed(
+        f"curl -sS -D - -o /dev/null http://cache.test/cache/secret/nar/{secret_file}"
+    )
+    assert "X-Cache-Status: HIT" not in anonymous, anonymous
+    anon_code = client.succeed(
+        f"curl -sS -o /dev/null -w '%{{http_code}}'"
+        f" http://cache.test/cache/secret/nar/{secret_file}"
+    ).strip()
+    assert anon_code == "404", f"a private NAR answered {anon_code} anonymously"
+
     # ── A BUCKET'S OWN NAME ─────────────────────────────────────────────────
     # The name is a fact of the bucket; nginx needs a vhost for it (eval time),
     # and the daemon answers by `Host` — no rewrite, no bucket in the path.
     server.succeed(f"{admin} {odu} cache domain main main.test")
     info = client.succeed("curl -sS http://main.test/nix-cache-info")
     assert "WantMassQuery: 1" in info, info
+
+    # THE NAME IS THE BUCKET'S ONLY. `/` is its page; the board, `/mcp` and
+    # the door's own paths never answer there; another bucket's path is the
+    # cache row's 404.
+    public_page = client.succeed("curl -sS http://main.test/")
+    assert "extra-substituters" in public_page, public_page[:300]
+    assert 'aria-label="board rows"' not in public_page, "the board answered a bucket name"
+    for outside in ["/mcp", "/auth/github", "/rpc/ws", "/assets/app.js", "/cache/other"]:
+        code = client.succeed(
+            f"curl -sS -o /dev/null -w '%{{http_code}}' http://main.test{outside}"
+        ).strip()
+        assert code == "404", f"{outside} answered {code} on a bucket name"
 
     # ── the client substitutes it back, trusting only the bucket's key ──────
     copied = client.execute(

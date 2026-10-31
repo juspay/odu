@@ -5,7 +5,7 @@
  *
  * One tunnel per server, the routes it carries, the proxied DNS records, and
  * the `cloudflared` process that connects them. It REACTS: the cache row
- * publishes which buckets have a domain (`CacheDomains`), and this row makes
+ * publishes which buckets have a domain (`BucketDomains`), and this row makes
  * the tunnel match. It never reads the cache's database or calls the cache's
  * verbs, and the cache never learns this row exists.
  *
@@ -16,13 +16,21 @@
  * that is what lets the board, `/mcp` and the websocket reach Cloudflare and
  * retires a Tailscale Funnel. A route whose `bucket` is null is that origin.
  *
- * ## The connector is a child, and its state is the row's fact
+ * ## A REFUSAL IS NOT AN OUTAGE
  *
- * `cloudflared` is spawned the way the cache spawns `nix`: a long-lived child
- * whose stdout is the connection state ("Registered tunnel connection"), whose
- * exit is a failure with its last words, and whose lifetime is this activation.
- * No name needs a tunnel means no connector — `stopped`, not a process idling
- * for a route nobody asked for.
+ * An inactive token or a missing permission refuses the row at mount, naming
+ * what Cloudflare said — the operator asked for this and can fix it. An
+ * UNREACHABLE API (network, 5xx, rate limit) mounts the row with the tunnel
+ * `failed: <reason>` and retries with backoff: a Cloudflare incident must not
+ * stop the board, the runs or the cache. The first reconcile therefore runs
+ * after the mount, never on `apply`'s path.
+ *
+ * ## The connector and the database are acquired under the activation
+ *
+ * `open()` acquires the database; the row registers `close()` immediately
+ * after it, before it mounts. `close()` waits for the reconcile in flight, for
+ * every probe, and for the child's exit — a `cloudflared` that outlived its row
+ * would be an orphan holding the tunnel token, and a restart would run two.
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
@@ -41,8 +49,19 @@ import {
   StateDir,
   type BucketDomains as BucketDomainFacts,
 } from "@odu/cordis/services";
-import { openCloudflareRepo, type RouteRow, type TunnelRow } from "./db";
-import { cloudflareApi, type CloudflareApi, type IngressRule, type ZoneRef } from "./api";
+import {
+  openCloudflareRepo,
+  type CloudflareRepo,
+  type RouteRow,
+  type TunnelRow,
+} from "./db";
+import {
+  cloudflareApi,
+  isRefusal,
+  type CloudflareApi,
+  type IngressRule,
+  type ZoneRef,
+} from "./api";
 import {
   CLOUDFLARE_KEY,
   CloudflareRefused,
@@ -52,6 +71,7 @@ import {
   type CloudflareStatus,
   type CloudflareTunnel,
 } from "./surface";
+import { readCloudflareConfig } from "./config";
 
 type CloudflareSpec = (typeof oduCloudflareSurface)["spec"];
 export type CloudflareSurfaceDeps = ImplementSurfaceDeps<CloudflareSpec>;
@@ -67,7 +87,7 @@ export interface CloudflareRowConfig {
    *  deployment's names resolve behind, and the browser suite's stub. */
   readonly probeBase?: string;
   /** Do the names answer? Defaults to a real `fetch` of the https URL. */
-  readonly probe?: (url: string) => Promise<boolean>;
+  readonly probe?: (url: string, signal?: AbortSignal) => Promise<boolean>;
   readonly probeAttempts?: number;
   readonly probeIntervalMs?: number;
 }
@@ -97,9 +117,11 @@ export interface CloudflarePublisher {
 export interface CloudflareServer {
   readonly surface: typeof oduCloudflareSurface;
   readonly deps: CloudflareSurfaceDeps;
+  /** Acquire the database. Call once, then register `close()` beside it. */
+  open(): void;
   attach(publisher: CloudflarePublisher): void;
-  /** Verify the token, subscribe to the cache's domains, and reconcile once.
-   *  Throws when the token is refused — the row then fails at mount. */
+  /** Verify the token. A REFUSAL throws (the row fails); an outage resolves
+   *  with the tunnel failed and a retry scheduled. */
   start(): Promise<void>;
   status(): CloudflareStatus;
   reconcile(): Promise<void>;
@@ -108,31 +130,44 @@ export interface CloudflareServer {
 
 const PROBE_ATTEMPTS = 20;
 const PROBE_INTERVAL_MS = 2_000;
+const RETRY_MIN_MS = 2_000;
+const RETRY_MAX_MS = 60_000;
 
-const defaultProbe = async (url: string): Promise<boolean> => {
+const signalOf = (signal: AbortSignal | undefined): AbortSignal =>
+  signal === undefined
+    ? AbortSignal.timeout(10_000)
+    : AbortSignal.any([AbortSignal.timeout(10_000), signal]);
+
+const defaultProbe = async (url: string, signal?: AbortSignal): Promise<boolean> => {
   try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+    const response = await fetch(url, { signal: signalOf(signal) });
     return response.ok;
   } catch {
     return false;
   }
 };
 
+const messageOf = (err: unknown): string =>
+  err instanceof Error ? err.message : String(err);
+
 export function cloudflareServer(options: CloudflareServerOptions): CloudflareServer {
   const { config, domains, log } = options;
   const now = options.now ?? (() => Date.now());
   const api =
     options.api ??
-    cloudflareApi({ token: config.token, ...(config.apiBase === undefined ? {} : { base: config.apiBase }) });
+    cloudflareApi({
+      token: config.token,
+      ...(config.apiBase === undefined ? {} : { base: config.apiBase }),
+    });
   const probe =
     config.probe ??
     (config.probeBase === undefined
       ? defaultProbe
-      : async (url: string): Promise<boolean> => {
+      : async (url: string, signal?: AbortSignal): Promise<boolean> => {
           try {
             const path = new URL(url).pathname;
             const response = await fetch(`${config.probeBase}${path}`, {
-              signal: AbortSignal.timeout(10_000),
+              signal: signalOf(signal),
             });
             return response.ok;
           } catch {
@@ -143,7 +178,12 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
   const interval = config.probeIntervalMs ?? PROBE_INTERVAL_MS;
   const cloudflared = config.cloudflared ?? "cloudflared";
 
-  const repo = openCloudflareRepo(join(options.stateRoot, "cloudflare", "cloudflare.sqlite"));
+  let repo: CloudflareRepo | null = null;
+  const db = (): CloudflareRepo => {
+    if (repo === null) throw new Error("odu cloudflare: the row was not opened");
+    return repo;
+  };
+
   const tunnelStore = inMemoryStore<CloudflareTunnel>(OFF_TUNNEL);
   /** The read model the surface serves. */
   const routeRows = new Map<string, CloudflareRoute>();
@@ -159,13 +199,20 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
   /** A generation per domain: a probe or a wiring pass from an older value must
    *  not overwrite the one that replaced it. */
   const generations = new Map<string, number>();
+  const confirmations = new Set<Promise<void>>();
+  const stopProbes = new AbortController();
   let connector: {
     child: ChildProcess;
     stopping: boolean;
     last: string;
+    exited: Promise<void>;
+    resolveExit: () => void;
   } | null = null;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let retryDelay = RETRY_MIN_MS;
 
   function setTunnel(next: CloudflareTunnel): void {
+    if (closed) return;
     const current = tunnelStore.get();
     if (JSON.stringify(current) === JSON.stringify(next)) return;
     tunnelStore.set(next);
@@ -173,10 +220,9 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
   }
 
   function tunnelReading(): CloudflareTunnel {
-    const row = repo.tunnel();
-    const connectorState = tunnelStore.get().state;
+    const row = repo?.tunnel() ?? null;
     return {
-      state: connectorState,
+      state: tunnelStore.get().state,
       name: row?.name ?? null,
       id: row?.tunnelId ?? null,
       reason: tunnelStore.get().reason,
@@ -194,20 +240,21 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
   }
 
   function putRoute(row: RouteRow): void {
-    repo.putRoute(row);
-    const reading = readingOf(row);
-    routeRows.set(row.domain, reading);
+    if (closed) return;
+    db().putRoute(row);
+    routeRows.set(row.domain, readingOf(row));
     publish();
   }
 
   function dropRoute(domain: string): void {
-    repo.deleteRoute(domain);
+    if (closed) return;
+    db().deleteRoute(domain);
     routeRows.delete(domain);
     publish();
   }
 
   function publish(): void {
-    if (publisher === null) return;
+    if (closed || publisher === null) return;
     const tunnel = tunnelReading();
     const encoded = JSON.stringify(tunnel);
     if (publishedTunnel.encoded !== encoded) {
@@ -241,12 +288,17 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
   // ── the connector ────────────────────────────────────────────────────────
 
   function connect(tunnel: TunnelRow): void {
+    if (closed) return;
     if (connector !== null && !connector.stopping) return;
     setTunnel({ state: "running", name: tunnel.name, id: tunnel.tunnelId, reason: null });
-    const child = spawn(cloudflared, ["tunnel", "--no-autoupdate", "run", "--token", tunnel.token], {
+    // THE TOKEN IS NOT ON ARGV. `cloudflared` reads `TUNNEL_TOKEN` from the
+    // environment; a `--token` argument is visible to every local `ps`.
+    const child = spawn(cloudflared, ["tunnel", "--no-autoupdate", "run"], {
       stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, TUNNEL_TOKEN: tunnel.token },
     });
-    const held = { child, stopping: false, last: "" };
+    const { promise: exited, resolve: resolveExit } = Promise.withResolvers<void>();
+    const held = { child, stopping: false, last: "", exited, resolveExit };
     connector = held;
     let pending = "";
     const readLine = (chunk: Buffer): string[] => {
@@ -270,6 +322,7 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
     child.on("error", (err) => {
       if (connector !== held) return;
       connector = null;
+      resolveExit();
       setTunnel({
         state: "failed",
         name: tunnel.name,
@@ -278,6 +331,7 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
       });
     });
     child.on("exit", (code) => {
+      resolveExit();
       if (connector !== held) return;
       connector = null;
       if (held.stopping) {
@@ -295,20 +349,24 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
     });
   }
 
-  function stopConnector(): void {
-    if (connector === null) {
+  /** Stop the connector and WAIT for the child: the row's release is not
+   *  finished while a process it started still holds the tunnel token. */
+  async function stopConnector(): Promise<void> {
+    const held = connector;
+    if (held === null) {
       setTunnel({ state: "stopped", name: tunnelReading().name, id: tunnelReading().id, reason: null });
       return;
     }
-    const held = connector;
     held.stopping = true;
     held.child.kill("SIGTERM");
-    // A connector that ignores SIGTERM is not a reason to hang the shutdown;
-    // the exit handler still runs and keeps a failed state if it dies badly.
-    setTimeout(() => {
-      if (connector === held) held.child.kill("SIGKILL");
-    }, 3_000).unref();
-    setTunnel({ state: "stopped", name: tunnelReading().name, id: tunnelReading().id, reason: null });
+    const killer = setTimeout(() => held.child.kill("SIGKILL"), 3_000);
+    killer.unref?.();
+    await held.exited;
+    clearTimeout(killer);
+    if (connector === held) connector = null;
+    if (!closed) {
+      setTunnel({ state: "stopped", name: tunnelReading().name, id: tunnelReading().id, reason: null });
+    }
   }
 
   // ── confirming a name ────────────────────────────────────────────────────
@@ -326,37 +384,38 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
     for (let attempt = 0; attempt < attempts; attempt++) {
       await new Promise<void>((resolve) => setTimeout(resolve, interval));
       if (closed || current(domain) !== generation) return;
-      if (await probe(url)) {
+      if (await probe(url, stopProbes.signal)) {
         if (closed || current(domain) !== generation) return;
-        putRoute({
-          domain,
-          bucket,
-          zoneId: repo.route(domain)?.zoneId ?? "",
-          recordId: repo.route(domain)?.recordId ?? "",
-          state: "live",
-          reason: null,
-          updated: now(),
-        });
+        const row = db().route(domain);
+        if (row === null) return;
+        putRoute({ ...row, bucket, state: "live", reason: null, updated: now() });
         return;
       }
     }
     if (closed || current(domain) !== generation) return;
-    const row = repo.route(domain);
+    const row = db().route(domain);
     if (row === null) return;
     putRoute({ ...row, state: "failed", reason: `${url} did not answer`, updated: now() });
   }
 
+  function startConfirm(domain: string, bucket: string | null): void {
+    const running = confirm(domain, bucket).finally(() => {
+      confirmations.delete(running);
+    });
+    confirmations.add(running);
+  }
+
   // ── unwiring ─────────────────────────────────────────────────────────────
 
-  async function unwire(row: RouteRow): Promise<void> {
+  async function unwire(row: RouteRow, tunnel: TunnelRow | null): Promise<void> {
     supersede(row.domain);
-    if (row.recordId !== "") {
+    if (row.recordId !== "" && tunnel !== null) {
       try {
-        await api.deleteRecord(row.zoneId, row.recordId);
+        await api.deleteRecord(row.zoneId, row.recordId, tunnel.tunnelId);
       } catch (err) {
         log.warn(
-          { domain: row.domain, error: err instanceof Error ? err.message : String(err) },
-          "odu cloudflare: could not remove a DNS record; dropping the row anyway",
+          { domain: row.domain, error: messageOf(err) },
+          "odu cloudflare: left a DNS record alone; dropping the route anyway",
         );
       }
     }
@@ -364,6 +423,13 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
   }
 
   // ── reconciliation ───────────────────────────────────────────────────────
+
+  /** An API call failed while wiring: mark one route failed, and schedule a
+   *  retry when the API (not the request) was the problem. */
+  function failFrom(domain: string, bucket: string | null, err: unknown): void {
+    fail(domain, bucket, messageOf(err));
+    if (!isRefusal(err)) scheduleRetry();
+  }
 
   async function reconcileNow(): Promise<void> {
     if (closed) return;
@@ -378,28 +444,34 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
         publicZone = await api.zoneFor(options.publicHost);
       } catch (err) {
         log.warn(
-          { host: options.publicHost, error: err instanceof Error ? err.message : String(err) },
+          { host: options.publicHost, error: messageOf(err) },
           "odu cloudflare: could not ask which zone the public origin is in",
         );
+        if (!isRefusal(err)) scheduleRetry();
       }
+      if (closed) return;
       if (publicZone !== null) desired.set(options.publicHost, null);
     }
 
     // A name that is no longer wanted loses its record — before anything new is
     // made, so the tunnel config is the state it is about to be.
-    for (const row of repo.routes()) {
+    const tunnelBefore = repo?.tunnel() ?? null;
+    for (const row of db().routes()) {
+      if (closed) return;
       if (desired.has(row.domain)) continue;
-      await unwire(row);
+      await unwire(row, tunnelBefore);
     }
+    if (closed) return;
 
     if (desired.size === 0) {
-      stopConnector();
+      await stopConnector();
       publish();
       return;
     }
 
     const zones = new Map<string, ZoneRef>();
-    for (const [domain] of desired) {
+    for (const [domain, bucket] of desired) {
+      if (closed) return;
       const known = domain === options.publicHost ? publicZone : null;
       if (known !== null) {
         zones.set(domain, known);
@@ -408,16 +480,21 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
       try {
         const zone = await api.zoneFor(domain);
         if (zone === null) {
-          fail(domain, desired.get(domain) ?? null, `no Cloudflare zone this token can edit contains ${domain}`);
+          fail(
+            domain,
+            bucket,
+            `no Cloudflare zone this token can edit contains ${domain}`,
+          );
           continue;
         }
         zones.set(domain, zone);
       } catch (err) {
-        fail(domain, desired.get(domain) ?? null, err instanceof Error ? err.message : String(err));
+        failFrom(domain, bucket, err);
       }
     }
+    if (closed) return;
     if (zones.size === 0) {
-      stopConnector();
+      await stopConnector();
       publish();
       return;
     }
@@ -426,30 +503,29 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
     // in another account cannot ride it, and saying so is better than a route
     // that silently never appears.
     const first = zones.values().next().value as ZoneRef;
-    let tunnel = repo.tunnel();
+    let tunnel = db().tunnel();
     if (tunnel === null) {
       try {
-        const created = await api.createTunnel(
-          first.accountId,
-          `odu ${options.publicHost ?? hostOf(options.localOrigin)}`,
-        );
+        const name = `odu ${options.publicHost ?? hostOf(options.localOrigin)}`;
+        const created = await api.createTunnel(first.accountId, name);
         tunnel = {
           tunnelId: created.id,
-          name: `odu ${options.publicHost ?? hostOf(options.localOrigin)}`,
+          name,
           token: created.token,
           accountId: first.accountId,
           created: now(),
         };
-        repo.putTunnel(tunnel);
+        db().putTunnel(tunnel);
       } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err);
-        for (const [domain, bucket] of desired) fail(domain, bucket, reason);
+        for (const [domain, bucket] of desired) failFrom(domain, bucket, err);
         publish();
         return;
       }
     }
+    if (closed) return;
 
     for (const [domain, bucket] of desired) {
+      if (closed) return;
       const zone = zones.get(domain);
       if (zone === undefined) continue;
       if (zone.accountId !== tunnel.accountId) {
@@ -469,12 +545,18 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
       try {
         await api.putTunnelConfig(tunnel.accountId, tunnel.tunnelId, ingress);
       } catch (err) {
-        fail(domain, bucket, err instanceof Error ? err.message : String(err));
+        failFrom(domain, bucket, err);
         continue;
       }
+      if (closed) return;
       try {
-        const existing = repo.route(domain);
-        const recordId = await api.ensureRecord(zone.zoneId, domain, tunnel.tunnelId);
+        const existing = db().route(domain);
+        const recordId = await api.ensureRecord(
+          zone.zoneId,
+          domain,
+          tunnel.tunnelId,
+          existing === null || existing.recordId === "" ? null : existing.recordId,
+        );
         putRoute({
           domain,
           bucket,
@@ -485,24 +567,31 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
           updated: now(),
         });
       } catch (err) {
-        fail(domain, bucket, err instanceof Error ? err.message : String(err));
+        failFrom(domain, bucket, err);
       }
     }
+    if (closed) return;
 
-    if (repo.routes().length > 0) {
+    if (db().routes().length > 0) {
       connect(tunnel);
-      for (const row of repo.routes()) {
-        if (row.state !== "live") void confirm(row.domain, row.bucket);
+      for (const row of db().routes()) {
+        if (closed) return;
+        // ONLY A WIRING NAME IS CONFIRMED. A route that failed for a reason
+        // (a foreign record, a zone the token cannot see) may still ANSWER if
+        // something else owns the name — probing it would overwrite the reason
+        // with a `live` that is not this row's.
+        if (row.state === "wiring") startConfirm(row.domain, row.bucket);
       }
     } else {
-      stopConnector();
+      await stopConnector();
     }
     publish();
   }
 
   function fail(domain: string, bucket: string | null, reason: string): void {
+    if (closed) return;
     supersede(domain);
-    const existing = repo.route(domain);
+    const existing = db().route(domain);
     putRoute({
       domain,
       bucket,
@@ -521,11 +610,42 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
     );
     work = next.catch((err: unknown) => {
       log.warn(
-        { error: err instanceof Error ? err.message : String(err) },
+        { error: messageOf(err) },
         "odu cloudflare: reconciliation failed",
       );
+      scheduleRetry();
     });
     return work;
+  }
+
+  /** Retry the API after an outage. Backs off, stops with the row, and never
+   *  schedules twice. */
+  function scheduleRetry(): void {
+    if (closed || retryTimer !== null) return;
+    const delay = retryDelay;
+    retryDelay = Math.min(retryDelay * 2, RETRY_MAX_MS);
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      void (async () => {
+        if (closed) return;
+        try {
+          await api.verify();
+          if (closed) return;
+          retryDelay = RETRY_MIN_MS;
+          setTunnel({ ...tunnelReading(), state: "stopped", reason: null });
+          await reconcile();
+        } catch (err) {
+          setTunnel({
+            ...tunnelReading(),
+            state: "failed",
+            reason: messageOf(err),
+          });
+          if (isRefusal(err)) return;
+          scheduleRetry();
+        }
+      })();
+    }, delay);
+    retryTimer.unref?.();
   }
 
   const deps: CloudflareSurfaceDeps = {
@@ -551,37 +671,55 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
   };
 
   function status(): CloudflareStatus {
-    return { tunnel: tunnelReading(), routes: repo.routes().map(readingOf) };
+    if (closed) return { tunnel: OFF_TUNNEL, routes: [] };
+    return { tunnel: tunnelReading(), routes: db().routes().map(readingOf) };
   }
 
   return {
     surface: oduCloudflareSurface,
     deps,
+    open() {
+      if (repo !== null) return;
+      repo = openCloudflareRepo(join(options.stateRoot, "cloudflare", "cloudflare.sqlite"));
+      for (const row of repo.routes()) routeRows.set(row.domain, readingOf(row));
+    },
     attach(next) {
       publisher = next;
-      // Seed the read model from what the row already made, so a page opening
-      // before the next reconcile sees the last state rather than an empty one.
-      for (const row of repo.routes()) routeRows.set(row.domain, readingOf(row));
       publish();
     },
     async start() {
       if (started) return;
-      // THE TOKEN IS CHECKED AT MOUNT. A daemon that cannot reach Cloudflare
-      // should refuse this row rather than serve a page that says `wiring` for
-      // ever; the host's refusal names the row and this sentence.
-      await api.verify();
+      try {
+        await api.verify();
+      } catch (err) {
+        if (isRefusal(err)) throw err;
+        setTunnel({ state: "failed", name: null, id: null, reason: messageOf(err) });
+        scheduleRetry();
+      }
       started = true;
       unsubscribe = domains.subscribe(() => void reconcile());
-      await reconcile();
+      // AFTER THE MOUNT AND OFF THE APPLY PATH: the row is served while the
+      // first reconciliation runs.
+      void reconcile();
     },
     status,
     reconcile,
     async close() {
+      if (closed) return;
       closed = true;
+      if (retryTimer !== null) clearTimeout(retryTimer);
+      retryTimer = null;
       unsubscribe?.();
       unsubscribe = null;
-      stopConnector();
-      repo.close();
+      stopProbes.abort();
+      // A reconcile already awaiting an API call must not spawn a connector on
+      // a row that is leaving; `closed` is checked after every await, and this
+      // join is the last one before the database closes.
+      await work.catch(() => {});
+      await Promise.allSettled([...confirmations]);
+      await stopConnector();
+      repo?.close();
+      repo = null;
     },
   };
 }
@@ -595,7 +733,11 @@ function hostOf(origin: string): string {
   }
 }
 
-/** The row as a plugin — mounted by the host only when the token file is set. */
+/** The row as a plugin — mounted by the host only when the token file is set.
+ *
+ *  THE ORDER IS THE LIFETIME: open the database, register its release, mount,
+ *  register the mount's drop, and only then start. A refusal from `start`
+ *  unwinds through both finalizers; an outage does not throw at all. */
 export const cloudflareRow = (config: CloudflareRowConfig) =>
   definePlugin({
     name: CLOUDFLARE_KEY,
@@ -617,10 +759,10 @@ export const cloudflareRow = (config: CloudflareRowConfig) =>
         log,
       });
 
-      // THE TOKEN BEFORE THE MOUNT: a refused token fails the activation, and a
-      // failed row is a daemon that refuses to serve half a surface rather than
-      // one with a tunnel panel that never moves.
-      yield* Effect.promise(() => server.start());
+      // ACQUIRE, THEN ARRANGE THE RELEASE — in the same step, before anything
+      // else can fail and leak it.
+      server.open();
+      yield* Effect.addFinalizer(() => Effect.promise(() => server.close()));
 
       const mounted = bundle.mount(CLOUDFLARE_KEY, server.surface, server.deps);
       server.attach({
@@ -630,11 +772,11 @@ export const cloudflareRow = (config: CloudflareRowConfig) =>
           remove: (key) => mounted.ctx.collections.routes.remove(key),
         },
       });
-
-      // Reverse order: the mount goes, THEN the connector and the database. A
-      // publish into a dropped mount would be the cache row's old bug.
-      yield* Effect.addFinalizer(() => Effect.promise(() => server.close()));
       yield* Effect.addFinalizer(() => Effect.promise(() => mounted.drop()));
+
+      // THE TOKEN BEFORE SERVING: a refusal fails the row; an outage marks the
+      // tunnel failed and retries.
+      yield* Effect.promise(() => server.start());
 
       log.info(
         { localOrigin: bound, publicHost: publicOrigin },
@@ -651,3 +793,6 @@ function hostOnly(origin: string): string {
     return origin.toLowerCase();
   }
 }
+
+/** Re-exported for the host: the row's ONE environment read. */
+export { readCloudflareConfig };

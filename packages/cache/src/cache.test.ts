@@ -9,7 +9,15 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  utimesSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
@@ -42,6 +50,17 @@ function cacheWith(rootToken: string | null): Cache {
     blob: store,
     now: () => NOW,
   });
+}
+
+/** Poll for a BACKGROUND effect — the row's upstream fetch queue. A real
+ *  `nix-store -r` cannot be driven by fake timers, so this is the integration
+ *  exception: short, bounded, and the condition is the thing awaited. */
+async function until(what: string, ask: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!ask()) {
+    if (Date.now() > deadline) throw new Error(`odu cache test: ${what} did not happen`);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
 }
 
 /** A body for `acceptNarinfo`, which takes a stream because a real one does. */
@@ -438,6 +457,9 @@ describe("chunked uploads", () => {
       ok: false,
       missing: [2],
     });
+    // TWO COMPLETES OF ONE FILE: the second is the state the first produced,
+    // not an unlink race.
+    expect(await cache.completeUpload(bucket, file, 2)).toEqual({ ok: true, parts: 2 });
     expect(await cache.completeUpload(bucket, file, 2)).toEqual({ ok: true, parts: 2 });
     // The joined bytes are the parts in order, and the narinfo's own proof is
     // what turns them into a stored path.
@@ -449,6 +471,35 @@ describe("chunked uploads", () => {
         name.includes(".part-"),
       ),
     ).toEqual([]);
+    cache.close();
+  });
+
+  it("does not sweep the parts of an upload that is still running", async () => {
+    const cache = cacheWith(ROOT);
+    await cache.admin.create(createInput);
+    const bucket = cache.bucket("main") as never;
+    const file = "slow.nar.zst";
+    const part = await cache.beginPart(bucket, file, 0, 100);
+    await part.write(new Uint8Array([1, 2, 3]));
+    await part.commit();
+    const narDir = join(scratch, "cache", "staging", "main", "nar");
+    const partPath = join(narDir, `${file}.part-0`);
+    const markerPath = join(narDir, `${file}.uploading`);
+
+    // AN ABANDONED PART AND ITS MARKER: the sweep takes both.
+    utimesSync(partPath, new Date(0), new Date(0));
+    utimesSync(markerPath, new Date(0), new Date(0));
+    await cache.beginUpload(bucket, "idle.nar.zst");
+    await until("the abandoned part to be swept", () => !existsSync(partPath));
+
+    // A PART WHOSE MARKER IS FRESH IS AN UPLOAD IN PROGRESS, however old the
+    // part is (a slow 2 GiB closure touches its marker per part).
+    const again = await cache.beginPart(bucket, file, 0, 100);
+    await again.write(new Uint8Array([4]));
+    await again.commit();
+    utimesSync(partPath, new Date(0), new Date(0));
+    await cache.beginUpload(bucket, "idle2.nar.zst");
+    expect(existsSync(partPath)).toBe(true);
     cache.close();
   });
 });
@@ -486,15 +537,18 @@ describe("upstream references", () => {
     return { cache, outcome };
   }
 
-  it("fetches a reference upstream signed, then imports the referrer", async () => {
+  it("fetches a reference upstream signed OFF the request, then imports the referrer", async () => {
     const { cache, outcome } = await parentWaitingOnChild(["cache.nixos.org-1"]);
-    expect(outcome).toMatchObject({ ok: true, status: 200 });
+    // THE REQUEST ANSWERS 202 WHILE THE FETCH RUNS: `nix-store -r` can outlive a
+    // proxy's origin timeout, and sitting behind it would turn a hold into a
+    // gateway error.
+    expect(outcome).toMatchObject({ ok: true, status: 202, fetching: 1 });
+    await until("the referrer to import", () => cache.bucket("main") !== null && cache.held().length === 0);
     // Scoped to the BUCKET's key: the fetch trusts what the bucket trusts and
     // nothing else.
     expect(store.substituted).toEqual([
       { paths: [child], keyNames: ["cache.nixos.org-1"] },
     ]);
-    expect(cache.held()).toEqual([]);
     expect(store.present.has(child)).toBe(true);
     cache.close();
   });
@@ -505,15 +559,18 @@ describe("upstream references", () => {
     const { cache, outcome } = await parentWaitingOnChild(["some-other-key"]);
     expect(outcome).toMatchObject({ ok: true, status: 202 });
     if (outcome.ok && outcome.status === 202) expect(outcome.missing).toEqual([child]);
+    // The fetch is attempted, fails to find a trusted signature, and the hold
+    // becomes the FINAL reason — not a fetching state for ever.
+    await until("the fetch to settle", () => cache.held()[0]?.fetching === 0);
     expect(cache.held()).toMatchObject([
-      { bucket: "main", storePath: parent, missing: [child] },
+      { bucket: "main", storePath: parent, missing: [child], fetching: 0 },
     ]);
     cache.close();
   });
 
   it("fetches nothing for a --no-upstream bucket", async () => {
     const { cache, outcome } = await parentWaitingOnChild([]);
-    expect(outcome).toMatchObject({ ok: true, status: 202 });
+    expect(outcome).toMatchObject({ ok: true, status: 202, fetching: 0 });
     expect(store.substituted).toEqual([]);
     expect(cache.held()).toHaveLength(1);
     cache.close();
@@ -521,6 +578,8 @@ describe("upstream references", () => {
 
   it("keeps the held row across a restart", async () => {
     const { cache } = await parentWaitingOnChild(["some-other-key"]);
+    // Let the (failing) fetch write its final reason before the process "dies".
+    await until("the fetch to settle", () => cache.held()[0]?.fetching === 0);
     cache.close();
     const second = createCache({
       stateRoot: scratch,

@@ -35,7 +35,7 @@ import {
 } from "@odu/credentials";
 import { narHashBase32, storePathBasename, storePathHash } from "./narinfo";
 import { CACHE_MOUNT } from "./paths";
-import { DEFAULT_NAR_PART_BYTES, MAX_NAR_PART_BYTES } from "./surface";
+import { DEFAULT_NAR_PART_BYTES, heldReason, MAX_NAR_PART_BYTES } from "./surface";
 import { type PathInfo, nixClosure, nixDump } from "./store";
 
 /** The environment slice this client reads. Passed in rather than reached for:
@@ -680,10 +680,7 @@ async function uploadOne(
       const said = (await infoResponse.text()).trim();
       return {
         ok: "held",
-        reason:
-          said === ""
-            ? "waiting for references that are neither here nor upstream"
-            : said,
+        reason: said === "" ? heldReason(["<unknown>"]) : said,
       };
     }
     if (infoResponse.ok) return { ok: true };

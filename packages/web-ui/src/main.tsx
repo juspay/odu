@@ -22,7 +22,7 @@ import { connectSurfaces } from "@kolu/surface-app/solid";
 import { AUTH_KEY, oduAuthSurface } from "@odu/auth/surface";
 import { CACHE_KEY, oduCacheSurface } from "@odu/cache/surface";
 import { CLOUDFLARE_KEY, oduCloudflareSurface } from "@odu/cloudflare/surface";
-import { readDoor } from "@odu/cordis/services";
+import { readDoor, readRows } from "@odu/cordis/services";
 import { oduServiceSurface } from "@odu/service-client/surface";
 import { createSignal } from "solid-js";
 import { render } from "solid-js/web";
@@ -43,6 +43,11 @@ if (root === null) {
  * door", and a known door survives a failed re-ask (`doorAfterAnswer`).
  */
 const [door, setDoor] = createSignal<DoorState>(await readDoor(window.location.origin));
+
+/** WHICH ROWS THIS DAEMON MOUNTS — read with the door, before the first draw.
+ *  A row that is absent gets no switch and no subscription; an unanswered ask
+ *  is `[]`, which draws no row rather than a control nothing answers. */
+const rows = (await readRows(window.location.origin)) ?? [];
 
 const connection = await connectSurfaces({
   // The rows. `cache` and `auth` are the keys the daemon mounts those rows at,
@@ -67,6 +72,7 @@ render(
         auth={connection.clients.auth}
         cloudflare={connection.clients.cloudflare}
         door={door()}
+        rows={rows}
         // The shell decides WHEN (a live wire); this file answers HOW (a host
         // route, which the fence keeps out of every other file).
         redialDoor={() => {

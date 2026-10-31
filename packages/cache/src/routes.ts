@@ -44,7 +44,12 @@ import { Effect, Layer, Stream } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import type { ClaimedRoutes } from "@odu/cordis/services";
 import { type Cache } from "./cache";
-import { CACHE_MOUNT } from "./paths";
+import {
+  CACHE_MOUNT,
+  CACHE_ROUTE_PATHS,
+  HASH_PATTERN,
+  PUSH_API,
+} from "./paths";
 import { NIX_CACHE_INFO } from "./staging";
 import type { BucketRow, Scope } from "./db";
 import { isStagedFileName, isStorePathHash } from "./narinfo";
@@ -114,6 +119,17 @@ function authorize(
   return { ok: true, bucket };
 }
 
+/**
+ * THE HEADERS A BUCKET'S READ CARRIES. A PUBLIC bucket's bytes are shared
+ * cacheable; a PRIVATE one's are not, and saying so is the ROW's fact — the
+ * module's nginx honours it, so one authorised read cannot become the next
+ * anonymous reader's cache hit. Nginx also bypasses its cache on any request
+ * that carries `Authorization`; this is the half the daemon owns.
+ */
+function readHeaders(bucket: BucketRow): Record<string, string> {
+  return bucket.isPublic ? {} : { "cache-control": "private, no-store" };
+}
+
 /** The two root-level narinfo routes share one body: a client that substitutes
  *  from a bucket's DOMAIN asks for `/<hash>.narinfo`, not `/cache/<name>/…`. */
 function narinfoRoot(cache: Cache) {
@@ -127,8 +143,11 @@ function narinfoRoot(cache: Cache) {
       if (text === null) return HttpServerResponse.empty({ status: 404 });
       cache.touch(admitted.bucket, hash);
       return request.method === "HEAD"
-        ? HttpServerResponse.empty({ status: 200 })
-        : HttpServerResponse.text(text, { contentType: "text/x-nix-narinfo" });
+        ? HttpServerResponse.empty({ status: 200, headers: readHeaders(admitted.bucket) })
+        : HttpServerResponse.text(text, {
+            contentType: "text/x-nix-narinfo",
+            headers: readHeaders(admitted.bucket),
+          });
     });
 }
 
@@ -136,32 +155,6 @@ const NARINFO_SUFFIX = ".narinfo";
 
 const bad = (message: string): HttpServerResponse.HttpServerResponse =>
   HttpServerResponse.text(message, { status: 400 });
-
-/** Where the push API lives — odu's own, beside the Nix protocol's mount. */
-const PUSH_API = "/_odu/v1";
-
-/** Nix's base32, as a route fragment: a narinfo is named for its 32-character
- *  store-path hash, and a DOMAIN's root route has no bucket segment to make the
- *  route unambiguous. */
-const HASH_PATTERN = "[0-9abcdfghijklmnpqrsvwxyz]{32}";
-
-/**
- * THE PATHS THESE ROUTES ANSWER, beside the routes: the Nix protocol under
- * {@link CACHE_MOUNT} and the push API under {@link PUSH_API}. Both carry their
- * own per-bucket credentials, so the door gate lets an anonymous request
- * through to them — and a route added below outside both prefixes is caught by
- * `@odu/host`'s `reserved.test.ts`, which records what this layer registers.
- */
-export const CACHE_ROUTE_PATHS: ReadonlyArray<string> = [
-  `${CACHE_MOUNT}/*`,
-  `${PUSH_API}/*`,
-  // A BUCKET DOMAIN ANSWERS AT THE ROOT of its name. The three paths are the
-  // Nix protocol's whole footprint there; the regex is a claim form the door
-  // gate reads (`~` is an anchored regular expression).
-  "/nix-cache-info",
-  "/nar/*",
-  `~^/${HASH_PATTERN}\\.narinfo$`,
-];
 
 /**
  * WHAT A BUCKET PUBLISHES TO ITS CONSUMERS: the substituter URL, the key, the
@@ -208,6 +201,8 @@ pre{background:#f4f4f4;padding:1rem;overflow:auto}code{font-size:.95em}</style><
 </body></html>
 `;
 }
+
+export { CACHE_ROUTE_PATHS } from "./paths";
 
 export function cacheRoutes(
   cache: Cache,
@@ -300,8 +295,11 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
         // fetch.
         cache.touch(admitted.bucket, hash);
         return request.method === "HEAD"
-          ? HttpServerResponse.empty({ status: 200 })
-          : HttpServerResponse.text(text, { contentType: "text/x-nix-narinfo" });
+          ? HttpServerResponse.empty({ status: 200, headers: readHeaders(admitted.bucket) })
+          : HttpServerResponse.text(text, {
+              contentType: "text/x-nix-narinfo",
+              headers: readHeaders(admitted.bucket),
+            });
       }),
     ),
 
@@ -316,7 +314,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
         if (stream === null) return HttpServerResponse.empty({ status: 404 });
         return HttpServerResponse.stream(
           Stream.fromReadableStream({ evaluate: () => stream, onError: (err) => err }),
-          { contentType: "application/x-nix-nar" },
+          { contentType: "application/x-nix-nar", headers: readHeaders(admitted.bucket) },
         );
       }),
     ),
@@ -374,7 +372,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
           return outcome.status === 200
             ? HttpServerResponse.empty({ status: 200 })
             : HttpServerResponse.text(
-                `${heldReason(outcome.missing)}: ${outcome.missing.join(" ")}`,
+                `${heldReason(outcome.missing, outcome.fetching)}: ${outcome.missing.join(" ")}`,
                 { status: 202 },
               );
         }
@@ -414,7 +412,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
         if (stream === null) return HttpServerResponse.empty({ status: 404 });
         return HttpServerResponse.stream(
           Stream.fromReadableStream({ evaluate: () => stream, onError: (err) => err }),
-          { contentType: "application/x-nix-nar" },
+          { contentType: "application/x-nix-nar", headers: readHeaders(admitted.bucket) },
         );
       }),
     ),
@@ -453,7 +451,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
           return outcome.status === 200
             ? HttpServerResponse.empty({ status: 200 })
             : HttpServerResponse.text(
-                `${heldReason(outcome.missing)}: ${outcome.missing.join(" ")}`,
+                `${heldReason(outcome.missing, outcome.fetching)}: ${outcome.missing.join(" ")}`,
                 { status: 202 },
               );
         }

@@ -140,10 +140,13 @@ export type CachePath = typeof CachePathSchema.Type;
 export const CacheHeldSchema = Schema.Struct({
   bucket: Schema.String,
   storePath: Schema.String,
-  /** {@link heldReason} of `missing` — the words, not a second computation. */
+  /** {@link heldReason} of `missing`/`fetching` — the words, not a second
+   *  computation. */
   reason: Schema.String,
   /** The references Nix says are not valid, in its own spelling. */
   missing: Schema.Array(Schema.String),
+  /** How many of those the server is fetching from upstream now. */
+  fetching: Schema.Int,
   /** When the path first arrived; a later drain does not move it. */
   since: Schema.Number,
 });
@@ -158,7 +161,10 @@ export const heldKey = (held: { bucket: string; storePath: string }): string =>
  * WHY A PATH IS HELD, in the one sentence the push, the server and the board
  * say — PLAN.md's wording: a reference that is neither here nor upstream.
  */
-export function heldReason(missing: readonly string[]): string {
+export function heldReason(missing: readonly string[], fetching = 0): string {
+  if (fetching > 0) {
+    return `fetching ${fetching} upstream reference${fetching === 1 ? "" : "s"}`;
+  }
   const n = missing.length;
   return `waiting for ${n} reference${n === 1 ? "" : "s"} that ${
     n === 1 ? "is" : "are"
@@ -343,6 +349,16 @@ export const PATH_PAGE_SIZE = 100;
  * under the cap, and few enough parts that a 2 GiB closure is 32 requests.
  * The ceiling odu itself accepts is 96 MiB: the same limit with headroom for
  * headers, so a part that works through Cloudflare also works directly.
+ *
+ * THIS IS A REQUEST SPLIT, NOT A DEDUP SCHEME, and the neighbours do something
+ * else. Attic chunks uncompressed NARs with FastCDC for deduplication — its
+ * defaults are 64 KiB minimum / 128 KiB average / 256 KiB maximum, configured
+ * on the SERVER and framed inside one upload
+ * (https://github.com/zhaofengli/attic/blob/main/book/src/admin-guide/chunking.md).
+ * Cachix pushes `--chunk-size` 32 MiB by default, with 4 concurrent chunks
+ * (cachix 1.7.2 changelog: https://hackage.haskell.org/package/cachix/changelog).
+ * odu's parts exist only to stay under a proxy's body limit; the server joins
+ * them and the narinfo's hash proof decides, so no chunk map is kept.
  */
 export const DEFAULT_NAR_PART_BYTES = 64 * 1024 * 1024;
 export const MAX_NAR_PART_BYTES = 96 * 1024 * 1024;

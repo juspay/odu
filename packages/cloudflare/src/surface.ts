@@ -116,8 +116,10 @@ export const oduCloudflareSurface = defineSurface({
   },
   procedures: {
     status: {
+      // NO INPUT, not an empty struct: an MCP host sends NO arguments for a
+      // verb with none, and decoding `undefined` against `Struct({})` is a tool
+      // error on every call (#134's lesson).
       read: {
-        input: Schema.Struct({}),
         output: CloudflareStatusSchema,
         error: CloudflareRefused,
       },

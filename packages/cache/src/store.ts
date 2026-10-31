@@ -341,6 +341,10 @@ export function nixStore(options: NixStoreOptions): BlobStore {
       // import attempt says so.
       await run("nix-store", [
         "-r",
+        // ONE reference that will not come does not stop the others: a
+        // sibling that IS upstream must still land, or the referrer stays
+        // held for a path the server could have fetched.
+        "--keep-going",
         ...storeArgs,
         "--option",
         "substituters",

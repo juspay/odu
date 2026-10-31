@@ -12,22 +12,6 @@ Feature: An admin administers the cache from the board
   # The button is never greyed out: the empty name is SENT, and what the page
   # shows is the ROW's own refusal — the sentence asserted is the cache's.
   @signed-in:admin
-  @tunnel
-  Scenario: A bucket's name becomes a live route through the tunnel
-    # THE TUNNEL WORLD mounts the cloudflare row against a stub API and a
-    # `cloudflared` that says it registered. A name set on the page reaches the
-    # panel as `live` — the whole way: row, route, record, connector, probe.
-    Given I open the cache
-    When I type the root token
-    And I name a new bucket
-    And I press "Create bucket"
-    And I name the bucket "cache.tunnel.test"
-    When I open the tunnel
-    Then the tunnel panel shows "cache.tunnel.test" as "live"
-    When I open that bucket
-    Then the bucket page shows the domain route as "live"
-    And there should be no page errors
-
   Scenario: An empty bucket name is refused by the row, in its words
     Given I open the cache
     When I press "Create bucket"

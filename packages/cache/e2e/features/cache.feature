@@ -64,6 +64,14 @@ Feature: The cache is a row of the board
     Then the cache answers it as its own 404
     And there should be no page errors
 
+  # A CONTROL FOR A ROW THAT IS NOT MOUNTED opens a subscription nothing
+  # answers, and runs on every existing cache scenario. The daemon's roster is
+  # the fact the page draws by.
+  Scenario: A daemon without the tunnel row draws no Tunnel control
+    Given I open the cache
+    Then the board offers no Tunnel control
+    And there should be no page errors
+
   Scenario: A bucket that does not exist is not a page error
     Given a bucket with one path pushed from the CLI
     When I open a bucket the cache does not have

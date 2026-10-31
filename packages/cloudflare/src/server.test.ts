@@ -1,17 +1,19 @@
 /**
- * THE TUNNEL ROW, OVER A RECORDED CONVERSATION.
+ * THE TUNNEL ROW, AGAINST A STUB THAT SPEAKS CLOUDFLARE'S ENVELOPE.
  *
- * The API is a stub in this process rather than a mock module: what the row
+ * The API is a server in this process rather than a mock module: what the row
  * sends is the thing the test reads — a tunnel named after this server, ONE of
  * them, an ingress with the names sorted and a 404 terminator, a proxied CNAME
  * per name — so a change to the request shape is a failure here rather than in
- * production. `cloudflared` is a real child process (a shell script that says
- * "Registered tunnel connection" and sleeps), because the connector's state is
- * read off stdout and a fake object could not prove that.
+ * production. The envelopes (`{success, errors, result}`) and the endpoints are
+ * Cloudflare's documented shapes; this is not a recording of a live account,
+ * and it says so. `cloudflared` is a real child process (a shell script that
+ * says "Registered tunnel connection" and sleeps), because the connector's
+ * state is read off stdout and a fake object could not prove that.
  */
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
@@ -31,6 +33,8 @@ interface Stub {
   seen: Seen[];
   zones: Record<string, { id: string; name: string; account: string }>;
   records: Map<string, { id: string; content: string; proxied: boolean }>;
+  /** Records pre-populated before the row starts, keyed by name. */
+  preexisting: Map<string, { id: string; content: string }>;
   tunnelCreates: number;
   verifyOk: boolean;
   stop: () => void;
@@ -50,6 +54,7 @@ function startStub(): Stub {
     seen: [],
     zones: { "example.org": { id: "zone-1", name: "example.org", account: "acct-1" } },
     records: new Map(),
+    preexisting: new Map(),
     tunnelCreates: 0,
     verifyOk: true,
     stop: () => {},
@@ -92,8 +97,18 @@ function startStub(): Stub {
       }
       if (url.pathname === "/zones/zone-1/dns_records" && request.method === "GET") {
         const name = url.searchParams.get("name") ?? "";
-        const record = state.records.get(name);
+        const record = state.records.get(name) ?? state.preexisting.get(name);
         return envelope(record === undefined ? [] : [{ id: record.id, content: record.content }]);
+      }
+      if (
+        url.pathname.startsWith("/zones/zone-1/dns_records/") &&
+        request.method === "GET"
+      ) {
+        const id = url.pathname.slice(url.pathname.lastIndexOf("/") + 1);
+        for (const record of [...state.records.values(), ...state.preexisting.values()]) {
+          if (record.id === id) return envelope({ id: record.id, content: record.content });
+        }
+        return new Response("not found", { status: 404 });
       }
       if (url.pathname === "/zones/zone-1/dns_records" && request.method === "POST") {
         const sent = body as { name: string; content: string; proxied: boolean };
@@ -106,6 +121,9 @@ function startStub(): Stub {
         for (const [name, record] of state.records) {
           if (record.id === id) state.records.delete(name);
         }
+        for (const [name, record] of state.preexisting) {
+          if (record.id === id) state.preexisting.delete(name);
+        }
         return envelope({ id });
       }
       return new Response("not found", { status: 404 });
@@ -116,13 +134,25 @@ function startStub(): Stub {
   return state;
 }
 
-/** A `cloudflared` that reports a registered connection and stays alive. */
-function fakeConnector(): string {
+/** A `cloudflared` that reports a registered connection, records what it was
+ *  given, and leaves a marker when it is stopped. */
+function fakeConnector(): { bin: string; markers: string } {
   scratch = mkdtempSync(join(tmpdir(), "odu-cloudflare-"));
+  const markers = join(scratch, "markers");
+  mkdirSync(markers, { recursive: true });
   const path = join(scratch, "cloudflared");
-  writeFileSync(path, '#!/bin/sh\necho "Registered tunnel connection connIndex=0"\nexec sleep 60\n');
+  writeFileSync(
+    path,
+    `#!/bin/sh
+echo "$@" > ${markers}/args
+echo "$TUNNEL_TOKEN" > ${markers}/token
+trap 'echo gone > ${markers}/exited; exit 0' TERM
+echo "Registered tunnel connection connIndex=0"
+while :; do sleep 0.1; done
+`,
+  );
   spawnSync("chmod", ["+x", path]);
-  return path;
+  return { bin: path, markers };
 }
 
 function domainsWorld(initial: BucketDomainFact[]): {
@@ -138,6 +168,7 @@ function domainsWorld(initial: BucketDomainFact[]): {
         listeners.add(listener);
         return () => listeners.delete(listener);
       },
+      paths: [],
     },
     set: (next) => {
       facts = [...next];
@@ -166,6 +197,7 @@ async function world(input: {
   probe?: (url: string) => Promise<boolean>;
 }) {
   const stub = startStub();
+  const connector = fakeConnector();
   const stateRoot = mkdtempSync(join(tmpdir(), "odu-cloudflare-state-"));
   const probes: string[] = [];
   const civet = domainsWorld(input.initial);
@@ -173,7 +205,7 @@ async function world(input: {
     config: {
       token: "api-token",
       apiBase: stub.origin,
-      cloudflared: fakeConnector(),
+      cloudflared: connector.bin,
       probe: input.probe ?? (async (url) => {
         probes.push(url);
         return true;
@@ -187,6 +219,7 @@ async function world(input: {
     domains: civet.domains,
     log: quiet,
   });
+  server.open();
   const tunnel: CloudflareTunnel[] = [];
   const routes = new Map<string, CloudflareRoute>();
   server.attach({
@@ -201,7 +234,7 @@ async function world(input: {
     stub.stop();
     rmSync(stateRoot, { recursive: true, force: true });
   });
-  return { server, stub, civet, tunnel, routes, probes };
+  return { server, stub, civet, tunnel, routes, probes, connector };
 }
 
 describe("the cloudflare row", () => {
@@ -274,5 +307,59 @@ describe("the cloudflare row", () => {
     const w = await world({ initial: [] });
     w.stub.verifyOk = false;
     await expect(w.server.start()).rejects.toThrow(/Invalid API Token/);
+  });
+
+  it("mounts with the tunnel failed when Cloudflare is unreachable, and retries", async () => {
+    const w = await world({ initial: [{ bucket: "kolu", domain: "cache.example.org" }] });
+    // A STOPS NOT A REFUSAL: the row mounts, the tunnel says why, and a retry
+    // is scheduled — the board and the runs never depend on Cloudflare.
+    w.stub.stop();
+    await expect(w.server.start()).resolves.toBeUndefined();
+    await until("the tunnel to report the outage", () => w.tunnel.at(-1)?.state === "failed");
+    expect(w.tunnel.at(-1)?.reason).toContain("could not be reached");
+  });
+
+  it("refuses a DNS record it did not create, and changes nothing", async () => {
+    const w = await world({ initial: [{ bucket: "kolu", domain: "cache.example.org" }] });
+    w.stub.preexisting.set("cache.example.org", {
+      id: "foreign-1",
+      content: "203.0.113.7",
+    });
+    await w.server.start();
+    await until("the route to fail", () => w.routes.get("cache.example.org")?.state === "failed");
+    expect(w.routes.get("cache.example.org")?.reason).toContain("is not odu's");
+    expect(w.stub.preexisting.get("cache.example.org")).toEqual({
+      id: "foreign-1",
+      content: "203.0.113.7",
+    });
+    expect(w.stub.records.size).toBe(0);
+  });
+
+  it("adopts a record that already points at this tunnel", async () => {
+    const w = await world({ initial: [{ bucket: "kolu", domain: "cache.example.org" }] });
+    w.stub.preexisting.set("cache.example.org", {
+      id: "ours-by-content",
+      content: "tunnel-1.cfargotunnel.com",
+    });
+    await w.server.start();
+    await until("the name to be live", () => w.routes.get("cache.example.org")?.state === "live");
+    // Adopted, not re-created: the row did not overwrite a record that was
+    // already pointing at its own tunnel.
+    expect(w.stub.preexisting.get("cache.example.org")?.id).toBe("ours-by-content");
+    expect(w.stub.records.size).toBe(0);
+  });
+
+  it("passes the tunnel token in the environment, and close waits for the child", async () => {
+    const w = await world({ initial: [{ bucket: "kolu", domain: "cache.example.org" }] });
+    await w.server.start();
+    await until("the connector to connect", () => w.tunnel.at(-1)?.state === "connected");
+    const markers = w.connector.markers;
+    // NEVER on argv: every local user can read `ps`.
+    expect(readFileSync(join(markers, "args"), "utf8")).not.toContain("connector-token");
+    expect(readFileSync(join(markers, "token"), "utf8").trim()).toBe("connector-token");
+
+    await w.server.close();
+    await until("the child to exit", () => existsSync(join(markers, "exited")));
+    expect(w.server.status().tunnel.state).toBe("stopped");
   });
 });

@@ -1,5 +1,5 @@
 /**
- * THE HOST'S ONE ENVIRONMENT READ for the cloudflare row.
+ * THE ROW'S ONE ENVIRONMENT READ, kept in the ROW (the host only calls it).
  *
  * The row exists only when a token file is configured: a laptop daemon has no
  * Cloudflare account and no names, and a row that mounted without a token would

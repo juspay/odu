@@ -94,6 +94,44 @@ export const Bundle = serviceTag<RootedSurfacesRuntime<never>>("odu:bundle");
 export const SERVICE_DOOR_PATH = "/_odu/door";
 
 /**
+ * WHICH SIBLING ROWS THIS DAEMON MOUNTS — the host's composition, as a fact a
+ * client may read before it draws anything.
+ *
+ * The browser drew a Tunnel switch and opened a `routes` subscription on every
+ * bucket page even on a daemon with no tunnel row; the bridge composed its MCP
+ * siblings from a fixed list. Both now ask. The answer is the roster at boot:
+ * rows are fixed for a tenure, and a row that leaves takes the daemon with it.
+ */
+export const SERVICE_ROWS_PATH = "/_odu/rows";
+
+/**
+ * ASK A DAEMON WHICH ROWS IT MOUNTS — the one spelling of that question, beside
+ * {@link readDoor} and for the same reasons: a second copy is a second parse,
+ * and the two readers (a page deciding whether to draw a control, a bridge
+ * deciding whether to advertise a verb) must agree.
+ *
+ * `null` is UNKNOWN (the host did not answer), deliberately not `[]`: a caller
+ * that treats an outage as "no rows" hides a control on a server that has it.
+ */
+export async function readRows(
+  origin: string,
+  ask: typeof fetch = fetch,
+): Promise<ReadonlyArray<string> | null> {
+  try {
+    const response = await ask(new URL(SERVICE_ROWS_PATH, origin), {
+      headers: { "cache-control": "no-cache" },
+      signal: AbortSignal.timeout(2_000),
+    });
+    if (!response.ok) return null;
+    const body = (await response.json()) as { rows?: unknown };
+    if (!Array.isArray(body.rows)) return null;
+    return body.rows.filter((row): row is string => typeof row === "string");
+  } catch {
+    return null;
+  }
+}
+
+/**
  * ASK A DAEMON WHETHER IT HAS A DOOR — the ONE spelling of the question.
  *
  * Two faces ask it: the browser, before it draws anything, and the CLI's MCP
@@ -221,6 +259,12 @@ export interface BucketDomains {
   /** Every bucket that has a domain, now. */
   current(): readonly BucketDomainFact[];
   subscribe(listener: () => void): () => void;
+  /**
+   * THE PATHS THE CACHE ROW ANSWERS. A bucket domain forwards EVERY path of
+   * its name to this daemon, so the host's gate needs to know what belongs to
+   * the cache and what must never answer there: its claims are the whole list.
+   */
+  paths: ReadonlyArray<string>;
 }
 
 export const BucketDomains = serviceTag<BucketDomains>("odu:bucketDomains");

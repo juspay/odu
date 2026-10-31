@@ -94,10 +94,12 @@ const declaration = {
       "packages/cloudflare/src/server.ts": 1,
       // The browser suite's Cloudflare stub answers the protocol probe.
       "packages/web-acceptance/support/cloudflareStub.ts": 1,
-      // `cache-control` on two responses — an HTTP header, not a bucket.
-      "packages/host/src/principal.ts": 2,
+      // `cache-control` on three responses — an HTTP header, not a bucket.
+      "packages/host/src/principal.ts": 3,
+      // The bucket-domain gate: `/cache/` is the cache row's path form.
+      "packages/host/src/bucketDomain.ts": 6,
       // The same header, on the shared door reader's one request.
-      "packages/cordis/src/services.ts": 2,
+      "packages/cordis/src/services.ts": 4,
       "packages/launch/src/webDaemonLaunch.ts": 1,
       "packages/web-acceptance/support/corpus.ts": 5,
       "packages/web-acceptance/support/world.ts": 5,
@@ -129,13 +131,14 @@ const declaration = {
     // `/nix-cache-info` is what a domain is probed for, and "cache" there
     // belongs to Nix. The row's own instructions are prose on the wire.
     cloudflare: {
-      // The host's ONE environment read for the row: a composition-root fact,
-      // not a second implementation of it.
-      "packages/host/src/cloudflareConfig.ts": 9,
       // The harness names the row's world and stubs the API it calls, the way
       // the door's world names the auth stub.
       "packages/web-acceptance/support/cloudflareStub.ts": 2,
       "packages/web-acceptance/support/hooks.ts": 15,
+      // The composed wires that speak the sibling's key — the tunnel's argv
+      // face and the MCP bridge beside the cache's and the door's.
+      "packages/cli/src/wire.ts": 2,
+      "packages/cli/src/serviceMcp.ts": 5,
     },
   },
   // A MODULE THAT HOLDS LIVE STATE BEHIND A DOOR, and why: the spawn module's

@@ -130,6 +130,7 @@ describe("held uploads", () => {
       bucket: "main",
       storePath: "/nix/store/parent",
       missing: ["/nix/store/child"],
+      fetching: 0,
       created: NOW,
     });
     // A later drain narrowed the reason; the row's `since` is when the path
@@ -138,10 +139,11 @@ describe("held uploads", () => {
       bucket: "main",
       storePath: "/nix/store/parent",
       missing: [],
+      fetching: 0,
       created: NOW + 5000,
     });
     expect(repo.held()).toEqual([
-      { bucket: "main", storePath: "/nix/store/parent", missing: [], created: NOW },
+      { bucket: "main", storePath: "/nix/store/parent", missing: [], fetching: 0, created: NOW },
     ]);
     expect(repo.held("main")).toHaveLength(1);
     expect(repo.held("other")).toEqual([]);
@@ -156,6 +158,7 @@ describe("held uploads", () => {
       bucket: "main",
       storePath: "/nix/store/parent",
       missing: ["/nix/store/child"],
+      fetching: 0,
       created: NOW,
     });
     repo.deleteBucket("main");

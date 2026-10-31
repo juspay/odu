@@ -19,7 +19,33 @@ import {
   type SurfaceClientCallable,
 } from "@kolu/surface-mcp";
 import { AUTH_AGENT, AUTH_KEY } from "@odu/auth/surface";
-import { agentInstructions, readDoor, type RowAgent } from "@odu/cordis/services";
+import { CLOUDFLARE_AGENT, CLOUDFLARE_KEY } from "@odu/cloudflare/surface";
+
+/**
+ * THE SIBLINGS A DAEMON CAN ANSWER, from its own composition facts.
+ *
+ * The cache is core; the tunnel mounts only with a Cloudflare token, and the
+ * door only with a GitHub App. A tool for a row that is not there is a tool
+ * error waiting for the first agent; the roster is asked, never assumed.
+ */
+export function mountedRows(
+  hasDoor: boolean | null,
+  rows: ReadonlyArray<string> | null,
+): Record<string, RowAgent> {
+  return {
+    [CACHE_KEY]: CACHE_AGENT,
+    ...(rows?.includes(CLOUDFLARE_KEY) === true
+      ? { [CLOUDFLARE_KEY]: CLOUDFLARE_AGENT }
+      : {}),
+    ...(hasDoor === true ? { [AUTH_KEY]: AUTH_AGENT } : {}),
+  };
+}
+import {
+  agentInstructions,
+  readDoor,
+  readRows,
+  type RowAgent,
+} from "@odu/cordis/services";
 import { CACHE_AGENT, CACHE_KEY } from "@odu/cache/surface";
 import { buildSurfaceFace } from "@kolu/surface/client";
 import { composedClients } from "@odu/cordis/compose";
@@ -77,10 +103,11 @@ export async function serveServiceMcpOverStdio(opts: {
   // after every dial, which is what makes a bridge that STARTS the daemon
   // right: the first dial boots it, and the answer arrives a moment later.
   let door: boolean | null = await readDoor(origin);
-  const siblingsFor = (hasDoor: boolean | null): Record<string, RowAgent> => ({
-    [CACHE_KEY]: CACHE_AGENT,
-    ...(hasDoor === true ? { [AUTH_KEY]: AUTH_AGENT } : {}),
-  });
+  // WHICH OTHER ROWS ARE MOUNTED is the daemon's roster, asked the same way the
+  // door is. A bridge that advertised the tunnel's verbs everywhere would hand
+  // an agent a tool the server does not have (the two-doors divergence #134
+  // closed for auth).
+  let rows: ReadonlyArray<string> | null = await readRows(origin);
   let served: ServedSurfaceMcp | null = null;
   let asking = false;
   const askDoor = async (): Promise<void> => {
@@ -89,16 +116,19 @@ export async function serveServiceMcpOverStdio(opts: {
     if (asking) return;
     asking = true;
     try {
-      const answer = await readDoor(origin);
-      if (answer === null || answer === door) return;
+      const [answer, rowList] = await Promise.all([readDoor(origin), readRows(origin)]);
+      if (answer === null && rowList === null) return;
+      const nextDoor = answer ?? door;
+      const nextRows = rowList ?? rows;
       // ONLY A ROSTER THAT MOVES IS MOVED. `null → false` changes the ANSWER
       // and not the tools, and a reroster for it would invite the framework's
       // one-generation rule for nothing. The comparison is the KEY SETS, not
       // their sizes: the day a second door-dependent row swaps one sibling for
       // another, two keys with the same count is still a move.
-      const before = Object.keys(siblingsFor(door)).sort().join("\n");
-      const after = Object.keys(siblingsFor(answer)).sort().join("\n");
-      door = answer;
+      const before = Object.keys(mountedRows(door, rows)).sort().join("\n");
+      const after = Object.keys(mountedRows(nextDoor, nextRows)).sort().join("\n");
+      door = nextDoor;
+      rows = nextRows;
       if (before === after) return;
       // The move, not a second serve: the adapter re-invokes `client()` for the
       // new roster, and this call answers with a fresh connection like any
@@ -107,7 +137,7 @@ export async function serveServiceMcpOverStdio(opts: {
       // stay alive: `reroster` re-makes every refusal the boot composition
       // owes, and one of those can reject.
       try {
-        await served?.reroster(surfacesOf(siblingsFor(door)));
+        await served?.reroster(surfacesOf(mountedRows(door, rows)));
       } catch (err) {
         process.stderr.write(`odu mcp: could not move the roster: ${String(err)}\n`);
       }
@@ -134,7 +164,7 @@ export async function serveServiceMcpOverStdio(opts: {
     // own verbs when the daemon has a door, under the keys the daemon mounts the
     // rows at. The rules are the rows': this face adds no authority, it forwards
     // a call.
-    surfaces: surfacesOf(siblingsFor(door)),
+    surfaces: surfacesOf(mountedRows(door, rows)),
     client: async () => {
       // ONE skew note per daemon for the bridge's life, not one per redial.
       const connection = await connectToService(origin, { warned });
@@ -174,7 +204,7 @@ export async function serveServiceMcpOverStdio(opts: {
     instructions: () =>
       agentInstructions(
         { surface: oduServiceSurface, expose: ODU_SERVICE_EXPOSE, instructions: ODU_SERVICE_MCP_INSTRUCTIONS },
-        siblingsFor(door),
+        mountedRows(door, rows),
       ),
     ...(opts.transport === undefined ? {} : { transport: opts.transport }),
   });

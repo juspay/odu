@@ -180,6 +180,10 @@ export function App(props: {
   /** Does this daemon have a DOOR? The host answers `GET /_odu/door` before the
    *  first render; `null` means the answer did not arrive. */
   door: DoorState;
+  /** WHICH SIBLING ROWS ARE MOUNTED, from `GET /_odu/rows`. A row that is not
+   *  here gets no switch and no subscription — the door's pattern for a
+   *  presence fact. */
+  rows: ReadonlyArray<string>;
   readout: SurfaceReadout;
   onReload: () => void;
 }): JSX.Element {
@@ -339,6 +343,9 @@ export function App(props: {
   // discriminated `route()` read inside the JSX.
   const atCache = createMemo(() => route().at === "cache");
   const atTunnel = createMemo(() => route().at === "tunnel");
+  /** THE TUNNEL ROW'S PRESENCE. Without its token the row is not mounted, and a
+   *  switch would open a subscription nothing answers. */
+  const tunnelRow = createMemo(() => props.rows.includes("cloudflare"));
   const atProfile = createMemo(() => route().at === "profile");
   const atPeople = createMemo(() => route().at === "people");
   /** THE PEOPLE PAGE IS AN OWNER'S, drawn for a signed-in owner only: a local
@@ -401,9 +408,11 @@ export function App(props: {
           >
             Cache
           </Button>
-          <Button pressed={atTunnel()} onClick={() => go({ at: "tunnel" })}>
-            Tunnel
-          </Button>
+          <Show when={tunnelRow()}>
+            <Button pressed={atTunnel()} onClick={() => go({ at: "tunnel" })}>
+              Tunnel
+            </Button>
+          </Show>
         </nav>
         {/* WHO IS SIGNED IN, and the door's two controls. Absent on a daemon
             with no auth row — `who` is never asked there — so today's header is
@@ -472,7 +481,7 @@ export function App(props: {
             onClose={() => go({ at: "board" })}
           />
         </Show>
-        <Show when={atTunnel()}>
+        <Show when={atTunnel() && tunnelRow()}>
           <TunnelFace
             client={props.cloudflare}
             now={now()}
@@ -492,7 +501,7 @@ export function App(props: {
           {/* THE ROUTE STRIP: the shell composes the two rows on a bucket page
               so the domain's state is visible where the name was set, without
               the cache's face knowing what a tunnel is. */}
-          <Show when={openBucket()}>
+          <Show when={tunnelRow() ? openBucket() : null}>
             {(bucket) => (
               <BucketRoute client={props.cloudflare} bucket={bucket()} now={now()} />
             )}

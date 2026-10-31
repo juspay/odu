@@ -233,6 +233,8 @@ A name is **wiring** while that happens, **live** once `https://<name>/nix-cache
 
 Once live, the bucket's **Use it** block and `odu cache use kolu` print the new URL; the old `/cache/kolu` URL keeps working. Pushes are unchanged: `odu cache push kolu` finds the bucket by name.
 
+**The name serves only the bucket.** `/` is the bucket's public page, the Nix protocol's paths (`/nix-cache-info`, `/<hash>.narinfo`, `/nar/<file>`, the push API) are served, and everything else on that hostname — the board, `/mcp`, `/auth`, `/rpc/ws` — is the cache row's 404. The tunnel forwards every path, so the daemon's `Host` routing is what keeps the control plane off a substituter's name; the board stays on `cache.domain`.
+
 **The server's own origin rides the same tunnel** when its host is in a zone the token can edit — the board, `/mcp` and the websocket. That is what lets a Tailscale Funnel retire; the GitHub App's callback URL then moves to that name.
 
 ### Remove it

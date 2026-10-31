@@ -49,7 +49,7 @@ export function TunnelFace(props: CloudflareFaceProps): JSX.Element {
   // is not served, which is exactly "Cloudflare is not configured here".
   const [first] = createResource(async (): Promise<Reading> => {
     try {
-      return { ok: true, status: await props.call(props.client.procedures.status.read({})) };
+      return { ok: true, status: await props.call(props.client.procedures.status.read()) };
     } catch (err) {
       return { ok: false, message: refusalText(err) };
     }

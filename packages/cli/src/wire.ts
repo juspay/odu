@@ -27,6 +27,7 @@ import { composedWire } from "@odu/cordis/compose";
 import { oduServiceSurface } from "@odu/service-client/surface";
 import { CACHE_KEY, oduCacheSurface } from "@odu/cache/surface";
 import { AUTH_KEY, oduAuthSurface } from "@odu/auth/surface";
+import { CLOUDFLARE_KEY, oduCloudflareSurface } from "@odu/cloudflare/surface";
 import { authorizationHeaders } from "@odu/auth/cli";
 import { connectOrStart } from "@odu/launch/webLauncher";
 import type { ServiceConnection } from "@odu/service-client/dial";
@@ -40,6 +41,7 @@ import type { ServiceConnection } from "@odu/service-client/dial";
 export const SERVICE_SIBLINGS = {
   [CACHE_KEY]: oduCacheSurface,
   [AUTH_KEY]: oduAuthSurface,
+  [CLOUDFLARE_KEY]: oduCloudflareSurface,
 } as const;
 
 /** The same map, as the group a link encodes against. Derived from

@@ -106,6 +106,7 @@
         "@modelcontextprotocol/sdk": "^1.29.0",
         "@odu/auth": "workspace:*",
         "@odu/cache": "workspace:*",
+        "@odu/cloudflare": "workspace:*",
         "@odu/cordis": "workspace:*",
         "@odu/execution": "workspace:*",
         "@odu/launch": "workspace:*",

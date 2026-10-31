@@ -110,6 +110,10 @@ export interface HeldRow {
   storePath: string;
   /** References the store says are not valid, as Nix named them. */
   missing: readonly string[];
+  /** How many of those the server is FETCHING from upstream right now. A hold
+   *  with a count is progress; zero means the fetch finished and they are
+   *  genuinely neither here nor upstream. */
+  fetching: number;
   created: number;
 }
 
@@ -259,6 +263,12 @@ const MIGRATIONS: readonly string[] = [
     PRIMARY KEY (bucket, store_path)
   );
   `,
+  // v4 — THE FETCH A HOLD REPRESENTS. A missing reference is fetched OFF the
+  // upload request; until it lands, the bucket publishes the progress rather
+  // than a silent 202.
+  `
+  ALTER TABLE held ADD COLUMN fetching INTEGER NOT NULL DEFAULT 0;
+  `,
   // v3 — A NAME PER BUCKET. One domain, one bucket: the partial unique index is
   // the rule, not a check in a verb that another caller could skip.
   `
@@ -358,6 +368,7 @@ const heldOf = (row: Row): HeldRow => ({
   bucket: text(row, "bucket"),
   storePath: text(row, "store_path"),
   missing: list(row, "missing"),
+  fetching: integer(row, "fetching"),
   created: integer(row, "created"),
 });
 
@@ -642,9 +653,10 @@ export function openCacheRepo(path: string): CacheRepo {
       // is what the board's "waiting since" means. A later drain with the same
       // or a shorter list of missing references refreshes the REASON only.
       db.run(
-        `INSERT INTO held (bucket, store_path, missing, created) VALUES (?, ?, ?, ?)
-         ON CONFLICT(bucket, store_path) DO UPDATE SET missing = excluded.missing`,
-        [row.bucket, row.storePath, JSON.stringify(row.missing), row.created],
+        `INSERT INTO held (bucket, store_path, missing, fetching, created) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(bucket, store_path) DO UPDATE SET missing = excluded.missing,
+           fetching = excluded.fetching`,
+        [row.bucket, row.storePath, JSON.stringify(row.missing), row.fetching, row.created],
       );
     },
     held: (bucket) =>

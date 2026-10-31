@@ -76,7 +76,7 @@ async function statusCommand(rest: string[], ports: CloudflareCliPorts): Promise
       { [CLOUDFLARE_KEY]: oduCloudflareSurface },
       connection.dispatch,
     ).cloudflare as unknown as CloudflareClient;
-    const answer = await Effect.runPromise(Effect.result(client.surface.status.read({})));
+    const answer = await Effect.runPromise(Effect.result(client.surface.status.read()));
     if (answer._tag === "Failure") {
       process.stderr.write(
         `odu: ${answer.failure instanceof Error ? answer.failure.message : String(answer.failure)}\n`,

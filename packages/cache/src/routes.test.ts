@@ -724,7 +724,9 @@ describe("uploading", () => {
       expect({ path, status: put.status }).toEqual({ path, status: 200 });
     }
     // ONE staged NAR, not two: both uploads named the same file.
-    expect(stagedFiles().filter((file) => file.includes("/nar/"))).toHaveLength(1);
+    expect(
+      stagedFiles().filter((file) => file.endsWith(".nar.zst")),
+    ).toHaveLength(1);
 
     const narinfo = (storePath: string): string =>
       `StorePath: ${storePath}\nURL: nar/${name}\nCompression: none\nNarHash: ${payload.narHash}\nNarSize: 1\nReferences: \n`;
@@ -786,6 +788,31 @@ describe("uploading", () => {
     expect(narinfo.status).toBe(200);
     expect((await h.fetch(`/main/${hashOf(staged)}.narinfo`)).status).toBe(200);
     await h.dispose();
+  });
+});
+
+describe("a private read is not shareable", () => {
+  it("marks a public bucket's read shareable, with no cache header", async () => {
+    const pub = await harness(true);
+    expect(
+      (await pub.fetch(`/main/${hashOf(HELLO)}.narinfo`)).headers.get("cache-control"),
+    ).toBeNull();
+    await pub.dispose();
+  });
+
+  it("marks a private bucket's narinfo and NAR private, no-store", async () => {
+    const priv = await harness(false);
+    const narinfo = await priv.fetch(`/main/${hashOf(HELLO)}.narinfo`, bearer(priv.tokens.read));
+    expect(narinfo.status).toBe(200);
+    expect(narinfo.headers.get("cache-control")).toBe("private, no-store");
+    const url = (await narinfo.text())
+      .split("\n")
+      .find((line) => line.startsWith("URL: "))!
+      .slice(5);
+    const nar = await priv.fetch(`/main/${url}`, bearer(priv.tokens.read));
+    expect(nar.status).toBe(200);
+    expect(nar.headers.get("cache-control")).toBe("private, no-store");
+    await priv.dispose();
   });
 });
 

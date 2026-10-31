@@ -47,7 +47,7 @@ import type {
   SurfaceAppHttpMiddleware,
 } from "@kolu/surface-app/serve";
 import type { SurfaceDispatch } from "@kolu/surface/link";
-import { SERVICE_DOOR_PATH } from "@odu/cordis/services";
+import { SERVICE_DOOR_PATH, SERVICE_ROWS_PATH } from "@odu/cordis/services";
 import { isReserved } from "./reserved";
 import type { SurfaceHandler, SurfaceHandlers } from "@kolu/surface/server";
 import {
@@ -363,6 +363,22 @@ export function doorGate(options: DoorGateOptions): SurfaceAppHttpMiddleware {
  * `service-client` spell another row's word. It lives here instead, on the
  * listener the host owns, and the browser asks once before it draws anything.
  */
+/**
+ * THE ROSTER FACT — which sibling rows this daemon mounts. A browser uses it to
+ * draw a row's control only when the row is there; the CLI's MCP bridge uses it
+ * to advertise only the verbs a daemon can answer.
+ */
+export function rowsRoute(rows: ReadonlyArray<string>) {
+  return HttpRouter.add("GET", SERVICE_ROWS_PATH, () =>
+    Effect.orDie(
+      HttpServerResponse.json(
+        { rows: [...rows] },
+        { headers: { "cache-control": "no-store" } },
+      ),
+    ),
+  );
+}
+
 export function doorRoute(door: boolean) {
   return HttpRouter.add("GET", SERVICE_DOOR_PATH, () =>
     Effect.orDie(

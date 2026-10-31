@@ -490,27 +490,11 @@ Then("the cache answers it as its own 404", function (this: OduWorld) {
   assert.ok(!visited.body.includes('aria-label="board rows"'), "the board's SPA answered a cache path");
 });
 
-When("I open the tunnel", async function (this: OduWorld) {
-  await this.open("#/tunnel");
-  await this.page.getByRole("heading", { name: "Tunnel", exact: true }).waitFor();
-});
-
-Then(
-  "the tunnel panel shows {string} as {string}",
-  async function (this: OduWorld, domain: string, state: string) {
-    const row = this.page.locator("ol.paths li", { hasText: domain });
-    await row.waitFor({ timeout: 30_000 });
-    await until(`the tunnel to report ${domain} ${state}`, async () =>
-      (await row.innerText()).includes(state) ? true : null,
-    );
-  },
-);
-
-Then("the bucket page shows the domain route as {string}", async function (this: OduWorld, state: string) {
-  const strip = this.page.locator('[aria-label="domain route"]');
-  await strip.waitFor({ timeout: 30_000 });
-  await until(`the bucket's route to be ${state}`, async () =>
-    (await strip.innerText()).includes(state) ? true : null,
+Then("the board offers no Tunnel control", async function (this: OduWorld) {
+  assert.strictEqual(
+    await this.page.getByRole("button", { name: "Tunnel", exact: true }).count(),
+    0,
+    "the Tunnel control is drawn on a daemon that does not mount the row",
   );
 });
 

@@ -18,12 +18,17 @@
  * fail-closed direction is unchanged.
  */
 
-import { type ClaimedRoutes, SERVICE_DOOR_PATH } from "@odu/cordis/services";
+import {
+  type ClaimedRoutes,
+  SERVICE_DOOR_PATH,
+  SERVICE_ROWS_PATH,
+} from "@odu/cordis/services";
 
 /** The paths the HOST'S listener answers itself. `*` means a walk — one or
  *  more characters after the prefix. */
 export const HOST_PATHS: ReadonlyArray<string> = [
   SERVICE_DOOR_PATH,
+  SERVICE_ROWS_PATH,
   "/assets/*",
   "/sw.js",
   "/manifest.webmanifest",

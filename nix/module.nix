@@ -92,6 +92,12 @@ let
       proxy_buffering on;
       proxy_cache odu_nar;
       proxy_cache_lock on;
+      # A REQUEST THAT CARRIES A CREDENTIAL IS NEVER SERVED FROM, OR STORED IN,
+      # THE SHARED CACHE. It is how a private bucket's authorised read would
+      # otherwise become the next anonymous reader's HIT; the daemon's
+      # `Cache-Control: private, no-store` is the other half.
+      proxy_no_cache $http_authorization;
+      proxy_cache_bypass $http_authorization;
       proxy_cache_valid 200 1h;
       proxy_cache_key "$host$request_uri";
       add_header X-Cache-Status $upstream_cache_status always;
@@ -109,7 +115,11 @@ let
     # nginx parses an unquoted `{32}` in a location regex as a block opener, so
     # the expression is quoted — and `[.]` avoids a backslash in the spelling.
     "~ \"^/[0-9abcdfghijklmnpqrsvwxyz]{32}[.]narinfo$\"" = proxyLocation;
-    "/" = { return = "404"; };
+    # EVERYTHING ELSE GOES TO THE DAEMON, which answers for the bucket only: `/`
+    # is its public page, the paths above are the protocol, and the board,
+    # `/mcp`, `/auth` and `/rpc/ws` are the cache row's 404. nginx cannot decide
+    # that — the bucket a name belongs to is the daemon's fact.
+    "/" = proxyLocation;
   };
 
   # IS THIS A SERVER MODE DEPLOYMENT? All three `github` options set; the
