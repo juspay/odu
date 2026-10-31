@@ -1,13 +1,17 @@
-# Build odu's outputs and push their closures to the shared Attic cache
-# (https://cache.nixos.asia/oss) — and then publish the lane runner
+# Build odu's outputs and push their closures to odu's OWN cache
+# (https://cache.kolu.dev, the `kolu` bucket on the public pod) — the cache the
+# flake's `nixConfig` substitutes from — and then publish the lane runner
 # CONTENT-ADDRESSED, so a dial from a published revision has the host pull its
 # own build with NO trust (`@kolu/surface-remote`'s `provisionAgent` index step;
 # the publisher is `juspay/kolu`'s `publish-closure` action, pinned to the kolu
 # revision odu pins in `npins/sources.json`).
 #
 # Two jobs, because they are two halves of one question with one ordering:
-# `build-and-push` warms the input-addressed cache a lane host substitutes from,
-# and `publish-closures` then rewrites from that same tree. It must be its OWN
+# `build-and-push` warms the input-addressed cache a lane host substitutes from
+# (odu's own, with `odu cache push`), and `publish-closures` then rewrites from
+# that same tree. The publish job still pushes through kolu's attic-shaped
+# action: switching it to this cache is kolu's generic push target, landing in
+# parallel. Until then only `build-and-push` is odu's own. It must be its OWN
 # job: the action installs the Nix it rewrites with (2.34.8 — see its
 # `action.yml`), which has to be the job's only Nix.
 #
@@ -57,8 +61,8 @@ jobs:
       - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
         with:
           nix_conf: |
-            extra-substituters = https://cache.nixos.asia/oss
-            extra-trusted-public-keys = oss:KO872wNJkCDgmGN3xy9dT89WAhvv13EiKncTtHDItVU=
+            extra-substituters = https://cache.kolu.dev
+            extra-trusted-public-keys = kolu-1:eAXwD1RPt1BpFjrHfVUO8Ia0bK32WcuIeJcwFWmgj9Y=
             accept-flake-config = true
 
       # ONE step, not a step per branch, so the token is never consulted in an
@@ -68,13 +72,14 @@ jobs:
       # warmed nothing is precisely the state a cache job exists to make
       # impossible (kolu's nix-cache.yml states the rule).
       #
-      # attic is installed from the repo's own npins-pinned nixpkgs, not an
-      # unpinned ref resolved through the GitHub API at run time: that API
-      # returning 503 is a repo-wide failure mode, and the tarball URL
-      # `nix/nixpkgs.nix` already builds from needs no resolution at all.
+      # ODU PUSHES TO ITS OWN CACHE. `odu cache push` computes each closure,
+      # asks the bucket what it is missing in one query, drops what an upstream
+      # key signed (the server fetches those references itself), and chunks a
+      # NAR too large for one request — so this works through cache.kolu.dev's
+      # Cloudflare tunnel, whose proxy caps a body at 100 MB.
       - name: Build odu's outputs, and push their closures
         env:
-          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+          ODU_CACHE_TOKEN: ${{ secrets.ODU_CACHE_TOKEN }}
         run: |
           set -euo pipefail
           paths=$(nix build -L --no-link --print-out-paths --accept-flake-config \
@@ -85,20 +90,17 @@ jobs:
             echo "::error::nix build produced no output paths"
             exit 1
           fi
-          if [ -z "$ATTIC_TOKEN" ]; then
+          if [ -z "$ODU_CACHE_TOKEN" ]; then
             if [ "$GITHUB_EVENT_NAME" = "push" ]; then
-              echo "::error::ATTIC_TOKEN is not set on $GITHUB_REPOSITORY — this push would publish no closure and no ca-index entry. Add the secret (the same attic login juspay/kolu uses)."
+              echo "::error::ODU_CACHE_TOKEN is not set on $GITHUB_REPOSITORY — this push would publish no closure. Add a write token for the kolu bucket (a bucket page mints one)."
               exit 1
             fi
-            echo "no ATTIC_TOKEN (a pull request) — built, pushed nothing"
+            echo "no ODU_CACHE_TOKEN (a pull request) — built, pushed nothing"
             exit 0
           fi
-          nix profile add "$(jq -r .pins.nixpkgs.url npins/sources.json)#attic-client"
-          attic login --set-default oss https://cache.nixos.asia "$ATTIC_TOKEN"
-          # `attic push` defaults to pushing CLOSURES and to skipping what
-          # cache.nixos.org already serves, so the out-paths alone are the
-          # complete instruction and nixpkgs stays out of a project cache.
-          printf '%s\n' "$paths" | attic push --stdin oss
+          odu="$(nix build .#odu --no-link --print-out-paths --accept-flake-config)/bin/odu"
+          # shellcheck disable=SC2086 # the out-paths are a list
+          "$odu" cache push kolu --origin https://cache.kolu.dev $paths
 
   publish-closures:
     needs: build-and-push
