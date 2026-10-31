@@ -118,7 +118,7 @@ async function harness(publicBucket: boolean): Promise<Harness> {
     write: await mint(cache, "write"),
     admin: await mint(cache, "admin"),
   };
-  const { handler, dispose } = HttpRouter.toWebHandler(cacheRoutes(cache), {
+  const { handler, dispose } = HttpRouter.toWebHandler(cacheRoutes(cache).layer, {
     disableLogger: true,
   });
   // The tests below name a path as a BUCKET names it (`/main/nix-cache-info`),

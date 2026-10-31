@@ -26,7 +26,7 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { Effect, Layer } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import type { Logger } from "@kolu/surface-daemon";
-import type { RowRoutes } from "@odu/cordis/services";
+import type { ClaimedRoutes } from "@odu/cordis/services";
 import {
   authorizeUrl,
   exchangeCode,
@@ -178,7 +178,7 @@ function withCookie(
   );
 }
 
-export function authRoutes(opts: AuthRoutesOptions): RowRoutes {
+export function authRoutes(opts: AuthRoutesOptions): ClaimedRoutes {
   const { config, server } = opts;
   const request = opts.request ?? fetch;
   const now = opts.now ?? Date.now;
@@ -271,5 +271,10 @@ export function authRoutes(opts: AuthRoutesOptions): RowRoutes {
     }),
   );
 
-  return Layer.merge(signIn, Layer.merge(callback, signOut));
+  return {
+    layer: Layer.merge(signIn, Layer.merge(callback, signOut)),
+    // The door's own flow, exactly: an anonymous person must reach it, and
+    // `/auth/` with nothing after it is a typo the shell answers.
+    paths: [AUTH_SIGN_IN_PATH, AUTH_CALLBACK_PATH, AUTH_SIGN_OUT_PATH],
+  };
 }

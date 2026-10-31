@@ -91,6 +91,9 @@ export class OduWorld extends World {
   cacheBucket?: string;
   cachePath?: string;
   cachePathName?: string;
+  /** The bucket token a door scenario pushed with — the push's whole
+   *  credential, and the one it reads the narinfo back under. */
+  cacheToken?: string;
   /** Every path the scenario pushed, in order, and their store-path names —
    *  what a filter scenario narrows between. */
   cachePaths?: string[];

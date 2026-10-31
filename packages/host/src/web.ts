@@ -108,6 +108,7 @@ import {
 } from "./principal";
 import type { SurfaceHandlers } from "@kolu/surface/server";
 import { SERVICE_MCP_PATH } from "@odu/service-client/endpoint";
+import { reservedPaths } from "./reserved";
 import { servingOptions } from "./serving";
 import { CI_AGENT, ciRow, CI_KEY } from "@odu/ci/row";
 import { cacheRow } from "@odu/cache/server";
@@ -120,13 +121,13 @@ import {
   DaemonHome,
   Log,
   type HttpRoutes,
+  type ClaimedRoutes,
   type Row,
-  type RowAgent,
   type RowRoutes,
+  type RowAgent,
   NixStore,
   PublicOrigin,
   RootToken,
-  SERVICE_DOOR_PATH,
   Routes,
   Shutdown,
   StateDir,
@@ -317,19 +318,6 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
   // THE ROOT ROW, read off its own record rather than off its POSITION: `key:
   // null` is what makes a row the root, and a roster that grew a row above this
   // one would otherwise hand the `/mcp` door the wrong surface as its core.
-  // `*` means "a walk, and not the bare prefix": `/cache/` with no bucket is
-  // not a cache path, it is a person typing — and an anonymous person typing
-  // meets the sign-in page, which is the whole point.
-  const RESERVED_PATHS: ReadonlyArray<string> = [
-    SERVICE_MCP_PATH,
-    SERVICE_DOOR_PATH,
-    "/auth/*",
-    "/cache/*",
-    "/assets/*",
-    "/sw.js",
-    "/manifest.webmanifest",
-  ];
-
   const coreAgent = (): RowAgent => {
     const root = ROWS.find((row) => row.key === null);
     if (root === undefined) throw new Error("odu: the roster has no root row");
@@ -351,7 +339,7 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
   // in `@odu/cordis` for the same reason the roster is: the tag and the
   // interface a row registers into are shared vocabulary, a mutable list is one
   // daemon's.
-  const layers: RowRoutes[] = [];
+  const layers: ClaimedRoutes[] = [];
   const routes: HttpRoutes = {
     add: (layer) => {
       layers.push(layer);
@@ -491,7 +479,9 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
       // The browser asks once before it draws anything.
       doorRoute(hasDoor),
     );
-    const composed = routes.layers().reduce((all, one) => Layer.merge(all, one), agentRoutes);
+    const composed = routes
+      .layers()
+      .reduce<RowRoutes>((all, one) => Layer.merge(all, one.layer), agentRoutes);
 
     let bound: string;
     try {
@@ -517,13 +507,14 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
               broker: principals,
               mcpPath: SERVICE_MCP_PATH,
               signInPage: () => signInPageHtml(),
-              // THE PATHS THIS DAEMON'S ROUTES CLAIM, in one place beside the
-              // routes they describe: the agent endpoint, the door's own flow,
-              // the cache's protocol walk, the bundle's assets, the worker and
-              // the manifest. Everything else is the shell, and an anonymous
+              // THE PATHS THIS DAEMON'S ROUTES CLAIM, composed rather than
+              // listed: the host's own (the door fact, the bundle's assets,
+              // the worker, the manifest) plus every row's
+              // claim, registered beside its routes. Read at bind, like the
+              // layers. Everything else is the shell, and an anonymous
               // connection meets the sign-in page there — which is what makes
               // `curl /anything` prove the door.
-              reservedPaths: RESERVED_PATHS,
+              reservedPaths: reservedPaths(routes.layers()),
             }),
           }),
         ).pipe(Scope.provide(scope)),

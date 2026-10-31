@@ -149,6 +149,25 @@ export function agentInstructions(
 export type RowRoutes = NonNullable<ServeSurfaceAppOptions["routes"]>;
 
 /**
+ * A ROW'S ROUTES AND THE PATHS THEY CLAIM — one value, so a layer cannot be
+ * registered without saying where it answers.
+ *
+ * The host's door gate must know, BEFORE it runs a request, whether a path is a
+ * route or the shell (the middleware seam cannot rewrite an answer, only skip
+ * it). A list of paths kept in the host was a second spelling of every row's
+ * routes, and it drifted: the cache's push API (`/_odu/v1/…`) was not on it, so
+ * an anonymous push met the sign-in page. The claim lives beside the
+ * `HttpRouter.add` calls it describes instead, and the gate composes them.
+ *
+ * Each entry is exact, or ends in `*` for a WALK — one or more characters after
+ * the prefix (`/cache/*` claims `/cache/b/x`, not `/cache/`).
+ */
+export interface ClaimedRoutes<Layer extends RowRoutes = RowRoutes> {
+  readonly layer: Layer;
+  readonly paths: ReadonlyArray<string>;
+}
+
+/**
  * THE HTTP ROUTER MOUNT — the one listener's app routes, which a row adds its
  * own layer to.
  *
@@ -162,10 +181,13 @@ export type RowRoutes = NonNullable<ServeSurfaceAppOptions["routes"]>;
  * database. The host applies the layers it is holding at each bind.
  */
 export interface HttpRoutes {
-  /** Add a layer. The returned function removes THAT layer and no other. */
-  add(routes: RowRoutes): () => void;
-  /** Every layer registered so far, in registration order. Read once, at bind. */
-  layers(): ReadonlyArray<RowRoutes>;
+  /** Add a layer and its claim. The returned function removes THAT one and no
+   *  other. */
+  add(routes: ClaimedRoutes): () => void;
+  /** Every layer registered so far, with its claim, in registration order. Read
+   *  once, at bind — by the router for the layers and by the door gate for the
+   *  paths. */
+  layers(): ReadonlyArray<ClaimedRoutes>;
 }
 
 /** ONE PER TENURE, made by whoever owns the tenure — `@odu/host`'s `web.ts`, and
