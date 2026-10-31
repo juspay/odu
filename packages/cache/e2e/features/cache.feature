@@ -55,3 +55,13 @@ Feature: The cache is a row of the board
     When I open a bucket the cache does not have
     Then the page says that bucket is not there
     And there should be no page errors
+
+  # THE PUSH API BEHIND A DOOR. Every scenario above runs against a loopback
+  # daemon with no door, which is how the gate answering `/_odu/v1/…` with the
+  # sign-in page reached a live pod unseen. A bucket token is the push's whole
+  # credential: the CLI carries no session cookie, and must not need one.
+  @signed-in:admin
+  Scenario: A bucket token pushes through the door with no session
+    When the CLI creates a bucket as this person
+    And one path is pushed to it with a bucket token and no session
+    Then the bucket serves that path's narinfo to the token

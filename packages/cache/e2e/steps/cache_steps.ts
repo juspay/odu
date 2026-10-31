@@ -79,6 +79,64 @@ function arrangePush(world: OduWorld, howMany = 1): void {
   );
 }
 
+/** One leaf path added to the store — no references, so its narinfo imports
+ *  at once rather than waiting at 202. */
+function addLeafPath(world: OduWorld): string {
+  const name = unique("door-path");
+  const file = join(mkdtempSync(join(tmpdir(), "odu-wa-cache-")), name);
+  writeFileSync(file, `odu web acceptance: ${name}\n`);
+  const added = spawnSync("nix", ["store", "add-file", file], {
+    env: world.service.env,
+    encoding: "utf-8",
+  });
+  assert.strictEqual(added.status, 0, `nix store add-file failed: ${added.stderr}`);
+  return added.stdout.trim();
+}
+
+When(
+  "one path is pushed to it with a bucket token and no session",
+  function (this: OduWorld) {
+    const bucket = this.cacheBucket;
+    assert.ok(bucket !== undefined, "no bucket was created for this scenario");
+    assert.ok(this.mintedToken !== undefined, "no personal token was minted");
+    // The person mints the bucket's write token through `/mcp` (their own
+    // credential); the PUSH then speaks only the cache's HTTP protocol, with
+    // that bucket token and no cookie — the shape a CI job on a door has.
+    const minted = oduCli(
+      this.service,
+      ["cache", "token", "mint", bucket, "--write", "-o", "json"],
+      { ODU_TOKEN: this.mintedToken },
+    );
+    assert.strictEqual(minted.status, 0, `odu cache token mint failed: ${minted.stderr}`);
+    const token = (JSON.parse(minted.stdout) as { token: string }).token;
+    const path = addLeafPath(this);
+    const pushed = oduCli(this.service, ["cache", "push", bucket, path, "-o", "json"], {
+      ODU_CACHE_TOKEN: token,
+    });
+    assert.strictEqual(
+      pushed.status,
+      0,
+      `odu cache push through the door failed: ${pushed.stderr}${pushed.stdout}`,
+    );
+    this.cachePath = path;
+    this.cacheToken = token;
+  },
+);
+
+Then("the bucket serves that path's narinfo to the token", async function (this: OduWorld) {
+  const path = this.cachePath;
+  assert.ok(path !== undefined && this.cacheBucket !== undefined, "nothing was pushed");
+  const hash = (path.split("/").pop() ?? "").slice(0, 32);
+  const answer = await fetch(
+    new URL(`/cache/${this.cacheBucket}/${hash}.narinfo`, this.service.origin),
+    { headers: { authorization: `Bearer ${this.cacheToken}` } },
+  );
+  const body = await answer.text();
+  assert.strictEqual(answer.status, 200, `the narinfo answered ${answer.status}: ${body}`);
+  assert.match(answer.headers.get("content-type") ?? "", /narinfo/);
+  assert.ok(body.includes(`StorePath: ${path}`), `the narinfo names another path:\n${body}`);
+});
+
 Given("a bucket with one path pushed from the CLI", function (this: OduWorld) {
   arrangePush(this);
 });
