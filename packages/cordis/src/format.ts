@@ -11,7 +11,7 @@
  * They are here rather than in a face because they are not one row's idea of
  * anything: a run's age and a bucket's age are the same question, and every row
  * in the tree already depends on this package. It names no row, so the fence
- * stays green, and it is a leaf — two pure functions, no state, no imports.
+ * stays green, and it is a leaf — pure functions, no state, no imports.
  */
 
 /** How long ago, coarsely. Coarse on purpose: a board is scanned rather than
@@ -40,4 +40,17 @@ export function bytes(count: number): string {
     unit += 1;
   }
   return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit] as string}`;
+}
+
+/** A refusal as the sentence a person reads. Every row's refusals are already
+ *  written for a person; this only appends the recovery when the error carries
+ *  one (`suggestion`, the runs' refusals' argv). One spelling, because three
+ *  faces had three — and one of them dropped the recovery. */
+export function refusalText(err: unknown): string {
+  const value = err as { message?: unknown; suggestion?: unknown };
+  const message = typeof value?.message === "string" ? value.message : String(err);
+  const suggestion = Array.isArray(value?.suggestion)
+    ? ` Try: ${(value.suggestion as unknown[]).map(String).join(" ")}`
+    : "";
+  return `${message}${suggestion}`;
 }

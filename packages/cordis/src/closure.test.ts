@@ -25,8 +25,11 @@ const MANIFEST = JSON.parse(
 
 const DECLARED = Object.keys(MANIFEST.dependencies ?? {});
 
-/** Pinned: one install, and no `@odu/*` at all. */
-const EXPECTED_DEPENDENCIES = ["effect"];
+/** Pinned: two installs, and no `@odu/*` at all. `solid-js` is `./control`'s
+ *  — the one control state machine every row's face shares (a factory: each
+ *  caller gets its own signals, so nothing is shared but the code). A server
+ *  that never imports `./control` never loads it. */
+const EXPECTED_DEPENDENCIES = ["effect", "solid-js"];
 
 /** The `@kolu/*` sources hydrated from a Nix pin rather than installed. */
 const HYDRATED = new Set<string>([

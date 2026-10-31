@@ -5,12 +5,13 @@
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "//": "THE SERVICE-TAG CONTRACT — what a row may `needs` and what the host `provide`s, in one module that belongs to NEITHER. `@odu/host` names every row and belongs to none, and a row may not import it; a row's own package cannot hold the tags the other rows need. So the vocabulary lives here, and both sides name it.",
-  "//dependencies": "One install: the plugin runtime. Everything else is a TYPE from the surface framework. No `@odu/*` at all — this module is what makes host and rows able to share a vocabulary without naming each other, so naming one would undo it in a line. `src/closure.test.ts` holds that.",
+  "//dependencies": "Two installs: the plugin runtime, and `solid-js` for `./control` alone — the control state machine every row's face shares, a factory whose state is per caller. Everything else is a TYPE from the surface framework. No `@odu/*` at all — this module is what makes host and rows able to share a vocabulary without naming each other, so naming one would undo it in a line. `src/closure.test.ts` holds that.",
   "sideEffects": false,
   "exports": {
     "./*": "./src/*.ts"
   },
   "dependencies": {
-    "effect": "4.0.0"
+    "effect": "4.0.0",
+    "solid-js": "^1.9.15"
   }
 }
