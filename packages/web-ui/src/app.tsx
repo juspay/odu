@@ -427,6 +427,7 @@ export function App(props: {
             client={props.cache}
             bucket={openBucket()}
             canAdminister={holdsFloor("admin")}
+            local={principal()?.kind === "local"}
             now={now()}
             call={(effect) => Effect.runPromise(effect)}
             onOpen={(bucket) => go({ at: "cache", bucket })}

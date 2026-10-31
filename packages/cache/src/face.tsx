@@ -22,12 +22,18 @@
  * question "did my build actually land" is asked by scrolling, and asked again
  * by typing a derivation's name.
  *
- * ## The one thing it does not do
+ * ## Reading needs no secret; administering is the row's floor
  *
- * It never reads a bucket through a token-gated verb. `bucket.paths` and
+ * The READS never go through a gated verb. `bucket.paths` and
  * `bucket.describe` take none, which is the cache's own decision — a bucket's
  * URL, key and path list are what the substituter publishes to anyone who can
- * read it — so a view can ask them without holding an operator's secret.
+ * read it — so a member's view asks them without holding anything.
+ *
+ * Every OTHER verb of the row has a control here too, because the board does
+ * everything `odu cache` does: create (with the upstream switch), and per
+ * bucket mint / list / revoke a token, pin a closure, run GC, read stats. They
+ * are DRAWN for the row's floor (the shell's `canAdminister`) and REFUSED by
+ * the row on its own — never one check standing in for the other.
  */
 
 import { ago, bytes } from "@odu/cordis/format";
@@ -47,6 +53,8 @@ import {
 import {
   type CacheBucket,
   type CachePath,
+  type CacheStats,
+  type CacheToken,
   oduCacheSurface,
   PATH_PAGE_SIZE,
   useBlock,
@@ -69,10 +77,16 @@ export interface CacheFaceProps {
   /** One clock for the page, read once a second by the shell. */
   now: number;
   /** MAY THIS PERSON ADMINISTER BUCKETS? The ROW's floor is `admin`, and the
-   *  shell reads it off the connection's principal — the face draws what the
-   *  role can use and hides the rest. Creating a bucket is the one control the
-   *  page has, so this is the one place it shows. */
+   *  shell reads it off the connection's principal — the face DRAWS what the
+   *  role can use and hides the rest. The row REFUSES on its own (`not_permitted`,
+   *  `no_root_token`): two independent checks, because a hidden button is not a
+   *  permission and a drawn one is not a grant. */
   canAdminister: boolean;
+  /** IS THIS PERSON THE DAEMON'S LOCAL OWNER — a daemon with no door? Then the
+   *  row's rule for administration is the operator's ROOT TOKEN rather than a
+   *  role, so the page asks for it once (the same secret `odu cache` reads from
+   *  `$ODU_ROOT_TOKEN`), and an empty list points at the CLI as it always has. */
+  local: boolean;
   /** THE UI EDGE, supplied by the shell rather than taken here.
    *
    *  A procedure is an `Effect` — a description — and a click is the moment one
@@ -83,61 +97,105 @@ export interface CacheFaceProps {
   call: <A>(effect: Effect.Effect<A, unknown>) => Promise<A>;
 }
 
+/** What every administrative control needs beside its own fields: the client,
+ *  the UI edge, and the credential the row compares for a local owner. */
+interface AdminProps {
+  client: CacheClient;
+  call: <A>(effect: Effect.Effect<A, unknown>) => Promise<A>;
+  /** `""` for a signed-in person — the row ignores it, their role is the
+   *  authority — and what the local owner typed otherwise. */
+  rootToken: () => string;
+}
+
 export function CacheFace(props: CacheFaceProps): JSX.Element {
+  // THE PAGE'S ONE COPY OF THE ROOT TOKEN, for as long as the cache is on
+  // screen and no longer: a signal owned by this face, never written to storage,
+  // and gone when the shell switches rows.
+  const [rootToken, setRootToken] = createSignal("");
+  const admin: AdminProps = {
+    get client() {
+      return props.client;
+    },
+    get call() {
+      return props.call;
+    },
+    rootToken: () => (props.local ? rootToken() : ""),
+  };
   return (
-    <Show
-      when={props.bucket}
-      fallback={
-        <BucketList
-          client={props.client}
-          now={props.now}
-          onOpen={props.onOpen}
-          canAdminister={props.canAdminister}
-          call={props.call}
-        />
-      }
-    >
-      {(name) => (
-        <BucketPage
-          client={props.client}
-          call={props.call}
-          name={name()}
-          now={props.now}
-          onOpen={props.onOpen}
-        />
-      )}
-    </Show>
+    <>
+      <Show when={props.local && props.canAdminister}>
+        <label class="search root-token">
+          <span class="sr-only">root token</span>
+          <input
+            type="password"
+            autocomplete="off"
+            placeholder="root token ($ODU_ROOT_TOKEN) — what this daemon's administration checks"
+            value={rootToken()}
+            onInput={(event) => setRootToken(event.currentTarget.value)}
+          />
+        </label>
+      </Show>
+      <Show
+        when={props.bucket}
+        fallback={
+          <BucketList
+            {...admin}
+            now={props.now}
+            onOpen={props.onOpen}
+            canAdminister={props.canAdminister}
+            local={props.local}
+          />
+        }
+      >
+        {(name) => (
+          <BucketPage
+            {...admin}
+            name={name()}
+            now={props.now}
+            onOpen={props.onOpen}
+            canAdminister={props.canAdminister}
+          />
+        )}
+      </Show>
+    </>
   );
 }
 
+/** THE SENTENCE AN EMPTY NAME GETS, in the row's own voice. The button is not
+ *  greyed out for it: a dead control does not say why, and this does. */
+export const EMPTY_NAME_FAULT =
+  "odu: a bucket needs a name — type one in the box, e.g. my-project";
+
+/** WHY THE UPSTREAM SWITCH EXISTS, in the docs' one line: a store that did not
+ *  build the paths never holds nixpkgs, so a bucket that skips upstream paths
+ *  makes every push wait at 202 for referrers that will never arrive. */
+export const UPSTREAM_HINT =
+  "Skip paths cache.nixos.org already signed. Turn off for a server whose " +
+  "store is not the machine that built the paths, or every push waits at 202 " +
+  "(the CLI's --no-upstream).";
+
 /**
- * ROWS THAT KEEP THEIR IDENTITY ACROSS A PUBLISH.
+ * CREATE A BUCKET.
  *
- * `<For>` keys by the row VALUE, so a publish that re-creates every row object
- * disposes and re-inserts every row — and the button a person was tabbing to,
- * or had focused, is gone. So a row whose facts did not change is handed back as
- * the SAME object: the cache publishes a bundle's counters every second, and a
- * keyboard user should not pay for it.
+ * A name, and the one creation fact a deployment needs — the upstream switch,
+ * on by default — beside the two it is created with (public, ninety days of
+ * retention). The button is ENABLED whenever this control is drawn: an empty
+ * name is refused on click with a `fault` line like every refusal the row
+ * sends, because a person reads a reason and cannot read a grey button.
  */
-/**
- * CREATE A BUCKET — the page's only administrative control.
- *
- * A minimal form: a name, and the two facts a bucket is created with (public by
- * default, ninety days of retention). The row decides whether this call is
- * allowed, and the SHELL decides whether the control is drawn at all — two
- * independent checks, because a hidden button is not a permission.
- */
-function CreateBucket(props: {
-  client: CacheClient;
-  call: <A>(effect: Effect.Effect<A, unknown>) => Promise<A>;
-  onCreated: (bucket: string | null) => void;
-}): JSX.Element {
+function CreateBucket(
+  props: AdminProps & { onCreated: (bucket: string | null) => void },
+): JSX.Element {
   const [name, setName] = createSignal("");
+  const [upstream, setUpstream] = createSignal(true);
   const [busy, setBusy] = createSignal(false);
   const [failure, setFailure] = createSignal<string | null>(null);
   const create = (): void => {
     const bucket = name().trim();
-    if (bucket === "") return;
+    if (bucket === "") {
+      setFailure(EMPTY_NAME_FAULT);
+      return;
+    }
     setBusy(true);
     setFailure(null);
     void props
@@ -145,10 +203,13 @@ function CreateBucket(props: {
         props.client.procedures.bucket.create({
           // The row ignores this for a signed-in admin (its role authorises the
           // call); only a local owner's token is compared.
-          rootToken: "",
+          rootToken: props.rootToken(),
           name: bucket,
           public: true,
           retentionDays: 90,
+          // ON is the row's own default (nixpkgs' key), so it is left ABSENT;
+          // OFF is the empty list, exactly what `--no-upstream` sends.
+          ...(upstream() ? {} : { upstreamKeys: [] }),
         }),
       )
       .then(
@@ -174,11 +235,16 @@ function CreateBucket(props: {
           onInput={(event) => setName(event.currentTarget.value)}
         />
       </label>
-      <button
-        type="button"
-        disabled={busy() || name().trim() === ""}
-        onClick={create}
-      >
+      <label class="toggle">
+        <input
+          type="checkbox"
+          checked={upstream()}
+          onChange={(event) => setUpstream(event.currentTarget.checked)}
+        />
+        Skip upstream paths
+      </label>
+      <p class="hint">{UPSTREAM_HINT}</p>
+      <button type="button" disabled={busy()} onClick={create}>
         {busy() ? "creating…" : "Create bucket"}
       </button>
       <Show when={failure()}>{(message) => <p class="fault">{message()}</p>}</Show>
@@ -186,6 +252,15 @@ function CreateBucket(props: {
   );
 }
 
+/**
+ * ROWS THAT KEEP THEIR IDENTITY ACROSS A PUBLISH.
+ *
+ * `<For>` keys by the row VALUE, so a publish that re-creates every row object
+ * disposes and re-inserts every row — and the button a person was tabbing to,
+ * or had focused, is gone. So a row whose facts did not change is handed back as
+ * the SAME object: the cache publishes a bundle's counters every second, and a
+ * keyboard user should not pay for it.
+ */
 function keepIdentity<T extends { readonly name: string }>(): (row: T) => T {
   const held = new Map<string, { readonly row: T; readonly encoded: string }>();
   return (row) => {
@@ -197,13 +272,29 @@ function keepIdentity<T extends { readonly name: string }>(): (row: T) => T {
   };
 }
 
-function BucketList(props: {
-  client: CacheClient;
-  now: number;
-  onOpen: (bucket: string | null) => void;
-  canAdminister: boolean;
-  call: <A>(effect: Effect.Effect<A, unknown>) => Promise<A>;
-}): JSX.Element {
+/**
+ * WHAT AN EMPTY CACHE SAYS, to whoever is looking — the one sentence that
+ * depends on the person rather than on the data. Exported and pure so the three
+ * answers are pinned by a unit test rather than by reading JSX.
+ */
+export function emptyBucketsText(viewer: { canAdminister: boolean; local: boolean }): string {
+  // No door: the person at this machine owns it, and the CLI is how they have
+  // always done it — the form above works too, with the root token.
+  if (viewer.local) {
+    return "No buckets yet — odu cache create <bucket> makes one, or use the form above.";
+  }
+  if (viewer.canAdminister) return "No buckets yet — name one in the form above to create it.";
+  return "There are no buckets yet.";
+}
+
+function BucketList(
+  props: AdminProps & {
+    now: number;
+    onOpen: (bucket: string | null) => void;
+    canAdminister: boolean;
+    local: boolean;
+  },
+): JSX.Element {
   const held = props.client.collections.buckets.use();
   const stable = keepIdentity<CacheBucket>();
   const rows = createMemo<CacheBucket[]>(() => {
@@ -218,17 +309,21 @@ function BucketList(props: {
   return (
     <section class="cache" aria-label="buckets">
       <h2>Buckets</h2>
-      {/* THE ONE CONTROL THIS PAGE HAS, and it is the ROW's floor made visible:
-          creating a bucket needs an `admin`, so a member is not shown a form
-          whose call would be refused. */}
+      {/* The ROW's floor made visible: creating a bucket needs an `admin`, so a
+          member is not shown a form whose call would be refused. */}
       <Show when={props.canAdminister}>
-        <CreateBucket client={props.client} call={props.call} onCreated={props.onOpen} />
+        <CreateBucket
+          client={props.client}
+          call={props.call}
+          rootToken={props.rootToken}
+          onCreated={props.onOpen}
+        />
       </Show>
       <Show
         when={rows().length > 0}
         fallback={
           <p class="hint">
-            No buckets yet — <code>odu cache create &lt;bucket&gt;</code> makes one.
+            {emptyBucketsText({ canAdminister: props.canAdminister, local: props.local })}
           </p>
         }
       >
@@ -292,13 +387,14 @@ function refusalText(err: unknown): string {
  *  speed is one query rather than six. */
 const FILTER_DEBOUNCE_MS = 200;
 
-function BucketPage(props: {
-  client: CacheClient;
-  call: <A>(effect: Effect.Effect<A, unknown>) => Promise<A>;
-  name: string;
-  now: number;
-  onOpen: (bucket: string | null) => void;
-}): JSX.Element {
+function BucketPage(
+  props: AdminProps & {
+    name: string;
+    now: number;
+    onOpen: (bucket: string | null) => void;
+    canAdminister: boolean;
+  },
+): JSX.Element {
   /** What the person typed, and what the query is allowed to see. Two signals:
    *  the box must track every keystroke, and the request must not. */
   const [typed, setTyped] = createSignal("");
@@ -489,6 +585,22 @@ function BucketPage(props: {
         )}
       </Show>
 
+      {/* THE BUCKET'S ADMINISTRATION, drawn for the row's floor and KEYED on
+          the name: a minted token, a pin's fields and a GC report belong to ONE
+          bucket, so opening another one builds these afresh rather than
+          carrying a secret across. */}
+      <Show when={props.canAdminister && bucket() !== undefined ? props.name : null} keyed>
+        {(name) => (
+          <BucketAdmin
+            client={props.client}
+            call={props.call}
+            rootToken={props.rootToken}
+            name={name}
+            now={props.now}
+          />
+        )}
+      </Show>
+
       <div class="cache-paths">
         <label class="search">
           <span class="sr-only">filter paths</span>
@@ -550,6 +662,369 @@ function BucketPage(props: {
           )}
         </Show>
       </div>
+    </section>
+  );
+}
+
+// ── a bucket's administration ───────────────────────────────────────────────
+
+/**
+ * ONE CONTROL'S STORY: busy, then a receipt or a refusal — and nothing after the
+ * control is gone. Owned by the component that made it: `onCleanup` retires it,
+ * so an answer that lands after the bucket page closed writes nowhere.
+ */
+function createAction(call: AdminProps["call"]): {
+  readonly busy: () => boolean;
+  readonly fault: () => string | null;
+  readonly done: () => string | null;
+  readonly refuse: (message: string) => void;
+  readonly run: <A>(effect: Effect.Effect<A, unknown>, ok: (value: A) => string) => void;
+} {
+  const [busy, setBusy] = createSignal(false);
+  const [fault, setFault] = createSignal<string | null>(null);
+  const [done, setDone] = createSignal<string | null>(null);
+  let live = true;
+  onCleanup(() => {
+    live = false;
+  });
+  return {
+    busy,
+    fault,
+    done,
+    refuse: (message) => {
+      setDone(null);
+      setFault(message);
+    },
+    run: (effect, ok) => {
+      setBusy(true);
+      setFault(null);
+      setDone(null);
+      void call(effect).then(
+        (value) => {
+          if (!live) return;
+          setBusy(false);
+          setDone(ok(value));
+        },
+        (err: unknown) => {
+          if (!live) return;
+          setBusy(false);
+          setFault(refusalText(err));
+        },
+      );
+    },
+  };
+}
+
+/** What a control answered, drawn the one way every answer on this page is. */
+function Answer(props: { action: ReturnType<typeof createAction> }): JSX.Element {
+  return (
+    <>
+      <Show when={props.action.fault()}>{(message) => <p class="fault">{message()}</p>}</Show>
+      <Show when={props.action.done()}>{(message) => <p class="hint done">{message()}</p>}</Show>
+    </>
+  );
+}
+
+/** A read that answers a value OR the sentence explaining why there is none —
+ *  the same rule {@link FirstPage} keeps, for the same reason. */
+type Reading<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly message: string };
+
+/** How a token's life reads, in one phrase. */
+function tokenLife(token: CacheToken, now: number): string {
+  if (token.revoked) return "revoked";
+  const used = token.lastUsed === null ? "never used" : `last used ${ago(token.lastUsed, now)}`;
+  const expires =
+    token.expires === null ? "no expiry" : `expires ${new Date(token.expires).toISOString().slice(0, 10)}`;
+  return `${used} · ${expires} · created ${ago(token.created, now)}`;
+}
+
+/**
+ * EVERYTHING AN ADMIN DOES TO ONE BUCKET without a terminal — the verbs
+ * `odu cache token|pin|gc|stats` call, as four sections.
+ *
+ * Drawn only for the row's floor (the shell's decision) and refused by the row
+ * on its own; each section reads or writes through the shell's edge and owns
+ * its answers, so a refusal in one is not painted over another.
+ */
+function BucketAdmin(props: AdminProps & { name: string; now: number }): JSX.Element {
+  return (
+    <div class="bucket-admin">
+      <BucketTokens {...props} />
+      <BucketPin {...props} />
+      <BucketGc {...props} />
+      <BucketStats {...props} />
+    </div>
+  );
+}
+
+/** `token.mint`, `token.list`, `token.revoke` for this bucket. */
+function BucketTokens(props: AdminProps & { name: string; now: number }): JSX.Element {
+  const [scope, setScope] = createSignal<"write" | "read">("write");
+  /** The token just minted — the ONE time its plaintext can be read. */
+  const [minted, setMinted] = createSignal<{ id: string; token: string } | null>(null);
+  const action = createAction(props.call);
+
+  const [tokens, { refetch }] = createResource(
+    () => props.name,
+    async (bucket): Promise<Reading<readonly CacheToken[]>> => {
+      try {
+        const answer = await props.call(
+          props.client.procedures.token.list({ rootToken: props.rootToken(), bucket }),
+        );
+        return { ok: true, value: answer.tokens };
+      } catch (err) {
+        return { ok: false, message: refusalText(err) };
+      }
+    },
+  );
+  const listed = createMemo<readonly CacheToken[]>(() => {
+    const answer = tokens();
+    return answer !== undefined && answer.ok ? answer.value : [];
+  });
+  const listFault = createMemo<string | null>(() => {
+    const answer = tokens();
+    return answer === undefined || answer.ok ? null : answer.message;
+  });
+
+  const mint = (): void => {
+    const chosen = scope();
+    action.run(
+      props.client.procedures.token.mint({
+        rootToken: props.rootToken(),
+        bucket: props.name,
+        scope: chosen,
+      }),
+      (answer) => {
+        setMinted({ id: answer.facts.id, token: answer.token });
+        void refetch();
+        return `Minted a ${chosen} token for ${props.name}.`;
+      },
+    );
+  };
+  const revoke = (id: string): void => {
+    action.run(
+      props.client.procedures.token.revoke({ rootToken: props.rootToken(), id }),
+      () => {
+        if (minted()?.id === id) setMinted(null);
+        void refetch();
+        return `Revoked ${id}.`;
+      },
+    );
+  };
+
+  return (
+    <section class="admin-section" aria-label="tokens">
+      <h3>Tokens</h3>
+      <div class="cache-create">
+        <label class="field-inline">
+          <span>scope</span>
+          <select
+            aria-label="token scope"
+            value={scope()}
+            onChange={(event) => setScope(event.currentTarget.value === "read" ? "read" : "write")}
+          >
+            <option value="write">write — push</option>
+            <option value="read">read — substitute</option>
+          </select>
+        </label>
+        <button type="button" disabled={action.busy()} onClick={mint}>
+          {action.busy() ? "working…" : "Mint token"}
+        </button>
+      </div>
+      <Answer action={action} />
+      <Show when={minted()}>
+        {(held) => (
+          <div class="minted">
+            <p>
+              <strong>Copy this token now.</strong> It is shown once; only a hash is kept.
+            </p>
+            <pre class="use-block minted-token">{held().token}</pre>
+          </div>
+        )}
+      </Show>
+      <Show when={listFault()}>{(message) => <p class="fault">{message()}</p>}</Show>
+      <Show
+        when={listed().length > 0}
+        fallback={
+          <Show when={listFault() === null}>
+            <p class="hint">{tokens.loading ? "reading…" : "No tokens for this bucket yet."}</p>
+          </Show>
+        }
+      >
+        <ul class="tokens">
+          <For each={listed()}>
+            {(token) => (
+              <li>
+                <span>
+                  <code>{token.id}</code> <span class="pill hue-grey">{token.scope}</span>
+                  <Show when={token.bucketGlob !== props.name}>
+                    <span class="pill hue-grey">{token.bucketGlob}</span>
+                  </Show>
+                  <span class="hint"> {tokenLife(token, props.now)}</span>
+                </span>
+                <Show when={!token.revoked}>
+                  <button
+                    type="button"
+                    class="text-action"
+                    aria-label={`revoke ${token.id}`}
+                    disabled={action.busy()}
+                    onClick={() => revoke(token.id)}
+                  >
+                    revoke
+                  </button>
+                </Show>
+              </li>
+            )}
+          </For>
+        </ul>
+      </Show>
+    </section>
+  );
+}
+
+/** Split a box of paths into paths: whitespace, any amount, any kind. */
+function pathsOf(raw: string): string[] {
+  return raw.split(/\s+/).filter((one) => one !== "");
+}
+
+/** `pin.create` — keep a closure out of GC, by name. */
+function BucketPin(props: AdminProps & { name: string }): JSX.Element {
+  const [pin, setPin] = createSignal("");
+  const [paths, setPaths] = createSignal("");
+  const action = createAction(props.call);
+  const create = (): void => {
+    const name = pin().trim();
+    const roots = pathsOf(paths());
+    // Refused ON CLICK, in the row's voice — the same rule as the bucket form.
+    if (name === "") return action.refuse("odu: a pin needs a name — e.g. release-1.2");
+    if (roots.length === 0) {
+      return action.refuse("odu: a pin needs at least one store path to keep");
+    }
+    action.run(
+      props.client.procedures.pin.create({
+        rootToken: props.rootToken(),
+        bucket: props.name,
+        name,
+        paths: roots,
+      }),
+      (answer) => {
+        setPin("");
+        setPaths("");
+        return `Pinned ${answer.name}: ${answer.rootPaths.length} path${answer.rootPaths.length === 1 ? "" : "s"} in its closure are kept from GC.`;
+      },
+    );
+  };
+  return (
+    <section class="admin-section" aria-label="pin">
+      <h3>Pin a closure</h3>
+      <label class="search">
+        <span class="sr-only">pin name</span>
+        <input
+          type="text"
+          placeholder="pin name, e.g. release-1.2"
+          value={pin()}
+          onInput={(event) => setPin(event.currentTarget.value)}
+        />
+      </label>
+      <label class="search">
+        <span class="sr-only">store paths to pin</span>
+        <textarea
+          rows={3}
+          placeholder="/nix/store/… — one or more, space or newline separated"
+          value={paths()}
+          onInput={(event) => setPaths(event.currentTarget.value)}
+        />
+      </label>
+      <button type="button" disabled={action.busy()} onClick={create}>
+        {action.busy() ? "pinning…" : "Pin closure"}
+      </button>
+      <Answer action={action} />
+    </section>
+  );
+}
+
+/** `gc.run`, for this bucket. */
+function BucketGc(props: AdminProps & { name: string }): JSX.Element {
+  const action = createAction(props.call);
+  const collect = (): void => {
+    action.run(
+      props.client.procedures.gc.run({ rootToken: props.rootToken(), bucket: props.name }),
+      (report) =>
+        `Collected: evicted ${report.evicted} path${report.evicted === 1 ? "" : "s"}` +
+        `${report.kept > 0 ? ` (${report.kept} kept by another root)` : ""}, freed ${bytes(report.bytes)}.`,
+    );
+  };
+  return (
+    <section class="admin-section" aria-label="garbage collection">
+      <h3>Garbage collection</h3>
+      <p class="hint">
+        Evicts what retention expired AND nothing retained references AND no pin holds.
+      </p>
+      <button type="button" disabled={action.busy()} onClick={collect}>
+        {action.busy() ? "collecting…" : "Run GC"}
+      </button>
+      <Answer action={action} />
+    </section>
+  );
+}
+
+/** `stats.read` — this bucket beside the whole cache. */
+function BucketStats(props: AdminProps & { name: string; now: number }): JSX.Element {
+  const [stats, { refetch }] = createResource(
+    () => props.name,
+    async (): Promise<Reading<CacheStats>> => {
+      try {
+        return {
+          ok: true,
+          value: await props.call(
+            props.client.procedures.stats.read({ rootToken: props.rootToken() }),
+          ),
+        };
+      } catch (err) {
+        return { ok: false, message: refusalText(err) };
+      }
+    },
+  );
+  const reading = createMemo<CacheStats | null>(() => {
+    const answer = stats();
+    return answer !== undefined && answer.ok ? answer.value : null;
+  });
+  const fault = createMemo<string | null>(() => {
+    const answer = stats();
+    return answer === undefined || answer.ok ? null : answer.message;
+  });
+  const mine = createMemo(() => reading()?.buckets.find((row) => row.name === props.name));
+  return (
+    <section class="admin-section" aria-label="stats">
+      <h3>Stats</h3>
+      <Show when={fault()}>{(message) => <p class="fault">{message()}</p>}</Show>
+      <Show when={reading()} fallback={<Show when={fault() === null}><p class="hint">reading…</p></Show>}>
+        {(all) => (
+          <dl class="stats">
+            <dt>this bucket</dt>
+            <dd class="bucket-facts">
+              <span>{mine()?.objects ?? 0} paths</span>
+              <span>{bytes(mine()?.bytes ?? 0)}</span>
+              <span>{mine()?.hits ?? 0} reads</span>
+            </dd>
+            <dt>whole cache</dt>
+            <dd class="bucket-facts">
+              <span>{all().buckets.length} buckets</span>
+              <span>{all().objects} paths</span>
+              <span>{bytes(all().bytes)}</span>
+              <span>{all().hits} reads</span>
+              <span>
+                {all().lastAccessed === null
+                  ? "never read"
+                  : `last read ${ago(all().lastAccessed ?? 0, props.now)}`}
+              </span>
+            </dd>
+          </dl>
+        )}
+      </Show>
+      <button type="button" class="text-action" disabled={stats.loading} onClick={() => refetch()}>
+        refresh stats
+      </button>
     </section>
   );
 }

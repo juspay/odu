@@ -1435,6 +1435,49 @@
      line, which is the one place this page allows a sideways scroll. */
   .paths .path { overflow-x: auto; white-space: nowrap; font-size: 0.8rem; }
 
+  /* A ROW'S ADMINISTRATION — the controls a role draws below what everyone
+     reads. One grammar for every section (a bucket's tokens, pin, GC and stats;
+     the people page; the runs' machines and maintenance): a small heading, the
+     fields, one button, and the answer under it. */
+  .cache-create,
+  .admin-section {
+    display: grid;
+    gap: 0.4rem;
+    margin: 0.5rem 0 1rem;
+    max-width: 40rem;
+  }
+  .admin-section h3 { margin: 0.5rem 0 0; font-size: 0.95rem; }
+  .bucket-admin { border-top: 1px solid var(--border); margin-top: 0.75rem; }
+  .cache-create button,
+  .admin-section > button { justify-self: start; }
+  .admin-section textarea,
+  .admin-section select,
+  .cache-create select {
+    padding: 0.4rem 0.5rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: inherit;
+    font: 0.85rem var(--mono);
+  }
+  .admin-section textarea { width: 100%; }
+  .field-inline { display: flex; align-items: center; gap: 0.5rem; font: 0.85rem var(--mono); }
+  .tokens,
+  .people { list-style: none; margin: 0; padding: 0; }
+  .tokens li,
+  .people li {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.4rem 0;
+    border-top: 1px solid var(--border);
+  }
+  .stats { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 0.75rem; margin: 0; }
+  .stats dt { font: 600 0.8rem var(--mono); }
+  .stats dd { margin: 0; }
+
   .crumbs { margin: 0.25rem 0 0; }
   .crumbs .link {
     padding: 0;
