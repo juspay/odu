@@ -297,6 +297,17 @@ function runPrune(
   const dryRun = input.dryRun ?? false;
   const retentionDays = input.retentionDays ?? DEFAULT_RETENTION_DAYS;
 
+  // THE VERB'S RULE, not the schema's: a schema check dies before any handler
+  // can say why, and the board sends what the person typed (`CheckoutPath`).
+  if (!Number.isSafeInteger(retentionDays) || retentionDays <= 0) {
+    return {
+      refusal: refuse(
+        "bad_input",
+        `odu: retention must be a positive whole number of days (got ${retentionDays})`,
+      ),
+    };
+  }
+
   if (!isRequestId(input.requestId)) {
     return {
       refusal: refuse(

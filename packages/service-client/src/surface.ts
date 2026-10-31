@@ -133,7 +133,12 @@ export { STATUS_META, type StatusHue } from "@odu/run-client/surface";
  * `@odu/auth/surface` bumps THIS number too. A row must not keep a version of
  * its own: nothing would enforce it.
  *
- * 2.2: `auth.grant.list` — the people page's verb (PR 2.5). Additive.
+ * 2.2: `auth.grant.list` — the people page's verb — and the `venues` cell, the
+ * last probe as a fact (PR 2.5); and six kinds of input
+ * LOOSENED so the verb, not the schema, refuses an empty field (a checkout
+ * path, prune's retention, a bucket's and a pin's name, a grant's login, a
+ * personal token's name).
+ * Additive: every input 2.1 accepted, 2.2 accepts.
  */
 export const SERVICE_CONTRACT_VERSION = "2.2";
 
@@ -381,6 +386,26 @@ export function admitService(
       `this build reads ${SERVICE_CONTRACT_VERSION} — upgrade the daemon ` +
       "(`odu web --upgrade`) or this build.",
   };
+}
+
+/** THE ONE COST OF THE ADDITIVE RULE, said where it can be acted on: a daemon
+ *  ADOPTED on the same major whose minor is behind this build lacks the verbs
+ *  added since, and calling one answers "unknown" from inside the RPC layer. A
+ *  face that adopted such a daemon prints this once, so that answer arrives
+ *  already explained. `null` when the daemon is level or ahead. */
+export function skewNote(cell: ServiceCell, where: string): string | null {
+  const minor = (version: string): number | null => {
+    const match = /^(\d+)\.(\d+)/.exec(version);
+    return match === null ? null : Number(match[2]);
+  };
+  const theirs = minor(cell.identity.protocolVersion);
+  const ours = minor(SERVICE_CONTRACT_VERSION);
+  if (theirs === null || ours === null || theirs >= ours) return null;
+  return (
+    `odu: the service at ${where} speaks contract ${cell.identity.protocolVersion}, ` +
+    `this build ${SERVICE_CONTRACT_VERSION} — a verb added since answers as unknown; ` +
+    "`odu web --upgrade` replaces the daemon."
+  );
 }
 
 /**
@@ -814,6 +839,19 @@ export function logHasMore(page: Pick<LogPage, "open" | "eof">): boolean {
  *  be told what happened to it. */
 const RequestId = Schema.String.check(Schema.isMinLength(1));
 
+/**
+ * A checkout's path, as the verbs that take one OUTSIDE `run.start` declare it:
+ * a plain string, with the rule (absolute, therefore non-empty) checked by the
+ * VERB — `notAbsolute` / the catalog's own guard — rather than by the schema.
+ *
+ * Because a schema check is not a refusal. It fails the decode as a
+ * `SchemaError` before any handler runs, so the caller is told nothing a person
+ * can act on, and the board — which sends an empty field rather than greying a
+ * button out — would show a defect where the row has a sentence. Loosening an
+ * input is additive (2.2).
+ */
+const CheckoutPath = Schema.String;
+
 const StartInputSchema = Schema.Struct({
   /** ABSOLUTE path of the checkout to run in. Explicit, never the caller's
    *  cwd: an MCP host's cwd is not a fact about what the user meant. */
@@ -1232,7 +1270,7 @@ export type LogPage = typeof LogPageSchema.Type;
 const CatalogImportInputSchema = Schema.Struct({
   /** ABSOLUTE path of the checkout whose legacy `.ci` records to bring in.
    *  Explicit, never the caller's cwd — the same rule `run.start` keeps. */
-  checkout: Schema.String.check(Schema.isMinLength(1)),
+  checkout: CheckoutPath,
   dryRun: Schema.optionalKey(Schema.Boolean),
   requestId: RequestId,
 });
@@ -1258,7 +1296,8 @@ const CatalogImportReportSchema = Schema.Struct({
 export type CatalogImportReport = typeof CatalogImportReportSchema.Type;
 
 const CatalogPruneInputSchema = Schema.Struct({
-  retentionDays: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0))),
+  /** Positive whole days. Checked by the VERB, not here — see {@link CheckoutPath}. */
+  retentionDays: Schema.optionalKey(Schema.Number),
   dryRun: Schema.optionalKey(Schema.Boolean),
   requestId: RequestId,
 });
@@ -1302,7 +1341,7 @@ export const TaskRowSchema = Schema.Struct({
 export type TaskRow = typeof TaskRowSchema.Type;
 
 const PipelineReadInputSchema = Schema.Struct({
-  checkout: Schema.String.check(Schema.isMinLength(1)),
+  checkout: CheckoutPath,
   root: Schema.optionalKey(Schema.String),
 });
 export type PipelineReadInput = typeof PipelineReadInputSchema.Encoded;
@@ -1389,12 +1428,36 @@ const VenueProbeOutputSchema = Schema.Struct({
   warnings: Schema.Array(Schema.String),
   rows: Schema.Array(VenueRowSchema),
 });
+
+/**
+ * THE LAST PROBE, as a FACT — what the Machines page reads on open.
+ *
+ * A probe SSH-dials every machine it is asked about, so a page that fired one
+ * per open would cost a fleet's worth of connections per glance, and wait on
+ * the slowest unreachable box. So the service keeps the answer of the most
+ * recent `venue.probe` — whoever asked it, the board or `odu hosts` — on this
+ * cell, with WHEN and FOR WHICH platforms, and the page draws that with its age
+ * and offers "probe now". `null` until the first probe since the daemon
+ * started. Read-only on the wire: the service is its one writer.
+ */
+export const VenueReadingSchema = Schema.NullOr(
+  Schema.Struct({
+    /** When the probe answered. */
+    at: Schema.Number,
+    /** The platforms it was narrowed to; empty means every configured one. */
+    platforms: Schema.Array(Schema.String),
+    source: Schema.NullOr(Schema.String),
+    warnings: Schema.Array(Schema.String),
+    rows: Schema.Array(VenueRowSchema),
+  }),
+);
+export type VenueReading = typeof VenueReadingSchema.Type;
 export type VenueProbeOutput = typeof VenueProbeOutputSchema.Type;
 
 const VenueHoldInputSchema = Schema.Struct({
   /** The checkout the hold is FOR. A lease is recorded per checkout because
    *  that is what a subsequent `odu run` there consults. */
-  checkout: Schema.String.check(Schema.isMinLength(1)),
+  checkout: CheckoutPath,
   /** Empty means every configured platform. */
   platforms: Schema.optionalKey(Schema.Array(Schema.String)),
   /**
@@ -1446,7 +1509,7 @@ const VenueHoldOutputSchema = Schema.Struct({
 export type VenueHoldOutput = typeof VenueHoldOutputSchema.Type;
 
 const VenueReleaseInputSchema = Schema.Struct({
-  checkout: Schema.String.check(Schema.isMinLength(1)),
+  checkout: CheckoutPath,
   platforms: Schema.optionalKey(Schema.Array(Schema.String)),
   /** The caller's `$ODU_HOSTS` — see `venue.hold`. A release resolves the same
    *  inventory a hold did, and the two disagreeing about which fleet a platform
@@ -1479,7 +1542,7 @@ export type VenueReleaseOutput = typeof VenueReleaseOutputSchema.Type;
 // ── branch protection ───────────────────────────────────────────────────────
 
 const ProtectInputSchema = Schema.Struct({
-  checkout: Schema.String.check(Schema.isMinLength(1)),
+  checkout: CheckoutPath,
   /** The branch to protect. Absent means the repository's default branch,
    *  which the service resolves from the forge. */
   branch: Schema.optionalKey(Schema.String),
@@ -1538,6 +1601,7 @@ export type ProtectOutput = typeof ProtectOutputSchema.Type;
 export const oduServiceSurface = defineSurface({
   cells: {
     service: { schema: ServiceCellSchema, default: UNKNOWN_SERVICE },
+    venues: { schema: VenueReadingSchema, default: null, verbs: ["get"] },
   },
   collections: {
     runs: {
