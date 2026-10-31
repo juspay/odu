@@ -15,6 +15,7 @@
   "dependencies": {
     "@odu/auth": "workspace:*",
     "@odu/cache": "workspace:*",
+    "@odu/cordis": "workspace:*",
     "@odu/ci": "workspace:*",
     "@odu/service-client": "workspace:*",
     "effect": "4.0.0",

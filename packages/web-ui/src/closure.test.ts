@@ -35,6 +35,7 @@ const EXPECTED_DEPENDENCIES = [
   "@odu/auth",
   "@odu/cache",
   "@odu/ci",
+  "@odu/cordis",
   "@odu/service-client",
   "effect",
   "solid-js",

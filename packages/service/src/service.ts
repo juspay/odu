@@ -101,10 +101,6 @@ export interface ServiceOptions {
    *  supervisor's half of a live upgrade. The daemon aborts its own controller
    *  here; nothing else in this package knows how a process ends. */
   onDrain: () => void | Promise<void>;
-  /** Does this daemon have a door — is the `auth` row mounted? A fact about the
-   *  COMPOSITION, supplied by the root that mounts the rows, and published on
-   *  the service cell so a browser knows whether to ask who it is. */
-  auth?: boolean;
   refreshMs?: number;
   now?: () => number;
   /** Where a degraded-but-serving fact goes — a refresh tick that outran its
@@ -173,25 +169,28 @@ export function createOduService(opts: ServiceOptions): OduService {
   const startedAt = now();
 
   /**
-   * THE RUNS' OWN RULE: a STATE CHANGE needs somebody signed in.
+   * THE RUNS' OWN FLOOR, and it is ONE verb's.
    *
-   * A `local` caller is the machine's owner and passes; a signed-in person
-   * passes at any role, because starting, cancelling and retrying a run is what
-   * being a MEMBER of this daemon means — what an `admin` may do beyond that is
-   * the cache's rule, and what an `owner` may do beyond THAT is the auth row's.
-   * The refusal is here rather than in the gate because it is this row's policy,
-   * and it is what PR 4 narrows when orgs make "member of WHAT" a question.
+   * Starting, retrying and cancelling a run is what being a MEMBER of this
+   * daemon means, and the gate has already refused every connection that is
+   * not one — so those verbs state no floor of their own (a second check would
+   * be dead code, and PR 4 is where an org's membership narrows it).
+   * `protect.apply` is different: it WRITES branch protection through the
+   * daemon's own `gh` credential, which is an administrator's act.
    */
-  const signedIn = (): Effect.Effect<Principal, ServiceRefused> =>
+  const adminOnly = (): Effect.Effect<Principal, ServiceRefused> =>
     Effect.flatMap(principalOf, (principal) =>
-      may(principal, "member")
+      may(principal, "admin")
         ? Effect.succeed(principal)
         : Effect.fail(
             new ServiceRefused({
               code: "not_permitted",
               message:
-                "odu: changing a run needs a signed-in member of this daemon",
-              suggestion: ["odu", "auth", "login"],
+                principal.kind === "user"
+                  ? `odu: protect.apply writes branch protection with this daemon's ` +
+                    `credential, so it needs an admin — ${principal.login} is a ${principal.role}`
+                  : "odu: protect.apply writes branch protection with this daemon's credential, so it needs an admin",
+              suggestion: ["odu", "auth", "whoami"],
             }),
           ),
     );
@@ -225,7 +224,6 @@ export function createOduService(opts: ServiceOptions): OduService {
     identity,
     build: opts.build,
     readiness: { state: "starting", since: startedAt, reconciled: 0 },
-    auth: opts.auth ?? false,
   });
 
   const runtime = implementRootedSurfaces(
@@ -302,7 +300,7 @@ export function createOduService(opts: ServiceOptions): OduService {
       procedures: {
         run: {
           start: ({ input }) =>
-            Effect.flatMap(signedIn(), (principal) =>
+            Effect.flatMap(principalOf, (principal) =>
               Effect.tap(
                 startRun(
                   input,
@@ -331,11 +329,9 @@ export function createOduService(opts: ServiceOptions): OduService {
           // keep true.
           read: ({ input }) => readRun(input, { catalog }),
           retry: ({ input }) =>
-            Effect.flatMap(signedIn(), () =>
-              Effect.tap(
-                retryRun(input, { retry: opts.ports.retry, catalog }),
-                () => Effect.sync(refresh),
-              ),
+            Effect.tap(
+              retryRun(input, { retry: opts.ports.retry, catalog }),
+              () => Effect.sync(refresh),
             ),
           // THE BOARD, FILTERED, in one call. Before this, `odu status`,
           // `attach`, `--run latest` and `history list` read every row with one
@@ -373,16 +369,14 @@ export function createOduService(opts: ServiceOptions): OduService {
               return Effect.succeed(registry.select(input));
             }),
           cancel: ({ input }) =>
-            Effect.flatMap(signedIn(), () =>
-              Effect.tap(
-                cancelRun(input, {
-                  cancel: opts.ports.cancel,
-                  requests,
-                  catalog,
-                  now,
-                }),
-                () => Effect.sync(refresh),
-              ),
+            Effect.tap(
+              cancelRun(input, {
+                cancel: opts.ports.cancel,
+                requests,
+                catalog,
+                now,
+              }),
+              () => Effect.sync(refresh),
             ),
         },
         log: { read: ({ input }) => readLog(input, { catalog }) },
@@ -399,23 +393,19 @@ export function createOduService(opts: ServiceOptions): OduService {
           // the same tree was two writers with no owner. `refresh` after, so
           // the board shows what the call just did before the answer leaves.
           import: ({ input }) =>
-            Effect.flatMap(signedIn(), () =>
-              Effect.tap(
-                importCatalog(input, {
-                  probeCheckout: opts.ports.probeCheckout,
-                  requests,
-                  catalog,
-                  now,
-                }),
-                () => Effect.sync(refresh),
-              ),
+            Effect.tap(
+              importCatalog(input, {
+                probeCheckout: opts.ports.probeCheckout,
+                requests,
+                catalog,
+                now,
+              }),
+              () => Effect.sync(refresh),
             ),
           prune: ({ input }) =>
-            Effect.flatMap(signedIn(), () =>
-              Effect.tap(
-                pruneCatalog(input, { requests, catalog, now }),
-                () => Effect.sync(refresh),
-              ),
+            Effect.tap(
+              pruneCatalog(input, { requests, catalog, now }),
+              () => Effect.sync(refresh),
             ),
         },
         pipeline: {
@@ -473,7 +463,7 @@ export function createOduService(opts: ServiceOptions): OduService {
               Effect.suspend(() => {
                 const bad = notAbsolute("venue.hold", input.checkout);
                 if (bad !== null) return Effect.fail(bad);
-                return Effect.flatMap(signedIn(), (principal) =>
+                return Effect.flatMap(principalOf, (principal) =>
                   Effect.promise(() =>
                   // ONCE ONLY. A repeat replays the recorded answer and takes
                   // no hold — see `onceOnly` on why "taking a hold you already
@@ -529,7 +519,7 @@ export function createOduService(opts: ServiceOptions): OduService {
               Effect.suspend(() => {
                 const bad = notAbsolute("venue.release", input.checkout);
                 if (bad !== null) return Effect.fail(bad);
-                return Effect.flatMap(signedIn(), (principal) =>
+                return Effect.flatMap(principalOf, (principal) =>
                   Effect.promise(() =>
                   // THE SHARP ONE. Release A's reply is lost, another client
                   // takes a new hold on the same platform, and A retries — a
@@ -569,7 +559,7 @@ export function createOduService(opts: ServiceOptions): OduService {
         },
         protect: {
           apply: ({ input }) =>
-            Effect.flatMap(signedIn(), (principal) =>
+            Effect.flatMap(adminOnly(), (principal) =>
             Effect.flatMap(
               Effect.suspend(() => {
                 const bad = notAbsolute("protect.apply", input.checkout);

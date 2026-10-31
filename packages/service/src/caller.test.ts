@@ -23,7 +23,12 @@ import { buildSurfaceFace } from "@kolu/surface/client";
 import { directDispatch } from "@kolu/surface/links/direct";
 import type { SurfaceDispatch } from "@kolu/surface/link";
 import type { SurfaceHandlers } from "@kolu/surface/server";
-import { CurrentPrincipal, LOCAL_OWNER, type Principal } from "@odu/cordis/principal";
+import {
+  CurrentPrincipal,
+  LOCAL_OWNER,
+  requestAdmission,
+  type Principal,
+} from "@odu/cordis/principal";
 import {
   oduServiceSurface,
   type OduServiceClient,
@@ -52,7 +57,7 @@ afterEach(() => {
  *  without importing the host. */
 function dispatchedAs(handlers: SurfaceHandlers, principal: Principal): SurfaceDispatch {
   const base = directDispatch({ handlers });
-  const admission = { principal, live: () => true, ended: Effect.never } as const;
+  const admission = requestAdmission(principal);
   return {
     unary: (tag, payload) =>
       Effect.provideService(base.unary(tag, payload), CurrentPrincipal, admission),

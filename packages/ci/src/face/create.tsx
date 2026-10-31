@@ -95,6 +95,9 @@ function CheckInput(props: {
 export function Create(props: {
   state: CreateState;
   onStart: (form: StartForm) => void;
+  /** The runs' floor is `member`; a principal below it may read a run and not
+   *  start one, so the submit is not drawn at all. */
+  canRun: boolean;
   onOpen: (runId: string) => void;
   onBack: () => void;
 }): JSX.Element {
@@ -213,13 +216,15 @@ export function Create(props: {
             path a start takes, whether it was reached by a mouse or by Enter in
             a field, so the two ways of asking cannot disagree and one press
             cannot start two runs. */}
-        <Button
-          type="submit"
-          class="btn-primary"
-          disabled={props.state.kind === "starting"}
-        >
-          {props.state.kind === "starting" ? "Starting…" : "Start run"}
-        </Button>
+        <Show when={props.canRun}>
+          <Button
+            type="submit"
+            class="btn-primary"
+            disabled={props.state.kind === "starting"}
+          >
+            {props.state.kind === "starting" ? "Starting…" : "Start run"}
+          </Button>
+        </Show>
       </form>
       {/* A refusal INTERRUPTS — `Receipt`'s `refused` tone announces it with
           `alert` rather than `status` — because it is the answer to the thing

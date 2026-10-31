@@ -21,6 +21,7 @@ import { reloadForUpdate } from "@kolu/surface-app/lifecycle";
 import { connectSurfaces } from "@kolu/surface-app/solid";
 import { AUTH_KEY, oduAuthSurface } from "@odu/auth/surface";
 import { CACHE_KEY, oduCacheSurface } from "@odu/cache/surface";
+import { SERVICE_DOOR_PATH } from "@odu/cordis/services";
 import { oduServiceSurface } from "@odu/service-client/surface";
 import { render } from "solid-js/web";
 import { App } from "./app";
@@ -29,6 +30,36 @@ const root = document.getElementById("odu");
 if (root === null) {
   throw new Error("odu: the shell has no #odu element to render into");
 }
+
+/**
+ * DOES THIS SERVER HAVE A DOOR? Asked of the HOST, once, before anything is
+ * drawn.
+ *
+ * It used to ride the runs' service cell, which meant the shell opened the
+ * board and subscribed to `runs` before it knew the answer — on a server with a
+ * door, every one of those subscriptions is refused. The fact is the host's
+ * (it changes with `auth`, not with the runs), so the host answers it on its own
+ * route, and a page that gets the answer first never draws the wrong board.
+ * An unreachable answer is `false`: a loopback page is the safe default, and
+ * the wire indicator already says the connection is down.
+ */
+async function doorMounted(): Promise<boolean> {
+  try {
+    // A `cache-control` header rather than fetch's cache option: the fence
+    // refuses a sibling key spelled with the row's word in any face, and a
+    // request option that happens to share a row's name is not a composition.
+    const response = await fetch(SERVICE_DOOR_PATH, {
+      headers: { "cache-control": "no-cache" },
+    });
+    if (!response.ok) return false;
+    const body = (await response.json()) as { mounted?: unknown };
+    return body.mounted === true;
+  } catch {
+    return false;
+  }
+}
+
+const door = await doorMounted();
 
 const connection = await connectSurfaces({
   // The rows. `cache` and `auth` are the keys the daemon mounts those rows at,
@@ -47,6 +78,7 @@ render(
         client={connection.core}
         cache={connection.clients.cache}
         auth={connection.clients.auth}
+        door={door}
         // The framework's readout is an accessor; read HERE, inside the render
         // root, so the compiler makes it a getter on `App`'s props and the
         // indicator keeps moving. Reading it into a `const` would freeze the

@@ -30,6 +30,7 @@ import {
   type CiRoute,
 } from "@odu/ci/face";
 import { CacheFace, type CacheClient } from "@odu/cache/face";
+import { may, type Principal, type Role } from "@odu/cordis/principal";
 import {
   ProfileFace,
   SignIn,
@@ -104,6 +105,9 @@ export function App(props: {
    *  the contract), but the row may not be MOUNTED — the service cell says
    *  which, and until it does nothing asks who you are. */
   auth: AuthClient;
+  /** Does this daemon have a DOOR? The host's answer, read before the first
+   *  render — so the board never opens on a server that cannot serve it. */
+  door: boolean;
   readout: SurfaceReadout;
   onReload: () => void;
 }): JSX.Element {
@@ -185,13 +189,13 @@ export function App(props: {
 
   // ── the door ──
   //
-  // TWO FACTS, and both come off the wire. The service cell says whether this
-  // daemon has a door at all (a fact about ITS composition, not about us), and
-  // `whoami` says who this connection is — `anonymous` when the gate let us in
-  // without a session, which is a page before it signs in rather than an error.
-  // With no door, neither is asked and the header is exactly today's.
-  const cell = props.client.cells.service.use().value;
-  const door = createMemo(() => cell()?.auth === true);
+  // TWO FACTS, and neither is guessed. Whether this daemon HAS a door is the
+  // host's own answer, fetched before this page was even rendered (`./main`),
+  // so the shell never opens the board for a moment on a server it turns out
+  // cannot serve it. `whoami` says who this connection is — `anonymous` when
+  // the gate let us in without a session, which is a page before it signs in
+  // rather than an error. With no door, nothing is asked and the header is
+  // exactly today's.
   const [who, setWho] = createSignal<Who | null>(null);
 
   // A SESSION QUESTION IS A QUESTION PER CONNECTION. Signing out in one tab, a
@@ -209,7 +213,7 @@ export function App(props: {
   );
 
   createEffect(() => {
-    if (!door() || who() !== null) return;
+    if (!props.door || who() !== null) return;
     void Effect.runPromise(props.auth.procedures.user.whoami({})).then(
       (answer) => setWho(answer.who),
       // A failed whoami on a daemon that says it has a door is a broken
@@ -220,18 +224,38 @@ export function App(props: {
     );
   });
   const signedIn = createMemo(() => who() !== null && who()?.kind !== "anonymous");
-  const boardShown = createMemo(() => !door() || signedIn());
+  /** THE CONNECTION'S PRINCIPAL, as a row reads it: nobody when the gate let us
+   *  in without a session. */
+  const principal = createMemo<Principal | null>(() => {
+    const held = who();
+    return held === null || held.kind === "anonymous" ? null : held;
+  });
+  /** Does this person hold `floor`? The rows' rule, read once here and handed
+   *  to each face as a boolean. */
+  const holds = (floor: Role): boolean => {
+    const held = principal();
+    return held !== null && may(held, floor);
+  };
+  const boardShown = createMemo(() => !props.door || signedIn());
   let ambientRoot: (() => void) | undefined;
   onCleanup(() => ambientRoot?.());
   createEffect(() => {
-    if (!boardShown() || ambient() !== null) return;
-    // A DETACHABLE OWNER, so the monitor's subscriptions have somewhere to be
-    // disposed from when the page unmounts — created inside this effect, they
-    // would otherwise belong to whatever owner happened to be running.
-    createRoot((dispose) => {
-      ambientRoot = dispose;
-      setAmbient(ciAmbient(props.client));
-    });
+    // THE MONITOR FOLLOWS THE BOARD, BOTH WAYS. Its subscriptions belong to a
+    // page that can see runs: built before the door is known they are refused
+    // on every accept, and left standing when the board hides they keep
+    // receiving frames nobody draws. A detachable owner is what lets it go.
+    if (boardShown() && ambient() === null) {
+      createRoot((dispose) => {
+        ambientRoot = dispose;
+        setAmbient(ciAmbient(props.client));
+      });
+      return;
+    }
+    if (!boardShown() && ambient() !== null) {
+      ambientRoot?.();
+      ambientRoot = undefined;
+      setAmbient(null);
+    }
   });
 
   // ── the cache's route slice ──
@@ -246,7 +270,7 @@ export function App(props: {
     const here = route();
     return here.at === "cache" ? here.bucket : null;
   });
-  const anonymous = createMemo(() => door() && who()?.kind === "anonymous");
+  const anonymous = createMemo(() => props.door && who()?.kind === "anonymous");
   const ciRoute = createMemo<CiRoute>(() => {
     const here = route();
     return here.at === "cache" || here.at === "profile" ? { at: "board" } : here;
@@ -326,14 +350,14 @@ export function App(props: {
           meets them: nobody yet (a daemon with a door, and whoami still in
           flight), anonymous (a sign-in form, and nothing else), signed in (the
           board, as it always was). A daemon with NO door never enters the first
-          two: `door()` is false and the board renders at once. */}
-      <Show when={door() && who() === null}>
+          two: this daemon has no door and the board renders at once. */}
+      <Show when={props.door && who() === null}>
         <p class="hint">checking who you are…</p>
       </Show>
       <Show when={anonymous()}>
         <SignIn />
       </Show>
-      <Show when={!door() || signedIn()}>
+      <Show when={boardShown()}>
         <Show when={atProfile()}>
           <ProfileFace
             client={props.auth}
@@ -352,6 +376,7 @@ export function App(props: {
           <CacheFace
             client={props.cache}
             bucket={openBucket()}
+            canAdminister={holds("admin")}
             now={now()}
             call={(effect) => Effect.runPromise(effect)}
             onOpen={(bucket) => go({ at: "cache", bucket })}
@@ -366,6 +391,7 @@ export function App(props: {
               call={(effect) => Effect.runPromise(effect)}
               onRoute={(next) => go(next)}
               ambient={held()}
+              canRun={holds("member")}
               connecting={props.readout.status === "connecting"}
             />
           )}

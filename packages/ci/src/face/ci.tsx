@@ -67,6 +67,10 @@ export interface CiFaceProps {
   /** The wire has not answered yet — the board's empty state is "arriving",
    *  not "nothing ran". */
   connecting: boolean;
+  /** MAY THIS PERSON CHANGE A RUN? The runs' floor is `member`, and the gate
+   *  has already refused everyone below it — the shell passes the floor anyway,
+   *  because the rule is the ROW's and this is where it would narrow. */
+  canRun: boolean;
 }
 
 
@@ -661,6 +665,7 @@ export function CiFace(props: CiFaceProps): JSX.Element {
         <Match when={route().at === "new"}>
           <Create
             state={creating()}
+            canRun={props.canRun}
             onStart={start}
             onOpen={(id) => props.onRoute({ at: "run", runId: id, log: null })}
             onBack={() => props.onRoute({ at: "board" })}
@@ -669,6 +674,7 @@ export function CiFace(props: CiFaceProps): JSX.Element {
         <Match when={route().at === "run"}>
           <Detail
             run={selectedRun()}
+            canRun={props.canRun}
             frame={frame()}
             now={now()}
             pending={nodesSub.pending()}
