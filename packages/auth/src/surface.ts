@@ -17,6 +17,7 @@
  * | `token.list`, `token.revoke` | a signed-in person, for their own tokens |
  * | `session.list`, `session.end` | a signed-in person, for their own sessions |
  * | `grant` | an `owner` — or the ROOT token, which is its one job: bootstrapping the first owner |
+ * | `grant.list` | an `owner` — who is in, and the role each holds |
  *
  * **`grant` is why the anonymous gate list exists.** A fresh daemon has no
  * owner, so `odu auth grant <login> owner` is made with the operator's root
@@ -161,6 +162,28 @@ const GrantOutputSchema = Schema.Struct({
   role: RoleSchema,
 });
 
+/**
+ * ONE PERSON WHO IS IN, as an owner sees them on the people page.
+ *
+ * Two sources, folded: the GRANTS (a role somebody set) and the logins that
+ * have SIGNED IN (GitHub let them through; with no grant they hold
+ * {@link DEFAULT_ROLE}). The second set is why this is not just the grant
+ * table — a person allowed in and never granted anything is exactly who an
+ * owner opens this page to promote.
+ */
+export const AuthPersonSchema = Schema.Struct({
+  login: Schema.String,
+  role: RoleSchema,
+  /** False when the role is the default, never granted. */
+  granted: Schema.Boolean,
+  /** The latest activity of any of their sessions; null for a grant made to
+   *  somebody who has not signed in yet. */
+  lastSeen: Schema.NullOr(Schema.Number),
+});
+export type AuthPerson = typeof AuthPersonSchema.Type;
+
+const GrantListOutputSchema = Schema.Struct({ people: Schema.Array(AuthPersonSchema) });
+
 // ── the surface ─────────────────────────────────────────────────────────────
 
 /**
@@ -192,6 +215,12 @@ export const oduAuthSurface = defineSurface({
       whoami: { output: WhoamiOutputSchema, error: REFUSES },
       grant: { input: GrantInputSchema, output: GrantOutputSchema, error: REFUSES },
     },
+    // `grant.list` and not `user.list`: its subject is the ROLE TABLE (who holds
+    // what), which is what `user.grant` writes — the people page reads the one
+    // and calls the other.
+    grant: {
+      list: { output: GrantListOutputSchema, error: REFUSES },
+    },
     token: {
       create: { input: TokenCreateInputSchema, output: TokenCreateOutputSchema, error: REFUSES },
       list: { output: TokenListOutputSchema, error: REFUSES },
@@ -219,6 +248,7 @@ export type OduAuthSurface = typeof oduAuthSurface;
 export const ODU_AUTH_EXPOSE = {
   "user.whoami": { tool: { mutates: false } },
   "user.grant": { tool: { mutates: true } },
+  "grant.list": { tool: { mutates: false } },
   "token.create": { tool: { mutates: true } },
   "token.list": { tool: { mutates: false } },
   "token.revoke": { tool: { mutates: true } },
@@ -250,7 +280,9 @@ export const ODU_AUTH_MCP_INSTRUCTIONS = [
   "`auth_session_end` end a credential everywhere at once — an open connection",
   "stops being served. `auth_user_grant` sets a login's role and is an owner's",
   "verb; on a daemon with no owner yet the operator's root token may set the",
-  "FIRST owner with it, and that is that token's only job.",
+  "FIRST owner with it, and that is that token's only job. `auth_grant_list`",
+  "answers who is in — every grant and every login that has signed in, with",
+  "the role each holds — and is an owner's verb too.",
 ].join("\n");
 
 export const AUTH_AGENT: RowAgent = {

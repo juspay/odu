@@ -66,6 +66,7 @@ import {
   AuthRefused,
   DEFAULT_ROLE,
   oduAuthSurface,
+  type AuthPerson,
   type AuthSession,
   type AuthToken,
   type Who,
@@ -354,6 +355,42 @@ export function authServer(opts: AuthServerOptions): AuthServer {
             // each arrives with the role it now has.
             endLogin(login);
             return Effect.succeed({ login, role: input.role });
+          }),
+      },
+
+      grant: {
+        // WHO IS IN — an owner's read, by the same rule as the write it serves:
+        // the people page lists these and calls `user.grant` on one. Not the
+        // root token's: that secret bootstraps the first owner and has no
+        // business reading the role table after.
+        list: () =>
+          Effect.flatMap(signedIn(), ({ login, role }) => {
+            if (role !== "owner") {
+              return Effect.fail(
+                notPermitted(`listing who is in is an owner's verb — ${login} is a ${role}`),
+              );
+            }
+            const people = new Map<string, AuthPerson>();
+            for (const grant of repo.grants()) {
+              people.set(grant.login, {
+                login: grant.login,
+                role: grant.role,
+                granted: true,
+                lastSeen: null,
+              });
+            }
+            for (const seen of repo.seen()) {
+              const granted = people.get(seen.login);
+              people.set(seen.login, {
+                login: seen.login,
+                role: granted?.role ?? DEFAULT_ROLE,
+                granted: granted !== undefined,
+                lastSeen: seen.lastSeen,
+              });
+            }
+            return Effect.succeed({
+              people: [...people.values()].sort((a, b) => a.login.localeCompare(b.login)),
+            });
           }),
       },
 

@@ -72,6 +72,11 @@ export interface AuthRepo {
   grant(login: string): GrantRow | null;
   setGrant(row: GrantRow): void;
   grants(): GrantRow[];
+  /** Every login with a live session row, and its latest activity — who has
+   *  come IN, granted or not. A login allowed by GitHub and never granted
+   *  holds {@link DEFAULT_ROLE}, and an owner must be able to see them to
+   *  change that. */
+  seen(): Array<{ login: string; lastSeen: number }>;
 
   close(): void;
 }
@@ -296,6 +301,12 @@ export function openAuthRepo(path: string): AuthRepo {
       (db.query("SELECT * FROM grant_row ORDER BY login").all() as GrantDb[]).map(
         (row) => ({ ...row, role: row.role as Role }),
       ),
+    seen: () =>
+      db
+        .query(
+          "SELECT login, MAX(last_seen) AS lastSeen FROM session GROUP BY login ORDER BY login",
+        )
+        .all() as Array<{ login: string; lastSeen: number }>,
 
     close: () => db.close(),
   };

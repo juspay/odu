@@ -269,6 +269,8 @@ odu auth login https://odu.example.com        # paste the owner's personal token
 odu auth grant alice admin --origin https://odu.example.com
 ```
 
+Or from the board: an owner's header has **People**, which lists who is in — every grant, and every login that has signed in, with its role — and grants or changes a role from a select. `odu auth people` prints the same list.
+
 That is the root token's only job on a daemon with a door: it is not a principal, and it cannot start a run or read a bucket.
 
 ### A token for a machine or an agent

@@ -18,6 +18,9 @@
  *     shown once), revoke, and end a session. It reads them when it opens rather
  *     than subscribing — a token list is not a live fact, and `whoami` on the
  *     next call is what notices a revocation.
+ *   - **`PeopleFace`** is the owner's page: who is in (`grant.list`) and the
+ *     role each holds, with a control to grant or change one (`user.grant`).
+ *     The shell DRAWS it for an owner; the row REFUSES everyone else on its own.
  */
 
 import { ago } from "@odu/cordis/format";
@@ -27,6 +30,7 @@ import {
   createResource,
   createSignal,
   For,
+  onCleanup,
   Match,
   Show,
   Switch,
@@ -36,6 +40,7 @@ import {
   AUTH_SIGN_IN_PATH,
   AUTH_SIGN_OUT_PATH,
   SIGN_IN_COPY,
+  type AuthPerson,
   type AuthSession,
   type AuthToken,
   oduAuthSurface,
@@ -72,9 +77,23 @@ export function SignedInHeader(props: {
   who: Who;
   atProfile: boolean;
   onProfile: () => void;
+  /** Draw the way to the people page — the shell's decision, from the role. */
+  canGrant: boolean;
+  atPeople: boolean;
+  onPeople: () => void;
 }): JSX.Element {
   return (
     <div class="account">
+      <Show when={props.canGrant}>
+        <button
+          type="button"
+          class="link"
+          aria-pressed={props.atPeople}
+          onClick={() => props.onPeople()}
+        >
+          People
+        </button>
+      </Show>
       <Switch>
         <Match when={props.who.kind === "user" ? props.who : null}>
           {(who) => (
@@ -308,6 +327,196 @@ export function ProfileFace(props: ProfileFaceProps): JSX.Element {
                 >
                   end
                 </button>
+              </li>
+            )}
+          </For>
+        </ul>
+      </Show>
+    </section>
+  );
+}
+
+/** The roles, least first — the order every select on this page offers them
+ *  in, so a slip of the keyboard promotes nobody to owner. */
+const ROLES = ["member", "admin", "owner"] as const;
+type RoleName = (typeof ROLES)[number];
+
+function isRole(value: string): value is RoleName {
+  return (ROLES as readonly string[]).includes(value);
+}
+
+/** How a person's presence reads, in one phrase. */
+function personLife(person: AuthPerson, now: number): string {
+  const role = person.granted ? "granted" : "default role";
+  return person.lastSeen === null
+    ? `${role} · never signed in`
+    : `${role} · last seen ${ago(person.lastSeen, now)}`;
+}
+
+export interface PeopleFaceProps {
+  client: AuthClient;
+  call: <A>(effect: Effect.Effect<A, unknown>) => Promise<A>;
+  now: number;
+  onClose: () => void;
+}
+
+/**
+ * WHO IS IN, AND WHAT EACH MAY DO — the owner's page, and `odu auth people` /
+ * `odu auth grant` without a terminal.
+ *
+ * Read when it opens and after every grant, for the profile's reason: the role
+ * table is not a live fact on the wire. A grant takes effect at the person's
+ * NEXT connection (the row ends their open ones), so the page says so.
+ */
+export function PeopleFace(props: PeopleFaceProps): JSX.Element {
+  type People =
+    | { readonly ok: true; readonly people: readonly AuthPerson[] }
+    | { readonly ok: false; readonly message: string };
+  const [people, { refetch }] = createResource(async (): Promise<People> => {
+    try {
+      const answer = await props.call(props.client.procedures.grant.list());
+      return { ok: true, people: answer.people };
+    } catch (err) {
+      return { ok: false, message: refusalText(err) };
+    }
+  });
+
+  const [login, setLogin] = createSignal("");
+  const [role, setRole] = createSignal<RoleName>("member");
+  const [busy, setBusy] = createSignal(false);
+  const [failure, setFailure] = createSignal<string | null>(null);
+  const [done, setDone] = createSignal<string | null>(null);
+  // A grant answered after the page closed writes nowhere.
+  let live = true;
+  onCleanup(() => {
+    live = false;
+  });
+
+  const grant = (who: string, to: RoleName): void => {
+    const name = who.trim();
+    // Refused ON CLICK, in the row's voice — never a dead button.
+    if (name === "") {
+      setDone(null);
+      setFailure("odu: a grant needs a GitHub login — type one in the box");
+      return;
+    }
+    setBusy(true);
+    setFailure(null);
+    setDone(null);
+    void props
+      // `rootToken` is the bootstrap's and is ignored for a signed-in caller:
+      // this page is only ever an owner's session.
+      .call(props.client.procedures.user.grant({ login: name, role: to, rootToken: "" }))
+      .then(
+        (answer) => {
+          if (!live) return;
+          setBusy(false);
+          setLogin("");
+          setDone(
+            `${answer.login} is now ${answer.role} — it takes effect at their next connection.`,
+          );
+          void refetch();
+        },
+        (err: unknown) => {
+          if (!live) return;
+          setBusy(false);
+          setFailure(refusalText(err));
+          // A refused change leaves a row's select showing a role the daemon
+          // does not hold: re-read, so every row says what is true.
+          void refetch();
+        },
+      );
+  };
+
+  const listed = (): readonly AuthPerson[] => {
+    const value = people();
+    return value !== undefined && value.ok ? value.people : [];
+  };
+  const refusal = (): string | null => {
+    const value = people();
+    return value !== undefined && !value.ok ? value.message : null;
+  };
+
+  return (
+    <section class="profile people-page" aria-label="people">
+      <p class="crumbs">
+        <button type="button" class="link" onClick={() => props.onClose()}>
+          ← runs
+        </button>
+      </p>
+      <h2>People</h2>
+      <p class="hint">
+        GitHub decides who may enter; this page decides what each person may do once in.
+      </p>
+
+      <div class="admin-section">
+        <h3>Grant a role</h3>
+        <label class="search">
+          <span class="sr-only">GitHub login</span>
+          <input
+            type="text"
+            placeholder="GitHub login, e.g. octocat"
+            value={login()}
+            onInput={(event) => setLogin(event.currentTarget.value)}
+          />
+        </label>
+        <label class="field-inline">
+          <span>role</span>
+          <select
+            aria-label="role to grant"
+            value={role()}
+            onChange={(event) => {
+              const value = event.currentTarget.value;
+              if (isRole(value)) setRole(value);
+            }}
+          >
+            <option value="member">member</option>
+            <option value="admin">admin</option>
+            <option value="owner">owner</option>
+          </select>
+        </label>
+        <button type="button" disabled={busy()} onClick={() => grant(login(), role())}>
+          {busy() ? "granting…" : "Grant"}
+        </button>
+      </div>
+
+      <Show when={failure()}>{(message) => <p class="fault">{message()}</p>}</Show>
+      <Show when={done()}>{(message) => <p class="hint done">{message()}</p>}</Show>
+      <Show when={refusal()}>{(message) => <p class="fault">{message()}</p>}</Show>
+
+      <h3>Who is in</h3>
+      <Show
+        when={listed().length > 0}
+        fallback={
+          <Show when={refusal() === null}>
+            <p class="hint">{people.loading ? "reading…" : "Nobody has signed in yet."}</p>
+          </Show>
+        }
+      >
+        <ul class="people">
+          <For each={listed()}>
+            {(person) => (
+              <li>
+                <span>
+                  <strong>{person.login}</strong>
+                  <span class="hint"> {personLife(person, props.now)}</span>
+                </span>
+                {/* CHANGING A ROLE IS A GRANT. The select shows the role held;
+                    choosing another one grants it at once, and the list is
+                    re-read so the row says what the daemon now holds. */}
+                <select
+                  aria-label={`role of ${person.login}`}
+                  value={person.role}
+                  disabled={busy()}
+                  onChange={(event) => {
+                    const value = event.currentTarget.value;
+                    if (isRole(value) && value !== person.role) grant(person.login, value);
+                  }}
+                >
+                  <option value="member">member</option>
+            <option value="admin">admin</option>
+            <option value="owner">owner</option>
+                </select>
               </li>
             )}
           </For>

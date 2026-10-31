@@ -32,9 +32,9 @@ principal through the `Caller`, never from input.
 
 **Names are `row_noun_verb`.** The framework derives an MCP tool name as
 `<sibling>_<namespace>_<verb>`, so the row's verbs are `auth_user_whoami`,
-`auth_user_grant`, `auth_token_create`, `auth_token_list`, `auth_token_revoke`,
-`auth_session_list` and `auth_session_end`. The argv face keeps the short
-spelling — `odu auth whoami`, `odu auth grant <login> <role>` — because it is
+`auth_user_grant`, `auth_grant_list`, `auth_token_create`, `auth_token_list`,
+`auth_token_revoke`, `auth_session_list` and `auth_session_end`. The argv face keeps the short
+spelling — `odu auth whoami`, `odu auth grant <login> <role>`, `odu auth people` — because it is
 hand-written grammar rather than a derivation.
 
 ## A GitHub App, and the PR 2 shape

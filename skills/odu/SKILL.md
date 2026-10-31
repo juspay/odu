@@ -21,7 +21,7 @@ venue_probe · venue_hold · venue_release · protect_apply
 cache_bucket_create · cache_bucket_list · cache_bucket_describe · cache_bucket_paths
 cache_token_mint · cache_token_list · cache_token_revoke
 cache_pin_create · cache_gc_run · cache_stats_read
-auth_user_whoami · auth_user_grant
+auth_user_whoami · auth_user_grant · auth_grant_list
 auth_token_create · auth_token_list · auth_token_revoke
 auth_session_list · auth_session_end
 ```
@@ -327,6 +327,7 @@ and a browser simply could not do them at all.
 | my sessions | `odu surface auth session_list --input '{}' --json` | `auth_session_list` | *(none)* | `sessions[]` (`id`, `created`, `lastSeen`, `expires`, `agent`) |
 | end a session | `odu surface auth session_end --input '{…}' --json` | `auth_session_end` | `id` | `id`, `ended` |
 | set a role | `odu auth grant <login> <owner\|admin\|member>` | `auth_user_grant` | `login`, `role`, `rootToken` (only when no session authorises it) | `login`, `role` |
+| who is in | `odu auth people -o json` | `auth_grant_list` | *(none)* — an owner's verb | `people[]` (`login`, `role`, `granted`, `lastSeen`) |
 
 - **`requestId` is an idempotency key on these three too.** A repeat with the
   same id replays the recorded answer and performs nothing — which is what
