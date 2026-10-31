@@ -30,6 +30,16 @@ Given("I open the board", async function (this: OduWorld) {
   await this.page.getByRole("heading", { name: "Runs", exact: true }).waitFor();
 });
 
+/**
+ * THE SAME NAVIGATION WITHOUT A PROMISE ABOUT WHAT IS THERE. `I open the board`
+ * waits for the board, which an anonymous connection on a daemon with a door
+ * never draws — it meets the sign-in page instead. A scenario whose subject IS
+ * that page arrives here, and asserts what it sees itself.
+ */
+Given("I open odu", async function (this: OduWorld) {
+  await this.open("#/");
+});
+
 Given("I open the create form", async function (this: OduWorld) {
   await this.open("#/new");
   await this.page.getByRole("heading", { name: "New run", exact: true }).waitFor();

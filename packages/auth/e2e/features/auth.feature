@@ -11,7 +11,9 @@ Feature: The door — sign in, and what a role may do
 
   @anonymous
   Scenario: An anonymous browser meets the sign-in page instead of the board
-    Given I open the board
+    # `I open odu`, not `I open the board`: the board is exactly what this
+    # scenario proves is NOT drawn.
+    Given I open odu
     Then the page asks me to sign in
     And the page offers no board rows
     And there should be no page errors
@@ -25,10 +27,13 @@ Feature: The door — sign in, and what a role may do
 
   @anonymous
   Scenario: A login outside the allow-list is refused with a reason
+    # NO "no page errors" HERE, deliberately: the refusal IS a 403 document,
+    # and a browser logs a refused navigation as a failed resource. The
+    # assertion that matters is the sentence the server wrote, which the step
+    # above holds.
     Given the stub says this account is not in the organisation
     When I start a sign-in
     Then the page refuses the sign-in naming the allow-list
-    And there should be no page errors
 
   @signed-in:member
   Scenario: A member may read the board and may not administer buckets
