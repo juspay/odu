@@ -52,8 +52,8 @@ import {
   Routes,
   StateDir,
 } from "@odu/cordis/services";
-import { createCache, type AdminAuthority, type BucketFacts, type Cache, type CacheOutcome } from "./cache";
-import { may, principalOf } from "@odu/cordis/principal";
+import { createCache, type Authority, type BucketFacts, type Cache, type CacheOutcome } from "./cache";
+import { may, principalOf, type Principal } from "@odu/cordis/principal";
 import { CACHE_MOUNT } from "./paths";
 import { cacheRoutes } from "./routes";
 import {
@@ -159,17 +159,30 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
     );
 
   /**
-   * ONE ADMINISTRATIVE ANSWER, with this ROW's authority rule applied first.
+   * HOW this caller may act — the row's one construction of `Authority`.
    *
-   * The cache's rule: administration needs an `admin` — or the operator's root
-   * token, which is the rule when no identity provider is mounted and therefore
-   * the only one a loopback daemon has. A signed-in MEMBER is refused here, by
-   * the row that decided what administration means, and the engine never sees
-   * the call.
+   * A signed-in person is a ROLE the row has already checked (or not, for a
+   * read); the local owner is the operator's ROOT TOKEN. The engine cannot turn
+   * one into the other, because they are different arms.
    */
+  const authorityOf = (
+    principal: Principal,
+    input: { rootToken: string },
+  ): Authority =>
+    principal.kind === "user"
+      ? { kind: "role", login: principal.login }
+      : { kind: "root", rootToken: input.rootToken };
+
+  /** One answer, with this ROW's authority rule applied first.
+   *
+   *  The cache's rule: ADMINISTRATION needs an `admin` — or the operator's root
+   *  token, which is the rule when no identity provider is mounted and therefore
+   *  the only one a loopback daemon has. A signed-in MEMBER is refused here, by
+   *  the row that decided what administration means, and the engine never sees
+   *  the call. */
   const admin = <A, B>(
     input: { rootToken: string },
-    work: (authority: AdminAuthority) => Promise<CacheOutcome<A>>,
+    work: (authority: Authority) => Promise<CacheOutcome<A>>,
     map: (value: A) => B,
   ): Effect.Effect<B, CacheRefused> =>
     Effect.flatMap(principalOf, (principal) => {
@@ -183,12 +196,21 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
           }),
         );
       }
-      const authority: AdminAuthority =
-        principal.kind === "user"
-          ? { rootToken: "", viaRole: true }
-          : { rootToken: input.rootToken };
-      return answer(() => work(authority), map);
+      return answer(() => work(authorityOf(principal, input)), map);
     });
+
+  /** A READ any signed-in person may make: a bucket's rows, its URL and key.
+   *
+   *  No floor above "signed in" — the gate has already refused an anonymous
+   *  connection — and the root token still applies to a local caller. */
+  const member = <A, B>(
+    input: { rootToken: string },
+    work: (authority: Authority) => Promise<CacheOutcome<A>>,
+    map: (value: A) => B,
+  ): Effect.Effect<B, CacheRefused> =>
+    Effect.flatMap(principalOf, (principal) =>
+      answer(() => work(authorityOf(principal, input)), map),
+    );
 
   const deps: CacheSurfaceDeps = {
     collections: {
@@ -211,7 +233,7 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
             input,
             (authority) =>
               cache.admin.create({
-                ...authority,
+                authority,
                 name: input.name,
                 public: input.public,
                 retentionDays: input.retentionDays,
@@ -223,9 +245,9 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
             (facts) => rowOf(facts),
           ),
         list: ({ input }) =>
-          admin(
+          member(
             input,
-            (authority) => cache.admin.list(authority),
+            (authority) => cache.admin.list({ authority }),
             (buckets) => ({
               buckets: buckets.map((facts) => rowOf(facts)),
             }),
@@ -255,7 +277,7 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
             input,
             (authority) =>
               cache.admin.tokenMint({
-                ...authority,
+                authority,
                 bucket: input.bucket,
                 bucketGlob: input.bucketGlob ?? null,
                 scope: input.scope,
@@ -268,7 +290,7 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
             input,
             (authority) =>
               cache.admin.tokenList({
-                ...authority,
+                authority,
                 bucket: input.bucket ?? null,
               }),
             (tokens) => ({ tokens: tokens.map((facts) => facts) }),
@@ -276,7 +298,7 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
         revoke: ({ input }) =>
           admin(
             input,
-            (authority) => cache.admin.tokenRevoke({ ...authority, id: input.id }),
+            (authority) => cache.admin.tokenRevoke({ authority, id: input.id }),
             (it) => it,
           ),
       },
@@ -286,7 +308,7 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
             input,
             (authority) =>
               cache.admin.pin({
-                ...authority,
+                authority,
                 bucket: input.bucket,
                 name: input.name,
                 paths: input.paths,
@@ -300,7 +322,7 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
             input,
             (authority) =>
               cache.admin.gc({
-                ...authority,
+                authority,
                 bucket: input.bucket ?? null,
               }),
             (report) => report,
@@ -310,7 +332,7 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
         read: ({ input }) =>
           admin(
             input,
-            (authority) => cache.admin.stats(authority),
+            (authority) => cache.admin.stats({ authority }),
             (stats) => ({
               ...stats,
               buckets: stats.buckets.map((facts) => rowOf(facts)),

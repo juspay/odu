@@ -17,6 +17,13 @@ import { base32 } from "./narinfo";
 import { type Cache, createCache } from "./cache";
 import { FakeStore, hashOf } from "../test/fakeStore";
 
+/** An admin call authorised by the OPERATOR'S ROOT TOKEN — the arm a loopback
+ *  daemon uses. The engine takes an `Authority`, so every test call names which
+ *  arm it means. */
+const asRoot = (rootToken: string) => ({
+  authority: { kind: "root" as const, rootToken },
+});
+
 const ROOT = "root-token";
 const NOW = 1_700_000_000_000;
 
@@ -84,7 +91,7 @@ const narinfoText = (
   ].join("\n");
 
 const createInput = {
-  rootToken: ROOT,
+  ...asRoot(ROOT),
   name: "main",
   public: true,
   retentionDays: 30,
@@ -96,13 +103,13 @@ describe("the root token", () => {
     const cache = cacheWith(null);
     const attempts = [
       cache.admin.create(createInput),
-      cache.admin.list({ rootToken: ROOT }),
-      cache.admin.tokenMint({ rootToken: ROOT, bucket: "main", bucketGlob: null, scope: "write", expiresDays: null }),
-      cache.admin.tokenList({ rootToken: ROOT, bucket: null }),
-      cache.admin.tokenRevoke({ rootToken: ROOT, id: "x" }),
-      cache.admin.pin({ rootToken: ROOT, bucket: "main", name: "p", paths: ["/nix/store/x"] }),
-      cache.admin.gc({ rootToken: ROOT, bucket: null }),
-      cache.admin.stats({ rootToken: ROOT }),
+      cache.admin.list(asRoot(ROOT)),
+      cache.admin.tokenMint({ ...asRoot(ROOT), bucket: "main", bucketGlob: null, scope: "write", expiresDays: null }),
+      cache.admin.tokenList({ ...asRoot(ROOT), bucket: null }),
+      cache.admin.tokenRevoke({ ...asRoot(ROOT), id: "x" }),
+      cache.admin.pin({ ...asRoot(ROOT), bucket: "main", name: "p", paths: ["/nix/store/x"] }),
+      cache.admin.gc({ ...asRoot(ROOT), bucket: null }),
+      cache.admin.stats(asRoot(ROOT)),
     ];
     for (const attempt of attempts) {
       expect(await attempt).toMatchObject({ ok: false, code: "no_root_token" });
@@ -112,17 +119,17 @@ describe("the root token", () => {
 
   it("refuses a wrong token, and says which of the two it is", async () => {
     const absent = cacheWith(null);
-    expect(await absent.admin.list({ rootToken: "" })).toMatchObject({
+    expect(await absent.admin.list(asRoot(""))).toMatchObject({
       ok: false,
       code: "no_root_token",
     });
-    expect((await absent.admin.list({ rootToken: "" })) as { message: string }).toMatchObject({
+    expect((await absent.admin.list(asRoot(""))) as { message: string }).toMatchObject({
       message: expect.stringContaining("without a root token"),
     });
     absent.close();
 
     const present = cacheWith(ROOT);
-    const refused = await present.admin.list({ rootToken: "nope" });
+    const refused = await present.admin.list(asRoot("nope"));
     expect(refused).toMatchObject({ ok: false, code: "no_root_token" });
     expect((refused as { message: string }).message).toContain("does not match");
     present.close();
@@ -130,7 +137,7 @@ describe("the root token", () => {
 
   it("does not let an empty configured token become a credential", async () => {
     const cache = cacheWith("");
-    expect(await cache.admin.list({ rootToken: "" })).toMatchObject({
+    expect(await cache.admin.list(asRoot(""))).toMatchObject({
       ok: false,
       code: "no_root_token",
     });
@@ -210,7 +217,7 @@ describe("tokenMint", () => {
     await cache.admin.create(createInput);
     const mint = (expiresDays: number | null) =>
       cache.admin.tokenMint({
-        rootToken: ROOT,
+        ...asRoot(ROOT),
         bucket: "main",
         bucketGlob: null,
         scope: "write",
@@ -228,7 +235,7 @@ describe("tokenMint", () => {
     const cache = cacheWith(ROOT);
     await cache.admin.create(createInput);
     const minted = await cache.admin.tokenMint({
-      rootToken: ROOT,
+      ...asRoot(ROOT),
       bucket: "main",
       bucketGlob: "team-*",
       scope: "write",
@@ -239,10 +246,10 @@ describe("tokenMint", () => {
     expect(minted.value.facts.bucketGlob).toBe("team-*");
     // The glob is the authorisation: it covers `team-ci`, and it does NOT cover
     // the bucket the token was minted under.
-    const listed = await cache.admin.tokenList({ rootToken: ROOT, bucket: "team-ci" });
+    const listed = await cache.admin.tokenList({ ...asRoot(ROOT), bucket: "team-ci" });
     expect(listed).toMatchObject({ ok: true });
     if (listed.ok) expect(listed.value).toHaveLength(1);
-    const elsewhere = await cache.admin.tokenList({ rootToken: ROOT, bucket: "main" });
+    const elsewhere = await cache.admin.tokenList({ ...asRoot(ROOT), bucket: "main" });
     if (elsewhere.ok) expect(elsewhere.value).toHaveLength(0);
     cache.close();
   });
@@ -252,7 +259,7 @@ describe("tokenMint", () => {
     await cache.admin.create(createInput);
     expect(
       await cache.admin.tokenMint({
-        rootToken: ROOT,
+        ...asRoot(ROOT),
         bucket: "main",
         bucketGlob: "Main!",
         scope: "write",
@@ -268,7 +275,7 @@ describe("pin", () => {
     const cache = cacheWith(ROOT);
     await cache.admin.create(createInput);
     const refused = await cache.admin.pin({
-      rootToken: ROOT,
+      ...asRoot(ROOT),
       bucket: "main",
       name: "p",
       paths: ["/nix/store/00000000000000000000000000000000-absent"],
@@ -287,7 +294,7 @@ describe("pin", () => {
     store.add({ storePath: parent, narHash: `sha256:${"2".repeat(52)}`, narSize: 1, references: [child] });
 
     const pinned = await cache.admin.pin({
-      rootToken: ROOT,
+      ...asRoot(ROOT),
       bucket: "main",
       name: "release-1",
       paths: [parent],
@@ -305,7 +312,7 @@ describe("stats", () => {
   it("counts in SQL rather than loading every row", async () => {
     const cache = cacheWith(ROOT);
     await cache.admin.create(createInput);
-    const stats = await cache.admin.stats({ rootToken: ROOT });
+    const stats = await cache.admin.stats(asRoot(ROOT));
     expect(stats).toMatchObject({
       ok: true,
       value: { objects: 0, bytes: 0, hits: 0, lastAccessed: null },
@@ -357,7 +364,7 @@ describe("a restart", () => {
     );
     expect(late).toMatchObject({ ok: true, status: 200 });
 
-    const stats = await second.admin.stats({ rootToken: ROOT });
+    const stats = await second.admin.stats(asRoot(ROOT));
     // Two: the child this call recorded, and the parent the recovered seed
     // unblocked.
     expect(stats).toMatchObject({ ok: true, value: { objects: 2 } });
@@ -391,8 +398,8 @@ describe("gc and pin", () => {
       return closure(paths);
     };
 
-    const pinning = cache.admin.pin({ rootToken: ROOT, bucket: "main", name: "keep", paths: [target] });
-    const collecting = cache.admin.gc({ rootToken: ROOT, bucket: null });
+    const pinning = cache.admin.pin({ ...asRoot(ROOT), bucket: "main", name: "keep", paths: [target] });
+    const collecting = cache.admin.gc({ ...asRoot(ROOT), bucket: null });
     gate.resolve();
     const [pinned, collected] = await Promise.all([pinning, collecting]);
 

@@ -180,6 +180,29 @@ describe("signed in: the role is the rule", () => {
     }
   });
 
+  it("a member may LIST buckets — the board is not an admin's to read", async () => {
+    const { client, close } = face(ROOT);
+    try {
+      const created = await ask(client.surface.bucket.create({ ...bucketInput, rootToken: ROOT }));
+      expect(created.ok).toBe(true);
+      const listed = await ask(
+        client.surface.bucket.list({ rootToken: "" }),
+        signedIn("member"),
+      );
+      expect(listed.ok).toBe(true);
+      if (!listed.ok) return;
+      expect(listed.value.buckets.map((bucket) => bucket.name)).toEqual([bucketInput.name]);
+      // …while ADMINISTRATION stays refused at the same role.
+      const refused = await ask(
+        client.surface.bucket.create({ ...bucketInput, name: "team-two", rootToken: "" }),
+        signedIn("member"),
+      );
+      expect(refused.ok).toBe(false);
+    } finally {
+      close();
+    }
+  });
+
   it("a member may still read a bucket's public identity", async () => {
     const { client, close } = face(ROOT);
     try {

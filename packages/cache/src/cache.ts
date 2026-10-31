@@ -119,19 +119,18 @@ export type CacheOutcome<T> =
   | { ok: false; code: CacheRefusalCode; message: string };
 
 /**
- * HOW AN ADMINISTRATIVE CALL WAS AUTHORISED.
+ * HOW A CALL WAS AUTHORISED — and the union is the point.
  *
- * Two arms, and the row chooses: an operator's ROOT TOKEN, or a signed-in
- * person's ROLE, which the row has already checked before it calls the engine.
- * The engine does not know what a role is — `cache` decides what an `admin` may
- * do, and this is that decision's arrival at the data.
+ * The row builds it, once, from the caller's principal: an operator's ROOT
+ * TOKEN, or a signed-in person whose ROLE the row already checked. The engine
+ * cannot mistake one for the other and cannot be handed a flag that says "trust
+ * me": `role` is a different arm, and a caller that is not the row has no way to
+ * *be* a role. The engine does not know what a role means — `cache` decides what
+ * an `admin` may do, and this is that decision's arrival at the data.
  */
-export interface AdminAuthority {
-  rootToken: string;
-  /** Set by the row when a signed-in `admin` or `owner` is asking. See
-   *  `requireRoot`. */
-  viaRole?: boolean;
-}
+export type Authority =
+  | { readonly kind: "root"; readonly rootToken: string }
+  | { readonly kind: "role"; readonly login: string };
 
 /** The admin face, structurally the service's `CacheAdmin` port. */
 export interface CacheAdmin {
@@ -139,13 +138,13 @@ export interface CacheAdmin {
    *  here because this is the object the composition root hands the service,
    *  and the service is what prefixes a bucket's substituter URL. */
   readonly mount: string;
-  create(input: AdminAuthority & {
+  create(input: { authority: Authority;
     name: string;
     public: boolean;
     retentionDays: number;
     upstreamKeys: readonly string[];
   }): Promise<CacheOutcome<BucketFacts>>;
-  list(input: AdminAuthority): Promise<CacheOutcome<readonly BucketFacts[]>>;
+  list(input: { authority: Authority }): Promise<CacheOutcome<readonly BucketFacts[]>>;
   /**
    * One bucket's PUBLIC identity — its URL and the key a client has to trust —
    * with no root token.
@@ -157,26 +156,26 @@ export interface CacheAdmin {
    * capability, the same way it is in the substituter URL.
    */
   describe(input: { bucket: string }): Promise<CacheOutcome<BucketIdentity>>;
-  tokenMint(input: AdminAuthority & {
+  tokenMint(input: { authority: Authority;
     bucket: string;
     /** A glob, so one token can cover `team-*`. Absent means the bucket. */
     bucketGlob: string | null;
     scope: Scope;
     expiresDays: number | null;
   }): Promise<CacheOutcome<TokenMinted>>;
-  tokenList(input: AdminAuthority & {
+  tokenList(input: { authority: Authority;
     bucket: string | null;
   }): Promise<CacheOutcome<readonly TokenFacts[]>>;
-  tokenRevoke(input: AdminAuthority & {
+  tokenRevoke(input: { authority: Authority;
     id: string;
   }): Promise<CacheOutcome<{ id: string; revoked: boolean }>>;
-  pin(input: AdminAuthority & {
+  pin(input: { authority: Authority;
     bucket: string;
     name: string;
     paths: readonly string[];
   }): Promise<CacheOutcome<PinFacts>>;
-  gc(input: AdminAuthority & { bucket: string | null }): Promise<CacheOutcome<GcReport>>;
-  stats(input: AdminAuthority): Promise<CacheOutcome<CacheStats>>;
+  gc(input: { authority: Authority; bucket: string | null }): Promise<CacheOutcome<GcReport>>;
+  stats(input: { authority: Authority }): Promise<CacheOutcome<CacheStats>>;
   /**
    * ONE PAGE of a bucket's stored paths, newest first.
    *
@@ -297,18 +296,15 @@ export function createCache(options: CacheOptions): Cache {
   /**
    * MAY THIS CALL ADMINISTER A BUCKET?
    *
-   * Two answers, and exactly one applies. A `viaRole` call is one the ROW
+   * Two answers, and exactly one applies. A `role` authority is one the ROW
    * already decided: it read the connection's principal and found an `admin` or
    * an `owner`, so there is no operator secret to compare — a daemon with an
    * identity provider mounted need not have a root token at all. Otherwise the
    * root token is the rule, which is loopback mode and the operator's bootstrap.
    */
-  function requireRoot(input: {
-    rootToken: string;
-    viaRole?: boolean;
-  }): CacheOutcome<null> {
-    if (input.viaRole === true) return { ok: true, value: null };
-    if (!rootTokenMatches(options.rootToken, input.rootToken)) {
+  function requireRoot(input: { authority: Authority }): CacheOutcome<null> {
+    if (input.authority.kind === "role") return { ok: true, value: null };
+    if (!rootTokenMatches(options.rootToken, input.authority.rootToken)) {
       return {
         ok: false,
         code: "no_root_token",

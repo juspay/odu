@@ -59,6 +59,10 @@ const layers: RowRoutes[] = [];
 const routesStub: HttpRoutes = {
   add: (routes) => {
     layers.push(routes);
+    return () => {
+      const at = layers.indexOf(routes);
+      if (at !== -1) layers.splice(at, 1);
+    };
   },
   layers: () => layers,
 };

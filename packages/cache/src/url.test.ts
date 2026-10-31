@@ -18,6 +18,13 @@ import { createCache, type Cache } from "./cache";
 import { cacheServer } from "./server";
 import type { CacheBucket } from "./surface";
 
+/** An admin call authorised by the OPERATOR'S ROOT TOKEN — the arm a loopback
+ *  daemon uses. The engine takes an `Authority`, so every test call names which
+ *  arm it means. */
+const asRoot = (rootToken: string) => ({
+  authority: { kind: "root" as const, rootToken },
+});
+
 const BOUND = "http://127.0.0.1:18440";
 const PUBLIC = "https://cache.example.com";
 
@@ -63,7 +70,7 @@ describe("the substituter URL a bucket publishes", () => {
     for (const origin of [BOUND, PUBLIC]) {
       const { cache, published, publish } = await row(origin);
       const created = await cache.admin.create({
-        rootToken: "root-token",
+        ...asRoot("root-token"),
         name: "main",
         public: true,
         retentionDays: 30,
@@ -80,7 +87,7 @@ describe("the substituter URL a bucket publishes", () => {
   it("is on every row the board reads, including a bucket made before it attached", async () => {
     const { cache, published, publish } = await row(PUBLIC);
     await cache.admin.create({
-      rootToken: "root-token",
+      ...asRoot("root-token"),
       name: "early",
       public: false,
       retentionDays: 0,
