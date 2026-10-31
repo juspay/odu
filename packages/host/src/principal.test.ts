@@ -1,16 +1,16 @@
 /**
- * THE DOOR, FROM THE HOST'S SIDE — the gate in front of the handlers, and the
- * two ways a request arrives with a credential.
+ * THE DOOR, FROM THE HOST'S SIDE — the gate in front of the handlers, the two
+ * HTTP legs, and the absence rule that makes the switch safe.
  *
  * `serveSurfaceApp` cannot refuse an upgrade, so a connection with no session is
  * served a daemon that answers NOTHING but the identity reads: this suite pins
  * that, and the rule that makes it safe — a session that ENDS takes effect on
- * the next call and INTERRUPTS every subscription already open, because that is
- * what the lease's `ended` does.
+ * the next call and INTERRUPTS every subscription already open.
  *
- * And the HTTP leg: an anonymous `/mcp` POST is answered `401` when an identity
- * provider is mounted, and untouched when none is (loopback mode's existing MCP
- * clients are the guard).
+ * The third thing here is the one the round-1 review called the PR's most
+ * serious: with a door CONFIGURED and no resolver registered, a caller is
+ * nobody. A door whose row is restarting must refuse, never fall open onto the
+ * local owner.
  */
 
 import { describe, expect, it } from "bun:test";
@@ -22,10 +22,17 @@ import {
   CurrentPrincipal,
   localBroker,
   makeLease,
+  NOBODY_ADMISSION,
   type Admission,
   type PrincipalBroker,
 } from "@odu/cordis/principal";
-import { admissionDispatch, admissionStore, bearerGate, gatedHandlers } from "./principal";
+import {
+  admissionDispatch,
+  admissionStore,
+  doorGate,
+  gatedHandlers,
+  liveDispatch,
+} from "./principal";
 
 const MEMBER = { kind: "user", login: "srid", role: "member" } as const;
 
@@ -38,8 +45,7 @@ const handlers: SurfaceHandlers = {
 };
 
 /** The gated record, with the shape each member produced narrowed. A handler's
- *  value is one of two forms, and the gate must preserve which — so the tests
- *  read it the same way the runtime does. */
+ *  value is one of two forms, and the gate must preserve which. */
 function gated() {
   const served = gatedHandlers(handlers);
   const effectOf = (tag: string): SurfaceHandler => (payload) => {
@@ -60,9 +66,7 @@ function gated() {
 }
 
 function run<A>(effect: Effect.Effect<A, unknown>, admission: Admission) {
-  return Effect.runPromise(
-    Effect.exit(Effect.provideService(effect, CurrentPrincipal, admission)),
-  );
+  return Effect.runPromise(Effect.exit(Effect.provideService(effect, CurrentPrincipal, admission)));
 }
 
 describe("the gate", () => {
@@ -128,62 +132,111 @@ describe("the gate", () => {
   });
 });
 
+describe("the absence rule", () => {
+  it("is the local owner with NO door, and nobody with one", () => {
+    const loopback = localBroker();
+    expect(loopback.hasDoor()).toBe(false);
+    expect(loopback.acquire({})?.principal).toEqual({ kind: "local" });
+    expect(loopback.authorize(undefined)).toEqual({ kind: "local" });
+
+    // A door is CONFIGURED and the row has not registered (it is starting, or
+    // it failed). The daemon must refuse, never fall open.
+    const door = localBroker({ door: true });
+    expect(door.hasDoor()).toBe(true);
+    expect(door.mounted()).toBe(false);
+    expect(door.acquire({})).toBeNull();
+    expect(door.authorize(undefined)).toBeNull();
+  });
+});
+
 /** A request the middleware can read: headers and path are the only fields this
  *  seam touches. */
 const request = (headers: Record<string, string>, url: string) =>
   ({ headers, url }) as unknown as HttpServerRequest.HttpServerRequest;
 
-/** Run an app through the middleware and read its status. */
+/** Run an app through the middleware and read its status. The app answers 299 —
+ *  a status nothing else uses — so "the middleware intervened" and "the app was
+ *  reached" cannot be confused. */
 async function through(
   broker: PrincipalBroker,
   headers: Record<string, string>,
-  url = "/mcp",
+  url = "/",
 ): Promise<number> {
-  const app = Effect.succeed(HttpServerResponse.text("served"));
+  const app = Effect.succeed(HttpServerResponse.text("served", { status: 299 }));
+  const gate = doorGate({
+    broker,
+    mcpPath: "/mcp",
+    shellPaths: ["/", "/index.html"],
+    signInPage: () => "<title>Sign in to odu</title>",
+  });
   return Effect.runPromise(
     Effect.map(
-      Effect.provideService(
-        bearerGate(broker, "/mcp")(app),
-        HttpServerRequest.HttpServerRequest,
-        request(headers, url),
-      ),
+      Effect.provideService(gate(app), HttpServerRequest.HttpServerRequest, request(headers, url)),
       (response) => response.status,
     ),
   );
 }
 
-describe("the HTTP leg", () => {
-  it("asks nothing in loopback mode", async () => {
-    expect(await through(localBroker(), {})).toBe(200);
+/** A broker with a door whose resolver answers ONE session cookie. */
+function doorWithSession(cookie: string): PrincipalBroker {
+  const broker = localBroker({ door: true });
+  broker.register({
+    acquire: (headers) =>
+      headers["cookie"] === `odu_session=${cookie}` ? makeLease(MEMBER).lease : null,
+    authorize: (authorization) =>
+      authorization === "Bearer good" ? MEMBER : null,
+  });
+  return broker;
+}
+
+describe("the HTTP legs", () => {
+  it("asks nothing at all in loopback mode", async () => {
+    expect(await through(localBroker(), {}, "/")).toBe(299);
+    expect(await through(localBroker(), {}, "/mcp")).toBe(299);
   });
 
-  it("refuses an anonymous POST once a resolver is mounted", async () => {
-    const broker = localBroker();
-    broker.register({ acquire: () => null, authorize: () => null });
-    expect(await through(broker, {})).toBe(401);
-    expect(await through(broker, { authorization: "Bearer nope" })).toBe(401);
+  it("refuses an anonymous /mcp POST once a door is configured", async () => {
+    expect(await through(doorWithSession("s3cret"), {}, "/mcp")).toBe(401);
+    expect(await through(doorWithSession("s3cret"), { authorization: "Bearer nope" }, "/mcp")).toBe(
+      401,
+    );
   });
 
   it("admits a Bearer the resolver recognises", async () => {
-    const broker = localBroker();
-    broker.register({
-      acquire: () => null,
-      authorize: (authorization) => (authorization === "Bearer good" ? MEMBER : null),
-    });
-    expect(await through(broker, { authorization: "Bearer good" })).toBe(200);
+    expect(
+      await through(doorWithSession("s3cret"), { authorization: "Bearer good" }, "/mcp"),
+    ).toBe(299);
   });
 
-  it("does not touch a non-MCP path", async () => {
-    const broker = localBroker();
-    broker.register({ acquire: () => null, authorize: () => null });
-    expect(await through(broker, {}, "/")).toBe(200);
+  it("answers an anonymous browser with the server-rendered sign-in page", async () => {
+    // 200 is the PAGE's status; the app's 299 is what a served shell answers.
+    expect(await through(doorWithSession("s3cret"), {}, "/")).toBe(200);
+    expect(await through(doorWithSession("s3cret"), {}, "/index.html")).toBe(200);
+  });
+
+  it("serves the shell to a live session", async () => {
+    expect(await through(doorWithSession("s3cret"), { cookie: "odu_session=s3cret" }, "/")).toBe(
+      299,
+    );
+  });
+
+  it("refuses a shell path on a door daemon whose row is not registered", async () => {
+    // The case the review called failing-open: configured, no resolver.
+    expect(await through(localBroker({ door: true }), {}, "/")).toBe(200);
+    expect(await through(localBroker({ door: true }), {}, "/mcp")).toBe(401);
+  });
+
+  it("does not touch the cache's paths or the sign-in routes", async () => {
+    const broker = doorWithSession("s3cret");
+    expect(await through(broker, {}, "/cache/main/nix-cache-info")).toBe(299);
+    expect(await through(broker, {}, "/auth/github")).toBe(299);
+    expect(await through(broker, {}, "/assets/app.js")).toBe(299);
   });
 });
 
 describe("the MCP dispatch", () => {
-  it("provides the request's admission to the call it wraps", async () => {
-    const store = admissionStore();
-    const dispatch = admissionDispatch(
+  const dispatch = (store: ReturnType<typeof admissionStore>) =>
+    admissionDispatch(
       {
         unary: () =>
           Effect.map(Effect.serviceOption(CurrentPrincipal), (held) =>
@@ -197,9 +250,28 @@ describe("the MCP dispatch", () => {
       store,
     );
 
+  it("provides the request's admission to the call it wraps", async () => {
+    const store = admissionStore();
     const user = admissionFor(makeLease(MEMBER).lease);
-    expect(await store.run(user, () => Effect.runPromise(dispatch.unary("t", null)))).toBe("user");
-    // Outside the request, the absence rule stands — loopback's local owner.
-    expect(await Effect.runPromise(dispatch.unary("t", null))).toBe("local");
+    expect(
+      await store.run(user, () => Effect.runPromise(dispatch(store).unary("t", null))),
+    ).toBe("user");
+  });
+
+  it("falls back to what the composition root chose — local, or nobody", async () => {
+    const loopback = admissionStore();
+    expect(await Effect.runPromise(dispatch(loopback).unary("t", null))).toBe("local");
+    const door = admissionStore(NOBODY_ADMISSION);
+    expect(await Effect.runPromise(dispatch(door).unary("t", null))).toBe("refused");
+  });
+});
+
+describe("the live dispatch", () => {
+  it("reads the handler record at each call", async () => {
+    let current: SurfaceHandlers = { "surface/runs/get": () => Effect.succeed("first") };
+    const dispatch = liveDispatch(() => current);
+    expect(await Effect.runPromise(dispatch.unary("surface/runs/get", null))).toBe("first");
+    current = { "surface/runs/get": () => Effect.succeed("second") };
+    expect(await Effect.runPromise(dispatch.unary("surface/runs/get", null))).toBe("second");
   });
 });

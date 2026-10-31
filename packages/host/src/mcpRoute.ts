@@ -67,7 +67,7 @@ import {
 import type { SurfaceDispatch } from "@kolu/surface/link";
 import { isAllowedWsOrigin } from "@kolu/surface/ws-origin";
 import type { RowAgent } from "@odu/cordis/services";
-import type { Admission, PrincipalBroker } from "@odu/cordis/principal";
+import { requestAdmission, type PrincipalBroker } from "@odu/cordis/principal";
 import type { AdmissionStore } from "./principal";
 import { Effect } from "effect";
 import { HttpRouter, HttpServerResponse } from "effect/http";
@@ -433,11 +433,7 @@ export function mcpRoute(
             { status: 401 },
           );
         }
-        const admission: Admission = {
-          principal,
-          live: () => true,
-          ended: Effect.never,
-        };
+        const admission = requestAdmission(principal);
         const body = yield* Effect.result(request.json);
         if (body._tag === "Failure") {
           return yield* Effect.orDie(

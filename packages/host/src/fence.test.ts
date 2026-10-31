@@ -89,6 +89,8 @@ const declaration = {
       "packages/cli/src/wire.ts": 2,
       "packages/execution/src/coordinator/spawn.ts": 1,
       "packages/execution/src/runner/workspace.ts": 22,
+      // `cache-control` on two responses — an HTTP header, not a bucket.
+      "packages/host/src/principal.ts": 2,
       "packages/launch/src/webDaemonLaunch.ts": 1,
       "packages/web-acceptance/support/corpus.ts": 5,
       "packages/web-acceptance/support/world.ts": 5,
@@ -104,17 +106,15 @@ const declaration = {
     auth: {
       "packages/cache/src/cache.ts": 2,
       "packages/ci/src/protect.ts": 2,
-      "packages/ci/src/row.ts": 6,
       "packages/cli/src/serviceMcp.ts": 4,
       "packages/cli/src/wire.ts": 2,
-      "packages/cordis/src/services.ts": 2,
+      "packages/service/src/service.ts": 1,
+      // The 401's sentence names the command a person runs to fix it.
       "packages/host/src/principal.ts": 1,
-      "packages/service-client/src/surface.ts": 2,
-      "packages/service/src/service.ts": 4,
       // The harness names the row's world: a scenario's tags say whether the
       // browser meets a door, and the stub's environment is the door's.
       "packages/web-acceptance/support/authWorld.ts": 1,
-      "packages/web-acceptance/support/hooks.ts": 1,
+      "packages/web-acceptance/support/hooks.ts": 3,
     },
   },
   // A MODULE THAT HOLDS LIVE STATE BEHIND A DOOR, and why: the spawn module's
@@ -196,8 +196,20 @@ describe("three rows, and the third one has no importers but the roots", () => {
     expect(Object.keys(FENCE_ROWS).sort()).toEqual(["auth", "cache", "ci"]);
   });
 
-  it("ci and cache do not depend on auth", () => {
-    for (const member of ["packages/ci", "packages/cache"]) {
+  it("no package of the ci or cache row depends on auth", () => {
+    // EVERY member of those rows, read off the manifests — not the two
+    // directories somebody remembered. A row is a set of packages, and a
+    // dependency added to any one of them is the import the fence exists to
+    // refuse.
+    const members = ["ci", "cache"]
+      .flatMap((row) => FENCE_ROWS[row] ?? [])
+      // `packages/cli` projects EVERY row's argv face (it names
+      // `@odu/cache/cli` for the same reason), so it is a root-shaped member
+      // rather than one row's engine. The engines are what must not reach the
+      // door.
+      .filter((member) => member !== "packages/cli");
+    expect(members.length).toBeGreaterThan(2);
+    for (const member of members) {
       expect(
         Object.keys(manifestOf(member).dependencies ?? {}),
         `${member} declares @odu/auth`,

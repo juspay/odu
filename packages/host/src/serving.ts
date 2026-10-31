@@ -52,19 +52,19 @@ export interface ServingParts<Svc = never, H extends string = never> {
   allowedOrigins: ReadonlyArray<string>;
   host: string;
   port: number;
-  /** The request headers a websocket connection is read under. odu names
-   *  `cookie` (the session a sign-in wrote) and nothing else, so the upgrade's
-   *  whole header bag — including any `Authorization` a browser might carry —
-   *  is unreachable from the connection. */
+  /** The request headers a websocket connection is read under. odu names TWO —
+   *  `cookie`, the session a sign-in wrote, and `authorization`, the personal
+   *  token a CLI or an agent presents on the upgrade — and nothing else, so the
+   *  rest of the upgrade's header bag is unreachable from the connection. */
   upgradeHeaders?: UpgradeHeadersSource<H>;
   /** Services ONE connection's handlers may require — the seam a per-connection
    *  fact rides, and where odu provides the connection's {@link
    *  CurrentPrincipal}. A layer, so the connection's lease is acquired and
    *  released with the connection's own scope. */
   services?: (connection: SurfaceAppConnection<H>) => Layer.Layer<Svc>;
-  /** Wrap every HTTP request. odu uses it as the second door's refusal: the
-   *  MCP endpoint takes a Bearer token per request, and an anonymous one is
-   *  answered `401` here. */
+  /** Wrap every HTTP request. odu uses it for both HTTP legs of the door: an
+   *  anonymous MCP POST is `401`, and an anonymous browser asking for the shell
+   *  meets the sign-in page the server renders. */
   middleware?: SurfaceAppHttpMiddleware;
 }
 

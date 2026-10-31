@@ -88,18 +88,22 @@ import {
 } from "@olai/effect-cordis";
 import { readProcessIdentity, selfProcessIdentity } from "@odu/launch/processIdentity";
 import { mcpGetRoute, mcpRoute, RouteTransport, serveServiceMcpInProcess } from "./mcpRoute";
-import { directDispatch } from "@kolu/surface/links/direct";
-import { localBroker, PrincipalBroker } from "@odu/cordis/principal";
-import { authRow, readGithubConfig } from "@odu/auth/server";
+import { LOCAL_ADMISSION, localBroker, PrincipalBroker } from "@odu/cordis/principal";
+import { authRow, readGithubConfig, signInPageHtml } from "@odu/auth/server";
 import { AUTH_AGENT, AUTH_ANONYMOUS_TAGS, AUTH_KEY } from "@odu/auth/surface";
 import {
   admissionDispatch,
   admissionStore,
-  bearerGate,
   connectionLayer,
+  doorGate,
+  doorRoute,
   gatedHandlers,
+  liveDispatch,
+  NOBODY,
+  SHELL_PATHS,
   UPGRADE_HEADERS,
 } from "./principal";
+import type { SurfaceHandlers } from "@kolu/surface/server";
 import { SERVICE_MCP_PATH } from "@odu/service-client/endpoint";
 import { servingOptions } from "./serving";
 import { CI_AGENT, ciRow, CI_KEY } from "@odu/ci/row";
@@ -107,7 +111,7 @@ import { cacheRow } from "@odu/cache/server";
 import { CACHE_AGENT, CACHE_KEY } from "@odu/cache/surface";
 import type { RootedSurfacesRuntime } from "@kolu/surface/server";
 import {
-  AuthDoor,
+
   BoundOrigin,
   Build,
   Bundle,
@@ -335,6 +339,10 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
   const routes: HttpRoutes = {
     add: (layer) => {
       layers.push(layer);
+      return () => {
+        const at = layers.indexOf(layer);
+        if (at !== -1) layers.splice(at, 1);
+      };
     },
     layers: () => layers,
   };
@@ -350,15 +358,18 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
 
   const scope = Scope.makeUnsafe();
   try {
-    // THE PRINCIPAL BROKER, before any row: a row that knows how to sign
-    // somebody in registers its resolver on this in its own `apply`, and with
-    // none registered every connection is the local owner — loopback mode.
-    const principals = localBroker();
+    // THE PRINCIPAL BROKER, before any row, built from the DOOR FACT: a row that
+    // knows how to sign somebody in registers its resolver on this in its own
+    // `apply`; with none registered, this daemon is either the local owner
+    // (loopback mode) or nobody at all (a door that is not answering) — the two
+    // arms `localBroker` states.
+    const hasDoor = github.kind === "config";
+    const principals = localBroker({ door: hasDoor });
     // The per-request admission the MCP door's dispatch reads. One per tenure:
-    // the composition root makes it, and the adapter is built once over it.
-    const admissions = admissionStore();
+    // the composition root makes it, and the adapter is built once over it. Its
+    // FALLBACK is the absent-resolver rule again, for a call outside any request.
+    const admissions = admissionStore(hasDoor ? NOBODY : LOCAL_ADMISSION);
     await run(provide(host, PrincipalBroker, () => principals));
-    await run(provide(host, AuthDoor, () => github.kind === "config"));
     await run(provide(host, StateDir, () => stateRoot(process.env)));
     await run(provide(host, RootToken, () => configured(process.env.ODU_ROOT_TOKEN)));
     await run(provide(host, NixStore, () => configured(process.env.ODU_CACHE_STORE)));
@@ -414,21 +425,36 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     // THE SERVED HANDLERS, WITH THE DOOR IN FRONT OF THEM — and only the
     // SERVED ones: the control socket `daemonMain` opens is owner-only and
     // already local, so it keeps the ungated record.
-    const servedHandlers = gatedHandlers(
-      runtime.handlers,
-      github.kind === "config" ? new Set(Object.keys(AUTH_ANONYMOUS_TAGS)) : new Set(),
-    );
+    //
+    // READ AT EVERY ACCEPT, not frozen at bind: `runtime.handlers` is a live
+    // getter, and a row's mount replaces the record. `serving.ts` says the
+    // generation is read at each accept for exactly this reason, so the gated
+    // record is memoised on the IDENTITY of the record it wraps.
+    const anonymousTags = hasDoor ? new Set(Object.keys(AUTH_ANONYMOUS_TAGS)) : new Set<string>();
+    let gated: { readonly source: SurfaceHandlers; readonly handlers: SurfaceHandlers } | null =
+      null;
+    const served = (): { group: typeof runtime.group; handlers: SurfaceHandlers } => {
+      const source = runtime.handlers;
+      if (gated === null || gated.source !== source) {
+        gated = { source, handlers: gatedHandlers(source, anonymousTags) };
+      }
+      return { group: runtime.group, handlers: gated.handlers };
+    };
 
     // THE `/mcp` DOOR — the composed bundle's, so it is the TRANSPORT's and is
     // built here rather than by any one row: an adapter that served one row
     // would have to be told what the others are. The adapter and its transport
     // are one pair for the listener's life (an MCP `Server` binds exactly one
     // transport, and re-making them per request would rebuild the expose walk
-    // and the resource pusher on every call).
+    // and the resource pusher on every call). The DISPATCH behind it reads the
+    // served record per call, for the reason above.
     const transport = new RouteTransport();
     mcp = await serveServiceMcpInProcess({
       path: SERVICE_MCP_PATH,
-      dispatch: admissionDispatch(directDispatch({ handlers: servedHandlers }), admissions),
+      dispatch: admissionDispatch(
+        liveDispatch(() => served().handlers),
+        admissions,
+      ),
       version: build.oduVersion,
       transport,
       core: coreAgent(),
@@ -437,11 +463,17 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
       ),
     });
     const agentRoutes = Layer.merge(
-      mcpRoute(transport, allowedOrigins, SERVICE_MCP_PATH, {
-        store: admissions,
-        broker: principals,
-      }),
-      mcpGetRoute(SERVICE_MCP_PATH),
+      Layer.merge(
+        mcpRoute(transport, allowedOrigins, SERVICE_MCP_PATH, {
+          store: admissions,
+          broker: principals,
+        }),
+        mcpGetRoute(SERVICE_MCP_PATH),
+      ),
+      // THE DOOR FACT, the HOST'S OWN — whether this daemon has a door is a fact
+      // about its composition, and it changes with `auth`, not with the runs.
+      // The browser asks once before it draws anything.
+      doorRoute(hasDoor),
     );
     const composed = routes.layers().reduce((all, one) => Layer.merge(all, one), agentRoutes);
 
@@ -452,19 +484,26 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
           // The parts and their assembly live in `./serving`: this function owns
           // the gate, the lifetime and the teardown around the listener.
           servingOptions({
-            live: () => ({ group: runtime.group, handlers: servedHandlers }),
+            live: served,
             dist,
             host: bindHost,
             port,
             allowedOrigins,
             routes: composed,
-            // THE DOOR ITSELF. `cookie` is the one header a connection is read
-            // under; the per-connection services provide the principal its
-            // lease admits; the middleware refuses an anonymous `/mcp` POST
-            // before the adapter is entered.
+            // THE DOOR ITSELF. `cookie` and `authorization` are the two headers a
+            // connection is read under; the per-connection services provide the
+            // principal its lease admits (and ask the closer to end it); the
+            // middleware answers an anonymous `/mcp` with 401 and an anonymous
+            // browser with the server-rendered sign-in page.
             upgradeHeaders: UPGRADE_HEADERS,
             services: (connection) => connectionLayer(principals, connection),
-            middleware: bearerGate(principals, SERVICE_MCP_PATH),
+            middleware: doorGate({
+              broker: principals,
+              mcpPath: SERVICE_MCP_PATH,
+              shellPaths: SHELL_PATHS,
+              signInPage: () =>
+                signInPageHtml(),
+            }),
           }),
         ).pipe(Scope.provide(scope)),
       );
