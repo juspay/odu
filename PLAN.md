@@ -59,6 +59,13 @@ a monthly price.
   public cache (PR 3). A public cache is administered over the network, and
   the pod has no nginx to hide the board behind, so the moment the ingress is
   public, odu itself must know who is asking.
+- **The web face and the web API are the product.** `/mcp` and the surface are
+  how anything drives odu; the board is how a person does. Every verb a row
+  exposes has a web control, and **a verb that exists only in the CLI is a
+  defect of that row's face, not a roadmap item** — the CLI is a thin client
+  kept only where a shell is the natural place (a push from CI or the
+  post-build hook, `odu run` in a checkout). Parity is checked by the row's own
+  e2e: one scenario per verb, through the face.
 - **First users:** OSS projects (single public bucket), then internal teams.
   Migration tooling from Attic is out of scope.
 
@@ -456,6 +463,40 @@ State of master after merge: our deployment has an authenticated public
 board over Funnel. One org, the operator's; runs and buckets are visible to
 its members and controlled by its admins. Loopback mode is byte-for-byte what
 it was.
+
+### PR 2.5: the web face has every verb
+
+> **Docs:** The board does everything `odu` does. An admin creates a bucket
+> from the Cache view — with the upstream switch the CLI's `--no-upstream`
+> stands for — mints, lists and revokes its tokens, pins a closure and runs
+> GC without a terminal; an owner opens a people page, sees who is in, and
+> grants or changes a role.
+
+Three items the first owner hit on the pod, and then the general rule the
+decision above makes:
+
+1. **A button is enabled whenever the person may act.** `Create bucket` is
+   greyed out today because the name field is empty, and the page does not say
+   why. An empty name is refused ON CLICK with the same `fault` line the row's
+   own refusals use — the reason a person reads, not a dead control.
+2. **The empty state says what THIS person can do.** An admin is pointed at the
+   form above it; a member sees only that there are none; only a daemon with no
+   door keeps the CLI hint.
+3. **The form carries the one creation fact the pod needs:** upstream on/off
+   (the CLI's `--no-upstream`), default on, with the docs' one-line reason —
+   without it, a bucket created from the web on the pod makes every push wait
+   at the 202 until PR 3.
+
+Then the gap the rule names, by row — the verbs the face cannot reach today:
+
+| row | verbs with no web control today |
+| --- | --- |
+| cache | `token.mint`, `token.list`, `token.revoke` (per bucket, write/read scope), `pin.create`, `gc.run`, `stats.read`, and `bucket.create`'s upstream switch |
+| auth | `user.grant` — roles are granted only from the CLI; the face needs a people page an owner sees (who is in, their role, grant and change it) |
+| ci | audit `packages/ci` the same way and list what the board cannot do that `odu` can |
+
+**Evidence:** each row's e2e has a scenario per verb through the face, and the
+list above is empty for every row in it.
 
 ### PR 3: odu runs its own cache
 
