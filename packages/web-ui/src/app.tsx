@@ -22,7 +22,13 @@
  */
 
 import type { SurfaceReadout } from "@kolu/surface/solid";
-import { CiFace, ciAmbient, type CiClient, type CiRoute } from "@odu/ci/face";
+import {
+  CiFace,
+  ciAmbient,
+  type CiAmbient,
+  type CiClient,
+  type CiRoute,
+} from "@odu/ci/face";
 import { CacheFace, type CacheClient } from "@odu/cache/face";
 import {
   ProfileFace,
@@ -33,7 +39,16 @@ import {
 } from "@odu/auth/face";
 
 import { Effect } from "effect";
-import { createEffect, createMemo, createSignal, on, onCleanup, Show, type JSX } from "solid-js";
+import {
+  createEffect,
+  createMemo,
+  createRoot,
+  createSignal,
+  on,
+  onCleanup,
+  Show,
+  type JSX,
+} from "solid-js";
 import { parseRunHash, runHash, logHash } from "@odu/service-client/routes";
 import { Button } from "@odu/ci/face";
 import { faviconSvg, wireText } from "./format";
@@ -129,7 +144,12 @@ export function App(props: {
   // window. Broken outranks busy: a run still going is worth a glance, a
   // failure is worth coming back for — and it is a WORD as well as a glyph,
   // because a title read aloud is the only version of this some people get.
-  const ambient = ciAmbient(props.client);
+  //
+  // BUILT LAZILY, and that is a door fact: the monitor subscribes to `runs`, and
+  // a server with a door refuses that subscription to a connection with no
+  // session. Opening it on the sign-in page would be a subscription that dies on
+  // arrival, four times a second. So it opens when the board does.
+  const [ambient, setAmbient] = createSignal<CiAmbient | null>(null);
   const restingIcon =
     typeof document === "undefined"
       ? null
@@ -137,7 +157,13 @@ export function App(props: {
         null);
   createEffect(() => {
     if (typeof document === "undefined") return;
-    const { failing, active } = ambient.tally();
+    const held = ambient();
+    if (held === null) {
+      // Nobody is looking at runs: the tab says nothing about them.
+      document.title = "odu";
+      return;
+    }
+    const { failing, active } = held.tally();
     document.title =
       failing > 0
         ? `✗ ${failing} failing · odu`
@@ -194,6 +220,19 @@ export function App(props: {
     );
   });
   const signedIn = createMemo(() => who() !== null && who()?.kind !== "anonymous");
+  const boardShown = createMemo(() => !door() || signedIn());
+  let ambientRoot: (() => void) | undefined;
+  onCleanup(() => ambientRoot?.());
+  createEffect(() => {
+    if (!boardShown() || ambient() !== null) return;
+    // A DETACHABLE OWNER, so the monitor's subscriptions have somewhere to be
+    // disposed from when the page unmounts — created inside this effect, they
+    // would otherwise belong to whatever owner happened to be running.
+    createRoot((dispose) => {
+      ambientRoot = dispose;
+      setAmbient(ciAmbient(props.client));
+    });
+  });
 
   // ── the cache's route slice ──
   //
@@ -318,16 +357,18 @@ export function App(props: {
             onOpen={(bucket) => go({ at: "cache", bucket })}
           />
         </Show>
-        <Show when={!atCache() && !atProfile()}>
-          <CiFace
-            client={props.client}
-            route={ciRoute()}
-            now={now()}
-            call={(effect) => Effect.runPromise(effect)}
-            onRoute={(next) => go(next)}
-            ambient={ambient}
-            connecting={props.readout.status === "connecting"}
-          />
+        <Show when={!atCache() && !atProfile() ? ambient() : null}>
+          {(held) => (
+            <CiFace
+              client={props.client}
+              route={ciRoute()}
+              now={now()}
+              call={(effect) => Effect.runPromise(effect)}
+              onRoute={(next) => go(next)}
+              ambient={held()}
+              connecting={props.readout.status === "connecting"}
+            />
+          )}
         </Show>
       </Show>
     </div>
