@@ -35,6 +35,7 @@ import {
   ODU_SERVICE_MCP_INSTRUCTIONS,
 } from "@odu/service-client/verbs";
 import { BoundOrigin, Build, Bundle, DaemonHome, Log, type RowAgent, Shutdown } from "@odu/cordis/services";
+import { AuthDoor } from "@odu/cordis/services";
 import { webPorts } from "./webPorts";
 
 /** The word this row is mounted under. It is the wire's ROOT, so it has no
@@ -51,13 +52,18 @@ export const CI_AGENT: RowAgent = {
 
 export const ciRow = definePlugin({
   name: CI_KEY,
-  needs: [DaemonHome, BoundOrigin, Build, Log, Shutdown],
+  needs: [DaemonHome, BoundOrigin, Build, Log, Shutdown, AuthDoor],
   apply: Effect.gen(function* () {
     const home = yield* DaemonHome;
     const origin = yield* BoundOrigin;
     const build = yield* Build;
     const log = yield* Log;
     const shutdown = yield* Shutdown;
+    // WHETHER THIS DAEMON HAS A DOOR — the host's fact, provided before any row
+    // mounts. The runs publish it; which row supplies the door is not their
+    // business (and cannot be read off the broker here: the auth row has not
+    // registered yet, because it is waiting for the bundle this row offers).
+    const authDoor = yield* AuthDoor;
 
     // THE COMPOSITION, bound: the ports to the engine. Everything the runs must
     // CAUSE — launch, retry, cancel, the checkout probe, the pipeline, the
@@ -71,6 +77,8 @@ export const ciRow = definePlugin({
       log,
       // The frozen control fragment's `drain`, wired to the process's own stop.
       onDrain: shutdown,
+      // Whether this daemon has a door, as the host declared it.
+      auth: authDoor,
     });
 
     // A runtime that has faulted answers nothing while the process stays alive

@@ -604,10 +604,22 @@ export async function connectOrStart(
      * row, which is what lets a row import it.
      */
     group?: RpcGroup.RpcGroup<Rpc.Any>;
+    /**
+     * THE CREDENTIAL THIS MACHINE HOLDS FOR THAT ORIGIN, as upgrade headers.
+     *
+     * A server with a door answers an unauthenticated socket with nothing but
+     * its own identity, so a face that reached it without a token would look
+     * like a board with no data. Resolving it is the CLI's business (the file is
+     * `~/.config/odu/auth/credentials`, and `$ODU_TOKEN` comes first) — this
+     * package names no row and reads no environment. Absent means no credential,
+     * which is loopback and is unconditional there.
+     */
+    authorization?: (origin: string) => Promise<Record<string, string>>;
   } = {},
 ): Promise<ServiceConnection> {
   const allowStart = opts.allowStart ?? origin === serviceOrigin();
-  const existing = await dialExisting(origin, allowStart, opts.group);
+  const headers = opts.authorization === undefined ? {} : await opts.authorization(origin);
+  const existing = await dialExisting(origin, allowStart, opts.group, headers);
   if (existing !== null) return adoptOrRefuse(existing, origin);
   const outcome = await ensureService({
     origin,
@@ -626,7 +638,10 @@ export async function connectOrStart(
   // even the one `ensureService` produced after its own contract check, so
   // "adopted" means "read its cell and this build can speak to it" by
   // construction rather than by argument.
-  return adoptOrRefuse(await dialService(outcome.origin, dialOptions(opts.group)), outcome.origin);
+  return adoptOrRefuse(
+    await dialService(outcome.origin, dialOptions(opts.group, headers)),
+    outcome.origin,
+  );
 }
 
 /**
@@ -649,12 +664,16 @@ async function dialExisting(
   origin: string,
   allowStart: boolean,
   group?: RpcGroup.RpcGroup<Rpc.Any>,
+  headers: Record<string, string> = {},
 ): Promise<ServiceConnection | null> {
   try {
-    return await dialService(origin, { readyMs: ABSENCE_PROBE_MS, ...dialGroup(group) });
+    return await dialService(origin, {
+      readyMs: ABSENCE_PROBE_MS,
+      ...dialOptions(group, headers),
+    });
   } catch (err) {
     if ((await whoeverIsListening(origin)) !== null) {
-      return await dialService(origin, dialGroup(group));
+      return await dialService(origin, dialOptions(group, headers));
     }
     // Nothing is accepting. That is absence — an answer only a caller allowed
     // to bootstrap can act on; anyone else gets the dial's own sentence.
@@ -681,9 +700,17 @@ function dialGroup(group: RpcGroup.RpcGroup<Rpc.Any> | undefined): {
   return group === undefined ? {} : { group };
 }
 
-/** The same, for a dial that carries other options too. */
-function dialOptions(group: RpcGroup.RpcGroup<Rpc.Any> | undefined): {
+/** The dial options a service connection takes, from the two things a face
+ *  knows: the tags it will address, and the credential it holds. */
+function dialOptions(
+  group: RpcGroup.RpcGroup<Rpc.Any> | undefined,
+  headers: Record<string, string> = {},
+): {
   group?: RpcGroup.RpcGroup<Rpc.Any>;
+  headers?: Record<string, string>;
 } {
-  return dialGroup(group);
+  return {
+    ...dialGroup(group),
+    ...(Object.keys(headers).length === 0 ? {} : { headers }),
+  };
 }

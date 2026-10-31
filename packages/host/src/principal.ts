@@ -71,10 +71,18 @@ export const IDENTITY_TAGS: Readonly<Record<string, true>> = {
   "surface/control/hello": true,
 };
 
+/** The request headers a websocket connection is read under, named here because
+ *  the per-connection layer's type and the listener's allowlist must agree: a
+ *  browser carries a session COOKIE, and the CLI and the MCP bridge carry a
+ *  personal token as `Authorization: Bearer`. Nothing else off the upgrade is
+ *  reachable from the connection. */
+export const UPGRADE_HEADERS = ["cookie", "authorization"] as const;
+export type UpgradeHeader = (typeof UPGRADE_HEADERS)[number];
+
 /** The admission a connection runs under, from the broker's lease. */
 export function connectionLayer(
   broker: PrincipalBroker,
-  connection: SurfaceAppConnection<"cookie">,
+  connection: SurfaceAppConnection<UpgradeHeader>,
 ): Layer.Layer<CurrentPrincipal> {
   return Layer.effect(
     CurrentPrincipal,

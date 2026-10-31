@@ -26,6 +26,10 @@
 import { composedWire } from "@odu/cordis/compose";
 import { oduServiceSurface } from "@odu/service-client/surface";
 import { CACHE_KEY, oduCacheSurface } from "@odu/cache/surface";
+import { AUTH_KEY, oduAuthSurface } from "@odu/auth/surface";
+import { authorizationHeaders } from "@odu/auth/cli";
+import { connectOrStart } from "@odu/launch/webLauncher";
+import type { ServiceConnection } from "@odu/service-client/dial";
 
 /**
  * ONE FLAT GROUP: the runs' bare tags plus each sibling's prefixed ones,
@@ -33,10 +37,29 @@ import { CACHE_KEY, oduCacheSurface } from "@odu/cache/surface";
  * is a boot-time error naming both, rather than a last-writer-wins map that
  * drops one in silence.
  */
-export const SERVICE_SIBLINGS = { [CACHE_KEY]: oduCacheSurface } as const;
+export const SERVICE_SIBLINGS = {
+  [CACHE_KEY]: oduCacheSurface,
+  [AUTH_KEY]: oduAuthSurface,
+} as const;
 
 /** The same map, as the group a link encodes against. Derived from
  *  {@link SERVICE_SIBLINGS} rather than beside it: two spellings of one row set,
  *  four lines apart, is a row that can be added to one and forgotten in the
  *  other. */
 export const SERVICE_WIRE_GROUP = composedWire(oduServiceSurface, SERVICE_SIBLINGS);
+
+/**
+ * REACH THE SERVICE AS THE CREDENTIAL THIS MACHINE HOLDS FOR IT.
+ *
+ * The one way a public command should dial, so nobody has to remember it: a
+ * server with a door answers an unauthenticated socket with its identity and
+ * nothing else, and a face that forgot the token would look like a board with
+ * no data rather than like a refusal. `$ODU_TOKEN` first, then the entry
+ * `odu auth login` wrote for that origin — the same order the docs promise.
+ */
+export function connectToService(origin?: string): Promise<ServiceConnection> {
+  return connectOrStart(origin, {
+    group: SERVICE_WIRE_GROUP,
+    authorization: (resolved) => authorizationHeaders(process.env, resolved),
+  });
+}

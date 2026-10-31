@@ -19,6 +19,7 @@
 
 import { reloadForUpdate } from "@kolu/surface-app/lifecycle";
 import { connectSurfaces } from "@kolu/surface-app/solid";
+import { AUTH_KEY, oduAuthSurface } from "@odu/auth/surface";
 import { CACHE_KEY, oduCacheSurface } from "@odu/cache/surface";
 import { oduServiceSurface } from "@odu/service-client/surface";
 import { render } from "solid-js/web";
@@ -30,9 +31,11 @@ if (root === null) {
 }
 
 const connection = await connectSurfaces({
-  // The rows. `cache` is the key the daemon mounts that row at, so the client
-  // this bundle hands back addresses `surface/cache/…` without a second dial.
-  surfaces: { [CACHE_KEY]: oduCacheSurface },
+  // The rows. `cache` and `auth` are the keys the daemon mounts those rows at,
+  // so the clients this bundle hands back address `surface/cache/…` and
+  // `surface/auth/…` without a second dial. The auth row may not be mounted at
+  // all — the service cell says so, and until it does nothing asks who you are.
+  surfaces: { [CACHE_KEY]: oduCacheSurface, [AUTH_KEY]: oduAuthSurface },
   core: { surface: oduServiceSurface, name: "ci" },
   retired: reloadForUpdate,
 });
@@ -43,6 +46,7 @@ render(
       <App
         client={connection.core}
         cache={connection.clients.cache}
+        auth={connection.clients.auth}
         // The framework's readout is an accessor; read HERE, inside the render
         // root, so the compiler makes it a getter on `App`'s props and the
         // indicator keeps moving. Reading it into a `const` would freeze the

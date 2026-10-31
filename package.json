@@ -14,6 +14,7 @@
     "test:e2e-cli": "bun test ./tests/e2e"
   },
   "dependencies": {
+    "@odu/auth": "workspace:*",
     "@odu/cache": "workspace:*",
     "@odu/ci": "workspace:*",
     "@odu/cli": "workspace:*",

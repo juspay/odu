@@ -85,6 +85,15 @@ export const Shutdown = serviceTag<() => void>("odu:shutdown");
  */
 export const Bundle = serviceTag<RootedSurfacesRuntime<never>>("odu:bundle");
 
+/** Does this daemon have a door? `true` when an identity provider's row is
+ *  mounted, decided by the host when it reads the one environment it reads.
+ *
+ *  Provided BEFORE any row mounts, because the runs' row publishes it on the
+ *  service cell and cannot learn it from the broker: the row that registers a
+ *  resolver is waiting for the bundle the runs offer, so at the runs' own
+ *  `apply` time that registration has not happened. */
+export const AuthDoor = serviceTag<boolean>("odu:authDoor");
+
 /** The route layer a row owns, typed as the seam that consumes it. */
 export type RowRoutes = NonNullable<ServeSurfaceAppOptions["routes"]>;
 

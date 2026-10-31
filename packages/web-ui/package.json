@@ -13,6 +13,7 @@
     "./*.tsx": "./src/*.tsx"
   },
   "dependencies": {
+    "@odu/auth": "workspace:*",
     "@odu/cache": "workspace:*",
     "@odu/ci": "workspace:*",
     "@odu/service-client": "workspace:*",

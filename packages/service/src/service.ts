@@ -101,6 +101,10 @@ export interface ServiceOptions {
    *  supervisor's half of a live upgrade. The daemon aborts its own controller
    *  here; nothing else in this package knows how a process ends. */
   onDrain: () => void | Promise<void>;
+  /** Does this daemon have a door — is the `auth` row mounted? A fact about the
+   *  COMPOSITION, supplied by the root that mounts the rows, and published on
+   *  the service cell so a browser knows whether to ask who it is. */
+  auth?: boolean;
   refreshMs?: number;
   now?: () => number;
   /** Where a degraded-but-serving fact goes — a refresh tick that outran its
@@ -221,6 +225,7 @@ export function createOduService(opts: ServiceOptions): OduService {
     identity,
     build: opts.build,
     readiness: { state: "starting", since: startedAt, reconciled: 0 },
+    auth: opts.auth ?? false,
   });
 
   const runtime = implementRootedSurfaces(

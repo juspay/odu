@@ -24,6 +24,14 @@
 import type { SurfaceReadout } from "@kolu/surface/solid";
 import { CiFace, ciAmbient, type CiClient, type CiRoute } from "@odu/ci/face";
 import { CacheFace, type CacheClient } from "@odu/cache/face";
+import {
+  ProfileFace,
+  SignIn,
+  SignedInHeader,
+  type AuthClient,
+  type Who,
+} from "@odu/auth/face";
+
 import { Effect } from "effect";
 import { createEffect, createMemo, createSignal, onCleanup, Show, type JSX } from "solid-js";
 import { parseRunHash, runHash, logHash } from "@odu/service-client/routes";
@@ -37,16 +45,18 @@ import { faviconSvg, wireText } from "./format";
  * node's output within it linkable — is `@odu/service-client/routes`, minted and
  * read there because a link is minted by whoever holds the run (an editor, a
  * terminal, another app's panel) and opened here. What stays local is the rest of
- * this page's states: `#/` for the runs, `#/new` for the create form and
- * `#/cache[/<bucket>]` for the other row.
+ * this page's states: `#/` for the runs, `#/new` for the create form,
+ * `#/cache[/<bucket>]` for the other row, and `#/profile` for the signed-in
+ * person's sessions and tokens.
  */
-type Route = CiRoute | { at: "cache"; bucket: string | null };
+type Route = CiRoute | { at: "cache"; bucket: string | null } | { at: "profile" };
 
 function routeOf(hash: string): Route {
   const run = parseRunHash(hash);
   if (run !== null) return { at: "run", ...run };
   const rest = hash.replace(/^#\/?/, "");
   if (rest === "new") return { at: "new" };
+  if (rest === "profile") return { at: "profile" };
   if (rest === "cache") return { at: "cache", bucket: null };
   if (rest.startsWith("cache/")) {
     const name = decodeURIComponent(rest.slice("cache/".length));
@@ -61,6 +71,8 @@ function hashOf(route: Route): string {
       return "#/";
     case "new":
       return "#/new";
+    case "profile":
+      return "#/profile";
     case "run":
       return route.log === null ? runHash(route.runId) : logHash(route.log);
     case "cache":
@@ -73,6 +85,10 @@ export function App(props: {
   /** THE CACHE'S CLIENT — a different row, handed to the one face that renders
    *  it and to nothing else. */
   cache: CacheClient;
+  /** THE AUTH ROW'S CLIENT. Its surface is always dialled (the bundle carries
+   *  the contract), but the row may not be MOUNTED — the service cell says
+   *  which, and until it does nothing asks who you are. */
+  auth: AuthClient;
   readout: SurfaceReadout;
   onReload: () => void;
 }): JSX.Element {
@@ -141,6 +157,29 @@ export function App(props: {
             (restingIcon ?? link.href);
   });
 
+  // ── the door ──
+  //
+  // TWO FACTS, and both come off the wire. The service cell says whether this
+  // daemon has a door at all (a fact about ITS composition, not about us), and
+  // `whoami` says who this connection is — `anonymous` when the gate let us in
+  // without a session, which is a page before it signs in rather than an error.
+  // With no door, neither is asked and the header is exactly today's.
+  const cell = props.client.cells.service.use().value;
+  const door = createMemo(() => cell()?.auth === true);
+  const [who, setWho] = createSignal<Who | null>(null);
+  createEffect(() => {
+    if (!door() || who() !== null) return;
+    void Effect.runPromise(props.auth.procedures.user.whoami({})).then(
+      (answer) => setWho(answer.who),
+      // A failed whoami on a daemon that says it has a door is a broken
+      // connection, not a person: the wire readout already says so, and a
+      // sign-in form would be a guess. Leave the page where it is until the
+      // readout recovers and the effect runs again.
+      () => {},
+    );
+  });
+  const signedIn = createMemo(() => who() !== null && who()?.kind !== "anonymous");
+
   // ── the cache's route slice ──
   //
   // Two facts about ONE route, read where the switch needs them: whether the
@@ -148,13 +187,15 @@ export function App(props: {
   // nothing into its children, so the readings are memos rather than a
   // discriminated `route()` read inside the JSX.
   const atCache = createMemo(() => route().at === "cache");
+  const atProfile = createMemo(() => route().at === "profile");
   const openBucket = createMemo<string | null>(() => {
     const here = route();
     return here.at === "cache" ? here.bucket : null;
   });
+  const anonymous = createMemo(() => door() && who()?.kind === "anonymous");
   const ciRoute = createMemo<CiRoute>(() => {
     const here = route();
-    return here.at === "cache" ? { at: "board" } : here;
+    return here.at === "cache" || here.at === "profile" ? { at: "board" } : here;
   });
 
   // ── the shell ──
@@ -189,8 +230,8 @@ export function App(props: {
             two STATES of one page: `aria-pressed` says which, and a person
             arriving with a screen reader hears "Runs, pressed" rather than a
             navigation menu's worth of ceremony. */}
-        <nav class="rows" aria-label="board rows">
-          <Button pressed={!atCache()} onClick={() => go({ at: "board" })}>
+        <nav class="rows" aria-label="board rows" hidden={anonymous()}>
+          <Button pressed={!atCache() && !atProfile()} onClick={() => go({ at: "board" })}>
             Runs
           </Button>
           <Button
@@ -200,6 +241,18 @@ export function App(props: {
             Cache
           </Button>
         </nav>
+        {/* WHO IS SIGNED IN, and the door's two controls. Absent on a daemon
+            with no auth row — `who` is never asked there — so today's header is
+            exactly what a loopback page shows. */}
+        <Show when={who()}>
+          {(held) => (
+            <SignedInHeader
+              who={held()}
+              atProfile={atProfile()}
+              onProfile={() => go({ at: "profile" })}
+            />
+          )}
+        </Show>
         {/* The words AND the hue come from `./format`'s `CONNECTION`, so the
             shell names no status class of its own: which colour "reconnecting"
             carries is an assignment of meaning, and it belongs in the table
@@ -215,30 +268,52 @@ export function App(props: {
           </Show>
         </div>
       </header>
-      {/* ONE FACE AT A TIME, and each is BUILT ON ENTRY: the compiler turns a
-          `Show`'s children into a getter, so leaving a run and coming back
-          mints a fresh view rather than re-inserting the one that was disposed
-          on the way out — see `@odu/ci/face`'s `dom` header for the failure
-          that taught us to care. */}
-      <Show when={atCache()}>
-        <CacheFace
-          client={props.cache}
-          bucket={openBucket()}
-          now={now()}
-          call={(effect) => Effect.runPromise(effect)}
-          onOpen={(bucket) => go({ at: "cache", bucket })}
-        />
+      {/* THE DOOR, IN FRONT OF THE BOARD. Three states, in the order a page
+          meets them: nobody yet (a daemon with a door, and whoami still in
+          flight), anonymous (a sign-in form, and nothing else), signed in (the
+          board, as it always was). A daemon with NO door never enters the first
+          two: `door()` is false and the board renders at once. */}
+      <Show when={door() && who() === null}>
+        <p class="hint">checking who you are…</p>
       </Show>
-      <Show when={!atCache()}>
-        <CiFace
-          client={props.client}
-          route={ciRoute()}
-          now={now()}
-          call={(effect) => Effect.runPromise(effect)}
-          onRoute={(next) => go(next)}
-          ambient={ambient}
-          connecting={props.readout.status === "connecting"}
-        />
+      <Show when={anonymous()}>
+        <SignIn />
+      </Show>
+      <Show when={!door() || signedIn()}>
+        <Show when={atProfile()}>
+          <ProfileFace
+            client={props.auth}
+            call={(effect) => Effect.runPromise(effect)}
+            now={now()}
+            who={who() ?? { kind: "local" }}
+            onClose={() => go({ at: "board" })}
+          />
+        </Show>
+        {/* ONE FACE AT A TIME, and each is BUILT ON ENTRY: the compiler turns a
+            `Show`'s children into a getter, so leaving a run and coming back
+            mints a fresh view rather than re-inserting the one that was disposed
+            on the way out — see `@odu/ci/face`'s `dom` header for the failure
+            that taught us to care. */}
+        <Show when={atCache()}>
+          <CacheFace
+            client={props.cache}
+            bucket={openBucket()}
+            now={now()}
+            call={(effect) => Effect.runPromise(effect)}
+            onOpen={(bucket) => go({ at: "cache", bucket })}
+          />
+        </Show>
+        <Show when={!atCache() && !atProfile()}>
+          <CiFace
+            client={props.client}
+            route={ciRoute()}
+            now={now()}
+            call={(effect) => Effect.runPromise(effect)}
+            onRoute={(next) => go(next)}
+            ambient={ambient}
+            connecting={props.readout.status === "connecting"}
+          />
+        </Show>
       </Show>
     </div>
   );

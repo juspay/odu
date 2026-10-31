@@ -296,6 +296,11 @@ export const ServiceCellSchema = Schema.Struct({
   identity: ServiceIdentitySchema,
   build: ServiceBuildSchema,
   readiness: ServiceReadinessSchema,
+  /** Does this daemon have a door? True when the `auth` row is mounted, which
+   *  is a fact about the daemon's COMPOSITION rather than about a caller — a
+   *  browser reads it to decide whether to sign in at all, and every face reads
+   *  it so "no sign-in configured" keeps today's page exactly. */
+  auth: Schema.Boolean,
 });
 export type ServiceCell = typeof ServiceCellSchema.Type;
 
@@ -315,6 +320,10 @@ export const UNKNOWN_SERVICE: ServiceCell = {
   },
   build: { oduVersion: "", commit: null, buildId: null, self: null },
   readiness: { state: "starting", since: 0, reconciled: 0 },
+  // A daemon that has said nothing has not claimed a door. The default is the
+  // LOOPBACK page (today's header), so a cell that never arrives never shows a
+  // sign-in form for a server that has none.
+  auth: false,
 };
 
 /** The verdict on a daemon that ANSWERED — whether this build can speak to it.

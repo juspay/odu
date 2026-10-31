@@ -18,11 +18,12 @@ import {
   type ServedSurfaceMcp,
   type SurfaceClientCallable,
 } from "@kolu/surface-mcp";
+import { AUTH_AGENT, AUTH_KEY } from "@odu/auth/surface";
 import { CACHE_AGENT, CACHE_KEY } from "@odu/cache/surface";
 import { buildSurfaceFace } from "@kolu/surface/client";
 import { composedClients } from "@odu/cordis/compose";
-import { SERVICE_SIBLINGS, SERVICE_WIRE_GROUP } from "./wire";
-import { connectOrStart } from "@odu/launch/webLauncher";
+import { connectToService, SERVICE_SIBLINGS, SERVICE_WIRE_GROUP } from "./wire";
+import type { ServiceConnection } from "@odu/service-client/dial";
 import { serviceOrigin } from "@odu/service-client/endpoint";
 import { oduServiceSurface } from "@odu/service-client/surface";
 import {
@@ -62,15 +63,16 @@ export async function serveServiceMcpOverStdio(opts: {
   //
   // It never recovers a failed dial by executing locally. There is nothing here
   // to execute with: this face holds no run authority at all.
-  let held: Awaited<ReturnType<typeof connectOrStart>> | null = null;
+  let held: ServiceConnection | null = null;
   const served = await serveSurfaceAsMcp({
     core: { surface: oduServiceSurface, expose: ODU_SERVICE_EXPOSE },
-    // THE CACHE IS A SIBLING on the same wire, so an agent reaches its verbs
-    // through this bridge too — `cache_bucket_create` and its neighbours, under
-    // the key the daemon mounts the row at.
-    surfaces: { [CACHE_KEY]: CACHE_AGENT },
+    // THE SIBLINGS ARE ON THE SAME WIRE, so an agent reaches their verbs through
+    // this bridge too — `cache_bucket_create` and its neighbours, and the door's
+    // own verbs, under the keys the daemon mounts the rows at. The rules are the
+    // rows': this face adds no authority, it forwards a call.
+    surfaces: { [CACHE_KEY]: CACHE_AGENT, [AUTH_KEY]: AUTH_AGENT },
     client: async () => {
-      const connection = await connectOrStart(origin, { group: SERVICE_WIRE_GROUP });
+      const connection = await connectToService(origin);
       held = connection;
       return {
         client: {

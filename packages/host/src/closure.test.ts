@@ -38,6 +38,7 @@ const DECLARED = Object.keys(MANIFEST.dependencies ?? {});
  *  the vocabulary both sides speak. Pinned so a package arriving or leaving is
  *  a diff somebody agrees to. */
 const EXPECTED_ODU_DEPENDENCIES = [
+  "@odu/auth",
   "@odu/cache",
   "@odu/ci",
   "@odu/cordis",

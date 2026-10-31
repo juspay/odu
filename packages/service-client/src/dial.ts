@@ -68,6 +68,25 @@ function webSocketCtor(): typeof WebSocket {
   return ctor;
 }
 
+/** The constructor as the platforms odu runs on spell it. Bun's and Node's
+ *  `WebSocket` both accept an options object carrying `headers` on the upgrade;
+ *  the DOM typing has no place for it because a browser page cannot set one.
+ *  odu only ever dials from a process, so this is the ONE cast on that seam —
+ *  named, with its reason, rather than repeated at a call site. */
+type UpgradeableWebSocket = new (
+  url: string,
+  options: { headers: Record<string, string> },
+) => WebSocket;
+
+function withHeaders(
+  ctor: typeof WebSocket,
+  url: string,
+  headers: Record<string, string>,
+): WebSocket {
+  const upgradeable = ctor as unknown as UpgradeableWebSocket;
+  return Object.keys(headers).length === 0 ? new ctor(url) : new upgradeable(url, { headers });
+}
+
 /**
  * How long a dial waits for the socket to actually open before reporting that
  * nothing is serving.
@@ -111,10 +130,22 @@ export async function dialService(
      * which is what a single-surface client is.
      */
     group?: typeof oduServiceSurface.group;
+    /**
+     * REQUEST HEADERS THE UPGRADE CARRIES — `Authorization: Bearer <token>`
+     * when this machine (or `$ODU_TOKEN`) holds one for that origin.
+     *
+     * The websocket is the only door a CLI has, and the daemon reads the
+     * credential off the UPGRADE rather than off any frame: a per-request header
+     * has no place in the socket protocol, so it is presented once, when the
+     * connection is made. Absent means "no credential", which is loopback and is
+     * unconditional there.
+     */
+    headers?: Record<string, string>;
   } = {},
 ): Promise<ServiceConnection> {
   const url = serviceWsUrl(origin);
   const ctor = webSocketCtor();
+  const headers = opts.headers ?? {};
   const link = await websocketLink({
     group: opts.group ?? oduServiceSurface.group,
     // A thunk, re-evaluated on every re-dial. The address does not move under
@@ -126,7 +157,7 @@ export async function dialService(
     // Terminal by construction: re-dialling would present the same stale
     // handshake and be closed again, forever.
     isTerminalClose: (code) => code === STALE_PROCESS_CLOSE_CODE,
-    connect: (target) => new ctor(target),
+    connect: (target) => withHeaders(ctor, target, headers),
   });
   const opened = await firstOpen(link, opts.readyMs ?? DIAL_READY_MS);
   if (!opened) {

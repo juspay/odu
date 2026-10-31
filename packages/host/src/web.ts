@@ -90,12 +90,15 @@ import { readProcessIdentity, selfProcessIdentity } from "@odu/launch/processIde
 import { mcpGetRoute, mcpRoute, RouteTransport, serveServiceMcpInProcess } from "./mcpRoute";
 import { directDispatch } from "@kolu/surface/links/direct";
 import { localBroker, PrincipalBroker } from "@odu/cordis/principal";
+import { authRow, readGithubConfig } from "@odu/auth/server";
+import { AUTH_AGENT, AUTH_ANONYMOUS_TAGS, AUTH_KEY } from "@odu/auth/surface";
 import {
   admissionDispatch,
   admissionStore,
   bearerGate,
   connectionLayer,
   gatedHandlers,
+  UPGRADE_HEADERS,
 } from "./principal";
 import { SERVICE_MCP_PATH } from "@odu/service-client/endpoint";
 import { servingOptions } from "./serving";
@@ -104,6 +107,7 @@ import { cacheRow } from "@odu/cache/server";
 import { CACHE_AGENT, CACHE_KEY } from "@odu/cache/surface";
 import type { RootedSurfacesRuntime } from "@kolu/surface/server";
 import {
+  AuthDoor,
   BoundOrigin,
   Build,
   Bundle,
@@ -228,6 +232,18 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     process.stderr.write(`odu: ${published.message}\n`);
     return 1;
   }
+  // THE DOOR'S CONFIGURATION — read here because the host is the one place that
+  // reads an environment, and refused here when it is half set: a daemon whose
+  // sign-in silently switched off because one variable was misspelled would be
+  // a door that looks shut and is not.
+  const github = readGithubConfig(process.env, {
+    publicOrigin: published.origin,
+    boundOrigin: origin,
+  });
+  if (github.kind === "refused") {
+    process.stderr.write(`${github.message}\n`);
+    return 1;
+  }
 
   // Claimed FIRST, so a launcher that lost the race never binds the port. The
   // framework's own gate: one atomic link, a liveness-proved holder, and a
@@ -277,6 +293,19 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
       plugin: cacheRow,
       agent: CACHE_AGENT,
     },
+    // THE DOOR, when this daemon has one. A GitHub App configured means the row
+    // is mounted, and with none configured nothing asks who is calling — which
+    // is loopback mode, unchanged.
+    ...(github.kind === "config"
+      ? [
+          {
+            name: AUTH_KEY,
+            key: AUTH_KEY,
+            plugin: authRow(github.config),
+            agent: AUTH_AGENT,
+          },
+        ]
+      : []),
   ];
   // THE ROOT ROW, read off its own record rather than off its POSITION: `key:
   // null` is what makes a row the root, and a roster that grew a row above this
@@ -329,6 +358,7 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     // the composition root makes it, and the adapter is built once over it.
     const admissions = admissionStore();
     await run(provide(host, PrincipalBroker, () => principals));
+    await run(provide(host, AuthDoor, () => github.kind === "config"));
     await run(provide(host, StateDir, () => stateRoot(process.env)));
     await run(provide(host, RootToken, () => configured(process.env.ODU_ROOT_TOKEN)));
     await run(provide(host, NixStore, () => configured(process.env.ODU_CACHE_STORE)));
@@ -384,7 +414,10 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     // THE SERVED HANDLERS, WITH THE DOOR IN FRONT OF THEM — and only the
     // SERVED ones: the control socket `daemonMain` opens is owner-only and
     // already local, so it keeps the ungated record.
-    const servedHandlers = gatedHandlers(runtime.handlers);
+    const servedHandlers = gatedHandlers(
+      runtime.handlers,
+      github.kind === "config" ? new Set(Object.keys(AUTH_ANONYMOUS_TAGS)) : new Set(),
+    );
 
     // THE `/mcp` DOOR — the composed bundle's, so it is the TRANSPORT's and is
     // built here rather than by any one row: an adapter that served one row
@@ -429,7 +462,7 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
             // under; the per-connection services provide the principal its
             // lease admits; the middleware refuses an anonymous `/mcp` POST
             // before the adapter is entered.
-            upgradeHeaders: ["cookie"] as const,
+            upgradeHeaders: UPGRADE_HEADERS,
             services: (connection) => connectionLayer(principals, connection),
             middleware: bearerGate(principals, SERVICE_MCP_PATH),
           }),
