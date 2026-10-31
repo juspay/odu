@@ -126,7 +126,7 @@ export { STATUS_META, type StatusHue } from "@odu/run-client/surface";
  * number too. A row must not keep a version of its own: nothing would enforce
  * it, and a stale tab would talk to a daemon whose members it cannot decode.
  */
-export const SERVICE_CONTRACT_VERSION = "2.0";
+export const SERVICE_CONTRACT_VERSION = "2.1";
 
 // ── refusals ────────────────────────────────────────────────────────────────
 
@@ -186,6 +186,11 @@ export const RefusalCodeSchema = Schema.Literals([
   /** A forge write was asked for and the service has no credential to make it.
    *  Carries the `gh auth login` recovery as `suggestion`, as ARGV. */
   "no_credential",
+  /** The caller is not allowed to do this. The service is not in loopback mode,
+   *  so "who is asking" is a real question — and this row's answer is its own
+   *  (a state change needs a member). Reaching it means a signed-in person
+   *  whose role is below what the verb needs. */
+  "not_permitted",
 ]);
 export type RefusalCode = typeof RefusalCodeSchema.Type;
 

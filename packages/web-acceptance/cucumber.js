@@ -37,8 +37,21 @@ const tags = process.env.CUCUMBER_TAGS || "not @skip";
 const retry = parseInt(process.env.CUCUMBER_RETRY || "0", 10);
 
 export const ui = {
-  ...(!cliHasFeatureArgs && { paths: ["features/**/*.feature"] }),
-  import: ["step_definitions/**/*.ts", "support/**/*.ts"],
+  // THE PROFILE'S DEFAULT PATHS, which is two trees: this package's own
+  // features (the shell, the wire, the keyboard) and every row's
+  // `e2e/features` beside it. A feature passed on the CLI still narrows the
+  // run — `cliHasFeatureArgs` above is why this entry is conditional.
+  ...(!cliHasFeatureArgs && {
+    paths: ["features/**/*.feature", "../*/e2e/features/**/*.feature"],
+  }),
+  // THE STEPS ARE ALWAYS ALL OF THEM, feature argument or not: a step is a
+  // global vocabulary entry, and `board.feature` says "the row is shown"
+  // whoever owns the row that draws it.
+  import: [
+    "step_definitions/**/*.ts",
+    "../*/e2e/steps/**/*.ts",
+    "support/**/*.ts",
+  ],
   tags,
   // progress-bar (stdout): how far along the run is.
   // pretty (stderr): the failing step, inline, the moment it fails — so a CI log

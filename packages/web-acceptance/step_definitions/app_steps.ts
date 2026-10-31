@@ -30,6 +30,16 @@ Given("I open the board", async function (this: OduWorld) {
   await this.page.getByRole("heading", { name: "Runs", exact: true }).waitFor();
 });
 
+/**
+ * THE SAME NAVIGATION WITHOUT A PROMISE ABOUT WHAT IS THERE. `I open the board`
+ * waits for the board, which an anonymous connection on a daemon with a door
+ * never draws — it meets the sign-in page instead. A scenario whose subject IS
+ * that page arrives here, and asserts what it sees itself.
+ */
+Given("I open odu", async function (this: OduWorld) {
+  await this.open("#/");
+});
+
 Given("I open the create form", async function (this: OduWorld) {
   await this.open("#/new");
   await this.page.getByRole("heading", { name: "New run", exact: true }).waitFor();
@@ -59,6 +69,18 @@ Then("the address names a run", async function (this: OduWorld) {
 
 Then("the wire reads {string}", async function (this: OduWorld, text: string) {
   await this.saysThat(this.wire(), "the connection indicator", text);
+});
+
+/**
+ * A control a page OFFERS, by the words a person reads — the presence half of
+ * every "hide what the role cannot use" assertion. Absence is its own step,
+ * because a missing button and a button that works are different failures.
+ *
+ * Matched by substring (`Retry` finds the node's own `Retry alpha@`), which is
+ * what makes one step cover a page-level button and a per-node one.
+ */
+Then("the run page offers {string}", async function (this: OduWorld, name: string) {
+  await this.page.getByRole("button", { name }).first().waitFor({ timeout: 30_000 });
 });
 
 Then("a status reads {string}", async function (this: OduWorld, text: string) {
@@ -99,5 +121,24 @@ Then("there should be no page errors", function (this: OduWorld) {
     this.errors,
     [],
     `the page reported ${this.errors.length} error(s):\n${this.errors.join("\n---\n")}`,
+  );
+});
+
+/**
+ * The same assertion, minus the ONE entry a scenario is about.
+ *
+ * A refused sign-in is a 403 DOCUMENT: the browser logs the navigation itself
+ * as a failed resource, and that line is the answer, not a fault. Dropping the
+ * whole check for such a scenario (which this suite did once) stops catching a
+ * genuine script error on the very page a person meets when they are turned
+ * away — so the check stays and exactly its own 403 is filtered. The filter is
+ * a message this scenario produced, not a category: any OTHER error still fails.
+ */
+Then("the page reports no errors other than the refused sign-in", function (this: OduWorld) {
+  const others = this.errors.filter((one) => !one.includes("403 (Forbidden)"));
+  assert.deepStrictEqual(
+    others,
+    [],
+    `the page reported ${others.length} error(s) besides the 403:\n${others.join("\n---\n")}`,
   );
 });

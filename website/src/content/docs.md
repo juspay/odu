@@ -84,7 +84,7 @@ The board lists runs across repositories. Open a run to inspect nodes, follow lo
 
 ### Access through Tailscale or a proxy
 
-Configure forwarding separately; Odu can keep listening on loopback. The service answers to whatever name it is reached by, so an SSH forward, a Tailscale name, or a proxy that passes the Host header through needs no configuration. Anyone who can reach the forwarded address can control CI.
+Configure forwarding separately; Odu can keep listening on loopback. The service answers to whatever name it is reached by, so an SSH forward, a Tailscale name, or a proxy that passes the Host header through needs no configuration. In the loopback shape, anyone who can reach the forwarded address can control CI; configure [Server mode](#server-mode) and they meet a sign-in page instead.
 
 A proxy that rewrites Host sends a browser Origin that no longer matches it. Admit that origin when starting the service — `services.odu.allowedOrigins` is the module's spelling of the same setting:
 
@@ -153,9 +153,146 @@ On a client, trust the bucket — the key `create` printed:
 }
 ```
 
-`ODU_PUBLIC_ORIGIN` is the setting behind that URL: it names the address a bucket is published under when a proxy stands in front, and defaults to what `cache.domain` and `cache.enableACME` imply. The module requires a loopback `listen`, because a public board is PR 3's (server mode) answer rather than a flag to flip today.
+`ODU_PUBLIC_ORIGIN` is the setting behind that URL: it names the address a bucket is published under when a proxy stands in front, and defaults to what `cache.domain` and `cache.enableACME` imply. The module requires a loopback `listen`, because the daemon has to sit behind a proxy: without `services.odu.github` nothing authenticates a request at all, and with it the session cookie wants TLS. Those are the two shapes — the second is [Server mode](#server-mode).
 
-**Without the module.** A container or any non-systemd host runs the same one process from the environment the module sets, and needs nothing else. `ODU_STATE_DIR` holds everything — the run catalog, the cache, and now the daemon's own gate and socket, which is what a read-only `$HOME` otherwise breaks. `ODU_WEB_ORIGIN` is the address it binds, `ODU_PUBLIC_ORIGIN` the one a bucket's URL is published at, and `ODU_ROOT_TOKEN` the administration secret. `ODU_CACHE_STORE=local?root=<dir>` gives the cache a store of its own on a volume; a store that is not the machine that built the paths never holds nixpkgs, so create its buckets with `odu cache create <bucket> --no-upstream` or every referrer sits at 202. It needs `nix` on `PATH` (deliberately not in the wrapper) and a `$HOME` that `nix` itself can write under. One process, one replica: there is no second daemon to elect. **The module's nginx proxies `/cache/*` and `/_odu/v1/*` and nothing else**, so a host that serves no bucket publicly needs no proxy at all — but a container must bind a non-loopback origin for any ingress to reach the cache, and then the board, the websocket and `/mcp` are reachable on that origin too: the network policy, not the listener, is the boundary until server mode.
+**Without the module.** A container or any non-systemd host runs the same one process from the environment the module sets, and needs nothing else. `ODU_STATE_DIR` holds everything — the run catalog, the cache, and now the daemon's own gate and socket, which is what a read-only `$HOME` otherwise breaks. `ODU_WEB_ORIGIN` is the address it binds, `ODU_PUBLIC_ORIGIN` the one a bucket's URL is published at, and `ODU_ROOT_TOKEN` the administration secret. `ODU_CACHE_STORE=local?root=<dir>` gives the cache a store of its own on a volume; a store that is not the machine that built the paths never holds nixpkgs, so create its buckets with `odu cache create <bucket> --no-upstream` or every referrer sits at 202. It needs `nix` on `PATH` (deliberately not in the wrapper) and a `$HOME` that `nix` itself can write under. One process, one replica: there is no second daemon to elect. **The module's nginx proxies `/cache/*` and `/_odu/v1/*` and nothing else** in the shape above, so a host that serves no bucket publicly needs no proxy at all — but a container must bind a non-loopback origin for any ingress to reach the cache, and then the board, the websocket and `/mcp` are reachable on that origin too: in a container, configure the door ([Server mode](#server-mode)) or the network policy, not the listener.
+
+## Server mode
+
+Set a GitHub App's credentials and odu has a **door**: an anonymous browser meets a sign-in page, `/mcp` answers `401` without a token, and every verb runs as a signed-in person with a role. Unset, none of that exists — a loopback `odu web` behaves exactly as it did before.
+
+| | |
+| --- | --- |
+| `ODU_GITHUB_CLIENT_ID` | the App's Client ID |
+| `ODU_GITHUB_CLIENT_SECRET_FILE` | a file holding the App's client secret |
+| `ODU_GITHUB_ALLOW` | who may sign in: `org:<name>`, `team:<org>/<slug>`, or a comma-separated list of GitHub logins |
+| `ODU_GITHUB_ORIGIN`, `ODU_GITHUB_API` | default `https://github.com` and `https://api.github.com`; a GitHub Enterprise host otherwise |
+
+All three of the first are required together. Half a configuration is refused at startup, because a daemon that silently stopped asking for sign-in would be a door that looks shut and is not.
+
+### Create the GitHub App
+
+A **GitHub App**, not an OAuth App: the App's permissions are the scope, and later releases use its installation token to post checks and sync membership. Create it once per odu instance — see [Two instances](#two-instances) below.
+
+On GitHub's **New GitHub App** form, set:
+
+| Field | Value |
+| --- | --- |
+| **GitHub App name** | anything unique on GitHub, e.g. `odu-yourorg` |
+| **Homepage URL** | `https://<host>/`, or your repository's URL |
+| **Identifying and authorizing users → Callback URL** | `https://<host>/auth/github/callback` — exactly, no trailing slash |
+| **Identifying and authorizing users → Expire user authorization tokens** | **OFF**. odu does not store refresh tokens in this release; if this is on, a sign-in is refused with a page naming this setting rather than holding a token that dies in eight hours |
+| **Identifying and authorizing users → Request user authorization (OAuth) during installation** | **ON** |
+| **Webhook → Active** | **OFF** (no webhooks yet) |
+| **Permissions → Organization → Members** | **Read-only** — membership for `org:` and `team:` rules is read with the person's own token, which needs this |
+| **Permissions → Account → Email addresses** | **Read-only** |
+| **Where can this GitHub App be installed?** | **Any account** |
+
+Then **Generate a new client secret** — the App's **Credentials** tab in the left sidebar, section **Client secrets**. Copy two things: the **Client ID** (top of the page) and the secret (shown once).
+
+GitHub's banner also says a **private key** must be generated before the App can be installed. This release does not read that key — only the Client ID and the client secret — so it is needed only when the allow-list has an `org:` or `team:` rule, which requires the App to be installed on that organisation; keep the downloaded `.pem` somewhere safe for later releases.
+
+### Install it
+
+An App is **owned** by an account and **installed** on organisations or accounts, and the two are separate. It may be owned by your personal account; that is fine.
+
+- For `org:<name>` or `team:<org>/<slug>` rules, an **owner of that organisation** installs the App on it — install it on selected repositories, which is enough (odu reads membership, not code).
+- For a rules list of logins (`ODU_GITHUB_ALLOW=srid,octocat`), no installation is needed at all.
+
+### Configure odu
+
+**NixOS module** — the public board and the cache on one hostname:
+
+```nix
+services.odu = {
+  enable = true;
+  cache.domain = "odu.example.com";
+  rootTokenFile = config.age.secrets.odu-root-token.path;
+  openFirewall = true;
+  github = {
+    clientId = "Iv1.0123456789abcdef";
+    clientSecretFile = config.age.secrets.odu-github-client-secret.path;
+    allow = [ "org:example" ];
+  };
+};
+```
+
+`github` set turns the module's nginx from "the cache routes and a 404" into "everything the daemon serves": the board, `/rpc/ws` (with the websocket upgrade) and `/mcp`, plus the cache's own paths. `publicOrigin` follows `cache.domain` (`https://odu.example.com`), so the App's callback is the one above.
+
+**The pod** (the project's own deployment) — the same settings from the environment, with the secret synced like the root token:
+
+```sh
+ODU_PUBLIC_ORIGIN=https://odu-k3s.rooster-blues.ts.net
+ODU_GITHUB_CLIENT_ID=...            # from the Secret
+ODU_GITHUB_CLIENT_SECRET_FILE=/path/to/client-secret
+ODU_GITHUB_ALLOW=org:juspay
+```
+
+**A bare `odu web`** — point it at a hostname it is reachable at, and open it in a browser:
+
+```sh
+ODU_PUBLIC_ORIGIN=http://localhost:18440 \
+ODU_GITHUB_CLIENT_ID=... \
+ODU_GITHUB_CLIENT_SECRET_FILE=./client-secret \
+ODU_GITHUB_ALLOW=org:example \
+  nix run github:juspay/odu -- web
+```
+
+The App's callback for that one is `http://localhost:18440/auth/github/callback`; GitHub allows a `localhost` callback, and the session cookie is not `Secure` there.
+
+`ODU_GITHUB_ALLOW` takes a comma-separated list, and one example of each form:
+
+```sh
+ODU_GITHUB_ALLOW='org:juspay'                  # anyone in the organisation
+ODU_GITHUB_ALLOW='team:juspay/platform'        # anyone on that team
+ODU_GITHUB_ALLOW='srid,octocat'                # these logins, by name
+ODU_GITHUB_ALLOW='org:juspay,srid'             # any rule may let you in
+```
+
+### First sign-in and the first owner
+
+Open the board. It is the sign-in page; **Sign in with GitHub** authorises the App and lands you on the runs. A person the allow-list refuses sees a page saying so, quoting the list — not a redirect and not an empty board.
+
+Everyone starts as a **member**: they see every run and every bucket, may start, retry and cancel runs, and may read the cache. An **admin** may also create buckets, mint and revoke cache tokens, pin and collect, and write branch protection. An **owner** grants roles. Roles are odu's, not GitHub's.
+
+**The root token creates the FIRST owner, and only that.** On a fresh daemon, once:
+
+```sh
+# On the server, with $ODU_ROOT_TOKEN set in its environment.
+odu auth grant srid owner --origin https://odu.example.com
+```
+
+After that the root token is spent — a second grant made with it is refused, whatever the role — and every further grant is an owner's, through that owner's own token:
+
+```sh
+odu auth login https://odu.example.com        # paste the owner's personal token
+odu auth grant alice admin --origin https://odu.example.com
+```
+
+That is the root token's only job on a daemon with a door: it is not a principal, and it cannot start a run or read a bucket.
+
+### A token for a machine or an agent
+
+The header's name opens the **profile page**: your sessions and your personal access tokens. Create one — it is shown **once** — and either store it on a machine or hand it to an agent:
+
+```sh
+odu auth login https://odu.example.com      # paste the token; it is kept at ~/.config/odu/auth/credentials, mode 0600
+odu auth whoami --origin https://odu.example.com
+odu cache list --origin https://odu.example.com
+
+# or, for an agent or CI, no login step:
+ODU_TOKEN=odu_... odu mcp --origin https://odu.example.com
+```
+
+Every `odu` command, and the MCP bridge, send the token as `Authorization: Bearer` on the connection they open. `ODU_TOKEN` wins over a stored credential, so one shell can be somebody else.
+
+Revoking a token on the profile page, signing out, or a session expiring ends every connection that credential opened: nothing further is served on it, the socket itself is closed, and an open board tab meets the sign-in page.
+
+Sessions last 30 days from the sign-in; using one does not extend it. The cache protocol does not change: public buckets are read without an account, and pushes carry a bucket token as before.
+
+### Two instances
+
+One App per odu instance: the callback URL is a single address, and the client secret is the App's. Two servers need two Apps — each owned by the same personal account is fine, and transferring an App to an organisation later keeps its Client ID, so the secret and `ODU_GITHUB_CLIENT_ID` survive the move.
 
 ## Daily workflow
 

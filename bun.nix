@@ -224,10 +224,12 @@
     url = "https://registry.npmjs.org/@modelcontextprotocol/sdk/-/sdk-1.30.0.tgz";
     hash = "sha512-xKd8OIzlqNzcqcNumGAa6g+PW2kjD5vrpcKOnfldAUPP3j7lnqMPwlTXQm8gF+UwH72z0lqaRbjr9hqGz0eITA==";
   };
+  "@odu/auth" = copyPathToStore ./packages/auth;
   "@odu/cache" = copyPathToStore ./packages/cache;
   "@odu/ci" = copyPathToStore ./packages/ci;
   "@odu/cli" = copyPathToStore ./packages/cli;
   "@odu/cordis" = copyPathToStore ./packages/cordis;
+  "@odu/credentials" = copyPathToStore ./packages/credentials;
   "@odu/execution" = copyPathToStore ./packages/execution;
   "@odu/host" = copyPathToStore ./packages/host;
   "@odu/launch" = copyPathToStore ./packages/launch;

@@ -1,0 +1,31 @@
+{
+  "name": "@odu/auth",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "cordis": {
+    "row": "auth"
+  },
+  "//cordis": "THE ROW this package belongs to, read by the fence. Sign-in is a row like the cache: a surface, a server, a CLI and a face, and no other row imports it.",
+  "//": "SIGN-IN, SESSIONS AND PERSONAL TOKENS — the feature that decides who is on a connection. The HOST owns the listener (and so owns the broker); this row registers a resolver on that broker in `apply` and withdraws it in its finalizer.",
+  "//dependencies": "`@odu/cordis` for the shared vocabulary (the Principal a verb reads, the broker a row registers on) and the surface framework for the contract. No other `@odu/*`: `ci` and `cache` must not be able to reach sign-in, and this row must not reach them.",
+  "sideEffects": false,
+  "exports": {
+    "./surface": "./src/surface.ts",
+    "./server": "./src/server.ts",
+    "./cli": "./src/cli.ts",
+    "./face": "./src/face.tsx"
+  },
+  "dependencies": {
+    "@odu/cordis": "workspace:*",
+    "@odu/credentials": "workspace:*",
+    "effect": "4.0.0",
+    "solid-js": "^1.9.15"
+  },
+  "//devDependencies": "The browser suite's toolchain, for the features and steps this row OWNS: a row keeps its promises under its own `e2e/`, and cucumber and playwright are what runs them. Dev-only — the shipped closure is unchanged.",
+  "devDependencies": {
+    "@cucumber/cucumber": "^12.8.1",
+    "playwright": "1.61.1"
+  }
+}

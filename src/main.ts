@@ -82,11 +82,11 @@ import { serviceMcpCommand } from "@odu/cli/serviceMcp";
 import { ODU_VERSION } from "@odu/execution/common/version";
 import { surfaceCliMain } from "@odu/cli/serviceCli";
 import { webCommand, webDaemonCommand } from "@odu/host/web";
-import { connectOrStart } from "@odu/launch/webLauncher";
-import { SERVICE_WIRE_GROUP } from "@odu/cli/wire";
+import { connectToService } from "@odu/cli/wire";
+import { authCommand } from "@odu/auth/cli";
 import { errorMessage, errorStack } from "@odu/execution/common/effectEdge";
 
-const USAGE = `usage: odu <run|wait|rerun|cancel|logs|history|status|attach|hosts|lease|release|dump|graph|protect|cache|web|surface|mcp> [args]
+const USAGE = `usage: odu <run|wait|rerun|cancel|logs|history|status|attach|hosts|lease|release|dump|graph|protect|cache|auth|web|surface|mcp> [args]
 
 Every command below is a client of the shared odu service. It is started for you
 if none is running; nothing here runs CI by itself.
@@ -460,7 +460,15 @@ async function dispatch(argv: string[]): Promise<number> {
       // `@odu/launch`'s — starting a service is not a row's business — so the
       // root binds it, and `@odu/cache/cli` stays a client that names no host.
       return cacheCommand(sub, subRest, {
-        connect: (origin) => connectOrStart(origin, { group: SERVICE_WIRE_GROUP }),
+        connect: (origin) => connectToService(origin),
+      });
+    }
+    case "auth": {
+      const [sub, ...subRest] = rest;
+      // The door's argv face, bound the same way — the same connection, the same
+      // credential, one more row's verbs.
+      return authCommand(sub, subRest, {
+        connect: (origin) => connectToService(origin),
       });
     }
     case "attach": {

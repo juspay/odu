@@ -21,10 +21,15 @@ venue_probe · venue_hold · venue_release · protect_apply
 cache_bucket_create · cache_bucket_list · cache_bucket_describe · cache_bucket_paths
 cache_token_mint · cache_token_list · cache_token_revoke
 cache_pin_create · cache_gc_run · cache_stats_read
+auth_user_whoami · auth_user_grant
+auth_token_create · auth_token_list · auth_token_revoke
+auth_session_list · auth_session_end
 ```
 
 The cache's verbs are a ROW of their own — the daemon serves it beside the runs
-— so their names carry its word (`cache_`) and then the thing and the act.
+— so their names carry its word (`cache_`) and then the thing and the act. The
+`auth_` verbs are the door's row, and only exist when the server has one (see
+"Signing in" below).
 
 | Face | Spelling | Who uses it |
 | --- | --- | --- |
@@ -315,6 +320,13 @@ and a browser simply could not do them at all.
 | pin a closure | `odu surface cache pin_create --input '{…}' --json` | `cache_pin_create` | `rootToken`, `bucket`, `name`, `paths[]` | `bucket`, `name`, `rootPaths[]`, `created` |
 | reclaim cache space | `odu surface cache gc_run --input '{…}' --json` | `cache_gc_run` | `rootToken`, `bucket?` | `buckets[]` (`evicted`, `kept`, `bytes`), `evicted`, `kept`, `bytes` |
 | cache sizes and reads | `odu surface cache stats_read --input '{…}' --json` | `cache_stats_read` | `rootToken` | `buckets[]`, `objects`, `bytes`, `hits`, `lastAccessed` |
+| who am I | `odu auth whoami -o json` | `auth_user_whoami` | *(none)* | `who` — a `user` with a `login` and `role`, or `anonymous`. Exits **1** when the answer is `anonymous`, even though the answer is printed: exit 0 would read as "you have a session" |
+| mint a personal token | `odu surface auth token_create --input '{…}' --json` | `auth_token_create` | `name` | `token` (plaintext, ONCE), `facts` |
+| my tokens | `odu auth token list -o json` | `auth_token_list` | *(none)* | `tokens[]` — never a plaintext |
+| revoke a token | `odu auth token revoke <id>` | `auth_token_revoke` | `id` | `id`, `revoked` |
+| my sessions | `odu surface auth session_list --input '{}' --json` | `auth_session_list` | *(none)* | `sessions[]` (`id`, `created`, `lastSeen`, `expires`, `agent`) |
+| end a session | `odu surface auth session_end --input '{…}' --json` | `auth_session_end` | `id` | `id`, `ended` |
+| set a role | `odu auth grant <login> <owner\|admin\|member>` | `auth_user_grant` | `login`, `role`, `rootToken` (only when no session authorises it) | `login`, `role` |
 
 - **`requestId` is an idempotency key on these three too.** A repeat with the
   same id replays the recorded answer and performs nothing — which is what
@@ -339,6 +351,27 @@ and a browser simply could not do them at all.
   `no_credential`, which is fixable rather than fatal — `dryRun` still answers.
 - **`catalog_prune` never expires a run with a live owner** — it reports it in
   `kept` with a reason instead.
+
+### Signing in
+
+A server may have a **door**: GitHub sign-in, roles, and personal tokens. You are
+told because two things change for an agent.
+
+- **A remote server needs a token.** Set `ODU_TOKEN` to a personal access token
+  (its holder mints one on the server's profile page) and pass `--origin`. Every
+  `odu` command and the MCP bridge send it as `Authorization: Bearer` on the
+  connection they open. Without one, the daemon answers only `auth_user_whoami`,
+  `auth_user_grant` and its own identity — every other verb is refused.
+- **Your role bounds what you may do.** `member` starts, retries and cancels
+  runs; `admin` also administers cache buckets; `owner` grants roles. On a
+  daemon with a door the ROOT TOKEN is not an administrator — it bootstraps the
+  first owner (`odu auth grant <login> owner`) and nothing else.
+
+**The `auth_*` verbs exist only on a daemon with a door.** With no
+`ODU_GITHUB_*` configured the auth row is not mounted: `odu auth whoami` has no
+verb to call, and the MCP bridge does not advertise the seven. That is the
+loopback shape and it is unchanged — the daemon is nobody's to authenticate,
+every caller is its local owner, and the runs answer without a credential.
 
 Reading state without a verb — the same three resources on both faces:
 

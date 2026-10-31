@@ -37,6 +37,14 @@ Then("the page does not scroll sideways", async function (this: OduWorld) {
  * one off the right edge instead of onto its own line fails here.
  */
 Then("every run row's scope and attention are within the viewport", async function (this: OduWorld) {
+  // THE ROW IS THE PRECONDITION. A board's rows arrive from the wire a moment
+  // after its heading, and measuring before they land is a red that says
+  // nothing about the layout — the assertion below still fails when the row
+  // exists and is laid out wrongly.
+  await this.page
+    .locator("button.row")
+    .first()
+    .waitFor({ timeout: 30_000 });
   const view = await this.page.evaluate(() => window.innerWidth);
   const rows = await this.page.locator("button.row").count();
   assert.ok(rows > 0, "the board listed no rows, so this scenario asserted nothing");

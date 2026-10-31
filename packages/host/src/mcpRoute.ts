@@ -4,7 +4,9 @@
  * `@kolu/surface-mcp` turns `oduServiceSurface` into MCP tools and resources
  * from the same `expose` map the terminal face reads, so `run_start` is one
  * verb with one name whichever door an agent came through. This is the HTTP
- * pipe: the adapter is in-process with the surface it serves (`directDispatch`),
+ * pipe: the adapter is in-process with the surface it serves (a direct
+ * dispatch, built by the composition root so the request's principal can ride
+ * it),
  * so a tool call is a function call and nothing is serialised twice.
  *
  * The STDIO pipe — `odu mcp`, a bridge a host spawns — stayed in `@odu/cli`
@@ -57,15 +59,16 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { buildSurfaceFace } from "@kolu/surface/client";
 import { composedClients } from "@odu/cordis/compose";
-import { directDispatch } from "@kolu/surface/links/direct";
 import {
   serveSurfaceAsMcp,
   type ServedSurfaceMcp,
   type SurfaceClientCallable,
 } from "@kolu/surface-mcp";
-import type { SurfaceHandlers } from "@kolu/surface/server";
+import type { SurfaceDispatch } from "@kolu/surface/link";
 import { isAllowedWsOrigin } from "@kolu/surface/ws-origin";
-import type { RowAgent } from "@odu/cordis/services";
+import { agentInstructions, type RowAgent } from "@odu/cordis/services";
+import { requestAdmission, type PrincipalBroker } from "@odu/cordis/principal";
+import type { AdmissionStore } from "./principal";
 import { Effect } from "effect";
 import { HttpRouter, HttpServerResponse } from "effect/http";
 import type { HttpServerRequest } from "effect/http";
@@ -254,7 +257,10 @@ export function mcpServerInfo(version: string): { name: string; version: string 
  * second serialisation, no second copy of the state to keep in step.
  */
 export function serveServiceMcpInProcess(opts: {
-  handlers: SurfaceHandlers;
+  /** The served surface, called through the dispatch the composition root
+   *  provides — so a per-request fact (the Bearer principal) can ride the call,
+   *  and so this door carries no second dispatch of its own. */
+  dispatch: SurfaceDispatch;
   version: string;
   transport: Transport;
   /** WHERE the endpoint is mounted. The HOST passes it, because this package
@@ -266,7 +272,7 @@ export function serveServiceMcpInProcess(opts: {
   /** Every sibling, keyed by the segment its names take. */
   siblings: Readonly<Record<string, RowAgent>>;
 }): Promise<ServedSurfaceMcp> {
-  const dispatch = directDispatch({ handlers: opts.handlers });
+  const dispatch = opts.dispatch;
   const keys = Object.keys(opts.siblings);
   const surfaces = Object.fromEntries(
     keys.map((key) => [key, opts.siblings[key]!.surface]),
@@ -304,11 +310,9 @@ export function serveServiceMcpInProcess(opts: {
     serverInfo: mcpServerInfo(opts.version),
     // Each row's own words, composed at the moment a host asks — a paragraph a
     // missing row contributed would be a sentence about a surface this serve
-    // does not carry.
-    instructions: () =>
-      [opts.core?.instructions, ...keys.map((key) => opts.siblings[key]!.instructions)]
-        .filter((text): text is string => text !== undefined && text !== "")
-        .join("\n\n"),
+    // does not carry. ONE composer, shared with the stdio bridge: the two doors
+    // had already drifted by a paragraph once.
+    instructions: () => agentInstructions(opts.core, opts.siblings),
     transport: opts.transport,
   });
 }
@@ -396,6 +400,12 @@ export function mcpRoute(
   transport: RouteTransport,
   allowedOrigins: readonly string[],
   path: PathInput,
+  door: {
+    /** Where this request's admission rides to the dispatch. */
+    readonly store: AdmissionStore;
+    /** The host's broker — the one resolver for a Bearer credential. */
+    readonly broker: PrincipalBroker;
+  },
 ) {
   return HttpRouter.add(
     "POST",
@@ -409,6 +419,19 @@ export function mcpRoute(
         if (!authorized(request.headers)) {
           return HttpServerResponse.text("unauthorized", { status: 401 });
         }
+        // THE SECOND DOOR'S OWN LOCK. The middleware already refuses an
+        // anonymous POST when an identity provider is mounted; resolving it
+        // again here is what the DISPATCH needs, because the adapter is built
+        // once and the admission has to ride this one request. One resolver,
+        // two readers — see `@odu/host/principal`.
+        const principal = door.broker.authorize(request.headers["authorization"]);
+        if (principal === null) {
+          return HttpServerResponse.text(
+            "odu: /mcp needs `Authorization: Bearer <token>`",
+            { status: 401 },
+          );
+        }
+        const admission = requestAdmission(principal);
         const body = yield* Effect.result(request.json);
         if (body._tag === "Failure") {
           return yield* Effect.orDie(
@@ -449,8 +472,13 @@ export function mcpRoute(
           : (request.headers[MCP_SESSION_HEADER] ?? null);
         const reply = yield* Effect.callback<unknown>((resume) => {
           const withdraw = new AbortController();
-          void transport
-            .ask(message, { session, signal: withdraw.signal })
+          // THE ADMISSION RIDES THE ASK. The SDK is Promise-shaped, so the
+          // request's principal enters the dispatch through the async context
+          // this call establishes — and only for as long as this call runs.
+          void door.store
+            .run(admission, () =>
+              transport.ask(message, { session, signal: withdraw.signal }),
+            )
             .then((value) => resume(Effect.succeed(value)));
           // The HTTP request went away — the tab closed, the agent gave up,
           // the process was killed. That ends the OBSERVATION: the adapter

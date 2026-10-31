@@ -12,8 +12,8 @@ import * as assert from "node:assert";
 import { basename } from "node:path";
 import { Then, When } from "@cucumber/cucumber";
 import type { Locator } from "playwright";
-import { headOf } from "../support/service.ts";
-import type { OduWorld } from "../support/world.ts";
+import { headOf } from "../../../web-acceptance/support/service.ts";
+import type { OduWorld } from "../../../web-acceptance/support/world.ts";
 
 function filter(world: OduWorld, label: string): Locator {
   return world.page

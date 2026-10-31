@@ -18,11 +18,13 @@ import {
   type ServedSurfaceMcp,
   type SurfaceClientCallable,
 } from "@kolu/surface-mcp";
+import { AUTH_AGENT, AUTH_KEY } from "@odu/auth/surface";
+import { agentInstructions, readDoor, type RowAgent } from "@odu/cordis/services";
 import { CACHE_AGENT, CACHE_KEY } from "@odu/cache/surface";
 import { buildSurfaceFace } from "@kolu/surface/client";
 import { composedClients } from "@odu/cordis/compose";
-import { SERVICE_SIBLINGS, SERVICE_WIRE_GROUP } from "./wire";
-import { connectOrStart } from "@odu/launch/webLauncher";
+import { connectToService, SERVICE_SIBLINGS, SERVICE_WIRE_GROUP } from "./wire";
+import type { ServiceConnection } from "@odu/service-client/dial";
 import { serviceOrigin } from "@odu/service-client/endpoint";
 import { oduServiceSurface } from "@odu/service-client/surface";
 import {
@@ -47,11 +49,6 @@ export async function serveServiceMcpOverStdio(opts: {
   transport?: Transport;
 }): Promise<{ served: ServedSurfaceMcp; close: () => Promise<void> }> {
   const origin = opts.origin ?? serviceOrigin();
-  // ONE dial, held for the adapter's life, and re-made by the adapter's own
-  // retry after a drop — `client()` is re-invoked, so a service that was
-  // upgraded underneath this bridge is picked up on the next call rather than
-  // leaving the bridge talking to a corpse.
-  //
   // And it BOOTSTRAPS. An MCP host launches this bridge on a machine where
   // nothing has ever run odu — that is the ordinary first contact, not an edge
   // case — and a bridge that could only report "nothing is serving" would put
@@ -62,41 +59,126 @@ export async function serveServiceMcpOverStdio(opts: {
   //
   // It never recovers a failed dial by executing locally. There is nothing here
   // to execute with: this face holds no run authority at all.
-  let held: Awaited<ReturnType<typeof connectOrStart>> | null = null;
-  const served = await serveSurfaceAsMcp({
+  //
+  // EVERY DIAL OWNS ITS CONNECTION. `client()` is the adapter's REDIAL FACTORY:
+  // a dropped transport disposes the connection and calls it again, the resource
+  // pusher dials its own, and `reroster` re-invokes it too. A cached connection
+  // here would hand a redial the one that was just closed — a bridge that
+  // outlives a daemon restart or an upgrade would stay dead, and the reader and
+  // the pusher would cut each other's socket. So each call opens one and returns
+  // the `dispose` that closes THAT one; the set is only for `close()`.
+  const opened = new Set<ServiceConnection>();
+
+  // THE DOOR IS THE DAEMON'S COMPOSITION, NOT THIS FACE'S, AND IT MOVES. The
+  // auth row is mounted only on a daemon with a door; a bridge that advertised
+  // its seven verbs everywhere would hand an agent tools the server it is
+  // talking to does not have. So it is asked BEFORE serving — a daemon that is
+  // already running is answered exactly, which is the ordinary case — and again
+  // after every dial, which is what makes a bridge that STARTS the daemon
+  // right: the first dial boots it, and the answer arrives a moment later.
+  let door: boolean | null = await readDoor(origin);
+  const siblingsFor = (hasDoor: boolean | null): Record<string, RowAgent> => ({
+    [CACHE_KEY]: CACHE_AGENT,
+    ...(hasDoor === true ? { [AUTH_KEY]: AUTH_AGENT } : {}),
+  });
+  let served: ServedSurfaceMcp | null = null;
+  let asking = false;
+  const askDoor = async (): Promise<void> => {
+    // One question at a time: two dials that both notice a fresh answer would
+    // otherwise reroster each other for the same fact.
+    if (asking) return;
+    asking = true;
+    try {
+      const answer = await readDoor(origin);
+      if (answer === null || answer === door) return;
+      // ONLY A ROSTER THAT MOVES IS MOVED. `null → false` changes the ANSWER
+      // and not the tools, and a reroster for it would invite the framework's
+      // one-generation rule for nothing. The comparison is the KEY SETS, not
+      // their sizes: the day a second door-dependent row swaps one sibling for
+      // another, two keys with the same count is still a move.
+      const before = Object.keys(siblingsFor(door)).sort().join("\n");
+      const after = Object.keys(siblingsFor(answer)).sort().join("\n");
+      door = answer;
+      if (before === after) return;
+      // The move, not a second serve: the adapter re-invokes `client()` for the
+      // new roster, and this call answers with a fresh connection like any
+      // other. The caller is a `void`, so a refusal here is LOGGED rather than
+      // left to become an unhandled rejection in a process whose only job is to
+      // stay alive: `reroster` re-makes every refusal the boot composition
+      // owes, and one of those can reject.
+      try {
+        await served?.reroster(surfacesOf(siblingsFor(door)));
+      } catch (err) {
+        process.stderr.write(`odu mcp: could not move the roster: ${String(err)}\n`);
+      }
+    } finally {
+      asking = false;
+    }
+  };
+  const surfacesOf = (siblings: Record<string, RowAgent>) =>
+    Object.fromEntries(
+      Object.entries(siblings).map(([key, row]) => [
+        key,
+        { surface: row.surface, expose: row.expose },
+      ]),
+    );
+
+  served = await serveSurfaceAsMcp({
     core: { surface: oduServiceSurface, expose: ODU_SERVICE_EXPOSE },
-    // THE CACHE IS A SIBLING on the same wire, so an agent reaches its verbs
-    // through this bridge too — `cache_bucket_create` and its neighbours, under
-    // the key the daemon mounts the row at.
-    surfaces: { [CACHE_KEY]: CACHE_AGENT },
+    // THE SIBLINGS ARE ON THE SAME WIRE, so an agent reaches their verbs through
+    // this bridge too — `cache_bucket_create` and its neighbours, and the door's
+    // own verbs when the daemon has a door, under the keys the daemon mounts the
+    // rows at. The rules are the rows': this face adds no authority, it forwards
+    // a call.
+    surfaces: surfacesOf(siblingsFor(door)),
     client: async () => {
-      const connection = await connectOrStart(origin, { group: SERVICE_WIRE_GROUP });
-      held = connection;
+      const connection = await connectToService(origin);
+      opened.add(connection);
+      // ASKED PER DIAL, AND NOT INSIDE IT. The dial is the one thing that
+      // guarantees there is a daemon to ask — but `reroster` from inside this
+      // factory moves the roster while the dial that answers it is still being
+      // taken, and the framework (rightly) refuses every request against the
+      // two generations it then straddles. So the question is fired and not
+      // awaited: the answer lands after this connection is in service, and the
+      // framework re-dials for the roster it carries.
+      void askDoor();
       return {
         client: {
           core: connection.client as unknown as SurfaceClientCallable,
           clients: composedClients(SERVICE_SIBLINGS, connection.dispatch),
         },
-        dispose: () => connection.dispose(),
+        // THE ANNOUNCEMENT the adapter builds its redial on: a daemon that died
+        // or was upgraded tells this connection's transport, the adapter drops
+        // the slot, and the NEXT call dials a fresh one. Without it the slot
+        // stays "live" holding a dead socket, and every later call fails on it
+        // — which is what the redial e2e found, with `SocketCloseError: 1000`.
+        onClose: connection.onClose,
+        dispose: () => {
+          opened.delete(connection);
+          connection.dispose();
+        },
       };
     },
     // The name an MCP host sees. ONE spelling, and it is the identity of the
     // thing being served rather than a transport detail: the daemon's own `/mcp`
     // route answers with the same pair.
     serverInfo: { name: "odu", version: opts.version },
-    // THE PARAGRAPHS BOTH DOORS TEACH, composed exactly as the daemon's `/mcp`
-    // route composes them (core first, then each sibling). This bridge used to
-    // pass the core's alone, which was true while the cache's paragraph was
-    // folded into that constant — so splitting it out made two doors teach
-    // different things about the same verbs, in principle and then in fact.
-    instructions: [ODU_SERVICE_MCP_INSTRUCTIONS, CACHE_AGENT.instructions].join("\n\n"),
+    // THE PARAGRAPHS BOTH DOORS TEACH, from the ONE composer the daemon's `/mcp`
+    // route uses, read at each `initialize` so a host that connects after a
+    // re-roster is told the rows it actually gets.
+    instructions: () =>
+      agentInstructions(
+        { surface: oduServiceSurface, expose: ODU_SERVICE_EXPOSE, instructions: ODU_SERVICE_MCP_INSTRUCTIONS },
+        siblingsFor(door),
+      ),
     ...(opts.transport === undefined ? {} : { transport: opts.transport }),
   });
   return {
     served,
     close: async () => {
       await served.close();
-      await held?.dispose();
+      for (const connection of opened) connection.dispose();
+      opened.clear();
     },
   };
 }

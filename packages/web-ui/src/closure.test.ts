@@ -31,7 +31,15 @@ const DECLARED = Object.keys(MANIFEST.dependencies ?? {});
 /** What a consumer must satisfy, pinned as a literal set. Growing it is a
  *  decision every downstream pays for, so it is written down rather than
  *  derived from whatever the manifest happens to say today. */
-const EXPECTED_DEPENDENCIES = ["@odu/cache", "@odu/ci", "@odu/service-client", "effect", "solid-js"];
+const EXPECTED_DEPENDENCIES = [
+  "@odu/auth",
+  "@odu/cache",
+  "@odu/ci",
+  "@odu/cordis",
+  "@odu/service-client",
+  "effect",
+  "solid-js",
+];
 
 /** The `@kolu/*` sources a consumer must hydrate alongside this package. */
 const HYDRATED = new Set<string>([
@@ -223,6 +231,31 @@ describe("@odu/web-ui's import closure", () => {
       `${offenders.join(", ")} reaches the cache from a place that is not the ` +
         "shell. The run views hold the runs' client and the cache view holds " +
         "the cache's; `app.tsx` is the ONE place that wires both.",
+    ).toEqual([]);
+  });
+
+  it("keeps the door's view to ONE importer too", () => {
+    // The same shape as the cache's: the ROOT dials the auth SURFACE (the
+    // bundle carries the contract whether or not the row is mounted), and the
+    // SHELL is the one file that opens the face — it is the route table, and the
+    // sign-in page is a route.
+    const offenders: string[] = [];
+    for (const { rel, specifiers } of sources) {
+      for (const spec of specifiers) {
+        if (!spec.startsWith("@odu/auth")) continue;
+        if (rel === "src/main.tsx") {
+          if (spec !== "@odu/auth/surface") offenders.push(`${rel}: ${spec} (the root mounts surfaces only)`);
+          continue;
+        }
+        if (rel !== "src/app.tsx") offenders.push(`${rel}: ${spec}`);
+        else if (spec !== "@odu/auth/face") offenders.push(`${rel}: ${spec} (the shell opens the view, not the contract)`);
+      }
+    }
+    expect(
+      offenders,
+      `${offenders.join(", ")} reaches the door from a place that is not the ` +
+        "shell. A run or cache view that imported it would be a view that could " +
+        "sign somebody in; the shell wires the sign-in page and the profile.",
     ).toEqual([]);
   });
 

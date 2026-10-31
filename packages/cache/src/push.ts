@@ -26,9 +26,13 @@
  * multi-gigabyte closure on a laptop.
  */
 
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
+import {
+  credentialsPath as sharedCredentialsPath,
+  normalizeOrigin,
+  readCredentials as sharedReadCredentials,
+  saveCredential as sharedSaveCredential,
+} from "@odu/credentials";
 import { narHashBase32, storePathBasename, storePathHash } from "./narinfo";
 import { CACHE_MOUNT } from "./paths";
 import { type PathInfo, nixClosure, nixDump } from "./store";
@@ -46,58 +50,24 @@ export interface PushEnv {
   readonly [other: string]: string | undefined;
 }
 
-/** Where a logged-in token lives: one entry per origin, 0600, under the user's
- *  config directory — the same shape `gh` and `docker` use, and for the same
- *  reason. */
-export function credentialsPath(env: PushEnv): string {
-  const config = env.XDG_CONFIG_HOME?.trim();
-  const home = env.HOME?.trim();
-  const base =
-    config !== undefined && config !== ""
-      ? config
-      : join(home !== undefined && home !== "" ? home : homedir(), ".config");
-  return join(base, "odu", "cache", "credentials");
-}
+/** THIS ROW'S STORE — the one word that differs from the auth row's file. */
+const STORE = "cache";
 
-async function readCredentials(env: PushEnv): Promise<Record<string, string>> {
-  try {
-    const parsed: unknown = JSON.parse(await readFile(credentialsPath(env), "utf8"));
-    if (parsed === null || typeof parsed !== "object") return {};
-    return Object.fromEntries(
-      Object.entries(parsed as Record<string, unknown>).filter(
-        (entry): entry is [string, string] => typeof entry[1] === "string",
-      ),
-    );
-  } catch {
-    // Absent is the ordinary case: CI sets `$ODU_CACHE_TOKEN` and never logs in.
-    return {};
-  }
-}
+/** Where a logged-in token lives: one entry per origin, 0600, under the user's
+ *  config directory (see `@odu/credentials`). */
+export const credentialsPath = (env: PushEnv): string => sharedCredentialsPath(env, STORE);
+
+const readCredentials = (env: PushEnv): Promise<Record<string, string>> =>
+  sharedReadCredentials(env, STORE);
 
 /** Save a token for an origin. Answers the path it wrote, for the message the
  *  command prints. */
-export async function saveCredential(
-  env: PushEnv,
-  origin: string,
-  token: string,
-): Promise<string> {
-  const path = credentialsPath(env);
-  const entries = await readCredentials(env);
-  entries[normalizeOrigin(origin)] = token;
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  await writeFile(path, `${JSON.stringify(entries, null, 2)}\n`, { mode: 0o600 });
-  // `writeFile`'s mode is only honoured on create; an existing file keeps
-  // whatever it had, and a world-readable token file is the one mistake this
-  // command must not make.
-  await chmod(path, 0o600);
-  return path;
-}
+export const saveCredential = (env: PushEnv, origin: string, token: string): Promise<string> =>
+  sharedSaveCredential(env, STORE, origin, token);
 
 /** `http://127.0.0.1:18440/` → `http://127.0.0.1:18440`, so a token saved by one
  *  spelling is found by the other. */
-export function normalizeOrigin(origin: string): string {
-  return origin.replace(/\/+$/, "");
-}
+export { normalizeOrigin } from "@odu/credentials";
 
 export interface ResolvedBucket {
   origin: string;

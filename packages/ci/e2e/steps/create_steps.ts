@@ -9,8 +9,8 @@
 
 import * as assert from "node:assert";
 import { Then, When } from "@cucumber/cucumber";
-import { headOf } from "../support/service.ts";
-import type { OduWorld } from "../support/world.ts";
+import { headOf } from "../../../web-acceptance/support/service.ts";
+import type { OduWorld } from "../../../web-acceptance/support/world.ts";
 
 When("I fill {string} with {string}", async function (this: OduWorld, label: string, value: string) {
   await this.page.getByLabel(label, { exact: true }).fill(value);

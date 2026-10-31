@@ -194,6 +194,7 @@ let
             ${pkgs.kolu-url-shape} @kolu/url-shape \
             ${pkgs.kolu-surface-remote} @kolu/surface-remote \
             ${pkgs.kolu-shell-quote} @kolu/shell-quote \
+            ${pkgs.kolu-byte-units} @kolu/byte-units \
             ${pkgs.kolu-surface-map} @kolu/surface-map \
             ${pkgs.kolu-log} @kolu/log \
             ${pkgs.kolu-surface-daemon-supervisor} @kolu/surface-daemon-supervisor \

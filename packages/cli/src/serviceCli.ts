@@ -51,10 +51,9 @@ import {
 } from "@kolu/surface-cli";
 import { ODU_VERSION } from "@odu/execution/common/version";
 import { serviceOrigin } from "@odu/service-client/endpoint";
-import { connectOrStart } from "@odu/launch/webLauncher";
 import { CACHE_AGENT, CACHE_KEY } from "@odu/cache/surface";
 import { composedClients } from "@odu/cordis/compose";
-import { SERVICE_SIBLINGS, SERVICE_WIRE_GROUP } from "./wire";
+import { connectToService, SERVICE_SIBLINGS, SERVICE_WIRE_GROUP } from "./wire";
 import { oduServiceSurface } from "@odu/service-client/surface";
 import { ODU_SERVICE_EXPOSE } from "@odu/service-client/verbs";
 import { Effect } from "effect";
@@ -87,7 +86,7 @@ const endpoint: EndpointSeam<typeof endpointFlags> = {
         // nothing for an explicitly named `--origin`, so a typo reports that
         // nothing is serving there rather than spawning a daemon that could not
         // bind the address anyway.
-        const connection = await connectOrStart(values.origin, { group: SERVICE_WIRE_GROUP });
+        const connection = await connectToService(values.origin);
         return {
           // THE ROOTED BUNDLE, over the one dispatch: the runs as the
           // unprefixed core and the cache as the sibling its commands mount

@@ -70,6 +70,7 @@ import { readLog, readTail } from "./logs";
 import { checkoutSource } from "./checkout";
 import { nodesSource } from "./nodes";
 import { callerOf } from "./caller";
+import { may, principalOf, type Principal } from "@odu/cordis/principal";
 import type { ServicePorts } from "./ports";
 import { reconcileRequests } from "./reconcile";
 import { everyAfter, slowTickReporter } from "./poller";
@@ -166,6 +167,33 @@ export function createOduService(opts: ServiceOptions): OduService {
     opts.requestsRoot === undefined ? {} : { root: opts.requestsRoot },
   );
   const startedAt = now();
+
+  /**
+   * THE RUNS' OWN FLOOR, and it is ONE verb's.
+   *
+   * Starting, retrying and cancelling a run is what being a MEMBER of this
+   * daemon means, and the gate has already refused every connection that is
+   * not one — so those verbs state no floor of their own (a second check would
+   * be dead code, and PR 4 is where an org's membership narrows it).
+   * `protect.apply` is different: it WRITES branch protection through the
+   * daemon's own `gh` credential, which is an administrator's act.
+   */
+  const adminOnly = (): Effect.Effect<Principal, ServiceRefused> =>
+    Effect.flatMap(principalOf, (principal) =>
+      may(principal, "admin")
+        ? Effect.succeed(principal)
+        : Effect.fail(
+            new ServiceRefused({
+              code: "not_permitted",
+              message:
+                principal.kind === "user"
+                  ? `odu: protect.apply writes branch protection with this daemon's ` +
+                    `credential, so it needs an admin — ${principal.login} is a ${principal.role}`
+                  : "odu: protect.apply writes branch protection with this daemon's credential, so it needs an admin",
+              suggestion: ["odu", "auth", "whoami"],
+            }),
+          ),
+    );
 
   // ── the two derived stores the surface publishes from ──
   //
@@ -272,21 +300,27 @@ export function createOduService(opts: ServiceOptions): OduService {
       procedures: {
         run: {
           start: ({ input }) =>
-            Effect.tap(
-              startRun(input, {
-                launch: opts.ports.launch,
-                probeCheckout: opts.ports.probeCheckout,
-                requests,
-                catalog,
-                host: hostname(),
-                now,
-              }),
-              // The board must already show the run this call just started
-              // before the answer leaves: an agent that starts a run and
-              // immediately reads the board is the ordinary case, and "I just
-              // created it and it is not there" is the one thing a projection
-              // must never say.
-              () => Effect.sync(refresh),
+            Effect.flatMap(principalOf, (principal) =>
+              Effect.tap(
+                startRun(
+                  input,
+                  {
+                    launch: opts.ports.launch,
+                    probeCheckout: opts.ports.probeCheckout,
+                    requests,
+                    catalog,
+                    host: hostname(),
+                    now,
+                  },
+                  principal,
+                ),
+                // The board must already show the run this call just started
+                // before the answer leaves: an agent that starts a run and
+                // immediately reads the board is the ordinary case, and "I just
+                // created it and it is not there" is the one thing a projection
+                // must never say.
+                () => Effect.sync(refresh),
+              ),
             ),
           wait: ({ input }) => waitForRun(input, { catalog }),
           // The read half of one question. Same payload as `wait` by
@@ -400,34 +434,37 @@ export function createOduService(opts: ServiceOptions): OduService {
         },
         venue: {
           probe: ({ input }) =>
-            Effect.flatMap(
-              Effect.promise(() =>
-                opts.ports.probeVenues({
-                  platforms: input.platforms ?? [],
-                  caller: callerOf(input),
-                }),
+            Effect.flatMap(principalOf, (principal) =>
+              Effect.flatMap(
+                Effect.promise(() =>
+                  opts.ports.probeVenues({
+                    platforms: input.platforms ?? [],
+                    caller: callerOf(input, principal),
+                  }),
+                ),
+                (outcome) =>
+                  outcome.ok
+                    ? Effect.succeed({
+                        source: outcome.source,
+                        warnings: outcome.warnings,
+                        rows: outcome.rows,
+                      })
+                    : Effect.fail(
+                        new ServiceRefused({
+                          code: "no_venue",
+                          message: outcome.message,
+                          suggestion: ["odu", "hosts"],
+                        }),
+                      ),
               ),
-              (outcome) =>
-                outcome.ok
-                  ? Effect.succeed({
-                      source: outcome.source,
-                      warnings: outcome.warnings,
-                      rows: outcome.rows,
-                    })
-                  : Effect.fail(
-                      new ServiceRefused({
-                        code: "no_venue",
-                        message: outcome.message,
-                        suggestion: ["odu", "hosts"],
-                      }),
-                    ),
             ),
           hold: ({ input }) =>
             Effect.flatMap(
               Effect.suspend(() => {
                 const bad = notAbsolute("venue.hold", input.checkout);
                 if (bad !== null) return Effect.fail(bad);
-                return Effect.promise(() =>
+                return Effect.flatMap(principalOf, (principal) =>
+                  Effect.promise(() =>
                   // ONCE ONLY. A repeat replays the recorded answer and takes
                   // no hold — see `onceOnly` on why "taking a hold you already
                   // hold is harmless" is true of the operation and false of a
@@ -453,9 +490,10 @@ export function createOduService(opts: ServiceOptions): OduService {
                       opts.ports.holdVenue({
                         checkout: input.checkout,
                         platforms: input.platforms ?? [],
-                        caller: callerOf(input),
+                        caller: callerOf(input, principal),
                         noWait: input.noWait ?? false,
                       }),
+                  ),
                   ),
                 );
               }),
@@ -481,7 +519,8 @@ export function createOduService(opts: ServiceOptions): OduService {
               Effect.suspend(() => {
                 const bad = notAbsolute("venue.release", input.checkout);
                 if (bad !== null) return Effect.fail(bad);
-                return Effect.promise(() =>
+                return Effect.flatMap(principalOf, (principal) =>
+                  Effect.promise(() =>
                   // THE SHARP ONE. Release A's reply is lost, another client
                   // takes a new hold on the same platform, and A retries — a
                   // repeat by its own reckoning, and a release of somebody
@@ -503,8 +542,9 @@ export function createOduService(opts: ServiceOptions): OduService {
                       opts.ports.releaseVenue({
                         checkout: input.checkout,
                         platforms: input.platforms ?? [],
-                        caller: callerOf(input),
+                        caller: callerOf(input, principal),
                       }),
+                  ),
                   ),
                 );
               }),
@@ -519,6 +559,7 @@ export function createOduService(opts: ServiceOptions): OduService {
         },
         protect: {
           apply: ({ input }) =>
+            Effect.flatMap(adminOnly(), (principal) =>
             Effect.flatMap(
               Effect.suspend(() => {
                 const bad = notAbsolute("protect.apply", input.checkout);
@@ -535,7 +576,7 @@ export function createOduService(opts: ServiceOptions): OduService {
                       checkout: input.checkout,
                       ...(input.branch === undefined ? {} : { branch: input.branch }),
                       platforms: input.platforms ?? [],
-                      caller: callerOf(input),
+                      caller: callerOf(input, principal),
                       dryRun: true,
                       create: input.create ?? false,
                     }),
@@ -571,7 +612,7 @@ export function createOduService(opts: ServiceOptions): OduService {
                           ? {}
                           : { branch: input.branch }),
                         platforms: input.platforms ?? [],
-                        caller: callerOf(input),
+                        caller: callerOf(input, principal),
                         dryRun: false,
                         create: input.create ?? false,
                       }),
@@ -597,6 +638,7 @@ export function createOduService(opts: ServiceOptions): OduService {
                       }),
                     );
               },
+            ),
             ),
         },
       },

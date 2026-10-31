@@ -47,6 +47,7 @@ import {
 import {
   headOf,
   killDaemon,
+  until,
   makeWebFixture,
   SHARED_TOOLS,
   startWebServiceViaCommand,
@@ -523,6 +524,85 @@ describe("odu mcp — a port that belongs to something else", () => {
     } finally {
       squatter.stop(true);
       world.dispose(null);
+    }
+  }, 300_000);
+});
+
+/**
+ * THE REDIAL GATE — B1's regression, and the one test that would have caught it.
+ *
+ * `client()` is the adapter's REDIAL FACTORY: a transport failure disposes the
+ * connection and calls it again, and the resource pusher dials its own. The
+ * bridge once cached the connection it had used for the door question, so a
+ * redial got back the object that had just been closed — a bridge that
+ * outlived a daemon restart, an upgrade or a dropped socket stayed dead, and
+ * the reader and the pusher could cut each other's socket.
+ *
+ * So: a live bridge, one tool call, the daemon killed underneath it, and a
+ * SECOND tool call that must answer — the bridge bootstraps the daemon the kill
+ * took away. Reverting that fix makes this test hang until `until`'s deadline
+ * and fail with the sentence, which is exactly what the red run said.
+ */
+describe("odu mcp — the bridge redials", () => {
+  it("answers again after the daemon it was talking to is killed", async () => {
+    const world = coldWorld("redial", suitePortFor("bridgeRedial"));
+    let daemonHome: string | null = null;
+    try {
+      const { client, close } = await connectBridge(world.env);
+      try {
+        // A LIVE SESSION: the bridge has dialled and its connection is in use.
+        const first = await client.callTool({ name: "run_list", arguments: {} });
+        expect(JSON.parse(payload(first, "run_list"))).toHaveProperty("rows");
+
+        const cell = await readServiceCell(client);
+        world.adopt(cell.identity.pid);
+        daemonHome = cell.identity.home;
+        killDaemon(cell.identity.pid);
+        // THE PORT, FIRST. A bridge that dials while the dying daemon still
+        // holds the socket fails a dial it would have won a moment later, and
+        // the test would blame the redial for the kill's timing.
+        await until(
+          "the killed daemon's port to close",
+          async () => ((await tcpListening(world.origin)) ? null : true),
+          30_000,
+        );
+
+        // THE SECOND CALL IS THE PROPERTY. A bounded poll rather than one call,
+        // because the framework drops the dead connection and redials on its own
+        // schedule. Every failure is REMEMBERED and named in the deadline's
+        // sentence: a red that says only "did not happen" hides which dial
+        // failed and why, which is the one thing the next reader needs.
+        let last = "no answer at all";
+        const answered = await until(
+          "a run_list answered after the daemon was killed",
+          async () => {
+            try {
+              const again = await client.callTool({ name: "run_list", arguments: {} });
+              if (again.isError === true) {
+                last = String((again.content as { text?: string }[] | undefined)?.[0]?.text ?? "");
+                return null;
+              }
+              return JSON.parse(payload(again, "run_list"));
+            } catch (err) {
+              last = String(err);
+              return null;
+            }
+          },
+          60_000,
+        ).catch((err: unknown) => {
+          throw new Error(`${String(err)}\nlast answer: ${last}`);
+        });
+        expect(answered).toHaveProperty("rows");
+
+        // The replacement is the daemon this process started, so teardown must
+        // reap IT rather than the pid that is already gone.
+        const replacement = await readServiceCell(client);
+        world.adopt(replacement.identity.pid);
+      } finally {
+        await close();
+      }
+    } finally {
+      world.dispose(daemonHome);
     }
   }, 300_000);
 });

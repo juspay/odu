@@ -119,6 +119,7 @@ function LaneHead(props: {
   nodes: readonly RunNode[];
   controls: DetailControls;
   busy: boolean;
+  canRun: boolean;
 }): JSX.Element {
   /** The machines this lane is actually on. Usually one; more than one is a lane
    *  that changed hosts mid-run, which is worth seeing rather than averaging
@@ -176,7 +177,7 @@ function LaneHead(props: {
       </span>
       {/* A lane with no platform has no lane to cancel: `run.cancel` addresses a
           lane BY platform, so the button here would name nothing. */}
-      <Show when={props.platform !== ""}>
+      <Show when={props.canRun && props.platform !== ""}>
         <Button
           title={`drop the ${props.platform} lane; the rest of the run continues`}
           disabled={props.busy}
@@ -199,6 +200,7 @@ function NodeRow(props: {
   onSelect: (node: RunNode) => void;
   controls: DetailControls;
   busy: boolean;
+  canRun: boolean;
 }): JSX.Element {
   const meta = (): (typeof NODE_STATUS)[RunNode["status"]] =>
     NODE_STATUS[props.node.status];
@@ -254,6 +256,7 @@ function NodeRow(props: {
           a control's absence is the honest statement that the action does not
           apply: Retry needs an attempt to retry and a node that has stopped;
           Cancel node needs something running to stop. */}
+      <Show when={props.canRun}>
       <span class="node-controls">
         <Show
           when={
@@ -282,6 +285,7 @@ function NodeRow(props: {
           </Button>
         </Show>
       </span>
+      </Show>
       {/* THE TIMELINE — where this node's latest attempt ran inside the run,
           not merely how long it took, so parallel work reads as parallel and
           the critical path is the bar nothing overlaps.
@@ -662,6 +666,12 @@ export function Detail(props: {
   error: Error | undefined;
   selected: RunNode | null;
   onSelect: (node: RunNode | null) => void;
+  /** MAY THIS PERSON CHANGE THIS RUN? The runs' floor is `member`, so every
+   *  principal that can see a run at all holds it today — the shell passes it
+   *  anyway, because the RULE is the row's and PR 4 is where an org narrows it.
+   *  False hides Run again / Cancel run / Retry / Cancel node and nothing else:
+   *  the evidence stays readable. */
+  canRun: boolean;
   /** THE LOG PANE, handed over built. Nine props used to arrive here — the
    *  attempt, the tail, the follow, the page and their handlers — and `Detail`
    *  read none of them: each was declared, documented and forwarded verbatim to
@@ -743,23 +753,25 @@ export function Detail(props: {
           teardown. The per-lane cancels used to sit here too — a row of
           near-identical buttons whose only difference was a platform triple,
           detached from the nodes they were about. Each rides its own lane now. */}
-      <div class="detail-controls">
-        <Button
-          title="start a NEW run of this selection, at this commit"
-          disabled={busy()}
-          onClick={props.controls.runAgain}
-        >
-          Run again
-        </Button>
-        <Button
-          class="btn-danger"
-          title="stop the whole run"
-          disabled={busy()}
-          onClick={() => setConfirmingCancel(true)}
-        >
-          Cancel run
-        </Button>
-      </div>
+      <Show when={props.canRun}>
+        <div class="detail-controls">
+          <Button
+            title="start a NEW run of this selection, at this commit"
+            disabled={busy()}
+            onClick={props.controls.runAgain}
+          >
+            Run again
+          </Button>
+          <Button
+            class="btn-danger"
+            title="stop the whole run"
+            disabled={busy()}
+            onClick={() => setConfirmingCancel(true)}
+          >
+            Cancel run
+          </Button>
+        </div>
+      </Show>
       {/* ARE YOU SURE — for this one control and no other. Cancelling the whole
           run throws away every lane's work at once, cannot be undone, and sits
           one button away from "Run again"; a lane's cancel and a node's are
@@ -864,6 +876,7 @@ export function Detail(props: {
                     nodes={laneNodes(platform)}
                     controls={props.controls}
                     busy={busy()}
+                    canRun={props.canRun}
                   />
                   <Index each={laneNodes(platform)}>
                     {(node) => (
@@ -881,6 +894,7 @@ export function Detail(props: {
                         onSelect={props.onSelect}
                         controls={props.controls}
                         busy={busy()}
+                        canRun={props.canRun}
                       />
                     )}
                   </Index>

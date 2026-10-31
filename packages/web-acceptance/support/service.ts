@@ -113,6 +113,25 @@ export function workerPort(): number {
   return 19500 + worker * 100 + (process.pid % 100);
 }
 
+/** THE DOOR'S WORLD, beside the loopback one.
+ *
+ * Two services per worker, because the two worlds cannot share one: a daemon
+ * with `ODU_GITHUB_*` set HAS a door, and a scenario tagged with no world at all
+ * asserts today's loopback page — which that daemon would refuse to draw. The
+ * offsets are inside the worker's own hundred (see `workerPort`) so two workers
+ * still cannot collide. */
+export const DOOR_PORT_OFFSET = 40;
+/** The GitHub stub both origins point at. */
+export const STUB_PORT_OFFSET = 45;
+
+export function doorPort(): number {
+  return workerPort() + DOOR_PORT_OFFSET;
+}
+
+export function stubPort(): number {
+  return workerPort() + STUB_PORT_OFFSET;
+}
+
 /** Poll until `ask` answers, or fail with a sentence naming what was waited on. */
 export async function until<T>(
   what: string,
@@ -144,7 +163,11 @@ export function daemonLog(service: Pick<Service, "logPath">): string {
 /** Start a service in a private world and wait for it to SAY it is ready.
  *  Readiness is asked for, never slept on: the service publishes its own state
  *  and this reads it. */
-export async function startService(odu: string, port: number): Promise<Service> {
+export async function startService(
+  odu: string,
+  port: number,
+  extraEnv: NodeJS.ProcessEnv = {},
+): Promise<Service> {
   const root = mkdtempSync(join(tmpdir(), "odu-wa-"));
   const state = join(root, "state");
   mkdirSync(state, { recursive: true });
@@ -173,6 +196,10 @@ export async function startService(odu: string, port: number): Promise<Service> 
     // refuse `no_root_token` and the substituter still serves, which is the
     // behaviour `odu cache` documents rather than a mode this suite wants.
     ODU_ROOT_TOKEN: ROOT_TOKEN,
+    // AND THE DOOR, when a caller has one: `ODU_GITHUB_*` plus the public
+    // origin a browser reaches this daemon at. Absent (the ordinary loopback
+    // world) the auth row is not mounted and nothing asks who anybody is.
+    ...extraEnv,
   };
 
   const logPath = join(root, "daemon.log");
@@ -263,6 +290,39 @@ export function surfaceCall(
     maxBuffer: BIG,
   });
   return { status: res.status, stdout: res.stdout, stderr: res.stderr };
+}
+
+/** EVERY RUN OF THIS CHECKOUT THAT IS STILL GOING, asked of the service rather
+ *  than trusted from the ids a scenario happened to write down.
+ *
+ *  A run a BUTTON started — "Run again" is a new run at the same commit — is
+ *  never named in the address, so nothing registers it in `ownRuns`, and a live
+ *  run whose checkout is then deleted holds a lane for minutes.
+ *
+ *  `settled` is the SERVICE's own answer, read off `run_list`; the row's
+ *  `isActive` predicate is not imported here, because this is the acceptance
+ *  HARNESS and the fence lets a harness reach the ci row only through a root
+ *  file — so the row's own field is read instead of the row's own function. */
+export function activeRunsOf(service: Service, checkout: string): string[] {
+  const answer = verb(service, "run_list", { checkout });
+  if (answer.status !== 0) {
+    throw new Error(
+      `web-acceptance: run_list refused (exit ${answer.status})\n${answer.stderr}`,
+    );
+  }
+  const rows =
+    (answer.json as { rows?: Array<{ runId: string; settled: boolean }> } | null)?.rows ?? [];
+  return rows.filter((row) => !row.settled).map((row) => row.runId);
+}
+
+/** Ask the service to stop one run, and answer whether the request was taken. */
+export function cancelRun(service: Service, runId: string): boolean {
+  const answer = verb(service, "run_cancel", {
+    runId,
+    scope: { kind: "run" },
+    requestId: `wa-teardown-${crypto.randomUUID()}`,
+  });
+  return answer.status === 0;
 }
 
 /**

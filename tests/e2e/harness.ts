@@ -145,6 +145,12 @@ export const PORT_SLOT = {
   /** `cache.e2e.test.ts` — a daemon that also serves a Nix binary cache, with
    *  its own chroot store and root token. */
   cache: 16,
+  /** `packages/auth/e2e/cli` — a daemon with a DOOR, and the GitHub stub its
+   *  OAuth flow is pointed at. */
+  authCli: 17,
+  authStub: 18,
+  /** `mcp.e2e.test.ts` — a daemon killed under a live bridge, redialled. */
+  bridgeRedial: 19,
 } as const;
 
 /** The port for one named slot in THIS suite's block. */

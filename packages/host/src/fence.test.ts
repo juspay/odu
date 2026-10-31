@@ -85,17 +85,38 @@ const declaration = {
   collisions: {
     cache: {
       "packages/cli/src/serviceCli.ts": 4,
-      "packages/cli/src/serviceMcp.ts": 5,
+      "packages/cli/src/serviceMcp.ts": 4,
       "packages/cli/src/wire.ts": 2,
       "packages/execution/src/coordinator/spawn.ts": 1,
       "packages/execution/src/runner/workspace.ts": 22,
+      // `cache-control` on two responses — an HTTP header, not a bucket.
+      "packages/host/src/principal.ts": 2,
+      // The same header, on the shared door reader's one request.
+      "packages/cordis/src/services.ts": 2,
       "packages/launch/src/webDaemonLaunch.ts": 1,
-      "packages/web-acceptance/step_definitions/cache_steps.ts": 32,
       "packages/web-acceptance/support/corpus.ts": 5,
       "packages/web-acceptance/support/world.ts": 5,
     },
     ci: {
       "packages/web-acceptance/support/service.ts": 7,
+    },
+    // THE DOOR'S WORD, and every one of these is a price of a row named after
+    // a common noun: the daemon's roster and its gate, the shared vocabulary
+    // that carries the `AuthDoor` fact and the broker tag, the composed wires a
+    // CLI and a bridge read, and the runs' own service cell — which publishes
+    // "does this daemon have a door" so a browser knows whether to sign in.
+    auth: {
+      "packages/cache/src/cache.ts": 2,
+      "packages/ci/src/protect.ts": 2,
+      "packages/cli/src/serviceMcp.ts": 4,
+      "packages/cli/src/wire.ts": 2,
+      "packages/service/src/service.ts": 1,
+      // The 401's sentence names the command a person runs to fix it.
+      "packages/host/src/principal.ts": 1,
+      // The harness names the row's world: a scenario's tags say whether the
+      // browser meets a door, and the stub's environment is the door's.
+      "packages/web-acceptance/support/authWorld.ts": 1,
+      "packages/web-acceptance/support/hooks.ts": 3,
     },
   },
   // A MODULE THAT HOLDS LIVE STATE BEHIND A DOOR, and why: the spawn module's
@@ -157,6 +178,55 @@ describe("the fence over this repo", () => {
             .join("; "),
     ).toBe(true);
   }, FENCE_TIMEOUT_MS);
+});
+
+/**
+ * THE THIRD ROW, and the shape that makes it a row rather than a folder.
+ *
+ * Declared by its manifest (so the walk above already found it), named by the
+ * roots that may name rows, and imported by NOBODY else — `ci` and `cache` must
+ * not be able to reach sign-in, which is the whole reason it is a separate
+ * package rather than a module inside either.
+ */
+describe("three rows, and the third one has no importers but the roots", () => {
+  const manifestOf = (member: string): { dependencies?: Record<string, string> } =>
+    JSON.parse(source(`${member}/package.json`)) as {
+      dependencies?: Record<string, string>;
+    };
+
+  it("is three rows, read off the manifests", () => {
+    expect(Object.keys(FENCE_ROWS).sort()).toEqual(["auth", "cache", "ci"]);
+  });
+
+  it("no package of the ci or cache row depends on auth", () => {
+    // EVERY member of those rows, read off the manifests — not the two
+    // directories somebody remembered. A row is a set of packages, and a
+    // dependency added to any one of them is the import the fence exists to
+    // refuse.
+    const members = ["ci", "cache"]
+      .flatMap((row) => FENCE_ROWS[row] ?? [])
+      // `packages/cli` projects EVERY row's argv face (it names
+      // `@odu/cache/cli` for the same reason), so it is a root-shaped member
+      // rather than one row's engine. The engines are what must not reach the
+      // door.
+      .filter((member) => member !== "packages/cli");
+    expect(members.length).toBeGreaterThan(2);
+    for (const member of members) {
+      expect(
+        Object.keys(manifestOf(member).dependencies ?? {}),
+        `${member} declares @odu/auth`,
+      ).not.toContain("@odu/auth");
+    }
+  });
+
+  it("the roots are what name it", () => {
+    // The daemon mounts it, the browser opens its face, and the shell's boot
+    // dials its surface — each is a root, which is the only place a row may be
+    // named.
+    expect(source("packages/host/src/web.ts")).toContain('"@odu/auth/server"');
+    expect(source("packages/web-ui/src/main.tsx")).toContain('"@odu/auth/surface"');
+    expect(source("packages/web-ui/src/app.tsx")).toContain('"@odu/auth/face"');
+  });
 });
 
 /**

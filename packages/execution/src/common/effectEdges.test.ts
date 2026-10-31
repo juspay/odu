@@ -122,6 +122,23 @@ const SANCTIONED = new Map<string, string>([
       "daemon runs it.",
   ],
   [
+    "packages/auth/src/cli.ts",
+    "The door's ARGV EDGE, exactly as `packages/cache/src/cli.ts` is the " +
+      "cache's: every `odu auth` command ends with a surface procedure — an " +
+      "`Effect` carrying a declared `AuthRefused` channel — becoming a number " +
+      "for `process.exit`, and the three outcomes (answered / refused / dead " +
+      "link) cannot be told apart without running it. `login` runs no Effect at " +
+      "all: it is the one command here that touches no service.",
+  ],
+  [
+    "packages/auth/src/routes.ts",
+    "The door's HTTP edge, and it is the SIGN-IN FLOW's: `HttpRouter` handlers " +
+      "answer with an `Effect` and a `Layer`, and a cookie is set on a response " +
+      "by an `Effect` combinator (`setCookie`). The router runs its own effects; " +
+      "the ONE crossing this file makes is a cookie set inside an already-" +
+      "effectful handler, which is exactly where the response value lives.",
+  ],
+  [
     "packages/launch/src/webLauncher.ts",
     "Converging on the singleton. Reading the service cell and asking a running " +
       "daemon to drain are Effects; everything that decides between adopt, " +

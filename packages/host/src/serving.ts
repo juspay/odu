@@ -15,16 +15,20 @@
  */
 
 import type { ServedGeneration } from "@kolu/surface/expose";
+import type { Layer } from "effect";
 import {
   reportSurfaceAppEvent,
   type ServeSurfaceAppOptions,
+  type SurfaceAppConnection,
+  type SurfaceAppHttpMiddleware,
 } from "@kolu/surface-app/serve";
+import type { UpgradeHeadersSource } from "@kolu/surface-app/upgrade-headers";
 
 type ServeRoutes = NonNullable<ServeSurfaceAppOptions["routes"]>;
 
 /** The parts a listener is built from. Each is supplied by the composition
  *  root; nothing here reads an environment or spawns anything. */
-export interface ServingParts {
+export interface ServingParts<Svc = never, H extends string = never> {
   /** The served generation, read at EVERY accept: the rooted runtime's served
    *  set moves when the control sibling mounts, and a snapshot taken at bind
    *  would serve a roster that no longer matches the handlers. */
@@ -48,6 +52,20 @@ export interface ServingParts {
   allowedOrigins: ReadonlyArray<string>;
   host: string;
   port: number;
+  /** The request headers a websocket connection is read under. odu names TWO —
+   *  `cookie`, the session a sign-in wrote, and `authorization`, the personal
+   *  token a CLI or an agent presents on the upgrade — and nothing else, so the
+   *  rest of the upgrade's header bag is unreachable from the connection. */
+  upgradeHeaders?: UpgradeHeadersSource<H>;
+  /** Services ONE connection's handlers may require — the seam a per-connection
+   *  fact rides, and where odu provides the connection's {@link
+   *  CurrentPrincipal}. A layer, so the connection's lease is acquired and
+   *  released with the connection's own scope. */
+  services?: (connection: SurfaceAppConnection<H>) => Layer.Layer<Svc>;
+  /** Wrap every HTTP request. odu uses it for both HTTP legs of the door: an
+   *  anonymous MCP POST is `401`, and an anonymous browser asking for the shell
+   *  meets the sign-in page the server renders. */
+  middleware?: SurfaceAppHttpMiddleware;
 }
 
 /** The shell's fixed identity: what every odu board installs as. */
@@ -57,8 +75,15 @@ const MANIFEST: NonNullable<ServeSurfaceAppOptions["manifest"]> = {
   icons: [],
 };
 
-/** The options `serveSurfaceApp` takes, from the parts above. */
-export function servingOptions(parts: ServingParts): ServeSurfaceAppOptions {
+/** The options `serveSurfaceApp` takes, from the parts above.
+ *
+ *  GENERIC over the header allowlist and the per-connection services so the
+ *  composition root's own literal (`["cookie"]`) reaches the connection type:
+ *  a widened `ReadonlyArray<string>` would make every read of
+ *  `connection.headers` compile and answer `string | undefined` forever. */
+export function servingOptions<Svc = never, H extends string = never>(
+  parts: ServingParts<Svc, H>,
+): ServeSurfaceAppOptions<Svc, H> {
   return {
     live: parts.live,
     clientDist: parts.dist,
@@ -67,6 +92,11 @@ export function servingOptions(parts: ServingParts): ServeSurfaceAppOptions {
     port: parts.port,
     allowedOrigins: parts.allowedOrigins,
     ...(parts.routes === undefined ? {} : { routes: parts.routes }),
+    ...(parts.upgradeHeaders === undefined
+      ? {}
+      : { upgradeHeaders: parts.upgradeHeaders }),
+    ...(parts.services === undefined ? {} : { services: parts.services }),
+    ...(parts.middleware === undefined ? {} : { middleware: parts.middleware }),
     onEvent: reportSurfaceAppEvent,
   };
 }

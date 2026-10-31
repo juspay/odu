@@ -15,6 +15,7 @@
 
 import { afterEach, describe, expect, it } from "bun:test";
 import { createCache, type Cache } from "./cache";
+import { asRoot } from "./testlib";
 import { cacheServer } from "./server";
 import type { CacheBucket } from "./surface";
 
@@ -63,7 +64,7 @@ describe("the substituter URL a bucket publishes", () => {
     for (const origin of [BOUND, PUBLIC]) {
       const { cache, published, publish } = await row(origin);
       const created = await cache.admin.create({
-        rootToken: "root-token",
+        ...asRoot("root-token"),
         name: "main",
         public: true,
         retentionDays: 30,
@@ -80,7 +81,7 @@ describe("the substituter URL a bucket publishes", () => {
   it("is on every row the board reads, including a bucket made before it attached", async () => {
     const { cache, published, publish } = await row(PUBLIC);
     await cache.admin.create({
-      rootToken: "root-token",
+      ...asRoot("root-token"),
       name: "early",
       public: false,
       retentionDays: 0,

@@ -47,6 +47,7 @@ function scripted(get: () => unknown): {
     } as unknown as OduServiceClient,
     dispatch: null as unknown as ServiceConnection["dispatch"],
     url: "ws://127.0.0.1:3737/rpc/ws",
+    onClose: () => () => {},
     dispose: async () => {
       disposes += 1;
     },

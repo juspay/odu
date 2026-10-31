@@ -68,6 +68,11 @@ export interface CacheFaceProps {
   onOpen: (bucket: string | null) => void;
   /** One clock for the page, read once a second by the shell. */
   now: number;
+  /** MAY THIS PERSON ADMINISTER BUCKETS? The ROW's floor is `admin`, and the
+   *  shell reads it off the connection's principal — the face draws what the
+   *  role can use and hides the rest. Creating a bucket is the one control the
+   *  page has, so this is the one place it shows. */
+  canAdminister: boolean;
   /** THE UI EDGE, supplied by the shell rather than taken here.
    *
    *  A procedure is an `Effect` — a description — and a click is the moment one
@@ -80,7 +85,18 @@ export interface CacheFaceProps {
 
 export function CacheFace(props: CacheFaceProps): JSX.Element {
   return (
-    <Show when={props.bucket} fallback={<BucketList client={props.client} now={props.now} onOpen={props.onOpen} />}>
+    <Show
+      when={props.bucket}
+      fallback={
+        <BucketList
+          client={props.client}
+          now={props.now}
+          onOpen={props.onOpen}
+          canAdminister={props.canAdminister}
+          call={props.call}
+        />
+      }
+    >
       {(name) => (
         <BucketPage
           client={props.client}
@@ -103,6 +119,73 @@ export function CacheFace(props: CacheFaceProps): JSX.Element {
  * the SAME object: the cache publishes a bundle's counters every second, and a
  * keyboard user should not pay for it.
  */
+/**
+ * CREATE A BUCKET — the page's only administrative control.
+ *
+ * A minimal form: a name, and the two facts a bucket is created with (public by
+ * default, ninety days of retention). The row decides whether this call is
+ * allowed, and the SHELL decides whether the control is drawn at all — two
+ * independent checks, because a hidden button is not a permission.
+ */
+function CreateBucket(props: {
+  client: CacheClient;
+  call: <A>(effect: Effect.Effect<A, unknown>) => Promise<A>;
+  onCreated: (bucket: string | null) => void;
+}): JSX.Element {
+  const [name, setName] = createSignal("");
+  const [busy, setBusy] = createSignal(false);
+  const [failure, setFailure] = createSignal<string | null>(null);
+  const create = (): void => {
+    const bucket = name().trim();
+    if (bucket === "") return;
+    setBusy(true);
+    setFailure(null);
+    void props
+      .call(
+        props.client.procedures.bucket.create({
+          // The row ignores this for a signed-in admin (its role authorises the
+          // call); only a local owner's token is compared.
+          rootToken: "",
+          name: bucket,
+          public: true,
+          retentionDays: 90,
+        }),
+      )
+      .then(
+        (created) => {
+          setBusy(false);
+          setName("");
+          props.onCreated(created.name);
+        },
+        (err: unknown) => {
+          setBusy(false);
+          setFailure(refusalText(err));
+        },
+      );
+  };
+  return (
+    <div class="cache-create">
+      <label class="search">
+        <span class="sr-only">new bucket name</span>
+        <input
+          type="text"
+          placeholder="new bucket name"
+          value={name()}
+          onInput={(event) => setName(event.currentTarget.value)}
+        />
+      </label>
+      <button
+        type="button"
+        disabled={busy() || name().trim() === ""}
+        onClick={create}
+      >
+        {busy() ? "creating…" : "Create bucket"}
+      </button>
+      <Show when={failure()}>{(message) => <p class="fault">{message()}</p>}</Show>
+    </div>
+  );
+}
+
 function keepIdentity<T extends { readonly name: string }>(): (row: T) => T {
   const held = new Map<string, { readonly row: T; readonly encoded: string }>();
   return (row) => {
@@ -118,6 +201,8 @@ function BucketList(props: {
   client: CacheClient;
   now: number;
   onOpen: (bucket: string | null) => void;
+  canAdminister: boolean;
+  call: <A>(effect: Effect.Effect<A, unknown>) => Promise<A>;
 }): JSX.Element {
   const held = props.client.collections.buckets.use();
   const stable = keepIdentity<CacheBucket>();
@@ -133,6 +218,12 @@ function BucketList(props: {
   return (
     <section class="cache" aria-label="buckets">
       <h2>Buckets</h2>
+      {/* THE ONE CONTROL THIS PAGE HAS, and it is the ROW's floor made visible:
+          creating a bucket needs an `admin`, so a member is not shown a form
+          whose call would be refused. */}
+      <Show when={props.canAdminister}>
+        <CreateBucket client={props.client} call={props.call} onCreated={props.onOpen} />
+      </Show>
       <Show
         when={rows().length > 0}
         fallback={

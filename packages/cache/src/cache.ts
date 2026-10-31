@@ -118,20 +118,43 @@ export type CacheOutcome<T> =
   | { ok: true; value: T }
   | { ok: false; code: CacheRefusalCode; message: string };
 
+/**
+ * HOW A CALL WAS AUTHORISED — and the union is the point.
+ *
+ * The row builds it, once, from the caller's principal: an operator's ROOT
+ * TOKEN, or a signed-in person whose ROLE the row already checked. The engine
+ * does not know what a role means — this package's row decides what an `admin`
+ * may do, and this is that decision's arrival at the data.
+ *
+ * THE ROLE ARM IS SEALED. It carries a key of a symbol this module does not
+ * export, so no code outside this package can word-process one: the only way to
+ * obtain the arm is {@link roleAuthority}, which nothing but the row calls. A
+ * boolean a caller could set would be a claim the engine cannot check.
+ */
+const roleSeal: unique symbol = Symbol("odu:cache/role");
+
+export type Authority =
+  | { readonly kind: "root"; readonly rootToken: string }
+  | { readonly kind: "role"; readonly login: string; readonly [roleSeal]: true };
+
+/** The ROLE arm — minted here and nowhere else, because `roleSeal` is private. */
+export function roleAuthority(login: string): Authority {
+  return { kind: "role", login, [roleSeal]: true };
+}
+
 /** The admin face, structurally the service's `CacheAdmin` port. */
 export interface CacheAdmin {
   /** Where the protocol is mounted under the origin — `./paths`, re-exported
    *  here because this is the object the composition root hands the service,
    *  and the service is what prefixes a bucket's substituter URL. */
   readonly mount: string;
-  create(input: {
-    rootToken: string;
+  create(input: { authority: Authority;
     name: string;
     public: boolean;
     retentionDays: number;
     upstreamKeys: readonly string[];
   }): Promise<CacheOutcome<BucketFacts>>;
-  list(input: { rootToken: string }): Promise<CacheOutcome<readonly BucketFacts[]>>;
+  list(input: { authority: Authority }): Promise<CacheOutcome<readonly BucketFacts[]>>;
   /**
    * One bucket's PUBLIC identity — its URL and the key a client has to trust —
    * with no root token.
@@ -143,30 +166,26 @@ export interface CacheAdmin {
    * capability, the same way it is in the substituter URL.
    */
   describe(input: { bucket: string }): Promise<CacheOutcome<BucketIdentity>>;
-  tokenMint(input: {
-    rootToken: string;
+  tokenMint(input: { authority: Authority;
     bucket: string;
     /** A glob, so one token can cover `team-*`. Absent means the bucket. */
     bucketGlob: string | null;
     scope: Scope;
     expiresDays: number | null;
   }): Promise<CacheOutcome<TokenMinted>>;
-  tokenList(input: {
-    rootToken: string;
+  tokenList(input: { authority: Authority;
     bucket: string | null;
   }): Promise<CacheOutcome<readonly TokenFacts[]>>;
-  tokenRevoke(input: {
-    rootToken: string;
+  tokenRevoke(input: { authority: Authority;
     id: string;
   }): Promise<CacheOutcome<{ id: string; revoked: boolean }>>;
-  pin(input: {
-    rootToken: string;
+  pin(input: { authority: Authority;
     bucket: string;
     name: string;
     paths: readonly string[];
   }): Promise<CacheOutcome<PinFacts>>;
-  gc(input: { rootToken: string; bucket: string | null }): Promise<CacheOutcome<GcReport>>;
-  stats(input: { rootToken: string }): Promise<CacheOutcome<CacheStats>>;
+  gc(input: { authority: Authority; bucket: string | null }): Promise<CacheOutcome<GcReport>>;
+  stats(input: { authority: Authority }): Promise<CacheOutcome<CacheStats>>;
   /**
    * ONE PAGE of a bucket's stored paths, newest first.
    *
@@ -284,8 +303,29 @@ export function createCache(options: CacheOptions): Cache {
   const writers = newChain();
   const withWriteLock = <T>(work: () => Promise<T>): Promise<T> => serial(writers, work);
 
-  function requireRoot(rootToken: string): CacheOutcome<null> {
-    if (!rootTokenMatches(options.rootToken, rootToken)) {
+  /**
+   * MAY THIS CALL ADMINISTER A BUCKET?
+   *
+   * Two answers, and exactly one applies. A `role` authority is one the ROW
+   * already decided: it read the connection's principal and found an `admin` or
+   * an `owner`, so there is no operator secret to compare — a daemon with an
+   * identity provider mounted need not have a root token at all. Otherwise the
+   * root token is the rule, which is loopback mode and the operator's bootstrap.
+   */
+  function requireRoot(input: { authority: Authority }): CacheOutcome<null> {
+    if (input.authority.kind === "role") {
+      // THE SEAL, not the word: `kind` is a string a cast can write, and the
+      // symbol is not obtainable outside this module.
+      if (roleSeal in input.authority && input.authority[roleSeal] === true) {
+        return { ok: true, value: null };
+      }
+      return {
+        ok: false,
+        code: "no_root_token",
+        message: "this authority was not minted by the cache row",
+      };
+    }
+    if (!rootTokenMatches(options.rootToken, input.authority.rootToken)) {
       return {
         ok: false,
         code: "no_root_token",
@@ -455,7 +495,7 @@ export function createCache(options: CacheOptions): Cache {
   const admin: CacheAdmin = {
     mount: CACHE_MOUNT,
     async create(input) {
-      const root = requireRoot(input.rootToken);
+      const root = requireRoot(input);
       if (!root.ok) return root;
       if (!BUCKET_NAME.test(input.name)) {
         return {
@@ -492,7 +532,7 @@ export function createCache(options: CacheOptions): Cache {
     },
 
     async list(input) {
-      const root = requireRoot(input.rootToken);
+      const root = requireRoot(input);
       if (!root.ok) return root;
       // ONE count query for every bucket, not one per bucket.
       const counted = repo.bucketStats();
@@ -519,7 +559,7 @@ export function createCache(options: CacheOptions): Cache {
     },
 
     async tokenMint(input) {
-      const root = requireRoot(input.rootToken);
+      const root = requireRoot(input);
       if (!root.ok) return root;
       const bucket = repo.bucket(input.bucket);
       if (bucket === null) {
@@ -556,7 +596,7 @@ export function createCache(options: CacheOptions): Cache {
     },
 
     async tokenList(input) {
-      const root = requireRoot(input.rootToken);
+      const root = requireRoot(input);
       if (!root.ok) return root;
       const rows = repo.tokens();
       return {
@@ -568,7 +608,7 @@ export function createCache(options: CacheOptions): Cache {
     },
 
     async tokenRevoke(input) {
-      const root = requireRoot(input.rootToken);
+      const root = requireRoot(input);
       if (!root.ok) return root;
       const revoked = repo.setTokenRevoked(input.id, true);
       if (!revoked) {
@@ -578,7 +618,7 @@ export function createCache(options: CacheOptions): Cache {
     },
 
     async pin(input) {
-      const root = requireRoot(input.rootToken);
+      const root = requireRoot(input);
       if (!root.ok) return root;
       const bucket = repo.bucket(input.bucket);
       if (bucket === null) {
@@ -591,7 +631,7 @@ export function createCache(options: CacheOptions): Cache {
     },
 
     async gc(input) {
-      const root = requireRoot(input.rootToken);
+      const root = requireRoot(input);
       if (!root.ok) return root;
       const buckets =
         input.bucket === null
@@ -644,7 +684,7 @@ export function createCache(options: CacheOptions): Cache {
     },
 
     async stats(input) {
-      const root = requireRoot(input.rootToken);
+      const root = requireRoot(input);
       if (!root.ok) return root;
       // ONE count query for every bucket, not one per bucket.
       const counted = repo.bucketStats();

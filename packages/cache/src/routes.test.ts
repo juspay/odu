@@ -18,6 +18,7 @@ import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { asRoot } from "./testlib";
 import { HttpRouter } from "effect/http";
 import { base32, storePathHash } from "./narinfo";
 import { type Cache, createCache } from "./cache";
@@ -104,7 +105,7 @@ async function harness(publicBucket: boolean): Promise<Harness> {
     now: () => NOW,
   });
   const created = await cache.admin.create({
-    rootToken: ROOT,
+    ...asRoot(ROOT),
     name: "main",
     public: publicBucket,
     retentionDays: 30,
@@ -181,7 +182,7 @@ async function upload(
 
 async function mint(cache: Cache, scope: "read" | "write" | "admin"): Promise<string> {
   const minted = await cache.admin.tokenMint({
-    rootToken: ROOT,
+    ...asRoot(ROOT),
     bucket: "main",
     bucketGlob: null,
     scope,
@@ -301,20 +302,20 @@ describe("the auth matrix", () => {
     const path = `/main/${hashOf(HELLO)}.narinfo`;
 
     const minted = await h.cache.admin.tokenMint({
-      rootToken: ROOT,
+      ...asRoot(ROOT),
       bucket: "main",
       bucketGlob: null,
       scope: "read",
       expiresDays: null,
     });
     if (!minted.ok) throw new Error(minted.message);
-    await h.cache.admin.tokenRevoke({ rootToken: ROOT, id: minted.value.facts.id });
+    await h.cache.admin.tokenRevoke({ ...asRoot(ROOT), id: minted.value.facts.id });
     expect((await h.fetch(path, bearer(minted.value.token))).status).toBe(403);
 
     // An expired token, written straight into the row: `now()` is frozen for
     // the harness, so the expiry is the only moving part.
     const expired = await h.cache.admin.tokenMint({
-      rootToken: ROOT,
+      ...asRoot(ROOT),
       bucket: "main",
       bucketGlob: null,
       scope: "read",
@@ -336,7 +337,7 @@ describe("the auth matrix", () => {
 
     // A token minted for `main` cannot reach a bucket it does not cover.
     const other = await h.cache.admin.create({
-      rootToken: ROOT,
+      ...asRoot(ROOT),
       name: "other",
       public: false,
       retentionDays: 30,
@@ -384,7 +385,7 @@ describe("the auth matrix", () => {
     expect((await h.raw("/assets/main-abc123.js")).status).toBe(404);
     // A bucket NAMED after the mount still lives under it.
     const created = await h.cache.admin.create({
-      rootToken: ROOT,
+      ...asRoot(ROOT),
       name: "cache",
       public: true,
       retentionDays: 30,
@@ -495,7 +496,7 @@ describe("missing", () => {
     // everything"); this pins that the skip really is off, not just unused.
     const h = await harness(true);
     const created = await h.cache.admin.create({
-      rootToken: ROOT,
+      ...asRoot(ROOT),
       name: "everything",
       public: true,
       retentionDays: 30,
@@ -505,7 +506,7 @@ describe("missing", () => {
     // A token minted for `main` cannot ask about this bucket, so mint one that
     // can: the point of the test is the upstream rule, not the scope rule.
     const scoped = await h.cache.admin.tokenMint({
-      rootToken: ROOT,
+      ...asRoot(ROOT),
       bucket: "everything",
       bucketGlob: null,
       scope: "write",

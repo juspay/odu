@@ -26,6 +26,7 @@ import {
 } from "./requests";
 import type { CheckoutFacts } from "./ports";
 import { reconcileRequests } from "./reconcile";
+import { LOCAL_OWNER } from "@odu/cordis/principal";
 import { digestOfRequest, startRun } from "./start";
 
 let world: World | null = null;
@@ -60,7 +61,8 @@ function deps(w: World, ports = recordingPorts()) {
             catalog: { root: w.catalogRoot },
             host: "test-host",
             now: () => Date.now(),
-          }),
+          },
+          LOCAL_OWNER),
         ),
       ),
   };
@@ -287,7 +289,8 @@ describe("run.start", () => {
           catalog: { root: w.catalogRoot },
           host: "test-host",
           now: () => Date.now(),
-        }),
+        },
+        LOCAL_OWNER),
       ),
     );
     expect(seen).toHaveLength(1);
@@ -531,7 +534,8 @@ describe("crash reconciliation", () => {
           catalog: { root: w.catalogRoot },
           host: "test-host",
           now: () => Date.now(),
-        }),
+        },
+        LOCAL_OWNER),
       ),
     );
     expect(result._tag).toBe("Success");

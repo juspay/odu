@@ -24,6 +24,7 @@ exec sh "$(dirname "$0")/hydrate-kolu-packages.sh" \
   "$ODU_KOLU_URL_SHAPE" @kolu/url-shape \
   "$ODU_KOLU_SURFACE_REMOTE" @kolu/surface-remote \
   "$ODU_KOLU_SHELL_QUOTE" @kolu/shell-quote \
+  "$ODU_KOLU_BYTE_UNITS" @kolu/byte-units \
   "$ODU_KOLU_SURFACE_MAP" @kolu/surface-map \
   "$ODU_KOLU_LOG" @kolu/log \
   "$ODU_KOLU_SURFACE_DAEMON_SUPERVISOR" @kolu/surface-daemon-supervisor \
