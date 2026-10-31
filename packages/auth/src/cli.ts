@@ -15,6 +15,7 @@
  * starting a service is `@odu/host`'s job and a row never names the host.
  */
 
+import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { buildSurfaceFace } from "@kolu/surface/client";
 import type { SurfaceClientOf } from "@kolu/surface/project";
@@ -131,9 +132,21 @@ function emitJson(value: unknown): void {
 
 /** One line from stdin, for a token typed by a person. */
 async function readSecret(): Promise<string> {
-  if (process.stdin.isTTY === true) process.stderr.write("token: ");
+  if (process.stdin.isTTY !== true) {
+    // A PIPE THAT HAS ALREADY FINISHED IS AT EOF BEFORE AN ASYNC ITERATOR
+    // ATTACHES, and Bun's iterator over such a stream yields NOTHING: a token
+    // pasted by `Bun.spawnSync(…, { stdin: Buffer })` — exactly how the e2e
+    // test and a script feed this command — read as no token at all. A
+    // synchronous read of fd 0 drains whatever is there, finished or not.
+    return readFileSync(0, "utf8").trim();
+  }
+  // A TERMINAL NEVER SENDS EOF, so the line is the end of the token.
+  process.stderr.write("token: ");
   const chunks: Buffer[] = [];
-  for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
+  for await (const chunk of process.stdin) {
+    chunks.push(Buffer.from(chunk as Buffer));
+    if (chunks.some((one) => one.includes("\n"))) break;
+  }
   return Buffer.concat(chunks).toString("utf8").trim();
 }
 
@@ -203,12 +216,17 @@ async function whoamiCommand(rest: string[], ports: AuthCliPorts): Promise<numbe
   });
   const json = values.output === "json";
   return withService(ports, values.origin, async (client) => {
-    const answer = await call(client.surface.user.whoami({}));
+    const answer = await call(client.surface.user.whoami());
     if (!answer.ok) return reportFailure(answer, json);
     const who = answer.value.who;
+    // THE ANSWER IS PRINTED, AND THE EXIT CODE SAYS WHETHER IT IS A PERSON.
+    // `anonymous` is a real answer — a page before it signs in is one — but a
+    // caller that exits 0 on it believes it has a session. `local` is a
+    // principal (the owner of a daemon with no door) and exits 0.
+    const signedIn = who.kind !== "anonymous";
     if (json) {
       emitJson(who);
-      return 0;
+      return signedIn ? 0 : 1;
     }
     process.stdout.write(
       who.kind === "user"
@@ -217,7 +235,7 @@ async function whoamiCommand(rest: string[], ports: AuthCliPorts): Promise<numbe
           ? "local owner (this daemon has no sign-in configured)\n"
           : "anonymous — this machine holds no credential for that server\n",
     );
-    return 0;
+    return signedIn ? 0 : 1;
   });
 }
 
@@ -256,7 +274,7 @@ async function tokenCommand(rest: string[], ports: AuthCliPorts): Promise<number
       });
       const json = values.output === "json";
       return withService(ports, values.origin, async (client) => {
-        const answer = await call(client.surface.token.list({}));
+        const answer = await call(client.surface.token.list());
         if (!answer.ok) return reportFailure(answer, json);
         if (json) {
           emitJson(answer.value);
