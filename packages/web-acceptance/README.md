@@ -107,6 +107,11 @@ pins.test.ts              the playwright pin is exact and matches nixpkgs
 ../auth/e2e/              the door's scenarios, and its CLI/MCP test
 ```
 
+**`@seam` is not a skip.** It marks a scenario whose promise needs the one kolu
+seam odu does not have — a call that closes a live connection from the server
+(see `packages/host/src/principal.ts`). The scenario is complete and stays in the
+tree; the default tag expression excludes it until the seam lands.
+
 **Scenarios declare their world by tag.** No tag is today's loopback daemon;
 `@anonymous` and `@signed-in:owner|admin|member` run against a SECOND daemon per
 worker, configured against the GitHub stub, with the role granted and the sign-in

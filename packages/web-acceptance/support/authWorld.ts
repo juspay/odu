@@ -27,6 +27,14 @@ export type { Identity };
 /** The login the stub claims by default. */
 export const STUB_LOGIN = "odu-e2e";
 
+/** THE OPERATOR — a login that is never granted anything but `owner`.
+ *
+ * The root token bootstraps the FIRST owner and nothing else, so the harness
+ * cannot keep re-granting roles with it. It bootstraps this account once per
+ * worker, mints a personal token for it through the profile page, and every
+ * scenario's role is then granted by that owner's token. */
+export const OPERATOR_LOGIN = "odu-owner";
+
 /** The allow-list every door world starts with: the stub's account is an active
  *  member of this organisation. */
 export const STUB_ALLOW = "org:juspay";

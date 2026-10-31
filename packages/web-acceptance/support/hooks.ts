@@ -47,7 +47,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BROWSER_ARGS } from "./browser.ts";
 import { clearCorpus } from "./corpus.ts";
-import { doorEnv, identityOf, signIn, STUB_LOGIN } from "./authWorld.ts";
+import { doorEnv, identityOf, OPERATOR_LOGIN, signIn, STUB_LOGIN } from "./authWorld.ts";
 import { startGithubStub, type GithubStub } from "./githubStub.ts";
 import {
   doorPort,
@@ -110,6 +110,52 @@ async function doorService(odu: string): Promise<Service> {
     }),
   );
   return door;
+}
+
+/** THE OPERATOR'S PERSONAL TOKEN, minted once per worker.
+ *
+ * The root token may bootstrap exactly ONE owner, so the harness spends it on an
+ * account that never changes role (`odu-owner`) and then grants every scenario's
+ * role with that account's token. Minting it is a person's route — sign in
+ * through the stub, open the profile, create a token — because that is the only
+ * way a token comes into existence.
+ */
+let operatorToken: string | undefined;
+
+async function operator(odu: string, world: Service): Promise<string> {
+  if (operatorToken !== undefined) return operatorToken;
+  if (browser === undefined || github === undefined) {
+    throw new Error("web-acceptance: no browser or stub to mint the operator");
+  }
+  const bootstrapped = oduCli(world, ["auth", "grant", OPERATOR_LOGIN, "owner"], {
+    ODU_ROOT_TOKEN: ROOT_TOKEN,
+  });
+  if (bootstrapped.status !== 0) {
+    throw new Error(
+      `web-acceptance: could not bootstrap ${OPERATOR_LOGIN} as the first owner\n` +
+        `${bootstrapped.stderr}\n--- daemon log ---\n${readFileSync(world.logPath, "utf-8").slice(-4000)}`,
+    );
+  }
+  const previous = github.mode.login;
+  github.mode = { ...github.mode, login: OPERATOR_LOGIN };
+  const context = await browser.newContext({ baseURL: world.origin });
+  try {
+    const page = await context.newPage();
+    await page.goto(new URL("/auth/github", world.origin).href, {
+      waitUntil: "domcontentloaded",
+    });
+    await page.goto(new URL("#/profile", world.origin).href);
+    await page.getByRole("button", { name: "Create token" }).waitFor({ timeout: 60_000 });
+    await page.getByPlaceholder("token name, e.g. laptop").fill("operator");
+    await page.getByRole("button", { name: "Create token" }).click();
+    const block = page.locator("pre.use-block").first();
+    await block.waitFor({ timeout: 60_000 });
+    operatorToken = (await block.innerText()).trim();
+  } finally {
+    await context.close();
+    github.mode = { ...github.mode, login: previous };
+  }
+  return operatorToken;
 }
 
 /** Whichever world a scenario's tags named, started if this worker has not
@@ -198,8 +244,11 @@ Before({ timeout: RUN_SETUP_TIMEOUT }, async function (this: OduWorld, scenario)
   this.identity = identity;
   this.signInLogin = STUB_LOGIN;
   if (identity.kind === "signed-in") {
+    // THE ROLE IS GRANTED BY AN OWNER, not by the root token: that token's one
+    // job was bootstrapping `OPERATOR_LOGIN`, above.
+    const token = await operator(odu, world);
     const granted = oduCli(world, ["auth", "grant", STUB_LOGIN, identity.role], {
-      ODU_ROOT_TOKEN: ROOT_TOKEN,
+      ODU_TOKEN: token,
     });
     if (granted.status !== 0) {
       throw new Error(
