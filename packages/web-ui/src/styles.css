@@ -1450,6 +1450,7 @@
   .bucket-admin { border-top: 1px solid var(--border); margin-top: 0.75rem; }
   .cache-create button,
   .admin-section > button { justify-self: start; }
+  .control-row { display: flex; flex-wrap: wrap; gap: 0.5rem; }
   .admin-section textarea,
   .admin-section select,
   .cache-create select {

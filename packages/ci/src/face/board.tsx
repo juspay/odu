@@ -204,6 +204,10 @@ export function Board(props: {
   loading: boolean;
   onOpen: (runId: string) => void;
   onCreate: () => void;
+  /** The machines page — `odu hosts | lease | release`. */
+  onMachines: () => void;
+  /** The maintenance page — the catalog's import and prune, and protect. */
+  onMaintain: () => void;
 }): JSX.Element {
   const shown = createMemo<Standing[]>(() => {
     const needle = query().trim().toLowerCase();
@@ -281,6 +285,8 @@ export function Board(props: {
         >
           History
         </Button>
+        <Button onClick={props.onMachines}>Machines</Button>
+        <Button onClick={props.onMaintain}>Maintenance</Button>
         <Button class="btn-primary" onClick={props.onCreate}>
           New run
         </Button>

@@ -17,10 +17,17 @@
  * The refusal is the feature. Every way this can fail — not a repository, a
  * commit that moved, a checkout that already has a live run — comes back as a
  * sentence with a recovery, and the form shows it rather than clearing itself.
+ *
+ * **Every option `run.start` takes is a field here**, because the board does
+ * everything `odu run` does: selectors, platforms, host pins, the justfile
+ * root, no-deps, no-strict, no-post, supersede, linger and the hosts file. And
+ * `pipeline.read` sits beside them as **Preview pipeline** — `odu dump` for the
+ * checkout typed above, so a person sees what a start would run before it runs.
  */
 
-import { createSignal, Show, type JSX } from "solid-js";
+import { createSignal, For, Show, type JSX } from "solid-js";
 import { Button, Field, Receipt } from "./dom";
+import type { Pipeline } from "./types";
 
 /** What the caller filled in. Every optional field is left ABSENT rather than
  *  sent empty: the wire's optional keys mean "not said", and an empty array
@@ -32,10 +39,23 @@ export interface StartForm {
   selectors: string[];
   platforms: string[];
   hostPins: string[];
+  /** `--root NAMEPATH`: which justfile module the DAG is read from. */
+  root: string;
+  /** The service's `$ODU_HOSTS` reading — empty means "use the service's own". */
+  hostsFile: string;
+  noDeps: boolean;
   noStrict: boolean;
   noPost: boolean;
   supersede: boolean;
+  linger: boolean;
 }
+
+/** What the pipeline preview is showing. */
+export type PreviewState =
+  | { kind: "idle" }
+  | { kind: "reading" }
+  | { kind: "read"; pipeline: Pipeline }
+  | { kind: "refused"; message: string };
 
 /** What the form is doing. `existing` is not an error: the caller asked for a
  *  checkout that already has a live run, and being shown that run is almost
@@ -95,6 +115,10 @@ function CheckInput(props: {
 export function Create(props: {
   state: CreateState;
   onStart: (form: StartForm) => void;
+  /** `pipeline.read` for the checkout and root typed so far. A READ, so it is
+   *  offered to anyone who may see the board. */
+  preview: PreviewState;
+  onPreview: (checkout: string, root: string) => void;
   /** The runs' floor is `member`; a principal below it may read a run and not
    *  start one, so the submit is not drawn at all. */
   canRun: boolean;
@@ -106,9 +130,13 @@ export function Create(props: {
   const [selectors, setSelectors] = createSignal("");
   const [platforms, setPlatforms] = createSignal("");
   const [hosts, setHosts] = createSignal("");
+  const [root, setRoot] = createSignal("");
+  const [hostsFile, setHostsFile] = createSignal("");
+  const [noDeps, setNoDeps] = createSignal(false);
   const [noStrict, setNoStrict] = createSignal(false);
   const [noPost, setNoPost] = createSignal(false);
   const [supersede, setSupersede] = createSignal(false);
+  const [linger, setLinger] = createSignal(false);
 
   const submit = (): void => {
     props.onStart({
@@ -117,9 +145,13 @@ export function Create(props: {
       selectors: tokens(selectors()),
       platforms: tokens(platforms()),
       hostPins: tokens(hosts()),
+      root: root().trim(),
+      hostsFile: hostsFile().trim(),
+      noDeps: noDeps(),
       noStrict: noStrict(),
       noPost: noPost(),
       supersede: supersede(),
+      linger: linger(),
     });
   };
 
@@ -196,8 +228,31 @@ export function Create(props: {
             onValue={setHosts}
           />
         </Field>
+        <Field
+          id="root"
+          label="Justfile root"
+          hint="A module path inside the justfile — the same NAMEPATH odu run --root takes. Empty means the top."
+        >
+          <TextInput id="root" value={root()} placeholder="ci" onValue={setRoot} />
+        </Field>
+        <Field
+          id="hosts-file"
+          label="Hosts file"
+          hint="An absolute path to the hosts file to resolve platforms from. Empty means the service's own."
+        >
+          <TextInput
+            id="hosts-file"
+            value={hostsFile()}
+            placeholder="/etc/odu/hosts.json"
+            onValue={setHostsFile}
+          />
+        </Field>
         <fieldset class="toggles">
           <legend>Options</legend>
+          <label class="toggle" for="no-deps">
+            <CheckInput id="no-deps" checked={noDeps()} onChecked={setNoDeps} />
+            Run only the named recipes, not what they need (--no-deps)
+          </label>
           <label class="toggle" for="no-strict">
             <CheckInput id="no-strict" checked={noStrict()} onChecked={setNoStrict} />
             Run the working tree as it stands (--no-strict)
@@ -210,7 +265,16 @@ export function Create(props: {
             <CheckInput id="supersede" checked={supersede()} onChecked={setSupersede} />
             Take the checkout from a run already live in it (--supersede)
           </label>
+          <label class="toggle" for="linger">
+            <CheckInput id="linger" checked={linger()} onChecked={setLinger} />
+            Keep the run answerable after it settles (linger)
+          </label>
         </fieldset>
+        {/* A READ, beside the submit rather than instead of it: what this
+            checkout would run, before anything runs. */}
+        <Button onClick={() => props.onPreview(checkout().trim(), root().trim())}>
+          {props.preview.kind === "reading" ? "Reading…" : "Preview pipeline"}
+        </Button>
         {/* A SUBMIT button, and with no click handler of its own — see
             `./dom`'s `ButtonAction`. The form's `onSubmit` above is the single
             path a start takes, whether it was reached by a mouse or by Enter in
@@ -235,6 +299,30 @@ export function Create(props: {
           nothing to be stuck with: this form's one control replaces its answer
           the moment it is pressed again, so a Dismiss button would be a second
           way to clear something one press already clears. */}
+      <Show when={props.preview.kind === "refused" ? props.preview : null}>
+        {(refused) => <Receipt tone="refused">{refused().message}</Receipt>}
+      </Show>
+      <Show when={props.preview.kind === "read" ? props.preview.pipeline : null}>
+        {(pipeline) => (
+          <section class="admin-section pipeline-preview" aria-label="pipeline">
+            <h3>{`${pipeline().name}: ${pipeline().tasks.length} recipes`}</h3>
+            <ul class="tokens">
+              <For each={pipeline().tasks}>
+                {(task) => (
+                  <li>
+                    <span>
+                      <code>{task.id}</code>
+                      <Show when={task.needs.length > 0}>
+                        <span class="hint">{` needs ${task.needs.join(", ")}`}</span>
+                      </Show>
+                    </span>
+                  </li>
+                )}
+              </For>
+            </ul>
+          </section>
+        )}
+      </Show>
       <Show when={props.state.kind === "refused" ? props.state : null}>
         {(refused) => <Receipt tone="refused">{refused().message}</Receipt>}
       </Show>

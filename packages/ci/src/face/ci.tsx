@@ -1,5 +1,6 @@
 /**
- * THE RUNS' FACE — the board, the create form and one run, as one component.
+ * THE RUNS' FACE — the board, the create form, one run, and the runs'
+ * operations (machines, maintenance), as one component.
  *
  * This is `ci`'s half of the page, in the package that owns the runs: the board
  * row, the DAG, the console, the controls. `@odu/web-ui` holds the SHELL — the
@@ -37,7 +38,8 @@ import { Board } from "./board";
 // The shell draws its two switch buttons and its Reload with the SAME control
 // the run views use: one place decides what a control is (`./dom`'s header).
 export { Button } from "./dom";
-import { Create, type CreateState, type StartForm } from "./create";
+import { Create, type CreateState, type PreviewState, type StartForm } from "./create";
+import { Machines, Maintain } from "./ops";
 import { type ControlState, Detail, LOG_PAGE_BYTES, LogPanel } from "./detail";
 import type { CheckoutFrame, LogPage, LogTail, NodesFrame, RunNode, RunRow } from "./types";
 
@@ -51,6 +53,8 @@ export type CiClient = SurfaceClient<ServiceSpec>;
 export type CiRoute =
   | { at: "board" }
   | { at: "new" }
+  | { at: "machines" }
+  | { at: "maintain" }
   | { at: "run"; runId: string; log: string | null };
 
 export interface CiFaceProps {
@@ -71,6 +75,10 @@ export interface CiFaceProps {
    *  has already refused everyone below it — the shell passes the floor anyway,
    *  because the rule is the ROW's and this is where it would narrow. */
   canRun: boolean;
+  /** MAY THIS PERSON ADMINISTER? `protect.apply` writes the forge with the
+   *  daemon's credential, so its floor is `admin`; the service refuses below
+   *  it whatever this face draws. */
+  canAdminister: boolean;
 }
 
 
@@ -315,6 +323,7 @@ export function CiFace(props: CiFaceProps): JSX.Element {
   // ── controls ──
   const [control, setControl] = createSignal<ControlState>({ kind: "idle" });
   const [creating, setCreating] = createSignal<CreateState>({ kind: "idle" });
+  const [preview, setPreview] = createSignal<PreviewState>({ kind: "idle" });
 
   /**
    * THE UI EDGE: the one place a description becomes execution, and the one
@@ -611,9 +620,13 @@ export function CiFace(props: CiFaceProps): JSX.Element {
         ...(form.selectors.length === 0 ? {} : { selectors: form.selectors }),
         ...(form.platforms.length === 0 ? {} : { platforms: form.platforms }),
         ...(form.hostPins.length === 0 ? {} : { hostPins: form.hostPins }),
+        ...(form.root === "" ? {} : { root: form.root }),
+        ...(form.hostsFile === "" ? {} : { hostsFile: form.hostsFile }),
+        ...(form.noDeps ? { noDeps: true } : {}),
         ...(form.noStrict ? { noStrict: true, noSnapshot: true } : {}),
         ...(form.noPost ? { noPost: true } : {}),
         ...(form.supersede ? { supersede: true } : {}),
+        ...(form.linger ? { linger: true } : {}),
       }),
       (receipt) => {
         if (receipt.accepted) {
@@ -628,6 +641,25 @@ export function CiFace(props: CiFaceProps): JSX.Element {
         });
       },
       (message) => setCreating({ kind: "refused", message }),
+    );
+  };
+
+  /** `pipeline.read` — what the create form's checkout would run. An empty
+   *  checkout is refused HERE, in the service's voice, rather than greying the
+   *  button out: the person reads why. */
+  const previewPipeline = (checkout: string, root: string): void => {
+    if (checkout === "") {
+      setPreview({
+        kind: "refused",
+        message: "odu: a pipeline is read off a checkout — type its absolute path above",
+      });
+      return;
+    }
+    setPreview({ kind: "reading" });
+    call(
+      props.client.procedures.pipeline.read({ checkout, ...(root === "" ? {} : { root }) }),
+      (pipeline) => setPreview({ kind: "read", pipeline }),
+      (message) => setPreview({ kind: "refused", message }),
     );
   };
 
@@ -660,6 +692,26 @@ export function CiFace(props: CiFaceProps): JSX.Element {
             loading={props.connecting && rows().length === 0}
             onOpen={(id) => props.onRoute({ at: "run", runId: id, log: null })}
             onCreate={() => props.onRoute({ at: "new" })}
+            onMachines={() => props.onRoute({ at: "machines" })}
+            onMaintain={() => props.onRoute({ at: "maintain" })}
+          />
+        </Match>
+        <Match when={route().at === "machines"}>
+          <Machines
+            client={props.client}
+            call={props.call}
+            now={now()}
+            canRun={props.canRun}
+            onBack={() => props.onRoute({ at: "board" })}
+          />
+        </Match>
+        <Match when={route().at === "maintain"}>
+          <Maintain
+            client={props.client}
+            call={props.call}
+            canRun={props.canRun}
+            canAdminister={props.canAdminister}
+            onBack={() => props.onRoute({ at: "board" })}
           />
         </Match>
         <Match when={route().at === "new"}>
@@ -667,6 +719,8 @@ export function CiFace(props: CiFaceProps): JSX.Element {
             state={creating()}
             canRun={props.canRun}
             onStart={start}
+            preview={preview()}
+            onPreview={previewPipeline}
             onOpen={(id) => props.onRoute({ at: "run", runId: id, log: null })}
             onBack={() => props.onRoute({ at: "board" })}
           />

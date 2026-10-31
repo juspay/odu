@@ -63,6 +63,7 @@ import { faviconSvg, wireText } from "./format";
  * read there because a link is minted by whoever holds the run (an editor, a
  * terminal, another app's panel) and opened here. What stays local is the rest of
  * this page's states: `#/` for the runs, `#/new` for the create form,
+ * `#/machines` and `#/maintain` for the runs' operations,
  * `#/cache[/<bucket>]` for the other row, `#/profile` for the signed-in
  * person's sessions and tokens, and `#/people` for an owner's role table.
  */
@@ -122,6 +123,8 @@ function routeOf(hash: string): Route {
   if (run !== null) return { at: "run", ...run };
   const rest = hash.replace(/^#\/?/, "");
   if (rest === "new") return { at: "new" };
+  if (rest === "machines") return { at: "machines" };
+  if (rest === "maintain") return { at: "maintain" };
   if (rest === "profile") return { at: "profile" };
   if (rest === "people") return { at: "people" };
   if (rest === "cache") return { at: "cache", bucket: null };
@@ -138,6 +141,10 @@ function hashOf(route: Route): string {
       return "#/";
     case "new":
       return "#/new";
+    case "machines":
+      return "#/machines";
+    case "maintain":
+      return "#/maintain";
     case "profile":
       return "#/profile";
     case "people":
@@ -474,6 +481,7 @@ export function App(props: {
               onRoute={(next) => go(next)}
               ambient={held()}
               canRun={holdsFloor("member")}
+              canAdminister={holdsFloor("admin")}
               connecting={props.readout.status === "connecting"}
             />
           )}
