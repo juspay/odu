@@ -80,21 +80,38 @@ two platforms. `support/corpus.ts` re-checks a cached run on every reuse and
 fails naming every scenario that has touched it — read its header for what that
 guard can and cannot tell you.
 
-## Layout
+## Layout, and where a row's promises live
+
+A feature is a promise, and a promise has an OWNER: each row keeps the features
+that grade it and the steps that drive its surface under `packages/<row>/e2e/`,
+so a change to a row is a diff inside that row. What is here is the HARNESS and
+the shell.
 
 ```
-cucumber.js               the one profile (`ui`), and its four knobs
+cucumber.js               the one profile (`ui`), and its five knobs
 support/parallelism.js    how many workers, and why the cap is 2 here
 support/browser.ts        the one Chromium argv, and why each flag is in it
 support/service.ts        the packaged odu, its private world, and the fixtures
+support/authWorld.ts      the worlds a tag can declare, and the sign-in flow
+support/githubStub.ts     a GitHub small enough to be one file, for the door
 support/corpus.ts         the per-worker cache of runs scenarios only read
 support/world.ts          the typed World: page, service, ledgers, locators
 support/hooks.ts          lifecycle, the two gates, screenshots, teardown
-features/*.feature        one file per thing a person does
-step_definitions/*.ts     roles and accessible names, never CSS nth-child
+features/*.feature        the SHELL: the wire, the keyboard, a narrow viewport
+step_definitions/*.ts     the shared vocabulary every feature speaks
 runner.test.ts            the suite is handed to bun, not to a node shebang
 pins.test.ts              the playwright pin is exact and matches nixpkgs
+
+../cache/e2e/             the cache's five scenarios, and its CLI test
+../ci/e2e/                the run views' six features
+../auth/e2e/              the door's scenarios, and its CLI/MCP test
 ```
+
+**Scenarios declare their world by tag.** No tag is today's loopback daemon;
+`@anonymous` and `@signed-in:owner|admin|member` run against a SECOND daemon per
+worker, configured against the GitHub stub, with the role granted and the sign-in
+completed through the stub as a person would. Two services per worker because a
+daemon with a door cannot also be the daemon without one.
 
 Failure screenshots land in `reports/screenshots/` (git-ignored). Set
 `ODU_WA_SHOTS=1` to capture the passing scenarios too, and `HEADLESS=false` to

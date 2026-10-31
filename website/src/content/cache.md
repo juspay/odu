@@ -2,7 +2,7 @@
 
 `odu web` also serves Nix binary caches. The same loopback service that runs CI answers the standard Nix HTTP binary cache protocol, so every Nix client works unchanged.
 
-A bucket is one cache: one substituter URL under the service's origin and one ed25519 public key. The server generates the keypair and signs each narinfo on ingest; a pusher never holds a signing key. Client signatures are kept. By default the cache binds loopback, like the board: `$ODU_WEB_ORIGIN` is the address it listens on, and the NixOS module puts nginx in front of the cache's protocol paths only — the board, the websocket and `/mcp` stay private. On a single machine the cache and the store are the same bytes; see [Where the data lives](#where-the-data-lives).
+A bucket is one cache: one substituter URL under the service's origin and one ed25519 public key. The server generates the keypair and signs each narinfo on ingest; a pusher never holds a signing key. Client signatures are kept. By default the cache binds loopback, like the board: `$ODU_WEB_ORIGIN` is the address it listens on, and the NixOS module puts nginx in front of it — proxying the cache's protocol paths only, unless [server mode](../docs/#server-mode) is configured, where the board and `/mcp` are behind the same door. On a single machine the cache and the store are the same bytes; see [Where the data lives](#where-the-data-lives).
 
 ## Create a bucket
 
@@ -50,6 +50,15 @@ Administration — creating buckets, minting and revoking tokens, pinning and co
 export ODU_ROOT_TOKEN=...
 odu cache create main
 ```
+
+**On a server with a door, the rule is your role.** Once [server mode](../docs/#server-mode) is configured, the root token is not an administrator — it exists to grant the first owner — and administration needs an `admin` or an `owner`:
+
+```sh
+odu auth whoami                    # who this machine's token belongs to, and its role
+odu cache create main              # as an admin, through the token odu auth login stored
+```
+
+A `member` sees every bucket and may read a bucket's URL, key and paths, but `create`, `token mint` and `gc` are refused with `not_permitted`. Pushing does not change: a write token from `odu cache token mint` is what a pusher carries, whoever minted it.
 
 ## Push
 

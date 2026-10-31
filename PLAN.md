@@ -82,7 +82,11 @@ Each item names where it is checked.
   fixed origin, an Origin allowlist for the websocket and `/mcp`, and a root
   token in `ODU_ROOT_TOKEN` that authorises the cache's admin verbs. Anyone who
   reaches the listener controls CI and reads every bucket's facts
-  (`packages/host/src/web.ts`, docs "Access through Tailscale").
+  (`packages/host/src/web.ts`, docs "Access through Tailscale"). **PR 2 removes
+  this fact for a configured daemon**: with `ODU_GITHUB_*` set, the listener
+  asks who is on a connection and every verb runs as a principal; without it,
+  everything above is still true, which is what makes loopback mode's tests the
+  regression guard.
 - **F3. One database, the cache's.** The run catalog is per-user append-only
   files under the state directory (`packages/run-history/src/paths.ts`,
   `store.ts`). PR 1 added `cache/cache.sqlite` behind `packages/cache`'s
@@ -312,10 +316,17 @@ Ownership, by the Cordis rules (olai `docs/architecture/cordis.md`):
   it, so the row can stop without the host, `ci` or `cache` noticing.
 - **A session is acquired, not looked up.** At upgrade the host takes a lease
   on the session from the resolver and arranges the release in the same step;
-  logout, expiry and revocation end the lease, and ending the lease closes
-  the connection. That is the fix for the seam checking only at upgrade, and
-  it is "acquisition and release in one step" rather than a revocation list
-  the connection would have to poll.
+  logout, expiry and revocation end the lease. **This is the one place the
+  implementation had to differ from the plan**: kolu's `serveSurfaceApp` has no
+  accept/reject hook and no public seam hands odu the socket, so the host
+  cannot close a connection. What it does instead, and it is enough for the
+  promise: an ended lease refuses EVERY member — the framework's reserved
+  `system/live` heartbeat included — so the client's watchdog severs the
+  socket, redials with the dead cookie, is refused at the upgrade, and comes
+  back anonymous. Every later call on the old connection is refused and every
+  open subscription is interrupted at the instant it ends. No revocation list
+  is polled. A close hook in kolu is the eventual tidy-up; this release does
+  not need one for the behaviour to be right.
 - **Roles are each row's rule.** `ci` decides what a `member` may start,
   `cache` what an `admin` may mint; `@odu/cordis` carries only the `Role`
   type. The root token stays what it is, the operator's bootstrap, and gains
@@ -385,9 +396,14 @@ What lands:
   the scope), the sign-in page an anonymous browser meets
   instead of the board, sessions and personal access tokens in `auth.sqlite`
   under the state directory, membership from a GitHub org or team or a list
-  of logins, the verbs `auth_whoami`, `auth_token_create`, `auth_token_list`,
-  `auth_token_revoke`, `auth_session_list`, `auth_session_end`,
-  `auth_grant`, and `odu auth login | whoami | token | grant`. Configuration
+  of logins, the verbs `auth_user_whoami`, `auth_user_grant`,
+  `auth_token_create`, `auth_token_list`, `auth_token_revoke`,
+  `auth_session_list`, `auth_session_end`,
+  and `odu auth login | whoami | token | grant`. **The framework mints
+  `<row>_<noun>_<verb>`** (`surface/<row>/<noun>/<verb>` on the wire), so a
+  verb with no noun between them — the `auth_whoami` this document first
+  proposed — cannot exist; `user` is the noun the first two take, and the argv
+  face keeps the short spelling. Configuration
   is environment (`ODU_GITHUB_CLIENT_ID`, `ODU_GITHUB_CLIENT_SECRET_FILE`,
   `ODU_GITHUB_ALLOW`); unset, the row is not mounted.
 - **The `Principal` broker** in `@odu/cordis` and the host: resolved per
@@ -408,7 +424,7 @@ What lands:
   the upgrade by the CLI and MCP clients (kolu's `connect` factory, no
   framework change), so `--origin` against a remote server is safe at last
   (F10).
-- **The board** reads `auth_whoami` through the wire: a signed-in header and
+- **The board** reads `auth_user_whoami` through the wire: a signed-in header and
   the profile page from the `auth` face, and the Runs and Cache views hide the
   controls the role cannot use. With no `auth` row the header is as today.
 - **The fence** gains a third row and the broker key's single-owner claim is

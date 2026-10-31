@@ -47,16 +47,45 @@
   nodes.client = { pkgs, ... }: {
     # `/etc/hosts` is a read-only copy of the store in a NixOS VM, so the name
     # has to be mapped at EVAL time. The test driver numbers the VLAN by node
-    # name in sorted order — `client` then `server`, so the server is .2 — and
-    # the script asserts that below, so a machine added to this file breaks the
-    # assertion instead of the `nix copy` four steps later.
-    networking.extraHosts = "192.168.1.2 cache.test";
+    # name in sorted order — `client`, `server`, `zdoor` — and the script
+    # asserts that below, so a machine added to this file breaks the assertion
+    # instead of the `nix copy` four steps later.
+    networking.extraHosts = "192.168.1.2 cache.test 192.168.1.3 door.test";
     nix.settings = {
       experimental-features = [ "nix-command" "flakes" ];
       # No substituters: the point is that the only source is the cache under
       # test, reached through the proxy.
       substituters = [ ];
     };
+  };
+
+  # THE SAME MACHINE, IN SERVER MODE — a second node rather than a second
+  # assertion on the first, because the two shapes are exclusive: a daemon with
+  # a door answers `/` with the sign-in page, and the loopback node's assertions
+  # are that it answers 404.
+  #
+  # Named `zdoor` so the driver's sorted numbering leaves `server` at .2; the
+  # assertion above is what notices if a node is inserted alphabetically.
+  nodes.zdoor = { config, pkgs, ... }: {
+    imports = [ self.nixosModules.default ];
+
+    services.odu = {
+      enable = true;
+      rootTokenFile = "/etc/odu-root-token";
+      cache.domain = "door.test";
+      cache.enableACME = false;
+      github = {
+        clientId = "test-client-id";
+        clientSecretFile = "/etc/odu-github-secret";
+        allow = [ "org:juspay" ];
+      };
+    };
+
+    environment.etc."odu-root-token".text = "test-root-token";
+    environment.etc."odu-github-secret".text = "test-client-secret";
+
+    nix.settings.experimental-features = [ "nix-command" "flakes" ];
+    networking.firewall.allowedTCPPorts = [ 80 ];
   };
 
   # The server is 192.168.1.1 in this test's network; the client resolves the
@@ -141,6 +170,39 @@
     # ── administration works, and collection does not eat the bucket ────────
     server.succeed(f"{admin} {odu} cache stats")
     server.succeed(f"{admin} {odu} cache gc main")
+
+    # ── the OTHER shape: a daemon with a door ───────────────────────────────
+    zdoor.wait_for_unit("odu-web.service")
+    zdoor.wait_for_unit("nginx.service")
+    zdoor.succeed(
+        "runuser -u odu -- env ODU_ROOT_TOKEN=test-root-token"
+        " ODU_WEB_ORIGIN=http://127.0.0.1:18440 HOME=/var/lib/odu"
+        f" {odu} auth grant srid owner"
+    )
+
+    # ANONYMOUS `GET /` IS THE SIGN-IN PAGE, not the board and not nginx.
+    root = client.succeed("curl -sS http://door.test/")
+    assert "Sign in to odu" in root, root[:400]
+    assert "Sign in with GitHub" in root, root[:400]
+
+    # `/mcp` WITHOUT A BEARER IS 401 — the door's second lock, refused before
+    # the adapter is entered.
+    mcp_door = client.succeed(
+        "curl -sS -o /dev/null -w '%{http_code}' -X POST"
+        " -H 'content-type: application/json' -H 'origin: http://door.test'"
+        " -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}'"
+        " http://door.test/mcp"
+    ).strip()
+    assert mcp_door == "401", f"/mcp answered {mcp_door} without a token"
+
+    # AND THE CACHE PROTOCOL IS STILL PROXIED. A bucket nobody created answers
+    # the DAEMON's empty 404 rather than nginx's HTML page, which is what says
+    # the route reached odu rather than the vhost's own handler.
+    cache_code, cache_body = client.succeed(
+        "curl -sS -w '\\n%{http_code}' http://door.test/cache/main/nix-cache-info"
+    ).rsplit("\n", 1)
+    assert cache_code.strip() == "404", cache_code
+    assert "<html" not in cache_body.lower(), cache_body[:200]
   '';
 }
 

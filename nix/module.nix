@@ -1,12 +1,17 @@
 # THE NIXOS MODULE FOR THE SERVICE, which is one process: the board, the CI it
 # runs, and the binary cache it serves.
 #
-# What it deliberately is NOT: there is no public board. The daemon binds a
-# loopback address and the module's nginx proxies exactly the cache's two route
-# families, because the board and `/mcp` have no authentication in this release
-# — a module that put them on the internet would be a module that opened a CI
-# server to the world. A public board is PR 3's (server mode) answer, and the
-# `listen` assertion says so in as many words.
+# TWO SHAPES, and `github` is the switch between them.
+#
+#   - WITHOUT `services.odu.github`, there is no public board. The daemon binds
+#     a loopback address and nginx proxies exactly the cache's two route
+#     families, because the board and `/mcp` have no authentication of their own
+#     — a module that put them on the internet would open a CI server to the
+#     world.
+#   - WITH it, the daemon has a DOOR: sign-in through a GitHub App, sessions,
+#     personal tokens, roles. nginx then proxies the board, the websocket and
+#     `/mcp` as well, and every caller meets the sign-in page before anything
+#     else. That is server mode, and it is what makes the public board safe.
 #
 # Nor is there object storage, a second store, or a signing service: a bucket is
 # metadata over the host's own `/nix/store`, the server signs at read, and the
@@ -64,6 +69,18 @@ let
     proxyPass = daemonUrl;
     extraConfig = proxyRules;
   };
+
+  # IS THIS A SERVER MODE DEPLOYMENT? All three `github` options set; the
+  # assertion above refuses a partial one.
+  serverMode = cfg.github.clientId != null;
+
+  # A WEBSOCKET IS NOT A REQUEST. nginx needs the upgrade pair on the location
+  # that carries `/rpc/ws`, and `recommendedProxySettings` is what defines
+  # `$connection_upgrade` — so this only works with it on, which the vhost sets.
+  websocketRules = proxyRules + ''
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+  '';
 in
 {
   options.services.odu = {
@@ -194,11 +211,57 @@ in
       type = types.nullOr types.str;
       default = null;
       description = ''
-        The public hostname a bucket is served at. Setting it turns on nginx
-        with one virtual host that proxies `/cache/` and `/_odu/v1/` to the
-        daemon and **nothing else** — no `location /`, so the board answers 404
-        from outside — and makes `publicOrigin` `https://<domain>`.
+        The public hostname a bucket is served at — and, with `github` set, the
+        board's as well. Setting it turns on nginx with one virtual host that
+        proxies the cache's route families (and, in server mode, the board, the
+        websocket and `/mcp`) and makes `publicOrigin` `https://<domain>`.
       '';
+    };
+
+    github = {
+      clientId = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "Iv1.0123456789abcdef";
+        description = ''
+          The GitHub App's **Client ID**. Setting this, `clientSecretFile` and
+          `allow` turns this daemon into a server with a door: anonymous
+          browsers meet a sign-in page, `/mcp` answers 401 without a token, and
+          every verb runs as a signed-in person with a role.
+
+          One App per instance: the App's callback URL is this deployment's
+          alone, so two odu servers need two Apps. See "Server mode" in the
+          docs for creating one, field by field.
+        '';
+      };
+
+      clientSecretFile = mkOption {
+        type = types.nullOr types.path;
+        default = null;
+        description = ''
+          A file holding the App's **client secret**, loaded as a systemd
+          credential and handed to the daemon as
+          `$ODU_GITHUB_CLIENT_SECRET_FILE`. A secret: keep it out of the Nix
+          store — a runtime path (`/run/secrets/…`, or whatever syncs it) is
+          what this option is for.
+        '';
+      };
+
+      allow = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        example = [ "org:juspay" "team:juspay/platform" "srid" ];
+        description = ''
+          Who may sign in: `org:<name>`, `team:<org>/<slug>`, or a GitHub login.
+          Any of them lets the person in, as a `member`; roles are granted
+          afterwards (`odu auth grant <login> owner` with the root token is the
+          bootstrap).
+
+          Membership is read with the person's own token in this release, which
+          works because the App is installed on the organisation — a `team:` or
+          `org:` rule needs an org owner to install it.
+        '';
+      };
     };
 
     cache.enableACME = mkOption {
@@ -229,10 +292,22 @@ in
         assertion = isLoopback;
         message = ''
           services.odu.listen is ${cfg.listen}, which is not a loopback address.
-          The board and /mcp have no authentication in this release, so the
-          daemon has to bind loopback and a proxy has to stand in front. A
-          public board is PR 3's (server mode) answer; until then reach it over
-          a tailnet or an SSH forward.
+          The daemon binds loopback and a proxy stands in front, in BOTH shapes:
+          without services.odu.github nothing authenticates a request at all, and
+          with it the session cookie is only Secure behind TLS.
+        '';
+      }
+      {
+        # HALF A DOOR IS A REFUSAL AT BOOT, so it is a refusal here too: a
+        # daemon that silently stopped asking for sign-in because one option was
+        # misspelled would be a door that looks shut and is not.
+        assertion =
+          (cfg.github.clientId != null) == (cfg.github.clientSecretFile != null)
+          && (cfg.github.clientId != null) == (cfg.github.allow != [ ]);
+        message = ''
+          services.odu.github needs clientId, clientSecretFile and allow TOGETHER,
+          or none of them. With none, this daemon has no door and every caller is
+          its owner; with all three it is a server that asks who you are.
         '';
       }
     ];
@@ -282,12 +357,25 @@ in
         ++ optionals (cfg.publicOrigin != null) [
           "ODU_PUBLIC_ORIGIN=${cfg.publicOrigin}"
         ]
+        ++ optionals serverMode [
+          "ODU_GITHUB_CLIENT_ID=${cfg.github.clientId}"
+          # The credential's own runtime path: systemd copies the file into a
+          # private directory, and this is the file the daemon reads.
+          "ODU_GITHUB_CLIENT_SECRET_FILE=%d/client-secret"
+          "ODU_GITHUB_ALLOW=${builtins.concatStringsSep "," cfg.github.allow}"
+        ]
         ++ optionals (cfg.allowedOrigins != [ ]) [
           "ODU_WEB_ALLOWED_ORIGINS=${builtins.concatStringsSep "," cfg.allowedOrigins}"
         ];
         Restart = "on-failure";
-      } // optionalAttrs (cfg.rootTokenFile != null) {
-        LoadCredential = "root-token:${cfg.rootTokenFile}";
+      } // lib.optionalAttrs (cfg.rootTokenFile != null || serverMode) {
+        # ONE list: two `//` updates would replace each other, and a missing
+        # credential is a daemon that cannot read its own secret.
+        LoadCredential = optionals (cfg.rootTokenFile != null) [
+          "root-token:${cfg.rootTokenFile}"
+        ] ++ optionals serverMode [
+          "client-secret:${toString cfg.github.clientSecretFile}"
+        ];
       };
     };
 
@@ -297,17 +385,30 @@ in
       virtualHosts.${cfg.cache.domain} = {
         enableACME = cfg.cache.enableACME;
         forceSSL = cfg.cache.enableACME;
-        # The cache's protocol and its admin API, and NOTHING else. `/` is an
-        # explicit 404 rather than an absent location: with no `location /` and
-        # no `root`, nginx falls back to its own `html/index.html` and answers
-        # "Welcome to nginx" with a 200 — which is not the board, but is not the
-        # 404 this module promised either, and a security claim that is merely
-        # "probably not the board" is not one worth making.
-        locations = {
-          "/cache/" = proxyLocation;
-          "/_odu/v1/" = proxyLocation;
-          "/" = { return = "404"; };
-        };
+        # TWO SETS OF LOCATIONS, one per shape.
+        #
+        # WITHOUT a door: the cache's protocol and its admin API, and NOTHING
+        # else. `/` is an explicit 404 rather than an absent location: with no
+        # `location /` and no `root`, nginx falls back to its own
+        # `html/index.html` and answers "Welcome to nginx" with a 200 — which is
+        # not the board, but is not the 404 this module promised either.
+        #
+        # WITH one: everything the daemon serves, because the door is what makes
+        # it safe to. `/rpc/ws` carries the websocket upgrade; `/` carries the
+        # board and every static asset; `/mcp` an agent's endpoint. `/auth/…`
+        # rides `/` — the OAuth redirect and the callback are ordinary requests.
+        locations =
+          if serverMode then {
+            "/rpc/ws" = {
+              proxyPass = daemonUrl;
+              extraConfig = websocketRules;
+            };
+            "/" = proxyLocation;
+          } else {
+            "/cache/" = proxyLocation;
+            "/_odu/v1/" = proxyLocation;
+            "/" = { return = "404"; };
+          };
       };
     };
 
