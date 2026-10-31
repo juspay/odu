@@ -97,6 +97,22 @@ const declaration = {
     ci: {
       "packages/web-acceptance/support/service.ts": 7,
     },
+    // THE DOOR'S WORD, and every one of these is a price of a row named after
+    // a common noun: the daemon's roster and its gate, the shared vocabulary
+    // that carries the `AuthDoor` fact and the broker tag, the composed wires a
+    // CLI and a bridge read, and the runs' own service cell — which publishes
+    // "does this daemon have a door" so a browser knows whether to sign in.
+    auth: {
+      "packages/cache/src/cache.ts": 2,
+      "packages/ci/src/protect.ts": 2,
+      "packages/ci/src/row.ts": 6,
+      "packages/cli/src/serviceMcp.ts": 4,
+      "packages/cli/src/wire.ts": 2,
+      "packages/cordis/src/services.ts": 2,
+      "packages/host/src/principal.ts": 1,
+      "packages/service-client/src/surface.ts": 2,
+      "packages/service/src/service.ts": 4,
+    },
   },
   // A MODULE THAT HOLDS LIVE STATE BEHIND A DOOR, and why: the spawn module's
   // registry of runs it started — written only there, read only to report a
@@ -157,6 +173,43 @@ describe("the fence over this repo", () => {
             .join("; "),
     ).toBe(true);
   }, FENCE_TIMEOUT_MS);
+});
+
+/**
+ * THE THIRD ROW, and the shape that makes it a row rather than a folder.
+ *
+ * Declared by its manifest (so the walk above already found it), named by the
+ * roots that may name rows, and imported by NOBODY else — `ci` and `cache` must
+ * not be able to reach sign-in, which is the whole reason it is a separate
+ * package rather than a module inside either.
+ */
+describe("three rows, and the third one has no importers but the roots", () => {
+  const manifestOf = (member: string): { dependencies?: Record<string, string> } =>
+    JSON.parse(source(`${member}/package.json`)) as {
+      dependencies?: Record<string, string>;
+    };
+
+  it("is three rows, read off the manifests", () => {
+    expect(Object.keys(FENCE_ROWS).sort()).toEqual(["auth", "cache", "ci"]);
+  });
+
+  it("ci and cache do not depend on auth", () => {
+    for (const member of ["packages/ci", "packages/cache"]) {
+      expect(
+        Object.keys(manifestOf(member).dependencies ?? {}),
+        `${member} declares @odu/auth`,
+      ).not.toContain("@odu/auth");
+    }
+  });
+
+  it("the roots are what name it", () => {
+    // The daemon mounts it, the browser opens its face, and the shell's boot
+    // dials its surface — each is a root, which is the only place a row may be
+    // named.
+    expect(source("packages/host/src/web.ts")).toContain('"@odu/auth/server"');
+    expect(source("packages/web-ui/src/main.tsx")).toContain('"@odu/auth/surface"');
+    expect(source("packages/web-ui/src/app.tsx")).toContain('"@odu/auth/face"');
+  });
 });
 
 /**
