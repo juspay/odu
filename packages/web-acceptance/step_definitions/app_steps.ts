@@ -61,6 +61,20 @@ Then("the wire reads {string}", async function (this: OduWorld, text: string) {
   await this.saysThat(this.wire(), "the connection indicator", text);
 });
 
+/**
+ * A control a page OFFERS, by the name a person reads — the presence half of
+ * every "hide what the role cannot use" assertion. Absence is its own step,
+ * because a missing button and a button that works are different failures.
+ */
+Then("the run page offers {string}", async function (this: OduWorld, name: string) {
+  await this.page.getByRole("button", { name, exact: true }).first().waitFor({ timeout: 30_000 });
+});
+
+/** A node's Retry — its name is the act, and there is one per stopped node. */
+Then("the run page offers a Retry control", async function (this: OduWorld) {
+  await this.page.getByRole("button", { name: "Retry" }).first().waitFor({ timeout: 30_000 });
+});
+
 Then("a status reads {string}", async function (this: OduWorld, text: string) {
   await this.saysThat(this.receipt(), "the control receipt", text);
 });

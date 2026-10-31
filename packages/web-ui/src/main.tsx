@@ -40,10 +40,12 @@ if (root === null) {
  * door, every one of those subscriptions is refused. The fact is the host's
  * (it changes with `auth`, not with the runs), so the host answers it on its own
  * route, and a page that gets the answer first never draws the wrong board.
- * An unreachable answer is `false`: a loopback page is the safe default, and
- * the wire indicator already says the connection is down.
+ * An unreachable answer is `null` — UNKNOWN, not "no door". A page that assumed
+ * a loopback daemon would draw every run control for a server that never
+ * answered; the wire indicator is the honest state, and nothing privileged is
+ * drawn until the question has an answer.
  */
-async function doorMounted(): Promise<boolean> {
+async function doorMounted(): Promise<boolean | null> {
   try {
     // A `cache-control` header rather than fetch's cache option: the fence
     // refuses a sibling key spelled with the row's word in any face, and a
@@ -51,11 +53,11 @@ async function doorMounted(): Promise<boolean> {
     const response = await fetch(SERVICE_DOOR_PATH, {
       headers: { "cache-control": "no-cache" },
     });
-    if (!response.ok) return false;
-    const body = (await response.json()) as { mounted?: unknown };
-    return body.mounted === true;
+    if (!response.ok) return null;
+    const body = (await response.json()) as { door?: unknown };
+    return body.door === true;
   } catch {
-    return false;
+    return null;
   }
 }
 

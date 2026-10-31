@@ -30,7 +30,7 @@ import {
   type CiRoute,
 } from "@odu/ci/face";
 import { CacheFace, type CacheClient } from "@odu/cache/face";
-import { may, type Principal, type Role } from "@odu/cordis/principal";
+import { LOCAL_OWNER, may, type Principal, type Role } from "@odu/cordis/principal";
 import {
   ProfileFace,
   SignIn,
@@ -67,6 +67,43 @@ import { faviconSvg, wireText } from "./format";
  */
 type Route = CiRoute | { at: "cache"; bucket: string | null } | { at: "profile" };
 
+/**
+ * DOES THIS DAEMON HAVE A DOOR? `null` when the answer could not be fetched
+ * before the first render — a daemon that is down, not one without a door.
+ */
+export type DoorState = boolean | null;
+
+/**
+ * WHO THIS PAGE APPLIES A ROW'S FLOOR TO. Pure, and exported, because it is the
+ * one decision every control's visibility rests on:
+ *
+ *   - **no door** (`false`) ⇒ the LOCAL OWNER. A loopback daemon has no
+ *     identity provider, so the person at this machine IS its owner and every
+ *     floor is held — the same rule `may()` states for `local`.
+ *   - **door, whoami still in flight, or anonymous** ⇒ nobody. Nothing
+ *     privileged is drawn before the answer arrives, and a sign-in page draws
+ *     none of it.
+ *   - **door, answered with a person** ⇒ that person, with their role.
+ */
+export function principalOf(door: DoorState, who: Who | null): Principal | null {
+  if (door === false) return LOCAL_OWNER;
+  if (door === null) return null;
+  return who === null || who.kind === "anonymous" ? null : who;
+}
+
+/** Does this principal hold `floor`? Nothing held by nobody. */
+export function holds(principal: Principal | null, floor: Role): boolean {
+  return principal !== null && may(principal, floor);
+}
+
+/** May the board be drawn? With no door it always may; with one, only for a
+ *  person who is not anonymous; with an unknown door, not until it answers. */
+export function showsBoard(door: DoorState, who: Who | null): boolean {
+  if (door === false) return true;
+  if (door === null) return false;
+  return who !== null && who.kind !== "anonymous";
+}
+
 function routeOf(hash: string): Route {
   const run = parseRunHash(hash);
   if (run !== null) return { at: "run", ...run };
@@ -102,12 +139,12 @@ export function App(props: {
    *  it and to nothing else. */
   cache: CacheClient;
   /** THE AUTH ROW'S CLIENT. Its surface is always dialled (the bundle carries
-   *  the contract), but the row may not be MOUNTED — the service cell says
-   *  which, and until it does nothing asks who you are. */
+   *  the contract), but the row may not be MOUNTED — `door` is the host's answer
+   *  to that question, read before the first render. */
   auth: AuthClient;
-  /** Does this daemon have a DOOR? The host's answer, read before the first
-   *  render — so the board never opens on a server that cannot serve it. */
-  door: boolean;
+  /** Does this daemon have a DOOR? The host answers `GET /_odu/door` before the
+   *  first render; `null` means the answer did not arrive. */
+  door: DoorState;
   readout: SurfaceReadout;
   onReload: () => void;
 }): JSX.Element {
@@ -213,7 +250,7 @@ export function App(props: {
   );
 
   createEffect(() => {
-    if (!props.door || who() !== null) return;
+    if (props.door !== true || who() !== null) return;
     void Effect.runPromise(props.auth.procedures.user.whoami({})).then(
       (answer) => setWho(answer.who),
       // A failed whoami on a daemon that says it has a door is a broken
@@ -223,20 +260,12 @@ export function App(props: {
       () => {},
     );
   });
-  const signedIn = createMemo(() => who() !== null && who()?.kind !== "anonymous");
-  /** THE CONNECTION'S PRINCIPAL, as a row reads it: nobody when the gate let us
-   *  in without a session. */
-  const principal = createMemo<Principal | null>(() => {
-    const held = who();
-    return held === null || held.kind === "anonymous" ? null : held;
-  });
-  /** Does this person hold `floor`? The rows' rule, read once here and handed
-   *  to each face as a boolean. */
-  const holds = (floor: Role): boolean => {
-    const held = principal();
-    return held !== null && may(held, floor);
-  };
-  const boardShown = createMemo(() => !props.door || signedIn());
+  /** THE CONNECTION'S PRINCIPAL, as a row reads it — the one decision every
+   *  control's visibility rests on (see {@link principalOf}). */
+  const principal = createMemo(() => principalOf(props.door, who()));
+  /** The rows' rule, read once here and handed to each face as a boolean. */
+  const holdsFloor = (floor: Role): boolean => holds(principal(), floor);
+  const boardShown = createMemo(() => showsBoard(props.door, who()));
   let ambientRoot: (() => void) | undefined;
   onCleanup(() => ambientRoot?.());
   createEffect(() => {
@@ -270,7 +299,7 @@ export function App(props: {
     const here = route();
     return here.at === "cache" ? here.bucket : null;
   });
-  const anonymous = createMemo(() => props.door && who()?.kind === "anonymous");
+  const anonymous = createMemo(() => props.door === true && who()?.kind === "anonymous");
   const ciRoute = createMemo<CiRoute>(() => {
     const here = route();
     return here.at === "cache" || here.at === "profile" ? { at: "board" } : here;
@@ -351,7 +380,7 @@ export function App(props: {
           flight), anonymous (a sign-in form, and nothing else), signed in (the
           board, as it always was). A daemon with NO door never enters the first
           two: this daemon has no door and the board renders at once. */}
-      <Show when={props.door && who() === null}>
+      <Show when={props.door === true && who() === null}>
         <p class="hint">checking who you are…</p>
       </Show>
       <Show when={anonymous()}>
@@ -376,7 +405,7 @@ export function App(props: {
           <CacheFace
             client={props.cache}
             bucket={openBucket()}
-            canAdminister={holds("admin")}
+            canAdminister={holdsFloor("admin")}
             now={now()}
             call={(effect) => Effect.runPromise(effect)}
             onOpen={(bucket) => go({ at: "cache", bucket })}
@@ -391,7 +420,7 @@ export function App(props: {
               call={(effect) => Effect.runPromise(effect)}
               onRoute={(next) => go(next)}
               ambient={held()}
-              canRun={holds("member")}
+              canRun={holdsFloor("member")}
               connecting={props.readout.status === "connecting"}
             />
           )}
