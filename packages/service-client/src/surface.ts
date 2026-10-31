@@ -1435,9 +1435,10 @@ const VenueProbeOutputSchema = Schema.Struct({
  * A probe SSH-dials every machine it is asked about, so a page that fired one
  * per open would cost a fleet's worth of connections per glance, and wait on
  * the slowest unreachable box. So the service keeps the answer of the most
- * recent `venue.probe` — whoever asked it, the board or `odu hosts` — on this
- * cell, with WHEN and FOR WHICH platforms, and the page draws that with its age
- * and offers "probe now". `null` until the first probe since the daemon
+ * recent `venue.probe` of ITS OWN fleet — a probe with no caller `hostsFile`;
+ * one naming a caller's file is that person's machines and is answered but not
+ * kept — on this cell, with WHEN and FOR WHICH platforms, and the page draws
+ * that with its age and offers "probe now". `null` until the first probe since the daemon
  * started. Read-only on the wire: the service is its one writer.
  */
 export const VenueReadingSchema = Schema.NullOr(

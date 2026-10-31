@@ -462,14 +462,20 @@ export function createOduService(opts: ServiceOptions): OduService {
                     rows: outcome.rows,
                   };
                   // KEPT, so the next reader — a page opening Machines — reads
-                  // this answer rather than dialling every machine again.
-                  const reading: VenueReading = {
-                    at: now(),
-                    platforms: [...(input.platforms ?? [])],
-                    ...answer,
-                  };
-                  venueStore.set(reading);
-                  runtime.ctx.cells.venues.set(reading);
+                  // this answer rather than dialling every machine again. Only
+                  // a probe of the SERVICE'S OWN fleet: a caller's `hostsFile`
+                  // (`odu hosts` forwards its shell's `$ODU_HOSTS`) names that
+                  // person's machines, and keeping it would show every reader
+                  // someone else's fleet and someone else's file path.
+                  if (input.hostsFile === undefined) {
+                    const reading: VenueReading = {
+                      at: now(),
+                      platforms: [...(input.platforms ?? [])],
+                      ...answer,
+                    };
+                    venueStore.set(reading);
+                    runtime.ctx.cells.venues.set(reading);
+                  }
                   return Effect.succeed(answer);
                 },
               ),
