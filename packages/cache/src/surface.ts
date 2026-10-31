@@ -137,6 +137,10 @@ export const CacheRefusalCodeSchema = Schema.Literals([
   "unknown_bucket",
   "bucket_exists",
   "bad_input",
+  /** The caller is not allowed to administer buckets. Reached when an identity
+   *  provider is mounted and a signed-in MEMBER asked an admin verb: the root
+   *  token is not the rule on such a daemon, the caller's role is. */
+  "not_permitted",
 ]);
 export type CacheRefusalCode = typeof CacheRefusalCodeSchema.Type;
 

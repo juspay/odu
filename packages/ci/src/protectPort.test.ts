@@ -23,6 +23,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ghForge } from "@odu/execution/common/forge";
+import { LOCAL_OWNER } from "@odu/cordis/principal";
 import { protectBranch } from "./protectPort";
 
 /** The port with the forge every process binds: `ghForge` over the fake
@@ -135,7 +136,7 @@ describe("protectBranch refusals", () => {
     const outcome = await protect({
       checkout: bare,
       platforms: LINUX,
-      caller: { hostsFile: null },
+      caller: { hostsFile: null, principal: LOCAL_OWNER },
       dryRun: true,
       create: false,
     });
@@ -152,7 +153,7 @@ describe("protectBranch refusals", () => {
     const outcome = await protect({
       checkout: checkout({ justfile: "alpha:\n    echo hi\n" }),
       platforms: LINUX,
-      caller: { hostsFile: null },
+      caller: { hostsFile: null, principal: LOCAL_OWNER },
       dryRun: true,
       create: false,
     });
@@ -167,7 +168,7 @@ describe("protectBranch refusals", () => {
     const outcome = await protect({
       checkout: checkout(),
       platforms: [],
-      caller: { hostsFile: null },
+      caller: { hostsFile: null, principal: LOCAL_OWNER },
       dryRun: true,
       create: false,
     });
@@ -189,7 +190,7 @@ describe("protectBranch refusals", () => {
     const outcome = await protect({
       checkout: checkout(),
       platforms: [""],
-      caller: { hostsFile: null },
+      caller: { hostsFile: null, principal: LOCAL_OWNER },
       dryRun: true,
       create: false,
     });
@@ -206,7 +207,7 @@ describe("protectBranch refusals", () => {
     const outcome = await protect({
       checkout: checkout({ origin: "git@gitlab.com:someone/thing.git" }),
       platforms: LINUX,
-      caller: { hostsFile: null },
+      caller: { hostsFile: null, principal: LOCAL_OWNER },
       dryRun: false,
       create: false,
     });
@@ -220,7 +221,7 @@ describe("protectBranch refusals", () => {
     const outcome = await protect({
       checkout: checkout({ origin: `https://github.com/${SLUG}` }),
       platforms: LINUX,
-      caller: { hostsFile: null },
+      caller: { hostsFile: null, principal: LOCAL_OWNER },
       dryRun: false,
       create: false,
     });
@@ -240,7 +241,7 @@ describe("protectBranch refusals", () => {
     const outcome = await protect({
       checkout: checkout({ origin: `https://github.com/${SLUG}` }),
       platforms: LINUX,
-      caller: { hostsFile: null },
+      caller: { hostsFile: null, principal: LOCAL_OWNER },
       dryRun: false,
       create: false,
     });
@@ -256,7 +257,7 @@ describe("protectBranch refusals", () => {
       checkout: checkout({ origin: `https://github.com/${SLUG}` }),
       branch: "master",
       platforms: LINUX,
-      caller: { hostsFile: null },
+      caller: { hostsFile: null, principal: LOCAL_OWNER },
       dryRun: false,
       create: false,
     });
@@ -311,7 +312,7 @@ describe("protectBranch successes", () => {
     const outcome = await protect({
       checkout: checkout({ origin: `https://github.com/${SLUG}` }),
       platforms: ["x86_64-linux", "aarch64-darwin"],
-      caller: { hostsFile: null },
+      caller: { hostsFile: null, principal: LOCAL_OWNER },
       dryRun: true,
       create: false,
     });
@@ -344,7 +345,7 @@ describe("protectBranch successes", () => {
     const outcome = await protect({
       checkout: checkout({}),
       platforms: ["x86_64-linux"],
-      caller: { hostsFile: null },
+      caller: { hostsFile: null, principal: LOCAL_OWNER },
       dryRun: true,
       create: false,
     });
@@ -365,7 +366,7 @@ describe("protectBranch successes", () => {
       checkout: checkout({ origin: `https://github.com/${SLUG}` }),
       branch: "master",
       platforms: [],
-      caller: { hostsFile: null },
+      caller: { hostsFile: null, principal: LOCAL_OWNER },
       dryRun: true,
       create: false,
     });
@@ -386,7 +387,7 @@ describe("protectBranch successes", () => {
       checkout: checkout({ origin: `https://github.com/${SLUG}` }),
       branch: "master",
       platforms: LINUX,
-      caller: { hostsFile: null },
+      caller: { hostsFile: null, principal: LOCAL_OWNER },
       dryRun: false,
       create: false,
     });
@@ -405,7 +406,7 @@ describe("protectBranch successes", () => {
       checkout: checkout({ origin: `https://github.com/${SLUG}` }),
       branch: "master",
       platforms: LINUX,
-      caller: { hostsFile: null },
+      caller: { hostsFile: null, principal: LOCAL_OWNER },
       dryRun: false,
       create: true,
     });

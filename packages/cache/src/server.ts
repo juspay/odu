@@ -52,7 +52,8 @@ import {
   Routes,
   StateDir,
 } from "@odu/cordis/services";
-import { createCache, type BucketFacts, type Cache, type CacheOutcome } from "./cache";
+import { createCache, type AdminAuthority, type BucketFacts, type Cache, type CacheOutcome } from "./cache";
+import { may, principalOf } from "@odu/cordis/principal";
 import { CACHE_MOUNT } from "./paths";
 import { cacheRoutes } from "./routes";
 import {
@@ -157,6 +158,38 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
         : Effect.fail(new CacheRefused({ code: outcome.code, message: outcome.message })),
     );
 
+  /**
+   * ONE ADMINISTRATIVE ANSWER, with this ROW's authority rule applied first.
+   *
+   * The cache's rule: administration needs an `admin` — or the operator's root
+   * token, which is the rule when no identity provider is mounted and therefore
+   * the only one a loopback daemon has. A signed-in MEMBER is refused here, by
+   * the row that decided what administration means, and the engine never sees
+   * the call.
+   */
+  const admin = <A, B>(
+    input: { rootToken: string },
+    work: (authority: AdminAuthority) => Promise<CacheOutcome<A>>,
+    map: (value: A) => B,
+  ): Effect.Effect<B, CacheRefused> =>
+    Effect.flatMap(principalOf, (principal) => {
+      if (principal.kind === "user" && !may(principal, "admin")) {
+        return Effect.fail(
+          new CacheRefused({
+            code: "not_permitted",
+            message:
+              `odu: administering a bucket needs an admin — ${principal.login} ` +
+              `is a ${principal.role}`,
+          }),
+        );
+      }
+      const authority: AdminAuthority =
+        principal.kind === "user"
+          ? { rootToken: "", viaRole: true }
+          : { rootToken: input.rootToken };
+      return answer(() => work(authority), map);
+    });
+
   const deps: CacheSurfaceDeps = {
     collections: {
       buckets: {
@@ -174,10 +207,11 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
     procedures: {
       bucket: {
         create: ({ input }) =>
-          answer(
-            () =>
+          admin(
+            input,
+            (authority) =>
               cache.admin.create({
-                rootToken: input.rootToken,
+                ...authority,
                 name: input.name,
                 public: input.public,
                 retentionDays: input.retentionDays,
@@ -189,8 +223,9 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
             (facts) => rowOf(facts),
           ),
         list: ({ input }) =>
-          answer(
-            () => cache.admin.list(input),
+          admin(
+            input,
+            (authority) => cache.admin.list(authority),
             (buckets) => ({
               buckets: buckets.map((facts) => rowOf(facts)),
             }),
@@ -216,10 +251,11 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
       },
       token: {
         mint: ({ input }) =>
-          answer(
-            () =>
+          admin(
+            input,
+            (authority) =>
               cache.admin.tokenMint({
-                rootToken: input.rootToken,
+                ...authority,
                 bucket: input.bucket,
                 bucketGlob: input.bucketGlob ?? null,
                 scope: input.scope,
@@ -228,22 +264,29 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
             (minted) => ({ token: minted.token, facts: minted.facts }),
           ),
         list: ({ input }) =>
-          answer(
-            () =>
+          admin(
+            input,
+            (authority) =>
               cache.admin.tokenList({
-                rootToken: input.rootToken,
+                ...authority,
                 bucket: input.bucket ?? null,
               }),
             (tokens) => ({ tokens: tokens.map((facts) => facts) }),
           ),
-        revoke: ({ input }) => answer(() => cache.admin.tokenRevoke(input), (it) => it),
+        revoke: ({ input }) =>
+          admin(
+            input,
+            (authority) => cache.admin.tokenRevoke({ ...authority, id: input.id }),
+            (it) => it,
+          ),
       },
       pin: {
         create: ({ input }) =>
-          answer(
-            () =>
+          admin(
+            input,
+            (authority) =>
               cache.admin.pin({
-                rootToken: input.rootToken,
+                ...authority,
                 bucket: input.bucket,
                 name: input.name,
                 paths: input.paths,
@@ -253,10 +296,11 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
       },
       gc: {
         run: ({ input }) =>
-          answer(
-            () =>
+          admin(
+            input,
+            (authority) =>
               cache.admin.gc({
-                rootToken: input.rootToken,
+                ...authority,
                 bucket: input.bucket ?? null,
               }),
             (report) => report,
@@ -264,8 +308,9 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
       },
       stats: {
         read: ({ input }) =>
-          answer(
-            () => cache.admin.stats(input),
+          admin(
+            input,
+            (authority) => cache.admin.stats(authority),
             (stats) => ({
               ...stats,
               buckets: stats.buckets.map((facts) => rowOf(facts)),

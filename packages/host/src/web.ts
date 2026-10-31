@@ -88,6 +88,15 @@ import {
 } from "@olai/effect-cordis";
 import { readProcessIdentity, selfProcessIdentity } from "@odu/launch/processIdentity";
 import { mcpGetRoute, mcpRoute, RouteTransport, serveServiceMcpInProcess } from "./mcpRoute";
+import { directDispatch } from "@kolu/surface/links/direct";
+import { localBroker, PrincipalBroker } from "@odu/cordis/principal";
+import {
+  admissionDispatch,
+  admissionStore,
+  bearerGate,
+  connectionLayer,
+  gatedHandlers,
+} from "./principal";
 import { SERVICE_MCP_PATH } from "@odu/service-client/endpoint";
 import { servingOptions } from "./serving";
 import { CI_AGENT, ciRow, CI_KEY } from "@odu/ci/row";
@@ -312,6 +321,14 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
 
   const scope = Scope.makeUnsafe();
   try {
+    // THE PRINCIPAL BROKER, before any row: a row that knows how to sign
+    // somebody in registers its resolver on this in its own `apply`, and with
+    // none registered every connection is the local owner — loopback mode.
+    const principals = localBroker();
+    // The per-request admission the MCP door's dispatch reads. One per tenure:
+    // the composition root makes it, and the adapter is built once over it.
+    const admissions = admissionStore();
+    await run(provide(host, PrincipalBroker, () => principals));
     await run(provide(host, StateDir, () => stateRoot(process.env)));
     await run(provide(host, RootToken, () => configured(process.env.ODU_ROOT_TOKEN)));
     await run(provide(host, NixStore, () => configured(process.env.ODU_CACHE_STORE)));
@@ -364,6 +381,11 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
       return 1;
     }
 
+    // THE SERVED HANDLERS, WITH THE DOOR IN FRONT OF THEM — and only the
+    // SERVED ones: the control socket `daemonMain` opens is owner-only and
+    // already local, so it keeps the ungated record.
+    const servedHandlers = gatedHandlers(runtime.handlers);
+
     // THE `/mcp` DOOR — the composed bundle's, so it is the TRANSPORT's and is
     // built here rather than by any one row: an adapter that served one row
     // would have to be told what the others are. The adapter and its transport
@@ -373,7 +395,7 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     const transport = new RouteTransport();
     mcp = await serveServiceMcpInProcess({
       path: SERVICE_MCP_PATH,
-      handlers: runtime.handlers,
+      dispatch: admissionDispatch(directDispatch({ handlers: servedHandlers }), admissions),
       version: build.oduVersion,
       transport,
       core: coreAgent(),
@@ -382,7 +404,10 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
       ),
     });
     const agentRoutes = Layer.merge(
-      mcpRoute(transport, allowedOrigins, SERVICE_MCP_PATH),
+      mcpRoute(transport, allowedOrigins, SERVICE_MCP_PATH, {
+        store: admissions,
+        broker: principals,
+      }),
       mcpGetRoute(SERVICE_MCP_PATH),
     );
     const composed = routes.layers().reduce((all, one) => Layer.merge(all, one), agentRoutes);
@@ -394,12 +419,19 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
           // The parts and their assembly live in `./serving`: this function owns
           // the gate, the lifetime and the teardown around the listener.
           servingOptions({
-            live: () => ({ group: runtime.group, handlers: runtime.handlers }),
+            live: () => ({ group: runtime.group, handlers: servedHandlers }),
             dist,
             host: bindHost,
             port,
             allowedOrigins,
             routes: composed,
+            // THE DOOR ITSELF. `cookie` is the one header a connection is read
+            // under; the per-connection services provide the principal its
+            // lease admits; the middleware refuses an anonymous `/mcp` POST
+            // before the adapter is entered.
+            upgradeHeaders: ["cookie"] as const,
+            services: (connection) => connectionLayer(principals, connection),
+            middleware: bearerGate(principals, SERVICE_MCP_PATH),
           }),
         ).pipe(Scope.provide(scope)),
       );

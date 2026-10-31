@@ -18,9 +18,12 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { Effect } from "effect";
+import { Effect, Stream } from "effect";
 import { buildSurfaceFace } from "@kolu/surface/client";
 import { directDispatch } from "@kolu/surface/links/direct";
+import type { SurfaceDispatch } from "@kolu/surface/link";
+import type { SurfaceHandlers } from "@kolu/surface/server";
+import { CurrentPrincipal, LOCAL_OWNER, type Principal } from "@odu/cordis/principal";
 import {
   oduServiceSurface,
   type OduServiceClient,
@@ -44,7 +47,21 @@ afterEach(() => {
   world = null;
 });
 
-function serve(ports: RecordingPorts) {
+/** A dispatch that provides ONE principal to every handler — what the daemon's
+ *  per-connection services do, spelled here so this suite can state the claim
+ *  without importing the host. */
+function dispatchedAs(handlers: SurfaceHandlers, principal: Principal): SurfaceDispatch {
+  const base = directDispatch({ handlers });
+  const admission = { principal, live: () => true, ended: Effect.never } as const;
+  return {
+    unary: (tag, payload) =>
+      Effect.provideService(base.unary(tag, payload), CurrentPrincipal, admission),
+    stream: (tag, payload) =>
+      Stream.provideService(base.stream(tag, payload), CurrentPrincipal, admission),
+  };
+}
+
+function serve(ports: RecordingPorts, principal?: Principal) {
   world = makeWorld();
   const built = createOduService({
     ports,
@@ -57,7 +74,9 @@ function serve(ports: RecordingPorts) {
   });
   const face = buildSurfaceFace(
     oduServiceSurface,
-    directDispatch(built.runtime),
+    principal === undefined
+      ? directDispatch(built.runtime)
+      : dispatchedAs(built.runtime.handlers, principal),
   ) as unknown as OduServiceClient;
   return { face, close: () => built.close() };
 }
@@ -84,17 +103,17 @@ const READINGS: readonly {
   {
     label: "a path names a fleet",
     hostsFile: "/fleets/a.json",
-    expected: { hostsFile: "/fleets/a.json" },
+    expected: { hostsFile: "/fleets/a.json", principal: LOCAL_OWNER },
   },
   {
     label: "an empty string is a shell with no $ODU_HOSTS",
     hostsFile: "",
-    expected: { hostsFile: "" },
+    expected: { hostsFile: "", principal: LOCAL_OWNER },
   },
   {
     label: "an absent field is a caller with no shell",
     hostsFile: undefined,
-    expected: { hostsFile: null },
+    expected: { hostsFile: null, principal: LOCAL_OWNER },
   },
 ];
 
@@ -159,4 +178,54 @@ describe("the caller is assembled once per call", () => {
       }
     });
   }
+
+  /**
+   * THE OTHER HALF OF THE SAME CONTRACT: the principal is the CONNECTION's.
+   *
+   * Nothing on the wire can say who is asking — the verb inputs carry no such
+   * field — so the only way a port learns it is from the context the call
+   * arrived in. This provides one, and reads it back at the port that carries a
+   * `Caller` furthest from the door (a venue HOLD, which is also a state change
+   * and therefore the verb whose rule is "signed in").
+   */
+  it("carries the connection's principal to the ports, and takes none from input", async () => {
+    const signedIn: Principal = { kind: "user", login: "srid", role: "member" };
+    const ports = recordingPorts();
+    const { face, close } = serve(ports, signedIn);
+    try {
+      await asked(
+        face.surface.venue.hold({
+          checkout: CHECKOUT,
+          platforms: [PLATFORM],
+          requestId: "caller-hold-principal",
+        }),
+      );
+      expect(ports.holds[0]?.caller.principal).toEqual(signedIn);
+    } finally {
+      await close();
+    }
+  });
+
+  /**
+   * AND THE ROW'S RULE, SEEN FROM THE ROW: a signed-in MEMBER may start a run.
+   * The refusal this asserts is the one an identity provider's lowest role must
+   * NOT meet; a higher role is the next test's business.
+   */
+  it("lets a member change a run", async () => {
+    const ports = recordingPorts();
+    const { face, close } = serve(ports, { kind: "user", login: "srid", role: "member" });
+    try {
+      await asked(
+        face.surface.run.start({
+          checkout: CHECKOUT,
+          expectedSha: HEAD,
+          requestId: "caller-start-member",
+        }),
+      );
+      // The port is the proof: a refusal never reaches it.
+      expect(ports.launches).toHaveLength(1);
+    } finally {
+      await close();
+    }
+  });
 });

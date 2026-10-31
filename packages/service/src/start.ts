@@ -42,6 +42,7 @@ import {
 } from "@odu/service-client/surface";
 import { Effect } from "effect";
 import { callerOf } from "./caller";
+import type { Principal } from "@odu/cordis/principal";
 import type { CheckoutProbe, RunLauncher } from "./ports";
 import {
   claimReceipt,
@@ -164,8 +165,9 @@ function receiptOfRun(
 export function startRun(
   input: StartInput,
   deps: StartDeps,
+  principal: Principal,
 ): Effect.Effect<StartReceipt, ServiceRefused> {
-  return Effect.suspend(() => Effect.promise(() => start(input, deps))).pipe(
+  return Effect.suspend(() => Effect.promise(() => start(input, deps, principal))).pipe(
     Effect.flatMap((outcome) =>
       outcome.ok ? Effect.succeed(outcome.receipt) : Effect.fail(outcome.refusal),
     ),
@@ -215,7 +217,11 @@ function answerAndRecord(
   return { ok: true, receipt };
 }
 
-async function start(input: StartInput, deps: StartDeps): Promise<Outcome> {
+async function start(
+  input: StartInput,
+  deps: StartDeps,
+  principal: Principal,
+): Promise<Outcome> {
   const catalog = deps.catalog ?? {};
 
   if (!isRequestId(input.requestId)) {
@@ -415,7 +421,7 @@ async function start(input: StartInput, deps: StartDeps): Promise<Outcome> {
     // Absent on the wire means the CALLER had no `$ODU_HOSTS` — which is a
     // fact to carry, not a gap to fill from this process. Filling it is how
     // the daemon's shell came to decide where other people's runs execute.
-    caller: callerOf(input),
+    caller: callerOf(input, principal),
     // The caller's explicit "take this checkout". The coordinator does the
     // cancel-then-confirm; this only has to not lose the word.
     supersede: input.supersede ?? false,

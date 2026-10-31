@@ -19,11 +19,23 @@
  * have: the three readings (a path, `""` for "my shell has none", absent for
  * "I have no shell") are the contract the docs and agents already speak, and
  * {@link callerOf} is where that contract becomes this object.
+ *
+ * **The principal comes from the CONNECTION, never from input.** It is resolved
+ * at the upgrade (a session cookie) or at the HTTP door (a Bearer token) and
+ * read by the verb out of the Effect context, so a caller cannot type who they
+ * are. {@link callerOf} takes it as an argument rather than reading it, which
+ * is what keeps this module a pure assembly step — {@link principalOf} is where
+ * the connection's answer arrives.
  */
+
+import type { Principal } from "@odu/cordis/principal";
 
 export interface Caller {
   /** The CALLER's `$ODU_HOSTS`, or `null` when the caller expressed nothing. */
   readonly hostsFile: string | null;
+  /** Who this call acts for: the machine's own owner, or a signed-in person and
+   *  their role. Each row decides what that may do; this only carries it. */
+  readonly principal: Principal;
 }
 
 /**
@@ -34,8 +46,11 @@ export interface Caller {
  * and a path stays a path. The first two mean opposite things downstream, which
  * is why this is `?? null` and not `?? ""`.
  */
-export function callerOf(input: {
-  readonly hostsFile?: string | undefined;
-}): Caller {
-  return { hostsFile: input.hostsFile ?? null };
+export function callerOf(
+  input: {
+    readonly hostsFile?: string | undefined;
+  },
+  principal: Principal,
+): Caller {
+  return { hostsFile: input.hostsFile ?? null, principal };
 }
