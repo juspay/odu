@@ -41,12 +41,16 @@ import {
   StateDir,
 } from "@odu/cordis/services";
 import { authRow } from "./server";
-import type { GithubConfig } from "./github";
+import { readAllow, type GithubConfig } from "./github";
+
+const allow = readAllow("org:juspay");
+if (!allow.ok) throw new Error(allow.message);
 
 const CONFIG: GithubConfig = {
   clientId: "client-id",
   clientSecret: "client-secret",
   allow: "org:juspay",
+  rules: allow.rules,
   origin: "https://github.test",
   api: "https://api.github.test",
   publicOrigin: "https://odu.test",

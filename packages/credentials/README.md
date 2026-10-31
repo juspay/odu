@@ -21,6 +21,7 @@ Two rows keep a token per origin: the cache's bucket credentials
 layout, the 0600 mode and the per-origin rule are written once; a row names its
 store and cannot get the rest wrong.
 
-It reads the filesystem, so it is CLI-side only: no row imports it, and the
-browser cannot. `@odu/cordis` is where a browser and a daemon share vocabulary,
-which is why this is not there.
+It reads the filesystem, so it is CLI-side only: the two rows' `cli.ts` modules
+import it, no row's surface, server or face does, and the browser cannot.
+`@odu/cordis` is where a browser and a daemon share vocabulary, which is why
+this is not there.

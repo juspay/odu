@@ -21,6 +21,7 @@ import { Database } from "bun:sqlite";
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Role } from "@odu/cordis/principal";
+import { normalizeLogin } from "./github";
 
 export interface SessionRow {
   /** sha256 of the session's cookie value, hex. */
@@ -167,9 +168,8 @@ export function openAuthRepo(path: string): AuthRepo {
     // filesystem that refuses the chmod is not a reason to refuse to serve.
   }
 
-  /** GitHub logins are case-insensitive, and a grant typed `Srid` must find the
-   *  grant written by a sign-in as `srid`. ONE place lowercases. */
-  const lower = (login: string): string => login.trim().toLowerCase();
+  /** The one spelling lives in `./github`; this module only applies it. */
+  const lower = normalizeLogin;
 
   const sessionOf = (row: SessionDb | null): SessionRow | null =>
     row === null

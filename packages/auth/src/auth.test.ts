@@ -32,7 +32,7 @@ import {
   authorizeUrl,
   exchangeCode,
   membership,
-  parseAllow,
+  readAllow,
   readGithubConfig,
   type GithubConfig,
 } from "./github";
@@ -41,10 +41,18 @@ import { AuthRefused, oduAuthSurface } from "./surface";
 
 type AuthClient = SurfaceClientOf<(typeof oduAuthSurface)["spec"]>;
 
+const ALLOW = "org:juspay";
+const readAllowOrThrow = (spec: string) => {
+  const reading = readAllow(spec);
+  if (!reading.ok) throw new Error(reading.message);
+  return reading.rules;
+};
+
 const CONFIG: GithubConfig = {
   clientId: "client-id",
   clientSecret: "client-secret",
-  allow: "org:juspay",
+  allow: ALLOW,
+  rules: readAllowOrThrow(ALLOW),
   origin: "https://github.test",
   api: "https://api.github.test",
   publicOrigin: "https://odu.test",
@@ -175,7 +183,8 @@ describe("the door's configuration", () => {
     expect(reading.config.publicOrigin).toBe("https://odu.test");
     expect(reading.config.origin).toBe("https://github.com");
     expect(reading.config.api).toBe("https://api.github.com");
-    expect(parseAllow(reading.config.allow)).toEqual([
+    // PARSED ONCE, at startup: the config carries the rules a sign-in acts on.
+    expect(reading.config.rules).toEqual([
       { kind: "org", org: "juspay" },
       { kind: "login", login: "srid" },
     ]);
@@ -235,7 +244,11 @@ describe("the GitHub App's flow", () => {
         : { status: 404, body: {} };
     });
     const answer = await membership(
-      { ...CONFIG, allow: "org:other, team:juspay/platform" },
+      {
+        ...CONFIG,
+        allow: "org:other, team:juspay/platform",
+        rules: readAllowOrThrow("org:other, team:juspay/platform"),
+      },
       "user-token",
       "srid",
       request,

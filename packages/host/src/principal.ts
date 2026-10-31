@@ -334,9 +334,6 @@ export function doorGate(options: DoorGateOptions): SurfaceAppHttpMiddleware {
     });
 }
 
-/** WHAT A DAEMON WITH A DOOR IS, for a caller that must choose a fallback. */
-export const NOBODY: Admission = NOBODY_ADMISSION;
-
 // ── the door fact, on its own route ─────────────────────────────────────────
 
 /** The paths that serve the SHELL. The SPA is hash-routed, so these two are all

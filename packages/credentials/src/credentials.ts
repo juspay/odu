@@ -13,8 +13,9 @@
  * here, `store` is the only word a row supplies, and a row cannot get them
  * wrong without changing this file.
  *
- * CLI-side: it reads the filesystem, the row does not import it, and the
- * browser cannot.
+ * CLI-side only: the two rows' `cli.ts` modules import it (they are what run
+ * `odu cache login` and `odu auth login`). No row's surface, server or face
+ * does, and the browser cannot.
  */
 
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";

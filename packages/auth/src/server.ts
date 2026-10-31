@@ -59,7 +59,7 @@ import {
   StateDir,
 } from "@odu/cordis/services";
 import { openAuthRepo, type AuthRepo, type SessionRow, type TokenRow } from "./db";
-import type { GithubConfig } from "./github";
+import { normalizeLogin, type GithubConfig } from "./github";
 import { authRoutes } from "./routes";
 import {
   AUTH_KEY,
@@ -347,7 +347,7 @@ export function authServer(opts: AuthServerOptions): AuthServer {
                 notPermitted(`granting a role is an owner's verb — ${who.login} is a ${who.role}`),
               );
             }
-            const login = input.login.trim().toLowerCase();
+            const login = normalizeLogin(input.login);
             repo.setGrant({ login, role: input.role, created: now() });
             // The role is read at the upgrade, so a change takes effect at the
             // NEXT connection: the open ones are ended, the clients redial, and

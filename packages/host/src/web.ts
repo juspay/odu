@@ -88,7 +88,12 @@ import {
 } from "@olai/effect-cordis";
 import { readProcessIdentity, selfProcessIdentity } from "@odu/launch/processIdentity";
 import { mcpGetRoute, mcpRoute, RouteTransport, serveServiceMcpInProcess } from "./mcpRoute";
-import { LOCAL_ADMISSION, localBroker, PrincipalBroker } from "@odu/cordis/principal";
+import {
+  LOCAL_ADMISSION,
+  localBroker,
+  NOBODY_ADMISSION,
+  PrincipalBroker,
+} from "@odu/cordis/principal";
 import { authRow, readGithubConfig, signInPageHtml } from "@odu/auth/server";
 import { AUTH_AGENT, AUTH_ANONYMOUS_TAGS, AUTH_KEY } from "@odu/auth/surface";
 import {
@@ -99,7 +104,6 @@ import {
   doorRoute,
   gatedHandlers,
   liveDispatch,
-  NOBODY,
   SHELL_PATHS,
   UPGRADE_HEADERS,
 } from "./principal";
@@ -367,7 +371,7 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     // The per-request admission the MCP door's dispatch reads. One per tenure:
     // the composition root makes it, and the adapter is built once over it. Its
     // FALLBACK is the absent-resolver rule again, for a call outside any request.
-    const admissions = admissionStore(hasDoor ? NOBODY : LOCAL_ADMISSION);
+    const admissions = admissionStore(hasDoor ? NOBODY_ADMISSION : LOCAL_ADMISSION);
     await run(provide(host, PrincipalBroker, () => principals));
     await run(provide(host, StateDir, () => stateRoot(process.env)));
     await run(provide(host, RootToken, () => configured(process.env.ODU_ROOT_TOKEN)));

@@ -29,13 +29,21 @@
 
 import { readFileSync } from "node:fs";
 
+/** GITHUB LOGINS ARE CASE-INSENSITIVE, and this is the one place that says so:
+ *  a grant typed `Srid` must find the grant written by a sign-in as `srid`, and
+ *  a rule written `Srid` must admit `srid`. */
+export function normalizeLogin(login: string): string {
+  return login.trim().toLowerCase();
+}
+
 export interface GithubConfig {
   readonly clientId: string;
   readonly clientSecret: string;
-  /** `org:<name>`, `team:<org>/<slug>`, or a login — comma-separated. Kept as
-   *  the SPEC rather than a parsed list, so a sentence can quote what the
-   *  operator wrote. */
+  /** The operator's WORDS — kept verbatim so a sentence can quote them. */
   readonly allow: string;
+  /** The same list, PARSED ONCE at startup: a sign-in may not re-read the
+   *  grammar, and a malformed entry was refused before the row mounted. */
+  readonly rules: ReadonlyArray<AllowRule>;
   /** Where a person authorises: `https://github.com`, or an enterprise host. */
   readonly origin: string;
   /** Where the API answers: `https://api.github.com`. */
@@ -121,6 +129,7 @@ export function readGithubConfig(
       clientId: clientId as string,
       clientSecret,
       allow: allowText as string,
+      rules: allow.rules,
       origin: filled(env[ORIGIN]) ?? "https://github.com",
       api: filled(env[API]) ?? "https://api.github.com",
       publicOrigin: origins.publicOrigin ?? origins.boundOrigin,
@@ -193,18 +202,12 @@ export function readAllow(spec: string): AllowReading {
         message: `"${entry}" is not a GitHub login, an \`org:<name>\`, or a \`team:<org>/<slug>\``,
       };
     }
-    rules.push({ kind: "login", login: entry });
+    rules.push({ kind: "login", login: normalizeLogin(entry) });
   }
   if (rules.length === 0) {
     return { ok: false, message: "names nobody — write `org:<name>`, `team:<org>/<slug>` or a comma-separated list of logins" };
   }
   return { ok: true, rules };
-}
-
-/** `readAllow`, for a caller that has already reported a refusal. */
-export function parseAllow(spec: string): AllowRule[] {
-  const reading = readAllow(spec);
-  return reading.ok ? [...reading.rules] : [];
 }
 
 /** The same rules, for a sentence a person reads on a refused sign-in. */
@@ -369,7 +372,7 @@ export async function membership(
   login: string,
   request: typeof fetch = fetch,
 ): Promise<Membership> {
-  const rules = parseAllow(config.allow);
+  const rules = config.rules;
   if (rules.length === 0) {
     return {
       ok: false,
