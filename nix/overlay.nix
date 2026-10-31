@@ -39,6 +39,10 @@ in
   # transitive sources too. TypeScript resolves the import from the hydrated
   # package's real location.
   kolu-shell-quote = mkKoluPackage "shell-quote";
+  # `surface-remote`'s byte formatting (`@kolu/byte-units`), same reason as the
+  # three above: a hydrated package's transitive imports resolve from its own
+  # location, so the consumer hydrates them too.
+  kolu-byte-units = mkKoluPackage "byte-units";
   kolu-surface-map = mkKoluPackage "surface-map";
   kolu-log = mkKoluPackage "log";
   # The survivable-spawn spine. `surface-daemon-supervisor` owns the mechanism a
