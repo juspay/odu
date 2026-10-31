@@ -142,9 +142,10 @@ Each item names where it is checked.
   (`@odu/host`) composing two Cordis rows, `ci` and `cache`, each owning its
   surface, server, CLI and face; `@odu/cordis` holds the contract both read,
   and `packages/host/src/fence.test.ts` proves, with `@olai/effect-cordis/fence`,
-  that only roots name rows. A per-connection principal is therefore a host
-  service that rows consume through the contract package, never a row's
-  import of another row.
+  that only roots name rows. Who is on a connection is therefore a fact the
+  HOST supplies through the contract package, and the feature that decides it
+  (sign-in, sessions, tokens) is a row of its own that registers with the
+  host; neither `ci` nor `cache` imports it.
 
 Consequences for the split:
 
@@ -290,14 +291,35 @@ open sockets, which odu owns through its session table. If a second kolu app
 later needs a cookie principal, the helper moves into `@kolu/surface-app`;
 not before.
 
-Identity is the host's concern, not a row's (F13): a no-row package
-`@odu/identity` owns GitHub OAuth, the session and personal-token tables in
-its own `identity.sqlite` under the state directory, and the sign-in page;
-`@odu/cordis` carries the `CurrentPrincipal` tag and the `Role` type so both
-rows read who is asking without importing identity. Every surface verb
-receives a principal; the org arrives in PR 4. The developer's loopback mode
-stays as it is: no identity configured means no principal, same verbs, same
-board, and its tests are the regression guard.
+Ownership, by the Cordis rules (olai `docs/architecture/cordis.md`):
+
+- **The connection is the host's.** The host owns the listener, so it owns
+  "who is on this connection": a `Principal` broker in `@odu/cordis`, always
+  present, whose absence behaviour is stated — with no resolver registered,
+  every connection is the local owner, which is loopback mode today. Rows
+  read `CurrentPrincipal` (a service key, a safe import) and never ask who
+  supplies it.
+- **Sign-in is a row.** `auth` (`@odu/auth`, four doors like `cache`) owns
+  GitHub OAuth, the sessions and personal-token tables in its own
+  `auth.sqlite`, the sign-in and profile faces, and `odu auth …`. It is
+  optional in the doc's second sense: a provider that adds itself to its
+  consumer. In its `apply` it registers its resolver on the host's
+  single-owner key (a second claimant is refused) and its finalizer withdraws
+  it, so the row can stop without the host, `ci` or `cache` noticing.
+- **A session is acquired, not looked up.** At upgrade the host takes a lease
+  on the session from the resolver and arranges the release in the same step;
+  logout, expiry and revocation end the lease, and ending the lease closes
+  the connection. That is the fix for the seam checking only at upgrade, and
+  it is "acquisition and release in one step" rather than a revocation list
+  the connection would have to poll.
+- **Roles are each row's rule.** `ci` decides what a `member` may start,
+  `cache` what an `admin` may mint; `@odu/cordis` carries only the `Role`
+  type. The root token stays what it is, the operator's bootstrap, and gains
+  one job: granting the first `owner`.
+
+Every surface verb receives a principal through `Caller`; the org arrives in
+PR 4. Loopback mode stays as it is: no `auth` row mounted means every caller
+is the local owner, same verbs, same board, and its tests are the guard.
 
 ### Deployment shapes
 
@@ -335,44 +357,57 @@ root token in `$ODU_ROOT_TOKEN` authorises administration; NixOS users set
 
 ### PR 2: server mode
 
-> **Docs:** The board at the server's address is behind a **Sign in with
-> GitHub** button. Signed-in members see the runs and buckets; owners and
-> admins start runs, create buckets, mint and revoke tokens. From your profile
-> page create a personal access token and use the CLI or MCP against the
-> server with `odu --origin https://<host>` and `$ODU_TOKEN`. Signing out ends
-> your live sessions everywhere. The cache protocol is unchanged: public
-> buckets read anonymously, pushes carry a bucket token. A local `odu web`
-> with no identity configured works exactly as before.
+> **Docs:** Your odu server now has a door. Open the board and you meet
+> **Sign in with GitHub**; the operator decides which GitHub org, team or
+> people may enter. Once in, members see every run and bucket and start runs;
+> admins also create buckets, mint and revoke cache tokens, and run GC; the
+> owner grants roles. Your profile page shows your sessions and lets you
+> create a **personal access token**: run `odu auth login https://<host>` once
+> with it, and every `odu` command and the MCP server reach that server with
+> `--origin https://<host>`; or hand it to an agent as `$ODU_TOKEN`. Signing
+> out, or revoking a token, ends those sessions everywhere at once, open
+> browser tabs included. The cache protocol does not change: public buckets
+> are read without an account, pushes carry a bucket token as before. A local
+> `odu web` with no sign-in configured behaves exactly as it does today.
 
 Why now: the pod's ingress goes public in PR 3, and nothing in the pod can
 hide the board or `/mcp` from whoever reaches it (F12). Identity has to be
 odu's own.
 
 What lands:
-- **`@odu/identity`**, a no-row package the host composes (F13): GitHub OAuth
-  (authorisation code, state cookie, the callback at
-  `/auth/github/callback`), the sign-in page served in place of the board for
-  an anonymous browser, sessions and personal access tokens in
-  `identity.sqlite` under the state directory, and membership: the operator
-  names a GitHub org or team, or a list of logins, whose members may sign in.
-  Configuration is environment (`ODU_GITHUB_CLIENT_ID`,
-  `ODU_GITHUB_CLIENT_SECRET_FILE`, `ODU_GITHUB_ALLOW`), absent in loopback mode.
-- **`CurrentPrincipal`** in `@odu/cordis`, provided per websocket from the
-  `cookie` upgrade header through kolu's `services(connection)` seam and per
-  HTTP request from `Authorization: Bearer` through its `middleware` (F1).
-  `Caller` carries it; every verb of both rows reads it, and the row's own
-  rule decides: `ci` verbs that change state need `member`, cache admin verbs
-  need `admin`, and the root token becomes the bootstrap that grants the first
-  `owner` (`odu identity grant <login> owner`) and nothing else afterwards.
-- **Sessions end on purpose.** Logout, expiry and revocation close that
-  principal's open sockets through the host's session table, because the seam
-  checks a session at upgrade only.
-- **Personal access tokens** from the profile page and `odu identity token`,
-  sent as `Authorization: Bearer` on the upgrade by the CLI and MCP clients
-  (kolu's `connect` factory, no framework change), so `--origin` against a
-  remote server is safe at last (F10).
-- **The board** gains the profile page and a signed-in header; the Cache and
-  Runs views hide the controls a role cannot use.
+- **The `auth` row** (`@odu/auth`, doors `./surface · ./server · ./cli ·
+  ./face`, F13): GitHub OAuth (authorisation code, state cookie, the callback
+  at `/auth/github/callback`), the sign-in page an anonymous browser meets
+  instead of the board, sessions and personal access tokens in `auth.sqlite`
+  under the state directory, membership from a GitHub org or team or a list
+  of logins, the verbs `auth_whoami`, `auth_token_create`, `auth_token_list`,
+  `auth_token_revoke`, `auth_session_list`, `auth_session_end`,
+  `auth_grant`, and `odu auth login | whoami | token | grant`. Configuration
+  is environment (`ODU_GITHUB_CLIENT_ID`, `ODU_GITHUB_CLIENT_SECRET_FILE`,
+  `ODU_GITHUB_ALLOW`); unset, the row is not mounted.
+- **The `Principal` broker** in `@odu/cordis` and the host: resolved per
+  websocket from the `cookie` upgrade header through kolu's
+  `services(connection)` seam and per HTTP request from `Authorization:
+  Bearer` through its `middleware` (F1). The `auth` row registers its
+  resolver on the broker's single-owner key in `apply` and withdraws it in its
+  finalizer; with none registered every caller is the local owner. `Caller`
+  carries the principal to every verb of every row, and each row's own rule
+  decides: `ci` state changes need `member`, cache administration `admin`,
+  grants `owner`; the root token grants the first `owner` and nothing else.
+- **Sessions are leases.** The host acquires a session lease at upgrade and
+  arranges its release in the same step; logout, expiry and revocation end the
+  lease, and the ended lease closes the connection. No revocation list is
+  polled.
+- **Personal access tokens** from the profile page or `odu auth token create`,
+  stored per origin by `odu auth login` and sent as `Authorization: Bearer` on
+  the upgrade by the CLI and MCP clients (kolu's `connect` factory, no
+  framework change), so `--origin` against a remote server is safe at last
+  (F10).
+- **The board** reads `auth_whoami` through the wire: a signed-in header and
+  the profile page from the `auth` face, and the Runs and Cache views hide the
+  controls the role cannot use. With no `auth` row the header is as today.
+- **The fence** gains a third row and the broker key's single-owner claim is
+  tested: a second resolver is refused and installs nothing.
 - **Deployment, both shapes.** The module gains `services.odu.github.*` and
   exposes the board, websocket and `/mcp` through nginx. For the pod,
   nixos-config switches the ingress from `tailscale serve` to Funnel and
