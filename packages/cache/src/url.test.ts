@@ -23,8 +23,8 @@ const BOUND = "http://127.0.0.1:18440";
 const PUBLIC = "https://cache.example.com";
 
 const trash: Cache[] = [];
-afterEach(() => {
-  for (const cache of trash.splice(0)) cache.close();
+afterEach(async () => {
+  await Promise.all(trash.splice(0).map((cache) => cache.close()));
 });
 
 /** A cache over a throwaway state root with NOTHING in the store: no NAR is

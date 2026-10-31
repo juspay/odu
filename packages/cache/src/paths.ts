@@ -44,3 +44,20 @@ export const CACHE_ROUTE_PATHS: ReadonlyArray<string> = [
   "/nar/*",
   `~^/${HASH_PATTERN}\\.narinfo$`,
 ];
+
+/**
+ * THE BUCKET A PATH NAMES, in either spelling, or `null` when it names none.
+ *
+ * The cache's own grammar, published as part of the `BucketDomains` fact: a
+ * bucket's DOMAIN forwards every path to the daemon, and the host's gate asks
+ * this question rather than spelling `/cache/<name>` a second time. A change
+ * to the mount or the push API's path is then one edit, not two that can drift.
+ */
+export function bucketOf(path: string): string | null {
+  for (const prefix of [`${CACHE_MOUNT}/`, `${PUSH_API}/buckets/`]) {
+    if (!path.startsWith(prefix)) continue;
+    const named = path.slice(prefix.length).split("/")[0] ?? "";
+    return named === "" ? null : decodeURIComponent(named);
+  }
+  return null;
+}

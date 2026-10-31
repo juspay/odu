@@ -169,6 +169,16 @@ function domainsWorld(initial: BucketDomainFact[]): {
         return () => listeners.delete(listener);
       },
       paths: [],
+      // The cache's grammar, as the row publishes it — this fake is the fact
+      // the tunnel row reads, and the gate that asks it lives in the host.
+      bucketOf: (path) => {
+        for (const prefix of ["/cache/", "/_odu/v1/buckets/"]) {
+          if (!path.startsWith(prefix)) continue;
+          const named = path.slice(prefix.length).split("/")[0] ?? "";
+          return named === "" ? null : decodeURIComponent(named);
+        }
+        return null;
+      },
     },
     set: (next) => {
       facts = [...next];

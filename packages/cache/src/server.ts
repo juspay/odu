@@ -56,7 +56,7 @@ import {
 } from "@odu/cordis/services";
 import { createCache, roleAuthority, type Authority, type BucketFacts, type Cache, type CacheOutcome } from "./cache";
 import { may, principalOf, type Principal } from "@odu/cordis/principal";
-import { CACHE_MOUNT, CACHE_ROUTE_PATHS } from "./paths";
+import { bucketOf, CACHE_MOUNT, CACHE_ROUTE_PATHS } from "./paths";
 import { cacheRoutes } from "./routes";
 import {
   type CacheBucket,
@@ -490,6 +490,7 @@ export const cacheRow = definePlugin({
       // name to the daemon; the host's gate keeps everything outside this list
       // (the board, `/mcp`, `/auth`, the websocket) off that name.
       paths: CACHE_ROUTE_PATHS,
+      bucketOf,
     };
     yield* offer(BucketDomains, () => domains);
 
@@ -537,9 +538,9 @@ export const cacheRow = definePlugin({
     // second, and `teardown.test.ts` closes a two-row host and proves it by
     // probing the cache from inside the drop.
     yield* Effect.addFinalizer(() =>
-      Effect.sync(() => {
+      Effect.promise(async () => {
         server.detach();
-        cache.close();
+        await cache.close();
       }),
     );
     yield* Effect.addFinalizer(() => Effect.promise(() => mounted.drop()));

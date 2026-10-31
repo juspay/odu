@@ -161,10 +161,14 @@ export const heldKey = (held: { bucket: string; storePath: string }): string =>
  * WHY A PATH IS HELD, in the one sentence the push, the server and the board
  * say — PLAN.md's wording: a reference that is neither here nor upstream.
  */
-export function heldReason(missing: readonly string[], fetching = 0): string {
+export function heldReason(missing: readonly string[] | null, fetching = 0): string {
   if (fetching > 0) {
     return `fetching ${fetching} upstream reference${fetching === 1 ? "" : "s"}`;
   }
+  // NULL IS "THE SERVER DID NOT SAY HOW MANY". It is a 202 body nobody filled
+  // in, or a client that never saw the body — and a sentence with a count would
+  // be a number this module invented.
+  if (missing === null) return "waiting for a reference that is neither here nor upstream";
   const n = missing.length;
   return `waiting for ${n} reference${n === 1 ? "" : "s"} that ${
     n === 1 ? "is" : "are"

@@ -293,7 +293,8 @@ export interface Cache {
   onChange(listener: () => void): () => void;
   /** The admin face. */
   admin: CacheAdmin;
-  close(): void;
+  /** Join the row's background work, then close the database. */
+  close(): Promise<void>;
 }
 
 export interface CacheOptions {
@@ -922,15 +923,15 @@ export function createCache(options: CacheOptions): Cache {
       };
     },
 
-    close() {
+    async close() {
       // The trailing-edge timer is the cache's, so the cache ends it. A timer
       // that outlived `close()` would publish into a closed database.
       if (trailing !== null) clearTimeout(trailing);
       trailing = null;
       // The write path's background fetches stop taking work BEFORE the
-      // database closes; a fetch already in `nix-store -r` sees `closed` when
-      // it resumes and writes nothing.
-      staging.close();
+      // database closes, and this AWAITS the one already in `nix-store -r`:
+      // the flag alone left the child running past the close.
+      await staging.close();
       listeners.clear();
       repo.close();
     },

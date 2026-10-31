@@ -112,6 +112,9 @@ export const SERVICE_ROWS_PATH = "/_odu/rows";
  *
  * `null` is UNKNOWN (the host did not answer), deliberately not `[]`: a caller
  * that treats an outage as "no rows" hides a control on a server that has it.
+ * A caller that can only HIDE — the browser, before its first draw — may fold
+ * `null` to `[]` on purpose; it must say so at the fold, and must not do it
+ * where it could wait for the answer instead.
  */
 export async function readRows(
   origin: string,
@@ -265,6 +268,12 @@ export interface BucketDomains {
    * the cache and what must never answer there: its claims are the whole list.
    */
   paths: ReadonlyArray<string>;
+  /**
+   * THE BUCKET A PATH NAMES, in either protocol spelling — or `null` when it
+   * names none. The grammar is the cache row's; the host's bucket-domain gate
+   * asks this rather than parsing `/cache/<name>` itself.
+   */
+  bucketOf(path: string): string | null;
 }
 
 export const BucketDomains = serviceTag<BucketDomains>("odu:bucketDomains");

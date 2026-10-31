@@ -90,7 +90,7 @@ What it says while it works — one preamble, then one line per path as the buck
 ⏳ /nix/store/…-big-output part 3
 ⏸ /nix/store/…-hello-2.12.3 held: waiting for 1 reference that is neither here nor upstream: /nix/store/…-glibc-2.44-57
 ❌ /nix/store/…-bad-output refused: the upload was truncated or corrupted
-held 1 path — see https://cache.kolu.dev/#/cache/kolu
+held 1 path — see https://odu.example.com/#/cache/main
 ```
 
 A `held` path is one the bucket accepted and cannot serve yet: a reference it needs is neither in the bucket nor signed by one of its upstream keys. The push reports it and **returns** — the exit is non-zero only for refusals — and the bucket's page lists the same paths with the same sentence. `--wait` is the explicit choice to stay until they land.
@@ -108,6 +108,8 @@ A GitHub Actions step, with the token as a secret:
       cache push kolu --origin https://cache.kolu.dev $paths
   env:
     ODU_CACHE_TOKEN: ${{ secrets.ODU_CACHE_TOKEN }}
+    # THE BOARD'S origin — the held list lives there, not on the bucket's name.
+    ODU_WEB_ORIGIN: https://odu.example.com
 ```
 
 Prefer plain Nix? `nix copy --to` works without any odu code on the client:

@@ -37,25 +37,6 @@ const hostOf = (header: string | undefined): string => {
   return colon === -1 ? raw : raw.slice(0, colon);
 };
 
-/**
- * Is this a path that belongs to `bucket`? Both path forms carry the bucket's
- * name; a name other than this host's is refused, so one bucket's domain never
- * answers for another's files.
- */
-function namesBucket(bucket: string, path: string): "yes" | "no" | "other" {
-  const cachePrefix = "/cache/";
-  if (path.startsWith(cachePrefix)) {
-    const named = decodeURIComponent(path.slice(cachePrefix.length).split("/")[0] ?? "");
-    return named === bucket ? "yes" : "other";
-  }
-  const pushPrefix = "/_odu/v1/buckets/";
-  if (path.startsWith(pushPrefix)) {
-    const named = decodeURIComponent(path.slice(pushPrefix.length).split("/")[0] ?? "");
-    return named === bucket ? "yes" : "other";
-  }
-  return "no";
-}
-
 export function bucketDomainGate(
   facts: () => BucketDomains | undefined,
 ): SurfaceAppHttpMiddleware {
@@ -77,9 +58,11 @@ export function bucketDomainGate(
         return Effect.provideService(app, HttpServerRequest.HttpServerRequest, rewritten);
       }
 
-      const named = namesBucket(bucket.bucket, path);
-      if (named === "other") return Effect.succeed(missing());
-      if (named === "yes") return app;
+      // THE GRAMMAR IS THE ROW'S: `bucketOf` is part of the fact this gate was
+      // handed, so the cache's mount and push paths are spelled once.
+      const named = domains.bucketOf(path);
+      if (named === bucket.bucket) return app;
+      if (named !== null) return Effect.succeed(missing());
       return isReserved(path, domains.paths) ? app : Effect.succeed(missing());
     });
 }

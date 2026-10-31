@@ -478,7 +478,13 @@ describe("pushing a closure", () => {
       const summary = await pushToCache({
         bucket: `${server.origin}/main`,
         paths: ["."],
-        env: envOf({ ODU_CACHE_TOKEN: "t" }),
+        env: envOf({
+          ODU_CACHE_TOKEN: "t",
+          // THE BOARD, on the daemon's own name — the push was told the bucket
+          // by URL, and its `see` line must still point at the page that
+          // lists the hold, not at the substituter's root.
+          ODU_WEB_ORIGIN: "https://board.example.org",
+        }),
         platform: PLATFORM,
         onLine: (line) => lines.push(line),
       });
@@ -492,7 +498,7 @@ describe("pushing a closure", () => {
           },
         ],
         failed: 0,
-        pageUrl: `${server.origin}/#/cache/main`,
+        pageUrl: "https://board.example.org/#/cache/main",
       });
       expect(lines[0]).toBe(
         "3 paths in the closure: 1 to push, 2 already here, 0 upstream",

@@ -96,8 +96,9 @@ const declaration = {
       "packages/web-acceptance/support/cloudflareStub.ts": 1,
       // `cache-control` on three responses — an HTTP header, not a bucket.
       "packages/host/src/principal.ts": 3,
-      // The bucket-domain gate: `/cache/` is the cache row's path form.
-      "packages/host/src/bucketDomain.ts": 6,
+      // The bucket-domain gate: the page rewrite's `/cache/` and its own
+      // 404 sentence. The path GRAMMAR moved to the row's `bucketOf` fact.
+      "packages/host/src/bucketDomain.ts": 2,
       // The same header, on the shared door reader's one request.
       "packages/cordis/src/services.ts": 4,
       "packages/launch/src/webDaemonLaunch.ts": 1,

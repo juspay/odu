@@ -45,8 +45,11 @@ if (root === null) {
 const [door, setDoor] = createSignal<DoorState>(await readDoor(window.location.origin));
 
 /** WHICH ROWS THIS DAEMON MOUNTS — read with the door, before the first draw.
- *  A row that is absent gets no switch and no subscription; an unanswered ask
- *  is `[]`, which draws no row rather than a control nothing answers. */
+ *  A row that is absent gets no switch and no subscription. An unanswered ask
+ *  is folded to `[]` DELIBERATELY (`readRows` warns a waiter not to): before
+ *  the first draw there is nothing to wait for, and drawing no control is the
+ *  safe direction — it hides a switch rather than opening a subscription
+ *  nobody answers. */
 const rows = (await readRows(window.location.origin)) ?? [];
 
 const connection = await connectSurfaces({

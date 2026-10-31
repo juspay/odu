@@ -355,6 +355,16 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
   // hold is not a failure: the exit code and `failed` stay about refusals.
   for (const one of held) say(`⏸ ${one.path} held: ${one.reason}`);
 
+  // THE BOARD, not the substituter. A push may name a bucket's domain as its
+  // origin, and that name serves only the bucket — its `/` is the public page,
+  // which does not know what is held. The held list lives on the daemon's own
+  // origin, which is `ODU_WEB_ORIGIN` when a lane sets one.
+  const board = (() => {
+    const configured = options.env.ODU_WEB_ORIGIN?.trim();
+    return configured === undefined || configured === ""
+      ? resolved.origin
+      : normalizeOrigin(configured);
+  })();
   return {
     pushed,
     skippedUpstream: answer.skippedUpstream.length,
@@ -362,7 +372,7 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
     held,
     failed: failures.length,
     failures,
-    pageUrl: `${resolved.origin}/#/cache/${encodeURIComponent(resolved.name)}`,
+    pageUrl: `${board}/#/cache/${encodeURIComponent(resolved.name)}`,
   };
 }
 
@@ -680,7 +690,7 @@ async function uploadOne(
       const said = (await infoResponse.text()).trim();
       return {
         ok: "held",
-        reason: said === "" ? heldReason(["<unknown>"]) : said,
+        reason: said === "" ? heldReason(null) : said,
       };
     }
     if (infoResponse.ok) return { ok: true };

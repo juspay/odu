@@ -22,10 +22,22 @@ const PATHS = [
   "~^/[0-9abcdfghijklmnpqrsvwxyz]{32}\\.narinfo$",
 ];
 
+/** The row's grammar, as its fact carries it — the gate under test reads THIS,
+ *  not a private copy; the grammar itself is `@odu/cache`'s `bucketOf` test. */
+const bucketOf = (path: string): string | null => {
+  for (const prefix of ["/cache/", "/_odu/v1/buckets/"]) {
+    if (!path.startsWith(prefix)) continue;
+    const named = path.slice(prefix.length).split("/")[0] ?? "";
+    return named === "" ? null : decodeURIComponent(named);
+  }
+  return null;
+};
+
 const domains: BucketDomains = {
   current: () => [{ bucket: "kolu", domain: "cache.example.org" }],
   subscribe: () => () => {},
   paths: PATHS,
+  bucketOf,
 };
 
 const request = (host: string, url: string): HttpServerRequest.HttpServerRequest =>

@@ -128,7 +128,7 @@ describe("the root token", () => {
     for (const attempt of attempts) {
       expect(await attempt).toMatchObject({ ok: false, code: "no_root_token" });
     }
-    cache.close();
+    await cache.close();
   });
 
   it("refuses a wrong token, and says which of the two it is", async () => {
@@ -140,13 +140,13 @@ describe("the root token", () => {
     expect((await absent.admin.list(asRoot(""))) as { message: string }).toMatchObject({
       message: expect.stringContaining("without a root token"),
     });
-    absent.close();
+    await absent.close();
 
     const present = cacheWith(ROOT);
     const refused = await present.admin.list(asRoot("nope"));
     expect(refused).toMatchObject({ ok: false, code: "no_root_token" });
     expect((refused as { message: string }).message).toContain("does not match");
-    present.close();
+    await present.close();
   });
 
   it("does not let an empty configured token become a credential", async () => {
@@ -155,7 +155,7 @@ describe("the root token", () => {
       ok: false,
       code: "no_root_token",
     });
-    cache.close();
+    await cache.close();
   });
 });
 
@@ -171,7 +171,7 @@ describe("create", () => {
       ok: false,
       code: "bucket_exists",
     });
-    cache.close();
+    await cache.close();
   });
 
   it("refuses a name that could not be a path segment", async () => {
@@ -182,7 +182,7 @@ describe("create", () => {
         answer: { ok: false, code: "bad_input" },
       });
     }
-    cache.close();
+    await cache.close();
   });
 
   it("refuses a negative retention, which would be a destructive reading of a typo", async () => {
@@ -192,7 +192,7 @@ describe("create", () => {
       code: "bad_input",
     });
     expect(await cache.admin.create({ ...createInput, retentionDays: 0 })).toMatchObject({ ok: true });
-    cache.close();
+    await cache.close();
   });
 });
 
@@ -207,7 +207,7 @@ describe("describe", () => {
       ok: false,
       code: "unknown_bucket",
     });
-    cache.close();
+    await cache.close();
   });
 
   it("answers the substituter's identity and nothing about the operator's cache", async () => {
@@ -226,7 +226,7 @@ describe("describe", () => {
         "publicKey",
       ]);
     }
-    cache.close();
+    await cache.close();
   });
 });
 
@@ -269,7 +269,7 @@ describe("a bucket's domain", () => {
     });
     expect(cleared).toMatchObject({ ok: true, value: { domain: null } });
     expect(cache.bucketByDomain("cache.example.org")).toBeNull();
-    cache.close();
+    await cache.close();
   });
 });
 
@@ -290,7 +290,7 @@ describe("tokenMint", () => {
     const ok = await mint(7);
     expect(ok).toMatchObject({ ok: true });
     if (ok.ok) expect(ok.value.facts.expires).toBe(NOW + 7 * 24 * 60 * 60 * 1000);
-    cache.close();
+    await cache.close();
   });
 
   it("honours a glob, so one token can cover a team's buckets", async () => {
@@ -313,7 +313,7 @@ describe("tokenMint", () => {
     if (listed.ok) expect(listed.value).toHaveLength(1);
     const elsewhere = await cache.admin.tokenList({ ...asRoot(ROOT), bucket: "main" });
     if (elsewhere.ok) expect(elsewhere.value).toHaveLength(0);
-    cache.close();
+    await cache.close();
   });
 
   it("refuses a glob that is not one", async () => {
@@ -328,7 +328,7 @@ describe("tokenMint", () => {
         expiresDays: null,
       }),
     ).toMatchObject({ ok: false, code: "bad_input" });
-    cache.close();
+    await cache.close();
   });
 });
 
@@ -344,7 +344,7 @@ describe("pin", () => {
     });
     expect(refused).toMatchObject({ ok: false, code: "bad_input" });
     expect(store.calls.filter((call) => call.op === "closure")).toHaveLength(1);
-    cache.close();
+    await cache.close();
   });
 
   it("resolves a closure through the store and roots every member", async () => {
@@ -366,7 +366,7 @@ describe("pin", () => {
     expect([...pinned.value.rootPaths].sort()).toEqual([child, parent].sort());
     expect(store.isRetained("main", child)).toBe(true);
     expect(store.isRetained("main", parent)).toBe(true);
-    cache.close();
+    await cache.close();
   });
 });
 
@@ -379,7 +379,7 @@ describe("stats", () => {
       ok: true,
       value: { objects: 0, bytes: 0, hits: 0, lastAccessed: null },
     });
-    cache.close();
+    await cache.close();
   });
 });
 
@@ -471,7 +471,7 @@ describe("chunked uploads", () => {
         name.includes(".part-"),
       ),
     ).toEqual([]);
-    cache.close();
+    await cache.close();
   });
 
   it("does not sweep the parts of an upload that is still running", async () => {
@@ -500,7 +500,7 @@ describe("chunked uploads", () => {
     utimesSync(partPath, new Date(0), new Date(0));
     await cache.beginUpload(bucket, "idle2.nar.zst");
     expect(existsSync(partPath)).toBe(true);
-    cache.close();
+    await cache.close();
   });
 });
 
@@ -550,7 +550,7 @@ describe("upstream references", () => {
       { paths: [child], keyNames: ["cache.nixos.org-1"] },
     ]);
     expect(store.present.has(child)).toBe(true);
-    cache.close();
+    await cache.close();
   });
 
   it("holds a reference that is neither here nor upstream, and publishes it", async () => {
@@ -565,7 +565,7 @@ describe("upstream references", () => {
     expect(cache.held()).toMatchObject([
       { bucket: "main", storePath: parent, missing: [child], fetching: 0 },
     ]);
-    cache.close();
+    await cache.close();
   });
 
   it("fetches nothing for a --no-upstream bucket", async () => {
@@ -573,14 +573,14 @@ describe("upstream references", () => {
     expect(outcome).toMatchObject({ ok: true, status: 202, fetching: 0 });
     expect(store.substituted).toEqual([]);
     expect(cache.held()).toHaveLength(1);
-    cache.close();
+    await cache.close();
   });
 
   it("keeps the held row across a restart", async () => {
     const { cache } = await parentWaitingOnChild(["some-other-key"]);
     // Let the (failing) fetch write its final reason before the process "dies".
     await until("the fetch to settle", () => cache.held()[0]?.fetching === 0);
-    cache.close();
+    await cache.close();
     const second = createCache({
       stateRoot: scratch,
       rootToken: ROOT,
@@ -629,7 +629,7 @@ describe("gc and pin", () => {
     expect(pinned).toMatchObject({ ok: true });
     expect(collected).toMatchObject({ ok: true });
     expect(store.deleted).not.toContain(target);
-    cache.close();
+    await cache.close();
   });
 });
 
@@ -645,7 +645,7 @@ describe("the wall behind the route", () => {
     for (const name of ["../escape.nar.zst", "a/b.nar.zst", ".hidden"]) {
       await expect(cache.beginUpload(bucket, name)).rejects.toThrow(/not a NAR file name/);
     }
-    cache.close();
+    await cache.close();
   });
 });
 
@@ -666,16 +666,16 @@ describe("missing", () => {
       missing: ["/nix/store/11111111111111111111111111111111-a"],
       skipped: ["/nix/store/22222222222222222222222222222222-b"],
     });
-    cache.close();
+    await cache.close();
   });
 });
 
 describe("file modes", () => {
-  it("keeps the database and its directory private", () => {
+  it("keeps the database and its directory private", async () => {
     // The database holds every bucket's ed25519 SECRET key and every token
     // hash, so it is a secret rather than a cache.
     const cache = cacheWith(ROOT);
-    cache.close();
+    await cache.close();
     expect(statSync(join(scratch, "cache")).mode & 0o777).toBe(0o700);
     expect(statSync(join(scratch, "cache", "cache.sqlite")).mode & 0o777).toBe(0o600);
   });
@@ -689,6 +689,6 @@ describe("file modes", () => {
     const wal = join(scratch, "cache", "cache.sqlite-wal");
     expect(existsSync(wal)).toBe(true);
     expect(statSync(wal).mode & 0o777).toBe(0o600);
-    cache.close();
+    await cache.close();
   });
 });

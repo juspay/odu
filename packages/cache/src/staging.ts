@@ -140,8 +140,10 @@ export interface StagingDeps {
 }
 
 export interface Staging {
-  /** Stop accepting background work. The row closes this BEFORE its database. */
-  close(): void;
+  /** Stop accepting background work, and JOIN a fetch already running.
+   *  The row awaits this BEFORE its database closes: a `nix-store -r` still in
+   *  flight must not import into a database that has gone. */
+  close(): Promise<void>;
   beginUpload(bucket: BucketRow, file: string): Promise<Upload>;
   /**
    * STAGE ONE PART of a NAR too large for one request. `index` is the part's
@@ -643,8 +645,12 @@ export function createStaging(deps: StagingDeps): Staging {
   }
 
   return {
-    close() {
+    async close() {
       closed = true;
+      // JOIN every queue this staging owns. The closed flag stops the next
+      // step; awaiting the tails is what makes "nothing is running" true rather
+      // than merely believed.
+      await Promise.all([...fetches.values()].map((chain) => chain.tail));
     },
     async beginUpload(bucket, file) {
       await sweep();

@@ -459,11 +459,6 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
       process.stderr.write("odu: the ci row offered no runtime — refusing to serve\n");
       return 1;
     }
-    // THE BUCKET NAMES ARE THE CACHE ROW'S FACT. The gate that keeps the
-    // board, `/mcp` and the websocket off a substituter's name reads it through
-    // the shared vocabulary, never through the row's package.
-    const bucketDomains = offered(host, BucketDomains);
-
     // THE SERVED HANDLERS, WITH THE DOOR IN FRONT OF THEM — and only the
     // SERVED ones: the control socket `daemonMain` opens is owner-only and
     // already local, so it keeps the ungated record.
@@ -552,7 +547,11 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
             // substituter's name sees the bucket's page, not the server's
             // sign-in form — and nothing else of this daemon answers there.
             middleware: (app) =>
-              bucketDomainGate(() => bucketDomains)(
+              // THE BUCKET NAMES ARE THE CACHE ROW'S FACT, read through a
+              // THUNK: a row that re-applies must not leave this gate holding
+              // the service it replaced. The gate itself is composed here, and
+              // the host reaches no row's internals.
+              bucketDomainGate(() => offered(host, BucketDomains))(
                 doorGate({
                   broker: principals,
                   mcpPath: SERVICE_MCP_PATH,
