@@ -231,6 +231,7 @@
   "@odu/cordis" = copyPathToStore ./packages/cordis;
   "@odu/credentials" = copyPathToStore ./packages/credentials;
   "@odu/execution" = copyPathToStore ./packages/execution;
+  "@odu/face" = copyPathToStore ./packages/face;
   "@odu/host" = copyPathToStore ./packages/host;
   "@odu/launch" = copyPathToStore ./packages/launch;
   "@odu/run-client" = copyPathToStore ./packages/run-client;

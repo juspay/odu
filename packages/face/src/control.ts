@@ -4,8 +4,9 @@
  *
  * Three faces spelled this machine three times (the runs' operations, a
  * bucket's administration, the people page), each with its own copy of the
- * refusal-to-sentence rule. It is here, beside `./format`, because it is no
- * row's idea: a control is a control.
+ * refusal-to-sentence rule. It is here, in a package of no row, because it is
+ * no row's idea — and not in `@odu/cordis`, the contract every server-side
+ * row loads, because a UI runtime is not vocabulary host and rows share.
  *
  * **A factory, not a store.** Each call makes its own signals inside the
  * caller's owner, and `onCleanup` retires it with that owner — so an answer
@@ -18,7 +19,7 @@
 
 import type { Effect } from "effect";
 import { createSignal, onCleanup } from "solid-js";
-import { refusalText } from "./format";
+import { refusalText } from "./refusal";
 
 /** What a control is doing. `ok` and `refused` carry the sentence to show. */
 export type ControlState =

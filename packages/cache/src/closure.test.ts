@@ -47,7 +47,7 @@ const DECLARED = Object.keys(MANIFEST.dependencies ?? {});
  *  cost, and the reason the face is a separate DOOR rather than a module the
  *  server could reach. `@kolu/surface` is HYDRATED from a Nix pin and so is
  *  absent here by design. */
-const EXPECTED_DEPENDENCIES = ["@odu/cordis", "@odu/credentials", "effect", "solid-js"];
+const EXPECTED_DEPENDENCIES = ["@odu/cordis", "@odu/credentials", "@odu/face", "effect", "solid-js"];
 
 /** The `@kolu/*` sources hydrated from a Nix pin rather than installed. Four
  *  doors of this package open the framework: the surface (`/define`,

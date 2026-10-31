@@ -24,7 +24,7 @@
  * service refuses on its own whatever this page draws.
  */
 
-import { createControl, type Control } from "@odu/cordis/control";
+import { createControl, type Control } from "@odu/face/control";
 import { ago } from "@odu/cordis/format";
 import { createSignal, For, Show, type JSX } from "solid-js";
 import type { Effect } from "effect";

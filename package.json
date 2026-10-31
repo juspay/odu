@@ -21,6 +21,7 @@
     "@odu/cli": "workspace:*",
     "@odu/cordis": "workspace:*",
     "@odu/execution": "workspace:*",
+    "@odu/face": "workspace:*",
     "@odu/host": "workspace:*",
     "@odu/launch": "workspace:*",
     "@odu/run-client": "workspace:*",

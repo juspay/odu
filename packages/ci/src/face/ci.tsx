@@ -16,7 +16,7 @@
 
 import type { SurfaceClient } from "@kolu/surface/solid";
 import type { SurfaceReadout } from "@kolu/surface/solid";
-import { refusalText } from "@odu/cordis/format";
+import { refusalText } from "@odu/face/refusal";
 import { formatLogKey, parseLogKey } from "@odu/service-client/logKey";
 import { logHasMore, LOG_TAIL_BYTES } from "@odu/service-client/surface";
 import { type oduServiceSurface } from "@odu/service-client/surface";

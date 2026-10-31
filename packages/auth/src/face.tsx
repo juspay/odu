@@ -23,8 +23,9 @@
  *     The shell DRAWS it for an owner; the row REFUSES everyone else on its own.
  */
 
-import { createControl } from "@odu/cordis/control";
-import { ago, refusalText } from "@odu/cordis/format";
+import { createControl } from "@odu/face/control";
+import { ago } from "@odu/cordis/format";
+import { refusalText } from "@odu/face/refusal";
 import type { SurfaceClient } from "@kolu/surface/solid";
 import type { Effect } from "effect";
 import {

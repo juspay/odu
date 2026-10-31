@@ -36,8 +36,9 @@
  * the row on its own — never one check standing in for the other.
  */
 
-import { createControl, type Control } from "@odu/cordis/control";
-import { ago, bytes, refusalText } from "@odu/cordis/format";
+import { createControl, type Control } from "@odu/face/control";
+import { ago, bytes } from "@odu/cordis/format";
+import { refusalText } from "@odu/face/refusal";
 import type { SurfaceClient } from "@kolu/surface/solid";
 import type { Effect } from "effect";
 import {
@@ -582,7 +583,7 @@ function BucketPage(
                 : props.canAdminister
                   ? "Mint a write token below, and this block fills it in while it can be shown."
                   : "With a write token an admin of this server mints for you."}{" "}
-              A GitHub Actions step comes with PR 3.
+              A ready-made GitHub Actions step is planned.
             </p>
             <pre class="use-block push-block">
               {pushBlock({
