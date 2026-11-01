@@ -178,6 +178,32 @@ describe("runGc", () => {
     expect(report.evicted).toBe(1);
   });
 
+  it("re-checks the rows before each delete: a NarHash recorded mid-run keeps its bytes", async () => {
+    // THE SNAPSHOT IS NOT THE ANSWER: a row naming an evicted NarHash that
+    // appears while the collection runs must keep that object.
+    const repo = openCacheRepo(":memory:");
+    repo.putBucket(bucket);
+    const rows = [C, F];
+    for (const row of rows) repo.putObject(row);
+    const keyOf = (row: ObjectRow): string => `main/nar/${row.narHash.replace(/^sha256:/, "")}.nar.zst`;
+    const deleted: string[] = [];
+    await runGc(repo, planGc({ buckets: [bucket], objects: rows, pins: [], now: NOW }), {
+      delete: async (key) => {
+        deleted.push(key);
+        if (deleted.length === 1) {
+          const other = rows.find((row) => keyOf(row) !== key) as ObjectRow;
+          repo.putObject({
+            ...other,
+            storePath: "/nix/store/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-arrived",
+            hash: "z".repeat(32),
+            lastAccessed: NOW,
+          });
+        }
+      },
+    });
+    expect(deleted).toHaveLength(1);
+  });
+
   it("counts the object's compressed size when the row has one", async () => {
     const repo = openCacheRepo(":memory:");
     repo.putBucket(bucket);
