@@ -83,6 +83,8 @@ interface Server {
   partFailures: Map<string, number>;
   /** Every completed join, in order. */
   completed: { file: string; total: number }[];
+  /** How many joins answer 500 before one succeeds. */
+  completeFailures: number;
   /** How many `/missing` calls still answer the current list; `undefined`
    *  means every call does. */
   missingCalls: number;
@@ -110,6 +112,7 @@ function startServer(): Server {
     parts: new Map(),
     partFailures: new Map(),
     completed: [],
+    completeFailures: 0,
     missingCalls: 0,
     missingOnlyFor: undefined,
     narinfoOnlyRefusal: false,
@@ -181,6 +184,10 @@ function startServer(): Server {
           if (!state.parts.has(`${file}:${index}`)) missing.push(index);
         }
         if (missing.length > 0) return Response.json({ missing }, { status: 409 });
+        if (state.completeFailures > 0) {
+          state.completeFailures -= 1;
+          return new Response("nope", { status: 500 });
+        }
         state.completed.push({ file, total });
         return Response.json({ parts: total });
       }
@@ -363,6 +370,42 @@ describe("pushing a closure", () => {
       expect(lines).toContain(`↻ ${LIBC} part 2 (retry 1)`);
       expect(lines).toContain(`⏳ ${LIBC} part 3`);
       expect(lines).toContain(`✅ ${LIBC} stored`);
+    } finally {
+      server.stop();
+    }
+  });
+
+  it("keeps ONE upload session across a retried join", async () => {
+    // A FAILED JOIN RETRIES THE WHOLE NAR; a fresh session per attempt would
+    // abandon the previous attempt's parts to the sweep for an hour.
+    const server = startServer();
+    try {
+      server.missing = [LIBC];
+      server.completeFailures = 1;
+      const bytes = new TextEncoder().encode("ten bytes!");
+      const summary = await pushToCache({
+        bucket: `${server.origin}/main`,
+        paths: ["."],
+        env: envOf({ ODU_CACHE_TOKEN: "t" }),
+        platform: {
+          closure: async () => [entry(LIBC)],
+          dump: () =>
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(bytes);
+                controller.close();
+              },
+            }),
+        },
+        partSize: 4,
+      });
+      expect(summary).toMatchObject({ pushed: 1, failed: 0 });
+      const chunked = server.seen.filter(
+        (seen) => seen.path.includes("/parts/") || seen.path.endsWith("/complete"),
+      );
+      // Two attempts: 3 parts + a join each.
+      expect(chunked).toHaveLength(8);
+      expect(new Set(chunked.map((seen) => seen.upload)).size).toBe(1);
     } finally {
       server.stop();
     }

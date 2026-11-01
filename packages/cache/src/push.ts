@@ -520,6 +520,7 @@ async function uploadNar(
   attempts: number,
   say: (line: string) => void,
   partSize: number,
+  session: string,
 ): Promise<NarUpload> {
   const narName = `${narHashBase32(entry.narHash)}.nar.zst`;
   const parts = narParts(platform.dump(entry.storePath), partSize);
@@ -543,10 +544,6 @@ async function uploadNar(
     };
   }
 
-  // THIS UPLOAD'S OWN PARTS (contract 2.4): another pusher of the same path,
-  // at another zstd level, cannot have its parts joined into ours. An older
-  // server ignores the header and keeps the shared names.
-  const session = randomUUID();
   let index = 0;
   let current = first.value as Uint8Array;
   let ahead: IteratorResult<Uint8Array> = second;
@@ -602,6 +599,11 @@ async function uploadOne(
   let lastMessage = "no attempt was made";
   const narinfoOnly = false;
   const narName = `${narHashBase32(entry.narHash)}.nar.zst`;
+  // THIS PATH'S OWN PARTS (contract 2.4): another pusher of the same path, at
+  // another zstd level, cannot have its parts joined into ours. ONE session for
+  // every attempt, so a retry overwrites its own parts rather than abandoning
+  // them to the hour-long sweep. An older server ignores the header.
+  const session = randomUUID();
   for (let attempt = 0; attempt < attempts; attempt++) {
     if (!narinfoOnly) {
       const uploaded = await uploadNar(
@@ -612,6 +614,7 @@ async function uploadOne(
         attempts,
         say,
         options.partSize,
+        session,
       );
       if (!uploaded.ok) {
         lastMessage = uploaded.message;
