@@ -229,6 +229,9 @@ on the bucket page (both landed).
   compression costs CPU per cold read; nginx `proxy_cache` (PR 3, module
   only) absorbs the repeats. S3-compatible storage is the second
   implementation in PR 11.
+- **Follow-up — compress once:** store the pushed `.nar.zst` by narHash and serve
+  the file (`Content-Length`, range, Cloudflare-cacheable); today every GET
+  re-dumps and re-compresses the path. Not this PR.
 - **Metadata:** SQLite in WAL mode behind a narrow repository layer (first
   database in the tree, F3). Tables: `org`, `bucket`, `token`, `object`
   (bucket, store path, narinfo fields, references, nar hash and size,
