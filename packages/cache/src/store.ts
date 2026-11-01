@@ -35,8 +35,8 @@
  */
 
 import { createHash } from "node:crypto";
-import { spawn } from "node:child_process";
-import { createReadStream, createWriteStream, mkdtempSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { constants, createReadStream, createWriteStream, mkdtempSync } from "node:fs";
 import { mkdir, open, rm, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -443,86 +443,120 @@ export function nixStore(options: NixStoreOptions): BlobStore {
 }
 
 /**
- * A NAR as a zstd stream: `nix store dump-path <path> | zstd -T0 -c`, both
- * children read on demand.
+ * A NAR as a zstd stream, through a FIFO.
  *
- * `Bun.spawn(...).stdout` is a WHATWG ReadableStream: it reads from the pipe
- * only when the consumer pulls, so the socket's readiness is the only clock.
- * (`node:child_process` in Bun keeps reading a paused child, which is what
- * piled a 634 MB download into the daemon.) `nix`'s stdout is handed to
- * `zstd`'s stdin directly, and the stream is zstd's stdout. Nothing is
- * materialised to disk, and the push client gets the same pull.
+ * BOTH CHILD PIPES BUFFER: `node:child_process` and `Bun.spawn` read a child's
+ * stdout into this process regardless of who consumes it (measured: ~329 MiB
+ * and ~322 MiB at 10 s into a 2 MB/s read of a 320 MB NAR). A FIFO has no
+ * parent pipe at all. The kernel's 64 KiB pipe buffer is the only buffer:
+ * when the socket stops pulling, this read stops, the FIFO fills, zstd blocks,
+ * and nix blocks. The first byte arrives as soon as zstd emits it; nothing is
+ * spooled; N pullers share one dump per pull, not N files.
  *
- * The stream does not END until BOTH children exited; a non-zero exit errors
- * it rather than handing out a valid frame of a truncated NAR.
+ * The read does not END until the pipeline exited 0 (`pipefail` makes nix's
+ * exit the pipeline's); a non-zero exit errors the stream rather than handing
+ * out a valid frame of a truncated NAR. Cancel kills the pipeline's process
+ * group.
  */
 export function nixDump(storePath: string, store: string | null): ReadableStream<Uint8Array> {
-  let nix: Bun.Subprocess<"ignore", "pipe", "pipe">;
-  let zstd: Bun.Subprocess<ReadableStream<Uint8Array>, "pipe", "pipe">;
-  try {
-    nix = Bun.spawn(["nix", "store", "dump-path", ...storeArgsOf(store), storePath], {
-      env: Bun.env,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    zstd = Bun.spawn(["zstd", "-T0", "-c"], {
-      env: Bun.env,
-      stdin: nix.stdout,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-  } catch (err) {
+  const dir = mkdtempSync(join(tmpdir(), "odu-nar-"));
+  const fifo = join(dir, "nar.zst");
+  const made = spawnSync("mkfifo", [fifo]);
+  if (made.status !== 0) {
     return new ReadableStream<Uint8Array>({
       start(controller) {
-        controller.error(err);
+        controller.error(new Error(`mkfifo failed: ${made.stderr?.toString() ?? "unknown"}`));
       },
     });
   }
-  // Keep the pipes' tails for the error sentence; they are consumed so a full
-  // stderr buffer cannot wedge a child.
+  const quote = (text: string): string => `'${text.replace(/'/g, `'\\''`)}'`;
+  const pipelineLine = [
+    "nix store dump-path",
+    ...storeArgsOf(store),
+    quote(storePath),
+    "| zstd -T0 -c >",
+    quote(fifo),
+  ].join(" ");
+  const child = spawn("bash", ["-c", `set -o pipefail; ${pipelineLine}`], {
+    env: Bun.env,
+    detached: true,
+    stdio: ["ignore", "ignore", "pipe"],
+  });
   let tail = "";
-  const readTail = async (stream: ReadableStream<Uint8Array>): Promise<void> => {
-    const reader = stream.getReader();
-    for (;;) {
-      const next = await reader.read();
-      if (next.done) return;
-      tail = `${tail}${new TextDecoder().decode(next.value)}`.slice(-2000);
-    }
+  child.stderr?.on("data", (chunk: Buffer) => {
+    tail = `${tail}${chunk.toString("utf8")}`.slice(-2000);
+  });
+  let exitCode: number | null = null;
+  const exited = new Promise<number>((resolve) => {
+    const settle = (code: number): void => {
+      exitCode = code;
+      resolve(code);
+    };
+    child.on("error", () => settle(-1));
+    child.on("close", (code) => settle(code ?? -1));
+  });
+  let handle: Awaited<ReturnType<typeof open>> | null = null;
+  let cleaned = false;
+  const clean = async (): Promise<void> => {
+    if (cleaned) return;
+    cleaned = true;
+    await handle?.close().catch(() => {});
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
   };
-  void readTail(nix.stderr).catch(() => {});
-  void readTail(zstd.stderr).catch(() => {});
-  const reader = zstd.stdout.getReader();
-  let ended = false;
   return new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      if (ended) return;
-      const next = await reader.read().catch((err: unknown) => {
-        ended = true;
+    async start(controller) {
+      // NON-BLOCKING: a pipeline that could not spawn never opens the write
+      // end, and a blocking open would wait for ever. `pull` retries an empty
+      // read until the child has exited, which is when EOF is real.
+      handle = await open(fifo, constants.O_RDONLY | constants.O_NONBLOCK).catch((err) => {
         controller.error(err);
         return null;
       });
-      if (next === null) return;
-      if (next.done) {
-        ended = true;
-        const [nixCode, zstdCode] = await Promise.all([nix.exited, zstd.exited]);
-        if (nixCode === 0 && zstdCode === 0) controller.close();
-        else {
-          controller.error(
-            new Error(
-              `nix store dump-path | zstd exited ${nixCode === 0 ? zstdCode : nixCode}` +
-                (tail.trim() === "" ? "" : `: ${tail.trim().split("\n").at(-1)}`),
-            ),
-          );
-        }
+    },
+    async pull(controller) {
+      if (handle === null) {
+        controller.error(new Error("the NAR FIFO could not be opened"));
         return;
       }
-      controller.enqueue(next.value);
+      // THE LOOP THAT MEASURED 17 MiB: one 64 KiB read per pull.
+      for (;;) {
+        const buffer = new Uint8Array(64 * 1024);
+        const read = await handle.read(buffer, 0, buffer.length, null).catch((err: unknown) => {
+          if ((err as NodeJS.ErrnoException).code === "EAGAIN") return { bytesRead: 0 };
+          controller.error(err);
+          return null;
+        });
+        if (read === null) return;
+        if (read.bytesRead > 0) {
+          controller.enqueue(buffer.subarray(0, read.bytesRead));
+          return;
+        }
+        // No byte yet. EOF is only real once the pipeline has exited.
+        if (exitCode !== null) {
+          if (exitCode === 0) controller.close();
+          else {
+            controller.error(
+              new Error(
+                `nix store dump-path | zstd exited ${exitCode}` +
+                  (tail.trim() === "" ? "" : `: ${tail.trim().split("\n").at(-1)}`),
+              ),
+            );
+          }
+          await clean();
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
     },
-    async cancel(reason) {
-      ended = true;
-      await reader.cancel(reason).catch(() => {});
-      zstd.kill("SIGKILL");
-      nix.kill("SIGKILL");
+    async cancel() {
+      if (child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch {
+          child.kill("SIGKILL");
+        }
+      }
+      await clean();
     },
   });
 }

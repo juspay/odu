@@ -25,13 +25,10 @@ function childRss(pid: number): number {
 }
 
 describe.skipIf(!LINUX)("a slow socket and the server's memory", () => {
-  // MEASURED, NOT PASSING: at 10 s into a 2 MB/s read of a 320 MB NAR, the
-  // old node:child_process source grew 345,026,560 B and the Bun.spawn pull
-  // source grew 337,645,568 B — BOTH unbounded, because this runtime buffers a
-  // child's stdout from under the consumer. The test is kept as the harness the
-  // next serve path must pass; it is skipped rather than asserting a bound no
-  // implementation currently meets.
-  it.skip("has not buffered the NAR ten seconds into a 2 MB/s read", async () => {
+  // THREE NUMBERS, one harness: at 10 s into a 2 MB/s read of a 320 MB NAR,
+  // node:child_process grew 345,026,560 B, Bun.spawn 337,645,568 B, and the
+  // FIFO (read 64 KiB per pull) stays under the bound.
+  it("has not buffered the NAR ten seconds into a 2 MB/s read", async () => {
     const dir = mkdtempSync(join(tmpdir(), "odu-nar-memory-"));
     const source = join(dir, "source.bin");
     const chunk = Buffer.alloc(MB);

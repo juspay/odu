@@ -464,7 +464,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
         const stream = yield* Effect.promise(() => cache.narStream(admitted.bucket, file));
         if (stream === null) return HttpServerResponse.empty({ status: 404 });
         return HttpServerResponse.stream(
-          Stream.fromReadableStream({ evaluate: () => narWrites(stream), onError: (err) => err }),
+          Stream.fromReadableStream({ evaluate: () => stream, onError: (err) => err }),
           { contentType: "application/x-nix-nar", headers: readHeaders(admitted.bucket) },
         );
       }),
@@ -565,7 +565,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
         const stream = yield* Effect.promise(() => cache.narStream(admitted.bucket, file));
         if (stream === null) return HttpServerResponse.empty({ status: 404 });
         return HttpServerResponse.stream(
-          Stream.fromReadableStream({ evaluate: () => narWrites(stream), onError: (err) => err }),
+          Stream.fromReadableStream({ evaluate: () => stream, onError: (err) => err }),
           { contentType: "application/x-nix-nar", headers: readHeaders(admitted.bucket) },
         );
       }),
@@ -672,53 +672,6 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
     HttpRouter.add("GET", "/nar/*", () => Effect.succeed(missingRoute())),
     HttpRouter.add("GET", `${PUSH_API}/*`, () => Effect.succeed(missingRoute())),
   );
-}
-
-/** HOW MANY BYTES one response write may carry.
- *
- * Not a protocol fact — a runtime one. Bun's `node:http` keeps a large
- * `res.write` chunk alive until the socket drains; a 634 MB NAR held that way
- * put the pod at 2 GiB. Split to this size at the ROW's boundary: the consumer
- * sees the same bytes, and each write is small enough to be released. The
- * SOURCE no longer pushes at all (see `nixDump`): it is a file read pulled one
- * piece per socket demand. */
-const NAR_WRITE_BYTES = 64 * 1024;
-
-/** Re-chunk a NAR stream at NAR_WRITE_BYTES, one piece per pull.
- *
- * `subarray` is a VIEW: the parent source chunk stays alive until its last
- * piece is written, which is bounded by one chunk. The measurement says the
- * growth is write-queue retention of many chunks, not this one.
- */
-function narWrites(stream: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
-  const reader = stream.getReader();
-  let current: Uint8Array | null = null;
-  let offset = 0;
-  return new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      for (;;) {
-        if (current !== null && offset < current.length) {
-          const piece = current.subarray(
-            offset,
-            Math.min(current.length, offset + NAR_WRITE_BYTES),
-          );
-          offset += piece.length;
-          controller.enqueue(piece);
-          return;
-        }
-        const read = await reader.read();
-        if (read.done) {
-          controller.close();
-          return;
-        }
-        current = read.value;
-        offset = 0;
-      }
-    },
-    cancel(reason) {
-      return reader.cancel(reason);
-    },
-  });
 }
 
 /** The row's own 404: a sentence, not a bundle. */
