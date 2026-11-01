@@ -14,10 +14,10 @@
  * sorted order; a self-reference is the literal `self`.
  *
  * **A SELF-REFERENCE IS PROVED FROM ITS BYTES.** Its CA hash is Nix's hash of
- * the NAR with the path's own hash part zeroed, folded with the positions of
- * those occurrences; the server computes that while verifying the object. The
- * pusher's `CA:` line is parsed and IGNORED: a fact about an object we hold
- * must not depend on who pushed it or when.
+ * the NAR with the path's own hash part replaced by zeros (Nix 2.34 records no
+ * match positions, so there is no `|pos` fold); the server computes that while
+ * verifying the object. The pusher's `CA:` line is parsed and IGNORED: a fact
+ * about an object we hold must not depend on who pushed it or when.
  */
 
 import { createHash } from "node:crypto";

@@ -13,7 +13,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
-import { nixDump, parsePathInfoTable, verifyNarFile } from "./store";
+import { narHashModuloHasher, nixDump, parsePathInfoTable, verifyNarFile } from "./store";
 import { contentAddressOf } from "./storePath";
 
 const HELLO = "/nix/store/pa6rydwgjxxmmvdxap7qk9c85h8jbimy-hello-2.12.3";
@@ -138,6 +138,28 @@ describe("an upload's bytes", () => {
       ok: false,
       absent: true,
     });
+  });
+
+  it("carries a split hash part across any chunk boundary", () => {
+    const hashPart = "0123456789abcdfghijklmnpqrsvwxyz";
+    const payload = Buffer.from(
+      `nar:${hashPart}:middle:${hashPart}:tail:${hashPart}`,
+      "utf8",
+    );
+    const whole = narHashModuloHasher(hashPart);
+    whole.update(payload);
+    const expected = whole.finish();
+
+    const oneByte = narHashModuloHasher(hashPart);
+    for (const byte of payload) oneByte.update(Uint8Array.of(byte));
+    expect(oneByte.finish()).toBe(expected);
+
+    for (let split = 0; split <= payload.length; split++) {
+      const hasher = narHashModuloHasher(hashPart);
+      hasher.update(payload.subarray(0, split));
+      hasher.update(payload.subarray(split));
+      expect({ split, hash: hasher.finish() }).toEqual({ split, hash: expected });
+    }
   });
 
   it("computes Nix's modulo-self hash from a make-content-addressed NAR", async () => {

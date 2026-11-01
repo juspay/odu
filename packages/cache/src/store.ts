@@ -305,7 +305,7 @@ export function nixDump(storePath: string, store: string | null): ReadableStream
  *  positions (`matches` stays empty), so there is NO `|pos` fold — pinned by a
  *  `nix store make-content-addressed` vector in the suite. Matching the Nix
  *  that produces the CA is the only useful definition. */
-function moduloHasher(hashPart: string): {
+export function narHashModuloHasher(hashPart: string): {
   update(chunk: Uint8Array): void;
   finish(): string;
 } {
@@ -313,11 +313,9 @@ function moduloHasher(hashPart: string): {
   const pattern = Buffer.from(hashPart, "utf8");
   const zeros = Buffer.alloc(pattern.length);
   let pending = Buffer.alloc(0);
-  let pendingStart = 0;
   return {
     update(chunk) {
       const data = pending.length === 0 ? Buffer.from(chunk) : Buffer.concat([pending, chunk]);
-      const base = pendingStart;
       let at = 0;
       for (;;) {
         const found = data.indexOf(pattern, at);
@@ -330,7 +328,6 @@ function moduloHasher(hashPart: string): {
       const safe = Math.max(at, data.length - (pattern.length - 1));
       hash.update(data.subarray(at, safe));
       pending = data.subarray(safe);
-      pendingStart = base + safe;
     },
     finish() {
       hash.update(pending);
@@ -406,7 +403,7 @@ export async function verifyNarFile(
   const { promise, resolve } = Promise.withResolvers<NarCheck>();
   const hash = createHash("sha256");
   const fileHash = createHash("sha256");
-  const modulo = selfHashPart === null ? null : moduloHasher(selfHashPart);
+  const modulo = selfHashPart === null ? null : narHashModuloHasher(selfHashPart);
   let fileSize = 0;
   let size = 0;
   let ended = false;

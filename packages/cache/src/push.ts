@@ -354,7 +354,6 @@ async function askMissing(
         paths: sending.map((entry) => ({
           path: entry.storePath,
           sigs: entry.sigs,
-          ...(entry.ca === null ? {} : { ca: entry.ca }),
         })),
       }),
     },
@@ -627,7 +626,6 @@ export function formatPushNarinfo(entry: ClosureEntry, narName: string): string 
     `NarSize: ${entry.narSize}`,
     `References: ${entry.references.map(storePathBasename).join(" ")}`,
     ...(entry.deriver === null ? [] : [`Deriver: ${storePathBasename(entry.deriver)}`]),
-    ...(entry.ca === null ? [] : [`CA: ${entry.ca}`]),
     ...entry.sigs.map((sig) => `Sig: ${sig}`),
     "",
   ].join("\n");
