@@ -46,6 +46,7 @@ import { cacheRow } from "./server";
 import { createCache } from "./cache";
 import { openCacheRepo } from "./db";
 import { asRoot } from "./testlib";
+import { canonicalNarHash } from "./narinfo";
 
 const silentLog: Logger = {
   debug: () => {},
@@ -135,6 +136,11 @@ describe("the cache row's teardown", () => {
     expect(added.status).toBe(0);
     const storePath = added.stdout.trim();
     const rowHash = "d".repeat(32);
+    const info = JSON.parse(
+      spawnSync("nix", ["path-info", "--json", storePath], { encoding: "utf-8" }).stdout,
+    ) as Record<string, { narHash: string; narSize: number }> | { narHash: string; narSize: number }[];
+    const facts = Array.isArray(info) ? info[0] : Object.values(info)[0];
+    if (facts === undefined) throw new Error("nix path-info answered nothing");
     const cache = createCache({ stateRoot: scratch, rootToken: "root-token" });
     await cache.admin.create({
       ...asRoot("root-token"),
@@ -148,8 +154,8 @@ describe("the cache row's teardown", () => {
       bucket: "main",
       storePath,
       hash: rowHash,
-      narHash: `sha256:${"e".repeat(52)}`,
-      narSize: 100,
+      narHash: canonicalNarHash(facts.narHash),
+      narSize: facts.narSize,
       references: [],
       deriver: null,
       ca: null,

@@ -10,8 +10,9 @@
  * work — the 166 GB Nix store was upstream closures nobody ever pulled from us.
  *
  * **Keys are content names under a bucket prefix:**
- * `<bucket>/nar/<narHash base32>.nar.zst`. Objects are immutable; a key is never
- * overwritten with different bytes, and `put` is idempotent for the same key.
+ * `<bucket>/nar/<narHash base32>.<ext>`, where the extension names the stored
+ * compression. Objects are immutable; a key is never overwritten with different
+ * bytes, and `put` is idempotent for the same key.
  *
  * **One owner, two implementations.** This module is the interface and its
  * DISK implementation. The cache row constructs it at apply; the routes serve

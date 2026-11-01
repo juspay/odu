@@ -587,10 +587,10 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
      * The narinfo that completes an upload.
      *
      * The answer is the OUTCOME, not an acknowledgement: 200 when the path is
-     * recorded, 202 when it is waiting on a reference that has not arrived (an
-     * ordering fact — `nix copy --to` may send a closure in any order), and 400
-     * with Nix's own sentence for everything else. A 200 for a path nobody
-     * recorded is how a push reports success for bytes the cache does not have.
+     * recorded, and 400 with Nix's own sentence otherwise — including a NAR
+     * that was never uploaded. References are names, so there is no ordering
+     * hold; a 200 for a path nobody recorded is how a push reports success for
+     * bytes the cache does not have.
      */
     HttpRouter.add("PUT", `${CACHE_MOUNT}/:bucket/:name`, (request) =>
       Effect.gen(function* () {

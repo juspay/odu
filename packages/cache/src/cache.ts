@@ -5,11 +5,12 @@
  * they must agree about one thing: what a bucket IS. The protocol face is what
  * a Nix client speaks (`./routes`); the admin face is what `odu cache` reaches
  * through the service. Between them sit the rows (`./db`), the tokens
- * (`./tokens`), the collector (`./gc`) and the blob store (`./store`).
+ * (`./tokens`), the collector (`./gc`), the object store (`./objectStore`) and
+ * the one-time migration.
  *
- * The WRITE PATH is not here: staging an upload, proving it and importing it
- * in order moves on the Nix protocol's clock rather than on the product's, and
- * it lives in `./staging`. This module hands it one dependency — `record` —
+ * The WRITE PATH is not here: staging an upload, proving it and keeping the
+ * object moves on the Nix protocol's clock rather than on the product's, and it
+ * lives in `./staging`. This module hands it one dependency — `record` —
  * because a pin and a collection take the same write lock, and a second lock
  * there would be a second answer to "who may change what is retained".
  *
@@ -32,6 +33,7 @@ import {
   isStorePathHash,
   keyNameOf,
   compressionOfFile,
+  canonicalNarHash,
   type NarInfo,
   compressionExtension,
   signFingerprint,
@@ -343,8 +345,9 @@ export interface CacheOptions {
    *  fresh deployment; the row never needs a store otherwise. */
   legacyStore?: {
     dump(storePath: string): ReadableStream<Uint8Array>;
-    /** The old store's own `CA:` for a row its narinfo could not prove. */
-    pathInfo?(storePath: string): Promise<{ ca: string | null } | null>;
+    /** The old store's own facts for a row: the NarHash the migration must
+     *  match before keeping bytes, and the CA its narinfo could not prove. */
+    pathInfo?(storePath: string): Promise<{ ca: string | null; narHash: string } | null>;
   } | null;
   /** Pause the migration below this many free bytes (default 10 GiB). */
   migrationFreeFloor?: number;
@@ -960,16 +963,34 @@ export function createCache(options: CacheOptions): Cache {
             });
             return;
           }
+          // A REBUILT PATH CAN WEAR THE SAME NAME WITH DIFFERENT BYTES. The row
+          // was signed over one NarHash; keep only bytes the old store says
+          // carry that hash.
+          if (
+            known !== undefined &&
+            canonicalNarHash(known.narHash) !== row.narHash
+          ) {
+            failures += 1;
+            options.log?.("cache.migration.object_failed", {
+              bucket: row.bucket,
+              path: row.storePath,
+              reason: `the old store has ${known.narHash} but the row is ${row.narHash}`,
+            });
+            return;
+          }
+          const dump = legacy.dump(row.storePath);
+          const writing = migrationSlots.withSlot(() =>
+            objects.put(objectKey(row.bucket, row.narHash, row.compression), dump),
+          );
+          // A losing write is not left running: cancelling the stream kills the
+          // dump pipeline's process group.
+          void writing.catch(() => {});
           const facts = await Promise.race([
-            migrationSlots.withSlot(() =>
-              objects.put(
-                objectKey(row.bucket, row.narHash, row.compression),
-                legacy.dump(row.storePath),
-              ),
-            ),
-            // CLOSE WINS over a dump that has not finished: the object write
-            // may continue off to the side, but no row is written after this.
-            stopSignal.promise.then(() => null),
+            writing,
+            stopSignal.promise.then(() => {
+              void dump.cancel().catch(() => {});
+              return null;
+            }),
           ]);
           if (facts === null || stopping) return;
           repo.putObject({ ...row, fileHash: facts.sha256, fileSize: facts.size });

@@ -718,6 +718,42 @@ describe("CA is proved from the path", () => {
     await second.close();
   });
 
+  it("refuses old-store bytes whose NarHash is not the row's", async () => {
+    const path = "/nix/store/abababababababababababababababab-mismatch";
+    const payload = nar("bytes the row did not sign");
+    const first = cacheWith(ROOT);
+    await first.admin.create(createInput);
+    await putNar(first, "main", payload);
+    await first.acceptNarinfo(
+      first.bucket("main") as never,
+      hashOf(path),
+      stream(narinfoText(path, payload)),
+    );
+    first.close();
+    rmSync(join(scratch, "cache", "objects", "main", "nar", `${payload.narHash.slice(7)}.nar`), { force: true });
+    const db = new Database(join(scratch, "cache", "cache.sqlite"));
+    db.run("UPDATE object SET file_hash = NULL, file_size = NULL");
+    db.close();
+
+    let dumped = false;
+    const second = createCache({
+      stateRoot: scratch,
+      rootToken: ROOT,
+      now: () => NOW,
+      migrationFreeFloor: 0,
+      legacyStore: {
+        dump: () => {
+          dumped = true;
+          return bytesStream(payload.bytes);
+        },
+        pathInfo: async () => ({ ca: null, narHash: `sha256:${"f".repeat(52)}` }),
+      },
+    });
+    expect(await second.migrate()).toMatchObject({ migrated: 0, failures: 1, complete: false });
+    expect(dumped).toBe(false);
+    await second.close();
+  });
+
   it("close() returns while a migration is waiting on the old store", async () => {
     const path = "/nix/store/dddddddddddddddddddddddddddddddd-close";
     const payload = nar("bytes behind a stalled dump");

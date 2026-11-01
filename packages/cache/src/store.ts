@@ -1,42 +1,37 @@
 /**
- * THE BLOB STORE — the Nix store itself, behind a port.
+ * THE LOCAL NIX STORE, as the PUSH CLIENT and the MIGRATION need it — never as
+ * the server's storage.
  *
- * A bucket holds METADATA. The bytes are the machine's own `/nix/store`, which
- * is the whole design (PLAN.md, "Storage"): dedup across buckets is free
- * because a store path is a store path, a push from the machine that built the
- * paths moves nothing, and a read is a `dump-path` piped through zstd rather
- * than a second copy of somebody's build. S3 is the second implementation of
- * this port (PR 11), which is why it IS a port.
+ * A cache object is the compressed NAR a pusher sent, kept by `ObjectStore`;
+ * this module no longer imports, roots or deletes anything. It is the seam for
+ * the three places a Nix store is still the right fact:
+ *
+ * - **The pusher's closure.** `nix path-info -r --json` and
+ *   `nix store dump-path | zstd` read the machine that BUILT the paths.
+ * - **The verifier.** {@link verifyNarFile} decompresses an upload and hashes
+ *   both the NAR and the compressed file before anything is kept.
+ * - **The one-time migration.** The old store is read with the same
+ *   `dump-path` pipeline (`null` means the host's `/nix/store`).
  *
  * **Nix comes from PATH, deliberately.** The repo does not pin it (see
- * `default.nix` near "deliberately NOT pinned"): the host that provides the
- * daemon provides the client, because a pinned client older than the daemon
- * corrupts content-addressed handling. The COMPRESSORS are pinned, on odu's
- * wrapper PATH and in the devShell, because compressing and decompressing a NAR
- * is odu's own work — `zstd` for what odu serves, `xz` and `bzip2` for what a
- * Nix client uploads (`nix copy --to` still defaults to xz).
+ * `default.nix` near "deliberately NOT pinned"): the host provides the client.
+ * The COMPRESSORS are pinned on odu's wrapper PATH and in the devShell —
+ * `zstd`, `xz` and `bzip2` — because verifying and serving a NAR is odu's own
+ * work, whatever a client uploaded.
  *
- * **`store` is one URI and every call carries it.** `null` means the daemon —
- * the production shape. `local?root=<tmp>` is the e2e shape: no trusted-user
- * setup on a CI host, and nothing the suite pushes lands in the host's store.
- *
- * **A NAR is never held in memory.** `dump` is a two-process pipeline
- * (`nix store dump-path | zstd -T0 -c`) whose stdout is handed out as a
- * ReadableStream; the routes stream that to the socket. The only way this
- * package could hold a multi-gigabyte NAR is by reading the stream, and
- * nothing does — except {@link verifyNarFile}, which HASHES an upload as it
- * decompresses it and never keeps more than one chunk.
+ * **A NAR is never held in memory.** `dump` is a two-process pipeline whose
+ * stdout is a ReadableStream; the only reader that touches every byte,
+ * {@link verifyNarFile}, hashes one chunk at a time.
  *
  * **A stream that ended cleanly is not a stream that succeeded.** `nix store
  * dump-path` failing halfway closes zstd's stdin, and zstd then writes a
- * perfectly valid frame of a truncated NAR. So `dump` holds the stream open
- * until BOTH children have exited and fails the read unless both exited 0 —
- * otherwise a broken read is a 200 with a hash mismatch at the far end.
+ * perfectly valid frame of a truncated NAR. `dump` holds the stream open until
+ * both children exit and fails the read unless both exited 0.
  */
 
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { constants, createReadStream, createWriteStream, mkdtempSync } from "node:fs";
+import { constants, createReadStream, createWriteStream, mkdtempSync, statSync } from "node:fs";
 import { mkdir, open, rm, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -365,23 +360,43 @@ export async function verifyNarFile(path: string, compression: string | null): P
   let fileSize = 0;
   let size = 0;
   let ended = false;
+  let fileEnded = false;
   let code: number | null = decompressor === null ? 0 : null;
   let settled = false;
 
   const settle = (): void => {
-    if (settled || !ended || code === null) return;
+    if (settled || !ended || !fileEnded || code === null) return;
     settled = true;
-    resolve(
-      code === 0
-        ? {
-            ok: true,
-            narHash: `sha256:${base32(hash.digest())}`,
-            narSize: size,
-            fileHash: `sha256:${base32(fileHash.digest())}`,
-            fileSize,
-          }
-        : { ok: false, absent: false, message: `${decompressor?.[0] ?? "the NAR"} exited ${code}` },
-    );
+    if (code !== 0) {
+      resolve({ ok: false, absent: false, message: `${decompressor?.[0] ?? "the NAR"} exited ${code}` });
+      return;
+    }
+    // THE DECOMPRESSOR CAN EXIT 0 EARLY (bzip2 warns about trailing garbage),
+    // so the COMPRESSED read must also have reached the end, and the bytes it
+    // hashed must be the file a client will receive.
+    let actual: number;
+    try {
+      actual = statSync(path).size;
+    } catch (err) {
+      const missing = (err as NodeJS.ErrnoException).code === "ENOENT";
+      resolve({ ok: false, absent: missing, message: String(err) });
+      return;
+    }
+    if (actual !== fileSize) {
+      resolve({
+        ok: false,
+        absent: false,
+        message: `${path} is ${actual} bytes but ${fileSize} were read`,
+      });
+      return;
+    }
+    resolve({
+      ok: true,
+      narHash: `sha256:${base32(hash.digest())}`,
+      narSize: size,
+      fileHash: `sha256:${base32(fileHash.digest())}`,
+      fileSize,
+    });
   };
 
   let source: Readable;
@@ -413,6 +428,10 @@ export async function verifyNarFile(path: string, compression: string | null): P
       const bytes = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
       fileHash.update(bytes);
       fileSize += bytes.length;
+    });
+    file.on("end", () => {
+      fileEnded = true;
+      settle();
     });
     file.on("error", (err) => {
       if (settled) return;
@@ -447,6 +466,7 @@ export async function verifyNarFile(path: string, compression: string | null): P
   });
   source.on("end", () => {
     ended = true;
+    if (decompressor === null) fileEnded = true;
     settle();
   });
   return promise;
