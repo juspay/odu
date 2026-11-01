@@ -161,6 +161,31 @@ async function putNar(path: Path, variant: number): Promise<string | null> {
   return response.status === 200 ? null : `nar PUT answered ${response.status}`;
 }
 
+/** One step of a CHUNKED push, as `odu cache push` sends a NAR larger than a
+ *  part: `PARTS` parts, then the join — every request carrying the upload's
+ *  own session (`x-odu-upload`), so its parts are its own. */
+const PARTS = 3;
+async function putPart(path: Path, variant: number, session: string, index: number): Promise<string | null> {
+  const bytes = path.variants[variant] as Uint8Array;
+  const size = Math.ceil(bytes.length / PARTS);
+  const response = await fetch(`${base}/nar/${path.file}/parts/${index}`, {
+    method: "PUT",
+    headers: { ...auth(), "x-odu-upload": session },
+    body: bytes.subarray(index * size, (index + 1) * size) as unknown as BodyInit,
+  });
+  await response.arrayBuffer();
+  return response.status === 204 ? null : `part ${index} answered ${response.status}`;
+}
+
+async function completeParts(path: Path, session: string): Promise<string | null> {
+  const response = await fetch(`${base}/nar/${path.file}/complete`, {
+    method: "POST",
+    headers: { ...auth(), "x-odu-upload": session, "x-odu-parts": String(PARTS) },
+  });
+  const text = await response.text();
+  return response.status === 200 ? null : `complete answered ${response.status}: ${text}`;
+}
+
 async function putNarinfo(path: Path, variant: number): Promise<string | null> {
   const bytes = path.variants[variant] as Uint8Array;
   const narinfo = [
@@ -258,6 +283,61 @@ describe.skipIf(!LINUX)("concurrent pushes of one path", () => {
         if (served !== null) failures.push(`${label}: ${served}`);
       }
     }
+    expect(failures).toEqual([]);
+  }, 120_000);
+
+  // TWO CHUNKED PUSHES OF ONE PATH, LEVELS 1 AND 19: each client's parts,
+  // join and narinfo in its own order, the two interleaved at random (seeded),
+  // once in sequence and once overlapped. Parts at one shared name per index
+  // would be joined from both clients.
+  it("accepts both chunked pushes and serves one consistent object, parts interleaved", async () => {
+    const random = rng(1402);
+    const failures: string[] = [];
+    for (let trial = 0; trial < 24; trial++) {
+      const overlapped = trial % 2 === 1;
+      const path = makePath(random, 1 << 20, `chunked${trial}`);
+      const clients = {
+        A: { variant: 0, session: `a${trial}-${Math.floor(random() * 1e9)}` },
+        B: { variant: 1, session: `b${trial}-${Math.floor(random() * 1e9)}` },
+      };
+      // PARTS parts, the join, the narinfo — per client, in that order.
+      const order = (["A", "B"] as const)
+        .flatMap((who) => Array.from({ length: PARTS + 2 }, () => ({ who, key: random() })))
+        .sort((x, y) => x.key - y.key)
+        .map((step) => step.who);
+      const last: Record<"A" | "B", Promise<string | null>> = {
+        A: Promise.resolve(null),
+        B: Promise.resolve(null),
+      };
+      const seen = { A: 0, B: 0 };
+      const results: Promise<string | null>[] = [];
+      for (const who of order) {
+        const step = seen[who]++;
+        const { variant, session } = clients[who];
+        const run = last[who].then((previous) =>
+          previous !== null
+            ? previous
+            : step < PARTS
+              ? putPart(path, variant, session, step)
+              : step === PARTS
+                ? completeParts(path, session)
+                : putNarinfo(path, variant),
+        );
+        last[who] = run;
+        results.push(run);
+        if (overlapped) await pause(1);
+        else await run;
+      }
+      const label = `trial ${trial} ${order.join("")}${overlapped ? " overlapped" : ""}`;
+      for (const who of ["A", "B"] as const) {
+        const failure = await last[who];
+        if (failure !== null) failures.push(`${label} ${who}: ${failure}`);
+      }
+      await Promise.all(results);
+      const served = await readBack(path);
+      if (served !== null) failures.push(`${label}: ${served}`);
+    }
+    console.log(`push race (chunked): ${failures.length} failures in 24 trials`);
     expect(failures).toEqual([]);
   }, 120_000);
 
