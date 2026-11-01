@@ -410,18 +410,8 @@ export function createStaging(deps: StagingDeps): Staging {
       return { missing, fetching: 0 };
     }
     if (!outcome.ok) {
-      if (outcome.missing.length > 0) {
-        repo.putHeld({
-          bucket: bucket.name,
-          storePath: entry.info.storePath,
-          missing: outcome.missing,
-          fetching: 0,
-          fetched: entry.fetched,
-          failure: null,
-          created: now(),
-        });
-        return { missing: outcome.missing, fetching: 0 };
-      }
+      // Every missing-reference outcome returned above; what is left is the
+      // client's bytes being wrong, which is a refusal and not a hold.
       repo.deleteHeld(bucket.name, entry.info.storePath);
       return { failed: outcome.message };
     }
