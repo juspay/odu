@@ -604,6 +604,16 @@ describe("operational lines", () => {
   });
 });
 
+describe("the deprecated held endpoint", () => {
+  it("answers an empty list, so a 2.x client waits for nothing", async () => {
+    const h = await harness(true);
+    const response = await h.fetch("/main/held");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ held: [] });
+    await h.dispose();
+  });
+});
+
 describe("the NAR", () => {
   it("serves the KEPT file with a length and the file's own hash", async () => {
     const h = await harness(true);
@@ -993,6 +1003,53 @@ describe("uploading", () => {
     });
     expect(narinfo.status).toBe(200);
     expect((await h.fetch(`/main/${hashOf(staged)}.narinfo`)).status).toBe(200);
+    await h.dispose();
+  });
+
+  it("joins 3+ parts uploaded concurrently and out of index order", async () => {
+    const h = await harness(true);
+    const staged = "/nix/store/99999999999999999999999999999999-concurrent";
+    // REAL PART SIZES: 64 MiB, 64 MiB, remainder — the agent-distro shape.
+    const MB = 1024 * 1024;
+    const bytes = new Uint8Array(130 * MB);
+    for (let i = 0; i < bytes.length; i += 4096) bytes[i] = i & 0xff;
+    const narHash = `sha256:${base32(createHash("sha256").update(bytes).digest())}`;
+    const payload = { bytes, narHash };
+    const name = `${narHash.slice(7)}.nar.zst`;
+    const split = [
+      bytes.subarray(0, 64 * MB),
+      bytes.subarray(64 * MB, 128 * MB),
+      bytes.subarray(128 * MB),
+    ];
+    const part = (index: number) =>
+      h.fetch(`/main/nar/${name}/parts/${index}`, {
+        ...bearer(h.tokens.write),
+        method: "PUT",
+        body: body(split[index] as Uint8Array),
+      });
+    // THE AGENT-DISTRO SHAPE: three parts, concurrent, lines in any order.
+    const uploaded = await Promise.all([part(2), part(1), part(0)]);
+    expect(uploaded.map((response) => response.status)).toEqual([204, 204, 204]);
+    const complete = await h.fetch(`/main/nar/${name}/complete`, {
+      ...bearer(h.tokens.write),
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${h.tokens.write}`,
+        "x-odu-parts": "3",
+      },
+    });
+    expect(complete.status).toBe(200);
+    const narinfo = await h.fetch(`/main/${hashOf(staged)}.narinfo`, {
+      ...bearer(h.tokens.write),
+      method: "PUT",
+      body: `StorePath: ${staged}\nURL: nar/${name}\nCompression: none\nNarHash: ${payload.narHash}\nNarSize: ${payload.bytes.length}\nReferences: \n`,
+    });
+    expect(await narinfo.text()).toBe("");
+    expect(narinfo.status).toBe(200);
+    const read = await h.fetch(`/main/nar/${name}`);
+    expect(Array.from(new Uint8Array(await read.arrayBuffer()))).toEqual(
+      Array.from(payload.bytes),
+    );
     await h.dispose();
   });
 });

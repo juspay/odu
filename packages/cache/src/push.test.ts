@@ -407,6 +407,47 @@ describe("pushing a closure", () => {
     }
   });
 
+  it("reassembles the same bytes with 3+ parts and uneven source chunks", async () => {
+    const server = startServer();
+    try {
+      server.missing = [LIBC];
+      const payload = "0123456789abcdef".repeat(700);
+      const chunks: string[] = [];
+      for (let at = 0; at < payload.length; ) {
+        const size = (at % 7) * 13 + 1;
+        chunks.push(payload.slice(at, at + size));
+        at += size;
+      }
+      const narName = `${narHashBase32(entry(LIBC).narHash)}.nar.zst`;
+      const summary = await pushToCache({
+        bucket: `${server.origin}/main`,
+        paths: ["."],
+        env: envOf({ ODU_CACHE_TOKEN: "t" }),
+        platform: {
+          closure: async () => [entry(LIBC)],
+          dump: () =>
+            new ReadableStream({
+              start(controller) {
+                for (const chunk of chunks) controller.enqueue(new TextEncoder().encode(chunk));
+                controller.close();
+              },
+            }),
+        },
+        partSize: 1000,
+      });
+      expect(summary).toMatchObject({ pushed: 1, failed: 0 });
+      const total = server.completed[0]?.total ?? 0;
+      expect(total).toBeGreaterThan(2);
+      let joined = "";
+      for (let index = 0; index < total; index++) {
+        joined += server.parts.get(`${narName}:${index}`) ?? "";
+      }
+      expect(joined).toBe(payload);
+    } finally {
+      server.stop();
+    }
+  });
+
   it("does not repeat a request the server refused outright", async () => {
     const server = startServer();
     try {

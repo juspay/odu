@@ -54,7 +54,18 @@ export interface Upload {
 /** What a narinfo PUT came to. `status` is the answer the route sends. */
 export type NarinfoOutcome =
   | { ok: true; status: 200; storePath: string }
-  | { ok: false; status: 400; message: string };
+  | {
+      ok: false;
+      status: 400;
+      message: string;
+      /** What the refusal knew, for the server's own log. */
+      detail?: {
+        storePath?: string;
+        narinfoHash?: string;
+        parts?: number;
+        bytesReceived?: number;
+      };
+    };
 
 /**
  * A PART THAT WENT OVER THE CEILING is answered by {@link Upload.write}
@@ -135,6 +146,8 @@ export function createStaging(deps: StagingDeps): Staging {
   /** One narinfo at a time per bucket: two PUTs for one bucket must not put the
    *  same staged file concurrently. */
   const records = new Map<string, Chain>();
+  /** Bytes/parts of a completed chunked upload, for a refusal's log line. */
+  const joined = new Map<string, { parts: number; bytes: number }>();
   let lastSweep = 0;
 
   /**
@@ -283,7 +296,18 @@ export function createStaging(deps: StagingDeps): Staging {
       async write(chunk) {
         written += chunk.length;
         if (limit !== null && written > limit) return "too-large";
-        await sink.write(chunk);
+        // A FileSink write returns the BYTES IT TOOK; a large or slow write can
+        // be partial. Ignoring the count truncates a part without an error, and
+        // the assembled NAR then fails its NarHash.
+        for (let at = 0; at < chunk.length; ) {
+          const wrote = await sink.write(chunk.subarray(at));
+          if (typeof wrote === "number" && wrote > 0) {
+            at += wrote;
+            continue;
+          }
+          if (wrote === 0) throw new Error(`writing ${path} made no progress`);
+          break;
+        }
         return "ok";
       },
       async commit() {
@@ -316,6 +340,7 @@ export function createStaging(deps: StagingDeps): Staging {
       const assembled = await stat(target).catch(() => null);
       if (assembled !== null && assembled.isFile()) {
         await unlink(uploadMarker(dirForBucket, file)).catch(() => {});
+        joined.set(`${bucket.name}/${file}`, { parts: total, bytes: assembled.size });
         return { ok: true, parts: total };
       }
       return { ok: false, missing };
@@ -387,6 +412,28 @@ export function createStaging(deps: StagingDeps): Staging {
       });
       return null;
     }
+  }
+
+  /** The context a refused upload carries into `cache.request.refused`. */
+  async function detailOf(
+    bucket: BucketRow,
+    info: NarInfo,
+    hash: string,
+    staged?: string,
+  ): Promise<NonNullable<Extract<NarinfoOutcome, { ok: false }>["detail"]>> {
+    const file = basename(info.url);
+    const done = joined.get(`${bucket.name}/${file}`);
+    const fileInfo = staged === undefined ? null : await stat(staged).catch(() => null);
+    return {
+      storePath: info.storePath,
+      narinfoHash: hash,
+      ...(done === undefined ? {} : { parts: done.parts }),
+      ...(fileInfo === null
+        ? done === undefined
+          ? {}
+          : { bytesReceived: done.bytes }
+        : { bytesReceived: fileInfo.size }),
+    };
   }
 
   async function recordNow(
@@ -500,14 +547,24 @@ export function createStaging(deps: StagingDeps): Staging {
 
       const staged = await ensureStaged(bucket, dirForBucket, info);
       if (!staged.ok) {
-        return { ok: false, status: 400, message: staged.message };
+        const stagedFile = join(dirForBucket, "nar", basename(info.url));
+        return {
+          ok: false,
+          status: 400,
+          message: staged.message,
+          detail: await detailOf(bucket, info, hash, stagedFile),
+        };
       }
       let chain = records.get(bucket.name);
       if (chain === undefined) {
         chain = newChain();
         records.set(bucket.name, chain);
       }
-      return serial(chain, () => recordNow(bucket, hash, info, staged.file, staged.facts));
+      const outcome = await serial(chain, () =>
+        recordNow(bucket, hash, info, staged.file, staged.facts),
+      );
+      if (outcome.ok) joined.delete(`${bucket.name}/${basename(info.url)}`);
+      return outcome;
     },
   };
 }

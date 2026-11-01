@@ -371,12 +371,14 @@ function refused(
   request: HttpServerRequest.HttpServerRequest,
   message: string,
   status = 400,
+  detail: Record<string, unknown> = {},
 ): HttpServerResponse.HttpServerResponse {
   cache.log("cache.request.refused", {
     method: request.method,
     path: request.url,
     status,
     reason: message,
+    ...detail,
   });
   return HttpServerResponse.text(message, { status });
 }
@@ -603,6 +605,20 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
     // answers both requests.
     HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket`, consumerFacts),
 
+    /**
+     * DEPRECATED, ALWAYS EMPTY. The cache no longer holds an upload for a
+     * reference; a 2.x `--wait`/client reads the list it always did and sees
+     * nothing waiting. REMOVED IN THE NEXT MAJOR.
+     */
+    HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket/held`, (request) =>
+      Effect.gen(function* () {
+        const bucket = yield* param("bucket");
+        const admitted = admit(cache, request, bucket, "read");
+        if (!admitted.ok) return admitted.response;
+        return HttpServerResponse.jsonUnsafe({ held: [] });
+      }),
+    ),
+
     HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket/nix-cache-info`, (request) =>
       Effect.gen(function* () {
         const bucket = yield* param("bucket");
@@ -717,7 +733,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
           ),
         );
         if (outcome.ok) return HttpServerResponse.empty({ status: 200 });
-        return refused(cache, request, outcome.message, outcome.status);
+        return refused(cache, request, outcome.message, outcome.status, outcome.detail);
       }),
     ),
 
@@ -793,7 +809,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
           cache.acceptNarinfo(admitted.bucket, hash, Stream.toReadableStream(request.stream)),
         );
         if (outcome.ok) return HttpServerResponse.empty({ status: 200 });
-        return refused(cache, request, outcome.message, outcome.status);
+        return refused(cache, request, outcome.message, outcome.status, outcome.detail);
       }),
     ),
 

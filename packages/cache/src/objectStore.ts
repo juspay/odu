@@ -118,7 +118,15 @@ export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
         for await (const chunk of stream as unknown as AsyncIterable<Uint8Array>) {
           hash.update(chunk);
           size += chunk.length;
-          await sink.write(chunk);
+          for (let at = 0; at < chunk.length; ) {
+            const wrote = await sink.write(chunk.subarray(at));
+            if (typeof wrote === "number" && wrote > 0) {
+              at += wrote;
+              continue;
+            }
+            if (wrote === 0) throw new Error(`writing ${temp} made no progress`);
+            break;
+          }
         }
       } finally {
         await sink.end();
