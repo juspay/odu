@@ -70,7 +70,7 @@ ODU_CACHE_TOKEN=... odu cache push main ./result
 | `odu cache use <bucket>` | Print the substituter and key settings, a `nixConfig` block, and the netrc lines | a bucket's page |
 | `odu cache token mint\|list\|revoke` | Scoped, expiring, revocable tokens; the plaintext is shown once | a bucket's **Tokens** |
 | `odu cache login <origin>` | Save a token for an origin in `~/.config/odu/cache/credentials` | — |
-| `odu cache push <bucket> <path>…` | Upload only the paths the bucket is missing; long NARs are chunked, holds are reported | — |
+| `odu cache push <bucket> <path>…` | Upload only the paths the bucket is missing; long NARs are chunked | — |
 | `odu cache domain <bucket> <name>\|--none` | Give a bucket a DNS name of its own through a Cloudflare tunnel | bucket → **Domain** |
 | `odu cache pin <bucket> <name> <path>…` | Keep a closure out of garbage collection | a bucket's **Pin closure** |
 | `odu cache gc [bucket]` | Evict what retention expired and nothing references or pins | a bucket's **Run GC** |

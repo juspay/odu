@@ -142,9 +142,10 @@ Each item names where it is checked.
   the docs all name the `kolu` bucket.
 - **F12. Our deployment is a pod, not the module.** nixos-config
   `k8s/apps/odu` runs `odu web` from the host's Nix store in `pureintent`'s
-  K3s, one replica, a `local-path` PVC for the catalog and a chroot cache store
-  (`ODU_CACHE_STORE=local?root=/data/cache-store`, so unsigned imports never
-  touch the host daemon). It binds the pod address (`ODU_WEB_ORIGIN=
+  K3s, one replica, a `local-path` PVC for the catalog and the cache objects.
+  `ODU_CACHE_STORE=local?root=/data/cache-store` remains ONLY so the one-time
+  migration can dump rows that predate the object store; once
+  `cache.migration.complete` is logged, that 166 GB directory is deleted. It binds the pod address (`ODU_WEB_ORIGIN=
   http://0.0.0.0:18440`), publishes `https://odu-k3s.rooster-blues.ts.net`
   (`ODU_PUBLIC_ORIGIN`), and the Tailscale Ingress is the only way in, today
   as `tailscale serve` (tailnet only). There is no nginx: every path odu
@@ -220,33 +221,37 @@ on the bucket page (both landed).
 
 ### Storage
 
-- **Blobs:** the server's own Nix store. `put` imports a NAR through the
-  daemon (`nix-store --import` semantics; the service user is a trusted user
-  on the module's machine), `get` streams `nix store dump-path` through zstd,
-  `delete` drops odu's gcroot and runs `nix-store --delete`. Dedup across
-  buckets is by store path, for free. No second copy on a single machine,
-  which is the small-team shape and the developer's laptop. On-the-fly
-  compression costs CPU per cold read; nginx `proxy_cache` (PR 3, module
-  only) absorbs the repeats. S3-compatible storage is the second
-  implementation in PR 11.
-- **Follow-up — compress once:** store the pushed `.nar.zst` by narHash and serve
-  the file (`Content-Length`, range, Cloudflare-cacheable); today every GET
-  re-dumps and re-compresses the path. Not this PR.
+- **Blobs: an object store, not a Nix store.** The object IS the compressed
+  NAR a pusher sent, kept once at `<bucket>/nar/<narHash>.nar.zst` and served
+  with `Content-Length`/`Range`. The server does not import paths, fetch
+  upstream closures, or keep gcroots; references are names in the narinfo.
+  That is the Cachix/Attic model, and it is why the pod's 166 GB store of
+  upstream closures goes away. `ObjectStore` is the interface
+  (`put`/`get`/`head`/`delete`/`list`); disk is its first implementation and
+  the contract suite is shared so S3 can be the second.
+- **CA is proved from the path.** `contentAddressOf` recomputes Nix's
+  `fixed:r:sha256` store path from (name, NarHash, references) and serves
+  `CA:` only when the formula reproduces the row's path. A self-referencing
+  path's CA hash is a modulo hash the narinfo does not carry, so it stays
+  unproved rather than guessed.
+- **Migration of a store-backed deployment:** at boot, two at a time, each
+  row without an object is dumped from `ODU_CACHE_STORE` into the object
+  store (`nix store dump-path | zstd`), pausing below 10 GB free. Until it
+  lands, the old store serves that row. `cache.migration.complete` says the
+  store is no longer read and can be deleted.
 - **Metadata:** SQLite in WAL mode behind a narrow repository layer (first
   database in the tree, F3). Tables: `org`, `bucket`, `token`, `object`
-  (bucket, store path, narinfo fields, references, nar hash and size,
-  created, last-accessed), `pin`, `audit`.
+  (bucket, store path, narinfo fields, references, nar hash and size, CA,
+  file hash and size, created, last-accessed), `pin`, `audit`.
 - **On disk:** under odu's state directory (`$ODU_STATE_DIR`, else
   `$XDG_STATE_HOME/odu`, else the platform default `run-history/paths.ts`
-  already resolves): `cache/cache.sqlite` and `cache/gcroots/`; the paths
-  themselves are in `/nix/store`. Signing keys live in the database; the
-  database is a secret, and backup is the database; paths are rebuilt or
-  re-pushed.
+  already resolves): `cache/cache.sqlite`, `cache/objects/`, and
+  `cache/staging/`. Signing keys live in the database; the database and the
+  objects are the backup.
 - **GC:** per-bucket retention on last access; an object is evicted only when
   nothing retained in the bucket references it and it is not under a pin;
-  a path with no retaining bucket loses its root and is deleted from the
-  store. Pins are named and root a closure. This is the niks3 model and the
-  direct answer to chutney issue 52.
+  the object file is deleted with the row, and an object with no row is swept
+  at boot. Pins are named and hold a closure from the bucket's own rows.
 
 ### Tokens and identity
 
@@ -501,6 +506,27 @@ Then the gap the rule names, by row — closed:
 
 **Evidence:** each row's e2e has a scenario per verb through the face, and the
 list above is empty for every row in it.
+
+### PR 3.5: object storage
+
+> **Docs:** Point a bucket's objects at an S3-compatible store — Garage or
+> versitygw on the same machine, or a real one — and the same cache serves
+> from it.
+
+An S3 implementation of `ObjectStore` on Bun's built-in client, selected by
+the module, with the SAME contract suite run against versitygw/Garage in CI
+so the local fixture exercises real S3 semantics. The cache row only chooses
+the implementation; no route learns a second dialect.
+
+### PR 3.6: direct transfer
+
+> **Docs:** Large pushes and pulls bypass the odu process: the client uploads
+> objects straight to the store with a presigned PUT, and downloads follow a
+> redirect.
+
+Presigned PUT/GET from the object store; the cache row handles narinfos and
+signing, not bytes. The push client and the NAR route switch to the signed
+URLs when the bucket's store supports them.
 
 ### PR 4: teams
 

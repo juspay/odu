@@ -2,7 +2,7 @@
 
 `odu web` also serves Nix binary caches. The same loopback service that runs CI answers the standard Nix HTTP binary cache protocol, so every Nix client works unchanged.
 
-A bucket is one cache: one substituter URL under the service's origin and one ed25519 public key. The server generates the keypair and signs each narinfo on ingest; a pusher never holds a signing key. Client signatures are kept. By default the cache binds loopback, like the board: `$ODU_WEB_ORIGIN` is the address it listens on, and the NixOS module puts nginx in front of it — proxying the cache's protocol paths only, unless [server mode](../docs/#server-mode) is configured, where the board and `/mcp` are behind the same door. On a single machine the cache and the store are the same bytes; see [Where the data lives](#where-the-data-lives).
+A bucket is one cache: one substituter URL under the service's origin and one ed25519 public key. The server generates the keypair and signs each narinfo on ingest; a pusher never holds a signing key. Client signatures are kept. By default the cache binds loopback, like the board: `$ODU_WEB_ORIGIN` is the address it listens on, and the NixOS module puts nginx in front of it — proxying the cache's protocol paths only, unless [server mode](../docs/#server-mode) is configured, where the board and `/mcp` are behind the same door. The cache keeps the compressed NAR a pusher sent (like Cachix and Attic) and no Nix store of its own; see [Where the data lives](#where-the-data-lives).
 
 ## Create a bucket
 
@@ -121,14 +121,10 @@ What it says while it works — one preamble, then one line per path as the buck
 118 paths in the closure: 6 to push, 108 already here, 4 upstream
 ✅ /nix/store/…-odu-0.1.0/bin/odu stored
 ⏳ /nix/store/…-big-output part 3
-⏸ /nix/store/…-hello-2.12.3 held: waiting for 1 reference that is neither here nor upstream: /nix/store/…-glibc-2.44-57
 ❌ /nix/store/…-bad-output refused: the upload was truncated or corrupted
-held 1 path — see https://odu.example.com/#/cache/main
 ```
 
-A `held` path is one the bucket accepted and cannot serve yet: a reference it needs is neither in the bucket nor signed by one of its upstream keys. The push reports it and **returns** — the exit is non-zero only for refusals — and the bucket's page lists the same paths with the same sentence.
-
-The server fetches a hold's references in **one job over the whole missing set**, started when the hold is recorded and not tied to the upload request; the sentence's count is that set's size. A held row is stored, so a restart re-queues it at row apply and the fetch resumes with no new push. The bucket page shows which references the job has already landed beside the ones still missing. `--wait` is the explicit choice to stay: it **reads that progress** until the referrer is recorded, and never re-uploads it.
+A push records each path as it lands. There is no hold to wait for: references are names in the narinfo, not paths the server must already hold. The exit is non-zero only for refusals.
 
 A NAR larger than `--part-size` (64 MiB by default) is sent in parts, each retried on its own; the server reassembles them and the same hash proof decides. That is what makes a push work through a proxy with a request-size ceiling — Cloudflare's is 100 MB.
 
@@ -197,32 +193,32 @@ odu cache gc main
 odu cache stats
 ```
 
-On the board: a bucket page's **Pin a closure**, **Run GC** and **Stats** sections. Pins are named and root a closure. Garbage collection applies per-bucket retention on last access: an object is evicted only when nothing retained in the bucket references it and it is not under a pin. A path no bucket retains loses its root and is deleted from the store. `odu cache stats` reports sizes and hit counts.
+On the board: a bucket page's **Pin a closure**, **Run GC** and **Stats** sections. Pins are named and root a closure. Garbage collection applies per-bucket retention on last access: an object is evicted only when nothing retained in the bucket references it and it is not under a pin. `odu cache stats` reports the objects, their bytes on disk and hit counts.
 
 ## Where the data lives
 
-The cache keeps no second copy of your builds. The server's own `/nix/store` holds the paths; a bucket is metadata over it.
+The cache keeps **the compressed NAR the pusher sent**, once, and no Nix store of its own. That is the Cachix/Attic model: an object is a content-named file (`<bucket>/nar/<narHash>.nar.zst`), references are names in the narinfo, and nothing is imported. On the pod this replaced a 166 GB `/nix/store` of upstream closures nobody pulled from us.
 
-- A push imports the paths into the server's store through the Nix daemon. Pushing from the machine that built them moves nothing.
-- An upload is accepted only when the bytes are there: the server hashes the NAR it staged against the narinfo's `NarHash` before importing it. `nix copy --from` alone would not do, because it copies nothing and exits 0 for a path the store already has — which on a single machine is the ordinary case.
-- A narinfo whose references are not in the store yet answers **202** and is imported when they arrive; anything else that cannot be imported answers **400** with Nix's own sentence. A reference `odu cache push` skipped as upstream is FETCHED BY THE SERVER: `nix-store -r` substitutes it into this store, trusting only the keys the bucket names, and the referrer imports. The 202 remains for a reference that is neither in the bucket nor signed by one of those keys — the held state the bucket publishes.
-- A NAR read streams the path out of the store, compressed on the fly.
-- Every path a bucket retains is rooted under odu's state directory, so the machine's own garbage collection never removes what the cache serves. `odu cache gc` drops the roots of what retention has expired and deletes those paths.
-- The database, signing keys, token hashes, narinfo metadata and pins live in one SQLite file:
+- A push assembles (or receives) `nar/<narHash>.nar.zst`, decompresses and hashes it against the narinfo's `NarHash`, then **keeps the file** and records its sha256 and length as `FileHash:`/`FileSize:`. One write, no second copy.
+- Serving is the file, with `Content-Length` and `Range`: Cloudflare caches an object under 512 MB and passes a larger one through, and a 634 MB NAR pulls through a cold edge. The server never re-dumps or re-compresses a path per reader.
+- A narinfo whose references are absent is recorded anyway: references are names, not paths a store must hold first. A `.drv` path, or a reference to one, is still refused with 400.
+- `CA:` is **proved from the path**: odu recomputes Nix's `fixed:r:sha256` store path from (name, NarHash, references) and serves the line only when the formula reproduces the path. A self-referencing path's CA uses a modulo NAR hash the narinfo does not carry, so those stay unproved rather than guessed.
+- GC deletes the object with its row; an object with no row (a crash between put and record) is swept at boot and logged.
+- **The one-time migration.** A deployment upgrading from the store-backed cache has rows whose object is not on disk. At boot, two at a time, odu dumps each from `$ODU_CACHE_STORE` (`nix store dump-path --store … | zstd`) into the object store, pausing if free space falls below 10 GB. Until a row's object lands, its NAR is served through the old store (logged as `source: transition`). The log line `cache.migration.complete` says the old store is no longer read and can be deleted.
 
 ```text
-<state>/cache/cache.sqlite    metadata, bucket signing keys, token hashes, pins
-<state>/cache/gcroots/        one root per retained path, per bucket
-<state>/cache/staging/        uploads between their NAR and their narinfo
+<state>/cache/cache.sqlite            metadata, bucket signing keys, token hashes, pins
+<state>/cache/objects/<bucket>/nar/   the objects: <narHash>.nar.zst, immutable
+<state>/cache/staging/                uploads between their NAR and their narinfo
 ```
 
-An upload sits in `staging/` until its narinfo arrives; one that never gets it is swept after an hour, so a client killed between the two PUTs cannot leak a NAR.
+An upload sits in `staging/` until its narinfo arrives; one that never gets it is swept after an hour, so a client killed between the two PUTs cannot leak a NAR. Back up the database **and** `objects/`: the bytes are not rebuilt from anywhere else.
 
-`<state>` is `$ODU_STATE_DIR` if set, else `$XDG_STATE_HOME/odu` (`~/.local/state/odu` by default) on Linux and `~/Library/Application Support/odu` on macOS, the same place as the run catalog. Tokens are stored only as hashes, so a copy of the database cannot be used to push. The signing keys are in it, so treat it as a secret. Back up the database; the paths themselves are rebuilt or re-pushed.
+`<state>` is `$ODU_STATE_DIR` if set, else `$XDG_STATE_HOME/odu` (`~/.local/state/odu` by default) on Linux and `~/Library/Application Support/odu` on macOS, the same place as the run catalog. Tokens are stored only as hashes, so a copy of the database cannot be used to push. The signing keys are in it, so treat it as a secret.
 
 **The daemon's own home is the one thing that is not under `<state>` by default.** It holds the singleton's gate and control socket, and its name is derived from the origin — `odu-web` at the default origin, `odu-web-<hash>` at any other, so two services cannot share one. Without `$ODU_STATE_DIR` it is `$HOME/.local/state/odu-web*`: a SIBLING of `odu` rather than a child of it, and deliberately not under `$XDG_STATE_HOME` — that variable varies by launch context (a login shell, a bare ssh, a systemd unit), and two contexts computing two "state" homes would split one daemon's identity. Set `$ODU_STATE_DIR` and the home moves inside it, which is what a container with a read-only `$HOME` wants.
 
-Importing paths built on another machine requires the user running `odu web` to be in `nix.settings.trusted-users` on the server, because those paths carry no signature the daemon trusts. Pushing from the same machine needs nothing. Running all of this on a NixOS host, with the state under `/var/lib/odu` and nginx in front, is [Self-host on NixOS](../docs/#self-host-on-nixos).
+The service needs no `nix.settings.trusted-users` entry and no Nix store: it never imports a path. Running all of this on a NixOS host, with the state under `/var/lib/odu` and nginx in front, is [Self-host on NixOS](../docs/#self-host-on-nixos).
 
 ## A domain for a bucket
 
@@ -298,7 +294,7 @@ One bucket is one substituter. Point any Nix-compatible tool at these routes:
 GET  /cache/<bucket>/nix-cache-info             StoreDir, WantMassQuery: 1, Priority: 40
 HEAD /cache/<bucket>/<hash>.narinfo
 GET  /cache/<bucket>/<hash>.narinfo
-GET  /cache/<bucket>/nar/<filehash>.nar.zst     streamed from the store, compressed on the fly
+GET  /cache/<bucket>/nar/<filehash>.nar.zst     the object file, Content-Length + Range
 PUT  /cache/<bucket>/nar/<filehash>.nar.<ext>   Bearer or Basic; any ext Nix sends
 PUT  /cache/<bucket>/<hash>.narinfo             server re-signs with the bucket key
 POST /_odu/v1/buckets/<bucket>/missing          batch "which of these are you missing"
@@ -327,7 +323,7 @@ Writes, and reads of private buckets, accept `Authorization: Bearer <token>` or 
 | `odu cache token list` | List tokens with scope, expiry and last use | bucket → Tokens |
 | `odu cache token revoke <id>` | Revoke one token | bucket → Tokens → **revoke** |
 | `odu cache login <origin>` | Save a token for an origin in `~/.config/odu/cache/credentials` | — (a machine's disk) |
-| `odu cache push <bucket> <paths…> [--wait] [--part-size MiB]` | Upload only the paths the bucket is missing; holds are reported, `--wait` stays until they land | — (a build box's job) |
+| `odu cache push <bucket> <paths…> [--part-size MiB]` | Upload only the paths the bucket is missing; the bucket keeps what it takes | — (a build box's job) |
 | `odu cache pin <bucket> <name> <paths…>` | Pin a closure against garbage collection | bucket → **Pin closure** |
 | `odu cache gc [bucket]` | Evict objects past retention that nothing references and no pin holds | bucket → **Run GC** |
 | `odu cache stats` | Show storage and hit counts | bucket → Stats |

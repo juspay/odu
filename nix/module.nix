@@ -13,9 +13,9 @@
 #     `/mcp` as well, and every caller meets the sign-in page before anything
 #     else. That is server mode, and it is what makes the public board safe.
 #
-# Nor is there object storage, a second store, or a signing service: a bucket is
-# metadata over the host's own `/nix/store`, the server signs at read, and the
-# state lives in one SQLite file under `stateDir`.
+# The cache keeps the compressed NAR a pusher sent, as objects under `stateDir`,
+# and never imports into a Nix store: references are names in the narinfo, the
+# server signs at read, and the state lives in one SQLite file plus `objects/`.
 { self }:
 { config, lib, pkgs, ... }:
 
@@ -207,12 +207,12 @@ in
 
     trustedUser = mkOption {
       type = types.bool;
-      default = true;
+      default = false;
       description = ''
-        Add `user` to `nix.settings.trusted-users`. A cache server has to be
-        allowed to import paths built on other machines, and those paths carry
-        no signature the daemon trusts; without this, a push from a lane other
-        than this host is refused by Nix, not by odu.
+        Add `user` to `nix.settings.trusted-users`. NO LONGER REQUIRED: the
+        cache does not import paths. Kept so an existing configuration still
+        evaluates; a store-backed deployment being migrated may leave it on
+        until `cache.migration.complete`.
       '';
     };
 
@@ -430,8 +430,7 @@ in
       homeMode = "0700";
     };
 
-    # A cache server imports what other machines built, and an unsigned path
-    # from a trusted user is the only way that works.
+    # Only for an instance still migrating from the store-backed cache.
     nix.settings.trusted-users = optionals cfg.trustedUser [ cfg.user ];
 
     systemd.services.odu-web = {

@@ -163,10 +163,9 @@ function realised(expr: string, what: string): string {
 }
 
 /**
- * Two paths where one REFERENCES the other — the shape every real closure has,
- * and the one the ordering exists for: the parent cannot be imported until the
- * child is valid, so a push that sent them in the wrong order would defer, and
- * a server that imported eagerly would fail.
+ * Two paths where one REFERENCES the other — the shape every real closure has.
+ * The parent records immediately now (a reference is a name in the narinfo),
+ * and a cold substitute still walks the closure.
  */
 function buildPair(name: string): { parent: string; child: string } {
   const child = `derivation { name = "${name}-child"; system = builtins.currentSystem; ` +
@@ -437,9 +436,8 @@ describe("odu serves a Nix binary cache", () => {
   it("takes what an upstream key signed when the bucket names no upstream", async () => {
     // A path carrying a `cache.nixos.org-1` signature is what a lane host that
     // built against nixpkgs produces. `main` skips it as upstream — the whole
-    // point of the default — and a server whose store is NOT the builder's has
-    // nothing to fall back on, so its referrers would sit at 202 for ever. The
-    // escape is a bucket with no upstream keys at all.
+    // point of the default. The escape is a bucket with no upstream keys at
+    // all; such a bucket stores it like any other object.
     const within = build("odu-cache-e2e-upstream");
     const keyFile = join(storeRoot, "nixos-key");
     const generated = spawnSync(

@@ -297,6 +297,11 @@ And say `passed` only from `settled: true`.
 
 ### Beyond one run
 
+A cache bucket keeps the compressed NAR a push uploaded (`FileHash`/`FileSize`
+are real, `CA:` is proved from the path) and keeps NO Nix store: references are
+names in the narinfo, so a push records a path even when its references are not
+in the bucket. `odu cache push` has no `--wait`; there is no held state.
+
 The same vocabulary reaches everything else odu does. These used to be local
 commands that each did their own work in your process — which meant an agent
 and a browser simply could not do them at all. Now every one of them also has a
@@ -318,7 +323,6 @@ terminal.
 | list buckets | `odu surface cache bucket_list --input '{…}' --json` | `cache_bucket_list` | `rootToken` | `buckets[]` (the shape above) |
 | one bucket's public identity | `odu surface cache bucket_describe --input '{…}' --json` | `cache_bucket_describe` | `bucket` — **no root token** | `name`, `public`, `publicKey`, `domain`, `url` only — the substituter's identity, not the operator's counts |
 | give a bucket a DNS name | `odu surface cache bucket_domain --input '{…}' --json` | `cache_bucket_domain` | `rootToken`, `bucket`, `domain` (omit to clear) | the bucket row; `url` becomes the name and `pushUrl` stays the path |
-| what a bucket is holding | `odu surface watch cache held` | the `held` resource | *(none)* | `bucket`, `storePath`, `reason`, `missing[]`, `since` — paths accepted and waiting on references neither in the bucket nor upstream |
 | one bucket's paths | `odu surface cache bucket_paths --input '{…}' --json` | `cache_bucket_paths` | `bucket`, `filter?`, `after?` — **no root token** | `paths[]` (`storePath`, `narSize`, `created`, `hits`, `lastAccessed`), `next?` — newest first, 100 a page |
 | the last venue probe, kept | `odu surface get venues` | the `venues` resource | *(none)* | `null`, or `at`, `platforms[]`, `source`, `warnings[]`, `rows[]` — what `venue_probe` last answered for the service's own fleet (a probe naming your own `hostsFile` is answered, not kept), so a reader need not dial every machine again |
 | the rows a board follows | `odu surface watch cache buckets` | the `buckets` resource | *(none)* | `name`, `public`, `retentionDays`, `keyName`, `publicKey`, `upstreamKeys[]`, `objects`, `bytes`, `created`, `domain`, `url`, `pushUrl`, `lastPush`, `hits` — one row per bucket, published as it moves |
