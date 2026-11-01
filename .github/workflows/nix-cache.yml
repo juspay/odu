@@ -5,13 +5,11 @@
 # `juspay/kolu`'s `publish-closure` action, pinned to the kolu revision odu
 # pins in `npins/sources.json`).
 #
-# THE BUILD JOB PUSHES TO THE NAME THE FLAKE ADVERTISES: the checkout's own
-# `odu` chunks a NAR, so Cloudflare's 100 MB request cap is not a factor. The
-# PUBLISH job still pushes through the pod's Funnel origin,
-# `https://odu-k3s.rooster-blues.ts.net`: the action runs KOLU'S PINNED odu,
-# which does not chunk, and that origin has no proxy cap. It moves to
-# `cache.kolu.dev` when kolu re-pins its odu to 150ad5e — before this PR
-# merges, with the kolu sha that re-pin names.
+# BOTH JOBS PUSH TO THE NAME THE FLAKE ADVERTISES: `https://cache.kolu.dev`.
+# The build job runs the checkout's own `odu`, which chunks. The publish job's
+# action is pinned to kolu #2335's head, whose npins odu is this branch's
+# 996f888 — chunked push and the `CA:` line in the pusher. The pin moves to
+# kolu's merge sha when #2335 lands.
 #
 # Two jobs, because they are two halves of one question with one ordering:
 # `build-and-push` warms the input-addressed cache a lane host substitutes from
@@ -112,17 +110,16 @@ jobs:
 
       - name: Bake the declaration the publisher is handed
         env:
-          PUSH_ORIGIN: https://odu-k3s.rooster-blues.ts.net
+          PUSH_ORIGIN: https://cache.kolu.dev
         run: |
           set -euo pipefail
           # THE ONE DECLARATION, with only its FIRST SUBSTITUTER moved: the
-          # action takes the push target from it (kolu#2334). It STAYS on the
-          # pod's Funnel origin until kolu re-pins its odu to 150ad5e: the
-          # action's pusher is kolu's pinned odu (2.2), which does not chunk,
-          # and Funnel has no 100 MB proxy cap. The BUCKET's path form, not the
-          # bare origin: the action's VERIFY imports the published paths back
-          # from this URL, and the bare origin is the board, whose `Host` is not
-          # a bucket (`admitByHost` 404s).
+          # action takes the push target from it (kolu#2334). The pusher is
+          # kolu #2335's pinned odu (this branch's 996f888), so it chunks and
+          # carries the `CA:` line. The BUCKET's path form, not the bare origin:
+          # the action's VERIFY imports the published paths back from this URL,
+          # and the bare origin is the board, whose `Host` is not a bucket
+          # (`admitByHost` 404s).
           source=$(nix build .#agent-flake-source --no-link --print-out-paths --accept-flake-config)
           mkdir -p "$RUNNER_TEMP/declaration"
           jq --arg url "$PUSH_ORIGIN/cache/kolu" '.substituters = [$url]' \
@@ -176,7 +173,7 @@ jobs:
       # `odu cache push kolu` when the declaration says `{ kind = "odu"; … }`.
       # WITH `sidecar`, installables are full flake installables, and the
       # revision the entries are keyed under defaults to the published commit.
-      - uses: juspay/kolu/.github/actions/publish-closure@fd831bb1c03db83dccebea90edff3d1fecf386e8
+      - uses: juspay/kolu/.github/actions/publish-closure@37b45f616ae4d7ef0cf3e160efefb7cb67b2bc85
         with:
           sidecar: ${{ runner.temp }}/declaration/binary-cache.json
           installables: .#odu-runner
