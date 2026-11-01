@@ -40,7 +40,7 @@ import {
   storePathBasename,
   storePathHash,
 } from "./narinfo";
-import { CACHE_MOUNT } from "./paths";
+import { CACHE_MOUNT, PARTS_HEADER, UPLOAD_SESSION_HEADER } from "./paths";
 import { DEFAULT_NAR_PART_BYTES, MAX_NAR_PART_BYTES } from "./surface";
 import { type PathInfo, nixClosure, nixDump } from "./store";
 
@@ -488,7 +488,7 @@ async function putPart(
     if (attempt > 0) say(`↻ ${storePath} part ${index + 1} (retry ${attempt})`);
     const response = await fetch(`${base}/nar/${narName}/parts/${index}`, {
       method: "PUT",
-      headers: { ...headers, "content-type": "application/x-nix-nar", "x-odu-upload": session },
+      headers: { ...headers, "content-type": "application/x-nix-nar", [UPLOAD_SESSION_HEADER]: session },
       // Bun's fetch takes the bytes; the DOM `BodyInit` the type names does
       // not include this `Uint8Array` spelling.
       body: part as unknown as BodyInit,
@@ -574,7 +574,7 @@ async function uploadNar(
 
   const joined = await fetch(`${base}/nar/${narName}/complete`, {
     method: "POST",
-    headers: { ...headers, "x-odu-parts": String(index), "x-odu-upload": session },
+    headers: { ...headers, [PARTS_HEADER]: String(index), [UPLOAD_SESSION_HEADER]: session },
   }).catch(asError);
   if (joined instanceof Error) return { ok: false, message: joined.message, retry: true };
   if (!joined.ok) {

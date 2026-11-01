@@ -49,7 +49,9 @@ import {
   CACHE_MOUNT,
   CACHE_ROUTE_PATHS,
   HASH_PATTERN,
+  PARTS_HEADER,
   PUSH_API,
+  UPLOAD_SESSION_HEADER,
 } from "./paths";
 import { isUploadSession, NIX_CACHE_INFO } from "./staging";
 import type { BucketRow, Scope } from "./db";
@@ -372,12 +374,12 @@ const bad = (message: string): HttpServerResponse.HttpServerResponse =>
  * the shared part names; malformed (`undefined`) is refused.
  */
 function uploadSession(request: HttpServerRequest.HttpServerRequest): string | null | undefined {
-  const value = request.headers["x-odu-upload"];
+  const value = request.headers[UPLOAD_SESSION_HEADER];
   if (value === undefined || value === "") return null;
   return isUploadSession(value) ? value : undefined;
 }
 
-const BAD_SESSION = "x-odu-upload must be 1–64 letters, digits, '-' or '_'";
+const BAD_SESSION = `${UPLOAD_SESSION_HEADER} must be 1–64 letters, digits, '-' or '_'`;
 
 /** ONE line per refused request: method, path, status and the reason. */
 function refused(
@@ -589,9 +591,9 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
         if (!isStagedFileName(file)) return refused(cache, request, `"${file}" is not a NAR file name`);
         const admitted = admit(cache, request, yield* param("bucket"), "write");
         if (!admitted.ok) return admitted.response;
-        const total = Number(request.headers["x-odu-parts"] ?? "");
+        const total = Number(request.headers[PARTS_HEADER] ?? "");
         if (!Number.isSafeInteger(total) || total < 1) {
-          return refused(cache, request, "send x-odu-parts: the number of parts this NAR has");
+          return refused(cache, request, `send ${PARTS_HEADER}: the number of parts this NAR has`);
         }
         const session = uploadSession(request);
         if (session === undefined) return refused(cache, request, BAD_SESSION);

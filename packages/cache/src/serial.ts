@@ -1,16 +1,17 @@
 /**
  * ONE THING AT A TIME — a promise chain, and the only spelling of it here.
  *
- * Two places in the cache need a mutex and they need it for the same reason:
+ * Three places in the cache need a mutex and they need it for the same reason:
  * a decision is taken, an `await` follows, and something else must not slip in
  * between. The write lock guards `record`, `pin` and `gc` so a collection
  * cannot delete what a pin just promised to keep, nor an object a push is
  * recording; the proof queue guards one staged NAR name so a second narinfo
- * for it sees the object the first kept.
+ * for it sees the object the first kept; the join queue guards one upload's
+ * parts so two completes cannot unlink what the other reads.
  *
  * They differ in SCOPE and in nothing else — one chain for the cache, one per
- * staged name — so the chain is here once and the keying is the caller's business.
- * A second copy of this trick is how the two would drift: one of them would
+ * staged name, one per upload — so the chain is here once and the keying is the caller's business.
+ * A second copy of this trick is how they would drift: one of them would
  * eventually get the "keep the chain alive on rejection" line wrong, and the
  * symptom would be a single failed PUT wedging every later one.
  */
