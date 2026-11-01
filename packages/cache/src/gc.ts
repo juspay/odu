@@ -4,15 +4,16 @@
  * The rule is one sentence and it is the whole answer to "why did my cache eat
  * my build": an object is expired when it has not been read within its bucket's
  * retention AND nothing the bucket still keeps references it AND no pin holds
- * it. Expired means "release its root, delete it from the store, forget the
- * row". Nothing is evicted because it is old; it is evicted because it is old
- * AND unreachable AND unpinned.
+ * it. Expired means "delete its object, forget the row". Nothing is evicted
+ * because it is old; it is evicted because it is old AND unreachable AND
+ * unpinned.
  *
  * **The decision is a pure function.** {@link planGc} takes rows and a clock
- * and answers what to evict; {@link runGc} does the store calls. That split is
- * what lets the suite state a fixture graph — a retained object, a reference to
- * it, a pin over a third — and assert the decision without a Nix store, and it
- * is why a "did GC keep the closure?" question has one place to look.
+ * and answers what to evict; {@link runGc} deletes rows and object keys. That
+ * split is what lets the suite state a fixture graph — a retained object, a
+ * reference to it, a pin over a third — and assert the decision without a
+ * filesystem, and it is why a "did GC keep the closure?" question has one place
+ * to look.
  *
  * **Two closures, because a pin is a promise.** A pin's closure is resolved at
  * pin time and stored, so a path that was in the closure then stays protected
@@ -21,23 +22,18 @@
  * the closure later is protected too. Either alone is a hole: the first misses
  * new members, the second misses members whose linking object was evicted.
  *
- * **Deletion is one call for the whole set.** `nix-store --delete` reports
- * "still alive" for a path that another path in the set references, so
- * deleting a closure one path at a time leaks every path in the middle of it
- * while reporting success. One call lets Nix order the set itself.
+ * **A twin does not lose its bytes.** Two store paths can share one NarHash
+ * and therefore one object key; the file is deleted only when no remaining row
+ * in the bucket names that NarHash.
  *
- * **And nothing can land in between.** `planGc` and the delete are separate
- * awaits, so a pin or a re-push issued while a collection is in flight would
- * find its path already gone — the "put the root back" branch would do nothing,
- * because the bytes are deleted. The cache therefore holds ONE async mutex over
- * `record`, `pin` and `gc`: a collection plans, releases and deletes with no
- * writer able to interleave, and a pin that arrived first is already in the
- * plan. That is why there is no re-plan here — there is nothing that could have
- * changed.
+ * **And nothing can land in between.** The cache holds ONE async mutex over
+ * `record`, `pin` and `gc`: a collection plans and deletes with no writer able
+ * to interleave, and a pin that arrived first is already in the plan. That is
+ * why there is no re-plan here — there is nothing that could have changed.
  */
 
 import type { BucketRow, CacheRepo, ObjectRow, PinRow } from "./db";
-import type { BlobStore } from "./store";
+import { objectKey } from "./staging";
 
 export interface GcInput {
   buckets: readonly BucketRow[];
@@ -102,8 +98,7 @@ export interface GcBucketReport {
   bucket: string;
   /** Rows dropped and paths deleted from the store. */
   evicted: number;
-  /** Paths whose row was dropped but whose bytes the store refused to delete,
-   *  because something else on this machine still roots them. */
+  /** Kept for the report's shape: the object store deletes unconditionally. */
   kept: number;
   /** Nar bytes reclaimed, by the narinfo's own `NarSize`. */
   bytes: number;
@@ -117,59 +112,46 @@ export interface GcReport {
 }
 
 /**
- * Do the plan.
- *
- * Release every root FIRST (the roots are what make `nix-store --delete` say
- * "still alive"), then delete the whole set in one call, then re-read the
- * world: a path that a pin or a re-push claimed in between gets its root back
- * and its row kept. A delete that throws re-roots everything it can before
- * failing — a root lost to an exception is a path the machine's own GC eats.
+ * Do the plan. An object leaves with its row; the bytes are the object store's,
+ * deleted by key, so nothing on this machine's Nix store is touched (the
+ * server does not have one).
  */
 export async function runGc(
-  store: BlobStore,
   repo: CacheRepo,
   plan: readonly GcBucketPlan[],
+  objects: { delete(key: string): Promise<void> },
 ): Promise<GcReport> {
-  const planned = plan.flatMap((entry) => entry.evict.map((row) => ({ ...row, bucket: entry.bucket })));
-  const bytesOf = new Map(planned.map((row) => [`${row.bucket}\u0000${row.storePath}`, row.narSize]));
-
-  for (const row of planned) await store.release(row.bucket, row.storePath);
-
-  let deleted: string[] = [];
-  try {
-    const outcome = await store.deleteMany(planned.map((row) => row.storePath));
-    deleted = outcome.deleted;
-  } catch (err) {
-    for (const row of planned) {
-      if (await store.has(row.storePath)) await store.retain(row.bucket, row.storePath);
-    }
-    throw err;
-  }
-
-  // No re-plan: the caller holds the cache's write mutex across the whole
-  // collection, so nothing a pin or a re-push could have changed has changed.
-  const deletedSet = new Set(deleted);
+  const planned = plan.flatMap((entry) =>
+    entry.evict.map((row) => ({ ...row, bucket: entry.bucket })),
+  );
   const perBucket = new Map<string, GcBucketReport>(
     plan.map((entry) => [entry.bucket, { bucket: entry.bucket, evicted: 0, kept: 0, bytes: 0 }]),
   );
-
+  // ONE query per bucket, then maintain the remaining rows in memory: a
+  // `repo.objects(bucket)` per evicted row is O(n²) on a large collection.
+  const remainingRows = new Map(plan.map((entry) => [entry.bucket, repo.objects(entry.bucket)]));
   for (const row of planned) {
-    const report = perBucket.get(row.bucket);
-    if (report === undefined) continue;
     repo.deleteObject(row.bucket, row.storePath);
-    if (deletedSet.has(row.storePath)) {
+    // TWINS: two rows can carry the same NarHash (different store paths, one
+    // object). The bytes go only when no REMAINING row in the bucket names them.
+    const rows = remainingRows.get(row.bucket) ?? [];
+    const at = rows.findIndex((other) => other.storePath === row.storePath);
+    if (at !== -1) rows.splice(at, 1);
+    const twin = rows.some((other) => other.narHash === row.narHash);
+    if (!twin) {
+      await objects.delete(objectKey(row.bucket, row.narHash, row.compression));
+    }
+    const report = perBucket.get(row.bucket);
+    if (report !== undefined) {
       report.evicted += 1;
-      report.bytes += bytesOf.get(`${row.bucket}\u0000${row.storePath}`) ?? 0;
-    } else {
-      report.kept += 1;
+      report.bytes += row.fileSize ?? row.narSize;
     }
   }
-
   const buckets = [...perBucket.values()];
   return {
     buckets,
     evicted: buckets.reduce((sum, bucket) => sum + bucket.evicted, 0),
-    kept: buckets.reduce((sum, bucket) => sum + bucket.kept, 0),
+    kept: 0,
     bytes: buckets.reduce((sum, bucket) => sum + bucket.bytes, 0),
   };
 }

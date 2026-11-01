@@ -64,9 +64,10 @@ boundary outside a declared service.
 - **No rendering.** The board is `@odu/web-ui`, the terminal and argv faces are
   `@odu/cli`, and both are clients of this process.
 - **No environment of its own beyond the boot.** `ODU_WEB_ORIGIN`,
-  `ODU_ROOT_TOKEN`, `ODU_PUBLIC_ORIGIN`, `ODU_CACHE_STORE` and the build
-  locators are read here because this is the one place that reads an
-  environment; every row is handed its facts as services.
+  `ODU_ROOT_TOKEN`, `ODU_PUBLIC_ORIGIN`, `ODU_CACHE_STORE` (read only by the
+  one-time object migration) and the build locators are read here because this
+  is the one place that reads an environment; every row is handed its facts as
+  services.
 
 ## The singleton, exactly
 

@@ -13,7 +13,8 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
-import { nixDump, parsePathInfoTable, verifyNarFile } from "./store";
+import { narHashModuloHasher, nixDump, parsePathInfoTable, verifyNarFile } from "./store";
+import { contentAddressOf } from "./storePath";
 
 const HELLO = "/nix/store/pa6rydwgjxxmmvdxap7qk9c85h8jbimy-hello-2.12.3";
 const GLIBC = "/nix/store/pqyiidz5mi73wv5f91d48s9plcqyj5bz-glibc-2.44-57";
@@ -58,6 +59,7 @@ describe("nix path-info's three shapes", () => {
       narSize: 279592,
       references: [GLIBC, HELLO],
       deriver: "/nix/store/y1kh9arkh7w7am664yqbnnrfpsisqcdc-hello-2.12.3.drv",
+      ca: null,
       sigs: ["cache.nixos.org-1:AAAA"],
     });
   });
@@ -138,6 +140,95 @@ describe("an upload's bytes", () => {
     });
   });
 
+  it("carries a split hash part across any chunk boundary", () => {
+    const hashPart = "0123456789abcdfghijklmnpqrsvwxyz";
+    const payload = Buffer.from(
+      `nar:${hashPart}:middle:${hashPart}:tail:${hashPart}`,
+      "utf8",
+    );
+    const whole = narHashModuloHasher(hashPart);
+    whole.update(payload);
+    const expected = whole.finish();
+
+    const oneByte = narHashModuloHasher(hashPart);
+    for (const byte of payload) oneByte.update(Uint8Array.of(byte));
+    expect(oneByte.finish()).toBe(expected);
+
+    for (let split = 0; split <= payload.length; split++) {
+      const hasher = narHashModuloHasher(hashPart);
+      hasher.update(payload.subarray(0, split));
+      hasher.update(payload.subarray(split));
+      expect({ split, hash: hasher.finish() }).toEqual({ split, hash: expected });
+    }
+  });
+
+  it("computes Nix's modulo-self hash from a make-content-addressed NAR", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "odu-self-ca-"));
+    try {
+      const drv = join(dir, "selfref.nix");
+      writeFileSync(
+        drv,
+        'derivation { name = "selfref"; system = builtins.currentSystem; builder = "/bin/sh"; args = [ "-c" "echo $out > $out" ]; }',
+      );
+      const built = spawnSync(
+        "nix",
+        ["build", "--impure", "--no-link", "--print-out-paths", "-f", drv],
+        { encoding: "utf-8" },
+      );
+      expect(built.status).toBe(0);
+      const input = built.stdout.trim();
+      const rewritten = spawnSync(
+        "nix",
+        ["store", "make-content-addressed", "--json", input],
+        { encoding: "utf-8" },
+      );
+      expect(rewritten.status).toBe(0);
+      const paths = JSON.parse(rewritten.stdout) as { rewrites: Record<string, string> };
+      const storePath = Object.values(paths.rewrites)[0] as string;
+      const info = JSON.parse(
+        spawnSync("nix", ["path-info", "--json", storePath], { encoding: "utf-8" }).stdout,
+      ) as Record<string, { ca: string | null; narHash: string; references: string[] }>;
+      const facts = Object.values(info)[0];
+      if (facts === undefined || facts.ca === null) throw new Error("no CA from nix path-info");
+      const nar = spawnSync("nix", ["store", "dump-path", storePath], { maxBuffer: 8 << 20 });
+      expect(nar.status).toBe(0);
+      const narFile = join(dir, "self.nar");
+      writeFileSync(narFile, nar.stdout);
+      const hashPart = storePath.split("/").at(-1)!.slice(0, 32);
+      const checked = await verifyNarFile(narFile, "none", hashPart);
+      expect(checked).toMatchObject({
+        ok: true,
+        selfHash: `sha256:${facts.ca.replace("fixed:r:sha256:", "")}`,
+      });
+      expect(
+        contentAddressOf({
+          storePath,
+          narHash: facts.narHash,
+          references: facts.references,
+          selfHash: checked.ok ? checked.selfHash : null,
+        }),
+      ).toBe(facts.ca);
+
+      // ONE BYTE DIFFERS: the modulo hash moves and no longer reproduces the
+      // path, so the proof refuses it.
+      const altered = Buffer.from(nar.stdout);
+      altered[Math.floor(altered.length / 2)]! ^= 0x01;
+      writeFileSync(narFile, altered);
+      const changed = await verifyNarFile(narFile, "none", hashPart);
+      expect(changed.ok).toBe(true);
+      expect(
+        contentAddressOf({
+          storePath,
+          narHash: facts.narHash,
+          references: facts.references,
+          selfHash: changed.ok ? changed.selfHash : null,
+        }),
+      ).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("decompresses before it hashes, for every Compression a client sends", async () => {
     // THE BUG THIS PINS: a decompressor spawned with stdin closed reads
     // nothing, exits non-zero, and refuses every upload — while `none` passes.
@@ -157,9 +248,14 @@ describe("an upload's bytes", () => {
       const child = spawnSync(argv[0], [...argv.slice(1), plain], { maxBuffer: 1 << 20 });
       expect({ compression, status: child.status }).toEqual({ compression, status: 0 });
       writeFileSync(compressed, child.stdout);
-      expect({ compression, checked: await verifyNarFile(compressed, compression) }).toEqual({
+      expect({ compression, checked: await verifyNarFile(compressed, compression) }).toMatchObject({
         compression,
-        checked: raw,
+        checked: {
+          ok: true,
+          narHash: raw.narHash,
+          narSize: raw.narSize,
+          fileSize: child.stdout.length,
+        },
       });
     }
   });

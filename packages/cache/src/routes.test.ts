@@ -14,6 +14,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,6 +22,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { asRoot } from "./testlib";
 import { HttpRouter } from "effect/http";
 import { base32, storePathHash } from "./narinfo";
+import { base32Bytes, storePathHashOf } from "./storePath";
 import { type Cache, createCache } from "./cache";
 import { CACHE_MOUNT } from "./paths";
 import { NIX_CACHE_INFO } from "./staging";
@@ -83,6 +85,7 @@ function stagedFiles(): string[] {
 async function harness(
   publicBucket: boolean,
   boardOrigin = "https://odu.example.org",
+  log?: (event: string, fields: Record<string, unknown>) => void,
 ): Promise<Harness> {
   const store = new FakeStore();
   const hello = nar("a NAR, in pieces");
@@ -103,9 +106,9 @@ async function harness(
   const cache = createCache({
     stateRoot: scratch,
     rootToken: ROOT,
-    store: null,
-    blob: store,
+    legacyStore: { dump: (path) => store.dump(path) },
     now: () => NOW,
+    log,
   });
   const created = await cache.admin.create({
     ...asRoot(ROOT),
@@ -137,7 +140,7 @@ async function harness(
   // SEEDED THROUGH THE PROTOCOL, not behind it: an object row exists because a
   // NAR and its narinfo were accepted, so the fixture is a push rather than a
   // row inserted past the code under test.
-  expect((await upload(fetchIt, tokens.write, HELLO, hello)).status).toBe(200);
+  expect((await upload(fetchIt, tokens.write, HELLO, hello, { sigs: ["cache.nixos.org-1:AAAA"] })).status).toBe(200);
 
   return {
     cache,
@@ -157,7 +160,14 @@ async function upload(
   token: string,
   storePath: string,
   payload: { bytes: Uint8Array; narHash: string },
-  options: { references?: readonly string[]; narHash?: string; compression?: string; skipNar?: boolean } = {},
+  options: {
+    references?: readonly string[];
+    narHash?: string;
+    compression?: string;
+    skipNar?: boolean;
+    ca?: string;
+    sigs?: readonly string[];
+  } = {},
 ): Promise<Response> {
   const name = `${payload.narHash.replace(/^sha256:/, "")}.nar.zst`;
   if (options.skipNar !== true) {
@@ -175,6 +185,8 @@ async function upload(
     `NarHash: ${options.narHash ?? payload.narHash}`,
     `NarSize: ${payload.bytes.length}`,
     `References: ${(options.references ?? []).map((path) => path.slice("/nix/store/".length)).join(" ")}`,
+    ...(options.ca === undefined ? [] : [`CA: ${options.ca}`]),
+    ...(options.sigs ?? []).map((sig) => `Sig: ${sig}`),
     "",
   ].join("\n");
   return fetchIt(`/main/${storePathHash(storePath)}.narinfo`, {
@@ -306,7 +318,7 @@ describe("narinfo", () => {
     expect(response.status).toBe(200);
     const text = await response.text();
     expect(text).toContain(`StorePath: ${HELLO}`);
-    expect(text).toContain("Compression: zstd");
+    expect(text).toContain("Compression: none");
     // The bucket's own signature first, and the client's kept beside it.
     expect(text).toMatch(/^Sig: main-1:/m);
     expect(text).toContain("Sig: cache.nixos.org-1:AAAA");
@@ -334,6 +346,34 @@ describe("narinfo", () => {
     const h = await harness(true);
     expect((await h.fetch(`/main/${hashOf(HELLO)}.narinfo`, { method: "HEAD" })).status).toBe(200);
     expect((await h.fetch(`/main/${"0".repeat(32)}.narinfo`, { method: "HEAD" })).status).toBe(404);
+    await h.dispose();
+  });
+
+  it("serves the CA its path proves, and ignores the pusher's claim", async () => {
+    const h = await harness(true);
+    const payload = nar("a content-addressed NAR");
+    const hash = payload.narHash.slice(7);
+    const name = "ca-route";
+    const path = `/nix/store/${storePathHashOf("source", base32Bytes(hash), name)}-${name}`;
+    const put = await upload(h.fetch, h.tokens.write, path, payload, {
+      ca: `fixed:r:sha256:${"B".repeat(52)}`,
+    });
+    expect(put.status).toBe(200);
+    const served = await (await h.fetch(`/main/${hashOf(path)}.narinfo`)).text();
+    expect(served.split("\n")).toContain(`CA: fixed:r:sha256:${hash}`);
+    await h.dispose();
+  });
+
+  it("refuses a derivation's narinfo", async () => {
+    const h = await harness(true);
+    const drv = "/nix/store/11111111111111111111111111111111-thing.drv";
+    const response = await h.fetch(`/main/${hashOf(drv)}.narinfo`, {
+      ...bearer(h.tokens.write),
+      method: "PUT",
+      body: `StorePath: ${drv}\nURL: nar/x.nar.zst\nNarHash: sha256:${"0".repeat(52)}\nNarSize: 1\nReferences: \n`,
+    });
+    expect(response.status).toBe(400);
+    expect(await response.text()).toContain("is a derivation");
     await h.dispose();
   });
 
@@ -411,8 +451,7 @@ describe("the auth matrix", () => {
     const later = createCache({
       stateRoot: scratch,
       rootToken: ROOT,
-      store: null,
-      blob: h.store,
+      legacyStore: { dump: (path) => h.store.dump(path) },
       now: () => NOW + 10 * 24 * 60 * 60 * 1000,
     });
     expect(later.bucket("main")?.name).toBe("main");
@@ -535,13 +574,170 @@ describe("route parameters", () => {
   });
 });
 
-describe("the NAR", () => {
-  it("streams the store's bytes, in the chunks the store produced", async () => {
-    const h = await harness(true);
+describe("operational lines", () => {
+  it("logs one line for a served NAR and one for a refusal", async () => {
+    const lines: string[] = [];
+    const h = await harness(true, "https://odu.example.org", (event, fields) =>
+      lines.push(`${event} ${JSON.stringify(fields)}`),
+    );
     const hello = nar("a NAR, in pieces");
     const response = await h.fetch(`/main/nar/${hello.narHash.replace(/^sha256:/, "")}.nar.zst`);
+    // INTENT IS NOT EVIDENCE: building the response logs nothing; the body
+    // finishing does.
+    expect(lines.some((line) => line.startsWith("cache.nar.served"))).toBe(false);
+    await response.arrayBuffer();
+    const servedLine = lines.find((line) => line.startsWith("cache.nar.served"));
+    expect(servedLine).toContain('"source":"file"');
+    expect(servedLine).toContain(`"bytes":${hello.bytes.length}`);
+    expect(servedLine).toContain('"cancelled":false');
+
+    const cancelled = await h.fetch(`/main/nar/${hello.narHash.replace(/^sha256:/, "")}.nar.zst`);
+    await cancelled.body?.cancel();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(
+      lines.some((line) => line.startsWith("cache.nar.served") && line.includes('"cancelled":true')),
+    ).toBe(true);
+
+    await h.fetch("/main/nar/.hidden.nar.zst");
+    expect(lines.some((line) => line.startsWith("cache.request.refused") && line.includes("not a NAR file name"))).toBe(true);
+    await h.dispose();
+  });
+});
+
+describe("the deprecated held endpoint", () => {
+  it("answers an empty list, so a 2.x client waits for nothing", async () => {
+    const h = await harness(true);
+    const response = await h.fetch("/main/held");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ held: [] });
+    await h.dispose();
+  });
+});
+
+describe("the NAR", () => {
+  it("serves the KEPT file with a length and the file's own hash", async () => {
+    const h = await harness(true);
+    const hello = nar("a NAR, in pieces");
+    const name = `${hello.narHash.replace(/^sha256:/, "")}.nar.zst`;
+    const response = await h.fetch(`/main/nar/${name}`);
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("application/x-nix-nar");
+    expect(response.headers.get("content-length")).toBe(String(hello.bytes.length));
+    const body = new Uint8Array(await response.arrayBuffer());
+    expect(Array.from(body)).toEqual(Array.from(hello.bytes));
+    // NOTHING RE-DUMPS THE PATH: the file the pusher sent is the answer.
+    expect(h.store.calls.filter((call) => call.op === "dump")).toHaveLength(0);
+    const narinfo = await (await h.fetch(`/main/${hashOf(HELLO)}.narinfo`)).text();
+    expect(narinfo).toContain(`FileSize: ${hello.bytes.length}`);
+    expect(narinfo).toContain(`FileHash: sha256:${base32(createHash("sha256").update(body).digest())}`);
+    await h.dispose();
+  });
+
+  it("serves each twin's own compression when NarHashes collide", async () => {
+    const h = await harness(true);
+    const raw = new TextEncoder().encode("identical NAR, two compression choices");
+    const zstd = spawnSync("zstd", ["-q", "-c"], { input: raw });
+    const xz = spawnSync("xz", ["-c"], { input: raw });
+    expect(zstd.status).toBe(0);
+    expect(xz.status).toBe(0);
+    const narHash = `sha256:${base32(createHash("sha256").update(raw).digest())}`;
+    const zstdBytes = new Uint8Array(zstd.stdout);
+    const xzBytes = new Uint8Array(xz.stdout);
+    const one = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-twin-zstd";
+    const two = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-twin-xz";
+    expect((await upload(h.fetch, h.tokens.write, one, { bytes: zstdBytes, narHash }, { compression: "zstd" })).status).toBe(200);
+    expect((await upload(h.fetch, h.tokens.write, two, { bytes: xzBytes, narHash }, { compression: "xz" })).status).toBe(200);
+    const oneNar = await h.fetch(`/main/nar/${narHash.slice(7)}.nar.zst`);
+    const twoNar = await h.fetch(`/main/nar/${narHash.slice(7)}.nar.xz`);
+    expect(oneNar.status).toBe(200);
+    expect(twoNar.status).toBe(200);
+    expect(Array.from(new Uint8Array(await oneNar.arrayBuffer()))).toEqual(Array.from(zstdBytes));
+    expect(Array.from(new Uint8Array(await twoNar.arrayBuffer()))).toEqual(Array.from(xzBytes));
+    expect(await (await h.fetch(`/main/${hashOf(one)}.narinfo`)).text()).toContain("Compression: zstd");
+    expect(await (await h.fetch(`/main/${hashOf(two)}.narinfo`)).text()).toContain("Compression: xz");
+    await h.dispose();
+  });
+
+  it("keeps an xz upload as xz and serves those exact bytes", async () => {
+    const h = await harness(true);
+    const raw = new TextEncoder().encode("a NAR compressed with xz");
+    const xz = spawnSync("xz", ["-c"], { input: raw });
+    expect(xz.status).toBe(0);
+    const payload = {
+      bytes: new Uint8Array(xz.stdout),
+      narHash: `sha256:${base32(createHash("sha256").update(raw).digest())}`,
+    };
+    const path = "/nix/store/dddddddddddddddddddddddddddddddd-xz";
+    const response = await upload(h.fetch, h.tokens.write, path, payload, { compression: "xz" });
+    expect(response.status).toBe(200);
+    const narinfo = await (await h.fetch(`/main/${hashOf(path)}.narinfo`)).text();
+    expect(narinfo).toContain("Compression: xz");
+    expect(narinfo).toContain(`FileSize: ${payload.bytes.length}`);
+    const name = `${payload.narHash.slice(7)}.nar.xz`;
+    const nar = await h.fetch(`/main/nar/${name}`);
+    expect(nar.status).toBe(200);
+    expect(nar.headers.get("content-length")).toBe(String(payload.bytes.length));
+    expect(Array.from(new Uint8Array(await nar.arrayBuffer()))).toEqual(Array.from(payload.bytes));
+    await h.dispose();
+  });
+
+  it("answers a Range from the file", async () => {
+    const h = await harness(true);
+    const hello = nar("a NAR, in pieces");
+    const response = await h.fetch(`/main/nar/${hello.narHash.replace(/^sha256:/, "")}.nar.zst`, {
+      headers: { range: "bytes=2-5" },
+    });
+    expect(response.status).toBe(206);
+    expect(response.headers.get("content-range")).toBe(
+      `bytes 2-5/${hello.bytes.length}`,
+    );
+    expect(response.headers.get("content-length")).toBe("4");
+    expect(Array.from(new Uint8Array(await response.arrayBuffer()))).toEqual(
+      Array.from(hello.bytes.subarray(2, 6)),
+    );
+    await h.dispose();
+  });
+
+  it("answers suffix and open-ended ranges, and refuses past the end", async () => {
+    const h = await harness(true);
+    const hello = nar("a NAR, in pieces");
+    const name = `${hello.narHash.slice(7)}.nar.zst`;
+    const suffix = await h.fetch(`/main/nar/${name}`, { headers: { range: "bytes=-4" } });
+    expect(suffix.status).toBe(206);
+    expect(suffix.headers.get("content-range")).toBe(
+      `bytes ${hello.bytes.length - 4}-${hello.bytes.length - 1}/${hello.bytes.length}`,
+    );
+    expect(Array.from(new Uint8Array(await suffix.arrayBuffer()))).toEqual(
+      Array.from(hello.bytes.subarray(hello.bytes.length - 4)),
+    );
+    const open = await h.fetch(`/main/nar/${name}`, {
+      headers: { range: `bytes=${hello.bytes.length - 2}-` },
+    });
+    expect(open.status).toBe(206);
+    expect(Array.from(new Uint8Array(await open.arrayBuffer()))).toEqual(
+      Array.from(hello.bytes.subarray(hello.bytes.length - 2)),
+    );
+    for (const range of [
+      `bytes=${hello.bytes.length}-`,
+      `bytes=${hello.bytes.length + 1}-`,
+      "bytes=-0",
+      "bytes=-",
+    ]) {
+      expect({ range, status: (await h.fetch(`/main/nar/${name}`, { headers: { range } })).status }).toEqual({
+        range,
+        status: 416,
+      });
+    }
+    await h.dispose();
+  });
+
+  it("falls back to the FIFO dump when the file is not there yet", async () => {
+    const h = await harness(true);
+    const hello = nar("a NAR, in pieces");
+    const name = `${hello.narHash.replace(/^sha256:/, "")}.nar.zst`;
+    rmSync(join(scratch, "cache", "objects", "main", "nar", `${hello.narHash.slice(7)}.nar`), { force: true });
+    const response = await h.fetch(`/main/nar/${name}`);
+    expect(response.status).toBe(200);
     expect(await response.text()).toBe("a NAR, in pieces");
     expect(h.store.calls.filter((call) => call.op === "dump")).toHaveLength(1);
     await h.dispose();
@@ -636,18 +832,13 @@ describe("uploading", () => {
     const h = await harness(true);
     const staged = "/nix/store/11111111111111111111111111111111-uploaded";
     const payload = nar("uploaded bytes");
-    h.store.add(
-      { storePath: staged, narHash: payload.narHash, narSize: payload.bytes.length, references: [] },
-      false,
-    );
     const response = await upload(h.fetch, h.tokens.write, staged, payload);
     expect(response.status).toBe(200);
-    expect(h.store.calls.filter((call) => call.op === "import").map((call) => call.storePath)).toContain(
-      staged,
-    );
     const read = await h.fetch(`/main/${hashOf(staged)}.narinfo`);
     expect(read.status).toBe(200);
-    expect(await read.text()).toContain("Sig: main-1:");
+    const narinfo = await read.text();
+    expect(narinfo).toContain("Sig: main-1:");
+    expect(narinfo).toContain(`FileSize: ${payload.bytes.length}`);
     await h.dispose();
   });
 
@@ -667,7 +858,6 @@ describe("uploading", () => {
     // sentence to decide whether to re-send the bytes, so the string is pinned
     // on purpose and the client's fallback is tested against the same words.
     expect(await response.text()).toContain("never uploaded");
-    expect(h.store.calls.filter((call) => call.op === "import")).toHaveLength(1); // the seed only
     await h.dispose();
   });
 
@@ -676,7 +866,6 @@ describe("uploading", () => {
     const staged = "/nix/store/33333333333333333333333333333333-truncated";
     const real = nar("the real bytes");
     const claimed = nar("the bytes somebody claimed");
-    h.store.add({ storePath: staged, narHash: claimed.narHash, narSize: 1, references: [] }, false);
 
     const response = await upload(h.fetch, h.tokens.write, staged, real, {
       narHash: claimed.narHash,
@@ -716,31 +905,19 @@ describe("uploading", () => {
     await h.dispose();
   });
 
-  it("answers 202 for an early upload, then records it when its reference lands", async () => {
+  it("records a parent whose reference is not in the bucket — a name, not a path", async () => {
     const h = await harness(true);
     const child = "/nix/store/44444444444444444444444444444444-child";
     const parent = "/nix/store/55555555555555555555555555555555-parent";
-    const childPayload = nar("child bytes");
     const parentPayload = nar("parent bytes");
-    h.store.add(
-      { storePath: child, narHash: childPayload.narHash, narSize: 1, references: [] },
-      false,
-    );
-    h.store.add(
-      { storePath: parent, narHash: parentPayload.narHash, narSize: 1, references: [child] },
-      false,
-    );
-
     const early = await upload(h.fetch, h.tokens.write, parent, parentPayload, {
       references: [child],
     });
-    expect(early.status).toBe(202);
-    expect(await early.text()).toContain(child);
-    expect((await h.fetch(`/main/${hashOf(parent)}.narinfo`)).status).toBe(404);
-
+    expect(early.status).toBe(200);
+    expect((await h.fetch(`/main/${hashOf(parent)}.narinfo`)).status).toBe(200);
+    const childPayload = nar("child bytes");
     const late = await upload(h.fetch, h.tokens.write, child, childPayload);
     expect(late.status).toBe(200);
-    expect((await h.fetch(`/main/${hashOf(parent)}.narinfo`)).status).toBe(200);
     await h.dispose();
   });
 
@@ -753,8 +930,6 @@ describe("uploading", () => {
     const one = "/nix/store/66666666666666666666666666666666-one";
     const two = "/nix/store/77777777777777777777777777777777-two";
     const payload = nar("identical bytes");
-    h.store.add({ storePath: one, narHash: payload.narHash, narSize: 1, references: [] }, false);
-    h.store.add({ storePath: two, narHash: payload.narHash, narSize: 1, references: [] }, false);
 
     const name = `${payload.narHash.replace(/^sha256:/, "")}.nar.zst`;
     for (const path of [one, two]) {
@@ -789,10 +964,6 @@ describe("uploading", () => {
     const h = await harness(true);
     const staged = "/nix/store/88888888888888888888888888888888-chunked";
     const payload = nar("bytes that arrive in pieces");
-    h.store.add(
-      { storePath: staged, narHash: payload.narHash, narSize: payload.bytes.length, references: [] },
-      false,
-    );
     const name = `${payload.narHash.replace(/^sha256:/, "")}.nar.zst`;
     const split = [payload.bytes.subarray(0, 5), payload.bytes.subarray(5)];
     const part = (index: number) =>
@@ -832,6 +1003,98 @@ describe("uploading", () => {
     });
     expect(narinfo.status).toBe(200);
     expect((await h.fetch(`/main/${hashOf(staged)}.narinfo`)).status).toBe(200);
+    await h.dispose();
+  });
+
+  it("names the path, parts and bytes when a joined upload fails its proof", async () => {
+    const lines: string[] = [];
+    const h = await harness(true, "https://odu.example.org", (event, fields) =>
+      lines.push(`${event} ${JSON.stringify(fields)}`),
+    );
+    const staged = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bad-nar";
+    const payload = nar("three parts that will not match the narinfo");
+    const wrong = nar("some other bytes");
+    const name = `${payload.narHash.slice(7)}.nar.zst`;
+    const split = [
+      payload.bytes.subarray(0, 5),
+      payload.bytes.subarray(5, 10),
+      payload.bytes.subarray(10),
+    ];
+    const put = (index: number) =>
+      h.fetch(`/main/nar/${name}/parts/${index}`, {
+        ...bearer(h.tokens.write),
+        method: "PUT",
+        body: body(split[index] as Uint8Array),
+      });
+    expect((await Promise.all([put(2), put(0), put(1)])).map((r) => r.status)).toEqual([
+      204, 204, 204,
+    ]);
+    expect(
+      (
+        await h.fetch(`/main/nar/${name}/complete`, {
+          ...bearer(h.tokens.write),
+          method: "POST",
+          headers: { authorization: `Bearer ${h.tokens.write}`, "x-odu-parts": "3" },
+        })
+      ).status,
+    ).toBe(200);
+    const refused = await h.fetch(`/main/${hashOf(staged)}.narinfo`, {
+      ...bearer(h.tokens.write),
+      method: "PUT",
+      body: `StorePath: ${staged}\nURL: nar/${name}\nCompression: none\nNarHash: ${wrong.narHash}\nNarSize: ${payload.bytes.length}\nReferences: \n`,
+    });
+    expect(refused.status).toBe(400);
+    const line = lines.find((entry) => entry.startsWith("cache.request.refused"));
+    expect(line).toContain(`"storePath":"${staged}"`);
+    expect(line).toContain('"parts":3');
+    expect(line).toContain(`"bytesReceived":${payload.bytes.length}`);
+    await h.dispose();
+  });
+
+  it("joins 3+ parts uploaded concurrently and out of index order", async () => {
+    const h = await harness(true);
+    const staged = "/nix/store/99999999999999999999999999999999-concurrent";
+    // REAL PART SIZES: 64 MiB, 64 MiB, remainder — the agent-distro shape.
+    const MB = 1024 * 1024;
+    const bytes = new Uint8Array(130 * MB);
+    for (let i = 0; i < bytes.length; i += 4096) bytes[i] = i & 0xff;
+    const narHash = `sha256:${base32(createHash("sha256").update(bytes).digest())}`;
+    const payload = { bytes, narHash };
+    const name = `${narHash.slice(7)}.nar.zst`;
+    const split = [
+      bytes.subarray(0, 64 * MB),
+      bytes.subarray(64 * MB, 128 * MB),
+      bytes.subarray(128 * MB),
+    ];
+    const part = (index: number) =>
+      h.fetch(`/main/nar/${name}/parts/${index}`, {
+        ...bearer(h.tokens.write),
+        method: "PUT",
+        body: body(split[index] as Uint8Array),
+      });
+    // THE AGENT-DISTRO SHAPE: three parts, concurrent, lines in any order.
+    const uploaded = await Promise.all([part(2), part(1), part(0)]);
+    expect(uploaded.map((response) => response.status)).toEqual([204, 204, 204]);
+    const complete = await h.fetch(`/main/nar/${name}/complete`, {
+      ...bearer(h.tokens.write),
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${h.tokens.write}`,
+        "x-odu-parts": "3",
+      },
+    });
+    expect(complete.status).toBe(200);
+    const narinfo = await h.fetch(`/main/${hashOf(staged)}.narinfo`, {
+      ...bearer(h.tokens.write),
+      method: "PUT",
+      body: `StorePath: ${staged}\nURL: nar/${name}\nCompression: none\nNarHash: ${payload.narHash}\nNarSize: ${payload.bytes.length}\nReferences: \n`,
+    });
+    expect(await narinfo.text()).toBe("");
+    expect(narinfo.status).toBe(200);
+    const read = await h.fetch(`/main/nar/${name}`);
+    expect(Array.from(new Uint8Array(await read.arrayBuffer()))).toEqual(
+      Array.from(payload.bytes),
+    );
     await h.dispose();
   });
 });
@@ -911,6 +1174,110 @@ describe("the shell's own paths", () => {
         .catch(() => 404);
       expect({ path, handled: status === 200 }).toEqual({ path, handled: false });
     }
+    await h.dispose();
+  });
+});
+
+/** A stream of `count` repeated `size`-byte chunks: large in TOTAL BYTES, small
+ *  on the heap. The same buffer is handed out every pull, so a leaking server
+ *  shows up as RSS and not as this fixture's allocation. */
+function pattern(size: number): Uint8Array {
+  const chunk = new Uint8Array(size);
+  let x = 0x9e3779b9;
+  for (let at = 0; at < chunk.length; at++) {
+    x ^= x << 13;
+    x ^= x >>> 17;
+    x ^= x << 5;
+    chunk[at] = x & 0xff;
+  }
+  return chunk;
+}
+
+function bigStream(count: number, size = 64 * 1024): ReadableStream<Uint8Array> {
+  const chunk = pattern(size);
+  let sent = 0;
+  return new ReadableStream({
+    pull(controller) {
+      if (sent >= count) {
+        controller.close();
+        return;
+      }
+      sent += 1;
+      controller.enqueue(chunk);
+    },
+  });
+}
+
+/** Highest RSS growth while `work` runs, sampled every 10 ms. */
+async function rssGrowth(work: () => Promise<void>): Promise<number> {
+  const baseline = process.memoryUsage().rss;
+  let peak = baseline;
+  const timer = setInterval(() => {
+    peak = Math.max(peak, process.memoryUsage().rss);
+  }, 10);
+  try {
+    await work();
+  } finally {
+    clearInterval(timer);
+  }
+  return peak - baseline;
+}
+
+describe("a large NAR stays off the heap", () => {
+  const CHUNKS = 5000; // ~320 MiB of NAR bytes
+  const LIMIT = 64 * 1024 * 1024;
+
+  it("serves it to a slow reader at constant memory", async () => {
+    const h = await harness(true);
+    const hello = nar("a NAR, in pieces");
+    // LARGE SOURCE CHUNKS, on purpose: zstd hands out ~1.5 MB buffers, and
+    // Bun keeps a `res.write` chunk alive until the socket drains.
+    const chunks = 214;
+    const size = 1_500_000;
+    h.store.dump = () => bigStream(chunks, size);
+    const file = `${hello.narHash.replace(/^sha256:/, "")}.nar`;
+    // The FIFO FALLBACK's fixed point: the kept file is removed, so the route
+    // has no length and must stream the dump without buffering.
+    rmSync(join(scratch, "cache", "objects", "main", "nar", file), { force: true });
+    const growth = await rssGrowth(async () => {
+      const response = await h.fetch(`/main/nar/${file}`);
+      expect(response.status).toBe(200);
+      const reader = (response.body as ReadableStream<Uint8Array>).getReader();
+      const digest = createHash("sha256");
+      let reads = 0;
+      let bytes = 0;
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) break;
+        digest.update(next.value);
+        bytes += next.value.length;
+        reads += 1;
+        // A SLOW CLIENT: the server must stop producing, not buffer.
+        if (reads % 16 === 0) await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      const expected = createHash("sha256");
+      const chunk = pattern(size);
+      for (let i = 0; i < chunks; i++) expected.update(chunk);
+      expect(bytes).toBe(chunks * size);
+      // CONTENT, not just length: the pieces must arrive in order.
+      expect(digest.digest("hex")).toBe(expected.digest("hex"));
+    });
+    expect({ growth, within: growth < LIMIT }).toEqual({ growth, within: true });
+    await h.dispose();
+  });
+
+  it("accepts an upload of it at constant memory", async () => {
+    const h = await harness(true);
+    const growth = await rssGrowth(async () => {
+      const response = await h.fetch(`/main/nar/big.nar.zst`, {
+        ...bearer(h.tokens.write),
+        method: "PUT",
+        body: bigStream(CHUNKS),
+        duplex: "half",
+      } as RequestInit);
+      expect(response.status).toBe(200);
+    });
+    expect({ growth, within: growth < LIMIT }).toEqual({ growth, within: true });
     await h.dispose();
   });
 });

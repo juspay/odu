@@ -20,7 +20,8 @@
  * unhandled rejection behind.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
@@ -42,6 +43,10 @@ import {
   StateDir,
 } from "@odu/cordis/services";
 import { cacheRow } from "./server";
+import { createCache } from "./cache";
+import { openCacheRepo } from "./db";
+import { asRoot } from "./testlib";
+import { canonicalNarHash } from "./narinfo";
 
 const silentLog: Logger = {
   debug: () => {},
@@ -118,6 +123,85 @@ describe("the cache row's teardown", () => {
 
   afterEach(() => {
     rmSync(scratch, { recursive: true, force: true });
+  });
+
+  it("starts the migration after apply returns, scoped to the row", async () => {
+    // A REAL ROW, OBJECTLESS: a store path in the test machine's own store, a
+    // bucket, and a row with no object. The migration must find it with no
+    // request; the old bug forked it with `forkChild`, which was interrupted
+    // when apply's fiber ended.
+    const source = join(scratch, "migrate-me");
+    writeFileSync(source, "the migration must keep this");
+    const added = spawnSync("nix", ["store", "add-file", source], { encoding: "utf-8" });
+    expect(added.status).toBe(0);
+    const storePath = added.stdout.trim();
+    const rowHash = "d".repeat(32);
+    const info = JSON.parse(
+      spawnSync("nix", ["path-info", "--json", storePath], { encoding: "utf-8" }).stdout,
+    ) as Record<string, { narHash: string; narSize: number }> | { narHash: string; narSize: number }[];
+    const facts = Array.isArray(info) ? info[0] : Object.values(info)[0];
+    if (facts === undefined) throw new Error("nix path-info answered nothing");
+    const cache = createCache({ stateRoot: scratch, rootToken: "root-token" });
+    await cache.admin.create({
+      ...asRoot("root-token"),
+      name: "main",
+      public: true,
+      retentionDays: 30,
+      upstreamKeys: [],
+    });
+    const repo = openCacheRepo(join(scratch, "cache", "cache.sqlite"));
+    repo.putObject({
+      bucket: "main",
+      storePath,
+      hash: rowHash,
+      narHash: canonicalNarHash(facts.narHash),
+      narSize: facts.narSize,
+      references: [],
+      deriver: null,
+      ca: null,
+      caProof: "unknown",
+      compression: "zstd",
+      fileHash: null,
+      fileSize: null,
+      sigs: [],
+      hits: 0,
+      created: 0,
+      lastAccessed: 0,
+    });
+    repo.close();
+    await cache.close();
+
+    const run = standing();
+    const host = await run(openHost);
+    await run(provide(host, StateDir, () => scratch));
+    await run(provide(host, RootToken, () => "root-token"));
+    await run(provide(host, NixStore, () => null));
+    await run(provide(host, BoundOrigin, () => "http://127.0.0.1:18440"));
+    await run(provide(host, PublicOrigin, () => null));
+    await run(provide(host, Log, () => silentLog));
+    await run(provide(host, Routes, () => routesStub));
+    await run(
+      provide(host, Bundle, () => ({
+        mount: () => ({
+          ctx: { collections: { buckets: { upsert: () => {}, remove: () => {} } } },
+          drop: async () => {},
+        }),
+      }) as unknown as RootedSurfacesRuntime<never>),
+    );
+    await run(mountPlugin(host, cacheRow));
+
+    // NO REQUEST: the row's scoped fiber must put the object.
+    const deadline = Date.now() + 10_000;
+    let row = null;
+    while (Date.now() < deadline) {
+      const read = openCacheRepo(join(scratch, "cache", "cache.sqlite"));
+      row = read.object("main", storePath);
+      read.close();
+      if (row?.fileHash !== null && row?.fileHash !== undefined) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(row?.fileHash ?? null).not.toBeNull();
+    await run(closeHost(host));
   });
 
   it("drops the mount before the database closes, and closes cleanly", async () => {

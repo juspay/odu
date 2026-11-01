@@ -1,43 +1,39 @@
 /**
- * THE BLOB STORE — the Nix store itself, behind a port.
+ * THE LOCAL NIX STORE, as the PUSH CLIENT and the MIGRATION need it — never as
+ * the server's storage.
  *
- * A bucket holds METADATA. The bytes are the machine's own `/nix/store`, which
- * is the whole design (PLAN.md, "Storage"): dedup across buckets is free
- * because a store path is a store path, a push from the machine that built the
- * paths moves nothing, and a read is a `dump-path` piped through zstd rather
- * than a second copy of somebody's build. S3 is the second implementation of
- * this port (PR 11), which is why it IS a port.
+ * A cache object is the compressed NAR a pusher sent, kept by `ObjectStore`;
+ * this module no longer imports, roots or deletes anything. It is the seam for
+ * the three places a Nix store is still the right fact:
+ *
+ * - **The pusher's closure.** `nix path-info -r --json` and
+ *   `nix store dump-path | zstd` read the machine that BUILT the paths.
+ * - **The verifier.** {@link verifyNarFile} decompresses an upload and hashes
+ *   both the NAR and the compressed file before anything is kept.
+ * - **The one-time migration.** The old store is read with the same
+ *   `dump-path` pipeline (`null` means the host's `/nix/store`).
  *
  * **Nix comes from PATH, deliberately.** The repo does not pin it (see
- * `default.nix` near "deliberately NOT pinned"): the host that provides the
- * daemon provides the client, because a pinned client older than the daemon
- * corrupts content-addressed handling. The COMPRESSORS are pinned, on odu's
- * wrapper PATH and in the devShell, because compressing and decompressing a NAR
- * is odu's own work — `zstd` for what odu serves, `xz` and `bzip2` for what a
- * Nix client uploads (`nix copy --to` still defaults to xz).
+ * `default.nix` near "deliberately NOT pinned"): the host provides the client.
+ * The COMPRESSORS are pinned on odu's wrapper PATH and in the devShell —
+ * `zstd`, `xz` and `bzip2` — because verifying and serving a NAR is odu's own
+ * work, whatever a client uploaded.
  *
- * **`store` is one URI and every call carries it.** `null` means the daemon —
- * the production shape. `local?root=<tmp>` is the e2e shape: no trusted-user
- * setup on a CI host, and nothing the suite pushes lands in the host's store.
- *
- * **A NAR is never held in memory.** `dump` is a two-process pipeline
- * (`nix store dump-path | zstd -T0 -c`) whose stdout is handed out as a
- * ReadableStream; the routes stream that to the socket. The only way this
- * package could hold a multi-gigabyte NAR is by reading the stream, and
- * nothing does — except {@link verifyNarFile}, which HASHES an upload as it
- * decompresses it and never keeps more than one chunk.
+ * **A NAR is never held in memory.** `dump` is a two-process pipeline whose
+ * stdout is a ReadableStream; the only reader that touches every byte,
+ * {@link verifyNarFile}, hashes one chunk at a time.
  *
  * **A stream that ended cleanly is not a stream that succeeded.** `nix store
  * dump-path` failing halfway closes zstd's stdin, and zstd then writes a
- * perfectly valid frame of a truncated NAR. So `dump` holds the stream open
- * until BOTH children have exited and fails the read unless both exited 0 —
- * otherwise a broken read is a 200 with a hash mismatch at the far end.
+ * perfectly valid frame of a truncated NAR. `dump` holds the stream open until
+ * both children exit and fails the read unless both exited 0.
  */
 
 import { createHash } from "node:crypto";
-import { spawn } from "node:child_process";
-import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, unlink } from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
+import { constants, createReadStream, createWriteStream, mkdtempSync, statSync } from "node:fs";
+import { mkdir, open, rm, unlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Readable } from "node:stream";
@@ -53,109 +49,10 @@ export interface PathInfo {
   narSize: number;
   references: readonly string[];
   deriver: string | null;
+  /** Nix's `CA:` fact about the path — `fixed:r:sha256:…` or null. The STORE
+   *  owns it; a pusher's narinfo line is only a hint. */
+  ca: string | null;
   sigs: readonly string[];
-}
-
-/** A staged upload: a `file://` binary cache on disk holding exactly what the
- *  client sent — `nar/<file>` and `<hash>.narinfo`. */
-export interface StagedImport {
-  dir: string;
-  storePath: string;
-}
-
-export type ImportOutcome =
-  | { ok: true }
-  /** `missing` is the one interesting arm: a REFERENCE of this path is not
-   *  valid yet, which happens whenever a client uploads a closure out of order.
-   *  The upload is not wrong, it is early, so the caller keeps it staged and
-   *  tries again when that reference lands. Anything else is the client's
-   *  error. */
-  | { ok: false; missing: readonly string[]; message: string };
-
-export type DeleteOutcome = "deleted" | "kept";
-
-/** A fetch's answer: either it landed, or the last line `nix-store -r` said. */
-export type SubstituteOutcome = { ok: true } | { ok: false; message: string };
-
-/**
- * AN UPSTREAM CACHE the server may fetch a reference from — the URL, and the
- * full public key whose signatures make a path from it trustworthy.
- *
- * A BUCKET STORES KEY NAMES (`cache.nixos.org-1`), which is what a pusher's
- * signatures carry, so this table is how a name becomes a substituter and a key
- * Nix can verify with. A name with no entry has no known URL and therefore
- * fetches nothing: the path stays held, and the reason says so.
- */
-export interface UpstreamCache {
-  readonly keyName: string;
-  readonly url: string;
-  readonly publicKey: string;
-}
-
-/** The upstream caches odu knows. One today; the shape is a table because the
- *  name is the bucket's and the URL is the world's. */
-export const UPSTREAM_CACHES: readonly UpstreamCache[] = [
-  {
-    keyName: "cache.nixos.org-1",
-    url: "https://cache.nixos.org",
-    publicKey: "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=",
-  },
-];
-
-/** The upstreams a bucket's key NAMES select, in the bucket's order. */
-export function upstreamFor(keyNames: readonly string[]): UpstreamCache[] {
-  const wanted = new Set(keyNames);
-  return UPSTREAM_CACHES.filter((cache) => wanted.has(cache.keyName));
-}
-
-export interface BlobStore {
-  has(storePath: string): Promise<boolean>;
-  pathInfo(storePath: string): Promise<PathInfo | null>;
-  /** One `nix path-info -r --json` for the whole set — a pin's closure and a
-   *  push's closure are the same question and one process answers both. */
-  closure(paths: readonly string[]): Promise<PathInfo[]>;
-  import(staged: StagedImport): Promise<ImportOutcome>;
-  /**
-   * FETCH UPSTREAM-SIGNED PATHS INTO THIS STORE, before a referrer is imported.
-   *
-   * `nix copy --from <staged>` refuses a path whose references are not valid,
-   * and a bucket that skips upstream paths never receives its referrers'
-   * upstream references — the 202 contradiction this exists to end. So the
-   * server asks each upstream cache for them with `nix-store -r`, trusting
-   * ONLY the bucket's own upstream keys: a path signed by anything else is not
-   * fetched, and the referrer stays held for a reference that is genuinely
-   * neither here nor upstream.
-   *
-   * A FAILURE IS NOT AN ERROR: the next import attempt reports exactly which
-   * references are still missing, and that is the sentence a pusher reads.
-   */
-  substitute(
-    paths: readonly string[],
-    upstreams: readonly UpstreamCache[],
-  ): Promise<SubstituteOutcome>;
-  /** WHICH OF THESE THE STORE ALREADY HAS, in ONE `nix path-info` — the
-   *  question `missingOf` asks of every reference. */
-  presentOf(paths: readonly string[]): Promise<ReadonlySet<string>>;
-  /** A zstd-compressed NAR, streamed. */
-  dump(storePath: string): ReadableStream<Uint8Array>;
-  retain(bucket: string, storePath: string): Promise<void>;
-  release(bucket: string, storePath: string): Promise<void>;
-  /** One path, for a caller that means exactly one. */
-  delete(storePath: string): Promise<DeleteOutcome>;
-  /**
-   * A SET, in one call. Deleting one path at a time reports "still alive" for
-   * any path another member of the set references, so a closure collected
-   * path-by-path leaks everything in the middle of it.
-   */
-  deleteMany(storePaths: readonly string[]): Promise<{ deleted: string[]; kept: string[] }>;
-}
-
-export interface NixStoreOptions {
-  /** Where one gcroot per retained path per bucket lives — under the cache's
-   *  own state directory, never inside the store. */
-  gcrootsRoot: string;
-  /** `--store <uri>` on every call; `null` is the daemon. */
-  store: string | null;
 }
 
 interface Run {
@@ -166,33 +63,6 @@ interface Run {
 
 /** One `nix`/`nix-store` invocation, collected. Used for everything that is not
  *  a byte stream: a path-info read, an import, a root, a delete. */
-/**
- * A child whose OUTPUT IS A TAIL, not a buffer. `nix-store -r --keep-going`
- * prints a line per path, and S1 needs only the last one; keeping the whole
- * stdout/stderr of a large closure is memory nobody reads.
- *
- * STDOUT IS DISCARDED ON PURPOSE: `nix-store -r` narrates on stderr, which is
- * where the failure line comes from. A caller that needs stdout wants `run`.
- */
-function runTail(command: string, args: readonly string[]): Promise<{ code: number | null; message: string }> {
-  const { promise, resolve } = Promise.withResolvers<{ code: number | null; message: string }>();
-  const child = spawn(command, [...args], { stdio: ["ignore", "ignore", "pipe"] });
-  let tail: string[] = [];
-  let partial = "";
-  child.stderr?.on("data", (chunk: Buffer) => {
-    partial += chunk.toString("utf8");
-    const lines = partial.split("\n");
-    partial = lines.pop() ?? "";
-    tail = [...tail, ...lines.map((line) => line.trim())].filter((line) => line !== "").slice(-20);
-  });
-  child.on("error", (err) => resolve({ code: null, message: String(err) }));
-  child.on("close", (code) => {
-    const last = [...tail, partial.trim()].filter((line) => line !== "").at(-1);
-    resolve({ code, message: last ?? `nix-store exited ${String(code)}` });
-  });
-  return promise;
-}
-
 function run(command: string, args: readonly string[]): Promise<Run> {
   const { promise, resolve } = Promise.withResolvers<Run>();
   const child = spawn(command, [...args], { stdio: ["ignore", "pipe", "pipe"] });
@@ -275,6 +145,7 @@ export function parsePathInfoTable(stdout: string): Map<string, PathInfo> {
         narSize: Number(entry["narSize"]),
         references: (entry["references"] as string[] | undefined) ?? [],
         deriver: (entry["deriver"] as string | null | undefined) ?? null,
+        ca: (entry["ca"] as string | null | undefined) ?? null,
         sigs: (entry["signatures"] as string[] | undefined) ?? [],
       });
     } catch (err) {
@@ -290,6 +161,15 @@ export function parsePathInfoTable(stdout: string): Map<string, PathInfo> {
  * before it can ask what is missing) — the same JSON, the same parser, one
  * implementation.
  */
+/** One old-store path's facts, for the migration's CA backfill. */
+export async function nixPathInfo(
+  storePath: string,
+  store: string | null,
+): Promise<PathInfo | null> {
+  const answer = await pathInfoArgs(["path-info"], store, [storePath]);
+  return answer.ok ? (parsePathInfoTable(answer.stdout).get(storePath) ?? null) : null;
+}
+
 export async function nixClosure(paths: readonly string[], store: string | null): Promise<PathInfo[]> {
   const answer = await pathInfoArgs(["path-info", "-r"], store, paths);
   // A FAILURE IS NOT AN EMPTY CLOSURE. A caller that got `[]` would report "no
@@ -298,240 +178,162 @@ export async function nixClosure(paths: readonly string[], store: string | null)
   return [...parsePathInfoTable(answer.stdout).values()];
 }
 
-export function nixStore(options: NixStoreOptions): BlobStore {
-  const storeArgs = storeArgsOf(options.store);
-
-  async function pathInfoTable(paths: readonly string[]): Promise<Map<string, PathInfo>> {
-    const answer = await pathInfoArgs(["path-info"], options.store, paths);
-    // "the store does not have it" and "the store could not be asked" are the
-    // same answer here — a path this cache cannot vouch for is not valid.
-    return answer.ok ? parsePathInfoTable(answer.stdout) : new Map();
-  }
-
-  function rootPath(bucket: string, storePath: string): string {
-    return join(options.gcrootsRoot, bucket, storePathHash(storePath));
-  }
-
-  async function deleteMany(
-    storePaths: readonly string[],
-  ): Promise<{ deleted: string[]; kept: string[] }> {
-    if (storePaths.length === 0) return { deleted: [], kept: [] };
-    const result = await run("nix-store", ["--delete", ...storeArgs, ...storePaths]);
-    // "still alive" is another root's answer, not a failure: something else on
-    // this machine is holding the path and odu has no business forcing it.
-    if (result.code !== 0 && !/is still alive/.test(result.stderr)) {
-      throw new Error(`nix-store --delete failed: ${result.stderr.trim()}`);
-    }
-    // ONE read of what survived, rather than a process per path.
-    const survivors = await pathInfoTable(storePaths);
-    return {
-      deleted: storePaths.filter((path) => !survivors.has(path)),
-      kept: storePaths.filter((path) => survivors.has(path)),
-    };
-  }
-
-  return {
-    async has(storePath) {
-      return (await pathInfoTable([storePath])).has(storePath);
-    },
-
-    async pathInfo(storePath) {
-      return (await pathInfoTable([storePath])).get(storePath) ?? null;
-    },
-
-    async closure(paths) {
-      return nixClosure(paths, options.store);
-    },
-
-    async import(staged) {
-      const result = await run("nix", [
-        "copy",
-        "--from",
-        pathToFileURL(staged.dir).href,
-        "--no-check-sigs",
-        "--no-recursive",
-        ...storeArgs,
-        staged.storePath,
-      ]);
-      if (result.code === 0) return { ok: true };
-      const message = (result.stderr || result.stdout).trim().split("\n").slice(-1)[0] ?? "";
-      // Nix names the reference it could not find: "path '/nix/store/…' is not
-      // valid". Naming it back is what lets the caller retry this upload when
-      // exactly that path lands, instead of rescanning the whole staging dir.
-      const missing = [...result.stderr.matchAll(/path '([^']+)' is not valid/g)].map(
-        (match) => match[1] as string,
-      );
-      return { ok: false, missing, message };
-    },
-
-    dump(storePath) {
-      return nixDump(storePath, options.store);
-    },
-
-    async presentOf(paths) {
-      // ONE process for the whole set: a hold can name seven references, and a
-      // `nix path-info` each made eight spawns per attempt and per resume.
-      if (paths.length === 0) return new Set();
-      return new Set((await pathInfoTable(paths)).keys());
-    },
-
-    async substitute(paths, upstreams) {
-      if (paths.length === 0 || upstreams.length === 0) return { ok: true };
-      // `nix-store -r` fetches the requested paths AND their closures, and it
-      // verifies every one against the keys given here — odu's key list, not
-      // the host's nix.conf. A path the upstream cannot serve, or serves under
-      // a key the bucket does not trust, simply stays absent; the caller's
-      // import attempt says so.
-      const result = await runTail("nix-store", [
-        "-r",
-        // ONE reference that will not come does not stop the others: a
-        // sibling that IS upstream must still land, or the referrer stays
-        // held for a path the server could have fetched.
-        "--keep-going",
-        ...storeArgs,
-        "--option",
-        "substituters",
-        upstreams.map((cache) => cache.url).join(" "),
-        "--option",
-        "trusted-public-keys",
-        upstreams.map((cache) => cache.publicKey).join(" "),
-        // A negative narinfo answer cached by an earlier attempt must not make
-        // a path that has since been published invisible for a TTL.
-        "--option",
-        "narinfo-cache-negative-ttl",
-        "0",
-        ...paths,
-      ]);
-      // THE EXIT CODE IS THE FACT: a network error, a full disk or a store
-      // lock must read as a failed fetch, not as "neither here nor upstream".
-      return result.code === 0 ? { ok: true } : { ok: false, message: result.message };
-    },
-
-    async retain(bucket, storePath) {
-      const root = rootPath(bucket, storePath);
-      await mkdir(dirname(root), { recursive: true, mode: 0o700 });
-      const result = await run("nix-store", [
-        "--add-root",
-        root,
-        "--indirect",
-        "-r",
-        ...storeArgs,
-        storePath,
-      ]);
-      if (result.code !== 0) {
-        throw new Error(`nix-store --add-root failed: ${result.stderr.trim()}`);
-      }
-    },
-
-    async release(bucket, storePath) {
-      // Unlinking the symlink is the whole release: an indirect root's
-      // registration goes with the link, which is why it is the unprivileged
-      // form.
-      await unlink(rootPath(bucket, storePath)).catch((err: NodeJS.ErrnoException) => {
-        if (err.code !== "ENOENT") throw err;
-      });
-    },
-
-    async delete(storePath) {
-      const { deleted } = await deleteMany([storePath]);
-      return deleted.length > 0 ? "deleted" : "kept";
-    },
-
-    deleteMany,
-  };
-}
-
 /**
- * A NAR as a zstd stream: `nix store dump-path <path> | zstd -T0 -c`.
+ * A NAR as a zstd stream, through a FIFO.
  *
- * One implementation for the server's reads and the push client's uploads —
- * they are the same bytes through the same two programs, and a second spelling
- * would be a second place for the pipeline to be got wrong.
+ * BOTH CHILD PIPES BUFFER: `node:child_process` and `Bun.spawn` read a child's
+ * stdout into this process regardless of who consumes it (measured: ~329 MiB
+ * and ~322 MiB at 10 s into a 2 MB/s read of a 320 MB NAR). A FIFO has no
+ * parent pipe at all. The kernel's 64 KiB pipe buffer is the only buffer:
+ * when the socket stops pulling, this read stops, the FIFO fills, zstd blocks,
+ * and nix blocks. The first byte arrives as soon as zstd emits it; nothing is
+ * spooled; N pullers share one dump per pull, not N files.
  *
- * The stream does not END until both children have exited, and it ERRORS unless
- * both exited 0. Closing on zstd's EOF alone would hand a consumer a valid
- * frame of a truncated NAR — the failure mode that turns a broken read into a
- * silent 200.
+ * The read does not END until the pipeline exited 0 (`pipefail` makes nix's
+ * exit the pipeline's); a non-zero exit errors the stream rather than handing
+ * out a valid frame of a truncated NAR. Cancel kills the pipeline's process
+ * group.
  */
 export function nixDump(storePath: string, store: string | null): ReadableStream<Uint8Array> {
-  const nix = spawn("nix", ["store", "dump-path", ...storeArgsOf(store), storePath], {
-    stdio: ["ignore", "pipe", "pipe"],
+  const dir = mkdtempSync(join(tmpdir(), "odu-nar-"));
+  const fifo = join(dir, "nar.zst");
+  const made = spawnSync("mkfifo", [fifo]);
+  if (made.status !== 0) {
+    return new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new Error(`mkfifo failed: ${made.stderr?.toString() ?? "unknown"}`));
+      },
+    });
+  }
+  const quote = (text: string): string => `'${text.replace(/'/g, `'\\''`)}'`;
+  const pipelineLine = [
+    "nix store dump-path",
+    ...storeArgsOf(store),
+    quote(storePath),
+    "| zstd -T0 -c >",
+    quote(fifo),
+  ].join(" ");
+  const child = spawn("bash", ["-c", `set -o pipefail; ${pipelineLine}`], {
+    env: Bun.env,
+    detached: true,
+    stdio: ["ignore", "ignore", "pipe"],
   });
-  const zstd = spawn("zstd", ["-T0", "-c"], { stdio: ["pipe", "pipe", "pipe"] });
-
-  let nixCode: number | null = null;
-  let zstdCode: number | null = null;
-  let sourceEnded = false;
-  let fault: string | null = null;
-  let sink: ReadableStreamDefaultController<Uint8Array> | null = null;
-
-  const settle = (): void => {
-    if (sink === null || !sourceEnded || nixCode === null || zstdCode === null) return;
-    const controller = sink;
-    sink = null;
-    if (fault !== null) controller.error(new Error(fault));
-    else if (nixCode !== 0) controller.error(new Error(`nix store dump-path exited ${nixCode}`));
-    else if (zstdCode !== 0) controller.error(new Error(`zstd exited ${zstdCode}`));
-    else controller.close();
+  let tail = "";
+  child.stderr?.on("data", (chunk: Buffer) => {
+    tail = `${tail}${chunk.toString("utf8")}`.slice(-2000);
+  });
+  let exitCode: number | null = null;
+  const exited = new Promise<number>((resolve) => {
+    const settle = (code: number): void => {
+      exitCode = code;
+      resolve(code);
+    };
+    child.on("error", () => settle(-1));
+    child.on("close", (code) => settle(code ?? -1));
+  });
+  let handle: Awaited<ReturnType<typeof open>> | null = null;
+  let cleaned = false;
+  const clean = async (): Promise<void> => {
+    if (cleaned) return;
+    cleaned = true;
+    await handle?.close().catch(() => {});
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
   };
-
-  const fail = (message: string): void => {
-    fault ??= message;
-    // A child that could not even be spawned never emits `close`, and a child
-    // that died produces no more bytes — so nothing else is coming, and the
-    // stream settles here rather than waiting for an `end` that never arrives.
-    nixCode ??= -1;
-    zstdCode ??= -1;
-    sourceEnded = true;
-    settle();
-  };
-
-  nix.on("error", (err) => fail(`nix: ${String(err)}`));
-  zstd.on("error", (err) => fail(`zstd: ${String(err)}`));
-  // EPIPE is the ordinary consequence of a consumer that walked away, and the
-  // cancel path below is what stops the work; it must not become an unhandled
-  // event that takes the process down.
-  zstd.stdin?.on("error", () => {});
-  nix.stdout?.on("error", (err) => fail(`nix stdout: ${String(err)}`));
-  nix.stdout?.pipe(zstd.stdin);
-  nix.stderr?.resume();
-  zstd.stderr?.resume();
-
-  nix.on("close", (code) => {
-    nixCode = code ?? -1;
-    if (zstd.stdin !== null && !zstd.stdin.destroyed) zstd.stdin.end();
-    settle();
-  });
-  zstd.on("close", (code) => {
-    zstdCode = code ?? -1;
-    nix.kill("SIGKILL");
-    settle();
-  });
-
   return new ReadableStream<Uint8Array>({
-    start(controller) {
-      sink = controller;
-      zstd.stdout?.on("data", (chunk: Buffer) => {
-        if (sink === null) return;
-        controller.enqueue(new Uint8Array(chunk));
-        // Backpressure: one chunk in flight is enough, and a paused source is
-        // what keeps a 2 GiB NAR off the heap.
-        if ((controller.desiredSize ?? 0) <= 0) zstd.stdout?.pause();
-      });
-      zstd.stdout?.on("end", () => {
-        sourceEnded = true;
-        settle();
+    async start(controller) {
+      // NON-BLOCKING: a pipeline that could not spawn never opens the write
+      // end, and a blocking open would wait for ever. `pull` retries an empty
+      // read until the child has exited, which is when EOF is real.
+      handle = await open(fifo, constants.O_RDONLY | constants.O_NONBLOCK).catch((err) => {
+        controller.error(err);
+        return null;
       });
     },
-    pull() {
-      zstd.stdout?.resume();
+    async pull(controller) {
+      if (handle === null) {
+        controller.error(new Error("the NAR FIFO could not be opened"));
+        return;
+      }
+      // THE LOOP THAT MEASURED 17 MiB: one 64 KiB read per pull.
+      for (;;) {
+        const buffer = new Uint8Array(64 * 1024);
+        const read = await handle.read(buffer, 0, buffer.length, null).catch((err: unknown) => {
+          if ((err as NodeJS.ErrnoException).code === "EAGAIN") return { bytesRead: 0 };
+          controller.error(err);
+          return null;
+        });
+        if (read === null) return;
+        if (read.bytesRead > 0) {
+          controller.enqueue(buffer.subarray(0, read.bytesRead));
+          return;
+        }
+        // No byte yet. EOF is only real once the pipeline has exited.
+        if (exitCode !== null) {
+          if (exitCode === 0) controller.close();
+          else {
+            controller.error(
+              new Error(
+                `nix store dump-path | zstd exited ${exitCode}` +
+                  (tail.trim() === "" ? "" : `: ${tail.trim().split("\n").at(-1)}`),
+              ),
+            );
+          }
+          await clean();
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
     },
-    cancel() {
-      sink = null;
-      nix.kill("SIGKILL");
-      zstd.kill("SIGKILL");
+    async cancel() {
+      if (child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch {
+          child.kill("SIGKILL");
+        }
+      }
+      await clean();
     },
   });
+}
+
+/** Nix's `HashModuloSink`: replace every occurrence of the path's own 32-char
+ *  hash part with 32 zero bytes and sha256 the result. Matches can straddle
+ *  read chunks, so the last 31 bytes wait for the next one.
+ *
+ *  Nix 2.34's `RewritingSink` calls `rewriteStrings` and records no match
+ *  positions (`matches` stays empty), so there is NO `|pos` fold — pinned by a
+ *  `nix store make-content-addressed` vector in the suite. Matching the Nix
+ *  that produces the CA is the only useful definition. */
+export function narHashModuloHasher(hashPart: string): {
+  update(chunk: Uint8Array): void;
+  finish(): string;
+} {
+  const hash = createHash("sha256");
+  const pattern = Buffer.from(hashPart, "utf8");
+  const zeros = Buffer.alloc(pattern.length);
+  let pending = Buffer.alloc(0);
+  return {
+    update(chunk) {
+      const data = pending.length === 0 ? Buffer.from(chunk) : Buffer.concat([pending, chunk]);
+      let at = 0;
+      for (;;) {
+        const found = data.indexOf(pattern, at);
+        if (found === -1) break;
+        hash.update(data.subarray(at, found));
+        hash.update(zeros);
+        at = found + pattern.length;
+      }
+      // A match may begin in the last 31 bytes; keep them for the next chunk.
+      const safe = Math.max(at, data.length - (pattern.length - 1));
+      hash.update(data.subarray(at, safe));
+      pending = data.subarray(safe);
+    },
+    finish() {
+      hash.update(pending);
+      return `sha256:${base32(hash.digest())}`;
+    },
+  };
 }
 
 /**
@@ -543,7 +345,16 @@ export function nixDump(storePath: string, store: string | null): ReadableStream
  * client's error.
  */
 export type NarCheck =
-  | { ok: true; narHash: string; narSize: number }
+  | {
+      ok: true;
+      narHash: string;
+      narSize: number;
+      /** The COMPRESSED file's sha256 and size, learned as it streamed. */
+      fileHash: string;
+      fileSize: number;
+      /** The self-reference modulo hash, when one was requested. */
+      selfHash: string | null;
+    }
   | { ok: false; absent: boolean; message: string };
 
 /** The decompressor for a narinfo's `Compression`. `none` and an absent field
@@ -578,7 +389,12 @@ function decompressorOf(compression: string | null): string[] | null | { error: 
  *
  * Streamed: one chunk at a time, never the whole NAR.
  */
-export async function verifyNarFile(path: string, compression: string | null): Promise<NarCheck> {
+export async function verifyNarFile(
+  path: string,
+  compression: string | null,
+  /** The row's own hash part when its references include itself. */
+  selfHashPart: string | null = null,
+): Promise<NarCheck> {
   const decompressor = decompressorOf(compression);
   if (decompressor !== null && !Array.isArray(decompressor)) {
     return { ok: false, absent: false, message: decompressor.error };
@@ -586,19 +402,49 @@ export async function verifyNarFile(path: string, compression: string | null): P
 
   const { promise, resolve } = Promise.withResolvers<NarCheck>();
   const hash = createHash("sha256");
+  const fileHash = createHash("sha256");
+  const modulo = selfHashPart === null ? null : narHashModuloHasher(selfHashPart);
+  let fileSize = 0;
   let size = 0;
   let ended = false;
+  let fileEnded = false;
   let code: number | null = decompressor === null ? 0 : null;
   let settled = false;
 
   const settle = (): void => {
-    if (settled || !ended || code === null) return;
+    if (settled || !ended || !fileEnded || code === null) return;
     settled = true;
-    resolve(
-      code === 0
-        ? { ok: true, narHash: `sha256:${base32(hash.digest())}`, narSize: size }
-        : { ok: false, absent: false, message: `${decompressor?.[0] ?? "the NAR"} exited ${code}` },
-    );
+    if (code !== 0) {
+      resolve({ ok: false, absent: false, message: `${decompressor?.[0] ?? "the NAR"} exited ${code}` });
+      return;
+    }
+    // THE DECOMPRESSOR CAN EXIT 0 EARLY (bzip2 warns about trailing garbage),
+    // so the COMPRESSED read must also have reached the end, and the bytes it
+    // hashed must be the file a client will receive.
+    let actual: number;
+    try {
+      actual = statSync(path).size;
+    } catch (err) {
+      const missing = (err as NodeJS.ErrnoException).code === "ENOENT";
+      resolve({ ok: false, absent: missing, message: String(err) });
+      return;
+    }
+    if (actual !== fileSize) {
+      resolve({
+        ok: false,
+        absent: false,
+        message: `${path} is ${actual} bytes but ${fileSize} were read`,
+      });
+      return;
+    }
+    resolve({
+      ok: true,
+      narHash: `sha256:${base32(hash.digest())}`,
+      narSize: size,
+      fileHash: `sha256:${base32(fileHash.digest())}`,
+      fileSize,
+      selfHash: modulo === null ? null : modulo.finish(),
+    });
   };
 
   let source: Readable;
@@ -626,6 +472,15 @@ export async function verifyNarFile(path: string, compression: string | null): P
     // EPIPE once the child has had enough is the ordinary end of a pipe.
     child.stdin?.on("error", () => {});
     const file = createReadStream(path);
+    file.on("data", (chunk: string | Buffer) => {
+      const bytes = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+      fileHash.update(bytes);
+      fileSize += bytes.length;
+    });
+    file.on("end", () => {
+      fileEnded = true;
+      settle();
+    });
     file.on("error", (err) => {
       if (settled) return;
       settled = true;
@@ -644,7 +499,13 @@ export async function verifyNarFile(path: string, compression: string | null): P
 
   source.on("data", (chunk: Buffer) => {
     hash.update(chunk);
+    modulo?.update(chunk);
     size += chunk.length;
+    // For an uncompressed NAR the file IS the bytes hashed above.
+    if (decompressor === null) {
+      fileHash.update(chunk);
+      fileSize += chunk.length;
+    }
   });
   source.on("error", (err) => {
     if (settled) return;
@@ -654,6 +515,7 @@ export async function verifyNarFile(path: string, compression: string | null): P
   });
   source.on("end", () => {
     ended = true;
+    if (decompressor === null) fileEnded = true;
     settle();
   });
   return promise;
@@ -661,10 +523,3 @@ export async function verifyNarFile(path: string, compression: string | null): P
 
 /** Copy a streamed body to a file, streaming. Used by the routes for an upload
  *  and by nothing else — a NAR is written to disk exactly as it arrives. */
-export async function writeStreamToFile(
-  body: ReadableStream<Uint8Array>,
-  path: string,
-): Promise<void> {
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  await pipeline(Readable.fromWeb(body as never), createWriteStream(path));
-}

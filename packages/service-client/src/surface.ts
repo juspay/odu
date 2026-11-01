@@ -144,6 +144,9 @@ export { STATUS_META, type StatusHue } from "@odu/run-client/surface";
  * collection (paths accepted and waiting on references), `Bucket.domain` and
  * `Bucket.pushUrl` as new output fields, and `auth.token.create`'s optional
  * `expiresDays`. Additive: every input 2.2 accepted, 2.3 accepts.
+ *
+ * 2.3 remains: the object cache is ADDITIVE. `held` and `--wait` are DEPRECATED
+ * and answer an empty list / return at once; they are REMOVED AT THE CACHE ROW'S NEXT MAJOR.
  */
 export const SERVICE_CONTRACT_VERSION = "2.3";
 
@@ -376,19 +379,22 @@ function contractMajor(version: string): number | null {
 export function admitService(
   cell: ServiceCell,
   where: string,
+  /** The version this BUILD reads. A seam for tests that need a build ahead of
+   *  the constant, so "the daemon is one minor behind" stays representable. */
+  build: string = SERVICE_CONTRACT_VERSION,
 ): ServiceAdmission {
   const speaks = cell.identity.protocolVersion;
   const theirs = contractMajor(speaks);
-  if (theirs !== null && theirs === contractMajor(SERVICE_CONTRACT_VERSION)) {
+  if (theirs !== null && theirs === contractMajor(build)) {
     return { kind: "adopt", identity: cell.identity };
   }
   return {
     kind: "refuse",
     speaks,
-    expected: SERVICE_CONTRACT_VERSION,
+    expected: build,
     message:
       `the odu service at ${where} speaks contract ${speaks || "nothing"}; ` +
-      `this build reads ${SERVICE_CONTRACT_VERSION} — upgrade the daemon ` +
+      `this build reads ${build} — upgrade the daemon ` +
       "(`odu web --upgrade`) or this build.",
   };
 }
@@ -398,17 +404,21 @@ export function admitService(
  *  added since, and calling one answers "unknown" from inside the RPC layer. A
  *  face that adopted such a daemon prints this once, so that answer arrives
  *  already explained. `null` when the daemon is level or ahead. */
-export function skewNote(cell: ServiceCell, where: string): string | null {
+export function skewNote(
+  cell: ServiceCell,
+  where: string,
+  build: string = SERVICE_CONTRACT_VERSION,
+): string | null {
   const minor = (version: string): number | null => {
     const match = /^(\d+)\.(\d+)/.exec(version);
     return match === null ? null : Number(match[2]);
   };
   const theirs = minor(cell.identity.protocolVersion);
-  const ours = minor(SERVICE_CONTRACT_VERSION);
+  const ours = minor(build);
   if (theirs === null || ours === null || theirs >= ours) return null;
   return (
     `odu: the service at ${where} speaks contract ${cell.identity.protocolVersion}, ` +
-    `this build ${SERVICE_CONTRACT_VERSION} — a verb added since answers as unknown; ` +
+    `this build ${build} — a verb added since answers as unknown; ` +
     "`odu web --upgrade` replaces the daemon."
   );
 }

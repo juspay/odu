@@ -5,11 +5,12 @@
  * they must agree about one thing: what a bucket IS. The protocol face is what
  * a Nix client speaks (`./routes`); the admin face is what `odu cache` reaches
  * through the service. Between them sit the rows (`./db`), the tokens
- * (`./tokens`), the collector (`./gc`) and the blob store (`./store`).
+ * (`./tokens`), the collector (`./gc`), the object store (`./objectStore`) and
+ * the one-time migration.
  *
- * The WRITE PATH is not here: staging an upload, proving it and importing it
- * in order moves on the Nix protocol's clock rather than on the product's, and
- * it lives in `./staging`. This module hands it one dependency — `record` —
+ * The WRITE PATH is not here: staging an upload, proving it and keeping the
+ * object moves on the Nix protocol's clock rather than on the product's, and it
+ * lives in `./staging`. This module hands it one dependency — `record` —
  * because a pin and a collection take the same write lock, and a second lock
  * there would be a second answer to "who may change what is retained".
  *
@@ -19,27 +20,39 @@
  * first contact is a cache anybody on the machine can create buckets in.
  */
 
+import { statfs } from "node:fs/promises";
 import { join } from "node:path";
-import { type BlobStore, nixStore } from "./store";
-import type { BucketRow, BucketTotals, HeldRow, ObjectRow, Scope, TokenRow } from "./db";
+import type { BucketRow, BucketTotals, ObjectRow, Scope, TokenRow } from "./db";
 import { cursorFor, openCacheRepo } from "./db";
 import { planGc, runGc, type GcReport } from "./gc";
 import {
   fingerprintOf,
   formatNarinfo,
   generateKeypair,
+  isDerivationPath,
   isStorePathHash,
   keyNameOf,
+  compressionOfFile,
+  canonicalNarHash,
   type NarInfo,
-  SERVED_EXTENSION,
+  compressionExtension,
   signFingerprint,
   storePathHash,
 } from "./narinfo";
 import { newChain, serial } from "./serial";
 import { CACHE_MOUNT } from "./paths";
 import { PATH_PAGE_SIZE } from "./surface";
-import { createStaging, type CompleteUpload, type NarinfoOutcome, type Upload } from "./staging";
-import { createSlots, type Slots } from "./slots";
+import {
+  createStaging,
+  objectKey,
+  type CompleteUpload,
+  type NarinfoOutcome,
+  type Upload,
+} from "./staging";
+import { diskObjectStore, type ObjectStore } from "./objectStore";
+import { contentAddressOf } from "./storePath";
+import { verifyNarFile } from "./store";
+import { createSlots } from "./slots";
 import {
   globMatches,
   hashToken,
@@ -230,6 +243,41 @@ export interface PathPageRow {
  *  exists, which is exactly what a private name must not leak. */
 export type AuthVerdict = { ok: true } | { ok: false; status: 401 | 403 | 404; message: string };
 
+export type NarSource =
+  | { kind: "file"; storePath: string; path: string; size: number }
+  | { kind: "stream"; storePath: string; stream: ReadableStream<Uint8Array>; size: number }
+  /** THE ONE-TIME MIGRATION: the old Nix store still has this row's path and
+   *  its object has not been produced yet. Removed when that store is. */
+  | { kind: "legacy"; storePath: string; stream: ReadableStream<Uint8Array> };
+
+/** What one boot's SYNCHRONOUS work found: before mount, no pushes can race. */
+export interface BootReport {
+  /** Rows whose path proved its own `fixed:r:sha256` CA. */
+  caProved: number;
+  /** Object files with no row (a crash between put and record). */
+  orphansSwept: number;
+  /** Abandoned `.tmp-*` files older than this boot. */
+  tempSwept: number;
+}
+
+/** What the one-time self-CA pass found. */
+export interface SelfProofReport {
+  rows: number;
+  proved: number;
+  refused: number;
+  unreadable: number;
+}
+
+/** What the row-owned background migration did. */
+export interface MigrationReport {
+  migrated: number;
+  failures: number;
+  /** True only when every row has its object. */
+  complete: boolean;
+  /** Why it is paused for space, if it ended that way. */
+  paused: string | null;
+}
+
 export interface Cache {
   /** The protocol face. */
   bucket(name: string): BucketRow | null;
@@ -239,7 +287,9 @@ export interface Cache {
   authorize(header: string | undefined, bucket: BucketRow, need: Scope): AuthVerdict;
   narinfoText(bucket: BucketRow, hash: string): string | null;
   touch(bucket: BucketRow, hash: string): void;
-  narStream(bucket: BucketRow, file: string): Promise<ReadableStream<Uint8Array> | null>;
+  /** ONE operational line; the row hands the daemon's logger to the cache. */
+  log(event: string, fields: Record<string, unknown>): void;
+  narSource(bucket: BucketRow, file: string): Promise<NarSource | null>;
   beginUpload(bucket: BucketRow, file: string): Promise<Upload>;
   /** One part of a chunked NAR, under the part ceiling. A retry overwrites the
    *  same index, so a dropped request costs one part. */
@@ -271,15 +321,6 @@ export interface Cache {
    */
   snapshot(): readonly BucketFacts[];
   /**
-   * WHAT THE BUCKETS ARE HOLDING FOR REFERENCES — a row per path, with the
-   * references Nix named.
-   *
-   * Not a log line and not staging's memory: the reason a push stopped is a
-   * fact the bucket publishes, so the board lists it and a restart does not
-   * make a pending upload look like one that never arrived.
-   */
-  held(): readonly HeldRow[];
-  /**
    * SOMETHING A SUBSCRIBER WOULD SEE MOVED — a narinfo landed, a bucket was
    * created, a closure was pinned or collected, or reads accumulated.
    *
@@ -294,9 +335,15 @@ export interface Cache {
   onChange(listener: () => void): () => void;
   /** The admin face. */
   admin: CacheAdmin;
-  /** RE-QUEUE the held rows this database remembers — called at ROW APPLY, so
-   *  a restart resumes a reference fetch instead of waiting for a new push. */
-  resume(): Promise<void>;
+  /** BEFORE MOUNT: prove `CA:`, sweep orphan objects and abandoned temp files.
+   *  Nothing is writing yet, so a sweep cannot race a put. */
+  boot(): Promise<BootReport>;
+  /** AFTER MOUNT, AS A ROW-OWNED BACKGROUND TASK: prove self-referencing rows
+   *  from their kept bytes, ONCE per row (the verdict is persisted). */
+  proveSelf(): Promise<SelfProofReport>;
+  /** AFTER MOUNT, AS A ROW-OWNED BACKGROUND TASK: migrate objects the old store
+   *  still owns, two at a time, resuming after a disk pause. */
+  migrate(): Promise<MigrationReport>;
   /** Join the row's background work, then close the database. */
   close(): Promise<void>;
 }
@@ -304,16 +351,29 @@ export interface Cache {
 export interface CacheOptions {
   /** The per-user state root; the cache owns `<stateRoot>/cache`. */
   stateRoot: string;
-  /** THE FETCH BOUND, made by the row's activation. Defaults to one per cache
-   *  instance — never module state. */
-  fetchSlots?: Slots;
   /** `$ODU_ROOT_TOKEN`, or null when the operator supplied none. */
   rootToken: string | null;
-  /** `--store` URI for every nix call; null is the daemon. */
-  store: string | null;
-  /** Injected by the suite; production uses the Nix store. */
-  blob?: BlobStore;
+  /** THE OLD NIX STORE, read only during the one-time migration. `null` on a
+   *  fresh deployment; the row never needs a store otherwise. */
+  legacyStore?: {
+    dump(storePath: string): ReadableStream<Uint8Array>;
+    /** The old store's own facts for a row: the NarHash the migration must
+     *  match before keeping bytes, and the CA its narinfo could not prove. */
+    pathInfo?(storePath: string): Promise<{ ca: string | null; narHash: string } | null>;
+  } | null;
+  /** Pause the migration below this many free bytes (default 10 GiB). */
+  migrationFreeFloor?: number;
+  /** How long a paused migration waits before re-checking free space. */
+  migrationRetryMs?: number;
+  /** Injected by the suite for the disk-floor test. */
+  freeBytes?: () => Promise<number | null>;
+  /** Injected by the suite; production is the disk under the cache's dir. */
+  objects?: ObjectStore;
   now?: () => number;
+  /** ONE structured line per operational fact (serve, import, boot, refusal).
+   *  The row hands the daemon's logger here; a suite that does not care omits
+   *  it. No per-chunk lines: a NAR read is one line. */
+  log?: (event: string, fields: Record<string, unknown>) => void;
 }
 
 /** The floor between two READ-driven publications. Reads are the only change
@@ -335,9 +395,7 @@ export function createCache(options: CacheOptions): Cache {
   const now = options.now ?? (() => Date.now());
   const dir = join(options.stateRoot, "cache");
   const repo = openCacheRepo(join(dir, "cache.sqlite"));
-  const blob =
-    options.blob ??
-    nixStore({ gcrootsRoot: join(dir, "gcroots"), store: options.store });
+  const objects = options.objects ?? diskObjectStore({ dir });
 
   /**
    * ONE writer at a time, across `record`, `pin` and `gc`.
@@ -429,14 +487,15 @@ export function createCache(options: CacheOptions): Cache {
   function narinfoFor(bucket: BucketRow, row: ObjectRow): string {
     const info: NarInfo = {
       storePath: row.storePath,
-      url: `nar/${row.narHash.replace(/^sha256:/, "")}.${SERVED_EXTENSION}`,
-      compression: "zstd",
-      fileHash: null,
-      fileSize: null,
+      url: `nar/${row.narHash.replace(/^sha256:/, "")}.${compressionExtension(row.compression)}`,
+      compression: row.compression,
+      fileHash: row.fileHash,
+      fileSize: row.fileSize,
       narHash: row.narHash,
       narSize: row.narSize,
       references: row.references,
       deriver: row.deriver,
+      ca: row.caProof === "content-addressed" ? row.ca : null,
       sigs: [signatureOf(bucket, row), ...row.sigs],
     };
     return formatNarinfo(info);
@@ -453,67 +512,90 @@ export function createCache(options: CacheOptions): Cache {
    */
   function record(
     bucket: BucketRow,
-    storePath: string,
-    expectedNarHash: string,
-    clientSigs: readonly string[],
+    info: NarInfo,
+    file: { fileHash: string; fileSize: number },
+    selfHash: string | null,
   ): Promise<boolean> {
-    return withWriteLock(() => recordNow(bucket, storePath, expectedNarHash, clientSigs));
+    return withWriteLock(() => recordNow(bucket, info, file, selfHash));
   }
 
   async function recordNow(
     bucket: BucketRow,
-    storePath: string,
-    expectedNarHash: string,
-    clientSigs: readonly string[],
+    info: NarInfo,
+    file: { fileHash: string; fileSize: number },
+    selfHash: string | null,
   ): Promise<boolean> {
-    const info = await blob.pathInfo(storePath);
-    if (info === null) {
-      throw new Error(`imported ${storePath} but the store does not know it`);
-    }
-    // Defence in depth: the bytes were hashed before the import, and this is
-    // the store agreeing afterwards.
-    if (info.narHash !== expectedNarHash) {
-      throw new Error(
-        `${storePath} is ${info.narHash} in the store but the narinfo said ${expectedNarHash}`,
-      );
-    }
-    const existing = repo.object(bucket.name, storePath);
+    const existing = repo.object(bucket.name, info.storePath);
     const at = now();
-    const sigs = [...new Set([...clientSigs, ...info.sigs])].filter(
-      (sig) => keyNameOf(sig) !== bucket.keyName,
-    );
+    const sigs = [...new Set(info.sigs)].filter((sig) => keyNameOf(sig) !== bucket.keyName);
+    // CA IS PROVED FROM THE PATH, not taken from the pusher and not asked of a
+    // store: the row already holds (name, narHash, references, self), and Nix's
+    // formula reproduces the path or it does not. An old input-addressed row
+    // stays null, honestly.
+    const computed = contentAddressOf({
+      storePath: info.storePath,
+      narHash: info.narHash,
+      references: info.references,
+      selfHash,
+    });
+    // A SECOND narinfo PUT for a self-referencing CA row has no staged NAR to
+    // prove from; `selfHash` is null. The SAME NarHash means the bytes the row
+    // already proved are the bytes being named — keep that verdict rather than
+    // flipping it to a final "not content-addressed".
+    const keep =
+      computed === null &&
+      selfHash === null &&
+      existing !== null &&
+      existing.narHash === info.narHash &&
+      existing.ca !== null;
+    const ca = keep ? existing.ca : computed;
+    const caProof = keep
+      ? existing.caProof
+      : ca === null
+        ? "not-content-addressed"
+        : "content-addressed";
     repo.putObject({
       bucket: bucket.name,
-      storePath,
-      hash: storePathHash(storePath),
+      storePath: info.storePath,
+      hash: storePathHash(info.storePath),
       narHash: info.narHash,
       narSize: info.narSize,
       references: info.references,
       deriver: info.deriver,
+      ca,
+      caProof,
+      compression: info.compression ?? "none",
+      fileHash: file.fileHash,
+      fileSize: file.fileSize,
       sigs,
       hits: existing?.hits ?? 0,
       created: existing?.created ?? at,
       // A re-push is an access: the pusher wants the path to stay.
       lastAccessed: at,
     });
-    // The root is what keeps the machine's own GC from eating a path the cache
-    // serves; without it the first `nix-collect-garbage` empties the bucket.
-    await blob.retain(bucket.name, storePath);
     return true;
   }
 
   // The write path, wired to the ONE lock: `record` is the dependency staging
-  // takes, and it is the locked one, so a pin cannot interleave with an import.
-  const fetchSlots = options.fetchSlots ?? createSlots(2);
+  // takes, and it is the locked one, so a pin cannot interleave with a record.
   const staging = createStaging({
-    repo,
-    blob,
+    objects,
     dir,
     now,
     record,
-    changed: () => notify(),
-    slots: fetchSlots,
+    log: options.log,
   });
+  /** THE MIGRATION'S THROTTLE: two old-store dumps at a time, never more. */
+  const migrationSlots = createSlots(2);
+  /** Paths whose transition serve was refused, logged once each. */
+  const unavailableLogged = new Set<string>();
+  /** The row's background migration, so close can join it before the DB goes. */
+  let migrationTask: Promise<MigrationReport> | null = null;
+  let selfTask: Promise<SelfProofReport> | null = null;
+  let stopping = false;
+  /** Resolves on close: a migration sleeping on disk or waiting on a dump can
+   *  end without waiting for that promise to settle. */
+  const stopSignal = Promise.withResolvers<void>();
 
   // ── who hears about a change ──────────────────────────────────────────────
   //
@@ -750,7 +832,7 @@ export function createCache(options: CacheOptions): Cache {
           pins: repo.pins(),
           now: now(),
         });
-        const report = await runGc(blob, repo, plan);
+        const report = await runGc(repo, plan, objects);
         // Every bucket the sweep touched answers a different object count now.
         notify();
         return { ok: true as const, value: report };
@@ -802,15 +884,29 @@ export function createCache(options: CacheOptions): Cache {
     bucket: BucketRow,
     input: { name: string; paths: readonly string[] },
   ): Promise<CacheOutcome<PinFacts>> {
-    // ONE `nix path-info -r` for the whole closure, not one process per path.
-    const closure = await blob.closure(input.paths);
-    const reached = new Set(closure.map((info) => info.storePath));
+    // THE CLOSURE IS THE BUCKET'S OWN ROWS: a pin holds what this cache
+    // serves, so the references are followed in the metadata, not asked of a
+    // Nix store the server no longer has.
+    const rows = new Map(repo.objects(bucket.name).map((row) => [row.storePath, row]));
+    const reached = new Set<string>();
+    const queue = [...input.paths];
+    while (queue.length > 0) {
+      const path = queue.pop() as string;
+      if (reached.has(path)) continue;
+      const row = rows.get(path);
+      if (row === undefined) continue;
+      reached.add(path);
+      for (const reference of row.references) {
+        const full = reference.startsWith("/nix/store/") ? reference : `/nix/store/${reference}`;
+        queue.push(full);
+      }
+    }
     const absent = input.paths.filter((path) => !reached.has(path));
     if (absent.length > 0) {
       return {
         ok: false,
         code: "bad_input",
-        message: `no such path in the store: ${absent.join(", ")}`,
+        message: `no such path in the bucket: ${absent.join(", ")}`,
       };
     }
     const created = now();
@@ -820,17 +916,231 @@ export function createCache(options: CacheOptions): Cache {
       rootPaths: [...reached],
       created,
     });
-    // Every path a pin holds must be rooted in the store, or the machine's own
-    // GC deletes the pin out from under the cache.
-    for (const path of reached) await blob.retain(bucket.name, path);
     // A pin changes `pinnedPaths`, which is a column of the bucket's row — so
-    // this is the third mutator that NOTIFIES, beside create and gc, rather
-    // than one the surface has to remember to publish for.
+    // this is the third mutator that NOTIFIES, beside create and gc.
     notify();
     return {
       ok: true,
       value: { bucket: bucket.name, name: input.name, rootPaths: [...reached], created },
     };
+  }
+
+  async function proveSelfNow(): Promise<SelfProofReport> {
+    const rows = repo.objects().filter(
+      (row) => row.caProof === "unknown" && row.references.includes(row.storePath),
+    );
+    if (rows.length === 0) {
+      return { rows: 0, proved: 0, refused: 0, unreadable: 0 };
+    }
+    options.log?.("cache.self_ca.start", {
+      rows: rows.length,
+      bytes: rows.reduce((sum, row) => sum + (row.fileSize ?? row.narSize), 0),
+    });
+    let next = 0;
+    let proved = 0;
+    let refused = 0;
+    let unreadable = 0;
+    let done = 0;
+    const worker = async (): Promise<void> => {
+      for (;;) {
+        if (stopping) return;
+        const row = rows[next++];
+        if (row === undefined) return;
+        const path = objects.localPath(objectKey(row.bucket, row.narHash, row.compression));
+        if (path === null) {
+          unreadable += 1;
+          continue;
+        }
+        const checked = await Promise.race([
+          verifyNarFile(path, row.compression, storePathHash(row.storePath)),
+          stopSignal.promise.then(() => null),
+        ]);
+        if (checked === null || stopping) return;
+        done += 1;
+        if (!checked.ok || checked.selfHash === null) {
+          unreadable += 1;
+        } else {
+          const ca = contentAddressOf({
+            storePath: row.storePath,
+            narHash: row.narHash,
+            references: row.references,
+            selfHash: checked.selfHash,
+          });
+          repo.putObject({
+            ...row,
+            ca,
+            caProof: ca === null ? "not-content-addressed" : "content-addressed",
+          });
+          if (ca === null) refused += 1;
+          else proved += 1;
+        }
+        if (done % 100 === 0) {
+          options.log?.("cache.self_ca.progress", { done, of: rows.length });
+        }
+      }
+    };
+    await Promise.all([worker(), worker()]);
+    if (proved > 0) notify();
+    options.log?.("cache.self_ca.complete", {
+      rows: rows.length,
+      proved,
+      refused,
+      unreadable,
+    });
+    return { rows: rows.length, proved, refused, unreadable };
+  }
+
+  async function migrateNow(): Promise<MigrationReport> {
+      const missing = repo.objects().filter((row) => row.fileHash === null);
+      if (missing.length === 0) {
+        return { migrated: 0, failures: 0, complete: true, paused: null };
+      }
+      const legacy = options.legacyStore;
+      if (legacy === undefined || legacy === null) {
+        // NO OLD STORE: the rows stay objectless, and the route answers 404
+        // rather than inventing bytes. The line names the count.
+        options.log?.("cache.migration.incomplete", {
+          remaining: missing.length,
+          reason: "no old store is configured",
+        });
+        return { migrated: 0, failures: missing.length, complete: false, paused: null };
+      }
+      const floor = options.migrationFreeFloor ?? 10 * 1024 * 1024 * 1024;
+      const retryMs = options.migrationRetryMs ?? 60_000;
+      const free = options.freeBytes ?? (async () => {
+        const stats = await statfs(join(dir, "objects")).catch(() => null);
+        return stats === null ? null : stats.bavail * stats.bsize;
+      });
+      const available = await free().catch(() => null);
+      options.log?.("cache.migration.start", {
+        objects: missing.length,
+        narBytes: missing.reduce((sum, row) => sum + row.narSize, 0),
+        freeBytes: available,
+      });
+
+      let next = 0;
+      let migrated = 0;
+      let failures = 0;
+      let paused: string | null = null;
+      const sleep = (ms: number): Promise<void> =>
+        new Promise((resolve) => setTimeout(resolve, ms));
+
+      const migrateOne = async (row: (typeof missing)[number]): Promise<void> => {
+        // THE DISK FLOOR, RE-CHECKED AND WAITED OUT rather than ending the run:
+        // space that returns in a minute should resume without a restart.
+        for (;;) {
+          if (stopping) return;
+          const bytes = await free().catch(() => null);
+          if (bytes === null || bytes >= floor) break;
+          if (paused === null) {
+            paused = `free space ${Math.round(bytes / 1024 ** 2)} MiB is below the ${Math.round(
+              floor / 1024 ** 2,
+            )} MiB floor`;
+            options.log?.("cache.migration.pause", { reason: paused, at: row.storePath });
+          }
+          await Promise.race([sleep(retryMs), stopSignal.promise]);
+        }
+        if (stopping) return;
+        if (paused !== null) {
+          options.log?.("cache.migration.resume", { at: row.storePath });
+          paused = null;
+        }
+        try {
+          if (stopping) return;
+          const known =
+            legacy.pathInfo === undefined
+              ? undefined
+              : await legacy.pathInfo(row.storePath).catch(() => null);
+          if (known === null) {
+            failures += 1;
+            options.log?.("cache.migration.object_failed", {
+              bucket: row.bucket,
+              path: row.storePath,
+              reason: "the old store does not have this path",
+            });
+            return;
+          }
+          // A REBUILT PATH CAN WEAR THE SAME NAME WITH DIFFERENT BYTES. The row
+          // was signed over one NarHash; keep only bytes the old store says
+          // carry that hash.
+          if (
+            known !== undefined &&
+            canonicalNarHash(known.narHash) !== row.narHash
+          ) {
+            failures += 1;
+            options.log?.("cache.migration.object_failed", {
+              bucket: row.bucket,
+              path: row.storePath,
+              reason: `the old store has ${known.narHash} but the row is ${row.narHash}`,
+            });
+            return;
+          }
+          // A TWIN MAY HAVE LANDED THE SAME OBJECT: ask before spawning a dump
+          // whose bytes would be thrown away.
+          const key = objectKey(row.bucket, row.narHash, row.compression);
+          if ((await objects.head(key)) !== null) {
+            const facts = await objects.put(key, new ReadableStream({ start: (c) => c.close() }));
+            repo.putObject({ ...row, fileHash: facts.sha256, fileSize: facts.size });
+            migrated += 1;
+            return;
+          }
+          const dump = legacy.dump(row.storePath);
+          const writing = migrationSlots.withSlot(() =>
+            objects.put(objectKey(row.bucket, row.narHash, row.compression), dump),
+          );
+          // A losing write is not left running: cancelling the stream kills the
+          // dump pipeline's process group.
+          void writing.catch(() => {});
+          const facts = await Promise.race([
+            writing,
+            stopSignal.promise.then(() => {
+              void dump.cancel().catch(() => {});
+              return null;
+            }),
+          ]);
+          if (facts === null || stopping) return;
+          repo.putObject({ ...row, fileHash: facts.sha256, fileSize: facts.size });
+          migrated += 1;
+          if (migrated % 100 === 0) {
+            options.log?.("cache.migration.progress", {
+              migrated,
+              remaining: repo.objects().filter((one) => one.fileHash === null).length,
+            });
+          }
+        } catch (err) {
+          failures += 1;
+          options.log?.("cache.migration.object_failed", {
+            bucket: row.bucket,
+            path: row.storePath,
+            reason: String((err as Error).message ?? err),
+          });
+        }
+      };
+
+      // REAL CONCURRENCY: two workers share the queue; each is inside the
+      // row's fetch-slot bound while it dumps and puts.
+      const workers = Array.from({ length: Math.min(2, missing.length) }, async () => {
+        for (;;) {
+          if (stopping) return;
+          const row = missing[next++];
+          if (row === undefined) return;
+          await migrateOne(row);
+        }
+      });
+      await Promise.all(workers);
+
+      const complete = repo.objects().every((row) => row.fileHash !== null);
+      const remaining = repo.objects().filter((row) => row.fileHash === null).length;
+      if (complete && migrated > 0) {
+        // THE LINE THE OPERATOR WAITS FOR before deleting the old store.
+        options.log?.("cache.migration.complete", {
+          migrated,
+          note: "the old store is no longer read and can be deleted",
+        });
+      } else if (!complete) {
+        options.log?.("cache.migration.incomplete", { migrated, failed: failures, remaining });
+      }
+    return { migrated, failures, complete, paused };
   }
 
   return {
@@ -873,6 +1183,8 @@ export function createCache(options: CacheOptions): Cache {
       return row === null ? null : narinfoFor(bucket, row);
     },
 
+    log: (event, fields) => options.log?.(event, fields),
+
     touch(bucket, hash) {
       if (!isStorePathHash(hash)) return;
       const row = repo.objectByHash(bucket.name, hash);
@@ -881,14 +1193,57 @@ export function createCache(options: CacheOptions): Cache {
       notifyReaders();
     },
 
-    async narStream(bucket, file) {
-      // `nar/<hash>.nar.zst` and `nar/<hash>.nar.xz` are the same object; the
-      // extension is the CLIENT's compression choice and odu always serves
-      // zstd, so only the hash part is looked up.
+    async narSource(bucket, file) {
+      // THE EXTENSION NAMES THE COMPRESSION, and twins can share a NarHash with
+      // different bytes: look up the pair, not the hash alone. A single row
+      // still answers a client that spelled the wrong extension, because its
+      // bytes are unambiguous.
       const at = file.indexOf(".nar");
       const hash = at === -1 ? file : file.slice(0, at);
-      const row = repo.objectByNarHash(bucket.name, `sha256:${hash}`);
-      return row === null ? null : blob.dump(row.storePath);
+      const narHash = `sha256:${hash}`;
+      const compression = compressionOfFile(file);
+      if (compression === null) return null;
+      const row =
+        repo.objectByNarHashCompression(bucket.name, narHash, compression) ??
+        (() => {
+          const twins = repo.objectsByNarHash(bucket.name, narHash);
+          return twins.length === 1 ? (twins[0] as ObjectRow) : null;
+        })();
+      if (row === null) return null;
+      const key = objectKey(bucket.name, narHash, row.compression);
+      const size = await objects.head(key);
+      if (size !== null) {
+        const path = objects.localPath(key);
+        if (path !== null) return { kind: "file", storePath: row.storePath, path, size };
+        const object = await objects.get(key);
+        if (object !== null) {
+          return { kind: "stream", storePath: row.storePath, stream: object.stream, size };
+        }
+      }
+      // THE ONE-TIME TRANSITION. A row from before objects were kept has no
+      // object yet; the old Nix store serves it until the boot migration lands
+      // it. When that store is gone this branch is unreachable and the route
+      // is a 404, not a silent dump.
+      const legacy = options.legacyStore;
+      if (legacy === undefined || legacy === null) return null;
+      // THE OLD STORE MAY NOT HAVE IT (the upstream closure was never copied,
+      // or the store is gone). A 404 is honest; a 200 whose stream errors is
+      // not. One line per path, not per client retry.
+      if (legacy.pathInfo !== undefined) {
+        const known = await legacy.pathInfo(row.storePath).catch(() => null);
+        if (known === null) {
+          if (!unavailableLogged.has(row.storePath)) {
+            unavailableLogged.add(row.storePath);
+            options.log?.("cache.nar.unavailable", {
+              bucket: bucket.name,
+              path: row.storePath,
+              reason: "no object and the old store does not have the path",
+            });
+          }
+          return null;
+        }
+      }
+      return { kind: "legacy", storePath: row.storePath, stream: legacy.dump(row.storePath) };
     },
 
     // The write path is `./staging`'s; this face is the one the routes speak,
@@ -898,10 +1253,9 @@ export function createCache(options: CacheOptions): Cache {
     completeUpload: (bucket, file, total) => staging.completeUpload(bucket, file, total),
     async acceptNarinfo(bucket, hash, body) {
       const outcome = await staging.acceptNarinfo(bucket, hash, body);
-      // A PUSH LANDED, OR A HELD PATH BECAME (OR STOPPED BEING) HELD — the
-      // changes nobody outside the cache can see, and the reason this
-      // listener exists at all. The publisher diffs, so a refusal that changed
-      // nothing costs one comparison.
+      // A PUSH LANDED OR WAS REFUSED — the changes nobody outside the cache
+      // can see, and the reason this listener exists at all. The publisher
+      // diffs, so a refusal that changed nothing costs one comparison.
       notify();
       return outcome;
     },
@@ -930,10 +1284,60 @@ export function createCache(options: CacheOptions): Cache {
       return repo.buckets().map((bucket) => factsOf(bucket, counted));
     },
 
-    held: () => repo.held(),
+    async boot() {
+      // 1. CA IS PROVED FROM THE PATH. Pure and instant: no store query, no
+      // pusher line. A self-reference's modulo hash comes from its bytes in 1b.
+      let caProved = 0;
+      for (const row of repo.objects().filter(
+        (one) => one.caProof === "unknown" && !one.references.includes(one.storePath),
+      )) {
+        const ca = contentAddressOf({
+          storePath: row.storePath,
+          narHash: row.narHash,
+          references: row.references,
+        });
+        repo.putObject({
+          ...row,
+          ca,
+          caProof: ca === null ? "not-content-addressed" : "content-addressed",
+        });
+        if (ca !== null) caProved += 1;
+      }
+      if (caProved > 0) {
+        options.log?.("cache.boot.ca", { proved: caProved });
+        notify();
+      }
 
-    resume: () => staging.resume(),
+      // 2. NOBODY IS WRITING YET: an object with no row is a crash between put
+      // and record; a `.tmp-*` older than this boot is a put that died. Both
+      // are swept BEFORE the mount, so the sweep cannot race a live push.
+      const tempSwept = (await objects.sweepTemp?.(now())) ?? 0;
+      const owned = new Set(
+        repo.objects().map((row) => objectKey(row.bucket, row.narHash, row.compression)),
+      );
+      let orphansSwept = 0;
+      for (const object of await objects.list("")) {
+        if (owned.has(object.key)) continue;
+        await objects.delete(object.key);
+        orphansSwept += 1;
+      }
+      if (orphansSwept > 0 || tempSwept > 0) {
+        options.log?.("cache.boot.orphans", { swept: orphansSwept, temp: tempSwept });
+      }
+      return { caProved, orphansSwept, tempSwept };
+    },
 
+    proveSelf() {
+      const task = proveSelfNow();
+      selfTask = task;
+      return task;
+    },
+
+    migrate() {
+      const task = migrateNow();
+      migrationTask = task;
+      return task;
+    },
     onChange(listener) {
       listeners.add(listener);
       return () => {
@@ -946,10 +1350,16 @@ export function createCache(options: CacheOptions): Cache {
       // that outlived `close()` would publish into a closed database.
       if (trailing !== null) clearTimeout(trailing);
       trailing = null;
+      stopping = true;
+      stopSignal.resolve();
+      // JOIN the row's migration before the database closes: its in-flight put
+      // may be one disk write away from a row.
+      if (migrationTask !== null) await migrationTask.catch(() => {});
+      if (selfTask !== null) await selfTask.catch(() => {});
       // REFUSE THE QUEUE FIRST: a job waiting for a slot belongs to this row,
       // and none of them may start after it closed. Then join the ones already
       // running, before the database closes.
-      fetchSlots.close();
+      migrationSlots.close();
       await staging.close();
       listeners.clear();
       repo.close();

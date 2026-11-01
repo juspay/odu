@@ -56,6 +56,11 @@ const object: ObjectRow = {
   narSize: 279592,
   references: ["/nix/store/pqyiidz5mi73wv5f91d48s9plcqyj5bz-glibc-2.44-57"],
   deriver: "/nix/store/y1kh9arkh7w7am664yqbnnrfpsisqcdc-hello-2.12.3.drv",
+  ca: null,
+  caProof: "unknown",
+    compression: "zstd",
+    fileHash: null,
+    fileSize: null,
   sigs: ["main-1:c2ln"],
   hits: 3,
   created: NOW,
@@ -122,63 +127,6 @@ describe("buckets", () => {
     repo.putBucket({ ...bucket, isPublic: false, retentionDays: 7 });
     expect(repo.buckets()).toHaveLength(1);
     expect(repo.bucket("main")).toEqual({ ...bucket, isPublic: false, retentionDays: 7 });
-  });
-});
-
-describe("held uploads", () => {
-  it("round-trips the reason and keeps the arrival time on a refresh", () => {
-    const repo = openCacheRepo(":memory:");
-    repo.putHeld({
-      bucket: "main",
-      storePath: "/nix/store/parent",
-      missing: ["/nix/store/child"],
-      fetching: 1,
-      fetched: [],
-      failure: null,
-      created: NOW,
-    });
-    // A later fetch landed one reference and the reason narrowed; the row's
-    // `since` is when the path first arrived and must not move.
-    repo.putHeld({
-      bucket: "main",
-      storePath: "/nix/store/parent",
-      missing: [],
-      fetching: 0,
-      fetched: ["/nix/store/child"],
-      failure: null,
-      created: NOW + 5000,
-    });
-    expect(repo.held()).toEqual([
-      {
-        bucket: "main",
-        storePath: "/nix/store/parent",
-        missing: [],
-        fetching: 0,
-        fetched: ["/nix/store/child"],
-        failure: null,
-        created: NOW,
-      },
-    ]);
-    expect(repo.held("main")).toHaveLength(1);
-    expect(repo.held("other")).toEqual([]);
-    repo.deleteHeld("main", "/nix/store/parent");
-    expect(repo.held()).toEqual([]);
-  });
-
-  it("goes with its bucket", () => {
-    const repo = openCacheRepo(":memory:");
-    repo.putBucket(bucket);
-    repo.putHeld({
-      bucket: "main",
-      storePath: "/nix/store/parent",
-      missing: ["/nix/store/child"],
-      fetching: 0,
-      fetched: [],
-      failure: null,
-      created: NOW,
-    });
-    repo.deleteBucket("main");
-    expect(repo.held()).toEqual([]);
   });
 });
 
@@ -339,37 +287,20 @@ describe("upgrading an existing database", () => {
       old.close();
 
       const repo = openCacheRepo(file);
-      repo.putHeld({
-        bucket: "main",
-        storePath: "/nix/store/parent",
-        missing: ["/nix/store/child"],
-        fetching: 0,
-        fetched: ["/nix/store/done"],
-        failure: "network unreachable",
-        created: NOW,
-      });
-      expect(repo.held()).toEqual([
-        {
-          bucket: "main",
-          storePath: "/nix/store/parent",
-          missing: ["/nix/store/child"],
-          fetching: 0,
-          fetched: ["/nix/store/done"],
-          failure: "network unreachable",
-          created: NOW,
-        },
-      ]);
       repo.close();
 
       const check = new Database(file);
       expect((check.query("PRAGMA user_version;").get() as { user_version: number }).user_version).toBe(
         CACHE_SCHEMA_VERSION,
       );
-      const columns = (check.query("PRAGMA table_info(held);").all() as { name: string }[]).map(
+      const columns = (check.query("PRAGMA table_info(object);").all() as { name: string }[]).map(
         (column) => column.name,
       );
-      expect(columns).toContain("fetched");
-      expect(columns).toContain("failure");
+      expect(columns).toContain("ca");
+      expect(columns).toContain("file_hash");
+      expect(columns).toContain("file_size");
+      const held = check.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'held'").get();
+      expect(held).toBeNull();
       check.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });

@@ -82,8 +82,9 @@ export const CACHE_USAGE = `usage: odu cache <create|list|use|domain|token|login
 create <bucket> [--private] [--retention-days N] [--upstream-key K]… | --no-upstream
                               create a bucket; print its substituter URL and
                               public key. Needs $ODU_ROOT_TOKEN.
-                              --no-upstream takes everything: for a server whose
-                              store is not the machine that built the paths
+                              --no-upstream takes everything, including
+                              upstream-signed closures (more disk), for consumers
+                              that cannot reach cache.nixos.org
 list [-o json]                buckets, with sizes. Needs $ODU_ROOT_TOKEN
 use <bucket>                  the nix.conf settings, the nixConfig block and the
                               netrc lines for a bucket. Needs NO token: a
@@ -103,9 +104,9 @@ push <bucket> <path>… [--token-file F] [--concurrency N] [--part-size MiB] [--
                               upload only the paths the bucket is missing.
                               Talks to the cache directly, from HERE. A NAR
                               larger than --part-size (64 MiB) is sent in parts,
-                              each retried on its own. A path the bucket holds
-                              for references is reported; --wait stays until the
-                              bucket can serve it
+                              each retried on its own. --wait is DEPRECATED and
+                              returns at once (nothing is held; removed at the
+                              cache row's next major)
 pin <bucket> <name> <path>…   pin a closure against garbage collection
 gc [bucket] [-o json]         evict what retention expired and nothing holds
 stats [-o json]               storage and reads
@@ -650,7 +651,6 @@ async function pushCommand(rest: string[]): Promise<number> {
             partSize:
               wholeNumber("--part-size", values["part-size"]) * 1024 * 1024,
           }),
-      ...(values.wait === true ? { wait: true } : {}),
       onLine: (line) => {
         if (!json) process.stderr.write(`${line}\n`);
       },
@@ -660,20 +660,14 @@ async function pushCommand(rest: string[]): Promise<number> {
     } else {
       process.stdout.write(
         `pushed ${summary.pushed}, skipped-upstream ${summary.skippedUpstream}, ` +
-          `already-present ${summary.alreadyPresent}, held ${summary.held.length}, ` +
-          `failed ${summary.failed}\n`,
+          `already-present ${summary.alreadyPresent}, ` +
+          `held ${summary.held.length}, failed ${summary.failed}\n`,
       );
+      for (const held of summary.held) {
+        process.stderr.write(`  ${held.path}: held by the older server (${held.reason})\n`);
+      }
       for (const failure of summary.failures) {
         process.stderr.write(`  ${failure.path}: ${failure.message}\n`);
-      }
-      if (summary.held.length > 0) {
-        // A HOLD IS NOT A FAILURE, and the command returns: what could not land
-        // is the bucket's fact, and the page says what it is waiting for.
-        process.stderr.write(
-          `held ${summary.held.length} path${summary.held.length === 1 ? "" : "s"} — ` +
-            `see ${summary.pageUrl}` +
-            (values.wait === true ? "\n" : "; pass --wait to stay until they land\n"),
-        );
       }
     }
     return summary.failed === 0 ? 0 : 1;

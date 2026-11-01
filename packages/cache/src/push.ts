@@ -16,10 +16,10 @@
  * take — the server drops paths signed by an upstream key, so a nixpkgs
  * dependency never costs an upload.
  *
- * **Uploads go in dependency order.** The server imports each narinfo through
- * `nix copy --from`, and Nix refuses a path whose references are not valid yet.
- * So paths are ordered by their depth in the closure and pushed shallowest
- * first; the concurrency is applied WITHIN a depth, never across one.
+ * **Uploads go in dependency order.** The cache records each narinfo; a
+ * reference is a NAME, not a path the server must already hold, so ordering is
+ * about a consumer walking the closure rather than an import. Paths go
+ * shallowest first; concurrency is applied WITHIN a depth, never across one.
  *
  * **A NAR is never in memory.** Each upload is `nix store dump-path | zstd -T0
  * -c` piped straight into the request body, which is why this can push a
@@ -33,9 +33,14 @@ import {
   readCredentials as sharedReadCredentials,
   saveCredential as sharedSaveCredential,
 } from "@odu/credentials";
-import { narHashBase32, storePathBasename, storePathHash } from "./narinfo";
+import {
+  isDerivationPath,
+  narHashBase32,
+  storePathBasename,
+  storePathHash,
+} from "./narinfo";
 import { CACHE_MOUNT } from "./paths";
-import { DEFAULT_NAR_PART_BYTES, heldReason, MAX_NAR_PART_BYTES } from "./surface";
+import { DEFAULT_NAR_PART_BYTES, MAX_NAR_PART_BYTES } from "./surface";
 import { type PathInfo, nixClosure, nixDump } from "./store";
 
 /** The environment slice this client reads. Passed in rather than reached for:
@@ -144,19 +149,18 @@ export interface PushSummary {
   /** Paths the bucket already has, or would not take because an upstream key
    *  signed them. The server says which is which. */
   skippedUpstream: number;
+  /** Derivations the caller named. A cache serves outputs; a `.drv` is a
+   *  recipe, and its references are recipes. */
+  skippedDerivation: readonly string[];
   alreadyPresent: number;
-  /**
-   * Paths the bucket ACCEPTED and is holding for references that are neither
-   * in it nor upstream-signed. Reported, not failed: the pusher cannot make
-   * the reference appear, and the bucket page says what it waits for.
-   */
+  /** DEPRECATED server-side state: an older 2.3 daemon answered 202. Reported,
+   *  not failed; today's daemon records immediately. */
   held: readonly { path: string; reason: string }[];
   failed: number;
   /** One line per failure, for a caller that wants to say which paths did not
    *  make it. */
   failures: readonly { path: string; message: string }[];
-  /** The bucket's page on the daemon that answered — where a person reads the
-   *  held paths and their reason. */
+  /** The daemon that answered, for a refusal's follow-up. */
   pageUrl: string;
 }
 
@@ -191,15 +195,6 @@ export interface PushOptions {
   partSize?: number;
   /** Attempts per path. */
   attempts?: number;
-  /**
-   * STAY UNTIL THE BUCKET CAN SERVE THE HELD PATHS. Off by default: a hold is
-   * reported and the command returns, because waiting on a reference the
-   * pusher cannot produce is the silence this voice exists to end.
-   */
-  wait?: boolean;
-  /** How often `--wait` asks again, and how long it is willing to. */
-  waitIntervalMs?: number;
-  waitTimeoutMs?: number;
   onLine?: (line: string) => void;
   platform?: PushPlatform;
 }
@@ -210,75 +205,11 @@ export interface PushOptions {
 const DEFAULT_CONCURRENCY = 4;
 const DEFAULT_ATTEMPTS = 3;
 
-/** How many times a deferred upload is repeated after the waves that could
- *  unblock it. Two is enough for any closure a real store produces — the
- *  depth of the graph, not its size. */
-const DEFERRED_ROUNDS = 2;
-
-/** `--wait`: how often the held paths are asked about, and how long the
- *  command is willing to stay. Ten minutes is long enough for a parallel
- *  pusher to land the missing reference and short enough that a hold nobody
- *  will fix is still a prompt answer. */
-const WAIT_INTERVAL_MS = 2_000;
-const WAIT_TIMEOUT_MS = 10 * 60_000;
-
-const sleep = (ms: number): Promise<void> => {
-  const { promise, resolve } = Promise.withResolvers<void>();
-  setTimeout(resolve, ms);
-  return promise;
-};
-
 /** Which answers are worth another attempt. A 4xx is the REQUEST being wrong —
  *  a bad token, a bad narinfo — and repeating it streams the whole NAR again
  *  for the same answer. */
 function worthRetrying(status: number): boolean {
   return status === 429 || status >= 500;
-}
-
-/** ONE HOLD'S PROGRESS, as the bucket publishes it. */
-interface HeldProgress {
-  readonly storePath: string;
-  readonly reason: string;
-  readonly missing: readonly string[];
-  readonly fetching: number;
-  readonly fetched: readonly string[];
-}
-
-/** THE HOLDS A BUCKET IS KEEPING, for a client that is waiting. */
-async function heldOf(
-  resolved: ResolvedBucket,
-  headers: Record<string, string>,
-): Promise<readonly HeldProgress[] | null> {
-  try {
-    const response = await fetch(
-      `${resolved.origin}${CACHE_MOUNT}/${encodeURIComponent(resolved.name)}/held`,
-      { headers: { ...headers, accept: "application/json" } },
-    );
-    if (!response.ok) return null;
-    const body = (await response.json()) as { held?: unknown };
-    if (!Array.isArray(body.held)) return null;
-    return body.held as HeldProgress[];
-  } catch {
-    return null;
-  }
-}
-
-/** THE INSTANCE'S PUBLIC ORIGIN, from the bucket's own consumer facts. */
-async function boardOf(
-  resolved: ResolvedBucket,
-  headers: Record<string, string>,
-): Promise<string | null> {
-  try {
-    const response = await fetch(
-      `${resolved.origin}${CACHE_MOUNT}/${encodeURIComponent(resolved.name)}`,
-      { headers: { ...headers, accept: "application/json" } },
-    );
-    if (!response.ok) return null;
-    const facts = (await response.json()) as { board?: unknown };
-    return typeof facts.board === "string" && facts.board !== "" ? facts.board : null;
-  } catch {
-    return null;
-  }
 }
 
 export async function pushToCache(options: PushOptions): Promise<PushSummary> {
@@ -299,8 +230,21 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
     closure: (paths) => nixClosure(paths, null),
     dump: (storePath) => nixDump(storePath, null),
   };
-  const closure = new Map((await platform.closure(options.paths)).map((info) => [info.storePath, info]));
-  const answer = await askMissing(resolved, headers, closure);
+  // A DERIVATION IS NOT A CACHE OBJECT. Its references are recipes, and
+  // fetching one lets Nix try to BUILD it on the cache host. Report and skip;
+  // the exit stays 0, like an upstream-signed path.
+  const skippedDerivation = options.paths.filter(isDerivationPath);
+  for (const path of skippedDerivation) say(`⏭ ${path} skipped-derivation`);
+  const uploadable = options.paths.filter((path) => !isDerivationPath(path));
+  const closure =
+    uploadable.length === 0
+      ? new Map()
+      : new Map((await platform.closure(uploadable)).map((info) => [info.storePath, info]));
+  // An empty closure has nothing to ask; the summary below is the one shape.
+  const answer =
+    closure.size === 0
+      ? { missing: [] as readonly string[], skippedUpstream: [] as readonly string[] }
+      : await askMissing(resolved, headers, closure);
   const present = closure.size - answer.missing.length;
   const alreadyPresent = present - answer.skippedUpstream.length;
   // ONE PREAMBLE, then a line per path: what the closure is, what the bucket
@@ -321,17 +265,10 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
   }
   let pushed = 0;
 
-  /**
-   * Upload one wave. A path the server ACCEPTED but cannot import yet is
-   * HELD, with the server's own sentence as its reason — the client does not
-   * invent a wording for a fact the bucket owns.
-   */
-  const runWave = async (
-    wave: readonly string[],
-    narinfoOnly = false,
-  ): Promise<{ path: string; reason: string }[]> => {
+  /** Upload one dependency depth, reporting refusals as they happen. */
+  const held: { path: string; reason: string }[] = [];
+  const runWave = async (wave: readonly string[]): Promise<void> => {
     const queue = [...wave];
-    const held: { path: string; reason: string }[] = [];
     const worker = async (): Promise<void> => {
       for (;;) {
         const storePath = queue.shift();
@@ -339,11 +276,11 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
         const entry = closure.get(storePath);
         if (entry === undefined) continue;
         const outcome = await uploadOne(base, headers, entry, platform, attempts, say, {
-          narinfoOnly,
           partSize,
         });
         if (outcome.ok === "held") {
           held.push({ path: storePath, reason: outcome.reason });
+          say(`⏸ ${storePath} held by the older server: ${outcome.reason}`);
           continue;
         }
         if (outcome.ok) {
@@ -356,70 +293,17 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
       }
     };
     await Promise.all(Array.from({ length: Math.max(1, Math.min(width, queue.length)) }, worker));
-    return held;
   };
 
-  let held: { path: string; reason: string }[] = [];
   for (const wave of orderByDepth(closure, new Set(answer.missing))) {
-    held.push(...(await runWave(wave)));
+    await runWave(wave);
   }
 
-  // A HELD path is still staged on the server: the repeat is the narinfo alone,
-  // never the NAR. Bounded, because a reference the pusher skipped as upstream
-  // will not arrive from here — and when the rounds stop changing anything, the
-  // hold is final and the line at the end says so.
-  for (
-    let round = 0;
-    options.wait !== true && held.length > 0 && round < DEFERRED_ROUNDS;
-    round++
-  ) {
-    const retrying = held.map((one) => one.path);
-    const next = await runWave(retrying, true);
-    if (next.length === retrying.length) {
-      held = next;
-      break;
-    }
-    held = next;
-  }
-
-  // `--wait` is the OPT-IN to the silence: READ THE HOLD'S PROGRESS until the
-  // paths are recorded or the patience runs out. No narinfo is re-uploaded and
-  // no missing question is asked again — a wait is not another push.
-  if (options.wait === true && held.length > 0) {
-    const interval = options.waitIntervalMs ?? WAIT_INTERVAL_MS;
-    const deadline = Date.now() + (options.waitTimeoutMs ?? WAIT_TIMEOUT_MS);
-    while (held.length > 0 && Date.now() < deadline) {
-      await sleep(interval);
-      const rows = await heldOf(resolved, headers);
-      if (rows === null) continue;
-      const byPath = new Map(rows.map((row) => [row.storePath, row]));
-      const recorded = held.filter((one) => !byPath.has(one.path)).map((one) => one.path);
-      for (const path of recorded) {
-        pushed += 1;
-        say(`✅ ${path} stored`);
-      }
-      // The reason is the bucket's latest sentence: a job that landed 6 of 7
-      // says so the next time the client looks.
-      held = held
-        .filter((one) => !recorded.includes(one.path))
-        .map((one) => ({ path: one.path, reason: byPath.get(one.path)?.reason ?? one.reason }));
-    }
-  }
-
-  // ONE LINE PER HELD PATH, at the end, with the bucket's latest sentence. A
-  // hold is not a failure: the exit code and `failed` stay about refusals.
-  for (const one of held) say(`⏸ ${one.path} held: ${one.reason}`);
-
-  // THE BOARD, not the substituter. A push may name a bucket's domain as its
-  // origin, and that name serves only the bucket — its `/` is the public page,
-  // which does not know what is held. The daemon publishes its own PUBLIC
-  // ORIGIN in the bucket's consumer facts (`ODU_PUBLIC_ORIGIN`), so the client
-  // asks rather than guessing from its own environment; a failed ask falls
-  // back to the origin it talked to.
-  const board = held.length === 0 ? resolved.origin : ((await boardOf(resolved, headers)) ?? resolved.origin);
+  const board = resolved.origin;
   return {
     pushed,
     skippedUpstream: answer.skippedUpstream.length,
+    skippedDerivation,
     alreadyPresent,
     held,
     failed: failures.length,
@@ -512,8 +396,7 @@ function asError(err: unknown): Error {
 
 type UploadOutcome =
   | { ok: true }
-  /** The server took it and cannot import it yet — a reference has not landed.
-   *  `reason` is the SERVER's sentence, not this client's. */
+  /** An older 2.3 daemon still holds this path for a reference. */
   | { ok: "held"; reason: string }
   | { ok: false; message: string };
 
@@ -707,10 +590,10 @@ async function uploadOne(
   platform: PushPlatform,
   attempts: number,
   say: (line: string) => void,
-  options: { narinfoOnly?: boolean; partSize: number },
+  options: { partSize: number },
 ): Promise<UploadOutcome> {
   let lastMessage = "no attempt was made";
-  let narinfoOnly = options.narinfoOnly === true;
+  const narinfoOnly = false;
   const narName = `${narHashBase32(entry.narHash)}.nar.zst`;
   for (let attempt = 0; attempt < attempts; attempt++) {
     if (!narinfoOnly) {
@@ -738,22 +621,17 @@ async function uploadOne(
       lastMessage = infoResponse.message;
       continue;
     }
+    // 202 IS HELD ON AN OLDER SERVER, not stored. The 2.3 client keeps working
+    // against a daemon that still answers the old hold protocol.
     if (infoResponse.status === 202) {
-      const said = (await infoResponse.text()).trim();
       return {
         ok: "held",
-        reason: said === "" ? heldReason(null) : said,
+        reason: (await infoResponse.text()).trim() || "the older server holds this path",
       };
     }
     if (infoResponse.ok) return { ok: true };
     const said = await infoResponse.text();
     lastMessage = `narinfo upload answered ${infoResponse.status}: ${said}`;
-    if (narinfoOnly && infoResponse.status === 400 && said.includes("never uploaded")) {
-      // The server no longer has the bytes — a restart, or a sweep. Send the
-      // pair rather than asking again.
-      narinfoOnly = false;
-      continue;
-    }
     if (!worthRetrying(infoResponse.status)) break;
   }
   return { ok: false, message: lastMessage };

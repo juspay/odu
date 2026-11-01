@@ -49,8 +49,8 @@ export const PublicOrigin = serviceTag<string | null>("odu:publicOrigin");
  *  substituter keeps serving. */
 export const RootToken = serviceTag<string | null>("odu:rootToken");
 
-/** The store URI a cache's blobs live in — `$ODU_CACHE_STORE`, or `null` for the
- *  host's own `/nix/store`. */
+/** The OLD store a cache migrates from — `$ODU_CACHE_STORE`, or `null` for the
+ *  host's own `/nix/store`. Never where the cache keeps objects. */
 export const NixStore = serviceTag<string | null>("odu:nixStore");
 
 /** WHICH APPLICATION this is, for the cell a client compares before it adopts a

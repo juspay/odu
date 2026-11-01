@@ -43,7 +43,6 @@ async function row(publicOrigin: string): Promise<{
     // not about.
     stateRoot: `${import.meta.dirname}/../../../.ci/cache-url-test/${process.pid}-${world}`,
     rootToken: "root-token",
-    store: null,
   });
   trash.push(cache);
   const server = cacheServer({ cache, publicOrigin, mount: "/cache" });
@@ -57,10 +56,7 @@ async function row(publicOrigin: string): Promise<{
         published.delete(key);
       },
     },
-    held: {
-      upsert: () => {},
-      remove: () => {},
-    },
+    held: { upsert: () => {}, remove: () => {} },
   });
   return { cache, published, publish: server.publish };
 }

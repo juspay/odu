@@ -65,17 +65,19 @@ ODU_CACHE_TOKEN=... odu cache push main ./result
 
 | Command | What it does | On the board |
 | --- | --- | --- |
-| `odu cache create <bucket>` | Create a bucket; print its substituter URL and public key. `--no-upstream` takes everything, for a store that is not the builder's | Cache → **Create bucket** |
+| `odu cache create <bucket>` | Create a bucket; print its substituter URL and public key. `--no-upstream` takes everything, including upstream-signed closures (more disk) | Cache → **Create bucket** |
 | `odu cache list` | List buckets, with sizes | Cache |
 | `odu cache use <bucket>` | Print the substituter and key settings, a `nixConfig` block, and the netrc lines | a bucket's page |
 | `odu cache token mint\|list\|revoke` | Scoped, expiring, revocable tokens; the plaintext is shown once | a bucket's **Tokens** |
 | `odu cache login <origin>` | Save a token for an origin in `~/.config/odu/cache/credentials` | — |
-| `odu cache push <bucket> <path>…` | Upload only the paths the bucket is missing; long NARs are chunked, holds are reported | — |
+| `odu cache push <bucket> <path>…` | Upload only the paths the bucket is missing; long NARs are chunked | — |
 | `odu cache domain <bucket> <name>\|--none` | Give a bucket a DNS name of its own through a Cloudflare tunnel | bucket → **Domain** |
 | `odu cache pin <bucket> <name> <path>…` | Keep a closure out of garbage collection | a bucket's **Pin closure** |
 | `odu cache gc [bucket]` | Evict what retention expired and nothing references or pins | a bucket's **Run GC** |
 | `odu cache stats` | Storage and reads | a bucket's **Stats** |
 | `odu cloudflare status` | The tunnel and the names it carries | **Tunnel** |
+
+Contract **2.3 is additive**: a 2.x client keeps working — the cache no longer holds references, so `/held` answers an empty list and `--wait` returns at once, both deprecated and removed at the cache row's next major.
 
 Odu's own builds are served from its own cache. To pull odu and its runners from
 it — and to show a project's own bucket — the flake settings are:

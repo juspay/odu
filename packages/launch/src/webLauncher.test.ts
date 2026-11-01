@@ -83,25 +83,27 @@ describe("adoptOrRefuse", () => {
   });
 
   it("adopts a service whose minor is BEHIND this build — the additive rule", async () => {
-    // A minor only ADDS members, so a reader built after the daemon is
-    // stranded by nothing but the one new control it calls. Refusing it at the
-    // handshake made every added verb a flag day for every newer reader.
+    // A minor only ADDS members: this build reads 2.3, the daemon speaks 2.2.
     const warned: string[] = [];
     const { connection, disposed } = scripted(() => Stream.make(cell(minorStep(-1))));
-    const result = await adoptOrRefuse(connection, ORIGIN, { warn: (line) => warned.push(line) });
+    const result = await adoptOrRefuse(connection, ORIGIN, {
+      warn: (line) => warned.push(line),
+    });
     expect(result).toBe(connection);
     expect(disposed()).toBe(0);
-    // …and says, once, what a newer verb's "unknown" will mean and what fixes it.
     expect(warned).toHaveLength(1);
     expect(warned[0]).toContain("odu web --upgrade");
   });
 
-  it("says it once per daemon to a caller that redials", async () => {
+  it("says the behind note once per daemon to a caller that redials", async () => {
     const warned: string[] = [];
     const seen = new Set<string>();
     for (let dial = 0; dial < 3; dial += 1) {
       const { connection } = scripted(() => Stream.make(cell(minorStep(-1))));
-      await adoptOrRefuse(connection, ORIGIN, { warn: (line) => warned.push(line), warned: seen });
+      await adoptOrRefuse(connection, ORIGIN, {
+        warn: (line) => warned.push(line),
+        warned: seen,
+      });
     }
     expect(warned).toHaveLength(1);
   });
@@ -154,10 +156,6 @@ describe("adoptOrRefuse", () => {
     expect(disposed()).toBe(1);
   });
 
-  // The fixtures must mean what the test names claim: at a future `x.0` bump
-  // `minor - 1` is `-1`, which the grammar rejects outright — the behind-minor
-  // test would then be refused for being MALFORMED and fail, rather than
-  // silently pass for the wrong reason. Pin all three readings here.
   it("uses fixtures that are genuinely a lower minor, a higher minor and another major", () => {
     expect(contractVerdict(cell(minorStep(-1)), ORIGIN)).toBeNull();
     expect(contractVerdict(cell(minorStep(1)), ORIGIN)).toBeNull();

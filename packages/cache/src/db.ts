@@ -76,6 +76,22 @@ export interface ObjectRow {
   narSize: number;
   references: readonly string[];
   deriver: string | null;
+  /** Nix's `CA:` line, verbatim; `null` for an ordinary input-addressed path. */
+  ca: string | null;
+  /** THE PROOF'S VERDICT, persisted so a row is examined once. `unknown` for
+   *  a row whose shape needs its bytes (a self-reference) and has not been
+   *  read yet; `content-addressed` when the path check passed; `not-content-
+   *  addressed` when the check failed and no CA is served. */
+  caProof: "unknown" | "content-addressed" | "not-content-addressed";
+  /** What the KEPT bytes are compressed with — `zstd`, `xz`, `bzip2` or
+   *  `none`. The narinfo says it and the object's extension encodes it. */
+  compression: string;
+  /** `sha256:<base32>` of the kept compressed NAR file, and its byte size.
+   *  `null` until the file exists (a row from before files were kept, or an
+   *  object whose boot backfill has not finished); the FIFO fallback serves it
+   *  meanwhile without claiming a `FileHash:`. */
+  fileHash: string | null;
+  fileSize: number | null;
   sigs: readonly string[];
   /** narinfo reads. What `odu cache stats` reports. */
   hits: number;
@@ -93,34 +109,6 @@ export interface BucketTotals {
   /** When the newest narinfo landed; `null` for a bucket nothing was pushed
    *  to. */
   lastPush: number | null;
-}
-
-/**
- * AN UPLOAD THE BUCKET TOOK BUT CANNOT SERVE YET — a narinfo whose references
- * are not in the store.
- *
- * It is a ROW rather than a line of staging's memory because it is a fact the
- * bucket publishes: the board lists the paths a push is holding and why, and a
- * restart must not make a pending upload look like one that never arrived. The
- * staged narinfo itself stays on disk (staging's), so the row only names the
- * position and the reason.
- */
-export interface HeldRow {
-  bucket: string;
-  storePath: string;
-  /** References the store says are not valid, as Nix named them. */
-  missing: readonly string[];
-  /** How many of those the server is FETCHING from upstream right now. A hold
-   *  with a count is progress; zero means the fetch finished and they are
-   *  genuinely neither here nor upstream. */
-  fetching: number;
-  /** References this hold's fetch ALREADY brought in. The page shows them
-   *  beside the ones still missing, so a job that lands 6 of 7 says which. */
-  fetched: readonly string[];
-  /** The last line a FAILED `nix-store -r` said. `null` while it is working,
-   *  or when the references are genuinely neither here nor upstream. */
-  failure: string | null;
-  created: number;
 }
 
 /** A named closure kept out of garbage collection. */
@@ -153,6 +141,12 @@ export interface CacheRepo {
   object(bucket: string, storePath: string): ObjectRow | null;
   objectByHash(bucket: string, hash: string): ObjectRow | null;
   objectByNarHash(bucket: string, narHash: string): ObjectRow | null;
+  objectByNarHashCompression(
+    bucket: string,
+    narHash: string,
+    compression: string,
+  ): ObjectRow | null;
+  objectsByNarHash(bucket: string, narHash: string): ObjectRow[];
   objects(bucket?: string): ObjectRow[];
   /** Bump last access and the hit count together — one row write per read. */
   touchObject(bucket: string, storePath: string, at: number): void;
@@ -167,9 +161,6 @@ export interface CacheRepo {
    * REASON when a drain says something different, so a row's `since` stays
    * the moment the path first arrived.
    */
-  putHeld(row: HeldRow): void;
-  held(bucket?: string): HeldRow[];
-  deleteHeld(bucket: string, storePath: string): void;
 
   /** Object count, nar bytes, reads and the newest push per bucket, COUNTED BY
    *  SQL. A cache with a hundred thousand objects must not answer "how big am
@@ -297,6 +288,42 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE held ADD COLUMN failure TEXT;
   `,
+  // Migration 7 — THE `CA:` LINE, as Nix sent it. A content-addressed rewrite
+  // is importable by its own hash; without this the consumer demands a
+  // signature instead.
+  `
+  ALTER TABLE object ADD COLUMN ca TEXT;
+  `,
+  // Migration 8 — THE COMPRESSED NAR IS KEPT. A push already uploads it, so
+  // the file the cache proved is the file it serves: a sized object Cloudflare
+  // will cache, and no re-dump per puller. Null means the file is not there
+  // yet; the row is served by the FIFO fallback until the boot backfill (or a
+  // re-push) produces it.
+  `
+  ALTER TABLE object ADD COLUMN file_hash TEXT;
+  ALTER TABLE object ADD COLUMN file_size INTEGER;
+  `,
+  // Migration 9 — NO HOLDS. A cache that keeps what it was pushed no longer
+  // waits for references: they are names in the narinfo, not paths a store must
+  // hold first. The table is dropped rather than left as dead state.
+  `
+  DROP TABLE held;
+  `,
+  // Migration 10 — THE STORED COMPRESSION. An upload may be zstd, xz, bzip2
+  // or none; the object is kept exactly as sent, so the row records what the
+  // bytes are and the narinfo says it. Rows from before this are zstd (the
+  // only thing odu ever served), hence the default.
+  `
+  ALTER TABLE object ADD COLUMN compression TEXT NOT NULL DEFAULT 'zstd';
+  `,
+  // Migration 11 — THE CA PROOF'S VERDICT, once per row. A self-referencing
+  // row's proof needs its bytes; re-reading it every boot made an ordinary
+  // input-addressed path a permanent startup cost. Rows that already carry a
+  // CA were proved by the old flow.
+  `
+  ALTER TABLE object ADD COLUMN ca_proof TEXT NOT NULL DEFAULT 'unknown';
+  UPDATE object SET ca_proof = 'content-addressed' WHERE ca IS NOT NULL;
+  `,
 ];
 
 /** The schema this build writes. A file carrying a HIGHER number was written by
@@ -373,6 +400,13 @@ const objectOf = (row: Row): ObjectRow => ({
   narSize: integer(row, "nar_size"),
   references: list(row, "refs"),
   deriver: maybeText(row, "deriver"),
+  ca: maybeText(row, "ca"),
+  caProof: text(row, "ca_proof") as ObjectRow["caProof"],
+  compression: text(row, "compression"),
+  fileHash: maybeText(row, "file_hash"),
+  fileSize: row["file_size"] === null || row["file_size"] === undefined
+    ? null
+    : integer(row, "file_size"),
   sigs: list(row, "sigs"),
   hits: integer(row, "hits"),
   created: integer(row, "created"),
@@ -383,16 +417,6 @@ const pinOf = (row: Row): PinRow => ({
   bucket: text(row, "bucket"),
   name: text(row, "name"),
   rootPaths: list(row, "root_paths"),
-  created: integer(row, "created"),
-});
-
-const heldOf = (row: Row): HeldRow => ({
-  bucket: text(row, "bucket"),
-  storePath: text(row, "store_path"),
-  missing: list(row, "missing"),
-  fetching: integer(row, "fetching"),
-  fetched: list(row, "fetched"),
-  failure: row["failure"] === null || row["failure"] === undefined ? null : String(row["failure"]),
   created: integer(row, "created"),
 });
 
@@ -496,7 +520,6 @@ export function openCacheRepo(path: string): CacheRepo {
       db.run("DELETE FROM bucket WHERE name = ?", [name]);
       db.run("DELETE FROM object WHERE bucket = ?", [name]);
       db.run("DELETE FROM pin WHERE bucket = ?", [name]);
-      db.run("DELETE FROM held WHERE bucket = ?", [name]);
     },
 
     putToken(row) {
@@ -533,12 +556,15 @@ export function openCacheRepo(path: string): CacheRepo {
     putObject(row) {
       db.run(
         `INSERT INTO object (bucket, store_path, hash, nar_hash, nar_size, refs,
-           deriver, sigs, hits, created, last_accessed)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           deriver, ca, ca_proof, compression, file_hash, file_size, sigs, hits, created, last_accessed)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(bucket, store_path) DO UPDATE SET hash = excluded.hash,
            nar_hash = excluded.nar_hash, nar_size = excluded.nar_size,
            refs = excluded.refs, deriver = excluded.deriver,
-           sigs = excluded.sigs`,
+           ca = excluded.ca, ca_proof = excluded.ca_proof,
+           compression = excluded.compression,
+           file_hash = excluded.file_hash,
+           file_size = excluded.file_size, sigs = excluded.sigs`,
         [
           row.bucket,
           row.storePath,
@@ -547,6 +573,11 @@ export function openCacheRepo(path: string): CacheRepo {
           row.narSize,
           JSON.stringify(row.references),
           row.deriver,
+          row.ca,
+          row.caProof,
+          row.compression,
+          row.fileHash,
+          row.fileSize,
           JSON.stringify(row.sigs),
           row.hits,
           row.created,
@@ -572,6 +603,14 @@ export function openCacheRepo(path: string): CacheRepo {
         .get(bucket, narHash) as Row | null;
       return row === null ? null : objectOf(row);
     },
+    objectByNarHashCompression: (bucket, narHash, compression) => {
+      const row = db
+        .query("SELECT * FROM object WHERE bucket = ? AND nar_hash = ? AND compression = ?")
+        .get(bucket, narHash, compression) as Row | null;
+      return row === null ? null : objectOf(row);
+    },
+    objectsByNarHash: (bucket, narHash) =>
+      all("SELECT * FROM object WHERE bucket = ? AND nar_hash = ?", [bucket, narHash], objectOf),
     objects: (bucket) =>
       bucket === undefined
         ? all("SELECT * FROM object", [], objectOf)
@@ -601,7 +640,7 @@ export function openCacheRepo(path: string): CacheRepo {
     bucketStats() {
       const rows = db
         .query(
-          "SELECT bucket, COUNT(*) AS objects, COALESCE(SUM(nar_size), 0) AS bytes, " +
+          "SELECT bucket, COUNT(*) AS objects, COALESCE(SUM(COALESCE(file_size, nar_size)), 0) AS bytes, " +
             "COALESCE(SUM(hits), 0) AS hits, MAX(created) AS pushed " +
             "FROM object GROUP BY bucket",
         )
@@ -649,7 +688,7 @@ export function openCacheRepo(path: string): CacheRepo {
     objectTotals() {
       const row = db
         .query(
-          "SELECT COUNT(*) AS objects, COALESCE(SUM(nar_size), 0) AS bytes, " +
+          "SELECT COUNT(*) AS objects, COALESCE(SUM(COALESCE(file_size, nar_size)), 0) AS bytes, " +
             "COALESCE(SUM(hits), 0) AS hits, MAX(last_accessed) AS last " +
             "FROM object",
         )
@@ -670,35 +709,6 @@ export function openCacheRepo(path: string): CacheRepo {
       if (found === null) return false;
       db.run("DELETE FROM pin WHERE bucket = ? AND name = ?", [bucket, name]);
       return true;
-    },
-
-    putHeld(row) {
-      // `created` is NOT overwritten: it is when the path first arrived, which
-      // is what the board's "waiting since" means. A later drain with the same
-      // or a shorter list of missing references refreshes the REASON only.
-      db.run(
-        `INSERT INTO held (bucket, store_path, missing, fetching, fetched, failure, created)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(bucket, store_path) DO UPDATE SET missing = excluded.missing,
-           fetching = excluded.fetching, fetched = excluded.fetched,
-           failure = excluded.failure`,
-        [
-          row.bucket,
-          row.storePath,
-          JSON.stringify(row.missing),
-          row.fetching,
-          JSON.stringify(row.fetched),
-          row.failure,
-          row.created,
-        ],
-      );
-    },
-    held: (bucket) =>
-      bucket === undefined
-        ? all("SELECT * FROM held ORDER BY created", [], heldOf)
-        : all("SELECT * FROM held WHERE bucket = ? ORDER BY created", [bucket], heldOf),
-    deleteHeld(bucket, storePath) {
-      db.run("DELETE FROM held WHERE bucket = ? AND store_path = ?", [bucket, storePath]);
     },
 
     close() {

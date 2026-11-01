@@ -5,14 +5,11 @@
 # `juspay/kolu`'s `publish-closure` action, pinned to the kolu revision odu
 # pins in `npins/sources.json`).
 #
-# TWO ORIGINS, ON PURPOSE: the flake ADVERTISES `https://cache.kolu.dev`, and
-# until this PR deploys and that name is set neither job can talk to it. Both
-# jobs therefore PUSH to the pod's live address,
-# `https://odu-k3s.rooster-blues.ts.net` (the same daemon and the same `kolu`
-# bucket, public through Funnel today) — a substituter that does not answer yet
-# is a warning to Nix, not a failure. Two follow-ups, named in the PR: move the
-# push origin back to `cache.kolu.dev` once live, and re-pin kolu's odu so the
-# publish job chunks too. Nothing here depends on either.
+# BOTH JOBS PUSH TO THE NAME THE FLAKE ADVERTISES: `https://cache.kolu.dev`.
+# The build job runs the checkout's own `odu`, which chunks. The publish job's
+# action is pinned to kolu #2335's head, whose npins odu is this branch's
+# 996f888 — chunked push and the `CA:` line in the pusher. The pin moves to
+# kolu's merge sha when #2335 lands.
 #
 # Two jobs, because they are two halves of one question with one ordering:
 # `build-and-push` warms the input-addressed cache a lane host substitutes from
@@ -80,15 +77,15 @@ jobs:
       # warmed nothing is precisely the state a cache job exists to make
       # impossible (kolu's nix-cache.yml states the rule).
       #
-      # ODU PUSHES TO ITS OWN CACHE. `odu cache push` computes each closure,
-      # asks the bucket what it is missing in one query, drops what an upstream
-      # key signed (the server fetches those references itself), and chunks a
-      # NAR too large for one request. The ORIGIN is the pod's live name until
-      # `cache.kolu.dev` answers; the flake still advertises the latter.
+      # ODU PUSHES TO ITS OWN CACHE, at the daily name. `odu cache push`
+      # computes each closure, asks the bucket what it is missing in one query,
+      # drops what an upstream key signed (the server fetches those references
+      # itself), and CHUNKS a NAR too large for one request — which is what
+      # makes `cache.kolu.dev` (Cloudflare, 100 MB) safe for this pusher.
       - name: Build odu's outputs, and push their closures
         env:
           ODU_CACHE_TOKEN: ${{ secrets.ODU_CACHE_TOKEN }}
-          PUSH_ORIGIN: https://odu-k3s.rooster-blues.ts.net
+          PUSH_ORIGIN: https://cache.kolu.dev
         run: |
           set -euo pipefail
           paths=$(nix build -L --no-link --print-out-paths --accept-flake-config \
@@ -112,20 +109,16 @@ jobs:
           "$odu" cache push kolu --origin "$PUSH_ORIGIN" $paths
 
       - name: Bake the declaration the publisher is handed
-        env:
-          PUSH_ORIGIN: https://odu-k3s.rooster-blues.ts.net
         run: |
           set -euo pipefail
-          # THE ONE DECLARATION, with only its FIRST SUBSTITUTER moved: the
-          # action takes the push target from it (kolu#2334), so the live pod
-          # is named here while `flake.nix` keeps advertising `cache.kolu.dev`.
-          # The BUCKET's path form, not the bare origin: the action's VERIFY
-          # imports the published paths back from this URL, and the bare origin
-          # is the board, whose `Host` is not a bucket (`admitByHost` 404s).
+          # THE DECLARATION AS THE FLAKE WRITES IT. Its first substituter is
+          # `https://cache.kolu.dev` — the bucket's DOMAIN ROOT, where the name
+          # serves the bucket — so a rewrite would be a no-op. The pusher is
+          # kolu #2335's pinned odu (this branch's 996f888): chunked push and
+          # the `CA:` line; verify imports the same URL.
           source=$(nix build .#agent-flake-source --no-link --print-out-paths --accept-flake-config)
           mkdir -p "$RUNNER_TEMP/declaration"
-          jq --arg url "$PUSH_ORIGIN/cache/kolu" '.substituters = [$url]' \
-            "$source/binary-cache.json" > "$RUNNER_TEMP/declaration/binary-cache.json"
+          cp "$source/binary-cache.json" "$RUNNER_TEMP/declaration/binary-cache.json"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -175,7 +168,7 @@ jobs:
       # `odu cache push kolu` when the declaration says `{ kind = "odu"; … }`.
       # WITH `sidecar`, installables are full flake installables, and the
       # revision the entries are keyed under defaults to the published commit.
-      - uses: juspay/kolu/.github/actions/publish-closure@fd831bb1c03db83dccebea90edff3d1fecf386e8
+      - uses: juspay/kolu/.github/actions/publish-closure@37b45f616ae4d7ef0cf3e160efefb7cb67b2bc85
         with:
           sidecar: ${{ runner.temp }}/declaration/binary-cache.json
           installables: .#odu-runner

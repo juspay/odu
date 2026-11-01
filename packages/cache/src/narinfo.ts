@@ -39,8 +39,40 @@ import {
   verify as cryptoVerify,
 } from "node:crypto";
 
-/** The compression and URL extension odu SERVES. Reads are zstd on the fly,
- *  whatever a client uploaded; writes accept any compression the client sent. */
+/** The extension a stored object carries for its compression. odu KEEPS the
+ *  bytes as uploaded: the narinfo says `Compression:` and the URL says it too. */
+export function compressionExtension(compression: string | null): string {
+  switch (compression ?? "none") {
+    case "none":
+      return "nar";
+    case "xz":
+      return "nar.xz";
+    case "bzip2":
+      return "nar.bz2";
+    default:
+      return "nar.zst";
+  }
+}
+
+/** The compression a NAR URL's extension names, or null for an unknown one. */
+export function compressionOfFile(file: string): string | null {
+  const at = file.indexOf(".nar");
+  if (at === -1) return null;
+  switch (file.slice(at)) {
+    case ".nar":
+      return "none";
+    case ".nar.zst":
+      return "zstd";
+    case ".nar.xz":
+      return "xz";
+    case ".nar.bz2":
+      return "bzip2";
+    default:
+      return null;
+  }
+}
+
+/** The default the push client writes; kept for its narinfo. */
 export const SERVED_EXTENSION = "nar.zst";
 
 /** Nix's base32 alphabet. NOT RFC 4648: no `e`, `o`, `u` or `t`. */
@@ -155,9 +187,9 @@ export class NarinfoError extends Error {
   }
 }
 
-/** One parsed narinfo. `fileHash`/`fileSize` are carried but never produced by
- *  odu: it compresses on the fly, so it does not know the served file's hash,
- *  and Nix verifies `narHash` over the decompressed NAR regardless. */
+/** One parsed narinfo. `fileHash`/`fileSize` are the COMPRESSED object's own
+ *  facts — odu keeps exactly the file a pusher sent, and verifies the NAR by
+ *  decompressing it, so both hashes are known. */
 export interface NarInfo {
   storePath: string;
   url: string;
@@ -170,11 +202,15 @@ export interface NarInfo {
   /** FULL store paths, in narinfo order. */
   references: readonly string[];
   deriver: string | null;
+  /** Nix's `CA:` line, verbatim. PARSED AND NOTHING ELSE: the server proves a
+   *  path's CA from its name, references and bytes; a pusher's claim is never
+   *  stored or served. */
+  ca: string | null;
   sigs: readonly string[];
 }
 
 /** Parse a narinfo. Unknown keys are ignored rather than refused: the format is
- *  Nix's to extend, and a pusher's `CA:` line is not odu's business. */
+ *  Nix's to extend. `CA:` is carried, never invented. */
 export function parseNarinfo(text: string): NarInfo {
   const fields = new Map<string, string[]>();
   for (const line of text.split("\n")) {
@@ -221,6 +257,7 @@ export function parseNarinfo(text: string): NarInfo {
         : deriverRaw.startsWith("/")
           ? deriverRaw
           : `/nix/store/${deriverRaw}`,
+    ca: one("CA"),
     sigs: fields.get("Sig") ?? [],
   };
 }
@@ -239,10 +276,16 @@ export function formatNarinfo(info: NarInfo): string {
     `NarSize: ${info.narSize}`,
     `References: ${info.references.map(storePathBasename).join(" ")}`,
     ...(info.deriver === null ? [] : [`Deriver: ${storePathBasename(info.deriver)}`]),
+    ...(info.ca === null ? [] : [`CA: ${info.ca}`]),
     ...info.sigs.map((sig) => `Sig: ${sig}`),
   ];
   return `${lines.join("\n")}\n`;
 }
+
+/** A store path for a DERIVATION. The cache serves outputs; a derivation is a
+ *  build recipe whose references are recipes, and fetching one lets Nix try to
+ *  build it. */
+export const isDerivationPath = (storePath: string): boolean => storePath.endsWith(".drv");
 
 /** What a signature is computed over — Nix's `fingerprintPath`, verbatim. */
 export function fingerprintOf(info: {

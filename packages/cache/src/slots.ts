@@ -36,11 +36,8 @@ export function createSlots(limit: number): Slots {
       } else {
         running += 1;
       }
-      // THE OWNER MAY HAVE CLOSED BETWEEN THE GRANT AND THIS LINE. A waiter is
-      // resolved by `close`? No — close rejects — but a slot handed over a
-      // moment before close can still arrive here after it.
-      if (closed) throw new SlotsClosed();
       try {
+        if (closed) throw new SlotsClosed();
         return await work();
       } finally {
         const next = waiters.shift();

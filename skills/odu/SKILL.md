@@ -318,10 +318,10 @@ terminal.
 | list buckets | `odu surface cache bucket_list --input '{…}' --json` | `cache_bucket_list` | `rootToken` | `buckets[]` (the shape above) |
 | one bucket's public identity | `odu surface cache bucket_describe --input '{…}' --json` | `cache_bucket_describe` | `bucket` — **no root token** | `name`, `public`, `publicKey`, `domain`, `url` only — the substituter's identity, not the operator's counts |
 | give a bucket a DNS name | `odu surface cache bucket_domain --input '{…}' --json` | `cache_bucket_domain` | `rootToken`, `bucket`, `domain` (omit to clear) | the bucket row; `url` becomes the name and `pushUrl` stays the path |
-| what a bucket is holding | `odu surface watch cache held` | the `held` resource | *(none)* | `bucket`, `storePath`, `reason`, `missing[]`, `since` — paths accepted and waiting on references neither in the bucket nor upstream |
 | one bucket's paths | `odu surface cache bucket_paths --input '{…}' --json` | `cache_bucket_paths` | `bucket`, `filter?`, `after?` — **no root token** | `paths[]` (`storePath`, `narSize`, `created`, `hits`, `lastAccessed`), `next?` — newest first, 100 a page |
 | the last venue probe, kept | `odu surface get venues` | the `venues` resource | *(none)* | `null`, or `at`, `platforms[]`, `source`, `warnings[]`, `rows[]` — what `venue_probe` last answered for the service's own fleet (a probe naming your own `hostsFile` is answered, not kept), so a reader need not dial every machine again |
 | the rows a board follows | `odu surface watch cache buckets` | the `buckets` resource | *(none)* | `name`, `public`, `retentionDays`, `keyName`, `publicKey`, `upstreamKeys[]`, `objects`, `bytes`, `created`, `domain`, `url`, `pushUrl`, `lastPush`, `hits` — one row per bucket, published as it moves |
+| the deprecated held list | `odu surface watch cache held` | the `held` resource | *(none)* | always empty in 2.3; kept for 2.x clients, removed at the cache row's next major |
 | mint a cache token | `odu surface cache token_mint --input '{…}' --json` | `cache_token_mint` | `rootToken`, `bucket`, `scope` (`read`/`write`/`admin`), `expiresDays?`, `bucketGlob?` | `token` (plaintext, ONCE), `facts` |
 | list cache tokens | `odu surface cache token_list --input '{…}' --json` | `cache_token_list` | `rootToken`, `bucket?` | `tokens[]` — never a plaintext |
 | revoke a cache token | `odu surface cache token_revoke --input '{…}' --json` | `cache_token_revoke` | `rootToken`, `id` | `id`, `revoked` |
@@ -337,6 +337,14 @@ terminal.
 | end a session | `odu surface auth session_end --input '{…}' --json` | `auth_session_end` | `id` | `id`, `ended` |
 | set a role | `odu auth grant <login> <owner\|admin\|member>` | `auth_user_grant` | `login`, `role`, `rootToken` (only when no session authorises it) | `login`, `role` |
 | who is in | `odu auth people -o json` | `auth_grant_list` | *(none)* — an owner's verb | `people[]` (`login`, `role`, `granted`, `lastSeen`) |
+
+### Cache verbs
+
+**A cache bucket keeps the compressed NAR a push uploaded** (`FileHash`/`FileSize`
+are real, `CA:` is proved from name, references and bytes) and keeps no Nix
+store: references are names, so a push records a path even when they are not in
+the bucket. `--wait` is deprecated and returns at once; `watch cache held` answers
+an empty list. Both are removed at the cache row's next major.
 
 - **`requestId` is an idempotency key on these three too.** A repeat with the
   same id replays the recorded answer and performs nothing — which is what

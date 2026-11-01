@@ -39,7 +39,7 @@
  * bundle to mount on, and the router mount for the protocol routes.
  */
 
-import { Effect } from "effect";
+import { Effect, Fiber } from "effect";
 import { definePlugin, offer } from "@olai/effect-cordis";
 import type { ImplementSurfaceDeps } from "@kolu/surface/server";
 import {
@@ -55,18 +55,15 @@ import {
   StateDir,
 } from "@odu/cordis/services";
 import { createCache, roleAuthority, type Authority, type BucketFacts, type Cache, type CacheOutcome } from "./cache";
-import { createSlots } from "./slots";
 import { may, principalOf, type Principal } from "@odu/cordis/principal";
 import { bucketOf, CACHE_MOUNT, CACHE_ROUTE_PATHS } from "./paths";
 import { cacheRoutes } from "./routes";
+import { nixDump, nixPathInfo } from "./store";
 import {
   type CacheBucket,
   type CacheHeld,
   CACHE_KEY,
   CacheRefused,
-  heldKey,
-  heldReason,
-  holdReason,
   oduCacheSurface,
 } from "./surface";
 
@@ -84,6 +81,7 @@ export interface CachePublisher {
     upsert(key: string, row: CacheBucket): void;
     remove(key: string): void;
   };
+  /** DEPRECATED, always empty in 2.3. */
   readonly held: {
     upsert(key: string, row: CacheHeld): void;
     remove(key: string): void;
@@ -124,8 +122,7 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
    *  filled by the framework from the same `upsert`s a publish performs, so the
    *  two cannot disagree. */
   const rows = new Map<string, CacheBucket>();
-  /** The same pair for the held collection — keyed `${bucket}|${storePath}`. */
-  const publishedHeld = new Map<string, string>();
+  /** DEPRECATED: retained so a 2.x subscriber's readAll still exists. */
   const rowsHeld = new Map<string, CacheHeld>();
   let publisher: CachePublisher | null = null;
 
@@ -188,33 +185,6 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
       publisher.buckets.remove(name);
     }
 
-    const nextHeld = new Map<string, string>();
-    for (const facts of cache.held()) {
-      const key = heldKey(facts);
-      const row: CacheHeld = {
-        bucket: facts.bucket,
-        storePath: facts.storePath,
-        reason: holdReason(facts),
-        missing: [...facts.missing],
-        fetching: facts.fetching,
-        fetched: [...facts.fetched],
-        since: facts.created,
-      };
-      const encoded = JSON.stringify(row);
-      nextHeld.set(key, encoded);
-      // THE REASON IS PART OF THE ROW, so a drain that narrows the missing list
-      // republishes even though the path itself has not moved.
-      if (publishedHeld.get(key) === encoded) continue;
-      publishedHeld.set(key, encoded);
-      rowsHeld.set(key, row);
-      publisher.held.upsert(key, row);
-    }
-    for (const key of [...publishedHeld.keys()]) {
-      if (nextHeld.has(key)) continue;
-      publishedHeld.delete(key);
-      rowsHeld.delete(key);
-      publisher.held.remove(key);
-    }
   };
 
   /** One admin call as a procedure's answer: the outcome mapped onto the
@@ -478,12 +448,33 @@ export const cacheRow = definePlugin({
     const publicOrigin = yield* PublicOrigin;
     const log = yield* Log;
 
-    // THE ROW'S FETCH BOUND, created at apply and closed with the row.
-    const fetchSlots = createSlots(2);
-    const cache = createCache({ stateRoot: stateDir, rootToken, store, fetchSlots });
-    // A RESTART RESUMES ITS HOLDS at row apply: the reference fetch a pod died
-    // in the middle of is re-queued here, with no request needed to start it.
-    yield* Effect.promise(() => cache.resume());
+    const cache = createCache({
+      stateRoot: stateDir,
+      rootToken,
+      // THE OLD NIX STORE is read ONLY by the one-time object migration. A
+      // fresh deployment leaves this null and the cache never shells out.
+      // `NixStore` NULL IS THE HOST'S OWN /nix/store (the contract): a module
+      // deployment migrates from there; the pod names its chroot store.
+      legacyStore: {
+        dump: (path) => nixDump(path, store),
+        pathInfo: (path) => nixPathInfo(path, store),
+      },
+      // ONE structured line per operational fact. The Effect logger renders
+      // the fields; no per-chunk lines, no narration.
+      log: (event, fields) => log.info(fields, `odu cache: ${event}`),
+    });
+    // BEFORE THE MOUNT: CA proof and the orphan/temp sweep. Nothing is
+    // writing yet, so this cannot race a push.
+    const boot = yield* Effect.promise(() => cache.boot());
+    if (boot.caProved > 0) {
+      log.info({ proved: boot.caProved }, "odu cache: boot proved CA");
+    }
+    if (boot.orphansSwept > 0 || boot.tempSwept > 0) {
+      log.info(
+        { swept: boot.orphansSwept, temp: boot.tempSwept },
+        "odu cache: boot swept orphan objects",
+      );
+    }
 
     // THE ROW'S PUBLISHED FACT: the names its buckets carry. A row that routes
     // those names (the cloudflare row) declares this service; it never opens
@@ -536,6 +527,23 @@ export const cacheRow = definePlugin({
         (name) => server.substituterUrl(name),
         publicOrigin ?? boundOrigin,
       ),
+    );
+
+    // AFTER THE MOUNT, AND ROW-OWNED: the migration dumps tens of gigabytes
+    // and must not hold `/` or `/cache/*` down while it does. The row's
+    // finalizer interrupts it before the database closes.
+    // SCOPED, not detached: a child forked with `forkChild` is interrupted the
+    // moment this apply's fiber ends (a few lines later), so the migration never
+    // ran on the pod. `forkScoped` lives until the ROW closes, which is exactly
+    // the lifecycle `cache.close()`'s stopping flag honours.
+    // ONE background task: the self pass needs the objects the migration is
+    // about to land, so it starts when migrate settles — not beside it, where a
+    // row could be counted unreadable and wait a whole boot.
+    yield* Effect.forkScoped(
+      Effect.promise(async () => {
+        await cache.migrate();
+        await cache.proveSelf();
+      }),
     );
 
     // FINALIZERS RUN IN REVERSE, so the one registered SECOND runs FIRST, and

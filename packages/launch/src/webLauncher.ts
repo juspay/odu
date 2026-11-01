@@ -162,8 +162,9 @@ export async function readService(
 export function contractVerdict(
   cell: ServiceCell,
   origin: string,
+  build?: string,
 ): string | null {
-  const verdict = admitService(cell, origin);
+  const verdict = admitService(cell, origin, build);
   return verdict.kind === "adopt" ? null : verdict.message;
 }
 
@@ -185,6 +186,8 @@ export async function adoptOrRefuse<C extends Pick<ServiceConnection, "client" |
      *  that dials more than once (the stdio bridge redials per connection), so
      *  the skew note is said once per daemon rather than once per redial. */
     warned?: Set<string>;
+    /** The version this build reads — a test seam for a build ahead of 3.0. */
+    build?: string;
   } = {},
 ): Promise<C> {
   const handshakeMs = opts.handshakeMs ?? SERVICE_HANDSHAKE_MS;
@@ -212,7 +215,7 @@ export async function adoptOrRefuse<C extends Pick<ServiceConnection, "client" |
         "(the cell stream ended empty) — not an odu service this build can use",
     );
   }
-  const refusal = contractVerdict(cell, origin);
+  const refusal = contractVerdict(cell, origin, opts.build);
   if (refusal !== null) {
     // Disposed HERE, on the only path that refuses: the caller never sees this
     // connection, so nothing can leak the link's dial, ping and response fibers.
@@ -222,7 +225,7 @@ export async function adoptOrRefuse<C extends Pick<ServiceConnection, "client" |
   // ADOPTED BEHIND: said once, on stderr, so stdout and `-o json` are the
   // command's alone — and the "unknown" a newer verb would meet is explained
   // before it arrives.
-  const note = skewNote(cell, origin);
+  const note = skewNote(cell, origin, opts.build);
   const instance = `${cell.identity.pid}:${cell.identity.startedAt}`;
   if (note !== null && opts.warned?.has(instance) !== true) {
     opts.warned?.add(instance);
@@ -634,12 +637,17 @@ export async function connectOrStart(
     authorization?: (origin: string) => Promise<Record<string, string>>;
     /** See {@link adoptOrRefuse}: the daemons already warned about. */
     warned?: Set<string>;
+    /** The version this build reads — a test seam for a build ahead of 3.0. */
+    build?: string;
   } = {},
 ): Promise<ServiceConnection> {
   const allowStart = opts.allowStart ?? origin === serviceOrigin();
   const headers = opts.authorization === undefined ? {} : await opts.authorization(origin);
   const existing = await dialExisting(origin, allowStart, opts.group, headers);
-  const adopt = { ...(opts.warned === undefined ? {} : { warned: opts.warned }) };
+  const adopt = {
+    ...(opts.warned === undefined ? {} : { warned: opts.warned }),
+    ...(opts.build === undefined ? {} : { build: opts.build }),
+  };
   if (existing !== null) return adoptOrRefuse(existing, origin, adopt);
   const outcome = await ensureService({
     origin,

@@ -13,9 +13,9 @@
 #     `/mcp` as well, and every caller meets the sign-in page before anything
 #     else. That is server mode, and it is what makes the public board safe.
 #
-# Nor is there object storage, a second store, or a signing service: a bucket is
-# metadata over the host's own `/nix/store`, the server signs at read, and the
-# state lives in one SQLite file under `stateDir`.
+# The cache keeps the compressed NAR a pusher sent, as objects under `stateDir`,
+# and never imports into a Nix store: references are names in the narinfo, the
+# server signs at read, and the state lives in one SQLite file plus `objects/`.
 { self }:
 { config, lib, pkgs, ... }:
 
@@ -32,8 +32,8 @@ let
     ;
 
   # `StateDirectory` takes a NAME under /var/lib, not a path. Deriving it keeps
-  # one authority: whatever `stateDir` says is where the database, the gcroots
-  # and the staging directory go, and systemd is told the same name.
+  # one authority: whatever `stateDir` says is where the database, the objects
+  # and the staging directory go; `gcroots/` is only migration leftovers.
   stateDirName = baseNameOf (toString cfg.stateDir);
 
   # `http://127.0.0.1:18440`, `http://[::1]:18440`, `http://localhost:18440`.
@@ -173,8 +173,8 @@ in
       default = "/var/lib/odu";
       description = ''
         Where the service keeps everything it owns: the run catalog, the
-        request receipts, and the cache's SQLite database, signing keys, gcroots
-        and staging directory. It is a systemd `StateDirectory` with mode 0700,
+        request receipts, and the cache's SQLite database, signing keys, objects
+        and staging directory (`gcroots/` is migration leftovers). It is a systemd `StateDirectory` with mode 0700,
         and it is the service user's home, because the cache's keys are in it
         and nobody else has business reading them.
       '';
@@ -207,12 +207,12 @@ in
 
     trustedUser = mkOption {
       type = types.bool;
-      default = true;
+      default = false;
       description = ''
-        Add `user` to `nix.settings.trusted-users`. A cache server has to be
-        allowed to import paths built on other machines, and those paths carry
-        no signature the daemon trusts; without this, a push from a lane other
-        than this host is refused by Nix, not by odu.
+        Add `user` to `nix.settings.trusted-users`. NOT NEEDED by the cache:
+        it never imports paths, and the migration only READS the old store
+        (`/nix/store` when `ODU_CACHE_STORE` is unset). Kept so an existing
+        configuration still evaluates.
       '';
     };
 
@@ -430,8 +430,7 @@ in
       homeMode = "0700";
     };
 
-    # A cache server imports what other machines built, and an unsigned path
-    # from a trusted user is the only way that works.
+    # Only for an instance still migrating from the store-backed cache.
     nix.settings.trusted-users = optionals cfg.trustedUser [ cfg.user ];
 
     systemd.services.odu-web = {
