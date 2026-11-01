@@ -60,6 +60,7 @@ import {
   startService,
   stopService,
   stubPort,
+  reserveWorldPorts,
   verb,
   tunnelPort,
   workerPort,
