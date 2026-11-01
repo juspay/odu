@@ -328,7 +328,9 @@ Before({ timeout: RUN_SETUP_TIMEOUT }, async function (this: OduWorld, scenario)
     this.requests.push(request.url());
   });
   this.page.on("response", (response) => {
-    if (!response.ok()) {
+    // A 3xx is a NAVIGATION STEP, not a failed response: `ok()` excludes
+    // redirects, and counting them turned every sign-in into an "error".
+    if (response.status() >= 400) {
       this.failedResponses.push({ status: response.status(), url: response.url() });
     }
   });
