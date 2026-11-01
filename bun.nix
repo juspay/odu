@@ -5,12 +5,11 @@
 # Consume this with `fetchBunDeps` (recommended)
 # or `pkgs.callPackage` if you wish to handle
 # it manually.
-{
-  copyPathToStore,
-  fetchFromGitHub,
-  fetchgit,
-  fetchurl,
-  ...
+{ copyPathToStore
+, fetchFromGitHub
+, fetchgit
+, fetchurl
+, ...
 }:
 {
   "@babel/code-frame@7.29.7" = fetchurl {

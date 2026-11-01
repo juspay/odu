@@ -483,19 +483,21 @@ in
           "ODU_CLOUDFLARE_API_TOKEN_FILE=%d/cloudflare-api-token"
         ];
         Restart = "on-failure";
-      } // lib.optionalAttrs (
-        cfg.rootTokenFile != null || serverMode || cfg.cloudflare.apiTokenFile != null
-      ) {
-        # ONE list: two `//` updates would replace each other, and a missing
-        # credential is a daemon that cannot read its own secret.
-        LoadCredential = optionals (cfg.rootTokenFile != null) [
-          "root-token:${cfg.rootTokenFile}"
-        ] ++ optionals serverMode [
-          "client-secret:${toString cfg.github.clientSecretFile}"
-        ] ++ optionals (cfg.cloudflare.apiTokenFile != null) [
-          "cloudflare-api-token:${toString cfg.cloudflare.apiTokenFile}"
-        ];
-      };
+      } // lib.optionalAttrs
+        (
+          cfg.rootTokenFile != null || serverMode || cfg.cloudflare.apiTokenFile != null
+        )
+        {
+          # ONE list: two `//` updates would replace each other, and a missing
+          # credential is a daemon that cannot read its own secret.
+          LoadCredential = optionals (cfg.rootTokenFile != null) [
+            "root-token:${cfg.rootTokenFile}"
+          ] ++ optionals serverMode [
+            "client-secret:${toString cfg.github.clientSecretFile}"
+          ] ++ optionals (cfg.cloudflare.apiTokenFile != null) [
+            "cloudflare-api-token:${toString cfg.cloudflare.apiTokenFile}"
+          ];
+        };
     };
 
     services.nginx = mkIf (cfg.cache.domain != null || cfg.cache.bucketDomains != [ ]) {
@@ -508,53 +510,56 @@ in
           max_size=10g inactive=7d use_temp_path=off;
       '';
       virtualHosts =
-        lib.optionalAttrs (cfg.cache.domain != null) {
-          ${cfg.cache.domain} = {
-            enableACME = cfg.cache.enableACME;
-            forceSSL = cfg.cache.enableACME;
-            # TWO SETS OF LOCATIONS, one per shape.
-            #
-            # WITHOUT a door: the cache's protocol and its admin API, and
-            # NOTHING else. `/` is an explicit 404 rather than an absent
-            # location: with no `location /` and no `root`, nginx falls back to
-            # its own `html/index.html` and answers "Welcome to nginx" with a
-            # 200 — which is not the board, but is not the 404 this module
-            # promised either.
-            #
-            # WITH one: everything the daemon serves, because the door is what
-            # makes it safe to. `/rpc/ws` carries the websocket upgrade; `/`
-            # carries the board and every static asset; `/mcp` an agent's
-            # endpoint. `/auth/…` rides `/` — the OAuth redirect and the
-            # callback are ordinary requests.
-            locations =
-              if serverMode then {
-                "/rpc/ws" = {
-                  proxyPass = daemonUrl;
-                  extraConfig = websocketRules;
+        lib.optionalAttrs (cfg.cache.domain != null)
+          {
+            ${cfg.cache.domain} = {
+              enableACME = cfg.cache.enableACME;
+              forceSSL = cfg.cache.enableACME;
+              # TWO SETS OF LOCATIONS, one per shape.
+              #
+              # WITHOUT a door: the cache's protocol and its admin API, and
+              # NOTHING else. `/` is an explicit 404 rather than an absent
+              # location: with no `location /` and no `root`, nginx falls back to
+              # its own `html/index.html` and answers "Welcome to nginx" with a
+              # 200 — which is not the board, but is not the 404 this module
+              # promised either.
+              #
+              # WITH one: everything the daemon serves, because the door is what
+              # makes it safe to. `/rpc/ws` carries the websocket upgrade; `/`
+              # carries the board and every static asset; `/mcp` an agent's
+              # endpoint. `/auth/…` rides `/` — the OAuth redirect and the
+              # callback are ordinary requests.
+              locations =
+                if serverMode then {
+                  "/rpc/ws" = {
+                    proxyPass = daemonUrl;
+                    extraConfig = websocketRules;
+                  };
+                  "/" = proxyLocation;
+                } else {
+                  # The NAR paths are regexes so they win over the `/cache/`
+                  # prefix beside them; everything else under `/cache/` is a
+                  # narinfo or the push API, which must not be cached.
+                  "~ ^/cache/[a-z0-9-]+/nar/" = narLocation;
+                  "/cache/" = proxyLocation;
+                  "/_odu/v1/" = proxyLocation;
+                  "/" = { return = "404"; };
                 };
-                "/" = proxyLocation;
-              } else {
-                # The NAR paths are regexes so they win over the `/cache/`
-                # prefix beside them; everything else under `/cache/` is a
-                # narinfo or the push API, which must not be cached.
-                "~ ^/cache/[a-z0-9-]+/nar/" = narLocation;
-                "/cache/" = proxyLocation;
-                "/_odu/v1/" = proxyLocation;
-                "/" = { return = "404"; };
-              };
-          };
-        }
+            };
+          }
         # ONE VHOST PER BUCKET NAME, each with its own certificate and exactly
         # the Nix protocol's paths. The daemon decides WHICH bucket a `Host`
         # names; nginx only has to let the request through.
         // lib.listToAttrs (
-          map (domain: lib.nameValuePair domain {
-            enableACME = cfg.cache.enableACME;
-            forceSSL = cfg.cache.enableACME;
-            locations = cacheLocations // {
-              "~ ^/nar/" = narLocation;
-            };
-          }) cfg.cache.bucketDomains
+          map
+            (domain: lib.nameValuePair domain {
+              enableACME = cfg.cache.enableACME;
+              forceSSL = cfg.cache.enableACME;
+              locations = cacheLocations // {
+                "~ ^/nar/" = narLocation;
+              };
+            })
+            cfg.cache.bucketDomains
         );
     };
 
