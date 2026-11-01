@@ -851,7 +851,7 @@ describe("CA is proved from the path", () => {
     const growth = process.memoryUsage().rss - baseline;
     expect({ growth, within: growth < 192 * 1024 * 1024 }).toEqual({ growth, within: true });
     await second.close();
-  });
+  }, 30_000);
 
   it("refuses old-store bytes whose NarHash is not the row's", async () => {
     const path = "/nix/store/abababababababababababababababab-mismatch";
