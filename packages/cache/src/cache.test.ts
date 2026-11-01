@@ -685,6 +685,18 @@ describe("CA is proved from the path", () => {
         `CA: ${facts.ca}`,
       );
 
+      // A RETRIED PUT takes the second-possession branch (the staged NAR is
+      // gone) and has no selfHash; the same NarHash must keep the proved CA.
+      const retried = await cache.acceptNarinfo(
+        cache.bucket("main") as never,
+        hashOf(path),
+        stream(narinfoText(path, payload, facts.references)),
+      );
+      expect(retried).toMatchObject({ ok: true, status: 200 });
+      expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).toContain(
+        `CA: ${facts.ca}`,
+      );
+
       // THE BACKGROUND BACKFILL: the verdict is unknown (though a value may be
       // stored), so boot does not serve or read it; proveSelf reads once.
       const db = new Database(join(scratch, "cache", "cache.sqlite"));

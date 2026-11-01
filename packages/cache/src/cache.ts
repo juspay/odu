@@ -532,12 +532,28 @@ export function createCache(options: CacheOptions): Cache {
     // store: the row already holds (name, narHash, references, self), and Nix's
     // formula reproduces the path or it does not. An old input-addressed row
     // stays null, honestly.
-    const ca = contentAddressOf({
+    const computed = contentAddressOf({
       storePath: info.storePath,
       narHash: info.narHash,
       references: info.references,
       selfHash,
     });
+    // A SECOND narinfo PUT for a self-referencing CA row has no staged NAR to
+    // prove from; `selfHash` is null. The SAME NarHash means the bytes the row
+    // already proved are the bytes being named — keep that verdict rather than
+    // flipping it to a final "not content-addressed".
+    const keep =
+      computed === null &&
+      selfHash === null &&
+      existing !== null &&
+      existing.narHash === info.narHash &&
+      existing.ca !== null;
+    const ca = keep ? existing.ca : computed;
+    const caProof = keep
+      ? existing.caProof
+      : ca === null
+        ? "not-content-addressed"
+        : "content-addressed";
     repo.putObject({
       bucket: bucket.name,
       storePath: info.storePath,
@@ -547,7 +563,7 @@ export function createCache(options: CacheOptions): Cache {
       references: info.references,
       deriver: info.deriver,
       ca,
-      caProof: ca === null ? "not-content-addressed" : "content-addressed",
+      caProof,
       compression: info.compression ?? "none",
       fileHash: file.fileHash,
       fileSize: file.fileSize,
@@ -965,7 +981,12 @@ export function createCache(options: CacheOptions): Cache {
     };
     await Promise.all([worker(), worker()]);
     if (proved > 0) notify();
-    options.log?.("cache.self_ca.complete", { proved, refused, unreadable });
+    options.log?.("cache.self_ca.complete", {
+      rows: rows.length,
+      proved,
+      refused,
+      unreadable,
+    });
     return { rows: rows.length, proved, refused, unreadable };
   }
 
