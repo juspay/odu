@@ -124,7 +124,7 @@ What it says while it works — one preamble, then one line per path as the buck
 ❌ /nix/store/…-bad-output refused: the upload was truncated or corrupted
 ```
 
-A push records each path as it lands. There is no hold to wait for: references are names in the narinfo, not paths the server must already hold. The exit is non-zero only for refusals. The server keeps and serves the upload as it arrived — `nix copy --to` defaults to xz, `?compression=zstd` sends zstd — and `--wait` is deprecated: it returns at once, and `/held` answers an empty list until the next major.
+A push records each path as it lands. There is no hold to wait for: references are names in the narinfo, not paths the server must already hold. The exit is non-zero only for refusals. The server keeps and serves the upload as it arrived — `nix copy --to` defaults to xz, `?compression=zstd` sends zstd — and `--wait` is deprecated: it returns at once, and `/held` answers an empty list until the cache row's next major.
 
 A NAR larger than `--part-size` (64 MiB by default) is sent in parts, each retried on its own; the server reassembles them and the same hash proof decides. That is what makes a push work through a proxy with a request-size ceiling — Cloudflare's is 100 MB.
 

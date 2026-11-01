@@ -1,6 +1,6 @@
 # Odu as a product: Nix cache + CI you run yourself
 
-Status: living, 2026-11-01. PR 0 through PR 2.5 are on master, and PR 3 (the
+Status: living, 2026-11-01. PR 0 through PR 2.5 are on master, and PR 3b (the
 object cache) is in review; the next PR is PR 4, teams. Decisions below were
 taken in conversation. There is no schedule: one phase is one PR, and the split
 is grounded in the source facts listed in "What the code is today".
@@ -373,15 +373,15 @@ with evidence, and leaves master in a state someone can run and rely on. A
 capability reaches the public surface only in the PR that completes it, and
 nothing merges that a later PR has to finish. The order is a dependency order.
 
-### Landed: PR 0, PR 1, PR 1.5, PR 3
+### Landed: PR 0, PR 1, PR 1.5, PR 3a, PR 3b
 
 | PR | merged | what master gained |
 | --- | --- | --- |
 | 0 — the caller and the forge | #130 `ba42ac2` | `Caller` assembled once per call (where PR 2 adds `principal`, PR 4 `org`); the forge as a port with the user's `gh` as its one binding; serving options in a module of their own. No behaviour change. |
 | 1 — odu serves a Nix binary cache | #132 `712eafe` | `packages/cache`: narinfo/NAR codec, Nix-store blobs, SQLite metadata, per-bucket signing, hashed scoped tokens, GC with pins; the protocol routes; `odu cache create · list · token · use · login · pin · gc · stats · push`; the `services.odu` module with its VM test; docs and e2e. Flat memory over multi-gigabyte NARs, recorded. |
 | 1.5 — a host and two rows | #133 `4e0d621` | `@odu/host` (tenure, listener, gate, `/mcp`, composition root), `@odu/launch`, `@odu/ci`, `@odu/cordis` (the contract); the cache as a row with `./surface · ./server · ./cli · ./face`; the Cache view at `#/cache`; cache verbs renamed under the row's word and `SERVICE_CONTRACT_VERSION` 2.0; the fence from `@olai/effect-cordis`, pinned with npins. |
-| 3 — odu runs its own cache | #138 | Upstream references substituted at import, so a referrer of a skipped path imports; the remaining hold is a published `held` row, and the push says stored / held / refused, returns on a hold, and `--wait`s by choice. `odu cache push` chunks a NAR at 64 MiB (parts retried alone) under a proxy's body cap. A bucket may carry a `domain`, answered by `Host` at the protocol's root, printed by `use`, and given an nginx vhost by the module. `@odu/cloudflare` makes the name real — one tunnel per server, routes, proxied records, a `cloudflared` child, `wiring`/`live`/`failed`, the server's public origin too — so no port opens and a Funnel can retire. nginx caches NAR reads; a public bucket's facts are answerable with no account from the protocol path; `SERVICE_CONTRACT_VERSION` 2.3; odu's own CI and `nixConfig` push and pull `cache.kolu.dev` (`kolu`). Docs and e2e follow. |
-| 3.5 — the object cache | #139 | The compressed NAR the pusher sent is kept and served (`Content-Length`, `Range`), with per-row compression and `CA:` proved from name, references and bytes. No Nix-store import, held rows, fetch machinery or 202; `ObjectStore` with a shared contract suite. A mount-first migration and a persisted self-CA pass run as row-scoped background tasks. `held`/`--wait` remain as deprecated empty/no-op for 2.x clients, removed in the next major. |
+| 3a — upstream fetch at import | #138 | Upstream references substituted at import, so a referrer of a skipped path imports; the remaining hold is a published `held` row, and the push says stored / held / refused, returns on a hold, and `--wait`s by choice. `odu cache push` chunks a NAR at 64 MiB (parts retried alone) under a proxy's body cap. A bucket may carry a `domain`, answered by `Host` at the protocol's root, printed by `use`, and given an nginx vhost by the module. `@odu/cloudflare` makes the name real — one tunnel per server, routes, proxied records, a `cloudflared` child, `wiring`/`live`/`failed`, the server's public origin too — so no port opens and a Funnel can retire. nginx caches NAR reads; a public bucket's facts are answerable with no account from the protocol path; `SERVICE_CONTRACT_VERSION` 2.3; odu's own CI and `nixConfig` push and pull `cache.kolu.dev` (`kolu`). Docs and e2e follow. |
+| 3b — the object cache | #139 | The compressed NAR the pusher sent is kept and served (`Content-Length`, `Range`), with per-row compression and `CA:` proved from name, references and bytes. No Nix-store import, held rows, fetch machinery or 202; `ObjectStore` with a shared contract suite. A mount-first migration and a persisted self-CA pass run as row-scoped background tasks. `held`/`--wait` remain as deprecated empty/no-op for 2.x clients, removed at the cache row's next major. |
 
 For users: `odu web` serves runs and buckets over one wire and one page, with
 a Runs / Cache switch; `odu cache use <bucket>` prints the substituter, key
@@ -509,7 +509,7 @@ Then the gap the rule names, by row — closed:
 **Evidence:** each row's e2e has a scenario per verb through the face, and the
 list above is empty for every row in it.
 
-### PR 3.5: object storage
+### PR 3c: object storage
 
 > **Docs:** Point a bucket's objects at an S3-compatible store — Garage or
 > versitygw on the same machine, or a real one — and the same cache serves
@@ -520,7 +520,7 @@ the module, with the SAME contract suite run against versitygw/Garage in CI
 so the local fixture exercises real S3 semantics. The cache row only chooses
 the implementation; no route learns a second dialect.
 
-### PR 3.6: direct transfer
+### PR 3d: direct transfer
 
 > **Docs:** Large pushes and pulls bypass the odu process: the client uploads
 > objects straight to the store with a presigned PUT, and downloads follow a
@@ -530,7 +530,7 @@ Presigned PUT/GET from the object store; the cache row handles narinfos and
 signing, not bytes. The push client and the NAR route switch to the signed
 URLs when the bucket's store supports them.
 
-### PR 3.7: Each row versions its own surface
+### PR 3e: Each row versions its own surface
 
 > **Docs:** A client that uses only CI runs is never refused because the cache,
 > auth or cloudflare row moved. Each row publishes its own contract version, and
@@ -547,6 +547,10 @@ CLI, MCP and web clients declaring their needs; kolu's `@kolu/surface-remote`
 declaring `ci` only; docs and fence tests. Migration note: today's single
 number becomes the host's version, and each row starts at the major it already
 speaks.
+
+A client that needs a row surface the daemon did not mount is REFUSED with that
+fact — never admitted without the row it asked for. The deprecated `held`
+surface leaves at the cache row's own 3.0, not the host's version.
 
 **Not in scope.** Any row behaviour change.
 

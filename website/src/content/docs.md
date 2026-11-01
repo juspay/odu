@@ -185,13 +185,13 @@ A bucket can also have **a name of its own** — `https://cache.kolu.dev` — se
 
 ### Upgrading from a store-backed cache
 
-1. **Module deployment:** leave `NixStore` unset — the old objects are the host's `/nix/store`. **Container:** point `ODU_CACHE_STORE` at the old chroot store.
+1. **Module deployment:** leave `ODU_CACHE_STORE` unset — the old objects are the host's `/nix/store`. **Container:** point `ODU_CACHE_STORE` at the old chroot store.
 2. Boot starts serving at once; the migration and the CA pass are row-scoped background tasks. Watch `cache.migration.*` and `cache.self_ca.*`.
 3. Wait for `cache.migration.complete`.
 4. **Module:** delete the abandoned roots under `<state>/cache/gcroots`, then run `nix-collect-garbage`. **Container:** delete the old store directory. Never delete `/nix/store` itself.
-5. Rows the old store lacks stay objectless and answer 404 until re-pushed; the completion line names them.
+5. Rows the old store lacks stay objectless and answer 404 until re-pushed: each is named by a `cache.migration.object_failed` line, and `cache.migration.incomplete` carries the counts.
 
-Contract **2.3 remains additive**: `held` answers an empty list and `odu cache push --wait` returns at once, both deprecated and removed in the next major. A 2.x client keeps working; kolu's pinned CI does not need to move with this cache change.
+Contract **2.3 remains additive**: `held` answers an empty list and `odu cache push --wait` returns at once, both deprecated and removed at the cache row's next major. A 2.x client keeps working; kolu's pinned CI does not need to move with this cache change.
 
 
 ## Server mode

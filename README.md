@@ -77,7 +77,7 @@ ODU_CACHE_TOKEN=... odu cache push main ./result
 | `odu cache stats` | Storage and reads | a bucket's **Stats** |
 | `odu cloudflare status` | The tunnel and the names it carries | **Tunnel** |
 
-Contract **2.3 is additive**: a 2.x client keeps working — the cache no longer holds references, so `/held` answers an empty list and `--wait` returns at once, both deprecated and removed in the next major.
+Contract **2.3 is additive**: a 2.x client keeps working — the cache no longer holds references, so `/held` answers an empty list and `--wait` returns at once, both deprecated and removed at the cache row's next major.
 
 Odu's own builds are served from its own cache. To pull odu and its runners from
 it — and to show a project's own bucket — the flake settings are:
