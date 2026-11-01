@@ -91,14 +91,14 @@ export type NarinfoOutcome =
 export type UploadWrite = "ok" | "too-large";
 
 /** What a proof hands `keep`: a file this request claimed and verified, or
- *  the stream of an object an earlier proof already kept. */
+ *  "the object an earlier proof already kept". */
 type Source =
   | {
       kind: "file";
       path: string;
       facts: { fileHash: string; fileSize: number; selfHash: string | null };
     }
-  | { kind: "object"; stream: ReadableStream<Uint8Array> };
+  | { kind: "object" };
 
 /** What `completeUpload` came to: every part present, or which indexes are not. */
 export type CompleteUpload =
@@ -143,6 +143,14 @@ export interface StagingDeps {
   ) => Promise<boolean>;
   /** One line per operational fact; the cache's logger. */
   log?: (event: string, fields: Record<string, unknown>) => void;
+  /** The `FileHash`/`FileSize` a row already holds for this bucket's object
+   *  of `narHash` and `compression`, or null — so a later push of a kept
+   *  object reads its facts instead of re-hashing it. */
+  recorded?: (
+    bucket: BucketRow,
+    narHash: string,
+    compression: string,
+  ) => { fileHash: string; fileSize: number } | null;
 }
 
 export interface Staging {
@@ -158,7 +166,7 @@ export interface Staging {
 }
 
 export function createStaging(deps: StagingDeps): Staging {
-  const { objects, now, record, log } = deps;
+  const { objects, now, record, log, recorded } = deps;
   const stagingRoot = join(deps.dir, "staging");
   const stagedDir = (bucket: string): string => join(stagingRoot, bucket);
 
@@ -227,11 +235,10 @@ export function createStaging(deps: StagingDeps): Staging {
       // THE SECOND PROOF OF POSSESSION. Two store paths with identical content
       // share a NarHash, and the first to be recorded took the staged NAR with
       // it; so did an earlier push of this same path. The object is the proof.
-      const object = await objects.get(objectKey(bucket.name, info.narHash, info.compression));
-      if (object === null) {
+      if ((await objects.head(objectKey(bucket.name, info.narHash, info.compression))) === null) {
         return refuse(`the narinfo names ${info.url}, which was never uploaded to this bucket`);
       }
-      return recordSerially(bucket, info, { kind: "object", stream: object.stream });
+      return recordSerially(bucket, info, { kind: "object" });
     }
     try {
       const selfHashPart = info.references.includes(info.storePath)
@@ -425,10 +432,18 @@ export function createStaging(deps: StagingDeps): Staging {
     try {
       const key = objectKey(bucket.name, info.narHash, info.compression);
       if (source.kind === "object") {
-        // IMMUTABLE: a put onto an existing key cancels the stream and answers
-        // the stored object's facts — no staged copy, no shared name.
-        const kept = await objects.put(key, source.stream);
-        return { fileHash: kept.sha256, fileSize: kept.size, selfHash: null };
+        // THE KEPT OBJECT'S FACTS, READ: the row an earlier proof recorded
+        // holds them, confirmed by the stored size; an object with no row (a
+        // crash between keep and record) is asked of the store itself.
+        const size = await objects.head(key);
+        if (size === null) throw new Error(`${key} is no longer stored`);
+        const row = recorded?.(bucket, info.narHash, info.compression ?? "none") ?? null;
+        if (row !== null && row.fileSize === size) {
+          return { fileHash: row.fileHash, fileSize: row.fileSize, selfHash: null };
+        }
+        const stored = await objects.facts(key);
+        if (stored === null) throw new Error(`${key} is no longer stored`);
+        return { fileHash: stored.sha256, fileSize: stored.size, selfHash: null };
       }
       const { facts } = source;
       // ADOPT the claimed file: one rename, never a copy of the same bytes.

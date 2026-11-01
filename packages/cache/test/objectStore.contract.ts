@@ -102,6 +102,16 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
       await dispose();
     });
 
+    it("reads a stored object's facts without writing", async () => {
+      const { store, dispose } = await make();
+      expect(await store.facts("main/nar/none.nar.zst")).toBeNull();
+      // A READ: asking about a missing key does not create it.
+      expect(await store.head("main/nar/none.nar.zst")).toBeNull();
+      const put = await store.put("main/nar/f.nar.zst", streamOf([bytes("stored "), bytes("bytes")]));
+      expect(await store.facts("main/nar/f.nar.zst")).toEqual(put);
+      await dispose();
+    });
+
     it("is immutable: a second put of a key keeps the first bytes", async () => {
       const { store, dispose } = await make();
       const first = bytes("first");

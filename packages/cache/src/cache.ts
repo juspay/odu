@@ -584,6 +584,12 @@ export function createCache(options: CacheOptions): Cache {
     now,
     record,
     log: options.log,
+    recorded(bucket, narHash, compression) {
+      const row = repo.objectByNarHashCompression(bucket.name, narHash, compression);
+      return row === null || row.fileHash === null || row.fileSize === null
+        ? null
+        : { fileHash: row.fileHash, fileSize: row.fileSize };
+    },
   });
   /** THE MIGRATION'S THROTTLE: two old-store dumps at a time, never more. */
   const migrationSlots = createSlots(2);
@@ -1078,9 +1084,10 @@ export function createCache(options: CacheOptions): Cache {
           // A TWIN MAY HAVE LANDED THE SAME OBJECT: ask before spawning a dump
           // whose bytes would be thrown away.
           const key = objectKey(row.bucket, row.narHash, row.compression);
-          if ((await objects.head(key)) !== null) {
-            const facts = await objects.put(key, new ReadableStream({ start: (c) => c.close() }));
-            repo.putObject({ ...row, fileHash: facts.sha256, fileSize: facts.size });
+          // A READ, not an empty put: a put racing a delete would store 0 bytes.
+          const stored = await objects.facts(key);
+          if (stored !== null) {
+            repo.putObject({ ...row, fileHash: stored.sha256, fileSize: stored.size });
             migrated += 1;
             return;
           }
