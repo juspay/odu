@@ -947,3 +947,85 @@ describe("the shell's own paths", () => {
     await h.dispose();
   });
 });
+
+/** A stream of `count` repeated `size`-byte chunks: large in TOTAL BYTES, small
+ *  on the heap. The same buffer is handed out every pull, so a leaking server
+ *  shows up as RSS and not as this fixture's allocation. */
+function bigStream(count: number, size = 64 * 1024): ReadableStream<Uint8Array> {
+  const chunk = new Uint8Array(size).fill(7);
+  let sent = 0;
+  return new ReadableStream({
+    pull(controller) {
+      if (sent >= count) {
+        controller.close();
+        return;
+      }
+      sent += 1;
+      controller.enqueue(chunk);
+    },
+  });
+}
+
+/** Highest RSS growth while `work` runs, sampled every 10 ms. */
+async function rssGrowth(work: () => Promise<void>): Promise<number> {
+  const baseline = process.memoryUsage().rss;
+  let peak = baseline;
+  const timer = setInterval(() => {
+    peak = Math.max(peak, process.memoryUsage().rss);
+  }, 10);
+  try {
+    await work();
+  } finally {
+    clearInterval(timer);
+  }
+  return peak - baseline;
+}
+
+describe("a large NAR stays off the heap", () => {
+  const CHUNKS = 5000; // ~320 MiB of NAR bytes
+  const LIMIT = 64 * 1024 * 1024;
+
+  it("serves it to a slow reader at constant memory", async () => {
+    const h = await harness(true);
+    const hello = nar("a NAR, in pieces");
+    // LARGE SOURCE CHUNKS, on purpose: zstd hands out ~1.5 MB buffers, and
+    // Bun keeps a `res.write` chunk alive until the socket drains.
+    const chunks = 214;
+    const size = 1_500_000;
+    h.store.dump = () => bigStream(chunks, size);
+    const file = `${hello.narHash.replace(/^sha256:/, "")}.nar.zst`;
+    const growth = await rssGrowth(async () => {
+      const response = await h.fetch(`/main/nar/${file}`);
+      expect(response.status).toBe(200);
+      const reader = (response.body as ReadableStream<Uint8Array>).getReader();
+      let reads = 0;
+      let bytes = 0;
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) break;
+        bytes += next.value.length;
+        reads += 1;
+        // A SLOW CLIENT: the server must stop producing, not buffer.
+        if (reads % 16 === 0) await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(bytes).toBe(chunks * size);
+    });
+    expect({ growth, within: growth < LIMIT }).toEqual({ growth, within: true });
+    await h.dispose();
+  });
+
+  it("accepts an upload of it at constant memory", async () => {
+    const h = await harness(true);
+    const growth = await rssGrowth(async () => {
+      const response = await h.fetch(`/main/nar/big.nar.zst`, {
+        ...bearer(h.tokens.write),
+        method: "PUT",
+        body: bigStream(CHUNKS),
+        duplex: "half",
+      } as RequestInit);
+      expect(response.status).toBe(200);
+    });
+    expect({ growth, within: growth < LIMIT }).toEqual({ growth, within: true });
+    await h.dispose();
+  });
+});

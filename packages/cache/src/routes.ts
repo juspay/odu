@@ -464,7 +464,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
         const stream = yield* Effect.promise(() => cache.narStream(admitted.bucket, file));
         if (stream === null) return HttpServerResponse.empty({ status: 404 });
         return HttpServerResponse.stream(
-          Stream.fromReadableStream({ evaluate: () => stream, onError: (err) => err }),
+          Stream.fromReadableStream({ evaluate: () => narWrites(stream), onError: (err) => err }),
           { contentType: "application/x-nix-nar", headers: readHeaders(admitted.bucket) },
         );
       }),
@@ -565,7 +565,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
         const stream = yield* Effect.promise(() => cache.narStream(admitted.bucket, file));
         if (stream === null) return HttpServerResponse.empty({ status: 404 });
         return HttpServerResponse.stream(
-          Stream.fromReadableStream({ evaluate: () => stream, onError: (err) => err }),
+          Stream.fromReadableStream({ evaluate: () => narWrites(stream), onError: (err) => err }),
           { contentType: "application/x-nix-nar", headers: readHeaders(admitted.bucket) },
         );
       }),
@@ -672,6 +672,49 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
     HttpRouter.add("GET", "/nar/*", () => Effect.succeed(missingRoute())),
     HttpRouter.add("GET", `${PUSH_API}/*`, () => Effect.succeed(missingRoute())),
   );
+}
+
+/** HOW MANY BYTES one response write may carry.
+ *
+ * Not a protocol fact — a runtime one. Bun's `node:http` keeps a large
+ * `res.write` chunk alive until the socket drains; a zstd child hands out
+ * ~1.5 MB buffers, and a 634 MB NAR held that way put the pod at 2 GiB. Split
+ * to this size at the ROW's boundary: the consumer sees the same bytes, and
+ * each write is small enough to be released. */
+const NAR_WRITE_BYTES = 64 * 1024;
+
+/** Re-chunk a NAR stream at NAR_WRITE_BYTES, one piece per pull. */
+function narWrites(stream: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+  const reader = stream.getReader();
+  const pending: Uint8Array[] = [];
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      const next = pending.pop();
+      if (next !== undefined) {
+        controller.enqueue(next);
+        return;
+      }
+      const read = await reader.read();
+      if (read.done) {
+        controller.close();
+        return;
+      }
+      const value = read.value;
+      if (value.length <= NAR_WRITE_BYTES) {
+        controller.enqueue(value);
+        return;
+      }
+      let at = 0;
+      while (at + NAR_WRITE_BYTES < value.length) {
+        pending.push(value.subarray(at + NAR_WRITE_BYTES, at + 2 * NAR_WRITE_BYTES));
+        at += NAR_WRITE_BYTES;
+      }
+      controller.enqueue(value.subarray(0, NAR_WRITE_BYTES));
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
 }
 
 /** The row's own 404: a sentence, not a bundle. */
