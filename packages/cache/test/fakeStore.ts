@@ -154,12 +154,26 @@ export class FakeStore implements BlobStore {
     });
   }
 
-  async substitute(paths: readonly string[], upstreams: readonly UpstreamCache[]): Promise<void> {
+  async presentOf(paths: readonly string[]): Promise<ReadonlySet<string>> {
+    this.calls.push({ op: "pathInfo", storePath: paths.join(",") });
+    return new Set(paths.filter((storePath) => this.present.has(storePath)));
+  }
+
+  /** What a fetch should answer, instead of success — S1's failure arm. */
+  substituteFailure: string | null = null;
+
+  async substitute(
+    paths: readonly string[],
+    upstreams: readonly UpstreamCache[],
+  ): Promise<{ ok: true } | { ok: false; message: string }> {
     for (const storePath of paths) this.calls.push({ op: "substitute", storePath });
     this.substituted.push({
       paths: [...paths],
       keyNames: upstreams.map((cache) => cache.keyName),
     });
+    if (this.substituteFailure !== null) {
+      return { ok: false, message: this.substituteFailure };
+    }
     const trusted = new Set(upstreams.map((cache) => cache.keyName));
     for (const storePath of paths) {
       const candidate = this.upstream.get(storePath);
@@ -174,6 +188,7 @@ export class FakeStore implements BlobStore {
       if (!this.paths.has(storePath)) this.paths.set(storePath, candidate);
       this.present.add(storePath);
     }
+    return { ok: true };
   }
 
   async retain(bucket: string, storePath: string): Promise<void> {

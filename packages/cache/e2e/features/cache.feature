@@ -62,7 +62,7 @@ Feature: The cache is a row of the board
     And the page has the four blocks a person pastes
     And the page carries no netrc block
     And the page links its substituter's health file
-    And the page credits odu at https://odu.kolu.dev/
+    And the page credits odu at "https://odu.kolu.dev/"
     And the page names the bucket's public key
     When I open a path under the cache that names nothing
     Then the cache answers it as its own 404

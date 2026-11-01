@@ -57,6 +57,7 @@ import {
   actionsBlock,
   flakeBlock,
   heldReason,
+  holdReason,
   MAX_NAR_PART_BYTES,
   netrcBlock,
   nixConfBlock,
@@ -206,13 +207,19 @@ function consumerPage(facts: ConsumerFacts): string {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <title>${escape(facts.name)} — an odu bucket</title>
-<style>body{font:15px system-ui;max-width:52rem;margin:3rem auto;padding:0 1rem;line-height:1.5}
+<style>:root{color-scheme:light dark}
+body{font:15px system-ui;max-width:52rem;margin:3rem auto;padding:0 1rem;line-height:1.5}
 pre{background:#f4f4f4;padding:1rem;overflow:auto}code{font-size:.95em}
 h3{margin:1.4rem 0 .3rem;font-size:1rem}
 .block{position:relative;margin:.4rem 0 1rem}
 .block pre{margin:0;padding:2.2rem 1rem 1rem}
 .block button{position:absolute;top:.5rem;right:.5rem;font:inherit;font-size:.8rem;padding:.2rem .55rem;cursor:pointer}
-.served{color:#666;font-size:.9em}</style></head>
+.served{color:#666;font-size:.9em}
+@media (prefers-color-scheme: dark){
+  body{background:#111;color:#ddd}
+  pre{background:#222}
+  .served{color:#999}
+}</style></head>
 <body>
 <h1>${escape(facts.name)}</h1>
 <p>${facts.public ? "A public bucket." : "A private bucket — this page was answered to a reader."}</p>
@@ -327,7 +334,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
             .filter((row) => row.bucket === admitted.bucket.name)
             .map((row) => ({
             storePath: row.storePath,
-            reason: heldReason(row.missing, row.fetching),
+            reason: holdReason(row),
             missing: [...row.missing],
             fetching: row.fetching,
             fetched: [...row.fetched],

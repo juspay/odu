@@ -116,6 +116,8 @@ interface Pending {
   fetching: number;
   /** References this hold's fetch already landed. */
   fetched: readonly string[];
+  /** The last line a failed fetch said; cleared when a fetch starts again. */
+  failure: string | null;
 }
 
 export interface StagingDeps {
@@ -172,6 +174,31 @@ export interface Staging {
     hash: string,
     body: ReadableStream<Uint8Array>,
   ): Promise<NarinfoOutcome>;
+}
+
+/**
+ * TWO FETCHES, PROCESS-WIDE. A restart re-queues every held row at once, and a
+ * `nix-store -r --keep-going` is a network-bound child that can carry a whole
+ * closure; a per-bucket chain bounded each bucket but not the fleet. The cap
+ * belongs to the process, so it is module scope and has no row's lifetime.
+ */
+const FETCH_SLOTS = 2;
+let fetchesRunning = 0;
+const fetchWaiters: Array<() => void> = [];
+
+async function withFetchSlot<T>(work: () => Promise<T>): Promise<T> {
+  if (fetchesRunning >= FETCH_SLOTS) {
+    await new Promise<void>((resolve) => fetchWaiters.push(resolve));
+  } else {
+    fetchesRunning += 1;
+  }
+  try {
+    return await work();
+  } finally {
+    const next = fetchWaiters.shift();
+    if (next === undefined) fetchesRunning -= 1;
+    else next();
+  }
 }
 
 export function createStaging(deps: StagingDeps): Staging {
@@ -293,7 +320,10 @@ export function createStaging(deps: StagingDeps): Staging {
         // `waitingOn: []` means "never attempted" and `proved: false` means
         // "this process has not hashed it", which are both exactly right for a
         // narinfo recovered from disk.
-        map.set(hash, { hash, info, waitingOn: [], proved: false, fetching: 0, fetched: [] });
+        map.set(
+          hash,
+          { hash, info, waitingOn: [], proved: false, fetching: 0, fetched: [], failure: null },
+        );
       } catch {
         await unlink(join(dirForBucket, file)).catch(() => {});
       }
@@ -321,11 +351,10 @@ export function createStaging(deps: StagingDeps): Staging {
    * the store, so one job covers all of them.
    */
   async function missingOf(entry: Pending, reported: readonly string[] = []): Promise<string[]> {
-    const out: string[] = [];
-    for (const reference of entry.info.references) {
-      if (reference === entry.info.storePath) continue;
-      if (!(await blob.has(reference))) out.push(reference);
-    }
+    const references = entry.info.references.filter((one) => one !== entry.info.storePath);
+    // ONE `nix path-info` for the whole set, not one spawn per reference.
+    const here = await blob.presentOf(references);
+    const out = references.filter((reference) => !here.has(reference));
     for (const one of reported) if (!out.includes(one)) out.push(one);
     return out;
   }
@@ -356,6 +385,7 @@ export function createStaging(deps: StagingDeps): Staging {
       const missing = await missingOf(entry, outcome.missing);
       entry.waitingOn = missing;
       entry.fetched = [...new Set([...entry.fetched, ...landed(entry, missing)])];
+      entry.failure = null;
       if (upstreams.length > 0) {
         if (entry.fetching === 0 && !closed) {
           entry.fetching = missing.length;
@@ -365,6 +395,7 @@ export function createStaging(deps: StagingDeps): Staging {
             missing,
             fetching: entry.fetching,
             fetched: entry.fetched,
+            failure: null,
             created: now(),
           });
           enqueueFetch(bucket, dirForBucket, entry, missing);
@@ -378,6 +409,7 @@ export function createStaging(deps: StagingDeps): Staging {
         missing,
         fetching: 0,
         fetched: entry.fetched,
+        failure: null,
         created: now(),
       });
       return { missing, fetching: 0 };
@@ -390,6 +422,7 @@ export function createStaging(deps: StagingDeps): Staging {
           missing: outcome.missing,
           fetching: 0,
           fetched: entry.fetched,
+          failure: null,
           created: now(),
         });
         return { missing: outcome.missing, fetching: 0 };
@@ -427,8 +460,25 @@ export function createStaging(deps: StagingDeps): Staging {
   ): Promise<void> {
     try {
       if (closed) return;
-      await blob.substitute(missing, upstreamFor(bucket.upstreamKeys));
+      const fetched = await withFetchSlot(() =>
+        blob.substitute(missing, upstreamFor(bucket.upstreamKeys)),
+      );
       if (closed) return;
+      if (!fetched.ok) {
+        entry.fetching = 0;
+        entry.failure = fetched.message;
+        repo.putHeld({
+          bucket: bucket.name,
+          storePath: entry.info.storePath,
+          missing: entry.waitingOn,
+          fetching: 0,
+          fetched: entry.fetched,
+          failure: fetched.message,
+          created: now(),
+        });
+        return;
+      }
+      entry.failure = null;
       const still = await missingOf(entry);
       entry.fetched = [...new Set([...entry.fetched, ...landed(entry, still)])];
       const outcome = await blob.import({
@@ -451,6 +501,7 @@ export function createStaging(deps: StagingDeps): Staging {
           missing: still,
           fetching: 0,
           fetched: entry.fetched,
+          failure: null,
           created: now(),
         });
       } else {
@@ -460,7 +511,7 @@ export function createStaging(deps: StagingDeps): Staging {
         pending.get(bucket.name)?.delete(entry.hash);
         await unlink(join(dirForBucket, `${entry.hash}.narinfo`)).catch(() => {});
       }
-    } catch {
+    } catch (err) {
       // A THROWN FETCH IS NOT "FETCHING" FOR EVER: the row goes back to its
       // waiting sentence, so the next boot (or push) can try again.
       if (!closed) {
@@ -470,6 +521,7 @@ export function createStaging(deps: StagingDeps): Staging {
           missing: entry.waitingOn,
           fetching: 0,
           fetched: entry.fetched,
+          failure: String((err as Error).message ?? err),
           created: now(),
         });
       }
@@ -730,7 +782,8 @@ export function createStaging(deps: StagingDeps): Staging {
           entry.waitingOn = missing;
           entry.fetched = row.fetched;
           entry.fetching = missing.length;
-          repo.putHeld({ ...row, missing, fetching: missing.length });
+          entry.failure = null;
+          repo.putHeld({ ...row, missing, fetching: missing.length, failure: null });
           enqueueFetch(bucket, stagedDir(name), entry, missing);
         }
       }
@@ -831,6 +884,7 @@ export function createStaging(deps: StagingDeps): Staging {
         proved: true,
         fetching: 0,
         fetched: [],
+        failure: null,
       };
       map.set(hash, entry);
       await queuedDrain(bucket, [info.storePath]);

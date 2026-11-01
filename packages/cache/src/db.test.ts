@@ -16,6 +16,7 @@ import { join } from "node:path";
 import {
   type BucketRow,
   CACHE_SCHEMA_VERSION,
+  MIGRATIONS,
   type ObjectRow,
   openCacheRepo,
   type TokenRow,
@@ -132,6 +133,7 @@ describe("held uploads", () => {
       missing: ["/nix/store/child"],
       fetching: 1,
       fetched: [],
+      failure: null,
       created: NOW,
     });
     // A later fetch landed one reference and the reason narrowed; the row's
@@ -142,6 +144,7 @@ describe("held uploads", () => {
       missing: [],
       fetching: 0,
       fetched: ["/nix/store/child"],
+      failure: null,
       created: NOW + 5000,
     });
     expect(repo.held()).toEqual([
@@ -151,6 +154,7 @@ describe("held uploads", () => {
         missing: [],
         fetching: 0,
         fetched: ["/nix/store/child"],
+        failure: null,
         created: NOW,
       },
     ]);
@@ -169,6 +173,7 @@ describe("held uploads", () => {
       missing: ["/nix/store/child"],
       fetching: 0,
       fetched: [],
+      failure: null,
       created: NOW,
     });
     repo.deleteBucket("main");
@@ -305,5 +310,56 @@ describe("deleting a bucket", () => {
     expect(repo.buckets()).toHaveLength(0);
     expect(repo.objects()).toHaveLength(0);
     expect(repo.pins()).toHaveLength(0);
+  });
+});
+
+describe("upgrading an existing database", () => {
+  it("opens a v4 file and applies only the appended migrations", () => {
+    const dir = mkdtempSync(join(tmpdir(), "odu-cache-upgrade-"));
+    const file = join(dir, "cache.sqlite");
+    try {
+      // THE POD'S FILE: the four migrations that shipped before this PR's
+      // fetch progress. `user_version` is 4, and `domain` already exists.
+      const old = new Database(file);
+      for (const sql of MIGRATIONS.slice(0, 4)) old.exec(sql);
+      old.exec("PRAGMA user_version = 4;");
+      old.close();
+
+      const repo = openCacheRepo(file);
+      repo.putHeld({
+        bucket: "main",
+        storePath: "/nix/store/parent",
+        missing: ["/nix/store/child"],
+        fetching: 0,
+        fetched: ["/nix/store/done"],
+        failure: "network unreachable",
+        created: NOW,
+      });
+      expect(repo.held()).toEqual([
+        {
+          bucket: "main",
+          storePath: "/nix/store/parent",
+          missing: ["/nix/store/child"],
+          fetching: 0,
+          fetched: ["/nix/store/done"],
+          failure: "network unreachable",
+          created: NOW,
+        },
+      ]);
+      repo.close();
+
+      const check = new Database(file);
+      expect((check.query("PRAGMA user_version;").get() as { user_version: number }).user_version).toBe(
+        CACHE_SCHEMA_VERSION,
+      );
+      const columns = (check.query("PRAGMA table_info(held);").all() as { name: string }[]).map(
+        (column) => column.name,
+      );
+      expect(columns).toContain("fetched");
+      expect(columns).toContain("failure");
+      check.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

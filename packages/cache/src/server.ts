@@ -65,6 +65,7 @@ import {
   CacheRefused,
   heldKey,
   heldReason,
+  holdReason,
   oduCacheSurface,
 } from "./surface";
 
@@ -192,7 +193,7 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
       const row: CacheHeld = {
         bucket: facts.bucket,
         storePath: facts.storePath,
-        reason: heldReason(facts.missing, facts.fetching),
+        reason: holdReason(facts),
         missing: [...facts.missing],
         fetching: facts.fetching,
         fetched: [...facts.fetched],

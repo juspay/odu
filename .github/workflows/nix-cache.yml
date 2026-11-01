@@ -119,9 +119,12 @@ jobs:
           # THE ONE DECLARATION, with only its FIRST SUBSTITUTER moved: the
           # action takes the push target from it (kolu#2334), so the live pod
           # is named here while `flake.nix` keeps advertising `cache.kolu.dev`.
+          # The BUCKET's path form, not the bare origin: the action's VERIFY
+          # imports the published paths back from this URL, and the bare origin
+          # is the board, whose `Host` is not a bucket (`admitByHost` 404s).
           source=$(nix build .#agent-flake-source --no-link --print-out-paths --accept-flake-config)
           mkdir -p "$RUNNER_TEMP/declaration"
-          jq --arg origin "$PUSH_ORIGIN" '.substituters = [$origin]' \
+          jq --arg url "$PUSH_ORIGIN/cache/kolu" '.substituters = [$url]' \
             "$source/binary-cache.json" > "$RUNNER_TEMP/declaration/binary-cache.json"
 
       - uses: actions/upload-artifact@v4

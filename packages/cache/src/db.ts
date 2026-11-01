@@ -117,6 +117,9 @@ export interface HeldRow {
   /** References this hold's fetch ALREADY brought in. The page shows them
    *  beside the ones still missing, so a job that lands 6 of 7 says which. */
   fetched: readonly string[];
+  /** The last line a FAILED `nix-store -r` said. `null` while it is working,
+   *  or when the references are genuinely neither here nor upstream. */
+  failure: string | null;
   created: number;
 }
 
@@ -203,7 +206,7 @@ export interface CacheRepo {
  * the index of the last applied entry, so a fresh file runs all of them and an
  * existing one runs the tail.
  */
-const MIGRATIONS: readonly string[] = [
+export const MIGRATIONS: readonly string[] = [
   `
   CREATE TABLE bucket (
     name            TEXT PRIMARY KEY,
@@ -254,9 +257,10 @@ const MIGRATIONS: readonly string[] = [
     PRIMARY KEY (bucket, name)
   );
   `,
-  // v2 — WHAT A BUCKET IS HOLDING FOR REFERENCES. Before this the reason lived
-  // only in a drain's memory and died with the process, so a person looking at
-  // a stalled push saw nothing until the next drain happened to run.
+  // Migration 2 — WHAT A BUCKET IS HOLDING FOR REFERENCES. Before this the
+  // reason lived only in a drain's memory and died with the process, so a
+  // person looking at a stalled push saw nothing until the next drain happened
+  // to run.
   `
   CREATE TABLE held (
     bucket     TEXT NOT NULL,
@@ -266,22 +270,32 @@ const MIGRATIONS: readonly string[] = [
     PRIMARY KEY (bucket, store_path)
   );
   `,
-  // v4 — THE FETCH A HOLD REPRESENTS. A missing reference is fetched OFF the
-  // upload request; until it lands, the bucket publishes the progress rather
-  // than a silent 202.
+  // Migration 3 — THE FETCH A HOLD REPRESENTS. A missing reference is fetched
+  // OFF the upload request; until it lands, the bucket publishes the progress
+  // rather than a silent 202.
   `
   ALTER TABLE held ADD COLUMN fetching INTEGER NOT NULL DEFAULT 0;
   `,
-  // v5 — WHICH REFERENCES THE FETCH HAS ALREADY LANDED. A hold with a count
-  // told a person how much was left, not which; the page shows both.
-  `
-  ALTER TABLE held ADD COLUMN fetched TEXT NOT NULL DEFAULT '[]';
-  `,
-  // v3 — A NAME PER BUCKET. One domain, one bucket: the partial unique index is
-  // the rule, not a check in a verb that another caller could skip.
+  // Migration 4 — A NAME PER BUCKET. One domain, one bucket: the partial
+  // unique index is the rule, not a check in a verb that another caller could
+  // skip.
   `
   ALTER TABLE bucket ADD COLUMN domain TEXT;
   CREATE UNIQUE INDEX bucket_domain ON bucket (domain) WHERE domain IS NOT NULL;
+  `,
+  // Migration 5 — WHICH REFERENCES THE FETCH HAS ALREADY LANDED. A hold with a
+  // count told a person how much was left, not which; the page shows both.
+  // APPENDED, never inserted: migrations apply by POSITION against
+  // `user_version`, so an entry added mid-array re-runs every migration after
+  // it on an existing database.
+  `
+  ALTER TABLE held ADD COLUMN fetched TEXT NOT NULL DEFAULT '[]';
+  `,
+  // Migration 6 — A FAILED FETCH IS NOT "NEITHER HERE NOR UPSTREAM". The
+  // last line `nix-store -r` said is stored so the hold names the real fault
+  // (network, disk, lock), and a later retry clears it.
+  `
+  ALTER TABLE held ADD COLUMN failure TEXT;
   `,
 ];
 
@@ -378,6 +392,7 @@ const heldOf = (row: Row): HeldRow => ({
   missing: list(row, "missing"),
   fetching: integer(row, "fetching"),
   fetched: list(row, "fetched"),
+  failure: row["failure"] === null || row["failure"] === undefined ? null : String(row["failure"]),
   created: integer(row, "created"),
 });
 
@@ -662,16 +677,18 @@ export function openCacheRepo(path: string): CacheRepo {
       // is what the board's "waiting since" means. A later drain with the same
       // or a shorter list of missing references refreshes the REASON only.
       db.run(
-        `INSERT INTO held (bucket, store_path, missing, fetching, fetched, created)
-         VALUES (?, ?, ?, ?, ?, ?)
+        `INSERT INTO held (bucket, store_path, missing, fetching, fetched, failure, created)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(bucket, store_path) DO UPDATE SET missing = excluded.missing,
-           fetching = excluded.fetching, fetched = excluded.fetched`,
+           fetching = excluded.fetching, fetched = excluded.fetched,
+           failure = excluded.failure`,
         [
           row.bucket,
           row.storePath,
           JSON.stringify(row.missing),
           row.fetching,
           JSON.stringify(row.fetched),
+          row.failure,
           row.created,
         ],
       );

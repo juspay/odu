@@ -791,3 +791,37 @@ describe("one fetch job over the whole missing set", () => {
     await second.close();
   });
 });
+
+describe("a failed fetch", () => {
+  it("holds with nix's last line, not 'neither here nor upstream'", async () => {
+    const child = "/nix/store/f111111111111111111111111111111111-child";
+    const parent = "/nix/store/f222222222222222222222222222222222-parent";
+    const cache = cacheWith(ROOT);
+    await cache.admin.create({ ...createInput, upstreamKeys: ["cache.nixos.org-1"] });
+    store.substituteFailure = "unable to download …: Could not resolve host";
+    const childPayload = nar("child bytes");
+    const parentPayload = nar("parent bytes");
+    store.upstream.set(child, {
+      storePath: child,
+      narHash: childPayload.narHash,
+      narSize: 1,
+      references: [],
+      sigs: ["cache.nixos.org-1:c2ln"],
+    });
+    store.add(
+      { storePath: parent, narHash: parentPayload.narHash, narSize: 1, references: [child] },
+      false,
+    );
+    await putNar(cache, "main", parentPayload);
+    await cache.acceptNarinfo(
+      cache.bucket("main") as never,
+      hashOf(parent),
+      stream(narinfoText(parent, parentPayload, [child])),
+    );
+    await until("the failed fetch to settle", () => cache.held()[0]?.fetching === 0);
+    expect(cache.held()).toMatchObject([
+      { storePath: parent, failure: "unable to download …: Could not resolve host" },
+    ]);
+    await cache.close();
+  });
+});

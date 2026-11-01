@@ -74,6 +74,9 @@ export type ImportOutcome =
 
 export type DeleteOutcome = "deleted" | "kept";
 
+/** A fetch's answer: either it landed, or the last line `nix-store -r` said. */
+export type SubstituteOutcome = { ok: true } | { ok: false; message: string };
+
 /**
  * AN UPSTREAM CACHE the server may fetch a reference from — the URL, and the
  * full public key whose signatures make a path from it trustworthy.
@@ -126,7 +129,13 @@ export interface BlobStore {
    * A FAILURE IS NOT AN ERROR: the next import attempt reports exactly which
    * references are still missing, and that is the sentence a pusher reads.
    */
-  substitute(paths: readonly string[], upstreams: readonly UpstreamCache[]): Promise<void>;
+  substitute(
+    paths: readonly string[],
+    upstreams: readonly UpstreamCache[],
+  ): Promise<SubstituteOutcome>;
+  /** WHICH OF THESE THE STORE ALREADY HAS, in ONE `nix path-info` — the
+   *  question `missingOf` asks of every reference. */
+  presentOf(paths: readonly string[]): Promise<ReadonlySet<string>>;
   /** A zstd-compressed NAR, streamed. */
   dump(storePath: string): ReadableStream<Uint8Array>;
   retain(bucket: string, storePath: string): Promise<void>;
@@ -157,6 +166,30 @@ interface Run {
 
 /** One `nix`/`nix-store` invocation, collected. Used for everything that is not
  *  a byte stream: a path-info read, an import, a root, a delete. */
+/**
+ * A child whose OUTPUT IS A TAIL, not a buffer. `nix-store -r --keep-going`
+ * prints a line per path, and S1 needs only the last one; keeping the whole
+ * stdout/stderr of a large closure is memory nobody reads.
+ */
+function runTail(command: string, args: readonly string[]): Promise<{ code: number | null; message: string }> {
+  const { promise, resolve } = Promise.withResolvers<{ code: number | null; message: string }>();
+  const child = spawn(command, [...args], { stdio: ["ignore", "ignore", "pipe"] });
+  let tail: string[] = [];
+  let partial = "";
+  child.stderr?.on("data", (chunk: Buffer) => {
+    partial += chunk.toString("utf8");
+    const lines = partial.split("\n");
+    partial = lines.pop() ?? "";
+    tail = [...tail, ...lines.map((line) => line.trim())].filter((line) => line !== "").slice(-20);
+  });
+  child.on("error", (err) => resolve({ code: null, message: String(err) }));
+  child.on("close", (code) => {
+    const last = [...tail, partial.trim()].filter((line) => line !== "").at(-1);
+    resolve({ code, message: last ?? `nix-store exited ${String(code)}` });
+  });
+  return promise;
+}
+
 function run(command: string, args: readonly string[]): Promise<Run> {
   const { promise, resolve } = Promise.withResolvers<Run>();
   const child = spawn(command, [...args], { stdio: ["ignore", "pipe", "pipe"] });
@@ -332,14 +365,21 @@ export function nixStore(options: NixStoreOptions): BlobStore {
       return nixDump(storePath, options.store);
     },
 
+    async presentOf(paths) {
+      // ONE process for the whole set: a hold can name seven references, and a
+      // `nix path-info` each made eight spawns per attempt and per resume.
+      if (paths.length === 0) return new Set();
+      return new Set((await pathInfoTable(paths)).keys());
+    },
+
     async substitute(paths, upstreams) {
-      if (paths.length === 0 || upstreams.length === 0) return;
+      if (paths.length === 0 || upstreams.length === 0) return { ok: true };
       // `nix-store -r` fetches the requested paths AND their closures, and it
       // verifies every one against the keys given here — odu's key list, not
       // the host's nix.conf. A path the upstream cannot serve, or serves under
       // a key the bucket does not trust, simply stays absent; the caller's
       // import attempt says so.
-      await run("nix-store", [
+      const result = await runTail("nix-store", [
         "-r",
         // ONE reference that will not come does not stop the others: a
         // sibling that IS upstream must still land, or the referrer stays
@@ -359,6 +399,9 @@ export function nixStore(options: NixStoreOptions): BlobStore {
         "0",
         ...paths,
       ]);
+      // THE EXIT CODE IS THE FACT: a network error, a full disk or a store
+      // lock must read as a failed fetch, not as "neither here nor upstream".
+      return result.code === 0 ? { ok: true } : { ok: false, message: result.message };
     },
 
     async retain(bucket, storePath) {

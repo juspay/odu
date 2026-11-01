@@ -402,10 +402,14 @@ Then("the page's netrc block names {string}", async function (this: OduWorld, ho
 });
 
 Then("the push block still names the bucket's path", async function (this: OduWorld) {
+  const name = this.cacheBucket;
+  assert.ok(name !== undefined, "no bucket was arranged");
   const text = await this.page.locator("pre.push-block").innerText();
+  // Naming the bucket is unchanged by a DOMAIN: the push block names the
+  // bucket and the daemon's origin, never the substituter URL.
   assert.ok(
-    text.includes(`/cache/${this.cacheBucket}`),
-    `the push block lost the bucket's path: ${text}`,
+    text.includes(`odu cache push ${name} <paths> --origin ${this.service.origin}`),
+    `the push block lost the bucket's origin form: ${text}`,
   );
 });
 
@@ -475,7 +479,7 @@ Then("the page is the bucket's public page", function (this: OduWorld) {
   assert.ok(!visited.body.includes('aria-label="board rows"'), "the board's SPA answered");
 });
 
-Then("the page has the four blocks a person pastes", function (this: OduWorld) {
+Then("the page has the four blocks a person pastes", async function (this: OduWorld) {
   const visited = this.visited;
   assert.ok(visited !== undefined, "no page was opened");
   for (const title of ["nix.conf", "NixOS / nix-darwin", "flake.nix", "GitHub Actions"]) {
@@ -485,7 +489,7 @@ Then("the page has the four blocks a person pastes", function (this: OduWorld) {
     );
   }
   assert.strictEqual(
-    visited.body.split('<button type="button" data-copy>').length - 1,
+    await this.page.locator("button[data-copy]").count(),
     5,
     "the page does not offer a copy button per block (four use blocks and the push)",
   );

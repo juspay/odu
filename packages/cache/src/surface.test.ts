@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { heldReason } from "./surface";
+import { heldReason, holdReason } from "./surface";
 
 describe("why a path is held", () => {
   it("counts the references it was told about", () => {
@@ -11,6 +11,15 @@ describe("why a path is held", () => {
       "waiting for 2 references that are neither here nor upstream",
     );
     expect(heldReason([], 2)).toBe("fetching 2 upstream references");
+  });
+
+  it("names a failed fetch instead of blaming the references", () => {
+    expect(
+      holdReason({ failure: "network unreachable", missing: ["/nix/store/a"], fetching: 0 }),
+    ).toBe("fetching failed: network unreachable");
+    expect(holdReason({ failure: null, missing: ["/nix/store/a"], fetching: 1 })).toBe(
+      "fetching 1 upstream reference",
+    );
   });
 
   it("says no count when the server did not give one", () => {

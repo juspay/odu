@@ -177,6 +177,19 @@ export function heldReason(missing: readonly string[] | null, fetching = 0): str
   } neither here nor upstream`;
 }
 
+/**
+ * THE HOLD'S ONE SENTENCE: a failed fetch names nix's last line; a live one
+ * counts the set; a final one says neither here nor upstream. Server, route and
+ * page read this, so the three cannot disagree.
+ */
+export function holdReason(row: {
+  readonly failure: string | null;
+  readonly missing: readonly string[];
+  readonly fetching: number;
+}): string {
+  return row.failure === null ? heldReason(row.missing, row.fetching) : `fetching failed: ${row.failure}`;
+}
+
 // ── the refusal ─────────────────────────────────────────────────────────────
 
 /**
