@@ -301,6 +301,74 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
           });
     });
 
+  /** The chunked upload's two verbs, on BOTH the push API's path and the
+   *  bucket's path form: `odu cache push` addresses `<bucket>/nar/<file>`,
+   *  which is the protocol's mount — while `/_odu/v1` is the admin API's. */
+  const uploadPart = (request: HttpServerRequest.HttpServerRequest) =>
+          Effect.gen(function* () {
+        const file = yield* param("file");
+        if (!isStagedFileName(file)) return bad(`"${file}" is not a NAR file name`);
+        const index = Number(yield* param("index"));
+        if (!Number.isSafeInteger(index) || index < 0) {
+          return bad(`"${yield* param("index")}" is not a part index`);
+        }
+        const admitted = admit(cache, request, yield* param("bucket"), "write");
+        if (!admitted.ok) return admitted.response;
+        const declared = Number(request.headers["content-length"] ?? "");
+        if (Number.isFinite(declared) && declared > MAX_NAR_PART_BYTES) {
+          return HttpServerResponse.text(
+            `a part may be at most ${MAX_NAR_PART_BYTES} bytes`,
+            { status: 413 },
+          );
+        }
+        const upload = yield* Effect.promise(() =>
+          cache.beginPart(admitted.bucket, file, index, MAX_NAR_PART_BYTES),
+        );
+        const written = yield* Effect.result(
+          Stream.runForEach(request.stream, (chunk) =>
+            Effect.promise(() => upload.write(chunk)).pipe(
+              Effect.flatMap((state) =>
+                state === "too-large"
+                  ? Effect.fail("too-large" as const)
+                  : Effect.void,
+              ),
+            ),
+          ).pipe(Effect.andThen(Effect.promise(() => upload.commit()))),
+        );
+        if (written._tag === "Failure") {
+          yield* Effect.promise(() => upload.discard());
+          return written.failure === "too-large"
+            ? HttpServerResponse.text(
+                `a part may be at most ${MAX_NAR_PART_BYTES} bytes`,
+                { status: 413 },
+              )
+            : HttpServerResponse.text("the part did not complete", { status: 400 });
+        }
+        return HttpServerResponse.empty({ status: 204 });
+      });
+
+  const completeParts = (request: HttpServerRequest.HttpServerRequest) =>
+          Effect.gen(function* () {
+        const file = yield* param("file");
+        if (!isStagedFileName(file)) return bad(`"${file}" is not a NAR file name`);
+        const admitted = admit(cache, request, yield* param("bucket"), "write");
+        if (!admitted.ok) return admitted.response;
+        const total = Number(request.headers["x-odu-parts"] ?? "");
+        if (!Number.isSafeInteger(total) || total < 1) {
+          return bad("send x-odu-parts: the number of parts this NAR has");
+        }
+        const outcome = yield* Effect.promise(() =>
+          cache.completeUpload(admitted.bucket, file, total),
+        );
+        if (!outcome.ok) {
+          return HttpServerResponse.jsonUnsafe(
+            { missing: outcome.missing },
+            { status: 409 },
+          );
+        }
+        return HttpServerResponse.jsonUnsafe({ parts: outcome.parts });
+      });
+
   return Layer.mergeAll(
     /**
      * WHAT TO PASTE INTO A CLIENT — a bucket's consumer facts, with no account
@@ -553,77 +621,16 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
      * part is addressed by its index, which makes a retry an overwrite: a
      * dropped request costs one part, not the path.
      */
-    HttpRouter.add("PUT", `${PUSH_API}/buckets/:bucket/nar/:file/parts/:index`, (request) =>
-      Effect.gen(function* () {
-        const file = yield* param("file");
-        if (!isStagedFileName(file)) return bad(`"${file}" is not a NAR file name`);
-        const index = Number(yield* param("index"));
-        if (!Number.isSafeInteger(index) || index < 0) {
-          return bad(`"${yield* param("index")}" is not a part index`);
-        }
-        const admitted = admit(cache, request, yield* param("bucket"), "write");
-        if (!admitted.ok) return admitted.response;
-        const declared = Number(request.headers["content-length"] ?? "");
-        if (Number.isFinite(declared) && declared > MAX_NAR_PART_BYTES) {
-          return HttpServerResponse.text(
-            `a part may be at most ${MAX_NAR_PART_BYTES} bytes`,
-            { status: 413 },
-          );
-        }
-        const upload = yield* Effect.promise(() =>
-          cache.beginPart(admitted.bucket, file, index, MAX_NAR_PART_BYTES),
-        );
-        const written = yield* Effect.result(
-          Stream.runForEach(request.stream, (chunk) =>
-            Effect.promise(() => upload.write(chunk)).pipe(
-              Effect.flatMap((state) =>
-                state === "too-large"
-                  ? Effect.fail("too-large" as const)
-                  : Effect.void,
-              ),
-            ),
-          ).pipe(Effect.andThen(Effect.promise(() => upload.commit()))),
-        );
-        if (written._tag === "Failure") {
-          yield* Effect.promise(() => upload.discard());
-          return written.failure === "too-large"
-            ? HttpServerResponse.text(
-                `a part may be at most ${MAX_NAR_PART_BYTES} bytes`,
-                { status: 413 },
-              )
-            : HttpServerResponse.text("the part did not complete", { status: 400 });
-        }
-        return HttpServerResponse.empty({ status: 204 });
-      }),
-    ),
+    HttpRouter.add("PUT", `${PUSH_API}/buckets/:bucket/nar/:file/parts/:index`, uploadPart),
+    HttpRouter.add("PUT", `${CACHE_MOUNT}/:bucket/nar/:file/parts/:index`, uploadPart),
 
     /**
      * JOIN THE PARTS — the client's count, and the server's answer. A gap is
      * `409` with the indexes: the client retries those parts and asks again.
      * The hash is still proved at the narinfo, as for every other upload.
      */
-    HttpRouter.add("POST", `${PUSH_API}/buckets/:bucket/nar/:file/complete`, (request) =>
-      Effect.gen(function* () {
-        const file = yield* param("file");
-        if (!isStagedFileName(file)) return bad(`"${file}" is not a NAR file name`);
-        const admitted = admit(cache, request, yield* param("bucket"), "write");
-        if (!admitted.ok) return admitted.response;
-        const total = Number(request.headers["x-odu-parts"] ?? "");
-        if (!Number.isSafeInteger(total) || total < 1) {
-          return bad("send x-odu-parts: the number of parts this NAR has");
-        }
-        const outcome = yield* Effect.promise(() =>
-          cache.completeUpload(admitted.bucket, file, total),
-        );
-        if (!outcome.ok) {
-          return HttpServerResponse.jsonUnsafe(
-            { missing: outcome.missing },
-            { status: 409 },
-          );
-        }
-        return HttpServerResponse.jsonUnsafe({ parts: outcome.parts });
-      }),
-    ),
+    HttpRouter.add("POST", `${PUSH_API}/buckets/:bucket/nar/:file/complete`, completeParts),
+    HttpRouter.add("POST", `${CACHE_MOUNT}/:bucket/nar/:file/complete`, completeParts),
 
     /**
      * The batched "which of these are you missing" query. Not part of the Nix

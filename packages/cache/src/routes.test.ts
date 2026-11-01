@@ -796,13 +796,16 @@ describe("uploading", () => {
     const name = `${payload.narHash.replace(/^sha256:/, "")}.nar.zst`;
     const split = [payload.bytes.subarray(0, 5), payload.bytes.subarray(5)];
     const part = (index: number) =>
-      h.raw(`/_odu/v1/buckets/main/nar/${name}/parts/${index}`, {
+      // THE PROTOCOL'S PATH FORM, which is where `odu cache push` addresses a
+      // part (`<bucket>/nar/<file>/parts/<index>`); the admin API's path is a
+      // second spelling of the same verbs.
+      h.fetch(`/main/nar/${name}/parts/${index}`, {
         ...bearer(h.tokens.write),
         method: "PUT",
         body: body(split[index] as Uint8Array),
       });
     const complete = () =>
-      h.raw(`/_odu/v1/buckets/main/nar/${name}/complete`, {
+      h.fetch(`/main/nar/${name}/complete`, {
         ...bearer(h.tokens.write),
         method: "POST",
         headers: {
