@@ -9,7 +9,7 @@
 
 import * as assert from "node:assert";
 import { Then, When } from "@cucumber/cucumber";
-import { oduCli, until } from "../../../web-acceptance/support/service.ts";
+import { oduCli, ROOT_TOKEN, until } from "../../../web-acceptance/support/service.ts";
 import type { OduWorld } from "../../../web-acceptance/support/world.ts";
 
 When("I open the tunnel", async function (this: OduWorld) {
@@ -79,6 +79,11 @@ When("I clear the bucket's domain", async function (this: OduWorld) {
   assert.ok(name !== undefined, "no bucket was arranged");
   await this.open(`#/cache/${name}`);
   await this.page.getByRole("heading", { name, exact: true }).waitFor();
+  // OPENING THE BUCKET AGAIN IS A FRESH PAGE, so the in-memory root token the
+  // earlier step typed is gone on a daemon with no door; a person types it
+  // again, and so does this step.
+  const token = this.page.getByLabel("root token", { exact: true });
+  if ((await token.count()) > 0) await token.fill(ROOT_TOKEN);
   await this.page.getByRole("button", { name: "Clear domain", exact: true }).click();
   // The USE BLOCK goes back to the path form: the row accepted the clear.
   await until("the substituter block to drop the name", async () =>

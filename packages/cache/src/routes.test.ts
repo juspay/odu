@@ -339,7 +339,11 @@ describe("narinfo", () => {
 
   it("does not answer a name that is not a narinfo", async () => {
     const h = await harness(true);
-    expect((await h.fetch("/main/hello-2.12.3")).status).toBe(404);
+    const notProtocol = await h.fetch("/main/hello-2.12.3");
+    expect(notProtocol.status).toBe(404);
+    // The row's sentence, not an empty body: a path under a bucket that names
+    // no protocol file must read as the cache's own 404.
+    expect(await notProtocol.text()).toContain("no such cache path");
     await h.dispose();
   });
 });

@@ -363,7 +363,10 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
     HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket/:name`, (request) =>
       Effect.gen(function* () {
         const name = yield* param("name");
-        if (!name.endsWith(NARINFO_SUFFIX)) return HttpServerResponse.empty({ status: 404 });
+        // A PATH UNDER A BUCKET THAT NAMES NO PROTOCOL FILE IS THE ROW'S 404,
+        // not an empty one: this route outranks the mount's wildcard, so the
+        // sentence has to be said here or the wildcard never gets the request.
+        if (!name.endsWith(NARINFO_SUFFIX)) return missingRoute();
         const hash = name.slice(0, -NARINFO_SUFFIX.length);
         if (!isStorePathHash(hash)) return bad(`"${hash}" is not a store path hash`);
         const admitted = admit(cache, request, yield* param("bucket"), "read");
@@ -436,7 +439,10 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
     HttpRouter.add("PUT", `${CACHE_MOUNT}/:bucket/:name`, (request) =>
       Effect.gen(function* () {
         const name = yield* param("name");
-        if (!name.endsWith(NARINFO_SUFFIX)) return HttpServerResponse.empty({ status: 404 });
+        // A PATH UNDER A BUCKET THAT NAMES NO PROTOCOL FILE IS THE ROW'S 404,
+        // not an empty one: this route outranks the mount's wildcard, so the
+        // sentence has to be said here or the wildcard never gets the request.
+        if (!name.endsWith(NARINFO_SUFFIX)) return missingRoute();
         const hash = name.slice(0, -NARINFO_SUFFIX.length);
         if (!isStorePathHash(hash)) return bad(`"${hash}" is not a store path hash`);
         const admitted = admit(cache, request, yield* param("bucket"), "write");

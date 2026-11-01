@@ -343,9 +343,18 @@ Then("the page opens that bucket", async function (this: OduWorld) {
   await this.page.getByRole("heading", { name, exact: true }).waitFor({ timeout: 30_000 });
 });
 
+/** On a daemon with NO DOOR the page asks for the operator's root token; a
+ *  step that administers from a page IT just opened must type it, exactly as a
+ *  person would. Signed-in scenarios draw no field, so this is a no-op there. */
+async function typeRootTokenIfAsked(page: OduWorld["page"]): Promise<void> {
+  const field = page.getByLabel("root token", { exact: true });
+  if ((await field.count()) > 0) await field.fill(ROOT_TOKEN);
+}
+
 Given("a bucket created from the board", async function (this: OduWorld) {
   await this.open("#/cache");
   await this.page.getByRole("heading", { name: "Buckets", exact: true }).waitFor();
+  await typeRootTokenIfAsked(this.page);
   const name = unique("board");
   this.cacheBucket = name;
   await this.page.getByPlaceholder("new bucket name").fill(name);
