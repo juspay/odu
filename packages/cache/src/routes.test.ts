@@ -1025,11 +1025,22 @@ describe("uploading", () => {
       `/main/nar/${name}.s-mine.part-0`,
       `/main/nar/${name}.s-theirs.part-0`,
     ]);
-    const joined = await h.fetch(`/main/nar/${name}/complete`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${h.tokens.write}`, "x-odu-upload": "mine", "x-odu-parts": "1" },
-    });
-    expect(joined.status).toBe(200);
+    const complete = (session: string, parts: number) =>
+      h.fetch(`/main/nar/${name}/complete`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${h.tokens.write}`,
+          "x-odu-upload": session,
+          "x-odu-parts": String(parts),
+        },
+      });
+    expect((await complete("mine", 1)).status).toBe(200);
+    // A RETRIED JOIN is answered from THIS session's join; another session
+    // with a gap is not told its NAR exists because someone else's does.
+    expect((await complete("mine", 1)).status).toBe(200);
+    const gap = await complete("theirs", 2);
+    expect(gap.status).toBe(409);
+    expect(await gap.json()).toEqual({ missing: [1] });
     const narinfo = await h.fetch(`/main/${hashOf(staged)}.narinfo`, {
       ...bearer(h.tokens.write),
       method: "PUT",

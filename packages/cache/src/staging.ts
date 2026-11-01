@@ -215,7 +215,7 @@ export function createStaging(deps: StagingDeps): Staging {
   /** One proof at a time per staged NAR name (see `acceptNarinfo`). */
   const proofs = new Map<string, Chain>();
   /** Bytes/parts of a completed chunked upload, for a refusal's log line. */
-  const joined = new Map<string, { parts: number; bytes: number }>();
+  const joined = new Map<string, { parts: number; bytes: number; session: string | null }>();
   let lastSweep = 0;
 
   /**
@@ -410,12 +410,15 @@ export function createStaging(deps: StagingDeps): Staging {
     }
     if (missing.length > 0) {
       // A SECOND COMPLETE for a file the first already joined is the state the
-      // caller wanted: the parts are gone because the NAR exists.
+      // caller wanted: the parts are gone because the NAR exists. With a
+      // session, only if THAT session's join is what sits there — another
+      // upload's join is not this one's.
       const target = join(dirForBucket, "nar", file);
       const assembled = await stat(target).catch(() => null);
-      if (assembled !== null && assembled.isFile()) {
+      const ours = session === null || joined.get(`${bucket.name}/${file}`)?.session === session;
+      if (assembled !== null && assembled.isFile() && ours) {
         await unlink(uploadMarker(dirForBucket, stem)).catch(() => {});
-        joined.set(`${bucket.name}/${file}`, { parts: total, bytes: assembled.size });
+        joined.set(`${bucket.name}/${file}`, { parts: total, bytes: assembled.size, session });
         return { ok: true, parts: total };
       }
       return { ok: false, missing };
@@ -453,6 +456,7 @@ export function createStaging(deps: StagingDeps): Staging {
     await unlink(uploadMarker(dirForBucket, stem)).catch(() => {});
     const joinedInfo = await stat(target).catch(() => null);
     joined.set(`${bucket.name}/${file}`, {
+      session,
       parts: total,
       bytes: joinedInfo?.size ?? 0,
     });
