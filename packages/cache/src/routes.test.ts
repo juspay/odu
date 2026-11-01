@@ -581,8 +581,23 @@ describe("operational lines", () => {
       lines.push(`${event} ${JSON.stringify(fields)}`),
     );
     const hello = nar("a NAR, in pieces");
-    await (await h.fetch(`/main/nar/${hello.narHash.replace(/^sha256:/, "")}.nar.zst`)).arrayBuffer();
-    expect(lines.some((line) => line.startsWith("cache.nar.served") && line.includes('"source":"file"'))).toBe(true);
+    const response = await h.fetch(`/main/nar/${hello.narHash.replace(/^sha256:/, "")}.nar.zst`);
+    // INTENT IS NOT EVIDENCE: building the response logs nothing; the body
+    // finishing does.
+    expect(lines.some((line) => line.startsWith("cache.nar.served"))).toBe(false);
+    await response.arrayBuffer();
+    const servedLine = lines.find((line) => line.startsWith("cache.nar.served"));
+    expect(servedLine).toContain('"source":"file"');
+    expect(servedLine).toContain(`"bytes":${hello.bytes.length}`);
+    expect(servedLine).toContain('"cancelled":false');
+
+    const cancelled = await h.fetch(`/main/nar/${hello.narHash.replace(/^sha256:/, "")}.nar.zst`);
+    await cancelled.body?.cancel();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(
+      lines.some((line) => line.startsWith("cache.nar.served") && line.includes('"cancelled":true')),
+    ).toBe(true);
+
     await h.fetch("/main/nar/.hidden.nar.zst");
     expect(lines.some((line) => line.startsWith("cache.request.refused") && line.includes("not a NAR file name"))).toBe(true);
     await h.dispose();

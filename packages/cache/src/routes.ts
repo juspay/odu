@@ -116,6 +116,44 @@ function fileBody(path: string, start: number, length: number): ReadableStream<U
   });
 }
 
+/** Count what actually crossed to the adapter, and report it once — at close,
+ *  at cancellation, or at an error. A log at response-build time is intent, not
+ *  evidence; the pod printed one for requests that never wrote a byte. */
+function observedBody(
+  body: ReadableStream<Uint8Array>,
+  onDone: (bytes: number, cancelled: boolean, error: string | null) => void,
+): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
+  let bytes = 0;
+  let finished = false;
+  const finish = (cancelled: boolean, error: string | null): void => {
+    if (finished) return;
+    finished = true;
+    onDone(bytes, cancelled, error);
+  };
+  return new ReadableStream({
+    async pull(controller) {
+      try {
+        const next = await reader.read();
+        if (next.done) {
+          finish(false, null);
+          controller.close();
+          return;
+        }
+        bytes += next.value.length;
+        controller.enqueue(next.value);
+      } catch (err) {
+        finish(false, String((err as Error).message ?? err));
+        controller.error(err);
+      }
+    },
+    async cancel(reason) {
+      finish(true, null);
+      await reader.cancel(reason).catch(() => {});
+    },
+  });
+}
+
 /**
  * SERVE THE BYTES. A kept file answers with the file itself, `Content-Length`
  * and `Accept-Ranges`; a `Range` is sliced here, so a resumed or ranged Nix
@@ -133,20 +171,28 @@ function narResponse(
   const started = performance.now();
   const at = file.indexOf(".nar");
   const hash = at === -1 ? file : file.slice(0, at);
-  const done = (bytes: number | null, kind: "file" | "object" | "transition"): void =>
-    cache.log("cache.nar.served", {
-      bucket,
-      hash,
-      path: source.storePath,
-      bytes,
-      ms: Math.round(performance.now() - started),
-      source: kind,
-    });
+  const served = (kind: "file" | "object" | "transition") =>
+    (bytes: number, cancelled: boolean, error: string | null): void =>
+      cache.log("cache.nar.served", {
+        bucket,
+        hash,
+        path: source.storePath,
+        bytes,
+        ms: Math.round(performance.now() - started),
+        source: kind,
+        cancelled,
+        ...(error === null ? {} : { error }),
+      });
   if (source.kind === "stream" || source.kind === "legacy") {
-    const bytes = source.kind === "stream" ? source.size : null;
-    done(bytes, source.kind === "stream" ? "object" : "transition");
+    const kind = source.kind === "stream" ? "object" : "transition";
     return HttpServerResponse.stream(
-      Stream.fromReadableStream({ evaluate: () => source.stream, onError: (err) => err }),
+      Stream.fromReadableStream({
+        evaluate: () =>
+          observedBody(source.stream, (bytes, cancelled, error) =>
+            served(kind)(bytes, cancelled, error),
+          ),
+        onError: (err) => err,
+      }),
       {
         contentType: "application/x-nix-nar",
         headers: source.kind === "stream" ? { ...headers, "content-length": String(source.size) } : headers,
@@ -171,10 +217,10 @@ function narResponse(
       return HttpServerResponse.empty({ status: 416 });
     }
     const bytes = bounded - start + 1;
-    done(bytes, "file");
     return HttpServerResponse.stream(
       Stream.fromReadableStream({
-        evaluate: () => fileBody(source.path, start, bytes),
+        evaluate: () =>
+          observedBody(fileBody(source.path, start, bytes), served("file")),
         onError: (err) => err,
       }),
       {
@@ -189,10 +235,9 @@ function narResponse(
       },
     );
   }
-  done(source.size, "file");
   return HttpServerResponse.stream(
     Stream.fromReadableStream({
-      evaluate: () => fileBody(source.path, 0, source.size),
+      evaluate: () => observedBody(fileBody(source.path, 0, source.size), served("file")),
       onError: (err) => err,
     }),
     {
