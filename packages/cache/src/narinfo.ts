@@ -170,11 +170,14 @@ export interface NarInfo {
   /** FULL store paths, in narinfo order. */
   references: readonly string[];
   deriver: string | null;
+  /** Nix's `CA:` line, verbatim. A content-addressed rewrite is importable by
+   *  its own hash; dropping this line makes the consumer demand a signature. */
+  ca: string | null;
   sigs: readonly string[];
 }
 
 /** Parse a narinfo. Unknown keys are ignored rather than refused: the format is
- *  Nix's to extend, and a pusher's `CA:` line is not odu's business. */
+ *  Nix's to extend. `CA:` is carried, never invented. */
 export function parseNarinfo(text: string): NarInfo {
   const fields = new Map<string, string[]>();
   for (const line of text.split("\n")) {
@@ -221,6 +224,7 @@ export function parseNarinfo(text: string): NarInfo {
         : deriverRaw.startsWith("/")
           ? deriverRaw
           : `/nix/store/${deriverRaw}`,
+    ca: one("CA"),
     sigs: fields.get("Sig") ?? [],
   };
 }
@@ -239,10 +243,16 @@ export function formatNarinfo(info: NarInfo): string {
     `NarSize: ${info.narSize}`,
     `References: ${info.references.map(storePathBasename).join(" ")}`,
     ...(info.deriver === null ? [] : [`Deriver: ${storePathBasename(info.deriver)}`]),
+    ...(info.ca === null ? [] : [`CA: ${info.ca}`]),
     ...info.sigs.map((sig) => `Sig: ${sig}`),
   ];
   return `${lines.join("\n")}\n`;
 }
+
+/** A store path for a DERIVATION. The cache serves outputs; a derivation is a
+ *  build recipe whose references are recipes, and fetching one lets Nix try to
+ *  build it. */
+export const isDerivationPath = (storePath: string): boolean => storePath.endsWith(".drv");
 
 /** What a signature is computed over — Nix's `fingerprintPath`, verbatim. */
 export function fingerprintOf(info: {

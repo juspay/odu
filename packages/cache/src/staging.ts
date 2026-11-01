@@ -40,6 +40,7 @@ import { upstreamFor, verifyNarFile, writeStreamToFile } from "./store";
 import type { BucketRow, CacheRepo, HeldRow } from "./db";
 import {
   formatNarinfo,
+  isDerivationPath,
   isStagedFileName,
   isStorePathHash,
   type NarInfo,
@@ -140,6 +141,7 @@ export interface StagingDeps {
     storePath: string,
     expectedNarHash: string,
     clientSigs: readonly string[],
+    ca: string | null,
   ) => Promise<boolean>;
   /** Something a subscriber would see moved — a background fetch landed, or a
    *  hold's reason changed. Supplied by the cache, whose listener it is. */
@@ -332,6 +334,8 @@ export function createStaging(deps: StagingDeps): Staging {
     const references = entry.info.references.filter((one) => one !== entry.info.storePath);
     // ONE `nix path-info` for the whole set, not one spawn per reference.
     const here = await blob.presentOf(references);
+    // A DERIVATION IS NEVER FETCHED: substituting one lets Nix try to build it
+    // on the cache host. It stays in the missing set so the hold says so.
     const out = references.filter((reference) => !here.has(reference));
     for (const one of reported) if (!out.includes(one)) out.push(one);
     return out;
@@ -360,23 +364,31 @@ export function createStaging(deps: StagingDeps): Staging {
     const upstreams = upstreamFor(bucket.upstreamKeys);
     const outcome = await blob.import({ dir: dirForBucket, storePath: entry.info.storePath });
     if (!outcome.ok && outcome.missing.length > 0) {
-      const missing = await missingOf(entry, outcome.missing);
+      const reportedDerivations = outcome.missing.filter(isDerivationPath);
+      const missing = await missingOf(
+        entry,
+        outcome.missing.filter((one) => !isDerivationPath(one)),
+      );
       entry.waitingOn = missing;
       entry.fetched = [...new Set([...entry.fetched, ...landed(entry, missing)])];
-      entry.failure = null;
-      if (upstreams.length > 0) {
+      entry.failure =
+        reportedDerivations.length > 0
+          ? "a reference is a derivation, which the cache never builds"
+          : null;
+      const fetchable = missing.filter((one) => !isDerivationPath(one));
+      if (upstreams.length > 0 && fetchable.length > 0) {
         if (entry.fetching === 0 && !closed) {
-          entry.fetching = missing.length;
+          entry.fetching = fetchable.length;
           repo.putHeld({
             bucket: bucket.name,
             storePath: entry.info.storePath,
             missing,
             fetching: entry.fetching,
             fetched: entry.fetched,
-            failure: null,
+            failure: entry.failure,
             created: now(),
           });
-          enqueueFetch(bucket, dirForBucket, entry, missing);
+          enqueueFetch(bucket, dirForBucket, entry, fetchable);
           changed();
         }
         return { missing, fetching: entry.fetching };
@@ -387,7 +399,7 @@ export function createStaging(deps: StagingDeps): Staging {
         missing,
         fetching: 0,
         fetched: entry.fetched,
-        failure: null,
+        failure: entry.failure,
         created: now(),
       });
       return { missing, fetching: 0 };
@@ -408,7 +420,7 @@ export function createStaging(deps: StagingDeps): Staging {
       repo.deleteHeld(bucket.name, entry.info.storePath);
       return { failed: outcome.message };
     }
-    await record(bucket, entry.info.storePath, entry.info.narHash, entry.info.sigs);
+    await record(bucket, entry.info.storePath, entry.info.narHash, entry.info.sigs, entry.info.ca);
     repo.deleteHeld(bucket.name, entry.info.storePath);
     changed();
     return "recorded";
@@ -465,7 +477,7 @@ export function createStaging(deps: StagingDeps): Staging {
       });
       if (closed) return;
       if (outcome.ok) {
-        await record(bucket, entry.info.storePath, entry.info.narHash, entry.info.sigs);
+        await record(bucket, entry.info.storePath, entry.info.narHash, entry.info.sigs, entry.info.ca);
         repo.deleteHeld(bucket.name, entry.info.storePath);
         pending.get(bucket.name)?.delete(entry.hash);
         await unlink(join(dirForBucket, "nar", basename(entry.info.url))).catch(() => {});
@@ -756,7 +768,10 @@ export function createStaging(deps: StagingDeps): Staging {
           if (entry === undefined) continue;
           // THE FULL SET, even if the row was written by a build that knew
           // only what stderr said: the recovery is the moment to widen it.
-          const missing = await missingOf(entry, row.missing);
+          const missing = (await missingOf(entry, row.missing)).filter(
+            (one) => !isDerivationPath(one),
+          );
+          if (missing.length === 0) continue;
           entry.waitingOn = missing;
           entry.fetched = row.fetched;
           entry.fetching = missing.length;
@@ -842,6 +857,16 @@ export function createStaging(deps: StagingDeps): Staging {
           ok: false,
           status: 400,
           message: `narinfo names ${info.storePath}, which is not ${hash}.narinfo`,
+        };
+      }
+      if (isDerivationPath(info.storePath)) {
+        await unlink(path).catch(() => {});
+        return {
+          ok: false,
+          status: 400,
+          message:
+            `${info.storePath} is a derivation — a cache serves outputs; ` +
+            "its references are recipes, and fetching one asks the host to build it",
         };
       }
 

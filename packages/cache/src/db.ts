@@ -76,6 +76,8 @@ export interface ObjectRow {
   narSize: number;
   references: readonly string[];
   deriver: string | null;
+  /** Nix's `CA:` line, verbatim; `null` for an ordinary input-addressed path. */
+  ca: string | null;
   sigs: readonly string[];
   /** narinfo reads. What `odu cache stats` reports. */
   hits: number;
@@ -297,6 +299,12 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE held ADD COLUMN failure TEXT;
   `,
+  // Migration 7 — THE `CA:` LINE, as Nix sent it. A content-addressed rewrite
+  // is importable by its own hash; without this the consumer demands a
+  // signature instead.
+  `
+  ALTER TABLE object ADD COLUMN ca TEXT;
+  `,
 ];
 
 /** The schema this build writes. A file carrying a HIGHER number was written by
@@ -373,6 +381,7 @@ const objectOf = (row: Row): ObjectRow => ({
   narSize: integer(row, "nar_size"),
   references: list(row, "refs"),
   deriver: maybeText(row, "deriver"),
+  ca: maybeText(row, "ca"),
   sigs: list(row, "sigs"),
   hits: integer(row, "hits"),
   created: integer(row, "created"),
@@ -533,12 +542,12 @@ export function openCacheRepo(path: string): CacheRepo {
     putObject(row) {
       db.run(
         `INSERT INTO object (bucket, store_path, hash, nar_hash, nar_size, refs,
-           deriver, sigs, hits, created, last_accessed)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           deriver, ca, sigs, hits, created, last_accessed)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(bucket, store_path) DO UPDATE SET hash = excluded.hash,
            nar_hash = excluded.nar_hash, nar_size = excluded.nar_size,
            refs = excluded.refs, deriver = excluded.deriver,
-           sigs = excluded.sigs`,
+           ca = excluded.ca, sigs = excluded.sigs`,
         [
           row.bucket,
           row.storePath,
@@ -547,6 +556,7 @@ export function openCacheRepo(path: string): CacheRepo {
           row.narSize,
           JSON.stringify(row.references),
           row.deriver,
+          row.ca,
           JSON.stringify(row.sigs),
           row.hits,
           row.created,

@@ -294,6 +294,9 @@ export interface Cache {
   onChange(listener: () => void): () => void;
   /** The admin face. */
   admin: CacheAdmin;
+  /** Drop held rows whose PATH is a derivation. Called at row apply: an old
+   *  pod may hold rows from before the push refused them. */
+  dropDerivationHolds(): number;
   /** RE-QUEUE the held rows this database remembers — called at ROW APPLY, so
    *  a restart resumes a reference fetch instead of waiting for a new push. */
   resume(): Promise<void>;
@@ -437,6 +440,7 @@ export function createCache(options: CacheOptions): Cache {
       narSize: row.narSize,
       references: row.references,
       deriver: row.deriver,
+      ca: row.ca,
       sigs: [signatureOf(bucket, row), ...row.sigs],
     };
     return formatNarinfo(info);
@@ -456,8 +460,9 @@ export function createCache(options: CacheOptions): Cache {
     storePath: string,
     expectedNarHash: string,
     clientSigs: readonly string[],
+    ca: string | null,
   ): Promise<boolean> {
-    return withWriteLock(() => recordNow(bucket, storePath, expectedNarHash, clientSigs));
+    return withWriteLock(() => recordNow(bucket, storePath, expectedNarHash, clientSigs, ca));
   }
 
   async function recordNow(
@@ -465,6 +470,7 @@ export function createCache(options: CacheOptions): Cache {
     storePath: string,
     expectedNarHash: string,
     clientSigs: readonly string[],
+    ca: string | null,
   ): Promise<boolean> {
     const info = await blob.pathInfo(storePath);
     if (info === null) {
@@ -490,6 +496,8 @@ export function createCache(options: CacheOptions): Cache {
       narSize: info.narSize,
       references: info.references,
       deriver: info.deriver,
+      // A re-push without the line keeps the one already stored; never invent.
+      ca: ca ?? existing?.ca ?? null,
       sigs,
       hits: existing?.hits ?? 0,
       created: existing?.created ?? at,
@@ -931,6 +939,13 @@ export function createCache(options: CacheOptions): Cache {
     },
 
     held: () => repo.held(),
+
+    dropDerivationHolds() {
+      const rows = repo.held().filter((row) => row.storePath.endsWith(".drv"));
+      for (const row of rows) repo.deleteHeld(row.bucket, row.storePath);
+      if (rows.length > 0) notify();
+      return rows.length;
+    },
 
     resume: () => staging.resume(),
 

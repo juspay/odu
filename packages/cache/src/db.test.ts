@@ -56,6 +56,7 @@ const object: ObjectRow = {
   narSize: 279592,
   references: ["/nix/store/pqyiidz5mi73wv5f91d48s9plcqyj5bz-glibc-2.44-57"],
   deriver: "/nix/store/y1kh9arkh7w7am664yqbnnrfpsisqcdc-hello-2.12.3.drv",
+  ca: null,
   sigs: ["main-1:c2ln"],
   hits: 3,
   created: NOW,

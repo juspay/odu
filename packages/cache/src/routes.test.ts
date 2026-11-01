@@ -157,7 +157,13 @@ async function upload(
   token: string,
   storePath: string,
   payload: { bytes: Uint8Array; narHash: string },
-  options: { references?: readonly string[]; narHash?: string; compression?: string; skipNar?: boolean } = {},
+  options: {
+    references?: readonly string[];
+    narHash?: string;
+    compression?: string;
+    skipNar?: boolean;
+    ca?: string;
+  } = {},
 ): Promise<Response> {
   const name = `${payload.narHash.replace(/^sha256:/, "")}.nar.zst`;
   if (options.skipNar !== true) {
@@ -175,6 +181,7 @@ async function upload(
     `NarHash: ${options.narHash ?? payload.narHash}`,
     `NarSize: ${payload.bytes.length}`,
     `References: ${(options.references ?? []).map((path) => path.slice("/nix/store/".length)).join(" ")}`,
+    ...(options.ca === undefined ? [] : [`CA: ${options.ca}`]),
     "",
   ].join("\n");
   return fetchIt(`/main/${storePathHash(storePath)}.narinfo`, {
@@ -334,6 +341,32 @@ describe("narinfo", () => {
     const h = await harness(true);
     expect((await h.fetch(`/main/${hashOf(HELLO)}.narinfo`, { method: "HEAD" })).status).toBe(200);
     expect((await h.fetch(`/main/${"0".repeat(32)}.narinfo`, { method: "HEAD" })).status).toBe(404);
+    await h.dispose();
+  });
+
+  it("serves the pusher's CA line verbatim", async () => {
+    const h = await harness(true);
+    const hello = nar("a NAR, in pieces");
+    const ca = `fixed:r:sha256:${"A".repeat(52)}`;
+    const put = await upload(h.fetch, h.tokens.write, HELLO, hello, { ca });
+    expect(put.status).toBe(200);
+    const served = await (await h.fetch(`/main/${hashOf(HELLO)}.narinfo`)).text();
+    // BYTE FOR BYTE — odu never synthesises or rewrites the line: an
+    // input-addressed reader would have to demand a signature instead.
+    expect(served.split("\n")).toContain(`CA: ${ca}`);
+    await h.dispose();
+  });
+
+  it("refuses a derivation's narinfo", async () => {
+    const h = await harness(true);
+    const drv = "/nix/store/11111111111111111111111111111111-thing.drv";
+    const response = await h.fetch(`/main/${hashOf(drv)}.narinfo`, {
+      ...bearer(h.tokens.write),
+      method: "PUT",
+      body: `StorePath: ${drv}\nURL: nar/x.nar.zst\nNarHash: sha256:${"0".repeat(52)}\nNarSize: 1\nReferences: \n`,
+    });
+    expect(response.status).toBe(400);
+    expect(await response.text()).toContain("is a derivation");
     await h.dispose();
   });
 

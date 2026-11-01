@@ -47,6 +47,7 @@ function obj(
     narSize: 100,
     references,
     deriver: null,
+  ca: null,
     sigs: [],
     hits: 0,
     created: accessed,
