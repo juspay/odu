@@ -21,6 +21,11 @@
  * place — never rebuilt at the shared name, where a concurrent verify would
  * read it half-written (kolu #2335's `zstd exited 1`).
  *
+ * **Claiming is safe across processes; the queue is not.** The rename hands an
+ * upload to one request on any shared filesystem, but the per-name queue that
+ * lets a second narinfo see the object the first keeps is in this process —
+ * replicas and the S3 store (both planned) need it somewhere shared.
+ *
  * **There is no ordering problem any more.** References are names in the
  * narinfo, not paths a store must already hold, so a closure arriving in any
  * order is all equally recordable. A narinfo without its NAR is still refused;
@@ -259,7 +264,9 @@ export function createStaging(deps: StagingDeps): Staging {
         facts: { fileHash: checked.fileHash, fileSize: checked.fileSize, selfHash: checked.selfHash },
       });
     } finally {
-      // OURS TO REMOVE: adopted, refused, or a duplicate of a kept object.
+      // OURS TO REMOVE: adopted, refused, or a duplicate of a kept object. A
+      // REFUSED narinfo deletes the upload it named — no new power: any
+      // write-token holder could already overwrite that name.
       openUploads.delete(claimed.path);
       await rm(claimed.path, { force: true }).catch(() => {});
     }
