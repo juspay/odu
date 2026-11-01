@@ -157,8 +157,7 @@ export interface PushSummary {
   /** One line per failure, for a caller that wants to say which paths did not
    *  make it. */
   failures: readonly { path: string; message: string }[];
-  /** The bucket's page on the daemon that answered — where a person reads the
-   *  held paths and their reason. */
+  /** The daemon that answered, for a refusal's follow-up. */
   pageUrl: string;
 }
 
@@ -355,6 +354,7 @@ async function askMissing(
         paths: sending.map((entry) => ({
           path: entry.storePath,
           sigs: entry.sigs,
+          ...(entry.ca === null ? {} : { ca: entry.ca }),
         })),
       }),
     },
@@ -627,6 +627,7 @@ export function formatPushNarinfo(entry: ClosureEntry, narName: string): string 
     `NarSize: ${entry.narSize}`,
     `References: ${entry.references.map(storePathBasename).join(" ")}`,
     ...(entry.deriver === null ? [] : [`Deriver: ${storePathBasename(entry.deriver)}`]),
+    ...(entry.ca === null ? [] : [`CA: ${entry.ca}`]),
     ...entry.sigs.map((sig) => `Sig: ${sig}`),
     "",
   ].join("\n");

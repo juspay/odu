@@ -39,8 +39,22 @@ import {
   verify as cryptoVerify,
 } from "node:crypto";
 
-/** The compression and URL extension odu SERVES. Reads are zstd on the fly,
- *  whatever a client uploaded; writes accept any compression the client sent. */
+/** The extension a stored object carries for its compression. odu KEEPS the
+ *  bytes as uploaded: the narinfo says `Compression:` and the URL says it too. */
+export function compressionExtension(compression: string | null): string {
+  switch (compression ?? "none") {
+    case "none":
+      return "nar";
+    case "xz":
+      return "nar.xz";
+    case "bzip2":
+      return "nar.bz2";
+    default:
+      return "nar.zst";
+  }
+}
+
+/** The default the push client writes; kept for its narinfo. */
 export const SERVED_EXTENSION = "nar.zst";
 
 /** Nix's base32 alphabet. NOT RFC 4648: no `e`, `o`, `u` or `t`. */

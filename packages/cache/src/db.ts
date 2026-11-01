@@ -78,6 +78,9 @@ export interface ObjectRow {
   deriver: string | null;
   /** Nix's `CA:` line, verbatim; `null` for an ordinary input-addressed path. */
   ca: string | null;
+  /** What the KEPT bytes are compressed with — `zstd`, `xz`, `bzip2` or
+   *  `none`. The narinfo says it and the object's extension encodes it. */
+  compression: string;
   /** `sha256:<base32>` of the kept compressed NAR file, and its byte size.
    *  `null` until the file exists (a row from before files were kept, or an
    *  object whose boot backfill has not finished); the FIFO fallback serves it
@@ -295,6 +298,13 @@ export const MIGRATIONS: readonly string[] = [
   `
   DROP TABLE held;
   `,
+  // Migration 10 — THE STORED COMPRESSION. An upload may be zstd, xz, bzip2
+  // or none; the object is kept exactly as sent, so the row records what the
+  // bytes are and the narinfo says it. Rows from before this are zstd (the
+  // only thing odu ever served), hence the default.
+  `
+  ALTER TABLE object ADD COLUMN compression TEXT NOT NULL DEFAULT 'zstd';
+  `,
 ];
 
 /** The schema this build writes. A file carrying a HIGHER number was written by
@@ -372,6 +382,7 @@ const objectOf = (row: Row): ObjectRow => ({
   references: list(row, "refs"),
   deriver: maybeText(row, "deriver"),
   ca: maybeText(row, "ca"),
+  compression: text(row, "compression"),
   fileHash: maybeText(row, "file_hash"),
   fileSize: row["file_size"] === null || row["file_size"] === undefined
     ? null
@@ -525,12 +536,13 @@ export function openCacheRepo(path: string): CacheRepo {
     putObject(row) {
       db.run(
         `INSERT INTO object (bucket, store_path, hash, nar_hash, nar_size, refs,
-           deriver, ca, file_hash, file_size, sigs, hits, created, last_accessed)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           deriver, ca, compression, file_hash, file_size, sigs, hits, created, last_accessed)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(bucket, store_path) DO UPDATE SET hash = excluded.hash,
            nar_hash = excluded.nar_hash, nar_size = excluded.nar_size,
            refs = excluded.refs, deriver = excluded.deriver,
-           ca = excluded.ca, file_hash = excluded.file_hash,
+           ca = excluded.ca, compression = excluded.compression,
+           file_hash = excluded.file_hash,
            file_size = excluded.file_size, sigs = excluded.sigs`,
         [
           row.bucket,
@@ -541,6 +553,7 @@ export function openCacheRepo(path: string): CacheRepo {
           JSON.stringify(row.references),
           row.deriver,
           row.ca,
+          row.compression,
           row.fileHash,
           row.fileSize,
           JSON.stringify(row.sigs),

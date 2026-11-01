@@ -39,7 +39,7 @@
  * bundle to mount on, and the router mount for the protocol routes.
  */
 
-import { Effect } from "effect";
+import { Effect, Fiber } from "effect";
 import { definePlugin, offer } from "@olai/effect-cordis";
 import type { ImplementSurfaceDeps } from "@kolu/surface/server";
 import {
@@ -58,7 +58,7 @@ import { createCache, roleAuthority, type Authority, type BucketFacts, type Cach
 import { may, principalOf, type Principal } from "@odu/cordis/principal";
 import { bucketOf, CACHE_MOUNT, CACHE_ROUTE_PATHS } from "./paths";
 import { cacheRoutes } from "./routes";
-import { nixDump } from "./store";
+import { nixDump, nixPathInfo } from "./store";
 import {
   type CacheBucket,
   CACHE_KEY,
@@ -436,22 +436,27 @@ export const cacheRow = definePlugin({
       rootToken,
       // THE OLD NIX STORE is read ONLY by the one-time object migration. A
       // fresh deployment leaves this null and the cache never shells out.
-      legacyStore: store === null ? null : { dump: (path) => nixDump(path, store) },
+      // `NixStore` NULL IS THE HOST'S OWN /nix/store (the contract): a module
+      // deployment migrates from there; the pod names its chroot store.
+      legacyStore: {
+        dump: (path) => nixDump(path, store),
+        pathInfo: (path) => nixPathInfo(path, store),
+      },
       // ONE structured line per operational fact. The Effect logger renders
       // the fields; no per-chunk lines, no narration.
       log: (event, fields) => log.info(fields, `odu cache: ${event}`),
     });
-    const boot = yield* Effect.promise(() => cache.resume());
+    // BEFORE THE MOUNT: CA proof and the orphan/temp sweep. Nothing is
+    // writing yet, so this cannot race a push.
+    const boot = yield* Effect.promise(() => cache.boot());
     if (boot.caProved > 0) {
       log.info({ proved: boot.caProved }, "odu cache: boot proved CA");
     }
-    if (boot.orphansSwept > 0) {
-      log.info({ swept: boot.orphansSwept }, "odu cache: boot swept orphan objects");
-    }
-    if (boot.paused !== null) {
-      log.warn({ reason: boot.paused }, "odu cache: migration paused");
-    } else if (boot.migrationComplete) {
-      log.info({}, "odu cache: every row has its object; the old store is no longer read");
+    if (boot.orphansSwept > 0 || boot.tempSwept > 0) {
+      log.info(
+        { swept: boot.orphansSwept, temp: boot.tempSwept },
+        "odu cache: boot swept orphan objects",
+      );
     }
 
     // THE ROW'S PUBLISHED FACT: the names its buckets carry. A row that routes
@@ -502,6 +507,12 @@ export const cacheRow = definePlugin({
         publicOrigin ?? boundOrigin,
       ),
     );
+
+    // AFTER THE MOUNT, AND ROW-OWNED: the migration dumps tens of gigabytes
+    // and must not hold `/` or `/cache/*` down while it does. The row's
+    // finalizer interrupts it before the database closes.
+    const migration = yield* Effect.forkChild(Effect.promise(() => cache.migrate()));
+    yield* Effect.addFinalizer(() => Fiber.interrupt(migration));
 
     // FINALIZERS RUN IN REVERSE, so the one registered SECOND runs FIRST, and
     // the safe order is: the mount goes, THEN the database. A publish that

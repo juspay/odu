@@ -563,8 +563,7 @@ export const ODU_CACHE_MCP_INSTRUCTIONS = [
   "substring `filter` and the `after` cursor it returned. `cache_bucket_domain`",
   "gives a bucket a DNS name of its own (clear it with no `domain`); the",
   "advertised `url` becomes that name while `pushUrl` keeps the path the push",
-  "API needs. `held` is a resource of the paths a bucket accepted but is",
-  "waiting on references for.",
+  "API needs.",
 ].join("\n");
 
 // ── the row ─────────────────────────────────────────────────────────────────

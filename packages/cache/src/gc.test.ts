@@ -48,6 +48,7 @@ function obj(
     references,
     deriver: null,
   ca: null,
+    compression: "zstd",
     fileHash: null,
     fileSize: null,
     sigs: [],
@@ -156,6 +157,24 @@ describe("runGc", () => {
     );
     expect(report.buckets).toEqual([{ bucket: "main", evicted: 3, kept: 0, bytes: 300 }]);
     expect(report.evicted).toBe(3);
+  });
+
+  it("does not delete bytes a twin row with the same narHash still needs", async () => {
+    const repo = openCacheRepo(":memory:");
+    repo.putBucket(bucket);
+    const oldTwin = { ...C, storePath: "/nix/store/cccccccccccccccccccccccccccccccc-c-old" };
+    const liveTwin = { ...C, storePath: "/nix/store/cccccccccccccccccccccccccccccccc-c-live", lastAccessed: FRESH };
+    repo.putObject(oldTwin);
+    repo.putObject(liveTwin);
+    const rows = [oldTwin, liveTwin];
+    const deleted: string[] = [];
+    const report = await runGc(
+      repo,
+      planGc({ buckets: [bucket], objects: rows, pins: [], now: NOW }),
+      { delete: async (key) => void deleted.push(key) },
+    );
+    expect(deleted).toEqual([]);
+    expect(report.evicted).toBe(1);
   });
 
   it("counts the object's compressed size when the row has one", async () => {

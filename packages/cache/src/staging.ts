@@ -32,6 +32,7 @@ import type { ObjectStore } from "./objectStore";
 import { verifyNarFile } from "./store";
 import type { BucketRow } from "./db";
 import {
+  compressionExtension,
   isDerivationPath,
   isStagedFileName,
   isStorePathHash,
@@ -80,8 +81,12 @@ const STAGE_TTL_MS = 60 * 60 * 1000;
 const SWEEP_EVERY_MS = 60 * 1000;
 
 /** The object key a bucket's compressed NAR lives at. */
-export function objectKey(bucket: string, narHash: string): string {
-  return `${bucket}/nar/${narHash.replace(/^sha256:/, "")}.${SERVED_EXTENSION}`;
+export function objectKey(
+  bucket: string,
+  narHash: string,
+  compression: string | null = "zstd",
+): string {
+  return `${bucket}/nar/${narHash.replace(/^sha256:/, "")}.${compressionExtension(compression)}`;
 }
 
 export interface StagingDeps {
@@ -162,14 +167,18 @@ export function createStaging(deps: StagingDeps): Staging {
     // THE SECOND PROOF OF POSSESSION. Two store paths with identical content
     // share a NarHash; the first to be recorded took the staged NAR with it, so
     // a twin's narinfo finds only the object. Copy it back for this proof.
-    const object = await objects.get(objectKey(bucket.name, info.narHash));
+    const object = await objects.get(objectKey(bucket.name, info.narHash, info.compression));
     if (object === null) {
       return {
         ok: false,
         message: `the narinfo names ${info.url}, which was never uploaded to this bucket`,
       };
     }
-    const materialised = join(dirForBucket, "nar", `${info.narHash.slice(7)}.${SERVED_EXTENSION}`);
+    const materialised = join(
+      dirForBucket,
+      "nar",
+      `${info.narHash.slice(7)}.${compressionExtension(info.compression)}`,
+    );
     const sink = Bun.file(materialised).writer({ highWaterMark: 1 << 20 });
     try {
       for await (const chunk of object.stream as unknown as AsyncIterable<Uint8Array>) {
@@ -334,7 +343,12 @@ export function createStaging(deps: StagingDeps): Staging {
     staged: string,
   ): Promise<{ fileHash: string; fileSize: number } | null> {
     try {
-      const facts = await objects.put(objectKey(bucket.name, info.narHash), Bun.file(staged).stream());
+      const key = objectKey(bucket.name, info.narHash, info.compression);
+      // ADOPT the staged file: one rename, never a copy of the same bytes.
+      const facts =
+        objects.adopt === undefined
+          ? await objects.put(key, Bun.file(staged).stream())
+          : await objects.adopt(key, staged);
       await unlink(staged).catch(() => {});
       return { fileHash: facts.sha256, fileSize: facts.size };
     } catch (err) {

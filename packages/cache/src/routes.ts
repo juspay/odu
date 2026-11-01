@@ -108,20 +108,24 @@ function narResponse(
   if (range !== null) {
     const first = range[1] === "" ? null : Number(range[1]);
     const last = range[2] === "" ? null : Number(range[2]);
+    // `bytes=-N` is the LAST N bytes, not "end at N". An open-ended request
+    // at or past the size has nothing to give.
+    if (first !== null && first >= source.size) return HttpServerResponse.empty({ status: 416 });
     const start = first ?? (last === null ? 0 : Math.max(0, source.size - last));
-    const end = last === null ? source.size - 1 : Math.min(last, source.size - 1);
-    if (first !== null && last !== null && (first > last || first >= source.size)) {
+    const end = first === null ? source.size - 1 : (last ?? source.size - 1);
+    const bounded = Math.min(end, source.size - 1);
+    if (first !== null && last !== null && (first > last || bounded < start)) {
       return HttpServerResponse.empty({ status: 416 });
     }
-    const body = Bun.file(source.path).slice(start, end + 1);
-    done(end - start + 1, "file");
+    const body = Bun.file(source.path).slice(start, bounded + 1);
+    done(bounded - start + 1, "file");
     return HttpServerResponse.raw(body, {
       status: 206,
       headers: {
         ...headers,
         "content-type": "application/x-nix-nar",
-        "content-length": String(end - start + 1),
-        "content-range": `bytes ${start}-${end}/${source.size}`,
+        "content-length": String(bounded - start + 1),
+        "content-range": `bytes ${start}-${bounded}/${source.size}`,
         "accept-ranges": "bytes",
       },
     });

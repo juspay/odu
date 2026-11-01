@@ -14,6 +14,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -317,7 +318,7 @@ describe("narinfo", () => {
     expect(response.status).toBe(200);
     const text = await response.text();
     expect(text).toContain(`StorePath: ${HELLO}`);
-    expect(text).toContain("Compression: zstd");
+    expect(text).toContain("Compression: none");
     // The bucket's own signature first, and the client's kept beside it.
     expect(text).toMatch(/^Sig: main-1:/m);
     expect(text).toContain("Sig: cache.nixos.org-1:AAAA");
@@ -607,6 +608,29 @@ describe("the NAR", () => {
     await h.dispose();
   });
 
+  it("keeps an xz upload as xz and serves those exact bytes", async () => {
+    const h = await harness(true);
+    const raw = new TextEncoder().encode("a NAR compressed with xz");
+    const xz = spawnSync("xz", ["-c"], { input: raw });
+    expect(xz.status).toBe(0);
+    const payload = {
+      bytes: new Uint8Array(xz.stdout),
+      narHash: `sha256:${base32(createHash("sha256").update(raw).digest())}`,
+    };
+    const path = "/nix/store/dddddddddddddddddddddddddddddddd-xz";
+    const response = await upload(h.fetch, h.tokens.write, path, payload, { compression: "xz" });
+    expect(response.status).toBe(200);
+    const narinfo = await (await h.fetch(`/main/${hashOf(path)}.narinfo`)).text();
+    expect(narinfo).toContain("Compression: xz");
+    expect(narinfo).toContain(`FileSize: ${payload.bytes.length}`);
+    const name = `${payload.narHash.slice(7)}.nar.xz`;
+    const nar = await h.fetch(`/main/nar/${name}`);
+    expect(nar.status).toBe(200);
+    expect(nar.headers.get("content-length")).toBe(String(payload.bytes.length));
+    expect(Array.from(new Uint8Array(await nar.arrayBuffer()))).toEqual(Array.from(payload.bytes));
+    await h.dispose();
+  });
+
   it("answers a Range from the file", async () => {
     const h = await harness(true);
     const hello = nar("a NAR, in pieces");
@@ -624,11 +648,39 @@ describe("the NAR", () => {
     await h.dispose();
   });
 
+  it("answers suffix and open-ended ranges, and refuses past the end", async () => {
+    const h = await harness(true);
+    const hello = nar("a NAR, in pieces");
+    const name = `${hello.narHash.slice(7)}.nar.zst`;
+    const suffix = await h.fetch(`/main/nar/${name}`, { headers: { range: "bytes=-4" } });
+    expect(suffix.status).toBe(206);
+    expect(suffix.headers.get("content-range")).toBe(
+      `bytes ${hello.bytes.length - 4}-${hello.bytes.length - 1}/${hello.bytes.length}`,
+    );
+    expect(Array.from(new Uint8Array(await suffix.arrayBuffer()))).toEqual(
+      Array.from(hello.bytes.subarray(hello.bytes.length - 4)),
+    );
+    const open = await h.fetch(`/main/nar/${name}`, {
+      headers: { range: `bytes=${hello.bytes.length - 2}-` },
+    });
+    expect(open.status).toBe(206);
+    expect(Array.from(new Uint8Array(await open.arrayBuffer()))).toEqual(
+      Array.from(hello.bytes.subarray(hello.bytes.length - 2)),
+    );
+    for (const range of [`bytes=${hello.bytes.length}-`, `bytes=${hello.bytes.length + 1}-`]) {
+      expect({ range, status: (await h.fetch(`/main/nar/${name}`, { headers: { range } })).status }).toEqual({
+        range,
+        status: 416,
+      });
+    }
+    await h.dispose();
+  });
+
   it("falls back to the FIFO dump when the file is not there yet", async () => {
     const h = await harness(true);
     const hello = nar("a NAR, in pieces");
     const name = `${hello.narHash.replace(/^sha256:/, "")}.nar.zst`;
-    rmSync(join(scratch, "cache", "objects", "main", "nar", name), { force: true });
+    rmSync(join(scratch, "cache", "objects", "main", "nar", `${hello.narHash.slice(7)}.nar`), { force: true });
     const response = await h.fetch(`/main/nar/${name}`);
     expect(response.status).toBe(200);
     expect(await response.text()).toBe("a NAR, in pieces");
@@ -1036,7 +1088,7 @@ describe("a large NAR stays off the heap", () => {
     const chunks = 214;
     const size = 1_500_000;
     h.store.dump = () => bigStream(chunks, size);
-    const file = `${hello.narHash.replace(/^sha256:/, "")}.nar.zst`;
+    const file = `${hello.narHash.replace(/^sha256:/, "")}.nar`;
     // The FIFO FALLBACK's fixed point: the kept file is removed, so the route
     // has no length and must stream the dump without buffering.
     rmSync(join(scratch, "cache", "objects", "main", "nar", file), { force: true });

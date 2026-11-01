@@ -32,7 +32,7 @@ import {
   isStorePathHash,
   keyNameOf,
   type NarInfo,
-  SERVED_EXTENSION,
+  compressionExtension,
   signFingerprint,
   storePathHash,
 } from "./narinfo";
@@ -246,17 +246,23 @@ export type NarSource =
    *  its object has not been produced yet. Removed when that store is. */
   | { kind: "legacy"; storePath: string; stream: ReadableStream<Uint8Array> };
 
-/** What one boot's work found or did. */
+/** What one boot's SYNCHRONOUS work found: before mount, no pushes can race. */
 export interface BootReport {
   /** Rows whose path proved its own `fixed:r:sha256` CA. */
   caProved: number;
-  /** Rows whose object was produced from the old Nix store this boot. */
-  objectsMigrated: number;
   /** Object files with no row (a crash between put and record). */
   orphansSwept: number;
-  /** True when every row has its object, so the old store is no longer read. */
-  migrationComplete: boolean;
-  /** Why the migration stopped early, if it did. */
+  /** Abandoned `.tmp-*` files older than this boot. */
+  tempSwept: number;
+}
+
+/** What the row-owned background migration did. */
+export interface MigrationReport {
+  migrated: number;
+  failures: number;
+  /** True only when every row has its object. */
+  complete: boolean;
+  /** Why it is paused for space, if it ended that way. */
   paused: string | null;
 }
 
@@ -317,9 +323,12 @@ export interface Cache {
   onChange(listener: () => void): () => void;
   /** The admin face. */
   admin: CacheAdmin;
-  /** BOOT WORK AT ROW APPLY: prove `CA:` from each path, migrate objects that
-   *  the old Nix store still owns, sweep orphan objects. */
-  resume(): Promise<BootReport>;
+  /** BEFORE MOUNT: prove `CA:`, sweep orphan objects and abandoned temp files.
+   *  Nothing is writing yet, so a sweep cannot race a put. */
+  boot(): Promise<BootReport>;
+  /** AFTER MOUNT, AS A ROW-OWNED BACKGROUND TASK: migrate objects the old store
+   *  still owns, two at a time, resuming after a disk pause. */
+  migrate(): Promise<MigrationReport>;
   /** Join the row's background work, then close the database. */
   close(): Promise<void>;
 }
@@ -331,9 +340,17 @@ export interface CacheOptions {
   rootToken: string | null;
   /** THE OLD NIX STORE, read only during the one-time migration. `null` on a
    *  fresh deployment; the row never needs a store otherwise. */
-  legacyStore?: { dump(storePath: string): ReadableStream<Uint8Array> } | null;
+  legacyStore?: {
+    dump(storePath: string): ReadableStream<Uint8Array>;
+    /** The old store's own `CA:` for a row its narinfo could not prove. */
+    pathInfo?(storePath: string): Promise<{ ca: string | null } | null>;
+  } | null;
   /** Pause the migration below this many free bytes (default 10 GiB). */
   migrationFreeFloor?: number;
+  /** How long a paused migration waits before re-checking free space. */
+  migrationRetryMs?: number;
+  /** Injected by the suite for the disk-floor test. */
+  freeBytes?: () => Promise<number | null>;
   /** Injected by the suite; production is the disk under the cache's dir. */
   objects?: ObjectStore;
   now?: () => number;
@@ -454,8 +471,8 @@ export function createCache(options: CacheOptions): Cache {
   function narinfoFor(bucket: BucketRow, row: ObjectRow): string {
     const info: NarInfo = {
       storePath: row.storePath,
-      url: `nar/${row.narHash.replace(/^sha256:/, "")}.${SERVED_EXTENSION}`,
-      compression: "zstd",
+      url: `nar/${row.narHash.replace(/^sha256:/, "")}.${compressionExtension(row.compression)}`,
+      compression: row.compression,
       fileHash: row.fileHash,
       fileSize: row.fileSize,
       narHash: row.narHash,
@@ -501,6 +518,7 @@ export function createCache(options: CacheOptions): Cache {
       storePath: info.storePath,
       narHash: info.narHash,
       references: info.references,
+      ca: info.ca,
     });
     repo.putObject({
       bucket: bucket.name,
@@ -511,6 +529,7 @@ export function createCache(options: CacheOptions): Cache {
       references: info.references,
       deriver: info.deriver,
       ca,
+      compression: info.compression ?? "none",
       fileHash: file.fileHash,
       fileSize: file.fileSize,
       sigs,
@@ -533,6 +552,11 @@ export function createCache(options: CacheOptions): Cache {
   });
   /** THE MIGRATION'S THROTTLE: two old-store dumps at a time, never more. */
   const migrationSlots = createSlots(2);
+  /** Paths whose transition serve was refused, logged once each. */
+  const unavailableLogged = new Set<string>();
+  /** The row's background migration, so close can join it before the DB goes. */
+  let migrationTask: Promise<MigrationReport> | null = null;
+  let stopping = false;
 
   // ── who hears about a change ──────────────────────────────────────────────
   //
@@ -862,6 +886,135 @@ export function createCache(options: CacheOptions): Cache {
     };
   }
 
+  async function migrateNow(): Promise<MigrationReport> {
+      const missing = repo.objects().filter((row) => row.fileHash === null);
+      if (missing.length === 0) {
+        return { migrated: 0, failures: 0, complete: true, paused: null };
+      }
+      const legacy = options.legacyStore;
+      if (legacy === undefined || legacy === null) {
+        // NO OLD STORE: the rows stay objectless, and the route answers 404
+        // rather than inventing bytes. The line names the count.
+        options.log?.("cache.migration.incomplete", {
+          remaining: missing.length,
+          reason: "no old store is configured",
+        });
+        return { migrated: 0, failures: missing.length, complete: false, paused: null };
+      }
+      const floor = options.migrationFreeFloor ?? 10 * 1024 * 1024 * 1024;
+      const retryMs = options.migrationRetryMs ?? 60_000;
+      const free = options.freeBytes ?? (async () => {
+        const stats = await statfs(join(dir, "objects")).catch(() => null);
+        return stats === null ? null : stats.bavail * stats.bsize;
+      });
+      const available = await free().catch(() => null);
+      options.log?.("cache.migration.start", {
+        objects: missing.length,
+        narBytes: missing.reduce((sum, row) => sum + row.narSize, 0),
+        freeBytes: available,
+      });
+
+      let next = 0;
+      let migrated = 0;
+      let failures = 0;
+      let paused: string | null = null;
+      let stopping = false;
+      const sleep = (ms: number): Promise<void> =>
+        new Promise((resolve) => setTimeout(resolve, ms));
+
+      const migrateOne = async (row: (typeof missing)[number]): Promise<void> => {
+        // THE DISK FLOOR, RE-CHECKED AND WAITED OUT rather than ending the run:
+        // space that returns in a minute should resume without a restart.
+        for (;;) {
+          if (stopping) return;
+          const bytes = await free().catch(() => null);
+          if (bytes === null || bytes >= floor) break;
+          if (paused === null) {
+            paused = `free space ${Math.round(bytes / 1024 ** 2)} MiB is below the ${Math.round(
+              floor / 1024 ** 2,
+            )} MiB floor`;
+            options.log?.("cache.migration.pause", { reason: paused, at: row.storePath });
+          }
+          await sleep(retryMs);
+        }
+        if (stopping) return;
+        if (paused !== null) {
+          options.log?.("cache.migration.resume", { at: row.storePath });
+          paused = null;
+        }
+        try {
+          if (stopping) return;
+          if (legacy.pathInfo !== undefined) {
+            const known = await legacy.pathInfo(row.storePath).catch(() => null);
+            if (known === null) {
+              failures += 1;
+              options.log?.("cache.migration.object_failed", {
+                bucket: row.bucket,
+                path: row.storePath,
+                reason: "the old store does not have this path",
+              });
+              return;
+            }
+          }
+          const facts = await migrationSlots.withSlot(() =>
+            objects.put(
+              objectKey(row.bucket, row.narHash, row.compression),
+              legacy.dump(row.storePath),
+            ),
+          );
+          if (stopping) return;
+          repo.putObject({ ...row, fileHash: facts.sha256, fileSize: facts.size });
+          migrated += 1;
+          // THE OLD STORE STILL KNOWS a self-reference's modulo CA that the
+          // narinfo cannot prove. Ask while it is here; afterwards it is gone.
+          if (row.ca === null && legacy.pathInfo !== undefined) {
+            const info = await legacy.pathInfo(row.storePath).catch(() => null);
+            if (info?.ca !== null && info?.ca !== undefined) {
+              repo.putObject({ ...row, fileHash: facts.sha256, fileSize: facts.size, ca: info.ca });
+            }
+          }
+          if (migrated % 100 === 0) {
+            options.log?.("cache.migration.progress", {
+              migrated,
+              remaining: repo.objects().filter((one) => one.fileHash === null).length,
+            });
+          }
+        } catch (err) {
+          failures += 1;
+          options.log?.("cache.migration.object_failed", {
+            bucket: row.bucket,
+            path: row.storePath,
+            reason: String((err as Error).message ?? err),
+          });
+        }
+      };
+
+      // REAL CONCURRENCY: two workers share the queue; each is inside the
+      // row's fetch-slot bound while it dumps and puts.
+      const workers = Array.from({ length: Math.min(2, missing.length) }, async () => {
+        for (;;) {
+          if (stopping) return;
+          const row = missing[next++];
+          if (row === undefined) return;
+          await migrateOne(row);
+        }
+      });
+      await Promise.all(workers);
+
+      const complete = repo.objects().every((row) => row.fileHash !== null);
+      const remaining = repo.objects().filter((row) => row.fileHash === null).length;
+      if (complete && migrated > 0) {
+        // THE LINE THE OPERATOR WAITS FOR before deleting the old store.
+        options.log?.("cache.migration.complete", {
+          migrated,
+          note: "the old store is no longer read and can be deleted",
+        });
+      } else if (!complete) {
+        options.log?.("cache.migration.incomplete", { migrated, failed: failures, remaining });
+      }
+    return { migrated, failures, complete, paused };
+  }
+
   return {
     bucket: (name) => repo.bucket(name),
 
@@ -921,7 +1074,7 @@ export function createCache(options: CacheOptions): Cache {
       const narHash = `sha256:${hash}`;
       const row = repo.objectByNarHash(bucket.name, narHash);
       if (row === null) return null;
-      const key = objectKey(bucket.name, narHash);
+      const key = objectKey(bucket.name, narHash, row.compression);
       const size = await objects.head(key);
       if (size !== null) {
         const path = objects.localPath(key);
@@ -936,9 +1089,25 @@ export function createCache(options: CacheOptions): Cache {
       // it. When that store is gone this branch is unreachable and the route
       // is a 404, not a silent dump.
       const legacy = options.legacyStore;
-      return legacy === undefined || legacy === null
-        ? null
-        : { kind: "legacy", storePath: row.storePath, stream: legacy.dump(row.storePath) };
+      if (legacy === undefined || legacy === null) return null;
+      // THE OLD STORE MAY NOT HAVE IT (the upstream closure was never copied,
+      // or the store is gone). A 404 is honest; a 200 whose stream errors is
+      // not. One line per path, not per client retry.
+      if (legacy.pathInfo !== undefined) {
+        const known = await legacy.pathInfo(row.storePath).catch(() => null);
+        if (known === null) {
+          if (!unavailableLogged.has(row.storePath)) {
+            unavailableLogged.add(row.storePath);
+            options.log?.("cache.nar.unavailable", {
+              bucket: bucket.name,
+              path: row.storePath,
+              reason: "no object and the old store does not have the path",
+            });
+          }
+          return null;
+        }
+      }
+      return { kind: "legacy", storePath: row.storePath, stream: legacy.dump(row.storePath) };
     },
 
     // The write path is `./staging`'s; this face is the one the routes speak,
@@ -948,10 +1117,9 @@ export function createCache(options: CacheOptions): Cache {
     completeUpload: (bucket, file, total) => staging.completeUpload(bucket, file, total),
     async acceptNarinfo(bucket, hash, body) {
       const outcome = await staging.acceptNarinfo(bucket, hash, body);
-      // A PUSH LANDED, OR A HELD PATH BECAME (OR STOPPED BEING) HELD — the
-      // changes nobody outside the cache can see, and the reason this
-      // listener exists at all. The publisher diffs, so a refusal that changed
-      // nothing costs one comparison.
+      // A PUSH LANDED OR WAS REFUSED — the changes nobody outside the cache
+      // can see, and the reason this listener exists at all. The publisher
+      // diffs, so a refusal that changed nothing costs one comparison.
       notify();
       return outcome;
     },
@@ -980,16 +1148,16 @@ export function createCache(options: CacheOptions): Cache {
       return repo.buckets().map((bucket) => factsOf(bucket, counted));
     },
 
-    async resume() {
+    async boot() {
       // 1. CA IS PROVED FROM THE PATH. Pure and instant: no store query, no
-      // pusher line. A row that was null for years gets its `CA:` if (and only
-      // if) Nix's formula reproduces its path.
+      // pusher line — except a self-reference, whose pusher CA is checked.
       let caProved = 0;
       for (const row of repo.objects().filter((one) => one.ca === null)) {
         const ca = contentAddressOf({
           storePath: row.storePath,
           narHash: row.narHash,
           references: row.references,
+          ca: row.ca,
         });
         if (ca === null) continue;
         repo.putObject({ ...row, ca });
@@ -1000,70 +1168,30 @@ export function createCache(options: CacheOptions): Cache {
         notify();
       }
 
-      // 2. MIGRATE THE OLD STORE'S ROWS INTO THE OBJECT STORE, two at a time.
-      // Disk is guarded BEFORE each put: a migration that fills the filesystem
-      // has broken the cache it was preserving.
-      const missing = repo.objects().filter((row) => row.fileHash === null);
-      let objectsMigrated = 0;
-      let paused: string | null = null;
-      const floor = options.migrationFreeFloor ?? 10 * 1024 * 1024 * 1024;
-      const legacy = options.legacyStore;
-      if (missing.length > 0 && legacy !== undefined && legacy !== null) {
-        options.log?.("cache.migration.start", { objects: missing.length });
-        for (const [index, row] of missing.entries()) {
-          const free = await statfs(dir).catch(() => null);
-          const available = free === null ? null : free.bavail * free.bsize;
-          if (available !== null && available < floor) {
-            paused = `free space ${Math.round(available / 1024 ** 2)} MiB is below the ${Math.round(
-              floor / 1024 ** 2,
-            )} MiB floor`;
-            options.log?.("cache.migration.pause", { reason: paused, at: index });
-            break;
-          }
-          try {
-            const facts = await migrationSlots.withSlot(() =>
-              objects.put(objectKey(row.bucket, row.narHash), legacy.dump(row.storePath)),
-            );
-            repo.putObject({ ...row, fileHash: facts.sha256, fileSize: facts.size });
-            objectsMigrated += 1;
-            if (objectsMigrated % 100 === 0) {
-              options.log?.("cache.migration.progress", {
-                migrated: objectsMigrated,
-                remaining: missing.length - index - 1,
-              });
-            }
-          } catch (err) {
-            options.log?.("cache.migration.object_failed", {
-              bucket: row.bucket,
-              path: row.storePath,
-              reason: String((err as Error).message ?? err),
-            });
-          }
-        }
-        if (options.log !== undefined && objectsMigrated > 0 && paused === null) {
-          // THE LINE THE OPERATOR WAITS FOR before deleting the old store.
-          options.log("cache.migration.complete", {
-            migrated: objectsMigrated,
-            note: "the old store is no longer read and can be deleted",
-          });
-        }
-      }
-      const migrationComplete = repo.objects().every((row) => row.fileHash !== null);
-
-      // 3. OBJECTS WITHOUT ROWS: a crash between put and record. Swept here,
-      // once, and logged.
-      const owned = new Set(repo.objects().map((row) => objectKey(row.bucket, row.narHash)));
+      // 2. NOBODY IS WRITING YET: an object with no row is a crash between put
+      // and record; a `.tmp-*` older than this boot is a put that died. Both
+      // are swept BEFORE the mount, so the sweep cannot race a live push.
+      const tempSwept = (await objects.sweepTemp?.(now())) ?? 0;
+      const owned = new Set(
+        repo.objects().map((row) => objectKey(row.bucket, row.narHash, row.compression)),
+      );
       let orphansSwept = 0;
       for (const object of await objects.list("")) {
         if (owned.has(object.key)) continue;
         await objects.delete(object.key);
         orphansSwept += 1;
       }
-      if (orphansSwept > 0) options.log?.("cache.boot.orphans", { swept: orphansSwept });
-
-      return { caProved, objectsMigrated, orphansSwept, migrationComplete, paused };
+      if (orphansSwept > 0 || tempSwept > 0) {
+        options.log?.("cache.boot.orphans", { swept: orphansSwept, temp: tempSwept });
+      }
+      return { caProved, orphansSwept, tempSwept };
     },
 
+    migrate() {
+      const task = migrateNow();
+      migrationTask = task;
+      return task;
+    },
     onChange(listener) {
       listeners.add(listener);
       return () => {
@@ -1076,6 +1204,10 @@ export function createCache(options: CacheOptions): Cache {
       // that outlived `close()` would publish into a closed database.
       if (trailing !== null) clearTimeout(trailing);
       trailing = null;
+      stopping = true;
+      // JOIN the row's migration before the database closes: its in-flight put
+      // may be one disk write away from a row.
+      if (migrationTask !== null) await migrationTask.catch(() => {});
       // REFUSE THE QUEUE FIRST: a job waiting for a slot belongs to this row,
       // and none of them may start after it closed. Then join the ones already
       // running, before the database closes.

@@ -509,10 +509,12 @@ describe("gc and pin", () => {
     expect(await cache.admin.gc({ ...asRoot(ROOT), bucket: "main" })).toMatchObject({ ok: true });
     expect(cache.narinfoText(cache.bucket("main") as never, hashOf(kept))).not.toBeNull();
     expect(cache.narinfoText(cache.bucket("main") as never, hashOf(gone))).toBeNull();
-    const objectOf = (path: string, payload: { narHash: string }): string =>
-      join(scratch, "cache", "objects", "main", "nar", `${payload.narHash.slice(7)}.nar.zst`);
-    expect(existsSync(objectOf(gone, nar(gone)))).toBe(false);
-    expect(existsSync(objectOf(kept, nar(kept)))).toBe(true);
+    expect(
+      await cache.narSource(cache.bucket("main") as never, `${nar(gone).narHash.slice(7)}.nar`),
+    ).toBeNull();
+    expect(
+      await cache.narSource(cache.bucket("main") as never, `${nar(kept).narHash.slice(7)}.nar`),
+    ).toMatchObject({ kind: "file" });
     await cache.close();
   });
 });
@@ -623,7 +625,7 @@ describe("CA is proved from the path", () => {
     db.run("UPDATE object SET ca = NULL");
     db.close();
     expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).not.toContain("CA:");
-    expect(await cache.resume()).toMatchObject({ caProved: 1 });
+    expect(await cache.boot()).toMatchObject({ caProved: 1 });
     expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).toContain("CA:");
     await cache.close();
   });
@@ -656,10 +658,10 @@ describe("CA is proved from the path", () => {
       migrationFreeFloor: 0,
       legacyStore: { dump: () => bytesStream(payload.bytes) },
     });
-    expect(await second.resume()).toMatchObject({
-      objectsMigrated: 1,
-      orphansSwept: 1,
-      migrationComplete: true,
+    expect(await second.boot()).toMatchObject({ orphansSwept: 1 });
+    expect(await second.migrate()).toMatchObject({
+      migrated: 1,
+      complete: true,
       paused: null,
     });
     expect(await second.narSource(second.bucket("main") as never, `${payload.narHash.slice(7)}.nar.zst`)).toMatchObject({
@@ -669,7 +671,54 @@ describe("CA is proved from the path", () => {
     await second.close();
   });
 
-  it("pauses the migration below the free-space floor instead of filling the disk", async () => {
+  it("serves through the old store while the migration is still writing", async () => {
+    const path = "/nix/store/cccccccccccccccccccccccccccccccc-transition";
+    const payload = nar("bytes available from the old store");
+    const first = cacheWith(ROOT);
+    await first.admin.create(createInput);
+    await putNar(first, "main", payload);
+    await first.acceptNarinfo(
+      first.bucket("main") as never,
+      hashOf(path),
+      stream(narinfoText(path, payload)),
+    );
+    first.close();
+    rmSync(join(scratch, "cache", "objects", "main", "nar", `${payload.narHash.slice(7)}.nar`), { force: true });
+    const db = new Database(join(scratch, "cache", "cache.sqlite"));
+    db.run("UPDATE object SET file_hash = NULL, file_size = NULL");
+    db.close();
+
+    const gate = Promise.withResolvers<void>();
+    const second = createCache({
+      stateRoot: scratch,
+      rootToken: ROOT,
+      now: () => NOW,
+      migrationFreeFloor: 0,
+      legacyStore: {
+        dump: () =>
+          new ReadableStream({
+            async start(controller) {
+              await gate.promise;
+              controller.enqueue(payload.bytes);
+              controller.close();
+            },
+          }),
+      },
+    });
+    const migrating = second.migrate();
+    // THE ROW ANSWERS NOW, through the transition path, before the put lands.
+    expect(
+      await second.narSource(second.bucket("main") as never, `${payload.narHash.slice(7)}.nar`),
+    ).toMatchObject({ kind: "legacy" });
+    gate.resolve();
+    expect(await migrating).toMatchObject({ migrated: 1, complete: true });
+    expect(
+      await second.narSource(second.bucket("main") as never, `${payload.narHash.slice(7)}.nar`),
+    ).toMatchObject({ kind: "file" });
+    await second.close();
+  });
+
+  it("pauses below the free-space floor, then resumes without a restart", async () => {
     const path = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-paused";
     const payload = nar("bytes that wait for disk");
     const first = cacheWith(ROOT);
@@ -686,17 +735,18 @@ describe("CA is proved from the path", () => {
     db.run("UPDATE object SET file_hash = NULL, file_size = NULL");
     db.close();
 
+    let reads = 0;
     const second = createCache({
       stateRoot: scratch,
       rootToken: ROOT,
       now: () => NOW,
-      migrationFreeFloor: Number.MAX_SAFE_INTEGER,
+      migrationFreeFloor: 1024,
+      migrationRetryMs: 1,
+      // LOW ONCE, THEN SPACE RETURNS: the same run must resume.
+      freeBytes: async () => (++reads === 1 ? 0 : 10 * 1024),
       legacyStore: { dump: () => bytesStream(payload.bytes) },
     });
-    const boot = await second.resume();
-    expect(boot.objectsMigrated).toBe(0);
-    expect(boot.paused).toContain("below");
-    expect(boot.migrationComplete).toBe(false);
+    expect(await second.migrate()).toMatchObject({ migrated: 1, complete: true });
     await second.close();
   });
 });
