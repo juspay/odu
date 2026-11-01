@@ -978,6 +978,15 @@ export function createCache(options: CacheOptions): Cache {
             });
             return;
           }
+          // A TWIN MAY HAVE LANDED THE SAME OBJECT: ask before spawning a dump
+          // whose bytes would be thrown away.
+          const key = objectKey(row.bucket, row.narHash, row.compression);
+          if ((await objects.head(key)) !== null) {
+            const facts = await objects.put(key, new ReadableStream({ start: (c) => c.close() }));
+            repo.putObject({ ...row, fileHash: facts.sha256, fileSize: facts.size });
+            migrated += 1;
+            return;
+          }
           const dump = legacy.dump(row.storePath);
           const writing = migrationSlots.withSlot(() =>
             objects.put(objectKey(row.bucket, row.narHash, row.compression), dump),

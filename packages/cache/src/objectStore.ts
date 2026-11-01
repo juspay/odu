@@ -101,7 +101,13 @@ export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
     const target = pathOf(key);
     // IMMUTABLE: a key that exists is the object. A re-push does not rewrite
     // bytes, and the retained file is what the row already names.
-    if ((await stat(target).catch(() => null)) !== null) return factsOf(target);
+    if ((await stat(target).catch(() => null)) !== null) {
+      // THE STREAM'S PRODUCER MUST STOP: a migration twin found an object
+      // another row already wrote, and abandoning the FIFO would leave its
+      // dump process blocked on a full pipe for the life of the daemon.
+      await stream.cancel().catch(() => {});
+      return factsOf(target);
+    }
     await mkdir(dirname(target), { recursive: true, mode: 0o700 });
     const temp = join(dirname(target), `.tmp-${randomUUID()}`);
     const hash = createHash("sha256");

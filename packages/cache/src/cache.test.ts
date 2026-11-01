@@ -718,6 +718,54 @@ describe("CA is proved from the path", () => {
     await second.close();
   });
 
+  it("does not retain the migration's per-object producers", async () => {
+    const first = cacheWith(ROOT);
+    await first.admin.create(createInput);
+    const repo = openCacheRepo(join(scratch, "cache", "cache.sqlite"));
+    const COUNT = 1000;
+    for (let i = 0; i < COUNT; i++) {
+      repo.putObject({
+        bucket: "main",
+        storePath: `/nix/store/${String(i).padStart(32, "0")}-migrated`,
+        hash: String(i).padStart(32, "0"),
+        // Unique per row; the migration never re-parses it.
+        narHash: `sha256:${Math.floor(i / 2).toString(36).padEnd(52, "0")}`,
+        narSize: 1024,
+        references: [],
+        deriver: null,
+        ca: null,
+        compression: "zstd",
+        fileHash: null,
+        fileSize: null,
+        sigs: [],
+        hits: 0,
+        created: 0,
+        lastAccessed: 0,
+      });
+    }
+    repo.close();
+    first.close();
+
+    const payload = new Uint8Array(1024);
+    const second = createCache({
+      stateRoot: scratch,
+      rootToken: ROOT,
+      now: () => NOW,
+      migrationFreeFloor: 0,
+      legacyStore: { dump: () => bytesStream(payload) },
+      migrationRetryMs: 1,
+    });
+    const baseline = process.memoryUsage().rss;
+    expect(await second.migrate()).toMatchObject({ migrated: COUNT, complete: true });
+    // A full GC once, then the heap should be near where it started: the bug
+    // was one live dump producer per TWIN row, not the bytes themselves.
+    Bun.gc(true);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const growth = process.memoryUsage().rss - baseline;
+    expect({ growth, within: growth < 192 * 1024 * 1024 }).toEqual({ growth, within: true });
+    await second.close();
+  });
+
   it("refuses old-store bytes whose NarHash is not the row's", async () => {
     const path = "/nix/store/abababababababababababababababab-mismatch";
     const payload = nar("bytes the row did not sign");
