@@ -35,7 +35,7 @@ import { mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from "n
 import { createReadStream, createWriteStream } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { basename, join } from "node:path";
+import { basename, join, relative } from "node:path";
 import type { ObjectStore } from "./objectStore";
 import { writeAll } from "./sink";
 import { verifyNarFile } from "./store";
@@ -73,6 +73,12 @@ export type NarinfoOutcome =
         narinfoHash?: string;
         parts?: number;
         bytesReceived?: number;
+        /** The staged file THIS proof read, under the staging root — the name
+         *  it claimed, which no other request could touch — or `null` when
+         *  nothing was staged and the object was the proof. */
+        stagedFile?: string | null;
+        /** That file's size when it was claimed: what the verify was given. */
+        stagedBytes?: number;
       };
     };
 
@@ -453,6 +459,10 @@ export function createStaging(deps: StagingDeps): Staging {
     return {
       storePath: info.storePath,
       narinfoHash: hash,
+      // WHICH BYTES WERE READ, so a refusal is diagnosable from the server
+      // alone: a race would show as a file this proof did not claim.
+      stagedFile: claimed === undefined ? null : relative(stagingRoot, claimed.path),
+      ...(claimed === undefined ? {} : { stagedBytes: claimed.size }),
       ...(done === undefined ? {} : { parts: done.parts }),
       ...(claimed === undefined
         ? done === undefined

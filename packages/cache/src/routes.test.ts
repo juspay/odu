@@ -1048,6 +1048,25 @@ describe("uploading", () => {
     expect(line).toContain(`"storePath":"${staged}"`);
     expect(line).toContain('"parts":3');
     expect(line).toContain(`"bytesReceived":${payload.bytes.length}`);
+    // THE FILE THIS PROOF READ: the name it claimed, and its size then.
+    expect(line).toMatch(new RegExp(`"stagedFile":"main/nar/${name.replaceAll(".", "\\.")}\\.[0-9a-f-]{36}\\.claimed"`));
+    expect(line).toContain(`"stagedBytes":${payload.bytes.length}`);
+    await h.dispose();
+  });
+
+  it("says nothing was staged when a narinfo names a NAR nobody uploaded", async () => {
+    const lines: string[] = [];
+    const h = await harness(true, "https://odu.example.org", (event, fields) =>
+      lines.push(`${event} ${JSON.stringify(fields)}`),
+    );
+    const missing = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-never-sent";
+    const refused = await upload(h.fetch, h.tokens.write, missing, nar("never sent"), {
+      skipNar: true,
+    });
+    expect(refused.status).toBe(400);
+    const line = lines.find((entry) => entry.startsWith("cache.request.refused"));
+    expect(line).toContain('"stagedFile":null');
+    expect(line).not.toContain("stagedBytes");
     await h.dispose();
   });
 
