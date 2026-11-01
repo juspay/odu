@@ -32,6 +32,7 @@ import { type Cache, createCache } from "./cache";
 import type { NarinfoOutcome } from "./staging";
 import { hashOf } from "../test/fakeStore";
 import { openCacheRepo } from "./db";
+import { diskObjectStore } from "./objectStore";
 
 const ROOT = "root-token";
 const NOW = 1_700_000_000_000;
@@ -484,6 +485,55 @@ describe("chunked uploads", () => {
     utimesSync(partPath, new Date(0), new Date(0));
     await cache.beginUpload(bucket, "idle2.nar.zst");
     expect(existsSync(partPath)).toBe(true);
+    await cache.close();
+  });
+});
+
+describe("gc and a concurrent push", () => {
+  it("keeps the object of a path re-pushed while the collection runs", async () => {
+    // THE WINDOW: a push that finds the object present and records AFTER the
+    // collection deleted it would leave a row with no bytes. Keeping and
+    // recording are under the collection's lock, so it re-creates the object.
+    const disk = diskObjectStore({ dir: join(scratch, "cache") });
+    const gate = Promise.withResolvers<void>();
+    const deleting = Promise.withResolvers<void>();
+    const cache = createCache({
+      stateRoot: scratch,
+      rootToken: ROOT,
+      now: () => NOW,
+      objects: {
+        ...disk,
+        async delete(key) {
+          deleting.resolve();
+          await gate.promise;
+          await disk.delete(key);
+        },
+      },
+    });
+    await cache.admin.create({ ...createInput, retentionDays: 0 });
+    const path = "/nix/store/rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr-repushed";
+    const payload = nar(path);
+    const push = async (): Promise<NarinfoOutcome> => {
+      await putNar(cache, "main", payload);
+      return cache.acceptNarinfo(cache.bucket("main") as never, hashOf(path), stream(narinfoText(path, payload)));
+    };
+    expect(await push()).toMatchObject({ ok: true });
+    const db = new Database(join(scratch, "cache", "cache.sqlite"));
+    db.run("UPDATE object SET last_accessed = 0");
+    db.close();
+
+    const collecting = cache.admin.gc({ ...asRoot(ROOT), bucket: "main" });
+    await deleting.promise;
+    const repushing = push();
+    // Long enough for the push to verify and reach whatever it waits on.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    gate.resolve();
+    expect(await collecting).toMatchObject({ ok: true });
+    expect(await repushing).toMatchObject({ ok: true });
+    expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).not.toBeNull();
+    expect(
+      await cache.narSource(cache.bucket("main") as never, `${payload.narHash.slice(7)}.nar`),
+    ).toMatchObject({ kind: "file" });
     await cache.close();
   });
 });

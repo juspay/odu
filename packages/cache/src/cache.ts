@@ -10,9 +10,9 @@
  *
  * The WRITE PATH is not here: staging an upload, proving it and keeping the
  * object moves on the Nix protocol's clock rather than on the product's, and it
- * lives in `./staging`. This module hands it one dependency — `record` —
- * because a pin and a collection take the same write lock, and a second lock
- * there would be a second answer to "who may change what is retained".
+ * lives in `./staging`. This module hands it the write lock and `record`,
+ * because a pin and a collection take the same lock, and a second lock there
+ * would be a second answer to "who may change what is retained".
  *
  * **The root token is a field, not a file.** `rootToken` arrives from the
  * composition root, which reads `$ODU_ROOT_TOKEN`. There is no fallback to a
@@ -405,7 +405,7 @@ export function createCache(options: CacheOptions): Cache {
   const objects = options.objects ?? diskObjectStore({ dir });
 
   /**
-   * ONE writer at a time, across `record`, `pin` and `gc`.
+   * ONE writer at a time, across keep-and-record (staging's), `pin` and `gc`.
    *
    * Those three are the only things that change what is retained, and they are
    * the three that must not interleave: a collection that planned while a pin
@@ -517,15 +517,6 @@ export function createCache(options: CacheOptions): Cache {
    * `path-info` that it took from the narinfo, and a row with it twice would
    * put it twice in every answer.
    */
-  function record(
-    bucket: BucketRow,
-    info: NarInfo,
-    file: { fileHash: string; fileSize: number },
-    selfHash: string | null,
-  ): Promise<boolean> {
-    return withWriteLock(() => recordNow(bucket, info, file, selfHash));
-  }
-
   async function recordNow(
     bucket: BucketRow,
     info: NarInfo,
@@ -583,13 +574,14 @@ export function createCache(options: CacheOptions): Cache {
     return true;
   }
 
-  // The write path, wired to the ONE lock: `record` is the dependency staging
-  // takes, and it is the locked one, so a pin cannot interleave with a record.
+  // The write path, wired to the ONE lock: staging keeps an object and records
+  // its row under it, so neither a pin nor a collection lands in between.
   const staging = createStaging({
     objects,
     dir,
     now,
-    record,
+    withWriteLock,
+    record: recordNow,
     log: options.log,
     recorded(bucket, narHash, compression) {
       const row = repo.objectByNarHashCompression(bucket.name, narHash, compression);

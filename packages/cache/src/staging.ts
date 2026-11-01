@@ -152,10 +152,14 @@ export interface StagingDeps {
   dir: string;
   now: () => number;
   /**
-   * Put an imported path in a bucket, and answer whether it landed. Supplied
-   * by `cache.ts` because it is the one thing the write path shares with
-   * administration — a pin and a collection take the same write lock.
+   * THE CACHE'S WRITE LOCK — the one a pin and a collection take. Keeping the
+   * object and recording its row happen under it TOGETHER: a push that found
+   * the object present and recorded after a collection deleted it would leave
+   * a row with no bytes.
    */
+  withWriteLock: <T>(work: () => Promise<T>) => Promise<T>;
+  /** Put an imported path in a bucket, and answer whether it landed. Called
+   *  only under {@link StagingDeps.withWriteLock}. */
   record: (
     bucket: BucketRow,
     info: NarInfo,
@@ -198,7 +202,7 @@ export interface Staging {
 }
 
 export function createStaging(deps: StagingDeps): Staging {
-  const { objects, now, record, log, recorded } = deps;
+  const { objects, now, record, log, recorded, withWriteLock } = deps;
   const stagingRoot = join(deps.dir, "staging");
   const stagedDir = (bucket: string): string => join(stagingRoot, bucket);
 
@@ -210,9 +214,6 @@ export function createStaging(deps: StagingDeps): Staging {
   const completes = new Map<string, Chain>();
   /** One proof at a time per staged NAR name (see `acceptNarinfo`). */
   const proofs = new Map<string, Chain>();
-  /** One keep-and-record at a time per bucket: two proofs of one object key
-   *  must not adopt it concurrently. */
-  const records = new Map<string, Chain>();
   /** Bytes/parts of a completed chunked upload, for a refusal's log line. */
   const joined = new Map<string, { parts: number; bytes: number }>();
   let lastSweep = 0;
@@ -527,15 +528,11 @@ export function createStaging(deps: StagingDeps): Staging {
     };
   }
 
-  /** Keep and record under the bucket's chain: two proofs of one object key
-   *  (twins under different names) must not adopt it at once. */
+  /** Keep and record under the cache's write lock: no collection between
+   *  "the object is there" and the row that names it, and no two proofs of one
+   *  object key (twins under different names) adopting it at once. */
   function recordSerially(bucket: BucketRow, info: NarInfo, source: Source): Promise<NarinfoOutcome> {
-    let chain = records.get(bucket.name);
-    if (chain === undefined) {
-      chain = newChain();
-      records.set(bucket.name, chain);
-    }
-    return serial(chain, async () => {
+    return withWriteLock(async () => {
       const file = await keep(bucket, info, source);
       if (file === null) {
         return {
@@ -559,7 +556,6 @@ export function createStaging(deps: StagingDeps): Staging {
     async close() {
       await Promise.all([...completes.values()].map((chain) => chain.tail));
       await Promise.all([...proofs.values()].map((chain) => chain.tail));
-      await Promise.all([...records.values()].map((chain) => chain.tail));
     },
 
     async beginUpload(bucket, file) {
