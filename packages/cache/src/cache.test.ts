@@ -718,6 +718,44 @@ describe("CA is proved from the path", () => {
     await second.close();
   });
 
+  it("close() returns while a migration is waiting on the old store", async () => {
+    const path = "/nix/store/dddddddddddddddddddddddddddddddd-close";
+    const payload = nar("bytes behind a stalled dump");
+    const first = cacheWith(ROOT);
+    await first.admin.create(createInput);
+    await putNar(first, "main", payload);
+    await first.acceptNarinfo(
+      first.bucket("main") as never,
+      hashOf(path),
+      stream(narinfoText(path, payload)),
+    );
+    first.close();
+    rmSync(join(scratch, "cache", "objects", "main", "nar", `${payload.narHash.slice(7)}.nar`), { force: true });
+    const db = new Database(join(scratch, "cache", "cache.sqlite"));
+    db.run("UPDATE object SET file_hash = NULL, file_size = NULL");
+    db.close();
+
+    const second = createCache({
+      stateRoot: scratch,
+      rootToken: ROOT,
+      now: () => NOW,
+      migrationFreeFloor: 0,
+      legacyStore: {
+        // NEVER PRODUCES A BYTE: close must cut the wait, not join it.
+        dump: () => new ReadableStream({ start: () => {} }),
+      },
+    });
+    const migrating = second.migrate();
+    const closed = second.close();
+    expect(
+      await Promise.race([
+        closed.then(() => "closed"),
+        new Promise((resolve) => setTimeout(() => resolve("hung"), 500)),
+      ]),
+    ).toBe("closed");
+    expect(await migrating).toMatchObject({ complete: false });
+  });
+
   it("pauses below the free-space floor, then resumes without a restart", async () => {
     const path = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-paused";
     const payload = nar("bytes that wait for disk");

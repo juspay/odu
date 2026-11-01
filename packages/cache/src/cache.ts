@@ -31,6 +31,7 @@ import {
   isDerivationPath,
   isStorePathHash,
   keyNameOf,
+  compressionOfFile,
   type NarInfo,
   compressionExtension,
   signFingerprint,
@@ -557,6 +558,9 @@ export function createCache(options: CacheOptions): Cache {
   /** The row's background migration, so close can join it before the DB goes. */
   let migrationTask: Promise<MigrationReport> | null = null;
   let stopping = false;
+  /** Resolves on close: a migration sleeping on disk or waiting on a dump can
+   *  end without waiting for that promise to settle. */
+  const stopSignal = Promise.withResolvers<void>();
 
   // ── who hears about a change ──────────────────────────────────────────────
   //
@@ -918,7 +922,6 @@ export function createCache(options: CacheOptions): Cache {
       let migrated = 0;
       let failures = 0;
       let paused: string | null = null;
-      let stopping = false;
       const sleep = (ms: number): Promise<void> =>
         new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -935,7 +938,7 @@ export function createCache(options: CacheOptions): Cache {
             )} MiB floor`;
             options.log?.("cache.migration.pause", { reason: paused, at: row.storePath });
           }
-          await sleep(retryMs);
+          await Promise.race([sleep(retryMs), stopSignal.promise]);
         }
         if (stopping) return;
         if (paused !== null) {
@@ -944,33 +947,54 @@ export function createCache(options: CacheOptions): Cache {
         }
         try {
           if (stopping) return;
-          if (legacy.pathInfo !== undefined) {
-            const known = await legacy.pathInfo(row.storePath).catch(() => null);
-            if (known === null) {
-              failures += 1;
-              options.log?.("cache.migration.object_failed", {
-                bucket: row.bucket,
-                path: row.storePath,
-                reason: "the old store does not have this path",
-              });
-              return;
-            }
+          const known =
+            legacy.pathInfo === undefined
+              ? undefined
+              : await legacy.pathInfo(row.storePath).catch(() => null);
+          if (known === null) {
+            failures += 1;
+            options.log?.("cache.migration.object_failed", {
+              bucket: row.bucket,
+              path: row.storePath,
+              reason: "the old store does not have this path",
+            });
+            return;
           }
-          const facts = await migrationSlots.withSlot(() =>
-            objects.put(
-              objectKey(row.bucket, row.narHash, row.compression),
-              legacy.dump(row.storePath),
+          const facts = await Promise.race([
+            migrationSlots.withSlot(() =>
+              objects.put(
+                objectKey(row.bucket, row.narHash, row.compression),
+                legacy.dump(row.storePath),
+              ),
             ),
-          );
-          if (stopping) return;
+            // CLOSE WINS over a dump that has not finished: the object write
+            // may continue off to the side, but no row is written after this.
+            stopSignal.promise.then(() => null),
+          ]);
+          if (facts === null || stopping) return;
           repo.putObject({ ...row, fileHash: facts.sha256, fileSize: facts.size });
           migrated += 1;
           // THE OLD STORE STILL KNOWS a self-reference's modulo CA that the
           // narinfo cannot prove. Ask while it is here; afterwards it is gone.
-          if (row.ca === null && legacy.pathInfo !== undefined) {
-            const info = await legacy.pathInfo(row.storePath).catch(() => null);
-            if (info?.ca !== null && info?.ca !== undefined) {
-              repo.putObject({ ...row, fileHash: facts.sha256, fileSize: facts.size, ca: info.ca });
+          if (row.ca === null && known !== undefined) {
+            const info = known;
+            if (info.ca !== null) {
+              // THE SAME PROOF the pusher's line gets: the old store is a
+              // source of a HASH, not of trust.
+              const proved = contentAddressOf({
+                storePath: row.storePath,
+                narHash: row.narHash,
+                references: row.references,
+                ca: info.ca,
+              });
+              if (proved !== null) {
+                repo.putObject({
+                  ...row,
+                  fileHash: facts.sha256,
+                  fileSize: facts.size,
+                  ca: proved,
+                });
+              }
             }
           }
           if (migrated % 100 === 0) {
@@ -1066,13 +1090,21 @@ export function createCache(options: CacheOptions): Cache {
     },
 
     async narSource(bucket, file) {
-      // `nar/<hash>.nar.zst` and `nar/<hash>.nar.xz` are the same object; the
-      // extension is the CLIENT's compression choice and odu always serves
-      // zstd, so only the hash part is looked up.
+      // THE EXTENSION NAMES THE COMPRESSION, and twins can share a NarHash with
+      // different bytes: look up the pair, not the hash alone. A single row
+      // still answers a client that spelled the wrong extension, because its
+      // bytes are unambiguous.
       const at = file.indexOf(".nar");
       const hash = at === -1 ? file : file.slice(0, at);
       const narHash = `sha256:${hash}`;
-      const row = repo.objectByNarHash(bucket.name, narHash);
+      const compression = compressionOfFile(file);
+      if (compression === null) return null;
+      const row =
+        repo.objectByNarHashCompression(bucket.name, narHash, compression) ??
+        (() => {
+          const twins = repo.objectsByNarHash(bucket.name, narHash);
+          return twins.length === 1 ? (twins[0] as ObjectRow) : null;
+        })();
       if (row === null) return null;
       const key = objectKey(bucket.name, narHash, row.compression);
       const size = await objects.head(key);
@@ -1157,7 +1189,6 @@ export function createCache(options: CacheOptions): Cache {
           storePath: row.storePath,
           narHash: row.narHash,
           references: row.references,
-          ca: row.ca,
         });
         if (ca === null) continue;
         repo.putObject({ ...row, ca });
@@ -1205,6 +1236,7 @@ export function createCache(options: CacheOptions): Cache {
       if (trailing !== null) clearTimeout(trailing);
       trailing = null;
       stopping = true;
+      stopSignal.resolve();
       // JOIN the row's migration before the database closes: its in-flight put
       // may be one disk write away from a row.
       if (migrationTask !== null) await migrationTask.catch(() => {});

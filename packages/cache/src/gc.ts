@@ -127,13 +127,17 @@ export async function runGc(
   const perBucket = new Map<string, GcBucketReport>(
     plan.map((entry) => [entry.bucket, { bucket: entry.bucket, evicted: 0, kept: 0, bytes: 0 }]),
   );
+  // ONE query per bucket, then maintain the remaining rows in memory: a
+  // `repo.objects(bucket)` per evicted row is O(n²) on a large collection.
+  const remainingRows = new Map(plan.map((entry) => [entry.bucket, repo.objects(entry.bucket)]));
   for (const row of planned) {
     repo.deleteObject(row.bucket, row.storePath);
     // TWINS: two rows can carry the same NarHash (different store paths, one
     // object). The bytes go only when no REMAINING row in the bucket names them.
-    const twin = repo
-      .objects(row.bucket)
-      .some((other) => other.narHash === row.narHash);
+    const rows = remainingRows.get(row.bucket) ?? [];
+    const at = rows.findIndex((other) => other.storePath === row.storePath);
+    if (at !== -1) rows.splice(at, 1);
+    const twin = rows.some((other) => other.narHash === row.narHash);
     if (!twin) {
       await objects.delete(objectKey(row.bucket, row.narHash, row.compression));
     }

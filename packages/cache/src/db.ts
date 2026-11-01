@@ -136,6 +136,12 @@ export interface CacheRepo {
   object(bucket: string, storePath: string): ObjectRow | null;
   objectByHash(bucket: string, hash: string): ObjectRow | null;
   objectByNarHash(bucket: string, narHash: string): ObjectRow | null;
+  objectByNarHashCompression(
+    bucket: string,
+    narHash: string,
+    compression: string,
+  ): ObjectRow | null;
+  objectsByNarHash(bucket: string, narHash: string): ObjectRow[];
   objects(bucket?: string): ObjectRow[];
   /** Bump last access and the hit count together — one row write per read. */
   touchObject(bucket: string, storePath: string, at: number): void;
@@ -581,6 +587,14 @@ export function openCacheRepo(path: string): CacheRepo {
         .get(bucket, narHash) as Row | null;
       return row === null ? null : objectOf(row);
     },
+    objectByNarHashCompression: (bucket, narHash, compression) => {
+      const row = db
+        .query("SELECT * FROM object WHERE bucket = ? AND nar_hash = ? AND compression = ?")
+        .get(bucket, narHash, compression) as Row | null;
+      return row === null ? null : objectOf(row);
+    },
+    objectsByNarHash: (bucket, narHash) =>
+      all("SELECT * FROM object WHERE bucket = ? AND nar_hash = ?", [bucket, narHash], objectOf),
     objects: (bucket) =>
       bucket === undefined
         ? all("SELECT * FROM object", [], objectOf)

@@ -511,7 +511,11 @@ export const cacheRow = definePlugin({
     // AFTER THE MOUNT, AND ROW-OWNED: the migration dumps tens of gigabytes
     // and must not hold `/` or `/cache/*` down while it does. The row's
     // finalizer interrupts it before the database closes.
-    const migration = yield* Effect.forkChild(Effect.promise(() => cache.migrate()));
+    // SCOPED, not detached: a child forked with `forkChild` is interrupted the
+    // moment this apply's fiber ends (a few lines later), so the migration never
+    // ran on the pod. `forkScoped` lives until the ROW closes, which is exactly
+    // the lifecycle `cache.close()`'s stopping flag honours.
+    const migration = yield* Effect.forkScoped(Effect.promise(() => cache.migrate()));
     yield* Effect.addFinalizer(() => Fiber.interrupt(migration));
 
     // FINALIZERS RUN IN REVERSE, so the one registered SECOND runs FIRST, and
