@@ -159,6 +159,7 @@ describe("the cache row's teardown", () => {
       references: [],
       deriver: null,
       ca: null,
+      caProof: "unknown",
       compression: "zstd",
       fileHash: null,
       fileSize: null,

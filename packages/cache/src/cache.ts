@@ -254,12 +254,18 @@ export type NarSource =
 export interface BootReport {
   /** Rows whose path proved its own `fixed:r:sha256` CA. */
   caProved: number;
-  /** Self-referencing rows whose CA was proved from their kept bytes. */
-  selfProved: number;
   /** Object files with no row (a crash between put and record). */
   orphansSwept: number;
   /** Abandoned `.tmp-*` files older than this boot. */
   tempSwept: number;
+}
+
+/** What the one-time self-CA pass found. */
+export interface SelfProofReport {
+  rows: number;
+  proved: number;
+  refused: number;
+  unreadable: number;
 }
 
 /** What the row-owned background migration did. */
@@ -332,6 +338,9 @@ export interface Cache {
   /** BEFORE MOUNT: prove `CA:`, sweep orphan objects and abandoned temp files.
    *  Nothing is writing yet, so a sweep cannot race a put. */
   boot(): Promise<BootReport>;
+  /** AFTER MOUNT, AS A ROW-OWNED BACKGROUND TASK: prove self-referencing rows
+   *  from their kept bytes, ONCE per row (the verdict is persisted). */
+  proveSelf(): Promise<SelfProofReport>;
   /** AFTER MOUNT, AS A ROW-OWNED BACKGROUND TASK: migrate objects the old store
    *  still owns, two at a time, resuming after a disk pause. */
   migrate(): Promise<MigrationReport>;
@@ -486,7 +495,7 @@ export function createCache(options: CacheOptions): Cache {
       narSize: row.narSize,
       references: row.references,
       deriver: row.deriver,
-      ca: row.ca,
+      ca: row.caProof === "content-addressed" ? row.ca : null,
       sigs: [signatureOf(bucket, row), ...row.sigs],
     };
     return formatNarinfo(info);
@@ -538,6 +547,7 @@ export function createCache(options: CacheOptions): Cache {
       references: info.references,
       deriver: info.deriver,
       ca,
+      caProof: ca === null ? "not-content-addressed" : "content-addressed",
       compression: info.compression ?? "none",
       fileHash: file.fileHash,
       fileSize: file.fileSize,
@@ -565,6 +575,7 @@ export function createCache(options: CacheOptions): Cache {
   const unavailableLogged = new Set<string>();
   /** The row's background migration, so close can join it before the DB goes. */
   let migrationTask: Promise<MigrationReport> | null = null;
+  let selfTask: Promise<SelfProofReport> | null = null;
   let stopping = false;
   /** Resolves on close: a migration sleeping on disk or waiting on a dump can
    *  end without waiting for that promise to settle. */
@@ -898,6 +909,66 @@ export function createCache(options: CacheOptions): Cache {
     };
   }
 
+  async function proveSelfNow(): Promise<SelfProofReport> {
+    const rows = repo.objects().filter(
+      (row) => row.caProof === "unknown" && row.references.includes(row.storePath),
+    );
+    if (rows.length === 0) {
+      return { rows: 0, proved: 0, refused: 0, unreadable: 0 };
+    }
+    options.log?.("cache.self_ca.start", {
+      rows: rows.length,
+      bytes: rows.reduce((sum, row) => sum + (row.fileSize ?? row.narSize), 0),
+    });
+    let next = 0;
+    let proved = 0;
+    let refused = 0;
+    let unreadable = 0;
+    let done = 0;
+    const worker = async (): Promise<void> => {
+      for (;;) {
+        if (stopping) return;
+        const row = rows[next++];
+        if (row === undefined) return;
+        const path = objects.localPath(objectKey(row.bucket, row.narHash, row.compression));
+        if (path === null) {
+          unreadable += 1;
+          continue;
+        }
+        const checked = await Promise.race([
+          verifyNarFile(path, row.compression, storePathHash(row.storePath)),
+          stopSignal.promise.then(() => null),
+        ]);
+        if (checked === null || stopping) return;
+        done += 1;
+        if (!checked.ok || checked.selfHash === null) {
+          unreadable += 1;
+        } else {
+          const ca = contentAddressOf({
+            storePath: row.storePath,
+            narHash: row.narHash,
+            references: row.references,
+            selfHash: checked.selfHash,
+          });
+          repo.putObject({
+            ...row,
+            ca,
+            caProof: ca === null ? "not-content-addressed" : "content-addressed",
+          });
+          if (ca === null) refused += 1;
+          else proved += 1;
+        }
+        if (done % 100 === 0) {
+          options.log?.("cache.self_ca.progress", { done, of: rows.length });
+        }
+      }
+    };
+    await Promise.all([worker(), worker()]);
+    if (proved > 0) notify();
+    options.log?.("cache.self_ca.complete", { proved, refused, unreadable });
+    return { rows: rows.length, proved, refused, unreadable };
+  }
+
   async function migrateNow(): Promise<MigrationReport> {
       const missing = repo.objects().filter((row) => row.fileHash === null);
       if (missing.length === 0) {
@@ -1196,56 +1267,23 @@ export function createCache(options: CacheOptions): Cache {
       // 1. CA IS PROVED FROM THE PATH. Pure and instant: no store query, no
       // pusher line. A self-reference's modulo hash comes from its bytes in 1b.
       let caProved = 0;
-      for (const row of repo.objects().filter((one) => one.ca === null)) {
+      for (const row of repo.objects().filter(
+        (one) => one.caProof === "unknown" && !one.references.includes(one.storePath),
+      )) {
         const ca = contentAddressOf({
           storePath: row.storePath,
           narHash: row.narHash,
           references: row.references,
         });
-        if (ca === null) continue;
-        repo.putObject({ ...row, ca });
-        caProved += 1;
+        repo.putObject({
+          ...row,
+          ca,
+          caProof: ca === null ? "not-content-addressed" : "content-addressed",
+        });
+        if (ca !== null) caProved += 1;
       }
       if (caProved > 0) {
         options.log?.("cache.boot.ca", { proved: caProved });
-        notify();
-      }
-
-      // 1b. SELF-REFERENCES NEED THE BYTES, not metadata: Nix's modulo hash is
-      // computed from the kept object in one streaming pass. Two workers, and a
-      // row is written as soon as its proof lands, so a restart resumes.
-      const selfRows = repo.objects().filter(
-        (row) => row.ca === null && row.references.includes(row.storePath),
-      );
-      let selfProved = 0;
-      let selfNext = 0;
-      const proveSelf = async (): Promise<void> => {
-        for (;;) {
-          const row = selfRows[selfNext++];
-          if (row === undefined) return;
-          const path = objects.localPath(objectKey(row.bucket, row.narHash, row.compression));
-          if (path === null) continue;
-          const checked = await migrationSlots.withSlot(() =>
-            verifyNarFile(path, row.compression, storePathHash(row.storePath)),
-          );
-          if (!checked.ok || checked.selfHash === null) continue;
-          const ca = contentAddressOf({
-            storePath: row.storePath,
-            narHash: row.narHash,
-            references: row.references,
-            selfHash: checked.selfHash,
-          });
-          if (ca === null) continue;
-          repo.putObject({ ...row, ca });
-          selfProved += 1;
-        }
-      };
-      await Promise.all([
-        proveSelf(),
-        proveSelf(),
-      ]);
-      if (selfProved > 0) {
-        options.log?.("cache.boot.self_ca", { proved: selfProved });
         notify();
       }
 
@@ -1265,7 +1303,13 @@ export function createCache(options: CacheOptions): Cache {
       if (orphansSwept > 0 || tempSwept > 0) {
         options.log?.("cache.boot.orphans", { swept: orphansSwept, temp: tempSwept });
       }
-      return { caProved, selfProved, orphansSwept, tempSwept };
+      return { caProved, orphansSwept, tempSwept };
+    },
+
+    proveSelf() {
+      const task = proveSelfNow();
+      selfTask = task;
+      return task;
     },
 
     migrate() {
@@ -1290,6 +1334,7 @@ export function createCache(options: CacheOptions): Cache {
       // JOIN the row's migration before the database closes: its in-flight put
       // may be one disk write away from a row.
       if (migrationTask !== null) await migrationTask.catch(() => {});
+      if (selfTask !== null) await selfTask.catch(() => {});
       // REFUSE THE QUEUE FIRST: a job waiting for a slot belongs to this row,
       // and none of them may start after it closed. Then join the ones already
       // running, before the database closes.

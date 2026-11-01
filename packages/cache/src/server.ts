@@ -516,7 +516,9 @@ export const cacheRow = definePlugin({
     // ran on the pod. `forkScoped` lives until the ROW closes, which is exactly
     // the lifecycle `cache.close()`'s stopping flag honours.
     const migration = yield* Effect.forkScoped(Effect.promise(() => cache.migrate()));
+    const selfProof = yield* Effect.forkScoped(Effect.promise(() => cache.proveSelf()));
     yield* Effect.addFinalizer(() => Fiber.interrupt(migration));
+    yield* Effect.addFinalizer(() => Fiber.interrupt(selfProof));
 
     // FINALIZERS RUN IN REVERSE, so the one registered SECOND runs FIRST, and
     // the safe order is: the mount goes, THEN the database. A publish that

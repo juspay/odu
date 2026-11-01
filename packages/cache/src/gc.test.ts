@@ -48,6 +48,7 @@ function obj(
     references,
     deriver: null,
   ca: null,
+  caProof: "unknown",
     compression: "zstd",
     fileHash: null,
     fileSize: null,

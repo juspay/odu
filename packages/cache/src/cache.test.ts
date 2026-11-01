@@ -623,7 +623,7 @@ describe("CA is proved from the path", () => {
 
     // A ROW FROM BEFORE THE PROOF: null, then proved at boot without a store.
     const db = new Database(join(scratch, "cache", "cache.sqlite"));
-    db.run("UPDATE object SET ca = NULL");
+    db.run("UPDATE object SET ca = NULL, ca_proof = 'unknown'");
     db.close();
     expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).not.toContain("CA:");
     expect(await cache.boot()).toMatchObject({ caProved: 1 });
@@ -685,15 +685,19 @@ describe("CA is proved from the path", () => {
         `CA: ${facts.ca}`,
       );
 
-      // THE BACKFILL: null the proof, then boot proves it from the kept bytes.
+      // THE BACKGROUND BACKFILL: the verdict is unknown (though a value may be
+      // stored), so boot does not serve or read it; proveSelf reads once.
       const db = new Database(join(scratch, "cache", "cache.sqlite"));
-      db.run("UPDATE object SET ca = NULL");
+      db.run("UPDATE object SET ca = ?, ca_proof = 'unknown'", [facts.ca]);
       db.close();
       expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).not.toContain("CA:");
-      expect(await cache.boot()).toMatchObject({ selfProved: 1 });
+      expect(await cache.boot()).toMatchObject({ caProved: 0 });
+      expect(await cache.proveSelf()).toMatchObject({ rows: 1, proved: 1, refused: 0 });
       expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).toContain(
         `CA: ${facts.ca}`,
       );
+      // A SECOND PASS EXAMINES NOTHING: the verdict is persisted.
+      expect(await cache.proveSelf()).toMatchObject({ rows: 0 });
       await cache.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -804,6 +808,7 @@ describe("CA is proved from the path", () => {
         references: [],
         deriver: null,
         ca: null,
+        caProof: "unknown",
         compression: "zstd",
         fileHash: null,
         fileSize: null,

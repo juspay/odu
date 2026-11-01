@@ -135,6 +135,7 @@ describe.skipIf(!LINUX)("a slow socket and the server's memory", () => {
       references: [],
       deriver: null,
       ca: null,
+      caProof: "unknown",
       compression: "zstd",
       fileHash: `sha256:${"b".repeat(52)}`,
       fileSize: file.length,

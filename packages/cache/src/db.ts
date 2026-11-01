@@ -78,6 +78,11 @@ export interface ObjectRow {
   deriver: string | null;
   /** Nix's `CA:` line, verbatim; `null` for an ordinary input-addressed path. */
   ca: string | null;
+  /** THE PROOF'S VERDICT, persisted so a row is examined once. `unknown` for
+   *  a row whose shape needs its bytes (a self-reference) and has not been
+   *  read yet; `content-addressed` when the path check passed; `not-content-
+   *  addressed` when the check failed and no CA is served. */
+  caProof: "unknown" | "content-addressed" | "not-content-addressed";
   /** What the KEPT bytes are compressed with — `zstd`, `xz`, `bzip2` or
    *  `none`. The narinfo says it and the object's extension encodes it. */
   compression: string;
@@ -311,6 +316,14 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE object ADD COLUMN compression TEXT NOT NULL DEFAULT 'zstd';
   `,
+  // Migration 11 — THE CA PROOF'S VERDICT, once per row. A self-referencing
+  // row's proof needs its bytes; re-reading it every boot made an ordinary
+  // input-addressed path a permanent startup cost. Rows that already carry a
+  // CA were proved by the old flow.
+  `
+  ALTER TABLE object ADD COLUMN ca_proof TEXT NOT NULL DEFAULT 'unknown';
+  UPDATE object SET ca_proof = 'content-addressed' WHERE ca IS NOT NULL;
+  `,
 ];
 
 /** The schema this build writes. A file carrying a HIGHER number was written by
@@ -388,6 +401,7 @@ const objectOf = (row: Row): ObjectRow => ({
   references: list(row, "refs"),
   deriver: maybeText(row, "deriver"),
   ca: maybeText(row, "ca"),
+  caProof: text(row, "ca_proof") as ObjectRow["caProof"],
   compression: text(row, "compression"),
   fileHash: maybeText(row, "file_hash"),
   fileSize: row["file_size"] === null || row["file_size"] === undefined
@@ -542,12 +556,13 @@ export function openCacheRepo(path: string): CacheRepo {
     putObject(row) {
       db.run(
         `INSERT INTO object (bucket, store_path, hash, nar_hash, nar_size, refs,
-           deriver, ca, compression, file_hash, file_size, sigs, hits, created, last_accessed)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           deriver, ca, ca_proof, compression, file_hash, file_size, sigs, hits, created, last_accessed)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(bucket, store_path) DO UPDATE SET hash = excluded.hash,
            nar_hash = excluded.nar_hash, nar_size = excluded.nar_size,
            refs = excluded.refs, deriver = excluded.deriver,
-           ca = excluded.ca, compression = excluded.compression,
+           ca = excluded.ca, ca_proof = excluded.ca_proof,
+           compression = excluded.compression,
            file_hash = excluded.file_hash,
            file_size = excluded.file_size, sigs = excluded.sigs`,
         [
@@ -559,6 +574,7 @@ export function openCacheRepo(path: string): CacheRepo {
           JSON.stringify(row.references),
           row.deriver,
           row.ca,
+          row.caProof,
           row.compression,
           row.fileHash,
           row.fileSize,
