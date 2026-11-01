@@ -250,6 +250,10 @@ export function createStaging(deps: StagingDeps): Staging {
             if (marker !== null && marker.mtimeMs >= cutoff) continue;
           }
           await rm(path, { force: true }).catch(() => {});
+          // A SWEPT UPLOAD'S LOG RECORD GOES WITH IT: otherwise the part/byte
+          // context for a refusal outlives the parts it describes.
+          const file = partAt > 0 ? entry.slice(0, partAt) : entry;
+          joined.delete(`${bucket}/${file}`);
           if (entry.endsWith(".narinfo")) {
             const hash = entry.slice(0, -".narinfo".length);
             await unlink(join(dirForBucket, `${hash}.narinfo`)).catch(() => {});

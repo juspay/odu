@@ -146,7 +146,7 @@ export { STATUS_META, type StatusHue } from "@odu/run-client/surface";
  * `expiresDays`. Additive: every input 2.2 accepted, 2.3 accepts.
  *
  * 2.3 remains: the object cache is ADDITIVE. `held` and `--wait` are DEPRECATED
- * and answer an empty list / return at once; they are REMOVED IN THE NEXT MAJOR.
+ * and answer an empty list / return at once; they are REMOVED AT THE CACHE ROW'S NEXT MAJOR.
  */
 export const SERVICE_CONTRACT_VERSION = "2.3";
 

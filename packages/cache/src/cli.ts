@@ -105,8 +105,8 @@ push <bucket> <path>… [--token-file F] [--concurrency N] [--part-size MiB] [--
                               Talks to the cache directly, from HERE. A NAR
                               larger than --part-size (64 MiB) is sent in parts,
                               each retried on its own. --wait is DEPRECATED and
-                              returns at once (nothing is held; removed in the
-                              next major)
+                              returns at once (nothing is held; removed at the
+                              cache row's next major)
 pin <bucket> <name> <path>…   pin a closure against garbage collection
 gc [bucket] [-o json]         evict what retention expired and nothing holds
 stats [-o json]               storage and reads
