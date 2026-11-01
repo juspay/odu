@@ -52,6 +52,10 @@ export interface ObjectStore {
   /** Write `stream` at `key`. Immutable: the same key with the same bytes is a
    *  no-op; a `.tmp-*` file is never visible. */
   put(key: string, stream: ReadableStream<Uint8Array>): Promise<ObjectFacts>;
+  /** KEEP a file that is already on this store's filesystem: rename it into
+   *  place, never copy. The disk implementation's fast path for a verified
+   *  upload; an object store without a shared filesystem has no equivalent. */
+  adopt?(key: string, file: string): Promise<ObjectFacts>;
   get(key: string): Promise<StoredObject | null>;
   head(key: string): Promise<number | null>;
   delete(key: string): Promise<void>;
@@ -59,6 +63,9 @@ export interface ObjectStore {
   list(prefix: string): Promise<{ key: string; size: number }[]>;
   /** The disk implementation's file, for a response that needs Range. */
   localPath(key: string): string | null;
+  /** Delete `.tmp-*` files older than `current` — the boot sweep, before a
+   *  mount can be writing. A younger temp file is a live put. */
+  sweepTemp?(current: number): Promise<number>;
 }
 
 export interface DiskObjectStoreOptions {
@@ -79,8 +86,21 @@ export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
   const root = join(options.dir, "objects");
   const pathOf = (key: string): string => join(root, safeKey(key));
 
+  /** The facts of a file already at `path`, without reading it twice. */
+  async function factsOf(path: string): Promise<ObjectFacts> {
+    const info = await stat(path);
+    const hash = createHash("sha256");
+    for await (const chunk of Bun.file(path).stream() as unknown as AsyncIterable<Uint8Array>) {
+      hash.update(chunk);
+    }
+    return { size: info.size, sha256: `sha256:${base32(hash.digest())}` };
+  }
+
   async function put(key: string, stream: ReadableStream<Uint8Array>): Promise<ObjectFacts> {
     const target = pathOf(key);
+    // IMMUTABLE: a key that exists is the object. A re-push does not rewrite
+    // bytes, and the retained file is what the row already names.
+    if ((await stat(target).catch(() => null)) !== null) return factsOf(target);
     await mkdir(dirname(target), { recursive: true, mode: 0o700 });
     const temp = join(dirname(target), `.tmp-${randomUUID()}`);
     const hash = createHash("sha256");
@@ -104,8 +124,28 @@ export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
     return { size, sha256: `sha256:${base32(hash.digest())}` };
   }
 
+  async function adopt(key: string, file: string): Promise<ObjectFacts> {
+    const target = pathOf(key);
+    if ((await stat(target).catch(() => null)) !== null) {
+      await unlink(file).catch(() => {});
+      return factsOf(target);
+    }
+    await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+    try {
+      await rename(file, target);
+    } catch (err) {
+      // A staged file on another filesystem cannot be renamed; copying is the
+      // only answer, and it is the exception rather than the import path.
+      if ((err as NodeJS.ErrnoException).code !== "EXDEV") throw err;
+      await Bun.write(target, Bun.file(file));
+      await unlink(file).catch(() => {});
+    }
+    return factsOf(target);
+  }
+
   return {
     put,
+    adopt,
 
     async get(key) {
       const path = pathOf(key);
@@ -151,6 +191,27 @@ export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
     localPath(key) {
       const path = pathOf(key);
       return path.startsWith(`${root}${sep}`) ? path : null;
+    },
+
+    async sweepTemp(current) {
+      let removed = 0;
+      const walk = async (dir: string): Promise<void> => {
+        for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+          const at = join(dir, entry.name);
+          if (entry.isDirectory()) {
+            await walk(at);
+            continue;
+          }
+          if (!entry.name.startsWith(".tmp-")) continue;
+          const info = await stat(at).catch(() => null);
+          // A temp file younger than this process is a put that is running now.
+          if (info === null || info.mtimeMs > current) continue;
+          await unlink(at).catch(() => {});
+          removed += 1;
+        }
+      };
+      await walk(root);
+      return removed;
     },
   };
 }

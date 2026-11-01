@@ -102,6 +102,33 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
       await dispose();
     });
 
+    it("is immutable: a second put of a key keeps the first bytes", async () => {
+      const { store, dispose } = await make();
+      const first = bytes("first");
+      const second = bytes("second");
+      const a = await store.put("main/nar/same.nar.zst", streamOf([first]));
+      const b = await store.put("main/nar/same.nar.zst", streamOf([second]));
+      expect(b).toEqual(a);
+      const got = await store.get("main/nar/same.nar.zst");
+      expect(Array.from(await drain(got?.stream as ReadableStream<Uint8Array>))).toEqual(
+        Array.from(first),
+      );
+      await dispose();
+    });
+
+    it("does not leave a partial object when the stream errors mid-put", async () => {
+      const { store, dispose } = await make();
+      const broken = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(bytes("some bytes"));
+          controller.error(new Error("connection dropped"));
+        },
+      });
+      await expect(store.put("main/nar/broken.nar.zst", broken)).rejects.toThrow("connection dropped");
+      expect(await store.head("main/nar/broken.nar.zst")).toBeNull();
+      await dispose();
+    });
+
     it("streams a 300 MB object at constant memory", async () => {
       const { store, dispose } = await make();
       let remaining = 300;
