@@ -82,8 +82,9 @@ export const CACHE_USAGE = `usage: odu cache <create|list|use|domain|token|login
 create <bucket> [--private] [--retention-days N] [--upstream-key K]… | --no-upstream
                               create a bucket; print its substituter URL and
                               public key. Needs $ODU_ROOT_TOKEN.
-                              --no-upstream takes everything: for a server whose
-                              store is not the machine that built the paths
+                              --no-upstream takes everything, including
+                              upstream-signed closures (more disk), for consumers
+                              that cannot reach cache.nixos.org
 list [-o json]                buckets, with sizes. Needs $ODU_ROOT_TOKEN
 use <bucket>                  the nix.conf settings, the nixConfig block and the
                               netrc lines for a bucket. Needs NO token: a
@@ -99,12 +100,13 @@ token list [bucket] [-o json] tokens with scope, expiry and last use
 token revoke <id>             revoke one token, without touching the rest
 login <origin> [--token T]    save a token for an origin in
                               ~/.config/odu/cache/credentials (0600)
-push <bucket> <path>… [--token-file F] [--concurrency N] [--part-size MiB] [-o json]
+push <bucket> <path>… [--token-file F] [--concurrency N] [--part-size MiB] [--wait] [-o json]
                               upload only the paths the bucket is missing.
                               Talks to the cache directly, from HERE. A NAR
                               larger than --part-size (64 MiB) is sent in parts,
-                              each retried on its own. The bucket keeps what it
-                              takes; there is no hold to wait for
+                              each retried on its own. --wait is DEPRECATED and
+                              returns at once (nothing is held; removed in the
+                              next major)
 pin <bucket> <name> <path>…   pin a closure against garbage collection
 gc [bucket] [-o json]         evict what retention expired and nothing holds
 stats [-o json]               storage and reads

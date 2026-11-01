@@ -145,13 +145,10 @@ export { STATUS_META, type StatusHue } from "@odu/run-client/surface";
  * `Bucket.pushUrl` as new output fields, and `auth.token.create`'s optional
  * `expiresDays`. Additive: every input 2.2 accepted, 2.3 accepts.
  *
- * 3.0: THE CACHE KEEPS THE OBJECT, so the `held` collection and the 202/hold
- * protocol are GONE; `odu cache push` no longer takes `--wait`, and a narinfo
- * whose references are absent is recorded immediately. NON-additive: a 2.x
- * client waiting on `held` has nothing to wait for, and the push voice lost
- * that verb, so this is a major bump.
+ * 2.3 remains: the object cache is ADDITIVE. `held` and `--wait` are DEPRECATED
+ * and answer an empty list / return at once; they are REMOVED IN THE NEXT MAJOR.
  */
-export const SERVICE_CONTRACT_VERSION = "3.0";
+export const SERVICE_CONTRACT_VERSION = "2.3";
 
 // ── refusals ────────────────────────────────────────────────────────────────
 

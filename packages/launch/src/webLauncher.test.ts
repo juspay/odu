@@ -83,13 +83,10 @@ describe("adoptOrRefuse", () => {
   });
 
   it("adopts a service whose minor is BEHIND this build — the additive rule", async () => {
-    // A minor only ADDS members. A build 3.1 reading a 3.0 daemon is the case;
-    // the version is a seam here so a major that starts at `.0` can still be
-    // tested in the direction that matters.
+    // A minor only ADDS members: this build reads 2.3, the daemon speaks 2.2.
     const warned: string[] = [];
-    const { connection, disposed } = scripted(() => Stream.make(cell("3.0")));
+    const { connection, disposed } = scripted(() => Stream.make(cell(minorStep(-1))));
     const result = await adoptOrRefuse(connection, ORIGIN, {
-      build: "3.1",
       warn: (line) => warned.push(line),
     });
     expect(result).toBe(connection);
@@ -102,9 +99,8 @@ describe("adoptOrRefuse", () => {
     const warned: string[] = [];
     const seen = new Set<string>();
     for (let dial = 0; dial < 3; dial += 1) {
-      const { connection } = scripted(() => Stream.make(cell("3.0")));
+      const { connection } = scripted(() => Stream.make(cell(minorStep(-1))));
       await adoptOrRefuse(connection, ORIGIN, {
-        build: "3.1",
         warn: (line) => warned.push(line),
         warned: seen,
       });
@@ -160,11 +156,9 @@ describe("adoptOrRefuse", () => {
     expect(disposed()).toBe(1);
   });
 
-  // A major starts at `.0`, so there is no representable LOWER minor at 3.0;
-  // the additive rule is still exercised in the ahead direction.
   it("uses fixtures that are genuinely a lower minor, a higher minor and another major", () => {
-    expect(contractVerdict(cell("3.0"), ORIGIN, "3.1")).toBeNull();
-    expect(contractVerdict(cell(minorStep(1)), ORIGIN, "3.1")).toBeNull();
+    expect(contractVerdict(cell(minorStep(-1)), ORIGIN)).toBeNull();
+    expect(contractVerdict(cell(minorStep(1)), ORIGIN)).toBeNull();
     expect(contractVerdict(cell(majorStep(1)), ORIGIN)).not.toBeNull();
     expect(contractVerdict(cell(majorStep(-1)), ORIGIN)).not.toBeNull();
     expect(contractVerdict(cell(""), ORIGIN)).not.toBeNull();

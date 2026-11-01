@@ -56,6 +56,7 @@ async function row(publicOrigin: string): Promise<{
         published.delete(key);
       },
     },
+    held: { upsert: () => {}, remove: () => {} },
   });
   return { cache, published, publish: server.publish };
 }
