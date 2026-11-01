@@ -39,6 +39,7 @@ import { newChain, serial } from "./serial";
 import { CACHE_MOUNT } from "./paths";
 import { PATH_PAGE_SIZE } from "./surface";
 import { createStaging, type CompleteUpload, type NarinfoOutcome, type Upload } from "./staging";
+import { createSlots, type Slots } from "./slots";
 import {
   globMatches,
   hashToken,
@@ -303,6 +304,9 @@ export interface Cache {
 export interface CacheOptions {
   /** The per-user state root; the cache owns `<stateRoot>/cache`. */
   stateRoot: string;
+  /** THE FETCH BOUND, made by the row's activation. Defaults to one per cache
+   *  instance — never module state. */
+  fetchSlots?: Slots;
   /** `$ODU_ROOT_TOKEN`, or null when the operator supplied none. */
   rootToken: string | null;
   /** `--store` URI for every nix call; null is the daemon. */
@@ -500,7 +504,16 @@ export function createCache(options: CacheOptions): Cache {
 
   // The write path, wired to the ONE lock: `record` is the dependency staging
   // takes, and it is the locked one, so a pin cannot interleave with an import.
-  const staging = createStaging({ repo, blob, dir, now, record, changed: () => notify() });
+  const fetchSlots = options.fetchSlots ?? createSlots(2);
+  const staging = createStaging({
+    repo,
+    blob,
+    dir,
+    now,
+    record,
+    changed: () => notify(),
+    slots: fetchSlots,
+  });
 
   // ── who hears about a change ──────────────────────────────────────────────
   //
@@ -933,9 +946,10 @@ export function createCache(options: CacheOptions): Cache {
       // that outlived `close()` would publish into a closed database.
       if (trailing !== null) clearTimeout(trailing);
       trailing = null;
-      // The write path's background fetches stop taking work BEFORE the
-      // database closes, and this AWAITS the one already in `nix-store -r`:
-      // the flag alone left the child running past the close.
+      // REFUSE THE QUEUE FIRST: a job waiting for a slot belongs to this row,
+      // and none of them may start after it closed. Then join the ones already
+      // running, before the database closes.
+      fetchSlots.close();
       await staging.close();
       listeners.clear();
       repo.close();

@@ -55,6 +55,7 @@ import {
   StateDir,
 } from "@odu/cordis/services";
 import { createCache, roleAuthority, type Authority, type BucketFacts, type Cache, type CacheOutcome } from "./cache";
+import { createSlots } from "./slots";
 import { may, principalOf, type Principal } from "@odu/cordis/principal";
 import { bucketOf, CACHE_MOUNT, CACHE_ROUTE_PATHS } from "./paths";
 import { cacheRoutes } from "./routes";
@@ -477,7 +478,9 @@ export const cacheRow = definePlugin({
     const publicOrigin = yield* PublicOrigin;
     const log = yield* Log;
 
-    const cache = createCache({ stateRoot: stateDir, rootToken, store });
+    // THE ROW'S FETCH BOUND, created at apply and closed with the row.
+    const fetchSlots = createSlots(2);
+    const cache = createCache({ stateRoot: stateDir, rootToken, store, fetchSlots });
     // A RESTART RESUMES ITS HOLDS at row apply: the reference fetch a pod died
     // in the middle of is re-queued here, with no request needed to start it.
     yield* Effect.promise(() => cache.resume());

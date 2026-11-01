@@ -48,6 +48,7 @@ import {
   storePathHash,
 } from "./narinfo";
 import { newChain, type Chain, serial } from "./serial";
+import type { Slots } from "./slots";
 
 /** A write in progress. `commit` publishes it under the name the narinfo will
  *  name; `discard` removes it. */
@@ -122,6 +123,8 @@ interface Pending {
 
 export interface StagingDeps {
   repo: CacheRepo;
+  /** THE FETCH BOUND, created by the row that owns this staging. */
+  slots: Slots;
   blob: BlobStore;
   /** The cache's own directory; staging lives at `<dir>/staging`. */
   dir: string;
@@ -174,31 +177,6 @@ export interface Staging {
     hash: string,
     body: ReadableStream<Uint8Array>,
   ): Promise<NarinfoOutcome>;
-}
-
-/**
- * TWO FETCHES, PROCESS-WIDE. A restart re-queues every held row at once, and a
- * `nix-store -r --keep-going` is a network-bound child that can carry a whole
- * closure; a per-bucket chain bounded each bucket but not the fleet. The cap
- * belongs to the process, so it is module scope and has no row's lifetime.
- */
-const FETCH_SLOTS = 2;
-let fetchesRunning = 0;
-const fetchWaiters: Array<() => void> = [];
-
-async function withFetchSlot<T>(work: () => Promise<T>): Promise<T> {
-  if (fetchesRunning >= FETCH_SLOTS) {
-    await new Promise<void>((resolve) => fetchWaiters.push(resolve));
-  } else {
-    fetchesRunning += 1;
-  }
-  try {
-    return await work();
-  } finally {
-    const next = fetchWaiters.shift();
-    if (next === undefined) fetchesRunning -= 1;
-    else next();
-  }
 }
 
 export function createStaging(deps: StagingDeps): Staging {
@@ -460,7 +438,7 @@ export function createStaging(deps: StagingDeps): Staging {
   ): Promise<void> {
     try {
       if (closed) return;
-      const fetched = await withFetchSlot(() =>
+      const fetched = await deps.slots.withSlot(() =>
         blob.substitute(missing, upstreamFor(bucket.upstreamKeys)),
       );
       if (closed) return;
