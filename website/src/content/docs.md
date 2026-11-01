@@ -82,6 +82,9 @@ odu web --upgrade       # replace the existing service, serve here
 
 The default address is **http://127.0.0.1:18440**. If a service already exists, bare `web` refuses; open its URL or replace it. Ctrl-C stops a foreground server, not its CI runs.
 
+Foreground `odu web` prints the cache row's operational `info` lines—migration, CA pass, NAR served, refusals—while keeping the host's own narration quiet; [The cache page](cache/#operating-it) lists them.
+
+
 The board lists runs across repositories. Open a run to inspect nodes, follow logs, select an earlier attempt, retry a failure, or cancel work. CLI and MCP clients use the same run IDs and state.
 
 ### The board does everything `odu` does
@@ -177,7 +180,19 @@ A bucket can also have **a name of its own** — `https://cache.kolu.dev` — se
 
 `ODU_PUBLIC_ORIGIN` is the setting behind that URL: it names the address a bucket is published under when a proxy stands in front, and defaults to what `cache.domain` and `cache.enableACME` imply. The module requires a loopback `listen`, because the daemon has to sit behind a proxy: without `services.odu.github` nothing authenticates a request at all, and with it the session cookie wants TLS. Those are the two shapes — the second is [Server mode](#server-mode).
 
-**Without the module.** A container or any non-systemd host runs the same one process from the environment the module sets, and needs nothing else. `ODU_STATE_DIR` holds everything — the run catalog, the cache, and now the daemon's own gate and socket, which is what a read-only `$HOME` otherwise breaks. `ODU_WEB_ORIGIN` is the address it binds, `ODU_PUBLIC_ORIGIN` the one a bucket's URL is published at, and `ODU_ROOT_TOKEN` the administration secret. The cache stores the uploaded compressed NARs under `<state>/cache/objects` and needs no Nix store. `ODU_CACHE_STORE` (or the host's own `/nix/store` when unset) is read ONLY by the one-time migration, which runs after the cache is serving; once the log says `cache.migration.complete`, delete that store. On a module deployment `NixStore` is unset and the old paths are the host's `/nix/store` (the daemon's own store): delete the old roots under `<state>/cache/gcroots` and then run `nix-collect-garbage` — never delete `/nix/store` itself. The objects live under `<state>/cache/objects` and are part of the backup; the migration pauses below 10 GiB free — see [Where the data lives](cache/#where-the-data-lives). `--no-upstream` makes a bucket take every path, including ones `cache.nixos.org` signed (the flag the Cache view's **Skip upstream paths** switch stands for).
+**Without the module.** A container or any non-systemd host runs the same one process from the environment the module sets, and needs nothing else. `ODU_STATE_DIR` holds everything — the run catalog, the cache, and the daemon's own gate and socket, which is what a read-only `$HOME` otherwise breaks. `ODU_WEB_ORIGIN` is the address it binds, `ODU_PUBLIC_ORIGIN` the one a bucket's URL is published at, and `ODU_ROOT_TOKEN` the administration secret. The cache stores the compressed NARs under `<state>/cache/objects`; disk is those objects plus staging for the largest in-flight NAR, memory is constant per NAR, and a `--no-upstream` bucket also stores the upstream closures it is pushed.
+
+
+### Upgrading from a store-backed cache
+
+1. **Module deployment:** leave `NixStore` unset — the old objects are the host's `/nix/store`. **Container:** point `ODU_CACHE_STORE` at the old chroot store.
+2. Boot starts serving at once; the migration and the CA pass are row-scoped background tasks. Watch `cache.migration.*` and `cache.self_ca.*`.
+3. Wait for `cache.migration.complete`.
+4. **Module:** delete the abandoned roots under `<state>/cache/gcroots`, then run `nix-collect-garbage`. **Container:** delete the old store directory. Never delete `/nix/store` itself.
+5. Rows the old store lacks stay objectless and answer 404 until re-pushed; the completion line names them.
+
+Contract **2.3 remains additive**: `held` answers an empty list and `odu cache push --wait` returns at once, both deprecated and removed in the next major. A 2.x client keeps working; kolu's pinned CI does not need to move with this cache change.
+
 
 ## Server mode
 

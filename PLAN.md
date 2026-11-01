@@ -1,9 +1,9 @@
 # Odu as a product: Nix cache + CI you run yourself
 
-Status: living, 2026-10-31. PR 0, PR 1 and PR 1.5 are on master; the next PR is
-server mode. Decisions below were taken in conversation. There is no schedule:
-one phase is one PR, and the split is grounded in the source facts listed in
-"What the code is today".
+Status: living, 2026-11-01. PR 0 through PR 2.5 are on master, and PR 3 (the
+object cache) is in review; the next PR is PR 4, teams. Decisions below were
+taken in conversation. There is no schedule: one phase is one PR, and the split
+is grounded in the source facts listed in "What the code is today".
 
 ## Positioning
 
@@ -150,9 +150,9 @@ Each item names where it is checked.
   (`ODU_PUBLIC_ORIGIN`), and the Tailscale Ingress is the only way in, today
   as `tailscale serve` (tailnet only). There is no nginx: every path odu
   serves is reachable alike, and the root token arrives from a 1Password item
-  through External Secrets. Buckets there are created `--no-upstream`,
-  because a chroot store starts empty and the server cannot yet fetch a
-  referrer's upstream-signed references itself.
+  through External Secrets. `kolu` is created `--no-upstream`: the runner's
+  published closure must import with no trusted key, so every upstream-signed
+  member is stored as an object too — that costs disk by design.
 - **F13. Two rows behind one fence.** After PR 1.5 the daemon is a host
   (`@odu/host`) composing two Cordis rows, `ci` and `cache`, each owning its
   surface, server, CLI and face; `@odu/cordis` holds the contract both read,
@@ -182,8 +182,8 @@ Consequences for the split:
 GET  /cache/<bucket>/nix-cache-info        StoreDir, WantMassQuery: 1, Priority: 40
 HEAD /cache/<bucket>/<hash>.narinfo
 GET  /cache/<bucket>/<hash>.narinfo
-GET  /cache/<bucket>/nar/<filehash>.nar.zst  stream, or 302 to presigned URL (PR 11)
-PUT  /cache/<bucket>/nar/<filehash>.nar.<ext>  Bearer or Basic; any ext Nix sends (xz by default, zst with ?compression=zstd)
+GET  /cache/<bucket>/nar/<narHash>.<ext>      stream, or 302 to presigned URL (PR 11)
+PUT  /cache/<bucket>/nar/<narHash>.<ext>       Bearer or Basic; any ext Nix sends (xz by default, zst with ?compression=zstd)
 PUT  /cache/<bucket>/<hash>.narinfo        server re-signs with the bucket key; URL field kept as sent
 POST /_odu/v1/buckets/<bucket>/missing    batch "which of these are you missing" (odu push client)
 ```
@@ -222,7 +222,7 @@ on the bucket page (both landed).
 ### Storage
 
 - **Blobs: an object store, not a Nix store.** The object IS the compressed
-  NAR a pusher sent, kept once at `<bucket>/nar/<narHash>.nar.zst` and served
+  NAR a pusher sent, kept once at `<bucket>/nar/<narHash>.<ext>` and served
   with `Content-Length`/`Range`. The server does not import paths, fetch
   upstream closures, or keep gcroots; references are names in the narinfo.
   That is the Cachix/Attic model, and it is why the pod's 166 GB store of
@@ -230,10 +230,10 @@ on the bucket page (both landed).
   (`put`/`get`/`head`/`delete`/`list`); disk is its first implementation and
   the contract suite is shared so S3 can be the second.
 - **CA is proved from the path.** `contentAddressOf` recomputes Nix's
-  `fixed:r:sha256` store path from (name, NarHash, references) and serves
-  `CA:` only when the formula reproduces the row's path. A self-referencing
-  path's CA hash is a modulo hash the narinfo does not carry, so it stays
-  unproved rather than guessed.
+  `fixed:r:sha256` store path from the name, references and bytes — the
+  NarHash for an ordinary row, Nix's hash-modulo-self-references for a
+  self-referencing one — and serves `CA:` only when the formula reproduces the
+  row's path.
 - **Migration of a store-backed deployment:** at boot, two at a time, each
   row without an object is dumped from `ODU_CACHE_STORE` into the object
   store (`nix store dump-path | zstd`), pausing below 10 GB free. Until it
@@ -291,7 +291,7 @@ HTTP API, with a token, from the machine that holds the paths.
    (see "Credentials on the client"); it buffers each NAR in memory and
    probes paths one at a time. Known gaps against cachix and attic, kept
    deliberately: uploads go through the server until PR 11 adds presigned
-   PUT; dedup is per store path, not per chunk; no watch mode until PR 5.
+   PUT; dedup is per NarHash per bucket, not per chunk; no watch mode until PR 5.
 3. **Run-scoped (PR 6).** `odu run --push <bucket>`: the runner pushes each
    recipe's `result*` closures after the recipe, using a write-only token
    scoped to that bucket with a lifetime of the run. This is a deliberate,
@@ -358,8 +358,9 @@ is the local owner, same verbs, same board, and its tests are the guard.
 - **Small team, one NixOS machine:** `services.odu.enable`, local disk, the
   same box is cache, board and lane runner (localhost lane, hook configured by
   the same module).
-- **Ours:** the K3s pod (F12): chroot cache store on a PVC, Tailscale Funnel
-  as the public door from PR 2, lanes on the tailnet (`croissant`, `petit`).
+- **Ours:** the K3s pod (F12): objects on a PVC (the old chroot store only as a
+  migration source), `cache.kolu.dev` as the public door, lanes on the tailnet
+  (`croissant`, `petit`).
 - **Large team:** cache node(s) with S3 and Postgres; lane pool of the team's
   own machines or our in-house VMs; nginx `proxy_cache` and/or CDN in front of
   reads.
@@ -380,6 +381,7 @@ nothing merges that a later PR has to finish. The order is a dependency order.
 | 1 — odu serves a Nix binary cache | #132 `712eafe` | `packages/cache`: narinfo/NAR codec, Nix-store blobs, SQLite metadata, per-bucket signing, hashed scoped tokens, GC with pins; the protocol routes; `odu cache create · list · token · use · login · pin · gc · stats · push`; the `services.odu` module with its VM test; docs and e2e. Flat memory over multi-gigabyte NARs, recorded. |
 | 1.5 — a host and two rows | #133 `4e0d621` | `@odu/host` (tenure, listener, gate, `/mcp`, composition root), `@odu/launch`, `@odu/ci`, `@odu/cordis` (the contract); the cache as a row with `./surface · ./server · ./cli · ./face`; the Cache view at `#/cache`; cache verbs renamed under the row's word and `SERVICE_CONTRACT_VERSION` 2.0; the fence from `@olai/effect-cordis`, pinned with npins. |
 | 3 — odu runs its own cache | #138 | Upstream references substituted at import, so a referrer of a skipped path imports; the remaining hold is a published `held` row, and the push says stored / held / refused, returns on a hold, and `--wait`s by choice. `odu cache push` chunks a NAR at 64 MiB (parts retried alone) under a proxy's body cap. A bucket may carry a `domain`, answered by `Host` at the protocol's root, printed by `use`, and given an nginx vhost by the module. `@odu/cloudflare` makes the name real — one tunnel per server, routes, proxied records, a `cloudflared` child, `wiring`/`live`/`failed`, the server's public origin too — so no port opens and a Funnel can retire. nginx caches NAR reads; a public bucket's facts are answerable with no account from the protocol path; `SERVICE_CONTRACT_VERSION` 2.3; odu's own CI and `nixConfig` push and pull `cache.kolu.dev` (`kolu`). Docs and e2e follow. |
+| 3.5 — the object cache | #139 | The compressed NAR the pusher sent is kept and served (`Content-Length`, `Range`), with per-row compression and `CA:` proved from name, references and bytes. No Nix-store import, held rows, fetch machinery or 202; `ObjectStore` with a shared contract suite. A mount-first migration and a persisted self-CA pass run as row-scoped background tasks. `held`/`--wait` remain as deprecated empty/no-op for 2.x clients, removed in the next major. |
 
 For users: `odu web` serves runs and buckets over one wire and one page, with
 a Runs / Cache switch; `odu cache use <bucket>` prints the substituter, key
@@ -527,6 +529,29 @@ the implementation; no route learns a second dialect.
 Presigned PUT/GET from the object store; the cache row handles narinfos and
 signing, not bytes. The push client and the NAR route switch to the signed
 URLs when the bucket's store supports them.
+
+### PR 3.7: Each row versions its own surface
+
+> **Docs:** A client that uses only CI runs is never refused because the cache,
+> auth or cloudflare row moved. Each row publishes its own contract version, and
+> a client is admitted per row.
+
+**Decision.** The service contract version covers only the host's own verbs and
+row admission. Every row — `ci`, `cache`, `auth`, `cloudflare` — publishes its
+own contract version for its verbs, resources and routes. A client declares
+which row surfaces it needs and at which major, and is admitted per row.
+
+**What lands.** Per-row contract constants and admission in `@odu/cordis`; a
+hello/admission exchange that lists the row surfaces and their versions; the
+CLI, MCP and web clients declaring their needs; kolu's `@kolu/surface-remote`
+declaring `ci` only; docs and fence tests. Migration note: today's single
+number becomes the host's version, and each row starts at the major it already
+speaks.
+
+**Not in scope.** Any row behaviour change.
+
+Placed after the two object-store phases because those are storage-only and do
+not change a client's row needs, while this one changes admission for every row.
 
 ### PR 4: teams
 

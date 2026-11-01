@@ -32,8 +32,8 @@ let
     ;
 
   # `StateDirectory` takes a NAME under /var/lib, not a path. Deriving it keeps
-  # one authority: whatever `stateDir` says is where the database, the gcroots
-  # and the staging directory go, and systemd is told the same name.
+  # one authority: whatever `stateDir` says is where the database, the objects
+  # and the staging directory go; `gcroots/` is only migration leftovers.
   stateDirName = baseNameOf (toString cfg.stateDir);
 
   # `http://127.0.0.1:18440`, `http://[::1]:18440`, `http://localhost:18440`.
@@ -173,8 +173,8 @@ in
       default = "/var/lib/odu";
       description = ''
         Where the service keeps everything it owns: the run catalog, the
-        request receipts, and the cache's SQLite database, signing keys, gcroots
-        and staging directory. It is a systemd `StateDirectory` with mode 0700,
+        request receipts, and the cache's SQLite database, signing keys, objects
+        and staging directory (`gcroots/` is migration leftovers). It is a systemd `StateDirectory` with mode 0700,
         and it is the service user's home, because the cache's keys are in it
         and nobody else has business reading them.
       '';

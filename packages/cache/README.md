@@ -37,8 +37,8 @@ service tags and composition helpers the daemon and its rows share, which name
 no row either — and it names it because this package IS a row: `./server` is a
 `definePlugin`, and the tags are how it says what it needs.
 
-**It reads no environment** — the state root, the root token and the store URI
-arrive as arguments, because the one variable that must never be found by
+**It reads no environment** — the state root, the root token and the migration
+source arrive as arguments, because the one variable that must never be found by
 accident is a root token. The single exception is `./cli`, which is a process
 and therefore has an environment: which token to present, and where `~` is, are
 its caller's facts, not the engine's.
@@ -56,13 +56,12 @@ on the wire and `cache_bucket_create` to an agent.
 - **Narinfo signatures are computed at READ time.** A stored signature would
   silently survive a rotated key; one ed25519 sign per narinfo GET is nothing.
   The client's own signatures are kept beside the server's.
-- **Blobs are the machine's Nix store.** `put` imports a NAR through the daemon,
-  `get` streams `nix store dump-path` through zstd, `delete` drops odu's gcroot
-  and runs `nix-store --delete`. Dedup across buckets is by store path, for
-  free, and there is no second copy on a single machine.
+- **Blobs are the compressed NAR the pusher sent.** `ObjectStore` keeps
+  `<narHash>.<ext>` under `<state>/cache/objects`; nothing is imported, and
+  references are names in the narinfo. Dedup is per NarHash per bucket, and a
+  twin row shares the object until GC deletes it with the last row.
 - **GC is the niks3 model.** An object is evicted only when retention has
-  expired, nothing retained in the bucket references it, and no pin holds it —
-  a path with no retaining bucket loses its root and is deleted from the store.
+  expired, nothing retained in the bucket references it, and no pin holds it.
   This is the direct answer to the failure chutney shipped: 669 GB of S3 and
   46 GB of Postgres with growth unbounded and GC off.
 

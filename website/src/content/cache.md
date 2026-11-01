@@ -124,7 +124,7 @@ What it says while it works — one preamble, then one line per path as the buck
 ❌ /nix/store/…-bad-output refused: the upload was truncated or corrupted
 ```
 
-A push records each path as it lands. There is no hold to wait for: references are names in the narinfo, not paths the server must already hold. The exit is non-zero only for refusals.
+A push records each path as it lands. There is no hold to wait for: references are names in the narinfo, not paths the server must already hold. The exit is non-zero only for refusals. The server keeps and serves the upload as it arrived — `nix copy --to` defaults to xz, `?compression=zstd` sends zstd — and `--wait` is deprecated: it returns at once, and `/held` answers an empty list until the next major.
 
 A NAR larger than `--part-size` (64 MiB by default) is sent in parts, each retried on its own; the server reassembles them and the same hash proof decides. That is what makes a push work through a proxy with a request-size ceiling — Cloudflare's is 100 MB.
 
@@ -169,15 +169,15 @@ The server accepts any username and the token as the password.
 | | cachix push | attic push | `odu cache push` |
 | --- | --- | --- | --- |
 | Closure, batched missing query, retries | yes | yes | yes |
-| Skips paths cache.nixos.org already has | yes | yes | yes: the server drops paths signed by an upstream key, `cache.nixos.org-1` by default — or nothing, with `--no-upstream` |
+| Skips paths cache.nixos.org already has | yes | yes | yes: the server drops paths signed by an upstream key, `cache.nixos.org-1` by default — or nothing, with `--no-upstream` (which also stores upstream closures, costing disk, for consumers that cannot reach cache.nixos.org) |
 | Streams NARs, parallel uploads | yes | yes | yes: `nix store dump-path` through zstd, several paths at a time, retry per path |
 | Uploads bypass the server | yes, straight to S3 | no | no; a later release adds it for object storage |
-| Dedup | per NAR | per chunk | per store path |
+| Dedup | per NAR | per chunk | per NarHash per bucket |
 | Pushes every build as it happens | `watch-exec`, `watch-store` | `watch-store` | not yet; a later release adds a post-build hook for lane hosts |
 | Client signs with its own key | optional | no | no; the server signs |
 | Client to install | cachix | attic | odu itself, or nothing: use `nix copy` with netrc |
 
-Until the hook ships, a CI job pushes only the closures it names. Plain `nix copy --to` compresses each NAR in memory before uploading and checks the cache one path at a time, which is why `odu cache push` exists; prefer it for large closures.
+Until the hook ships, a CI job pushes only the closures it names. Plain `nix copy --to` compresses each NAR in memory on the CLIENT before uploading and checks the cache one path at a time; the server keeps and serves the bytes exactly as they arrived (`nix copy --to` defaults to xz, `?compression=zstd` asks for zstd). That client-memory limit is why `odu cache push` exists; prefer it for large closures.
 
 ## Private buckets
 
@@ -197,14 +197,15 @@ On the board: a bucket page's **Pin a closure**, **Run GC** and **Stats** sectio
 
 ## Where the data lives
 
-The cache keeps **the compressed NAR the pusher sent**, once, and no Nix store of its own. That is the Cachix/Attic model: an object is a content-named file (`<bucket>/nar/<narHash>.nar.zst`), references are names in the narinfo, and nothing is imported. On the pod this replaced a 166 GB `/nix/store` of upstream closures nobody pulled from us.
+The cache keeps **the compressed NAR the pusher sent**, once, and no Nix store of its own. That is the Cachix/Attic model: an object is a content-named file (`<bucket>/nar/<narHash>.<ext>`, where the extension is the stored compression), references are names in the narinfo, and nothing is imported. On the pod this replaced a 166 GB `/nix/store` of upstream closures nobody pulled from us.
 
-- A push assembles (or receives) `nar/<narHash>.nar.zst`, decompresses and hashes it against the narinfo's `NarHash`, then **keeps the file** and records its sha256 and length as `FileHash:`/`FileSize:`. One write, no second copy.
-- Serving is the file, with `Content-Length` and `Range`: Cloudflare caches an object under 512 MB and passes a larger one through, and a 634 MB NAR pulls through a cold edge. The server never re-dumps or re-compresses a path per reader.
+- A push assembles (or receives) `nar/<narHash>.<ext>`, decompresses and hashes it against the narinfo's `NarHash`, then **keeps the file** and records its sha256 and length as `FileHash:`/`FileSize:`. One write, no second copy; the same NarHash+compression keeps the existing file, and twins share one object until GC deletes it with the last row.
+- Serving is the file, with `Content-Length` and `Range`: Cloudflare's 512 MB per-file CACHE limit means larger objects are served uncached through the tunnel, not refused — and its 100 MB request cap is why pushes are chunked. A 634 MB NAR pulls through a cold edge. The server never re-dumps or re-compresses a path per reader.
 - A narinfo whose references are absent is recorded anyway: references are names, not paths a store must hold first. A `.drv` path, or a reference to one, is still refused with 400.
 - `CA:` is **proved from the object we hold**: odu recomputes Nix's `fixed:r:sha256` store path from (name, references and bytes) and serves the line only when the formula reproduces the path. A non-self row uses its NarHash; a self-referencing row uses Nix's hash-modulo-self-references, computed while the NAR streams through verification. Old rows get a one-time background pass after the cache is serving (two workers, progress logged), and the verdict is persisted so a row is read once. Nothing is taken from the pusher.
 - GC deletes the object with its row; an object with no row (a crash between put and record) is swept at boot and logged.
-- **The one-time migration.** A deployment upgrading from the store-backed cache has rows whose object is not on disk. After the cache is mounted and serving, two at a time, odu dumps each from the old store (`$ODU_CACHE_STORE`, or the host's own `/nix/store` when unset) into the object store. It pauses below 10 GiB free and re-checks every minute, resuming without a restart. Until a row's object lands, its NAR is served through the old store (logged as `source: transition`); a row the old store does not have answers 404 and is named once. The log line `cache.migration.complete` says every row has its object and the old store can be deleted. On the module shape the old store is the host's `/nix/store`: delete the abandoned roots under `<state>/cache/gcroots`, then let `nix-collect-garbage` reclaim the paths; do not delete `/nix/store`.
+- **The one-time migration.** A deployment upgrading from the store-backed cache has rows whose object is not on disk. After the cache is mounted and serving, two at a time, odu dumps each from the old store (`$ODU_CACHE_STORE`, or the host's own `/nix/store` when unset) into the object store. It pauses below 10 GiB free and re-checks every minute, resuming without a restart. Until a row's object lands, its NAR is served through the old store (logged as `source: transition`); a row the old store does not have answers 404 and is named once. A row whose object is missing or unreadable is retried by the next boot's background work, not by a request. The log line `cache.migration.complete` says every row has its object and the old store can be deleted. On the module shape the old store is the host's `/nix/store`: delete the abandoned roots under `<state>/cache/gcroots`, then let `nix-collect-garbage` reclaim the paths; do not delete `/nix/store`.
+- **Sizing.** Disk is the compressed objects plus staging for the largest in-flight NAR; memory is constant per NAR, not proportional to its size. A `--no-upstream` bucket also stores every upstream-signed closure it is pushed, so budget that disk deliberately.
 
 ```text
 <state>/cache/cache.sqlite            metadata, bucket signing keys, token hashes, pins
@@ -258,7 +259,7 @@ Odu then:
 1. creates one Cloudflare Tunnel for this server, named after its public origin, the first time any name is set;
 2. routes every name through that tunnel to the cache;
 3. creates each proxied DNS record;
-4. starts the `cloudflared` connector as a child of the daemon — the way it runs `nix`.
+4. starts the `cloudflared` connector as a child of the daemon (as it does `nix` only during a migration).
 
 A name is **wiring** while that happens, **live** once `https://<name>/nix-cache-info` answers, or **failed** with Cloudflare's reason (a token without the DNS permission; a zone the token cannot see). The bucket page's route strip and the board's **Tunnel** page show it, and `odu cloudflare status` asks from a terminal. The tunnel page also shows the connector: running, connected, stopped, or failed with the last words `cloudflared` said.
 
@@ -286,6 +287,17 @@ The connector needs outbound HTTPS from the server and nothing inbound: no port 
 
 The rows arrive over the wire the page already holds, so a path pushed from a build box appears without a reload; reads are folded into a bucket's counters at most once a second rather than once per NAR.
 
+## Operating it
+
+Watch these lines on a foreground `odu web` (it prints a row's operational `info`, and drops host narration):
+
+- `cache.migration.start` / `.progress` / `.pause` / `.resume` / `.complete` / `.incomplete` — objects, NAR bytes, free space. On `incomplete`, the rows it names have no object and no old-store copy: their NAR answers 404 until re-pushed.
+- `cache.self_ca.start` / `.progress` / `.complete` — the one-time self-reference proof pass, with rows, bytes, proved/refused/unreadable.
+- `cache.nar.served` — path, bytes actually written, ms, `source` (`file`/`object`/`transition`), `cancelled`.
+- `cache.nar.unavailable` — no object and the old store lacks it; served as 404 once per path.
+- `cache.boot.orphans`, `cache.boot.ca` — sweep and metadata-CA counts at boot.
+- `cache.import.recorded`, `cache.request.refused`, `cache.object.put_failed`.
+
 ## Protocol
 
 One bucket is one substituter. Point any Nix-compatible tool at these routes:
@@ -294,8 +306,8 @@ One bucket is one substituter. Point any Nix-compatible tool at these routes:
 GET  /cache/<bucket>/nix-cache-info             StoreDir, WantMassQuery: 1, Priority: 40
 HEAD /cache/<bucket>/<hash>.narinfo
 GET  /cache/<bucket>/<hash>.narinfo
-GET  /cache/<bucket>/nar/<filehash>.nar.zst     the object file, Content-Length + Range
-PUT  /cache/<bucket>/nar/<filehash>.nar.<ext>   Bearer or Basic; any ext Nix sends
+GET  /cache/<bucket>/nar/<narHash>.<ext>       the object file, Content-Length + Range
+PUT  /cache/<bucket>/nar/<narHash>.<ext>         Bearer or Basic; any ext Nix sends
 PUT  /cache/<bucket>/<hash>.narinfo             server re-signs with the bucket key
 POST /_odu/v1/buckets/<bucket>/missing          batch "which of these are you missing"
 GET  /cache/<bucket>/                           a public bucket's facts: the use block,
@@ -315,7 +327,7 @@ Writes, and reads of private buckets, accept `Authorization: Bearer <token>` or 
 
 | Command | What it does | On the board |
 | --- | --- | --- |
-| `odu cache create <bucket> [--no-upstream]` | Create a bucket; print its substituter URL and public key. `--no-upstream` takes everything, for a store that is not the builder's | Cache → **Create bucket**, **Skip upstream paths** off |
+| `odu cache create <bucket> [--no-upstream]` | Create a bucket; print its substituter URL and public key. `--no-upstream` takes everything, including upstream-signed closures (costs disk; for consumers that cannot reach cache.nixos.org) | Cache → **Create bucket**, **Skip upstream paths** off |
 | `odu cache list` | List buckets | Cache |
 | `odu cache use <bucket>` | Print the substituter and key settings, the `nixConfig` block, and the netrc lines. No account for a public bucket | a bucket page's block |
 | `odu cache domain <bucket> <name>\|--none` | Give a bucket a DNS name of its own, or take it away | bucket → **Domain** |
