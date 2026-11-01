@@ -26,6 +26,7 @@
  * multi-gigabyte closure on a laptop.
  */
 
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import {
   credentialsPath as sharedCredentialsPath,
@@ -480,13 +481,14 @@ async function putPart(
   attempts: number,
   say: (line: string) => void,
   storePath: string,
+  session: string,
 ): Promise<{ ok: true } | { ok: false; message: string }> {
   let lastMessage = "no attempt was made";
   for (let attempt = 0; attempt < attempts; attempt++) {
     if (attempt > 0) say(`↻ ${storePath} part ${index + 1} (retry ${attempt})`);
     const response = await fetch(`${base}/nar/${narName}/parts/${index}`, {
       method: "PUT",
-      headers: { ...headers, "content-type": "application/x-nix-nar" },
+      headers: { ...headers, "content-type": "application/x-nix-nar", "x-odu-upload": session },
       // Bun's fetch takes the bytes; the DOM `BodyInit` the type names does
       // not include this `Uint8Array` spelling.
       body: part as unknown as BodyInit,
@@ -541,6 +543,10 @@ async function uploadNar(
     };
   }
 
+  // THIS UPLOAD'S OWN PARTS (contract 2.4): another pusher of the same path,
+  // at another zstd level, cannot have its parts joined into ours. An older
+  // server ignores the header and keeps the shared names.
+  const session = randomUUID();
   let index = 0;
   let current = first.value as Uint8Array;
   let ahead: IteratorResult<Uint8Array> = second;
@@ -554,6 +560,7 @@ async function uploadNar(
       attempts,
       say,
       entry.storePath,
+      session,
     );
     if (!sent.ok) {
       await parts.return(undefined as never);
@@ -570,7 +577,7 @@ async function uploadNar(
 
   const joined = await fetch(`${base}/nar/${narName}/complete`, {
     method: "POST",
-    headers: { ...headers, "x-odu-parts": String(index) },
+    headers: { ...headers, "x-odu-parts": String(index), "x-odu-upload": session },
   }).catch(asError);
   if (joined instanceof Error) return { ok: false, message: joined.message, retry: true };
   if (!joined.ok) {

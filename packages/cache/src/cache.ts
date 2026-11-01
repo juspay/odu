@@ -292,16 +292,23 @@ export interface Cache {
   narSource(bucket: BucketRow, file: string): Promise<NarSource | null>;
   beginUpload(bucket: BucketRow, file: string): Promise<Upload>;
   /** One part of a chunked NAR, under the part ceiling. A retry overwrites the
-   *  same index, so a dropped request costs one part. */
+   *  same index, so a dropped request costs one part. `session` (2.4) makes
+   *  the parts this upload's own; null keeps the shared names 2.x sends. */
   beginPart(
     bucket: BucketRow,
     file: string,
     index: number,
     limit: number,
+    session?: string | null,
   ): Promise<Upload>;
   /** Join the parts into the NAR the narinfo will name. `missing` non-empty
    *  means the client's count is ahead of what arrived. */
-  completeUpload(bucket: BucketRow, file: string, total: number): Promise<CompleteUpload>;
+  completeUpload(
+    bucket: BucketRow,
+    file: string,
+    total: number,
+    session?: string | null,
+  ): Promise<CompleteUpload>;
   acceptNarinfo(bucket: BucketRow, hash: string, body: ReadableStream<Uint8Array>): Promise<NarinfoOutcome>;
   /** Which of `paths` the bucket needs. `skipped` is the subset it will never
    *  take because an upstream key signed it — reported separately so `odu cache
@@ -1256,8 +1263,10 @@ export function createCache(options: CacheOptions): Cache {
     // The write path is `./staging`'s; this face is the one the routes speak,
     // and it is the same object either way.
     beginUpload: (bucket, file) => staging.beginUpload(bucket, file),
-    beginPart: (bucket, file, index, limit) => staging.beginPart(bucket, file, index, limit),
-    completeUpload: (bucket, file, total) => staging.completeUpload(bucket, file, total),
+    beginPart: (bucket, file, index, limit, session) =>
+      staging.beginPart(bucket, file, index, limit, session),
+    completeUpload: (bucket, file, total, session) =>
+      staging.completeUpload(bucket, file, total, session),
     async acceptNarinfo(bucket, hash, body) {
       const outcome = await staging.acceptNarinfo(bucket, hash, body);
       // A PUSH LANDED OR WAS REFUSED — the changes nobody outside the cache

@@ -1006,6 +1006,41 @@ describe("uploading", () => {
     await h.dispose();
   });
 
+  it("keeps each session's parts apart, and refuses a malformed session", async () => {
+    const h = await harness(true);
+    const staged = "/nix/store/cccccccccccccccccccccccccccccccc-sessions";
+    const payload = nar("parts that belong to one upload");
+    const other = nar("parts that belong to another upload!");
+    const name = `${payload.narHash.replace(/^sha256:/, "")}.nar.zst`;
+    const part = (session: string, bytes: Uint8Array) =>
+      h.fetch(`/main/nar/${name}/parts/0`, {
+        method: "PUT",
+        headers: { authorization: `Bearer ${h.tokens.write}`, "x-odu-upload": session },
+        body: body(bytes),
+      });
+    // TWO UPLOADS OF ONE NAME, index 0 each: neither overwrites the other.
+    expect((await part("mine", payload.bytes)).status).toBe(204);
+    expect((await part("theirs", other.bytes)).status).toBe(204);
+    expect(stagedFiles().filter((file) => file.includes(".part-0")).sort()).toEqual([
+      `/main/nar/${name}.s-mine.part-0`,
+      `/main/nar/${name}.s-theirs.part-0`,
+    ]);
+    const joined = await h.fetch(`/main/nar/${name}/complete`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${h.tokens.write}`, "x-odu-upload": "mine", "x-odu-parts": "1" },
+    });
+    expect(joined.status).toBe(200);
+    const narinfo = await h.fetch(`/main/${hashOf(staged)}.narinfo`, {
+      ...bearer(h.tokens.write),
+      method: "PUT",
+      body: `StorePath: ${staged}\nURL: nar/${name}\nCompression: none\nNarHash: ${payload.narHash}\nNarSize: ${payload.bytes.length}\nReferences: \n`,
+    });
+    expect(narinfo.status).toBe(200);
+    // A SESSION IS PART OF A FILE NAME: anything but a plain token is refused.
+    expect((await part("../escape", payload.bytes)).status).toBe(400);
+    await h.dispose();
+  });
+
   it("names the path, parts and bytes when a joined upload fails its proof", async () => {
     const lines: string[] = [];
     const h = await harness(true, "https://odu.example.org", (event, fields) =>

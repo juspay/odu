@@ -51,7 +51,7 @@ import {
   HASH_PATTERN,
   PUSH_API,
 } from "./paths";
-import { NIX_CACHE_INFO } from "./staging";
+import { isUploadSession, NIX_CACHE_INFO } from "./staging";
 import type { BucketRow, Scope } from "./db";
 import { isStagedFileName, isStorePathHash } from "./narinfo";
 import {
@@ -365,6 +365,20 @@ const NARINFO_SUFFIX = ".narinfo";
 const bad = (message: string): HttpServerResponse.HttpServerResponse =>
   HttpServerResponse.text(message, { status: 400 });
 
+/**
+ * THE UPLOAD SESSION a chunked upload's parts and join carry (`x-odu-upload`,
+ * contract 2.4): the parts are that upload's own, so two clients sending one
+ * NAR cannot have theirs joined together. Absent is a 2.x client, and keeps
+ * the shared part names; malformed (`undefined`) is refused.
+ */
+function uploadSession(request: HttpServerRequest.HttpServerRequest): string | null | undefined {
+  const value = request.headers["x-odu-upload"];
+  if (value === undefined || value === "") return null;
+  return isUploadSession(value) ? value : undefined;
+}
+
+const BAD_SESSION = "x-odu-upload must be 1–64 letters, digits, '-' or '_'";
+
 /** ONE line per refused request: method, path, status and the reason. */
 function refused(
   cache: Cache,
@@ -534,6 +548,8 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
         }
         const admitted = admit(cache, request, yield* param("bucket"), "write");
         if (!admitted.ok) return admitted.response;
+        const session = uploadSession(request);
+        if (session === undefined) return refused(cache, request, BAD_SESSION);
         const declared = Number(request.headers["content-length"] ?? "");
         if (Number.isFinite(declared) && declared > MAX_NAR_PART_BYTES) {
           return HttpServerResponse.text(
@@ -542,7 +558,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
           );
         }
         const upload = yield* Effect.promise(() =>
-          cache.beginPart(admitted.bucket, file, index, MAX_NAR_PART_BYTES),
+          cache.beginPart(admitted.bucket, file, index, MAX_NAR_PART_BYTES, session),
         );
         const written = yield* Effect.result(
           Stream.runForEach(request.stream, (chunk) =>
@@ -577,8 +593,10 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
         if (!Number.isSafeInteger(total) || total < 1) {
           return refused(cache, request, "send x-odu-parts: the number of parts this NAR has");
         }
+        const session = uploadSession(request);
+        if (session === undefined) return refused(cache, request, BAD_SESSION);
         const outcome = yield* Effect.promise(() =>
-          cache.completeUpload(admitted.bucket, file, total),
+          cache.completeUpload(admitted.bucket, file, total, session),
         );
         if (!outcome.ok) {
           return HttpServerResponse.jsonUnsafe(

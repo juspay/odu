@@ -60,6 +60,7 @@ interface Seen {
   method: string;
   path: string;
   authorization: string | null;
+  upload: string | null;
   body: string;
 }
 
@@ -128,6 +129,7 @@ function startServer(): Server {
         method: request.method,
         path: url.pathname,
         authorization: request.headers.get("authorization"),
+        upload: request.headers.get("x-odu-upload"),
         body,
       });
       if (request.method === "GET" && url.pathname === "/cache/main") {
@@ -344,6 +346,15 @@ describe("pushing a closure", () => {
         .map((seen) => Number(seen.path.slice(seen.path.lastIndexOf("/") + 1)));
       expect(parts).toEqual([0, 1, 1, 2]);
       expect(server.completed).toEqual([{ file: narName, total: 3 }]);
+      // ONE SESSION for every part and the join (contract 2.4): the parts are
+      // this upload's own, whoever else is sending the same path.
+      const sessions = new Set(
+        server.seen
+          .filter((seen) => seen.path.includes("/parts/") || seen.path.endsWith("/complete"))
+          .map((seen) => seen.upload),
+      );
+      expect(sessions.size).toBe(1);
+      expect([...sessions][0]).toMatch(/^[0-9a-f-]{36}$/);
       expect(server.seen.some((seen) => seen.method === "PUT" && seen.path.endsWith(".nar.zst"))).toBe(
         false,
       );

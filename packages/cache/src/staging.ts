@@ -114,6 +114,22 @@ export type CompleteUpload =
  *  from a real one. */
 export const NIX_CACHE_INFO = "StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 40\n";
 
+/** An upload session as a client names it (`x-odu-upload`): a plain token,
+ *  because it becomes part of a staged file name. */
+export function isUploadSession(value: string): boolean {
+  return /^[A-Za-z0-9_-]{1,64}$/.test(value);
+}
+
+/**
+ * THE NAME A CHUNKED UPLOAD'S PARTS AND MARKER HANG OFF. With a session (2.4
+ * clients), every upload owns its parts: two clients sending one NAR at
+ * different zstd levels can no longer have their parts joined together. Without
+ * one (a 2.x client), the parts keep the shared name they always had.
+ */
+function partStem(file: string, session: string | null): string {
+  return session === null ? file : `${file}.s-${session}`;
+}
+
 /** How long a staged upload nobody finished survives. */
 const STAGE_TTL_MS = 60 * 60 * 1000;
 
@@ -161,8 +177,19 @@ export interface StagingDeps {
 export interface Staging {
   close(): Promise<void>;
   beginUpload(bucket: BucketRow, file: string): Promise<Upload>;
-  beginPart(bucket: BucketRow, file: string, index: number, limit: number): Promise<Upload>;
-  completeUpload(bucket: BucketRow, file: string, total: number): Promise<CompleteUpload>;
+  beginPart(
+    bucket: BucketRow,
+    file: string,
+    index: number,
+    limit: number,
+    session?: string | null,
+  ): Promise<Upload>;
+  completeUpload(
+    bucket: BucketRow,
+    file: string,
+    total: number,
+    session?: string | null,
+  ): Promise<CompleteUpload>;
   acceptNarinfo(
     bucket: BucketRow,
     hash: string,
@@ -366,11 +393,17 @@ export function createStaging(deps: StagingDeps): Staging {
     };
   }
 
-  /** Join one staged file's parts — under the file's lock, so two completes
-   *  cannot unlink what the other reads. */
-  async function completeNow(bucket: BucketRow, file: string, total: number): Promise<CompleteUpload> {
+  /** Join one upload's parts — under its lock, so two completes cannot
+   *  unlink what the other reads. */
+  async function completeNow(
+    bucket: BucketRow,
+    file: string,
+    total: number,
+    session: string | null,
+  ): Promise<CompleteUpload> {
     const dirForBucket = stagedDir(bucket.name);
-    const partPath = (index: number): string => join(dirForBucket, "nar", `${file}.part-${index}`);
+    const stem = partStem(file, session);
+    const partPath = (index: number): string => join(dirForBucket, "nar", `${stem}.part-${index}`);
     const missing: number[] = [];
     for (let index = 0; index < total; index++) {
       const info = await stat(partPath(index)).catch(() => null);
@@ -382,7 +415,7 @@ export function createStaging(deps: StagingDeps): Staging {
       const target = join(dirForBucket, "nar", file);
       const assembled = await stat(target).catch(() => null);
       if (assembled !== null && assembled.isFile()) {
-        await unlink(uploadMarker(dirForBucket, file)).catch(() => {});
+        await unlink(uploadMarker(dirForBucket, stem)).catch(() => {});
         joined.set(`${bucket.name}/${file}`, { parts: total, bytes: assembled.size });
         return { ok: true, parts: total };
       }
@@ -418,7 +451,7 @@ export function createStaging(deps: StagingDeps): Staging {
     for (let index = 0; index < total; index++) {
       await unlink(partPath(index)).catch(() => {});
     }
-    await unlink(uploadMarker(dirForBucket, file)).catch(() => {});
+    await unlink(uploadMarker(dirForBucket, stem)).catch(() => {});
     const joinedInfo = await stat(target).catch(() => null);
     joined.set(`${bucket.name}/${file}`, {
       parts: total,
@@ -538,29 +571,36 @@ export function createStaging(deps: StagingDeps): Staging {
       return openAt(join(dirForBucket, "nar", file), null);
     },
 
-    async beginPart(bucket, file, index, limit) {
+    async beginPart(bucket, file, index, limit, session = null) {
       if (!isStagedFileName(file)) throw new Error(`"${file}" is not a NAR file name`);
       if (!Number.isSafeInteger(index) || index < 0 || index >= MAX_PARTS) {
         throw new Error(`"${index}" is not a part index`);
       }
+      if (session !== null && !isUploadSession(session)) {
+        throw new Error(`"${session}" is not an upload session`);
+      }
       const dirForBucket = stagedDir(bucket.name);
+      const stem = partStem(file, session);
       await mkdir(join(dirForBucket, "nar"), { recursive: true, mode: 0o700 });
-      await touchUpload(dirForBucket, file);
-      return openAt(join(dirForBucket, "nar", `${file}.part-${index}`), limit);
+      await touchUpload(dirForBucket, stem);
+      return openAt(join(dirForBucket, "nar", `${stem}.part-${index}`), limit);
     },
 
-    async completeUpload(bucket, file, total) {
+    async completeUpload(bucket, file, total, session = null) {
       if (!isStagedFileName(file)) throw new Error(`"${file}" is not a NAR file name`);
       if (!Number.isSafeInteger(total) || total < 1 || total > MAX_PARTS) {
         throw new Error(`"${total}" is not a part count`);
       }
-      const key = `${bucket.name}/${file}`;
+      if (session !== null && !isUploadSession(session)) {
+        throw new Error(`"${session}" is not an upload session`);
+      }
+      const key = `${bucket.name}/${partStem(file, session)}`;
       let chain = completes.get(key);
       if (chain === undefined) {
         chain = newChain();
         completes.set(key, chain);
       }
-      return serial(chain, () => completeNow(bucket, file, total));
+      return serial(chain, () => completeNow(bucket, file, total, session));
     },
 
     async acceptNarinfo(bucket, hash, body) {
