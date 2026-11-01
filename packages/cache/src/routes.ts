@@ -683,33 +683,36 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
  * each write is small enough to be released. */
 const NAR_WRITE_BYTES = 64 * 1024;
 
-/** Re-chunk a NAR stream at NAR_WRITE_BYTES, one piece per pull. */
+/** Re-chunk a NAR stream at NAR_WRITE_BYTES, one piece per pull.
+ *
+ * `subarray` is a VIEW: the parent source chunk stays alive until its last
+ * piece is written, which is bounded by one chunk. The measurement says the
+ * growth is write-queue retention of many chunks, not this one.
+ */
 function narWrites(stream: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
   const reader = stream.getReader();
-  const pending: Uint8Array[] = [];
+  let current: Uint8Array | null = null;
+  let offset = 0;
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
-      const next = pending.pop();
-      if (next !== undefined) {
-        controller.enqueue(next);
-        return;
+      for (;;) {
+        if (current !== null && offset < current.length) {
+          const piece = current.subarray(
+            offset,
+            Math.min(current.length, offset + NAR_WRITE_BYTES),
+          );
+          offset += piece.length;
+          controller.enqueue(piece);
+          return;
+        }
+        const read = await reader.read();
+        if (read.done) {
+          controller.close();
+          return;
+        }
+        current = read.value;
+        offset = 0;
       }
-      const read = await reader.read();
-      if (read.done) {
-        controller.close();
-        return;
-      }
-      const value = read.value;
-      if (value.length <= NAR_WRITE_BYTES) {
-        controller.enqueue(value);
-        return;
-      }
-      let at = 0;
-      while (at + NAR_WRITE_BYTES < value.length) {
-        pending.push(value.subarray(at + NAR_WRITE_BYTES, at + 2 * NAR_WRITE_BYTES));
-        at += NAR_WRITE_BYTES;
-      }
-      controller.enqueue(value.subarray(0, NAR_WRITE_BYTES));
     },
     cancel(reason) {
       return reader.cancel(reason);

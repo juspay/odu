@@ -951,8 +951,20 @@ describe("the shell's own paths", () => {
 /** A stream of `count` repeated `size`-byte chunks: large in TOTAL BYTES, small
  *  on the heap. The same buffer is handed out every pull, so a leaking server
  *  shows up as RSS and not as this fixture's allocation. */
+function pattern(size: number): Uint8Array {
+  const chunk = new Uint8Array(size);
+  let x = 0x9e3779b9;
+  for (let at = 0; at < chunk.length; at++) {
+    x ^= x << 13;
+    x ^= x >>> 17;
+    x ^= x << 5;
+    chunk[at] = x & 0xff;
+  }
+  return chunk;
+}
+
 function bigStream(count: number, size = 64 * 1024): ReadableStream<Uint8Array> {
-  const chunk = new Uint8Array(size).fill(7);
+  const chunk = pattern(size);
   let sent = 0;
   return new ReadableStream({
     pull(controller) {
@@ -998,17 +1010,24 @@ describe("a large NAR stays off the heap", () => {
       const response = await h.fetch(`/main/nar/${file}`);
       expect(response.status).toBe(200);
       const reader = (response.body as ReadableStream<Uint8Array>).getReader();
+      const digest = createHash("sha256");
       let reads = 0;
       let bytes = 0;
       for (;;) {
         const next = await reader.read();
         if (next.done) break;
+        digest.update(next.value);
         bytes += next.value.length;
         reads += 1;
         // A SLOW CLIENT: the server must stop producing, not buffer.
         if (reads % 16 === 0) await new Promise((resolve) => setTimeout(resolve, 5));
       }
+      const expected = createHash("sha256");
+      const chunk = pattern(size);
+      for (let i = 0; i < chunks; i++) expected.update(chunk);
       expect(bytes).toBe(chunks * size);
+      // CONTENT, not just length: the pieces must arrive in order.
+      expect(digest.digest("hex")).toBe(expected.digest("hex"));
     });
     expect({ growth, within: growth < LIMIT }).toEqual({ growth, within: true });
     await h.dispose();
