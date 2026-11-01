@@ -12,6 +12,7 @@
         "@odu/cache": "workspace:*",
         "@odu/ci": "workspace:*",
         "@odu/cli": "workspace:*",
+        "@odu/cloudflare": "workspace:*",
         "@odu/cordis": "workspace:*",
         "@odu/execution": "workspace:*",
         "@odu/face": "workspace:*",
@@ -105,6 +106,7 @@
         "@modelcontextprotocol/sdk": "^1.29.0",
         "@odu/auth": "workspace:*",
         "@odu/cache": "workspace:*",
+        "@odu/cloudflare": "workspace:*",
         "@odu/cordis": "workspace:*",
         "@odu/execution": "workspace:*",
         "@odu/launch": "workspace:*",
@@ -115,6 +117,20 @@
         "@opentui/core": "^0.4.5",
         "@xterm/headless": "^6.0.0",
         "effect": "4.0.0",
+      },
+    },
+    "packages/cloudflare": {
+      "name": "@odu/cloudflare",
+      "version": "0.1.0",
+      "dependencies": {
+        "@odu/cordis": "workspace:*",
+        "@odu/face": "workspace:*",
+        "effect": "4.0.0",
+        "solid-js": "^1.9.15",
+      },
+      "devDependencies": {
+        "@cucumber/cucumber": "^12.8.1",
+        "playwright": "1.61.1",
       },
     },
     "packages/cordis": {
@@ -153,6 +169,7 @@
         "@odu/auth": "workspace:*",
         "@odu/cache": "workspace:*",
         "@odu/ci": "workspace:*",
+        "@odu/cloudflare": "workspace:*",
         "@odu/cordis": "workspace:*",
         "@odu/launch": "workspace:*",
         "@odu/run-history": "workspace:*",
@@ -219,6 +236,7 @@
         "@odu/auth": "workspace:*",
         "@odu/cache": "workspace:*",
         "@odu/ci": "workspace:*",
+        "@odu/cloudflare": "workspace:*",
         "@odu/cordis": "workspace:*",
         "@odu/service-client": "workspace:*",
         "effect": "4.0.0",
@@ -343,6 +361,8 @@
     "@odu/ci": ["@odu/ci@workspace:packages/ci"],
 
     "@odu/cli": ["@odu/cli@workspace:packages/cli"],
+
+    "@odu/cloudflare": ["@odu/cloudflare@workspace:packages/cloudflare"],
 
     "@odu/cordis": ["@odu/cordis@workspace:packages/cordis"],
 

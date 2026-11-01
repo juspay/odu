@@ -1,0 +1,31 @@
+{
+  "name": "@odu/cloudflare",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "cordis": {
+    "row": "cloudflare"
+  },
+  "//cordis": "THE ROW that makes a bucket's DNS name exist. It reacts to the cache row's published domains (a service, never that row's internals), and owns the tunnel, its routes, the DNS records and the connector process.",
+  "//": "A DOMAIN, A PROXY AND A CONNECTOR — the three things between a bucket's name and a person's `nix.conf`. The tunnel and records are Cloudflare's; the connector is a child process of this daemon, the way the cache shells out to `nix`.",
+  "//dependencies": "`@odu/cordis` for the shared vocabulary (the cache's domain facts, the state root, the origins) and the surface framework. No row packages: this row must not reach the cache row's database or verbs, and nothing may reach this row's.",
+  "sideEffects": false,
+  "exports": {
+    "./surface": "./src/surface.ts",
+    "./server": "./src/server.ts",
+    "./cli": "./src/cli.ts",
+    "./face": "./src/face.tsx"
+  },
+  "dependencies": {
+    "@odu/cordis": "workspace:*",
+    "@odu/face": "workspace:*",
+    "effect": "4.0.0",
+    "solid-js": "^1.9.15"
+  },
+  "//devDependencies": "The browser suite's toolchain, for the features and steps this row OWNS: a row keeps its promises under its own `e2e/`, and cucumber and playwright are what runs them.",
+  "devDependencies": {
+    "@cucumber/cucumber": "^12.8.1",
+    "playwright": "1.61.1"
+  }
+}

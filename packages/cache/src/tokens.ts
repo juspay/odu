@@ -71,7 +71,13 @@ export const TOKEN_TOUCH_MS = 60_000;
 
 export type TokenVerdict =
   | { ok: true; token: TokenRow }
-  | { ok: false; reason: "unknown" | "revoked" | "expired" | "wrong_bucket" | "insufficient" };
+  | {
+      ok: false;
+      reason: "unknown" | "revoked" | "wrong_bucket" | "insufficient";
+    }
+  /** An expiry is a DATE, not a category: the refusal names it, so a person
+   *  holding the token knows which one ran out and when. */
+  | { ok: false; reason: "expired"; expiredAt: number };
 
 /**
  * Resolve a presented token against a bucket and the scope the operation needs.
@@ -87,7 +93,9 @@ export function verifyToken(
   const row = repo.tokenByHash(hashToken(presented));
   if (row === null) return { ok: false, reason: "unknown" };
   if (row.revoked) return { ok: false, reason: "revoked" };
-  if (row.expires !== null && row.expires <= now) return { ok: false, reason: "expired" };
+  if (row.expires !== null && row.expires <= now) {
+    return { ok: false, reason: "expired", expiredAt: row.expires };
+  }
   if (!globMatches(row.bucketGlob, bucket)) return { ok: false, reason: "wrong_bucket" };
   if (!scopeAtLeast(row.scope, need)) return { ok: false, reason: "insufficient" };
   if (row.lastUsed === null || now - row.lastUsed >= TOKEN_TOUCH_MS) {

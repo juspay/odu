@@ -27,6 +27,7 @@ const bucket: BucketRow = {
   publicKey: "main-1:y",
   upstreamKeys: [],
   created: OLD,
+  domain: null,
 };
 
 const other: BucketRow = { ...bucket, name: "other" };

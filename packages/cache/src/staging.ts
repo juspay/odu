@@ -31,11 +31,13 @@
  */
 
 import { mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { createReadStream, createWriteStream } from "node:fs";
 import { randomUUID } from "node:crypto";
+import { once } from "node:events";
 import { basename, join } from "node:path";
 import type { BlobStore } from "./store";
-import { verifyNarFile, writeStreamToFile } from "./store";
-import type { BucketRow, CacheRepo } from "./db";
+import { upstreamFor, verifyNarFile, writeStreamToFile } from "./store";
+import type { BucketRow, CacheRepo, HeldRow } from "./db";
 import {
   formatNarinfo,
   isStagedFileName,
@@ -46,11 +48,12 @@ import {
   storePathHash,
 } from "./narinfo";
 import { newChain, type Chain, serial } from "./serial";
+import type { Slots } from "./slots";
 
 /** A write in progress. `commit` publishes it under the name the narinfo will
  *  name; `discard` removes it. */
 export interface Upload {
-  write(chunk: Uint8Array): Promise<void>;
+  write(chunk: Uint8Array): Promise<UploadWrite>;
   commit(): Promise<void>;
   discard(): Promise<void>;
 }
@@ -59,10 +62,30 @@ export interface Upload {
 export type NarinfoOutcome =
   /** Recorded: the bucket serves this path. */
   | { ok: true; status: 200; storePath: string }
-  /** Accepted, but waiting on references that are not in the store yet. */
-  | { ok: true; status: 202; storePath: string; missing: readonly string[] }
+  /** Accepted, but waiting on references that are not in the store yet.
+   *  `fetching` is how many are being fetched from upstream right now. */
+  | {
+      ok: true;
+      status: 202;
+      storePath: string;
+      missing: readonly string[];
+      fetching: number;
+    }
   /** Refused, with the sentence to put in the body. */
   | { ok: false; status: 400; message: string };
+
+/**
+ * A PART THAT WENT OVER THE CEILING is answered by {@link Upload.write}
+ * returning `"too-large"` rather than throwing: the route's refusal is an HTTP
+ * status about the protocol, and a sentinel is one branch rather than an error
+ * class crossing a stream boundary.
+ */
+export type UploadWrite = "ok" | "too-large";
+
+/** What `completeUpload` came to: every part present, or which indexes are not. */
+export type CompleteUpload =
+  | { ok: true; parts: number }
+  | { ok: false; missing: readonly number[] };
 
 /** What a staged `file://` cache contains, and the first thing a client reads
  *  from a real one. */
@@ -90,10 +113,18 @@ interface Pending {
    * before Nix hashes it a third time.
    */
   proved: boolean;
+  /** How many missing references an upstream fetch is working on right now. */
+  fetching: number;
+  /** References this hold's fetch already landed. */
+  fetched: readonly string[];
+  /** The last line a failed fetch said; cleared when a fetch starts again. */
+  failure: string | null;
 }
 
 export interface StagingDeps {
   repo: CacheRepo;
+  /** THE FETCH BOUND, created by the row that owns this staging. */
+  slots: Slots;
   blob: BlobStore;
   /** The cache's own directory; staging lives at `<dir>/staging`. */
   dir: string;
@@ -110,10 +141,37 @@ export interface StagingDeps {
     expectedNarHash: string,
     clientSigs: readonly string[],
   ) => Promise<boolean>;
+  /** Something a subscriber would see moved — a background fetch landed, or a
+   *  hold's reason changed. Supplied by the cache, whose listener it is. */
+  changed: () => void;
 }
 
 export interface Staging {
+  /** Stop accepting background work, and JOIN a fetch already running.
+   *  The row awaits this BEFORE its database closes: a `nix-store -r` still in
+   *  flight must not import into a database that has gone. */
+  close(): Promise<void>;
+  /** RE-QUEUE every held row this database remembers. Called at row apply: a
+   *  restart must resume a reference fetch, not strand it until a new push. */
+  resume(): Promise<void>;
   beginUpload(bucket: BucketRow, file: string): Promise<Upload>;
+  /**
+   * STAGE ONE PART of a NAR too large for one request. `index` is the part's
+   * position; a retry overwrites the same file, so a dropped part is retried
+   * on its own rather than restarting the path.
+   */
+  beginPart(
+    bucket: BucketRow,
+    file: string,
+    index: number,
+    limit: number,
+  ): Promise<Upload>;
+  /**
+   * JOIN the parts into the NAR the narinfo will name, then drop them. `total`
+   * is the client's count; a gap is answered with the missing indexes rather
+   * than a half-assembled file.
+   */
+  completeUpload(bucket: BucketRow, file: string, total: number): Promise<CompleteUpload>;
   acceptNarinfo(
     bucket: BucketRow,
     hash: string,
@@ -122,7 +180,8 @@ export interface Staging {
 }
 
 export function createStaging(deps: StagingDeps): Staging {
-  const { repo, blob, now, record } = deps;
+  const { repo, blob, now, record, changed } = deps;
+  let closed = false;
   const stagingRoot = join(deps.dir, "staging");
   const stagedDir = (bucket: string): string => join(stagingRoot, bucket);
 
@@ -134,6 +193,11 @@ export function createStaging(deps: StagingDeps): Staging {
   const drains = new Map<string, Chain>();
   /** The staged narinfos this process knows about, by bucket then by hash. */
   const pending = new Map<string, Map<string, Pending>>();
+  /** One upstream fetch at a time per bucket, off the upload request. */
+  const fetches = new Map<string, Chain>();
+  /** One COMPLETE at a time per staged file: two clients finishing one NAR
+   *  would otherwise unlink parts each other is reading. */
+  const completes = new Map<string, Chain>();
   /** Store paths recovered from disk on a bucket's first load, waiting to be
    *  handed to the first drain. */
   const recoveredSeeds = new Map<string, string[]>();
@@ -234,7 +298,10 @@ export function createStaging(deps: StagingDeps): Staging {
         // `waitingOn: []` means "never attempted" and `proved: false` means
         // "this process has not hashed it", which are both exactly right for a
         // narinfo recovered from disk.
-        map.set(hash, { hash, info, waitingOn: [], proved: false });
+        map.set(
+          hash,
+          { hash, info, waitingOn: [], proved: false, fetching: 0, fetched: [], failure: null },
+        );
       } catch {
         await unlink(join(dirForBucket, file)).catch(() => {});
       }
@@ -246,24 +313,200 @@ export function createStaging(deps: StagingDeps): Staging {
     return map;
   }
 
-  /** One import, and the row that follows it. */
+  /** One import, and the row that follows it.
+   *
+   *  A MISSING REFERENCE THE UPSTREAM SIGNED IS NOT WAITED ON IN THE REQUEST.
+   *  `nix-store -r` can outlive a proxy's origin timeout (Cloudflare's is ~100
+   *  s), so the narinfo answers 202 with "fetching", a row-owned queue does the
+   *  substitution, and the import follows when it is done. The hold's reason is
+   *  the progress. */
+  /**
+   * THE REFERRER'S WHOLE MISSING SET, not the one Nix happened to name.
+   *
+   * `nix copy` fails at the FIRST invalid reference and says so; a job built
+   * from stderr therefore fetches one reference per attempt, and the next push
+   * discovers the next. Every reference the narinfo lists is checked against
+   * the store, so one job covers all of them.
+   */
+  async function missingOf(entry: Pending, reported: readonly string[] = []): Promise<string[]> {
+    const references = entry.info.references.filter((one) => one !== entry.info.storePath);
+    // ONE `nix path-info` for the whole set, not one spawn per reference.
+    const here = await blob.presentOf(references);
+    const out = references.filter((reference) => !here.has(reference));
+    for (const one of reported) if (!out.includes(one)) out.push(one);
+    return out;
+  }
+
+  /** What this job landed since the hold was last written: references that
+   *  were missing, are now present, and are still in the narinfo's list. */
+  function landed(entry: Pending, still: readonly string[]): string[] {
+    const wanted = new Set([...entry.waitingOn, ...entry.fetched]);
+    return [...wanted].filter((one) => !still.includes(one));
+  }
+
   async function attempt(
     bucket: BucketRow,
     dirForBucket: string,
     entry: Pending,
-  ): Promise<"recorded" | { missing: readonly string[] } | { failed: string }> {
+  ): Promise<
+    "recorded" | { missing: readonly string[]; fetching: number } | { failed: string }
+  > {
     if (!entry.proved) {
       const staged = await ensureStaged(bucket, dirForBucket, entry.info);
       if (!staged.ok) return { failed: staged.message };
       entry.info = staged.info;
       entry.proved = true;
     }
+    const upstreams = upstreamFor(bucket.upstreamKeys);
     const outcome = await blob.import({ dir: dirForBucket, storePath: entry.info.storePath });
+    if (!outcome.ok && outcome.missing.length > 0) {
+      const missing = await missingOf(entry, outcome.missing);
+      entry.waitingOn = missing;
+      entry.fetched = [...new Set([...entry.fetched, ...landed(entry, missing)])];
+      entry.failure = null;
+      if (upstreams.length > 0) {
+        if (entry.fetching === 0 && !closed) {
+          entry.fetching = missing.length;
+          repo.putHeld({
+            bucket: bucket.name,
+            storePath: entry.info.storePath,
+            missing,
+            fetching: entry.fetching,
+            fetched: entry.fetched,
+            failure: null,
+            created: now(),
+          });
+          enqueueFetch(bucket, dirForBucket, entry, missing);
+          changed();
+        }
+        return { missing, fetching: entry.fetching };
+      }
+      repo.putHeld({
+        bucket: bucket.name,
+        storePath: entry.info.storePath,
+        missing,
+        fetching: 0,
+        fetched: entry.fetched,
+        failure: null,
+        created: now(),
+      });
+      return { missing, fetching: 0 };
+    }
     if (!outcome.ok) {
-      return outcome.missing.length > 0 ? { missing: outcome.missing } : { failed: outcome.message };
+      if (outcome.missing.length > 0) {
+        repo.putHeld({
+          bucket: bucket.name,
+          storePath: entry.info.storePath,
+          missing: outcome.missing,
+          fetching: 0,
+          fetched: entry.fetched,
+          failure: null,
+          created: now(),
+        });
+        return { missing: outcome.missing, fetching: 0 };
+      }
+      repo.deleteHeld(bucket.name, entry.info.storePath);
+      return { failed: outcome.message };
     }
     await record(bucket, entry.info.storePath, entry.info.narHash, entry.info.sigs);
+    repo.deleteHeld(bucket.name, entry.info.storePath);
+    changed();
     return "recorded";
+  }
+
+  /** ONE fetch at a time per bucket, and it is the ROW's work: the queue owns
+   *  the import that follows, so an upload request returns immediately. */
+  function enqueueFetch(
+    bucket: BucketRow,
+    dirForBucket: string,
+    entry: Pending,
+    missing: readonly string[],
+  ): void {
+    let chain = fetches.get(bucket.name);
+    if (chain === undefined) {
+      chain = newChain();
+      fetches.set(bucket.name, chain);
+    }
+    void serial(chain, () => fetchNow(bucket, dirForBucket, entry, missing));
+  }
+
+  async function fetchNow(
+    bucket: BucketRow,
+    dirForBucket: string,
+    entry: Pending,
+    missing: readonly string[],
+  ): Promise<void> {
+    try {
+      if (closed) return;
+      const fetched = await deps.slots.withSlot(() =>
+        blob.substitute(missing, upstreamFor(bucket.upstreamKeys)),
+      );
+      if (closed) return;
+      if (!fetched.ok) {
+        entry.fetching = 0;
+        entry.failure = fetched.message;
+        repo.putHeld({
+          bucket: bucket.name,
+          storePath: entry.info.storePath,
+          missing: entry.waitingOn,
+          fetching: 0,
+          fetched: entry.fetched,
+          failure: fetched.message,
+          created: now(),
+        });
+        return;
+      }
+      entry.failure = null;
+      const still = await missingOf(entry);
+      entry.fetched = [...new Set([...entry.fetched, ...landed(entry, still)])];
+      const outcome = await blob.import({
+        dir: dirForBucket,
+        storePath: entry.info.storePath,
+      });
+      if (closed) return;
+      if (outcome.ok) {
+        await record(bucket, entry.info.storePath, entry.info.narHash, entry.info.sigs);
+        repo.deleteHeld(bucket.name, entry.info.storePath);
+        pending.get(bucket.name)?.delete(entry.hash);
+        await unlink(join(dirForBucket, "nar", basename(entry.info.url))).catch(() => {});
+        await unlink(join(dirForBucket, `${entry.hash}.narinfo`)).catch(() => {});
+      } else if (still.length > 0) {
+        entry.fetching = 0;
+        entry.waitingOn = still;
+        repo.putHeld({
+          bucket: bucket.name,
+          storePath: entry.info.storePath,
+          missing: still,
+          fetching: 0,
+          fetched: entry.fetched,
+          failure: null,
+          created: now(),
+        });
+      } else {
+        // A REFUSAL is the client's bytes; drop the entry so it is not retried
+        // for ever, the way a drain does.
+        repo.deleteHeld(bucket.name, entry.info.storePath);
+        pending.get(bucket.name)?.delete(entry.hash);
+        await unlink(join(dirForBucket, `${entry.hash}.narinfo`)).catch(() => {});
+      }
+    } catch (err) {
+      // A THROWN FETCH IS NOT "FETCHING" FOR EVER: the row goes back to its
+      // waiting sentence, so the next boot (or push) can try again.
+      if (!closed) {
+        repo.putHeld({
+          bucket: bucket.name,
+          storePath: entry.info.storePath,
+          missing: entry.waitingOn,
+          fetching: 0,
+          fetched: entry.fetched,
+          failure: String((err as Error).message ?? err),
+          created: now(),
+        });
+      }
+    } finally {
+      entry.fetching = 0;
+      changed();
+    }
   }
 
   /**
@@ -347,18 +590,189 @@ export function createStaging(deps: StagingDeps): Staging {
           if (openUploads.has(path)) continue;
           const info = await stat(path).catch(() => null);
           if (info === null || !info.isFile() || info.mtimeMs >= cutoff) continue;
+          // A PART OF AN UPLOAD STILL IN PROGRESS IS NOT LITTER. Its session
+          // marker is touched on every part; an hour-old marker means nobody is
+          // finishing it.
+          const partAt = entry.lastIndexOf(".part-");
+          if (partAt > 0) {
+            const marker = await stat(
+              join(at, `${entry.slice(0, partAt)}.uploading`),
+            ).catch(() => null);
+            if (marker !== null && marker.mtimeMs >= cutoff) continue;
+          }
           await rm(path, { force: true }).catch(() => {});
           // A swept narinfo is not pending any more; leaving it in the map
           // grows it by one per abandoned upload for the life of the process.
           if (entry.endsWith(".narinfo")) {
-            pending.get(bucket)?.delete(entry.slice(0, -".narinfo".length));
+            const hash = entry.slice(0, -".narinfo".length);
+            const held = pending.get(bucket)?.get(hash);
+            if (held !== undefined) repo.deleteHeld(bucket, held.info.storePath);
+            pending.get(bucket)?.delete(hash);
           }
         }
       }
     }
   }
 
+  /** How many parts one NAR may have. A 2 GiB NAR at 64 MiB is 32; the ceiling
+   *  is for the protocol, not for a real closure. */
+  const MAX_PARTS = 10_000;
+
+  /** THE UPLOAD SESSION'S MARKER: a file beside the parts, touched on every
+   *  part, so the sweep can tell an upload that is STILL RUNNING (a slow 2 GiB
+   *  closure) from one abandoned an hour ago. */
+  const uploadMarker = (dirForBucket: string, file: string): string =>
+    join(dirForBucket, "nar", `${file}.uploading`);
+
+  async function touchUpload(dirForBucket: string, file: string): Promise<void> {
+    await writeFile(uploadMarker(dirForBucket, file), "", { mode: 0o600 }).catch(() => {});
+  }
+
+  /**
+   * A WRITER AT ONE PATH: a unique temp file, renamed into place on commit, and
+   * an optional byte cap that refuses a part the proxy would have refused
+   * anyway.
+   *
+   * BUN'S FILE SINK is the primitive here, and it is the whole of an upload's
+   * memory. Measured on a 2 GiB push, daemon RSS sampled every 0.5 s, idle
+   * 227 MiB: `FileHandle.write` per chunk 324–1366 MiB (Node's `fs` shim);
+   * `createWriteStream` + `pipeline` 379–1328 MiB (the same shim);
+   * `writeSync` on a raw descriptor 304–325 MiB (blocks the loop);
+   * `Bun.file(part).writer()` 299–316 MiB (this). The shim leaves each chunk
+   * to the collector, so the peak is whatever was not reclaimed; the sink owns
+   * the buffer, so the number stops depending on the collector's mood.
+   */
+  function openAt(path: string, limit: number | null): Upload {
+    const part = `${path}.${randomUUID()}.part`;
+    openUploads.add(part);
+    const sink = Bun.file(part).writer({ highWaterMark: 1 << 20 });
+    let written = 0;
+    const release = (): void => {
+      openUploads.delete(part);
+    };
+    return {
+      async write(chunk) {
+        written += chunk.length;
+        if (limit !== null && written > limit) return "too-large";
+        await sink.write(chunk);
+        return "ok";
+      },
+      async commit() {
+        await sink.end();
+        await rename(part, path);
+        release();
+      },
+      async discard() {
+        await Promise.resolve(sink.end()).catch(() => {});
+        await rm(part, { force: true }).catch(() => {});
+        release();
+      },
+    };
+  }
+
+  /** Join one staged file's parts — under the file's lock, so two completes
+   *  cannot unlink what the other reads. */
+  async function completeNow(
+    bucket: BucketRow,
+    file: string,
+    total: number,
+  ): Promise<CompleteUpload> {
+    const dirForBucket = stagedDir(bucket.name);
+      const partPath = (index: number): string =>
+        join(dirForBucket, "nar", `${file}.part-${index}`);
+      const missing: number[] = [];
+      for (let index = 0; index < total; index++) {
+        const info = await stat(partPath(index)).catch(() => null);
+        if (info === null || !info.isFile()) missing.push(index);
+      }
+      if (missing.length > 0) {
+        // A SECOND COMPLETE for a file the first already joined is the state
+        // the caller wanted: the parts are gone because the NAR exists.
+        const target = join(dirForBucket, "nar", file);
+        const assembled = await stat(target).catch(() => null);
+        if (assembled !== null && assembled.isFile()) {
+          await unlink(uploadMarker(dirForBucket, file)).catch(() => {});
+          return { ok: true, parts: total };
+        }
+        return { ok: false, missing };
+      }
+
+      // JOIN, never buffer: one read stream at a time, appended in order into a
+      // temp file, then renamed. A client's dropped POST costs a rename, not a
+      // second upload.
+      const target = join(dirForBucket, "nar", file);
+      const assembling = `${target}.${randomUUID()}.assembling`;
+      openUploads.add(assembling);
+      try {
+        const out = createWriteStream(assembling);
+        try {
+          for (let index = 0; index < total; index++) {
+            for await (const chunk of createReadStream(partPath(index))) {
+              if (!out.write(chunk as Uint8Array)) await once(out, "drain");
+            }
+          }
+          await new Promise<void>((resolve, reject) => {
+            out.once("error", reject);
+            out.end(resolve);
+          });
+        } finally {
+          out.destroy();
+        }
+        await rename(assembling, target);
+      } finally {
+        openUploads.delete(assembling);
+        await rm(assembling, { force: true }).catch(() => {});
+      }
+      for (let index = 0; index < total; index++) {
+        await unlink(partPath(index)).catch(() => {});
+      }
+      // The session marker goes with the parts: the upload is no longer open,
+      // and a later sweep must not keep its leftovers.
+      await unlink(uploadMarker(dirForBucket, file)).catch(() => {});
+      return { ok: true, parts: total };
+  }
+
   return {
+    async resume() {
+      // AT ROW APPLY. Every held row is this database's, so a process that
+      // restarted picks each one up with the full missing set its row names —
+      // no request is needed to start a fetch that was already owed.
+      const rows = repo.held();
+      const byBucket = new Map<string, HeldRow[]>();
+      for (const row of rows) {
+        const list = byBucket.get(row.bucket) ?? [];
+        list.push(row);
+        byBucket.set(row.bucket, list);
+      }
+      for (const [name, held] of byBucket) {
+        const bucket = repo.bucket(name);
+        if (bucket === null) continue;
+        const map = await ensurePending(bucket);
+        const byPath = new Map([...map.values()].map((entry) => [entry.info.storePath, entry]));
+        for (const row of held) {
+          const entry = byPath.get(row.storePath);
+          // The narinfo is what makes the referrer importable after the
+          // references land; without it the row stays a fact, not a job.
+          if (entry === undefined) continue;
+          // THE FULL SET, even if the row was written by a build that knew
+          // only what stderr said: the recovery is the moment to widen it.
+          const missing = await missingOf(entry, row.missing);
+          entry.waitingOn = missing;
+          entry.fetched = row.fetched;
+          entry.fetching = missing.length;
+          entry.failure = null;
+          repo.putHeld({ ...row, missing, fetching: missing.length, failure: null });
+          enqueueFetch(bucket, stagedDir(name), entry, missing);
+        }
+      }
+    },
+    async close() {
+      closed = true;
+      // JOIN every queue this staging owns. The closed flag stops the next
+      // step; awaiting the tails is what makes "nothing is running" true rather
+      // than merely believed.
+      await Promise.all([...fetches.values()].map((chain) => chain.tail));
+    },
     async beginUpload(bucket, file) {
       await sweep();
       const dirForBucket = stagedDir(bucket.name);
@@ -370,50 +784,37 @@ export function createStaging(deps: StagingDeps): Staging {
       if (!isStagedFileName(file)) {
         throw new Error(`"${file}" is not a NAR file name`);
       }
-      const path = join(dirForBucket, "nar", file);
-      // A UNIQUE temp name, renamed into place on commit. Two store paths with
-      // identical content share a NAR name, and two writers opening one file
-      // truncate each other; the bytes are identical by construction, so an
-      // atomic rename is the whole fix.
-      const part = `${path}.${randomUUID()}.part`;
-      openUploads.add(part);
-      // BUN'S FILE SINK, and the primitive is the whole of an upload's memory.
-      // The body reaches us with correct backpressure either way — writing
-      // nothing at all leaves a 2 GiB push flat at 295–305 MiB — so the peak is
-      // decided by how the bytes get to the disk. Measured on a 2 GiB push, the
-      // daemon's RSS sampled every 0.5 s, idle 227 MiB:
-      //
-      //   `FileHandle.write` per chunk      324–1366 MiB   (Node's `fs` shim)
-      //   `createWriteStream` + `pipeline`  379–1328 MiB   (the same shim)
-      //   `writeSync` on a raw descriptor   304–325 MiB    (blocks the loop)
-      //   **`Bun.file(part).writer()`**     299–316 MiB    (this, and 289 at 256 MiB)
-      //
-      // Node's `fs` shim leaves each chunk buffer to the collector, so the
-      // peak is whatever the collector happened not to reclaim: the same 2 GiB
-      // upload peaked at 324 in one run and 1366 in another, and forcing
-      // `Bun.gc(false)` every 256 MiB merely bounded it to 360–486. The sink
-      // owns the buffer, so the number stops depending on the collector's mood.
-      // The descriptor sink is the fallback if this runtime's writer ever goes
-      // away: it measures the same, at the cost of a stalled event loop.
-      const sink = Bun.file(part).writer({ highWaterMark: 1 << 20 });
-      const release = (): void => {
-        openUploads.delete(part);
-      };
-      return {
-        async write(chunk) {
-          await sink.write(chunk);
-        },
-        async commit() {
-          await sink.end();
-          await rename(part, path);
-          release();
-        },
-        async discard() {
-          await Promise.resolve(sink.end()).catch(() => {});
-          await rm(part, { force: true }).catch(() => {});
-          release();
-        },
-      };
+      await touchUpload(dirForBucket, file);
+      return openAt(join(dirForBucket, "nar", file), null);
+    },
+
+    async beginPart(bucket, file, index, limit) {
+      if (!isStagedFileName(file)) {
+        throw new Error(`"${file}" is not a NAR file name`);
+      }
+      if (!Number.isSafeInteger(index) || index < 0 || index >= MAX_PARTS) {
+        throw new Error(`"${index}" is not a part index`);
+      }
+      const dirForBucket = stagedDir(bucket.name);
+      await mkdir(join(dirForBucket, "nar"), { recursive: true, mode: 0o700 });
+      await touchUpload(dirForBucket, file);
+      return openAt(join(dirForBucket, "nar", `${file}.part-${index}`), limit);
+    },
+
+    async completeUpload(bucket, file, total) {
+      if (!isStagedFileName(file)) {
+        throw new Error(`"${file}" is not a NAR file name`);
+      }
+      if (!Number.isSafeInteger(total) || total < 1 || total > MAX_PARTS) {
+        throw new Error(`"${total}" is not a part count`);
+      }
+      const key = `${bucket.name}/${file}`;
+      let chain = completes.get(key);
+      if (chain === undefined) {
+        chain = newChain();
+        completes.set(key, chain);
+      }
+      return serial(chain, () => completeNow(bucket, file, total));
     },
 
     async acceptNarinfo(bucket, hash, body) {
@@ -454,7 +855,15 @@ export function createStaging(deps: StagingDeps): Staging {
       }
 
       const map = await ensurePending(bucket);
-      const entry: Pending = { hash, info: staged.info, waitingOn: [], proved: true };
+      const entry: Pending = {
+        hash,
+        info: staged.info,
+        waitingOn: [],
+        proved: true,
+        fetching: 0,
+        fetched: [],
+        failure: null,
+      };
       map.set(hash, entry);
       await queuedDrain(bucket, [info.storePath]);
 
@@ -463,7 +872,13 @@ export function createStaging(deps: StagingDeps): Staging {
       }
       const still = map.get(hash);
       if (still !== undefined && still.waitingOn.length > 0) {
-        return { ok: true, status: 202, storePath: info.storePath, missing: still.waitingOn };
+        return {
+          ok: true,
+          status: 202,
+          storePath: info.storePath,
+          missing: still.waitingOn,
+          fetching: still.fetching,
+        };
       }
       return {
         ok: false,

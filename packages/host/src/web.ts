@@ -95,6 +95,8 @@ import {
   PrincipalBroker,
 } from "@odu/cordis/principal";
 import { authRow, readGithubConfig, signInPageHtml } from "@odu/auth/server";
+import { cloudflareRow, readCloudflareConfig } from "@odu/cloudflare/server";
+import { CLOUDFLARE_AGENT, CLOUDFLARE_KEY } from "@odu/cloudflare/surface";
 import { AUTH_AGENT, AUTH_ANONYMOUS_TAGS, AUTH_KEY } from "@odu/auth/surface";
 import {
   admissionDispatch,
@@ -102,12 +104,14 @@ import {
   connectionLayer,
   doorGate,
   doorRoute,
+  rowsRoute,
   gatedHandlers,
   liveDispatch,
   UPGRADE_HEADERS,
 } from "./principal";
 import type { SurfaceHandlers } from "@kolu/surface/server";
 import { SERVICE_MCP_PATH } from "@odu/service-client/endpoint";
+import { bucketDomainGate } from "./bucketDomain";
 import { reservedPaths } from "./reserved";
 import { servingOptions } from "./serving";
 import { CI_AGENT, ciRow, CI_KEY } from "@odu/ci/row";
@@ -116,6 +120,7 @@ import { CACHE_AGENT, CACHE_KEY } from "@odu/cache/surface";
 import type { RootedSurfacesRuntime } from "@kolu/surface/server";
 import {
   BoundOrigin,
+  BucketDomains,
   Build,
   Bundle,
   DaemonHome,
@@ -252,6 +257,14 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     process.stderr.write(`${github.message}\n`);
     return 1;
   }
+  // THE TUNNEL ROW'S CONFIGURATION — read here for the same reason: this is the
+  // one place that reads an environment, and a half-set file path is refused at
+  // boot rather than as a Tunnel panel that never moves.
+  const cloudflare = readCloudflareConfig(process.env);
+  if (cloudflare.kind === "refused") {
+    process.stderr.write(`${cloudflare.message}\n`);
+    return 1;
+  }
 
   // Claimed FIRST, so a launcher that lost the race never binds the port. The
   // framework's own gate: one atomic link, a liveness-proved holder, and a
@@ -311,6 +324,27 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
             key: AUTH_KEY,
             plugin: authRow(github.config),
             agent: AUTH_AGENT,
+          },
+        ]
+      : []),
+    // THE TUNNEL, when a token file is configured. It reacts to the cache row's
+    // published domains; the roster order is the mount order, so the cache (and
+    // its `BucketDomains` offer) is standing before this row asks for it.
+    ...(cloudflare.kind === "config"
+      ? [
+          {
+            name: CLOUDFLARE_KEY,
+            key: CLOUDFLARE_KEY,
+            plugin: cloudflareRow({
+              token: cloudflare.config.token,
+              ...(cloudflare.config.apiBase === null
+                ? {}
+                : { apiBase: cloudflare.config.apiBase }),
+              ...(cloudflare.config.probeBase === null
+                ? {}
+                : { probeBase: cloudflare.config.probeBase }),
+            }),
+            agent: CLOUDFLARE_AGENT,
           },
         ]
       : []),
@@ -425,7 +459,6 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
       process.stderr.write("odu: the ci row offered no runtime — refusing to serve\n");
       return 1;
     }
-
     // THE SERVED HANDLERS, WITH THE DOOR IN FRONT OF THEM — and only the
     // SERVED ones: the control socket `daemonMain` opens is owner-only and
     // already local, so it keeps the ungated record.
@@ -468,16 +501,23 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     });
     const agentRoutes = Layer.merge(
       Layer.merge(
-        mcpRoute(transport, allowedOrigins, SERVICE_MCP_PATH, {
-          store: admissions,
-          broker: principals,
-        }),
-        mcpGetRoute(SERVICE_MCP_PATH),
+        Layer.merge(
+          mcpRoute(transport, allowedOrigins, SERVICE_MCP_PATH, {
+            store: admissions,
+            broker: principals,
+          }),
+          mcpGetRoute(SERVICE_MCP_PATH),
+        ),
+        // THE DOOR FACT, the HOST'S OWN — whether this daemon has a door is a
+        // fact about its composition, and it changes with `auth`, not with the
+        // runs. The browser asks once before it draws anything.
+        doorRoute(hasDoor),
       ),
-      // THE DOOR FACT, the HOST'S OWN — whether this daemon has a door is a fact
-      // about its composition, and it changes with `auth`, not with the runs.
-      // The browser asks once before it draws anything.
-      doorRoute(hasDoor),
+      // AND WHICH ROWS ARE HERE: a control for a row that is not mounted opens
+      // a subscription nobody answers. The roster is fixed at boot.
+      rowsRoute(
+        ROWS.map((row) => row.key).filter((key): key is string => key !== null),
+      ),
     );
     const composed = routes
       .layers()
@@ -503,19 +543,29 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
             // browser with the server-rendered sign-in page.
             upgradeHeaders: UPGRADE_HEADERS,
             services: (connection) => connectionLayer(principals, connection),
-            middleware: doorGate({
-              broker: principals,
-              mcpPath: SERVICE_MCP_PATH,
-              signInPage: () => signInPageHtml(),
-              // THE PATHS THIS DAEMON'S ROUTES CLAIM, composed rather than
-              // listed: the host's own (the door fact, the bundle's assets,
-              // the worker, the manifest) plus every row's
-              // claim, registered beside its routes. Read at bind, like the
-              // layers. Everything else is the shell, and an anonymous
-              // connection meets the sign-in page there — which is what makes
-              // `curl /anything` prove the door.
-              reservedPaths: reservedPaths(routes.layers()),
-            }),
+            // THE BUCKET NAMES RUN OUTSIDE THE DOOR: a visitor to a
+            // substituter's name sees the bucket's page, not the server's
+            // sign-in form — and nothing else of this daemon answers there.
+            middleware: (app) =>
+              // THE BUCKET NAMES ARE THE CACHE ROW'S FACT, read through a
+              // THUNK: a row that re-applies must not leave this gate holding
+              // the service it replaced. The gate itself is composed here, and
+              // the host reaches no row's internals.
+              bucketDomainGate(() => offered(host, BucketDomains))(
+                doorGate({
+                  broker: principals,
+                  mcpPath: SERVICE_MCP_PATH,
+                  signInPage: () => signInPageHtml(),
+                  // THE PATHS THIS DAEMON'S ROUTES CLAIM, composed rather than
+                  // listed: the host's own (the door fact, the bundle's assets,
+                  // the worker, the manifest) plus every row's
+                  // claim, registered beside its routes. Read at bind, like the
+                  // layers. Everything else is the shell, and an anonymous
+                  // connection meets the sign-in page there — which is what
+                  // makes `curl /anything` prove the door.
+                  reservedPaths: reservedPaths(routes.layers()),
+                })(app),
+              ),
           }),
         ).pipe(Scope.provide(scope)),
       );

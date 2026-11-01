@@ -60,11 +60,19 @@ export const CacheBucketSchema = Schema.Struct({
   publicKey: Schema.String,
   /** Key names whose signatures make a path "already upstream". */
   upstreamKeys: Schema.Array(Schema.String),
+  /** The name this bucket is served at, when it has one. Set it and the
+   *  advertised URL is that name instead of a path under this origin. */
+  domain: Schema.NullOr(Schema.String),
   objects: Schema.Int,
   bytes: Schema.Int,
   created: Schema.Number,
-  /** `<origin>/<name>` — what `extra-substituters` takes. */
+  /** The substituter URL — the bucket's domain when it has one, otherwise
+   *  `<origin>/<name>`. What `extra-substituters` takes. */
   url: Schema.String,
+  /** WHERE A PUSH ADDRESSES THIS BUCKET: always `<origin>/cache/<name>`, so the
+   *  push API works through a bucket domain without the domain needing to name
+   *  a bucket in its path. The page's push block and the docs use this. */
+  pushUrl: Schema.String,
   /** When the last narinfo landed here; `null` for a bucket nothing has been
    *  pushed to. */
   lastPush: Schema.NullOr(Schema.Number),
@@ -87,7 +95,9 @@ export const CacheBucketIdentitySchema = Schema.Struct({
   public: Schema.Boolean,
   /** `<keyName>:<base64 32>`, ready for `extra-trusted-public-keys`. */
   publicKey: Schema.String,
-  /** `<origin>/<name>` — what `extra-substituters` takes. */
+  /** The name the bucket is served at, or `null` for the path form. */
+  domain: Schema.NullOr(Schema.String),
+  /** The substituter URL — the domain when it has one. */
   url: Schema.String,
 });
 export type CacheBucketIdentity = typeof CacheBucketIdentitySchema.Type;
@@ -119,6 +129,70 @@ export const CachePathSchema = Schema.Struct({
   lastAccessed: Schema.Number,
 });
 export type CachePath = typeof CachePathSchema.Type;
+
+/**
+ * ONE UPLOAD THE BUCKET TOOK BUT CANNOT SERVE YET, as every face reads it.
+ *
+ * `reason` is computed HERE rather than in each face: the CLI's line, the
+ * server's 202 body and the board's pending list are one sentence about one
+ * fact, and the day that sentence changes it changes once.
+ */
+export const CacheHeldSchema = Schema.Struct({
+  bucket: Schema.String,
+  storePath: Schema.String,
+  /** {@link heldReason} of `missing`/`fetching` — the words, not a second
+   *  computation. */
+  reason: Schema.String,
+  /** The references Nix says are not valid, in its own spelling. */
+  missing: Schema.Array(Schema.String),
+  /** How many of those the server is fetching from upstream now. */
+  fetching: Schema.Int,
+  /** References this hold's fetch ALREADY landed — the done half of the list. */
+  fetched: Schema.Array(Schema.String),
+  /** When the path first arrived; a later drain does not move it. */
+  since: Schema.Number,
+});
+export type CacheHeld = typeof CacheHeldSchema.Type;
+
+/** The key a held row is published under — the bucket, then the path. A store
+ *  path cannot contain `|`, so the key parses. */
+export const heldKey = (held: { bucket: string; storePath: string }): string =>
+  `${held.bucket}|${held.storePath}`;
+
+/**
+ * WHY A PATH IS HELD, in the one sentence the push, the server and the board
+ * say — PLAN.md's wording: a reference that is neither here nor upstream.
+ */
+export function heldReason(missing: readonly string[] | null, fetching = 0): string {
+  if (fetching > 0) {
+    return `fetching ${fetching} upstream reference${fetching === 1 ? "" : "s"}`;
+  }
+  // NULL IS "THE SERVER DID NOT SAY HOW MANY". It is a 202 body nobody filled
+  // in, or a client that never saw the body — and a sentence with a count would
+  // be a number this module invented.
+  if (missing === null) return "waiting for a reference that is neither here nor upstream";
+  const n = missing.length;
+  return `waiting for ${n} reference${n === 1 ? "" : "s"} that ${
+    n === 1 ? "is" : "are"
+  } neither here nor upstream`;
+}
+
+/**
+ * THE HOLD'S ONE SENTENCE: a failed fetch names nix's last line; a live one
+ * counts the set; a final one says neither here nor upstream. Server, route and
+ * page read this, so the three cannot disagree.
+ */
+export function holdReason(row: {
+  readonly failure: string | null;
+  readonly missing: readonly string[];
+  readonly fetching: number;
+}): string {
+  if (row.failure === null) return heldReason(row.missing, row.fetching);
+  return (
+    `fetching failed: ${row.failure} — it retries on the next push of this ` +
+    "path, or when odu next starts"
+  );
+}
 
 // ── the refusal ─────────────────────────────────────────────────────────────
 
@@ -178,6 +252,13 @@ const ListOutputSchema = Schema.Struct({ buckets: Schema.Array(CacheBucketSchema
 
 const DescribeInputSchema = Schema.Struct({
   bucket: Schema.String.check(Schema.isMinLength(1)),
+});
+
+const DomainInputSchema = Schema.Struct({
+  rootToken: Schema.String,
+  bucket: Schema.String,
+  /** A DNS name, or absent/blank to take the name away. */
+  domain: Schema.optionalKey(Schema.String),
 });
 
 const TokenMintInputSchema = Schema.Struct({
@@ -282,27 +363,78 @@ export type CachePaths = typeof PathsOutputSchema.Type;
  *  filter. Here because the VERB's page and the VIEW's page are one number. */
 export const PATH_PAGE_SIZE = 100;
 
+/**
+ * HOW BIG ONE UPLOAD REQUEST MAY BE.
+ *
+ * Cloudflare caps a proxied request body at 100 MB (Free and Pro, tunnels
+ * included), and a NAR is routinely larger, so `odu cache push` splits its
+ * stream into parts under that ceiling. 64 MiB is the default — comfortably
+ * under the cap, and few enough parts that a 2 GiB closure is 32 requests.
+ * The ceiling odu itself accepts is 96 MiB: the same limit with headroom for
+ * headers, so a part that works through Cloudflare also works directly.
+ *
+ * THIS IS A REQUEST SPLIT, NOT A DEDUP SCHEME, and the neighbours do something
+ * else. Attic chunks uncompressed NARs with FastCDC for deduplication — its
+ * defaults are 64 KiB minimum / 128 KiB average / 256 KiB maximum, configured
+ * on the SERVER and framed inside one upload
+ * (https://github.com/zhaofengli/attic/blob/main/book/src/admin-guide/chunking.md).
+ * Cachix pushes `--chunk-size` 32 MiB by default, with 4 concurrent chunks
+ * (cachix 1.7.2 changelog: https://hackage.haskell.org/package/cachix/changelog).
+ * odu's parts exist only to stay under a proxy's body limit; the server joins
+ * them and the narinfo's hash proof decides, so no chunk map is kept.
+ */
+export const DEFAULT_NAR_PART_BYTES = 64 * 1024 * 1024;
+export const MAX_NAR_PART_BYTES = 96 * 1024 * 1024;
+
 /** What stands where a write token goes, in every block a page or a doc
  *  prints — the netrc line and the push block say the same thing. */
 export const WRITE_TOKEN_PLACEHOLDER = "<your-write-token>";
 
+/** What stands where a READ token goes: the netrc line of a private bucket. */
+export const READ_TOKEN_PLACEHOLDER = "<your-read-token>";
+
+/** The `nix.conf` pair — the two `extra-` lines a Nix client reads. */
+export function nixConfBlock(input: { readonly url: string; readonly publicKey: string }): string {
+  return `extra-substituters = ${input.url}
+extra-trusted-public-keys = ${input.publicKey}`;
+}
+
+/** The same pair as a NixOS / nix-darwin attrset. */
+export function nixOsBlock(input: { readonly url: string; readonly publicKey: string }): string {
+  return `nix.settings = {
+  extra-substituters = [ "${input.url}" ];
+  extra-trusted-public-keys = [ "${input.publicKey}" ];
+};`;
+}
+
+/** The same pair as a flake's `nixConfig`. */
+export function flakeBlock(input: { readonly url: string; readonly publicKey: string }): string {
+  return `{
+  nixConfig = {
+    extra-substituters = [ "${input.url}" ];
+    extra-trusted-public-keys = [ "${input.publicKey}" ];
+  };
+}`;
+}
+
+/** The same pair inside a workflow's install-nix step. */
+export function actionsBlock(input: { readonly url: string; readonly publicKey: string }): string {
+  return `extra_nix_config: |
+  extra-substituters = ${input.url}
+  extra-trusted-public-keys = ${input.publicKey}`;
+}
+
 /**
- * THE BLOCK A CLIENT PASTES, for one bucket — `odu cache use`'s output and the
- * bucket page's, from one function.
+ * THE CREDENTIAL LINES, for a PRIVATE bucket only: reading it needs a token.
  *
  * `home` is the caller's ABSOLUTE home directory, or `null` when it has none to
  * offer. It cannot be `~`: Nix expands no tilde here — `--netrc-file ~/.netrc`
  * fails with `not an absolute path` — so a block printed with one is a block
  * that silently does nothing when pasted. The CLI knows `$HOME`; the page does
  * not, and prints a placeholder that says so.
- *
- * Everything else is the bucket's own facts, which is what keeps the two faces
- * from drifting the way they had (`~/.netrc` on one and `$HOME/.netrc` on the
- * other, and a `flake.nix` block on only one).
  */
-export function useBlock(input: {
+export function netrcBlock(input: {
   readonly url: string;
-  readonly publicKey: string;
   readonly home: string | null;
 }): string {
   const authority = ((): string => {
@@ -312,26 +444,32 @@ export function useBlock(input: {
       return input.url;
     }
   })();
-  return `# nix.conf
-extra-substituters = ${input.url}
-extra-trusted-public-keys = ${input.publicKey}
-
-# flake.nix
-{
-  nixConfig = {
-    extra-substituters = [ "${input.url}" ];
-    extra-trusted-public-keys = [ "${input.publicKey}" ];
-  };
-}
-
-# netrc — Nix reads only the file named by netrc-file, never ~/.netrc,
+  return `# netrc — Nix reads only the file named by netrc-file, never ~/.netrc,
 # and it does NOT expand ~ there: give it an absolute path.${
     input.home === null
       ? "\n# (replace <home> below with yours — a page cannot know it)\nnetrc-file = <home>/.netrc"
       : `\nnetrc-file = ${input.home}/.netrc`
   }
-machine ${authority} password ${WRITE_TOKEN_PLACEHOLDER}
-`;
+machine ${authority} password ${READ_TOKEN_PLACEHOLDER}`;
+}
+
+/**
+ * EVERY BLOCK A CLIENT PASTES, from one function each — the page renders them
+ * as separate titled blocks, `odu cache use` prints them one after another, and
+ * the docs quote the same strings (`useCopy.test.ts` holds them together).
+ */
+export function useBlock(input: {
+  readonly url: string;
+  readonly publicKey: string;
+  readonly home: string | null;
+}): string {
+  return [
+    `# nix.conf\n${nixConfBlock(input)}`,
+    `# NixOS / nix-darwin\n${nixOsBlock(input)}`,
+    `# flake.nix\n${flakeBlock(input)}`,
+    `# GitHub Actions\n${actionsBlock(input)}`,
+    netrcBlock(input),
+  ].join("\n\n");
 }
 
 /** The one line that prints {@link useBlock} for a bucket, from a terminal. */
@@ -344,15 +482,21 @@ export function useCommand(bucket: string): string {
  * example, from one function (the docs quote it; `useCopy.test.ts` holds the
  * two together).
  *
- * The bucket is named by its full URL, so the command works on a build box
- * that never ran `odu cache login`. `token` is the JUST-MINTED write token
- * while the page can still show it — the once-shown moment is exactly when a
- * person pastes it into a CI secret — and `null` (the placeholder) otherwise.
+ * The bucket is named, and the ORIGIN is the daemon's public origin, so the
+ * command works on a build box that never ran `odu cache login` and through a
+ * bucket's domain or the instance's own name alike. `token` is the JUST-MINTED
+ * write token while the page can still show it — the once-shown moment is
+ * exactly when a person pastes it into a CI secret — and `null` (the
+ * placeholder) otherwise.
  */
-export function pushBlock(input: { readonly url: string; readonly token: string | null }): string {
+export function pushBlock(input: {
+  readonly origin: string;
+  readonly bucket: string;
+  readonly token: string | null;
+}): string {
   return `# push — a write token, exported where the build runs (a build secret)
 export ODU_CACHE_TOKEN=${input.token ?? WRITE_TOKEN_PLACEHOLDER}
-odu cache push ${input.url} ./result
+odu cache push ${input.bucket} <paths> --origin ${input.origin.replace(/\/$/, "")}
 `;
 }
 
@@ -390,6 +534,21 @@ export const oduCacheSurface = defineSurface({
       // not a wire member.
       verbs: ["keys", "get", "deltas"],
     },
+    /**
+     * THE UPLOADS A BUCKET IS HOLDING FOR REFERENCES.
+     *
+     * A collection rather than a field on `CacheBucket`: a held path is a set
+     * whose size the bucket does not bound, and a bucket row carrying every
+     * pending path would put a push's backlog in every publish. The board
+     * filters this by bucket; the READ is public, like a bucket's path list —
+     * the path and its missing references are what the substituter is already
+     * telling its clients.
+     */
+    held: {
+      keySchema: Schema.String,
+      schema: CacheHeldSchema,
+      verbs: ["keys", "get", "deltas"],
+    },
   },
   procedures: {
     bucket: {
@@ -400,6 +559,7 @@ export const oduCacheSurface = defineSurface({
         output: CacheBucketIdentitySchema,
         error: REFUSES,
       },
+      domain: { input: DomainInputSchema, output: CacheBucketSchema, error: REFUSES },
       paths: { input: PathsInputSchema, output: PathsOutputSchema, error: REFUSES },
     },
     token: {
@@ -449,9 +609,11 @@ export type OduCacheSurface = typeof oduCacheSurface;
  */
 export const ODU_CACHE_EXPOSE = {
   buckets: "resource",
+  held: "resource",
   "bucket.create": { tool: { mutates: true } },
   "bucket.list": { tool: { mutates: false } },
   "bucket.describe": { tool: { mutates: false } },
+  "bucket.domain": { tool: { mutates: true } },
   "bucket.paths": { tool: { mutates: false } },
   "token.mint": { tool: { mutates: true } },
   "token.list": { tool: { mutates: false } },
@@ -478,7 +640,11 @@ export const ODU_CACHE_MCP_INSTRUCTIONS = [
   "uses; `cache_pin_create` keeps a closure out of `cache_gc_run`, which evicts",
   "only what retention has expired AND nothing retained references AND no pin",
   "holds. `cache_bucket_paths` pages a bucket's paths newest first, and takes a",
-  "substring `filter` and the `after` cursor it returned.",
+  "substring `filter` and the `after` cursor it returned. `cache_bucket_domain`",
+  "gives a bucket a DNS name of its own (clear it with no `domain`); the",
+  "advertised `url` becomes that name while `pushUrl` keeps the path the push",
+  "API needs. `held` is a resource of the paths a bucket accepted but is",
+  "waiting on references for.",
 ].join("\n");
 
 // ── the row ─────────────────────────────────────────────────────────────────

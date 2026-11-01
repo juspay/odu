@@ -19,6 +19,38 @@ Feature: An admin administers the cache from the board
     And there should be no page errors
 
   @signed-in:admin
+  Scenario: A bucket gets a name of its own from its page
+    # THE NAME CHANGES WHAT THE PAGE SHOWS A CLIENT, and nothing else on this
+    # page moved: the substituter URL, the nix.conf block and the netrc machine
+    # are the domain, while the push block keeps the path the API addresses.
+    Given a bucket created from the board
+    When I name the bucket "cache.e2e.test"
+    Then the page's substituter URL is "cache.e2e.test"
+    And the domain answer says "Point its DNS record here."
+    And the page's netrc block names "cache.e2e.test"
+    And the push block still names the bucket's path
+    And there should be no page errors
+
+  # A PUBLIC BUCKET'S FACTS NEED NO ACCOUNT, and that is a PROTOCOL read: the
+  # anonymous CLI works before anybody signs in, and a cURL sees the key.
+  @signed-in:admin
+  Scenario: A public bucket's facts are read with no account
+    Given the CLI creates a bucket as this person
+    When the CLI reads the bucket's facts with no account
+    Then it prints the bucket's public key
+    And an anonymous HTTP GET of the bucket's page shows the key
+    And there should be no page errors
+
+  @signed-in:admin
+  Scenario: A private bucket's facts need a reader
+    Given I open the profile
+    And I create a token named "cli"
+    When the CLI creates a private bucket as this person
+    And the CLI reads the bucket's facts with no account
+    Then it is refused as private
+    And there should be no page errors
+
+  @signed-in:admin
   Scenario: A bucket is created from the board with the upstream switch off
     Given I open the cache
     When I name a new bucket
@@ -40,6 +72,15 @@ Feature: An admin administers the cache from the board
     And there should be no page errors
 
   @signed-in:admin
+  Scenario: A token minted on the page carries an expiry
+    # THE FORM'S DEFAULT IS NINETY DAYS and "never" is a visible choice, so a
+    # web-minted token is not the one credential on this page that never ends.
+    Given a bucket created from the board
+    Then the token form defaults to 90 days
+    When I mint a "write" token
+    Then the minted token shows an expiry
+    And there should be no page errors
+
   Scenario: A path pushed with a page-minted token is pinned, collected and counted
     Given a bucket created from the board
     And I mint a "write" token

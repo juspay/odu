@@ -44,10 +44,29 @@ import { Effect, Layer, Stream } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import type { ClaimedRoutes } from "@odu/cordis/services";
 import { type Cache } from "./cache";
-import { CACHE_MOUNT } from "./paths";
+import {
+  CACHE_MOUNT,
+  CACHE_ROUTE_PATHS,
+  HASH_PATTERN,
+  PUSH_API,
+} from "./paths";
 import { NIX_CACHE_INFO } from "./staging";
 import type { BucketRow, Scope } from "./db";
 import { isStagedFileName, isStorePathHash } from "./narinfo";
+import {
+  actionsBlock,
+  flakeBlock,
+  heldReason,
+  holdReason,
+  MAX_NAR_PART_BYTES,
+  netrcBlock,
+  nixConfBlock,
+  nixOsBlock,
+  pushBlock,
+  useBlock,
+  useCommand,
+  type CacheBucketIdentity,
+} from "./surface";
 
 /** A bucket by name, and a credential that may do `need` with it — or the
  *  response that says why not. Every protocol route starts here, so "unknown
@@ -62,6 +81,41 @@ function admit(
   if (bucket === null) {
     return { ok: false, response: HttpServerResponse.empty({ status: 404 }) };
   }
+  return authorize(cache, request, bucket, need);
+}
+
+/** The `Host` a request arrived under, lowercased and without its port. A
+ *  bucket's domain is stored that way, and the header is the only name a
+ *  domain-routed request carries. */
+function hostOf(request: HttpServerRequest.HttpServerRequest): string {
+  const raw = (request.headers["host"] ?? "").trim().toLowerCase();
+  const colon = raw.indexOf(":");
+  return colon === -1 ? raw : raw.slice(0, colon);
+}
+
+/**
+ * THE BUCKET A REQUEST'S `HOST` NAMES. A bucket with a domain is served at the
+ * ROOT of that name — `/nix-cache-info`, `/<hash>.narinfo`, `/nar/<file>` — the
+ * way every public binary cache is; no `Host` match is the path form's business.
+ */
+function admitByHost(
+  cache: Cache,
+  request: HttpServerRequest.HttpServerRequest,
+  need: Scope,
+): { ok: true; bucket: BucketRow } | { ok: false; response: HttpServerResponse.HttpServerResponse } {
+  const bucket = cache.bucketByDomain(hostOf(request));
+  if (bucket === null) {
+    return { ok: false, response: HttpServerResponse.empty({ status: 404 }) };
+  }
+  return authorize(cache, request, bucket, need);
+}
+
+function authorize(
+  cache: Cache,
+  request: HttpServerRequest.HttpServerRequest,
+  bucket: BucketRow,
+  need: Scope,
+): { ok: true; bucket: BucketRow } | { ok: false; response: HttpServerResponse.HttpServerResponse } {
   const verdict = cache.authorize(request.headers["authorization"], bucket, need);
   if (!verdict.ok) {
     return {
@@ -72,29 +126,292 @@ function admit(
   return { ok: true, bucket };
 }
 
+/**
+ * THE HEADERS A BUCKET'S READ CARRIES. A PUBLIC bucket's bytes are shared
+ * cacheable; a PRIVATE one's are not, and saying so is the ROW's fact — the
+ * module's nginx honours it, so one authorised read cannot become the next
+ * anonymous reader's cache hit. Nginx also bypasses its cache on any request
+ * that carries `Authorization`; this is the half the daemon owns.
+ */
+function readHeaders(bucket: BucketRow): Record<string, string> {
+  return bucket.isPublic ? {} : { "cache-control": "private, no-store" };
+}
+
+/** The two root-level narinfo routes share one body: a client that substitutes
+ *  from a bucket's DOMAIN asks for `/<hash>.narinfo`, not `/cache/<name>/…`. */
+function narinfoRoot(cache: Cache) {
+  return (request: HttpServerRequest.HttpServerRequest) =>
+    Effect.gen(function* () {
+      const hash = yield* param("hash");
+      if (!isStorePathHash(hash)) return bad(`"${hash}" is not a store path hash`);
+      const admitted = admitByHost(cache, request, "read");
+      if (!admitted.ok) return admitted.response;
+      const text = cache.narinfoText(admitted.bucket, hash);
+      if (text === null) return HttpServerResponse.empty({ status: 404 });
+      cache.touch(admitted.bucket, hash);
+      return request.method === "HEAD"
+        ? HttpServerResponse.empty({ status: 200, headers: readHeaders(admitted.bucket) })
+        : HttpServerResponse.text(text, {
+            contentType: "text/x-nix-narinfo",
+            headers: readHeaders(admitted.bucket),
+          });
+    });
+}
+
 const NARINFO_SUFFIX = ".narinfo";
 
 const bad = (message: string): HttpServerResponse.HttpServerResponse =>
   HttpServerResponse.text(message, { status: 400 });
 
-/** Where the push API lives — odu's own, beside the Nix protocol's mount. */
-const PUSH_API = "/_odu/v1";
-
 /**
- * THE PATHS THESE ROUTES ANSWER, beside the routes: the Nix protocol under
- * {@link CACHE_MOUNT} and the push API under {@link PUSH_API}. Both carry their
- * own per-bucket credentials, so the door gate lets an anonymous request
- * through to them — and a route added below outside both prefixes is caught by
- * `@odu/host`'s `reserved.test.ts`, which records what this layer registers.
+ * WHAT A BUCKET PUBLISHES TO ITS CONSUMERS: the substituter URL, the key, the
+ * upstream key names, and the block every face prints.
+ *
+ * A PUBLIC bucket's consumer facts are as public as the NARs it serves, so they
+ * are answered with NO credential — that is what lets `odu cache use` work
+ * before anybody has signed in, and what makes the page a cURL away. A private
+ * bucket answers them only to a reader, through the same per-bucket rule the
+ * protocol's reads use.
  */
-export const CACHE_ROUTE_PATHS: ReadonlyArray<string> = [`${CACHE_MOUNT}/*`, `${PUSH_API}/*`];
-
-export function cacheRoutes(cache: Cache): ClaimedRoutes<ReturnType<typeof cacheLayer>> {
-  return { layer: cacheLayer(cache), paths: CACHE_ROUTE_PATHS };
+export interface ConsumerFacts extends CacheBucketIdentity {
+  readonly upstreamKeys: readonly string[];
+  /** The `nix.conf` / `flake.nix` / netrc block, `home` unpinned: the page
+   *  cannot know a reader's home, and `useBlock` says so. */
+  readonly use: string;
+  /** The command that prints the block in a terminal. */
+  readonly command: string;
+  /** The daemon's PUBLIC ORIGIN — where THIS INSTANCE is. The push's `see`
+   *  link is built from it; the page's own link is attribution to the PRODUCT
+   *  (`served by odu`), a fixed site, never a call to action. */
+  readonly board: string;
 }
 
-function cacheLayer(cache: Cache) {
+/** The HTML a person reads; every block is text and is escaped here, once. */
+function consumerPage(facts: ConsumerFacts): string {
+  const escape = (text: string): string =>
+    text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  // ONE BLOCK PER THING A PERSON PASTES SOMEWHERE. netrc only when reading
+  // needs a credential: a public bucket is read with no account at all.
+  const blocks: ReadonlyArray<readonly [string, string]> = [
+    ["nix.conf", nixConfBlock(facts)],
+    ["NixOS / nix-darwin", nixOsBlock(facts)],
+    ["flake.nix", flakeBlock(facts)],
+    ["GitHub Actions", actionsBlock(facts)],
+    ...(facts.public
+      ? []
+      : [["netrc", netrcBlock({ url: facts.url, home: null })] as const]),
+  ];
+  const block = (title: string, text: string): string =>
+    `<h3>${escape(title)}</h3>
+<div class="block"><button type="button" data-copy>copy</button><pre>${escape(text)}</pre></div>`;
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>${escape(facts.name)} — an odu bucket</title>
+<style>:root{color-scheme:light dark}
+body{font:15px system-ui;max-width:52rem;margin:3rem auto;padding:0 1rem;line-height:1.5}
+pre{background:#f4f4f4;padding:1rem;overflow:auto}code{font-size:.95em}
+h3{margin:1.4rem 0 .3rem;font-size:1rem}
+.block{position:relative;margin:.4rem 0 1rem}
+.block pre{margin:0;padding:2.2rem 1rem 1rem}
+.block button{position:absolute;top:.5rem;right:.5rem;font:inherit;font-size:.8rem;padding:.2rem .55rem;cursor:pointer}
+.served{color:#666;font-size:.9em}
+@media (prefers-color-scheme: dark){
+  body{background:#111;color:#ddd}
+  pre{background:#222}
+  .served{color:#999}
+}</style></head>
+<body>
+<h1>${escape(facts.name)}</h1>
+<p>${facts.public ? "A public bucket." : "A private bucket — this page was answered to a reader."}</p>
+<dl>
+<dt>Substituter</dt><dd><code>${escape(facts.url)}</code> · <a href="${escape(
+    `${facts.url.replace(/\/$/, "")}/nix-cache-info`,
+  )}">nix-cache-info</a></dd>
+<dt>Public key</dt><dd><code>${escape(facts.publicKey)}</code></dd>
+<dt>Upstream keys</dt><dd><code>${escape(facts.upstreamKeys.join(" ") || "(none)")}</code></dd>
+</dl>
+<h2>Use it</h2>
+${blocks.map(([title, text]) => block(title, text)).join("\n")}
+<p class="hint">Or let a terminal print them: <code>${escape(facts.command)}</code></p>
+<h2>Push to it</h2>
+<p class="hint">A write token comes from this bucket's page on the board — an admin mints one. The push exports it where the build runs.</p>
+${block(
+  "push",
+  pushBlock({ origin: facts.board, bucket: facts.name, token: null }),
+)}
+<script>
+document.addEventListener("click", function (event) {
+  var button = event.target.closest("[data-copy]");
+  if (!button) return;
+  var pre = button.parentElement.querySelector("pre");
+  navigator.clipboard.writeText(pre.textContent).then(function () {
+    button.textContent = "copied";
+    setTimeout(function () { button.textContent = "copy"; }, 1200);
+  });
+});
+</script>
+<p class="served">served by <a href="https://odu.kolu.dev/">odu</a></p>
+</body></html>
+`;
+}
+
+export { CACHE_ROUTE_PATHS } from "./paths";
+
+export function cacheRoutes(
+  cache: Cache,
+  /** The substituter URL a bucket publishes. The ROW knows the deployment's
+   *  public origin; a route suite that does not passes the path form. */
+  urlFor: (name: string) => string = (name) => `${CACHE_MOUNT}/${name}`,
+  /** Where the board is, for the public page's one link. */
+  boardUrl: string = "/",
+): ClaimedRoutes<ReturnType<typeof cacheLayer>> {
+  return { layer: cacheLayer(cache, urlFor, boardUrl), paths: CACHE_ROUTE_PATHS };
+}
+
+function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: string) {
+  /** The public page and its JSON form — one handler for both spellings. */
+  const consumerFacts = (request: HttpServerRequest.HttpServerRequest) =>
+    Effect.gen(function* () {
+      const name = yield* param("bucket");
+      const bucket = cache.bucket(name);
+      if (bucket === null) return HttpServerResponse.empty({ status: 404 });
+      const verdict = cache.authorize(request.headers["authorization"], bucket, "read");
+      if (!verdict.ok) {
+        return HttpServerResponse.text(verdict.message, { status: verdict.status });
+      }
+      const url = urlFor(bucket.name);
+      const facts: ConsumerFacts = {
+        name: bucket.name,
+        public: bucket.isPublic,
+        publicKey: bucket.publicKey,
+        domain: bucket.domain,
+        url,
+        upstreamKeys: [...bucket.upstreamKeys],
+        use: useBlock({ url, publicKey: bucket.publicKey, home: null }),
+        command: useCommand(bucket.name),
+        board: boardUrl,
+      };
+      if ((request.headers["accept"] ?? "").includes("application/json")) {
+        return HttpServerResponse.jsonUnsafe(facts);
+      }
+      return request.method === "HEAD"
+        ? HttpServerResponse.empty({ status: 200 })
+        : HttpServerResponse.text(consumerPage(facts), {
+            contentType: "text/html; charset=utf-8",
+          });
+    });
+
+  /** The chunked upload's two verbs, on BOTH the push API's path and the
+   *  bucket's path form: `odu cache push` addresses `<bucket>/nar/<file>`,
+   *  which is the protocol's mount — while `/_odu/v1` is the admin API's. */
+  const uploadPart = (request: HttpServerRequest.HttpServerRequest) =>
+          Effect.gen(function* () {
+        const file = yield* param("file");
+        if (!isStagedFileName(file)) return bad(`"${file}" is not a NAR file name`);
+        const index = Number(yield* param("index"));
+        if (!Number.isSafeInteger(index) || index < 0) {
+          return bad(`"${yield* param("index")}" is not a part index`);
+        }
+        const admitted = admit(cache, request, yield* param("bucket"), "write");
+        if (!admitted.ok) return admitted.response;
+        const declared = Number(request.headers["content-length"] ?? "");
+        if (Number.isFinite(declared) && declared > MAX_NAR_PART_BYTES) {
+          return HttpServerResponse.text(
+            `a part may be at most ${MAX_NAR_PART_BYTES} bytes`,
+            { status: 413 },
+          );
+        }
+        const upload = yield* Effect.promise(() =>
+          cache.beginPart(admitted.bucket, file, index, MAX_NAR_PART_BYTES),
+        );
+        const written = yield* Effect.result(
+          Stream.runForEach(request.stream, (chunk) =>
+            Effect.promise(() => upload.write(chunk)).pipe(
+              Effect.flatMap((state) =>
+                state === "too-large"
+                  ? Effect.fail("too-large" as const)
+                  : Effect.void,
+              ),
+            ),
+          ).pipe(Effect.andThen(Effect.promise(() => upload.commit()))),
+        );
+        if (written._tag === "Failure") {
+          yield* Effect.promise(() => upload.discard());
+          return written.failure === "too-large"
+            ? HttpServerResponse.text(
+                `a part may be at most ${MAX_NAR_PART_BYTES} bytes`,
+                { status: 413 },
+              )
+            : HttpServerResponse.text("the part did not complete", { status: 400 });
+        }
+        return HttpServerResponse.empty({ status: 204 });
+      });
+
+  const completeParts = (request: HttpServerRequest.HttpServerRequest) =>
+          Effect.gen(function* () {
+        const file = yield* param("file");
+        if (!isStagedFileName(file)) return bad(`"${file}" is not a NAR file name`);
+        const admitted = admit(cache, request, yield* param("bucket"), "write");
+        if (!admitted.ok) return admitted.response;
+        const total = Number(request.headers["x-odu-parts"] ?? "");
+        if (!Number.isSafeInteger(total) || total < 1) {
+          return bad("send x-odu-parts: the number of parts this NAR has");
+        }
+        const outcome = yield* Effect.promise(() =>
+          cache.completeUpload(admitted.bucket, file, total),
+        );
+        if (!outcome.ok) {
+          return HttpServerResponse.jsonUnsafe(
+            { missing: outcome.missing },
+            { status: 409 },
+          );
+        }
+        return HttpServerResponse.jsonUnsafe({ parts: outcome.parts });
+      });
+
   return Layer.mergeAll(
+    /**
+     * WHAT TO PASTE INTO A CLIENT — a bucket's consumer facts, with no account
+     * for a public bucket.
+     *
+     * The CLI's "use needs no token" was only true of the SURFACE, where a door
+     * refuses an anonymous connection before a public read can be answered.
+     * These facts are as public as the NARs, so the protocol path answers them
+     * anonymously; JSON for a terminal, a small page for `curl`.
+     */
+    // BOTH SPELLINGS ARE ONE ROUTE: this router normalises a trailing slash in
+    // the PATTERN, so `/cache/:bucket/` and `/cache/:bucket` are the same
+    // registration (a second one is a duplicate-route error), and the handler
+    // answers both requests.
+    HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket`, consumerFacts),
+
+    /**
+     * A HOLD'S PROGRESS, for a client that is WAITING. `--wait` used to ask the
+     * missing question and re-push the narinfo; this answers the row the board
+     * reads, so a waiting push learns which references landed and when the
+     * referrer was recorded — without touching the upload path.
+     */
+    HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket/held`, (request) =>
+      Effect.gen(function* () {
+        const bucket = yield* param("bucket");
+        const admitted = admit(cache, request, bucket, "read");
+        if (!admitted.ok) return admitted.response;
+        return HttpServerResponse.jsonUnsafe({
+          held: cache
+            .held()
+            .filter((row) => row.bucket === admitted.bucket.name)
+            .map((row) => ({
+            storePath: row.storePath,
+            reason: holdReason(row),
+            missing: [...row.missing],
+            fetching: row.fetching,
+            fetched: [...row.fetched],
+            since: row.created,
+          })),
+        });
+      }),
+    ),
+
     /** `nix-cache-info` — the three lines a client reads before anything else. */
     HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket/nix-cache-info`, (request) =>
       Effect.gen(function* () {
@@ -114,7 +431,10 @@ function cacheLayer(cache: Cache) {
     HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket/:name`, (request) =>
       Effect.gen(function* () {
         const name = yield* param("name");
-        if (!name.endsWith(NARINFO_SUFFIX)) return HttpServerResponse.empty({ status: 404 });
+        // A PATH UNDER A BUCKET THAT NAMES NO PROTOCOL FILE IS THE ROW'S 404,
+        // not an empty one: this route outranks the mount's wildcard, so the
+        // sentence has to be said here or the wildcard never gets the request.
+        if (!name.endsWith(NARINFO_SUFFIX)) return missingRoute();
         const hash = name.slice(0, -NARINFO_SUFFIX.length);
         if (!isStorePathHash(hash)) return bad(`"${hash}" is not a store path hash`);
         const admitted = admit(cache, request, yield* param("bucket"), "read");
@@ -126,8 +446,11 @@ function cacheLayer(cache: Cache) {
         // fetch.
         cache.touch(admitted.bucket, hash);
         return request.method === "HEAD"
-          ? HttpServerResponse.empty({ status: 200 })
-          : HttpServerResponse.text(text, { contentType: "text/x-nix-narinfo" });
+          ? HttpServerResponse.empty({ status: 200, headers: readHeaders(admitted.bucket) })
+          : HttpServerResponse.text(text, {
+              contentType: "text/x-nix-narinfo",
+              headers: readHeaders(admitted.bucket),
+            });
       }),
     ),
 
@@ -142,7 +465,7 @@ function cacheLayer(cache: Cache) {
         if (stream === null) return HttpServerResponse.empty({ status: 404 });
         return HttpServerResponse.stream(
           Stream.fromReadableStream({ evaluate: () => stream, onError: (err) => err }),
-          { contentType: "application/x-nix-nar" },
+          { contentType: "application/x-nix-nar", headers: readHeaders(admitted.bucket) },
         );
       }),
     ),
@@ -184,7 +507,10 @@ function cacheLayer(cache: Cache) {
     HttpRouter.add("PUT", `${CACHE_MOUNT}/:bucket/:name`, (request) =>
       Effect.gen(function* () {
         const name = yield* param("name");
-        if (!name.endsWith(NARINFO_SUFFIX)) return HttpServerResponse.empty({ status: 404 });
+        // A PATH UNDER A BUCKET THAT NAMES NO PROTOCOL FILE IS THE ROW'S 404,
+        // not an empty one: this route outranks the mount's wildcard, so the
+        // sentence has to be said here or the wildcard never gets the request.
+        if (!name.endsWith(NARINFO_SUFFIX)) return missingRoute();
         const hash = name.slice(0, -NARINFO_SUFFIX.length);
         if (!isStorePathHash(hash)) return bad(`"${hash}" is not a store path hash`);
         const admitted = admit(cache, request, yield* param("bucket"), "write");
@@ -200,13 +526,111 @@ function cacheLayer(cache: Cache) {
           return outcome.status === 200
             ? HttpServerResponse.empty({ status: 200 })
             : HttpServerResponse.text(
-                `waiting on ${outcome.missing.join(", ")} — upload them and repeat this narinfo`,
+                `${heldReason(outcome.missing, outcome.fetching)}: ${outcome.missing.join(" ")}`,
                 { status: 202 },
               );
         }
         return HttpServerResponse.text(outcome.message, { status: outcome.status });
       }),
     ),
+
+    // ── A BUCKET'S OWN NAME ──────────────────────────────────────────────
+    //
+    // A domain is a STABLE NAME FOR A BUCKET, not a prefix: the same four
+    // protocol paths sit at the root of it, and the request's `Host` — not a
+    // path segment — says which bucket. The routes are registered always; a
+    // request whose `Host` names no bucket is a plain 404, which is exactly
+    // what a wrong name deserves.
+
+    /** `nix-cache-info` at a bucket's domain. */
+    HttpRouter.add("GET", "/nix-cache-info", (request) =>
+      Effect.gen(function* () {
+        const admitted = admitByHost(cache, request, "read");
+        if (!admitted.ok) return admitted.response;
+        return HttpServerResponse.text(NIX_CACHE_INFO, { contentType: "text/plain" });
+      }),
+    ),
+
+    /** `<hash>.narinfo` at a bucket's domain. The hash is the route's only
+     *  parameter; the suffix is static, so a shell path cannot match it. */
+    HttpRouter.add("GET", `/:hash(${HASH_PATTERN}).narinfo`, narinfoRoot(cache)),
+
+    /** The NAR at a bucket's domain, streamed from the store. */
+    HttpRouter.add("GET", "/nar/:file", (request) =>
+      Effect.gen(function* () {
+        const file = yield* param("file");
+        if (!isStagedFileName(file)) return bad(`"${file}" is not a NAR file name`);
+        const admitted = admitByHost(cache, request, "read");
+        if (!admitted.ok) return admitted.response;
+        const stream = yield* Effect.promise(() => cache.narStream(admitted.bucket, file));
+        if (stream === null) return HttpServerResponse.empty({ status: 404 });
+        return HttpServerResponse.stream(
+          Stream.fromReadableStream({ evaluate: () => stream, onError: (err) => err }),
+          { contentType: "application/x-nix-nar", headers: readHeaders(admitted.bucket) },
+        );
+      }),
+    ),
+
+    /** A `nix copy --to https://<domain>` uploads at the root too. */
+    HttpRouter.add("PUT", "/nar/:file", (request) =>
+      Effect.gen(function* () {
+        const file = yield* param("file");
+        if (!isStagedFileName(file)) return bad(`"${file}" is not a NAR file name`);
+        const admitted = admitByHost(cache, request, "write");
+        if (!admitted.ok) return admitted.response;
+        const upload = yield* Effect.promise(() => cache.beginUpload(admitted.bucket, file));
+        const written = yield* Effect.exit(
+          Stream.runForEach(request.stream, (chunk) =>
+            Effect.promise(() => upload.write(chunk)),
+          ).pipe(Effect.andThen(Effect.promise(() => upload.commit()))),
+        );
+        if (written._tag === "Failure") {
+          yield* Effect.promise(() => upload.discard());
+          return HttpServerResponse.text("the upload did not complete", { status: 400 });
+        }
+        return HttpServerResponse.empty({ status: 200 });
+      }),
+    ),
+
+    HttpRouter.add("PUT", `/:hash(${HASH_PATTERN}).narinfo`, (request) =>
+      Effect.gen(function* () {
+        const hash = yield* param("hash");
+        if (!isStorePathHash(hash)) return bad(`"${hash}" is not a store path hash`);
+        const admitted = admitByHost(cache, request, "write");
+        if (!admitted.ok) return admitted.response;
+        const outcome = yield* Effect.promise(() =>
+          cache.acceptNarinfo(admitted.bucket, hash, Stream.toReadableStream(request.stream)),
+        );
+        if (outcome.ok) {
+          return outcome.status === 200
+            ? HttpServerResponse.empty({ status: 200 })
+            : HttpServerResponse.text(
+                `${heldReason(outcome.missing, outcome.fetching)}: ${outcome.missing.join(" ")}`,
+                { status: 202 },
+              );
+        }
+        return HttpServerResponse.text(outcome.message, { status: outcome.status });
+      }),
+    ),
+
+    /**
+     * ONE PART of a NAR too large for a single request.
+     *
+     * Cloudflare — and any proxy with a body ceiling — refuses a 100 MB
+     * request, so `odu cache push` splits the compressed stream into parts. A
+     * part is addressed by its index, which makes a retry an overwrite: a
+     * dropped request costs one part, not the path.
+     */
+    HttpRouter.add("PUT", `${PUSH_API}/buckets/:bucket/nar/:file/parts/:index`, uploadPart),
+    HttpRouter.add("PUT", `${CACHE_MOUNT}/:bucket/nar/:file/parts/:index`, uploadPart),
+
+    /**
+     * JOIN THE PARTS — the client's count, and the server's answer. A gap is
+     * `409` with the indexes: the client retries those parts and asks again.
+     * The hash is still proved at the narinfo, as for every other upload.
+     */
+    HttpRouter.add("POST", `${PUSH_API}/buckets/:bucket/nar/:file/complete`, completeParts),
+    HttpRouter.add("POST", `${CACHE_MOUNT}/:bucket/nar/:file/complete`, completeParts),
 
     /**
      * The batched "which of these are you missing" query. Not part of the Nix
@@ -234,7 +658,28 @@ function cacheLayer(cache: Cache) {
         });
       }),
     ),
+
+    /**
+     * A CLAIMED PREFIX MEANS "MINE". Anything under one of this row's paths
+     * that matched no protocol file is the CACHE's 404 — text, never the
+     * shell's catch-all. Without these, `…/cache/kolu/nope` met the board's
+     * SPA, which is a page at a path the board never routed for and reads as
+     * a broken board rather than as a missing file.
+     */
+    HttpRouter.add("GET", `${CACHE_MOUNT}/*`, () =>
+      Effect.succeed(missingRoute()),
+    ),
+    HttpRouter.add("GET", "/nar/*", () => Effect.succeed(missingRoute())),
+    HttpRouter.add("GET", `${PUSH_API}/*`, () => Effect.succeed(missingRoute())),
   );
+}
+
+/** The row's own 404: a sentence, not a bundle. */
+function missingRoute(): HttpServerResponse.HttpServerResponse {
+  return HttpServerResponse.text("no such cache path\n", {
+    status: 404,
+    contentType: "text/plain; charset=utf-8",
+  });
 }
 
 /** One route parameter, as an Effect so it can be yielded beside the handler's

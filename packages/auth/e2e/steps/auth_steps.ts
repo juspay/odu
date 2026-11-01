@@ -160,6 +160,13 @@ Then("the page shows the token once", function (this: OduWorld) {
   assert.match(this.mintedToken, /^odu_/, "the token does not look like one odu minted");
 });
 
+Then("the profile shows an expiry for {string}", async function (this: OduWorld, name: string) {
+  const row = this.page.locator("ul.tokens li", { hasText: name });
+  await row.waitFor({ timeout: 30_000 });
+  const text = await row.innerText();
+  assert.match(text, /expires \d{4}-\d{2}-\d{2}/, `the token's row names no expiry: ${text}`);
+});
+
 Then("a CLI with that token answers whoami as this person", function (this: OduWorld) {
   const answer = asPerson(this, ["auth", "whoami", "-o", "json"]);
   assert.strictEqual(answer.status, 0, `whoami failed: ${answer.stderr}`);

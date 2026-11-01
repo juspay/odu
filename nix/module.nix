@@ -70,6 +70,58 @@ let
     extraConfig = proxyRules;
   };
 
+  # THE READ CACHE IS FOR NARS, and only for NARs. A narinfo is a few hundred
+  # bytes and its hit count is a fact the bucket publishes, so it must reach
+  # odu; a NAR is the gigabytes, and a second fetch of the same one is the
+  # commonest thing a build farm does. `$host$request_uri` keys the two forms
+  # of the same object apart: a bucket domain and the path form are different
+  # names for the same bytes, and a cache that merged them would answer one
+  # name with the other's header.
+  narLocation = {
+    proxyPass = daemonUrl;
+    # THE SAME STREAMING RULES, EXCEPT BUFFERING: `proxyRules` turns response
+    # buffering off so odu streams a NAR straight to the socket, and a cached
+    # NAR is the opposite trade — one copy on disk that every later reader
+    # shares. `proxy_buffering on` is therefore stated here instead, not added
+    # to a rules string that already says off (nginx refuses the duplicate).
+    extraConfig = ''
+      proxy_pass_request_headers on;
+      client_max_body_size 0;
+      proxy_request_buffering off;
+      proxy_read_timeout 3600s;
+      proxy_buffering on;
+      proxy_cache odu_nar;
+      proxy_cache_lock on;
+      # A REQUEST THAT CARRIES A CREDENTIAL IS NEVER SERVED FROM, OR STORED IN,
+      # THE SHARED CACHE. It is how a private bucket's authorised read would
+      # otherwise become the next anonymous reader's HIT; the daemon's
+      # `Cache-Control: private, no-store` is the other half.
+      proxy_no_cache $http_authorization;
+      proxy_cache_bypass $http_authorization;
+      proxy_cache_valid 200 1h;
+      proxy_cache_key "$host$request_uri";
+      add_header X-Cache-Status $upstream_cache_status always;
+    '';
+  };
+
+  # THE NIX PROTOCOL'S WHOLE FOOTPRINT AT A BUCKET'S OWN NAME. A bucket domain
+  # answers at `/`, so the vhost proxies exactly the paths the cache claims —
+  # and NOT `/`, which is the board's and stays on `cache.domain`.
+  cacheLocations = {
+    "/nix-cache-info" = proxyLocation;
+    "/nar/" = proxyLocation;
+    "/cache/" = proxyLocation;
+    "/_odu/v1/" = proxyLocation;
+    # nginx parses an unquoted `{32}` in a location regex as a block opener, so
+    # the expression is quoted — and `[.]` avoids a backslash in the spelling.
+    "~ \"^/[0-9abcdfghijklmnpqrsvwxyz]{32}[.]narinfo$\"" = proxyLocation;
+    # EVERYTHING ELSE GOES TO THE DAEMON, which answers for the bucket only: `/`
+    # is its public page, the paths above are the protocol, and the board,
+    # `/mcp`, `/auth` and `/rpc/ws` are the cache row's 404. nginx cannot decide
+    # that — the bucket a name belongs to is the daemon's fact.
+    "/" = proxyLocation;
+  };
+
   # IS THIS A SERVER MODE DEPLOYMENT? All three `github` options set; the
   # assertion above refuses a partial one.
   serverMode = cfg.github.clientId != null;
@@ -211,10 +263,31 @@ in
       type = types.nullOr types.str;
       default = null;
       description = ''
-        The public hostname a bucket is served at — and, with `github` set, the
-        board's as well. Setting it turns on nginx with one virtual host that
+        The public hostname this SERVICE is served at — and, with `github` set,
+        the board's as well. Setting it turns on nginx with one virtual host that
         proxies the cache's route families (and, in server mode, the board, the
         websocket and `/mcp`) and makes `publicOrigin` `https://<domain>`.
+
+        A bucket's OWN name is `cache.bucketDomains`, not this: this one carries
+        the board, and a bucket domain answers only the Nix protocol.
+      '';
+    };
+
+    cache.bucketDomains = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "cache.example.org" ];
+      description = ''
+        DNS names that belong to BUCKETS, each getting its own virtual host with
+        its certificate and exactly the Nix protocol's paths at `/`. The daemon
+        answers a name by its `Host`, so the same name must also be set on the
+        bucket itself (`odu cache domain <bucket> <name>`, or the bucket page's
+        Domain field); this option is what puts nginx and a certificate in
+        front of it.
+
+        A bucket domain is a NAME, not read access control: a public bucket
+        stays readable without a token, and the board is not served on these
+        names.
       '';
     };
 
@@ -264,6 +337,30 @@ in
       };
     };
 
+    cloudflare = {
+      apiTokenFile = mkOption {
+        type = types.nullOr types.path;
+        default = null;
+        example = "/run/secrets/cloudflare-api-token";
+        description = ''
+          A file holding a Cloudflare API token. Setting it mounts the
+          `cloudflare` row: it makes ONE tunnel for this server, routes each
+          bucket that has a domain, keeps the proxied DNS record, and runs
+          `cloudflared` as a child of the daemon. The token needs
+          **Zone:DNS:Edit** and **Account:Cloudflare Tunnel:Edit**; a missing or
+          inactive token refuses the row at boot, naming what Cloudflare said.
+
+          This is how `cache.kolu.dev` exists on a host with no public port:
+          the tunnel is outbound, so neither nginx nor the firewall has to
+          expose anything. The same tunnel carries \`publicOrigin\`'s host when
+          the token can edit its zone, which is what lets a Tailscale Funnel
+          retire — and moves the GitHub App's callback URL to that name.
+
+          The token is loaded as a systemd credential, not put in the Nix store.
+        '';
+      };
+    };
+
     cache.enableACME = mkOption {
       type = types.bool;
       default = true;
@@ -308,6 +405,19 @@ in
           services.odu.github needs clientId, clientSecretFile and allow TOGETHER,
           or none of them. With none, this daemon has no door and every caller is
           its owner; with all three it is a server that asks who you are.
+        '';
+      }
+      {
+        # ONE NAME, ONE VHOST. A duplicate in the list would silently pick one
+        # entry, and `cache.domain` already owns the board's vhost — a bucket
+        # domain there would replace it rather than add to it.
+        assertion =
+          builtins.length (lib.unique cfg.cache.bucketDomains) == builtins.length cfg.cache.bucketDomains
+          && !(builtins.elem cfg.cache.domain cfg.cache.bucketDomains);
+        message = ''
+          services.odu.cache.bucketDomains must be distinct, and must not
+          repeat services.odu.cache.domain: the board's vhost and a bucket's
+          would collide, and one of them would answer for the other.
         '';
       }
     ];
@@ -366,53 +476,97 @@ in
         ]
         ++ optionals (cfg.allowedOrigins != [ ]) [
           "ODU_WEB_ALLOWED_ORIGINS=${builtins.concatStringsSep "," cfg.allowedOrigins}"
+        ]
+        ++ optionals (cfg.cloudflare.apiTokenFile != null) [
+          # The credential's runtime path: systemd copies the file into a
+          # private directory, and this is the file the daemon reads.
+          "ODU_CLOUDFLARE_API_TOKEN_FILE=%d/cloudflare-api-token"
         ];
         Restart = "on-failure";
-      } // lib.optionalAttrs (cfg.rootTokenFile != null || serverMode) {
-        # ONE list: two `//` updates would replace each other, and a missing
-        # credential is a daemon that cannot read its own secret.
-        LoadCredential = optionals (cfg.rootTokenFile != null) [
-          "root-token:${cfg.rootTokenFile}"
-        ] ++ optionals serverMode [
-          "client-secret:${toString cfg.github.clientSecretFile}"
-        ];
-      };
+      } // lib.optionalAttrs
+        (
+          cfg.rootTokenFile != null || serverMode || cfg.cloudflare.apiTokenFile != null
+        )
+        {
+          # ONE list: two `//` updates would replace each other, and a missing
+          # credential is a daemon that cannot read its own secret.
+          LoadCredential = optionals (cfg.rootTokenFile != null) [
+            "root-token:${cfg.rootTokenFile}"
+          ] ++ optionals serverMode [
+            "client-secret:${toString cfg.github.clientSecretFile}"
+          ] ++ optionals (cfg.cloudflare.apiTokenFile != null) [
+            "cloudflare-api-token:${toString cfg.cloudflare.apiTokenFile}"
+          ];
+        };
     };
 
-    services.nginx = mkIf (cfg.cache.domain != null) {
+    services.nginx = mkIf (cfg.cache.domain != null || cfg.cache.bucketDomains != [ ]) {
       enable = true;
       recommendedProxySettings = true;
-      virtualHosts.${cfg.cache.domain} = {
-        enableACME = cfg.cache.enableACME;
-        forceSSL = cfg.cache.enableACME;
-        # TWO SETS OF LOCATIONS, one per shape.
-        #
-        # WITHOUT a door: the cache's protocol and its admin API, and NOTHING
-        # else. `/` is an explicit 404 rather than an absent location: with no
-        # `location /` and no `root`, nginx falls back to its own
-        # `html/index.html` and answers "Welcome to nginx" with a 200 — which is
-        # not the board, but is not the 404 this module promised either.
-        #
-        # WITH one: everything the daemon serves, because the door is what makes
-        # it safe to. `/rpc/ws` carries the websocket upgrade; `/` carries the
-        # board and every static asset; `/mcp` an agent's endpoint. `/auth/…`
-        # rides `/` — the OAuth redirect and the callback are ordinary requests.
-        locations =
-          if serverMode then {
-            "/rpc/ws" = {
-              proxyPass = daemonUrl;
-              extraConfig = websocketRules;
+      # The zone lives here rather than in a vhost: both vhost shapes read from
+      # it, and one declaration is one place for its size to be argued about.
+      appendHttpConfig = ''
+        proxy_cache_path /var/cache/nginx/odu-nar levels=1:2 keys_zone=odu_nar:10m
+          max_size=10g inactive=7d use_temp_path=off;
+      '';
+      virtualHosts =
+        lib.optionalAttrs (cfg.cache.domain != null)
+          {
+            ${cfg.cache.domain} = {
+              enableACME = cfg.cache.enableACME;
+              forceSSL = cfg.cache.enableACME;
+              # TWO SETS OF LOCATIONS, one per shape.
+              #
+              # WITHOUT a door: the cache's protocol and its admin API, and
+              # NOTHING else. `/` is an explicit 404 rather than an absent
+              # location: with no `location /` and no `root`, nginx falls back to
+              # its own `html/index.html` and answers "Welcome to nginx" with a
+              # 200 — which is not the board, but is not the 404 this module
+              # promised either.
+              #
+              # WITH one: everything the daemon serves, because the door is what
+              # makes it safe to. `/rpc/ws` carries the websocket upgrade; `/`
+              # carries the board and every static asset; `/mcp` an agent's
+              # endpoint. `/auth/…` rides `/` — the OAuth redirect and the
+              # callback are ordinary requests.
+              locations =
+                if serverMode then {
+                  "/rpc/ws" = {
+                    proxyPass = daemonUrl;
+                    extraConfig = websocketRules;
+                  };
+                  "/" = proxyLocation;
+                } else {
+                  # The NAR paths are regexes so they win over the `/cache/`
+                  # prefix beside them; everything else under `/cache/` is a
+                  # narinfo or the push API, which must not be cached.
+                  "~ ^/cache/[a-z0-9-]+/nar/" = narLocation;
+                  "/cache/" = proxyLocation;
+                  "/_odu/v1/" = proxyLocation;
+                  "/" = { return = "404"; };
+                };
             };
-            "/" = proxyLocation;
-          } else {
-            "/cache/" = proxyLocation;
-            "/_odu/v1/" = proxyLocation;
-            "/" = { return = "404"; };
-          };
-      };
+          }
+        # ONE VHOST PER BUCKET NAME, each with its own certificate and exactly
+        # the Nix protocol's paths. The daemon decides WHICH bucket a `Host`
+        # names; nginx only has to let the request through.
+        // lib.listToAttrs (
+          map
+            (domain: lib.nameValuePair domain {
+              enableACME = cfg.cache.enableACME;
+              forceSSL = cfg.cache.enableACME;
+              locations = cacheLocations // {
+                "~ ^/nar/" = narLocation;
+              };
+            })
+            cfg.cache.bucketDomains
+        );
     };
 
     networking.firewall.allowedTCPPorts =
-      optionals (cfg.cache.domain != null && cfg.openFirewall) [ 80 443 ];
+      optionals ((cfg.cache.domain != null || cfg.cache.bucketDomains != [ ]) && cfg.openFirewall) [
+        80
+        443
+      ];
   };
 }

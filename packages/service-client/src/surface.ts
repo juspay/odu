@@ -139,8 +139,13 @@ export { STATUS_META, type StatusHue } from "@odu/run-client/surface";
  * path, prune's retention, a bucket's and a pin's name, a grant's login, a
  * personal token's name).
  * Additive: every input 2.1 accepted, 2.2 accepts.
+ *
+ * 2.3: `cache.bucket.domain` (a bucket's own DNS name, clearable), the `held`
+ * collection (paths accepted and waiting on references), `Bucket.domain` and
+ * `Bucket.pushUrl` as new output fields, and `auth.token.create`'s optional
+ * `expiresDays`. Additive: every input 2.2 accepted, 2.3 accepts.
  */
-export const SERVICE_CONTRACT_VERSION = "2.2";
+export const SERVICE_CONTRACT_VERSION = "2.3";
 
 // ── refusals ────────────────────────────────────────────────────────────────
 

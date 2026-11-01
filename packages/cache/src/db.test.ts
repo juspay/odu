@@ -9,6 +9,7 @@
  */
 
 import { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,6 +17,7 @@ import { join } from "node:path";
 import {
   type BucketRow,
   CACHE_SCHEMA_VERSION,
+  MIGRATIONS,
   type ObjectRow,
   openCacheRepo,
   type TokenRow,
@@ -32,6 +34,7 @@ const bucket: BucketRow = {
   publicKey: "main-1:cHVibGlj",
   upstreamKeys: ["cache.nixos.org-1"],
   created: NOW,
+  domain: null,
 };
 
 const token: TokenRow = {
@@ -95,12 +98,87 @@ describe("buckets", () => {
     expect(repo.buckets().map((row) => row.name)).toEqual(["main"]);
   });
 
+  it("finds a bucket by the domain it claimed", () => {
+    const repo = openCacheRepo(":memory:");
+    repo.putBucket({ ...bucket, domain: "cache.example.org" });
+    expect(repo.bucketByDomain("cache.example.org")?.name).toBe("main");
+    expect(repo.bucketByDomain("other.example.org")).toBeNull();
+    // A-TO-B: the upsert moves the name rather than keeping the old one.
+    repo.putBucket({ ...bucket, domain: null });
+    expect(repo.bucketByDomain("cache.example.org")).toBeNull();
+  });
+
+  it("refuses two buckets with one domain", () => {
+    const repo = openCacheRepo(":memory:");
+    repo.putBucket({ ...bucket, domain: "cache.example.org" });
+    expect(() =>
+      repo.putBucket({ ...bucket, name: "other", domain: "cache.example.org" }),
+    ).toThrow();
+  });
+
   it("updates a bucket in place rather than duplicating it", () => {
     const repo = openCacheRepo(":memory:");
     repo.putBucket(bucket);
     repo.putBucket({ ...bucket, isPublic: false, retentionDays: 7 });
     expect(repo.buckets()).toHaveLength(1);
     expect(repo.bucket("main")).toEqual({ ...bucket, isPublic: false, retentionDays: 7 });
+  });
+});
+
+describe("held uploads", () => {
+  it("round-trips the reason and keeps the arrival time on a refresh", () => {
+    const repo = openCacheRepo(":memory:");
+    repo.putHeld({
+      bucket: "main",
+      storePath: "/nix/store/parent",
+      missing: ["/nix/store/child"],
+      fetching: 1,
+      fetched: [],
+      failure: null,
+      created: NOW,
+    });
+    // A later fetch landed one reference and the reason narrowed; the row's
+    // `since` is when the path first arrived and must not move.
+    repo.putHeld({
+      bucket: "main",
+      storePath: "/nix/store/parent",
+      missing: [],
+      fetching: 0,
+      fetched: ["/nix/store/child"],
+      failure: null,
+      created: NOW + 5000,
+    });
+    expect(repo.held()).toEqual([
+      {
+        bucket: "main",
+        storePath: "/nix/store/parent",
+        missing: [],
+        fetching: 0,
+        fetched: ["/nix/store/child"],
+        failure: null,
+        created: NOW,
+      },
+    ]);
+    expect(repo.held("main")).toHaveLength(1);
+    expect(repo.held("other")).toEqual([]);
+    repo.deleteHeld("main", "/nix/store/parent");
+    expect(repo.held()).toEqual([]);
+  });
+
+  it("goes with its bucket", () => {
+    const repo = openCacheRepo(":memory:");
+    repo.putBucket(bucket);
+    repo.putHeld({
+      bucket: "main",
+      storePath: "/nix/store/parent",
+      missing: ["/nix/store/child"],
+      fetching: 0,
+      fetched: [],
+      failure: null,
+      created: NOW,
+    });
+    repo.deleteBucket("main");
+    expect(repo.held()).toEqual([]);
   });
 });
 
@@ -233,5 +311,68 @@ describe("deleting a bucket", () => {
     expect(repo.buckets()).toHaveLength(0);
     expect(repo.objects()).toHaveLength(0);
     expect(repo.pins()).toHaveLength(0);
+  });
+});
+
+/** THE FOUR SQL STRINGS THAT SHIPPED BEFORE THIS PR, pinned by content.
+ *
+ * `slice(0, 4)` alone follows a future mid-list insert, so it would hand the
+ * new migration list back to itself and pass. The hash makes a reorder or an
+ * insert in the shipped prefix fail HERE, where the cause is obvious.
+ */
+const SHIPPED_V1_TO_V4_SHA256 =
+  "278af79f3e7195b7faed7eb47e239afb5a7e978c4f8a5b5ccf8b1ea324a6f22e";
+
+describe("upgrading an existing database", () => {
+  it("opens a v4 file and applies only the appended migrations", () => {
+    expect(
+      createHash("sha256").update(MIGRATIONS.slice(0, 4).join("\n")).digest("hex"),
+    ).toBe(SHIPPED_V1_TO_V4_SHA256);
+    const dir = mkdtempSync(join(tmpdir(), "odu-cache-upgrade-"));
+    const file = join(dir, "cache.sqlite");
+    try {
+      // THE POD'S FILE: the four migrations that shipped before this PR's
+      // fetch progress. `user_version` is 4, and `domain` already exists.
+      const old = new Database(file);
+      for (const sql of MIGRATIONS.slice(0, 4)) old.exec(sql);
+      old.exec("PRAGMA user_version = 4;");
+      old.close();
+
+      const repo = openCacheRepo(file);
+      repo.putHeld({
+        bucket: "main",
+        storePath: "/nix/store/parent",
+        missing: ["/nix/store/child"],
+        fetching: 0,
+        fetched: ["/nix/store/done"],
+        failure: "network unreachable",
+        created: NOW,
+      });
+      expect(repo.held()).toEqual([
+        {
+          bucket: "main",
+          storePath: "/nix/store/parent",
+          missing: ["/nix/store/child"],
+          fetching: 0,
+          fetched: ["/nix/store/done"],
+          failure: "network unreachable",
+          created: NOW,
+        },
+      ]);
+      repo.close();
+
+      const check = new Database(file);
+      expect((check.query("PRAGMA user_version;").get() as { user_version: number }).user_version).toBe(
+        CACHE_SCHEMA_VERSION,
+      );
+      const columns = (check.query("PRAGMA table_info(held);").all() as { name: string }[]).map(
+        (column) => column.name,
+      );
+      expect(columns).toContain("fetched");
+      expect(columns).toContain("failure");
+      check.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

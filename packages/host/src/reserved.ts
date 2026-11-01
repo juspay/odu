@@ -18,12 +18,17 @@
  * fail-closed direction is unchanged.
  */
 
-import { type ClaimedRoutes, SERVICE_DOOR_PATH } from "@odu/cordis/services";
+import {
+  type ClaimedRoutes,
+  SERVICE_DOOR_PATH,
+  SERVICE_ROWS_PATH,
+} from "@odu/cordis/services";
 
 /** The paths the HOST'S listener answers itself. `*` means a walk — one or
  *  more characters after the prefix. */
 export const HOST_PATHS: ReadonlyArray<string> = [
   SERVICE_DOOR_PATH,
+  SERVICE_ROWS_PATH,
   "/assets/*",
   "/sw.js",
   "/manifest.webmanifest",
@@ -34,12 +39,24 @@ export function reservedPaths(rows: ReadonlyArray<ClaimedRoutes>): ReadonlyArray
   return [...HOST_PATHS, ...rows.flatMap((row) => row.paths)];
 }
 
-/** Does a path belong to a route odu itself composed? An entry ending in `*` is
- *  a WALK — one or more characters after the prefix, so `/cache/` itself is not
- *  the cache's (and the shell answering it is the shell answering a typo).
- *  Everything else is exact. */
+/**
+ * Does a path belong to a route odu itself composed? Three claim forms:
+ *
+ *   - exact (`/nix-cache-info`);
+ *   - a WALK, ending in `*` — one or more characters after the prefix, so
+ *     `/cache/` itself is not the cache's (and the shell answering it is the
+ *     shell answering a typo);
+ *   - a REGEX, beginning `~`, for a path that cannot be spelled as a prefix.
+ *     The cache's bucket-domain narinfo (a 32-character base32 hash, then
+ *     `.narinfo`) is the case: a prefix claim would take every one-segment
+ *     path the shell owns.
+ *
+ * Claim entries are odu's own, written beside the routes; a regex here is not
+ * user input.
+ */
 export function isReserved(path: string, reserved: ReadonlyArray<string>): boolean {
   return reserved.some((one) => {
+    if (one.startsWith("~")) return new RegExp(one.slice(1)).test(path);
     if (!one.endsWith("*")) return path === one;
     const prefix = one.slice(0, -1);
     return path.length > prefix.length && path.startsWith(prefix);

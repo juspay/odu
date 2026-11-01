@@ -43,6 +43,10 @@ export interface BucketRow {
    *  that keeps nixpkgs out of a bucket. */
   upstreamKeys: readonly string[];
   created: number;
+  /** THE NAME A BUCKET IS SERVED AT, when it has one (`cache.kolu.dev`). The
+   *  row answers by `Host` as well as by `/cache/<name>`, and the advertised
+   *  substituter URL becomes this name. `null` means the path form. */
+  domain: string | null;
 }
 
 export type Scope = "read" | "write" | "admin";
@@ -91,6 +95,34 @@ export interface BucketTotals {
   lastPush: number | null;
 }
 
+/**
+ * AN UPLOAD THE BUCKET TOOK BUT CANNOT SERVE YET — a narinfo whose references
+ * are not in the store.
+ *
+ * It is a ROW rather than a line of staging's memory because it is a fact the
+ * bucket publishes: the board lists the paths a push is holding and why, and a
+ * restart must not make a pending upload look like one that never arrived. The
+ * staged narinfo itself stays on disk (staging's), so the row only names the
+ * position and the reason.
+ */
+export interface HeldRow {
+  bucket: string;
+  storePath: string;
+  /** References the store says are not valid, as Nix named them. */
+  missing: readonly string[];
+  /** How many of those the server is FETCHING from upstream right now. A hold
+   *  with a count is progress; zero means the fetch finished and they are
+   *  genuinely neither here nor upstream. */
+  fetching: number;
+  /** References this hold's fetch ALREADY brought in. The page shows them
+   *  beside the ones still missing, so a job that lands 6 of 7 says which. */
+  fetched: readonly string[];
+  /** The last line a FAILED `nix-store -r` said. `null` while it is working,
+   *  or when the references are genuinely neither here nor upstream. */
+  failure: string | null;
+  created: number;
+}
+
 /** A named closure kept out of garbage collection. */
 export interface PinRow {
   bucket: string;
@@ -105,6 +137,9 @@ export interface PinRow {
 export interface CacheRepo {
   putBucket(row: BucketRow): void;
   bucket(name: string): BucketRow | null;
+  /** The bucket a `Host` names, if one has claimed it. The caller normalizes
+   *  the header (lowercase, no port); the domain is stored that way. */
+  bucketByDomain(domain: string): BucketRow | null;
   buckets(): BucketRow[];
   deleteBucket(name: string): void;
 
@@ -126,6 +161,15 @@ export interface CacheRepo {
   putPin(row: PinRow): void;
   pins(bucket?: string): PinRow[];
   deletePin(bucket: string, name: string): boolean;
+
+  /**
+   * The uploads a bucket is holding for references. `put` refreshes the
+   * REASON when a drain says something different, so a row's `since` stays
+   * the moment the path first arrived.
+   */
+  putHeld(row: HeldRow): void;
+  held(bucket?: string): HeldRow[];
+  deleteHeld(bucket: string, storePath: string): void;
 
   /** Object count, nar bytes, reads and the newest push per bucket, COUNTED BY
    *  SQL. A cache with a hundred thousand objects must not answer "how big am
@@ -162,7 +206,7 @@ export interface CacheRepo {
  * the index of the last applied entry, so a fresh file runs all of them and an
  * existing one runs the tail.
  */
-const MIGRATIONS: readonly string[] = [
+export const MIGRATIONS: readonly string[] = [
   `
   CREATE TABLE bucket (
     name            TEXT PRIMARY KEY,
@@ -212,6 +256,46 @@ const MIGRATIONS: readonly string[] = [
     created    INTEGER NOT NULL,
     PRIMARY KEY (bucket, name)
   );
+  `,
+  // Migration 2 — WHAT A BUCKET IS HOLDING FOR REFERENCES. Before this the
+  // reason lived only in a drain's memory and died with the process, so a
+  // person looking at a stalled push saw nothing until the next drain happened
+  // to run.
+  `
+  CREATE TABLE held (
+    bucket     TEXT NOT NULL,
+    store_path TEXT NOT NULL,
+    missing    TEXT NOT NULL,
+    created    INTEGER NOT NULL,
+    PRIMARY KEY (bucket, store_path)
+  );
+  `,
+  // Migration 3 — THE FETCH A HOLD REPRESENTS. A missing reference is fetched
+  // OFF the upload request; until it lands, the bucket publishes the progress
+  // rather than a silent 202.
+  `
+  ALTER TABLE held ADD COLUMN fetching INTEGER NOT NULL DEFAULT 0;
+  `,
+  // Migration 4 — A NAME PER BUCKET. One domain, one bucket: the partial
+  // unique index is the rule, not a check in a verb that another caller could
+  // skip.
+  `
+  ALTER TABLE bucket ADD COLUMN domain TEXT;
+  CREATE UNIQUE INDEX bucket_domain ON bucket (domain) WHERE domain IS NOT NULL;
+  `,
+  // Migration 5 — WHICH REFERENCES THE FETCH HAS ALREADY LANDED. A hold with a
+  // count told a person how much was left, not which; the page shows both.
+  // APPENDED, never inserted: migrations apply by POSITION against
+  // `user_version`, so an entry added mid-array re-runs every migration after
+  // it on an existing database.
+  `
+  ALTER TABLE held ADD COLUMN fetched TEXT NOT NULL DEFAULT '[]';
+  `,
+  // Migration 6 — A FAILED FETCH IS NOT "NEITHER HERE NOR UPSTREAM". The
+  // last line `nix-store -r` said is stored so the hold names the real fault
+  // (network, disk, lock), and a later retry clears it.
+  `
+  ALTER TABLE held ADD COLUMN failure TEXT;
   `,
 ];
 
@@ -267,6 +351,7 @@ const bucketOf = (row: Row): BucketRow => ({
   publicKey: text(row, "public_key"),
   upstreamKeys: list(row, "upstream_keys"),
   created: integer(row, "created"),
+  domain: maybeText(row, "domain"),
 });
 
 const tokenOf = (row: Row): TokenRow => ({
@@ -298,6 +383,16 @@ const pinOf = (row: Row): PinRow => ({
   bucket: text(row, "bucket"),
   name: text(row, "name"),
   rootPaths: list(row, "root_paths"),
+  created: integer(row, "created"),
+});
+
+const heldOf = (row: Row): HeldRow => ({
+  bucket: text(row, "bucket"),
+  storePath: text(row, "store_path"),
+  missing: list(row, "missing"),
+  fetching: integer(row, "fetching"),
+  fetched: list(row, "fetched"),
+  failure: row["failure"] === null || row["failure"] === undefined ? null : String(row["failure"]),
   created: integer(row, "created"),
 });
 
@@ -369,12 +464,12 @@ export function openCacheRepo(path: string): CacheRepo {
     putBucket(row) {
       db.run(
         `INSERT INTO bucket (name, is_public, retention_days, key_name, secret_key,
-           public_key, upstream_keys, created)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           public_key, upstream_keys, created, domain)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET is_public = excluded.is_public,
            retention_days = excluded.retention_days, key_name = excluded.key_name,
            secret_key = excluded.secret_key, public_key = excluded.public_key,
-           upstream_keys = excluded.upstream_keys`,
+           upstream_keys = excluded.upstream_keys, domain = excluded.domain`,
         [
           row.name,
           row.isPublic ? 1 : 0,
@@ -384,6 +479,7 @@ export function openCacheRepo(path: string): CacheRepo {
           row.publicKey,
           JSON.stringify(row.upstreamKeys),
           row.created,
+          row.domain,
         ],
       );
     },
@@ -391,11 +487,16 @@ export function openCacheRepo(path: string): CacheRepo {
       const row = db.query("SELECT * FROM bucket WHERE name = ?").get(name) as Row | null;
       return row === null ? null : bucketOf(row);
     },
+    bucketByDomain: (domain) => {
+      const row = db.query("SELECT * FROM bucket WHERE domain = ?").get(domain) as Row | null;
+      return row === null ? null : bucketOf(row);
+    },
     buckets: () => all("SELECT * FROM bucket ORDER BY name", [], bucketOf),
     deleteBucket(name) {
       db.run("DELETE FROM bucket WHERE name = ?", [name]);
       db.run("DELETE FROM object WHERE bucket = ?", [name]);
       db.run("DELETE FROM pin WHERE bucket = ?", [name]);
+      db.run("DELETE FROM held WHERE bucket = ?", [name]);
     },
 
     putToken(row) {
@@ -569,6 +670,35 @@ export function openCacheRepo(path: string): CacheRepo {
       if (found === null) return false;
       db.run("DELETE FROM pin WHERE bucket = ? AND name = ?", [bucket, name]);
       return true;
+    },
+
+    putHeld(row) {
+      // `created` is NOT overwritten: it is when the path first arrived, which
+      // is what the board's "waiting since" means. A later drain with the same
+      // or a shorter list of missing references refreshes the REASON only.
+      db.run(
+        `INSERT INTO held (bucket, store_path, missing, fetching, fetched, failure, created)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(bucket, store_path) DO UPDATE SET missing = excluded.missing,
+           fetching = excluded.fetching, fetched = excluded.fetched,
+           failure = excluded.failure`,
+        [
+          row.bucket,
+          row.storePath,
+          JSON.stringify(row.missing),
+          row.fetching,
+          JSON.stringify(row.fetched),
+          row.failure,
+          row.created,
+        ],
+      );
+    },
+    held: (bucket) =>
+      bucket === undefined
+        ? all("SELECT * FROM held ORDER BY created", [], heldOf)
+        : all("SELECT * FROM held WHERE bucket = ? ORDER BY created", [bucket], heldOf),
+    deleteHeld(bucket, storePath) {
+      db.run("DELETE FROM held WHERE bucket = ? AND store_path = ?", [bucket, storePath]);
     },
 
     close() {

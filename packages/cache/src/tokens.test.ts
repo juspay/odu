@@ -120,6 +120,7 @@ describe("verifyToken", () => {
     expect(verifyToken(repo, expired, "main", "read", NOW)).toEqual({
       ok: false,
       reason: "expired",
+      expiredAt: NOW - 1,
     });
     expect(verifyToken(repo, revoked, "main", "read", NOW)).toEqual({
       ok: false,

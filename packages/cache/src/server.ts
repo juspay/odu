@@ -40,11 +40,13 @@
  */
 
 import { Effect } from "effect";
-import { definePlugin } from "@olai/effect-cordis";
+import { definePlugin, offer } from "@olai/effect-cordis";
 import type { ImplementSurfaceDeps } from "@kolu/surface/server";
 import {
   BoundOrigin,
   Bundle,
+  BucketDomains,
+  type BucketDomains as BucketDomainsFacts,
   Log,
   NixStore,
   PublicOrigin,
@@ -53,13 +55,18 @@ import {
   StateDir,
 } from "@odu/cordis/services";
 import { createCache, roleAuthority, type Authority, type BucketFacts, type Cache, type CacheOutcome } from "./cache";
+import { createSlots } from "./slots";
 import { may, principalOf, type Principal } from "@odu/cordis/principal";
-import { CACHE_MOUNT } from "./paths";
+import { bucketOf, CACHE_MOUNT, CACHE_ROUTE_PATHS } from "./paths";
 import { cacheRoutes } from "./routes";
 import {
   type CacheBucket,
+  type CacheHeld,
   CACHE_KEY,
   CacheRefused,
+  heldKey,
+  heldReason,
+  holdReason,
   oduCacheSurface,
 } from "./surface";
 
@@ -70,10 +77,17 @@ type CacheSpec = (typeof oduCacheSurface)["spec"];
 const DEFAULT_UPSTREAM_KEY = "cache.nixos.org-1";
 export type CacheSurfaceDeps = ImplementSurfaceDeps<CacheSpec>;
 
-/** The sibling's publishing half, as the composed bundle hands it over. */
+/** The sibling's publishing half, as the composed bundle hands it over — the
+ *  two collections this row owns, each with its own key type. */
 export interface CachePublisher {
-  upsert(key: string, row: CacheBucket): void;
-  remove(key: string): void;
+  readonly buckets: {
+    upsert(key: string, row: CacheBucket): void;
+    remove(key: string): void;
+  };
+  readonly held: {
+    upsert(key: string, row: CacheHeld): void;
+    remove(key: string): void;
+  };
 }
 
 export interface CacheServerOptions {
@@ -97,6 +111,9 @@ export interface CacheServer {
   readonly publish: () => void;
   /** Stop listening. The activation's cleanup, alongside the cache's own. */
   readonly detach: () => void;
+  /** The substituter URL for one bucket, as the cache row publishes it — the
+   *  same string the board's row carries, for a route that takes no root token. */
+  readonly substituterUrl: (name: string) => string;
 }
 
 export function cacheServer(opts: CacheServerOptions): CacheServer {
@@ -107,6 +124,9 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
    *  filled by the framework from the same `upsert`s a publish performs, so the
    *  two cannot disagree. */
   const rows = new Map<string, CacheBucket>();
+  /** The same pair for the held collection — keyed `${bucket}|${storePath}`. */
+  const publishedHeld = new Map<string, string>();
+  const rowsHeld = new Map<string, CacheHeld>();
   let publisher: CachePublisher | null = null;
 
   /** A bucket's row: the cache's own facts plus the one thing the cache cannot
@@ -115,12 +135,36 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
    *  `nix.conf`, built once. The board's row and `bucket.describe` both answer
    *  it, and two builders were two chances for them to disagree about the
    *  address the cache is actually served at. */
-  const urlOf = (name: string): string => `${opts.publicOrigin}${opts.mount}/${name}`;
+  /** The SCHEME the deployment's public origin uses — a bucket's domain is
+   *  reached over the same TLS story, and the module's test vhost is plain
+   *  HTTP. */
+  const scheme = ((): string => {
+    try {
+      return new URL(opts.publicOrigin).protocol;
+    } catch {
+      return "https:";
+    }
+  })();
+
+  /**
+   * WHERE A CLIENT SUBSTITUTES THIS BUCKET FROM. A domain is the whole
+   * address (that is what "a name of its own" means); otherwise the bucket is a
+   * path under the origin.
+   */
+  const urlOf = (facts: { name: string; domain: string | null }): string =>
+    facts.domain === null
+      ? `${opts.publicOrigin}${opts.mount}/${facts.name}`
+      : `${scheme}//${facts.domain}`;
+
+  /** WHERE A PUSH ADDRESSES IT. Always the path form: the push API needs the
+   *  bucket's name, and a domain host answers `/cache/<name>` too. */
+  const pushUrlOf = (name: string): string => `${opts.publicOrigin}${opts.mount}/${name}`;
 
   const rowOf = (facts: BucketFacts): CacheBucket => ({
     ...facts,
     upstreamKeys: [...facts.upstreamKeys],
-    url: urlOf(facts.name),
+    url: urlOf(facts),
+    pushUrl: pushUrlOf(facts.name),
   });
 
   const publish = (): void => {
@@ -133,7 +177,7 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
       if (published.get(row.name) === encoded) continue;
       published.set(row.name, encoded);
       rows.set(row.name, row);
-      publisher.upsert(row.name, row);
+      publisher.buckets.upsert(row.name, row);
     }
     // A bucket that went away — `odu cache` has no delete yet, but a row left
     // behind by one would be a row nobody can open.
@@ -141,7 +185,35 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
       if (next.has(name)) continue;
       published.delete(name);
       rows.delete(name);
-      publisher.remove(name);
+      publisher.buckets.remove(name);
+    }
+
+    const nextHeld = new Map<string, string>();
+    for (const facts of cache.held()) {
+      const key = heldKey(facts);
+      const row: CacheHeld = {
+        bucket: facts.bucket,
+        storePath: facts.storePath,
+        reason: holdReason(facts),
+        missing: [...facts.missing],
+        fetching: facts.fetching,
+        fetched: [...facts.fetched],
+        since: facts.created,
+      };
+      const encoded = JSON.stringify(row);
+      nextHeld.set(key, encoded);
+      // THE REASON IS PART OF THE ROW, so a drain that narrows the missing list
+      // republishes even though the path itself has not moved.
+      if (publishedHeld.get(key) === encoded) continue;
+      publishedHeld.set(key, encoded);
+      rowsHeld.set(key, row);
+      publisher.held.upsert(key, row);
+    }
+    for (const key of [...publishedHeld.keys()]) {
+      if (nextHeld.has(key)) continue;
+      publishedHeld.delete(key);
+      rowsHeld.delete(key);
+      publisher.held.remove(key);
     }
   };
 
@@ -225,6 +297,15 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
           rows.delete(key);
         },
       },
+      held: {
+        readAll: () => rowsHeld,
+        upsert: (key, row) => {
+          rowsHeld.set(key, row);
+        },
+        remove: (key) => {
+          rowsHeld.delete(key);
+        },
+      },
     },
     procedures: {
       bucket: {
@@ -255,8 +336,22 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
         describe: ({ input }) =>
           answer(() => cache.admin.describe(input), (identity) => ({
             ...identity,
-            url: urlOf(identity.name),
+            url: urlOf(identity),
           })),
+        domain: ({ input }) =>
+          admin(
+            input,
+            (authority) =>
+              cache.admin.domain({
+                authority,
+                bucket: input.bucket,
+                domain:
+                  input.domain === undefined || input.domain.trim() === ""
+                    ? null
+                    : input.domain,
+              }),
+            (facts) => rowOf(facts),
+          ),
         paths: ({ input }) =>
           answer(
             () =>
@@ -353,6 +448,10 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
     },
     publish,
     detach,
+    substituterUrl: (name) => {
+      const bucket = cache.bucket(name);
+      return urlOf({ name, domain: bucket?.domain ?? null });
+    },
   };
 }
 
@@ -379,7 +478,30 @@ export const cacheRow = definePlugin({
     const publicOrigin = yield* PublicOrigin;
     const log = yield* Log;
 
-    const cache = createCache({ stateRoot: stateDir, rootToken, store });
+    // THE ROW'S FETCH BOUND, created at apply and closed with the row.
+    const fetchSlots = createSlots(2);
+    const cache = createCache({ stateRoot: stateDir, rootToken, store, fetchSlots });
+    // A RESTART RESUMES ITS HOLDS at row apply: the reference fetch a pod died
+    // in the middle of is re-queued here, with no request needed to start it.
+    yield* Effect.promise(() => cache.resume());
+
+    // THE ROW'S PUBLISHED FACT: the names its buckets carry. A row that routes
+    // those names (the cloudflare row) declares this service; it never opens
+    // this package's database or calls its verbs.
+    const domains: BucketDomainsFacts = {
+      current: () =>
+        cache.snapshot().flatMap((bucket) =>
+          bucket.domain === null ? [] : [{ bucket: bucket.name, domain: bucket.domain }],
+        ),
+      subscribe: (listener) => cache.onChange(listener),
+      // The paths this row answers. A bucket DOMAIN forwards every path of its
+      // name to the daemon; the host's gate keeps everything outside this list
+      // (the board, `/mcp`, `/auth`, the websocket) off that name.
+      paths: CACHE_ROUTE_PATHS,
+      bucketOf,
+    };
+    yield* offer(BucketDomains, () => domains);
+
     const server = cacheServer({
       cache,
       // The address a client must be told: the proxy's when one stands in
@@ -394,13 +516,27 @@ export const cacheRow = definePlugin({
     // back the `ctx` this row publishes through.
     const mounted = bundle.mount(CACHE_KEY, server.surface, server.deps);
     server.attach({
-      upsert: (key, row) => mounted.ctx.collections.buckets.upsert(key, row),
-      remove: (key) => mounted.ctx.collections.buckets.remove(key),
+      buckets: {
+        upsert: (key, row) => mounted.ctx.collections.buckets.upsert(key, row),
+        remove: (key) => mounted.ctx.collections.buckets.remove(key),
+      },
+      held: {
+        upsert: (key, row) => mounted.ctx.collections.held.upsert(key, row),
+        remove: (key) => mounted.ctx.collections.held.remove(key),
+      },
     });
 
     // The Nix protocol, registered where the row activates rather than
-    // collected by a host that has to know what a row is.
-    routes.add(cacheRoutes(cache));
+    // collected by a host that has to know what a row is. The row answers a
+    // bucket's anonymous consumer facts from the same URL builder the board's
+    // row uses, so the page and a cURL cannot disagree about the address.
+    routes.add(
+      cacheRoutes(
+        cache,
+        (name) => server.substituterUrl(name),
+        publicOrigin ?? boundOrigin,
+      ),
+    );
 
     // FINALIZERS RUN IN REVERSE, so the one registered SECOND runs FIRST, and
     // the safe order is: the mount goes, THEN the database. A publish that
@@ -410,9 +546,9 @@ export const cacheRow = definePlugin({
     // second, and `teardown.test.ts` closes a two-row host and proves it by
     // probing the cache from inside the drop.
     yield* Effect.addFinalizer(() =>
-      Effect.sync(() => {
+      Effect.promise(async () => {
         server.detach();
-        cache.close();
+        await cache.close();
       }),
     );
     yield* Effect.addFinalizer(() => Effect.promise(() => mounted.drop()));

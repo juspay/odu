@@ -10,14 +10,29 @@ A bucket is one cache: one substituter URL under the service's origin and one ed
 odu cache create main
 ```
 
-On the board: the Cache view's **Create bucket** form, with the same upstream switch. `create` prints the substituter URL and the bucket's public key. Behind a proxy that URL is the address you published the service at, not the loopback one — `$ODU_PUBLIC_ORIGIN`, which the NixOS module derives for you. `odu cache use main` prints the same as two Nix settings, ready for `nix.conf` — and needs no token at all, because a bucket's URL and public key are what it publishes to every client that talks to it:
+On the board: the Cache view's **Create bucket** form, with the same upstream switch. `create` prints the substituter URL and the bucket's public key. Behind a proxy that URL is the address you published the service at, not the loopback one — `$ODU_PUBLIC_ORIGIN`, which the NixOS module derives for you. `odu cache use main` prints the same as two Nix settings, ready for `nix.conf` — and needs no token at all, because a bucket's URL and public key are what it publishes to every client that talks to it. On a server with a door that is a PROTOCOL read, not a session: `GET /cache/<bucket>/` answers a public bucket's facts with no account (a small page for `curl`, add `Accept: application/json` for a terminal). A private bucket's facts need a reader, and `odu cache use` says so:
+
+## Use it
+
+The bucket's page shows these as separate, titled blocks — one per thing you paste somewhere. Trust the key, then a build substitutes from the bucket instead of the network.
+
+`nix.conf`:
 
 ```sh
 extra-substituters = http://127.0.0.1:18440/cache/main
 extra-trusted-public-keys = main-1:<public-key>
 ```
 
-and as a `nixConfig` block for `flake.nix`:
+NixOS / nix-darwin:
+
+```nix
+nix.settings = {
+  extra-substituters = [ "http://127.0.0.1:18440/cache/main" ];
+  extra-trusted-public-keys = [ "main-1:<public-key>" ];
+};
+```
+
+`flake.nix`:
 
 ```nix
 {
@@ -28,7 +43,25 @@ and as a `nixConfig` block for `flake.nix`:
 }
 ```
 
-Trust the key, then a build substitutes from the bucket instead of the network. `odu cache use` also prints the two netrc lines described under [Push](#push).
+GitHub Actions — inside the step that installs Nix:
+
+```yaml
+extra_nix_config: |
+  extra-substituters = http://127.0.0.1:18440/cache/main
+  extra-trusted-public-keys = main-1:<public-key>
+```
+
+A **private** bucket's page also carries the netrc block, because reading it needs a credential:
+
+```sh
+# netrc — Nix reads only the file named by netrc-file, never ~/.netrc,
+# and it does NOT expand ~ there: give it an absolute path.
+# (replace <home> below with yours — a page cannot know it)
+netrc-file = <home>/.netrc
+machine 127.0.0.1:18440 password <your-read-token>
+```
+
+Or let a terminal print them: `odu cache use main`.
 
 ## Tokens
 
@@ -37,7 +70,7 @@ odu cache token mint main --write
 odu cache token mint main --write --buckets 'team-*'   # one token, several buckets
 ```
 
-On the board: a bucket page's **Tokens** section mints one (write or read scope), lists them, and revokes one. The token is printed once; the server keeps only its hash, in the database described under [Where the data lives](#where-the-data-lives). A token carries a bucket glob, a scope (`--read`, `--write` or `--admin`), an expiry, and its last use. Revoke one without touching the rest:
+On the board: a bucket page's **Tokens** section mints one (write or read scope), lists them, and revokes one. The token is printed once; the server keeps only its hash, in the database described under [Where the data lives](#where-the-data-lives). A token carries a bucket glob, a scope (`--read`, `--write` or `--admin`), an expiry, and its last use. It expires in **ninety days** unless `--expires-days` says otherwise; `--no-expiry` is the explicit never, and both pages' forms default to ninety days with **never** a visible choice. An expired token's refusal names the date it expired. Revoke one without touching the rest:
 
 ```sh
 odu cache token list
@@ -79,12 +112,38 @@ The bucket argument is a name resolved against the logged-in origin, or a full `
 ```sh
 # push — a write token, exported where the build runs (a build secret)
 export ODU_CACHE_TOKEN=<your-write-token>
-odu cache push https://odu.example.com/cache/main ./result
+odu cache push main <paths> --origin https://odu.example.com
 ```
 
-A ready-made GitHub Actions step is planned.
+What it says while it works — one preamble, then one line per path as the bucket answers:
+
+```text
+118 paths in the closure: 6 to push, 108 already here, 4 upstream
+✅ /nix/store/…-odu-0.1.0/bin/odu stored
+⏳ /nix/store/…-big-output part 3
+⏸ /nix/store/…-hello-2.12.3 held: waiting for 1 reference that is neither here nor upstream: /nix/store/…-glibc-2.44-57
+❌ /nix/store/…-bad-output refused: the upload was truncated or corrupted
+held 1 path — see https://odu.example.com/#/cache/main
+```
+
+A `held` path is one the bucket accepted and cannot serve yet: a reference it needs is neither in the bucket nor signed by one of its upstream keys. The push reports it and **returns** — the exit is non-zero only for refusals — and the bucket's page lists the same paths with the same sentence.
+
+The server fetches a hold's references in **one job over the whole missing set**, started when the hold is recorded and not tied to the upload request; the sentence's count is that set's size. A held row is stored, so a restart re-queues it at row apply and the fetch resumes with no new push. The bucket page shows which references the job has already landed beside the ones still missing. `--wait` is the explicit choice to stay: it **reads that progress** until the referrer is recorded, and never re-uploads it.
+
+A NAR larger than `--part-size` (64 MiB by default) is sent in parts, each retried on its own; the server reassembles them and the same hash proof decides. That is what makes a push work through a proxy with a request-size ceiling — Cloudflare's is 100 MB.
 
 `push` asks the bucket which paths it is missing, then uploads only those, with retries. It talks to the cache's HTTP API directly, so it runs on the machine that holds the paths.
+
+A GitHub Actions step, with the token as a secret:
+
+```yaml
+- run: |
+    paths=$(nix build -L --no-link --print-out-paths .#your-package)
+    nix run --accept-flake-config github:juspay/odu -- \
+      cache push kolu --origin https://cache.kolu.dev $paths
+  env:
+    ODU_CACHE_TOKEN: ${{ secrets.ODU_CACHE_TOKEN }}
+```
 
 Prefer plain Nix? `nix copy --to` works without any odu code on the client:
 
@@ -146,7 +205,7 @@ The cache keeps no second copy of your builds. The server's own `/nix/store` hol
 
 - A push imports the paths into the server's store through the Nix daemon. Pushing from the machine that built them moves nothing.
 - An upload is accepted only when the bytes are there: the server hashes the NAR it staged against the narinfo's `NarHash` before importing it. `nix copy --from` alone would not do, because it copies nothing and exits 0 for a path the store already has — which on a single machine is the ordinary case.
-- A narinfo whose references are not in the store yet answers **202** and is imported when they arrive; anything else that cannot be imported answers **400** with Nix's own sentence. A reference that `odu cache push` skipped as upstream is never uploaded, so a server whose store does not already hold it will leave the referrer at 202 — either let the server's store be the machine that built it, or create the bucket with `--no-upstream` and push the closure in full.
+- A narinfo whose references are not in the store yet answers **202** and is imported when they arrive; anything else that cannot be imported answers **400** with Nix's own sentence. A reference `odu cache push` skipped as upstream is FETCHED BY THE SERVER: `nix-store -r` substitutes it into this store, trusting only the keys the bucket names, and the referrer imports. The 202 remains for a reference that is neither in the bucket nor signed by one of those keys — the held state the bucket publishes.
 - A NAR read streams the path out of the store, compressed on the fly.
 - Every path a bucket retains is rooted under odu's state directory, so the machine's own garbage collection never removes what the cache serves. `odu cache gc` drops the roots of what retention has expired and deletes those paths.
 - The database, signing keys, token hashes, narinfo metadata and pins live in one SQLite file:
@@ -164,6 +223,64 @@ An upload sits in `staging/` until its narinfo arrives; one that never gets it i
 **The daemon's own home is the one thing that is not under `<state>` by default.** It holds the singleton's gate and control socket, and its name is derived from the origin — `odu-web` at the default origin, `odu-web-<hash>` at any other, so two services cannot share one. Without `$ODU_STATE_DIR` it is `$HOME/.local/state/odu-web*`: a SIBLING of `odu` rather than a child of it, and deliberately not under `$XDG_STATE_HOME` — that variable varies by launch context (a login shell, a bare ssh, a systemd unit), and two contexts computing two "state" homes would split one daemon's identity. Set `$ODU_STATE_DIR` and the home moves inside it, which is what a container with a read-only `$HOME` wants.
 
 Importing paths built on another machine requires the user running `odu web` to be in `nix.settings.trusted-users` on the server, because those paths carry no signature the daemon trusts. Pushing from the same machine needs nothing. Running all of this on a NixOS host, with the state under `/var/lib/odu` and nginx in front, is [Self-host on NixOS](../docs/#self-host-on-nixos).
+
+## A domain for a bucket
+
+A bucket is served at `https://<your odu>/cache/<bucket>`. Give it a name of its own — `https://cache.kolu.dev` — and that is the URL people put in `nix.conf`, and it stays the same when the server moves.
+
+Odu does the wiring itself through Cloudflare. Hand it one API token and set the domain on the bucket; there is nothing else to run.
+
+### Create the Cloudflare token
+
+In Cloudflare, **My Profile → API Tokens → Create Token → Custom token**:
+
+| Field | Value |
+| --- | --- |
+| Token name | `odu` |
+| Permissions | **Zone → DNS → Edit**, **Zone → Zone → Read**, **Account → Cloudflare Tunnel → Edit** |
+| Zone Resources | Include → Specific zone → `kolu.dev` (one line per zone you will use) |
+| Account Resources | Include → your account |
+
+### Give it to odu
+
+| | |
+| --- | --- |
+| `ODU_CLOUDFLARE_API_TOKEN_FILE` | a file holding the token — a systemd credential under the module |
+
+With the NixOS module, `services.odu.cloudflare.apiTokenFile`. The token is verified at boot: a missing or inactive one refuses the row with Cloudflare's own sentence, rather than a panel that never moves.
+
+### Set the domain
+
+On the bucket's page, under **Domain**, type `cache.kolu.dev` and save. Or, for parity:
+
+```sh
+odu cache domain kolu cache.kolu.dev --origin https://odu.example.com
+```
+
+Odu then:
+
+1. creates one Cloudflare Tunnel for this server, named after its public origin, the first time any name is set;
+2. routes every name through that tunnel to the cache;
+3. creates each proxied DNS record;
+4. starts the `cloudflared` connector as a child of the daemon — the way it runs `nix`.
+
+A name is **wiring** while that happens, **live** once `https://<name>/nix-cache-info` answers, or **failed** with Cloudflare's reason (a token without the DNS permission; a zone the token cannot see). The bucket page's route strip and the board's **Tunnel** page show it, and `odu cloudflare status` asks from a terminal. The tunnel page also shows the connector: running, connected, stopped, or failed with the last words `cloudflared` said.
+
+Once live, the bucket's **Use it** block and `odu cache use kolu` print the new URL; the old `/cache/kolu` URL keeps working. Pushes are unchanged: `odu cache push kolu` finds the bucket by name.
+
+**The name serves only the bucket.** `/` is the bucket's public page, the Nix protocol's paths (`/nix-cache-info`, `/<hash>.narinfo`, `/nar/<file>`, the push API) are served, and everything else on that hostname — the board, `/mcp`, `/auth`, `/rpc/ws` — is the cache row's 404. The tunnel forwards every path, so the daemon's `Host` routing is what keeps the control plane off a substituter's name; the board stays on `cache.domain`.
+
+**The server's own origin rides the same tunnel** when its host is in a zone the token can edit — the board, `/mcp` and the websocket. That is what lets a Tailscale Funnel retire; the GitHub App's callback URL then moves to that name.
+
+### Remove it
+
+Clear the **Domain** field, or `odu cache domain kolu --none`. Odu removes the route and the DNS record. The tunnel itself is this server's and stays; the connector stops when the last name goes.
+
+### What it does not do
+
+A domain is a name, not a lock. Reads on a public bucket stay anonymous whether you reach it by `/cache/kolu` or by `cache.kolu.dev`. Private buckets — read with a token — come with teams.
+
+The connector needs outbound HTTPS from the server and nothing inbound: no port is opened on your network, and your server's address never appears in DNS.
 
 ## The Cache view
 
@@ -185,7 +302,11 @@ GET  /cache/<bucket>/nar/<filehash>.nar.zst     streamed from the store, compres
 PUT  /cache/<bucket>/nar/<filehash>.nar.<ext>   Bearer or Basic; any ext Nix sends
 PUT  /cache/<bucket>/<hash>.narinfo             server re-signs with the bucket key
 POST /_odu/v1/buckets/<bucket>/missing          batch "which of these are you missing"
+GET  /cache/<bucket>/                           a public bucket's facts: the use block,
+                                                or JSON on Accept: application/json
 ```
+
+On a bucket's own domain the same four Nix paths sit at `/`: `/nix-cache-info`, `/<hash>.narinfo`, `/nar/<file>` and their uploads. `Host` names the bucket.
 
 `/cache` is a literal, and it is load-bearing: the board answers `/assets/<hashed
 bundle>` on the same origin, and a bucket at the origin's first segment would
@@ -200,12 +321,13 @@ Writes, and reads of private buckets, accept `Authorization: Bearer <token>` or 
 | --- | --- | --- |
 | `odu cache create <bucket> [--no-upstream]` | Create a bucket; print its substituter URL and public key. `--no-upstream` takes everything, for a store that is not the builder's | Cache → **Create bucket**, **Skip upstream paths** off |
 | `odu cache list` | List buckets | Cache |
-| `odu cache use <bucket>` | Print the substituter and key settings, the `nixConfig` block, and the netrc lines | a bucket page's block |
+| `odu cache use <bucket>` | Print the substituter and key settings, the `nixConfig` block, and the netrc lines. No account for a public bucket | a bucket page's block |
+| `odu cache domain <bucket> <name>\|--none` | Give a bucket a DNS name of its own, or take it away | bucket → **Domain** |
 | `odu cache token mint <bucket> --write\|--read\|--admin` | Mint a token, printed once | bucket → **Mint token** (write or read) |
 | `odu cache token list` | List tokens with scope, expiry and last use | bucket → Tokens |
 | `odu cache token revoke <id>` | Revoke one token | bucket → Tokens → **revoke** |
 | `odu cache login <origin>` | Save a token for an origin in `~/.config/odu/cache/credentials` | — (a machine's disk) |
-| `odu cache push <bucket> <paths…>` | Upload only the paths the bucket is missing | — (a build box's job) |
+| `odu cache push <bucket> <paths…> [--wait] [--part-size MiB]` | Upload only the paths the bucket is missing; holds are reported, `--wait` stays until they land | — (a build box's job) |
 | `odu cache pin <bucket> <name> <paths…>` | Pin a closure against garbage collection | bucket → **Pin closure** |
 | `odu cache gc [bucket]` | Evict objects past retention that nothing references and no pin holds | bucket → **Run GC** |
 | `odu cache stats` | Show storage and hit counts | bucket → Stats |

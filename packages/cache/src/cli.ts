@@ -32,10 +32,12 @@ import { parseArgs } from "node:util";
 import { buildSurfaceFace } from "@kolu/surface/client";
 import type { SurfaceClientOf } from "@kolu/surface/project";
 import { composedClients } from "@odu/cordis/compose";
+import { readDoor } from "@odu/cordis/services";
 import { bytes } from "@odu/cordis/format";
 import type { SurfaceDispatch } from "@kolu/surface/link";
 import { Effect } from "effect";
-import { pushToCache, saveCredential } from "./push";
+import { CACHE_MOUNT } from "./paths";
+import { normalizeOrigin, pushToCache, saveCredential } from "./push";
 import {
   CACHE_KEY,
   type CacheScope,
@@ -75,7 +77,7 @@ export interface CacheCliPorts {
   }>;
 }
 
-export const CACHE_USAGE = `usage: odu cache <create|list|use|token|login|push|pin|gc|stats> [args]
+export const CACHE_USAGE = `usage: odu cache <create|list|use|domain|token|login|push|pin|gc|stats> [args]
 
 create <bucket> [--private] [--retention-days N] [--upstream-key K]… | --no-upstream
                               create a bucket; print its substituter URL and
@@ -86,16 +88,24 @@ list [-o json]                buckets, with sizes. Needs $ODU_ROOT_TOKEN
 use <bucket>                  the nix.conf settings, the nixConfig block and the
                               netrc lines for a bucket. Needs NO token: a
                               bucket's URL and public key are public
-token mint <bucket> [--read|--write|--admin] [--expires-days N] [--buckets GLOB]
+domain <bucket> <name>|--none give a bucket a DNS name of its own (the
+                              substituter URL becomes that name), or take it
+                              away. Needs $ODU_ROOT_TOKEN
+token mint <bucket> [--read|--write|--admin] [--expires-days N|--no-expiry] [--buckets GLOB]
                               mint a token. It is printed ONCE; only its hash
-                              is kept
+                              is kept. Expires in 90 days unless --expires-days
+                              says otherwise; --no-expiry is the explicit never
 token list [bucket] [-o json] tokens with scope, expiry and last use
 token revoke <id>             revoke one token, without touching the rest
 login <origin> [--token T]    save a token for an origin in
                               ~/.config/odu/cache/credentials (0600)
-push <bucket> <path>… [--token-file F] [--concurrency N] [-o json]
+push <bucket> <path>… [--token-file F] [--concurrency N] [--part-size MiB] [--wait] [-o json]
                               upload only the paths the bucket is missing.
-                              Talks to the cache directly, from HERE
+                              Talks to the cache directly, from HERE. A NAR
+                              larger than --part-size (64 MiB) is sent in parts,
+                              each retried on its own. A path the bucket holds
+                              for references is reported; --wait stays until the
+                              bucket can serve it
 pin <bucket> <name> <path>…   pin a closure against garbage collection
 gc [bucket] [-o json]         evict what retention expired and nothing holds
 stats [-o json]               storage and reads
@@ -219,6 +229,8 @@ export async function cacheCommand(
       return listCommand(rest, ports);
     case "use":
       return useCommand(rest, ports);
+    case "domain":
+      return domainCommand(rest, ports);
     case "token":
       return tokenCommand(rest, ports);
     case "login":
@@ -341,13 +353,64 @@ async function useCommand(rest: string[], ports: CacheCliPorts): Promise<number>
     process.stderr.write(`odu: cache use needs a bucket name\n${CACHE_USAGE}`);
     return 1;
   }
+  // A PUBLIC BUCKET'S FACTS COME OFF THE PROTOCOL, not the surface: on a
+  // daemon with a door an anonymous connection is refused before a public
+  // read can be answered, and "use needs no token" has to be true of a person
+  // who has not signed in. The protocol's own path answers a public bucket with
+  // no account — the same facts the page shows, JSON for a terminal.
+  const origin = normalizeOrigin(
+    values.origin ?? process.env.ODU_WEB_ORIGIN?.trim() ?? "http://127.0.0.1:18440",
+  );
+  const personal = process.env.ODU_TOKEN?.trim() || process.env.ODU_CACHE_TOKEN?.trim() || null;
+  const publicFacts = await fetch(`${origin}${CACHE_MOUNT}/${name}/`, {
+    headers: {
+      accept: "application/json",
+      ...(personal === null ? {} : { authorization: `Bearer ${personal}` }),
+    },
+    signal: AbortSignal.timeout(5_000),
+  }).catch(() => null);
+  if (publicFacts !== null && publicFacts.ok) {
+    const facts = (await publicFacts.json()) as { url?: unknown; publicKey?: unknown };
+    if (typeof facts.url === "string" && typeof facts.publicKey === "string") {
+      process.stdout.write(
+        useBlock({
+          url: facts.url,
+          publicKey: facts.publicKey,
+          home: process.env.HOME ?? null,
+        }),
+      );
+      return 0;
+    }
+  }
+
+  // A PRIVATE BUCKET ON A DAEMON WITH A DOOR is not readable without a
+  // session, and asking the surface would be an anonymous connection refused
+  // for the wrong reason. The door fact says which sentence a person needs.
+  if ((await readDoor(origin)) === true) {
+    process.stderr.write(
+      `odu: no public bucket "${name}" on ${origin} — if it is private, sign in ` +
+        `(\`odu auth login\`) or set $ODU_TOKEN to a read token\n`,
+    );
+    return REFUSED;
+  }
+
   return withService(ports, values.origin, async (client) => {
-    // NO ROOT TOKEN: a bucket's substituter URL and public key are what it
-    // publishes to every client that talks to it, so asking the operator's
-    // credential for them would turn a read-only question into an
-    // administrative act.
+    // THE FALLBACK IS A PRIVATE BUCKET ON A DAEMON WITH NO DOOR, and an unknown
+    // bucket there; the surface answers both without a credential, as it always
+    // did.
     const answer = await call(client.surface.bucket.describe({ bucket: name }));
-    if (!answer.ok) return reportFailure(answer, false, REFUSED);
+    if (!answer.ok) {
+      if (answer.refusal !== null) return reportFailure(answer, false, REFUSED);
+      const said = String(answer.error);
+      if (/no principal/i.test(said)) {
+        process.stderr.write(
+          `odu: "${name}" is not publicly readable — if it is private, sign in ` +
+            `(\`odu auth login\`) or set $ODU_TOKEN to a read token\n`,
+        );
+        return REFUSED;
+      }
+      return reportFailure(answer, false, REFUSED);
+    }
     const bucket = answer.value;
     // ONE spelling of the block, in `./surface`, because the bucket page prints
     // it too — and the two had already drifted (`~/.netrc` here, `$HOME/.netrc`
@@ -358,6 +421,42 @@ async function useCommand(rest: string[], ports: CacheCliPorts): Promise<number>
         publicKey: bucket.publicKey,
         home: process.env.HOME ?? null,
       }),
+    );
+    return 0;
+  });
+}
+
+async function domainCommand(rest: string[], ports: CacheCliPorts): Promise<number> {
+  const { values, positionals } = parseArgs({
+    args: rest,
+    allowPositionals: true,
+    options: { none: { type: "boolean" }, origin: originOption, output: outputOption },
+  });
+  const [bucket, domain] = positionals;
+  if (bucket === undefined || (values.none === true) === (domain !== undefined)) {
+    process.stderr.write(
+      `odu: cache domain needs a bucket and a name, or --none to clear it\n${CACHE_USAGE}`,
+    );
+    return 1;
+  }
+  const json = values.output === "json";
+  return withService(ports, values.origin, async (client) => {
+    const answer = await call(
+      client.surface.bucket.domain({
+        rootToken: rootToken(),
+        bucket,
+        ...(values.none === true ? {} : { domain }),
+      }),
+    );
+    if (!answer.ok) return reportFailure(answer, json, REFUSED);
+    if (json) {
+      emitJson(answer.value);
+      return 0;
+    }
+    process.stdout.write(
+      answer.value.domain === null
+        ? `cleared the name; ${bucket} is served under /cache/${bucket}\n`
+        : `named ${bucket} ${answer.value.domain}\n  substituter: ${answer.value.url}\n`,
     );
     return 0;
   });
@@ -375,6 +474,7 @@ async function tokenCommand(rest: string[], ports: CacheCliPorts): Promise<numbe
           write: { type: "boolean" },
           admin: { type: "boolean" },
           "expires-days": { type: "string" },
+          "no-expiry": { type: "boolean" },
           buckets: { type: "string" },
           origin: originOption,
           output: outputOption,
@@ -385,6 +485,13 @@ async function tokenCommand(rest: string[], ports: CacheCliPorts): Promise<numbe
         process.stderr.write(`odu: cache token mint needs a bucket name\n${CACHE_USAGE}`);
         return 1;
       }
+      if (values["no-expiry"] === true && values["expires-days"] !== undefined) {
+        process.stderr.write(
+          "odu: --no-expiry and --expires-days are opposites — a token either " +
+            "expires or it does not\n",
+        );
+        return 1;
+      }
       const json = values.output === "json";
       return withService(ports, values.origin, async (client) => {
         const answer = await call(
@@ -393,9 +500,16 @@ async function tokenCommand(rest: string[], ports: CacheCliPorts): Promise<numbe
             bucket,
             ...(values.buckets === undefined ? {} : { bucketGlob: values.buckets }),
             scope: scopeOf(values),
-            ...(values["expires-days"] === undefined
+            // NINETY DAYS unless said otherwise. "Never" is a choice a person
+            // types, not what happens when they forget a flag.
+            ...(values["no-expiry"] === true
               ? {}
-              : { expiresDays: wholeNumber("--expires-days", values["expires-days"]) }),
+              : {
+                  expiresDays:
+                    values["expires-days"] === undefined
+                      ? 90
+                      : wholeNumber("--expires-days", values["expires-days"]),
+                }),
           }),
         );
         if (!answer.ok) return reportFailure(answer, json, REFUSED);
@@ -506,6 +620,8 @@ async function pushCommand(rest: string[]): Promise<number> {
     options: {
       "token-file": { type: "string" },
       concurrency: { type: "string" },
+      "part-size": { type: "string" },
+      wait: { type: "boolean" },
       origin: originOption,
       output: outputOption,
     },
@@ -528,6 +644,13 @@ async function pushCommand(rest: string[]): Promise<number> {
       ...(values.concurrency === undefined
         ? {}
         : { concurrency: wholeNumber("--concurrency", values.concurrency) }),
+      ...(values["part-size"] === undefined
+        ? {}
+        : {
+            partSize:
+              wholeNumber("--part-size", values["part-size"]) * 1024 * 1024,
+          }),
+      ...(values.wait === true ? { wait: true } : {}),
       onLine: (line) => {
         if (!json) process.stderr.write(`${line}\n`);
       },
@@ -537,10 +660,20 @@ async function pushCommand(rest: string[]): Promise<number> {
     } else {
       process.stdout.write(
         `pushed ${summary.pushed}, skipped-upstream ${summary.skippedUpstream}, ` +
-          `already-present ${summary.alreadyPresent}, failed ${summary.failed}\n`,
+          `already-present ${summary.alreadyPresent}, held ${summary.held.length}, ` +
+          `failed ${summary.failed}\n`,
       );
       for (const failure of summary.failures) {
         process.stderr.write(`  ${failure.path}: ${failure.message}\n`);
+      }
+      if (summary.held.length > 0) {
+        // A HOLD IS NOT A FAILURE, and the command returns: what could not land
+        // is the bucket's fact, and the page says what it is waiting for.
+        process.stderr.write(
+          `held ${summary.held.length} path${summary.held.length === 1 ? "" : "s"} — ` +
+            `see ${summary.pageUrl}` +
+            (values.wait === true ? "\n" : "; pass --wait to stay until they land\n"),
+        );
       }
     }
     return summary.failed === 0 ? 0 : 1;

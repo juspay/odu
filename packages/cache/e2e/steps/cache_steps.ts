@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { Given, Then, When } from "@cucumber/cucumber";
-import { oduCli, ROOT_TOKEN } from "../../../web-acceptance/support/service.ts";
+import { oduCli, ROOT_TOKEN, until } from "../../../web-acceptance/support/service.ts";
 import type { OduWorld } from "../../../web-acceptance/support/world.ts";
 
 function unique(what: string): string {
@@ -343,9 +343,18 @@ Then("the page opens that bucket", async function (this: OduWorld) {
   await this.page.getByRole("heading", { name, exact: true }).waitFor({ timeout: 30_000 });
 });
 
+/** On a daemon with NO DOOR the page asks for the operator's root token; a
+ *  step that administers from a page IT just opened must type it, exactly as a
+ *  person would. Signed-in scenarios draw no field, so this is a no-op there. */
+async function typeRootTokenIfAsked(page: OduWorld["page"]): Promise<void> {
+  const field = page.getByLabel("root token", { exact: true });
+  if ((await field.count()) > 0) await field.fill(ROOT_TOKEN);
+}
+
 Given("a bucket created from the board", async function (this: OduWorld) {
   await this.open("#/cache");
   await this.page.getByRole("heading", { name: "Buckets", exact: true }).waitFor();
+  await typeRootTokenIfAsked(this.page);
   const name = unique("board");
   this.cacheBucket = name;
   await this.page.getByPlaceholder("new bucket name").fill(name);
@@ -366,11 +375,253 @@ When("I mint a {string} token", async function (this: OduWorld, scope: string) {
   minted(this).id = (await row.locator("code").first().innerText()).trim();
 });
 
+When("I name the bucket {string}", async function (this: OduWorld, domain: string) {
+  await this.page.getByPlaceholder("cache.example.org").fill(domain);
+  await this.page.getByRole("button", { name: "Set domain", exact: true }).click();
+  // The USE BLOCK is the proof the row accepted it: it is redrawn from the
+  // published bucket row, not from the field that was typed.
+  await until(`the substituter block to name ${domain}`, async () =>
+    (await this.page.locator("pre.consume-block").innerText()).includes(domain) ? true : null,
+  );
+});
+
+Then("the domain answer says {string}", async function (this: OduWorld, text: string) {
+  const answer = this.page.locator("p.hint.done", { hasText: "Named this bucket" });
+  await answer.waitFor({ timeout: 30_000 });
+  await until(`the domain answer to say ${text}`, async () =>
+    (await answer.innerText()).includes(text) ? true : null,
+  );
+});
+
+Then("the page's substituter URL is {string}", async function (this: OduWorld, host: string) {
+  const text = await this.page.locator("pre.consume-block").innerText();
+  assert.match(
+    text,
+    new RegExp(`extra-substituters = \\S*${host.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
+    `the substituter URL does not name ${host}: ${text}`,
+  );
+});
+
+Then("the page's netrc block names {string}", async function (this: OduWorld, host: string) {
+  const text = await this.page.locator("pre.consume-block").innerText();
+  assert.ok(
+    text.includes(`machine ${host} password`),
+    `the netrc block does not name ${host}: ${text}`,
+  );
+});
+
+Then("the push block still names the bucket's path", async function (this: OduWorld) {
+  const name = this.cacheBucket;
+  assert.ok(name !== undefined, "no bucket was arranged");
+  const text = await this.page.locator("pre.push-block").innerText();
+  // Naming the bucket is unchanged by a DOMAIN: the push block names the
+  // bucket and the daemon's origin, never the substituter URL.
+  assert.ok(
+    text.includes(`odu cache push ${name} <paths> --origin ${this.service.origin}`),
+    `the push block lost the bucket's origin form: ${text}`,
+  );
+});
+
+When("the CLI creates a private bucket as this person", function (this: OduWorld) {
+  assert.ok(this.mintedToken !== undefined, "no token was minted for this scenario");
+  const name = unique("private");
+  this.cacheBucket = name;
+  this.cliAnswer = oduCli(this.service, ["cache", "create", name, "--private", "-o", "json"], {
+    ODU_TOKEN: this.mintedToken,
+  });
+  assert.strictEqual(this.cliAnswer.status, 0, `create failed: ${this.cliAnswer.stderr}`);
+});
+
+When("the CLI reads the bucket's facts with no account", function (this: OduWorld) {
+  const name = this.cacheBucket;
+  assert.ok(name !== undefined, "no bucket was arranged");
+  // NO ODU_TOKEN, NO ROOT TOKEN: the substituter URL is what a person with a
+  // browser and a terminal has before signing in.
+  this.cliAnswer = oduCli(this.service, ["cache", "use", name, "--origin", this.service.origin], {
+    ODU_TOKEN: "",
+    ODU_ROOT_TOKEN: "",
+  });
+});
+
+Then("it prints the bucket's public key", function (this: OduWorld) {
+  const name = this.cacheBucket;
+  assert.ok(name !== undefined, "no bucket was arranged");
+  assert.ok(this.cliAnswer !== undefined, "no CLI call was made");
+  assert.strictEqual(this.cliAnswer.status, 0, `use failed: ${this.cliAnswer.stderr}`);
+  assert.match(this.cliAnswer.stdout, new RegExp(`${name}-1:`));
+  assert.ok(this.cliAnswer.stdout.includes("extra-substituters"));
+});
+
+Then("an anonymous HTTP GET of the bucket's page shows the key", async function (this: OduWorld) {
+  const name = this.cacheBucket;
+  assert.ok(name !== undefined, "no bucket was arranged");
+  const response = await fetch(`${this.service.origin}/cache/${name}`);
+  assert.strictEqual(response.status, 200);
+  const body = await response.text();
+  assert.match(body, new RegExp(`${name}-1:`), "the page does not show the public key");
+});
+
+Then("it is refused as private", function (this: OduWorld) {
+  assert.ok(this.cliAnswer !== undefined, "no CLI call was made");
+  assert.strictEqual(this.cliAnswer.status, 1);
+  assert.ok(
+    this.cliAnswer.stderr.includes("if it is private"),
+    `the refusal does not name privacy: ${this.cliAnswer.stderr}`,
+  );
+});
+
+When("I open the bucket's substituter URL in a browser", async function (this: OduWorld) {
+  const name = this.cacheBucket;
+  assert.ok(name !== undefined, "no bucket was arranged");
+  const response = await this.page.goto(`${this.service.origin}/cache/${name}`);
+  this.visited = { status: response?.status() ?? null, body: await this.page.content() };
+});
+
+Then("the page is the bucket's public page", function (this: OduWorld) {
+  const visited = this.visited;
+  assert.ok(visited !== undefined, "no page was opened");
+  assert.strictEqual(visited.status, 200, "the substituter URL did not answer 200");
+  assert.ok(visited.body.includes("extra-substituters"), "the page carries no nix.conf lines");
+  assert.ok(visited.body.includes("odu cache use "), "the page carries no `odu cache use` line");
+  // NOT THE BOARD: the SPA shell has the board's row buttons; this page has a
+  // sentence and a pre block.
+  assert.ok(!visited.body.includes('aria-label="board rows"'), "the board's SPA answered");
+});
+
+Then("the page has the four blocks a person pastes", async function (this: OduWorld) {
+  const visited = this.visited;
+  assert.ok(visited !== undefined, "no page was opened");
+  for (const title of ["nix.conf", "NixOS / nix-darwin", "flake.nix", "GitHub Actions"]) {
+    assert.ok(
+      visited.body.includes(`<h3>${title}</h3>`),
+      `the page has no ${title} block`,
+    );
+  }
+  assert.strictEqual(
+    await this.page.locator("button[data-copy]").count(),
+    5,
+    "the page does not offer a copy button per block (four use blocks and the push)",
+  );
+});
+
+Then("the page carries no netrc block", function (this: OduWorld) {
+  const visited = this.visited;
+  assert.ok(visited !== undefined, "no page was opened");
+  assert.ok(
+    !visited.body.includes("netrc-file"),
+    "a public bucket's page carries netrc, which reading it does not need",
+  );
+});
+
+Then("the page links its substituter's health file", function (this: OduWorld) {
+  const name = this.cacheBucket;
+  assert.ok(name !== undefined, "no bucket was arranged");
+  const visited = this.visited;
+  assert.ok(visited !== undefined, "no page was opened");
+  assert.ok(
+    visited.body.includes(
+      `<a href="${this.service.origin}/cache/${name}/nix-cache-info">nix-cache-info</a>`,
+    ),
+    "the page does not link the substituter's nix-cache-info",
+  );
+});
+
+Then("the page credits odu at {string}", function (this: OduWorld, site: string) {
+  const visited = this.visited;
+  assert.ok(visited !== undefined, "no page was opened");
+  assert.ok(
+    visited.body.includes(`served by <a href="${site}">odu</a>`),
+    `the page does not credit odu at ${site}`,
+  );
+});
+
+When("the CLI makes a private bucket and mints a read token", function (this: OduWorld) {
+  const name = unique("private");
+  this.cacheBucket = name;
+  const created = oduCli(this.service, ["cache", "create", name, "--private", "-o", "json"]);
+  assert.strictEqual(created.status, 0, `create failed: ${created.stderr}`);
+  const minted = oduCli(this.service, ["cache", "token", "mint", name, "--read", "-o", "json"]);
+  assert.strictEqual(minted.status, 0, `token mint failed: ${minted.stderr}`);
+  this.rowState.set("cache.readToken", (JSON.parse(minted.stdout) as { token: string }).token);
+});
+
+When("I open that bucket's page as its reader", async function (this: OduWorld) {
+  const name = this.cacheBucket;
+  const token = this.rowState.get("cache.readToken") as string | undefined;
+  assert.ok(name !== undefined && token !== undefined, "no private bucket was arranged");
+  const response = await fetch(`${this.service.origin}/cache/${name}`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  this.visited = { status: response.status, body: await response.text() };
+});
+
+Then("the page has the netrc block", function (this: OduWorld) {
+  const visited = this.visited;
+  assert.ok(visited !== undefined, "no page was opened");
+  assert.strictEqual(visited.status, 200, "the private page was not answered to its reader");
+  assert.ok(visited.body.includes("<h3>netrc</h3>"), "the private page has no netrc block");
+  assert.ok(visited.body.includes("netrc-file"), "the netrc block names no netrc-file");
+});
+
+Then("the page names the bucket's public key", function (this: OduWorld) {
+  const name = this.cacheBucket;
+  assert.ok(name !== undefined, "no bucket was arranged");
+  const visited = this.visited;
+  assert.ok(visited !== undefined, "no page was opened");
+  assert.match(visited.body, new RegExp(`${name}-1:`), "the page does not name the public key");
+});
+
+When("I open a path under the cache that names nothing", async function (this: OduWorld) {
+  const name = this.cacheBucket;
+  assert.ok(name !== undefined, "no bucket was arranged");
+  const url = `${this.service.origin}/cache/${name}/nope`;
+  // THE 404 IS THE ANSWER THIS STEP ASKS FOR. Declared before the navigation,
+  // so the generic "no page errors" check allows exactly this URL and status.
+  this.expectedResponses.push({ status: 404, url });
+  const response = await this.page.goto(url);
+  this.visited = { status: response?.status() ?? null, body: await this.page.content() };
+});
+
+Then("the cache answers it as its own 404", function (this: OduWorld) {
+  const visited = this.visited;
+  assert.ok(visited !== undefined, "no page was opened");
+  assert.strictEqual(visited.status, 404);
+  assert.ok(visited.body.includes("no such cache path"), "the 404 is not the cache row's");
+  assert.ok(!visited.body.includes('aria-label="board rows"'), "the board's SPA answered a cache path");
+});
+
+Then("the board offers no Tunnel control", async function (this: OduWorld) {
+  assert.strictEqual(
+    await this.page.getByRole("button", { name: "Tunnel", exact: true }).count(),
+    0,
+    "the Tunnel control is drawn on a daemon that does not mount the row",
+  );
+});
+
+Then("the token form defaults to 90 days", async function (this: OduWorld) {
+  assert.strictEqual(
+    await this.page.getByLabel("token expiry").inputValue(),
+    "90",
+    "the mint form's expiry is not the ninety-day default",
+  );
+});
+
 Then("the page shows the cache token once", function (this: OduWorld) {
   const token = minted(this).token;
   assert.ok(
     token !== undefined && token.length > 16,
     `no token was shown: ${JSON.stringify(token)}`,
+  );
+});
+
+Then("the minted token shows an expiry", async function (this: OduWorld) {
+  const id = minted(this).id;
+  assert.ok(id !== undefined, "no token was minted");
+  const text = await this.page.locator("ul.tokens li", { hasText: id }).innerText();
+  assert.match(
+    text,
+    /expires \d{4}-\d{2}-\d{2}/,
+    `the minted token's row names no expiry: ${text}`,
   );
 });
 

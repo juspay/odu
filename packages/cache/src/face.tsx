@@ -54,6 +54,7 @@ import {
 } from "solid-js";
 import {
   type CacheBucket,
+  type CacheHeld,
   type CachePath,
   type CacheStats,
   type CacheToken,
@@ -87,6 +88,10 @@ export interface CacheFaceProps {
    *  `no_root_token`): two independent checks, because a hidden button is not a
    *  permission and a drawn one is not a grant. */
   canAdminister: boolean;
+  /** DOES THE SHELL MOUNT THE TUNNEL ROW? With it, a bucket's name is routed
+   *  by that row and the page must not tell the operator to make the record;
+   *  without it, pointing the record is exactly the operator's next step. */
+  tunnelRow: boolean;
   /** IS THIS PERSON THE DAEMON'S LOCAL OWNER — a daemon with no door? Then the
    *  row's rule for administration is the operator's ROOT TOKEN rather than a
    *  role, so the page asks for it once (the same secret `odu cache` reads from
@@ -160,6 +165,7 @@ export function CacheFace(props: CacheFaceProps): JSX.Element {
             now={props.now}
             onOpen={props.onOpen}
             canAdminister={props.canAdminister}
+            tunnelRow={props.tunnelRow}
           />
         )}
       </Show>
@@ -368,6 +374,7 @@ function BucketPage(
     now: number;
     onOpen: (bucket: string | null) => void;
     canAdminister: boolean;
+    tunnelRow: boolean;
   },
 ): JSX.Element {
   /** What the person typed, and what the query is allowed to see. Two signals:
@@ -527,6 +534,19 @@ function BucketPage(
   const held = props.client.collections.buckets.use();
   const bucket = createMemo<CacheBucket | undefined>(() => held.byKey(props.name)?.());
 
+  /** WHAT THE BUCKET IS HOLDING FOR REFERENCES — one of the row's facts, not a
+   *  log line: the same sentence `odu cache push` prints, and the reason a
+   *  large closure stops halfway. */
+  const heldRows = props.client.collections.held.use();
+  const waiting = createMemo<readonly CacheHeld[]>(() => {
+    const out: CacheHeld[] = [];
+    for (const key of heldRows.keys()) {
+      const row = heldRows.byKey(key)?.();
+      if (row !== undefined && row.bucket === props.name) out.push(row);
+    }
+    return out;
+  });
+
   return (
     <section class="cache" aria-label={`bucket ${props.name}`}>
       <p class="crumbs">
@@ -562,7 +582,51 @@ function BucketPage(
                   ? "no upstream filter"
                   : `skips ${row().upstreamKeys.join(", ")}`}
               </span>
+              {/* Waiting for references is a FACT of the bucket — printed with
+                  the same words the push prints, because it is the same fact. */}
+              <Show when={waiting().length > 0}>
+                <span class="pill hue-amber">{waiting().length} waiting</span>
+              </Show>
             </p>
+            <Show when={waiting().length > 0}>
+              <div class="cache-paths" aria-label="pending paths">
+                <h3>Waiting for references</h3>
+                <p class="hint">
+                  Accepted, but not served yet: each path needs a reference that
+                  is neither in this bucket nor upstream. The push that uploaded
+                  it says the same thing.
+                </p>
+                <ol class="paths">
+                  <For each={waiting()}>
+                    {(one) => (
+                      <li>
+                        <code class="path">{one.storePath}</code>
+                        <span class="bucket-facts">
+                          <span>{one.reason}</span>
+                          <Show when={one.fetched.length > 0}>
+                            <span class="pill hue-grey">{one.fetched.length} fetched</span>
+                          </Show>
+                          <span>since {ago(one.since, props.now)}</span>
+                        </span>
+                        {/* WHICH REFERENCES THE FETCH LANDED — the done half of
+                            the hold, not only how many are left. */}
+                        <Show when={one.fetched.length > 0}>
+                          <ul class="refs">
+                            <For each={one.fetched}>
+                              {(reference) => (
+                                <li>
+                                  <code>{reference}</code> done
+                                </li>
+                              )}
+                            </For>
+                          </ul>
+                        </Show>
+                      </li>
+                    )}
+                  </For>
+                </ol>
+              </div>
+            </Show>
             {/* HOW TO USE THIS BUCKET, in two blocks a person copies: reading
                 from it, and pushing to it. Both come from the contract's own
                 functions — `odu cache use` prints the first, and the docs quote
@@ -587,7 +651,14 @@ function BucketPage(
             </p>
             <pre class="use-block push-block">
               {pushBlock({
-                url: row().url,
+                origin: (() => {
+                  try {
+                    return new URL(row().pushUrl).origin;
+                  } catch {
+                    return row().pushUrl;
+                  }
+                })(),
+                bucket: props.name,
                 token: minted()?.scope === "write" ? (minted()?.token ?? null) : null,
               })}
             </pre>
@@ -601,15 +672,25 @@ function BucketPage(
           carrying a secret across. */}
       <Show when={props.canAdminister && bucket() !== undefined ? props.name : null} keyed>
         {(name) => (
-          <BucketAdmin
-            client={props.client}
-            call={props.call}
-            rootToken={props.rootToken}
-            minted={minted()}
-            onMinted={setMinted}
-            name={name}
-            now={props.now}
-          />
+          <>
+            <BucketDomain
+              client={props.client}
+              call={props.call}
+              rootToken={props.rootToken}
+              name={name}
+              domain={bucket()?.domain ?? null}
+              tunnelRow={props.tunnelRow}
+            />
+            <BucketAdmin
+              client={props.client}
+              call={props.call}
+              rootToken={props.rootToken}
+              minted={minted()}
+              onMinted={setMinted}
+              name={name}
+              now={props.now}
+            />
+          </>
         )}
       </Show>
 
@@ -700,7 +781,11 @@ function tokenLife(token: CacheToken, now: number): string {
   if (token.revoked) return "revoked";
   const used = token.lastUsed === null ? "never used" : `last used ${ago(token.lastUsed, now)}`;
   const expires =
-    token.expires === null ? "no expiry" : `expires ${new Date(token.expires).toISOString().slice(0, 10)}`;
+    token.expires === null
+      ? "no expiry"
+      : token.expires <= now
+        ? `expired ${new Date(token.expires).toISOString().slice(0, 10)}`
+        : `expires ${new Date(token.expires).toISOString().slice(0, 10)}`;
   return `${used} · ${expires} · created ${ago(token.created, now)}`;
 }
 
@@ -738,9 +823,91 @@ function BucketAdmin(props: TokenProps): JSX.Element {
   );
 }
 
+/**
+ * THE NAME A BUCKET IS SERVED AT — a domain, or a path under the origin.
+ *
+ * A NAME BELONGS TO THE BUCKET, not to the page: setting it changes the
+ * substituted URL, the `nix.conf` block above and the push's address. WHO
+ * creates the DNS record is the deployment's: with a tunnel row mounted, the
+ * row does and the strip beside this page carries its state; without one, the
+ * operator points the record, and the answer says so.
+ */
+function BucketDomain(
+  props: AdminProps & { name: string; domain: string | null; tunnelRow: boolean },
+): JSX.Element {
+  const [typed, setTyped] = createSignal(props.domain ?? "");
+  createEffect(on(() => props.domain, (domain) => setTyped(domain ?? ""), { defer: true }));
+  const action = createControl(props.call);
+  const apply = (domain: string | null): void => {
+    action.run(
+      props.client.procedures.bucket.domain({
+        rootToken: props.rootToken(),
+        bucket: props.name,
+        ...(domain === null ? {} : { domain }),
+      }),
+      (row) =>
+        row.domain === null
+          ? `Cleared the name; ${props.name} is served under /cache/${props.name}.`
+          : props.tunnelRow
+            // THE RECORD IS THE TUNNEL ROW'S JOB. Its state is on the strip
+            // beside this page (wiring / live / failed: reason); claiming a
+            // manual step here would be the stale instruction this replaced.
+            ? `Named this bucket ${row.domain}. The tunnel row is wiring its route.`
+            : `Named this bucket ${row.domain}. Point its DNS record here.`,
+    );
+  };
+  return (
+    <section class="admin-section" aria-label="domain">
+      <h3>A name of its own</h3>
+      <p class="hint">
+        A DNS name for this bucket, with no scheme and no port. When it is set,
+        the substituter URL, the netrc block and the push block use it. The
+        NixOS module needs a virtual host for the same name; a bucket on the
+        public pod gets one through a tunnel row.
+      </p>
+      <label class="search">
+        <span class="sr-only">bucket domain</span>
+        <input
+          type="text"
+          class="input"
+          placeholder="cache.example.org"
+          value={typed()}
+          onInput={(event) => setTyped(event.currentTarget.value)}
+        />
+      </label>
+      <div class="cache-create">
+        <button
+          type="button"
+          class="btn btn-primary"
+          disabled={action.busy()}
+          onClick={() => apply(typed().trim())}
+        >
+          {action.busy() ? "working…" : "Set domain"}
+        </button>
+        <Show when={props.domain !== null}>
+          <button
+            type="button"
+            class="btn"
+            disabled={action.busy()}
+            onClick={() => apply(null)}
+          >
+            Clear domain
+          </button>
+        </Show>
+      </div>
+      <Answer control={action} />
+    </section>
+  );
+}
+
 /** `token.mint`, `token.list`, `token.revoke` for this bucket. */
 function BucketTokens(props: TokenProps): JSX.Element {
   const [scope, setScope] = createSignal<"write" | "read">("write");
+  // AN EXPIRY IS THE FORM'S DEFAULT, not the row's: a token minted at a
+  // terminal with no `--expires-days` does not expire, and a page must not
+  // silently do what no visible field said. Ninety days is the default the
+  // select shows; "never" is a choice a person makes.
+  const [expiry, setExpiry] = createSignal("90");
   const minted = (): Minted | null => props.minted;
   const setMinted = props.onMinted;
   const action = createControl(props.call);
@@ -774,11 +941,15 @@ function BucketTokens(props: TokenProps): JSX.Element {
         rootToken: props.rootToken(),
         bucket: props.name,
         scope: chosen,
+        // ABSENT is the row's "does not expire"; the form says which it is.
+        ...(expiry() === "never" ? {} : { expiresDays: Number(expiry()) }),
       }),
       (answer) => {
         setMinted({ id: answer.facts.id, token: answer.token, scope: answer.facts.scope });
         void refetch();
-        return `Minted a ${chosen} token for ${props.name}.`;
+        return expiry() === "never"
+          ? `Minted a ${chosen} token for ${props.name}, with no expiry.`
+          : `Minted a ${chosen} token for ${props.name}, expiring in ${expiry()} days.`;
       },
     );
   };
@@ -807,6 +978,20 @@ function BucketTokens(props: TokenProps): JSX.Element {
           >
             <option value="write">write — push</option>
             <option value="read">read — substitute</option>
+          </select>
+        </label>
+        <label class="field-inline">
+          <span>expiry</span>
+          <select
+            class="input"
+            aria-label="token expiry"
+            value={expiry()}
+            onChange={(event) => setExpiry(event.currentTarget.value)}
+          >
+            <option value="30">30 days</option>
+            <option value="90">90 days</option>
+            <option value="365">1 year</option>
+            <option value="never">never</option>
           </select>
         </label>
         <button type="button" class="btn btn-primary" disabled={action.busy()} onClick={mint}>

@@ -70,6 +70,27 @@ afterAll(() => {
   for (const dir of dirs.splice(0)) cleanup(dir);
 });
 
+/** A deterministic, incompressible file in the builder's store. Xorshift keeps
+ *  it reproducible across hosts without a toolchain: no fetch, no /dev/urandom,
+ *  no dd. */
+function storeFile(name: string, bytes: number): string {
+  const dir = scratchDir("odu-e2e-file-");
+  dirs.push(dir);
+  const file = join(dir, name);
+  const data = Buffer.alloc(bytes);
+  let x = 0x9e3779b9;
+  for (let at = 0; at < data.length; at++) {
+    x ^= x << 13;
+    x ^= x >>> 17;
+    x ^= x << 5;
+    data[at] = x & 0xff;
+  }
+  writeFileSync(file, data);
+  const added = nix(["store", "add-file", file]);
+  if (added.status !== 0) throw new Error(`nix store add-file ${name} failed:\n${added.stderr}`);
+  return added.stdout.trim();
+}
+
 interface Ran {
   status: number | null;
   stdout: string;
@@ -236,6 +257,26 @@ describe("odu serves a Nix binary cache", () => {
     ]);
   });
 
+  it("serves a public bucket's facts with no account", async () => {
+    // THE PROTOCOL PATH, not the surface: anonymous `cache use` did not work on
+    // a daemon with a door because the connection was refused first. The
+    // consumer facts are as public as the NARs.
+    const response = await fetch(`${world.origin}/cache/main`, {
+      headers: { accept: "application/json" },
+    });
+    expect(response.status).toBe(200);
+    const facts = (await response.json()) as { publicKey: string; url: string };
+    expect(facts.publicKey).toBe(main.publicKey);
+    expect(facts.url).toBe(`${world.origin}/cache/main`);
+
+    const used = cli(["cache", "use", "main", "--origin", world.origin], {
+      ODU_ROOT_TOKEN: "",
+      ODU_TOKEN: "",
+    });
+    expect({ status: used.status, stderr: used.stderr }).toMatchObject({ status: 0 });
+    expect(used.stdout).toContain(main.publicKey);
+  });
+
   it("refuses administration without the root token", () => {
     const refused = cli(["cache", "create", "other"], { ODU_ROOT_TOKEN: "wrong" });
     expect(refused.status).toBe(1);
@@ -299,6 +340,44 @@ describe("odu serves a Nix binary cache", () => {
     // one is signed by a trusted key.
     expect(verified.stderr).not.toContain("not signed");
     expect(verified.status).toBe(0);
+  });
+
+  it("pushes a NAR in parts, and substitutes the joined path", () => {
+    // TWO MEGABYTES OF DETERMINISTIC, INCOMPRESSIBLE BYTES: the NAR's compressed
+    // stream cannot fit one part at `--part-size 1`, which is the shape
+    // Cloudflare forces on a real closure. A part is an overwrite by index, so
+    // this is also the protocol's retry story in miniature.
+    //
+    // NOT A DERIVATION: the lane host's build sandbox has `/bin/sh` and no
+    // `dd`, and a fixture that fetches or runs host tools is not a fixture the
+    // lane can build. The bytes are made here, deterministically, and added to
+    // the store with `nix store add-file`.
+    const big = storeFile("odu-cache-e2e-chunked", 2 * 1024 * 1024);
+    const pushed = cli(["cache", "push", "main", big, "--part-size", "1"], {
+      ODU_CACHE_TOKEN: writeToken,
+      NIX_REMOTE: builderStore,
+    });
+    expect({ status: pushed.status, stderr: pushed.stderr }).toMatchObject({ status: 0 });
+    // The voice names the parts, so a large push is not silent.
+    expect(pushed.stderr).toContain("part 2");
+    expect(pushed.stdout).toContain("pushed 1");
+
+    const substituted = nix(
+      [
+        "build",
+        "--store",
+        substituteStore,
+        "--substituters",
+        main.url,
+        "--trusted-public-keys",
+        main.publicKey,
+        "--no-link",
+        big,
+      ],
+      { NIX_REMOTE: "" },
+    );
+    expect(substituted.stderr).not.toContain("not signed");
+    expect(substituted.status).toBe(0);
   });
 
   it("takes a path `nix copy --to` uploads, and keeps the client's signature", async () => {

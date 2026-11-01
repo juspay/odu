@@ -62,6 +62,11 @@ let
           if selfRev == null
           then null
           else { repo = "juspay/odu"; branch = "ca-index"; };
+        # THE DECLARATION NAMES ITS PUSHER, so the publish job pushes to odu's
+        # OWN cache: the first substituter is `cache.kolu.dev`, and its bucket
+        # is `kolu`. kolu#2334 added this field; a binder that leaves it null
+        # bakes the declaration it always did.
+        pusher = { kind = "odu"; bucket = "kolu"; };
         extraFiles = { "commit-hash" = commitHash; };
       };
 

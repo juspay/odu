@@ -46,6 +46,9 @@ export const STEP_TIMEOUT = 120_000;
 export type Identity =
   | { readonly kind: "loopback" }
   | { readonly kind: "anonymous" }
+  /** Loopback, but with the cloudflare row mounted (a stub API, a fake
+   *  connector): the Tunnel panel and a bucket's route are on the board. */
+  | { readonly kind: "tunnel" }
   | { readonly kind: "signed-in"; readonly role: "owner" | "admin" | "member" };
 
 export class OduWorld extends World {
@@ -67,6 +70,9 @@ export class OduWorld extends World {
   /** The last `odu …` answer a scenario arranged with, so the next step can
    *  assert on the receipt rather than re-running the call. */
   cliAnswer?: { status: number | null; stdout: string; stderr: string };
+  /** The last non-board navigation: a bucket's public page, or the cache's own
+   *  404. Its status and body are what those steps assert on. */
+  visited?: { status: number | null; body: string };
   /** A second tab, for the scenario where signing out of one closes the other. */
   second?: Page;
   /** This worker's GitHub stub — a scenario changes what it claims when the
@@ -119,6 +125,12 @@ export class OduWorld extends World {
   errors: string[] = [];
   /** Every URL the page asked for. */
   requests: string[] = [];
+  /** A NAVIGATION THIS SCENARIO ASKED FOR, and the status it must answer.
+   *  The generic "no page errors" check allows exactly these and nothing else:
+   *  a 404 the scenario asked for is the answer, not a fault. */
+  expectedResponses: { status: number; url: string }[] = [];
+  /** Every non-2xx response the page received, for the same check. */
+  failedResponses: { status: number; url: string }[] = [];
 
   /** The log key the service minted for the failure this scenario is about,
    *  when a step arranged one. Kept so an assertion about the ADDRESS compares

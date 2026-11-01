@@ -89,10 +89,18 @@ const declaration = {
       "packages/cli/src/wire.ts": 2,
       "packages/execution/src/coordinator/spawn.ts": 1,
       "packages/execution/src/runner/workspace.ts": 22,
-      // `cache-control` on two responses — an HTTP header, not a bucket.
-      "packages/host/src/principal.ts": 2,
+      // `nix-cache-info` — Nix's protocol path, not odu's cache row. The probe
+      // URL a tunnel's name is confirmed with is the protocol's own spelling.
+      "packages/cloudflare/src/server.ts": 1,
+      // The browser suite's Cloudflare stub answers the protocol probe.
+      "packages/web-acceptance/support/cloudflareStub.ts": 1,
+      // `cache-control` on three responses — an HTTP header, not a bucket.
+      "packages/host/src/principal.ts": 3,
+      // The bucket-domain gate: the page rewrite's `/cache/` and its own
+      // 404 sentence. The path GRAMMAR moved to the row's `bucketOf` fact.
+      "packages/host/src/bucketDomain.ts": 2,
       // The same header, on the shared door reader's one request.
-      "packages/cordis/src/services.ts": 2,
+      "packages/cordis/src/services.ts": 4,
       "packages/launch/src/webDaemonLaunch.ts": 1,
       "packages/web-acceptance/support/corpus.ts": 5,
       "packages/web-acceptance/support/world.ts": 5,
@@ -107,6 +115,8 @@ const declaration = {
     // "does this daemon have a door" so a browser knows whether to sign in.
     auth: {
       "packages/cache/src/cache.ts": 2,
+      // The refusal a private bucket gets names the command that fixes it.
+      "packages/cache/src/cli.ts": 2,
       "packages/ci/src/protect.ts": 2,
       "packages/cli/src/serviceMcp.ts": 4,
       "packages/cli/src/wire.ts": 2,
@@ -117,6 +127,19 @@ const declaration = {
       // browser meets a door, and the stub's environment is the door's.
       "packages/web-acceptance/support/authWorld.ts": 1,
       "packages/web-acceptance/support/hooks.ts": 3,
+    },
+    // THE TUNNEL'S WORD, where it is not a row: the NIX protocol's own path
+    // `/nix-cache-info` is what a domain is probed for, and "cache" there
+    // belongs to Nix. The row's own instructions are prose on the wire.
+    cloudflare: {
+      // The harness names the row's world and stubs the API it calls, the way
+      // the door's world names the auth stub.
+      "packages/web-acceptance/support/cloudflareStub.ts": 2,
+      "packages/web-acceptance/support/hooks.ts": 15,
+      // The composed wires that speak the sibling's key — the tunnel's argv
+      // face and the MCP bridge beside the cache's and the door's.
+      "packages/cli/src/wire.ts": 2,
+      "packages/cli/src/serviceMcp.ts": 5,
     },
   },
   // A MODULE THAT HOLDS LIVE STATE BEHIND A DOOR, and why: the spawn module's
@@ -188,14 +211,14 @@ describe("the fence over this repo", () => {
  * not be able to reach sign-in, which is the whole reason it is a separate
  * package rather than a module inside either.
  */
-describe("three rows, and the third one has no importers but the roots", () => {
+describe("four rows, each reachable only from the roots", () => {
   const manifestOf = (member: string): { dependencies?: Record<string, string> } =>
     JSON.parse(source(`${member}/package.json`)) as {
       dependencies?: Record<string, string>;
     };
 
-  it("is three rows, read off the manifests", () => {
-    expect(Object.keys(FENCE_ROWS).sort()).toEqual(["auth", "cache", "ci"]);
+  it("is four rows, read off the manifests", () => {
+    expect(Object.keys(FENCE_ROWS).sort()).toEqual(["auth", "cache", "ci", "cloudflare"]);
   });
 
   it("no package of the ci or cache row depends on auth", () => {
@@ -216,6 +239,18 @@ describe("three rows, and the third one has no importers but the roots", () => {
         Object.keys(manifestOf(member).dependencies ?? {}),
         `${member} declares @odu/auth`,
       ).not.toContain("@odu/auth");
+    }
+  });
+
+  it("no package of the tunnel row depends on the cache row", () => {
+    // THE TUNNEL REACTS TO A PUBLISHED FACT, not to the cache's database or
+    // verbs. A dependency added here would be the row reaching across, which is
+    // the shape `@odu/cordis`'s `BucketDomains` exists to avoid.
+    for (const member of FENCE_ROWS.cloudflare ?? []) {
+      expect(
+        Object.keys(manifestOf(member).dependencies ?? {}),
+        `${member} declares @odu/cache`,
+      ).not.toContain("@odu/cache");
     }
   });
 

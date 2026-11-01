@@ -19,8 +19,10 @@ run_start · run_wait · run_read · run_list · run_retry · run_cancel · log_
 catalog_import · catalog_prune · pipeline_read
 venue_probe · venue_hold · venue_release · protect_apply
 cache_bucket_create · cache_bucket_list · cache_bucket_describe · cache_bucket_paths
+cache_bucket_domain
 cache_token_mint · cache_token_list · cache_token_revoke
 cache_pin_create · cache_gc_run · cache_stats_read
+cloudflare_status
 auth_user_whoami · auth_user_grant · auth_grant_list
 auth_token_create · auth_token_list · auth_token_revoke
 auth_session_list · auth_session_end
@@ -312,20 +314,23 @@ terminal.
 | import old runs | `odu surface catalog_import --input '{…}' --json` | `catalog_import` | `checkout`, `dryRun?`, `requestId` | `imported[]`, `skipped[]`, `catalog` |
 | expire old runs | `odu surface catalog_prune --input '{…}' --json` | `catalog_prune` | `retentionDays?`, `dryRun?`, `requestId` | `expired[]`, `kept[]`, `retentionDays`, `dryRun`, `replayed` |
 | require odu's checks | `odu surface protect_apply --input '{…}' --json` | `protect_apply` | `checkout`, `branch?`, `platforms?`, `hostsFile?`, `dryRun?`, `create?`, `requestId` | `repo`, `branch`, `contexts[]`, `rulesetId`, `applied`, `created`, `derivedFrom`, `detail`, `replayed` |
-| create a cache bucket | `odu surface cache bucket_create --input '{…}' --json` | `cache_bucket_create` | `rootToken`, `name`, `public`, `retentionDays`, `upstreamKeys?` | `name`, `public`, `retentionDays`, `keyName`, `publicKey`, `upstreamKeys[]`, `objects`, `bytes`, `created`, `url` |
+| create a cache bucket | `odu surface cache bucket_create --input '{…}' --json` | `cache_bucket_create` | `rootToken`, `name`, `public`, `retentionDays`, `upstreamKeys?` | `name`, `public`, `retentionDays`, `keyName`, `publicKey`, `upstreamKeys[]`, `objects`, `bytes`, `created`, `domain`, `url`, `pushUrl` |
 | list buckets | `odu surface cache bucket_list --input '{…}' --json` | `cache_bucket_list` | `rootToken` | `buckets[]` (the shape above) |
-| one bucket's public identity | `odu surface cache bucket_describe --input '{…}' --json` | `cache_bucket_describe` | `bucket` — **no root token** | `name`, `public`, `publicKey`, `url` only — the substituter's identity, not the operator's counts |
+| one bucket's public identity | `odu surface cache bucket_describe --input '{…}' --json` | `cache_bucket_describe` | `bucket` — **no root token** | `name`, `public`, `publicKey`, `domain`, `url` only — the substituter's identity, not the operator's counts |
+| give a bucket a DNS name | `odu surface cache bucket_domain --input '{…}' --json` | `cache_bucket_domain` | `rootToken`, `bucket`, `domain` (omit to clear) | the bucket row; `url` becomes the name and `pushUrl` stays the path |
+| what a bucket is holding | `odu surface watch cache held` | the `held` resource | *(none)* | `bucket`, `storePath`, `reason`, `missing[]`, `since` — paths accepted and waiting on references neither in the bucket nor upstream |
 | one bucket's paths | `odu surface cache bucket_paths --input '{…}' --json` | `cache_bucket_paths` | `bucket`, `filter?`, `after?` — **no root token** | `paths[]` (`storePath`, `narSize`, `created`, `hits`, `lastAccessed`), `next?` — newest first, 100 a page |
 | the last venue probe, kept | `odu surface get venues` | the `venues` resource | *(none)* | `null`, or `at`, `platforms[]`, `source`, `warnings[]`, `rows[]` — what `venue_probe` last answered for the service's own fleet (a probe naming your own `hostsFile` is answered, not kept), so a reader need not dial every machine again |
-| the rows a board follows | `odu surface watch cache buckets` | the `buckets` resource | *(none)* | `name`, `public`, `retentionDays`, `keyName`, `publicKey`, `upstreamKeys[]`, `objects`, `bytes`, `created`, `url`, `lastPush`, `hits` — one row per bucket, published as it moves |
+| the rows a board follows | `odu surface watch cache buckets` | the `buckets` resource | *(none)* | `name`, `public`, `retentionDays`, `keyName`, `publicKey`, `upstreamKeys[]`, `objects`, `bytes`, `created`, `domain`, `url`, `pushUrl`, `lastPush`, `hits` — one row per bucket, published as it moves |
 | mint a cache token | `odu surface cache token_mint --input '{…}' --json` | `cache_token_mint` | `rootToken`, `bucket`, `scope` (`read`/`write`/`admin`), `expiresDays?`, `bucketGlob?` | `token` (plaintext, ONCE), `facts` |
 | list cache tokens | `odu surface cache token_list --input '{…}' --json` | `cache_token_list` | `rootToken`, `bucket?` | `tokens[]` — never a plaintext |
 | revoke a cache token | `odu surface cache token_revoke --input '{…}' --json` | `cache_token_revoke` | `rootToken`, `id` | `id`, `revoked` |
 | pin a closure | `odu surface cache pin_create --input '{…}' --json` | `cache_pin_create` | `rootToken`, `bucket`, `name`, `paths[]` | `bucket`, `name`, `rootPaths[]`, `created` |
 | reclaim cache space | `odu surface cache gc_run --input '{…}' --json` | `cache_gc_run` | `rootToken`, `bucket?` | `buckets[]` (`evicted`, `kept`, `bytes`), `evicted`, `kept`, `bytes` |
 | cache sizes and reads | `odu surface cache stats_read --input '{…}' --json` | `cache_stats_read` | `rootToken` | `buckets[]`, `objects`, `bytes`, `hits`, `lastAccessed` |
+| the tunnel and its names | `odu cloudflare status -o json` | `cloudflare_status` | *(none)* | `tunnel` (`state`, `name`, `id`, `reason`) and `routes[]` (`domain`, `bucket`, `state` `wiring`/`live`/`failed`, `reason`, `updated`) — a route with `bucket: null` is the server's own public origin |
 | who am I | `odu auth whoami -o json` | `auth_user_whoami` | *(none)* | `who` — a `user` with a `login` and `role`, or `anonymous`. Exits **1** when the answer is `anonymous`, even though the answer is printed: exit 0 would read as "you have a session" |
-| mint a personal token | `odu surface auth token_create --input '{…}' --json` | `auth_token_create` | `name` | `token` (plaintext, ONCE), `facts` |
+| mint a personal token | `odu surface auth token_create --input '{…}' --json` | `auth_token_create` | `name`, `expiresDays?` (absent = never; the profile form defaults to 90) | `token` (plaintext, ONCE), `facts` |
 | my tokens | `odu auth token list -o json` | `auth_token_list` | *(none)* | `tokens[]` — never a plaintext |
 | revoke a token | `odu auth token revoke <id>` | `auth_token_revoke` | `id` | `id`, `revoked` |
 | my sessions | `odu surface auth session_list --input '{}' --json` | `auth_session_list` | *(none)* | `sessions[]` (`id`, `created`, `lastSeen`, `expires`, `agent`) |

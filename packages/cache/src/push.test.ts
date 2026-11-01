@@ -17,7 +17,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
-import { storePathHash } from "./narinfo";
+import { narHashBase32, storePathHash } from "./narinfo";
 import {
   credentialsPath,
   type ClosureEntry,
@@ -64,6 +64,8 @@ interface Seen {
 
 interface Server {
   origin: string;
+  /** The instance's public origin, as its consumer facts publish it. */
+  board: string;
   seen: Seen[];
   /** How many times each path's nar upload should fail before succeeding. */
   failNar: Map<string, number>;
@@ -71,9 +73,24 @@ interface Server {
   narStatus: Map<string, number>;
   /** Store paths whose narinfo answers 202 the first time it is asked. */
   deferOnce: Set<string>;
+  /** Store paths whose narinfo answers 202 every time — a hold nobody fixes. */
+  alwaysDefer: Set<string>;
+  /** Parts received, keyed `${file}:${index}`. */
+  parts: Map<string, string>;
+  /** How many times a part answers 500 before succeeding, keyed the same. */
+  partFailures: Map<string, number>;
+  /** Every completed join, in order. */
+  completed: { file: string; total: number }[];
+  /** How many `/missing` calls still answer the current list; `undefined`
+   *  means every call does. */
+  missingCalls: number;
+  missingOnlyFor: number | undefined;
   /** Answer a narinfo PUT that carries no preceding NAR with a 400 saying the
    *  bytes are gone — what a restarted server says. */
   narinfoOnlyRefusal: boolean;
+  /** `--wait` reads THIS endpoint; `null` keeps every hold forever. */
+  heldLandAfter: number | null;
+  heldPolls: number;
   missing: string[];
   skipped: string[];
   stop: () => void;
@@ -82,11 +99,20 @@ interface Server {
 function startServer(): Server {
   const state: Server = {
     origin: "",
+    board: "https://board.example.org",
     seen: [],
     failNar: new Map(),
     narStatus: new Map(),
     deferOnce: new Set(),
+    alwaysDefer: new Set(),
+    parts: new Map(),
+    partFailures: new Map(),
+    completed: [],
+    missingCalls: 0,
+    missingOnlyFor: undefined,
     narinfoOnlyRefusal: false,
+    heldLandAfter: null,
+    heldPolls: 0,
     missing: [LIBC, GLIBC, HELLO],
     skipped: [],
     stop: () => {},
@@ -103,8 +129,57 @@ function startServer(): Server {
         authorization: request.headers.get("authorization"),
         body,
       });
+      if (request.method === "GET" && url.pathname === "/cache/main") {
+        // THE BUCKET'S CONSUMER FACTS: the push asks where THIS INSTANCE is,
+        // rather than guessing from its own environment.
+        return Response.json({ board: state.board });
+      }
+      if (request.method === "GET" && url.pathname === "/cache/main/held") {
+        state.heldPolls += 1;
+        const keep = state.heldLandAfter === null || state.heldPolls <= state.heldLandAfter;
+        return Response.json({
+          held: keep
+            ? [
+                {
+                  storePath: LIBC,
+                  reason: `fetching 1 upstream reference`,
+                  missing: [LIBC],
+                  fetching: 1,
+                  fetched: [],
+                },
+              ]
+            : [],
+        });
+      }
       if (url.pathname.endsWith("/missing")) {
+        state.missingCalls += 1;
+        if (state.missingOnlyFor !== undefined && state.missingCalls > state.missingOnlyFor) {
+          return Response.json({ missing: [], skippedUpstream: [] });
+        }
         return Response.json({ missing: state.missing, skippedUpstream: state.skipped });
+      }
+      if (request.method === "PUT" && url.pathname.includes("/parts/")) {
+        const index = url.pathname.slice(url.pathname.lastIndexOf("/") + 1);
+        const file = url.pathname.slice(url.pathname.lastIndexOf("/nar/") + 5, -`/parts/${index}`.length);
+        const key = `${file}:${index}`;
+        const failures = state.partFailures.get(key) ?? 0;
+        if (failures > 0) {
+          state.partFailures.set(key, failures - 1);
+          return new Response("nope", { status: 500 });
+        }
+        state.parts.set(key, body);
+        return new Response(null, { status: 204 });
+      }
+      if (request.method === "POST" && url.pathname.endsWith("/complete")) {
+        const file = url.pathname.slice(url.pathname.lastIndexOf("/nar/") + 5, -"/complete".length);
+        const total = Number(request.headers.get("x-odu-parts"));
+        const missing: number[] = [];
+        for (let index = 0; index < total; index++) {
+          if (!state.parts.has(`${file}:${index}`)) missing.push(index);
+        }
+        if (missing.length > 0) return Response.json({ missing }, { status: 409 });
+        state.completed.push({ file, total });
+        return Response.json({ parts: total });
       }
       if (request.method === "PUT" && url.pathname.includes("/nar/")) {
         const file = url.pathname.slice(url.pathname.lastIndexOf("/") + 1);
@@ -119,8 +194,11 @@ function startServer(): Server {
       }
       if (request.method === "PUT" && url.pathname.endsWith(".narinfo")) {
         const hash = url.pathname.slice(url.pathname.lastIndexOf("/") + 1, -".narinfo".length);
-        if (state.deferOnce.delete(hash)) {
-          return new Response("waiting on a reference", { status: 202 });
+        if (state.alwaysDefer.has(hash) || state.deferOnce.delete(hash)) {
+          return new Response(
+            `waiting for 1 reference that is neither here nor upstream: ${GLIBC}`,
+            { status: 202 },
+          );
         }
         if (state.narinfoOnlyRefusal) {
           state.narinfoOnlyRefusal = false;
@@ -226,6 +304,83 @@ describe("pushing a closure", () => {
         (seen) => seen.method === "PUT" && seen.path.endsWith(".narinfo"),
       );
       expect(infoPuts).toHaveLength(1);
+    } finally {
+      server.stop();
+    }
+  });
+
+  it("splits a large NAR into parts, retries one part, and joins them", async () => {
+    const server = startServer();
+    try {
+      server.missing = [LIBC];
+      const bytes = new TextEncoder().encode("0123456789");
+      const narName = `${narHashBase32(entry(LIBC).narHash)}.nar.zst`;
+      // The MIDDLE part fails once: a retry costs that part, not the path.
+      server.partFailures.set(`${narName}:1`, 1);
+      const lines: string[] = [];
+      const summary = await pushToCache({
+        bucket: `${server.origin}/main`,
+        paths: ["."],
+        env: envOf({ ODU_CACHE_TOKEN: "t" }),
+        platform: {
+          closure: async () => [entry(LIBC)],
+          dump: () =>
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(bytes);
+                controller.close();
+              },
+            }),
+        },
+        // Four bytes a part: ten bytes become three requests, which is the
+        // whole point — Cloudflare refuses one hundred megabytes, not ten.
+        partSize: 4,
+        onLine: (line) => lines.push(line),
+      });
+      expect(summary).toMatchObject({ pushed: 1, failed: 0, held: [] });
+      const parts = server.seen
+        .filter((seen) => seen.method === "PUT" && seen.path.includes("/parts/"))
+        .map((seen) => Number(seen.path.slice(seen.path.lastIndexOf("/") + 1)));
+      expect(parts).toEqual([0, 1, 1, 2]);
+      expect(server.completed).toEqual([{ file: narName, total: 3 }]);
+      expect(server.seen.some((seen) => seen.method === "PUT" && seen.path.endsWith(".nar.zst"))).toBe(
+        false,
+      );
+      // ONE LINE PER PART, and the retry names itself.
+      expect(lines).toContain(`⏳ ${LIBC} part 1`);
+      expect(lines).toContain(`↻ ${LIBC} part 2 (retry 1)`);
+      expect(lines).toContain(`⏳ ${LIBC} part 3`);
+      expect(lines).toContain(`✅ ${LIBC} stored`);
+    } finally {
+      server.stop();
+    }
+  });
+
+  it("sends a NAR under the part size as one request", async () => {
+    const server = startServer();
+    try {
+      server.missing = [LIBC];
+      await pushToCache({
+        bucket: `${server.origin}/main`,
+        paths: ["."],
+        env: envOf({ ODU_CACHE_TOKEN: "t" }),
+        platform: {
+          closure: async () => [entry(LIBC)],
+          dump: () =>
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(new TextEncoder().encode("small"));
+                controller.close();
+              },
+            }),
+        },
+        partSize: 64,
+      });
+      expect(server.parts.size).toBe(0);
+      expect(server.completed).toEqual([]);
+      expect(
+        server.seen.filter((seen) => seen.method === "PUT" && seen.path.endsWith(".nar.zst")),
+      ).toHaveLength(1);
     } finally {
       server.stop();
     }
@@ -339,6 +494,71 @@ describe("pushing a closure", () => {
         platform: PLATFORM,
       });
       expect(summary).toMatchObject({ pushed: 1, skippedUpstream: 1, alreadyPresent: 1, failed: 0 });
+    } finally {
+      server.stop();
+    }
+  });
+
+  it("reports a hold in the server's own words, and does not fail", async () => {
+    const server = startServer();
+    try {
+      server.missing = [LIBC];
+      server.alwaysDefer.add(storePathHash(LIBC));
+      const lines: string[] = [];
+      const summary = await pushToCache({
+        bucket: `${server.origin}/main`,
+        paths: ["."],
+        env: envOf({ ODU_CACHE_TOKEN: "t" }),
+        platform: PLATFORM,
+        onLine: (line) => lines.push(line),
+      });
+      // A HOLD IS REPORTED AND THE COMMAND RETURNS: no failure, no hang.
+      expect(summary).toMatchObject({
+        pushed: 0,
+        held: [
+          {
+            path: LIBC,
+            reason: `waiting for 1 reference that is neither here nor upstream: ${GLIBC}`,
+          },
+        ],
+        failed: 0,
+        pageUrl: "https://board.example.org/#/cache/main",
+      });
+      expect(lines[0]).toBe(
+        "3 paths in the closure: 1 to push, 2 already here, 0 upstream",
+      );
+      expect(lines).toContain(`⏸ ${LIBC} held: ${summary.held[0]?.reason}`);
+    } finally {
+      server.stop();
+    }
+  });
+
+  it("--wait stays until the bucket can serve the held path", async () => {
+    const server = startServer();
+    try {
+      server.missing = [LIBC];
+      server.alwaysDefer.add(storePathHash(LIBC));
+      // The hold's row is what the wait reads: it is kept for one poll, then
+      // the reference landed and the row is gone.
+      server.heldLandAfter = 1;
+      const summary = await pushToCache({
+        bucket: `${server.origin}/main`,
+        paths: ["."],
+        env: envOf({ ODU_CACHE_TOKEN: "t" }),
+        platform: PLATFORM,
+        wait: true,
+        waitIntervalMs: 1,
+        waitTimeoutMs: 2_000,
+      });
+      expect(summary).toMatchObject({ pushed: 1, held: [], failed: 0 });
+      // THE WAIT READS THE HOLD, NOT THE UPLOAD PATH: one `/missing` (the
+      // preamble's), no second narinfo PUT while waiting, and the held endpoint
+      // asked until the row went.
+      expect(server.heldPolls).toBeGreaterThan(1);
+      const narinfoPuts = server.seen.filter(
+        (seen) => seen.method === "PUT" && seen.path.endsWith(".narinfo"),
+      );
+      expect(narinfoPuts).toHaveLength(1);
     } finally {
       server.stop();
     }

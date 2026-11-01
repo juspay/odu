@@ -94,6 +94,47 @@ export const Bundle = serviceTag<RootedSurfacesRuntime<never>>("odu:bundle");
 export const SERVICE_DOOR_PATH = "/_odu/door";
 
 /**
+ * WHICH SIBLING ROWS THIS DAEMON MOUNTS — the host's composition, as a fact a
+ * client may read before it draws anything.
+ *
+ * The browser drew a Tunnel switch and opened a `routes` subscription on every
+ * bucket page even on a daemon with no tunnel row; the bridge composed its MCP
+ * siblings from a fixed list. Both now ask. The answer is the roster at boot:
+ * rows are fixed for a tenure, and a row that leaves takes the daemon with it.
+ */
+export const SERVICE_ROWS_PATH = "/_odu/rows";
+
+/**
+ * ASK A DAEMON WHICH ROWS IT MOUNTS — the one spelling of that question, beside
+ * {@link readDoor} and for the same reasons: a second copy is a second parse,
+ * and the two readers (a page deciding whether to draw a control, a bridge
+ * deciding whether to advertise a verb) must agree.
+ *
+ * `null` is UNKNOWN (the host did not answer), deliberately not `[]`: a caller
+ * that treats an outage as "no rows" hides a control on a server that has it.
+ * A caller that can only HIDE — the browser, before its first draw — may fold
+ * `null` to `[]` on purpose; it must say so at the fold, and must not do it
+ * where it could wait for the answer instead.
+ */
+export async function readRows(
+  origin: string,
+  ask: typeof fetch = fetch,
+): Promise<ReadonlyArray<string> | null> {
+  try {
+    const response = await ask(new URL(SERVICE_ROWS_PATH, origin), {
+      headers: { "cache-control": "no-cache" },
+      signal: AbortSignal.timeout(2_000),
+    });
+    if (!response.ok) return null;
+    const body = (await response.json()) as { rows?: unknown };
+    if (!Array.isArray(body.rows)) return null;
+    return body.rows.filter((row): row is string => typeof row === "string");
+  } catch {
+    return null;
+  }
+}
+
+/**
  * ASK A DAEMON WHETHER IT HAS A DOOR — the ONE spelling of the question.
  *
  * Two faces ask it: the browser, before it draws anything, and the CLI's MCP
@@ -196,6 +237,46 @@ export interface HttpRoutes {
  *  contract: eleven tags, four types and two pure helpers, with no state to
  *  outlive a call. */
 export const Routes = serviceTag<HttpRoutes>("odu:httpRoutes");
+
+// ── what a row publishes ────────────────────────────────────────────────────
+
+/** ONE BUCKET'S OWN NAME, as the cache row publishes it. */
+export interface BucketDomainFact {
+  readonly bucket: string;
+  readonly domain: string;
+}
+
+/**
+ * THE CACHE ROW'S DOMAINS, AS A FACT OTHER ROWS MAY REACT TO.
+ *
+ * The `cloudflare` row watches this to route a bucket's name; it must not import
+ * the cache row's internals (the database, the surface's procedures) to learn a
+ * fact the cache already knows. A service key is the safe import: the cache
+ * offers it in its own activation, the cloudflare row declares it, and the two
+ * never name each other's packages.
+ *
+ * `subscribe` returns the WITHDRAWAL, and the cache ends every listener when it
+ * closes — the same lifetime its own `onChange` has.
+ */
+export interface BucketDomains {
+  /** Every bucket that has a domain, now. */
+  current(): readonly BucketDomainFact[];
+  subscribe(listener: () => void): () => void;
+  /**
+   * THE PATHS THE CACHE ROW ANSWERS. A bucket domain forwards EVERY path of
+   * its name to this daemon, so the host's gate needs to know what belongs to
+   * the cache and what must never answer there: its claims are the whole list.
+   */
+  paths: ReadonlyArray<string>;
+  /**
+   * THE BUCKET A PATH NAMES, in either protocol spelling — or `null` when it
+   * names none. The grammar is the cache row's; the host's bucket-domain gate
+   * asks this rather than parsing `/cache/<name>` itself.
+   */
+  bucketOf(path: string): string | null;
+}
+
+export const BucketDomains = serviceTag<BucketDomains>("odu:bucketDomains");
 
 // ── what a row is ───────────────────────────────────────────────────────────
 

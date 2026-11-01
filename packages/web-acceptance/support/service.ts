@@ -32,6 +32,7 @@
  */
 
 import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { createServer } from "node:net";
 import { createWriteStream, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -108,9 +109,42 @@ export const ROOT_TOKEN = "acceptance-root-token";
  * would not fail to bind, it would yield to its sibling's gate and every
  * scenario behind it would grade the wrong service.
  */
+/** PORTS THE KERNEL VOUCHES FOR, reserved once per cucumber worker. The old
+ *  pid-derived band collided with a PREVIOUS run's daemon on a persistent CI
+ *  host: the pid landed on the same band and the stale service held the port.
+ *  Binding `0` and reading the assigned port cannot hit a bound port — the
+ *  kernel excludes every listener that is actually there. */
+const reservedPorts = new Map<string, number>();
+
+async function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.unref();
+    server.on("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address !== null ? address.port : 0;
+      server.close(() => (port > 0 ? resolve(port) : reject(new Error("no port was assigned"))));
+    });
+  });
+}
+
+/** Reserve this worker's four ports BEFORE any world starts. */
+export async function reserveWorldPorts(): Promise<void> {
+  for (const key of ["worker", "door", "stub", "tunnel"]) {
+    reservedPorts.set(key, await freePort());
+  }
+}
+
+function reserved(key: string, fallback: () => number): number {
+  return reservedPorts.get(key) ?? fallback();
+}
+
 export function workerPort(): number {
-  const worker = Number(process.env.CUCUMBER_WORKER_ID ?? 0);
-  return 19500 + worker * 100 + (process.pid % 100);
+  return reserved("worker", () => {
+    const worker = Number(process.env.CUCUMBER_WORKER_ID ?? 0);
+    return 19500 + worker * 100 + (process.pid % 100);
+  });
 }
 
 /** THE DOOR'S WORLD, beside the loopback one.
@@ -124,12 +158,21 @@ export const DOOR_PORT_OFFSET = 40;
 /** The GitHub stub both origins point at. */
 export const STUB_PORT_OFFSET = 45;
 
+/** THE TUNNEL'S WORLD — a third daemon, because the cloudflare row mounts only
+ *  when its token file is configured, and the loopback page a scenario without
+ *  that row asserts must stay exactly as it is. */
+export const TUNNEL_PORT_OFFSET = 50;
+
 export function doorPort(): number {
-  return workerPort() + DOOR_PORT_OFFSET;
+  return reserved("door", () => workerPort() + DOOR_PORT_OFFSET);
 }
 
 export function stubPort(): number {
-  return workerPort() + STUB_PORT_OFFSET;
+  return reserved("stub", () => workerPort() + STUB_PORT_OFFSET);
+}
+
+export function tunnelPort(): number {
+  return reserved("tunnel", () => workerPort() + TUNNEL_PORT_OFFSET);
 }
 
 /** Poll until `ask` answers, or fail with a sentence naming what was waited on. */

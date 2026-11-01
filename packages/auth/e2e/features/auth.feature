@@ -64,6 +64,14 @@ Feature: The door — sign in, and what a role may do
     And there should be no page errors
 
   @signed-in:member
+  Scenario: A token created on the profile page shows its expiry
+    # The profile form defaults to ninety days too; "never" is a choice there.
+    When I open the profile
+    And I create a token named "laptop-expiring"
+    Then the profile shows an expiry for "laptop-expiring"
+    And there should be no page errors
+
+  @signed-in:member
   Scenario: Signing out in one tab closes the other tab
     Given I open a second tab on the board
     And I open the profile

@@ -80,7 +80,10 @@ function stagedFiles(): string[] {
   return out.sort();
 }
 
-async function harness(publicBucket: boolean): Promise<Harness> {
+async function harness(
+  publicBucket: boolean,
+  boardOrigin = "https://odu.example.org",
+): Promise<Harness> {
   const store = new FakeStore();
   const hello = nar("a NAR, in pieces");
   store.add(
@@ -118,9 +121,10 @@ async function harness(publicBucket: boolean): Promise<Harness> {
     write: await mint(cache, "write"),
     admin: await mint(cache, "admin"),
   };
-  const { handler, dispose } = HttpRouter.toWebHandler(cacheRoutes(cache).layer, {
-    disableLogger: true,
-  });
+  const { handler, dispose } = HttpRouter.toWebHandler(
+    cacheRoutes(cache, (name) => `${CACHE_MOUNT}/${name}`, boardOrigin).layer,
+    { disableLogger: true },
+  );
   // The tests below name a path as a BUCKET names it (`/main/nix-cache-info`),
   // and this puts it where the protocol actually is. The mount is pinned on its
   // own, once, in "the protocol's mount is not the origin's first segment".
@@ -201,6 +205,84 @@ const basic = (token: string): RequestInit => ({
   headers: { authorization: `Basic ${Buffer.from(`anyone:${token}`).toString("base64")}` },
 });
 
+describe("a bucket's consumer facts", () => {
+  it("answers a PUBLIC bucket with no credential, and a private one only to a reader", async () => {
+    const h = await harness(true);
+    const json = await h.fetch("/main/", { headers: { accept: "application/json" } });
+    expect(json.status).toBe(200);
+    const facts = (await json.json()) as {
+      name: string;
+      url: string;
+      publicKey: string;
+      upstreamKeys: string[];
+      use: string;
+      board: string;
+    };
+    expect(facts).toMatchObject({
+      name: "main",
+      publicKey: expect.stringContaining("main-1:"),
+      // THE INSTANCE'S OWN ADDRESS, not the bucket's name: the push's `see`
+      // link and anything else that needs the board read it from here.
+      board: "https://odu.example.org",
+    });
+    expect(facts.url).toContain("/cache/main");
+    expect(facts.upstreamKeys).toEqual(["cache.nixos.org-1"]);
+    expect(facts.use).toContain("extra-substituters");
+    // The SAME PAGE WITHOUT THE SLASH: the substituter URL a person pastes
+    // into a browser is `…/cache/main`, and it must not fall to the shell.
+    const bare = await h.fetch("/main");
+    expect(bare.status).toBe(200);
+    expect((await bare.text()).includes("extra-substituters")).toBe(true);
+    // The PAGE is the same facts for a person with curl, and the key is in it.
+    const page = await h.fetch("/main/");
+    expect(page.status).toBe(200);
+    // The PAGE carries the key too. (Checked as a substring of the key, not
+    // of `facts`: a matcher with an asymmetric expectation can rewrite the
+    // object it matched.)
+    const body = await page.text();
+    expect(body.includes("main-1:")).toBe(true);
+    // ONE BLOCK PER THING A PERSON PASTES SOMEWHERE, each with a copy button.
+    for (const title of ["nix.conf", "NixOS / nix-darwin", "flake.nix", "GitHub Actions"]) {
+      expect({ title, heading: body.includes(`<h3>${title}</h3>`) }).toEqual({
+        title,
+        heading: true,
+      });
+    }
+    expect(body.split(`<button type="button" data-copy>`).length - 1).toBe(5);
+    // A PUBLIC BUCKET IS READ WITH NO CREDENTIAL, so netrc is not on its page.
+    expect(body.includes("netrc-file")).toBe(false);
+    // THE HEALTH FILE, at the substituter's root, as a link a person clicks.
+    expect(body).toContain(
+      `<a href="/cache/main/nix-cache-info">nix-cache-info</a>`,
+    );
+    // ATTRIBUTION TO THE PRODUCT, a fixed site — never the instance's board.
+    expect(body).toContain(
+      `<p class="served">served by <a href="https://odu.kolu.dev/">odu</a></p>`,
+    );
+    await h.dispose();
+  });
+
+  it("does not leak a private bucket's existence to an anonymous reader", async () => {
+    const h = await harness(false);
+    expect((await h.fetch("/main/")).status).toBe(404);
+    // A reader with a read token is answered.
+    const withToken = await h.fetch("/main/", {
+      ...bearer(h.tokens.read),
+      headers: { ...(bearer(h.tokens.read).headers as Record<string, string>), accept: "application/json" },
+    });
+    expect(withToken.status).toBe(200);
+    // The PAGE, not the JSON: the blocks are what a reader pastes.
+    const page = await h.fetch("/main/", bearer(h.tokens.read));
+    expect(page.status).toBe(200);
+    const body = await page.text();
+    // READING THIS BUCKET NEEDS A CREDENTIAL, so its page carries the netrc
+    // block — and only a private bucket's does.
+    expect(body).toContain("<h3>netrc</h3>");
+    expect(body).toContain("netrc-file");
+    await h.dispose();
+  });
+});
+
 describe("nix-cache-info", () => {
   it("answers the three lines a client reads first", async () => {
     const h = await harness(true);
@@ -257,7 +339,11 @@ describe("narinfo", () => {
 
   it("does not answer a name that is not a narinfo", async () => {
     const h = await harness(true);
-    expect((await h.fetch("/main/hello-2.12.3")).status).toBe(404);
+    const notProtocol = await h.fetch("/main/hello-2.12.3");
+    expect(notProtocol.status).toBe(404);
+    // The row's sentence, not an empty body: a path under a bucket that names
+    // no protocol file must read as the cache's own 404.
+    expect(await notProtocol.text()).toContain("no such cache path");
     await h.dispose();
   });
 });
@@ -332,7 +418,11 @@ describe("the auth matrix", () => {
     expect(later.bucket("main")?.name).toBe("main");
     expect(
       later.authorize(`Bearer ${expired.value.token}`, later.bucket("main") as never, "read"),
-    ).toEqual({ ok: false, status: 403, message: "that token has expired" });
+    ).toMatchObject({
+      ok: false,
+      status: 403,
+      message: expect.stringContaining("expired on 2023-11-15"),
+    });
     later.close();
 
     // A token minted for `main` cannot reach a bucket it does not cover.
@@ -676,7 +766,9 @@ describe("uploading", () => {
       expect({ path, status: put.status }).toEqual({ path, status: 200 });
     }
     // ONE staged NAR, not two: both uploads named the same file.
-    expect(stagedFiles().filter((file) => file.includes("/nar/"))).toHaveLength(1);
+    expect(
+      stagedFiles().filter((file) => file.endsWith(".nar.zst")),
+    ).toHaveLength(1);
 
     const narinfo = (storePath: string): string =>
       `StorePath: ${storePath}\nURL: nar/${name}\nCompression: none\nNarHash: ${payload.narHash}\nNarSize: 1\nReferences: \n`;
@@ -690,6 +782,117 @@ describe("uploading", () => {
     }
     expect((await h.fetch(`/main/${hashOf(one)}.narinfo`)).status).toBe(200);
     expect((await h.fetch(`/main/${hashOf(two)}.narinfo`)).status).toBe(200);
+    await h.dispose();
+  });
+
+  it("reassembles a chunked NAR, refusing a gap", async () => {
+    const h = await harness(true);
+    const staged = "/nix/store/88888888888888888888888888888888-chunked";
+    const payload = nar("bytes that arrive in pieces");
+    h.store.add(
+      { storePath: staged, narHash: payload.narHash, narSize: payload.bytes.length, references: [] },
+      false,
+    );
+    const name = `${payload.narHash.replace(/^sha256:/, "")}.nar.zst`;
+    const split = [payload.bytes.subarray(0, 5), payload.bytes.subarray(5)];
+    const part = (index: number) =>
+      // THE PROTOCOL'S PATH FORM, which is where `odu cache push` addresses a
+      // part (`<bucket>/nar/<file>/parts/<index>`); the admin API's path is a
+      // second spelling of the same verbs.
+      h.fetch(`/main/nar/${name}/parts/${index}`, {
+        ...bearer(h.tokens.write),
+        method: "PUT",
+        body: body(split[index] as Uint8Array),
+      });
+    const complete = () =>
+      h.fetch(`/main/nar/${name}/complete`, {
+        ...bearer(h.tokens.write),
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${h.tokens.write}`,
+          "x-odu-parts": "2",
+        },
+      });
+
+    expect((await part(0)).status).toBe(204);
+    // A GAP IS THE CLIENT'S TO FILL: the answer names the index, not a
+    // half-assembled NAR.
+    const gap = await complete();
+    expect(gap.status).toBe(409);
+    expect(await gap.json()).toEqual({ missing: [1] });
+
+    expect((await part(1)).status).toBe(204);
+    expect((await complete()).status).toBe(200);
+    // The narinfo then proves the joined bytes exactly as it would a single
+    // request — the chunking is invisible to the proof.
+    const narinfo = await h.fetch(`/main/${hashOf(staged)}.narinfo`, {
+      ...bearer(h.tokens.write),
+      method: "PUT",
+      body: `StorePath: ${staged}\nURL: nar/${name}\nCompression: none\nNarHash: ${payload.narHash}\nNarSize: ${payload.bytes.length}\nReferences: \n`,
+    });
+    expect(narinfo.status).toBe(200);
+    expect((await h.fetch(`/main/${hashOf(staged)}.narinfo`)).status).toBe(200);
+    await h.dispose();
+  });
+});
+
+describe("a private read is not shareable", () => {
+  it("marks a public bucket's read shareable, with no cache header", async () => {
+    const pub = await harness(true);
+    expect(
+      (await pub.fetch(`/main/${hashOf(HELLO)}.narinfo`)).headers.get("cache-control"),
+    ).toBeNull();
+    await pub.dispose();
+  });
+
+  it("marks a private bucket's narinfo and NAR private, no-store", async () => {
+    const priv = await harness(false);
+    const narinfo = await priv.fetch(`/main/${hashOf(HELLO)}.narinfo`, bearer(priv.tokens.read));
+    expect(narinfo.status).toBe(200);
+    expect(narinfo.headers.get("cache-control")).toBe("private, no-store");
+    const url = (await narinfo.text())
+      .split("\n")
+      .find((line) => line.startsWith("URL: "))!
+      .slice(5);
+    const nar = await priv.fetch(`/main/${url}`, bearer(priv.tokens.read));
+    expect(nar.status).toBe(200);
+    expect(nar.headers.get("cache-control")).toBe("private, no-store");
+    await priv.dispose();
+  });
+});
+
+describe("a bucket's domain", () => {
+  it("answers the Nix protocol at the root of its name, and 404s another name", async () => {
+    const h = await harness(true);
+    const named = await h.cache.admin.domain({
+      ...asRoot(ROOT),
+      bucket: "main",
+      domain: "cache.example.org",
+    });
+    expect(named.ok).toBe(true);
+    const host = (path: string, init: RequestInit = {}): Promise<Response> =>
+      h.raw(path, {
+        ...init,
+        headers: { ...(init.headers as Record<string, string>), host: "cache.example.org" },
+      });
+
+    const info = await host("/nix-cache-info");
+    expect(info.status).toBe(200);
+    expect(await info.text()).toContain("WantMassQuery");
+
+    const narinfo = await host(`/${hashOf(HELLO)}.narinfo`);
+    expect(narinfo.status).toBe(200);
+    const text = await narinfo.text();
+    expect(text).toContain("Sig: main-1:");
+    const nar = await host(`/${text.split("\n").find((line) => line.startsWith("URL: "))!.slice(5)}`);
+    expect(nar.status).toBe(200);
+
+    // THE WRONG NAME IS A 404, not the path form and not the shell.
+    expect(
+      (await h.raw("/nix-cache-info", { headers: { host: "other.example.org" } })).status,
+    ).toBe(404);
+    // And the claim is the hash's shape, not every one-segment path.
+    expect((await host("/sw.js")).status).toBe(404);
     await h.dispose();
   });
 });

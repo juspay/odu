@@ -15,8 +15,9 @@
   "dependencies": {
     "@odu/auth": "workspace:*",
     "@odu/cache": "workspace:*",
-    "@odu/cordis": "workspace:*",
     "@odu/ci": "workspace:*",
+    "@odu/cloudflare": "workspace:*",
+    "@odu/cordis": "workspace:*",
     "@odu/service-client": "workspace:*",
     "effect": "4.0.0",
     "solid-js": "^1.9.0"

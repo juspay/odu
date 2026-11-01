@@ -117,10 +117,40 @@ Then("there is no alert", async function (this: OduWorld) {
  * navigation.
  */
 Then("there should be no page errors", function (this: OduWorld) {
+  // A SCENARIO MAY ASK FOR A FAILED NAVIGATION. The browser logs it as a
+  // console error like any other; exactly the status it asked for, on exactly
+  // the URL it asked, is allowed. Any other failed response, or any other
+  // error, still fails — the check is not dropped for such a scenario.
+  const unexpected = this.failedResponses.filter(
+    (failed) =>
+      !this.expectedResponses.some(
+        (expected) => expected.status === failed.status && expected.url === failed.url,
+      ),
+  );
   assert.deepStrictEqual(
-    this.errors,
+    unexpected,
     [],
-    `the page reported ${this.errors.length} error(s):\n${this.errors.join("\n---\n")}`,
+    `the page received ${unexpected.length} unexpected failed response(s):\n` +
+      unexpected.map((one) => `${one.status} ${one.url}`).join("\n"),
+  );
+  const allowances = new Map<string, number>();
+  for (const expected of this.expectedResponses) {
+    const key = `${expected.status} (`;
+    allowances.set(key, (allowances.get(key) ?? 0) + 1);
+  }
+  const others = this.errors.filter((one) => {
+    for (const [key, left] of allowances) {
+      if (left > 0 && one.includes(key)) {
+        allowances.set(key, left - 1);
+        return false;
+      }
+    }
+    return true;
+  });
+  assert.deepStrictEqual(
+    others,
+    [],
+    `the page reported ${others.length} error(s):\n${others.join("\n---\n")}`,
   );
 });
 

@@ -74,6 +74,40 @@ export type ImportOutcome =
 
 export type DeleteOutcome = "deleted" | "kept";
 
+/** A fetch's answer: either it landed, or the last line `nix-store -r` said. */
+export type SubstituteOutcome = { ok: true } | { ok: false; message: string };
+
+/**
+ * AN UPSTREAM CACHE the server may fetch a reference from — the URL, and the
+ * full public key whose signatures make a path from it trustworthy.
+ *
+ * A BUCKET STORES KEY NAMES (`cache.nixos.org-1`), which is what a pusher's
+ * signatures carry, so this table is how a name becomes a substituter and a key
+ * Nix can verify with. A name with no entry has no known URL and therefore
+ * fetches nothing: the path stays held, and the reason says so.
+ */
+export interface UpstreamCache {
+  readonly keyName: string;
+  readonly url: string;
+  readonly publicKey: string;
+}
+
+/** The upstream caches odu knows. One today; the shape is a table because the
+ *  name is the bucket's and the URL is the world's. */
+export const UPSTREAM_CACHES: readonly UpstreamCache[] = [
+  {
+    keyName: "cache.nixos.org-1",
+    url: "https://cache.nixos.org",
+    publicKey: "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=",
+  },
+];
+
+/** The upstreams a bucket's key NAMES select, in the bucket's order. */
+export function upstreamFor(keyNames: readonly string[]): UpstreamCache[] {
+  const wanted = new Set(keyNames);
+  return UPSTREAM_CACHES.filter((cache) => wanted.has(cache.keyName));
+}
+
 export interface BlobStore {
   has(storePath: string): Promise<boolean>;
   pathInfo(storePath: string): Promise<PathInfo | null>;
@@ -81,6 +115,27 @@ export interface BlobStore {
    *  push's closure are the same question and one process answers both. */
   closure(paths: readonly string[]): Promise<PathInfo[]>;
   import(staged: StagedImport): Promise<ImportOutcome>;
+  /**
+   * FETCH UPSTREAM-SIGNED PATHS INTO THIS STORE, before a referrer is imported.
+   *
+   * `nix copy --from <staged>` refuses a path whose references are not valid,
+   * and a bucket that skips upstream paths never receives its referrers'
+   * upstream references — the 202 contradiction this exists to end. So the
+   * server asks each upstream cache for them with `nix-store -r`, trusting
+   * ONLY the bucket's own upstream keys: a path signed by anything else is not
+   * fetched, and the referrer stays held for a reference that is genuinely
+   * neither here nor upstream.
+   *
+   * A FAILURE IS NOT AN ERROR: the next import attempt reports exactly which
+   * references are still missing, and that is the sentence a pusher reads.
+   */
+  substitute(
+    paths: readonly string[],
+    upstreams: readonly UpstreamCache[],
+  ): Promise<SubstituteOutcome>;
+  /** WHICH OF THESE THE STORE ALREADY HAS, in ONE `nix path-info` — the
+   *  question `missingOf` asks of every reference. */
+  presentOf(paths: readonly string[]): Promise<ReadonlySet<string>>;
   /** A zstd-compressed NAR, streamed. */
   dump(storePath: string): ReadableStream<Uint8Array>;
   retain(bucket: string, storePath: string): Promise<void>;
@@ -111,6 +166,33 @@ interface Run {
 
 /** One `nix`/`nix-store` invocation, collected. Used for everything that is not
  *  a byte stream: a path-info read, an import, a root, a delete. */
+/**
+ * A child whose OUTPUT IS A TAIL, not a buffer. `nix-store -r --keep-going`
+ * prints a line per path, and S1 needs only the last one; keeping the whole
+ * stdout/stderr of a large closure is memory nobody reads.
+ *
+ * STDOUT IS DISCARDED ON PURPOSE: `nix-store -r` narrates on stderr, which is
+ * where the failure line comes from. A caller that needs stdout wants `run`.
+ */
+function runTail(command: string, args: readonly string[]): Promise<{ code: number | null; message: string }> {
+  const { promise, resolve } = Promise.withResolvers<{ code: number | null; message: string }>();
+  const child = spawn(command, [...args], { stdio: ["ignore", "ignore", "pipe"] });
+  let tail: string[] = [];
+  let partial = "";
+  child.stderr?.on("data", (chunk: Buffer) => {
+    partial += chunk.toString("utf8");
+    const lines = partial.split("\n");
+    partial = lines.pop() ?? "";
+    tail = [...tail, ...lines.map((line) => line.trim())].filter((line) => line !== "").slice(-20);
+  });
+  child.on("error", (err) => resolve({ code: null, message: String(err) }));
+  child.on("close", (code) => {
+    const last = [...tail, partial.trim()].filter((line) => line !== "").at(-1);
+    resolve({ code, message: last ?? `nix-store exited ${String(code)}` });
+  });
+  return promise;
+}
+
 function run(command: string, args: readonly string[]): Promise<Run> {
   const { promise, resolve } = Promise.withResolvers<Run>();
   const child = spawn(command, [...args], { stdio: ["ignore", "pipe", "pipe"] });
@@ -284,6 +366,45 @@ export function nixStore(options: NixStoreOptions): BlobStore {
 
     dump(storePath) {
       return nixDump(storePath, options.store);
+    },
+
+    async presentOf(paths) {
+      // ONE process for the whole set: a hold can name seven references, and a
+      // `nix path-info` each made eight spawns per attempt and per resume.
+      if (paths.length === 0) return new Set();
+      return new Set((await pathInfoTable(paths)).keys());
+    },
+
+    async substitute(paths, upstreams) {
+      if (paths.length === 0 || upstreams.length === 0) return { ok: true };
+      // `nix-store -r` fetches the requested paths AND their closures, and it
+      // verifies every one against the keys given here — odu's key list, not
+      // the host's nix.conf. A path the upstream cannot serve, or serves under
+      // a key the bucket does not trust, simply stays absent; the caller's
+      // import attempt says so.
+      const result = await runTail("nix-store", [
+        "-r",
+        // ONE reference that will not come does not stop the others: a
+        // sibling that IS upstream must still land, or the referrer stays
+        // held for a path the server could have fetched.
+        "--keep-going",
+        ...storeArgs,
+        "--option",
+        "substituters",
+        upstreams.map((cache) => cache.url).join(" "),
+        "--option",
+        "trusted-public-keys",
+        upstreams.map((cache) => cache.publicKey).join(" "),
+        // A negative narinfo answer cached by an earlier attempt must not make
+        // a path that has since been published invisible for a TTL.
+        "--option",
+        "narinfo-cache-negative-ttl",
+        "0",
+        ...paths,
+      ]);
+      // THE EXIT CODE IS THE FACT: a network error, a full disk or a store
+      // lock must read as a failed fetch, not as "neither here nor upstream".
+      return result.code === 0 ? { ok: true } : { ok: false, message: result.message };
     },
 
     async retain(bucket, storePath) {

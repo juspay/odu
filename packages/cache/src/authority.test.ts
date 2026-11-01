@@ -66,7 +66,7 @@ function face(rootToken: string | null) {
     ) as unknown as CacheClient,
     close: () => {
       server.detach();
-      cache.close();
+      return cache.close();
     },
   };
 }
@@ -121,7 +121,7 @@ describe("loopback: the root token is still the rule", () => {
       if (answer.ok) return;
       expect(refusedWith(answer.error).code).toBe("no_root_token");
     } finally {
-      close();
+      await close();
     }
   });
 
@@ -131,14 +131,14 @@ describe("loopback: the root token is still the rule", () => {
       const answer = await ask(withToken.client.surface.bucket.create({ ...bucketInput, rootToken: ROOT }));
       expect(answer.ok).toBe(true);
     } finally {
-      withToken.close();
+      await withToken.close();
     }
     const without = face(null);
     try {
       const answer = await ask(without.client.surface.bucket.create({ ...bucketInput, rootToken: "" }));
       expect(answer.ok).toBe(false);
     } finally {
-      without.close();
+      await without.close();
     }
   });
 });
@@ -163,7 +163,7 @@ describe("signed in: the role is the rule", () => {
       if (answer.ok) return;
       expect(answer.code).toBe("no_root_token");
     } finally {
-      cache.close();
+      await cache.close();
     }
   });
 
@@ -182,7 +182,7 @@ describe("signed in: the role is the rule", () => {
       expect(refusal.code).toBe("not_permitted");
       expect(refusal.message).toContain("is a member");
     } finally {
-      close();
+      await close();
     }
   });
 
@@ -198,7 +198,7 @@ describe("signed in: the role is the rule", () => {
         );
         expect(answer.ok, `${role} was refused`).toBe(true);
       } finally {
-        close();
+        await close();
       }
     }
   });
@@ -222,7 +222,7 @@ describe("signed in: the role is the rule", () => {
       );
       expect(refused.ok).toBe(false);
     } finally {
-      close();
+      await close();
     }
   });
 
@@ -239,7 +239,7 @@ describe("signed in: the role is the rule", () => {
       );
       expect(described.ok).toBe(true);
     } finally {
-      close();
+      await close();
     }
   });
 });

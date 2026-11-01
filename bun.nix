@@ -228,6 +228,7 @@
   "@odu/cache" = copyPathToStore ./packages/cache;
   "@odu/ci" = copyPathToStore ./packages/ci;
   "@odu/cli" = copyPathToStore ./packages/cli;
+  "@odu/cloudflare" = copyPathToStore ./packages/cloudflare;
   "@odu/cordis" = copyPathToStore ./packages/cordis;
   "@odu/credentials" = copyPathToStore ./packages/credentials;
   "@odu/execution" = copyPathToStore ./packages/execution;

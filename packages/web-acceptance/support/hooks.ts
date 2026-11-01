@@ -60,10 +60,13 @@ import {
   startService,
   stopService,
   stubPort,
+  reserveWorldPorts,
   verb,
+  tunnelPort,
   workerPort,
   type Service,
 } from "./service.ts";
+import { startCloudflareStub, type CloudflareStub } from "./cloudflareStub.ts";
 import { OduWorld, RUN_SETUP_TIMEOUT, STEP_TIMEOUT } from "./world.ts";
 
 setDefaultTimeout(STEP_TIMEOUT);
@@ -84,6 +87,8 @@ let browser: Browser | undefined;
  *  `service` is whichever the running scenario's tags named. */
 let loopback: Service | undefined;
 let door: Service | undefined;
+let tunnel: Service | undefined;
+let cloudflare: CloudflareStub | undefined;
 let service: Service | undefined;
 let github: GithubStub | undefined;
 /** Where the App's client secret file lives for this worker. */
@@ -112,6 +117,28 @@ async function doorService(odu: string): Promise<Service> {
     }),
   );
   return door;
+}
+
+/** THE TUNNEL'S WORLD: loopback, plus the cloudflare row pointed at the stub
+ *  and a `cloudflared` that says it registered. Its names are
+ *  `<something>.tunnel.test`, which is the stub's one zone.
+ *
+ *  The PROBE base is the stub too: a name in this suite does not resolve, so the
+ *  row confirms it by asking the same server that stands for Cloudflare — which
+ *  is what a deployment behind a proxy does, with a proxy. */
+async function tunnelService(odu: string): Promise<Service> {
+  if (tunnel !== undefined) return tunnel;
+  cloudflare ??= startCloudflareStub();
+  const dir = mkdtempSync(join(tmpdir(), "odu-wa-tunnel-"));
+  const tokenFile = join(dir, "cloudflare-token");
+  writeFileSync(tokenFile, "stub-cloudflare-token\n", { mode: 0o600 });
+  tunnel = await startService(odu, tunnelPort(), {
+    ODU_CLOUDFLARE_API_TOKEN_FILE: tokenFile,
+    ODU_CLOUDFLARE_API: cloudflare.origin,
+    ODU_CLOUDFLARE_PROBE_BASE: cloudflare.origin,
+    PATH: `${cloudflare.binDir}:${process.env.PATH ?? ""}`,
+  });
+  return tunnel;
 }
 
 /** THE OPERATOR'S PERSONAL TOKEN, minted once per worker.
@@ -167,7 +194,9 @@ async function operator(odu: string, world: Service): Promise<string> {
 /** Whichever world a scenario's tags named, started if this worker has not
  *  needed it yet. */
 async function worldFor(odu: string, identity: ReturnType<typeof identityOf>): Promise<Service> {
-  return identity.kind === "loopback" ? loopbackService(odu) : doorService(odu);
+  if (identity.kind === "loopback") return loopbackService(odu);
+  if (identity.kind === "tunnel") return tunnelService(odu);
+  return doorService(odu);
 }
 
 /** What the npm `playwright` in THIS tree says its version is. Read from the
@@ -281,6 +310,8 @@ Before({ timeout: RUN_SETUP_TIMEOUT }, async function (this: OduWorld, scenario)
 
   this.errors = [];
   this.requests = [];
+  this.expectedResponses = [];
+  this.failedResponses = [];
   this.ownFixtures = [];
   this.ownRuns = [];
 
@@ -296,6 +327,13 @@ Before({ timeout: RUN_SETUP_TIMEOUT }, async function (this: OduWorld, scenario)
   });
   this.page.on("request", (request) => {
     this.requests.push(request.url());
+  });
+  this.page.on("response", (response) => {
+    // A 3xx is a NAVIGATION STEP, not a failed response: `ok()` excludes
+    // redirects, and counting them turned every sign-in into an "error".
+    if (response.status() >= 400) {
+      this.failedResponses.push({ status: response.status(), url: response.url() });
+    }
   });
 
   // AND LAST, so the sign-in's own navigation is one of the requests and its
@@ -362,16 +400,21 @@ After({ timeout: RUN_SETUP_TIMEOUT }, async function (this: OduWorld, scenario) 
 
 AfterAll({ timeout: RUN_SETUP_TIMEOUT }, async () => {
   await clearCorpus();
-  for (const world of [service, loopback, door]) {
+  for (const world of [service, loopback, door, tunnel]) {
     if (world === undefined) continue;
     stopService(world);
   }
   service = undefined;
   loopback = undefined;
   door = undefined;
+  tunnel = undefined;
   if (github !== undefined) {
     await github.close();
     github = undefined;
+  }
+  if (cloudflare !== undefined) {
+    cloudflare.stop();
+    cloudflare = undefined;
   }
   if (secretDir !== undefined) {
     rmSync(secretDir, { recursive: true, force: true });

@@ -15,6 +15,7 @@
     "@odu/auth": "workspace:*",
     "@odu/cache": "workspace:*",
     "@odu/ci": "workspace:*",
+    "@odu/cloudflare": "workspace:*",
     "@odu/cordis": "workspace:*",
     "@odu/launch": "workspace:*",
     "@odu/run-history": "workspace:*",

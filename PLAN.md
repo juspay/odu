@@ -124,22 +124,22 @@ Each item names where it is checked.
 - **F8. Hosts are per user.** `~/.config/odu/hosts.json` or `$ODU_HOSTS`,
   SSH `ci@host`, leases held by the service's child. No org scoping.
 - **F9. Packaging.** The flake exports `odu`, `odu-runner`, `web-ui` and the
-  `services.odu` NixOS module (PR 1: service user, nginx with ACME proxying
-  only `/cache/*` and `/_odu/v1/*`, a VM test). Its `nixConfig` still trusts
-  `cache.nixos.asia/oss`, and macOS lanes need that cache trusted to pull the
-  runner (docs "Choose hosts"), so odu's own flake is the first consumer of
-  the new bucket.
+  `services.odu` NixOS module (service user; nginx with ACME proxying only the
+  cache paths, unless a door is configured; a VM test). Its `nixConfig` names
+  odu's OWN cache — the `kolu` bucket on the pod, `cache.kolu.dev` — and macOS
+  lanes need that key trusted to pull the runner (docs "Choose hosts"), so
+  odu's own flake is the first consumer of the bucket.
 - **F10. Remote dialling exists, unauthenticated.** Every client takes
   `--origin URL`; a named origin is dialled and never auto-started.
-- **F11. How odu warms its own cache today.** `.github/workflows/nix-cache.yml`
+- **F11. How odu warms its own cache.** `.github/workflows/nix-cache.yml`
   builds `.#odu .#odu-runner .#web-ui` on ubuntu and macos runners and pushes
-  the closures with `attic push` to `cache.nixos.asia/oss` using an
-  `ATTIC_TOKEN` secret; a second job runs kolu's `publish-closure` action,
-  which rewrites the runner content-addressed, pushes it with the same attic
-  token, and writes the `ca-index` branch a lane dial reads. The flake's
-  `nixConfig`, the workflow's `nix_conf`, and the docs all name that cache.
-  The repository has no `ATTIC_TOKEN` secret, so this workflow is red on
-  every commit of master; PR 3 retires it.
+  the closures with `odu cache push kolu` through `cache.kolu.dev`, using an
+  `ODU_CACHE_TOKEN` secret; a second job runs kolu's `publish-closure` action,
+  which rewrites the runner content-addressed and writes the `ca-index` branch
+  a lane dial reads. That publish job still pushes through the action's
+  attic-shaped path; moving it to this cache is kolu's generic push target,
+  landing in parallel. The flake's `nixConfig`, the workflow's `nix_conf`, and
+  the docs all name the `kolu` bucket.
 - **F12. Our deployment is a pod, not the module.** nixos-config
   `k8s/apps/odu` runs `odu web` from the host's Nix store in `pureintent`'s
   K3s, one replica, a `local-path` PVC for the catalog and a chroot cache store
@@ -364,13 +364,14 @@ with evidence, and leaves master in a state someone can run and rely on. A
 capability reaches the public surface only in the PR that completes it, and
 nothing merges that a later PR has to finish. The order is a dependency order.
 
-### Landed: PR 0, PR 1, PR 1.5
+### Landed: PR 0, PR 1, PR 1.5, PR 3
 
 | PR | merged | what master gained |
 | --- | --- | --- |
 | 0 — the caller and the forge | #130 `ba42ac2` | `Caller` assembled once per call (where PR 2 adds `principal`, PR 4 `org`); the forge as a port with the user's `gh` as its one binding; serving options in a module of their own. No behaviour change. |
 | 1 — odu serves a Nix binary cache | #132 `712eafe` | `packages/cache`: narinfo/NAR codec, Nix-store blobs, SQLite metadata, per-bucket signing, hashed scoped tokens, GC with pins; the protocol routes; `odu cache create · list · token · use · login · pin · gc · stats · push`; the `services.odu` module with its VM test; docs and e2e. Flat memory over multi-gigabyte NARs, recorded. |
 | 1.5 — a host and two rows | #133 `4e0d621` | `@odu/host` (tenure, listener, gate, `/mcp`, composition root), `@odu/launch`, `@odu/ci`, `@odu/cordis` (the contract); the cache as a row with `./surface · ./server · ./cli · ./face`; the Cache view at `#/cache`; cache verbs renamed under the row's word and `SERVICE_CONTRACT_VERSION` 2.0; the fence from `@olai/effect-cordis`, pinned with npins. |
+| 3 — odu runs its own cache | #138 | Upstream references substituted at import, so a referrer of a skipped path imports; the remaining hold is a published `held` row, and the push says stored / held / refused, returns on a hold, and `--wait`s by choice. `odu cache push` chunks a NAR at 64 MiB (parts retried alone) under a proxy's body cap. A bucket may carry a `domain`, answered by `Host` at the protocol's root, printed by `use`, and given an nginx vhost by the module. `@odu/cloudflare` makes the name real — one tunnel per server, routes, proxied records, a `cloudflared` child, `wiring`/`live`/`failed`, the server's public origin too — so no port opens and a Funnel can retire. nginx caches NAR reads; a public bucket's facts are answerable with no account from the protocol path; `SERVICE_CONTRACT_VERSION` 2.3; odu's own CI and `nixConfig` push and pull `cache.kolu.dev` (`kolu`). Docs and e2e follow. |
 
 For users: `odu web` serves runs and buckets over one wire and one page, with
 a Runs / Cache switch; `odu cache use <bucket>` prints the substituter, key
@@ -497,111 +498,6 @@ Then the gap the rule names, by row — closed:
 
 **Evidence:** each row's e2e has a scenario per verb through the face, and the
 list above is empty for every row in it.
-
-### PR 3: odu runs its own cache
-
-> **Docs:** Odu's own builds are served from its own cache: add the
-> substituter and key from the README to your `nix.conf` to pull odu and its
-> runners from it. A bucket on a server whose store is not the builder's no
-> longer needs `--no-upstream`: the server fetches a referrer's upstream
-> references itself. Open-source repos push to a bucket from GitHub Actions
-> with the documented step and an `ODU_CACHE_TOKEN` secret minted by a
-> signed-in admin. NixOS users get an nginx `proxy_cache` on NAR reads.
-
-Prerequisite PR in kolu: `publish-closure` gains a generic push target (a
-cache URL with netrc, or a push command) beside its attic inputs.
-
-What lands:
-- The server substitutes a referrer's upstream-signed references into its OWN
-  store (`nix-store -r --store … --option substituters …`) before the narinfo
-  is imported, so a chroot store (F12) keeps the upstream skip and still
-  imports referrers. `--no-upstream` stays as the explicit choice it already
-  is.
-- **The push says what the server is doing.** On the pod `odu cache push`
-  printed "118 paths in the closure, 6 missing, 112 already there or upstream"
-  and then hung, silent: the server deferred each import at 202 for want of
-  upstream references, and the client waited on a state the person cannot
-  affect and was never told about.
-
-  What the other pushers do. **attic**: the client computes the closure, drops
-  every path signed by a key in the cache's `upstream_cache_key_names`
-  (default `cache.nixos.org-1`), asks the server which of the rest are missing
-  and uploads only those — one preamble, `⚙️ Pushing N paths to <cache> on
-  <server> (A already cached, U in upstream)...`, then one line per path,
-  `✅ <path> (<speed>)` or `❌ <path>: <error>`; a failed path does not stop
-  the run, the exit is non-zero if any failed, and the SERVER STORES EVERY
-  NARINFO AS IT ARRIVES, never holding a path for its references.
-  **cachix**: a bulk narinfo query for what the cache already has, `Pushing N
-  paths (M are already present) using zstd to cache X`, one line or bar per
-  path, `All done.`; no upstream filter at all (cache.nixos.org paths are
-  pushed unless the user filters them), and the server stores as it arrives.
-  **`nix copy`**: dependencies first; the destination stores as it arrives.
-
-  The conclusion: a reference signed by one of the bucket's upstream keys
-  counts as SATISFIED, and it is satisfied BY THE SERVER SUBSTITUTING IT AT
-  IMPORT. Unlike attic's, odu's blobs are the server's own Nix store, which
-  will not import a path whose references are missing — that refusal is the
-  202 today. So this PR's first bullet (the server substitutes upstream
-  references into its own store) stays, and is what makes "satisfied" true:
-  the push skips an upstream path, and the server fetches it from upstream
-  rather than holding the referrer. Today the push skips 112 upstream paths
-  and the server then holds 4 paths for those same references — the
-  contradiction the first owner hit. Holding remains only for a reference
-  that is neither in the bucket nor upstream-signed, and even then the push
-  REPORTS it and returns.
-
-  What odu's push does, in attic's voice: (a) one preamble, then one line per
-  path as it uploads and as the server answers — stored, deferred (waiting for
-  N references that are neither here nor upstream), or refused (why); (b) a
-  deferral is reported and the command returns, pointing at the bucket page
-  where the pending paths and their reason are listed — it never blocks on the
-  server's pending state (`--wait` opts in); (c) `-o json` carries the same
-  facts for CI. The bucket page shows pending paths with that reason — the
-  row's fact, the same one the CLI prints.
-- The dogfood switch (F9, F11): `flake.nix` `nixConfig` names the pod's
-  bucket; `nix-cache.yml` substitutes from it and pushes with `odu cache push`
-  under an `ODU_CACHE_TOKEN` secret, its publish job uses the new kolu push
-  target, odu's lane hosts trust the bucket, and the docs name it. The
-  `ATTIC_TOKEN` job, red on every commit today, is gone.
-- The module's nginx gains a `proxy_cache` on `/cache/*/nar/*`; the pod has no
-  nginx and gets its read cache in PR 11.
-- **A domain per bucket.** A bucket may carry a `domain` (`cache.kolu.dev` for
-  the `kolu` bucket), the way every public cache a person has met today is
-  named: the cache row answers by `Host` as well as by `/cache/<name>`, the
-  bucket's advertised substituter URL and the board's netrc block use that
-  domain when it is set, and the module emits one nginx vhost — with its
-  certificate — per bucket domain. What it does NOT change: a read stays
-  anonymous on a public bucket, so a domain is a stable name for a bucket, not
-  read access control; reading a bucket with a token (a private bucket) is its
-  own item, listed with teams in PR 4.
-
-  **On the pod it is Cloudflare's.** `cache.kolu.dev` points at the `kolu`
-  bucket, and the record is made with Cloudflare's `cf` CLI
-  (https://developers.cloudflare.com/cf/ — DNS and zone settings from a
-  command line, agent-usable, API-token auth in CI), so the module emits
-  nothing for it. Two shapes are possible, and the fact that separates them is
-  where TLS and `Host` are decided:
-
-  - **Cloudflare proxies the name to the pod's public hostname** (the Funnel
-    name, `odu-k3s.rooster-blues.ts.net`). Cloudflare terminates TLS for
-    `cache.kolu.dev`; the origin presents a certificate for the `.ts.net` name
-    only and Funnel routes by that name, so an origin rule rewrites the origin
-    `Host` — and odu must then read the ORIGINAL name (`X-Forwarded-Host`, or
-    Cloudflare's header) to answer by bucket domain. The `Host` half of this
-    design reads the forwarded name, not only `Host`.
-  - **A `cloudflared` tunnel beside the pod**, pointed at the odu Service: no
-    Funnel in the path, `Host` arrives as `cache.kolu.dev`, no rewrite — one
-    more process on the cluster.
-
-  The implementor picks, with evidence, when PR 3 is built; the plan records
-  the fork and the fact that decides it.
-- **Evidence:** a CI run of odu whose lanes substitute odu's runner from the
-  pod, and the workflow's push landing in the bucket.
-
-State of master after merge: a public OSS cache exists at the pod's address,
-odu's own checks and runner provisioning substitute from it, and `git grep
-cache.nixos.asia` returns nothing. Other OSS repos can adopt it with the
-documented Actions step.
 
 ### PR 4: teams
 

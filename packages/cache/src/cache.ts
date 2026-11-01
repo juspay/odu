@@ -21,7 +21,7 @@
 
 import { join } from "node:path";
 import { type BlobStore, nixStore } from "./store";
-import type { BucketRow, BucketTotals, ObjectRow, Scope, TokenRow } from "./db";
+import type { BucketRow, BucketTotals, HeldRow, ObjectRow, Scope, TokenRow } from "./db";
 import { cursorFor, openCacheRepo } from "./db";
 import { planGc, runGc, type GcReport } from "./gc";
 import {
@@ -38,7 +38,8 @@ import {
 import { newChain, serial } from "./serial";
 import { CACHE_MOUNT } from "./paths";
 import { PATH_PAGE_SIZE } from "./surface";
-import { createStaging, type NarinfoOutcome, type Upload } from "./staging";
+import { createStaging, type CompleteUpload, type NarinfoOutcome, type Upload } from "./staging";
+import { createSlots, type Slots } from "./slots";
 import {
   globMatches,
   hashToken,
@@ -58,6 +59,8 @@ export interface BucketFacts {
   keyName: string;
   publicKey: string;
   upstreamKeys: readonly string[];
+  /** The name this bucket is served at, when it has one. */
+  domain: string | null;
   objects: number;
   bytes: number;
   created: number;
@@ -83,6 +86,8 @@ export interface BucketIdentity {
   name: string;
   public: boolean;
   publicKey: string;
+  /** The name a client substitutes from, when the bucket has one. */
+  domain: string | null;
 }
 
 export interface TokenMinted {
@@ -166,6 +171,15 @@ export interface CacheAdmin {
    * capability, the same way it is in the substituter URL.
    */
   describe(input: { bucket: string }): Promise<CacheOutcome<BucketIdentity>>;
+  /**
+   * GIVE A BUCKET A NAME, or take it away (`null`). One domain, one bucket;
+   * the row answers by that `Host` and the substituter URL becomes the name.
+   */
+  domain(input: {
+    authority: Authority;
+    bucket: string;
+    domain: string | null;
+  }): Promise<CacheOutcome<BucketFacts>>;
   tokenMint(input: { authority: Authority;
     bucket: string;
     /** A glob, so one token can cover `team-*`. Absent means the bucket. */
@@ -219,11 +233,25 @@ export type AuthVerdict = { ok: true } | { ok: false; status: 401 | 403 | 404; m
 export interface Cache {
   /** The protocol face. */
   bucket(name: string): BucketRow | null;
+  /** The bucket a HOST names, or null. The caller lowercases and strips the
+   *  port; a domain is stored as the name a client types. */
+  bucketByDomain(host: string): BucketRow | null;
   authorize(header: string | undefined, bucket: BucketRow, need: Scope): AuthVerdict;
   narinfoText(bucket: BucketRow, hash: string): string | null;
   touch(bucket: BucketRow, hash: string): void;
   narStream(bucket: BucketRow, file: string): Promise<ReadableStream<Uint8Array> | null>;
   beginUpload(bucket: BucketRow, file: string): Promise<Upload>;
+  /** One part of a chunked NAR, under the part ceiling. A retry overwrites the
+   *  same index, so a dropped request costs one part. */
+  beginPart(
+    bucket: BucketRow,
+    file: string,
+    index: number,
+    limit: number,
+  ): Promise<Upload>;
+  /** Join the parts into the NAR the narinfo will name. `missing` non-empty
+   *  means the client's count is ahead of what arrived. */
+  completeUpload(bucket: BucketRow, file: string, total: number): Promise<CompleteUpload>;
   acceptNarinfo(bucket: BucketRow, hash: string, body: ReadableStream<Uint8Array>): Promise<NarinfoOutcome>;
   /** Which of `paths` the bucket needs. `skipped` is the subset it will never
    *  take because an upstream key signed it — reported separately so `odu cache
@@ -243,6 +271,15 @@ export interface Cache {
    */
   snapshot(): readonly BucketFacts[];
   /**
+   * WHAT THE BUCKETS ARE HOLDING FOR REFERENCES — a row per path, with the
+   * references Nix named.
+   *
+   * Not a log line and not staging's memory: the reason a push stopped is a
+   * fact the bucket publishes, so the board lists it and a restart does not
+   * make a pending upload look like one that never arrived.
+   */
+  held(): readonly HeldRow[];
+  /**
    * SOMETHING A SUBSCRIBER WOULD SEE MOVED — a narinfo landed, a bucket was
    * created, a closure was pinned or collected, or reads accumulated.
    *
@@ -257,12 +294,19 @@ export interface Cache {
   onChange(listener: () => void): () => void;
   /** The admin face. */
   admin: CacheAdmin;
-  close(): void;
+  /** RE-QUEUE the held rows this database remembers — called at ROW APPLY, so
+   *  a restart resumes a reference fetch instead of waiting for a new push. */
+  resume(): Promise<void>;
+  /** Join the row's background work, then close the database. */
+  close(): Promise<void>;
 }
 
 export interface CacheOptions {
   /** The per-user state root; the cache owns `<stateRoot>/cache`. */
   stateRoot: string;
+  /** THE FETCH BOUND, made by the row's activation. Defaults to one per cache
+   *  instance — never module state. */
+  fetchSlots?: Slots;
   /** `$ODU_ROOT_TOKEN`, or null when the operator supplied none. */
   rootToken: string | null;
   /** `--store` URI for every nix call; null is the daemon. */
@@ -281,6 +325,11 @@ export const HITS_REFRESH_MS = 1000;
  *  nothing else: lowercase, digits, dashes. A name with a `/` in it would be a
  *  second route, and one with a `.` would collide with `<hash>.narinfo`. */
 const BUCKET_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
+
+/** A bucket's public NAME: a lowercase DNS hostname, no scheme, no port. The
+ *  last label is alphanumeric so `cache.` and `-x` are refused. */
+const DOMAIN =
+  /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
 export function createCache(options: CacheOptions): Cache {
   const now = options.now ?? (() => Date.now());
@@ -351,6 +400,7 @@ export function createCache(options: CacheOptions): Cache {
       keyName: bucket.keyName,
       publicKey: bucket.publicKey,
       upstreamKeys: bucket.upstreamKeys,
+      domain: bucket.domain,
       objects: counts?.objects ?? 0,
       bytes: counts?.bytes ?? 0,
       created: bucket.created,
@@ -454,7 +504,16 @@ export function createCache(options: CacheOptions): Cache {
 
   // The write path, wired to the ONE lock: `record` is the dependency staging
   // takes, and it is the locked one, so a pin cannot interleave with an import.
-  const staging = createStaging({ repo, blob, dir, now, record });
+  const fetchSlots = options.fetchSlots ?? createSlots(2);
+  const staging = createStaging({
+    repo,
+    blob,
+    dir,
+    now,
+    record,
+    changed: () => notify(),
+    slots: fetchSlots,
+  });
 
   // ── who hears about a change ──────────────────────────────────────────────
   //
@@ -527,6 +586,7 @@ export function createCache(options: CacheOptions): Cache {
         publicKey: keypair.publicKey,
         upstreamKeys: input.upstreamKeys,
         created: now(),
+        domain: null,
       };
       repo.putBucket(bucket);
       // A bucket that appeared is a row that appeared.
@@ -557,8 +617,42 @@ export function createCache(options: CacheOptions): Cache {
           name: bucket.name,
           public: bucket.isPublic,
           publicKey: bucket.publicKey,
+          domain: bucket.domain,
         },
       };
+    },
+
+    async domain(input) {
+      const root = requireRoot(input);
+      if (!root.ok) return root;
+      const bucket = repo.bucket(input.bucket);
+      if (bucket === null) {
+        return { ok: false, code: "unknown_bucket", message: `no bucket "${input.bucket}"` };
+      }
+      const domain = input.domain === null ? null : input.domain.trim().toLowerCase();
+      if (domain !== null && !DOMAIN.test(domain)) {
+        return {
+          ok: false,
+          code: "bad_input",
+          message:
+            `"${input.domain}" is not a domain name — a lowercase DNS name ` +
+            "like cache.example.org, with no scheme and no port",
+        };
+      }
+      if (domain !== null) {
+        const holder = repo.bucketByDomain(domain);
+        if (holder !== null && holder.name !== bucket.name) {
+          return {
+            ok: false,
+            code: "bad_input",
+            message: `"${domain}" already names the bucket "${holder.name}"`,
+          };
+        }
+      }
+      const next: BucketRow = { ...bucket, domain };
+      repo.putBucket(next);
+      notify();
+      return { ok: true, value: factsOf(next) };
     },
 
     async tokenMint(input) {
@@ -742,6 +836,8 @@ export function createCache(options: CacheOptions): Cache {
   return {
     bucket: (name) => repo.bucket(name),
 
+    bucketByDomain: (host) => repo.bucketByDomain(host),
+
     authorize(header, bucket, need) {
       const presented = credentialOf(header);
       if (presented === null) {
@@ -759,13 +855,15 @@ export function createCache(options: CacheOptions): Cache {
       if (rootTokenMatches(options.rootToken, presented)) return { ok: true };
       const verdict = verifyToken(repo, presented, bucket.name, need, now());
       if (verdict.ok) return { ok: true };
-      const message = {
-        unknown: "that token is not one this service minted",
-        revoked: "that token has been revoked",
-        expired: "that token has expired",
-        wrong_bucket: `that token cannot reach "${bucket.name}"`,
-        insufficient: `that token cannot ${need === "read" ? "read" : "write"} here`,
-      }[verdict.reason];
+      const message =
+        verdict.reason === "expired"
+          ? `that token expired on ${new Date(verdict.expiredAt).toISOString().slice(0, 10)}`
+          : {
+              unknown: "that token is not one this service minted",
+              revoked: "that token has been revoked",
+              wrong_bucket: `that token cannot reach "${bucket.name}"`,
+              insufficient: `that token cannot ${need === "read" ? "read" : "write"} here`,
+            }[verdict.reason];
       return { ok: false, status: 403, message };
     },
 
@@ -796,11 +894,15 @@ export function createCache(options: CacheOptions): Cache {
     // The write path is `./staging`'s; this face is the one the routes speak,
     // and it is the same object either way.
     beginUpload: (bucket, file) => staging.beginUpload(bucket, file),
+    beginPart: (bucket, file, index, limit) => staging.beginPart(bucket, file, index, limit),
+    completeUpload: (bucket, file, total) => staging.completeUpload(bucket, file, total),
     async acceptNarinfo(bucket, hash, body) {
       const outcome = await staging.acceptNarinfo(bucket, hash, body);
-      // A PUSH LANDED — the one change nobody outside the cache can see, and
-      // the reason this listener exists at all.
-      if (outcome.ok) notify();
+      // A PUSH LANDED, OR A HELD PATH BECAME (OR STOPPED BEING) HELD — the
+      // changes nobody outside the cache can see, and the reason this
+      // listener exists at all. The publisher diffs, so a refusal that changed
+      // nothing costs one comparison.
+      notify();
       return outcome;
     },
 
@@ -828,6 +930,10 @@ export function createCache(options: CacheOptions): Cache {
       return repo.buckets().map((bucket) => factsOf(bucket, counted));
     },
 
+    held: () => repo.held(),
+
+    resume: () => staging.resume(),
+
     onChange(listener) {
       listeners.add(listener);
       return () => {
@@ -835,11 +941,16 @@ export function createCache(options: CacheOptions): Cache {
       };
     },
 
-    close() {
+    async close() {
       // The trailing-edge timer is the cache's, so the cache ends it. A timer
       // that outlived `close()` would publish into a closed database.
       if (trailing !== null) clearTimeout(trailing);
       trailing = null;
+      // REFUSE THE QUEUE FIRST: a job waiting for a slot belongs to this row,
+      // and none of them may start after it closed. Then join the ones already
+      // running, before the database closes.
+      fetchSlots.close();
+      await staging.close();
       listeners.clear();
       repo.close();
     },
