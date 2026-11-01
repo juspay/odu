@@ -187,7 +187,11 @@ export function holdReason(row: {
   readonly missing: readonly string[];
   readonly fetching: number;
 }): string {
-  return row.failure === null ? heldReason(row.missing, row.fetching) : `fetching failed: ${row.failure}`;
+  if (row.failure === null) return heldReason(row.missing, row.fetching);
+  return (
+    `fetching failed: ${row.failure} — it retries on the next push of this ` +
+    "path, or when odu next starts"
+  );
 }
 
 // ── the refusal ─────────────────────────────────────────────────────────────

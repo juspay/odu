@@ -170,6 +170,9 @@ interface Run {
  * A child whose OUTPUT IS A TAIL, not a buffer. `nix-store -r --keep-going`
  * prints a line per path, and S1 needs only the last one; keeping the whole
  * stdout/stderr of a large closure is memory nobody reads.
+ *
+ * STDOUT IS DISCARDED ON PURPOSE: `nix-store -r` narrates on stderr, which is
+ * where the failure line comes from. A caller that needs stdout wants `run`.
  */
 function runTail(command: string, args: readonly string[]): Promise<{ code: number | null; message: string }> {
   const { promise, resolve } = Promise.withResolvers<{ code: number | null; message: string }>();
