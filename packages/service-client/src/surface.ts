@@ -147,8 +147,13 @@ export { STATUS_META, type StatusHue } from "@odu/run-client/surface";
  *
  * 2.3 remains: the object cache is ADDITIVE. `held` and `--wait` are DEPRECATED
  * and answer an empty list / return at once; they are REMOVED AT THE CACHE ROW'S NEXT MAJOR.
+ *
+ * 2.4: a chunked upload's parts and join may carry `x-odu-upload: <session>`,
+ * and then the parts are that upload's own — two pushers of one path cannot
+ * have their parts joined together. Additive: a request without it keeps the
+ * shared part names every 2.x client used.
  */
-export const SERVICE_CONTRACT_VERSION = "2.3";
+export const SERVICE_CONTRACT_VERSION = "2.4";
 
 // ── refusals ────────────────────────────────────────────────────────────────
 

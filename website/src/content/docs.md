@@ -191,7 +191,7 @@ A bucket can also have **a name of its own** — `https://cache.kolu.dev` — se
 4. **Module:** delete the abandoned roots under `<state>/cache/gcroots`, then run `nix-collect-garbage`. **Container:** delete the old store directory. Never delete `/nix/store` itself.
 5. Rows the old store lacks stay objectless and answer 404 until re-pushed: each is named by a `cache.migration.object_failed` line, and `cache.migration.incomplete` carries the counts.
 
-Contract **2.3 remains additive**: `held` answers an empty list and `odu cache push --wait` returns at once, both deprecated and removed at the cache row's next major. A 2.x client keeps working; kolu's pinned CI does not need to move with this cache change.
+Contract **2.4 remains additive**: `held` answers an empty list and `odu cache push --wait` returns at once, both deprecated and removed at the cache row's next major. A chunked upload that sends `x-odu-upload` owns its parts, so concurrent pushers of one path never mix them; one that does not keeps the shared part names. A 2.x client keeps working; kolu's pinned CI does not need to move with this cache change.
 
 
 ## Server mode

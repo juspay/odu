@@ -26,6 +26,7 @@
  * multi-gigabyte closure on a laptop.
  */
 
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import {
   credentialsPath as sharedCredentialsPath,
@@ -39,7 +40,7 @@ import {
   storePathBasename,
   storePathHash,
 } from "./narinfo";
-import { CACHE_MOUNT } from "./paths";
+import { CACHE_MOUNT, PARTS_HEADER, UPLOAD_SESSION_HEADER } from "./paths";
 import { DEFAULT_NAR_PART_BYTES, MAX_NAR_PART_BYTES } from "./surface";
 import { type PathInfo, nixClosure, nixDump } from "./store";
 
@@ -480,13 +481,14 @@ async function putPart(
   attempts: number,
   say: (line: string) => void,
   storePath: string,
+  session: string,
 ): Promise<{ ok: true } | { ok: false; message: string }> {
   let lastMessage = "no attempt was made";
   for (let attempt = 0; attempt < attempts; attempt++) {
     if (attempt > 0) say(`↻ ${storePath} part ${index + 1} (retry ${attempt})`);
     const response = await fetch(`${base}/nar/${narName}/parts/${index}`, {
       method: "PUT",
-      headers: { ...headers, "content-type": "application/x-nix-nar" },
+      headers: { ...headers, "content-type": "application/x-nix-nar", [UPLOAD_SESSION_HEADER]: session },
       // Bun's fetch takes the bytes; the DOM `BodyInit` the type names does
       // not include this `Uint8Array` spelling.
       body: part as unknown as BodyInit,
@@ -518,6 +520,7 @@ async function uploadNar(
   attempts: number,
   say: (line: string) => void,
   partSize: number,
+  session: string,
 ): Promise<NarUpload> {
   const narName = `${narHashBase32(entry.narHash)}.nar.zst`;
   const parts = narParts(platform.dump(entry.storePath), partSize);
@@ -554,6 +557,7 @@ async function uploadNar(
       attempts,
       say,
       entry.storePath,
+      session,
     );
     if (!sent.ok) {
       await parts.return(undefined as never);
@@ -570,7 +574,7 @@ async function uploadNar(
 
   const joined = await fetch(`${base}/nar/${narName}/complete`, {
     method: "POST",
-    headers: { ...headers, "x-odu-parts": String(index) },
+    headers: { ...headers, [PARTS_HEADER]: String(index), [UPLOAD_SESSION_HEADER]: session },
   }).catch(asError);
   if (joined instanceof Error) return { ok: false, message: joined.message, retry: true };
   if (!joined.ok) {
@@ -595,6 +599,11 @@ async function uploadOne(
   let lastMessage = "no attempt was made";
   const narinfoOnly = false;
   const narName = `${narHashBase32(entry.narHash)}.nar.zst`;
+  // THIS PATH'S OWN PARTS (contract 2.4): another pusher of the same path, at
+  // another zstd level, cannot have its parts joined into ours. ONE session for
+  // every attempt, so a retry overwrites its own parts rather than abandoning
+  // them to the hour-long sweep. An older server ignores the header.
+  const session = randomUUID();
   for (let attempt = 0; attempt < attempts; attempt++) {
     if (!narinfoOnly) {
       const uploaded = await uploadNar(
@@ -605,6 +614,7 @@ async function uploadOne(
         attempts,
         say,
         options.partSize,
+        session,
       );
       if (!uploaded.ok) {
         lastMessage = uploaded.message;

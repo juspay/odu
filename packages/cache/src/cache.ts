@@ -10,9 +10,9 @@
  *
  * The WRITE PATH is not here: staging an upload, proving it and keeping the
  * object moves on the Nix protocol's clock rather than on the product's, and it
- * lives in `./staging`. This module hands it one dependency — `record` —
- * because a pin and a collection take the same write lock, and a second lock
- * there would be a second answer to "who may change what is retained".
+ * lives in `./staging`. This module hands it the write lock and `record`,
+ * because a pin and a collection take the same lock, and a second lock there
+ * would be a second answer to "who may change what is retained".
  *
  * **The root token is a field, not a file.** `rootToken` arrives from the
  * composition root, which reads `$ODU_ROOT_TOKEN`. There is no fallback to a
@@ -292,16 +292,23 @@ export interface Cache {
   narSource(bucket: BucketRow, file: string): Promise<NarSource | null>;
   beginUpload(bucket: BucketRow, file: string): Promise<Upload>;
   /** One part of a chunked NAR, under the part ceiling. A retry overwrites the
-   *  same index, so a dropped request costs one part. */
+   *  same index, so a dropped request costs one part. `session` (2.4) makes
+   *  the parts this upload's own; null keeps the shared names 2.x sends. */
   beginPart(
     bucket: BucketRow,
     file: string,
     index: number,
     limit: number,
+    session?: string | null,
   ): Promise<Upload>;
   /** Join the parts into the NAR the narinfo will name. `missing` non-empty
    *  means the client's count is ahead of what arrived. */
-  completeUpload(bucket: BucketRow, file: string, total: number): Promise<CompleteUpload>;
+  completeUpload(
+    bucket: BucketRow,
+    file: string,
+    total: number,
+    session?: string | null,
+  ): Promise<CompleteUpload>;
   acceptNarinfo(bucket: BucketRow, hash: string, body: ReadableStream<Uint8Array>): Promise<NarinfoOutcome>;
   /** Which of `paths` the bucket needs. `skipped` is the subset it will never
    *  take because an upstream key signed it — reported separately so `odu cache
@@ -398,7 +405,7 @@ export function createCache(options: CacheOptions): Cache {
   const objects = options.objects ?? diskObjectStore({ dir });
 
   /**
-   * ONE writer at a time, across `record`, `pin` and `gc`.
+   * ONE writer at a time, across keep-and-record (staging's), `pin` and `gc`.
    *
    * Those three are the only things that change what is retained, and they are
    * the three that must not interleave: a collection that planned while a pin
@@ -510,15 +517,6 @@ export function createCache(options: CacheOptions): Cache {
    * `path-info` that it took from the narinfo, and a row with it twice would
    * put it twice in every answer.
    */
-  function record(
-    bucket: BucketRow,
-    info: NarInfo,
-    file: { fileHash: string; fileSize: number },
-    selfHash: string | null,
-  ): Promise<boolean> {
-    return withWriteLock(() => recordNow(bucket, info, file, selfHash));
-  }
-
   async function recordNow(
     bucket: BucketRow,
     info: NarInfo,
@@ -576,14 +574,29 @@ export function createCache(options: CacheOptions): Cache {
     return true;
   }
 
-  // The write path, wired to the ONE lock: `record` is the dependency staging
-  // takes, and it is the locked one, so a pin cannot interleave with a record.
+  // The write path, wired to the ONE lock: staging keeps an object and records
+  // its row under it, so neither a pin nor a collection lands in between.
   const staging = createStaging({
     objects,
     dir,
     now,
-    record,
+    withWriteLock,
+    record: recordNow,
     log: options.log,
+    // A KEPT OBJECT'S FACTS, READ — never re-hashed when a row already has
+    // them: the row an earlier proof recorded, confirmed by the stored size.
+    // An object with no row (a crash between keep and record) is asked of the
+    // store, which for S3 is a stored checksum rather than a read of the bytes.
+    async keptFacts(bucket, narHash, compression) {
+      const key = objectKey(bucket.name, narHash, compression);
+      const size = await objects.head(key);
+      if (size === null) return null;
+      const row = repo.objectByNarHashCompression(bucket.name, narHash, compression ?? "none");
+      if (row !== null && row.fileHash !== null && row.fileSize === size) {
+        return { size, sha256: row.fileHash };
+      }
+      return objects.facts(key);
+    },
   });
   /** THE MIGRATION'S THROTTLE: two old-store dumps at a time, never more. */
   const migrationSlots = createSlots(2);
@@ -1078,9 +1091,10 @@ export function createCache(options: CacheOptions): Cache {
           // A TWIN MAY HAVE LANDED THE SAME OBJECT: ask before spawning a dump
           // whose bytes would be thrown away.
           const key = objectKey(row.bucket, row.narHash, row.compression);
-          if ((await objects.head(key)) !== null) {
-            const facts = await objects.put(key, new ReadableStream({ start: (c) => c.close() }));
-            repo.putObject({ ...row, fileHash: facts.sha256, fileSize: facts.size });
+          // A READ, not an empty put: a put racing a delete would store 0 bytes.
+          const stored = await objects.facts(key);
+          if (stored !== null) {
+            repo.putObject({ ...row, fileHash: stored.sha256, fileSize: stored.size });
             migrated += 1;
             return;
           }
@@ -1249,8 +1263,10 @@ export function createCache(options: CacheOptions): Cache {
     // The write path is `./staging`'s; this face is the one the routes speak,
     // and it is the same object either way.
     beginUpload: (bucket, file) => staging.beginUpload(bucket, file),
-    beginPart: (bucket, file, index, limit) => staging.beginPart(bucket, file, index, limit),
-    completeUpload: (bucket, file, total) => staging.completeUpload(bucket, file, total),
+    beginPart: (bucket, file, index, limit, session) =>
+      staging.beginPart(bucket, file, index, limit, session),
+    completeUpload: (bucket, file, total, session) =>
+      staging.completeUpload(bucket, file, total, session),
     async acceptNarinfo(bucket, hash, body) {
       const outcome = await staging.acceptNarinfo(bucket, hash, body);
       // A PUSH LANDED OR WAS REFUSED — the changes nobody outside the cache

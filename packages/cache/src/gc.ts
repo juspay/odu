@@ -27,9 +27,12 @@
  * in the bucket names that NarHash.
  *
  * **And nothing can land in between.** The cache holds ONE async mutex over
- * `record`, `pin` and `gc`: a collection plans and deletes with no writer able
- * to interleave, and a pin that arrived first is already in the plan. That is
- * why there is no re-plan here — there is nothing that could have changed.
+ * keep-and-record, `pin` and `gc`: a collection plans and deletes with no
+ * writer able to interleave, and a pin that arrived first is already in the
+ * plan. A push keeps its object under that lock too, so it cannot see an object
+ * this run is about to delete. Each delete still asks the rows, not the plan,
+ * whether a twin names its NarHash — the lock is the guarantee, the re-check is
+ * what keeps a writer added outside it from costing bytes.
  */
 
 import type { BucketRow, CacheRepo, ObjectRow, PinRow } from "./db";
@@ -127,17 +130,13 @@ export async function runGc(
   const perBucket = new Map<string, GcBucketReport>(
     plan.map((entry) => [entry.bucket, { bucket: entry.bucket, evicted: 0, kept: 0, bytes: 0 }]),
   );
-  // ONE query per bucket, then maintain the remaining rows in memory: a
-  // `repo.objects(bucket)` per evicted row is O(n²) on a large collection.
-  const remainingRows = new Map(plan.map((entry) => [entry.bucket, repo.objects(entry.bucket)]));
   for (const row of planned) {
     repo.deleteObject(row.bucket, row.storePath);
     // TWINS: two rows can carry the same NarHash (different store paths, one
-    // object). The bytes go only when no REMAINING row in the bucket names them.
-    const rows = remainingRows.get(row.bucket) ?? [];
-    const at = rows.findIndex((other) => other.storePath === row.storePath);
-    if (at !== -1) rows.splice(at, 1);
-    const twin = rows.some((other) => other.narHash === row.narHash);
+    // object). The bytes go only when no row in the bucket names them NOW —
+    // asked of the database right before the delete (an indexed lookup), not
+    // of the plan's snapshot, so a row that appeared mid-run keeps its object.
+    const twin = repo.objectsByNarHash(row.bucket, row.narHash).length > 0;
     if (!twin) {
       await objects.delete(objectKey(row.bucket, row.narHash, row.compression));
     }

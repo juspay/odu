@@ -1006,6 +1006,52 @@ describe("uploading", () => {
     await h.dispose();
   });
 
+  it("keeps each session's parts apart, and refuses a malformed session", async () => {
+    const h = await harness(true);
+    const staged = "/nix/store/cccccccccccccccccccccccccccccccc-sessions";
+    const payload = nar("parts that belong to one upload");
+    const other = nar("parts that belong to another upload!");
+    const name = `${payload.narHash.replace(/^sha256:/, "")}.nar.zst`;
+    const part = (session: string, bytes: Uint8Array) =>
+      h.fetch(`/main/nar/${name}/parts/0`, {
+        method: "PUT",
+        headers: { authorization: `Bearer ${h.tokens.write}`, "x-odu-upload": session },
+        body: body(bytes),
+      });
+    // TWO UPLOADS OF ONE NAME, index 0 each: neither overwrites the other.
+    expect((await part("mine", payload.bytes)).status).toBe(204);
+    expect((await part("theirs", other.bytes)).status).toBe(204);
+    expect(stagedFiles().filter((file) => file.includes(".part-0")).sort()).toEqual([
+      `/main/nar/${name}.s-mine.part-0`,
+      `/main/nar/${name}.s-theirs.part-0`,
+    ]);
+    const complete = (session: string, parts: number) =>
+      h.fetch(`/main/nar/${name}/complete`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${h.tokens.write}`,
+          "x-odu-upload": session,
+          "x-odu-parts": String(parts),
+        },
+      });
+    expect((await complete("mine", 1)).status).toBe(200);
+    // A RETRIED JOIN is answered from THIS session's join; another session
+    // with a gap is not told its NAR exists because someone else's does.
+    expect((await complete("mine", 1)).status).toBe(200);
+    const gap = await complete("theirs", 2);
+    expect(gap.status).toBe(409);
+    expect(await gap.json()).toEqual({ missing: [1] });
+    const narinfo = await h.fetch(`/main/${hashOf(staged)}.narinfo`, {
+      ...bearer(h.tokens.write),
+      method: "PUT",
+      body: `StorePath: ${staged}\nURL: nar/${name}\nCompression: none\nNarHash: ${payload.narHash}\nNarSize: ${payload.bytes.length}\nReferences: \n`,
+    });
+    expect(narinfo.status).toBe(200);
+    // A SESSION IS PART OF A FILE NAME: anything but a plain token is refused.
+    expect((await part("../escape", payload.bytes)).status).toBe(400);
+    await h.dispose();
+  });
+
   it("names the path, parts and bytes when a joined upload fails its proof", async () => {
     const lines: string[] = [];
     const h = await harness(true, "https://odu.example.org", (event, fields) =>
@@ -1048,6 +1094,25 @@ describe("uploading", () => {
     expect(line).toContain(`"storePath":"${staged}"`);
     expect(line).toContain('"parts":3');
     expect(line).toContain(`"bytesReceived":${payload.bytes.length}`);
+    // THE FILE THIS PROOF READ: the name it claimed, and its size then.
+    expect(line).toMatch(new RegExp(`"stagedFile":"main/nar/${name.replaceAll(".", "\\.")}\\.[0-9a-f-]{36}\\.claimed"`));
+    expect(line).toContain(`"stagedBytes":${payload.bytes.length}`);
+    await h.dispose();
+  });
+
+  it("says nothing was staged when a narinfo names a NAR nobody uploaded", async () => {
+    const lines: string[] = [];
+    const h = await harness(true, "https://odu.example.org", (event, fields) =>
+      lines.push(`${event} ${JSON.stringify(fields)}`),
+    );
+    const missing = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-never-sent";
+    const refused = await upload(h.fetch, h.tokens.write, missing, nar("never sent"), {
+      skipNar: true,
+    });
+    expect(refused.status).toBe(400);
+    const line = lines.find((entry) => entry.startsWith("cache.request.refused"));
+    expect(line).toContain('"stagedFile":null');
+    expect(line).not.toContain("stagedBytes");
     await h.dispose();
   });
 

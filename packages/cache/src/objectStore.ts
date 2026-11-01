@@ -60,6 +60,10 @@ export interface ObjectStore {
   adopt?(key: string, file: string, facts?: ObjectFacts): Promise<ObjectFacts>;
   get(key: string): Promise<StoredObject | null>;
   head(key: string): Promise<number | null>;
+  /** The STORED object's facts — size and sha256 of the bytes `get` serves —
+   *  or null when the key is absent. A read, never a write: an object store
+   *  that keeps a checksum answers it without reading the bytes. */
+  facts(key: string): Promise<ObjectFacts | null>;
   delete(key: string): Promise<void>;
   /** Every object under `prefix`, for the boot sweep and a stats line. */
   list(prefix: string): Promise<{ key: string; size: number }[]>;
@@ -169,6 +173,13 @@ export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
     async head(key) {
       const info = await stat(pathOf(key)).catch(() => null);
       return info !== null && info.isFile() ? info.size : null;
+    },
+
+    async facts(key) {
+      const path = pathOf(key);
+      const info = await stat(path).catch(() => null);
+      if (info === null || !info.isFile()) return null;
+      return factsOf(path);
     },
 
     async delete(key) {
