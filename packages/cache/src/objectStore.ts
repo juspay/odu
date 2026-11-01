@@ -55,7 +55,7 @@ export interface ObjectStore {
   /** KEEP a file that is already on this store's filesystem: rename it into
    *  place, never copy. The disk implementation's fast path for a verified
    *  upload; an object store without a shared filesystem has no equivalent. */
-  adopt?(key: string, file: string): Promise<ObjectFacts>;
+  adopt?(key: string, file: string, facts?: ObjectFacts): Promise<ObjectFacts>;
   get(key: string): Promise<StoredObject | null>;
   head(key: string): Promise<number | null>;
   delete(key: string): Promise<void>;
@@ -124,7 +124,11 @@ export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
     return { size, sha256: `sha256:${base32(hash.digest())}` };
   }
 
-  async function adopt(key: string, file: string): Promise<ObjectFacts> {
+  async function adopt(
+    key: string,
+    file: string,
+    facts?: ObjectFacts,
+  ): Promise<ObjectFacts> {
     const target = pathOf(key);
     if ((await stat(target).catch(() => null)) !== null) {
       await unlink(file).catch(() => {});
@@ -140,7 +144,7 @@ export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
       await Bun.write(target, Bun.file(file));
       await unlink(file).catch(() => {});
     }
-    return factsOf(target);
+    return facts ?? factsOf(target);
   }
 
   return {

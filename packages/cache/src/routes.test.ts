@@ -608,6 +608,31 @@ describe("the NAR", () => {
     await h.dispose();
   });
 
+  it("serves each twin's own compression when NarHashes collide", async () => {
+    const h = await harness(true);
+    const raw = new TextEncoder().encode("identical NAR, two compression choices");
+    const zstd = spawnSync("zstd", ["-q", "-c"], { input: raw });
+    const xz = spawnSync("xz", ["-c"], { input: raw });
+    expect(zstd.status).toBe(0);
+    expect(xz.status).toBe(0);
+    const narHash = `sha256:${base32(createHash("sha256").update(raw).digest())}`;
+    const zstdBytes = new Uint8Array(zstd.stdout);
+    const xzBytes = new Uint8Array(xz.stdout);
+    const one = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-twin-zstd";
+    const two = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-twin-xz";
+    expect((await upload(h.fetch, h.tokens.write, one, { bytes: zstdBytes, narHash }, { compression: "zstd" })).status).toBe(200);
+    expect((await upload(h.fetch, h.tokens.write, two, { bytes: xzBytes, narHash }, { compression: "xz" })).status).toBe(200);
+    const oneNar = await h.fetch(`/main/nar/${narHash.slice(7)}.nar.zst`);
+    const twoNar = await h.fetch(`/main/nar/${narHash.slice(7)}.nar.xz`);
+    expect(oneNar.status).toBe(200);
+    expect(twoNar.status).toBe(200);
+    expect(Array.from(new Uint8Array(await oneNar.arrayBuffer()))).toEqual(Array.from(zstdBytes));
+    expect(Array.from(new Uint8Array(await twoNar.arrayBuffer()))).toEqual(Array.from(xzBytes));
+    expect(await (await h.fetch(`/main/${hashOf(one)}.narinfo`)).text()).toContain("Compression: zstd");
+    expect(await (await h.fetch(`/main/${hashOf(two)}.narinfo`)).text()).toContain("Compression: xz");
+    await h.dispose();
+  });
+
   it("keeps an xz upload as xz and serves those exact bytes", async () => {
     const h = await harness(true);
     const raw = new TextEncoder().encode("a NAR compressed with xz");
@@ -667,7 +692,12 @@ describe("the NAR", () => {
     expect(Array.from(new Uint8Array(await open.arrayBuffer()))).toEqual(
       Array.from(hello.bytes.subarray(hello.bytes.length - 2)),
     );
-    for (const range of [`bytes=${hello.bytes.length}-`, `bytes=${hello.bytes.length + 1}-`]) {
+    for (const range of [
+      `bytes=${hello.bytes.length}-`,
+      `bytes=${hello.bytes.length + 1}-`,
+      "bytes=-0",
+      "bytes=-",
+    ]) {
       expect({ range, status: (await h.fetch(`/main/nar/${name}`, { headers: { range } })).status }).toEqual({
         range,
         status: 416,

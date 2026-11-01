@@ -144,7 +144,14 @@ export function createStaging(deps: StagingDeps): Staging {
     bucket: BucketRow,
     dirForBucket: string,
     info: NarInfo,
-  ): Promise<{ ok: true; file: string } | { ok: false; message: string }> {
+  ): Promise<
+    | {
+        ok: true;
+        file: string;
+        facts?: { fileHash: string; fileSize: number };
+      }
+    | { ok: false; message: string }
+  > {
     const name = basename(info.url);
     if (!isStagedFileName(name)) {
       return { ok: false, message: `narinfo names ${info.url}, which is not a NAR this cache staged` };
@@ -160,7 +167,11 @@ export function createStaging(deps: StagingDeps): Staging {
             `${info.narHash} — the upload was truncated or corrupted`,
         };
       }
-      return { ok: true, file: staged };
+      return {
+        ok: true,
+        file: staged,
+        facts: { fileHash: checked.fileHash, fileSize: checked.fileSize },
+      };
     }
     if (!checked.absent) return { ok: false, message: `${info.url}: ${checked.message}` };
 
@@ -341,16 +352,21 @@ export function createStaging(deps: StagingDeps): Staging {
     bucket: BucketRow,
     info: NarInfo,
     staged: string,
+    facts?: { fileHash: string; fileSize: number },
   ): Promise<{ fileHash: string; fileSize: number } | null> {
     try {
       const key = objectKey(bucket.name, info.narHash, info.compression);
       // ADOPT the staged file: one rename, never a copy of the same bytes.
-      const facts =
+      const kept =
         objects.adopt === undefined
           ? await objects.put(key, Bun.file(staged).stream())
-          : await objects.adopt(key, staged);
+          : await objects.adopt(
+              key,
+              staged,
+              facts === undefined ? undefined : { size: facts.fileSize, sha256: facts.fileHash },
+            );
       await unlink(staged).catch(() => {});
-      return { fileHash: facts.sha256, fileSize: facts.size };
+      return { fileHash: kept.sha256, fileSize: kept.size };
     } catch (err) {
       log?.("cache.object.put_failed", {
         bucket: bucket.name,
@@ -366,8 +382,9 @@ export function createStaging(deps: StagingDeps): Staging {
     hash: string,
     info: NarInfo,
     staged: string,
+    facts?: { fileHash: string; fileSize: number },
   ): Promise<NarinfoOutcome> {
-    const file = await keep(bucket, info, staged);
+    const file = await keep(bucket, info, staged, facts);
     if (file === null) {
       return {
         ok: false,
@@ -478,7 +495,7 @@ export function createStaging(deps: StagingDeps): Staging {
         chain = newChain();
         records.set(bucket.name, chain);
       }
-      return serial(chain, () => recordNow(bucket, hash, info, staged.file));
+      return serial(chain, () => recordNow(bucket, hash, info, staged.file, staged.facts));
     },
   };
 }

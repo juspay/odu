@@ -108,6 +108,10 @@ function narResponse(
   if (range !== null) {
     const first = range[1] === "" ? null : Number(range[1]);
     const last = range[2] === "" ? null : Number(range[2]);
+    // `bytes=-` names no bytes, and a zero-length suffix names none either.
+    if (first === null && (last === null || last === 0)) {
+      return HttpServerResponse.empty({ status: 416 });
+    }
     // `bytes=-N` is the LAST N bytes, not "end at N". An open-ended request
     // at or past the size has nothing to give.
     if (first !== null && first >= source.size) return HttpServerResponse.empty({ status: 416 });

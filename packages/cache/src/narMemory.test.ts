@@ -7,10 +7,13 @@
  * the kernel and Bun's fetch apply pressure the pod's path does not.
  */
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "bun:test";
+import { createCache } from "./cache";
+import { openCacheRepo } from "./db";
+import { asRoot } from "./testlib";
 
 const LINUX = process.platform === "linux";
 const LIMIT = 64 * 1024 * 1024;
@@ -71,7 +74,14 @@ describe.skipIf(!LINUX)("a slow socket and the server's memory", () => {
       const baseline = childRss(server.pid as number);
       const slow = spawn(
         "curl",
-        ["--silent", "--limit-rate", "2M", "-o", "/dev/null", `http://127.0.0.1:${port}/`],
+        [
+          "--silent",
+          "--limit-rate",
+          "2M",
+          "-o",
+          "/dev/null",
+          `http://127.0.0.1:${port}/`,
+        ],
         { stdio: "ignore" },
       );
       await new Promise((resolve) => setTimeout(resolve, SAMPLE_AFTER_MS));
@@ -99,10 +109,52 @@ describe.skipIf(!LINUX)("a slow socket and the server's memory", () => {
       }
       chunk.copy(file, at);
     }
-    writeFileSync(source, file);
-    const server = spawn(process.execPath, [join(import.meta.dirname, "..", "test", "narServer.ts"), "file", source], {
-      stdio: ["ignore", "pipe", "inherit"],
+    // THE REAL ROUTE, with a seeded cache: one bucket, one row, one object.
+    const stateRoot = join(dir, "state");
+    const hash = "a".repeat(52);
+    const storePath = `/nix/store/${"a".repeat(32)}-big`;
+    const cache = createCache({ stateRoot, rootToken: "root" });
+    await cache.admin.create({
+      ...asRoot("root"),
+      name: "main",
+      public: true,
+      retentionDays: 30,
+      upstreamKeys: [],
     });
+    const objectDir = join(stateRoot, "cache", "objects", "main", "nar");
+    mkdirSync(objectDir, { recursive: true });
+    writeFileSync(join(objectDir, `${hash}.nar.zst`), file);
+    const repo = openCacheRepo(join(stateRoot, "cache", "cache.sqlite"));
+    repo.putObject({
+      bucket: "main",
+      storePath,
+      hash: hash.slice(0, 32),
+      narHash: `sha256:${hash}`,
+      narSize: file.length,
+      references: [],
+      deriver: null,
+      ca: null,
+      compression: "zstd",
+      fileHash: `sha256:${"b".repeat(52)}`,
+      fileSize: file.length,
+      sigs: [],
+      hits: 0,
+      created: 0,
+      lastAccessed: 0,
+    });
+    repo.close();
+    await cache.close();
+    const server = spawn(
+      process.execPath,
+      [
+        join(import.meta.dirname, "..", "test", "narServer.ts"),
+        "routes",
+        stateRoot,
+        "main",
+        hash,
+      ],
+      { stdio: ["ignore", "pipe", "inherit"] },
+    );
     try {
       const port = await new Promise<number>((resolve, reject) => {
         let buffered = "";
@@ -118,7 +170,14 @@ describe.skipIf(!LINUX)("a slow socket and the server's memory", () => {
       const baseline = childRss(server.pid as number);
       const slow = spawn(
         "curl",
-        ["--silent", "--limit-rate", "2M", "-o", "/dev/null", `http://127.0.0.1:${port}/`],
+        [
+          "--silent",
+          "--limit-rate",
+          "2M",
+          "-o",
+          "/dev/null",
+          `http://127.0.0.1:${port}/cache/main/nar/${hash}.nar.zst`,
+        ],
         { stdio: "ignore" },
       );
       await new Promise((resolve) => setTimeout(resolve, SAMPLE_AFTER_MS));

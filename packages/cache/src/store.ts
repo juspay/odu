@@ -311,7 +311,14 @@ export function nixDump(storePath: string, store: string | null): ReadableStream
  * client's error.
  */
 export type NarCheck =
-  | { ok: true; narHash: string; narSize: number }
+  | {
+      ok: true;
+      narHash: string;
+      narSize: number;
+      /** The COMPRESSED file's sha256 and size, learned as it streamed. */
+      fileHash: string;
+      fileSize: number;
+    }
   | { ok: false; absent: boolean; message: string };
 
 /** The decompressor for a narinfo's `Compression`. `none` and an absent field
@@ -354,6 +361,8 @@ export async function verifyNarFile(path: string, compression: string | null): P
 
   const { promise, resolve } = Promise.withResolvers<NarCheck>();
   const hash = createHash("sha256");
+  const fileHash = createHash("sha256");
+  let fileSize = 0;
   let size = 0;
   let ended = false;
   let code: number | null = decompressor === null ? 0 : null;
@@ -364,7 +373,13 @@ export async function verifyNarFile(path: string, compression: string | null): P
     settled = true;
     resolve(
       code === 0
-        ? { ok: true, narHash: `sha256:${base32(hash.digest())}`, narSize: size }
+        ? {
+            ok: true,
+            narHash: `sha256:${base32(hash.digest())}`,
+            narSize: size,
+            fileHash: `sha256:${base32(fileHash.digest())}`,
+            fileSize,
+          }
         : { ok: false, absent: false, message: `${decompressor?.[0] ?? "the NAR"} exited ${code}` },
     );
   };
@@ -394,6 +409,11 @@ export async function verifyNarFile(path: string, compression: string | null): P
     // EPIPE once the child has had enough is the ordinary end of a pipe.
     child.stdin?.on("error", () => {});
     const file = createReadStream(path);
+    file.on("data", (chunk: string | Buffer) => {
+      const bytes = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+      fileHash.update(bytes);
+      fileSize += bytes.length;
+    });
     file.on("error", (err) => {
       if (settled) return;
       settled = true;
@@ -413,6 +433,11 @@ export async function verifyNarFile(path: string, compression: string | null): P
   source.on("data", (chunk: Buffer) => {
     hash.update(chunk);
     size += chunk.length;
+    // For an uncompressed NAR the file IS the bytes hashed above.
+    if (decompressor === null) {
+      fileHash.update(chunk);
+      fileSize += chunk.length;
+    }
   });
   source.on("error", (err) => {
     if (settled) return;

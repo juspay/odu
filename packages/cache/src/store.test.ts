@@ -158,9 +158,14 @@ describe("an upload's bytes", () => {
       const child = spawnSync(argv[0], [...argv.slice(1), plain], { maxBuffer: 1 << 20 });
       expect({ compression, status: child.status }).toEqual({ compression, status: 0 });
       writeFileSync(compressed, child.stdout);
-      expect({ compression, checked: await verifyNarFile(compressed, compression) }).toEqual({
+      expect({ compression, checked: await verifyNarFile(compressed, compression) }).toMatchObject({
         compression,
-        checked: raw,
+        checked: {
+          ok: true,
+          narHash: raw.narHash,
+          narSize: raw.narSize,
+          fileSize: child.stdout.length,
+        },
       });
     }
   });

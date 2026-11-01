@@ -54,6 +54,24 @@ export function compressionExtension(compression: string | null): string {
   }
 }
 
+/** The compression a NAR URL's extension names, or null for an unknown one. */
+export function compressionOfFile(file: string): string | null {
+  const at = file.indexOf(".nar");
+  if (at === -1) return null;
+  switch (file.slice(at)) {
+    case ".nar":
+      return "none";
+    case ".nar.zst":
+      return "zstd";
+    case ".nar.xz":
+      return "xz";
+    case ".nar.bz2":
+      return "bzip2";
+    default:
+      return null;
+  }
+}
+
 /** The default the push client writes; kept for its narinfo. */
 export const SERVED_EXTENSION = "nar.zst";
 
@@ -169,9 +187,9 @@ export class NarinfoError extends Error {
   }
 }
 
-/** One parsed narinfo. `fileHash`/`fileSize` are carried but never produced by
- *  odu: it compresses on the fly, so it does not know the served file's hash,
- *  and Nix verifies `narHash` over the decompressed NAR regardless. */
+/** One parsed narinfo. `fileHash`/`fileSize` are the COMPRESSED object's own
+ *  facts — odu keeps exactly the file a pusher sent, and verifies the NAR by
+ *  decompressing it, so both hashes are known. */
 export interface NarInfo {
   storePath: string;
   url: string;

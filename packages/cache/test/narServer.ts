@@ -8,23 +8,40 @@
  * argv: <store-path>. Prints `ready <port>` on stdout.
  */
 import { createServer } from "node:http";
+import { HttpRouter } from "effect/http";
 import { nixDump } from "../src/store";
+import { createCache } from "../src/cache";
+import { cacheRoutes } from "../src/routes";
 
 const path = process.argv[2];
 if (path === undefined) throw new Error("narServer: a store path is required");
 
-// `narServer file <path>`: the FILE response's fixed point. The kept object is
-// served by Bun as a file (sendfile, sized), so a slow reader must not grow
-// this process at all.
-if (path === "file") {
-  const file = process.argv[3];
-  if (file === undefined) throw new Error("narServer file: a file path is required");
+// `narServer routes <stateDir> <bucket> <hash>`: the FILE response's fixed
+// point, through the REAL cacheRoutes (narResponse, Content-Length, Range), not
+// a bare Bun.serve that skipped the code under test.
+if (path === "routes") {
+  const stateRoot = process.argv[3];
+  const bucket = process.argv[4];
+  const hash = process.argv[5];
+  if (stateRoot === undefined || bucket === undefined || hash === undefined) {
+    throw new Error("narServer routes: a state dir, bucket and hash are required");
+  }
+  const cache = createCache({ stateRoot, rootToken: null });
+  const { handler, dispose } = HttpRouter.toWebHandler(
+    cacheRoutes(cache).layer,
+    { disableLogger: true },
+  );
   const served = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
-    fetch: () => new Response(Bun.file(file), { headers: { "content-type": "application/x-nix-nar" } }),
+    fetch: (request) => handler(request),
   });
   process.stdout.write(`ready ${served.port}\n`);
+  process.on("SIGTERM", () => {
+    served.stop();
+    void dispose();
+    void cache.close();
+  });
 } else {
   const server = createServer((_request, response) => {
   response.writeHead(200, { "content-type": "application/x-nix-nar" });
