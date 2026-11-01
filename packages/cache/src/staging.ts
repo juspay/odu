@@ -13,6 +13,14 @@
  * Nix store, so the compressed file the pusher sent IS the object, and its
  * sha256 and length become the row's `FileHash:`/`FileSize:`.
  *
+ * **A staged NAR belongs to the narinfo that claims it.** Every pusher of a
+ * path uploads to the same name, so the narinfo PUT first renames that name to
+ * one only it knows, then verifies and adopts THAT file: nothing another
+ * request does can replace, move or delete the bytes under it. A narinfo with
+ * nothing to claim is proved by the object an earlier proof kept, read in
+ * place — never rebuilt at the shared name, where a concurrent verify would
+ * read it half-written (kolu #2335's `zstd exited 1`).
+ *
  * **There is no ordering problem any more.** References are names in the
  * narinfo, not paths a store must already hold, so a closure arriving in any
  * order is all equally recordable. A narinfo without its NAR is still refused;
@@ -75,6 +83,16 @@ export type NarinfoOutcome =
  * class crossing a stream boundary.
  */
 export type UploadWrite = "ok" | "too-large";
+
+/** What a proof hands `keep`: a file this request claimed and verified, or
+ *  the stream of an object an earlier proof already kept. */
+type Source =
+  | {
+      kind: "file";
+      path: string;
+      facts: { fileHash: string; fileSize: number; selfHash: string | null };
+    }
+  | { kind: "object"; stream: ReadableStream<Uint8Array> };
 
 /** What `completeUpload` came to: every part present, or which indexes are not. */
 export type CompleteUpload =
@@ -144,83 +162,94 @@ export function createStaging(deps: StagingDeps): Staging {
   /** One COMPLETE at a time per staged file: two clients finishing one NAR
    *  would otherwise unlink parts each other is reading. */
   const completes = new Map<string, Chain>();
-  /** One narinfo at a time per bucket: two PUTs for one bucket must not put the
-   *  same staged file concurrently. */
+  /** One proof at a time per staged NAR name (see `acceptNarinfo`). */
+  const proofs = new Map<string, Chain>();
+  /** One keep-and-record at a time per bucket: two proofs of one object key
+   *  must not adopt it concurrently. */
   const records = new Map<string, Chain>();
   /** Bytes/parts of a completed chunked upload, for a refusal's log line. */
   const joined = new Map<string, { parts: number; bytes: number }>();
   let lastSweep = 0;
 
   /**
-   * THE INVARIANT THE PRIVATE-BUCKET STORY RESTS ON: a row is recorded only
-   * when the NAR it names has been shown to carry the bytes it claims.
+   * TAKE THE STAGED NAR FOR THIS REQUEST ALONE. Every push of a path names one
+   * file — `nar/<narHash>.nar.zst`, whoever sends it — so the shared name is a
+   * mailbox, not a file anybody owns: another upload can rename over it, and
+   * another narinfo can adopt it, while this one is reading. A rename is
+   * atomic, so exactly one request gets each upload, under a name nobody else
+   * knows; the sweep skips it while it is held. `null` is "nothing staged".
    */
-  async function ensureStaged(
-    bucket: BucketRow,
+  async function claim(
     dirForBucket: string,
-    info: NarInfo,
-  ): Promise<
-    | {
-        ok: true;
-        file: string;
-        facts?: { fileHash: string; fileSize: number; selfHash: string | null };
-      }
-    | { ok: false; message: string }
-  > {
-    const name = basename(info.url);
-    if (!isStagedFileName(name)) {
-      return { ok: false, message: `narinfo names ${info.url}, which is not a NAR this cache staged` };
-    }
-    const staged = join(dirForBucket, "nar", name);
-    const selfHashPart = info.references.includes(info.storePath)
-      ? storePathHash(info.storePath)
-      : null;
-    const checked = await verifyNarFile(staged, info.compression, selfHashPart);
-    if (checked.ok) {
-      if (checked.narHash !== info.narHash) {
-        return {
-          ok: false,
-          message:
-            `${info.url} hashes to ${checked.narHash} but the narinfo says ` +
-            `${info.narHash} — the upload was truncated or corrupted`,
-        };
-      }
-      return {
-        ok: true,
-        file: staged,
-        facts: {
-          fileHash: checked.fileHash,
-          fileSize: checked.fileSize,
-          selfHash: checked.selfHash,
-        },
-      };
-    }
-    if (!checked.absent) return { ok: false, message: `${info.url}: ${checked.message}` };
-
-    // THE SECOND PROOF OF POSSESSION. Two store paths with identical content
-    // share a NarHash; the first to be recorded took the staged NAR with it, so
-    // a twin's narinfo finds only the object. Copy it back for this proof.
-    const object = await objects.get(objectKey(bucket.name, info.narHash, info.compression));
-    if (object === null) {
-      return {
-        ok: false,
-        message: `the narinfo names ${info.url}, which was never uploaded to this bucket`,
-      };
-    }
-    const materialised = join(
-      dirForBucket,
-      "nar",
-      `${info.narHash.slice(7)}.${compressionExtension(info.compression)}`,
-    );
-    const sink = Bun.file(materialised).writer({ highWaterMark: 1 << 20 });
+    name: string,
+  ): Promise<{ path: string; size: number } | null> {
+    const claimed = join(dirForBucket, "nar", `${name}.${randomUUID()}.claimed`);
+    openUploads.add(claimed);
     try {
-      for await (const chunk of object.stream as unknown as AsyncIterable<Uint8Array>) {
-        await writeAll(sink, chunk, materialised);
-      }
-    } finally {
-      await sink.end();
+      await rename(join(dirForBucket, "nar", name), claimed);
+      return { path: claimed, size: (await stat(claimed)).size };
+    } catch (err) {
+      openUploads.delete(claimed);
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw err;
     }
-    return { ok: true, file: materialised };
+  }
+
+  /**
+   * THE INVARIANT THE PRIVATE-BUCKET STORY RESTS ON: a row is recorded only
+   * when the NAR it names has been shown to carry the bytes it claims — the
+   * bytes of a file this request claimed, or an object an earlier proof kept.
+   */
+  async function prove(
+    bucket: BucketRow,
+    hash: string,
+    info: NarInfo,
+    dirForBucket: string,
+    name: string,
+  ): Promise<NarinfoOutcome> {
+    const refuse = async (
+      message: string,
+      claimed?: { path: string; size: number },
+    ): Promise<NarinfoOutcome> => ({
+      ok: false,
+      status: 400,
+      message,
+      detail: await detailOf(bucket, info, hash, claimed),
+    });
+    const claimed = await claim(dirForBucket, name);
+    if (claimed === null) {
+      // THE SECOND PROOF OF POSSESSION. Two store paths with identical content
+      // share a NarHash, and the first to be recorded took the staged NAR with
+      // it; so did an earlier push of this same path. The object is the proof.
+      const object = await objects.get(objectKey(bucket.name, info.narHash, info.compression));
+      if (object === null) {
+        return refuse(`the narinfo names ${info.url}, which was never uploaded to this bucket`);
+      }
+      return recordSerially(bucket, info, { kind: "object", stream: object.stream });
+    }
+    try {
+      const selfHashPart = info.references.includes(info.storePath)
+        ? storePathHash(info.storePath)
+        : null;
+      const checked = await verifyNarFile(claimed.path, info.compression, selfHashPart);
+      if (!checked.ok) return await refuse(`${info.url}: ${checked.message}`, claimed);
+      if (checked.narHash !== info.narHash) {
+        return await refuse(
+          `${info.url} hashes to ${checked.narHash} but the narinfo says ` +
+            `${info.narHash} — the upload was truncated or corrupted`,
+          claimed,
+        );
+      }
+      return await recordSerially(bucket, info, {
+        kind: "file",
+        path: claimed.path,
+        facts: { fileHash: checked.fileHash, fileSize: checked.fileSize, selfHash: checked.selfHash },
+      });
+    } finally {
+      // OURS TO REMOVE: adopted, refused, or a duplicate of a kept object.
+      openUploads.delete(claimed.path);
+      await rm(claimed.path, { force: true }).catch(() => {});
+    }
   }
 
   /** Remove staged FILES older than an hour — a client that died between the
@@ -378,31 +407,30 @@ export function createStaging(deps: StagingDeps): Staging {
     return { ok: true, parts: total };
   }
 
-  /** Take the proved file into the object store; the row learns its facts. A
-   *  put failure refuses the push (the bytes are not safely kept). */
+  /** Take the proved file into the object store, or learn an existing
+   *  object's facts; the row learns them either way. A put failure refuses the
+   *  push (the bytes are not safely kept). FIRST KEPT WINS: adopting onto a key
+   *  that exists keeps the object and answers ITS facts. */
   async function keep(
     bucket: BucketRow,
     info: NarInfo,
-    staged: string,
-    facts?: { fileHash: string; fileSize: number; selfHash: string | null },
+    source: Source,
   ): Promise<{ fileHash: string; fileSize: number; selfHash: string | null } | null> {
     try {
       const key = objectKey(bucket.name, info.narHash, info.compression);
-      // ADOPT the staged file: one rename, never a copy of the same bytes.
+      if (source.kind === "object") {
+        // IMMUTABLE: a put onto an existing key cancels the stream and answers
+        // the stored object's facts — no staged copy, no shared name.
+        const kept = await objects.put(key, source.stream);
+        return { fileHash: kept.sha256, fileSize: kept.size, selfHash: null };
+      }
+      const { facts } = source;
+      // ADOPT the claimed file: one rename, never a copy of the same bytes.
       const kept =
         objects.adopt === undefined
-          ? await objects.put(key, Bun.file(staged).stream())
-          : await objects.adopt(
-              key,
-              staged,
-              facts === undefined ? undefined : { size: facts.fileSize, sha256: facts.fileHash },
-            );
-      await unlink(staged).catch(() => {});
-      return {
-        fileHash: kept.sha256,
-        fileSize: kept.size,
-        selfHash: facts?.selfHash ?? null,
-      };
+          ? await objects.put(key, Bun.file(source.path).stream())
+          : await objects.adopt(key, source.path, { size: facts.fileSize, sha256: facts.fileHash });
+      return { fileHash: kept.sha256, fileSize: kept.size, selfHash: facts.selfHash };
     } catch (err) {
       log?.("cache.object.put_failed", {
         bucket: bucket.name,
@@ -418,51 +446,54 @@ export function createStaging(deps: StagingDeps): Staging {
     bucket: BucketRow,
     info: NarInfo,
     hash: string,
-    staged?: string,
+    claimed?: { path: string; size: number },
   ): Promise<NonNullable<Extract<NarinfoOutcome, { ok: false }>["detail"]>> {
     const file = basename(info.url);
     const done = joined.get(`${bucket.name}/${file}`);
-    const fileInfo = staged === undefined ? null : await stat(staged).catch(() => null);
     return {
       storePath: info.storePath,
       narinfoHash: hash,
       ...(done === undefined ? {} : { parts: done.parts }),
-      ...(fileInfo === null
+      ...(claimed === undefined
         ? done === undefined
           ? {}
           : { bytesReceived: done.bytes }
-        : { bytesReceived: fileInfo.size }),
+        : { bytesReceived: claimed.size }),
     };
   }
 
-  async function recordNow(
-    bucket: BucketRow,
-    hash: string,
-    info: NarInfo,
-    staged: string,
-    facts?: { fileHash: string; fileSize: number; selfHash: string | null },
-  ): Promise<NarinfoOutcome> {
-    const file = await keep(bucket, info, staged, facts);
-    if (file === null) {
-      return {
-        ok: false,
-        status: 400,
-        message: `${info.storePath} could not be stored: the object store refused it`,
-      };
+  /** Keep and record under the bucket's chain: two proofs of one object key
+   *  (twins under different names) must not adopt it at once. */
+  function recordSerially(bucket: BucketRow, info: NarInfo, source: Source): Promise<NarinfoOutcome> {
+    let chain = records.get(bucket.name);
+    if (chain === undefined) {
+      chain = newChain();
+      records.set(bucket.name, chain);
     }
-    await record(bucket, info, file, file.selfHash);
-    log?.("cache.import.recorded", {
-      bucket: bucket.name,
-      path: info.storePath,
-      bytes: info.narSize,
-      fileSize: file.fileSize,
+    return serial(chain, async () => {
+      const file = await keep(bucket, info, source);
+      if (file === null) {
+        return {
+          ok: false,
+          status: 400,
+          message: `${info.storePath} could not be stored: the object store refused it`,
+        };
+      }
+      await record(bucket, info, file, file.selfHash);
+      log?.("cache.import.recorded", {
+        bucket: bucket.name,
+        path: info.storePath,
+        bytes: info.narSize,
+        fileSize: file.fileSize,
+      });
+      return { ok: true, status: 200, storePath: info.storePath };
     });
-    return { ok: true, status: 200, storePath: info.storePath };
   }
 
   return {
     async close() {
       await Promise.all([...completes.values()].map((chain) => chain.tail));
+      await Promise.all([...proofs.values()].map((chain) => chain.tail));
       await Promise.all([...records.values()].map((chain) => chain.tail));
     },
 
@@ -544,22 +575,30 @@ export function createStaging(deps: StagingDeps): Staging {
         };
       }
 
-      const staged = await ensureStaged(bucket, dirForBucket, info);
-      if (!staged.ok) {
-        const stagedFile = join(dirForBucket, "nar", basename(info.url));
-        const detail = await detailOf(bucket, info, hash, stagedFile);
-        joined.delete(`${bucket.name}/${basename(info.url)}`);
-        return { ok: false, status: 400, message: staged.message, detail };
+      const name = basename(info.url);
+      if (!isStagedFileName(name)) {
+        return {
+          ok: false,
+          status: 400,
+          message: `narinfo names ${info.url}, which is not a NAR this cache staged`,
+        };
       }
-      let chain = records.get(bucket.name);
+      // ONE PROOF PER STAGED NAME AT A TIME: a narinfo that finds nothing to
+      // claim because another is proving it must see the object that one
+      // keeps, not "never uploaded". Held for this request only.
+      const key = `${bucket.name}/${name}`;
+      let chain = proofs.get(key);
       if (chain === undefined) {
         chain = newChain();
-        records.set(bucket.name, chain);
+        proofs.set(key, chain);
       }
-      const outcome = await serial(chain, () =>
-        recordNow(bucket, hash, info, staged.file, staged.facts),
-      );
-      joined.delete(`${bucket.name}/${basename(info.url)}`);
+      const proving = serial(chain, () => prove(bucket, hash, info, dirForBucket, name));
+      const tail = chain.tail;
+      const outcome = await proving;
+      // A NAME NOBODY ELSE QUEUED ON is forgotten: a daemon sees every NAR
+      // name it will ever be pushed, and a chain per name would be all of them.
+      if (chain.tail === tail) proofs.delete(key);
+      joined.delete(key);
       return outcome;
     },
   };

@@ -18,7 +18,7 @@
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
@@ -216,6 +216,13 @@ function interleavings(): ("A" | "B")[][] {
   return out;
 }
 
+/** Staged NARs nobody will name: every upload was claimed by its own
+ *  narinfo or replaced by another pusher's, so none should be left. */
+function litter(): string[] {
+  const at = join(dir, "state", "cache", "staging", "main", "nar");
+  return readdirSync(at).filter((name) => name.endsWith(".nar.zst") || name.endsWith(".claimed"));
+}
+
 const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe.skipIf(!LINUX)("concurrent pushes of one path", () => {
@@ -333,6 +340,7 @@ describe.skipIf(!LINUX)("concurrent pushes of one path", () => {
           const served = await readBack(path);
           if (served !== null) failures.push(`round ${round} ${path.storePath}: ${served}`);
         }
+        for (const file of litter()) failures.push(`round ${round}: ${file} left in staging`);
       }
       console.log(`push race (${levels}): ${failures.length} failures in ${pushes} pushes`);
       expect(failures).toEqual([]);
