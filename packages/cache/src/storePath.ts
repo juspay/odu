@@ -13,13 +13,12 @@
  * `type` is `source` followed by `:` and each reference **full store path**, in
  * sorted order; a self-reference is the literal `self`.
  *
- * **What cannot be proved from metadata.** Nix's own `CA:` hash for a path
- * WITH a self-reference is the hash of the NAR with the path zeroed plus the
- * positions of the references — not the `NarHash` the narinfo carries (checked
- * against `nix store make-content-addressed` of a self-referencing output: the
- * narinfo's NarHash differs from its CA hash). Since the object row holds only
- * the narinfo, a self-referencing path stays null rather than claiming a CA it
- * cannot prove. Every non-self path is exact.
+ * **A PUSHER'S `CA:` IS ACCEPTED ONLY WHEN IT PROVES ITS PATH.** For a
+ * self-reference the CA hash is Nix's modulo hash, which the narinfo's NarHash
+ * is not; the pusher's own hash can still be checked by the same formula, with
+ * `self` in the type. Without that line, a self-referencing row is backfilled
+ * from the old store's `nix path-info --json` during the migration, and a
+ * non-self row from its NarHash. Nothing is trusted and nothing is guessed.
  */
 
 import { createHash } from "node:crypto";
@@ -65,6 +64,8 @@ export function contentAddressOf(input: {
   storePath: string;
   narHash: string;
   references: readonly string[];
+  /** The pusher's `CA:` line, a HINT: accepted only if the formula checks it. */
+  ca?: string | null;
 }): string | null {
   const path = input.storePath;
   if (!path.startsWith("/nix/store/")) return null;
@@ -76,15 +77,35 @@ export function contentAddressOf(input: {
   const references = input.references.map((reference) =>
     reference.startsWith("/nix/store/") ? reference : `/nix/store/${reference}`,
   );
-  // SELF-REFERENCES NEED THE NAR, NOT THE NARINFO (see the note above).
-  if (references.includes(path)) return null;
+  const self = references.includes(path);
+  const refs = self
+    ? references.map((reference) => (reference === path ? "self" : reference))
+    : references;
+  const type = refs.length === 0 ? "source" : `source:${[...refs].sort().join(":")}`;
+  const proves = (hash: string): string | null => {
+    let nar: string;
+    try {
+      nar = narHashBase32(`sha256:${hash}`);
+    } catch {
+      return null;
+    }
+    const candidate = `/nix/store/${storePathHashOf(type, base32Bytes(nar), name)}-${name}`;
+    return candidate === path ? `fixed:r:sha256:${nar}` : null;
+  };
+  // THE PUSHER'S LINE, checked first — it is the only way a self-reference can
+  // be proved from metadata, because its hash is not the NarHash.
+  const claimed = /^fixed:r:sha256:([0-9abcdfghijklmnpqrsvwxyz]{52})$/.exec(input.ca ?? "");
+  if (claimed !== null) {
+    const proved = proves(claimed[1] as string);
+    if (proved !== null) return proved;
+  }
+  if (self) return null;
   let nar: string;
   try {
     nar = narHashBase32(input.narHash);
   } catch {
     return null;
   }
-  const type = references.length === 0 ? "source" : `source:${[...references].sort().join(":")}`;
   const candidate = `/nix/store/${storePathHashOf(type, base32Bytes(nar), name)}-${name}`;
   return candidate === path ? `fixed:r:sha256:${nar}` : null;
 }

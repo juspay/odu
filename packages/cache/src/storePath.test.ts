@@ -53,6 +53,17 @@ describe("contentAddressOf", () => {
     ).toBeNull();
   });
 
+  it("accepts a pusher CA for a self-reference when its hash proves the path", () => {
+    expect(
+      contentAddressOf({
+        storePath: "/nix/store/6gyc4k1ilcw1k97kf3dnzwia3rq6vakd-selfref",
+        narHash: "sha256:0nhllj6n6swi6w1b8290hj2jdpn14q44552mr1lz3xc634azh3ng",
+        references: ["/nix/store/6gyc4k1ilcw1k97kf3dnzwia3rq6vakd-selfref"],
+        ca: "fixed:r:sha256:163ryiah9ms80qck6zb6dpy7sz9db61pjx460983wd3yyb41r7gl",
+      }),
+    ).toBe("fixed:r:sha256:163ryiah9ms80qck6zb6dpy7sz9db61pjx460983wd3yyb41r7gl");
+  });
+
   it("matches Nix's makeStorePath for the self vector's own hash", () => {
     // `nix path-info` reports this path's CA as fixed:r:sha256:163ry…
     // The TYPE for a self reference is `source:self`, and with that hash the
