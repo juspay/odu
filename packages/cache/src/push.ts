@@ -235,6 +235,34 @@ function worthRetrying(status: number): boolean {
   return status === 429 || status >= 500;
 }
 
+/** ONE HOLD'S PROGRESS, as the bucket publishes it. */
+interface HeldProgress {
+  readonly storePath: string;
+  readonly reason: string;
+  readonly missing: readonly string[];
+  readonly fetching: number;
+  readonly fetched: readonly string[];
+}
+
+/** THE HOLDS A BUCKET IS KEEPING, for a client that is waiting. */
+async function heldOf(
+  resolved: ResolvedBucket,
+  headers: Record<string, string>,
+): Promise<readonly HeldProgress[] | null> {
+  try {
+    const response = await fetch(
+      `${resolved.origin}${CACHE_MOUNT}/${encodeURIComponent(resolved.name)}/held`,
+      { headers: { ...headers, accept: "application/json" } },
+    );
+    if (!response.ok) return null;
+    const body = (await response.json()) as { held?: unknown };
+    if (!Array.isArray(body.held)) return null;
+    return body.held as HeldProgress[];
+  } catch {
+    return null;
+  }
+}
+
 /** THE INSTANCE'S PUBLIC ORIGIN, from the bucket's own consumer facts. */
 async function boardOf(
   resolved: ResolvedBucket,
@@ -340,7 +368,11 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
   // never the NAR. Bounded, because a reference the pusher skipped as upstream
   // will not arrive from here — and when the rounds stop changing anything, the
   // hold is final and the line at the end says so.
-  for (let round = 0; held.length > 0 && round < DEFERRED_ROUNDS; round++) {
+  for (
+    let round = 0;
+    options.wait !== true && held.length > 0 && round < DEFERRED_ROUNDS;
+    round++
+  ) {
     const retrying = held.map((one) => one.path);
     const next = await runWave(retrying, true);
     if (next.length === retrying.length) {
@@ -350,22 +382,27 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
     held = next;
   }
 
-  // `--wait` is the OPT-IN to the silence: ask the bucket until the held paths
-  // are recorded (a reference landed from somewhere else) or the patience runs
-  // out.
+  // `--wait` is the OPT-IN to the silence: READ THE HOLD'S PROGRESS until the
+  // paths are recorded or the patience runs out. No narinfo is re-uploaded and
+  // no missing question is asked again — a wait is not another push.
   if (options.wait === true && held.length > 0) {
     const interval = options.waitIntervalMs ?? WAIT_INTERVAL_MS;
     const deadline = Date.now() + (options.waitTimeoutMs ?? WAIT_TIMEOUT_MS);
     while (held.length > 0 && Date.now() < deadline) {
       await sleep(interval);
-      const only = new Set(held.map((one) => one.path));
-      const now = await askMissing(resolved, headers, closure, only);
-      const recorded = new Set(held.map((one) => one.path).filter((path) => !now.missing.includes(path)));
+      const rows = await heldOf(resolved, headers);
+      if (rows === null) continue;
+      const byPath = new Map(rows.map((row) => [row.storePath, row]));
+      const recorded = held.filter((one) => !byPath.has(one.path)).map((one) => one.path);
       for (const path of recorded) {
         pushed += 1;
         say(`✅ ${path} stored`);
       }
-      held = held.filter((one) => !recorded.has(one.path));
+      // The reason is the bucket's latest sentence: a job that landed 6 of 7
+      // says so the next time the client looks.
+      held = held
+        .filter((one) => !recorded.includes(one.path))
+        .map((one) => ({ path: one.path, reason: byPath.get(one.path)?.reason ?? one.reason }));
     }
   }
 

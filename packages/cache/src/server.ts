@@ -195,6 +195,7 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
         reason: heldReason(facts.missing, facts.fetching),
         missing: [...facts.missing],
         fetching: facts.fetching,
+        fetched: [...facts.fetched],
         since: facts.created,
       };
       const encoded = JSON.stringify(row);
@@ -476,6 +477,9 @@ export const cacheRow = definePlugin({
     const log = yield* Log;
 
     const cache = createCache({ stateRoot: stateDir, rootToken, store });
+    // A RESTART RESUMES ITS HOLDS at row apply: the reference fetch a pod died
+    // in the middle of is re-queued here, with no request needed to start it.
+    yield* Effect.promise(() => cache.resume());
 
     // THE ROW'S PUBLISHED FACT: the names its buckets carry. A row that routes
     // those names (the cloudflare row) declares this service; it never opens

@@ -130,20 +130,29 @@ describe("held uploads", () => {
       bucket: "main",
       storePath: "/nix/store/parent",
       missing: ["/nix/store/child"],
-      fetching: 0,
+      fetching: 1,
+      fetched: [],
       created: NOW,
     });
-    // A later drain narrowed the reason; the row's `since` is when the path
-    // first arrived and must not move.
+    // A later fetch landed one reference and the reason narrowed; the row's
+    // `since` is when the path first arrived and must not move.
     repo.putHeld({
       bucket: "main",
       storePath: "/nix/store/parent",
       missing: [],
       fetching: 0,
+      fetched: ["/nix/store/child"],
       created: NOW + 5000,
     });
     expect(repo.held()).toEqual([
-      { bucket: "main", storePath: "/nix/store/parent", missing: [], fetching: 0, created: NOW },
+      {
+        bucket: "main",
+        storePath: "/nix/store/parent",
+        missing: [],
+        fetching: 0,
+        fetched: ["/nix/store/child"],
+        created: NOW,
+      },
     ]);
     expect(repo.held("main")).toHaveLength(1);
     expect(repo.held("other")).toEqual([]);
@@ -159,6 +168,7 @@ describe("held uploads", () => {
       storePath: "/nix/store/parent",
       missing: ["/nix/store/child"],
       fetching: 0,
+      fetched: [],
       created: NOW,
     });
     repo.deleteBucket("main");

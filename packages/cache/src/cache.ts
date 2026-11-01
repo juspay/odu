@@ -293,6 +293,9 @@ export interface Cache {
   onChange(listener: () => void): () => void;
   /** The admin face. */
   admin: CacheAdmin;
+  /** RE-QUEUE the held rows this database remembers — called at ROW APPLY, so
+   *  a restart resumes a reference fetch instead of waiting for a new push. */
+  resume(): Promise<void>;
   /** Join the row's background work, then close the database. */
   close(): Promise<void>;
 }
@@ -915,6 +918,8 @@ export function createCache(options: CacheOptions): Cache {
     },
 
     held: () => repo.held(),
+
+    resume: () => staging.resume(),
 
     onChange(listener) {
       listeners.add(listener);

@@ -603,8 +603,24 @@ function BucketPage(
                         <code class="path">{one.storePath}</code>
                         <span class="bucket-facts">
                           <span>{one.reason}</span>
+                          <Show when={one.fetched.length > 0}>
+                            <span class="pill hue-grey">{one.fetched.length} fetched</span>
+                          </Show>
                           <span>since {ago(one.since, props.now)}</span>
                         </span>
+                        {/* WHICH REFERENCES THE FETCH LANDED — the done half of
+                            the hold, not only how many are left. */}
+                        <Show when={one.fetched.length > 0}>
+                          <ul class="refs">
+                            <For each={one.fetched}>
+                              {(reference) => (
+                                <li>
+                                  <code>{reference}</code> done
+                                </li>
+                              )}
+                            </For>
+                          </ul>
+                        </Show>
                       </li>
                     )}
                   </For>

@@ -147,6 +147,8 @@ export const CacheHeldSchema = Schema.Struct({
   missing: Schema.Array(Schema.String),
   /** How many of those the server is fetching from upstream now. */
   fetching: Schema.Int,
+  /** References this hold's fetch ALREADY landed — the done half of the list. */
+  fetched: Schema.Array(Schema.String),
   /** When the path first arrived; a later drain does not move it. */
   since: Schema.Number,
 });

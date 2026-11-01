@@ -62,6 +62,10 @@ export class FakeStore implements BlobStore {
   /** What `import` should answer, by store path, instead of the reference
    *  check. */
   readonly importOutcome = new Map<string, ImportOutcome>();
+  /** Nix reports the FIRST invalid reference, not every one. Set this to make
+   *  the fake say what `nix copy` says, so a caller that trusts stderr alone
+   *  is caught fetching one reference per attempt. */
+  reportOneMissing = false;
   /** Every staged import attempted, in order. */
   readonly staged: StagedImport[] = [];
   /** Paths an UPSTREAM cache could serve, with the signatures they carry. A
@@ -125,7 +129,8 @@ export class FakeStore implements BlobStore {
       (reference) => reference !== staged.storePath && !this.present.has(reference),
     );
     if (missing.length > 0) {
-      return { ok: false, missing, message: `path '${missing[0] as string}' is not valid` };
+      const said = this.reportOneMissing ? missing.slice(0, 1) : missing;
+      return { ok: false, missing: said, message: `path '${said[0] as string}' is not valid` };
     }
     this.present.add(staged.storePath);
     return { ok: true };

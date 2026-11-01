@@ -692,3 +692,102 @@ describe("file modes", () => {
     await cache.close();
   });
 });
+
+describe("one fetch job over the whole missing set", () => {
+  it("imports a referrer with three upstream references after ONE job", async () => {
+    const parent = "/nix/store/pppppppppppppppppppppppppppppppp-parent";
+    const children = [
+      "/nix/store/c111111111111111111111111111111111-first",
+      "/nix/store/c222222222222222222222222222222222-second",
+      "/nix/store/c333333333333333333333333333333333-third",
+    ];
+    const cache = cacheWith(ROOT);
+    await cache.admin.create({ ...createInput, upstreamKeys: ["cache.nixos.org-1"] });
+    for (const child of children) {
+      const bytes = nar(child);
+      store.upstream.set(child, {
+        storePath: child,
+        narHash: bytes.narHash,
+        narSize: 1,
+        references: [],
+        sigs: ["cache.nixos.org-1:c2ln"],
+      });
+    }
+    const parentPayload = nar("parent bytes");
+    store.add(
+      {
+        storePath: parent,
+        narHash: parentPayload.narHash,
+        narSize: 1,
+        references: children,
+      },
+      false,
+    );
+    // NIX NAMES ONE. The job must still ask for all three.
+    store.reportOneMissing = true;
+    await putNar(cache, "main", parentPayload);
+    const outcome = await cache.acceptNarinfo(
+      cache.bucket("main") as never,
+      hashOf(parent),
+      stream(narinfoText(parent, parentPayload, children)),
+    );
+    expect(outcome).toMatchObject({ ok: true, status: 202, fetching: 3 });
+    if (outcome.ok && outcome.status === 202) expect(outcome.missing).toEqual(children);
+
+    await until("the referrer to import", () => cache.held().length === 0);
+    // ONE substitute call, over the full set — not one per reference and not
+    // one per attempt.
+    expect(store.substituted).toEqual([
+      { paths: children, keyNames: ["cache.nixos.org-1"] },
+    ]);
+    await cache.close();
+  });
+
+  it("resumes a held row at row apply after a restart", async () => {
+    const child = "/nix/store/cccccccccccccccccccccccccccccccc-child";
+    const parent = "/nix/store/pppppppppppppppppppppppppppppppp-parent";
+    const first = cacheWith(ROOT);
+    await first.admin.create({ ...createInput, upstreamKeys: ["cache.nixos.org-1"] });
+    const childPayload = nar("child bytes");
+    const parentPayload = nar("parent bytes");
+    // The upstream cannot answer yet: the hold is real when the process dies.
+    store.add(
+      { storePath: parent, narHash: parentPayload.narHash, narSize: 1, references: [child] },
+      false,
+    );
+    await putNar(first, "main", parentPayload);
+    const outcome = await first.acceptNarinfo(
+      first.bucket("main") as never,
+      hashOf(parent),
+      stream(narinfoText(parent, parentPayload, [child])),
+    );
+    expect(outcome).toMatchObject({ ok: true, status: 202 });
+    await until("the fetch to settle", () => first.held()[0]?.fetching === 0);
+    await first.close();
+    expect(store.substituted.length).toBeGreaterThan(0);
+
+    // The reference becomes available while the pod is down; the restart's
+    // row apply must pick the hold up with NO new push.
+    store.upstream.set(child, {
+      storePath: child,
+      narHash: childPayload.narHash,
+      narSize: 1,
+      references: [],
+      sigs: ["cache.nixos.org-1:c2ln"],
+    });
+    store.substituted.length = 0;
+    const second = createCache({
+      stateRoot: scratch,
+      rootToken: ROOT,
+      store: null,
+      blob: store,
+      now: () => NOW,
+    });
+    await second.resume();
+    await until("the resumed fetch to import the referrer", () => second.held().length === 0);
+    expect(store.substituted).toEqual([
+      { paths: [child], keyNames: ["cache.nixos.org-1"] },
+    ]);
+    await second.close();
+  });
+});

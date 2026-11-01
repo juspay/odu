@@ -88,6 +88,9 @@ interface Server {
   /** Answer a narinfo PUT that carries no preceding NAR with a 400 saying the
    *  bytes are gone — what a restarted server says. */
   narinfoOnlyRefusal: boolean;
+  /** `--wait` reads THIS endpoint; `null` keeps every hold forever. */
+  heldLandAfter: number | null;
+  heldPolls: number;
   missing: string[];
   skipped: string[];
   stop: () => void;
@@ -108,6 +111,8 @@ function startServer(): Server {
     missingCalls: 0,
     missingOnlyFor: undefined,
     narinfoOnlyRefusal: false,
+    heldLandAfter: null,
+    heldPolls: 0,
     missing: [LIBC, GLIBC, HELLO],
     skipped: [],
     stop: () => {},
@@ -128,6 +133,23 @@ function startServer(): Server {
         // THE BUCKET'S CONSUMER FACTS: the push asks where THIS INSTANCE is,
         // rather than guessing from its own environment.
         return Response.json({ board: state.board });
+      }
+      if (request.method === "GET" && url.pathname === "/cache/main/held") {
+        state.heldPolls += 1;
+        const keep = state.heldLandAfter === null || state.heldPolls <= state.heldLandAfter;
+        return Response.json({
+          held: keep
+            ? [
+                {
+                  storePath: LIBC,
+                  reason: `fetching 1 upstream reference`,
+                  missing: [LIBC],
+                  fetching: 1,
+                  fetched: [],
+                },
+              ]
+            : [],
+        });
       }
       if (url.pathname.endsWith("/missing")) {
         state.missingCalls += 1;
@@ -516,9 +538,9 @@ describe("pushing a closure", () => {
     try {
       server.missing = [LIBC];
       server.alwaysDefer.add(storePathHash(LIBC));
-      // The first `/missing` says the path is absent; the wait's next question
-      // says it landed (a parallel pusher supplied the reference).
-      server.missingOnlyFor = 1;
+      // The hold's row is what the wait reads: it is kept for one poll, then
+      // the reference landed and the row is gone.
+      server.heldLandAfter = 1;
       const summary = await pushToCache({
         bucket: `${server.origin}/main`,
         paths: ["."],
@@ -529,10 +551,14 @@ describe("pushing a closure", () => {
         waitTimeoutMs: 2_000,
       });
       expect(summary).toMatchObject({ pushed: 1, held: [], failed: 0 });
-      // The wait asks about the HELD paths, not the whole closure again.
-      const last = server.seen.filter((seen) => seen.path.endsWith("/missing")).at(-1);
-      const asked = JSON.parse(last?.body as string) as { paths: { path: string }[] };
-      expect(asked.paths.map((entry) => entry.path)).toEqual([LIBC]);
+      // THE WAIT READS THE HOLD, NOT THE UPLOAD PATH: one `/missing` (the
+      // preamble's), no second narinfo PUT while waiting, and the held endpoint
+      // asked until the row went.
+      expect(server.heldPolls).toBeGreaterThan(1);
+      const narinfoPuts = server.seen.filter(
+        (seen) => seen.method === "PUT" && seen.path.endsWith(".narinfo"),
+      );
+      expect(narinfoPuts).toHaveLength(1);
     } finally {
       server.stop();
     }

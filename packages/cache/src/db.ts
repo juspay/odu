@@ -114,6 +114,9 @@ export interface HeldRow {
    *  with a count is progress; zero means the fetch finished and they are
    *  genuinely neither here nor upstream. */
   fetching: number;
+  /** References this hold's fetch ALREADY brought in. The page shows them
+   *  beside the ones still missing, so a job that lands 6 of 7 says which. */
+  fetched: readonly string[];
   created: number;
 }
 
@@ -269,6 +272,11 @@ const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE held ADD COLUMN fetching INTEGER NOT NULL DEFAULT 0;
   `,
+  // v5 — WHICH REFERENCES THE FETCH HAS ALREADY LANDED. A hold with a count
+  // told a person how much was left, not which; the page shows both.
+  `
+  ALTER TABLE held ADD COLUMN fetched TEXT NOT NULL DEFAULT '[]';
+  `,
   // v3 — A NAME PER BUCKET. One domain, one bucket: the partial unique index is
   // the rule, not a check in a verb that another caller could skip.
   `
@@ -369,6 +377,7 @@ const heldOf = (row: Row): HeldRow => ({
   storePath: text(row, "store_path"),
   missing: list(row, "missing"),
   fetching: integer(row, "fetching"),
+  fetched: list(row, "fetched"),
   created: integer(row, "created"),
 });
 
@@ -653,10 +662,18 @@ export function openCacheRepo(path: string): CacheRepo {
       // is what the board's "waiting since" means. A later drain with the same
       // or a shorter list of missing references refreshes the REASON only.
       db.run(
-        `INSERT INTO held (bucket, store_path, missing, fetching, created) VALUES (?, ?, ?, ?, ?)
+        `INSERT INTO held (bucket, store_path, missing, fetching, fetched, created)
+         VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(bucket, store_path) DO UPDATE SET missing = excluded.missing,
-           fetching = excluded.fetching`,
-        [row.bucket, row.storePath, JSON.stringify(row.missing), row.fetching, row.created],
+           fetching = excluded.fetching, fetched = excluded.fetched`,
+        [
+          row.bucket,
+          row.storePath,
+          JSON.stringify(row.missing),
+          row.fetching,
+          JSON.stringify(row.fetched),
+          row.created,
+        ],
       );
     },
     held: (bucket) =>

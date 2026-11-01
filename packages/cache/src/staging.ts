@@ -37,7 +37,7 @@ import { once } from "node:events";
 import { basename, join } from "node:path";
 import type { BlobStore } from "./store";
 import { upstreamFor, verifyNarFile, writeStreamToFile } from "./store";
-import type { BucketRow, CacheRepo } from "./db";
+import type { BucketRow, CacheRepo, HeldRow } from "./db";
 import {
   formatNarinfo,
   isStagedFileName,
@@ -114,6 +114,8 @@ interface Pending {
   proved: boolean;
   /** How many missing references an upstream fetch is working on right now. */
   fetching: number;
+  /** References this hold's fetch already landed. */
+  fetched: readonly string[];
 }
 
 export interface StagingDeps {
@@ -144,6 +146,9 @@ export interface Staging {
    *  The row awaits this BEFORE its database closes: a `nix-store -r` still in
    *  flight must not import into a database that has gone. */
   close(): Promise<void>;
+  /** RE-QUEUE every held row this database remembers. Called at row apply: a
+   *  restart must resume a reference fetch, not strand it until a new push. */
+  resume(): Promise<void>;
   beginUpload(bucket: BucketRow, file: string): Promise<Upload>;
   /**
    * STAGE ONE PART of a NAR too large for one request. `index` is the part's
@@ -288,7 +293,7 @@ export function createStaging(deps: StagingDeps): Staging {
         // `waitingOn: []` means "never attempted" and `proved: false` means
         // "this process has not hashed it", which are both exactly right for a
         // narinfo recovered from disk.
-        map.set(hash, { hash, info, waitingOn: [], proved: false, fetching: 0 });
+        map.set(hash, { hash, info, waitingOn: [], proved: false, fetching: 0, fetched: [] });
       } catch {
         await unlink(join(dirForBucket, file)).catch(() => {});
       }
@@ -307,6 +312,31 @@ export function createStaging(deps: StagingDeps): Staging {
    *  s), so the narinfo answers 202 with "fetching", a row-owned queue does the
    *  substitution, and the import follows when it is done. The hold's reason is
    *  the progress. */
+  /**
+   * THE REFERRER'S WHOLE MISSING SET, not the one Nix happened to name.
+   *
+   * `nix copy` fails at the FIRST invalid reference and says so; a job built
+   * from stderr therefore fetches one reference per attempt, and the next push
+   * discovers the next. Every reference the narinfo lists is checked against
+   * the store, so one job covers all of them.
+   */
+  async function missingOf(entry: Pending, reported: readonly string[] = []): Promise<string[]> {
+    const out: string[] = [];
+    for (const reference of entry.info.references) {
+      if (reference === entry.info.storePath) continue;
+      if (!(await blob.has(reference))) out.push(reference);
+    }
+    for (const one of reported) if (!out.includes(one)) out.push(one);
+    return out;
+  }
+
+  /** What this job landed since the hold was last written: references that
+   *  were missing, are now present, and are still in the narinfo's list. */
+  function landed(entry: Pending, still: readonly string[]): string[] {
+    const wanted = new Set([...entry.waitingOn, ...entry.fetched]);
+    return [...wanted].filter((one) => !still.includes(one));
+  }
+
   async function attempt(
     bucket: BucketRow,
     dirForBucket: string,
@@ -321,22 +351,36 @@ export function createStaging(deps: StagingDeps): Staging {
       entry.proved = true;
     }
     const upstreams = upstreamFor(bucket.upstreamKeys);
-    let outcome = await blob.import({ dir: dirForBucket, storePath: entry.info.storePath });
-    if (!outcome.ok && outcome.missing.length > 0 && upstreams.length > 0) {
-      entry.waitingOn = outcome.missing;
-      if (entry.fetching === 0 && !closed) {
-        entry.fetching = outcome.missing.length;
-        repo.putHeld({
-          bucket: bucket.name,
-          storePath: entry.info.storePath,
-          missing: outcome.missing,
-          fetching: entry.fetching,
-          created: now(),
-        });
-        enqueueFetch(bucket, dirForBucket, entry, outcome.missing);
-        changed();
+    const outcome = await blob.import({ dir: dirForBucket, storePath: entry.info.storePath });
+    if (!outcome.ok && outcome.missing.length > 0) {
+      const missing = await missingOf(entry, outcome.missing);
+      entry.waitingOn = missing;
+      entry.fetched = [...new Set([...entry.fetched, ...landed(entry, missing)])];
+      if (upstreams.length > 0) {
+        if (entry.fetching === 0 && !closed) {
+          entry.fetching = missing.length;
+          repo.putHeld({
+            bucket: bucket.name,
+            storePath: entry.info.storePath,
+            missing,
+            fetching: entry.fetching,
+            fetched: entry.fetched,
+            created: now(),
+          });
+          enqueueFetch(bucket, dirForBucket, entry, missing);
+          changed();
+        }
+        return { missing, fetching: entry.fetching };
       }
-      return { missing: outcome.missing, fetching: entry.fetching };
+      repo.putHeld({
+        bucket: bucket.name,
+        storePath: entry.info.storePath,
+        missing,
+        fetching: 0,
+        fetched: entry.fetched,
+        created: now(),
+      });
+      return { missing, fetching: 0 };
     }
     if (!outcome.ok) {
       if (outcome.missing.length > 0) {
@@ -345,6 +389,7 @@ export function createStaging(deps: StagingDeps): Staging {
           storePath: entry.info.storePath,
           missing: outcome.missing,
           fetching: 0,
+          fetched: entry.fetched,
           created: now(),
         });
         return { missing: outcome.missing, fetching: 0 };
@@ -384,6 +429,8 @@ export function createStaging(deps: StagingDeps): Staging {
       if (closed) return;
       await blob.substitute(missing, upstreamFor(bucket.upstreamKeys));
       if (closed) return;
+      const still = await missingOf(entry);
+      entry.fetched = [...new Set([...entry.fetched, ...landed(entry, still)])];
       const outcome = await blob.import({
         dir: dirForBucket,
         storePath: entry.info.storePath,
@@ -395,14 +442,15 @@ export function createStaging(deps: StagingDeps): Staging {
         pending.get(bucket.name)?.delete(entry.hash);
         await unlink(join(dirForBucket, "nar", basename(entry.info.url))).catch(() => {});
         await unlink(join(dirForBucket, `${entry.hash}.narinfo`)).catch(() => {});
-      } else if (outcome.missing.length > 0) {
+      } else if (still.length > 0) {
         entry.fetching = 0;
-        entry.waitingOn = outcome.missing;
+        entry.waitingOn = still;
         repo.putHeld({
           bucket: bucket.name,
           storePath: entry.info.storePath,
-          missing: outcome.missing,
+          missing: still,
           fetching: 0,
+          fetched: entry.fetched,
           created: now(),
         });
       } else {
@@ -413,8 +461,18 @@ export function createStaging(deps: StagingDeps): Staging {
         await unlink(join(dirForBucket, `${entry.hash}.narinfo`)).catch(() => {});
       }
     } catch {
-      // The row's listener may still publish the last state; a thrown fetch is
-      // not a reason to take the process down in the background.
+      // A THROWN FETCH IS NOT "FETCHING" FOR EVER: the row goes back to its
+      // waiting sentence, so the next boot (or push) can try again.
+      if (!closed) {
+        repo.putHeld({
+          bucket: bucket.name,
+          storePath: entry.info.storePath,
+          missing: entry.waitingOn,
+          fetching: 0,
+          fetched: entry.fetched,
+          created: now(),
+        });
+      }
     } finally {
       entry.fetching = 0;
       changed();
@@ -645,6 +703,38 @@ export function createStaging(deps: StagingDeps): Staging {
   }
 
   return {
+    async resume() {
+      // AT ROW APPLY. Every held row is this database's, so a process that
+      // restarted picks each one up with the full missing set its row names —
+      // no request is needed to start a fetch that was already owed.
+      const rows = repo.held();
+      const byBucket = new Map<string, HeldRow[]>();
+      for (const row of rows) {
+        const list = byBucket.get(row.bucket) ?? [];
+        list.push(row);
+        byBucket.set(row.bucket, list);
+      }
+      for (const [name, held] of byBucket) {
+        const bucket = repo.bucket(name);
+        if (bucket === null) continue;
+        const map = await ensurePending(bucket);
+        const byPath = new Map([...map.values()].map((entry) => [entry.info.storePath, entry]));
+        for (const row of held) {
+          const entry = byPath.get(row.storePath);
+          // The narinfo is what makes the referrer importable after the
+          // references land; without it the row stays a fact, not a job.
+          if (entry === undefined) continue;
+          // THE FULL SET, even if the row was written by a build that knew
+          // only what stderr said: the recovery is the moment to widen it.
+          const missing = await missingOf(entry, row.missing);
+          entry.waitingOn = missing;
+          entry.fetched = row.fetched;
+          entry.fetching = missing.length;
+          repo.putHeld({ ...row, missing, fetching: missing.length });
+          enqueueFetch(bucket, stagedDir(name), entry, missing);
+        }
+      }
+    },
     async close() {
       closed = true;
       // JOIN every queue this staging owns. The closed flag stops the next
@@ -740,6 +830,7 @@ export function createStaging(deps: StagingDeps): Staging {
         waitingOn: [],
         proved: true,
         fetching: 0,
+        fetched: [],
       };
       map.set(hash, entry);
       await queuedDrain(bucket, [info.storePath]);

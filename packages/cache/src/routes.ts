@@ -310,6 +310,33 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
     // answers both requests.
     HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket`, consumerFacts),
 
+    /**
+     * A HOLD'S PROGRESS, for a client that is WAITING. `--wait` used to ask the
+     * missing question and re-push the narinfo; this answers the row the board
+     * reads, so a waiting push learns which references landed and when the
+     * referrer was recorded — without touching the upload path.
+     */
+    HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket/held`, (request) =>
+      Effect.gen(function* () {
+        const bucket = yield* param("bucket");
+        const admitted = admit(cache, request, bucket, "read");
+        if (!admitted.ok) return admitted.response;
+        return HttpServerResponse.jsonUnsafe({
+          held: cache
+            .held()
+            .filter((row) => row.bucket === admitted.bucket.name)
+            .map((row) => ({
+            storePath: row.storePath,
+            reason: heldReason(row.missing, row.fetching),
+            missing: [...row.missing],
+            fetching: row.fetching,
+            fetched: [...row.fetched],
+            since: row.created,
+          })),
+        });
+      }),
+    ),
+
     /** `nix-cache-info` — the three lines a client reads before anything else. */
     HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket/nix-cache-info`, (request) =>
       Effect.gen(function* () {

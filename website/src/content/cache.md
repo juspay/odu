@@ -126,7 +126,9 @@ What it says while it works — one preamble, then one line per path as the buck
 held 1 path — see https://odu.example.com/#/cache/main
 ```
 
-A `held` path is one the bucket accepted and cannot serve yet: a reference it needs is neither in the bucket nor signed by one of its upstream keys. The push reports it and **returns** — the exit is non-zero only for refusals — and the bucket's page lists the same paths with the same sentence. `--wait` is the explicit choice to stay until they land.
+A `held` path is one the bucket accepted and cannot serve yet: a reference it needs is neither in the bucket nor signed by one of its upstream keys. The push reports it and **returns** — the exit is non-zero only for refusals — and the bucket's page lists the same paths with the same sentence.
+
+The server fetches a hold's references in **one job over the whole missing set**, started when the hold is recorded and not tied to the upload request; the sentence's count is that set's size. A held row is stored, so a restart re-queues it at row apply and the fetch resumes with no new push. The bucket page shows which references the job has already landed beside the ones still missing. `--wait` is the explicit choice to stay: it **reads that progress** until the referrer is recorded, and never re-uploads it.
 
 A NAR larger than `--part-size` (64 MiB by default) is sent in parts, each retried on its own; the server reassembles them and the same hash proof decides. That is what makes a push work through a proxy with a request-size ceiling — Cloudflare's is 100 MB.
 
