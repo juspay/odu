@@ -40,6 +40,7 @@
  * that will not read it.
  */
 
+import { open } from "node:fs/promises";
 import { Effect, Layer, Stream } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import type { ClaimedRoutes } from "@odu/cordis/services";
@@ -68,8 +69,56 @@ import {
 
 
 /**
+ * A FILE AS A PULL STREAM, 64 KiB per read.
+ *
+ * NEVER hand a `BunFile` to `HttpServerResponse.raw`: the Node adapter odu web
+ * runs does not write that body, so the response headers go out and the socket
+ * then waits for ever (the pod's post-migration hang). This reads with the same
+ * `open`/`handle.read` loop the FIFO path uses, so the adapter sees a stream it
+ * knows; `Content-Length`/`Content-Range` are the route's own arithmetic.
+ */
+function fileBody(path: string, start: number, length: number): ReadableStream<Uint8Array> {
+  let handle: Awaited<ReturnType<typeof open>> | null = null;
+  let position = start;
+  let left = length;
+  return new ReadableStream({
+    async pull(controller) {
+      try {
+        handle ??= await open(path, "r");
+        if (left <= 0) {
+          await handle.close();
+          handle = null;
+          controller.close();
+          return;
+        }
+        const size = Math.min(64 * 1024, left);
+        const buffer = new Uint8Array(size);
+        const { bytesRead } = await handle.read(buffer, 0, size, position);
+        if (bytesRead === 0) {
+          await handle.close();
+          handle = null;
+          controller.error(new Error(`${path} ended ${left} bytes early`));
+          return;
+        }
+        position += bytesRead;
+        left -= bytesRead;
+        controller.enqueue(bytesRead === size ? buffer : buffer.subarray(0, bytesRead));
+      } catch (err) {
+        await handle?.close().catch(() => {});
+        handle = null;
+        controller.error(err);
+      }
+    },
+    async cancel() {
+      await handle?.close().catch(() => {});
+      handle = null;
+    },
+  });
+}
+
+/**
  * SERVE THE BYTES. A kept file answers with the file itself, `Content-Length`
- * and `Accept-Ranges`; a `Range` is sliced by Bun, so a resumed or ranged Nix
+ * and `Accept-Ranges`; a `Range` is sliced here, so a resumed or ranged Nix
  * fetch never re-dumps the path. Only an object whose file is not there yet
  * falls back to the FIFO stream, which has no length and is logged as such.
  */
@@ -121,28 +170,40 @@ function narResponse(
     if (first !== null && last !== null && (first > last || bounded < start)) {
       return HttpServerResponse.empty({ status: 416 });
     }
-    const body = Bun.file(source.path).slice(start, bounded + 1);
-    done(bounded - start + 1, "file");
-    return HttpServerResponse.raw(body, {
-      status: 206,
+    const bytes = bounded - start + 1;
+    done(bytes, "file");
+    return HttpServerResponse.stream(
+      Stream.fromReadableStream({
+        evaluate: () => fileBody(source.path, start, bytes),
+        onError: (err) => err,
+      }),
+      {
+        status: 206,
+        headers: {
+          ...headers,
+          "content-type": "application/x-nix-nar",
+          "content-length": String(bytes),
+          "content-range": `bytes ${start}-${bounded}/${source.size}`,
+          "accept-ranges": "bytes",
+        },
+      },
+    );
+  }
+  done(source.size, "file");
+  return HttpServerResponse.stream(
+    Stream.fromReadableStream({
+      evaluate: () => fileBody(source.path, 0, source.size),
+      onError: (err) => err,
+    }),
+    {
       headers: {
         ...headers,
         "content-type": "application/x-nix-nar",
-        "content-length": String(bounded - start + 1),
-        "content-range": `bytes ${start}-${bounded}/${source.size}`,
+        "content-length": String(source.size),
         "accept-ranges": "bytes",
       },
-    });
-  }
-  done(source.size, "file");
-  return HttpServerResponse.raw(Bun.file(source.path), {
-    headers: {
-      ...headers,
-      "content-type": "application/x-nix-nar",
-      "content-length": String(source.size),
-      "accept-ranges": "bytes",
     },
-  });
+  );
 }
 
 /** A bucket by name, and a credential that may do `need` with it — or the

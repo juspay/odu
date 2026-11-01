@@ -6,10 +6,11 @@
  * pull-based source has not. An in-process loopback reader is not this test:
  * the kernel and Bun's fetch apply pressure the pod's path does not.
  */
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "bun:test";
 import { createCache } from "./cache";
 import { openCacheRepo } from "./db";
@@ -167,6 +168,25 @@ describe.skipIf(!LINUX)("a slow socket and the server's memory", () => {
           resolve(Number(match[1]));
         });
       });
+      // THE SAME ADAPTER, OBSERVED FROM OUTSIDE: a Range byte-for-byte check
+      // and the headers a client actually receives.
+      const url = `http://127.0.0.1:${port}/cache/main/nar/${hash}.nar.zst`;
+      const ranged = spawnSync(
+        "curl",
+        ["-s", "-H", "Range: bytes=100-1099", url],
+        { maxBuffer: 1 << 20 },
+      );
+      expect(ranged.status).toBe(0);
+      expect(ranged.stdout.length).toBe(1000);
+      expect(createHash("sha256").update(ranged.stdout).digest("hex")).toBe(
+        createHash("sha256").update(file.subarray(100, 1100)).digest("hex"),
+      );
+      const headers = spawnSync("curl", ["-s", "-D", "-", "-o", "/dev/null", url], {
+        encoding: "utf-8",
+        maxBuffer: 1 << 20,
+      });
+      expect(headers.stdout.toLowerCase()).toContain(`content-length: ${file.length}`);
+
       const baseline = childRss(server.pid as number);
       const slow = spawn(
         "curl",

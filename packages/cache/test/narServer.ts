@@ -8,7 +8,9 @@
  * argv: <store-path>. Prints `ready <port>` on stdout.
  */
 import { createServer } from "node:http";
+import { ManagedRuntime, Effect, Scope } from "effect";
 import { HttpRouter } from "effect/http";
+import { NodeHttpServer } from "@effect/platform-node";
 import { nixDump } from "../src/store";
 import { createCache } from "../src/cache";
 import { cacheRoutes } from "../src/routes";
@@ -27,19 +29,26 @@ if (path === "routes") {
     throw new Error("narServer routes: a state dir, bucket and hash are required");
   }
   const cache = createCache({ stateRoot, rootToken: null });
-  const { handler, dispose } = HttpRouter.toWebHandler(
-    cacheRoutes(cache).layer,
-    { disableLogger: true },
+  // THE PRODUCTION ADAPTER: a Node request handler made by
+  // `NodeHttpServer.makeHandler` over the same Effect layer `odu web` uses.
+  // A handler called directly (or Bun's fetch) is not a test of serving: a
+  // body the adapter cannot write passes there and hangs in production.
+  const runtime = ManagedRuntime.make(NodeHttpServer.layerHttpServices);
+  const scope = await runtime.runPromise(Scope.make());
+  const handler = await runtime.runPromise(
+    Effect.gen(function* () {
+      const httpEffect = yield* HttpRouter.toHttpEffect(cacheRoutes(cache).layer);
+      return yield* NodeHttpServer.makeHandler(httpEffect, { scope });
+    }).pipe(Effect.provideService(Scope.Scope, scope)),
   );
-  const served = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    fetch: (request) => handler(request),
-  });
-  process.stdout.write(`ready ${served.port}\n`);
+  const server = createServer(handler);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (typeof address !== "object" || address === null) throw new Error("no listener");
+  process.stdout.write(`ready ${address.port}\n`);
   process.on("SIGTERM", () => {
-    served.stop();
-    void dispose();
+    server.close();
+    void runtime.dispose();
     void cache.close();
   });
 } else {
