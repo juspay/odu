@@ -28,6 +28,7 @@ import {
   fingerprintOf,
   formatNarinfo,
   generateKeypair,
+  isDerivationPath,
   isStorePathHash,
   keyNameOf,
   type NarInfo,
@@ -294,12 +295,11 @@ export interface Cache {
   onChange(listener: () => void): () => void;
   /** The admin face. */
   admin: CacheAdmin;
-  /** Drop held rows whose PATH is a derivation. Called at row apply: an old
-   *  pod may hold rows from before the push refused them. */
-  dropDerivationHolds(): number;
   /** RE-QUEUE the held rows this database remembers — called at ROW APPLY, so
-   *  a restart resumes a reference fetch instead of waiting for a new push. */
-  resume(): Promise<void>;
+   *  a restart resumes a reference fetch instead of waiting for a new push.
+   *  Rows whose PATH is a derivation are dropped here, not re-fetched: an old
+   *  pod may hold them from before the push refused them. */
+  resume(): Promise<{ droppedDerivations: number }>;
   /** Join the row's background work, then close the database. */
   close(): Promise<void>;
 }
@@ -940,14 +940,13 @@ export function createCache(options: CacheOptions): Cache {
 
     held: () => repo.held(),
 
-    dropDerivationHolds() {
-      const rows = repo.held().filter((row) => row.storePath.endsWith(".drv"));
-      for (const row of rows) repo.deleteHeld(row.bucket, row.storePath);
-      if (rows.length > 0) notify();
-      return rows.length;
+    async resume() {
+      const derivations = repo.held().filter((row) => isDerivationPath(row.storePath));
+      for (const row of derivations) repo.deleteHeld(row.bucket, row.storePath);
+      if (derivations.length > 0) notify();
+      await staging.resume();
+      return { droppedDerivations: derivations.length };
     },
-
-    resume: () => staging.resume(),
 
     onChange(listener) {
       listeners.add(listener);

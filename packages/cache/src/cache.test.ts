@@ -26,6 +26,7 @@ import { base32 } from "./narinfo";
 import { type Cache, createCache } from "./cache";
 import type { NarinfoOutcome } from "./staging";
 import { FakeStore, hashOf } from "../test/fakeStore";
+import { openCacheRepo } from "./db";
 
 const ROOT = "root-token";
 const NOW = 1_700_000_000_000;
@@ -822,6 +823,66 @@ describe("a failed fetch", () => {
     expect(cache.held()).toMatchObject([
       { storePath: parent, failure: "unable to download …: Could not resolve host" },
     ]);
+    await cache.close();
+  });
+});
+
+describe("held derivations at boot", () => {
+  it("are dropped instead of re-fetched", async () => {
+    const first = cacheWith(ROOT);
+    await first.admin.create(createInput);
+    await first.close();
+    // A row from the pod before the push refused derivations.
+    const file = `${scratch}/cache/cache.sqlite`;
+    const repo = openCacheRepo(file);
+    repo.putHeld({
+      bucket: "main",
+      storePath: "/nix/store/dddddddddddddddddddddddddddddddd-clang-20.1.8.drv",
+      missing: ["/nix/store/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-dep.drv"],
+      fetching: 1,
+      fetched: [],
+      failure: null,
+      created: NOW,
+    });
+    repo.close();
+
+    const second = createCache({
+      stateRoot: scratch,
+      rootToken: ROOT,
+      store: null,
+      blob: store,
+      now: () => NOW,
+    });
+    expect(await second.resume()).toEqual({ droppedDerivations: 1 });
+    expect(second.held()).toEqual([]);
+    await second.close();
+  });
+});
+
+describe("a reference that is a derivation", () => {
+  it("refuses the import instead of holding it for ever", async () => {
+    const parent = "/nix/store/abababababababababababababababab-parent";
+    const drv = "/nix/store/cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd-thing.drv";
+    const cache = cacheWith(ROOT);
+    await cache.admin.create({ ...createInput, upstreamKeys: ["cache.nixos.org-1"] });
+    const payload = nar("parent that names a recipe");
+    store.add(
+      { storePath: parent, narHash: payload.narHash, narSize: 1, references: [drv] },
+      false,
+    );
+    await putNar(cache, "main", payload);
+    const outcome = await cache.acceptNarinfo(
+      cache.bucket("main") as never,
+      hashOf(parent),
+      stream(narinfoText(parent, payload, [drv])),
+    );
+    expect(outcome).toMatchObject({ ok: false, status: 400 });
+    if (!outcome.ok) {
+      expect(outcome.message).toContain("references a derivation");
+      expect(outcome.message).toContain(drv);
+    }
+    // NOT A HOLD: nothing could ever clear it.
+    expect(cache.held()).toEqual([]);
     await cache.close();
   });
 });

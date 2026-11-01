@@ -482,8 +482,15 @@ export const cacheRow = definePlugin({
     const fetchSlots = createSlots(2);
     const cache = createCache({ stateRoot: stateDir, rootToken, store, fetchSlots });
     // A RESTART RESUMES ITS HOLDS at row apply: the reference fetch a pod died
-    // in the middle of is re-queued here, with no request needed to start it.
-    yield* Effect.promise(() => cache.resume());
+    // in the middle of is re-queued here, and held derivation rows from before
+    // the push refused them are DROPPED (not re-fetched) by the same verb.
+    const { droppedDerivations } = yield* Effect.promise(() => cache.resume());
+    if (droppedDerivations > 0) {
+      log.info(
+        { dropped: droppedDerivations },
+        "odu cache: dropped held derivation paths at boot",
+      );
+    }
 
     // THE ROW'S PUBLISHED FACT: the names its buckets carry. A row that routes
     // those names (the cloudflare row) declares this service; it never opens

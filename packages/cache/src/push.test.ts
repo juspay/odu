@@ -698,3 +698,27 @@ describe("the narinfo a push sends", () => {
     expect(text).toContain("Sig: lane-1:AAAA");
   });
 });
+
+describe("a derivation argument", () => {
+  it("is skipped, named, and never uploaded", async () => {
+    const server = startServer();
+    try {
+      const drv = "/nix/store/dddddddddddddddddddddddddddddddd-thing.drv";
+      const lines: string[] = [];
+      const summary = await pushToCache({
+        bucket: `${server.origin}/main`,
+        paths: [drv],
+        env: envOf({ ODU_CACHE_TOKEN: "t" }),
+        platform: PLATFORM,
+        onLine: (line) => lines.push(line),
+      });
+      expect(summary).toMatchObject({ pushed: 0, failed: 0, skippedDerivation: [drv] });
+      expect(lines).toContain(`⏭ ${drv} skipped-derivation`);
+      // The only request a derivation may cause is the consumer facts (the
+      // page link); NO upload, no missing question.
+      expect(server.seen.filter((seen) => seen.method === "PUT")).toEqual([]);
+    } finally {
+      server.stop();
+    }
+  });
+});

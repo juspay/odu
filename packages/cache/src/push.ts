@@ -33,7 +33,12 @@ import {
   readCredentials as sharedReadCredentials,
   saveCredential as sharedSaveCredential,
 } from "@odu/credentials";
-import { narHashBase32, storePathBasename, storePathHash } from "./narinfo";
+import {
+  isDerivationPath,
+  narHashBase32,
+  storePathBasename,
+  storePathHash,
+} from "./narinfo";
 import { CACHE_MOUNT } from "./paths";
 import { DEFAULT_NAR_PART_BYTES, heldReason, MAX_NAR_PART_BYTES } from "./surface";
 import { type PathInfo, nixClosure, nixDump } from "./store";
@@ -144,6 +149,9 @@ export interface PushSummary {
   /** Paths the bucket already has, or would not take because an upstream key
    *  signed them. The server says which is which. */
   skippedUpstream: number;
+  /** Derivations the caller named. A cache serves outputs; a `.drv` is a
+   *  recipe, and its references are recipes. */
+  skippedDerivation: readonly string[];
   alreadyPresent: number;
   /**
    * Paths the bucket ACCEPTED and is holding for references that are neither
@@ -299,8 +307,21 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
     closure: (paths) => nixClosure(paths, null),
     dump: (storePath) => nixDump(storePath, null),
   };
-  const closure = new Map((await platform.closure(options.paths)).map((info) => [info.storePath, info]));
-  const answer = await askMissing(resolved, headers, closure);
+  // A DERIVATION IS NOT A CACHE OBJECT. Its references are recipes, and
+  // fetching one lets Nix try to BUILD it on the cache host. Report and skip;
+  // the exit stays 0, like an upstream-signed path.
+  const skippedDerivation = options.paths.filter(isDerivationPath);
+  for (const path of skippedDerivation) say(`⏭ ${path} skipped-derivation`);
+  const uploadable = options.paths.filter((path) => !isDerivationPath(path));
+  const closure =
+    uploadable.length === 0
+      ? new Map()
+      : new Map((await platform.closure(uploadable)).map((info) => [info.storePath, info]));
+  // An empty closure has nothing to ask; the summary below is the one shape.
+  const answer =
+    closure.size === 0
+      ? { missing: [] as readonly string[], skippedUpstream: [] as readonly string[] }
+      : await askMissing(resolved, headers, closure);
   const present = closure.size - answer.missing.length;
   const alreadyPresent = present - answer.skippedUpstream.length;
   // ONE PREAMBLE, then a line per path: what the closure is, what the bucket
@@ -420,6 +441,7 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
   return {
     pushed,
     skippedUpstream: answer.skippedUpstream.length,
+    skippedDerivation,
     alreadyPresent,
     held,
     failed: failures.length,

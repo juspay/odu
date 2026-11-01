@@ -334,10 +334,12 @@ export function createStaging(deps: StagingDeps): Staging {
     const references = entry.info.references.filter((one) => one !== entry.info.storePath);
     // ONE `nix path-info` for the whole set, not one spawn per reference.
     const here = await blob.presentOf(references);
-    // A DERIVATION IS NEVER FETCHED: substituting one lets Nix try to build it
-    // on the cache host. It stays in the missing set so the hold says so.
-    const out = references.filter((reference) => !here.has(reference));
-    for (const one of reported) if (!out.includes(one)) out.push(one);
+    const out = references.filter(
+      (reference) => !here.has(reference) && !isDerivationPath(reference),
+    );
+    for (const one of reported) {
+      if (!isDerivationPath(one) && !out.includes(one)) out.push(one);
+    }
     return out;
   }
 
@@ -364,31 +366,34 @@ export function createStaging(deps: StagingDeps): Staging {
     const upstreams = upstreamFor(bucket.upstreamKeys);
     const outcome = await blob.import({ dir: dirForBucket, storePath: entry.info.storePath });
     if (!outcome.ok && outcome.missing.length > 0) {
-      const reportedDerivations = outcome.missing.filter(isDerivationPath);
-      const missing = await missingOf(
-        entry,
-        outcome.missing.filter((one) => !isDerivationPath(one)),
-      );
+      // A DERIVATION IS A REFUSAL, NOT A HOLD. Nothing will ever clear it: the
+      // cache never fetches one and never accepts one. The pusher is told, and
+      // the row is dropped like any other import that cannot be served.
+      const derivations = outcome.missing.filter(isDerivationPath);
+      if (derivations.length > 0) {
+        repo.deleteHeld(bucket.name, entry.info.storePath);
+        return {
+          failed:
+            `${entry.info.storePath} references a derivation ` +
+            `(${derivations.join(", ")}), which a cache never serves`,
+        };
+      }
+      const missing = await missingOf(entry, outcome.missing);
       entry.waitingOn = missing;
       entry.fetched = [...new Set([...entry.fetched, ...landed(entry, missing)])];
-      entry.failure =
-        reportedDerivations.length > 0
-          ? "a reference is a derivation, which the cache never builds"
-          : null;
-      const fetchable = missing.filter((one) => !isDerivationPath(one));
-      if (upstreams.length > 0 && fetchable.length > 0) {
+      if (upstreams.length > 0) {
         if (entry.fetching === 0 && !closed) {
-          entry.fetching = fetchable.length;
+          entry.fetching = missing.length;
           repo.putHeld({
             bucket: bucket.name,
             storePath: entry.info.storePath,
             missing,
             fetching: entry.fetching,
             fetched: entry.fetched,
-            failure: entry.failure,
+            failure: null,
             created: now(),
           });
-          enqueueFetch(bucket, dirForBucket, entry, fetchable);
+          enqueueFetch(bucket, dirForBucket, entry, missing);
           changed();
         }
         return { missing, fetching: entry.fetching };
@@ -399,7 +404,7 @@ export function createStaging(deps: StagingDeps): Staging {
         missing,
         fetching: 0,
         fetched: entry.fetched,
-        failure: entry.failure,
+        failure: null,
         created: now(),
       });
       return { missing, fetching: 0 };
@@ -867,6 +872,17 @@ export function createStaging(deps: StagingDeps): Staging {
           message:
             `${info.storePath} is a derivation — a cache serves outputs; ` +
             "its references are recipes, and fetching one asks the host to build it",
+        };
+      }
+      const derivedReference = info.references.find(isDerivationPath);
+      if (derivedReference !== undefined) {
+        await unlink(path).catch(() => {});
+        return {
+          ok: false,
+          status: 400,
+          message:
+            `${info.storePath} references a derivation (${derivedReference}), ` +
+            "which a cache never serves",
         };
       }
 
