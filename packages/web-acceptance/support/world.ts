@@ -125,6 +125,12 @@ export class OduWorld extends World {
   errors: string[] = [];
   /** Every URL the page asked for. */
   requests: string[] = [];
+  /** A NAVIGATION THIS SCENARIO ASKED FOR, and the status it must answer.
+   *  The generic "no page errors" check allows exactly these and nothing else:
+   *  a 404 the scenario asked for is the answer, not a fault. */
+  expectedResponses: { status: number; url: string }[] = [];
+  /** Every non-2xx response the page received, for the same check. */
+  failedResponses: { status: number; url: string }[] = [];
 
   /** The log key the service minted for the failure this scenario is about,
    *  when a step arranged one. Kept so an assertion about the ADDRESS compares

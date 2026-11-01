@@ -309,6 +309,8 @@ Before({ timeout: RUN_SETUP_TIMEOUT }, async function (this: OduWorld, scenario)
 
   this.errors = [];
   this.requests = [];
+  this.expectedResponses = [];
+  this.failedResponses = [];
   this.ownFixtures = [];
   this.ownRuns = [];
 
@@ -324,6 +326,11 @@ Before({ timeout: RUN_SETUP_TIMEOUT }, async function (this: OduWorld, scenario)
   });
   this.page.on("request", (request) => {
     this.requests.push(request.url());
+  });
+  this.page.on("response", (response) => {
+    if (!response.ok()) {
+      this.failedResponses.push({ status: response.status(), url: response.url() });
+    }
   });
 
   // AND LAST, so the sign-in's own navigation is one of the requests and its

@@ -574,7 +574,11 @@ Then("the page names the bucket's public key", function (this: OduWorld) {
 When("I open a path under the cache that names nothing", async function (this: OduWorld) {
   const name = this.cacheBucket;
   assert.ok(name !== undefined, "no bucket was arranged");
-  const response = await this.page.goto(`${this.service.origin}/cache/${name}/nope`);
+  const url = `${this.service.origin}/cache/${name}/nope`;
+  // THE 404 IS THE ANSWER THIS STEP ASKS FOR. Declared before the navigation,
+  // so the generic "no page errors" check allows exactly this URL and status.
+  this.expectedResponses.push({ status: 404, url });
+  const response = await this.page.goto(url);
   this.visited = { status: response?.status() ?? null, body: await this.page.content() };
 });
 
