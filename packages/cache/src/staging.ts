@@ -26,6 +26,12 @@
  * lets a second narinfo see the object the first keeps is in this process —
  * replicas and the S3 store (both planned) need it somewhere shared.
  *
+ * **A chunked upload's parts are its session's (`x-odu-upload`, 2.4):**
+ * `F.s-<session>.part-i`, joined into `nar/F`. A client could PUT a NAR
+ * literally named `F.s-<session>` and collide with them, but only by knowing
+ * another upload's random session id — no more than a write token already
+ * allows. A request without a session keeps the shared `F.part-i` of 2.x.
+ *
  * **There is no ordering problem any more.** References are names in the
  * narinfo, not paths a store must already hold, so a closure arriving in any
  * order is all equally recordable. A narinfo without its NAR is still refused;
