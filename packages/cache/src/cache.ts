@@ -19,9 +19,9 @@
  * first contact is a cache anybody on the machine can create buckets in.
  */
 
+import { statfs } from "node:fs/promises";
 import { join } from "node:path";
-import { type BlobStore, nixStore } from "./store";
-import type { BucketRow, BucketTotals, HeldRow, ObjectRow, Scope, TokenRow } from "./db";
+import type { BucketRow, BucketTotals, ObjectRow, Scope, TokenRow } from "./db";
 import { cursorFor, openCacheRepo } from "./db";
 import { planGc, runGc, type GcReport } from "./gc";
 import {
@@ -39,8 +39,16 @@ import {
 import { newChain, serial } from "./serial";
 import { CACHE_MOUNT } from "./paths";
 import { PATH_PAGE_SIZE } from "./surface";
-import { createStaging, type CompleteUpload, type NarinfoOutcome, type Upload } from "./staging";
-import { createSlots, type Slots } from "./slots";
+import {
+  createStaging,
+  objectKey,
+  type CompleteUpload,
+  type NarinfoOutcome,
+  type Upload,
+} from "./staging";
+import { diskObjectStore, type ObjectStore } from "./objectStore";
+import { contentAddressOf } from "./storePath";
+import { createSlots } from "./slots";
 import {
   globMatches,
   hashToken,
@@ -231,6 +239,27 @@ export interface PathPageRow {
  *  exists, which is exactly what a private name must not leak. */
 export type AuthVerdict = { ok: true } | { ok: false; status: 401 | 403 | 404; message: string };
 
+export type NarSource =
+  | { kind: "file"; storePath: string; path: string; size: number }
+  | { kind: "stream"; storePath: string; stream: ReadableStream<Uint8Array>; size: number }
+  /** THE ONE-TIME MIGRATION: the old Nix store still has this row's path and
+   *  its object has not been produced yet. Removed when that store is. */
+  | { kind: "legacy"; storePath: string; stream: ReadableStream<Uint8Array> };
+
+/** What one boot's work found or did. */
+export interface BootReport {
+  /** Rows whose path proved its own `fixed:r:sha256` CA. */
+  caProved: number;
+  /** Rows whose object was produced from the old Nix store this boot. */
+  objectsMigrated: number;
+  /** Object files with no row (a crash between put and record). */
+  orphansSwept: number;
+  /** True when every row has its object, so the old store is no longer read. */
+  migrationComplete: boolean;
+  /** Why the migration stopped early, if it did. */
+  paused: string | null;
+}
+
 export interface Cache {
   /** The protocol face. */
   bucket(name: string): BucketRow | null;
@@ -240,7 +269,9 @@ export interface Cache {
   authorize(header: string | undefined, bucket: BucketRow, need: Scope): AuthVerdict;
   narinfoText(bucket: BucketRow, hash: string): string | null;
   touch(bucket: BucketRow, hash: string): void;
-  narStream(bucket: BucketRow, file: string): Promise<ReadableStream<Uint8Array> | null>;
+  /** ONE operational line; the row hands the daemon's logger to the cache. */
+  log(event: string, fields: Record<string, unknown>): void;
+  narSource(bucket: BucketRow, file: string): Promise<NarSource | null>;
   beginUpload(bucket: BucketRow, file: string): Promise<Upload>;
   /** One part of a chunked NAR, under the part ceiling. A retry overwrites the
    *  same index, so a dropped request costs one part. */
@@ -272,15 +303,6 @@ export interface Cache {
    */
   snapshot(): readonly BucketFacts[];
   /**
-   * WHAT THE BUCKETS ARE HOLDING FOR REFERENCES — a row per path, with the
-   * references Nix named.
-   *
-   * Not a log line and not staging's memory: the reason a push stopped is a
-   * fact the bucket publishes, so the board lists it and a restart does not
-   * make a pending upload look like one that never arrived.
-   */
-  held(): readonly HeldRow[];
-  /**
    * SOMETHING A SUBSCRIBER WOULD SEE MOVED — a narinfo landed, a bucket was
    * created, a closure was pinned or collected, or reads accumulated.
    *
@@ -295,11 +317,9 @@ export interface Cache {
   onChange(listener: () => void): () => void;
   /** The admin face. */
   admin: CacheAdmin;
-  /** RE-QUEUE the held rows this database remembers — called at ROW APPLY, so
-   *  a restart resumes a reference fetch instead of waiting for a new push.
-   *  Rows whose PATH is a derivation are dropped here, not re-fetched: an old
-   *  pod may hold them from before the push refused them. */
-  resume(): Promise<{ droppedDerivations: number; backfilledCa: number }>;
+  /** BOOT WORK AT ROW APPLY: prove `CA:` from each path, migrate objects that
+   *  the old Nix store still owns, sweep orphan objects. */
+  resume(): Promise<BootReport>;
   /** Join the row's background work, then close the database. */
   close(): Promise<void>;
 }
@@ -307,16 +327,20 @@ export interface Cache {
 export interface CacheOptions {
   /** The per-user state root; the cache owns `<stateRoot>/cache`. */
   stateRoot: string;
-  /** THE FETCH BOUND, made by the row's activation. Defaults to one per cache
-   *  instance — never module state. */
-  fetchSlots?: Slots;
   /** `$ODU_ROOT_TOKEN`, or null when the operator supplied none. */
   rootToken: string | null;
-  /** `--store` URI for every nix call; null is the daemon. */
-  store: string | null;
-  /** Injected by the suite; production uses the Nix store. */
-  blob?: BlobStore;
+  /** THE OLD NIX STORE, read only during the one-time migration. `null` on a
+   *  fresh deployment; the row never needs a store otherwise. */
+  legacyStore?: { dump(storePath: string): ReadableStream<Uint8Array> } | null;
+  /** Pause the migration below this many free bytes (default 10 GiB). */
+  migrationFreeFloor?: number;
+  /** Injected by the suite; production is the disk under the cache's dir. */
+  objects?: ObjectStore;
   now?: () => number;
+  /** ONE structured line per operational fact (serve, import, boot, refusal).
+   *  The row hands the daemon's logger here; a suite that does not care omits
+   *  it. No per-chunk lines: a NAR read is one line. */
+  log?: (event: string, fields: Record<string, unknown>) => void;
 }
 
 /** The floor between two READ-driven publications. Reads are the only change
@@ -338,9 +362,7 @@ export function createCache(options: CacheOptions): Cache {
   const now = options.now ?? (() => Date.now());
   const dir = join(options.stateRoot, "cache");
   const repo = openCacheRepo(join(dir, "cache.sqlite"));
-  const blob =
-    options.blob ??
-    nixStore({ gcrootsRoot: join(dir, "gcroots"), store: options.store });
+  const objects = options.objects ?? diskObjectStore({ dir });
 
   /**
    * ONE writer at a time, across `record`, `pin` and `gc`.
@@ -434,8 +456,8 @@ export function createCache(options: CacheOptions): Cache {
       storePath: row.storePath,
       url: `nar/${row.narHash.replace(/^sha256:/, "")}.${SERVED_EXTENSION}`,
       compression: "zstd",
-      fileHash: null,
-      fileSize: null,
+      fileHash: row.fileHash,
+      fileSize: row.fileSize,
       narHash: row.narHash,
       narSize: row.narSize,
       references: row.references,
@@ -457,70 +479,60 @@ export function createCache(options: CacheOptions): Cache {
    */
   function record(
     bucket: BucketRow,
-    storePath: string,
-    expectedNarHash: string,
-    clientSigs: readonly string[],
+    info: NarInfo,
+    file: { fileHash: string; fileSize: number },
   ): Promise<boolean> {
-    return withWriteLock(() => recordNow(bucket, storePath, expectedNarHash, clientSigs));
+    return withWriteLock(() => recordNow(bucket, info, file));
   }
 
   async function recordNow(
     bucket: BucketRow,
-    storePath: string,
-    expectedNarHash: string,
-    clientSigs: readonly string[],
+    info: NarInfo,
+    file: { fileHash: string; fileSize: number },
   ): Promise<boolean> {
-    const info = await blob.pathInfo(storePath);
-    if (info === null) {
-      throw new Error(`imported ${storePath} but the store does not know it`);
-    }
-    // Defence in depth: the bytes were hashed before the import, and this is
-    // the store agreeing afterwards.
-    if (info.narHash !== expectedNarHash) {
-      throw new Error(
-        `${storePath} is ${info.narHash} in the store but the narinfo said ${expectedNarHash}`,
-      );
-    }
-    const existing = repo.object(bucket.name, storePath);
+    const existing = repo.object(bucket.name, info.storePath);
     const at = now();
-    const sigs = [...new Set([...clientSigs, ...info.sigs])].filter(
-      (sig) => keyNameOf(sig) !== bucket.keyName,
-    );
+    const sigs = [...new Set(info.sigs)].filter((sig) => keyNameOf(sig) !== bucket.keyName);
+    // CA IS PROVED FROM THE PATH, not taken from the pusher and not asked of a
+    // store: the row already holds (name, narHash, references, self), and Nix's
+    // formula reproduces the path or it does not. An old input-addressed row
+    // stays null, honestly.
+    const ca = contentAddressOf({
+      storePath: info.storePath,
+      narHash: info.narHash,
+      references: info.references,
+    });
     repo.putObject({
       bucket: bucket.name,
-      storePath,
-      hash: storePathHash(storePath),
+      storePath: info.storePath,
+      hash: storePathHash(info.storePath),
       narHash: info.narHash,
       narSize: info.narSize,
       references: info.references,
       deriver: info.deriver,
-      // THE STORE'S FACT. A pusher's `CA:` line is a hint; `nix path-info`
-      // knows whether the path is content-addressed, and the store wins.
-      ca: info.ca,
+      ca,
+      fileHash: file.fileHash,
+      fileSize: file.fileSize,
       sigs,
       hits: existing?.hits ?? 0,
       created: existing?.created ?? at,
       // A re-push is an access: the pusher wants the path to stay.
       lastAccessed: at,
     });
-    // The root is what keeps the machine's own GC from eating a path the cache
-    // serves; without it the first `nix-collect-garbage` empties the bucket.
-    await blob.retain(bucket.name, storePath);
     return true;
   }
 
   // The write path, wired to the ONE lock: `record` is the dependency staging
-  // takes, and it is the locked one, so a pin cannot interleave with an import.
-  const fetchSlots = options.fetchSlots ?? createSlots(2);
+  // takes, and it is the locked one, so a pin cannot interleave with a record.
   const staging = createStaging({
-    repo,
-    blob,
+    objects,
     dir,
     now,
     record,
-    changed: () => notify(),
-    slots: fetchSlots,
+    log: options.log,
   });
+  /** THE MIGRATION'S THROTTLE: two old-store dumps at a time, never more. */
+  const migrationSlots = createSlots(2);
 
   // ── who hears about a change ──────────────────────────────────────────────
   //
@@ -757,7 +769,7 @@ export function createCache(options: CacheOptions): Cache {
           pins: repo.pins(),
           now: now(),
         });
-        const report = await runGc(blob, repo, plan);
+        const report = await runGc(repo, plan, objects);
         // Every bucket the sweep touched answers a different object count now.
         notify();
         return { ok: true as const, value: report };
@@ -809,15 +821,29 @@ export function createCache(options: CacheOptions): Cache {
     bucket: BucketRow,
     input: { name: string; paths: readonly string[] },
   ): Promise<CacheOutcome<PinFacts>> {
-    // ONE `nix path-info -r` for the whole closure, not one process per path.
-    const closure = await blob.closure(input.paths);
-    const reached = new Set(closure.map((info) => info.storePath));
+    // THE CLOSURE IS THE BUCKET'S OWN ROWS: a pin holds what this cache
+    // serves, so the references are followed in the metadata, not asked of a
+    // Nix store the server no longer has.
+    const rows = new Map(repo.objects(bucket.name).map((row) => [row.storePath, row]));
+    const reached = new Set<string>();
+    const queue = [...input.paths];
+    while (queue.length > 0) {
+      const path = queue.pop() as string;
+      if (reached.has(path)) continue;
+      const row = rows.get(path);
+      if (row === undefined) continue;
+      reached.add(path);
+      for (const reference of row.references) {
+        const full = reference.startsWith("/nix/store/") ? reference : `/nix/store/${reference}`;
+        queue.push(full);
+      }
+    }
     const absent = input.paths.filter((path) => !reached.has(path));
     if (absent.length > 0) {
       return {
         ok: false,
         code: "bad_input",
-        message: `no such path in the store: ${absent.join(", ")}`,
+        message: `no such path in the bucket: ${absent.join(", ")}`,
       };
     }
     const created = now();
@@ -827,12 +853,8 @@ export function createCache(options: CacheOptions): Cache {
       rootPaths: [...reached],
       created,
     });
-    // Every path a pin holds must be rooted in the store, or the machine's own
-    // GC deletes the pin out from under the cache.
-    for (const path of reached) await blob.retain(bucket.name, path);
     // A pin changes `pinnedPaths`, which is a column of the bucket's row — so
-    // this is the third mutator that NOTIFIES, beside create and gc, rather
-    // than one the surface has to remember to publish for.
+    // this is the third mutator that NOTIFIES, beside create and gc.
     notify();
     return {
       ok: true,
@@ -880,6 +902,8 @@ export function createCache(options: CacheOptions): Cache {
       return row === null ? null : narinfoFor(bucket, row);
     },
 
+    log: (event, fields) => options.log?.(event, fields),
+
     touch(bucket, hash) {
       if (!isStorePathHash(hash)) return;
       const row = repo.objectByHash(bucket.name, hash);
@@ -888,14 +912,33 @@ export function createCache(options: CacheOptions): Cache {
       notifyReaders();
     },
 
-    async narStream(bucket, file) {
+    async narSource(bucket, file) {
       // `nar/<hash>.nar.zst` and `nar/<hash>.nar.xz` are the same object; the
       // extension is the CLIENT's compression choice and odu always serves
       // zstd, so only the hash part is looked up.
       const at = file.indexOf(".nar");
       const hash = at === -1 ? file : file.slice(0, at);
-      const row = repo.objectByNarHash(bucket.name, `sha256:${hash}`);
-      return row === null ? null : blob.dump(row.storePath);
+      const narHash = `sha256:${hash}`;
+      const row = repo.objectByNarHash(bucket.name, narHash);
+      if (row === null) return null;
+      const key = objectKey(bucket.name, narHash);
+      const size = await objects.head(key);
+      if (size !== null) {
+        const path = objects.localPath(key);
+        if (path !== null) return { kind: "file", storePath: row.storePath, path, size };
+        const object = await objects.get(key);
+        if (object !== null) {
+          return { kind: "stream", storePath: row.storePath, stream: object.stream, size };
+        }
+      }
+      // THE ONE-TIME TRANSITION. A row from before objects were kept has no
+      // object yet; the old Nix store serves it until the boot migration lands
+      // it. When that store is gone this branch is unreachable and the route
+      // is a 404, not a silent dump.
+      const legacy = options.legacyStore;
+      return legacy === undefined || legacy === null
+        ? null
+        : { kind: "legacy", storePath: row.storePath, stream: legacy.dump(row.storePath) };
     },
 
     // The write path is `./staging`'s; this face is the one the routes speak,
@@ -937,36 +980,88 @@ export function createCache(options: CacheOptions): Cache {
       return repo.buckets().map((bucket) => factsOf(bucket, counted));
     },
 
-    held: () => repo.held(),
-
     async resume() {
-      const derivations = repo.held().filter((row) => isDerivationPath(row.storePath));
-      for (const row of derivations) repo.deleteHeld(row.bucket, row.storePath);
-      if (derivations.length > 0) notify();
-      // BACKFILL `ca` FROM THE STORE. A row written before the store owned the
-      // fact has null; that means UNKNOWN, not input-addressed. One batched
-      // `nix path-info` over every null row at each boot keeps the schema as
-      // is: a path the store reports content-addressed is updated; a genuinely
-      // input-addressed one comes back null and stays null (honest, not lying).
-      const unknown = repo.objects().filter((row) => row.ca === null);
-      let backfilledCa = 0;
-      if (unknown.length > 0) {
-        const facts = new Map(
-          (await blob.pathInfos(unknown.map((row) => row.storePath))).map((info) => [
-            info.storePath,
-            info.ca,
-          ]),
-        );
-        for (const row of unknown) {
-          const ca = facts.get(row.storePath) ?? null;
-          if (ca === null) continue;
-          repo.putObject({ ...row, ca });
-          backfilledCa += 1;
-        }
-        if (backfilledCa > 0) notify();
+      // 1. CA IS PROVED FROM THE PATH. Pure and instant: no store query, no
+      // pusher line. A row that was null for years gets its `CA:` if (and only
+      // if) Nix's formula reproduces its path.
+      let caProved = 0;
+      for (const row of repo.objects().filter((one) => one.ca === null)) {
+        const ca = contentAddressOf({
+          storePath: row.storePath,
+          narHash: row.narHash,
+          references: row.references,
+        });
+        if (ca === null) continue;
+        repo.putObject({ ...row, ca });
+        caProved += 1;
       }
-      await staging.resume();
-      return { droppedDerivations: derivations.length, backfilledCa };
+      if (caProved > 0) {
+        options.log?.("cache.boot.ca", { proved: caProved });
+        notify();
+      }
+
+      // 2. MIGRATE THE OLD STORE'S ROWS INTO THE OBJECT STORE, two at a time.
+      // Disk is guarded BEFORE each put: a migration that fills the filesystem
+      // has broken the cache it was preserving.
+      const missing = repo.objects().filter((row) => row.fileHash === null);
+      let objectsMigrated = 0;
+      let paused: string | null = null;
+      const floor = options.migrationFreeFloor ?? 10 * 1024 * 1024 * 1024;
+      const legacy = options.legacyStore;
+      if (missing.length > 0 && legacy !== undefined && legacy !== null) {
+        options.log?.("cache.migration.start", { objects: missing.length });
+        for (const [index, row] of missing.entries()) {
+          const free = await statfs(dir).catch(() => null);
+          const available = free === null ? null : free.bavail * free.bsize;
+          if (available !== null && available < floor) {
+            paused = `free space ${Math.round(available / 1024 ** 2)} MiB is below the ${Math.round(
+              floor / 1024 ** 2,
+            )} MiB floor`;
+            options.log?.("cache.migration.pause", { reason: paused, at: index });
+            break;
+          }
+          try {
+            const facts = await migrationSlots.withSlot(() =>
+              objects.put(objectKey(row.bucket, row.narHash), legacy.dump(row.storePath)),
+            );
+            repo.putObject({ ...row, fileHash: facts.sha256, fileSize: facts.size });
+            objectsMigrated += 1;
+            if (objectsMigrated % 100 === 0) {
+              options.log?.("cache.migration.progress", {
+                migrated: objectsMigrated,
+                remaining: missing.length - index - 1,
+              });
+            }
+          } catch (err) {
+            options.log?.("cache.migration.object_failed", {
+              bucket: row.bucket,
+              path: row.storePath,
+              reason: String((err as Error).message ?? err),
+            });
+          }
+        }
+        if (options.log !== undefined && objectsMigrated > 0 && paused === null) {
+          // THE LINE THE OPERATOR WAITS FOR before deleting the old store.
+          options.log("cache.migration.complete", {
+            migrated: objectsMigrated,
+            note: "the old store is no longer read and can be deleted",
+          });
+        }
+      }
+      const migrationComplete = repo.objects().every((row) => row.fileHash !== null);
+
+      // 3. OBJECTS WITHOUT ROWS: a crash between put and record. Swept here,
+      // once, and logged.
+      const owned = new Set(repo.objects().map((row) => objectKey(row.bucket, row.narHash)));
+      let orphansSwept = 0;
+      for (const object of await objects.list("")) {
+        if (owned.has(object.key)) continue;
+        await objects.delete(object.key);
+        orphansSwept += 1;
+      }
+      if (orphansSwept > 0) options.log?.("cache.boot.orphans", { swept: orphansSwept });
+
+      return { caProved, objectsMigrated, orphansSwept, migrationComplete, paused };
     },
 
     onChange(listener) {
@@ -984,7 +1079,7 @@ export function createCache(options: CacheOptions): Cache {
       // REFUSE THE QUEUE FIRST: a job waiting for a slot belongs to this row,
       // and none of them may start after it closed. Then join the ones already
       // running, before the database closes.
-      fetchSlots.close();
+      migrationSlots.close();
       await staging.close();
       listeners.clear();
       repo.close();

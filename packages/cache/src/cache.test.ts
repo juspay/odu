@@ -11,32 +11,34 @@
 import { createHash } from "node:crypto";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
   statSync,
   utimesSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { Database } from "bun:sqlite";
 import { asRoot } from "./testlib";
 import { base32 } from "./narinfo";
+import { base32Bytes, storePathHashOf } from "./storePath";
 import { type Cache, createCache } from "./cache";
 import type { NarinfoOutcome } from "./staging";
-import { FakeStore, hashOf } from "../test/fakeStore";
+import { hashOf } from "../test/fakeStore";
 import { openCacheRepo } from "./db";
 
 const ROOT = "root-token";
 const NOW = 1_700_000_000_000;
 
 let scratch: string;
-let store: FakeStore;
 
 beforeEach(() => {
   scratch = mkdtempSync(join(tmpdir(), "odu-cache-admin-"));
-  store = new FakeStore();
 });
 
 afterEach(() => {
@@ -47,21 +49,8 @@ function cacheWith(rootToken: string | null): Cache {
   return createCache({
     stateRoot: scratch,
     rootToken,
-    store: null,
-    blob: store,
     now: () => NOW,
   });
-}
-
-/** Poll for a BACKGROUND effect — the row's upstream fetch queue. A real
- *  `nix-store -r` cannot be driven by fake timers, so this is the integration
- *  exception: short, bounded, and the condition is the thing awaited. */
-async function until(what: string, ask: () => boolean, timeoutMs = 2_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!ask()) {
-    if (Date.now() > deadline) throw new Error(`odu cache test: ${what} did not happen`);
-    await new Promise((resolve) => setTimeout(resolve, 2));
-  }
 }
 
 /** A body for `acceptNarinfo`, which takes a stream because a real one does. */
@@ -74,6 +63,14 @@ const stream = (text: string): ReadableStream<Uint8Array> =>
   });
 
 /** Bytes, and the NAR hash a narinfo has to claim for them. */
+const bytesStream = (bytes: Uint8Array): ReadableStream<Uint8Array> =>
+  new ReadableStream({
+    start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    },
+  });
+
 function nar(text: string): { bytes: Uint8Array; narHash: string } {
   const bytes = new TextEncoder().encode(text);
   return {
@@ -334,7 +331,7 @@ describe("tokenMint", () => {
 });
 
 describe("pin", () => {
-  it("refuses a path the store does not have, in one closure query", async () => {
+  it("refuses a path the bucket does not have", async () => {
     const cache = cacheWith(ROOT);
     await cache.admin.create(createInput);
     const refused = await cache.admin.pin({
@@ -344,17 +341,27 @@ describe("pin", () => {
       paths: ["/nix/store/00000000000000000000000000000000-absent"],
     });
     expect(refused).toMatchObject({ ok: false, code: "bad_input" });
-    expect(store.calls.filter((call) => call.op === "closure")).toHaveLength(1);
     await cache.close();
   });
 
-  it("resolves a closure through the store and roots every member", async () => {
+  it("resolves a closure through the bucket's own rows", async () => {
     const cache = cacheWith(ROOT);
     await cache.admin.create(createInput);
     const child = "/nix/store/11111111111111111111111111111111-child";
     const parent = "/nix/store/22222222222222222222222222222222-parent";
-    store.add({ storePath: child, narHash: `sha256:${"1".repeat(52)}`, narSize: 1, references: [] });
-    store.add({ storePath: parent, narHash: `sha256:${"2".repeat(52)}`, narSize: 1, references: [child] });
+    const childPayload = nar("child bytes");
+    const parentPayload = nar("parent bytes");
+    for (const [path, payload, refs] of [
+      [child, childPayload, []],
+      [parent, parentPayload, [child]],
+    ] as const) {
+      await putNar(cache, "main", payload);
+      await cache.acceptNarinfo(
+        cache.bucket("main") as never,
+        hashOf(path),
+        stream(narinfoText(path, payload, refs)),
+      );
+    }
 
     const pinned = await cache.admin.pin({
       ...asRoot(ROOT),
@@ -365,8 +372,6 @@ describe("pin", () => {
     expect(pinned).toMatchObject({ ok: true });
     if (!pinned.ok) return;
     expect([...pinned.value.rootPaths].sort()).toEqual([child, parent].sort());
-    expect(store.isRetained("main", child)).toBe(true);
-    expect(store.isRetained("main", parent)).toBe(true);
     await cache.close();
   });
 });
@@ -385,52 +390,26 @@ describe("stats", () => {
 });
 
 describe("a restart", () => {
-  it("attempts a narinfo recovered from disk on the next write", async () => {
-    // The uploads that survive a restart have no seed of their own: `drain`
-    // only tries entries its seed names, so without the recovered seed they
-    // would sit until the sweep deleted them an hour later.
+  it("keeps the rows and the object files", async () => {
     const first = cacheWith(ROOT);
     await first.admin.create(createInput);
-    const child = "/nix/store/cccccccccccccccccccccccccccccccc-child";
-    const parent = "/nix/store/pppppppppppppppppppppppppppppppp-parent";
-    const childPayload = nar("child bytes");
-    const parentPayload = nar("parent bytes");
-    store.add({ storePath: child, narHash: childPayload.narHash, narSize: 1, references: [] }, false);
-    store.add(
-      { storePath: parent, narHash: parentPayload.narHash, narSize: 1, references: [child] },
-      false,
-    );
-
-    // The parent arrives first, and cannot import: its reference is not valid.
-    await putNar(first, "main", parentPayload);
-    const early = await first.acceptNarinfo(
+    const path = "/nix/store/dddddddddddddddddddddddddddddddd-restart";
+    const payload = nar("bytes that outlive a process");
+    await putNar(first, "main", payload);
+    await first.acceptNarinfo(
       first.bucket("main") as never,
-      hashOf(parent),
-      stream(narinfoText(parent, parentPayload, [child])),
+      hashOf(path),
+      stream(narinfoText(path, payload)),
     );
-    expect(early).toMatchObject({ ok: true, status: 202 });
     first.close();
 
-    // A NEW process over the same state root, which has never seen either.
-    const second = createCache({
-      stateRoot: scratch,
-      rootToken: ROOT,
-      store: null,
-      blob: store,
-      now: () => NOW,
+    const second = cacheWith(ROOT);
+    expect(await second.admin.stats(asRoot(ROOT))).toMatchObject({
+      ok: true,
+      value: { objects: 1, bytes: payload.bytes.length },
     });
-    await putNar(second, "main", childPayload);
-    const late = await second.acceptNarinfo(
-      second.bucket("main") as never,
-      hashOf(child),
-      stream(narinfoText(child, childPayload)),
-    );
-    expect(late).toMatchObject({ ok: true, status: 200 });
-
-    const stats = await second.admin.stats(asRoot(ROOT));
-    // Two: the child this call recorded, and the parent the recovered seed
-    // unblocked.
-    expect(stats).toMatchObject({ ok: true, value: { objects: 2 } });
+    const source = await second.narSource(second.bucket("main") as never, `${payload.narHash.slice(7)}.nar.zst`);
+    expect(source).toMatchObject({ kind: "file", size: payload.bytes.length });
     second.close();
   });
 });
@@ -491,7 +470,10 @@ describe("chunked uploads", () => {
     utimesSync(partPath, new Date(0), new Date(0));
     utimesSync(markerPath, new Date(0), new Date(0));
     await cache.beginUpload(bucket, "idle.nar.zst");
-    await until("the abandoned part to be swept", () => !existsSync(partPath));
+    for (let tries = 0; tries < 200 && existsSync(partPath); tries++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(existsSync(partPath)).toBe(false);
 
     // A PART WHOSE MARKER IS FRESH IS AN UPLOAD IN PROGRESS, however old the
     // part is (a slow 2 GiB closure touches its marker per part).
@@ -505,131 +487,32 @@ describe("chunked uploads", () => {
   });
 });
 
-describe("upstream references", () => {
-  const child = "/nix/store/cccccccccccccccccccccccccccccccc-child";
-  const parent = "/nix/store/pppppppppppppppppppppppppppppppp-parent";
-
-  /** A parent whose only reference is absent from this store. */
-  async function parentWaitingOnChild(
-    upstreamKeys: readonly string[],
-  ): Promise<{ cache: Cache; outcome: NarinfoOutcome }> {
-    const cache = cacheWith(ROOT);
-    await cache.admin.create({ ...createInput, upstreamKeys });
-    const childPayload = nar("child bytes");
-    const parentPayload = nar("parent bytes");
-    store.upstream.set(child, {
-      storePath: child,
-      narHash: childPayload.narHash,
-      narSize: 1,
-      references: [],
-      // Signed by the key the bucket trusts — and therefore fetchable.
-      sigs: ["cache.nixos.org-1:c2ln"],
-    });
-    store.add(
-      { storePath: parent, narHash: parentPayload.narHash, narSize: 1, references: [child] },
-      false,
-    );
-    await putNar(cache, "main", parentPayload);
-    const outcome = await cache.acceptNarinfo(
-      cache.bucket("main") as never,
-      hashOf(parent),
-      stream(narinfoText(parent, parentPayload, [child])),
-    );
-    return { cache, outcome };
-  }
-
-  it("fetches a reference upstream signed OFF the request, then imports the referrer", async () => {
-    const { cache, outcome } = await parentWaitingOnChild(["cache.nixos.org-1"]);
-    // THE REQUEST ANSWERS 202 WHILE THE FETCH RUNS: `nix-store -r` can outlive a
-    // proxy's origin timeout, and sitting behind it would turn a hold into a
-    // gateway error.
-    expect(outcome).toMatchObject({ ok: true, status: 202, fetching: 1 });
-    await until("the referrer to import", () => cache.bucket("main") !== null && cache.held().length === 0);
-    // Scoped to the BUCKET's key: the fetch trusts what the bucket trusts and
-    // nothing else.
-    expect(store.substituted).toEqual([
-      { paths: [child], keyNames: ["cache.nixos.org-1"] },
-    ]);
-    expect(store.present.has(child)).toBe(true);
-    await cache.close();
-  });
-
-  it("holds a reference that is neither here nor upstream, and publishes it", async () => {
-    // The upstream has the path, but signed by a key this bucket does not
-    // trust — so it is not "upstream" for this bucket, and the referrer is held.
-    const { cache, outcome } = await parentWaitingOnChild(["some-other-key"]);
-    expect(outcome).toMatchObject({ ok: true, status: 202 });
-    if (outcome.ok && outcome.status === 202) expect(outcome.missing).toEqual([child]);
-    // The fetch is attempted, fails to find a trusted signature, and the hold
-    // becomes the FINAL reason — not a fetching state for ever.
-    await until("the fetch to settle", () => cache.held()[0]?.fetching === 0);
-    expect(cache.held()).toMatchObject([
-      { bucket: "main", storePath: parent, missing: [child], fetching: 0 },
-    ]);
-    await cache.close();
-  });
-
-  it("fetches nothing for a --no-upstream bucket", async () => {
-    const { cache, outcome } = await parentWaitingOnChild([]);
-    expect(outcome).toMatchObject({ ok: true, status: 202, fetching: 0 });
-    expect(store.substituted).toEqual([]);
-    expect(cache.held()).toHaveLength(1);
-    await cache.close();
-  });
-
-  it("keeps the held row across a restart", async () => {
-    const { cache } = await parentWaitingOnChild(["some-other-key"]);
-    // Let the (failing) fetch write its final reason before the process "dies".
-    await until("the fetch to settle", () => cache.held()[0]?.fetching === 0);
-    await cache.close();
-    const second = createCache({
-      stateRoot: scratch,
-      rootToken: ROOT,
-      store: null,
-      blob: store,
-      now: () => NOW,
-    });
-    // The reason is a ROW, not a drain's memory: a new process reads it before
-    // it has attempted anything.
-    expect(second.held()).toMatchObject([{ bucket: "main", storePath: parent, missing: [child] }]);
-    second.close();
-  });
-});
-
 describe("gc and pin", () => {
-  it("does not let a collection interleave with a pin that was already running", async () => {
-    // THE WINDOW: `planGc` and the delete are separate awaits. A pin issued
-    // while a collection is in flight must either be in the plan or win
-    // outright — never be promised a path the delete has already taken.
+  it("deletes the object of an expired row and keeps a pin", async () => {
     const cache = cacheWith(ROOT);
     await cache.admin.create({ ...createInput, retentionDays: 0 });
-    const target = "/nix/store/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-kept";
-    const payload = nar("kept bytes");
-    store.add({ storePath: target, narHash: payload.narHash, narSize: 1, references: [] }, false);
-    await putNar(cache, "main", payload);
-    const recorded = await cache.acceptNarinfo(
-      cache.bucket("main") as never,
-      hashOf(target),
-      stream(narinfoText(target, payload)),
-    );
-    expect(recorded).toMatchObject({ ok: true, status: 200 });
-
-    // A pin whose closure query is slow, started BEFORE the collection.
-    const gate = Promise.withResolvers<void>();
-    const closure = store.closure.bind(store);
-    store.closure = async (paths) => {
-      await gate.promise;
-      return closure(paths);
-    };
-
-    const pinning = cache.admin.pin({ ...asRoot(ROOT), bucket: "main", name: "keep", paths: [target] });
-    const collecting = cache.admin.gc({ ...asRoot(ROOT), bucket: null });
-    gate.resolve();
-    const [pinned, collected] = await Promise.all([pinning, collecting]);
-
-    expect(pinned).toMatchObject({ ok: true });
-    expect(collected).toMatchObject({ ok: true });
-    expect(store.deleted).not.toContain(target);
+    const kept = "/nix/store/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-kept";
+    const gone = "/nix/store/llllllllllllllllllllllllllllllll-gone";
+    for (const path of [kept, gone]) {
+      const payload = nar(path);
+      await putNar(cache, "main", payload);
+      await cache.acceptNarinfo(
+        cache.bucket("main") as never,
+        hashOf(path),
+        stream(narinfoText(path, payload)),
+      );
+    }
+    expect(await cache.admin.pin({ ...asRoot(ROOT), bucket: "main", name: "keep", paths: [kept] })).toMatchObject({ ok: true });
+    const db = new Database(join(scratch, "cache", "cache.sqlite"));
+    db.run("UPDATE object SET last_accessed = 0");
+    db.close();
+    expect(await cache.admin.gc({ ...asRoot(ROOT), bucket: "main" })).toMatchObject({ ok: true });
+    expect(cache.narinfoText(cache.bucket("main") as never, hashOf(kept))).not.toBeNull();
+    expect(cache.narinfoText(cache.bucket("main") as never, hashOf(gone))).toBeNull();
+    const objectOf = (path: string, payload: { narHash: string }): string =>
+      join(scratch, "cache", "objects", "main", "nar", `${payload.narHash.slice(7)}.nar.zst`);
+    expect(existsSync(objectOf(gone, nar(gone)))).toBe(false);
+    expect(existsSync(objectOf(kept, nar(kept)))).toBe(true);
     await cache.close();
   });
 });
@@ -694,171 +577,6 @@ describe("file modes", () => {
   });
 });
 
-describe("one fetch job over the whole missing set", () => {
-  it("imports a referrer with three upstream references after ONE job", async () => {
-    const parent = "/nix/store/pppppppppppppppppppppppppppppppp-parent";
-    const children = [
-      "/nix/store/c111111111111111111111111111111111-first",
-      "/nix/store/c222222222222222222222222222222222-second",
-      "/nix/store/c333333333333333333333333333333333-third",
-    ];
-    const cache = cacheWith(ROOT);
-    await cache.admin.create({ ...createInput, upstreamKeys: ["cache.nixos.org-1"] });
-    for (const child of children) {
-      const bytes = nar(child);
-      store.upstream.set(child, {
-        storePath: child,
-        narHash: bytes.narHash,
-        narSize: 1,
-        references: [],
-        sigs: ["cache.nixos.org-1:c2ln"],
-      });
-    }
-    const parentPayload = nar("parent bytes");
-    store.add(
-      {
-        storePath: parent,
-        narHash: parentPayload.narHash,
-        narSize: 1,
-        references: children,
-      },
-      false,
-    );
-    // NIX NAMES ONE. The job must still ask for all three.
-    store.reportOneMissing = true;
-    await putNar(cache, "main", parentPayload);
-    const outcome = await cache.acceptNarinfo(
-      cache.bucket("main") as never,
-      hashOf(parent),
-      stream(narinfoText(parent, parentPayload, children)),
-    );
-    expect(outcome).toMatchObject({ ok: true, status: 202, fetching: 3 });
-    if (outcome.ok && outcome.status === 202) expect(outcome.missing).toEqual(children);
-
-    await until("the referrer to import", () => cache.held().length === 0);
-    // ONE substitute call, over the full set — not one per reference and not
-    // one per attempt.
-    expect(store.substituted).toEqual([
-      { paths: children, keyNames: ["cache.nixos.org-1"] },
-    ]);
-    await cache.close();
-  });
-
-  it("resumes a held row at row apply after a restart", async () => {
-    const child = "/nix/store/cccccccccccccccccccccccccccccccc-child";
-    const parent = "/nix/store/pppppppppppppppppppppppppppppppp-parent";
-    const first = cacheWith(ROOT);
-    await first.admin.create({ ...createInput, upstreamKeys: ["cache.nixos.org-1"] });
-    const childPayload = nar("child bytes");
-    const parentPayload = nar("parent bytes");
-    // The upstream cannot answer yet: the hold is real when the process dies.
-    store.add(
-      { storePath: parent, narHash: parentPayload.narHash, narSize: 1, references: [child] },
-      false,
-    );
-    await putNar(first, "main", parentPayload);
-    const outcome = await first.acceptNarinfo(
-      first.bucket("main") as never,
-      hashOf(parent),
-      stream(narinfoText(parent, parentPayload, [child])),
-    );
-    expect(outcome).toMatchObject({ ok: true, status: 202 });
-    await until("the fetch to settle", () => first.held()[0]?.fetching === 0);
-    await first.close();
-    expect(store.substituted.length).toBeGreaterThan(0);
-
-    // The reference becomes available while the pod is down; the restart's
-    // row apply must pick the hold up with NO new push.
-    store.upstream.set(child, {
-      storePath: child,
-      narHash: childPayload.narHash,
-      narSize: 1,
-      references: [],
-      sigs: ["cache.nixos.org-1:c2ln"],
-    });
-    store.substituted.length = 0;
-    const second = createCache({
-      stateRoot: scratch,
-      rootToken: ROOT,
-      store: null,
-      blob: store,
-      now: () => NOW,
-    });
-    await second.resume();
-    await until("the resumed fetch to import the referrer", () => second.held().length === 0);
-    expect(store.substituted).toEqual([
-      { paths: [child], keyNames: ["cache.nixos.org-1"] },
-    ]);
-    await second.close();
-  });
-});
-
-describe("a failed fetch", () => {
-  it("holds with nix's last line, not 'neither here nor upstream'", async () => {
-    const child = "/nix/store/f111111111111111111111111111111111-child";
-    const parent = "/nix/store/f222222222222222222222222222222222-parent";
-    const cache = cacheWith(ROOT);
-    await cache.admin.create({ ...createInput, upstreamKeys: ["cache.nixos.org-1"] });
-    store.substituteFailure = "unable to download …: Could not resolve host";
-    const childPayload = nar("child bytes");
-    const parentPayload = nar("parent bytes");
-    store.upstream.set(child, {
-      storePath: child,
-      narHash: childPayload.narHash,
-      narSize: 1,
-      references: [],
-      sigs: ["cache.nixos.org-1:c2ln"],
-    });
-    store.add(
-      { storePath: parent, narHash: parentPayload.narHash, narSize: 1, references: [child] },
-      false,
-    );
-    await putNar(cache, "main", parentPayload);
-    await cache.acceptNarinfo(
-      cache.bucket("main") as never,
-      hashOf(parent),
-      stream(narinfoText(parent, parentPayload, [child])),
-    );
-    await until("the failed fetch to settle", () => cache.held()[0]?.fetching === 0);
-    expect(cache.held()).toMatchObject([
-      { storePath: parent, failure: "unable to download …: Could not resolve host" },
-    ]);
-    await cache.close();
-  });
-});
-
-describe("held derivations at boot", () => {
-  it("are dropped instead of re-fetched", async () => {
-    const first = cacheWith(ROOT);
-    await first.admin.create(createInput);
-    await first.close();
-    // A row from the pod before the push refused derivations.
-    const file = `${scratch}/cache/cache.sqlite`;
-    const repo = openCacheRepo(file);
-    repo.putHeld({
-      bucket: "main",
-      storePath: "/nix/store/dddddddddddddddddddddddddddddddd-clang-20.1.8.drv",
-      missing: ["/nix/store/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-dep.drv"],
-      fetching: 1,
-      fetched: [],
-      failure: null,
-      created: NOW,
-    });
-    repo.close();
-
-    const second = createCache({
-      stateRoot: scratch,
-      rootToken: ROOT,
-      store: null,
-      blob: store,
-      now: () => NOW,
-    });
-    expect(await second.resume()).toEqual({ droppedDerivations: 1, backfilledCa: 0 });
-    expect(second.held()).toEqual([]);
-    await second.close();
-  });
-});
-
 describe("a reference that is a derivation", () => {
   it("refuses the import instead of holding it for ever", async () => {
     const parent = "/nix/store/abababababababababababababababab-parent";
@@ -866,10 +584,6 @@ describe("a reference that is a derivation", () => {
     const cache = cacheWith(ROOT);
     await cache.admin.create({ ...createInput, upstreamKeys: ["cache.nixos.org-1"] });
     const payload = nar("parent that names a recipe");
-    store.add(
-      { storePath: parent, narHash: payload.narHash, narSize: 1, references: [drv] },
-      false,
-    );
     await putNar(cache, "main", payload);
     const outcome = await cache.acceptNarinfo(
       cache.bucket("main") as never,
@@ -881,22 +595,18 @@ describe("a reference that is a derivation", () => {
       expect(outcome.message).toContain("references a derivation");
       expect(outcome.message).toContain(drv);
     }
-    // NOT A HOLD: nothing could ever clear it.
-    expect(cache.held()).toEqual([]);
     await cache.close();
   });
 });
 
-describe("CA as the store's fact", () => {
-  it("backfills a null row at resume and serves the line", async () => {
-    const path = "/nix/store/cacacacacacacacacacacacacacacaca-ca-path";
+describe("CA is proved from the path", () => {
+  it("records and serves the CA of a content-addressed path", async () => {
     const cache = cacheWith(ROOT);
     await cache.admin.create(createInput);
     const payload = nar("a content-addressed path");
-    const metadata = store.add(
-      { storePath: path, narHash: payload.narHash, narSize: 1, references: [], ca: null },
-      false,
-    );
+    const hash = payload.narHash.slice(7);
+    const name = "ca-thing";
+    const path = `/nix/store/${storePathHashOf("source", base32Bytes(hash), name)}-${name}`;
     await putNar(cache, "main", payload);
     const accepted = await cache.acceptNarinfo(
       cache.bucket("main") as never,
@@ -904,15 +614,89 @@ describe("CA as the store's fact", () => {
       stream(narinfoText(path, payload, [])),
     );
     expect(accepted).toMatchObject({ ok: true, status: 200 });
-    // The pusher sent no CA line; the store did not know either at record time.
-    expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).not.toContain("CA:");
-
-    // The store now reports it content-addressed; boot backfills the row.
-    metadata.ca = `fixed:r:sha256:${"A".repeat(52)}`;
-    expect(await cache.resume()).toEqual({ droppedDerivations: 0, backfilledCa: 1 });
     expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).toContain(
-      `CA: ${metadata.ca}`,
+      `CA: fixed:r:sha256:${hash}`,
     );
+
+    // A ROW FROM BEFORE THE PROOF: null, then proved at boot without a store.
+    const db = new Database(join(scratch, "cache", "cache.sqlite"));
+    db.run("UPDATE object SET ca = NULL");
+    db.close();
+    expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).not.toContain("CA:");
+    expect(await cache.resume()).toMatchObject({ caProved: 1 });
+    expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).toContain("CA:");
     await cache.close();
+  });
+
+  it("migrates a row whose object was never kept, then serves the object file", async () => {
+    const path = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-migrated";
+    const payload = nar("bytes the old store still has");
+    const first = cacheWith(ROOT);
+    await first.admin.create(createInput);
+    await putNar(first, "main", payload);
+    await first.acceptNarinfo(
+      first.bucket("main") as never,
+      hashOf(path),
+      stream(narinfoText(path, payload)),
+    );
+    first.close();
+    const objectPath = join(scratch, "cache", "objects", "main", "nar", `${payload.narHash.slice(7)}.nar.zst`);
+    rmSync(objectPath, { force: true });
+    const db = new Database(join(scratch, "cache", "cache.sqlite"));
+    db.run("UPDATE object SET file_hash = NULL, file_size = NULL");
+    db.close();
+
+    const orphanDir = join(scratch, "cache", "objects", "orphan", "nar");
+    mkdirSync(orphanDir, { recursive: true });
+    writeFileSync(join(orphanDir, "dead.nar.zst"), "no row");
+    const second = createCache({
+      stateRoot: scratch,
+      rootToken: ROOT,
+      now: () => NOW,
+      migrationFreeFloor: 0,
+      legacyStore: { dump: () => bytesStream(payload.bytes) },
+    });
+    expect(await second.resume()).toMatchObject({
+      objectsMigrated: 1,
+      orphansSwept: 1,
+      migrationComplete: true,
+      paused: null,
+    });
+    expect(await second.narSource(second.bucket("main") as never, `${payload.narHash.slice(7)}.nar.zst`)).toMatchObject({
+      kind: "file",
+      size: payload.bytes.length,
+    });
+    await second.close();
+  });
+
+  it("pauses the migration below the free-space floor instead of filling the disk", async () => {
+    const path = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-paused";
+    const payload = nar("bytes that wait for disk");
+    const first = cacheWith(ROOT);
+    await first.admin.create(createInput);
+    await putNar(first, "main", payload);
+    await first.acceptNarinfo(
+      first.bucket("main") as never,
+      hashOf(path),
+      stream(narinfoText(path, payload)),
+    );
+    first.close();
+    rmSync(join(scratch, "cache", "objects", "main", "nar", `${payload.narHash.slice(7)}.nar.zst`), { force: true });
+    const db = new Database(join(scratch, "cache", "cache.sqlite"));
+    db.run("UPDATE object SET file_hash = NULL, file_size = NULL");
+    db.close();
+
+    const second = createCache({
+      stateRoot: scratch,
+      rootToken: ROOT,
+      now: () => NOW,
+      migrationFreeFloor: Number.MAX_SAFE_INTEGER,
+      legacyStore: { dump: () => bytesStream(payload.bytes) },
+    });
+    const boot = await second.resume();
+    expect(boot.objectsMigrated).toBe(0);
+    expect(boot.paused).toContain("below");
+    expect(boot.migrationComplete).toBe(false);
+    await second.close();
   });
 });

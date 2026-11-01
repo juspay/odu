@@ -99,13 +99,12 @@ token list [bucket] [-o json] tokens with scope, expiry and last use
 token revoke <id>             revoke one token, without touching the rest
 login <origin> [--token T]    save a token for an origin in
                               ~/.config/odu/cache/credentials (0600)
-push <bucket> <path>… [--token-file F] [--concurrency N] [--part-size MiB] [--wait] [-o json]
+push <bucket> <path>… [--token-file F] [--concurrency N] [--part-size MiB] [-o json]
                               upload only the paths the bucket is missing.
                               Talks to the cache directly, from HERE. A NAR
                               larger than --part-size (64 MiB) is sent in parts,
-                              each retried on its own. A path the bucket holds
-                              for references is reported; --wait stays until the
-                              bucket can serve it
+                              each retried on its own. The bucket keeps what it
+                              takes; there is no hold to wait for
 pin <bucket> <name> <path>…   pin a closure against garbage collection
 gc [bucket] [-o json]         evict what retention expired and nothing holds
 stats [-o json]               storage and reads
@@ -650,7 +649,6 @@ async function pushCommand(rest: string[]): Promise<number> {
             partSize:
               wholeNumber("--part-size", values["part-size"]) * 1024 * 1024,
           }),
-      ...(values.wait === true ? { wait: true } : {}),
       onLine: (line) => {
         if (!json) process.stderr.write(`${line}\n`);
       },
@@ -660,20 +658,11 @@ async function pushCommand(rest: string[]): Promise<number> {
     } else {
       process.stdout.write(
         `pushed ${summary.pushed}, skipped-upstream ${summary.skippedUpstream}, ` +
-          `already-present ${summary.alreadyPresent}, held ${summary.held.length}, ` +
+          `already-present ${summary.alreadyPresent}, ` +
           `failed ${summary.failed}\n`,
       );
       for (const failure of summary.failures) {
         process.stderr.write(`  ${failure.path}: ${failure.message}\n`);
-      }
-      if (summary.held.length > 0) {
-        // A HOLD IS NOT A FAILURE, and the command returns: what could not land
-        // is the bucket's fact, and the page says what it is waiting for.
-        process.stderr.write(
-          `held ${summary.held.length} path${summary.held.length === 1 ? "" : "s"} — ` +
-            `see ${summary.pageUrl}` +
-            (values.wait === true ? "\n" : "; pass --wait to stay until they land\n"),
-        );
       }
     }
     return summary.failed === 0 ? 0 : 1;

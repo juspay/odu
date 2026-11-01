@@ -338,7 +338,7 @@ describe("pushing a closure", () => {
         partSize: 4,
         onLine: (line) => lines.push(line),
       });
-      expect(summary).toMatchObject({ pushed: 1, failed: 0, held: [] });
+      expect(summary).toMatchObject({ pushed: 1, failed: 0 });
       const parts = server.seen
         .filter((seen) => seen.method === "PUT" && seen.path.includes("/parts/"))
         .map((seen) => Number(seen.path.slice(seen.path.lastIndexOf("/") + 1)));
@@ -407,59 +407,6 @@ describe("pushing a closure", () => {
     }
   });
 
-  it("repeats an upload the server accepted but could not import yet", async () => {
-    const server = startServer();
-    try {
-      server.missing = [LIBC];
-      // The first narinfo is 202 (a reference had not landed), the second is
-      // 200 — the shape an out-of-order closure produces.
-      server.deferOnce.add(storePathHash(LIBC));
-      const summary = await pushToCache({
-        bucket: `${server.origin}/main`,
-        paths: ["."],
-        env: envOf({ ODU_CACHE_TOKEN: "t" }),
-        platform: PLATFORM,
-      });
-      expect(summary).toMatchObject({ pushed: 1, failed: 0 });
-      const infoPuts = server.seen.filter(
-        (seen) => seen.method === "PUT" && seen.path.endsWith(".narinfo"),
-      );
-      expect(infoPuts).toHaveLength(2);
-      // The repeat is the NARINFO alone: the NAR is still staged on the
-      // server, and re-streaming it to say "try again" is the cost this avoids.
-      const narPuts = server.seen.filter(
-        (seen) => seen.method === "PUT" && seen.path.endsWith(".nar.zst"),
-      );
-      expect(narPuts).toHaveLength(1);
-    } finally {
-      server.stop();
-    }
-  });
-
-  it("sends the pair again when the deferred retry finds the bytes gone", async () => {
-    const server = startServer();
-    try {
-      server.missing = [LIBC];
-      server.deferOnce.add(storePathHash(LIBC));
-      // The narinfo-only repeat is refused as "never uploaded", which is what a
-      // restarted or swept server says — so the client falls back to the pair.
-      server.narinfoOnlyRefusal = true;
-      const summary = await pushToCache({
-        bucket: `${server.origin}/main`,
-        paths: ["."],
-        env: envOf({ ODU_CACHE_TOKEN: "t" }),
-        platform: PLATFORM,
-      });
-      expect(summary).toMatchObject({ pushed: 1, failed: 0 });
-      const narPuts = server.seen.filter(
-        (seen) => seen.method === "PUT" && seen.path.endsWith(".nar.zst"),
-      );
-      expect(narPuts).toHaveLength(2);
-    } finally {
-      server.stop();
-    }
-  });
-
   it("does not repeat a request the server refused outright", async () => {
     const server = startServer();
     try {
@@ -495,71 +442,6 @@ describe("pushing a closure", () => {
         platform: PLATFORM,
       });
       expect(summary).toMatchObject({ pushed: 1, skippedUpstream: 1, alreadyPresent: 1, failed: 0 });
-    } finally {
-      server.stop();
-    }
-  });
-
-  it("reports a hold in the server's own words, and does not fail", async () => {
-    const server = startServer();
-    try {
-      server.missing = [LIBC];
-      server.alwaysDefer.add(storePathHash(LIBC));
-      const lines: string[] = [];
-      const summary = await pushToCache({
-        bucket: `${server.origin}/main`,
-        paths: ["."],
-        env: envOf({ ODU_CACHE_TOKEN: "t" }),
-        platform: PLATFORM,
-        onLine: (line) => lines.push(line),
-      });
-      // A HOLD IS REPORTED AND THE COMMAND RETURNS: no failure, no hang.
-      expect(summary).toMatchObject({
-        pushed: 0,
-        held: [
-          {
-            path: LIBC,
-            reason: `waiting for 1 reference that is neither here nor upstream: ${GLIBC}`,
-          },
-        ],
-        failed: 0,
-        pageUrl: "https://board.example.org/#/cache/main",
-      });
-      expect(lines[0]).toBe(
-        "3 paths in the closure: 1 to push, 2 already here, 0 upstream",
-      );
-      expect(lines).toContain(`⏸ ${LIBC} held: ${summary.held[0]?.reason}`);
-    } finally {
-      server.stop();
-    }
-  });
-
-  it("--wait stays until the bucket can serve the held path", async () => {
-    const server = startServer();
-    try {
-      server.missing = [LIBC];
-      server.alwaysDefer.add(storePathHash(LIBC));
-      // The hold's row is what the wait reads: it is kept for one poll, then
-      // the reference landed and the row is gone.
-      server.heldLandAfter = 1;
-      const summary = await pushToCache({
-        bucket: `${server.origin}/main`,
-        paths: ["."],
-        env: envOf({ ODU_CACHE_TOKEN: "t" }),
-        platform: PLATFORM,
-        wait: true,
-        waitIntervalMs: 1,
-        waitTimeoutMs: 2_000,
-      });
-      expect(summary).toMatchObject({ pushed: 1, held: [], failed: 0 });
-      // THE WAIT READS THE HOLD, NOT THE UPLOAD PATH: one `/missing` (the
-      // preamble's), no second narinfo PUT while waiting, and the held endpoint
-      // asked until the row went.
-      expect(server.heldPolls).toBeGreaterThan(1);
-      const narinfoPuts = server.seen.filter(
-        (seen) => seen.method === "PUT" && seen.path.endsWith(".narinfo"),
-      );
-      expect(narinfoPuts).toHaveLength(1);
     } finally {
       server.stop();
     }

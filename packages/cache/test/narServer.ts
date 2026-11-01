@@ -13,7 +13,20 @@ import { nixDump } from "../src/store";
 const path = process.argv[2];
 if (path === undefined) throw new Error("narServer: a store path is required");
 
-const server = createServer((_request, response) => {
+// `narServer file <path>`: the FILE response's fixed point. The kept object is
+// served by Bun as a file (sendfile, sized), so a slow reader must not grow
+// this process at all.
+if (path === "file") {
+  const file = process.argv[3];
+  if (file === undefined) throw new Error("narServer file: a file path is required");
+  const served = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => new Response(Bun.file(file), { headers: { "content-type": "application/x-nix-nar" } }),
+  });
+  process.stdout.write(`ready ${served.port}\n`);
+} else {
+  const server = createServer((_request, response) => {
   response.writeHead(200, { "content-type": "application/x-nix-nar" });
   const reader = nixDump(path, null).getReader();
   void (async () => {
@@ -35,9 +48,10 @@ const server = createServer((_request, response) => {
     }
   })().catch(() => response.destroy());
 });
-server.listen(0, "127.0.0.1", () => {
-  const address = server.address();
-  if (typeof address === "object" && address !== null) {
-    process.stdout.write(`ready ${address.port}\n`);
-  }
-});
+  server.listen(0, "127.0.0.1", () => {
+    const address = server.address();
+    if (typeof address === "object" && address !== null) {
+      process.stdout.write(`ready ${address.port}\n`);
+    }
+  });
+}

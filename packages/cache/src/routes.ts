@@ -43,7 +43,7 @@
 import { Effect, Layer, Stream } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import type { ClaimedRoutes } from "@odu/cordis/services";
-import { type Cache } from "./cache";
+import { type Cache, type NarSource } from "./cache";
 import {
   CACHE_MOUNT,
   CACHE_ROUTE_PATHS,
@@ -56,8 +56,6 @@ import { isStagedFileName, isStorePathHash } from "./narinfo";
 import {
   actionsBlock,
   flakeBlock,
-  heldReason,
-  holdReason,
   MAX_NAR_PART_BYTES,
   netrcBlock,
   nixConfBlock,
@@ -67,6 +65,77 @@ import {
   useCommand,
   type CacheBucketIdentity,
 } from "./surface";
+
+
+/**
+ * SERVE THE BYTES. A kept file answers with the file itself, `Content-Length`
+ * and `Accept-Ranges`; a `Range` is sliced by Bun, so a resumed or ranged Nix
+ * fetch never re-dumps the path. Only an object whose file is not there yet
+ * falls back to the FIFO stream, which has no length and is logged as such.
+ */
+function narResponse(
+  cache: Cache,
+  request: HttpServerRequest.HttpServerRequest,
+  bucket: string,
+  file: string,
+  source: NarSource,
+  headers: Record<string, string>,
+): HttpServerResponse.HttpServerResponse {
+  const started = performance.now();
+  const at = file.indexOf(".nar");
+  const hash = at === -1 ? file : file.slice(0, at);
+  const done = (bytes: number | null, kind: "file" | "object" | "transition"): void =>
+    cache.log("cache.nar.served", {
+      bucket,
+      hash,
+      path: source.storePath,
+      bytes,
+      ms: Math.round(performance.now() - started),
+      source: kind,
+    });
+  if (source.kind === "stream" || source.kind === "legacy") {
+    const bytes = source.kind === "stream" ? source.size : null;
+    done(bytes, source.kind === "stream" ? "object" : "transition");
+    return HttpServerResponse.stream(
+      Stream.fromReadableStream({ evaluate: () => source.stream, onError: (err) => err }),
+      {
+        contentType: "application/x-nix-nar",
+        headers: source.kind === "stream" ? { ...headers, "content-length": String(source.size) } : headers,
+      },
+    );
+  }
+  const range = /^bytes=(\d*)-(\d*)$/.exec(request.headers["range"] ?? "");
+  if (range !== null) {
+    const first = range[1] === "" ? null : Number(range[1]);
+    const last = range[2] === "" ? null : Number(range[2]);
+    const start = first ?? (last === null ? 0 : Math.max(0, source.size - last));
+    const end = last === null ? source.size - 1 : Math.min(last, source.size - 1);
+    if (first !== null && last !== null && (first > last || first >= source.size)) {
+      return HttpServerResponse.empty({ status: 416 });
+    }
+    const body = Bun.file(source.path).slice(start, end + 1);
+    done(end - start + 1, "file");
+    return HttpServerResponse.raw(body, {
+      status: 206,
+      headers: {
+        ...headers,
+        "content-type": "application/x-nix-nar",
+        "content-length": String(end - start + 1),
+        "content-range": `bytes ${start}-${end}/${source.size}`,
+        "accept-ranges": "bytes",
+      },
+    });
+  }
+  done(source.size, "file");
+  return HttpServerResponse.raw(Bun.file(source.path), {
+    headers: {
+      ...headers,
+      "content-type": "application/x-nix-nar",
+      "content-length": String(source.size),
+      "accept-ranges": "bytes",
+    },
+  });
+}
 
 /** A bucket by name, and a credential that may do `need` with it — or the
  *  response that says why not. Every protocol route starts here, so "unknown
@@ -79,6 +148,12 @@ function admit(
 ): { ok: true; bucket: BucketRow } | { ok: false; response: HttpServerResponse.HttpServerResponse } {
   const bucket = cache.bucket(name);
   if (bucket === null) {
+    cache.log("cache.request.refused", {
+      method: request.method,
+      path: request.url,
+      status: 404,
+      reason: `no bucket "${name}"`,
+    });
     return { ok: false, response: HttpServerResponse.empty({ status: 404 }) };
   }
   return authorize(cache, request, bucket, need);
@@ -105,6 +180,12 @@ function admitByHost(
 ): { ok: true; bucket: BucketRow } | { ok: false; response: HttpServerResponse.HttpServerResponse } {
   const bucket = cache.bucketByDomain(hostOf(request));
   if (bucket === null) {
+    cache.log("cache.request.refused", {
+      method: request.method,
+      path: request.url,
+      status: 404,
+      reason: `no bucket "${hostOf(request)}"`,
+    });
     return { ok: false, response: HttpServerResponse.empty({ status: 404 }) };
   }
   return authorize(cache, request, bucket, need);
@@ -118,6 +199,13 @@ function authorize(
 ): { ok: true; bucket: BucketRow } | { ok: false; response: HttpServerResponse.HttpServerResponse } {
   const verdict = cache.authorize(request.headers["authorization"], bucket, need);
   if (!verdict.ok) {
+    cache.log("cache.request.refused", {
+      method: request.method,
+      path: request.url,
+      bucket: bucket.name,
+      status: verdict.status,
+      reason: verdict.message,
+    });
     return {
       ok: false,
       response: HttpServerResponse.text(verdict.message, { status: verdict.status }),
@@ -143,7 +231,7 @@ function narinfoRoot(cache: Cache) {
   return (request: HttpServerRequest.HttpServerRequest) =>
     Effect.gen(function* () {
       const hash = yield* param("hash");
-      if (!isStorePathHash(hash)) return bad(`"${hash}" is not a store path hash`);
+      if (!isStorePathHash(hash)) return refused(cache, request, `"${hash}" is not a store path hash`);
       const admitted = admitByHost(cache, request, "read");
       if (!admitted.ok) return admitted.response;
       const text = cache.narinfoText(admitted.bucket, hash);
@@ -162,6 +250,22 @@ const NARINFO_SUFFIX = ".narinfo";
 
 const bad = (message: string): HttpServerResponse.HttpServerResponse =>
   HttpServerResponse.text(message, { status: 400 });
+
+/** ONE line per refused request: method, path, status and the reason. */
+function refused(
+  cache: Cache,
+  request: HttpServerRequest.HttpServerRequest,
+  message: string,
+  status = 400,
+): HttpServerResponse.HttpServerResponse {
+  cache.log("cache.request.refused", {
+    method: request.method,
+    path: request.url,
+    status,
+    reason: message,
+  });
+  return HttpServerResponse.text(message, { status });
+}
 
 /**
  * WHAT A BUCKET PUBLISHES TO ITS CONSUMERS: the substituter URL, the key, the
@@ -307,10 +411,10 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
   const uploadPart = (request: HttpServerRequest.HttpServerRequest) =>
           Effect.gen(function* () {
         const file = yield* param("file");
-        if (!isStagedFileName(file)) return bad(`"${file}" is not a NAR file name`);
+        if (!isStagedFileName(file)) return refused(cache, request, `"${file}" is not a NAR file name`);
         const index = Number(yield* param("index"));
         if (!Number.isSafeInteger(index) || index < 0) {
-          return bad(`"${yield* param("index")}" is not a part index`);
+          return refused(cache, request, `"${yield* param("index")}" is not a part index`);
         }
         const admitted = admit(cache, request, yield* param("bucket"), "write");
         if (!admitted.ok) return admitted.response;
@@ -350,12 +454,12 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
   const completeParts = (request: HttpServerRequest.HttpServerRequest) =>
           Effect.gen(function* () {
         const file = yield* param("file");
-        if (!isStagedFileName(file)) return bad(`"${file}" is not a NAR file name`);
+        if (!isStagedFileName(file)) return refused(cache, request, `"${file}" is not a NAR file name`);
         const admitted = admit(cache, request, yield* param("bucket"), "write");
         if (!admitted.ok) return admitted.response;
         const total = Number(request.headers["x-odu-parts"] ?? "");
         if (!Number.isSafeInteger(total) || total < 1) {
-          return bad("send x-odu-parts: the number of parts this NAR has");
+          return refused(cache, request, "send x-odu-parts: the number of parts this NAR has");
         }
         const outcome = yield* Effect.promise(() =>
           cache.completeUpload(admitted.bucket, file, total),
@@ -385,34 +489,6 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
     // answers both requests.
     HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket`, consumerFacts),
 
-    /**
-     * A HOLD'S PROGRESS, for a client that is WAITING. `--wait` used to ask the
-     * missing question and re-push the narinfo; this answers the row the board
-     * reads, so a waiting push learns which references landed and when the
-     * referrer was recorded — without touching the upload path.
-     */
-    HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket/held`, (request) =>
-      Effect.gen(function* () {
-        const bucket = yield* param("bucket");
-        const admitted = admit(cache, request, bucket, "read");
-        if (!admitted.ok) return admitted.response;
-        return HttpServerResponse.jsonUnsafe({
-          held: cache
-            .held()
-            .filter((row) => row.bucket === admitted.bucket.name)
-            .map((row) => ({
-            storePath: row.storePath,
-            reason: holdReason(row),
-            missing: [...row.missing],
-            fetching: row.fetching,
-            fetched: [...row.fetched],
-            since: row.created,
-          })),
-        });
-      }),
-    ),
-
-    /** `nix-cache-info` — the three lines a client reads before anything else. */
     HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket/nix-cache-info`, (request) =>
       Effect.gen(function* () {
         const bucket = yield* param("bucket");
@@ -436,7 +512,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
         // sentence has to be said here or the wildcard never gets the request.
         if (!name.endsWith(NARINFO_SUFFIX)) return missingRoute();
         const hash = name.slice(0, -NARINFO_SUFFIX.length);
-        if (!isStorePathHash(hash)) return bad(`"${hash}" is not a store path hash`);
+        if (!isStorePathHash(hash)) return refused(cache, request, `"${hash}" is not a store path hash`);
         const admitted = admit(cache, request, yield* param("bucket"), "read");
         if (!admitted.ok) return admitted.response;
         const text = cache.narinfoText(admitted.bucket, hash);
@@ -458,14 +534,18 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
     HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket/nar/:file`, (request) =>
       Effect.gen(function* () {
         const file = yield* param("file");
-        if (!isStagedFileName(file)) return bad(`"${file}" is not a NAR file name`);
+        if (!isStagedFileName(file)) return refused(cache, request, `"${file}" is not a NAR file name`);
         const admitted = admit(cache, request, yield* param("bucket"), "read");
         if (!admitted.ok) return admitted.response;
-        const stream = yield* Effect.promise(() => cache.narStream(admitted.bucket, file));
-        if (stream === null) return HttpServerResponse.empty({ status: 404 });
-        return HttpServerResponse.stream(
-          Stream.fromReadableStream({ evaluate: () => stream, onError: (err) => err }),
-          { contentType: "application/x-nix-nar", headers: readHeaders(admitted.bucket) },
+        const source = yield* Effect.promise(() => cache.narSource(admitted.bucket, file));
+        if (source === null) return HttpServerResponse.empty({ status: 404 });
+        return narResponse(
+          cache,
+          request,
+          admitted.bucket.name,
+          file,
+          source,
+          readHeaders(admitted.bucket),
         );
       }),
     ),
@@ -478,7 +558,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
     HttpRouter.add("PUT", `${CACHE_MOUNT}/:bucket/nar/:file`, (request) =>
       Effect.gen(function* () {
         const file = yield* param("file");
-        if (!isStagedFileName(file)) return bad(`"${file}" is not a NAR file name`);
+        if (!isStagedFileName(file)) return refused(cache, request, `"${file}" is not a NAR file name`);
         const admitted = admit(cache, request, yield* param("bucket"), "write");
         if (!admitted.ok) return admitted.response;
         const upload = yield* Effect.promise(() => cache.beginUpload(admitted.bucket, file));
@@ -512,7 +592,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
         // sentence has to be said here or the wildcard never gets the request.
         if (!name.endsWith(NARINFO_SUFFIX)) return missingRoute();
         const hash = name.slice(0, -NARINFO_SUFFIX.length);
-        if (!isStorePathHash(hash)) return bad(`"${hash}" is not a store path hash`);
+        if (!isStorePathHash(hash)) return refused(cache, request, `"${hash}" is not a store path hash`);
         const admitted = admit(cache, request, yield* param("bucket"), "write");
         if (!admitted.ok) return admitted.response;
         const outcome = yield* Effect.promise(() =>
@@ -522,15 +602,8 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
             Stream.toReadableStream(request.stream),
           ),
         );
-        if (outcome.ok) {
-          return outcome.status === 200
-            ? HttpServerResponse.empty({ status: 200 })
-            : HttpServerResponse.text(
-                `${heldReason(outcome.missing, outcome.fetching)}: ${outcome.missing.join(" ")}`,
-                { status: 202 },
-              );
-        }
-        return HttpServerResponse.text(outcome.message, { status: outcome.status });
+        if (outcome.ok) return HttpServerResponse.empty({ status: 200 });
+        return refused(cache, request, outcome.message, outcome.status);
       }),
     ),
 
@@ -559,14 +632,18 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
     HttpRouter.add("GET", "/nar/:file", (request) =>
       Effect.gen(function* () {
         const file = yield* param("file");
-        if (!isStagedFileName(file)) return bad(`"${file}" is not a NAR file name`);
+        if (!isStagedFileName(file)) return refused(cache, request, `"${file}" is not a NAR file name`);
         const admitted = admitByHost(cache, request, "read");
         if (!admitted.ok) return admitted.response;
-        const stream = yield* Effect.promise(() => cache.narStream(admitted.bucket, file));
-        if (stream === null) return HttpServerResponse.empty({ status: 404 });
-        return HttpServerResponse.stream(
-          Stream.fromReadableStream({ evaluate: () => stream, onError: (err) => err }),
-          { contentType: "application/x-nix-nar", headers: readHeaders(admitted.bucket) },
+        const source = yield* Effect.promise(() => cache.narSource(admitted.bucket, file));
+        if (source === null) return HttpServerResponse.empty({ status: 404 });
+        return narResponse(
+          cache,
+          request,
+          admitted.bucket.name,
+          file,
+          source,
+          readHeaders(admitted.bucket),
         );
       }),
     ),
@@ -575,7 +652,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
     HttpRouter.add("PUT", "/nar/:file", (request) =>
       Effect.gen(function* () {
         const file = yield* param("file");
-        if (!isStagedFileName(file)) return bad(`"${file}" is not a NAR file name`);
+        if (!isStagedFileName(file)) return refused(cache, request, `"${file}" is not a NAR file name`);
         const admitted = admitByHost(cache, request, "write");
         if (!admitted.ok) return admitted.response;
         const upload = yield* Effect.promise(() => cache.beginUpload(admitted.bucket, file));
@@ -595,21 +672,14 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
     HttpRouter.add("PUT", `/:hash(${HASH_PATTERN}).narinfo`, (request) =>
       Effect.gen(function* () {
         const hash = yield* param("hash");
-        if (!isStorePathHash(hash)) return bad(`"${hash}" is not a store path hash`);
+        if (!isStorePathHash(hash)) return refused(cache, request, `"${hash}" is not a store path hash`);
         const admitted = admitByHost(cache, request, "write");
         if (!admitted.ok) return admitted.response;
         const outcome = yield* Effect.promise(() =>
           cache.acceptNarinfo(admitted.bucket, hash, Stream.toReadableStream(request.stream)),
         );
-        if (outcome.ok) {
-          return outcome.status === 200
-            ? HttpServerResponse.empty({ status: 200 })
-            : HttpServerResponse.text(
-                `${heldReason(outcome.missing, outcome.fetching)}: ${outcome.missing.join(" ")}`,
-                { status: 202 },
-              );
-        }
-        return HttpServerResponse.text(outcome.message, { status: outcome.status });
+        if (outcome.ok) return HttpServerResponse.empty({ status: 200 });
+        return refused(cache, request, outcome.message, outcome.status);
       }),
     ),
 
@@ -645,7 +715,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
         const body = yield* request.json;
         const paths = missingRequestOf(body);
         if (paths === null) {
-          return bad('expected {"paths": [{"path": "/nix/store/…", "sigs": […]}]}');
+          return refused(cache, request, 'expected {"paths": [{"path": "/nix/store/…", "sigs": […]}]}');
         }
         const answer = cache.missing(admitted.bucket, paths);
         return HttpServerResponse.jsonUnsafe({

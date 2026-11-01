@@ -54,7 +54,6 @@ import {
 } from "solid-js";
 import {
   type CacheBucket,
-  type CacheHeld,
   type CachePath,
   type CacheStats,
   type CacheToken,
@@ -531,21 +530,8 @@ function BucketPage(
   createEffect(on(() => props.name, () => setMinted(null), { defer: true }));
 
   /** The bucket's row, from the same subscription the list reads. */
-  const held = props.client.collections.buckets.use();
-  const bucket = createMemo<CacheBucket | undefined>(() => held.byKey(props.name)?.());
-
-  /** WHAT THE BUCKET IS HOLDING FOR REFERENCES — one of the row's facts, not a
-   *  log line: the same sentence `odu cache push` prints, and the reason a
-   *  large closure stops halfway. */
-  const heldRows = props.client.collections.held.use();
-  const waiting = createMemo<readonly CacheHeld[]>(() => {
-    const out: CacheHeld[] = [];
-    for (const key of heldRows.keys()) {
-      const row = heldRows.byKey(key)?.();
-      if (row !== undefined && row.bucket === props.name) out.push(row);
-    }
-    return out;
-  });
+  const buckets = props.client.collections.buckets.use();
+  const bucket = createMemo<CacheBucket | undefined>(() => buckets.byKey(props.name)?.());
 
   return (
     <section class="cache" aria-label={`bucket ${props.name}`}>
@@ -582,51 +568,7 @@ function BucketPage(
                   ? "no upstream filter"
                   : `skips ${row().upstreamKeys.join(", ")}`}
               </span>
-              {/* Waiting for references is a FACT of the bucket — printed with
-                  the same words the push prints, because it is the same fact. */}
-              <Show when={waiting().length > 0}>
-                <span class="pill hue-amber">{waiting().length} waiting</span>
-              </Show>
             </p>
-            <Show when={waiting().length > 0}>
-              <div class="cache-paths" aria-label="pending paths">
-                <h3>Waiting for references</h3>
-                <p class="hint">
-                  Accepted, but not served yet: each path needs a reference that
-                  is neither in this bucket nor upstream. The push that uploaded
-                  it says the same thing.
-                </p>
-                <ol class="paths">
-                  <For each={waiting()}>
-                    {(one) => (
-                      <li>
-                        <code class="path">{one.storePath}</code>
-                        <span class="bucket-facts">
-                          <span>{one.reason}</span>
-                          <Show when={one.fetched.length > 0}>
-                            <span class="pill hue-grey">{one.fetched.length} fetched</span>
-                          </Show>
-                          <span>since {ago(one.since, props.now)}</span>
-                        </span>
-                        {/* WHICH REFERENCES THE FETCH LANDED — the done half of
-                            the hold, not only how many are left. */}
-                        <Show when={one.fetched.length > 0}>
-                          <ul class="refs">
-                            <For each={one.fetched}>
-                              {(reference) => (
-                                <li>
-                                  <code>{reference}</code> done
-                                </li>
-                              )}
-                            </For>
-                          </ul>
-                        </Show>
-                      </li>
-                    )}
-                  </For>
-                </ol>
-              </div>
-            </Show>
             {/* HOW TO USE THIS BUCKET, in two blocks a person copies: reading
                 from it, and pushing to it. Both come from the contract's own
                 functions — `odu cache use` prints the first, and the docs quote

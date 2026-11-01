@@ -55,18 +55,14 @@ import {
   StateDir,
 } from "@odu/cordis/services";
 import { createCache, roleAuthority, type Authority, type BucketFacts, type Cache, type CacheOutcome } from "./cache";
-import { createSlots } from "./slots";
 import { may, principalOf, type Principal } from "@odu/cordis/principal";
 import { bucketOf, CACHE_MOUNT, CACHE_ROUTE_PATHS } from "./paths";
 import { cacheRoutes } from "./routes";
+import { nixDump } from "./store";
 import {
   type CacheBucket,
-  type CacheHeld,
   CACHE_KEY,
   CacheRefused,
-  heldKey,
-  heldReason,
-  holdReason,
   oduCacheSurface,
 } from "./surface";
 
@@ -82,10 +78,6 @@ export type CacheSurfaceDeps = ImplementSurfaceDeps<CacheSpec>;
 export interface CachePublisher {
   readonly buckets: {
     upsert(key: string, row: CacheBucket): void;
-    remove(key: string): void;
-  };
-  readonly held: {
-    upsert(key: string, row: CacheHeld): void;
     remove(key: string): void;
   };
 }
@@ -124,9 +116,6 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
    *  filled by the framework from the same `upsert`s a publish performs, so the
    *  two cannot disagree. */
   const rows = new Map<string, CacheBucket>();
-  /** The same pair for the held collection — keyed `${bucket}|${storePath}`. */
-  const publishedHeld = new Map<string, string>();
-  const rowsHeld = new Map<string, CacheHeld>();
   let publisher: CachePublisher | null = null;
 
   /** A bucket's row: the cache's own facts plus the one thing the cache cannot
@@ -188,33 +177,6 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
       publisher.buckets.remove(name);
     }
 
-    const nextHeld = new Map<string, string>();
-    for (const facts of cache.held()) {
-      const key = heldKey(facts);
-      const row: CacheHeld = {
-        bucket: facts.bucket,
-        storePath: facts.storePath,
-        reason: holdReason(facts),
-        missing: [...facts.missing],
-        fetching: facts.fetching,
-        fetched: [...facts.fetched],
-        since: facts.created,
-      };
-      const encoded = JSON.stringify(row);
-      nextHeld.set(key, encoded);
-      // THE REASON IS PART OF THE ROW, so a drain that narrows the missing list
-      // republishes even though the path itself has not moved.
-      if (publishedHeld.get(key) === encoded) continue;
-      publishedHeld.set(key, encoded);
-      rowsHeld.set(key, row);
-      publisher.held.upsert(key, row);
-    }
-    for (const key of [...publishedHeld.keys()]) {
-      if (nextHeld.has(key)) continue;
-      publishedHeld.delete(key);
-      rowsHeld.delete(key);
-      publisher.held.remove(key);
-    }
   };
 
   /** One admin call as a procedure's answer: the outcome mapped onto the
@@ -295,15 +257,6 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
         },
         remove: (key) => {
           rows.delete(key);
-        },
-      },
-      held: {
-        readAll: () => rowsHeld,
-        upsert: (key, row) => {
-          rowsHeld.set(key, row);
-        },
-        remove: (key) => {
-          rowsHeld.delete(key);
         },
       },
     },
@@ -478,21 +431,27 @@ export const cacheRow = definePlugin({
     const publicOrigin = yield* PublicOrigin;
     const log = yield* Log;
 
-    // THE ROW'S FETCH BOUND, created at apply and closed with the row.
-    const fetchSlots = createSlots(2);
-    const cache = createCache({ stateRoot: stateDir, rootToken, store, fetchSlots });
-    // A RESTART RESUMES ITS HOLDS at row apply: the reference fetch a pod died
-    // in the middle of is re-queued here, and held derivation rows from before
-    // the push refused them are DROPPED (not re-fetched) by the same verb.
-    const { droppedDerivations, backfilledCa } = yield* Effect.promise(() => cache.resume());
-    if (droppedDerivations > 0) {
-      log.info(
-        { dropped: droppedDerivations },
-        "odu cache: dropped held derivation paths at boot",
-      );
+    const cache = createCache({
+      stateRoot: stateDir,
+      rootToken,
+      // THE OLD NIX STORE is read ONLY by the one-time object migration. A
+      // fresh deployment leaves this null and the cache never shells out.
+      legacyStore: store === null ? null : { dump: (path) => nixDump(path, store) },
+      // ONE structured line per operational fact. The Effect logger renders
+      // the fields; no per-chunk lines, no narration.
+      log: (event, fields) => log.info(fields, `odu cache: ${event}`),
+    });
+    const boot = yield* Effect.promise(() => cache.resume());
+    if (boot.caProved > 0) {
+      log.info({ proved: boot.caProved }, "odu cache: boot proved CA");
     }
-    if (backfilledCa > 0) {
-      log.info({ filled: backfilledCa }, "odu cache: backfilled CA lines from the store at boot");
+    if (boot.orphansSwept > 0) {
+      log.info({ swept: boot.orphansSwept }, "odu cache: boot swept orphan objects");
+    }
+    if (boot.paused !== null) {
+      log.warn({ reason: boot.paused }, "odu cache: migration paused");
+    } else if (boot.migrationComplete) {
+      log.info({}, "odu cache: every row has its object; the old store is no longer read");
     }
 
     // THE ROW'S PUBLISHED FACT: the names its buckets carry. A row that routes
@@ -529,10 +488,6 @@ export const cacheRow = definePlugin({
       buckets: {
         upsert: (key, row) => mounted.ctx.collections.buckets.upsert(key, row),
         remove: (key) => mounted.ctx.collections.buckets.remove(key),
-      },
-      held: {
-        upsert: (key, row) => mounted.ctx.collections.held.upsert(key, row),
-        remove: (key) => mounted.ctx.collections.held.remove(key),
       },
     });
 

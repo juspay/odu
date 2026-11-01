@@ -48,6 +48,8 @@ function obj(
     references,
     deriver: null,
   ca: null,
+    fileHash: null,
+    fileSize: null,
     sigs: [],
     hits: 0,
     created: accessed,
@@ -127,51 +129,51 @@ describe("planGc", () => {
 });
 
 describe("runGc", () => {
-  /** The rows AND the bytes: a store that does not have a path cannot delete
-   *  it, and a fixture that only wrote rows would grade the wrong thing. */
-  const repoWith = (): { repo: CacheRepo; store: FakeStore } => {
+  const repoWith = (): CacheRepo => {
     const repo = openCacheRepo(":memory:");
-    const store = new FakeStore();
     repo.putBucket(bucket);
-    for (const row of objects) {
-      repo.putObject(row);
-      store.add(
-        { storePath: row.storePath, narHash: row.narHash, narSize: row.narSize, references: row.references },
-        true,
-      );
-    }
+    for (const row of objects) repo.putObject(row);
     for (const pin of pins) repo.putPin(pin);
-    return { repo, store };
+    return repo;
   };
 
-  it("releases the root, deletes from the store, and drops the row", async () => {
-    const { repo, store } = repoWith();
-    const report = await runGc(store, repo, planGc({ buckets: [bucket], objects, pins, now: NOW }));
-
-    expect(store.calls.filter((call) => call.op === "release").map((call) => call.storePath).sort()).toEqual(
-      [C.storePath, E.storePath, F.storePath].sort(),
+  it("drops the rows and deletes each evicted object's key", async () => {
+    const repo = repoWith();
+    const deleted: string[] = [];
+    const report = await runGc(
+      repo,
+      planGc({ buckets: [bucket], objects, pins, now: NOW }),
+      { delete: async (key) => void deleted.push(key) },
     );
-    expect(store.deleted.sort()).toEqual([C.storePath, E.storePath, F.storePath].sort());
-    // ONE delete call for the set: `nix-store --delete` reports "still alive"
-    // for a path another member references, so path-by-path leaks a closure.
-    expect(store.calls.filter((call) => call.op === "delete")).toHaveLength(3);
+
+    expect(deleted.sort()).toEqual(
+      [C, E, F]
+        .map((row) => `main/nar/${row.narHash.replace(/^sha256:/, "")}.nar.zst`)
+        .sort(),
+    );
     expect(repo.objects("main").map((row) => row.storePath).sort()).toEqual(
       [A.storePath, B.storePath, D.storePath].sort(),
     );
-    expect(report.buckets).toEqual([
-      { bucket: "main", evicted: 3, kept: 0, bytes: 300 },
-    ]);
+    expect(report.buckets).toEqual([{ bucket: "main", evicted: 3, kept: 0, bytes: 300 }]);
     expect(report.evicted).toBe(3);
   });
 
-  it("counts a path the store will not delete as kept, and still forgets the row", async () => {
-    const { repo, store } = repoWith();
-    store.immortal.add(C.storePath);
-    const report = await runGc(store, repo, planGc({ buckets: [bucket], objects, pins, now: NOW }));
-
-    expect(report.kept).toBe(1);
-    expect(report.evicted).toBe(2);
-    expect(report.bytes).toBe(200);
-    expect(repo.object("main", C.storePath)).toBeNull();
+  it("counts the object's compressed size when the row has one", async () => {
+    const repo = openCacheRepo(":memory:");
+    repo.putBucket(bucket);
+    const sized = objects.map((row) =>
+      row.storePath === C.storePath ? { ...row, fileSize: 999 } : row,
+    );
+    for (const row of sized) repo.putObject(row);
+    const report = await runGc(
+      repo,
+      planGc({ buckets: [bucket], objects: sized, pins: [], now: NOW }),
+      { delete: async () => {} },
+    );
+    const expected = [C, D, E, F].reduce(
+      (sum, row) => sum + (row.storePath === C.storePath ? 999 : row.narSize),
+      0,
+    );
+    expect(report.buckets[0]?.bytes).toBe(expected);
   });
 });

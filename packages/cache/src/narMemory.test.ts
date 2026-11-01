@@ -83,4 +83,51 @@ describe.skipIf(!LINUX)("a slow socket and the server's memory", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 60_000);
-});
+
+  it("serves the KEPT file at constant memory", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "odu-file-memory-"));
+    const source = join(dir, "source.bin");
+    const chunk = Buffer.alloc(MB);
+    let x = 0x9e3779b9;
+    const file = Buffer.alloc(320 * MB);
+    for (let at = 0; at < file.length; at += chunk.length) {
+      for (let i = 0; i < chunk.length; i++) {
+        x ^= x << 13;
+        x ^= x >>> 17;
+        x ^= x << 5;
+        chunk[i] = x & 0xff;
+      }
+      chunk.copy(file, at);
+    }
+    writeFileSync(source, file);
+    const server = spawn(process.execPath, [join(import.meta.dirname, "..", "test", "narServer.ts"), "file", source], {
+      stdio: ["ignore", "pipe", "inherit"],
+    });
+    try {
+      const port = await new Promise<number>((resolve, reject) => {
+        let buffered = "";
+        const timer = setTimeout(() => reject(new Error("file server did not become ready")), 30_000);
+        server.stdout?.on("data", (data: Buffer) => {
+          buffered += data.toString("utf8");
+          const match = /ready (\d+)/.exec(buffered);
+          if (match === null) return;
+          clearTimeout(timer);
+          resolve(Number(match[1]));
+        });
+      });
+      const baseline = childRss(server.pid as number);
+      const slow = spawn(
+        "curl",
+        ["--silent", "--limit-rate", "2M", "-o", "/dev/null", `http://127.0.0.1:${port}/`],
+        { stdio: "ignore" },
+      );
+      await new Promise((resolve) => setTimeout(resolve, SAMPLE_AFTER_MS));
+      const growth = childRss(server.pid as number) - baseline;
+      slow.kill("SIGKILL");
+      expect({ growth, within: growth < LIMIT }).toEqual({ growth, within: true });
+    } finally {
+      server.kill("SIGKILL");
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+ });

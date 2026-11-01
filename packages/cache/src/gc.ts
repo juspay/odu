@@ -37,7 +37,6 @@
  */
 
 import type { BucketRow, CacheRepo, ObjectRow, PinRow } from "./db";
-import type { BlobStore } from "./store";
 
 export interface GcInput {
   buckets: readonly BucketRow[];
@@ -102,8 +101,7 @@ export interface GcBucketReport {
   bucket: string;
   /** Rows dropped and paths deleted from the store. */
   evicted: number;
-  /** Paths whose row was dropped but whose bytes the store refused to delete,
-   *  because something else on this machine still roots them. */
+  /** Kept for the report's shape: the object store deletes unconditionally. */
   kept: number;
   /** Nar bytes reclaimed, by the narinfo's own `NarSize`. */
   bytes: number;
@@ -117,59 +115,35 @@ export interface GcReport {
 }
 
 /**
- * Do the plan.
- *
- * Release every root FIRST (the roots are what make `nix-store --delete` say
- * "still alive"), then delete the whole set in one call, then re-read the
- * world: a path that a pin or a re-push claimed in between gets its root back
- * and its row kept. A delete that throws re-roots everything it can before
- * failing — a root lost to an exception is a path the machine's own GC eats.
+ * Do the plan. An object leaves with its row; the bytes are the object store's,
+ * deleted by key, so nothing on this machine's Nix store is touched (the
+ * server does not have one).
  */
 export async function runGc(
-  store: BlobStore,
   repo: CacheRepo,
   plan: readonly GcBucketPlan[],
+  objects: { delete(key: string): Promise<void> },
 ): Promise<GcReport> {
-  const planned = plan.flatMap((entry) => entry.evict.map((row) => ({ ...row, bucket: entry.bucket })));
-  const bytesOf = new Map(planned.map((row) => [`${row.bucket}\u0000${row.storePath}`, row.narSize]));
-
-  for (const row of planned) await store.release(row.bucket, row.storePath);
-
-  let deleted: string[] = [];
-  try {
-    const outcome = await store.deleteMany(planned.map((row) => row.storePath));
-    deleted = outcome.deleted;
-  } catch (err) {
-    for (const row of planned) {
-      if (await store.has(row.storePath)) await store.retain(row.bucket, row.storePath);
-    }
-    throw err;
-  }
-
-  // No re-plan: the caller holds the cache's write mutex across the whole
-  // collection, so nothing a pin or a re-push could have changed has changed.
-  const deletedSet = new Set(deleted);
+  const planned = plan.flatMap((entry) =>
+    entry.evict.map((row) => ({ ...row, bucket: entry.bucket })),
+  );
   const perBucket = new Map<string, GcBucketReport>(
     plan.map((entry) => [entry.bucket, { bucket: entry.bucket, evicted: 0, kept: 0, bytes: 0 }]),
   );
-
   for (const row of planned) {
-    const report = perBucket.get(row.bucket);
-    if (report === undefined) continue;
     repo.deleteObject(row.bucket, row.storePath);
-    if (deletedSet.has(row.storePath)) {
+    await objects.delete(`${row.bucket}/nar/${row.narHash.replace(/^sha256:/, "")}.nar.zst`);
+    const report = perBucket.get(row.bucket);
+    if (report !== undefined) {
       report.evicted += 1;
-      report.bytes += bytesOf.get(`${row.bucket}\u0000${row.storePath}`) ?? 0;
-    } else {
-      report.kept += 1;
+      report.bytes += row.fileSize ?? row.narSize;
     }
   }
-
   const buckets = [...perBucket.values()];
   return {
     buckets,
     evicted: buckets.reduce((sum, bucket) => sum + bucket.evicted, 0),
-    kept: buckets.reduce((sum, bucket) => sum + bucket.kept, 0),
+    kept: 0,
     bytes: buckets.reduce((sum, bucket) => sum + bucket.bytes, 0),
   };
 }
