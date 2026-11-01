@@ -204,11 +204,11 @@ The cache keeps **the compressed NAR the pusher sent**, once, and no Nix store o
 - A narinfo whose references are absent is recorded anyway: references are names, not paths a store must hold first. A `.drv` path, or a reference to one, is still refused with 400.
 - `CA:` is **proved from the path**: odu recomputes Nix's `fixed:r:sha256` store path from (name, NarHash, references) and serves the line only when the formula reproduces the path. A self-referencing path's CA uses a modulo NAR hash the narinfo does not carry, so those stay unproved rather than guessed.
 - GC deletes the object with its row; an object with no row (a crash between put and record) is swept at boot and logged.
-- **The one-time migration.** A deployment upgrading from the store-backed cache has rows whose object is not on disk. At boot, two at a time, odu dumps each from `$ODU_CACHE_STORE` (`nix store dump-path --store … | zstd`) into the object store, pausing if free space falls below 10 GB. Until a row's object lands, its NAR is served through the old store (logged as `source: transition`). The log line `cache.migration.complete` says the old store is no longer read and can be deleted.
+- **The one-time migration.** A deployment upgrading from the store-backed cache has rows whose object is not on disk. After the cache is mounted and serving, two at a time, odu dumps each from the old store (`$ODU_CACHE_STORE`, or the host's own `/nix/store` when unset) into the object store. It pauses below 10 GiB free and re-checks every minute, resuming without a restart. Until a row's object lands, its NAR is served through the old store (logged as `source: transition`); a row the old store does not have answers 404 and is named once. The log line `cache.migration.complete` says every row has its object and the old store can be deleted.
 
 ```text
 <state>/cache/cache.sqlite            metadata, bucket signing keys, token hashes, pins
-<state>/cache/objects/<bucket>/nar/   the objects: <narHash>.nar.zst, immutable
+<state>/cache/objects/<bucket>/nar/   the objects: <narHash>.<ext>, immutable
 <state>/cache/staging/                uploads between their NAR and their narinfo
 ```
 

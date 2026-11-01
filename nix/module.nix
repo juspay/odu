@@ -209,10 +209,10 @@ in
       type = types.bool;
       default = false;
       description = ''
-        Add `user` to `nix.settings.trusted-users`. NO LONGER REQUIRED: the
-        cache does not import paths. Kept so an existing configuration still
-        evaluates; a store-backed deployment being migrated may leave it on
-        until `cache.migration.complete`.
+        Add `user` to `nix.settings.trusted-users`. NOT NEEDED by the cache:
+        it never imports paths, and the migration only READS the old store
+        (`/nix/store` when `ODU_CACHE_STORE` is unset). Kept so an existing
+        configuration still evaluates.
       '';
     };
 
