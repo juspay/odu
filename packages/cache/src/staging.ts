@@ -604,12 +604,15 @@ export function createStaging(deps: StagingDeps): Staging {
       }
       const proving = serial(chain, () => prove(bucket, hash, info, dirForBucket, name));
       const tail = chain.tail;
-      const outcome = await proving;
-      // A NAME NOBODY ELSE QUEUED ON is forgotten: a daemon sees every NAR
-      // name it will ever be pushed, and a chain per name would be all of them.
-      if (chain.tail === tail) proofs.delete(key);
-      joined.delete(key);
-      return outcome;
+      try {
+        return await proving;
+      } finally {
+        // A NAME NOBODY ELSE QUEUED ON is forgotten — on a refusal or a throw
+        // as much as on success: a daemon sees every NAR name it will ever be
+        // pushed, and a chain per name would be all of them.
+        if (chain.tail === tail) proofs.delete(key);
+        joined.delete(key);
+      }
     },
   };
 }
