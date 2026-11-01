@@ -644,7 +644,10 @@ export async function connectOrStart(
   const allowStart = opts.allowStart ?? origin === serviceOrigin();
   const headers = opts.authorization === undefined ? {} : await opts.authorization(origin);
   const existing = await dialExisting(origin, allowStart, opts.group, headers);
-  const adopt = { ...(opts.warned === undefined ? {} : { warned: opts.warned }) };
+  const adopt = {
+    ...(opts.warned === undefined ? {} : { warned: opts.warned }),
+    ...(opts.build === undefined ? {} : { build: opts.build }),
+  };
   if (existing !== null) return adoptOrRefuse(existing, origin, adopt);
   const outcome = await ensureService({
     origin,
