@@ -58,6 +58,7 @@ describe("nix path-info's three shapes", () => {
       narSize: 279592,
       references: [GLIBC, HELLO],
       deriver: "/nix/store/y1kh9arkh7w7am664yqbnnrfpsisqcdc-hello-2.12.3.drv",
+      ca: null,
       sigs: ["cache.nixos.org-1:AAAA"],
     });
   });

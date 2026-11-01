@@ -141,7 +141,6 @@ export interface StagingDeps {
     storePath: string,
     expectedNarHash: string,
     clientSigs: readonly string[],
-    ca: string | null,
   ) => Promise<boolean>;
   /** Something a subscriber would see moved — a background fetch landed, or a
    *  hold's reason changed. Supplied by the cache, whose listener it is. */
@@ -415,7 +414,7 @@ export function createStaging(deps: StagingDeps): Staging {
       repo.deleteHeld(bucket.name, entry.info.storePath);
       return { failed: outcome.message };
     }
-    await record(bucket, entry.info.storePath, entry.info.narHash, entry.info.sigs, entry.info.ca);
+    await record(bucket, entry.info.storePath, entry.info.narHash, entry.info.sigs);
     repo.deleteHeld(bucket.name, entry.info.storePath);
     changed();
     return "recorded";
@@ -472,7 +471,7 @@ export function createStaging(deps: StagingDeps): Staging {
       });
       if (closed) return;
       if (outcome.ok) {
-        await record(bucket, entry.info.storePath, entry.info.narHash, entry.info.sigs, entry.info.ca);
+        await record(bucket, entry.info.storePath, entry.info.narHash, entry.info.sigs);
         repo.deleteHeld(bucket.name, entry.info.storePath);
         pending.get(bucket.name)?.delete(entry.hash);
         await unlink(join(dirForBucket, "nar", basename(entry.info.url))).catch(() => {});

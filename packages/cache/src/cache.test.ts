@@ -853,7 +853,7 @@ describe("held derivations at boot", () => {
       blob: store,
       now: () => NOW,
     });
-    expect(await second.resume()).toEqual({ droppedDerivations: 1 });
+    expect(await second.resume()).toEqual({ droppedDerivations: 1, backfilledCa: 0 });
     expect(second.held()).toEqual([]);
     await second.close();
   });
@@ -883,6 +883,36 @@ describe("a reference that is a derivation", () => {
     }
     // NOT A HOLD: nothing could ever clear it.
     expect(cache.held()).toEqual([]);
+    await cache.close();
+  });
+});
+
+describe("CA as the store's fact", () => {
+  it("backfills a null row at resume and serves the line", async () => {
+    const path = "/nix/store/cacacacacacacacacacacacacacacaca-ca-path";
+    const cache = cacheWith(ROOT);
+    await cache.admin.create(createInput);
+    const payload = nar("a content-addressed path");
+    const metadata = store.add(
+      { storePath: path, narHash: payload.narHash, narSize: 1, references: [], ca: null },
+      false,
+    );
+    await putNar(cache, "main", payload);
+    const accepted = await cache.acceptNarinfo(
+      cache.bucket("main") as never,
+      hashOf(path),
+      stream(narinfoText(path, payload, [])),
+    );
+    expect(accepted).toMatchObject({ ok: true, status: 200 });
+    // The pusher sent no CA line; the store did not know either at record time.
+    expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).not.toContain("CA:");
+
+    // The store now reports it content-addressed; boot backfills the row.
+    metadata.ca = `fixed:r:sha256:${"A".repeat(52)}`;
+    expect(await cache.resume()).toEqual({ droppedDerivations: 0, backfilledCa: 1 });
+    expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).toContain(
+      `CA: ${metadata.ca}`,
+    );
     await cache.close();
   });
 });

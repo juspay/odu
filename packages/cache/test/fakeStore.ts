@@ -39,6 +39,7 @@ export interface FakePath {
   narSize: number;
   references: readonly string[];
   deriver?: string | null;
+  ca?: string | null;
   sigs?: readonly string[];
   /** The bytes a `dump` streams. Defaults to the store path's own name. */
   bytes?: Uint8Array;
@@ -100,6 +101,14 @@ export class FakeStore implements BlobStore {
   async pathInfo(storePath: string): Promise<PathInfo | null> {
     this.calls.push({ op: "pathInfo", storePath });
     return this.infoOf(storePath);
+  }
+
+  async pathInfos(paths: readonly string[]): Promise<PathInfo[]> {
+    this.calls.push({ op: "pathInfo", storePath: paths.join(",") });
+    return paths.flatMap((path) => {
+      const info = this.infoOf(path);
+      return info === null ? [] : [info];
+    });
   }
 
   async closure(paths: readonly string[]): Promise<PathInfo[]> {
@@ -232,6 +241,7 @@ export class FakeStore implements BlobStore {
       narSize: path.narSize,
       references: path.references,
       deriver: path.deriver ?? null,
+      ca: path.ca ?? null,
       sigs: path.sigs ?? [],
     };
   }

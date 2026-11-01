@@ -484,12 +484,15 @@ export const cacheRow = definePlugin({
     // A RESTART RESUMES ITS HOLDS at row apply: the reference fetch a pod died
     // in the middle of is re-queued here, and held derivation rows from before
     // the push refused them are DROPPED (not re-fetched) by the same verb.
-    const { droppedDerivations } = yield* Effect.promise(() => cache.resume());
+    const { droppedDerivations, backfilledCa } = yield* Effect.promise(() => cache.resume());
     if (droppedDerivations > 0) {
       log.info(
         { dropped: droppedDerivations },
         "odu cache: dropped held derivation paths at boot",
       );
+    }
+    if (backfilledCa > 0) {
+      log.info({ filled: backfilledCa }, "odu cache: backfilled CA lines from the store at boot");
     }
 
     // THE ROW'S PUBLISHED FACT: the names its buckets carry. A row that routes

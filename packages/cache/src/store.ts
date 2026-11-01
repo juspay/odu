@@ -54,6 +54,9 @@ export interface PathInfo {
   narSize: number;
   references: readonly string[];
   deriver: string | null;
+  /** Nix's `CA:` fact about the path — `fixed:r:sha256:…` or null. The STORE
+   *  owns it; a pusher's narinfo line is only a hint. */
+  ca: string | null;
   sigs: readonly string[];
 }
 
@@ -112,6 +115,8 @@ export function upstreamFor(keyNames: readonly string[]): UpstreamCache[] {
 export interface BlobStore {
   has(storePath: string): Promise<boolean>;
   pathInfo(storePath: string): Promise<PathInfo | null>;
+  /** MANY paths in ONE `nix path-info`, for the boot backfill. */
+  pathInfos(paths: readonly string[]): Promise<PathInfo[]>;
   /** One `nix path-info -r --json` for the whole set — a pin's closure and a
    *  push's closure are the same question and one process answers both. */
   closure(paths: readonly string[]): Promise<PathInfo[]>;
@@ -276,6 +281,7 @@ export function parsePathInfoTable(stdout: string): Map<string, PathInfo> {
         narSize: Number(entry["narSize"]),
         references: (entry["references"] as string[] | undefined) ?? [],
         deriver: (entry["deriver"] as string | null | undefined) ?? null,
+        ca: (entry["ca"] as string | null | undefined) ?? null,
         sigs: (entry["signatures"] as string[] | undefined) ?? [],
       });
     } catch (err) {
@@ -338,6 +344,10 @@ export function nixStore(options: NixStoreOptions): BlobStore {
 
     async pathInfo(storePath) {
       return (await pathInfoTable([storePath])).get(storePath) ?? null;
+    },
+
+    async pathInfos(paths) {
+      return [...(await pathInfoTable(paths)).values()];
     },
 
     async closure(paths) {

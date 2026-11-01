@@ -344,16 +344,20 @@ describe("narinfo", () => {
     await h.dispose();
   });
 
-  it("serves the pusher's CA line verbatim", async () => {
+  it("serves the STORE's CA line, not the pusher's", async () => {
     const h = await harness(true);
     const hello = nar("a NAR, in pieces");
-    const ca = `fixed:r:sha256:${"A".repeat(52)}`;
-    const put = await upload(h.fetch, h.tokens.write, HELLO, hello, { ca });
+    const storeCa = `fixed:r:sha256:${"A".repeat(52)}`;
+    h.store.paths.get(HELLO)!.ca = storeCa;
+    // The pusher claims something else; the store is the owner of the fact.
+    const put = await upload(h.fetch, h.tokens.write, HELLO, hello, {
+      ca: `fixed:r:sha256:${"B".repeat(52)}`,
+    });
     expect(put.status).toBe(200);
     const served = await (await h.fetch(`/main/${hashOf(HELLO)}.narinfo`)).text();
     // BYTE FOR BYTE — odu never synthesises or rewrites the line: an
     // input-addressed reader would have to demand a signature instead.
-    expect(served.split("\n")).toContain(`CA: ${ca}`);
+    expect(served.split("\n")).toContain(`CA: ${storeCa}`);
     await h.dispose();
   });
 

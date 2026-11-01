@@ -299,7 +299,7 @@ export interface Cache {
    *  a restart resumes a reference fetch instead of waiting for a new push.
    *  Rows whose PATH is a derivation are dropped here, not re-fetched: an old
    *  pod may hold them from before the push refused them. */
-  resume(): Promise<{ droppedDerivations: number }>;
+  resume(): Promise<{ droppedDerivations: number; backfilledCa: number }>;
   /** Join the row's background work, then close the database. */
   close(): Promise<void>;
 }
@@ -460,9 +460,8 @@ export function createCache(options: CacheOptions): Cache {
     storePath: string,
     expectedNarHash: string,
     clientSigs: readonly string[],
-    ca: string | null,
   ): Promise<boolean> {
-    return withWriteLock(() => recordNow(bucket, storePath, expectedNarHash, clientSigs, ca));
+    return withWriteLock(() => recordNow(bucket, storePath, expectedNarHash, clientSigs));
   }
 
   async function recordNow(
@@ -470,7 +469,6 @@ export function createCache(options: CacheOptions): Cache {
     storePath: string,
     expectedNarHash: string,
     clientSigs: readonly string[],
-    ca: string | null,
   ): Promise<boolean> {
     const info = await blob.pathInfo(storePath);
     if (info === null) {
@@ -496,8 +494,9 @@ export function createCache(options: CacheOptions): Cache {
       narSize: info.narSize,
       references: info.references,
       deriver: info.deriver,
-      // A re-push without the line keeps the one already stored; never invent.
-      ca: ca ?? existing?.ca ?? null,
+      // THE STORE'S FACT. A pusher's `CA:` line is a hint; `nix path-info`
+      // knows whether the path is content-addressed, and the store wins.
+      ca: info.ca,
       sigs,
       hits: existing?.hits ?? 0,
       created: existing?.created ?? at,
@@ -944,8 +943,30 @@ export function createCache(options: CacheOptions): Cache {
       const derivations = repo.held().filter((row) => isDerivationPath(row.storePath));
       for (const row of derivations) repo.deleteHeld(row.bucket, row.storePath);
       if (derivations.length > 0) notify();
+      // BACKFILL `ca` FROM THE STORE. A row written before the store owned the
+      // fact has null; that means UNKNOWN, not input-addressed. One batched
+      // `nix path-info` over every null row at each boot keeps the schema as
+      // is: a path the store reports content-addressed is updated; a genuinely
+      // input-addressed one comes back null and stays null (honest, not lying).
+      const unknown = repo.objects().filter((row) => row.ca === null);
+      let backfilledCa = 0;
+      if (unknown.length > 0) {
+        const facts = new Map(
+          (await blob.pathInfos(unknown.map((row) => row.storePath))).map((info) => [
+            info.storePath,
+            info.ca,
+          ]),
+        );
+        for (const row of unknown) {
+          const ca = facts.get(row.storePath) ?? null;
+          if (ca === null) continue;
+          repo.putObject({ ...row, ca });
+          backfilledCa += 1;
+        }
+        if (backfilledCa > 0) notify();
+      }
       await staging.resume();
-      return { droppedDerivations: derivations.length };
+      return { droppedDerivations: derivations.length, backfilledCa };
     },
 
     onChange(listener) {

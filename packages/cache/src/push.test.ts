@@ -44,6 +44,7 @@ function entry(storePath: string, references: readonly string[] = []): ClosureEn
     narSize: 10,
     references,
     deriver: null,
+    ca: null,
     sigs: [],
   };
 }
