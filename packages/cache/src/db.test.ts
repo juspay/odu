@@ -9,6 +9,7 @@
  */
 
 import { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -313,8 +314,20 @@ describe("deleting a bucket", () => {
   });
 });
 
+/** THE FOUR SQL STRINGS THAT SHIPPED BEFORE THIS PR, pinned by content.
+ *
+ * `slice(0, 4)` alone follows a future mid-list insert, so it would hand the
+ * new migration list back to itself and pass. The hash makes a reorder or an
+ * insert in the shipped prefix fail HERE, where the cause is obvious.
+ */
+const SHIPPED_V1_TO_V4_SHA256 =
+  "278af79f3e7195b7faed7eb47e239afb5a7e978c4f8a5b5ccf8b1ea324a6f22e";
+
 describe("upgrading an existing database", () => {
   it("opens a v4 file and applies only the appended migrations", () => {
+    expect(
+      createHash("sha256").update(MIGRATIONS.slice(0, 4).join("\n")).digest("hex"),
+    ).toBe(SHIPPED_V1_TO_V4_SHA256);
     const dir = mkdtempSync(join(tmpdir(), "odu-cache-upgrade-"));
     const file = join(dir, "cache.sqlite");
     try {
