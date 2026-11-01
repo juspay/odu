@@ -677,10 +677,11 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
 /** HOW MANY BYTES one response write may carry.
  *
  * Not a protocol fact — a runtime one. Bun's `node:http` keeps a large
- * `res.write` chunk alive until the socket drains; a zstd child hands out
- * ~1.5 MB buffers, and a 634 MB NAR held that way put the pod at 2 GiB. Split
- * to this size at the ROW's boundary: the consumer sees the same bytes, and
- * each write is small enough to be released. */
+ * `res.write` chunk alive until the socket drains; a 634 MB NAR held that way
+ * put the pod at 2 GiB. Split to this size at the ROW's boundary: the consumer
+ * sees the same bytes, and each write is small enough to be released. The
+ * SOURCE no longer pushes at all (see `nixDump`): it is a file read pulled one
+ * piece per socket demand. */
 const NAR_WRITE_BYTES = 64 * 1024;
 
 /** Re-chunk a NAR stream at NAR_WRITE_BYTES, one piece per pull.

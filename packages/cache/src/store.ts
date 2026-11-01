@@ -36,8 +36,9 @@
 
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, unlink } from "node:fs/promises";
+import { createReadStream, createWriteStream, mkdtempSync } from "node:fs";
+import { mkdir, open, rm, unlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Readable } from "node:stream";
@@ -442,94 +443,83 @@ export function nixStore(options: NixStoreOptions): BlobStore {
 }
 
 /**
- * A NAR as a zstd stream: `nix store dump-path <path> | zstd -T0 -c`.
+ * A NAR as a zstd stream.
  *
- * One implementation for the server's reads and the push client's uploads —
- * they are the same bytes through the same two programs, and a second spelling
- * would be a second place for the pipeline to be got wrong.
+ * MATERIALISED TO A FILE, THEN PULLED. A child's stdout does not honour
+ * backpressure on this runtime: Bun buffers everything a `node:child_process`
+ * (or `Bun.spawn`) pipe produces, so a 300 MB dump stayed in the daemon even
+ * when the socket asked for 2 MB/s. A shell pipeline writes the compressed NAR
+ * to a temp file with NO pipe to the parent, and this stream reads that file
+ * one 64 KiB piece per pull — the socket's readiness is the only clock. The
+ * file is removed when the read ends or is cancelled.
  *
- * The stream does not END until both children have exited, and it ERRORS unless
- * both exited 0. Closing on zstd's EOF alone would hand a consumer a valid
- * frame of a truncated NAR — the failure mode that turns a broken read into a
- * silent 200.
+ * The read does not END until the pipeline exited 0; a non-zero exit errors the
+ * stream rather than handing out a valid frame of a truncated NAR.
  */
 export function nixDump(storePath: string, store: string | null): ReadableStream<Uint8Array> {
-  const nix = spawn("nix", ["store", "dump-path", ...storeArgsOf(store), storePath], {
-    stdio: ["ignore", "pipe", "pipe"],
+  const dir = mkdtempSync(join(tmpdir(), "odu-nar-"));
+  const file = join(dir, "nar.zst");
+  const quote = (text: string): string => `'${text.replace(/'/g, `'\\''`)}'`;
+  const pipelineLine = [
+    "nix store dump-path",
+    ...storeArgsOf(store),
+    quote(storePath),
+    "| zstd -T0 -c >",
+    quote(file),
+  ].join(" ");
+  // `pipefail` makes NIX's exit code the pipeline's: without it zstd happily
+  // compresses a truncated dump and exits 0.
+  const child = spawn("bash", ["-c", `set -o pipefail; ${pipelineLine}`], {
+    stdio: ["ignore", "ignore", "pipe"],
   });
-  const zstd = spawn("zstd", ["-T0", "-c"], { stdio: ["pipe", "pipe", "pipe"] });
-
-  let nixCode: number | null = null;
-  let zstdCode: number | null = null;
-  let sourceEnded = false;
-  let fault: string | null = null;
-  let sink: ReadableStreamDefaultController<Uint8Array> | null = null;
-
-  const settle = (): void => {
-    if (sink === null || !sourceEnded || nixCode === null || zstdCode === null) return;
-    const controller = sink;
-    sink = null;
-    if (fault !== null) controller.error(new Error(fault));
-    else if (nixCode !== 0) controller.error(new Error(`nix store dump-path exited ${nixCode}`));
-    else if (zstdCode !== 0) controller.error(new Error(`zstd exited ${zstdCode}`));
-    else controller.close();
+  let tail = "";
+  child.stderr?.on("data", (chunk: Buffer) => {
+    tail = `${tail}${chunk.toString("utf8")}`.slice(-2000);
+  });
+  const exited = new Promise<number>((resolve) => {
+    child.on("error", (err) => resolve(-1));
+    child.on("close", (code) => resolve(code ?? -1));
+  });
+  let handle: Awaited<ReturnType<typeof open>> | null = null;
+  let cleaned = false;
+  const clean = async (): Promise<void> => {
+    if (cleaned) return;
+    cleaned = true;
+    await handle?.close().catch(() => {});
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
   };
-
-  const fail = (message: string): void => {
-    fault ??= message;
-    // A child that could not even be spawned never emits `close`, and a child
-    // that died produces no more bytes — so nothing else is coming, and the
-    // stream settles here rather than waiting for an `end` that never arrives.
-    nixCode ??= -1;
-    zstdCode ??= -1;
-    sourceEnded = true;
-    settle();
-  };
-
-  nix.on("error", (err) => fail(`nix: ${String(err)}`));
-  zstd.on("error", (err) => fail(`zstd: ${String(err)}`));
-  // EPIPE is the ordinary consequence of a consumer that walked away, and the
-  // cancel path below is what stops the work; it must not become an unhandled
-  // event that takes the process down.
-  zstd.stdin?.on("error", () => {});
-  nix.stdout?.on("error", (err) => fail(`nix stdout: ${String(err)}`));
-  nix.stdout?.pipe(zstd.stdin);
-  nix.stderr?.resume();
-  zstd.stderr?.resume();
-
-  nix.on("close", (code) => {
-    nixCode = code ?? -1;
-    if (zstd.stdin !== null && !zstd.stdin.destroyed) zstd.stdin.end();
-    settle();
-  });
-  zstd.on("close", (code) => {
-    zstdCode = code ?? -1;
-    nix.kill("SIGKILL");
-    settle();
-  });
-
   return new ReadableStream<Uint8Array>({
-    start(controller) {
-      sink = controller;
-      zstd.stdout?.on("data", (chunk: Buffer) => {
-        if (sink === null) return;
-        controller.enqueue(new Uint8Array(chunk));
-        // Backpressure: one chunk in flight is enough, and a paused source is
-        // what keeps a 2 GiB NAR off the heap.
-        if ((controller.desiredSize ?? 0) <= 0) zstd.stdout?.pause();
-      });
-      zstd.stdout?.on("end", () => {
-        sourceEnded = true;
-        settle();
+    async start(controller) {
+      const code = await exited;
+      if (code !== 0) {
+        controller.error(
+          new Error(`nix store dump-path | zstd exited ${code}${tail.trim() === "" ? "" : `: ${tail.trim().split("\n").at(-1)}`}`),
+        );
+        await clean();
+        return;
+      }
+      handle = await open(file, "r").catch((err) => {
+        controller.error(err);
+        return null;
       });
     },
-    pull() {
-      zstd.stdout?.resume();
+    async pull(controller) {
+      if (handle === null) {
+        controller.error(new Error("the NAR file could not be opened"));
+        return;
+      }
+      const buffer = new Uint8Array(64 * 1024);
+      const read = await handle.read(buffer, 0, buffer.length, null);
+      if (read.bytesRead === 0) {
+        controller.close();
+        await clean();
+        return;
+      }
+      controller.enqueue(buffer.subarray(0, read.bytesRead));
     },
-    cancel() {
-      sink = null;
-      nix.kill("SIGKILL");
-      zstd.kill("SIGKILL");
+    async cancel() {
+      child.kill("SIGKILL");
+      await clean();
     },
   });
 }
