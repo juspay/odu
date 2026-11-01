@@ -47,7 +47,7 @@ import { createReadStream, createWriteStream } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { basename, join, relative } from "node:path";
-import type { ObjectStore } from "./objectStore";
+import type { ObjectFacts, ObjectStore } from "./objectStore";
 import { writeAll } from "./sink";
 import { verifyNarFile } from "./store";
 import type { BucketRow } from "./db";
@@ -101,15 +101,7 @@ export type NarinfoOutcome =
  */
 export type UploadWrite = "ok" | "too-large";
 
-/** What a proof hands `keep`: a file this request claimed and verified, or
- *  "the object an earlier proof already kept". */
-type Source =
-  | {
-      kind: "file";
-      path: string;
-      facts: { fileHash: string; fileSize: number; selfHash: string | null };
-    }
-  | { kind: "object" };
+type Refusal = Extract<NarinfoOutcome, { ok: false }>;
 
 /** What `completeUpload` came to: every part present, or which indexes are not. */
 export type CompleteUpload =
@@ -174,14 +166,16 @@ export interface StagingDeps {
   ) => Promise<boolean>;
   /** One line per operational fact; the cache's logger. */
   log?: (event: string, fields: Record<string, unknown>) => void;
-  /** The `FileHash`/`FileSize` a row already holds for this bucket's object
-   *  of `narHash` and `compression`, or null — so a later push of a kept
-   *  object reads its facts instead of re-hashing it. */
-  recorded?: (
+  /** The facts of the object this bucket already KEEPS for `narHash` and
+   *  `compression`, or null when it keeps none. Called under the write lock.
+   *  The cache answers it, because how — a row's recorded facts, or the store
+   *  itself — is the database's and the backend's business, not the
+   *  protocol's. */
+  keptFacts: (
     bucket: BucketRow,
     narHash: string,
-    compression: string,
-  ) => { fileHash: string; fileSize: number } | null;
+    compression: string | null,
+  ) => Promise<ObjectFacts | null>;
 }
 
 export interface Staging {
@@ -208,7 +202,7 @@ export interface Staging {
 }
 
 export function createStaging(deps: StagingDeps): Staging {
-  const { objects, now, record, log, recorded, withWriteLock } = deps;
+  const { objects, now, record, log, keptFacts, withWriteLock } = deps;
   const stagingRoot = join(deps.dir, "staging");
   const stagedDir = (bucket: string): string => join(stagingRoot, bucket);
 
@@ -263,7 +257,7 @@ export function createStaging(deps: StagingDeps): Staging {
     const refuse = async (
       message: string,
       claimed?: { path: string; size: number },
-    ): Promise<NarinfoOutcome> => ({
+    ): Promise<Refusal> => ({
       ok: false,
       status: 400,
       message,
@@ -274,10 +268,10 @@ export function createStaging(deps: StagingDeps): Staging {
       // THE SECOND PROOF OF POSSESSION. Two store paths with identical content
       // share a NarHash, and the first to be recorded took the staged NAR with
       // it; so did an earlier push of this same path. The object is the proof.
-      if ((await objects.head(objectKey(bucket.name, info.narHash, info.compression))) === null) {
-        return refuse(`the narinfo names ${info.url}, which was never uploaded to this bucket`);
-      }
-      return recordSerially(bucket, info, { kind: "object" });
+      return recordSerially(bucket, info, null, async () =>
+        (await keptFacts(bucket, info.narHash, info.compression)) ??
+        refuse(`the narinfo names ${info.url}, which was never uploaded to this bucket`),
+      );
     }
     try {
       const selfHashPart = info.references.includes(info.storePath)
@@ -292,11 +286,9 @@ export function createStaging(deps: StagingDeps): Staging {
           claimed,
         );
       }
-      return await recordSerially(bucket, info, {
-        kind: "file",
-        path: claimed.path,
-        facts: { fileHash: checked.fileHash, fileSize: checked.fileSize, selfHash: checked.selfHash },
-      });
+      return await recordSerially(bucket, info, checked.selfHash, () =>
+        adopt(bucket, info, claimed.path, { size: checked.fileSize, sha256: checked.fileHash }),
+      );
     } finally {
       // OURS TO REMOVE: adopted, refused, or a duplicate of a kept object. A
       // REFUSED narinfo deletes the upload it named — no new power: any
@@ -467,45 +459,32 @@ export function createStaging(deps: StagingDeps): Staging {
     return { ok: true, parts: total };
   }
 
-  /** Take the proved file into the object store, or learn an existing
-   *  object's facts; the row learns them either way. A put failure refuses the
-   *  push (the bytes are not safely kept). FIRST KEPT WINS: adopting onto a key
-   *  that exists keeps the object and answers ITS facts. */
-  async function keep(
+  /** Take the claimed, proved file into the object store. FIRST KEPT WINS:
+   *  adopting onto a key that exists keeps that object and answers ITS facts.
+   *  A put failure refuses the push (the bytes are not safely kept). */
+  async function adopt(
     bucket: BucketRow,
     info: NarInfo,
-    source: Source,
-  ): Promise<{ fileHash: string; fileSize: number; selfHash: string | null } | null> {
+    path: string,
+    facts: ObjectFacts,
+  ): Promise<ObjectFacts | Refusal> {
+    const key = objectKey(bucket.name, info.narHash, info.compression);
     try {
-      const key = objectKey(bucket.name, info.narHash, info.compression);
-      if (source.kind === "object") {
-        // THE KEPT OBJECT'S FACTS, READ: the row an earlier proof recorded
-        // holds them, confirmed by the stored size; an object with no row (a
-        // crash between keep and record) is asked of the store itself.
-        const size = await objects.head(key);
-        if (size === null) throw new Error(`${key} is no longer stored`);
-        const row = recorded?.(bucket, info.narHash, info.compression ?? "none") ?? null;
-        if (row !== null && row.fileSize === size) {
-          return { fileHash: row.fileHash, fileSize: row.fileSize, selfHash: null };
-        }
-        const stored = await objects.facts(key);
-        if (stored === null) throw new Error(`${key} is no longer stored`);
-        return { fileHash: stored.sha256, fileSize: stored.size, selfHash: null };
-      }
-      const { facts } = source;
-      // ADOPT the claimed file: one rename, never a copy of the same bytes.
-      const kept =
-        objects.adopt === undefined
-          ? await objects.put(key, Bun.file(source.path).stream())
-          : await objects.adopt(key, source.path, { size: facts.fileSize, sha256: facts.fileHash });
-      return { fileHash: kept.sha256, fileSize: kept.size, selfHash: facts.selfHash };
+      // ONE rename, never a copy of the same bytes.
+      return objects.adopt === undefined
+        ? await objects.put(key, Bun.file(path).stream())
+        : await objects.adopt(key, path, facts);
     } catch (err) {
       log?.("cache.object.put_failed", {
         bucket: bucket.name,
         path: info.storePath,
         reason: String((err as Error).message ?? err),
       });
-      return null;
+      return {
+        ok: false,
+        status: 400,
+        message: `${info.storePath} could not be stored: the object store refused it`,
+      };
     }
   }
 
@@ -536,18 +515,20 @@ export function createStaging(deps: StagingDeps): Staging {
 
   /** Keep and record under the cache's write lock: no collection between
    *  "the object is there" and the row that names it, and no two proofs of one
-   *  object key (twins under different names) adopting it at once. */
-  function recordSerially(bucket: BucketRow, info: NarInfo, source: Source): Promise<NarinfoOutcome> {
+   *  object key (twins under different names) adopting it at once. `keep`
+   *  answers the kept object's facts, or why it could not. `selfHash` is the
+   *  verify's evidence about the PATH, not a fact of the object. */
+  function recordSerially(
+    bucket: BucketRow,
+    info: NarInfo,
+    selfHash: string | null,
+    keep: () => Promise<ObjectFacts | Refusal>,
+  ): Promise<NarinfoOutcome> {
     return withWriteLock(async () => {
-      const file = await keep(bucket, info, source);
-      if (file === null) {
-        return {
-          ok: false,
-          status: 400,
-          message: `${info.storePath} could not be stored: the object store refused it`,
-        };
-      }
-      await record(bucket, info, file, file.selfHash);
+      const kept = await keep();
+      if ("ok" in kept) return kept;
+      const file = { fileHash: kept.sha256, fileSize: kept.size };
+      await record(bucket, info, file, selfHash);
       log?.("cache.import.recorded", {
         bucket: bucket.name,
         path: info.storePath,

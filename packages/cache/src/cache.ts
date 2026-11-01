@@ -583,11 +583,19 @@ export function createCache(options: CacheOptions): Cache {
     withWriteLock,
     record: recordNow,
     log: options.log,
-    recorded(bucket, narHash, compression) {
-      const row = repo.objectByNarHashCompression(bucket.name, narHash, compression);
-      return row === null || row.fileHash === null || row.fileSize === null
-        ? null
-        : { fileHash: row.fileHash, fileSize: row.fileSize };
+    // A KEPT OBJECT'S FACTS, READ — never re-hashed when a row already has
+    // them: the row an earlier proof recorded, confirmed by the stored size.
+    // An object with no row (a crash between keep and record) is asked of the
+    // store, which for S3 is a stored checksum rather than a read of the bytes.
+    async keptFacts(bucket, narHash, compression) {
+      const key = objectKey(bucket.name, narHash, compression);
+      const size = await objects.head(key);
+      if (size === null) return null;
+      const row = repo.objectByNarHashCompression(bucket.name, narHash, compression ?? "none");
+      if (row !== null && row.fileHash !== null && row.fileSize === size) {
+        return { size, sha256: row.fileHash };
+      }
+      return objects.facts(key);
     },
   });
   /** THE MIGRATION'S THROTTLE: two old-store dumps at a time, never more. */
