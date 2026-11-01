@@ -29,6 +29,7 @@ import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { basename, join } from "node:path";
 import type { ObjectStore } from "./objectStore";
+import { writeAll } from "./sink";
 import { verifyNarFile } from "./store";
 import type { BucketRow } from "./db";
 import {
@@ -214,7 +215,7 @@ export function createStaging(deps: StagingDeps): Staging {
     const sink = Bun.file(materialised).writer({ highWaterMark: 1 << 20 });
     try {
       for await (const chunk of object.stream as unknown as AsyncIterable<Uint8Array>) {
-        await sink.write(chunk);
+        await writeAll(sink, chunk, materialised);
       }
     } finally {
       await sink.end();
@@ -296,18 +297,7 @@ export function createStaging(deps: StagingDeps): Staging {
       async write(chunk) {
         written += chunk.length;
         if (limit !== null && written > limit) return "too-large";
-        // A FileSink write returns the BYTES IT TOOK; a large or slow write can
-        // be partial. Ignoring the count truncates a part without an error, and
-        // the assembled NAR then fails its NarHash.
-        for (let at = 0; at < chunk.length; ) {
-          const wrote = await sink.write(chunk.subarray(at));
-          if (typeof wrote === "number" && wrote > 0) {
-            at += wrote;
-            continue;
-          }
-          if (wrote === 0) throw new Error(`writing ${path} made no progress`);
-          break;
-        }
+        await writeAll(sink, chunk, path);
         return "ok";
       },
       async commit() {
@@ -376,6 +366,11 @@ export function createStaging(deps: StagingDeps): Staging {
       await unlink(partPath(index)).catch(() => {});
     }
     await unlink(uploadMarker(dirForBucket, file)).catch(() => {});
+    const joinedInfo = await stat(target).catch(() => null);
+    joined.set(`${bucket.name}/${file}`, {
+      parts: total,
+      bytes: joinedInfo?.size ?? 0,
+    });
     return { ok: true, parts: total };
   }
 
@@ -548,12 +543,9 @@ export function createStaging(deps: StagingDeps): Staging {
       const staged = await ensureStaged(bucket, dirForBucket, info);
       if (!staged.ok) {
         const stagedFile = join(dirForBucket, "nar", basename(info.url));
-        return {
-          ok: false,
-          status: 400,
-          message: staged.message,
-          detail: await detailOf(bucket, info, hash, stagedFile),
-        };
+        const detail = await detailOf(bucket, info, hash, stagedFile);
+        joined.delete(`${bucket.name}/${basename(info.url)}`);
+        return { ok: false, status: 400, message: staged.message, detail };
       }
       let chain = records.get(bucket.name);
       if (chain === undefined) {
@@ -563,7 +555,7 @@ export function createStaging(deps: StagingDeps): Staging {
       const outcome = await serial(chain, () =>
         recordNow(bucket, hash, info, staged.file, staged.facts),
       );
-      if (outcome.ok) joined.delete(`${bucket.name}/${basename(info.url)}`);
+      joined.delete(`${bucket.name}/${basename(info.url)}`);
       return outcome;
     },
   };

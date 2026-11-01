@@ -507,7 +507,7 @@ export const oduCacheSurface = defineSurface({
     /**
      * DEPRECATED: the uploads a bucket is holding for references. Always
      * empty in 2.3 — kept so a 2.x reader sees the same collection it always
-     * subscribed to. REMOVED IN THE NEXT MAJOR.
+     * subscribed to. REMOVED AT THE CACHE ROW'S NEXT MAJOR.
      */
     held: {
       keySchema: Schema.String,
@@ -574,7 +574,7 @@ export type OduCacheSurface = typeof oduCacheSurface;
  */
 export const ODU_CACHE_EXPOSE = {
   buckets: "resource",
-  /** DEPRECATED and always empty; removed in the next major. */
+  /** DEPRECATED and always empty; removed at the cache row's next major. */
   held: "resource",
   "bucket.create": { tool: { mutates: true } },
   "bucket.list": { tool: { mutates: false } },

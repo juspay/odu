@@ -16,10 +16,10 @@
  * take — the server drops paths signed by an upstream key, so a nixpkgs
  * dependency never costs an upload.
  *
- * **Uploads go in dependency order.** The server imports each narinfo through
- * `nix copy --from`, and Nix refuses a path whose references are not valid yet.
- * So paths are ordered by their depth in the closure and pushed shallowest
- * first; the concurrency is applied WITHIN a depth, never across one.
+ * **Uploads go in dependency order.** The cache records each narinfo; a
+ * reference is a NAME, not a path the server must already hold, so ordering is
+ * about a consumer walking the closure rather than an import. Paths go
+ * shallowest first; concurrency is applied WITHIN a depth, never across one.
  *
  * **A NAR is never in memory.** Each upload is `nix store dump-path | zstd -T0
  * -c` piped straight into the request body, which is why this can push a
@@ -153,6 +153,9 @@ export interface PushSummary {
    *  recipe, and its references are recipes. */
   skippedDerivation: readonly string[];
   alreadyPresent: number;
+  /** DEPRECATED server-side state: an older 2.3 daemon answered 202. Reported,
+   *  not failed; today's daemon records immediately. */
+  held: readonly { path: string; reason: string }[];
   failed: number;
   /** One line per failure, for a caller that wants to say which paths did not
    *  make it. */
@@ -263,6 +266,7 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
   let pushed = 0;
 
   /** Upload one dependency depth, reporting refusals as they happen. */
+  const held: { path: string; reason: string }[] = [];
   const runWave = async (wave: readonly string[]): Promise<void> => {
     const queue = [...wave];
     const worker = async (): Promise<void> => {
@@ -274,6 +278,11 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
         const outcome = await uploadOne(base, headers, entry, platform, attempts, say, {
           partSize,
         });
+        if (outcome.ok === "held") {
+          held.push({ path: storePath, reason: outcome.reason });
+          say(`⏸ ${storePath} held by the older server: ${outcome.reason}`);
+          continue;
+        }
         if (outcome.ok) {
           pushed += 1;
           say(`✅ ${storePath} stored`);
@@ -296,6 +305,7 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
     skippedUpstream: answer.skippedUpstream.length,
     skippedDerivation,
     alreadyPresent,
+    held,
     failed: failures.length,
     failures,
     pageUrl: `${board.replace(/\/$/, "")}/#/cache/${encodeURIComponent(resolved.name)}`,
@@ -384,7 +394,11 @@ function asError(err: unknown): Error {
   return err instanceof Error ? err : new Error(String(err));
 }
 
-type UploadOutcome = { ok: true } | { ok: false; message: string };
+type UploadOutcome =
+  | { ok: true }
+  /** An older 2.3 daemon still holds this path for a reference. */
+  | { ok: "held"; reason: string }
+  | { ok: false; message: string };
 
 type NarUpload =
   | { ok: true }
@@ -606,6 +620,14 @@ async function uploadOne(
     if (infoResponse instanceof Error) {
       lastMessage = infoResponse.message;
       continue;
+    }
+    // 202 IS HELD ON AN OLDER SERVER, not stored. The 2.3 client keeps working
+    // against a daemon that still answers the old hold protocol.
+    if (infoResponse.status === 202) {
+      return {
+        ok: "held",
+        reason: (await infoResponse.text()).trim() || "the older server holds this path",
+      };
     }
     if (infoResponse.ok) return { ok: true };
     const said = await infoResponse.text();

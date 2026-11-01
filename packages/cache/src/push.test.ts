@@ -448,6 +448,30 @@ describe("pushing a closure", () => {
     }
   });
 
+  it("reports a 202 from an older daemon as held, not stored", async () => {
+    const server = startServer();
+    try {
+      server.missing = [LIBC];
+      server.alwaysDefer.add(storePathHash(LIBC));
+      const lines: string[] = [];
+      const summary = await pushToCache({
+        bucket: `${server.origin}/main`,
+        paths: ["."],
+        env: envOf({ ODU_CACHE_TOKEN: "t" }),
+        platform: PLATFORM,
+        onLine: (line) => lines.push(line),
+      });
+      expect(summary).toMatchObject({
+        pushed: 0,
+        held: [{ path: LIBC, reason: expect.stringContaining("neither here nor upstream") }],
+        failed: 0,
+      });
+      expect(lines.some((line) => line.startsWith(`⏸ ${LIBC} held`))).toBe(true);
+    } finally {
+      server.stop();
+    }
+  });
+
   it("does not repeat a request the server refused outright", async () => {
     const server = startServer();
     try {

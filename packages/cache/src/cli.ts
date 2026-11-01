@@ -661,8 +661,11 @@ async function pushCommand(rest: string[]): Promise<number> {
       process.stdout.write(
         `pushed ${summary.pushed}, skipped-upstream ${summary.skippedUpstream}, ` +
           `already-present ${summary.alreadyPresent}, ` +
-          `failed ${summary.failed}\n`,
+          `held ${summary.held.length}, failed ${summary.failed}\n`,
       );
+      for (const held of summary.held) {
+        process.stderr.write(`  ${held.path}: held by the older server (${held.reason})\n`);
+      }
       for (const failure of summary.failures) {
         process.stderr.write(`  ${failure.path}: ${failure.message}\n`);
       }

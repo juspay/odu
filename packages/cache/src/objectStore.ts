@@ -36,6 +36,7 @@ import { mkdir, readdir, rename, stat, unlink } from "node:fs/promises";
 import { dirname, join, normalize, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { base32 } from "./narinfo";
+import { writeAll } from "./sink";
 
 /** What `put` learned while it wrote: the compressed bytes' own facts. */
 export interface ObjectFacts {
@@ -118,15 +119,7 @@ export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
         for await (const chunk of stream as unknown as AsyncIterable<Uint8Array>) {
           hash.update(chunk);
           size += chunk.length;
-          for (let at = 0; at < chunk.length; ) {
-            const wrote = await sink.write(chunk.subarray(at));
-            if (typeof wrote === "number" && wrote > 0) {
-              at += wrote;
-              continue;
-            }
-            if (wrote === 0) throw new Error(`writing ${temp} made no progress`);
-            break;
-          }
+          await writeAll(sink, chunk, temp);
         }
       } finally {
         await sink.end();

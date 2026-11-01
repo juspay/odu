@@ -1006,6 +1006,51 @@ describe("uploading", () => {
     await h.dispose();
   });
 
+  it("names the path, parts and bytes when a joined upload fails its proof", async () => {
+    const lines: string[] = [];
+    const h = await harness(true, "https://odu.example.org", (event, fields) =>
+      lines.push(`${event} ${JSON.stringify(fields)}`),
+    );
+    const staged = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bad-nar";
+    const payload = nar("three parts that will not match the narinfo");
+    const wrong = nar("some other bytes");
+    const name = `${payload.narHash.slice(7)}.nar.zst`;
+    const split = [
+      payload.bytes.subarray(0, 5),
+      payload.bytes.subarray(5, 10),
+      payload.bytes.subarray(10),
+    ];
+    const put = (index: number) =>
+      h.fetch(`/main/nar/${name}/parts/${index}`, {
+        ...bearer(h.tokens.write),
+        method: "PUT",
+        body: body(split[index] as Uint8Array),
+      });
+    expect((await Promise.all([put(2), put(0), put(1)])).map((r) => r.status)).toEqual([
+      204, 204, 204,
+    ]);
+    expect(
+      (
+        await h.fetch(`/main/nar/${name}/complete`, {
+          ...bearer(h.tokens.write),
+          method: "POST",
+          headers: { authorization: `Bearer ${h.tokens.write}`, "x-odu-parts": "3" },
+        })
+      ).status,
+    ).toBe(200);
+    const refused = await h.fetch(`/main/${hashOf(staged)}.narinfo`, {
+      ...bearer(h.tokens.write),
+      method: "PUT",
+      body: `StorePath: ${staged}\nURL: nar/${name}\nCompression: none\nNarHash: ${wrong.narHash}\nNarSize: ${payload.bytes.length}\nReferences: \n`,
+    });
+    expect(refused.status).toBe(400);
+    const line = lines.find((entry) => entry.startsWith("cache.request.refused"));
+    expect(line).toContain(`"storePath":"${staged}"`);
+    expect(line).toContain('"parts":3');
+    expect(line).toContain(`"bytesReceived":${payload.bytes.length}`);
+    await h.dispose();
+  });
+
   it("joins 3+ parts uploaded concurrently and out of index order", async () => {
     const h = await harness(true);
     const staged = "/nix/store/99999999999999999999999999999999-concurrent";
