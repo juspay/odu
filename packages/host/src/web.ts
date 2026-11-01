@@ -658,6 +658,25 @@ function quietLogger(): Logger {
 }
 
 /**
+ * FOREGROUND `odu web`: quiet about the spine, visible for a ROW's operational
+ * facts. A person watching a terminal wants the URL and the way to stop it, not
+ * "listener bound"; but a cache migration, a refused push and a NAR served are
+ * exactly what they are watching for, and those arrive at `info`. The line
+ * prefix is the contract: every cache row event is prefixed with its key.
+ */
+export function foregroundLogger(sink: Logger = stderrLogger()): Logger {
+  return {
+    debug: () => {},
+    info: (fields, message, ...rest) => {
+      if (typeof message !== "string" || !message.startsWith(`odu ${CACHE_KEY}:`)) return;
+      sink.info(fields, message, ...rest);
+    },
+    warn: sink.warn,
+    error: sink.error,
+  };
+}
+
+/**
  * Serve in this terminal.
  *
  * The singleton still holds: if another process owns the gate, this one cannot
@@ -686,12 +705,10 @@ async function foregroundWeb(opts: {
     }
   }
   return serveWebService({
-    // QUIET unless something is wrong. The spine's routine narration —
-    // "listener bound", "daemon listening" — is what a supervisor reads out of
-    // a file later; a person watching a terminal wants the URL and the way to
-    // stop it, and anything else is in the way. Warnings and faults still come
-    // through, because those are the lines they need most.
-    log: quietLogger(),
+    // QUIET about the spine, VISIBLE for a row's operational facts: a cache
+    // migration, a refusal and a served object are what the person watching is
+    // waiting for. Warnings and faults always come through.
+    log: foregroundLogger(),
     stopOn: ["SIGINT", "SIGTERM"],
     onHeld: async (pid) => {
       const running = await readService(origin);
