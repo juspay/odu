@@ -109,21 +109,16 @@ jobs:
           "$odu" cache push kolu --origin "$PUSH_ORIGIN" $paths
 
       - name: Bake the declaration the publisher is handed
-        env:
-          PUSH_ORIGIN: https://cache.kolu.dev
         run: |
           set -euo pipefail
-          # THE ONE DECLARATION, with only its FIRST SUBSTITUTER moved: the
-          # action takes the push target from it (kolu#2334). The pusher is
-          # kolu #2335's pinned odu (this branch's 996f888), so it chunks and
-          # carries the `CA:` line. The BUCKET's path form, not the bare origin:
-          # the action's VERIFY imports the published paths back from this URL,
-          # and the bare origin is the board, whose `Host` is not a bucket
-          # (`admitByHost` 404s).
+          # THE DECLARATION AS THE FLAKE WRITES IT. Its first substituter is
+          # `https://cache.kolu.dev` — the bucket's DOMAIN ROOT, where the name
+          # serves the bucket — so a rewrite would be a no-op. The pusher is
+          # kolu #2335's pinned odu (this branch's 996f888): chunked push and
+          # the `CA:` line; verify imports the same URL.
           source=$(nix build .#agent-flake-source --no-link --print-out-paths --accept-flake-config)
           mkdir -p "$RUNNER_TEMP/declaration"
-          jq --arg url "$PUSH_ORIGIN/cache/kolu" '.substituters = [$url]' \
-            "$source/binary-cache.json" > "$RUNNER_TEMP/declaration/binary-cache.json"
+          cp "$source/binary-cache.json" "$RUNNER_TEMP/declaration/binary-cache.json"
 
       - uses: actions/upload-artifact@v4
         with:
