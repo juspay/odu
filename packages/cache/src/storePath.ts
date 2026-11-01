@@ -13,12 +13,11 @@
  * `type` is `source` followed by `:` and each reference **full store path**, in
  * sorted order; a self-reference is the literal `self`.
  *
- * **A PUSHER'S `CA:` IS ACCEPTED ONLY WHEN IT PROVES ITS PATH.** For a
- * self-reference the CA hash is Nix's modulo hash, which the narinfo's NarHash
- * is not; the pusher's own hash can still be checked by the same formula, with
- * `self` in the type. Without that line, a self-referencing row is backfilled
- * from the old store's `nix path-info --json` during the migration, and a
- * non-self row from its NarHash. Nothing is trusted and nothing is guessed.
+ * **A SELF-REFERENCE IS PROVED FROM ITS BYTES.** Its CA hash is Nix's hash of
+ * the NAR with the path's own hash part zeroed, folded with the positions of
+ * those occurrences; the server computes that while verifying the object. The
+ * pusher's `CA:` line is parsed and IGNORED: a fact about an object we hold
+ * must not depend on who pushed it or when.
  */
 
 import { createHash } from "node:crypto";
@@ -64,8 +63,8 @@ export function contentAddressOf(input: {
   storePath: string;
   narHash: string;
   references: readonly string[];
-  /** The pusher's `CA:` line, a HINT: accepted only if the formula checks it. */
-  ca?: string | null;
+  /** The modulo-self hash computed from the NAR (self-referencing rows). */
+  selfHash?: string | null;
 }): string | null {
   const path = input.storePath;
   if (!path.startsWith("/nix/store/")) return null;
@@ -92,14 +91,10 @@ export function contentAddressOf(input: {
     const candidate = `/nix/store/${storePathHashOf(type, base32Bytes(nar), name)}-${name}`;
     return candidate === path ? `fixed:r:sha256:${nar}` : null;
   };
-  // THE PUSHER'S LINE, checked first — it is the only way a self-reference can
-  // be proved from metadata, because its hash is not the NarHash.
-  const claimed = /^fixed:r:sha256:([0-9abcdfghijklmnpqrsvwxyz]{52})$/.exec(input.ca ?? "");
-  if (claimed !== null) {
-    const proved = proves(claimed[1] as string);
-    if (proved !== null) return proved;
+  if (self) {
+    const modulo = /^sha256:([0-9abcdfghijklmnpqrsvwxyz]{52})$/.exec(input.selfHash ?? "");
+    return modulo === null ? null : proves(modulo[1] as string);
   }
-  if (self) return null;
   let nar: string;
   try {
     nar = narHashBase32(input.narHash);

@@ -202,8 +202,9 @@ export interface NarInfo {
   /** FULL store paths, in narinfo order. */
   references: readonly string[];
   deriver: string | null;
-  /** Nix's `CA:` line, verbatim. A content-addressed rewrite is importable by
-   *  its own hash; dropping this line makes the consumer demand a signature. */
+  /** Nix's `CA:` line, verbatim. PARSED AND NOTHING ELSE: the server proves a
+   *  path's CA from its name, references and bytes; a pusher's claim is never
+   *  stored or served. */
   ca: string | null;
   sigs: readonly string[];
 }

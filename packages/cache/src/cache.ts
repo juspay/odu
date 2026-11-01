@@ -51,6 +51,7 @@ import {
 } from "./staging";
 import { diskObjectStore, type ObjectStore } from "./objectStore";
 import { contentAddressOf } from "./storePath";
+import { verifyNarFile } from "./store";
 import { createSlots } from "./slots";
 import {
   globMatches,
@@ -253,6 +254,8 @@ export type NarSource =
 export interface BootReport {
   /** Rows whose path proved its own `fixed:r:sha256` CA. */
   caProved: number;
+  /** Self-referencing rows whose CA was proved from their kept bytes. */
+  selfProved: number;
   /** Object files with no row (a crash between put and record). */
   orphansSwept: number;
   /** Abandoned `.tmp-*` files older than this boot. */
@@ -502,14 +505,16 @@ export function createCache(options: CacheOptions): Cache {
     bucket: BucketRow,
     info: NarInfo,
     file: { fileHash: string; fileSize: number },
+    selfHash: string | null,
   ): Promise<boolean> {
-    return withWriteLock(() => recordNow(bucket, info, file));
+    return withWriteLock(() => recordNow(bucket, info, file, selfHash));
   }
 
   async function recordNow(
     bucket: BucketRow,
     info: NarInfo,
     file: { fileHash: string; fileSize: number },
+    selfHash: string | null,
   ): Promise<boolean> {
     const existing = repo.object(bucket.name, info.storePath);
     const at = now();
@@ -522,7 +527,7 @@ export function createCache(options: CacheOptions): Cache {
       storePath: info.storePath,
       narHash: info.narHash,
       references: info.references,
-      ca: info.ca,
+      selfHash,
     });
     repo.putObject({
       bucket: bucket.name,
@@ -1004,29 +1009,6 @@ export function createCache(options: CacheOptions): Cache {
           if (facts === null || stopping) return;
           repo.putObject({ ...row, fileHash: facts.sha256, fileSize: facts.size });
           migrated += 1;
-          // THE OLD STORE STILL KNOWS a self-reference's modulo CA that the
-          // narinfo cannot prove. Ask while it is here; afterwards it is gone.
-          if (row.ca === null && known !== undefined) {
-            const info = known;
-            if (info.ca !== null) {
-              // THE SAME PROOF the pusher's line gets: the old store is a
-              // source of a HASH, not of trust.
-              const proved = contentAddressOf({
-                storePath: row.storePath,
-                narHash: row.narHash,
-                references: row.references,
-                ca: info.ca,
-              });
-              if (proved !== null) {
-                repo.putObject({
-                  ...row,
-                  fileHash: facts.sha256,
-                  fileSize: facts.size,
-                  ca: proved,
-                });
-              }
-            }
-          }
           if (migrated % 100 === 0) {
             options.log?.("cache.migration.progress", {
               migrated,
@@ -1212,7 +1194,7 @@ export function createCache(options: CacheOptions): Cache {
 
     async boot() {
       // 1. CA IS PROVED FROM THE PATH. Pure and instant: no store query, no
-      // pusher line — except a self-reference, whose pusher CA is checked.
+      // pusher line. A self-reference's modulo hash comes from its bytes in 1b.
       let caProved = 0;
       for (const row of repo.objects().filter((one) => one.ca === null)) {
         const ca = contentAddressOf({
@@ -1226,6 +1208,44 @@ export function createCache(options: CacheOptions): Cache {
       }
       if (caProved > 0) {
         options.log?.("cache.boot.ca", { proved: caProved });
+        notify();
+      }
+
+      // 1b. SELF-REFERENCES NEED THE BYTES, not metadata: Nix's modulo hash is
+      // computed from the kept object in one streaming pass. Two workers, and a
+      // row is written as soon as its proof lands, so a restart resumes.
+      const selfRows = repo.objects().filter(
+        (row) => row.ca === null && row.references.includes(row.storePath),
+      );
+      let selfProved = 0;
+      let selfNext = 0;
+      const proveSelf = async (): Promise<void> => {
+        for (;;) {
+          const row = selfRows[selfNext++];
+          if (row === undefined) return;
+          const path = objects.localPath(objectKey(row.bucket, row.narHash, row.compression));
+          if (path === null) continue;
+          const checked = await migrationSlots.withSlot(() =>
+            verifyNarFile(path, row.compression, storePathHash(row.storePath)),
+          );
+          if (!checked.ok || checked.selfHash === null) continue;
+          const ca = contentAddressOf({
+            storePath: row.storePath,
+            narHash: row.narHash,
+            references: row.references,
+            selfHash: checked.selfHash,
+          });
+          if (ca === null) continue;
+          repo.putObject({ ...row, ca });
+          selfProved += 1;
+        }
+      };
+      await Promise.all([
+        proveSelf(),
+        proveSelf(),
+      ]);
+      if (selfProved > 0) {
+        options.log?.("cache.boot.self_ca", { proved: selfProved });
         notify();
       }
 
@@ -1245,7 +1265,7 @@ export function createCache(options: CacheOptions): Cache {
       if (orphansSwept > 0 || tempSwept > 0) {
         options.log?.("cache.boot.orphans", { swept: orphansSwept, temp: tempSwept });
       }
-      return { caProved, orphansSwept, tempSwept };
+      return { caProved, selfProved, orphansSwept, tempSwept };
     },
 
     migrate() {

@@ -20,12 +20,13 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Database } from "bun:sqlite";
 import { asRoot } from "./testlib";
-import { base32 } from "./narinfo";
+import { base32, canonicalNarHash } from "./narinfo";
 import { base32Bytes, storePathHashOf } from "./storePath";
 import { type Cache, createCache } from "./cache";
 import type { NarinfoOutcome } from "./staging";
@@ -628,6 +629,75 @@ describe("CA is proved from the path", () => {
     expect(await cache.boot()).toMatchObject({ caProved: 1 });
     expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).toContain("CA:");
     await cache.close();
+  });
+
+  it("proves a self-referencing CA at import, and backfills a null row at boot", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "odu-self-cache-"));
+    try {
+      const drv = join(dir, "selfref.nix");
+      writeFileSync(
+        drv,
+        'derivation { name = "selfref"; system = builtins.currentSystem; builder = "/bin/sh"; args = [ "-c" "echo $out > $out" ]; }',
+      );
+      const built = spawnSync(
+        "nix",
+        ["build", "--impure", "--no-link", "--print-out-paths", "-f", drv],
+        { encoding: "utf-8" },
+      );
+      expect(built.status).toBe(0);
+      const rewritten = spawnSync(
+        "nix",
+        ["store", "make-content-addressed", "--json", built.stdout.trim()],
+        { encoding: "utf-8" },
+      );
+      expect(rewritten.status).toBe(0);
+      const path = Object.values(
+        (JSON.parse(rewritten.stdout) as { rewrites: Record<string, string> }).rewrites,
+      )[0] as string;
+      const info = JSON.parse(
+        spawnSync("nix", ["path-info", "--json", path], { encoding: "utf-8" }).stdout,
+      ) as Record<string, { ca: string | null; narHash: string; references: string[] }>;
+      const facts = Object.values(info)[0];
+      if (facts === undefined || facts.ca === null) throw new Error("no self CA");
+      const nar = spawnSync("nix", ["store", "dump-path", path], { maxBuffer: 8 << 20 });
+      expect(nar.status).toBe(0);
+      const payload = {
+        bytes: new Uint8Array(nar.stdout),
+        narHash: canonicalNarHash(facts.narHash),
+      };
+
+      const logs: string[] = [];
+      const cache = createCache({
+        stateRoot: scratch,
+        rootToken: ROOT,
+        now: () => NOW,
+        log: (event, fields) => logs.push(`${event} ${JSON.stringify(fields)}`),
+      });
+      await cache.admin.create(createInput);
+      await putNar(cache, "main", payload);
+      const accepted = await cache.acceptNarinfo(
+        cache.bucket("main") as never,
+        hashOf(path),
+        stream(narinfoText(path, payload, facts.references)),
+      );
+      expect(accepted).toMatchObject({ ok: true, status: 200 });
+      expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).toContain(
+        `CA: ${facts.ca}`,
+      );
+
+      // THE BACKFILL: null the proof, then boot proves it from the kept bytes.
+      const db = new Database(join(scratch, "cache", "cache.sqlite"));
+      db.run("UPDATE object SET ca = NULL");
+      db.close();
+      expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).not.toContain("CA:");
+      expect(await cache.boot()).toMatchObject({ selfProved: 1 });
+      expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).toContain(
+        `CA: ${facts.ca}`,
+      );
+      await cache.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("migrates a row whose object was never kept, then serves the object file", async () => {

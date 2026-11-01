@@ -103,6 +103,7 @@ export interface StagingDeps {
     bucket: BucketRow,
     info: NarInfo,
     file: { fileHash: string; fileSize: number },
+    selfHash: string | null,
   ) => Promise<boolean>;
   /** One line per operational fact; the cache's logger. */
   log?: (event: string, fields: Record<string, unknown>) => void;
@@ -148,7 +149,7 @@ export function createStaging(deps: StagingDeps): Staging {
     | {
         ok: true;
         file: string;
-        facts?: { fileHash: string; fileSize: number };
+        facts?: { fileHash: string; fileSize: number; selfHash: string | null };
       }
     | { ok: false; message: string }
   > {
@@ -157,7 +158,10 @@ export function createStaging(deps: StagingDeps): Staging {
       return { ok: false, message: `narinfo names ${info.url}, which is not a NAR this cache staged` };
     }
     const staged = join(dirForBucket, "nar", name);
-    const checked = await verifyNarFile(staged, info.compression);
+    const selfHashPart = info.references.includes(info.storePath)
+      ? storePathHash(info.storePath)
+      : null;
+    const checked = await verifyNarFile(staged, info.compression, selfHashPart);
     if (checked.ok) {
       if (checked.narHash !== info.narHash) {
         return {
@@ -170,7 +174,11 @@ export function createStaging(deps: StagingDeps): Staging {
       return {
         ok: true,
         file: staged,
-        facts: { fileHash: checked.fileHash, fileSize: checked.fileSize },
+        facts: {
+          fileHash: checked.fileHash,
+          fileSize: checked.fileSize,
+          selfHash: checked.selfHash,
+        },
       };
     }
     if (!checked.absent) return { ok: false, message: `${info.url}: ${checked.message}` };
@@ -352,8 +360,8 @@ export function createStaging(deps: StagingDeps): Staging {
     bucket: BucketRow,
     info: NarInfo,
     staged: string,
-    facts?: { fileHash: string; fileSize: number },
-  ): Promise<{ fileHash: string; fileSize: number } | null> {
+    facts?: { fileHash: string; fileSize: number; selfHash: string | null },
+  ): Promise<{ fileHash: string; fileSize: number; selfHash: string | null } | null> {
     try {
       const key = objectKey(bucket.name, info.narHash, info.compression);
       // ADOPT the staged file: one rename, never a copy of the same bytes.
@@ -366,7 +374,11 @@ export function createStaging(deps: StagingDeps): Staging {
               facts === undefined ? undefined : { size: facts.fileSize, sha256: facts.fileHash },
             );
       await unlink(staged).catch(() => {});
-      return { fileHash: kept.sha256, fileSize: kept.size };
+      return {
+        fileHash: kept.sha256,
+        fileSize: kept.size,
+        selfHash: facts?.selfHash ?? null,
+      };
     } catch (err) {
       log?.("cache.object.put_failed", {
         bucket: bucket.name,
@@ -382,7 +394,7 @@ export function createStaging(deps: StagingDeps): Staging {
     hash: string,
     info: NarInfo,
     staged: string,
-    facts?: { fileHash: string; fileSize: number },
+    facts?: { fileHash: string; fileSize: number; selfHash: string | null },
   ): Promise<NarinfoOutcome> {
     const file = await keep(bucket, info, staged, facts);
     if (file === null) {
@@ -392,7 +404,7 @@ export function createStaging(deps: StagingDeps): Staging {
         message: `${info.storePath} could not be stored: the object store refused it`,
       };
     }
-    await record(bucket, info, file);
+    await record(bucket, info, file, file.selfHash);
     log?.("cache.import.recorded", {
       bucket: bucket.name,
       path: info.storePath,

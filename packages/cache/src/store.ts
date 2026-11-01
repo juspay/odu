@@ -297,6 +297,48 @@ export function nixDump(storePath: string, store: string | null): ReadableStream
   });
 }
 
+/** Nix's `HashModuloSink`: replace every occurrence of the path's own 32-char
+ *  hash part with 32 zero bytes and sha256 the result. Matches can straddle
+ *  read chunks, so the last 31 bytes wait for the next one.
+ *
+ *  Nix 2.34's `RewritingSink` calls `rewriteStrings` and records no match
+ *  positions (`matches` stays empty), so there is NO `|pos` fold — pinned by a
+ *  `nix store make-content-addressed` vector in the suite. Matching the Nix
+ *  that produces the CA is the only useful definition. */
+function moduloHasher(hashPart: string): {
+  update(chunk: Uint8Array): void;
+  finish(): string;
+} {
+  const hash = createHash("sha256");
+  const pattern = Buffer.from(hashPart, "utf8");
+  const zeros = Buffer.alloc(pattern.length);
+  let pending = Buffer.alloc(0);
+  let pendingStart = 0;
+  return {
+    update(chunk) {
+      const data = pending.length === 0 ? Buffer.from(chunk) : Buffer.concat([pending, chunk]);
+      const base = pendingStart;
+      let at = 0;
+      for (;;) {
+        const found = data.indexOf(pattern, at);
+        if (found === -1) break;
+        hash.update(data.subarray(at, found));
+        hash.update(zeros);
+        at = found + pattern.length;
+      }
+      // A match may begin in the last 31 bytes; keep them for the next chunk.
+      const safe = Math.max(at, data.length - (pattern.length - 1));
+      hash.update(data.subarray(at, safe));
+      pending = data.subarray(safe);
+      pendingStart = base + safe;
+    },
+    finish() {
+      hash.update(pending);
+      return `sha256:${base32(hash.digest())}`;
+    },
+  };
+}
+
 /**
  * What a staged upload's bytes came to, or why they could not be read.
  *
@@ -313,6 +355,8 @@ export type NarCheck =
       /** The COMPRESSED file's sha256 and size, learned as it streamed. */
       fileHash: string;
       fileSize: number;
+      /** The self-reference modulo hash, when one was requested. */
+      selfHash: string | null;
     }
   | { ok: false; absent: boolean; message: string };
 
@@ -348,7 +392,12 @@ function decompressorOf(compression: string | null): string[] | null | { error: 
  *
  * Streamed: one chunk at a time, never the whole NAR.
  */
-export async function verifyNarFile(path: string, compression: string | null): Promise<NarCheck> {
+export async function verifyNarFile(
+  path: string,
+  compression: string | null,
+  /** The row's own hash part when its references include itself. */
+  selfHashPart: string | null = null,
+): Promise<NarCheck> {
   const decompressor = decompressorOf(compression);
   if (decompressor !== null && !Array.isArray(decompressor)) {
     return { ok: false, absent: false, message: decompressor.error };
@@ -357,6 +406,7 @@ export async function verifyNarFile(path: string, compression: string | null): P
   const { promise, resolve } = Promise.withResolvers<NarCheck>();
   const hash = createHash("sha256");
   const fileHash = createHash("sha256");
+  const modulo = selfHashPart === null ? null : moduloHasher(selfHashPart);
   let fileSize = 0;
   let size = 0;
   let ended = false;
@@ -396,6 +446,7 @@ export async function verifyNarFile(path: string, compression: string | null): P
       narSize: size,
       fileHash: `sha256:${base32(fileHash.digest())}`,
       fileSize,
+      selfHash: modulo === null ? null : modulo.finish(),
     });
   };
 
@@ -451,6 +502,7 @@ export async function verifyNarFile(path: string, compression: string | null): P
 
   source.on("data", (chunk: Buffer) => {
     hash.update(chunk);
+    modulo?.update(chunk);
     size += chunk.length;
     // For an uncompressed NAR the file IS the bytes hashed above.
     if (decompressor === null) {

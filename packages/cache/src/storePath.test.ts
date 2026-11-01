@@ -4,9 +4,9 @@
  * `0ng8ghb7…-odu-runner` is a real path from the kolu bucket, with the
  * references and NarHash its narinfo carries. `6gyc…-selfref` is
  * `nix build` output containing its own store path, then
- * `nix store make-content-addressed`; it is the negative that proves the
- * boundary: a self-reference's CA hash is a modulo hash of the NAR, which the
- * narinfo's NarHash is not, so metadata cannot prove it.
+ * `nix store make-content-addressed`; a self-reference's CA hash is the modulo
+ * hash of its NAR, supplied by the byte pass — metadata alone (NarHash) cannot
+ * prove it.
  */
 import { describe, expect, it } from "bun:test";
 import { contentAddressOf, storePathHashOf, base32Bytes } from "./storePath";
@@ -43,7 +43,7 @@ describe("contentAddressOf", () => {
     ).toBeNull();
   });
 
-  it("refuses a self-referencing path, whose CA hash is not its NarHash", () => {
+  it("refuses a self-referencing path without its modulo hash", () => {
     expect(
       contentAddressOf({
         storePath: "/nix/store/6gyc4k1ilcw1k97kf3dnzwia3rq6vakd-selfref",
@@ -53,15 +53,23 @@ describe("contentAddressOf", () => {
     ).toBeNull();
   });
 
-  it("accepts a pusher CA for a self-reference when its hash proves the path", () => {
+  it("proves a self-reference from its computed modulo hash", () => {
     expect(
       contentAddressOf({
         storePath: "/nix/store/6gyc4k1ilcw1k97kf3dnzwia3rq6vakd-selfref",
         narHash: "sha256:0nhllj6n6swi6w1b8290hj2jdpn14q44552mr1lz3xc634azh3ng",
         references: ["/nix/store/6gyc4k1ilcw1k97kf3dnzwia3rq6vakd-selfref"],
-        ca: "fixed:r:sha256:163ryiah9ms80qck6zb6dpy7sz9db61pjx460983wd3yyb41r7gl",
+        selfHash: "sha256:163ryiah9ms80qck6zb6dpy7sz9db61pjx460983wd3yyb41r7gl",
       }),
     ).toBe("fixed:r:sha256:163ryiah9ms80qck6zb6dpy7sz9db61pjx460983wd3yyb41r7gl");
+    expect(
+      contentAddressOf({
+        storePath: "/nix/store/6gyc4k1ilcw1k97kf3dnzwia3rq6vakd-selfref",
+        narHash: "sha256:0nhllj6n6swi6w1b8290hj2jdpn14q44552mr1lz3xc634azh3ng",
+        references: ["/nix/store/6gyc4k1ilcw1k97kf3dnzwia3rq6vakd-selfref"],
+        selfHash: `sha256:${"0".repeat(52)}`,
+      }),
+    ).toBeNull();
   });
 
   it("matches Nix's makeStorePath for the self vector's own hash", () => {
