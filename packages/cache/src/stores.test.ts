@@ -30,7 +30,7 @@ const files = (map: Record<string, string>) => (path: string): string => {
 };
 
 const read = (declared: unknown, credentials: Record<string, string> = { [R2.credentialsFile]: CREDENTIALS }) =>
-  readCacheStores({ ODU_CACHE_STORES: "/etc/odu/stores.json" }, files({
+  readCacheStores({ ODU_OBJECT_STORES: "/etc/odu/stores.json" }, files({
     "/etc/odu/stores.json": JSON.stringify(declared),
     ...credentials,
   }));
@@ -82,7 +82,7 @@ describe("reading the declarations", () => {
     const empty = read({ r2: R2 }, { [R2.credentialsFile]: "AWS_ACCESS_KEY_ID=abc\n" });
     expect(empty).toMatchObject({ kind: "refused", refusal: { kind: "missing_credentials", store: "r2" } });
     if (empty.kind === "refused") expect(storeConfigMessage(empty.refusal)).not.toContain("abc");
-    expect(readCacheStores({ ODU_CACHE_STORES: "/nope" }, files({}))).toMatchObject({
+    expect(readCacheStores({ ODU_OBJECT_STORES: "/nope" }, files({}))).toMatchObject({
       kind: "refused",
       refusal: { kind: "unreadable", file: "/nope" },
     });

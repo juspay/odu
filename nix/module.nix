@@ -582,7 +582,7 @@ in
           "ODU_CLOUDFLARE_API_TOKEN_FILE=%d/cloudflare-api-token"
         ]
         ++ optionals (cfg.cache.stores != { }) [
-          "ODU_CACHE_STORES=${storesFile}"
+          "ODU_OBJECT_STORES=${storesFile}"
         ];
         Restart = "on-failure";
       } // lib.optionalAttrs

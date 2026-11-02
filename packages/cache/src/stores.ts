@@ -2,7 +2,7 @@
  * THE STORES A DAEMON DECLARED — read once, parsed once, held as values.
  *
  * The operator declares named stores (`services.odu.cache.stores.<name>` in
- * the module, which writes them to the JSON file `$ODU_CACHE_STORES` names);
+ * the module, which writes them to the JSON file `$ODU_OBJECT_STORES` names);
  * `local`, the disk under the state directory, is always there and cannot be
  * redeclared. A bucket names one store at creation, and from then on the cache
  * row holds `ObjectStore` values by name and nothing else.
@@ -29,7 +29,7 @@ import type { S3Target } from "./s3sign";
 import { type CacheStore, LOCAL_STORE } from "./surface";
 
 /** The variable naming the declarations file. */
-export const STORES_FILE = "ODU_CACHE_STORES";
+export const STORES_FILE = "ODU_OBJECT_STORES";
 
 /** One declared S3-compatible store, credentials read. */
 export interface S3Declaration {
@@ -105,7 +105,7 @@ function parseCredentials(
 }
 
 /**
- * THE DECLARATIONS, from the file `$ODU_CACHE_STORES` names — or none, when it
+ * THE DECLARATIONS, from the file `$ODU_OBJECT_STORES` names — or none, when it
  * is unset. The file is JSON, one entry per store:
  *
  * ```json

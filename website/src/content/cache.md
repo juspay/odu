@@ -262,7 +262,7 @@ A bucket keeps its objects in a **store**: `local`, the server's own disk (alway
 
 | | `local` | an S3 store |
 | --- | --- | --- |
-| Declared | never — always there | `services.odu.cache.stores.<name>`, or `$ODU_CACHE_STORES` |
+| Declared | never — always there | `services.odu.cache.stores.<name>`, or `$ODU_OBJECT_STORES` |
 | Objects at | `<state>/cache/objects/<bucket>/nar/` | `<s3-bucket>/<bucket>/nar/` |
 | A put that finds the key | refused, first kept wins (`link`) | refused, first kept wins (`If-None-Match: *`) |
 | `FileHash`/`FileSize` kept | beside the object (`objects/.facts/`) | as object metadata (`x-amz-meta-odu-*`) |
@@ -284,7 +284,7 @@ services.odu.cache.stores.r2 = {
 odu cache create main --store r2
 ```
 
-On the board, the **Create bucket** form offers the declared stores, and a bucket's page says where its objects are (`objects on r2`). The credentials file is a systemd credential: never in the Nix store, never in the database, never logged; the key needs object read, write, delete and list. Without the module, point `$ODU_CACHE_STORES` at a JSON file of the same shape — `{"r2": {"kind": "s3", "endpoint": …, "bucket": …, "region": …, "credentialsFile": …}}` — before `odu web` starts.
+On the board, the **Create bucket** form offers the declared stores, and a bucket's page says where its objects are (`objects on r2`). The credentials file is a systemd credential: never in the Nix store, never in the database, never logged; the key needs object read, write, delete and list. Without the module, point `$ODU_OBJECT_STORES` at a JSON file of the same shape — `{"r2": {"kind": "s3", "endpoint": …, "bucket": …, "region": …, "credentialsFile": …}}` — before `odu web` starts.
 
 - **One S3 bucket, many odu buckets.** Each odu bucket is a key prefix of its own name; odu lists, sweeps and deletes nothing outside those prefixes, so the S3 bucket may hold other things.
 - **A store a bucket still names cannot be removed.** The cache row refuses to mount, naming the bucket and the store, rather than serve 404 for every path it has.

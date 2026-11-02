@@ -230,7 +230,7 @@ on the bucket page (both landed).
   (`put`/`keep`/`get`/`head`/`facts`/`delete`/`list`), and a store is a VALUE
   the cache row holds by name: `local` (disk under the state directory, always
   there) and each S3-compatible store the operator declares
-  (`services.odu.cache.stores`, read from `$ODU_CACHE_STORES`, credentials from
+  (`services.odu.cache.stores`, read from `$ODU_OBJECT_STORES`, credentials from
   a file). A bucket names its store at creation (`bucket.store`). A put is
   put-if-absent (disk `link`, S3 `If-None-Match: *`, plus a per-key queue in
   the S3 store because versitygw's check is not atomic); a read takes a range

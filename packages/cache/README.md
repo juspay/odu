@@ -61,7 +61,7 @@ on the wire and `cache_bucket_create` to an agent.
 - **Blobs are the compressed NAR the pusher sent.** An `ObjectStore` keeps
   `<bucket>/nar/<narHash>.<ext>` — the disk store under `<state>/cache/objects`,
   an S3 store in its bucket — and each bucket names its store (`local` or one
-  declared in `$ODU_CACHE_STORES`). A put is put-if-absent, a read takes a
+  declared in `$ODU_OBJECT_STORES`). A put is put-if-absent, a read takes a
   range, and the facts written at put are read back. Nothing is imported, and
   references are names in the narinfo. Dedup is per NarHash per bucket, and a
   twin row shares the object until GC deletes it with the last row.
