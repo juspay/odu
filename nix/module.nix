@@ -592,7 +592,7 @@ in
       } // lib.optionalAttrs
         (
           cfg.rootTokenFile != null || serverMode || cfg.cloudflare.apiTokenFile != null
-          || cfg.cache.stores != { }
+            || cfg.cache.stores != { }
         )
         {
           # ONE list: two `//` updates would replace each other, and a missing
